@@ -1823,9 +1823,15 @@ CLASS_BLURB = {
                    "path: a fact about the TARGET, not a construct the backend "
                    "failed to lower — its own class because the fallback would "
                    "have counted it as a gap in the backend",
-    CLASS_TARGET: "calls a gimple-runtime `mojo_*` entry point, which a "
-                  "freestanding image cannot bind: a limit of the TARGET, not a "
-                  "gap in the backend (the printed line names the call)",
+    CLASS_TARGET: "calls a gimple-runtime `mojo_*` entry point that a formal "
+                  "image cannot bind — because a type crossing the boundary is "
+                  "not one 64-bit word, or because the per-architecture "
+                  "`mojo_*` library on this image's link line does not export "
+                  "the name (it carries the core runtime, the coroutine runtime "
+                  "and the async scheduler; the optional sqlite3/zlib/ssl/"
+                  "ncurses units are not in it). Either way a limit of the "
+                  "TARGET, not a gap in the backend — the printed line names "
+                  "the call and which of the two it is",
     CLASS_CRASH: "the backend RAISED rather than refusing: a bug in the "
                  "compiler, in no rate, exit 1 — never cached, so it re-runs",
     CLASS_UNKNOWN: "a build message this tool does not recognise — the "

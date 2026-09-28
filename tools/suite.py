@@ -652,6 +652,14 @@ test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
 test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
      deps=['preflight'],
      desc='every bound symbol is accounted for, on every container format')
+# The gimple runtime's C library on a formal link line, and the three-way
+# split a `mojo_*` call now takes: linked, refused for its TYPES, and refused
+# because this library does not export the name. In `proofs` rather than
+# `check` because it builds ~20 images across both architectures and needs
+# `otool`; no `prooflib` dep because it asserts without Lean.
+test('formal-runtime-link', [PY, 'test_formal_runtime_link.py'],
+     deps=['preflight'],
+     desc='the mojo_* runtime library is on a formal link line, and what is still refused')
 # output/x86_64/ keeps these from colliding with the arm64 verdicts above, so
 # they can share the machine with them.
 test('formal-x86', [PY, 'test_formal.py', '--backend', 'x86_64'], j=True,
@@ -716,7 +724,7 @@ BUCKETS = {
 
     'proofs': ['formal', 'formal-run', 'formal-dylib', 'formal-imports',
                'formal-sweep', 'formal-sweep-truth',
-               'formal-link-accounting', 'formal-x86',
+               'formal-link-accounting', 'formal-runtime-link', 'formal-x86',
                'formal-x86-endtoend', 'formal-x86-model'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model'],
     'coroutine': ['coro', 'coro-nested-capture'],

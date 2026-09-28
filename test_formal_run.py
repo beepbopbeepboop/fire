@@ -511,11 +511,17 @@ CASES = [
     #
     # `mojo_*` is the ABI of the OTHER backend's C runtime (runtime/
     # fire_runtime.h, runtime/fire_sqlite3.h), and a program written against it
-    # spells those entry points in the source. A formal image links libSystem
-    # and nothing else, so each of these used to emit a BL against a symbol
+    # spells those entry points in the source. A formal image used to link
+    # libSystem and nothing else, so each of these emitted a BL against a symbol
     # nothing defines: the build reported success and the program died in the
-    # loader. A `refuse:` case, so the assertion is that BOTH architectures
-    # say no with the same words.
+    # loader. A formal build now puts the per-architecture `mojo_*` library on
+    # the link line when the program names a word-shaped entry point of it
+    # (`formal/build.py`'s `_runtime_library_for`), so a `mojo_*` call splits
+    # three ways: linked, refused for its TYPES, and refused because this
+    # library does not export the name. The two `refuse:` cases below are the
+    # second and the third; a numeric case is the first, and the assertion there
+    # is that BOTH architectures AGREE — which `refuse:` also asserts, for the
+    # other two.
     ("gimple_runtime_sqlite_refused",
      "def main():\n"
      "    var db = mojo_sqlite3_open(\":memory:\")\n"
@@ -523,12 +529,17 @@ CASES = [
      "    return 0\n",
      "refuse:is an entry point of the gimple backend's C runtime", None),
     # `mojo_print` rather than `print`, for the file that spells the runtime's
-    # own name. Same namespace, same answer.
-    ("gimple_runtime_print_refused",
+    # own name. Same namespace, OPPOSITE answer, and this is the case the whole
+    # phase-2 payoff turns on: every type crossing this call is one 64-bit word
+    # — a `char *` is a value on this path, because a string is an interned
+    # `char *` with no header — and the per-arch runtime library is on the link
+    # line, so this is no longer a refusal but an image that RUNS. Verified:
+    # exit 0 and "hi" on stdout, arm64 and x86_64.
+    ("gimple_runtime_print_runs",
      "def main():\n"
      "    mojo_print(\"hi\")\n"
      "    return 0\n",
-     "refuse:is an entry point of the gimple backend's C runtime", None),
+     0, None),
     # The one that is NOT answerable by linking the library, which is why the
     # refusal says more than "no library here". `mojo_list_len` takes a
     # `MojoList *` — a heap box the gimple runtime owns — where a list on this

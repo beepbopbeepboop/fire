@@ -932,6 +932,18 @@ def compile_formal(source_path: str, output: str = None,
         linked = linked + [d for d in load_dylib_manifests(import_dylibs)
                            if d["install_name"] not in have]
 
+    # The gimple runtime's C library, on this image's link line, if and only if
+    # the program names an entry point of it that the library really provides
+    # (see `_runtime_library_for` for why those are two questions). LAST in the
+    # list, so an imported module's own export still wins the name if the two
+    # ever collide: an import is a specific thing the program asked for and the
+    # runtime is the ambient one. `_codegen_and_link` merges the maps with
+    # `setdefault` in list order, so position here is the precedence.
+    runtime_lib, runtime_calls = _runtime_library_for(ordered, arch, fmt)
+    if runtime_lib is not None:
+        linked = linked + [runtime_lib]
+
+
     # `comptime f(...)` is resolved by RUNNING f through this same backend
     # (formal/comptime_runner.py), so a folded constant and the emitted code
     # can never come from two different implementations.
@@ -960,6 +972,17 @@ def compile_formal(source_path: str, output: str = None,
         "binary": binary,
         "info": info,
         "backend": f"{arch}/{fmt}",
+        # The libraries this image actually carries, by the path its load
+        # commands name. A caller that wants to know whether a `mojo_*` call was
+        # linked against the real runtime or refused asks here; the image
+        # itself is the other answer, but reading a Mach-O to find out is not
+        # something a test should have to do twice.
+        "linked_dylibs": [d["install_name"] for d in linked],
+        # Which `mojo_*` calls the runtime library was put on the link line FOR.
+        # Empty on both sides of the decision is the normal case, and the
+        # distinction is the whole gate: a call that is word-shaped but not
+        # exported is refused, and one that is exported is not.
+        "runtime_calls": list(runtime_calls),
     }
 
     if prove:
@@ -3609,6 +3632,395 @@ def load_dylib_manifests(dylib_paths: list) -> list:
     return out
 
 
+# ── The gimple runtime's C library, on a formal link line ──────────────────
+#
+# FORMAL.md phase 2 made a `mojo_*` call DECIDABLE. `model.gimple_runtime_
+# callable` answers, from the runtime header's own types, whether a formal image
+# could make one — "every type crossing the boundary is one 64-bit word, AND the
+# symbol is on the link line" — and for the 219 entry points that were word-shaped
+# the second half was false for every single one of them. The library was not
+# missing: `runtime_dylib()` (build_stdlib_dylib.py:981) builds a
+# per-architecture `-dynamiclib` exporting the whole `mojo_*` namespace, it is
+# CAS-cached, `_arch_or_die`-checked against the architecture it was asked for,
+# and the gimple path links it every day. What was missing is that nothing ever
+# put it on a FORMAL link line, so the honest summary of the reachable surface
+# was "0 of the word-shaped calls are callable from a proof" and the refusal was
+# — correctly — saying exactly that.
+#
+# What is here closes that, and it is deliberately NOT a codegen change.
+# `is_gimple_runtime_builtin` answers "can this target bind this", and widening
+# it would have taught the compiler to emit a call it had no way to resolve: the
+# image would build, the audit would pass it as unaccounted-or-libc, and the
+# program would die in the loader. The answer there stays no until the symbol is
+# genuinely on the line. The line is what changes.
+#
+# Three decisions, each of which could have gone the other way:
+#
+#   * The export table is READ OUT OF THE DYLIB's export trie — the one
+#     structure dyld itself consults — rather than taken from the headers the
+#     library was built from, and not from an `nm` invocation. Re-deriving it
+#     from the header would be a second hand-kept answer to a question the
+#     artifact already answers, and the two drift the moment a unit is dropped
+#     for a symbol collision (which `build_stdlib_dylib` does, silently, per
+#     module). An `nm` proxy is nearly right and has a real failure: it reports
+#     every global the objects DEFINE, while dyld resolves against what the
+#     linker EXPORTED, and those differ. The trie is the link contract.
+#
+#   * The library goes on the line only when the program names an entry point of
+#     it that a formal image could make (`_runtime_word_calls`). Not a flag: a
+#     formal image that names nothing there must keep the smallest link line it
+#     has, because every dependency is a load command, a load command moves the
+#     entry point, and the entry point moves every address in the image. Doing
+#     it unconditionally would re-emit all 590 files of the coverage sweep for
+#     no gain, and would put a library dyld has to open in front of every
+#     program — including the ones a proof is about. Doing it NEVER is the
+#     failure this would have been the other way round: a refusal for a call
+#     that should have compiled.
+#
+#   * An ELF image gets nothing. `build_elf` carries one `lib_name` and no
+#     dependency list, and `formal/elf.py` is not this file's to grow. A
+#     `mojo_*` call on an ELF target is still refused, by the same shared rule
+#     and the same words, and the refusal now says why.
+
+
+_MH_MAGIC_64 = 0xFEEDFACF
+_MH_DYLIB = 6
+_LC_SEGMENT_64 = 0x19          # not decoded; the walk skips what it does not know
+_LC_DYLD_EXPORTS_TRIE = 0x33 | 0x80000000   # LC_REQ_DYLD, as the linker writes it
+
+# An export trie's terminal payload is (flags, address). The low two bits of
+# `flags` are the KIND — 0 regular, 1 thread-local, 2 absolute — and 0x04/0x08
+# mark a weak definition and a re-export. Only KIND 0 is an ordinary function
+# this path can call: a thread-local is not code an image can branch to, an
+# absolute is an address constant, and a re-export forwards to whatever THIS
+# library depends on, so binding it here would be binding the wrong image.
+_MH_EXPORT_KIND_MASK = 0x03
+_MH_EXPORT_KIND_REGULAR = 0x00
+
+
+def _uleb128(data: bytes, pos: int) -> tuple:
+    """(value, next position) for the LEB128 the Mach-O link-edit formats use."""
+    result = 0
+    shift = 0
+    while True:
+        if pos >= len(data):
+            raise FormalBuildError(
+                "a Mach-O LEB128 field runs past the end of its structure")
+        byte = data[pos]
+        pos += 1
+        result |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return result, pos
+        shift += 7
+        if shift > 63:
+            raise FormalBuildError(
+                "a Mach-O LEB128 field is wider than 64 bits")
+
+
+def _read_export_trie(trie: bytes, offset: int, prefix: str,
+                      out: dict) -> None:
+    """Walk one node of an export trie, adding every ordinary export to `out`.
+
+    The format is a prefix tree of edge LABELS: at each node a LEB128 terminal
+    size, that many bytes of terminal payload if the size is non-zero (the
+    flags and the image offset of the symbol this node's accumulated prefix
+    names), then one child-count byte and that many (NUL-terminated label,
+    LEB128 child offset) pairs. Empty terminal payload is the common case and
+    means "this prefix is not itself a symbol" — every interior node of the
+    tree is like that, and reading the count byte from the wrong offset is how
+    a reader walks off the end of the structure.
+
+    Recursive rather than iterative because the recursion is bounded by the
+    length of a symbol name, which is a handful.
+    """
+    size, pos = _uleb128(trie, offset)
+    end = pos + size
+    if size:
+        if end > len(trie):
+            raise FormalBuildError(
+                "an export trie's terminal payload runs past the end of the "
+                "trie")
+        flags, after = _uleb128(trie, pos)
+        address, after = _uleb128(trie, after)
+        if after > end:
+            raise FormalBuildError(
+                f"an export trie's terminal payload for {prefix!r} overruns "
+                f"the size its own header declares")
+        if (flags & _MH_EXPORT_KIND_MASK) == _MH_EXPORT_KIND_REGULAR and address:
+            out[prefix] = flags
+    if end >= len(trie):
+        raise FormalBuildError(
+            "an export trie node's child count runs past the end of the trie")
+    nchildren = trie[end]
+    pos = end + 1
+    for _ in range(nchildren):
+        nul = trie.find(b"\0", pos)
+        if nul < 0:
+            raise FormalBuildError(
+                "an export trie edge label is not NUL-terminated")
+        label = trie[pos:nul].decode("utf-8", "replace")
+        child, pos = _uleb128(trie, nul + 1)
+        _read_export_trie(trie, child, prefix + label, out)
+
+
+def macho_dylib_exports(path: str) -> dict:
+    """{Mach-O name: flags} for every ordinary export of a Mach-O dylib.
+
+    An INDEPENDENT reader: `formal/macho_linker.py` writes these images and has
+    a `_export_trie` that builds one, and asking the writer to read its own
+    output is how a writer's bug becomes invisible. This parses the file's load
+    commands and the trie dyld would consult, and knows nothing about how any of
+    it was produced.
+
+    Raises rather than returning a partial table. Every caller here wants the
+    whole export surface — a name quietly missing from this dict is a call that
+    is refused, and a name quietly ADDED is a bind whose ordinal points at the
+    wrong library — so a truncated answer is the one thing worse than no answer.
+    """
+    import struct          # lazy, like `json` above: keep the module edges few
+    with open(path, "rb") as f:
+        data = f.read()
+    if len(data) < 32:
+        raise FormalBuildError(f"{path} is too small to be a Mach-O file")
+    (magic, _cputype, _sub, filetype, ncmds, sizeofcmds, _flags,
+     _reserved) = struct.unpack_from("<8I", data, 0)
+    if magic != _MH_MAGIC_64:
+        raise FormalBuildError(
+            f"{path} is not a 64-bit Mach-O (magic {magic:#x}); the runtime "
+            f"library this looks for is built by clang for the host")
+    if filetype != _MH_DYLIB:
+        raise FormalBuildError(
+            f"{path} is not a dylib (filetype {filetype}); a link line names "
+            f"libraries, and an executable on it is a cycle, not a provider")
+    if sizeofcmds > len(data) - 32:
+        raise FormalBuildError(
+            f"{path} has a load-command list that runs past the end of the file")
+    out = {}
+    pos = 32
+    for _ in range(ncmds):
+        if pos + 8 > 32 + sizeofcmds:
+            raise FormalBuildError(
+                f"{path}: a load command starts past sizeofcmds")
+        cmd, cmdsize = struct.unpack_from("<II", data, pos)
+        if cmdsize < 8 or pos + cmdsize > 32 + sizeofcmds:
+            raise FormalBuildError(
+                f"{path}: load command {cmd:#x} has an impossible cmdsize "
+                f"{cmdsize}")
+        if cmd == _LC_DYLD_EXPORTS_TRIE:
+            if cmdsize < 16:
+                raise FormalBuildError(
+                    f"{path}: LC_DYLD_EXPORTS_TRIE is {cmdsize} bytes, which is "
+                    f"too small to hold its own dataoff/datasize")
+            dataoff, datasize = struct.unpack_from("<II", data, pos + 8)
+            if dataoff + datasize > len(data):
+                raise FormalBuildError(
+                    f"{path}: its export trie runs past the end of the file")
+            _read_export_trie(data[dataoff:dataoff + datasize], 0, "", out)
+        pos += cmdsize
+    if not out:
+        raise FormalBuildError(
+            f"{path} exports nothing, so a client could bind no name in it")
+    return out
+
+
+def _c_export_name(macho_name: str):
+    """The C identifier a Mach-O export name spells, or None for a name that is
+    not one.
+
+    A Mach-O symbol is its C name with a leading underscore — that underscore is
+    dyld's, and `_bind_info` says so where it takes the C spelling back off
+    before writing the bind stream. So `_mojo_strlen` is `mojo_strlen`.
+
+    Exactly ONE leading underscore. C++ template instantiations and the rest of
+    what the mangler emitted are `__ZNSt...`, i.e. two, and there is no C
+    declaration to bind them to: a program calls a name it spelled, and no
+    program spells `__ZNSt3vectorIiNS_9allocatorIiEEE9push_backERKi`. Listing
+    them would widen the map with names nothing can ask for, and would make the
+    bind audit wave through a dangling call whose name happened to be mangled.
+    """
+    if not macho_name.startswith("_") or macho_name.startswith("__"):
+        return None
+    name = macho_name[1:]
+    for ch in name:
+        if not (ch.isalnum() or ch == "_") or ord(ch) > 127:
+            return None
+    if not name or name[0].isdigit():
+        return None
+    return name
+
+
+def runtime_manifest(dylib: str) -> str:
+    """Write (and return) the export manifest for the runtime dylib.
+
+    The SAME artifact and the SAME manifest shape a formal module dylib gets
+    (`write_dylib_manifest`), so `load_dylib_manifests` reads the runtime
+    library with no special case anywhere: one manifest format, one loader, one
+    link line. That is the point of writing it here at all — the alternative is
+    a second, runtime-specific shape threaded through `_codegen_and_link`,
+    `_dylib_syms` and `_audit_bound_symbols`, which is three places to keep in
+    step for the sake of a list that is already in the file.
+
+    The `exports` are the trie's ordinary exports, and each one's `signature`
+    is filled in from the runtime header when `model.runtime_abi` declares it.
+    A name the dylib exports that no header declares is still exported — it is
+    real and a client can bind it — with an empty signature, because inventing
+    one would be the kind of plausible-looking wrong answer this whole mechanism
+    exists to avoid.
+
+    Idempotent, and safe to race: the dylib's own name is content-addressed
+    (`runtime_dylib`'s docstring), so two processes that agree write byte-equal
+    files at the same path, and `write_dylib_manifest` replaces rather than
+    appends.
+    """
+    import json
+    abi = M.runtime_abi()
+    exports = []
+    for macho_name in sorted(macho_dylib_exports(dylib)):
+        name = _c_export_name(macho_name)
+        if name is None:
+            continue
+        entry = abi.get(name)
+        exports.append({
+            "module": "mojo_runtime",
+            "name": name,
+            # The C spelling, not the Mach-O one: `symbol` is what the bind
+            # stream carries and what `_dylib_syms` rewrites a call site to,
+            # and dyld puts the underscore back on.
+            "symbol": name,
+            "arity": None,
+            "signature": entry["signature"] if entry else "",
+            "kind": 0,       # reflect.SYM_FUNCTION
+        })
+    install = "@rpath/" + os.path.basename(dylib)
+    return write_dylib_manifest(dylib, install, exports)
+
+
+def runtime_library(arch: str, fmt: str):
+    """The `mojo_*` C runtime as one link-line entry, or None for a target that
+    cannot carry a library at all.
+
+    The return value is exactly what `load_dylib_manifests` produces for a
+    module dylib, which is deliberate: from `_codegen_and_link` down — the
+    callee mangling, the LC_LOAD_DYLIB, the bind ordinal, the audit — nothing
+    downstream can tell the runtime from an imported module, and nothing
+    downstream has to know.
+
+    `fmt != "macho"` returns None. That is not a shrug: `build_elf` carries one
+    `lib_name` and no dependency list, so an ELF image genuinely cannot name a
+    second library, and the caller falls back to the shared refusal, which says
+    so. Returning None and letting the refusal speak is the honest failure; the
+    alternative — silently linking nothing and reporting a successful build —
+    is the failure class this whole programme exists to remove.
+
+    A Mach-O target that cannot BUILD the library is an error rather than a
+    None. `runtime_dylib` needs a working host toolchain, and on a host without
+    one there is no library to link, no word-shaped call to make, and no
+    diagnostic the refusal could improve on: the refusal already says the link
+    line does not define the name, and it would be right.
+    """
+    if fmt != "macho":
+        return None
+    from build_stdlib_dylib import runtime_dylib    # lazy: see the note below
+    dylib = os.path.abspath(runtime_dylib(arch=arch))
+    if not os.path.exists(dylib_manifest_path(dylib)):
+        runtime_manifest(dylib)
+    return load_dylib_manifests([dylib])[0]
+
+
+def _runtime_word_calls(ordered: list) -> list:
+    """The `mojo_*` entry points `ordered` calls that a formal image could make.
+
+    A pre-pass over the source's own AST, and therefore a SUPERSET of what
+    codegen can emit. Nothing between here and the call lowering invents a
+    callee name: `_prepare_functions` renames a repeated definition, and
+    `_rewrite_method_calls` spells a method `Owner_method`, neither of which is
+    in the runtime ABI; `comptime_runner` can only REPLACE a call with a
+    constant, and dropping a name can never make the linker need a library it
+    would not otherwise have needed. Over-approximating costs an image that does
+    not call the library one load command. Under-approximating costs a refusal
+    for a call that should have compiled, which is the failure this whole change
+    exists to remove — so the direction is not a preference.
+
+    Two filters, and both are the question `model.gimple_runtime_callable` asks
+    rather than a second version of it:
+
+      * the `mojo_*` NAMESPACE, because that is the scope the rule is scoped to.
+        The headers also declare `input`, `setattr`, `string_strip`,
+        `int64_t_basename` and `py_tokenize`, and `gimple_runtime_callable`
+        answers True for all of them on purpose — they are the C library and the
+        compiler's own shims, not the runtime's ABI. A pre-pass keyed on the
+        header table alone would put a 478-name library on the link line of
+        every image that calls `input()`, which is four files of this
+        repository's corpus, for a name no library there defines.
+      * a name this module DEFINES, because codegen resolves a call to a local
+        function before it ever reaches the extern path, and a module that
+        defines its own `mojo_thing` must not drag the C runtime onto its link
+        line to answer a call that never left the file.
+    """
+    abi = M.runtime_abi()
+    local = set()
+    for fn in (ordered or []):
+        name = getattr(fn, "name", None)
+        if isinstance(name, str):
+            local.add(name)
+    found = set()
+
+    def walk(node):
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                walk(item)
+            return
+        if isinstance(node, dict):
+            for item in node.values():
+                walk(item)
+            return
+        if isinstance(node, F.CallExpr):
+            fn = node.func
+            if isinstance(fn, F.IdentExpr) and fn.name not in local \
+                    and fn.name.startswith(M.GIMPLE_RUNTIME_PREFIX):
+                entry = abi.get(fn.name)
+                if entry is not None and entry["word"]:
+                    found.add(fn.name)
+        for field in getattr(node, "__dataclass_fields__", {}):
+            walk(getattr(node, field))
+
+    for fn in (ordered or []):
+        walk(getattr(fn, "body", None))
+    return sorted(found)
+
+
+def _runtime_library_for(ordered: list, arch: str, fmt: str):
+    """(entry, covered names) for the runtime library, or (None, []).
+
+    The second half of the decision `_runtime_word_calls` cannot make: a name
+    being word-shaped says the CALL is answerable, and only the library's own
+    export table says whether this one answers it. They are different sets and
+    the difference is 51 entry points on this tree, because
+    `runtime_dylib` links `runtime_units(arch, None)` — the core runtime, the
+    coroutine runtime and the async scheduler — and NOT the OPTIONAL units
+    `fire_sqlite3.c`, `fire_ssl.c`, `fire_zlib.c` and `fire_ncurses.c`, which
+    the gimple path compiles on demand (`build_config.OPTIONAL_RUNTIME_UNITS`).
+    So `mojo_strlen` is exported and `mojo_sqlite3_step` is not, and both are
+    word-shaped.
+
+    Checking the intersection rather than linking optimistically is what keeps
+    the other 5 honest: a program that calls only `mojo_sqlite3_close` gets the
+    refusal that says the library does not export the name, rather than a
+    478-name library on its link line that changes nothing about the verdict.
+    """
+    named = _runtime_word_calls(ordered)
+    if not named:
+        return None, []
+    lib = runtime_library(arch, fmt)
+    if lib is None:
+        return None, []
+    amap = lib.get("map") or {}
+    covered = [n for n in named if n in amap]
+    if not covered:
+        return None, []
+    return lib, covered
+
+
 def _module_prefix(source_path: str) -> str:
     """This module's ABI qualifier — `module_loader.module_name_for_path`, the
     single source of truth both backends must use (its own docstring: "both
@@ -4352,13 +4764,6 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # reference to `leaf_base_<hash>`, or the library builds and then fails to
     # load with "Symbol not found" for a function its sibling defines.
     linked = load_dylib_manifests(link_dylibs)
-    dylib_syms = {}
-    for d in linked:
-        for bare, mangled in (d.get("map") or {}).items():
-            dylib_syms.setdefault(bare, mangled)
-    dep_install = [d["install_name"] for d in linked]
-    dep_syms = {d["install_name"]: list((d.get("map") or {}).values())
-                for d in linked}
     ordered = []
     seen: dict = {}
     structs_by_file: dict = {}
@@ -4389,6 +4794,26 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             if n:
                 fn.name = f"{fn.name}__ov{n + 1}"
             ordered.append(fn)
+
+    # The gimple runtime's C library, on THIS library's link line, for the same
+    # reason and under the same condition as on the executable path — and here it
+    # is not tidiness. A module dylib that binds `mojo_strlen` has a symbol in
+    # its own bind stream, and the ordinal that name gets is an index into THIS
+    # image's LC_LOAD_DYLIB list. Without the load command here, that ordinal
+    # names whatever library happens to sit at that position, and the library
+    # builds, links, passes the audit below, and then calls the wrong function.
+    # LAST again, for the same precedence reason as `compile_formal`, and gated
+    # on the library really providing the name for the same reason.
+    runtime_lib, _covered = _runtime_library_for(ordered, arch, fmt)
+    if runtime_lib is not None:
+        linked = linked + [runtime_lib]
+    dylib_syms = {}
+    for d in linked:
+        for bare, mangled in (d.get("map") or {}).items():
+            dylib_syms.setdefault(bare, mangled)
+    dep_install = [d["install_name"] for d in linked]
+    dep_syms = {d["install_name"]: list((d.get("map") or {}).values())
+                for d in linked}
 
     if output is None:
         stem = os.path.splitext(os.path.basename(source_paths[0]))[0] or "module"
