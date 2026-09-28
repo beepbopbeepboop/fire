@@ -170,6 +170,32 @@ def _pop_test_input(argv: list):
         sys.exit(2)
 
 
+def _sorry_note(result) -> str:
+    """The proof's sorry count, or "" when there is nothing to say.
+
+    `formal/build.py` has computed this and put it in the result dict since the
+    census existed, and NOTHING read it: `proof_sorries` had exactly two
+    references tree-wide, both the assignment. So a proof carrying a thousand
+    admitted `sorry`s printed exactly the same two lines as a proof with none,
+    and "the proof checked" read as though it meant "the proof is sound". The
+    number is already in hand at both call sites as `n_sorries`, so surfacing it
+    costs one line and closes the last step of a chain that was otherwise fully
+    built.
+
+    Printed only when NON-ZERO. A zero is the expected case, and putting it on
+    every line is how the line that matters gets trained away. The count is
+    Lean-reported ("declaration uses sorry") rather than a textual count, so it
+    does not move for a tactic alternative that merely lost — see
+    `formal/lean.py`'s own note on why the textual count is a count of
+    hypothetical holes.
+    """
+    n = result.get("proof_sorries")
+    if not n:
+        return ""
+    return (f"  [{n} declaration(s) ADMITTED a sorry — the file typechecks, "
+            f"it is not a proof]")
+
+
 def _formal_executable(input_file: str, output, test_input: int, prove: bool,
                        run_it: bool, link_dylibs=None, arch: str = "arm64") -> int:
     """The one formal executable path: `mojo build --formal` and bare
@@ -199,7 +225,7 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
     print(f"Built: {result['path']}  [{result.get('backend', arch)}]")
     if result.get("proof_path"):
         cached = " (verified from cache)" if result.get("proof_cached") else ""
-        print(f"Proof: {result['proof_path']}{cached}")
+        print(f"Proof: {result['proof_path']}{cached}{_sorry_note(result)}")
     if not run_it:
         return 0
     argv = _formal_run_argv(result["path"], arch)
@@ -911,7 +937,7 @@ Backend selector (may appear anywhere; selects the codegen path):
             print(f"Built: {result['path']}")
             if result.get("proof_path"):
                 cached = " (verified from cache)" if result.get("proof_cached") else ""
-                print(f"Proof: {result['proof_path']}{cached}")
+                print(f"Proof: {result['proof_path']}{cached}{_sorry_note(result)}")
             sys.exit(0)
         import driver
         rc = driver.compile_dylib(dylib_inputs, output=dylib_output, opt_flag=opt_flag)

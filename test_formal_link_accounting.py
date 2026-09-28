@@ -135,17 +135,35 @@ def test_relative_imports():
 
 # ── 2. the host-module split ────────────────────────────────────────────────
 
-# The list as it stood before the split, read from git rather than from memory
-# so this cannot drift into asserting whatever the code happens to do.
+# The list as it stood BEFORE the split, pinned here as the specification.
+#
+# It was read out of `git show HEAD:formal/imports.py` first, which is wrong in a
+# way worth recording: HEAD moves. The moment the split was committed, HEAD *was*
+# the split, the regex stopped matching, and the check failed while asserting
+# something still true. An oracle has to be pinned, because its whole job is to
+# be the thing that does not move. (A pinned list in a TEST is not the duplicate
+# source of truth the conventions warn about — that is about production code
+# keeping two lists; here the second list is the expected value, and a
+# deliberate change to the host set is supposed to fail until someone updates
+# the specification on purpose.)
+PRE_SPLIT_HOST_MODULES = frozenset((
+    "os", "sys", "ast", "json", "re", "argparse", "dataclasses", "typing",
+    "collections", "itertools", "functools", "math", "random", "time",
+    "pathlib", "subprocess", "shutil", "textwrap", "inspect", "abc", "enum",
+    "io", "csv", "copy", "pickle", "struct", "threading", "socket", "glob",
+    "hashlib", "base64", "urllib", "http", "unittest", "logging", "warnings",
+    "importlib", "importlib.util", "importlib.machinery", "contextlib",
+    "traceback", "gc", "atexit", "signal", "errno", "stat", "platform",
+    "tempfile", "uuid", "zlib", "gzip", "codecs", "locale", "getpass",
+    "webbrowser", "unittest.mock", "difflib", "fnmatch", "operator",
+    "heapq", "bisect", "array", "numbers", "decimal", "fractions", "secrets",
+    "select", "queue", "weakref", "types", "dis", "pprint", "reprlib",
+    "asyncio", "ctypes", "concurrent", "concurrent.futures",
+))
+
+
 def _original_host_modules():
-    import re
-    import subprocess
-    src = subprocess.run(['git', 'show', 'HEAD:formal/imports.py'],
-                         capture_output=True, text=True, cwd=REPO).stdout
-    m = re.search(r'HOST_MODULES = frozenset\(\((.*?)\)\)\n', src, re.S)
-    if not m:
-        return None
-    return set(re.findall(r'"([^"]+)"', re.sub(r'#.*', '', m.group(1))))
+    return set(PRE_SPLIT_HOST_MODULES)
 
 
 def test_host_tiers():
@@ -304,12 +322,59 @@ def test_audit_fires_on_a_real_build():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_sorry_note():
+    """The census has to be READ to be worth computing.
+
+    `formal/build.py` puts `proof_sorries` in the result dict and, before this,
+    nothing read it: two references tree-wide, both the assignment. A proof with
+    a thousand admitted sorries printed exactly what a clean one printed, and
+    "the proof checked" read as though it meant "the proof is sound". Checked at
+    unit level because `fire.py build --formal` cannot currently generate a proof
+    for even a trivial program on this tree (a pre-existing failure in
+    arm64_proof_gen.py's recursion handling, reproduced with these files
+    stashed), so an end-to-end demonstration is not available today.
+    """
+    sys.path.insert(0, REPO)
+    import fire
+    check(fire._sorry_note({}) == "",
+          'no proof_sorries key means nothing to say')
+    check(fire._sorry_note({'proof_sorries': 0}) == "",
+          'zero sorries prints nothing (a zero on every line is noise)')
+    check(fire._sorry_note({'proof_sorries': None}) == "",
+          'a None count prints nothing')
+    note = fire._sorry_note({'proof_sorries': 13})
+    check('13' in note, 'a non-zero count is reported', note)
+    check('ADMITTED' in note and 'not a proof' in note,
+          'the wording says the file typechecks but is not a proof', note)
+    # And it is wired to both places that already print the sibling field.
+    import inspect
+    src = inspect.getsource(fire)
+    # Three textual matches: the `def` line and the two call sites. Asserting
+    # the call SITES by locating the lines that print the sibling field is less
+    # ambiguous than counting a substring that also matches the definition.
+    call_sites = [ln for ln in src.splitlines()
+                  if '_sorry_note(result)' in ln
+                  and not ln.lstrip().startswith('def ')]
+    check(len(call_sites) == 2,
+          'both places that print `Proof:` carry the note', str(call_sites))
+    lines = src.splitlines()
+    near_proof_path = [
+        any('proof_path' in lines[j] for j in range(max(0, i - 3), i))
+        for i, ln in enumerate(lines) if '_sorry_note(result)' in ln
+        and not ln.lstrip().startswith('def ')]
+    check(near_proof_path == [True, True],
+          'both sites are the ones that print a proof path', str(near_proof_path))
+    check(inspect.signature(fire._sorry_note).return_annotation is str,
+          'the helper is annotated, so a caller can see it returns text')
+
+
 def main():
     test_relative_imports()
     test_host_tiers()
     test_libsystem_provider()
     test_bind_audit()
     test_audit_fires_on_a_real_build()
+    test_sorry_note()
     npass = sum(1 for ok, _w in RESULTS if ok)
     nfail = len(RESULTS) - npass
     print(f"\n{npass} passed, {nfail} failed, {len(RESULTS)} checks")
