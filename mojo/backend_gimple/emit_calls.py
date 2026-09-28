@@ -1473,18 +1473,34 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and not gen._locally_binds_name('reversed')
             and 'reversed' not in gen.func_return_types
             and 'reversed' not in getattr(gen, '_imported_func_home', ())
-            and 'reversed' not in getattr(gen, '_own_imported_func_home', ())
-            and gen._quick_type(node.args[0]) in (
-                'MojoList *', 'char *', 'MojoStr *', 'MojoBytes *')):
-        # Only intercept `reversed(<list|str|bytes>)` when the name does NOT
-        # resolve to a real (user/stdlib) `reversed` free function — the real
-        # stdlib `std/builtin/reversed.mojo` defines overloads that call
+            and 'reversed' not in getattr(gen, '_own_imported_func_home', ())):
+        # Only intercept `reversed(x)` when the name does NOT resolve to a real
+        # (user/stdlib) `reversed` free function — the real stdlib
+        # `std/builtin/reversed.mojo` defines overloads that call
         # `value.__reversed__()`, and those (plus `reversed(range(...))`,
         # `reversed(<deque>)`, `reversed(<Span>)`, ...) must keep routing to
         # the generic call path. This builtin lowering is for the
         # do_imports=False / no-prelude case (e.g. the zipfile probe:
         # `reversed(sorted(self.filelist, ...))`) where `reversed` is
         # otherwise an unresolved stub producing a silently-dropped loop.
+        #
+        # The argument's STATIC type is deliberately not part of this gate.
+        # It used to be, and that is what made the named offender in
+        # FORMAL.md §11.2 real: an unannotated parameter lowers to a boxed
+        # `int64_t`, so `_quick_type` answered `int64_t`, the gate closed,
+        # and the call fell to `BUILTIN_VALUE_MAP`'s `mojo_reversed` —
+        # a `('void *', ['void *'])` identity stub. `for x in
+        # reversed(scopes)` then iterated a `void *` this backend can only
+        # refuse, so the loop ran zero times (emit_funcs.py's
+        # `_in_any_import_frame` had to be rewritten to avoid `reversed`
+        # for exactly this reason).
+        #
+        # The static-type test was also redundant: the guards above it —
+        # the ones that stop a real user/stdlib `reversed` from being
+        # hijacked — are the actual precondition, and
+        # `_lower_builtin_reversed` handles every argument shape itself,
+        # including (as of the boxed arm below) the one this gate used to
+        # exclude.
         return gen._lower_builtin_reversed(node)
     if fname_raw == '__import__':                                return gen._lower_builtin_import(node)
     if (fname_raw in ('set', 'frozenset')
@@ -2977,18 +2993,46 @@ def _lower_builtin_reversed(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str
         gen._emit_call('void', '', 'mojo_list_reverse', [('MojoList *', _keys)])
         gen._elem_types[_keys] = 'char *'
         return 'MojoList *', _keys
+    if at in ('int64_t', 'int', 'void *'):
+        # A BOXED handle: an unannotated parameter, a comprehension result,
+        # or anything else this codegen erased to an untyped int64_t. The
+        # value is a real container at run time — it is the STATIC type that
+        # was lost — and this backend already has the one chokepoint that
+        # recovers it, `_materialize_as_list` (DESIGN.html R1), which
+        # consults the runtime container registries rather than assuming
+        # (DESIGN.html R5).
+        #
+        # The unrecognized-type fallthrough below used to handle this shape
+        # by returning the value UNCHANGED, and that is a silent WRONG
+        # ANSWER, not a neutral pass-through: the consuming `for` loop takes
+        # its own generic path and iterates the container in FORWARD order,
+        # so `for x in reversed(seq)` computed the right elements in the
+        # wrong order and nothing said so. Materialize, then reverse the
+        # copy for real.
+        try:
+            _lp = gen._materialize_as_list(at, av)
+        except Exception as e:
+            gimple_ctypes._debug_note(
+                'reversed() could not materialize its argument as a list', e)
+            return at, av
+        cp = gen._call_expr('MojoList *', 'mojo_list_copy', [('MojoList *', _lp)])
+        gen._emit_call('void', '', 'mojo_list_reverse', [('MojoList *', cp)])
+        _e = gen._elem_of(_lp)
+        if _e:
+            gen._elem_types[cp] = _e
+        _n = gen._nested_elem_types.get(_lp)
+        if _n:
+            gen._nested_elem_types[cp] = _n
+        return 'MojoList *', cp
     # An unrecognized argument type (a Mojo container struct with its own
-    # `__reversed__`, an opaque int64_t-boxed value, a comprehension
-    # result typed `void *`, …). A real general fix is `__reversed__`
-    # dispatch + the struct iterator protocol (see
+    # `__reversed__`, a struct pointer, …). A real general fix is
+    # `__reversed__` dispatch + the struct iterator protocol (see
     # bugs/CODEGEN_generator_function_Lib_collections___init__.md's
     # `reversed()` discussion). Until then, fall through to the generic
     # dynamic-dispatch value the pre-`reversed()`-lowering code produced —
-    # the consuming `for` loop then takes its own generic path (which may
-    # iterate via the value's protocol, or, for a genuinely opaque value,
-    # drop — the pre-existing behavior). NOT a `raise`: that turned five
-    # previously-compiling stdlib files (which used `reversed()` on these
-    # shapes) into hard failures.
+    # the consuming `for` loop then takes its own generic path. NOT a
+    # `raise`: that turned five previously-compiling stdlib files (which
+    # used `reversed()` on these shapes) into hard failures.
     gimple_ctypes._debug_note('reversed() on unrecognized type — generic fallthrough', at)
     return at, av
 

@@ -396,6 +396,232 @@ def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
     gen._emit_label(bb_after)
 
 
+def _regex_prog_for(gen, pattern: str) -> dict:
+    """Compile `pattern` into the emitted regex-program tables, reusing the
+    one already built for that exact pattern text. Shared by the finditer
+    and findall lowerings so `for m in P.finditer(s)` and
+    `for w in P.findall(s)` over the same pattern cost one program."""
+    if pattern not in gen._regex_progs:
+        prog_id = f"re{len(gen._regex_progs)}"
+        gen._regex_progs[pattern] = gimple_ctypes.regex_compile.compile_pattern(pattern, prog_id)
+    return gen._regex_progs[pattern]
+
+
+def _emit_regex_scan(gen, pattern: str, text_val: str) -> tuple:
+    """Emit the shared `mojo_regex_search` scan loop and yield the pieces a
+    consumer needs to act on each match.
+
+    Returns the 10-tuple
+    `(info, bb_cond, bb_body, bb_post, bb_after, pos, mstart, mend, gstart,
+    gend)`. The loop is left OPEN at `bb_body`: the caller emits whatever it
+    does per match, then calls `_close_regex_scan`, which emits the cursor
+    advance (`pos = max(mend, pos + 1)`, mirroring real Python's
+    finditer/findall zero-width handling) and closes the loop.
+
+    `pos`, `mstart` and `mend` are the three scalar C temps a consumer needs
+    by name; `gstart`/`gend` are the `int64_t *` group-offset arrays, and
+    `gstart[0]`/`gend[0]` are the WHOLE match — capturing group k (1-based,
+    as `re` numbers them) is at index k.
+
+    `continue` inside a consumer body is therefore correct for free — its
+    target is `bb_post`, which is where the advance lives."""
+    info = _regex_prog_for(gen, pattern)
+    ngroups = info['ngroups']
+    prog_local = gen._new_val('const ReNode *', info['prog_var'])
+    ranges_local = gen._new_val('const ReRange *', info['ranges_var'])
+    classinfo_local = gen._new_val('const ReClassInfo *', info['classinfo_var'])
+
+    text_len = gen._call_expr('int64_t', 'mojo_strlen', [('char *', text_val)])
+    pos_var = gen._new_temp('int64_t')
+    gen._emit(f'  {pos_var} = (int64_t)0;')
+    gsize = gen._new_val('int64_t', f'(int64_t)(sizeof(int64_t) * {ngroups + 1})')
+    gstart_vp = gen._new_val('void *', f'malloc ({gsize})')
+    gstart_var = gen._new_val('int64_t *', f'(int64_t *){gstart_vp}')
+    gend_vp = gen._new_val('void *', f'malloc ({gsize})')
+    gend_var = gen._new_val('int64_t *', f'(int64_t *){gend_vp}')
+    mstart_var = gen._new_temp('int64_t')
+    mend_var = gen._new_temp('int64_t')
+    ok_var = gen._new_temp('int')
+
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb()
+    bb_post = gen._new_bb(); bb_after = gen._new_bb()
+    gen._emit(f'  goto {bb_cond};')
+    gen._emit_label(bb_cond)
+    gen._emit(f'  {ok_var} = mojo_regex_search ({prog_local}, {ranges_local}, {classinfo_local}, '
+              f'{info["root"]}, {ngroups}, {text_val}, {text_len}, {pos_var}, '
+              f'&{mstart_var}, &{mend_var}, {gstart_var}, {gend_var});')
+    gen._emit(f'  if ({ok_var}) goto {bb_body}; else goto {bb_after};')
+    gen._emit_label(bb_body, f'count(guessed_local({10 ** (gen._loop_depth + 1)}))')
+    gen.loop_stack.append((bb_post, bb_after))
+    return (info, bb_cond, bb_body, bb_post, bb_after, pos_var,
+            mstart_var, mend_var, gstart_var, gend_var)
+
+
+def _close_regex_scan(gen, pieces) -> None:
+    """Close a scan loop opened by `_emit_regex_scan` (see its docstring)."""
+    (_info, bb_cond, _bb_body, bb_post, bb_after,
+     pos, _mstart, mend, _gstart, _gend) = pieces
+    gen.loop_stack.pop()
+    if not gen._last_was_terminal:
+        gen._emit(f'  goto {bb_post};')
+    gen._emit_label(bb_post)
+    # pos = (mend > pos) ? mend : pos + 1 — advance past the match, or by
+    # one char on a zero-width match, exactly like Python's finditer/findall.
+    pos_plus1 = gen._new_val('int64_t', f'{pos} + (int64_t)1')
+    cmp_t = gen._new_val('_Bool', f'{mend} > {pos}')
+    next_pos = gen._new_val('int64_t', f'{cmp_t} ? {mend} : {pos_plus1}')
+    gen._emit(f'  {pos} = {next_pos};')
+    gen._emit(f'  goto {bb_cond};')
+    gen._emit_label(bb_after)
+
+
+def _gen_for_findall_loop(gen, node: gimple_ctypes.ForStmt) -> None:
+    """`for x in <findall>(text): ...` — lower the CALL to a real
+    `MojoList *` and iterate that, instead of refusing the loop.
+
+    `findall` had NO lowering of any kind before this, which made it one of
+    the named offenders in FORMAL.md §11.2: the call fell through to
+    `BUILTIN_VALUE_MAP`'s `void *` identity stub, `_gen_for_iter` received
+    an untyped handle, and the loop body ran ZERO times with nothing beyond
+    a `mojo_unsupported_iter` naming `void *`. Two of this compiler's own
+    loops have that shape (module_loader.py's re-export scan), and the
+    dedup pass in emit_infra.py had to be written to avoid the form
+    altogether — its own docstring records that `finditer`/`findall` "has no
+    lowering for either shape of for-loop ... so a loop here over either
+    would silently run zero times once this file compiles itself".
+
+    What is emitted is exactly what `re.findall` computes: a scan over the
+    subject with the same engine `finditer` already uses, appending one
+    element per match.
+
+      * no capture groups  -> each element is the whole matched text, a
+        fresh `char *` from `mojo_regex_substr` (which copies, so the list
+        owns its strings and no two elements alias the subject).
+      * exactly one group -> each element is that group's text, matching
+        real Python, which does NOT wrap a single group in a tuple.
+      * two or more       -> each element is a TUPLE of the groups, which
+        in this backend is a `MojoList *` marked by `mojo_mark_as_tuple`
+        (the representation `_lower_tuple_literal` produces), so a
+        consuming `for a, b in ...` unpacks it through the ordinary
+        two-slot path.
+
+    The pattern must be known at compile time, because the scan is driven
+    by the emitted regex-program tables rather than by a runtime `re`
+    object — the same constraint `finditer` already has, and the same one
+    that makes an unlowerable pattern a refusal rather than a guess.
+    `_try_const_fold_str` supplies it from a literal, a concatenation, a
+    repetition, or a reference to an already-folded local.
+
+    FLAGS are refused rather than ignored. `_re_py.MULTILINE` and friends
+    change what `^`/`$`/`.` mean, and this backend's engine has no flag
+    input; silently dropping one would be precisely the silent wrong answer
+    this whole class is about. So both a `flags=` keyword and a third
+    POSITIONAL argument are refused — the latter because that is exactly
+    how the flags are spelled at the two real call sites
+    (module_loader.py passes `_re_py.MULTILINE` third).
+
+    Any shape not provably supported raises, and the caller rolls back and
+    leaves the loud refusal in place."""
+    it = node.iterable
+    if not isinstance(it, gimple_ctypes.CallExpr):
+        raise ValueError('findall() call expected')
+    if len(it.kwargs or []) > 0:
+        raise ValueError('findall() keyword arguments (incl. flags=) are not lowered')
+    if len(it.args) != 2:
+        raise ValueError(
+            f'findall() with {len(it.args)} positional arguments is not lowered '
+            f'(a third argument is a flags argument)')
+    pattern = gen._try_const_fold_str(it.args[0])
+    if pattern is None:
+        raise ValueError('findall() pattern is not a compile-time-known string')
+
+    text_type, text_val = gen.lower_expr(it.args[1])
+    if text_type != 'char *':
+        text_val = gen._new_val(
+            'char *', f'(char *){gen._ensure_local(text_type, text_val)}')
+
+    ngroups = _regex_prog_for(gen, pattern)['ngroups']
+    res = gen._call_expr('MojoList *', 'mojo_list_new', [])
+    pieces = _emit_regex_scan(gen, pattern, text_val)
+    (_info, _bb_cond, _bb_body, _bb_post, _bb_after,
+     _pos, mstart, mend, gstart, gend) = pieces
+    if ngroups == 0:
+        _whole = gen._call_expr(
+            'char *', 'mojo_regex_substr',
+            [('char *', text_val), ('int64_t', mstart), ('int64_t', mend)])
+        gen._void_call('mojo_list_append_str', [('MojoList *', res), ('char *', _whole)])
+        gen._elem_types[res] = 'char *'
+    else:
+        # `gstart`/`gend` are `int64_t[ngroups + 1]` as filled by
+        # `mojo_regex_search`, and index 0 is the WHOLE match — capturing
+        # group k (1-based, as `re` numbers them) is at index k. So group
+        # `_gi` (0-based here) is at `_gi + 1`. Read each through
+        # `_mojo_at_int64_t` — the shared `p + n` helper every other
+        # pointer-arithmetic READ in this backend uses — rather than
+        # writing `*p + n` inline, which GIMPLE rejects (and which
+        # silently read 0 where it did not, producing empty group strings
+        # rather than a compile error).
+        gen._ptr_helpers_needed.add('int64_t')
+        # TWO OR MORE GROUPS: ONE tuple per match, holding every group as a
+        # slot. (Building the tuple inside the per-group loop instead
+        # appends N one-slot tuples per match, which a consuming
+        # `for a, b in ...` then unpacks as N pairs of (group, null) —
+        # twice the iterations and a null second slot.)
+        _tup = gen._call_expr('MojoList *', 'mojo_list_new', []) if ngroups >= 2 else None
+        if _tup is not None:
+            gen._void_call('mojo_mark_as_tuple', [('MojoList *', _tup)])
+        for _gi in range(ngroups):
+            _gi64 = gen._new_val('int64_t', f'(int64_t){_gi + 1}')
+            _gsp = gen._new_val('int64_t *', f'_mojo_at_int64_t ({gstart}, {_gi64})')
+            _gep = gen._new_val('int64_t *', f'_mojo_at_int64_t ({gend}, {_gi64})')
+            _gsv = gen._new_temp('int64_t')
+            _gev = gen._new_temp('int64_t')
+            gen._emit(f'  {_gsv} = *{_gsp};')
+            gen._emit(f'  {_gev} = *{_gep};')
+            # A group that did not participate in this match has gstart
+            # -1 (the engine initialises every slot to -1 before
+            # matching); real `re.findall` yields an empty string for an
+            # unmatched optional group, and `mojo_regex_substr` already
+            # clamps a negative length to 0 — but it would read from
+            # `text - 1` first, so clamp the offsets here.
+            _zero = gen._new_val('int64_t', '(int64_t)0')
+            _gsz = gen._new_val('int64_t', f'{_gsv} < {_zero} ? {_zero} : {_gsv}')
+            _gez = gen._new_val('int64_t', f'{_gev} < {_zero} ? {_zero} : {_gev}')
+            _s = gen._call_expr(
+                'char *', 'mojo_regex_substr',
+                [('char *', text_val), ('int64_t', _gsz), ('int64_t', _gez)])
+            if _tup is None:
+                gen._void_call('mojo_list_append_str', [('MojoList *', res), ('char *', _s)])
+                gen._elem_types[res] = 'char *'
+            else:
+                gen._void_call('mojo_list_append_str', [('MojoList *', _tup), ('char *', _s)])
+        if _tup is not None:
+            # A nested list is appended as its boxed handle — the runtime
+            # has no `mojo_list_append(MojoList *, MojoList *)` and every
+            # other nested-list append in this backend boxes the pointer
+            # the same way.
+            _boxed = gen._new_val('int64_t', f'(int64_t)(intptr_t){_tup}')
+            gen._void_call('mojo_list_append_int', [('MojoList *', res), ('int64_t', _boxed)])
+    _close_regex_scan(gen, pieces)
+    if ngroups >= 2:
+        gen._elem_types[res] = 'MojoList *'
+        gen._tuple_slot_types[res] = ['char *'] * ngroups
+
+    # `re.findall` returns a real list, and the consuming `for` loop must
+    # iterate THAT list. Give the result a declared name (with its element
+    # metadata carried across) and hand it to `_gen_for_list`, which is
+    # the ordinary list-loop path — rather than duplicating the loop
+    # emission here.
+    _tmp = gen._new_temp('MojoList *')
+    gen._safe_coerce_emit('MojoList *', 'MojoList *', res, _tmp)
+    if ngroups == 0 or ngroups == 1:
+        gen._elem_types[_tmp] = 'char *'
+    else:
+        gen._elem_types[_tmp] = 'MojoList *'
+        gen._tuple_slot_types[_tmp] = ['char *'] * ngroups
+    gen._gen_for_list(node.target, _tmp, node.body)
+
+
 def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # `for m in <compile-time-known-pattern>.finditer(text):` — see
     # regex_compile.py / BACKLOG-CODEGEN.md §4f. Checked structurally,
@@ -422,6 +648,22 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             del gen.body_lines[body_mark:]
             del gen.decls[decls_mark:]
             gimple_ctypes._debug_note('regex finditer lowering failed, falling back', e)
+
+    # `for x in <known-pattern>.findall(text):` — see
+    # _gen_for_findall_loop below. Same transactional shape as the finditer
+    # case above: a lowering that cannot prove a shape supported rolls back
+    # completely and leaves the pre-existing refusal in place, which is
+    # loud, rather than half-emitting a loop that computes something else.
+    if (isinstance(it, gimple_ctypes.CallExpr) and isinstance(it.func, gimple_ctypes.MemberExpr)
+            and it.func.member == 'findall'):
+        body_mark, decls_mark = len(gen.body_lines), len(gen.decls)
+        try:
+            _gen_for_findall_loop(gen, node)
+            return
+        except Exception as e:
+            del gen.body_lines[body_mark:]
+            del gen.decls[decls_mark:]
+            gimple_ctypes._debug_note('regex findall lowering failed, falling back', e)
 
     # `for a, b in materialize[LIST_CONST]():` — `materialize[T,//,value:T]
     # (out result: T)` (std.builtin.value) just hands back its bracket
@@ -621,8 +863,27 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             else:
                 gimple_ctypes._debug_note('for loop over MojoGenerator* with no known API (unreachable in Milestone B scope)', it_val)
                 gen._emit_unsupported_iter(it_type, node)
-        elif it_type.endswith(' *') or it_type.endswith('*'):
+        elif ((it_type.endswith(' *') and it_type != 'void *')
+              or it_type.endswith('*')):
             # User-defined struct: try __iter__ / __has_next__ / __next__ protocol
+            #
+            # `void *` is EXCLUDED, and that exclusion is load-bearing.
+            # `'void *'.endswith(' *')` is true, so before it the arm took
+            # every untyped pointer-shaped value — including the plain
+            # `void *` that `_lower_builtin_reversed`'s unrecognized-type
+            # fallthrough (and a comprehension result, and several builtin
+            # stubs) produce — and looked for a `void___has_next__` that
+            # cannot exist, then REFUSED. That made the boxed runtime
+            # dispatch below, whose own `it_type in ('int', 'int64_t',
+            # 'void *')` test names `void *` explicitly, unreachable for
+            # `void *` — the two arms contradicted each other and the
+            # narrower one won. `for x in reversed(seq)` therefore ran zero
+            # times with a `mojo_unsupported_iter` naming `void *`, which is
+            # the exact silent-no-op this site exists to prevent.
+            #
+            # A user-defined struct is never spelled `void *` in this
+            # codegen (every emitted struct has its own `Foo *` typedef), so
+            # excluding it costs the struct-protocol branch nothing.
             base = gimple_exprtypes._struct_name_of(it_type)
             has_next = f"{base}___has_next__"
             nxt      = f"{base}___next__"
