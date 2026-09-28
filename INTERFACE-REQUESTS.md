@@ -276,6 +276,87 @@ the `reflect.py` diff above.
 
 ---
 
+## [2] — reconciliation: [1] × [2] × [3] in one tree, verified working
+
+[2] committed first, so [2] checked that the three sets of changes actually
+work **together** rather than each passing alone. They do. Recorded here
+because two of the three facts below are not visible from any one agent's diff.
+
+**It works, end to end.** With [1]'s optional-unit registry, [2]'s per-arch
+runtime dylib and [3]'s scanner fix all in the tree:
+
+```
+$ python3 fire.py build -o /tmp/sq test_sqlite3.mojo && /tmp/sq
+rows: 1 hello 2 world                          # the round's only user-visible
+                                                # broken thing, now fixed
+$ python3 fire.py build -o /tmp/nosql <a program that never mentions sqlite>
+$ otool -L /tmp/nosql | grep -iE 'sqlite|libz|libssl|crypto'
+   (nothing)                                    # and the negative half holds:
+                                                # it does not link libsqlite3
+$ otool -L /tmp/sq | grep -i sqlite
+  /usr/lib/libsqlite3.dylib                     # while the sqlite one does
+```
+
+**Merge order matters, in one place only.** `reflect.py`'s two changes
+(request `[2] → [3]`, above) are **uncommitted**. `bdd76b0` alone still
+advertises 30 of 459 runtime entry points; the 458 is the working tree. Land
+`reflect.py` and the claim holds; do not and it does not.
+
+**[1] and [3] are coupled through one function, and now that is pinned.**
+`build_config.optional_unit_symbols` derives each unit's `mojo_<unit>_`
+namespace as the longest common prefix of what `reflect.collect_runtime_exports_h`
+reports for that unit's header. So a change to the scanner is a change to which
+libraries a program links, with **no file in common** between the two agents.
+The specific hazard: a scanner reporting a name that is not a real C symbol
+feeds an invented string into a prefix computation, and the resulting
+namespace is a prefix of nothing — the program that genuinely calls the unit
+stops matching it and fails to link, or a near-miss matches the wrong unit and
+the program silently links a library it never asked for. That scanner *did*
+have that bug (it read `return f(x);` inside a `static inline` as a
+declaration); it is fixed, and `test_runtime_dylib.py` §7 now fails if the
+two halves ever disagree again — namespaces that do not cover exactly their
+own symbols, namespaces that overlap each other, a runtime symbol falling
+inside a unit's namespace, or a header promising a symbol its unit does not
+define. Measured, all clean: 22/6/13/18 symbols, four disjoint namespaces, no
+overlap with any of the runtime's.
+
+### One defect in the combination, in [1]'s file, for [1] to take
+
+`driver.compile_program` and `fire.py`'s `build_executable` handle a
+**failing optional-unit compile** differently, and the worse one is on the
+path FORMAL-PARALLEL says `fire.py build` normally takes:
+
+```
+fire.py build  ->  optional runtime compile failed (ssl, .../fire_ssl.c):
+                   fire_ssl.c:2:10: fatal error: openssl/ssl.h: No such file
+                   (names the unit, the source, and the compiler's own error)
+
+driver.compile_program  ->  CalledProcessError: Command '['/opt/local/bin/
+                   gcc-mp-15', '-fPIC', '-I.../runtime', '-O0', '-g3', '-c',
+                   '-o', '/var/folders/.../mojo_optrt_owzc_1o0...
+```
+
+`driver.py`'s `_mk_opt` uses `subprocess.run(..., check=True)`; `fire.py`'s
+equivalent checks `returncode` and prints the diagnostic. The fix is to copy
+[1]'s own `fire.py` handling — the good version is already written, three
+files away. Not loud-vs-silent (an exception is loud, exit non-zero), but a
+traceback where the project has a habit of naming the thing that went wrong.
+
+**This is reachable on this machine**, which makes it worth fixing rather than
+filing: `fire_ssl.c` does `#include <openssl/ssl.h>` and OpenSSL is **not
+installed here**, so the unit yields no object at all. Any program referencing
+`mojo_ssl_*` cannot build until it is. Two consequences worth knowing:
+
+* `test_runtime_dylib.py` reports `skip ssl: … 13 declared symbols are
+  unchecked` with the compiler's reason, rather than passing quietly — 0 of 13
+  checked is a materially weaker claim than 13 of 13 and must not read the
+  same.
+* Whether `fire_ssl.c` belongs in the registry **on a machine with no OpenSSL**
+  is a registry question, not a code one, and the answer is arguable either
+  way: the header is `#include`d unconditionally so a program calling
+  `mojo_ssl_new` must get *something*, and a loud "this build needs OpenSSL"
+  beats a bare `Undefined symbols` on the same line. Left to [1].
+
 ## Notes for the integrator, not requests
 
 * **`build_stdlib_dylib.py` and `cas.py` changed shape, and the CAS domains

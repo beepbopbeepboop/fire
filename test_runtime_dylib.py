@@ -649,6 +649,128 @@ def test_dylib_link_key_includes_the_arch():
         os.unlink(obj)
 
 
+# ── 7. the optional-runtime-unit registry agrees with the export table ──────
+#
+# The coupling this file pins is a CROSS-AGENT one, and it is the reason the
+# check is here rather than in the registry's own test. `build_config`'s
+# optional-unit registry derives each unit's `mojo_<unit>_` namespace as the
+# longest common prefix of the symbols that unit's HEADER declares, read
+# through `reflect.collect_runtime_exports_h` — the same scanner whose output
+# this file already depends on. So a change to that scanner is a change to
+# which libraries a program links, with no file in common to make the
+# dependency visible.
+#
+# The failure it has to fail on: a scanner that reports a name which is not a
+# real C symbol puts an invented string into a longest-common-prefix
+# computation, and the resulting namespace is then a prefix of nothing. A
+# program that genuinely calls into the unit no longer matches it and fails to
+# link (loud, so recoverable) — or, worse, a namespace computed from a
+# near-miss matches the WRONG unit and the program silently links a library it
+# never asked for. The scanner did have that bug: it read `return f(x);`
+# inside a `static inline` body as a declaration. It is fixed; this is what
+# keeps it fixed, from the side that cannot see the scanner.
+#
+# Nothing here writes another agent's file. It reads `build_config` and fails
+# if the two halves disagree, which is the whole point.
+
+_OPTIONAL_UNITS = ('sqlite3', 'zlib', 'ssl', 'ncurses')
+
+
+def _unit_namespace(u):
+    import build_config
+    return build_config.optional_unit_namespace(u), build_config.optional_unit_symbols(u)
+
+
+def test_derived_namespaces_cover_exactly_their_own_symbols():
+    """The derived namespace must select the unit's own symbols and NOTHING
+    else. Under-matching means a program that calls the unit fails to link;
+    over-matching means an unrelated program's namespace probe fires and it
+    links a library it never mentioned."""
+    for u in _OPTIONAL_UNITS:
+        ns, syms = _unit_namespace(u)
+        check(bool(ns), f'{u}: a namespace is derived from the header, not empty')
+        check(all(s.startswith(ns) for s in syms),
+              f'{u}: every declared symbol is inside its own namespace '
+              f'({ns!r})', str([s for s in syms if not s.startswith(ns)]))
+        matched = [s for s in syms if s.startswith(ns)]
+        check(len(matched) == len(syms),
+              f'{u}: the namespace selects all {len(syms)} of its symbols and '
+              f'no others', f'{len(matched)}/{len(syms)}')
+
+
+def test_unit_namespaces_are_disjoint():
+    """Two units whose namespaces overlap cannot both be probed for: the
+    program that mentions one gets both, or the probe cannot say which."""
+    seen = {}
+    for u in _OPTIONAL_UNITS:
+        ns, _syms = _unit_namespace(u)
+        for other, ons in seen.items():
+            check(not (ns.startswith(ons) or ons.startswith(ns)),
+                  f'{u} ({ns!r}) and {other} ({ons!r}) namespaces are disjoint')
+        seen[u] = ns
+
+
+def test_no_unit_namespace_catches_a_runtime_symbol():
+    """The symbol-level form of "a program that never mentions sqlite must not
+    link libsqlite3". The link-line probe fires on a NAMESPACE, so a runtime
+    symbol that happens to sit inside a unit's namespace would drag that unit
+    onto the link line of every program using it — for reasons that have
+    nothing to do with sqlite. Measured: no overlap today, and this is what
+    says so."""
+    arch = bsd.normalize_arch()
+    runtime_syms = set()
+    for hdr in bsd._RUNTIME_HEADERS:
+        for e in reflect.collect_runtime_exports_h(os.path.join(RUNTIME, hdr)):
+            runtime_syms.add(e['name'])
+    # Also the symbols the runtime dylib really defines, not just the ones its
+    # headers declare: the probe matches against generated C, which can name
+    # either.
+    for o in objects_for(arch):
+        runtime_syms |= set(s.lstrip('_') for s in bsd._defined_symbols(bsd.find_gcc(), o))
+    for u in _OPTIONAL_UNITS:
+        ns, _syms = _unit_namespace(u)
+        caught = sorted(s for s in runtime_syms if s.startswith(ns))
+        check(not caught,
+              f'{u}: no runtime symbol falls inside {ns!r}, so the probe cannot '
+              f'fire for a program that never mentions it', str(caught[:5]))
+
+
+def test_declared_symbols_are_real_definitions_where_the_unit_compiles():
+    """The other end: the header must not promise a symbol the unit does not
+    define, or a caller compiles clean and dies at link — the exact failure
+    the registry exists to fix, one level in.
+
+    A unit that cannot be COMPILED on this machine is reported and skipped
+    rather than failed, and that is a real case rather than a hypothetical:
+    `fire_ssl.c` `#include <openssl/ssl.h>`, which is not installed here, so it
+    yields no object at all. A skip is stated in the output rather than passing
+    quietly, because "0 of 13 symbols checked" is a materially weaker claim
+    than "13 of 13" and must not read the same."""
+    import build_config
+    cc = bsd.find_gcc()
+    rt_dir = build_config.runtime_dir()
+    for u in _OPTIONAL_UNITS:
+        syms = build_config.optional_unit_symbols(u)
+        src = build_config.optional_unit_source(u, rt_dir)
+        with tempfile.TemporaryDirectory() as td:
+            o = os.path.join(td, 'u.o')
+            r = subprocess.run([cc, '-fPIC', f'-I{rt_dir}', '-c', '-o', o, src],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                first = (r.stderr or '').strip().splitlines()
+                why = next((l for l in first if 'fatal error' in l), first[-1] if first else '')
+                print(f"  skip  {u}: {os.path.basename(src)} does not compile on "
+                      f"this machine, so its {len(syms)} declared symbols are "
+                      f"unchecked — {why}")
+                continue
+            defined = set(s.lstrip('_')
+                          for s in bsd._defined_symbols(cc, o))
+            missing = sorted(s for s in syms if s not in defined)
+            check(not missing,
+                  f'{u}: every one of the {len(syms)} symbols its header declares '
+                  f'is defined by {os.path.basename(src)}', f'missing: {missing}')
+
+
 def main():
     test_arch_names_canonicalize()
     test_arch_flags_and_units_differ_by_target()
@@ -668,6 +790,10 @@ def main():
     test_clang_can_compile_the_runtime_for_both_architectures()
     test_stdlib_dylib_default_output_carries_the_arch()
     test_dylib_link_key_includes_the_arch()
+    test_derived_namespaces_cover_exactly_their_own_symbols()
+    test_unit_namespaces_are_disjoint()
+    test_no_unit_namespace_catches_a_runtime_symbol()
+    test_declared_symbols_are_real_definitions_where_the_unit_compiles()
     npass = sum(1 for ok, _w in RESULTS if ok)
     nfail = len(RESULTS) - npass
     print(f"\n{npass} passed, {nfail} failed, {len(RESULTS)} checks")
