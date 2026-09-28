@@ -585,9 +585,54 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
         f"unknown arch {arch!r} (expected one of {', '.join(ARCHES)})")
 
 
+def _audit_bound_symbols(external_syms, dylib_syms, where: str) -> list:
+    """Every extern must be accounted for: a C library, or a linked dependency.
+
+    An image that binds a symbol nothing provides is not a working image — it
+    builds cleanly and then cannot be loaded, or dies at the first call. That
+    is the failure mode the whole import mechanism exists to prevent, and this
+    check is where it is caught, in the place that can still name the symbol.
+
+    It used to run on the DYLIB path only. The executable path — `build
+    --formal`, which is what the test suites and the coverage sweep actually
+    drive — emitted `external_syms` into the Mach-O/ELF with nothing checking
+    them, so the one path that matters most had the weakest checking. Both call
+    this now, which is also why it is factored out rather than copied: two
+    copies of a rule like this is how they come to disagree about what
+    "accounted for" means.
+
+    `dylib_syms` is the merged `{bare callee: exported symbol}` of every linked
+    library's manifest. Two spellings meet here: a manifest records the C
+    identifier (what a bind stream carries — dyld prepends the underscore) while
+    a name the codegen could not resolve arrives in the Mach-O spelling, with
+    one. Comparing them raw reports every dependency symbol as unprovided, so
+    both sides are compared without the underscore.
+
+    Returns the unaccounted names, which is empty when the image is sound. The
+    caller decides how to report, because the two paths have different names to
+    report it against.
+    """
+    provided = {n.lstrip("_") for n in (dylib_syms or {})}
+    provided |= {n.lstrip("_") for n in (dylib_syms or {}).values()}
+    return [sym for sym in sorted(set(external_syms or []))
+            if sym.lstrip("_") not in provided
+            and not _is_libsystem(sym)]
+
+
+def _unaccounted_report(source_path: str, unaccounted: list, where: str) -> str:
+    """The one wording for "this image would bind symbols nothing provides"."""
+    return (f"{os.path.basename(source_path)}: the {where} would bind "
+            f"{len(unaccounted)} symbol(s) that nothing provides, so it could "
+            f"not be loaded: {', '.join(unaccounted[:8])}"
+            f"{' …' if len(unaccounted) > 8 else ''}. These are constructs "
+            f"this backend does not lower (a struct type, a method call on a "
+            f"value, a compiler intrinsic), not exports that are missing. "
+            f"(Provider check: {_libsystem_probe_status()}.)")
+
+
 def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
                       dylibs: list = None, comptime_hook=None,
-                      structs: list = None):
+                      structs: list = None, source_path: str = None):
     """Compile `ordered` for `arch` and wrap it in its binary container.
 
     Returns (code, info, external_syms, binary). Mach-O needs two passes: the
@@ -622,6 +667,11 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
                                     lib_name=DEFAULT_LIBC)
             codegen.asm.resolve_extern(got)
             code = bytes(codegen.asm.sections["text"])
+        unaccounted = _audit_bound_symbols(external_syms, dylib_syms, "image")
+        if unaccounted:
+            raise FormalBuildError(
+                _unaccounted_report(source_path or "<program>", unaccounted,
+                                    "image"))
         binary = build_elf(code, entry=info["base_addr"],
                            vaddr=info["base_addr"],
                            external_syms=external_syms, lib_name=DEFAULT_LIBC)
@@ -655,6 +705,11 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
             code = bytes(codegen.asm.sections["text"])
     except CodegenError as e:
         raise FormalBuildError(str(e))
+    unaccounted = _audit_bound_symbols(external_syms, dylib_syms, "image")
+    if unaccounted:
+        raise FormalBuildError(
+            _unaccounted_report(source_path or "<program>", unaccounted,
+                                "image"))
     binary = build_macho(code, external_syms=external_syms, arch=arch,
                          dylibs=[{"install_name": d["install_name"],
                                   "symbols": set((d.get("map") or {}).values())}
@@ -878,7 +933,7 @@ def compile_formal(source_path: str, output: str = None,
     code, info, external_syms, binary = _codegen_and_link(
         arch, fmt, ordered, test_input, dylibs=linked,
         comptime_hook=comptime_hook,
-        structs=structs)
+        structs=structs, source_path=source_path)
 
     if output is None:
         stem = os.path.splitext(os.path.basename(source_path))[0] or "a.out"
@@ -3588,18 +3643,108 @@ def _abi_symbol(entry: dict):
         return None
 
 
+def _libsystem_handle():
+    """A dlopen-able handle on the C library this image's load command names.
+
+    `None` until the first call, then either a handle or `False` for "this host
+    will not let us ask". Deliberately NOT `ctypes.CDLL(None)`: the global
+    namespace contains everything the *building* process has loaded, so it
+    answers questions about the compiler rather than about the target.
+    Measured on this machine, same symbol, two handles:
+
+        CDLL('/usr/lib/libSystem.B.dylib')   sqlite3_open -> False   correct
+        CDLL(None)                           sqlite3_open -> True    WRONG
+
+    because this python has libsqlite3 in its own global namespace. A build-time
+    audit that inherits that would wave through exactly the symbols it exists to
+    catch. `tools/formal_sweep.py` reached the same conclusion about its own
+    earlier probe, and for the same reason, its own comment is explicit that the
+    global namespace "is a false PASS".
+    """
+    global _LIBSYSTEM_HANDLE
+    if _LIBSYSTEM_HANDLE is None:
+        _LIBSYSTEM_HANDLE = False
+        try:
+            import ctypes
+            import platform
+            if platform.system() == "Darwin":
+                from formal.macho_linker import LIBSYSTEM_PATH
+                name = LIBSYSTEM_PATH.decode().rstrip("\0")
+            else:
+                from formal.elf import DEFAULT_LIBC
+                name = DEFAULT_LIBC
+            _LIBSYSTEM_HANDLE = ctypes.CDLL(name)
+        except Exception:
+            _LIBSYSTEM_HANDLE = False
+    return _LIBSYSTEM_HANDLE
+
+
+_LIBSYSTEM_HANDLE = None
+
+# The 19 names this function used to hardcode, kept ONLY as the fallback for a
+# host that will not let us dlopen its C library. They are a guess at names
+# rather than a check of anything, which is the whole reason the real table
+# exists; on such a host this is no worse than the behaviour being replaced.
+_LIBSYSTEM_LEGACY = frozenset((
+    "printf", "puts", "putchar", "malloc", "calloc", "realloc", "free",
+    "memcpy", "memset", "strlen", "strcmp", "strncmp", "abort", "exit",
+    "atoi", "qsort", "fmod", "pow", "sqrt",
+))
+
+# memo: bare symbol -> bool
+_LIBSYSTEM_MEMO = {}
+
+
 def _is_libsystem(sym: str) -> bool:
-    """True for a symbol libSystem itself provides.
+    """True for a symbol the C library this image links actually provides.
 
     The externs a library legitimately sends outward are the C library's own
     (`printf`, `malloc`, …), and those are declared by the libSystem load
     command the image already carries. Everything else has to come from a
-    dependency's export table."""
-    import ctypes.util
-    known = {"printf", "puts", "putchar", "malloc", "calloc", "realloc",
-             "free", "memcpy", "memset", "strlen", "strcmp", "strncmp",
-             "abort", "exit", "atoi", "qsort", "fmod", "pow", "sqrt"}
-    return sym.lstrip("_") in known
+    dependency's export table.
+
+    This used to be a 19-name literal, which was a guess at names rather than a
+    check of anything, and it was wrong in the direction that hides defects: a
+    formal program calling `stat`, `clock_gettime`, `regcomp` or `arc4random_buf`
+    — all of which libSystem genuinely provides, and all of which are the whole
+    reason a module like `os` or `re` is in the *modelled* half of
+    `formal/imports.py`'s host split — was reported as binding a symbol nothing
+    provides. Now the answer comes from dlsym against the real library.
+
+    Memoised per symbol: this runs once per extern per build, and a dlsym per
+    extern would be a needless syscall storm in a large program.
+    """
+    bare = sym.lstrip("_") if isinstance(sym, str) else sym
+    if not bare:
+        return False
+    hit = _LIBSYSTEM_MEMO.get(bare)
+    if hit is not None:
+        return hit
+    handle = _libsystem_handle()
+    if handle is False:
+        answer = bare in _LIBSYSTEM_LEGACY
+    else:
+        try:
+            answer = hasattr(handle, bare)
+        except Exception:
+            answer = bare in _LIBSYSTEM_LEGACY
+    _LIBSYSTEM_MEMO[bare] = answer
+    return answer
+
+
+def _libsystem_probe_status() -> str:
+    """How the answer above was reached, for a diagnostic that depends on it.
+
+    A build that fell back to the 19-name list is making a weaker claim than one
+    that asked the library, and a reader of the audit output should be able to
+    tell which happened rather than being told "nothing provides this symbol"
+    with no indication that the question was only partly asked.
+    """
+    return ("asked the C library (dlsym)"
+            if _libsystem_handle() is not False
+            else "FALLBACK: this host would not let the build open its C "
+                 "library, so a 19-name list was used instead")
+
 
 
 def _export_entries(source_paths: list, prefixes: dict = None) -> dict:
@@ -4306,35 +4451,18 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     except CodegenError as e:
         raise FormalBuildError(str(e))
 
-    # A library may only bind symbols it can account for. Every name the
-    # image sends through a stub lands in its bind stream, and dyld resolves
+    # A library may only bind symbols it can account for. Checked by the SAME
+    # function the executable path now uses, and for the same reason: every name
+    # the image sends through a stub lands in its bind stream, and dyld resolves
     # each one at load time against libSystem or a declared dependency. A name
     # that is neither is not a working library — it is an image that builds
     # cleanly and then cannot be loaded, which is the failure mode this whole
     # import work exists to remove, just moved later. Checking here says it
     # where the library is built, and names the symbols.
-    #
-    # These are the formal model's unsupported constructs arriving late: a
-    # struct used as a type (`CycleIterator`), a method call on a value
-    # (`element.copy`), and compiler intrinsics (`rebind_var`). None is a
-    # missing export to be added; each needs lowering this backend does not do.
-    # Two spellings meet here: a manifest records the C identifier (what a
-    # bind stream carries — dyld prepends the underscore) while a name the
-    # codegen could not resolve arrives in the Mach-O spelling, with one.
-    # Comparing them raw would report every dependency symbol as unprovided.
-    provided = {n.lstrip("_") for n in dylib_syms}
-    provided |= {n.lstrip("_") for n in dylib_syms.values()}
-    unaccounted = [sym for sym in sorted(set(external_syms or []))
-                   if sym.lstrip("_") not in provided
-                   and not _is_libsystem(sym)]
+    unaccounted = _audit_bound_symbols(external_syms, dylib_syms, "library")
     if unaccounted:
         raise FormalBuildError(
-            f"{os.path.basename(source_paths[0])}: the library would bind "
-            f"{len(unaccounted)} symbol(s) that nothing provides, so it could "
-            f"not be loaded: {', '.join(unaccounted[:8])}"
-            f"{' …' if len(unaccounted) > 8 else ''}. These are constructs "
-            f"this backend does not lower (a struct type, a method call on a "
-            f"value, a compiler intrinsic), not exports that are missing.")
+            _unaccounted_report(source_paths[0], unaccounted, "library"))
 
     exports = _formal_exports(source_paths, ordered, info, module_prefixes,
                               _method_exports(source_paths, structs_by_file,

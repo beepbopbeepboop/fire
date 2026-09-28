@@ -44,31 +44,134 @@ _BUILT: dict = {}
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-# CPython's standard library. These have no Mojo source and no symbol the
-# formal model could bind, so a file importing one cannot be built here — but
-# that is a statement about the target, not a module-resolution failure.
-HOST_MODULES = frozenset((
-    "os", "sys", "ast", "json", "re", "argparse", "dataclasses", "typing",
-    "collections", "itertools", "functools", "math", "random", "time",
-    "pathlib", "subprocess", "shutil", "textwrap", "inspect", "abc", "enum",
-    "io", "csv", "copy", "pickle", "struct", "threading", "socket", "glob",
-    "hashlib", "base64", "urllib", "http", "unittest", "logging", "warnings",
-    "importlib", "importlib.util", "importlib.machinery", "contextlib",
-    "traceback", "gc", "atexit", "signal", "errno", "stat", "platform",
-    "tempfile", "uuid", "zlib", "gzip", "codecs", "locale", "getpass",
-    "webbrowser", "unittest.mock", "difflib", "fnmatch", "operator",
-    "heapq", "bisect", "array", "numbers", "decimal", "fractions", "secrets",
-    "select", "queue", "weakref", "types", "dis", "pprint", "reprlib",
-    # Added because the sweep's classifier was working around their absence:
-    # a file importing one of these was told "not a stdlib or sibling module",
-    # which is a statement about module RESOLUTION and is simply false — they
-    # are CPython standard-library modules with no Mojo source, which is what
-    # this list exists to say. `__future__` is deliberately NOT here: it is not
-    # a host module but a compiler directive that binds nothing, and it is
-    # excluded as INERT_MODULES below, which is a different and more accurate
-    # reason than "the host provides it".
-    "asyncio", "ctypes", "concurrent", "concurrent.futures",
+# CPython's standard library, SPLIT BY WHAT IMPLEMENTING IT WOULD REQUIRE.
+#
+# These have no Mojo source in this tree and no symbol this formal model could
+# bind, so a file importing one cannot be built here — that much is a statement
+# about the TARGET, not a module-resolution failure. But "cannot be built here"
+# and "could never be built here" are different claims, and the coverage report
+# used to conflate them: `tools/formal_sweep.py`'s CLASS_HOST blurb says a host
+# import is *"outside this backend's reach, and not fixable"*, which is FALSE of
+# `os`, `sys`, `math`, `struct`, `time`, `json` and `re`. Those are modules
+# whose capability is reachable — libSystem provides the underlying facility, or
+# the work is pure computation. Saying "not fixable" about them is how the
+# largest bucket in the report came to rest on a claim nobody had checked.
+#
+# The rule that separates the tiers, stated once: **does implementing it need an
+# object a freestanding image that links libSystem and NOTHING ELSE does not
+# have?** A second process, a thread, a socket, a dynamic loader for foreign
+# code, an embedded CPython, a terminal — or a library outside libSystem. That
+# is a property of the target and no amount of backend work changes it.
+# Everything else is `HOST_MODELLED`: reachable in principle, not implemented
+# today, and therefore a gap with an owner rather than a permanent fact.
+#
+# This is a judgement with a stated rule, not a proof. A module is placed by the
+# rule and by nothing else — never because it happens to be unimplemented, and
+# never because it is unimplemented *on this backend specifically*.
+#
+# `_is_host_module` consults the UNION, so this is a CLASSIFICATION change and
+# not a behaviour change: every one of these refuses the build exactly as
+# before, and the union is asserted to equal what the single list used to hold.
+HOST_UNREACHABLE = frozenset((
+    # A second process.
+    "subprocess",
+    # A thread, and a proved model of one.
+    "threading", "concurrent", "concurrent.futures", "asyncio",
+    # A socket.
+    "socket", "urllib", "http",
+    # A dynamic loader for foreign code, or an embedded CPython.
+    "ctypes", "importlib", "importlib.util", "importlib.machinery",
+    # The interpreter's own frames, allocation set, or shutdown path. There is
+    # no interpreter here to ask, and on this path a value is one 64-bit word,
+    # so there is nothing for `gc` to track and no bytecode for `dis` to
+    # disassemble (the formal backends emit machine code, not bytecode).
+    "traceback", "gc", "atexit", "signal", "warnings", "dis",
+    # Process-wide reporting machinery, which is a host object by construction.
+    "logging", "unittest", "unittest.mock",
+    # A terminal, or a writable filesystem this target does not get.
+    "getpass", "webbrowser", "tempfile", "shutil",
+    # A library outside libSystem, so linking it would contradict the premise
+    # that a formal image links libSystem and nothing else.
+    "zlib", "gzip", "locale",
 ))
+
+# The reachable half: libSystem provides the facility, or the module is pure
+# computation over values the model already represents. NOT implemented today.
+# Grouped by what it would need, because that is what "reachable" means here.
+HOST_MODELLED = frozenset((
+    # A libSystem/libc facility: getcwd, stat, clock_gettime, regcomp,
+    # arc4random_buf, CommonCrypto for hashlib, the POSIX file calls.
+    "os", "sys", "errno", "stat", "platform", "time", "select", "io",
+    "pathlib", "glob", "fnmatch", "hashlib", "secrets", "uuid",
+    # Pure computation over representable values: string and text handling,
+    # numeric containers, pattern matching, byte packing, data structures.
+    "json", "re", "struct", "math", "random", "decimal", "fractions",
+    "numbers", "array", "operator", "functools", "itertools", "collections",
+    "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
+    "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
+    "weakref", "pprint", "reprlib", "pickle",
+    # A shape over the source language rather than a runtime facility: the
+    # parser, the type lattice, the dataclass transform, the CLI parser.
+    "ast", "typing", "dataclasses", "argparse",
+    # A SUBSET is reachable, and the subset is the point. `inspect` reads
+    # attributes off live values, which this path has (the gimple runtime
+    # carries a type tag and `mojo_obj_getattr`); what it cannot do is walk a
+    # live interpreter's frames, because there is no interpreter. Flagged as
+    # considered rather than missed.
+    "inspect",
+))
+
+# Everything the build treats as a host module. The union, deliberately: the
+# predicate the BUILD consults must not change behaviour, and this is the one
+# place that says so.
+#
+# `__future__` is deliberately NOT in either tier. It is not a host module but a
+# compiler directive that binds nothing, and it is excluded as INERT_MODULES
+# below — a different and more accurate reason than "the host provides it", and
+# the reason that matters is the sweep's: a file whose FIRST problem was
+# `from __future__ import annotations` was reported as importing a module that
+# cannot be built, which buried the `import os` that was what actually stopped
+# it. That was the reason `asyncio`, `ctypes` and `concurrent` were added here in
+# the first place: the coverage report was working around their absence, telling
+# files they imported "not a stdlib or sibling module", which is a statement
+# about module RESOLUTION and is simply false of a CPython standard-library
+# module with no Mojo source.
+HOST_MODULES = HOST_UNREACHABLE | HOST_MODELLED
+
+
+def host_module_tier(name: str) -> str:
+    """`'modelled'`, `'unreachable'`, or `''` for a name that is not a host module.
+
+    The accessor that makes the split usable. A coverage report can then say
+    "this file is out of reach because it needs a second process" — a fact
+    about the target, permanent — separately from "this file is out of reach
+    because `os.path.join` has not been built yet", which is a gap with an
+    owner. Before this existed both were one bucket, and the bucket's own
+    description asserted the stronger of the two claims about all of them.
+
+    `unreachable` is tested first, so a name in both tiers would resolve to the
+    permanent answer; the partition is asserted to be disjoint by the test
+    suite, and `_host_tier_conflicts` reports any overlap on demand.
+    """
+    if not name:
+        return ""
+    top = name.split(".")[0]
+    if top in HOST_UNREACHABLE or name in HOST_UNREACHABLE:
+        return "unreachable"
+    if top in HOST_MODELLED or name in HOST_MODELLED:
+        return "modelled"
+    return ""
+
+
+def _host_tier_conflicts() -> list:
+    """Names in both tiers, and (for auditing a future edit) names in neither.
+
+    Empty is correct. This exists so a name added to one tier and forgotten in
+    the other is a visible failure rather than a silent change to a verdict
+    nobody reads a diff for. The suite asserts on it.
+    """
+    return sorted(HOST_UNREACHABLE & HOST_MODELLED)
+
 
 
 def _is_host_module(name: str) -> bool:
@@ -240,6 +343,69 @@ def _candidates(module_name: str, base: str, ext: str) -> list:
             os.path.join(base, leaf, "__init__" + ext)]
 
 
+def _relative_candidates(module_name: str, relative_to: str, ext: str) -> list:
+    """The file shapes a RELATIVE module name can take, resolved properly.
+
+    A leading dot is not a path separator, and treating it as one is what made
+    `..` resolve to the importer's own package. `_candidates` does
+    `module_name.replace(".", os.sep)`, so `".."` becomes `"/"`, the first two
+    candidates land at the FILESYSTEM ROOT where they never exist, and the leaf
+    fallback — which takes `"..".split(".")[-1]`, i.e. the empty string — then
+    matches the importer's OWN `__init__.mojo`. Measured, before this function
+    existed:
+
+        _candidates("..", ".../std/gpu/host/nvidia", ".mojo")
+          ['//.mojo', '//__init__.mojo',
+           '.../gpu/host/nvidia/.mojo', '.../gpu/host/nvidia/__init__.mojo']
+
+        from .../gpu/host/nvidia/tma.mojo
+          ".."            -> .../gpu/host/nvidia/__init__.mojo   WRONG
+          "std.gpu.host"  -> .../gpu/host/__init__.mojo         right
+
+    so `from .. import DeviceBuffer` imported nvidia's own package instead of
+    its parent, and the file was refused for a module that resolves perfectly
+    well (bugs/FORMAL_known_limits.md 1.3).
+
+    The rule, which is Python's and needs no special case: **the containing
+    package's directory is the importing file's own directory, whatever the file
+    is called.** `a/b/c.py` is a module of package `a.b`, and `a/b/__init__.py`
+    *is* package `a.b`; in both cases `.` is `a/b`. So `.` is `dirname(file)`,
+    each additional dot ascends one level, and whatever follows the dots is
+    appended to the result.
+
+    This deliberately reproduces what the leaf fallback already did for `.leaf`
+    and `.` — `from .path import ...` inside `os/path/__init__.mojo` resolves to
+    `os/path/path.mojo` today and still does, because it was never the broken
+    case. Fixing `..` must not disturb it, so `resolve_module_path` tries the
+    relative form FIRST and leaves the four root passes exactly as they were.
+
+    Ascending stops at the filesystem root rather than looping, and a name that
+    asks for more levels than exist simply yields the root, fails to match, and
+    falls through to the ordinary search — a miss, not a wrong answer.
+    """
+    if not module_name or not module_name.startswith("."):
+        return []
+    if not relative_to:
+        return []
+    dots = 0
+    while dots < len(module_name) and module_name[dots] == ".":
+        dots += 1
+    rest = module_name[dots:]
+    base = os.path.dirname(os.path.abspath(relative_to))
+    for _ in range(dots - 1):
+        parent = os.path.dirname(base)
+        if parent == base:            # already at the root: stop, do not spin
+            break
+        base = parent
+    if not rest:
+        # `.` and `..` with nothing after them name a PACKAGE, and a package is
+        # a directory. Its `__init__` is the only spelling.
+        return [os.path.join(base, "__init__" + ext)]
+    rel = rest.replace(".", os.sep)
+    return [os.path.join(base, rel + ext),
+            os.path.join(base, rel, "__init__" + ext)]
+
+
 def resolve_module_path(module_name: str, relative_to: str = None,
                         project_root: str = None) -> str:
     """The source file for `module_name`, or None if it cannot be resolved.
@@ -280,7 +446,31 @@ def resolve_module_path(module_name: str, relative_to: str = None,
     Returns None when all four come up empty; the caller then distinguishes a
     host module from a plain typo and says which (see
     `unresolvable_import_error`, the single wording for that).
+
+    A RELATIVE name (`.x`, `..x`, `..`) is resolved before all four passes, from
+    the importing file's own directory, by `_relative_candidates`. It cannot go
+    through the root search at all: the roots are absolute directories and a
+    relative name is not spelled from any of them, so pass 1 reduces it to a
+    filesystem-root path that never exists and the leaf fallback then finds the
+    importer's OWN package. That is how `from .. import DeviceBuffer` came to
+    mean `gpu.host.nvidia` rather than `gpu.host`. Trying it first leaves the
+    four passes — and the leaf fallback that several real stdlib
+    `from .sibling import` statements depend on — exactly as they were.
     """
+    if module_name.startswith("."):
+        for ext in (".mojo", ".py"):
+            for cand in _relative_candidates(module_name, relative_to, ext):
+                if os.path.isfile(cand):
+                    return cand
+        # A relative name that resolved to nothing is a MISS, and returning None
+        # here rather than falling through is the point. A relative name is by
+        # definition not spelled from any of the search roots, so the root
+        # passes cannot answer it correctly -- they can only answer it wrongly.
+        # They did: the leaf fallback takes `"..".split(".")[-1]`, which is the
+        # EMPTY STRING, so any all-dots name matched `__init__` in the importing
+        # file's own directory and `from .......... import x` resolved to the
+        # importer's own package. A miss is the honest answer.
+        return None
     roots = _search_roots(relative_to, project_root)
     for ext in (".mojo",):                       # pass 1
         for base in roots:
