@@ -385,8 +385,35 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
         text = f.read()
     check("DylibImage" in text and "dylib_export_0_triple" in text,
           "generated dylib proof does not mention the exported function")
-    check("sorry" not in text and "admit" not in text,
-          "generated dylib proof contains sorry/admit")
+    # The generated file no longer admits NOTHING, and that is the point.
+    # [3]'s IR-3-to-2-dylib-stubs.md replaced three `sorry`s-over-false-claims
+    # with two NAMED obligations -- `_semantics_total` (the run terminates for
+    # every argument) and `_spec` (the export matches its specification) -- so
+    # that the caller's theorem is proved and sorry-free.  Grepping for "no
+    # sorry anywhere" would therefore be red for the right reason, and silencing
+    # it would be wrong.  So the obligation SET is pinned instead: a THIRD
+    # obligation appearing is a regression, and one closing stays green.  Same
+    # asymmetry the library check below already had, applied to the half that
+    # moved out of lib/ and into this file.
+    import re as _re
+    # The WHOLE theorem name is captured, suffix included: capturing the ident
+    # and comparing against ident+suffix is off by the suffix, which is how the
+    # first version of this check reported an obligation set that looked right
+    # and matched nothing.
+    obligations = set(_re.findall(r"theorem (\w+_semantics_total)\b", text))
+    obligations |= set(_re.findall(r"theorem (\w+_spec)\b", text))
+    # one `_semantics_total` and one `_spec` per export, named by its ident
+    idents = set(_re.findall(r"^def (dylib_export_\w+) : DylibExport :=", text, _re.M))
+    expected = {f"{i}_semantics_total" for i in idents} | {f"{i}_spec" for i in idents}
+    check(obligations == expected,
+          f"generated dylib proof has obligation set {sorted(obligations)}, "
+          f"expected exactly {sorted(expected)}")
+    # The caller's theorem must stay PROVED and sorry-free: it is the whole
+    # reason the obligations are named rather than the contract being admitted.
+    check(":=\n  Refine.dylib_export_contract_of_spec" in text,
+          "the caller's contract is no longer derived from the spec")
+    check("dylib_export_contract_stub" not in text,
+          "the deleted identity-claim stub is still emitted")
     # The check above reads the GENERATED file, and the three holes that decide
     # this proof's verdict are in lib/, not in it:
     #
@@ -407,8 +434,17 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
     # regression somebody has to know about, while one of the three closing is
     # progress and stays green. The count is re-measured either way, so the
     # figure is read on every run rather than merely known.
-    KNOWN_LIB_HOLES = {"in_image_stub", "semantics_stub",
-                       "dylib_export_contract_stub"}
+    # Was {"in_image_stub", "semantics_stub", "dylib_export_contract_stub"}.
+    # All three are GONE: [3] made `InImage` a decidable CHECK, split the
+    # vacuous `Semantics` into `Total` and `Functional`, and deleted
+    # `dylib_export_contract_stub` -- which was `by sorry` asserting that every
+    # dylib export computes the identity, which is false
+    # (`export_result dylib_image triple 7 = 21`).  The comment above called
+    # this "a permanent red for something nobody here may fix" and named the
+    # exception: fixing it IS this change.  The set is now empty, so the check
+    # reads as what it now means -- the dylib proof rests on no library hole --
+    # and the subset logic below still fails if a NEW one appears.
+    KNOWN_LIB_HOLES: set = set()
     try:
         from formal.lean import library_census, find_lean
         lib = library_census(find_lean(HERE), os.path.join(HERE, "lib"))

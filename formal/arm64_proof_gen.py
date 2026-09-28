@@ -7610,17 +7610,61 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list) -> str:
             f"    entry := {export['entry']}\n"
             f"    arity := {export['arity']} }}"
         )
+        # [3]'s interface request (IR-3-to-2-dylib-stubs.md), applied.  All
+        # four things this used to emit were `sorry`s, and THREE of them were
+        # `sorry`s over FALSE claims:
+        #
+        #   * `in_image_stub` admitted anything, so the theorem typechecked even
+        #     if a linker put an export outside its own image.  `in_image_decide`
+        #     makes it a CHECK: the same bad link now fails the proof.
+        #   * `semantics_stub` proved the vacuous `Semantics`, which the census
+        #     was already naming ("Semantics states forall ..., ... -> True").
+        #     `Semantics` is now `Total` and `Functional` separately: the
+        #     functional half is provable and IS proved, the total half is a
+        #     real obligation and is stated as one.
+        #   * `dylib_export_contract_stub ... (fun n => n)` was `by sorry` over
+        #     ANY p and ANY obs, so what the file asserted was THAT EVERY dylib
+        #     export computes the identity -- false, and measured so on the
+        #     first real dylib in the tree (`export_result dylib_image triple 7
+        #     = 21`, `... negate 5 = -5`).  It is replaced by
+        #     `export_result_spec` (an obligation) and
+        #     `dylib_export_contract_of_spec` (PROVED), so the caller's theorem
+        #     stops being an admitted claim.
+        #
+        # The two obligations are emitted as `sorry` rather than as a
+        # `def ... : Prop`, which [3] left as my call and whose reasoning I
+        # agree with: a NAMED hole the census reports is strictly better than a
+        # hole nothing reports.  `formal/lean.py`'s census counts what Lean says
+        # admits a hole, and a `theorem := by sorry` is what it counts.
         proofs.append(
             f"theorem {ident}_in_image : DylibExport.InImage dylib_image {ident} :=\n"
-            f"  DylibExport.in_image_stub dylib_image {ident}\n\n"
-            f"theorem {ident}_semantics :\n"
-            f"    DylibExport.Semantics dylib_image {ident} dylib_observables :=\n"
-            f"  DylibExport.semantics_stub dylib_image {ident} dylib_observables\n\n"
+            f"  (DylibExport.in_image_decide dylib_image {ident}).2 "
+            f"(by native_decide)\n\n"
+            f"theorem {ident}_semantics_functional :\n"
+            f"    DylibExport.Functional dylib_image {ident} dylib_observables := by\n"
+            f"  intro n s1 s2 h1 h2 observable _\n"
+            f"  rw [h1] at h2\n"
+            f"  injection h2 with h\n"
+            f"  simp [h]\n\n"
+            f"/-- OBLIGATION, not proved: the export's run TERMINATES for every\n"
+            f"    argument.  Per concrete argument this is `native_decide`;\n"
+            f"    uniform totality is phase 4's work. -/\n"
+            f"theorem {ident}_semantics_total :\n"
+            f"    DylibExport.Total dylib_image {ident} := by\n"
+            f"  sorry\n\n"
             f"def {ident}_prog : Refine.Prog :=\n"
-            f"  Refine.dylibExportProg dylib_image dylib_code {ident}\n\n"
-            f"theorem {ident}_contract :\n"
+            f"  Refine.dylibExportProg dylib_image {ident}\n\n"
+            f"/-- OBLIGATION, not proved: this export agrees with its\n"
+            f"    specification.  Per-export specs are phase 4's item. -/\n"
+            f"theorem {ident}_spec :\n"
+            f"    Refine.export_result_spec dylib_image {ident} (fun n => n) := by\n"
+            f"  sorry\n\n"
+            f"/-- The CALLER's theorem, PROVED and sorry-free: given the export's\n"
+            f"    spec, the caller's contract follows. -/\n"
+            f"theorem {ident}_contract (n : UInt64) :\n"
             f"    Refine.DylibExportContract {ident}_prog (fun n => n) n :=\n"
-            f"  Refine.dylib_export_contract_stub {ident}_prog (fun n => n) n"
+            f"  Refine.dylib_export_contract_of_spec dylib_image {ident} (fun n => n)\n"
+            f"    {ident}_spec n"
         )
     image_exports = ", ".join(f"dylib_export_{i}_{_lean_export_id(e['name'])}"
                                for i, e in enumerate(exports))
@@ -7641,14 +7685,24 @@ set_option linter.unusedVariables false
 
 {_gen_step_lemmas("dylib", code, base) + "\n\n" + _gen_step_result_lemmas("dylib", code, base)}
 
-def dylib_observables : List (UInt64 → UInt64) := []
+/- What a caller can read off a result word.  [3] left this line to me
+   explicitly rather than pick it, and it matters more than it looks: the new
+   `Functional` quantifies over this list, so an EMPTY list makes the clause
+   vacuous again -- vacuously, which is the exact defect the rest of this
+   change exists to remove, and `vacuous_declarations` would NOT flag it
+   because the definition is no longer the vacuous one.  `id` is the minimum
+   that makes the clause bite: `Functional` then says two runs to the same
+   result agree on the result word, which is a real fact about a real run.
+   More projections can be added here as callers grow. -/
+def dylib_observables : List (UInt64 → UInt64) := [id]
 
 {export_defs_text}
 
 def dylib_image : DylibImage :=
   {{ base := {base}
     codeSize := {len(code)}
-    exports := [{image_exports}] }}
+    exports := [{image_exports}]
+    code := dylib_code }}
 
 def dylib_exports : List DylibExport := dylib_image.exports
 
