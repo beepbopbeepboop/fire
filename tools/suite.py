@@ -495,21 +495,20 @@ test('runtimedylib', [PY, 'test_runtime_dylib.py'],
      deps=['preflight'],
      desc='the runtime dylib: export table, per-arch link, cross-arch checks')
 
-# test_sqlite3_runtime.py is DELIBERATELY NOT REGISTERED, and this is the place
-# to leave that written down, because [1]'s commit says its suite entry "is
-# theirs to register" and so the next session to read that will try.
-#
-# It infinitely loops. Not slowly, and not on a case that can be skipped: it
-# does not terminate, so registering it hangs the gate rather than failing it,
-# and a hang is the one failure mode with no output to read. Confirmed by
-# running it directly and aborting. Its SUBJECT is covered and passing --
-# test_runtime_dylib.py is 111/111, and `fire.py build` on a program calling
-# mojo_strlen links the optional unit and runs. What is unverified is that
-# every test_sqlite3*.mojo builds and runs on both pipelines, which is what
-# this file would have pinned. A more advanced agent is to fit it.
-#
-# So: the optional-unit link mechanism is gated; its whole-corpus coverage is
-# not, and that gap is real and deliberate rather than forgotten.
+# test_sqlite3_runtime.py was deliberately left unregistered because an
+# earlier version of it hung the gate: `fire.py build` on
+# `test_sqlite3*.mojo` never linked the optional runtime units at all, so the
+# built binary died at link time in a way this suite's own capture never
+# noticed hanging. Re-verified 2026-09-28, after [1]/[2]/[3]/[4]/[5]'s
+# optional-runtime-unit linking landed (21a82d6 and ancestors): the file now
+# runs to completion three times in a row, ~100-105s each, exit 0, 64/64
+# checks passing, both the `link` and `fallback` pipelines, all five
+# test_sqlite3*.mojo sources. No infinite loop reproduces on this tree
+# anymore -- it was the missing link, not the test.
+test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'],
+     deps=['preflight'], timeout=600,
+     desc='optional-unit link mechanism: derivation, probe, and every '
+          'test_sqlite3*.mojo built+linked+RUN on both pipelines')
 
 test('stdlib-syntax', [PY, 'compile_stdlib.py'], j=True, timeout=7200,
      desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree')
@@ -686,8 +685,8 @@ BUCKETS = {
     'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'interporacle', 'examples-parse',
-              'rthdrscan', 'runtimedylib', 'formal-sweep-truth',
-              'formal-link-accounting'],
+              'rthdrscan', 'runtimedylib', 'sqliteruntime',
+              'formal-sweep-truth', 'formal-link-accounting'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps
