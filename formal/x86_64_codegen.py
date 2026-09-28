@@ -37,6 +37,7 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
 from formal.x86_64 import *  # noqa: F401,F403 — encoders, Reg, Assembler
 
 import fire_compiler as F
+import mojo.middle.comptime as comptime_eval
 from formal import model as M
 from formal.model import CodegenError, IDENTITY_TYPE_CTORS
 from mojo.middle.boundnames import bound_names_in_order
@@ -714,6 +715,13 @@ class X86_64Codegen:
         self._dict_vars = set()
         self._blob_vars = set()
         self._fd_vars = set()
+        # `comptime NAME = value` bindings in scope, and the list-valued ones
+        # kept as their AST. Reset per function, exactly like the tables above:
+        # a comptime binding is compile-time state local to the body that
+        # declares it, and carrying one across a function boundary would make
+        # a name resolve in a function that never wrote it.
+        self._comptime_vals: dict = {}
+        self._comptime_list_asts: dict = {}
         self._pending_finally = []
         # What each local holds (see model.ValueKinds) and how much room each
         # list literal needs for `append`. Whole-function properties, so they
@@ -1029,6 +1037,9 @@ class X86_64Codegen:
             return
 
         if isinstance(stmt, F.AugAssignStmt):
+            if isinstance(stmt.target, F.IdentExpr):
+                self._check_comptime_target(stmt.target.name,
+                                            "augmented assignment")
             self._emit_aug_assign(stmt)
             return
 
@@ -1099,6 +1110,7 @@ class X86_64Codegen:
             # function_var_types already resolves ann-or-infer for the type
             # lattice, so a non-int annotation must not stop the VALUE from
             # lowering.
+            self._check_comptime_target(stmt.target.name, "assignment")
             self._emit_expr(stmt.value)
             self._store_var(stmt.target.name, Reg.RAX)
             self._note_binding(stmt.target.name, stmt.value)
@@ -1130,9 +1142,146 @@ class X86_64Codegen:
             raise CodegenError("nested function definitions are not "
                                "supported on the formal x86-64 path")
 
+        if isinstance(stmt, F.ComptimeVarStmt):
+            # `comptime NAME = <const>`: fold and record, emit nothing. Same
+            # rule as the gimple path's _gen_stmt_ComptimeVarStmt — a comptime
+            # binding is compile-time state, so it produces no instructions and
+            # no storage. The DECISION is shared (comptime_eval.resolve_var),
+            # which is the whole point of that module living in mojo/middle/.
+            self._bind_comptime(stmt)
+            return
+
+        if isinstance(stmt, F.ComptimeIfStmt):
+            # Which branch is taken is a language decision, shared
+            # (comptime_eval.resolve_if); 'runtime' here just means the
+            # condition did not fold, and this backend then emits the ordinary
+            # runtime branch — the same degradation the gimple path makes, so
+            # all three agree on the observable behaviour.
+            which = comptime_eval.resolve_if(stmt, self._comptime_vals)
+            if which == "then":
+                for s in stmt.then_body:
+                    self._emit_stmt(s)
+                return
+            if which == "else":
+                for s in (stmt.else_body or []):
+                    self._emit_stmt(s)
+                return
+            if isinstance(which, tuple) and which[0] == "elif":
+                for s in (stmt.elifs[which[1]][1]):
+                    self._emit_stmt(s)
+                return
+            self._emit_stmt(F.IfStmt(condition=stmt.condition,
+                                     then_body=stmt.then_body,
+                                     elifs=getattr(stmt, "elifs", None),
+                                     else_body=stmt.else_body,
+                                     line=stmt.line, col=stmt.col))
+            return
+
+        if isinstance(stmt, F.ComptimeForStmt):
+            # Folded when the iterable is a compile-time-known sequence (the
+            # `comptime for i in range(0, 8)` idiom), else emitted as the
+            # ordinary runtime loop.
+            vals = self._comptime_iterable(stmt.iterable)
+            if vals is None:
+                self._emit_stmt(F.ForStmt(target=stmt.target,
+                                          iterable=stmt.iterable,
+                                          body=stmt.body,
+                                          line=stmt.line, col=stmt.col))
+                return
+            for v in vals:
+                self._emit_comptime_target(stmt.target, v)
+                for s in stmt.body:
+                    self._emit_stmt(s)
+            return
+
         raise CodegenError(
             f"unsupported statement {type(stmt).__name__} on the formal "
             f"x86-64 path")
+
+    def _check_comptime_target(self, name: str, what: str) -> None:
+        """Refuse a store to a name that is currently a `comptime` binding.
+
+        The store would otherwise be silently dropped: reads of the name go
+        through `_comptime_vals` (which is the whole point — the binding is a
+        constant, not a local), so a following `_store_var` would write a slot
+        nothing ever reads. That is a silent miscompile, so it is an error.
+        Real Mojo rejects the assignment too, for the same reason: a `comptime`
+        name is not assignable.
+
+        Not optional to the comptime support above, and this is why: x86-64 used
+        to refuse every `comptime` binding outright, so it could not reach the
+        state this guards. Adding the bindings without this would have introduced
+        a miscompile rather than removed one. arm64's copy of the rule is the
+        same function for the same reason."""
+        if name in self._comptime_vals or name in self._comptime_list_asts:
+            raise CodegenError(
+                f"{what} to comptime binding {name!r} (a `comptime` name is a "
+                "compile-time constant and cannot be assigned)")
+
+    def _bind_comptime(self, stmt) -> None:
+        """Record a `comptime NAME = value` binding, or fail honestly.
+
+        The decision itself is shared — `comptime_eval.resolve_var` — and is the
+        same function the arm64 backend and the gimple path call, so all three
+        agree on what a `comptime` binding means and on exactly which
+        initializers do not fold. What is left to the backend is only the
+        failure: a binding that does not fold to a constant is an ERROR here
+        rather than a runtime local, because a runtime local would give the
+        program different behaviour than the source declares.
+
+        This is the refusal `bugs/FORMAL_known_limits.md` §3 records as ARCH
+        DRIFT. x86-64 used to refuse every `comptime` binding one layer up, at
+        the statement dispatch, with "unsupported statement ComptimeVarStmt" —
+        a different limit for the same construct on the two architectures, and
+        one that named a shape the author never wrote. Sharing the resolver
+        removes the drift by construction rather than by keeping the two
+        wordings in step by hand.
+        """
+        name = stmt.target
+        resolved = comptime_eval.resolve_var(stmt, self._comptime_vals)
+        if resolved is None:
+            raise CodegenError(M.comptime_fold_refusal(name))
+        kind, val = resolved
+        if kind == "list":
+            self._comptime_list_asts[name] = val
+        else:
+            self._comptime_vals[name] = val
+
+    def _emit_comptime_read(self, name: str) -> None:
+        """RAX = the value of the `comptime` binding `name`.
+
+        A string binding is not a machine word here: this path has no interned
+        comptime strings, so it materializes the interned literal for the text —
+        which is what the value *is* everywhere else a string is on this
+        backend (see the `StringLiteral` case in `_emit_expr`, a LEA of the
+        same interned data)."""
+        val = self._comptime_vals[name]
+        if isinstance(val, str):
+            self.asm.emit(encode_lea_r64_rip(Reg.RAX, 0))
+            self.asm.emit_label_rip(self._intern_string(val), here_offset=-4)
+            return
+        self._emit_mov_imm(Reg.RAX, int(val))
+
+    # A `comptime for` over more iterations than this is emitted as the
+    # ordinary runtime loop instead of unrolled: the point of folding is a
+    # compile-time-known trip count, not a guarantee it is small. The cap is
+    # passed to the shared resolver, which is where the expansion happens.
+    COMPTIME_UNROLL_CAP = 64
+
+    def _comptime_iterable(self, iterable):
+        """The elements of a `comptime for` iterable when they are all known
+        at compile time, else None (→ emit the ordinary runtime loop)."""
+        return comptime_eval.resolve_for_iterable(
+            iterable, self._comptime_vals, self._comptime_list_asts,
+            self.COMPTIME_UNROLL_CAP)
+
+    def _emit_comptime_target(self, target, value) -> None:
+        """Bind a `comptime for` target for one iteration, as an ordinary local
+        assignment (the counter is a real runtime local — only the trip count
+        was compile-time here), so a folded and an unfolded `comptime for`
+        produce the same shape of code."""
+        self._emit_stmt(F.AssignStmt(target=F.IdentExpr(name=target),
+                                     value=value, line=0, col=0))
 
     def _intern_string(self, s: str) -> str:
         """Return a stable data label for `s`, emitting the bytes on first use.
@@ -3201,6 +3350,13 @@ class X86_64Codegen:
         why = M.mlir_template_refusal(expr)
         if why is not None:
             raise CodegenError(why)
+        # Likewise a `...`. This one MATTERS here: it used to fall through to
+        # `_unsupported_expr_message`, which appends "container and string
+        # values are not" — false of a `...`, and a claim that sent the reader
+        # looking for a list the file does not contain. Shared text with arm64.
+        why = M.ellipsis_refusal(expr)
+        if why is not None:
+            raise CodegenError(why)
         if isinstance(expr, F.IntLiteral):
             self._emit_mov_imm(Reg.RAX, expr.value)
             return
@@ -3214,6 +3370,17 @@ class X86_64Codegen:
             return
 
         if isinstance(expr, F.IdentExpr):
+            # A `comptime NAME = …` binding is a compile-time constant, not a
+            # local: no register or slot was ever assigned to it, so the
+            # ordinary `_load_var` below would read whatever happens to be in a
+            # slot. Materialize the folded value instead. Consulted for EVERY
+            # expression context, not just other comptime ones, because a
+            # version of this that only looked in comptime contexts read an
+            # ordinary use of a `comptime` name as a local and silently
+            # emitted 0 (see mojo/middle/comptime.py's rule 3).
+            if expr.name in self._comptime_vals:
+                self._emit_comptime_read(expr.name)
+                return
             # Python singletons parse as bare idents (True/False are
             # BoolLiterals; None stays an IdentExpr). Materialize them as
             # integers so `x is None` compares against 0 rather than against
@@ -4556,11 +4723,17 @@ class X86_64Codegen:
         # bare `mojo_*` names. Everything a call to one of those could bind to
         # has been ruled out above (not a function of this module, not a struct,
         # not a type constructor, and a linked dylib supplies its own spelling
-        # below), so what is left has nowhere to go — and the extern path emits
-        # a `call` the image carries to its death in the loader. Same refusal,
-        # same words as arm64's, from the one shared function.
-        if is_extern and name not in self._dylib_syms \
-                and M.is_gimple_runtime_builtin(name):
+        # below). What is left is decided by the runtime's ABI rather than by
+        # the name, in the one shared function arm64 also reads, so the two
+        # architectures cannot come to different verdicts about one construct:
+        # a call is answerable when every type crossing the boundary is one
+        # 64-bit word — which is what a value IS here — AND the symbol is on the
+        # link line. A `MojoList *` argument is a box no link line can answer
+        # and is refused even when a dylib provides the symbol; `mojo_print`,
+        # whose every type is a word, is refused only because nothing here
+        # provides it. Same decision, same words, from the one place.
+        if is_extern and not M.gimple_runtime_callable(
+                name, name in self._dylib_syms):
             raise CodegenError(M.gimple_runtime_refusal(name))
         # A callee that a linked formal dylib provides is emitted against the
         # spelling that dylib exports, not the name the source used.

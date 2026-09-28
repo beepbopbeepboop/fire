@@ -288,8 +288,8 @@ drive-by.
 |---|---|---|---|
 | `constructing X has no representation: this image has no declaration of X` | 4 — `stdlib_core.mojo` (`StringRef`, direct) and `std/testing/prop/{__init__,random,runner}.mojo` (`Error`, at depth) | **refusal TRUE** | `Error` really is 2 fields and `StringRef` is a fat pointer, so neither fits one word, and neither is a struct in these images. The message now says the one thing it has checked — that there is no declaration here to ask — instead of asserting a shape it cannot see |
 | `__mlir_attr[...]` assembles an MLIR attribute | 46 | **true limit** | §2 |
-| `comptime X = … does not fold to a compile-time constant` | 2 (`std/math/polynomial.mojo`, `std/algorithm/backend/tile.mojo`) | **true limit**, with **arch drift** | `comptime n = len(coefficients)` over a *runtime* parameter. arm64 refuses with this. x86-64 refuses **earlier and differently** — `unsupported call target on the formal x86-64 path (got SubscriptExpr)` for `polynomial.mojo` and `unsupported statement ComptimeForStmt` for `tile.mojo` — so the two architectures name different limits for one construct. **Already pinned** by `limit_comptime_over_a_runtime_parameter` with `refuse_either:` |
-| `unsupported expression EllipsisLiteral` | 1 (`std/builtin/len.mojo`) | **true limit**, **weak message** | `def len(value: StringSlice) -> Int: ...` has no instructions. The message does not say what to do. (A `...` in a *trait* method that is never called builds, so the refusal is reach-dependent, not spelling-dependent — correct, but worth knowing) |
+| `comptime X = … does not fold to a compile-time constant` | 2 (`std/math/polynomial.mojo`, `std/algorithm/backend/tile.mojo`) | **true limit** — and the arch drift is **CLOSED** (2026-09-27) | `comptime n = len(coefficients)` over a *runtime* parameter, which is genuinely not knowable at compile time. The **drift** was that x86-64 refused **earlier and differently** (`unsupported call target on the formal x86-64 path (got SubscriptExpr)` for `polynomial.mojo`, `unsupported statement ComptimeForStmt` for `tile.mojo`), so one construct got two different limits from two architectures that are one language implementation. Closed by giving x86-64 the same `mojo/middle/comptime.py` resolver arm64 uses — that module documents x86-64 as an intended consumer of exactly this seam and it never was one — so both now refuse with `model.comptime_fold_refusal`, byte for byte. Side effect: x86-64 now *builds* a comptime binding that folds, which it used to refuse outright |
+| `a \`...\` stands where this path needs instructions to emit` | 1 (`std/builtin/len.mojo`) | **true limit**, message **CLOSED** (2026-09-27) | `def len(value: StringSlice) -> Int: ...` has no instructions, and the old message (`unsupported expression EllipsisLiteral on the formal <arch> path`) named an AST node the author never wrote and said nothing about what to do. On x86-64 it was worse than weak: `_unsupported_expr_message` appended "container and string values are not", false of a `...`. Now one arch-free `model.ellipsis_refusal`, naming the language's own no-implementation marker and both repairs. **Measured, both arches, because the old note's scope claim was wrong in a way worth recording:** a `...` in a `trait` method builds, but a `...` in a plain function is refused whether or not anything ever CALLS it — so the distinction is the declaration KIND, not reach |
 | `a Optional receiver is stored in a container` | 1 (`std/iter/__init__.mojo`) | **true limit** | by-reference receiver work; **already pinned** by `byref_refuse_stored_in_a_list` (`test_formal_run.py`). Not duplicated here |
 
 Two rows this table used to carry are **gone** and not replaced, because both
@@ -301,7 +301,90 @@ language's zero-argument empty-string constructor, and a string on this path is
 a NUL-terminated `char *`, so the interned `""` is the answer and `len` of it is
 0). Both are closed; see below.
 
+## 3.1 The `mojo_*` refusal is now decided by the ABI, not by the prefix
+
+`FORMAL.md` phase 2, landed 2026-09-27. `is_gimple_runtime_builtin` was
+`startswith("mojo_")` (`GIMPLE_RUNTIME_PREFIX`); it is now a table read out of
+`runtime/*.h` by `reflect.collect_runtime_exports_h`, and
+`model.gimple_runtime_callable(name, provided)` is the whole rule: every type
+crossing the call boundary is one 64-bit word, AND the symbol is on the link
+line. `GIMPLE_LIST_PREFIX` is **gone** — it was a hand-kept list of prefixes
+standing in for a shape, and the shape answers the same question for all 546
+entry points instead of the 40-odd names one prefix covered.
+
+The two halves are independent and both are needed, which is what the prefix
+rule could not express. A `MojoList *` **argument** is a box no link line can
+answer, so it is refused *even when a dylib provides the symbol* — the old code
+let that through. And `mojo_print`, whose every type is a word, is refused only
+because nothing provides it.
+
+| | measured over all 10 headers in `runtime/` |
+|---|---|
+| entry points declared | 546 |
+| every type crossing the boundary is one word | **223** |
+| a box in an argument or the return | 323 |
+| of the 223, refused only for want of a linked library | 223 |
+
+**223 of 546 is what a link line converts into working code with no backend
+change at all.** For `mojo_sqlite3_*` it is **18 of 22**.
+
+### Two numbers in `FORMAL-PARALLEL.md` §3 that the headers do not support
+
+The brief says "of 455 entry points, 352 return one 64-bit word and 101 return a
+heap box" and "for sqlite, **20 of 22** … the only two that are not are
+`mojo_sqlite3_query` and `_query_dict`". Measured, both are off, and the reason
+is worth recording because it is a rule, not a typo:
+
+1. **455 / 352 / 101.** I measure 546 / 406 / 140 by return type alone, and 223
+   once the ARGUMENTS are counted too. Neither matches 455/352/101. The
+   scanner those numbers were taken with recorded `char *f` as returning `char`
+   (see below), so every pointer-returning function was scored as a scalar —
+   and the brief's own headline rule ("callable iff every parameter type AND
+   the return type are word-shaped") is the 223 column, not the 406 one. The
+   brief's own warning is the reason the larger number is the wrong one.
+2. **20 of 22, with `_query` and `_query_dict` the only two refused.** Not
+   derivable from the header. `_query` returns `void *`; so do `_open` and
+   `_prepare`, and nothing in the *declaration* distinguishes a `void *` a
+   program only passes on from a `void *` it iterates — the distinction is in a
+   comment. Any rule producing 20/22 is hand-kept, which is the rot phase 2
+   exists to remove. The machine-derivable rule refuses all four
+   (`_open`, `_prepare`, `_query`, `_query_dict`) and calls the other 18
+   word-shaped, and `test_formal_run.py`'s pre-existing
+   `gimple_runtime_sqlite_refused` case — which calls `_open` and `_close` — is
+   pinned on that, so 18 is also the number the suite already believed.
+
+### The scanner this rests on was itself wrong, twice
+
+`reflect.collect_runtime_exports_h` is where the table comes from, and the
+"never hand-kept" property is worth nothing if it misreports. Both fixed here,
+both in `reflect.py`:
+
+- **Every pointer return was recorded as a scalar.** The 2026 fix made them
+  MATCH; the separator's `\*?` then consumed the `*` that belongs to the type,
+  so the table said `char mojo_str_new (char *s)` for a function returning
+  `MojoStr *`. 92 `char *` and 39 `MojoList *` returns in `fire_runtime.h`, all
+  misstated. A consumer deciding what a value IS was told the opposite of the
+  truth — and phase 2 is exactly such a consumer.
+- **Five non-existent symbols were in the shipped dylib's table.**
+  `mojo_fnptr_call_0` … `_4` are `static inline` helpers, and the scanner read
+  the `return` statement in one's body as a prototype (`build_stdlib_dylib.py`
+  emits `extern void <sym>();` and takes its address). BUG-2026-036's shape.
+  `fire_runtime.h` 459 → 456; four real declarations gained in the same fix.
+
+Neither is closed by a test in the tree, so both are in
+`INTERFACE_REQUESTS_agent3.md` §2 as diffs for the integrator.
+
+### What is still open, and it is [1]'s half
+
+A word-shaped call is emitted only when the symbol is on the link line, and the
+executable path (`build --formal`, which every suite drives) has no runtime
+library on its link line at all. So today the 223 are refused *for want of a
+library*, which the new message says plainly instead of claiming there is
+nothing to lower. INTERFACE REQUEST to [1] for the optional-runtime-unit
+registry; it is the only thing between the 223 and working code.
+
 ---
+
 
 # 4. What wave 5 closed
 

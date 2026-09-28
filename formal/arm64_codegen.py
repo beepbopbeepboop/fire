@@ -2056,6 +2056,13 @@ class ARM64Codegen:
         why = M.mlir_template_refusal(expr)
         if why is not None:
             raise CodegenError(why)
+        # Likewise a `...`, which used to reach the walk's tail and be named as
+        # an AST node the author never wrote. Shared text, so x86-64 says the
+        # same thing — and neither says the false thing x86-64 used to append
+        # about containers and strings.
+        why = M.ellipsis_refusal(expr)
+        if why is not None:
+            raise CodegenError(why)
         if isinstance(expr, F.IntLiteral):
             self._emit_mov_imm("X0", expr.value)
             return
@@ -4929,11 +4936,20 @@ class ARM64Codegen:
         # `mojo_print`). Everything a call to one of those could bind to has
         # been ruled out above: not a function of this module, not a struct, not
         # a type constructor, and a dylib the program linked would have
-        # supplied its own spelling below. So what is left is a call with
-        # nowhere to go, and the extern path would emit a BL that the image
-        # carries to its death in the loader.
-        if is_extern and name not in self._dylib_syms \
-                and M.is_gimple_runtime_builtin(name):
+        # supplied its own spelling below.
+        #
+        # What is left is decided by the runtime's ABI rather than by the name
+        # (`model.gimple_runtime_callable`): a call is answerable when every
+        # type crossing the boundary is one 64-bit word — which is what a value
+        # IS here — AND the symbol is on the link line, which `_dylib_syms` is.
+        # Note the two are independent and both are needed. A `MojoList *`
+        # argument is a box no link line can answer, so it is refused EVEN IF a
+        # dylib provides the symbol; and `mojo_print`, whose every type is a
+        # word, is refused only because nothing here provides it. Refusing by
+        # prefix got the first case right by accident and could not tell the
+        # second from it.
+        if is_extern and not M.gimple_runtime_callable(
+                name, name in self._dylib_syms):
             raise CodegenError(M.gimple_runtime_refusal(name))
         if is_extern:
             # Unknown signature: AAPCS has no place for Python kwargs on a
@@ -5950,9 +5966,7 @@ class ARM64Codegen:
         resolved = comptime_eval.resolve_var(
                 stmt, self._comptime_vals, self._comptime_hook)
         if resolved is None:
-            raise CodegenError(
-                f"comptime {name} = ... does not fold to a compile-time "
-                "constant on the formal arm64 path")
+            raise CodegenError(M.comptime_fold_refusal(name))
         kind, val = resolved
         if kind == "list":
             self._comptime_list_asts[name] = val
