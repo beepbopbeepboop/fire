@@ -3805,7 +3805,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                            code_name: str = None, sr_name: str = None,
                            exit_at: int = None, thm: str = None,
                            prop: str = None, no_change: bool = False,
-                           halt_only: bool = False):
+                           halt_only: bool = False, fuel: int = None):
     """CompCert-style universal e2e driven by the control-flow graph.
 
     The generator is thin: it emits, per basic block, wrapper defs + a
@@ -3831,6 +3831,18 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
       post         -- tactic lines emitted after the terminal value flow;
       no_mojo      -- do not mention `mojo`/`{name}_go` in the terminal simp.
 
+    `fuel` states the theorem at that CONSTANT fuel and for EVERY `n`, with no
+    `hn`/`FrameBound` premise.  The default budget grows with `n` and the
+    premise reserves stack per recursion level; both exist for calls and loops
+    only.  A walk with neither -- no `bl`, no back edge, not recursive -- runs
+    each instruction at most once, so any budget at or above the instruction
+    count suffices and the premise is never consulted.  That is the shape a
+    caller needs when the fuel is fixed by someone else's definition (a dylib
+    export's `runExport` pins it to `exportFuel`) and the claim is universal.
+    For any other CFG shape, or a `fuel` below the instruction count, the
+    constant budget would be FALSE for large inputs, so None is returned
+    rather than a theorem that cannot check.
+
     Returns None for constructs not yet decomposed (caller falls back)."""
     words = {base + i: int.from_bytes(code[i:i + 4], "little")
              for i in range(0, len(code) - len(code) % 4, 4)}
@@ -3850,6 +3862,14 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     if not blocks:
         return None
     _TOTAL = max(1, sum(len(b["instrs"]) for b in blocks))
+    if fuel is not None:
+        # A back edge is any branch whose target is at or before the branch
+        # itself; `_cfg_blocks` orders blocks by start pc, so forward-only
+        # targets mean the walk is a DAG and each instruction runs at most once.
+        _acyclic = all(t > b["instrs"][-1] for b in blocks for t in b["targets"])
+        if (recursive or not _acyclic or fuel < _TOTAL
+                or any(b["kind"] == "bl" for b in blocks)):
+            return None
     _RETS = ", ".join(str(b["instrs"][-1]) for b in blocks if b["kind"] == "ret")
     # Stack consumed by one call frame: the `_SCRATCH` reservation plus the
     # callee-saved pairs the prologue pushed (16 bytes each).  Counted from the
@@ -4094,6 +4114,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         _PATH0 = 512
     FUEL0 = ("(200000 + 1000 * 2 ^ n.toNat)" if _tree
              else f"(200000 + {_PATH0} * n.toNat)")
+    if fuel is not None:
+        FUEL0 = f"({fuel})"
 
     def _pc_fact_lookup(sc: str):
         sc = sc.strip()
@@ -4243,6 +4265,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}rw [hhit_{bi}]")
                 if _flow:
                     A(f"{IND}rw [hsid_{bi}]")
+                else:
+                    A(f"{IND}trivial")
             if _flow:
                 # Terminal value flow: unfold the block/instruction effects along
                 # the path and the source model; residual arithmetic/recursion
@@ -5580,7 +5604,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     _thm = _fr.get("thm") or f"{name}_compiles_correctly_universal"
     _prop = _fr.get("prop") or _DEFAULT_TERM_PROP
     A(f"theorem {_thm} ({_fr.get('params') or 'n : UInt64'})")
-    A(f"    (hn : {stride} * (n.toNat + 1) + {stride} ≤ 18446744073709551600)")
+    if fuel is None:
+        A(f"    (hn : {stride} * (n.toNat + 1) + {stride} ≤ 18446744073709551600)")
     for _h in (_fr.get("hyps") or []):
         A(f"    ({_h[0]} : {_h[1]})")
     if _fr.get("hbnd_binder"):
@@ -5602,7 +5627,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     for _h in (_fr.get("hyps") or []):
         if _h[2]:
             A(f"  have {_h[0]} : {_h[1]} := {_h[2]}")
-    if not _fr.get("hbnd_binder"):
+    if not _fr.get("hbnd_binder") and fuel is None:
         A(f"  have hbnd : FrameBound {stride} {init} n := by")
         A(f"    change {stride} * (n.toNat + 1) ≤ 18446744073709551600")
         A("    omega")
@@ -7596,6 +7621,62 @@ def _lean_export_id(name: str) -> str:
     return ident
 
 
+# `DylibExport.exportFuel` in lib/ProofLib.lean.  Mirrored rather than read,
+# and the mirror cannot drift silently: `DylibExport.total_of_halts` takes the
+# walk's theorem at `runExport`'s own type, so a different number here is a
+# type error in the generated proof, not a proof about a different run.
+_EXPORT_FUEL = 100000
+
+
+def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
+                       exports: list) -> str:
+    """`{ident}_semantics_total`, PROVED where the export's CFG allows it.
+
+    The claim is that `runExport` returns `some` for every argument.  It is
+    proved by the CFG walk's halt-only mode at `runExport`'s fixed fuel: the
+    walk steps the export block by block from its entry with `x30` at the exit,
+    and its `ret` block shows the restored `x30` IS the exit -- the prologue's
+    `stp x29, x30` and the epilogue's `ldp x29, x30` are followed through the
+    stack, not assumed.  The walk accepts a constant fuel only for an acyclic,
+    call-free export (see its `fuel` parameter); for anything else `Total` is
+    left as one named obligation over the true statement.
+
+    What this replaced, and why it had to go: `{ident}_halts` and
+    `{ident}_nodrop` as `sorry`s quantified over EVERY state below the exit.
+    Both were false for every dylib the backend emits -- a pc below
+    `image.base` decodes nothing, and every export's `ret` jumps to an
+    arbitrary state's arbitrary `x30` -- so the census was counting two holes
+    that no proof could ever fill.
+    """
+    later = sorted(e["entry"] for e in exports if e["entry"] > entry)
+    func_end = later[0] if later else base + len(code)
+    try:
+        walk = _gen_universal_e2e_cfg(
+            f"{ident}_walk", code, base, entry, recursive=False, go_lemmas=[],
+            fn=None, tw_extra="", tc={"typed": False, "vtypes": {}, "call_types": {}},
+            cond_branches=set(), code_name="dylib_code", sr_name="dylib",
+            frame={"func_end": func_end}, thm=f"{ident}_halts", prop="True",
+            no_change=True, halt_only=True, fuel=_EXPORT_FUEL)
+    except (NotImplementedError, ValueError):
+        walk = None
+    if walk is None:
+        return (
+            f"/-- OBLIGATION, not proved: this export's run terminates for every\n"
+            f"    argument.  Its control flow has a loop or a call, which the\n"
+            f"    constant-fuel CFG walk that proves the acyclic, call-free\n"
+            f"    exports does not cover. -/\n"
+            f"theorem {ident}_semantics_total :\n"
+            f"    DylibExport.Total dylib_image {ident} := by\n"
+            f"  sorry")
+    return (
+        f"{walk}\n\n"
+        f"/-- TERMINATION, PROVED: `{ident}_halts` walks this export's code from\n"
+        f"    its entry to the exit for every argument, at `exportFuel`. -/\n"
+        f"theorem {ident}_semantics_total :\n"
+        f"    DylibExport.Total dylib_image {ident} :=\n"
+        f"  DylibExport.total_of_halts dylib_image {ident} {ident}_halts")
+
+
 def generate_dylib_proof(code: bytes, info: dict, exports: list) -> str:
     base = info["base_addr"]
     test_input = info.get("test_input", 10)
@@ -7631,11 +7712,13 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list) -> str:
         #     `dylib_export_contract_of_spec` (PROVED), so the caller's theorem
         #     stops being an admitted claim.
         #
-        # The two obligations are emitted as `sorry` rather than as a
+        # What is still open is emitted as `sorry` rather than as a
         # `def ... : Prop`, which [3] left as my call and whose reasoning I
         # agree with: a NAMED hole the census reports is strictly better than a
         # hole nothing reports.  `formal/lean.py`'s census counts what Lean says
-        # admits a hole, and a `theorem := by sorry` is what it counts.
+        # admits a hole, and a `theorem := by sorry` is what it counts.  That
+        # is `_spec` always, and `_semantics_total` only for an export with a
+        # loop or a call -- see `_dylib_total_proof`.
         proofs.append(
             f"theorem {ident}_in_image : DylibExport.InImage dylib_image {ident} :=\n"
             f"  (DylibExport.in_image_decide dylib_image {ident}).2 "
@@ -7646,40 +7729,7 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list) -> str:
             f"  rw [h1] at h2\n"
             f"  injection h2 with h\n"
             f"  simp [h]\n\n"
-            f"/-- The export's own code HALTS: every in-image pc decodes to a\n"
-            f"    step.  OBLIGATION, stated in full rather than as a bare `sorry`,\n"
-            f"    because this is exactly the content that `sorry` used to hide\n"
-            f"    inside an opaque `Total` claim.  For a straight-line export it\n"
-            f"    is a finite check over the image's words. -/\n"
-            f"theorem {ident}_halts :\n"
-            f"    ∀ st : Arm64State, st.pc < dylib_image.base + dylib_image.codeSize →\n"
-            f"      ∃ st', arm64_step st dylib_image.code = some st' := by\n"
-            f"  sorry\n\n"
-            f"/-- The export's own code does not LOOP: the effective next pc strictly\n"
-            f"    advances and stays inside the image.  This is the honest limit of\n"
-            f"    the result -- an export with a backward branch has no such\n"
-            f"    `hnodrop`, and the theorem below then genuinely does not apply. -/\n"
-            f"theorem {ident}_nodrop :\n"
-            f"    ∀ st st' : Arm64State, st.pc < dylib_image.base + dylib_image.codeSize →\n"
-            f"      arm64_step st dylib_image.code = some st' →\n"
-            f"      st.pc < DylibExport.effNext st st' ∧\n"
-            f"        DylibExport.effNext st st' ≤ dylib_image.base + dylib_image.codeSize := by\n"
-            f"  sorry\n\n"
-            f"/-- TERMINATION, DERIVED rather than admitted.\n\n"
-            f"    `exportFuel` is not merely large here: the step bound\n"
-            f"    `DylibExport.arm64_go_exit_terminates` proves `exit - entry < fuel`\n"
-            f"    suffices, and `{ident}_in_image` supplies the entry bound, so the\n"
-            f"    only fuel hypothesis left is the literal `codeSize < exportFuel`,\n"
-            f"    closed by `native_decide`.\n\n"
-            f"    What remains is exactly, and only, `{ident}_halts` and\n"
-            f"    `{ident}_nodrop` -- two named, precisely-stated obligations about\n"
-            f"    this export's code, in place of one opaque `sorry` over `Total`.\n"
-            f"    Note `Total` is `∀ n, ∃ s, …`; it used to be `∀ n s, …`, which was\n"
-            f"    false (see the note on `DylibExport.Total` in ProofLib). -/\n"
-            f"theorem {ident}_semantics_total :\n"
-            f"    DylibExport.Total dylib_image {ident} :=\n"
-            f"  DylibExport.dylibExport_total_of dylib_image {ident}\n"
-            f"    {ident}_halts {ident}_nodrop {ident}_in_image (by native_decide)\n\n"
+            f"{_dylib_total_proof(ident, code, base, export['entry'], exports)}\n\n"
             f"def {ident}_prog : Refine.Prog :=\n"
             f"  Refine.dylibExportProg dylib_image {ident}\n\n"
             f"/-- OBLIGATION, not proved: this export agrees with its\n"

@@ -408,6 +408,12 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
     check(obligations == expected,
           f"generated dylib proof has obligation set {sorted(obligations)}, "
           f"expected exactly {sorted(expected)}")
+    # `triple` is acyclic and call-free, so its termination is PROVED by the
+    # CFG walk rather than left as the obligation above.  Pinned so a
+    # regression to the `sorry` fallback is a failure, not a quiet extra hole.
+    check(":=\n  DylibExport.total_of_halts dylib_image dylib_export_0_triple "
+          "dylib_export_0_triple_halts" in text,
+          "triple's termination is no longer proved by the CFG walk")
     # The caller's theorem must stay PROVED and sorry-free: it is the whole
     # reason the obligations are named rather than the contract being admitted.
     check(":=\n  Refine.dylib_export_contract_of_spec" in text,
