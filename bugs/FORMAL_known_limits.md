@@ -1,6 +1,6 @@
 # FORMAL_known_limits: the sweep residue, audited — which refusals are true
 
-**Last audited: 2026-09-27 (FORMAL-PARALLEL round 1, agent [5] — §6 added).**
+**Last audited: 2026-09-27 (the five-agent round 1, agent [5] — §6 added).**
 Sections 1–5 are wave 5's audit and are **not** re-measured here; §6 is a
 separate, later measurement of the same sweep on a tree four other agents were
 editing, and it does not restate or revise §1–§5. §6 answers one question the
@@ -184,10 +184,11 @@ now     : export table: 458 of 459 runtime entry points advertised
                        (0 misresolved, 1 undefined — py_tokenize)
 ```
 
-**This is now the real export table**, and it is the input
-`FORMAL-PARALLEL.md` §[4] item 1 asks for: 458 symbols read off the headers
-and confirmed against `nm`, per architecture, from
-`build_stdlib_dylib.runtime_export_entries(arch)`. The one entry it does not
+**This is now the real export table**, and `FORMAL.md` §11.2 agent [5] is built
+on it: symbols read off the headers and confirmed against `nm`, per
+architecture, from `build_stdlib_dylib.runtime_export_entries(arch)`. Measured
+2026-09-28 on the merged tree: **1964 of 1968 advertised, 0 misresolved** — the
+`csym` fix that made it so is in `reflect.export_csym`. The one entry it does not
 advertise is correct — `py_tokenize` is defined by the self-hosted compiler's
 own transpiled `fire_compiler.py`, not by the runtime.
 
@@ -417,9 +418,9 @@ because nothing provides it.
 **223 of 546 is what a link line converts into working code with no backend
 change at all.** For `mojo_sqlite3_*` it is **18 of 22**.
 
-### Two numbers in `FORMAL-PARALLEL.md` §3 that the headers do not support
+### Two numbers from the round-1 brief that the headers do not support
 
-The brief says "of 455 entry points, 352 return one 64-bit word and 101 return a
+The brief said "of 455 entry points, 352 return one 64-bit word and 101 return a
 heap box" and "for sqlite, **20 of 22** … the only two that are not are
 `mojo_sqlite3_query` and `_query_dict`". Measured, both are off, and the reason
 is worth recording because it is a rule, not a typo:

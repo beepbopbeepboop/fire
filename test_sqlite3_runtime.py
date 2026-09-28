@@ -54,7 +54,7 @@ import gimple_codegen
 
 RESULTS = []
 # Artifacts land under build/, named after this test, so two agents running
-# different tests in a shared checkout cannot collide (FORMAL-PARALLEL §3).
+# different tests in a shared checkout cannot collide (FORMAL.md §11.3).
 # The name deliberately contains no unit namespace: `otool -L` prints the
 # binary's own path as its first line, so a directory called `sqlite3rt` makes
 # the "does not link sqlite3" check match ITSELF. Measured, and it is the kind

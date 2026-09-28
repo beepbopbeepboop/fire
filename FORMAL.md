@@ -10,12 +10,18 @@ documents this one defers to. What lives *here* is the thesis, the measured curr
 state, the decisions taken, and the order.
 
 Read with: `doc/ABI.md` (the boundary contract this must not contradict),
-`FORMAL-PARALLEL.md` (how to run this programme as concurrent agents without
-their work colliding), `bugs/FORMAL_known_limits.md` (the audited codegen
-residue), `bugs/FORMAL_arm64_known_proof_gaps.md` (the proof census), and
-`bugs/OPEN_WORK.md` A1 (the x86-64 `call_rel32`, which phase 3 needs).
+`bugs/FORMAL_known_limits.md` (the audited codegen residue),
+`bugs/FORMAL_arm64_known_proof_gaps.md` (the proof census),
+`bugs/CODEGEN_bootstrap_resource_blowup.md` (the upstream cause of the
+self-host divergence), and `bugs/OPEN_WORK.md` A1 (the x86-64 `call_rel32`,
+which [3] needs). **§11 is the operating contract** — the five agents, their
+exclusive write sets, the isolation rules, the interface-request mechanism and
+the merge order all live here now; `FORMAL-PARALLEL.md` is folded in and
+deleted.
 
-**Citations.** Every line number below was verified against **`7604105`**. The tree
+**Citations.** Line numbers were verified against **`7604105`**; §2.2, §7 and
+§11 were re-measured against **`21a82d6`** + the sqlite work on 2026-09-28, and
+§2.2's figures are corrected there. The tree
 moves — `a5b8ceb` landed the same day this was written and shifted
 `formal/model.py` and `formal/arm64_codegen.py` under an in-progress read — so
 each citation names the function or construct first and the line second. A line
@@ -73,29 +79,44 @@ The formal codegen already lowers a call to an external symbol, emits a `BL` to 
 already handle a function with a function call in it; it is just wiring" is
 correct about the call half.**
 
-### 2.2 Most of the runtime surface is word-shaped
+### 2.2 A minority of the runtime surface is word-shaped
 
-`runtime/fire_runtime.h` declares **455** entry points:
+**Corrected 2026-09-28.** The figures this section used to carry — 455 entry
+points, 352 word-returning, 101 box-returning, "20 of 22" for sqlite — are
+stale in *every* number, and one of them is nearly inverted. `formal.model`'s
+`runtime_abi()` is the authority and it reads **every** header in `runtime/`,
+not just `fire_runtime.h`:
 
 | | count | note |
 |---|---|---|
-| return exactly one 64-bit word | **352** | `void`, `int`, `int64_t`, `double`, `char *`, `void *` |
-| return a heap box | **101** | `MojoList*`, `MojoDict*`, `MojoSet*`, `MojoBytes*`, `MojoMemoryView*`, `MojoStr*`, `MojoStructFmt*`, `MojoCompletedProcess*` |
+| entry points across 10 headers | **540** | `fire_runtime.h` 450, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_ssl.h` 13, `fire_async_runtime.h` 13, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_coro.h` and `fire_wd.h` scan to **zero** |
+| **word in, word out** | **219** | every parameter and the return value is one 64-bit word |
+| not word-shaped | **321** | a box crosses the boundary — in an argument, in the return, or both |
 
-**The 352/101 split is by return type only, and is not the callable set.** A
-function such as `mojo_list_get_int(MojoList *, int64_t) -> int64_t` is in the 352
-and is *not* callable, because the box is in the parameter. Any table built for
-phase 2 must filter over parameters **and** return.
+So **219 of 540 (40.6%)** is the reachable-surface ceiling, against the 352 of
+455 (77%) this section previously claimed. The reachable surface is **smaller**
+than believed, not larger, and the number to beat is 219 rather than 352.
 
-`runtime/fire_sqlite3.c` — 22 functions, header and source in exact 1:1 agreement,
-and the same 22 in `gimple_codegen.py:2364-2386`:
+**The word/box split is over parameters AND return, and never was only the
+return.** The old table split by return type alone, which is why it read
+352/101; `mojo_list_get_int(MojoList *, int64_t) -> int64_t` returns a single
+word and is in neither column, because the box is in the *parameter*. Phase 2's
+table filters both, and `runtime_abi()`'s per-entry `word` flag is that filter —
+`word: True` means every type crossing the boundary is one word, so an entry
+with a word return and a boxed argument is `word: False`.
 
-- **20 of 22 are pure word-in/word-out.** `void *`, `int64_t`, `double`,
-  `const char *` in; one word out. Directly portable.
-- The two exceptions are `mojo_sqlite3_query` and `mojo_sqlite3_query_dict`
+`runtime/fire_sqlite3.c` — 22 functions, header and source in exact 1:1
+agreement:
+
+- **18 of 22 are pure word-in/word-out** (`runtime/fire_sqlite3.h`, measured via
+  `runtime_abi_entry`). This section previously said 20; the correction is
+  recorded in `bugs/FORMAL_known_limits.md` and is right there — `void *`,
+  `int64_t`, `double`, `const char *` in, one word out, directly portable.
+- The exceptions include `mojo_sqlite3_query` and `mojo_sqlite3_query_dict`
   (`runtime/fire_sqlite3.h:17,27`). The latter returns a `MojoList *` whose
-  elements are boxed `MojoDict *`, each stored as the `int64_t` bit-pattern of its
-  pointer (`runtime/fire_sqlite3.c:156-157`). They are the *entire* obstruction.
+  elements are boxed `MojoDict *`, each stored as the `int64_t` bit-pattern of
+its pointer (`runtime/fire_sqlite3.c:156-157`). The remaining two are
+`mojo_sqlite3_open`/`_close`, whose `void *` handle is a box on **both** sides.
 
 `runtime/fire_python.c` — 15 functions, all word-shaped, with CPython behind
 `#if USE_PYTHON` whose default is **0** (`runtime/fire_python.c:7`). At the default
@@ -180,8 +201,8 @@ The formal model also has **no allocator at all**. Blobs are frame-resident and
 bounded: arm64 against a scratch region (`_SCRATCH = 131072`,
 `formal/arm64_codegen.py:37`; `_blob_cap` at `:738`; over-capacity raises at
 `:1909-1912`) and x86-64 against `_BLOB_BYTES = 16384`
-(`formal/x86_64_codegen.py:63`). So the 101 box-returning entry points, and the
-box-argument half of the 352, are not merely unwired — they have no representation.
+(`formal/x86_64_codegen.py:63`). So the 321 non-word entry points are not merely
+unwired — they have no representation.
 
 ### 3.3 The gimple premise needs establishing before anything is measured against it
 
@@ -211,14 +232,21 @@ This is not an argument against the programme. It is phase 0, it is on the gimpl
 path where bug reduction is wanted anyway, and it turns the programme's baseline
 from assumed into measured.
 
-### 3.4 The provider notion is a hardcoded 19-name set
+### 3.4 ~~The provider notion is a hardcoded 19-name set~~ — FIXED, with a caveat
 
-`_is_libsystem` (`formal/build.py:3591`) is a 19-element literal set with one caller
-(`:4329`). It is the entire notion of "a symbol provided by a linked native
-runtime", it is a *name* guess rather than a check of anything, and the audit that
-uses it — "the library would bind N symbol(s) that nothing provides",
-`formal/build.py:4332` — runs **only on the dylib path**. `build` / `build --formal`
-emits `external_syms` with no such audit at all.
+`_is_libsystem` was a 19-element literal set: a *name* guess rather than a check of
+anything, and the audit using it ran only on the dylib path. Both halves are
+closed — the provider is now a real `dlsym` probe of the C library, and the
+executable path is audited too (`formal/build.py`'s `_unaccounted_report`, pinned
+by `test_formal_link_accounting.py`, 83 checks).
+
+**The caveat, and it is the reason this is not simply struck.** The audit can
+only say *nothing on this link line defines these names*; it cannot say **why**.
+`info` carries `external_syms` and nothing recording a construct the codegen
+failed to lower, so no code in the backend can distinguish a dangling emitted
+call from a bare reference with no call site behind it. The message says so
+rather than guessing. Distinguishing them is a real, small piece of work and it
+is not in §11.2's five.
 
 ---
 
@@ -244,14 +272,14 @@ emits `external_syms` with no such audit at all.
 
 This is stated separately because it is the load-bearing consequence of decision 3.
 
-Under (c) alone, the formal target's containers stay frame blobs and the 101
+Under (c) alone, the formal target's containers stay frame blobs and the 321
 box-returning entry points stay gimple-only, permanently. That is a real ceiling,
 and it is why (c) cannot be the destination.
 
 A slab allocator removes the ceiling. Once the formal target has a *proved* bump
 allocator, its `MojoList` can be a real pointer into a region rather than a stack
 blob; `doc/ABI.md`'s `List → MojoList *` becomes literally true on both backends;
-and the 101 become callable **incrementally, one entry point at a time, each with
+and the 321 become callable **incrementally, one entry point at a time, each with
 its own proof** — rather than in one change to the value model that would disturb a
 proof library currently 34 of 40 clean.
 
@@ -405,7 +433,7 @@ has **no Lean `axiom` and no `opaque`** anywhere; everything is assumed in the
 | 8 | `lib/ProofLib.lean:895` | "All per-node lemmas currently admit" |
 
 **The two holes in the mechanism that checks this** were both closed in the
-FORMAL-PARALLEL round of 2026-09-27, by [5]'s `formal/lean.py` and the
+five-agent round of 2026-09-27, by that round's [5] (`formal/lean.py`) and the
 integration that followed it. What they were, and what they are now:
 
 - ~~`check_proof_cached` returns `n_sorries` and **nobody reads it**.~~ Now
@@ -432,7 +460,7 @@ sharpest entry in this table. `lib/` is out of scope for the parallel round, so
 nothing was changed — but the figure is now *read* on every run rather than
 merely known.
 
-**What the FORMAL-PARALLEL round did to phase 2, measured.** The word-shaped
+**What the five-agent round did to phase 2, measured.** The word-shaped
 callable surface is now *unblocked but not yet reachable*, and the distinction
 is the whole remaining step. [3] made the refusal ABI-shaped: a call is refused
 for its type, and a word-in/word-out call is explicitly named as one a formal
@@ -476,8 +504,15 @@ Stated so no reader infers otherwise.
   headline** — 24 of family 1's 30 files (`bugs/FORMAL_known_limits.md` §1.2) — and
   it is **not** in this programme. It is phase 7, and it is weeks, not an
   afternoon.
-- **The sweep's headline will move modestly.** What changes is that its largest
-  unanswerable bucket stops resting on a claim we know to be false.
+- **The sweep's headline has already moved, further than this section predicted.**
+  Measured 2026-09-28: **108/416 = 26.0%** on arm64, against the ~8% this
+  section was written against. What changed is not that the backend got 3x
+  better but that the largest unanswerable bucket stopped resting on a claim we
+  knew to be false (`CLASS_HOST`'s "not fixable" was wrong of `os`, `sys`,
+  `re`, `json` and 10 more), and that 9 stdlib files stopped being falsely
+  classified by the relative-import bug. The lesson worth keeping: a coverage
+  number is only as good as the *classification* under it, and the cheapest
+  large win in this programme was a truthfulness fix, not a capability.
 
 ---
 
@@ -529,56 +564,329 @@ Stated so no reader infers otherwise.
 
 ## 11. Running this as concurrent work
 
-`FORMAL-PARALLEL.md` is the operating contract for executing this programme with
-five agents at once: the `[1]`–`[5]` scopes, each agent's **exclusive** write set,
-the `GMOJO_HOME` isolation, the shared-path audit that makes a shared working
-directory safe, the INTERFACE REQUEST mechanism for anything crossing an ownership
-boundary, the merge order, and the easy/hard line. It is kept separate rather
-than folded in here because this document is the programme — what the phases are
-and why — and that one is the coordination for a particular week. Two documents
-with two different lifetimes should not be one document.
+This section used to be a pointer to `FORMAL-PARALLEL.md`, which held the `[1]`–`[5]`
+scopes, the exclusive write sets, the isolation mechanics, the INTERFACE REQUEST
+mechanism and the merge order. That document is now **folded in here** and
+deleted. The separation was a mistake of bookkeeping, not of judgement: the
+scopes are the phases, the write sets are the phases' files, and a round that
+had to be looked up in a second file was one more thing to go stale. The
+lifetime argument that justified the split has expired — the first round is
+merged, so there is no longer a "this week" to be separate from.
 
-**This round covers the easy half only: phases 0, 1 and 2, plus measurement.
-Phases 3–6 — the Lean call/return semantics and everything downstream of it —
-are deliberately not assigned, and are to be planned on their own.** §6 of
-`FORMAL-PARALLEL.md` records where that work stands, in enough detail that the
-next plan starts from measurements rather than re-deriving them: the root cause is
-that `lib/ProofLib.lean:1548-1549` gives `BL` no callee, so the model halts at
-the stub and every downstream symptom follows from that one gap. The useful
-sub-finding is that the x86-64 `call_rel32` is **already modelled** at
-`lib/X86.lean:720` and merely unwired, so the deferred round has a genuinely
-independent first step.
+### 11.1 The measured state this round starts from
 
-The partition, in one line each: **[1]** the gimple build path (holds the only
-known regression, and the only currently-broken user-visible thing);
-**[2]** the per-arch runtime dylib both backends would consume; **[3]** formal
-codegen — the `mojo_*` refusal shaped by ABI, which is the single highest-value
-item on the list and is *not* proof work; **[4]** formal link and import
-resolution; **[5]** the instruments.
+Everything below was measured on `21a82d6` + the sqlite work, not inferred. It
+is here because a plan built on the numbers in §2 as they *were* would be
+planning against a fiction.
 
-The operating rules, so this file is not self-incomplete:
+**The sweep says the backend is much further along than §8 implies.**
+`tools/formal_sweep.py`, arm64: **590 files, PASS=108, coverage 108/416 =
+26.0%** (the denominator excludes the 174 in a not-answerable or tool class,
+because a fact about the target is not a gap in the backend). Of the 127
+in-file codegen findings, **123 are one unnamed family, "other refusal"** — so
+97% of what is actually blocking is not classified at all. That single number
+is the strongest argument for agent [4] below. 30 of the 127 sit in files that
+also import a host module, so closing them would not raise the rate; they are
+counted as findings on purpose, because reclassifying them would improve the
+headline without anyone writing code.
 
-- **The partition is file ownership, not task dependency.** One writer per file at
-  every moment. Needing a file you do not own is an INTERFACE REQUEST, never an
-  edit.
+**The sorry counter says the proof side is barely started, and now says so out
+loud.** `formal/lean.py`'s census, over the 29-proof arm64 corpus: **7 admitted
+`sorry` in generated files** across 6 proofs, **2 in `lib/`**
+(`in_image_stub`, `semantics_stub`), **1 vacuous** (`Semantics` at
+`lib/ProofLib.lean:4617`, which states `∀ …, … → True`), plus
+`dylib_export_contract_stub` in `lib/Refine.lean`, invoked with
+`obs := fun n => n` — an admitted `sorry` over a claim that is **false**. None
+of these were visible before the counter existed; all are still open. And the
+number that does *not* appear in any census is the largest one: every extern
+call site generates `extern_<sym>_step : True := by trivial`, which is
+vacuously true and so contributes **zero** sorries while being worth nothing.
+
+**Self-certification — the actual goal — is blocked in three distinct places,
+and only one of them is an error message.** The goal is that the compiled
+`fire.py`, fed the same input as the python3 one, produces the same output.
+Measured:
+
+1. **Proof generation fails on any program that makes a call.**
+   `formal/arm64_proof_gen.py`'s `emit_block` raises
+   `ValueError: unsupported: recursion argument bound (not a dec1 pattern)` for
+   `fn main(): print(42)` and for anything else with a call; only a bare
+   `return` survives. So a large part of the corpus currently has no proof at
+   all, and `fire.py build --formal` prints no `Proof:` line to put a sorry
+   count on. The compiled path is not behind here — it is *absent*.
+2. **The self-hosted binary runs but computes wrong answers.**
+   `bootstrap-stage2-dumps` no longer segfaults (re-measured 2026-09-27: exit 0
+   on a two-line program, 12.1 MB, 94.6 M instructions) but does not reproduce
+   the reference dumps: sub-jobs return `mojo_unsupported_iter` no-ops or a
+   wrong dump. It is emitted from **exactly one place** —
+   `mojo/backend_gimple/emit_loops.py:206`, the generic loop fallback, which
+   emits the call and **runs the body zero times**. The other 16 textual hits
+   across the gimple backend are comments recording this same bug, and they
+   name the forms that fall into it: no `zip()` lowering, no `reversed(<list>)`
+   lowering, `for w in pat.findall(s)`, `with` blocks, and generator
+   expressions. So this is one site with a known list of offenders, not 17
+   independent ones — which makes it a much better-shaped piece of work than
+   the grep count first suggests. A silent no-op is the worst class
+   of defect for this goal: it cannot be caught by an exit code, and it is
+   exactly what a self-certifying compiler must not do to its own input.
+3. **The resource blowup** (`bugs/CODEGEN_bootstrap_resource_blowup.md`,
+   58.6 GB / 1.24 T instructions on a real self-host input) is the documented
+   *upstream* cause and is localised, not fixed. Not assigned below, because it
+   is one optimisation with a known shape rather than five parallel items — but
+   agent [1] is expected to shrink it as a side effect, since a no-op that
+   silently discards work is also work not done.
+
+**`comptime` is the clean example of why a self-certifying compiler needs a
+parity test rather than a test per feature.** Measured, same program both ways:
+
+| | statement form `comptime { … }` | expression form `comptime f()` |
+|---|---|---|
+| `python3 fire.py run` | **`NameError: name 'comptime' is not defined`** | **`NameError`** |
+| `fire.py build` then run | works, prints | **prints `0`, where `f()` returns `7`** |
+
+Three different answers for one construct, and the worst one is silent. The
+sweep independently names the same family — `comptime value does not fold`, 2
+findings. The general shape is the point: the interpreter is *behind* the
+compiled backend here, which inverts the usual direction, so a test that only
+exercises the compiled path would pass.
+
+### 11.2 The five agents
+
+Partitioned so that no two agents share a writable file. The label is how we talk
+about work; put it in commit subjects and in INTERFACE REQUESTs.
+
+| agent | theme | exclusive write set |
+|---|---|---|
+| **[1]** | **the silent no-op class** — make every `mojo_unsupported_iter` correct or loud | `mojo/backend_gimple/emit_loops.py`, `emit_stmts.py`, `emit_exprs.py`, `emit_calls.py`, `emit_funcs.py`, `emit_methods.py`, `emit_infra.py` |
+| **[2]** | **proof generation correctness** — the `ValueError` that kills any program with a call | `formal/arm64_proof_gen.py`, `formal/x86_64_proof_gen.py` |
+| **[3]** | **the Lean model, owned for the first time** — call/return semantics, non-vacuous semantics | `lib/ProofLib.lean`, `lib/Refine.lean`, `lib/X86.lean` |
+| **[4]** | **feature parity and the refusal taxonomy** — `comptime`, and naming the 123 | `myinterpreter.py`, `gimple_codegen.py`, `tools/formal_sweep.py` |
+| **[5]** | **the formal path links the runtime dylib** — the phase-2 payoff | `formal/model.py`, `formal/build.py`, `formal/imports.py` |
+
+Everything not listed above belongs to somebody. If it seems to belong to
+nobody, it belongs to whoever owns the nearest file, or it is an INTERFACE
+REQUEST.
+
+**Why these five, and not the phases.** Phases 0–2 landed in the previous round
+and are done. What remains is phase 3 (the Lean model) and its dependants, plus
+the three self-certification blockers above — and those five blockers partition
+cleanly by file, which phases do not: phase 3 is one modelling problem with a
+fan-out, and the self-certification work is three unrelated ones. The write sets
+are disjoint, which is the property that actually makes five agents safe. Order
+matters only in that [1] and [2] are the two whose fixes change what the gate
+measures, so they want merging first.
+
+**Deliberately unowned this round:** `runtime/`, `build_config.py`, `driver.py`,
+`build_stdlib_dylib.py`, `cas.py`, `reflect.py`, `fire_compiler.py`,
+`mojo/middle/*`, and `test_sqlite3_runtime.py`. Those are settled — agents [1]
+and [2] of the *previous* round landed them, and this round is not to reopen
+them. In particular [1] must not "fix" the no-op class by making the compiler
+call into `runtime/`, and nobody edits a `.lean` file except [3].
+
+#### [1] The silent no-op class
+
+*Why first.* It is the only item on this list that makes the compiled compiler
+**lie** rather than fail, and self-certification is precisely the property that
+a lie destroys. Everything else on this list produces a red test.
+
+*What.* One emission site, `emit_loops.py:206`, reached by a generic fallback
+whenever a loop's iterable has no lowering. It emits the call and the body runs
+**zero times** — a silent wrong answer, and the reason a self-hosted `fire.py`
+compiles and exits 0 while being wrong about its own input.
+
+The work is twofold, and the second half is the honest one. Either **lower the
+named forms** — `zip`, `reversed(<list>)`, `re.findall`, `with`, generator
+expressions — each a bounded piece of `emit_loops.py`; or **refuse the
+construct** by name, which is a perfectly good outcome and is what should happen
+to anything whose semantics the backend cannot model, because a loop form the
+backend cannot lower is also a loop form no proof can reason about. What is not
+acceptable is the third option: falling through.
+
+*Do not trust the comment count.* Sixteen of the seventeen textual hits are
+comments about this one site. Reading them as a work list produces seventeen
+phantom items; reading them as a *list of offenders* produces the real one.
+
+*Trap.* Making it loud is easy in a way that is useless: refusing every
+unlowered iterable turns the self-host build red without making anything true,
+because the compiler's own source uses these forms. The bar is that each named
+form either computes the right answer or is refused *specifically*, and the
+self-host build still completes. Measure `fire.py build fire.py` before and
+after, and keep the artifact.
+
+*Done when:* the named forms are lowered or individually refused, the
+`bootstrap-stage2-dumps` sub-jobs that currently return no-ops either produce
+reference-matching output or a named refusal, and `make mojoc` still works.
+
+#### [2] Proof generation correctness
+
+*What.* `emit_block`'s `ValueError: unsupported: recursion argument bound (not
+a dec1 pattern)` — pre-existing, reproduces on `fn main(): print(42)`, and
+therefore means the arm64 corpus has **no proofs at all** for any program with a
+call. That is upstream of everything in `FORMAL.md` §7's inventory: a `sorry`
+census is meaningless while the generator cannot emit a proof. Then the two
+other Python-side defects the previous round recorded but could not fix:
+post-call state **fabricated** as `{pre with pc := bl+4}`, and the byte-identical
+duplicated blocks (`generate_arm64_proof` at both `:6034` and `:7222`,
+`_gen_extern_test` at both `:5661` and `:6849`, `_find_extern_call` at both
+`:5556` and `:6744` — Python binds the second, so `:6849` is live).
+
+*Order.* De-duplicate **before** the semantic work, not during it. Three copies
+of a function that is about to change is how a fix lands in the dead one.
+
+*Done when:* `fire.py build --formal` emits a `Proof:` line for a
+call-containing program, and the emitted proof for one fixed input is
+byte-identical across two runs.
+
+#### [3] The Lean model, owned for the first time
+
+*Why it was unowned and is not any more.* Every previous round deliberately left
+`lib/*.lean` alone so this work would be owned cleanly rather than inherited
+half-changed. It is now the largest unowned piece of the programme and the
+gate for phases 4–7, so it gets an agent.
+
+*What.* Root cause is mechanical and single: the `BL` arm of `arm64_step`'s dispatch
+(`lib/ProofLib.lean:1549`, whose comment at `:1548` names the encoding) gives
+`BL` a bare `x30`/pc transfer with **no callee**. A dylib or libc branch target
+is a `__TEXT,__stubs` address *outside the image*, so `arm64_go_exit` returns
+`none` and the model halts. One gap, every downstream symptom. Then, in order:
+(1) a call frame, a callee entry, and return-to-`x30`; (2) wire the x86-64
+`call_rel32`, which is **already modelled** at `lib/X86.lean:720` and merely
+unwired from `_FORMS`/`_SUCCS`/`_resolve` (`bugs/OPEN_WORK.md` A1) — the
+cheapest real step in the whole programme; (3) give `DylibExport.Semantics` a
+non-vacuous definition against real observables rather than a hardcoded `[]`;
+(4) either prove `dylib_export_contract_stub` or **delete it**, since asserting
+every export is the identity is false.
+
+*Done when:* a dylib export has a non-vacuous semantics, a caller can discharge
+an obligation against it, and `lib/ProofLib.lean:4617` no longer states
+`∀ …, … → True`.
+
+#### [4] Feature parity, and the refusal taxonomy
+
+*What, first:* `comptime`. The table in §11.1 is the whole bug — the
+interpreter does not have the construct, the compiled backend has it in
+statement form, and in expression form it silently yields `0`. Make all three
+paths agree, and whichever way they agree, make it agree *loudly*.
+
+*What, second:* the 123 "other refusal" findings. 97% of the in-file codegen
+findings are one unnamed family, so the sweep currently cannot answer "what is
+actually left". Naming them is not a cosmetic change — it is what turns 26.0%
+into a plan. Extend the existing `CLASS_*` machinery rather than inventing a
+second taxonomy, and do **not** reclassify a file out of the denominator to
+improve the rate; that is the failure this programme has already committed once.
+
+*Done when:* the sweep's family table has no bucket above ~10% of the findings,
+and `comptime` gives the same answer on all three paths.
+
+#### [5] The formal path links the runtime dylib
+
+*What.* Phase 2's payoff, and the last thing standing between "the ABI is
+word-shaped" and "a proof can call it". The refusal is now honest — a formal
+image is freestanding, links libSystem and nothing else, and the per-arch
+runtime dylib that the previous round built is **not on its link line**. Opt it
+in. Then the number to move is 0 → as much of 219 as the link line can carry.
+
+*Careful.* This is a `formal/build.py` change, not a codegen one, precisely
+because it is not a codegen problem. Do not "fix" it by widening
+`is_gimple_runtime_builtin` — that predicate answers *can this target bind
+this*, and the honest answer stays no until the symbol is genuinely on the line.
+
+*Done when:* a formal image links the per-arch runtime dylib, dyld resolves a
+word-shaped `mojo_*` call, and the call is **not** refused. The box-returning
+321 must still be refused, and the refusal must still name the type.
+
+### 11.3 The operating rules
+
+- **The partition is file ownership, not task dependency.** One writer per file
+  at every moment. Needing a file you do not own is an INTERFACE REQUEST, never
+  an edit.
+- **Never `git checkout <path>` or `git restore <path>`.** Not to "reset" a
+  file, not to clean up a merge, not to drop a stash. It destroys uncommitted
+  work with no recovery, and it has destroyed about ten hours of work in this
+  project already, in more than one session. `git checkout <branch>` is safe —
+  the hazard is path-scoped. Before ANY checkout, run `git status --short` and
+  look at what you are about to discard. If you need a file back, `git stash
+  push -- <paths>` is recoverable and `git merge --abort` is safe; reach for
+  those first.
 - **Nobody runs a gate.** Each agent verifies with its own tests, run directly —
   not even `tools/suite.py <one-test>`, which writes the `build/suite.log` the
   integrator needs. The integrator registers the new tests, applies held
   requests, and runs the gate once at the end.
-- **Take the 80/20 and leave a note.** This round is the easy half on purpose. A
-  precise "this costs weeks, and here is why" is a **deliverable**; a
-  half-finished attempt is not. `bugs/FORMAL_known_limits.md` has the table shape
-  for that — measured count, whether the refusal is *true*, what closing it takes.
+- **Do not add an `expect=` marker to make something green.** That is silencing
+  a test, and `tools/suite.py` is set up to report an `expect`-marked test that
+  *passes* as a failure precisely so a stale marker cannot survive.
+- **Take the 80/20 and leave a note.** A precise "this costs weeks, and here is
+  why" is a **deliverable**; a half-finished attempt is not.
+  `bugs/FORMAL_known_limits.md` has the table shape for that — measured count,
+  whether the refusal is *true*, what closing it takes.
 - **`GMOJO_HOME` is per-agent, always.** One environment variable, and it removes
-  every CAS contention, torn cache entry and dylib overwrite question — including
-  `formal/imports`' per-arch dylib directory, which two agents sharing a
-  `GMOJO_HOME` would otherwise write into simultaneously.
+  every CAS contention, torn cache entry and dylib overwrite question. Set it
+  on **every** command, no exceptions: `export GMOJO_HOME="$HOME/.gmojo-agent-N"`.
 - **The one repo-root collision that matters is building the same basename**
-  (`fire.ci` from `fire.py build fire.py`, `./mojoc` from `make mojoc`), so only
-  `[1]` may write either. Every other artifact is named after the test that
-  produced it, so two agents running different tests in one directory do not
-  collide.
-- `lib/*.olean` is shared but **safe**: `ensure_library` (`formal/lean.py:150`)
-  builds it under an exclusive `flock` and writes via a private temp +
-  `os.replace`, so concurrent callers queue rather than corrupt. The hazard is
-  staleness, not corruption. Nobody edits a `.lean` file this round.
+  (`fire.ci` from `fire.py build fire.py`, `./mojoc` from `make mojoc`). Every
+  other artifact is named after the test that produced it, so two agents running
+  different tests in one directory do not collide.
+- `lib/*.olean` is shared but **safe**: `ensure_library` (`formal/lean.py`) builds
+  it under an exclusive `flock` and writes via a private temp + `os.replace`, so
+  concurrent callers queue rather than corrupt. The hazard is staleness, not
+  corruption. Do not `rm` anyone's `.olean`/`.srcsha256`/`.buildlock`, and do
+  not `rm -rf lib/`. To work against your own copy, copy `lib/*.lean` into your
+  own directory and pass it as `repo_root` — `formal/lean.py` derives `lib_dir`
+  from it.
+- **In a shared tree, leave alone:** `build/`, `__pycache__`, `*.o`. Do not
+  rename, reformat or "tidy" anything outside your write set, however ugly it
+  looks — that is how two agents end up fighting over a diff neither intended.
+  Do not edit `FORMAL.md` or `tools/suite.py`; they are integrator-owned.
+
+### 11.4 The easy/hard line, so nobody grinds
+
+| take it | leave it, and write it down |
+|---|---|
+| anything in your write set that a test can pin | Stage 5 monomorphization (`FORMAL.md` phase 7 — "weeks, not an afternoon"; `FORMAL_known_limits.md` §1.2) |
+| a refusal made **true** rather than more capable | MLIR attribute templates (46 files, a **permanent** limit, `FORMAL_known_limits.md` §2) |
+| a number that is wrong, fixed by measurement | anything needing a heap or allocator — the slab allocator, phase 6, gated behind [3] |
+| a silent wrong answer turned into a loud one | a `mojo_*` call returning a heap box (needs the ABI decision, not a codegen patch) |
+| | adding a **capability** whose value model does not exist yet |
+
+If you hit the wall, the deliverable is a bug doc with a repro and a cost, or an
+INTERFACE REQUEST — not a grind.
+
+### 11.5 INTERFACE REQUEST
+
+For anything crossing an ownership boundary:
+
+```
+INTERFACE REQUEST  from=[N]  to=[M]  file=<one path>
+WHAT:   the exact change, as a diff if you have written it somewhere legal
+WHY:    one line
+BLOCKS: what of yours cannot land without it
+```
+
+Writing the diff in a scratch file and handing it over is encouraged. Keep
+working on everything that does not depend on it; most requests are
+non-blocking by design.
+
+**An INTERFACE REQUEST file is deleted in the merge that answers it.** A file
+whose sections are all resolved is indistinguishable from an open one to whoever
+opens the queue next, and the sections reading `OPEN, to=[4],
+file=formal/build.py:629` are the actively misleading part — the line number no
+longer means what it meant. Each request's content is expected to have landed as
+a commit, a test, or a row in this document; none of it lives only in the
+request file. To restate the rule the bug docs already follow: **if the answer
+is in the tree, the request is not.**
+
+### 11.6 Merging
+
+1. **[1]** and **[2]** first — they are the two whose fixes change what the gate
+   measures, so everything after them is measured against corrected code.
+2. **[4]** next — it makes the instruments stricter, and applying that to
+   finished work is better than firing halfway through everyone else's.
+3. **[3]** then. It is the deepest change and the one most likely to need a
+   second pass once the others are in.
+4. **[5]** whenever it is ready; it is independent of all of them.
+
+The integrator, and only the integrator: applies held requests, registers all new
+test files in `tools/suite.py`, resolves any overlap that turns out to be real,
+updates this document with what actually landed, deletes the bug doc for any bug
+that is now **fixed** (a doc for a fixed bug is a doc that lies), and then
+**runs the gate once**.
