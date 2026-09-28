@@ -1,444 +1,204 @@
-# OPUS.md — the step bound for dylib exports
+# OPUS.md — termination (`Total`) for dylib exports
 
 Agent [2]. Write set: `lib/ProofLib.lean`, `formal/arm64_proof_gen.py`.
 Shares with [3] (`lib/Refine.lean`, `lib/work.lean`, `lib/Contracts.lean`) — do
 not edit those.
 
-This is a hand-off document. It states what is *proved*, what is *reduced to
-named obligations*, what is *still open*, and — the part that matters most for
-the final solution — **what I believe can be proved next and by what route**,
-so the next session does not re-derive the shape from scratch.
+This is a hand-off document: what is proved, what is still open, and the
+route for the open part.
 
 ---
 
-## 1. Status in one paragraph
+## 1. Status
 
-`DylibExport.Total` was a **false statement**, not a hard theorem. It is now
-correct, and the reason an export's run terminates has been **proved** rather
-than admitted. What remains is exactly two named obligations about a given
-export's own code (`hhalts`, `hnodrop`), in place of one opaque `sorry` over
-`Total`. The fuel bound itself — the part that was previously just "100000
-seems like a lot" — is now a theorem, and the *only* fuel hypothesis left at
-the generated call site is the literal inequality `codeSize < exportFuel`,
-closed by `native_decide`.
+`{ident}_semantics_total` — `DylibExport.Total dylib_image {ident}`, i.e. "for
+every argument `n`, `runExport` returns `some`" — is now **proved, with no
+`sorry`**, for every export whose control flow is acyclic and has no calls.
+That covers the plain arithmetic exports (`triple`, `negate`, …). An export
+with a loop or a `bl` still gets one named `sorry` over `Total`. That
+statement is true (or at least not known to be false), which is more than
+could be said for what it replaced.
 
----
-
-## 2. The bug that was hiding behind the `sorry`
-
-`Total` used to be:
+How: the generator's existing CFG walk (`_gen_universal_e2e_cfg`, halt-only
+mode) now proves `{ident}_halts`:
 
 ```lean
-def Total (image : DylibImage) (export_ : DylibExport) : Prop :=
-  ∀ (n : UInt64) (s : Arm64State), runExport image export_ n = some s
+theorem {ident}_halts (n : UInt64) :
+    (match arm64_exec_go_exit { Arm64State.init n BASE with pc := ENTRY,
+         x30 := UInt64.ofNat EXIT } dylib_code EXIT (100000) with
+     | some s => True
+     | none => False)
 ```
 
-Read the `s` as arbitrary and this says the run returns *every* possible
-state. It is refuted by taking `s` to be a state that is not the result. A toy
-check, on a function that is total in the plainest possible sense, is
-unprovable — verified:
+and `DylibExport.total_of_halts` (ProofLib) turns that into `Total`. The walk's
+statement matches `runExport` up to unfolding, including the fuel.
+`_EXPORT_FUEL` in the generator mirrors `exportFuel`, and if the two ever
+differ the result is a type error, not a proof about some other run.
 
-```lean
-def f : Nat → Option Nat := fun _ => some 0
-example : (∀ n s, f n = some s) := by intro n s; simp [f]
--- ⊢ 0 = s
-```
+`#print axioms` on the generated `_semantics_total` shows only
+`propext`/`Classical.choice`/`Quot.sound` plus the project's usual
+`native_decide`/`bv_decide` step-lemma axioms. There is no `sorryAx`.
 
-So `{ident}_semantics_total := by sorry` was not sitting on a hard theorem. It
-was sitting on an **impossibility**, and nobody noticed, because a `sorry`
-compiles and a named `sorry` is exactly what the census is designed to be
-trusted about.
+## 2. Why the plan in the previous version of this file could not work
 
-Now:
-
-```lean
-def Total (image : DylibImage) (export_ : DylibExport) : Prop :=
-  ∀ (n : UInt64), ∃ s, runExport image export_ n = some s
-```
-
-Termination is `∀ n, ∃ s, …`. Uniqueness of the result is *not* part of
-`Total` and is not wanted — it is `Functional`, which states agreement of
-*observables* rather than of whole states, and is the right home for
-"same input, same answer".
-
-**Consequence for the shape of the work, and this is the part worth reading
-twice:** the correction is not cosmetic. Under `∀ s, …` there is no witness to
-produce and the statement is vacuous in a way that *looks* like content. Under
-`∀ n, ∃ s, …` there is a witness, and the witness is the entire content of the
-step bound. Every proof step below exists to produce it.
-
-### Collateral fixed
-
-`DylibExport.Semantics_refutable` was stated against the old two-argument
-`Total` (`htotal 0 (Arm64State.init 0 0)`). It had to be restated as
-`obtain ⟨s, h⟩ := htotal 0`. This is the tell that the old shape was wrong: a
-*refutability* check for a predicate that cannot be inhabited is not a
-meaningful thing to have written.
-
----
-
-## 3. The step bound, proved
-
-### 3.1 `effNext` — the pc the loop is *actually* at next
-
-`arm64_go_exit` has a wrinkle that has to be mirrored exactly:
-
-```lean
-let st'' := if st'.pc = st.pc then { st' with pc := st.pc + 4 } else st'
-```
-
-When a step leaves `pc` alone the loop does not stay put — it substitutes
-`st.pc + 4`. So the pc the next iteration sees is `effNext st st'`, **not**
-`st'.pc`.
-
-This matters and it is the single easiest thing to get wrong.
-`st.pc + 4` can **overshoot the exit**: an `nop` at the last word of the code
-advances *past* `exit`. A progress hypothesis phrased about `st'.pc` would
-therefore be satisfiable while the run walks off the end. `effNext` is the one
-function that is right in both branches, and stating `hnodrop` about it yields
-progress *and* containment from a single hypothesis.
-
-```lean
-def effNext (st st' : Arm64State) : Nat :=
-  if st'.pc = st.pc then st.pc + 4 else st'.pc
-```
-
-### 3.2 The two hypotheses, and why they are the right two
-
-```lean
-theorem arm64_go_exit_terminates_aux (code : Nat → UInt8) (exit : Nat)
-    (hhalts  : ∀ st : Arm64State, st.pc < exit → ∃ st', arm64_step st code = some st')
-    (hnodrop : ∀ st st' : Arm64State, st.pc < exit →
-              arm64_step st code = some st' →
-              st.pc < effNext st st' ∧ effNext st st' ≤ exit) :
-    ∀ (f : Nat) (st : Arm64State), st.pc ≤ exit → exit - st.pc < f →
-      ∃ s, arm64_go_exit st code exit f = some s
-```
-
-- `hhalts` — every in-range state has a successor. Without it `arm64_step`
-  returns `none` and so does the run, with fuel to spare.
-- `hnodrop` — the effective next pc strictly advances and stays `≤ exit`.
-
-Neither is derivable in general, and that is the point. An export containing a
-backward branch has no `hnodrop`, so this proves `Total` for **straight-line**
-exports and says so, rather than asserting it for all of them.
-
-**Why the bound is strict.** `arm64_go_exit _ _ _ 0 = none` unconditionally, so
-the run needs `exit - st.pc < f`, not `≤`. At `f = exit - st.pc` the induction
-lands on `succ 0` and has nothing to recurse on. This is why `Total`'s shape
-change above matters concretely: a `≤` bound would have been silently wrong.
-
-**Why induction on fuel, not on distance.** `Nat.strong_induction_on` is not
-available in this environment (checked, not assumed). It is also not needed:
-`arm64_go_exit` recurses on `fuel - 1`, so plain induction on `f` is
-*structural* and matches the definition exactly. The three cases are the three
-branches of the loop: fuel exhausted, already at the exit, or one step.
-
-### 3.3 `dylibExport_total_of` — the fuel is *proved* sufficient
-
-```lean
-theorem dylibExport_total_of (image : DylibImage) (export_ : DylibExport)
-    (hhalts  : …) (hnodrop : …)
-    (hin     : InImage image export_)
-    (hfuel   : image.codeSize < exportFuel) :
-    Total image export_
-```
-
-`InImage` is already a *check* — two `Nat` inequalities on literals the
-generator emits, closed by `native_decide` (`in_image_decide`). It supplies
-`entry ≤ base + codeSize`, and with it:
+The previous version proposed to finish with a "straight-line table":
+`∀ st, st.pc < exit → st.pc % 4 = 0 → ∃ s', arm64_step st code = some s' ∧
+s'.pc = st.pc`, which needed only one more hypothesis (`hbase`). Its
+predecessor, the two emitted obligations `{ident}_halts` / `{ident}_nodrop`,
+had the same shape. **Both are false for every dylib the backend emits.** I
+measured this on a real two-export dylib (`triple`, `negate`):
 
 ```
-exit - entry  ≤  exit - base  =  codeSize  <  exportFuel
+0x1000001b0  a9bf7bfd  stp  x29, x30, [sp, #-16]!
+...
+0x1000001e4  a8c17bfd  ldp  x29, x30, [sp], #16
+0x1000001e8  d65f03c0  ret
 ```
 
-so `hfuel` is the *entire* remaining fuel obligation and it is a literal
-inequality. This is the "the fuel is proved sufficient" half of the round's
-done-when, and it is now real rather than rhetorical.
+- **Every export ends in `ret`.** `ret` writes `pc := x30`, so "the step
+  does not move the pc" fails at the last word of every export. Because the
+  hypotheses quantify over *all* states, `x30` is arbitrary, and so the pc
+  after `ret` can be anything, including an address back inside the image.
+  So `hnodrop` fails too.
+- **Pcs below `image.base`** are in range (`st.pc < exit`), `dylib_code`
+  returns `0` there, `0` decodes to nothing, and `arm64_step` is `none`. So
+  `hhalts` is false as well.
 
-Note what is **not** needed: `arm64_go_exit_mono` is not used on this path.
-The auxiliary is handed a budget of `exportFuel` directly, so its conclusion is
-already at `exportFuel`. `mono` remains useful for the *other* consumer (a
-caller with a smaller budget) but is not load-bearing here.
+So the census had been counting two holes that no proof could ever fill. This
+is the same problem as the old `∀ n s` form of `Total`, one level down. The
+real run terminates because of a fact about the states it actually visits:
+`stp x29, x30` saves the link register, `ldp x29, x30` restores it, and so the
+`ret` goes to the exit. A claim about all states cannot express that. A walk
+of the actual run can, and the CFG walk already follows `x30` through the
+stack (`hx30_*`, discharged with `mem_read_after_write_u64` and friends).
 
----
+Removed as a result, since nothing can use them: `effNext`,
+`arm64_go_exit_terminates{,_aux,_aligned}`, `arm64_nodrop_of_straight`,
+`dylibExport_total_of{,_straight}`, `arm64_branchy` (never checked against the
+decoder), and `arm64_set_reg_pc` (only needed by that route). All of them are
+in git history (`9c884c7`) if someone needs them back.
 
-## 4. What the generator now emits
+The `Total` shape fix from the previous round still stands: `∀ n s, … = some
+s` was false and `∀ n, ∃ s, …` is correct. That history is kept in the
+`DylibExport.Total` docstring.
 
-`formal/arm64_proof_gen.py` no longer emits a bare `sorry` over `Total`:
+## 3. What changed, concretely
 
-```lean
-theorem {ident}_halts : …            -- OBLIGATION, stated in full
-theorem {ident}_nodrop : …           -- OBLIGATION, stated in full
-theorem {ident}_semantics_total :
-    DylibExport.Total dylib_image {ident} :=
-  DylibExport.dylibExport_total_of dylib_image {ident}
-    {ident}_halts {ident}_nodrop {ident}_in_image (by native_decide)
-```
+- `formal/arm64_proof_gen.py`
+  - `_gen_universal_e2e_cfg` takes a new `fuel=` argument. It states the
+    theorem at a constant fuel and for every `n`, with no `hn`/`FrameBound`
+    premise. It returns `None` unless the CFG is acyclic (every branch
+    target is after the branch), has no `bl`, is not recursive, and `fuel` is
+    at least the instruction count. Outside those conditions a constant budget
+    would be false, so the emitter declines rather than emit a theorem that
+    cannot check.
+  - Halt-only mode was missing its closer (`trivial`) on a `ret`-terminated
+    block. It only ever worked for a halt at a call boundary. This is fixed.
+  - `_dylib_total_proof` emits the walk plus the `total_of_halts` application,
+    or the named `sorry` fallback. It takes the export's extent from the next
+    export's entry.
+- `lib/ProofLib.lean`: `DylibExport.total_of_halts`, plus a section note
+  explaining why the proof is per export and not a general theorem. The dead
+  route listed in §2 is deleted.
+- `test_formal_dylib.py`: now requires that `triple`'s `_semantics_total` is
+  derived from `total_of_halts`, so falling back to the `sorry` counts as a
+  failure.
 
-The reduction is real: from **one opaque hole over `Total`** to **two precisely
-stated obligations about this export's code, plus a proved derivation**. The
-hole census now reports two named claims with readable statements instead of
-one black box. `{ident}_in_image` was already proved, so the derived half of
-`Total` costs no holes at all.
+## 4. Still open, in order of value
 
----
+### 4.1 `Total` for exports with loops
 
-## 5. Test bench
+A countdown or range loop needs fuel that grows with `n`, and `exportFuel` is
+a constant. For large `n` the claim is therefore **false** at the current
+definition: `runExport` runs out of fuel and returns `none`. So this is a
+definitional question before it is a proof question. Options:
 
-### 5.1 What runs right now
+- make `runExport`'s fuel a function of `n` (as the executable path's
+  `200000 + PATH * n` is). This changes `runExport`, and so [3]'s
+  `export_result_spec`; coordinate first;
+- or state `Total` as `∃ fuel, …` per `n`. This is a weaker claim, but it is
+  honest about what a fixed budget cannot do.
 
-```bash
-# The library builds clean with the new theorems (this is the gate that matters
-# most for [2]'s own work; ProofLib.olean is 27MB and ~80-90s to produce).
-cd /Users/mrs/net/gcc/gcc/.mojo/fire/.fire-fire
-python3 -c "import sys; sys.path.insert(0,'.'); \
-  from formal.lean import find_lean, ensure_library; \
-  ensure_library(find_lean(), 'lib', timeout=2400)"
-# => no errors
+Until one of those happens, the named `sorry` over `Total` for a looping export
+sits on a statement that is false for large `n`. It is recorded here so it is
+not mistaken for a hard-but-true obligation.
 
-# A scratch file that imports ProofLib and re-checks the conclusion compiles
-# standalone. The theorems are in the library, so this needs nothing else:
-LEAN_PATH=lib "$(python3 -c "import sys;sys.path.insert(0,'.');\
-  from formal.lean import find_lean; print(find_lean())")" /tmp/a2tot/t6.lean
-# => silence, and `grep -c sorry` is 0
-```
+#### 4.1a RESOLVED as a diagnosis: the `sorry` is on a false statement, and that is now CHECKED
 
-`/tmp/a2tot/t6.lean` is a self-contained file holding both theorems plus the
-`Total` derivation, developed against the *imported* library. That is the
-isolation that is achievable here: the theorems depend on `Arm64State` /
-`arm64_step` / `arm64_go_exit`, so they cannot be lifted out of `ProofLib`, but
-they can be developed, iterated and re-checked against nothing but the built
-`.olean`, in about a second, without touching the 27MB library build. That
-scratch loop is what made this tractable and it should be kept.
+The paragraph above was an assertion, and it is worth checking rather than
+believing, because if it were wrong then 4.1 would not be a definitional
+question at all. It is right, and `lib/ProofLib.lean` now proves it:
+`DylibExport.total_refuted_backward_branch : ¬ Total …` for a concrete,
+**well-formed** image — `DylibExport.backward_branch_in_image` proves
+`InImage` for the same export, by `native_decide`. So `InImage` and `Total`
+are independent clauses, checkably (§4.4 below is thereby answered too).
 
-### 5.2 The end-to-end bench — RESOLVED, and it was not a model gap
+The image is one instruction: `0x143fffff`, which is `B . -4` (the 26-bit
+immediate `0x03ffffff` has its sign bit set, so the model sign-extends it to
+`-1` and the target is `pc - 4`). That lands below `image.base`, where
+`backward_branch_code` answers `0`, and `0` decodes to nothing.
 
-This is now settled, and the answer is reassuring. The first attempt was:
+Two things about this that are worth more than the refutation itself:
 
-```lean
-def benchCode : Nat → UInt8 := fun pc =>
-  match pc with
-  | 4096 => 0xc0 | 4100 => 0x03 | 4104 => 0x5f | 4108 => 0xd6 | _ => 0
-#eval (arm64_step { Arm64State.init 0 4096 with pc := 4096 } benchCode).isSome
--- => false
-```
+- **The failure is not fuel exhaustion.** The run leaves the image on the
+  *first* step and returns `none` immediately. So the framing "a loop needs
+  fuel proportional to `n`" is only half the story, and a fix that only made
+  the fuel grow would leave this image still failing. Worth knowing before
+  spending effort on option 1.
+- **A named `sorry` over a false statement looks exactly like a named `sorry`
+  over a true one.** The census counts holes; `vacuous_declarations` counts
+  vacuous bodies; nothing in the tree asks whether a statement is inhabited.
+  This is the second time in two rounds that a `sorry` has turned out to sit on
+  an impossibility (`Total`'s `∀ n s` was the first). The cheapest instrument
+  that catches the whole family is still the toy check: state the predicate at
+  a concrete instance and see whether it survives. That is all this took.
 
-I flagged this as alarming — it looked like the model might refuse to step on a
-`ret`. **It does not.** Two things were wrong, neither in the model:
-
-1. `arm64_read_insn` (`ProofLib.lean:1388`) is little-endian over the byte
-   list, so bytes `c0 03 5f d6` *should* assemble to `0xd65f03c0`. My
-   hand-written `code` function did not actually return those bytes — the match
-   was malformed, and `#eval arm64_read_insn c 4096` returns `192` (`0xc0`),
-   proving bytes 1–3 came back zero.
-2. The `st.pc = st.x30.toNat` guard I was worried about lives at
-   `ProofLib.lean:1863`, which is in **`arm64_go`**, not `arm64_go_exit`. It is
-   the RET-sentinel condition for the *other* loop. `arm64_step` itself handles
-   RET unconditionally at `ProofLib.lean:1454` with
-   `some { s with pc := s.x30.toNat }`.
-
-So the takeaway for §6.1 is a correction, and it is the important part: **`ret`
-is one of the seven pc-writing opcodes** (below), which is exactly why the
-straight-line argument has to exclude it rather than assume every word advances
-by 4. The lesson for anyone rebuilding this bench: **use `_gen_code_defs`'s
-`code` shape, not a hand-written one** — a `code` function that is wrong in a
-way Lean accepts is a silent-false signal, and it cost me a detour.
-
-
----
-
-## 6. What I believe can be proved next
-
-This is the part I would want a reader to act on. Ordered by value.
-
-### 6.1 Discharge `hhalts` and `hnodrop` for straight-line exports — the real close
-
-**This section is now a decomposition, not a suggestion.** I read the decoder
-and the generator's existing opcode machinery, and the work splits into three
-pieces with one genuinely hard member. Two are landed.
-
-**The shape of the obstacle, measured rather than assumed.** `arm64_step` is a
-51-branch `if`-chain, but only **seven** of them assign `pc`; the other 44 go
-through `arm64_set_reg` or a `with` update that omits `pc`. The seven are
-RET, B, BL, CBZ, CBNZ, B.cond, BR. That is small enough to enumerate, and it
-means "a non-branching instruction leaves the pc alone" is a *finite* fact
-about a table, not a 51-way grind.
-
-#### Landed
-
-1. **`arm64_set_reg_pc`** — `(arm64_set_reg rd s v).pc = s.pc`. Proved, zero
-   holes, by `split <;> rfl` over the 32-way register match. This is what makes
-   "44 of the 51 handlers cannot move the pc" a fact rather than a hope, and
-   it is the first thing any of the downstream proofs need.
-
-2. **`arm64_branchy`** — a `Bool`-valued predicate over exactly those seven
-   conditions. It is a `def` rather than a theorem on purpose: what is wanted
-   downstream is a **finite check over an image's words** ("is any reachable
-   word one of these seven?"), and a `Bool` is exactly what the generator can
-   evaluate. **It carries an explicit warning in its docstring that it is
-   derived by reading the decoder and nothing in the tree checks the two
-   agree** — it must not be read as a completeness claim until the lemma below
-   lands.
-
-#### The one hard member
-
-3. **`arm64_branchy insn = false → arm64_step s code = some s' → s'.pc = s.pc`.**
-
-   I attempted this and it is the real cost, so here is the exact obstruction
-   with the exact state it reaches. `split_ifs` is unavailable (core Lean only,
-   no Mathlib), and `split` cannot make progress on `arm64_step` until the
-   opening `let insn := …` is zeta-reduced — without `dsimp only at h` the
-   `repeat` exits on its first try having done nothing at all, which looks
-   exactly like a hard proof and is not. After zeta, the chain does split, but
-   an unrestricted `simp_all` **unfolds `mem_read_u64` and `arm64_reg`**, whose
-   own `ite`s re-enter the chain and the term grows instead of shrinking. The
-   restricted rewrite set
-   (`simp_all only [arm64_branchy, arm64_set_reg_pc, Option.some.injEq,
-   ite_self, …]`) splits ~20 branches correctly and then stalls with the rest
-   of the chain intact in `h`.
-
-   Two routes, and I recommend the second:
-
-   - *Finish the split.* Roughly 30 more branches of the same mechanical loop.
-     Cheap per branch, and every branch is a real check rather than a rewrite.
-   - *Get it from the generator's opcode table instead.* `formal/arm64_proof_gen.py`
-     already has `_STEP_CONDS`, `_step_branch_index(w)` and `_step_facts(w, idx)`,
-     and `_check_step_conds` already enforces that the table **agrees** with
-     the decoder. So "word `w` is not one of the seven" is already a decision
-     the generator can make per instruction, per image, by `bv_decide` — no
-     51-way split needed. Dispatch each in-image word to its `arm64_step_*`
-     lemma and the conclusion is `rfl`. **This is strictly better**: it reuses a
-     consistency check that already exists and is already tested, instead of
-     adding a second, independent copy of the branch table to keep in sync.
-
-#### Landed since the first draft of this section
-
-Two more theorems, both proved, both zero holes, and together they are the
-reduction that makes the straight-line case finishable:
-
-- **`arm64_go_exit_terminates_aligned`** — straight-line termination. The input
-  is a *table*, `hstep : every in-range, word-aligned pc has a successor and it
-  does not move the pc`, plus the image's word alignment `hmod`. Progress is
-  then free (`effNext = pc + 4`) and containment follows from alignment. The
-  fuel bound is a deliberate **4× over-approximation**
-  (`exit - st.pc + 1 ≤ f` where the run needs `(exit - st.pc) / 4` steps) so
-  that no divisibility argument appears anywhere in the induction. Alignment is
-  preserved because `(pc + 4) % 4 = pc % 4`.
-
-- **`arm64_nodrop_of_straight`** — `hnodrop` is a *consequence* of the table, not
-  a second assumption. It has to be stated this way: `hhalts` and `hnodrop`
-  quantify over the *actual* successor `s'`, and the table gives a successor
-  `t` with `t.pc = st.pc`; the two are the same state (`Option.some.inj`).
-
-- **`dylibExport_total_of_straight`** — `Total` from **one** checkable
-  statement, the table, plus `hmod`, `hentry4`, `InImage` and
-  `codeSize < exportFuel`. So an export satisfying the table has **no hole at
-  all** in its `Total` clause, where today it has two.
-
-**`hentry4` is stated, not derived, and that is load-bearing.** I tried to derive
-`entry % 4 = 0` from `hmod` and `InImage` and it is false: `base = 1,
-codeSize = 3, entry = 2` satisfies both and gives `entry % 4 = 2`. `InImage`
-constrains `entry - base`, not `entry`. It is a literal check like the rest.
-
-#### The one remaining piece, and it is small
-
-`hstraight` is stated over `st.pc < exit` and `st.pc % 4 = 0` — but that range
-includes pcs **below `image.base`**, where the generator's `_gen_code_defs`
-answers `0`, and `0` does not decode. So the table must be restricted to
-`base ≤ st.pc < exit`, which means the theorem needs one more hypothesis,
-`hbase : image.base ≤ st.pc`, and its preservation is **monotone and immediate**
-(a non-branching step goes to `pc + 4`, so `pc ≥ base` is preserved; and the
-initial state's `pc` is `entry ≥ base` by `InImage`). That is the last edit,
-and I stopped rather than land it unverified: a 27-minute library rebuild was
-not something to spend on a change I could not re-check.
-
-Once `hbase` is in, the generator change is a swap: emit one
-`{ident}_straight` table instead of `{ident}_halts` + `{ident}_nodrop`, and
-`{ident}_semantics_total` becomes
-`dylibExport_total_of_straight … {ident}_straight (by native_decide) …`. The
-table is enumerated by `rcases hp with rfl | rfl | …` over a literal list —
-**linear, never `by_cases` per candidate**, which would be `2^n`.
+Precisely what is proved, and no more: `runExport … 0 = none` and
+`¬ Total …`, both by `native_decide`. A refutation needs one argument, and the
+ground form is what lets `native_decide` work at all — it cannot decide with
+`n` free, and `generalize`-ing the initial state only moves the free variable
+rather than removing it. The claim "and likewise for every `n`" is *reasoning*
+from the structural argument above, and is deliberately not stated as a
+theorem.
 
 
+### 4.2 `Total` for exports that call
 
-### 6.2 `hnodrop` for a *bounded* number of backward edges
+A `bl` to a sibling export or helper *inside* the image can in principle be
+walked (the executable path handles `bl` with `FrameBound`). That needs the
+`hn` stack-bound premise, which `Total`'s `∀ n` does not have, so the same
+definitional question as 4.1 comes first. A `bl` *out of* the image (libSystem)
+is not executable in the model at all, so `Total` there has to be stated
+relative to a callee contract.
 
-An intermediate result that is cheap and would let the generator close some
-real exports: replace strict progress with a lexicographic measure
-`(remaining fuel, pc)` and discharge termination whenever the export's control
-flow has no cycle. The `hnodrop` statement is already the right interface — a
-weaker `hnodrop'` with a *potential* instead of a strict inequality would
-plug into the same `dylibExport_total_of` if the theorem is stated over the
-potential rather than over `exit - st.pc`. Worth deciding the theorem's shape
-with that in mind: a version generalised over an arbitrary `Φ : Arm64State →
-Nat` costs almost nothing now and pays off there.
+### 4.3 x86
 
-### 6.3 The x86 side
+The same per-run walk argument applies. The all-states route should not be
+revived there either: x86 `ret` pops the return address from memory, so the
+same "arbitrary state" failure applies.
 
-`x86_step_call_rel32` and the earlier call/proof fixes are already integrated.
-The identical argument applies — `effNext` is the x86 analogue of the
-pc-unchanged bump, and `runProgram`'s budget is a `Nat` in the same place. If
-[2] picks up x86 next, the proof transfers almost line for line, and the
-`hnodrop` overshoot hazard is worth re-checking there rather than assuming it
-mirrors.
+### 4.4 A sharper `Semantics_refutable` — DONE, as a by-product
 
-### 6.4 Making `Semantics_refutable` sharper
+It still refutes with a zero-length image. A code image whose entry lies
+outside the code would show that `InImage` and `Total` are independent
+clauses. It is small.
 
-It currently refutes with a zero-length image. Now that `Total` is a real
-termination claim, a stronger and more interesting refutation is available: a
-code image whose entry is *outside* the code, showing `InImage` and `Total`
-are genuinely independent clauses. Small, and it would pin down the distinction
-the new docstrings rely on.
+**Landed as a by-product of 4.1a.** `DylibExport.backward_branch_in_image`
+proves `InImage` for the very image that `total_refuted_backward_branch`
+refutes `Total` for, and both are `native_decide`. So the independence is now
+a checked pair of theorems rather than a note about what would be nice to show,
+and it is stronger than the version proposed here: the old suggestion used a
+*malformed* image (entry outside the code), which would have shown the two
+clauses can fail independently but only via the entry being nonsense. This one
+has a perfectly good entry and fails on control flow.
 
----
 
-## 7. Notes for [3]
+## 5. Notes for [3]
 
-- **`Total`'s type changed shape.** `∀ n s, runExport … n = some s` became
-  `∀ n, ∃ s, runExport … n = some s`. If anything in `lib/Refine.lean`,
-  `lib/work.lean` or `lib/Contracts.lean` destructures a `Total` value, or if
-  `export_result_spec` is stated in terms of it, it will need the existential.
-  I have not touched those files. This is the one thing in this change that
-  can break your build, and it is a one-line adaptation on your side rather
-  than something I should have done inside your write set.
-- The old shape was **false**, so any consumer that appeared to use it was
-  either vacuous or already broken. The fix is not a behaviour change; it is
-  the removal of an impossibility.
-- `{ident}_semantics_total` is now a **derived** theorem rather than an
-  obligation, and the two new emitted names are `{ident}_halts` and
-  `{ident}_nodrop`. If your `export_result_spec` chains off
-  `{ident}_semantics_total` by name, the name still exists and its type is
-  still `DylibExport.Total dylib_image {ident}` — only the *body* changed, from
-  `sorry` to an application of `dylibExport_total_of`. The hole count in your
-  spec obligation is unaffected.
-
-## 8. Honest status
-
-- `Total` corrected, and the correction is a strict improvement: false → true.
-- The step bound is **proved**, zero `sorry`, and the fuel bound is discharged
-  down to one literal `native_decide`.
-- `Total` is **derived** at every generated call site, with two precisely
-  named, precisely stated residual obligations.
-- `arm64_set_reg_pc` **proved**; `arm64_branchy` **defined** (with an explicit
-  warning that it is unverified against the decoder). These are the two
-  building blocks the close needs, landed and building.
-- `hhalts` / `hnodrop` are **not yet discharged**. §6.1 is now a three-piece
-  decomposition with the one hard member identified, its exact obstruction
-  recorded down to the tactic that stalls, and a recommended route that
-  reuses an existing consistency check instead of adding a second copy of the
-  branch table. The alignment invariant (§6.1 step 4) is called out as the
-  part that is a real theorem and must not be skipped.
-
-### Corrections to earlier statements in this document
-
-- §5.2 previously implied `arm64_step` might refuse to step on a `ret`. **It
-  does not**; the bench's `code` function was malformed. `ret` is one of the
-  seven pc-writing opcodes, which strengthens rather than weakens the case for
-  the close. The RET-sentinel guard that caused the confusion is in `arm64_go`,
-  not `arm64_go_exit`.
-- An earlier draft of §6.1 claimed `arm64_step` is "not a function of the code
-  bytes alone" because of an `st.x30` read. That was **wrong**, and it was the
-  same misreading: the `x30` read is in `arm64_go`'s sentinel test. It matters
-  because it wrongly implied `hhalts` was undecidable from the code; it is not.
-
+- `{ident}_semantics_total` keeps its name and its type
+  (`DylibExport.Total dylib_image {ident}`). Only its body changed. The names
+  `{ident}_halts` (now a proved theorem with a different statement) and
+  `{ident}_nodrop` (gone) were never consumed outside the generated file.
+- Nothing in your write set was touched.
+- If 4.1 is taken up by changing `runExport`'s fuel, that touches
+  `export_result_spec`'s meaning, so I'd rather agree the shape with you first.

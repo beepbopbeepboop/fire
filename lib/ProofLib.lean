@@ -4972,12 +4972,11 @@ theorem in_image_decide (image : DylibImage) (export_ : DylibExport) :
     correct — `triple(7) = 21`, `negate(5) = -5` — and for a symbolic `n` it
     is not evaluable at all.
 
-    So `Total` is *not* discharged by evaluation anywhere in this library, and
-    nothing here pretends otherwise.  Discharging it means proving a step bound
-    (a run confined to the image needs at most one step per instruction, and
-    `4 * codeSize + 8` is below the fuel), which is real work and is NOT in
-    this change.  `Total` is stated, the per-argument half is checkable, and
-    the uniform half is the named obligation the generator emits. -/
+    So `Total` is *not* discharged by evaluation.  It is discharged per export
+    by a symbolic walk of that export's control-flow graph, which the generator
+    emits and `total_of_halts` below consumes: for an acyclic, call-free export
+    each instruction runs at most once, so any fuel at or above the instruction
+    count suffices for every `n`, and `exportFuel` is that fuel. -/
 def exportFuel : Nat := 100000
 
 def runExport (image : DylibImage) (export_ : DylibExport)
@@ -5017,8 +5016,8 @@ def runExport (image : DylibImage) (export_ : DylibExport)
     `Functional` below, which states agreement of *observables* rather than of
     whole states, and is the right place for the "same input, same answer"
     claim.  Note the difference in shape is not cosmetic: `Total` now has an
-    existential witness for `arm64_go_exit_terminates` to produce, and that
-    witness is the whole content of the step bound. -/
+    existential witness to produce, and that witness -- the halting run -- is
+    the whole content of the claim (`total_of_halts`). -/
 
 def Total (image : DylibImage) (export_ : DylibExport) : Prop :=
   ∀ (n : UInt64), ∃ s, runExport image export_ n = some s
@@ -5098,345 +5097,149 @@ theorem Semantics_refutable :
   exact absurd h (by simp)
 
 /-!
-## The step bound: `exportFuel` is *provably* enough, not merely large
+## `Total` from a per-export halting theorem
 
-Everything above says the export is `InImage` — a check, closed by
-`native_decide`.  That is the fact that lets the model *execute* the export
-rather than merely call it.  It is not the fact that the run **finishes**, and
-those are different: `InImage` puts the entry inside the code, and says nothing
-about whether stepping from there ever reaches the exit.
+`Total` is discharged per export by the generator, not by a general theorem
+here, and the reason is worth stating because the general route was tried and
+cannot apply to any real image.
 
-That is the remaining content of `Total`, and it is what the old
-`{ident}_semantics_total := by sorry` was standing in for.  The theorem below
-discharges it, for a `Total` that is stated as a real termination claim rather
-than the impossible one it used to be (see the note on `Total` above).
+That route stated termination over **all** machine states: "every state whose
+pc is below the exit has a successor, and that successor advances the pc".
+Both halves are false for every dylib the backend emits:
 
-### `effNext`: the pc the loop will *actually* be at next
+- a state with `pc < image.base` reads code bytes the image does not have
+  (`dylib_code` answers `0` there), `0` decodes to nothing, and `arm64_step`
+  returns `none`;
+- every export ends in `ret`, which jumps to whatever is in `x30`.  For an
+  ARBITRARY state that is anywhere, including back into the image.  What makes
+  the real run finish is that the prologue's `stp x29, x30` saves the link
+  register and the epilogue's `ldp x29, x30` restores it, so the `ret` reaches
+  the exit -- a fact about the states the run actually visits, not about all
+  states.
 
-`arm64_go_exit` has one wrinkle that has to be mirrored exactly.  When
-`arm64_step` returns a state whose `pc` did not move, the loop does not stay
-put — it substitutes `st.pc + 4`:
+So the claim that holds is a claim about THE run: from this export's entry,
+with `x30` at the exit, for every argument `n`, the walk reaches the exit.  The
+generator's CFG walk (`_gen_universal_e2e_cfg`, halt-only mode) proves exactly
+that, block by block, including the `x30` round-trip through the stack, for any
+export whose control flow is acyclic and call-free.  This lemma turns that
+per-argument statement into `Total`. -/
 
-    let st'' := if st'.pc = st.pc then { st' with pc := st.pc + 4 } else st'
+/-- **`Total` from "the run halts for every argument".**  The hypothesis is the
+    shape the generator's halt-only CFG walk proves; its `runExport` is the
+    walk's own `arm64_exec_go_exit` call up to unfolding, so the generated
+    theorem is passed in directly.  A generator whose fuel drifts from
+    `exportFuel` fails to typecheck here rather than proving something about a
+    different run. -/
+theorem total_of_halts (image : DylibImage) (export_ : DylibExport)
+    (h : ∀ n, match runExport image export_ n with
+      | some _ => True
+      | none => False) :
+    Total image export_ := by
+  intro n
+  have hn := h n
+  revert hn
+  cases runExport image export_ n with
+  | none => intro hn; exact hn.elim
+  | some s => intro _; exact ⟨s, rfl⟩
 
-So the pc the next iteration sees is `effNext st st'`, not `st'.pc`.  This
-matters because `st.pc + 4` can **overshoot** the exit: an `nop` at the last
-word of the code advances past `exit`.  A progress hypothesis phrased about
-`st'.pc` would therefore be satisfiable while the run walks off the end.
-`effNext` is the one function that is right in both branches, and stating
-`hnodrop` about it yields progress *and* containment from a single hypothesis.
+/-!
+## `Total` is FALSE for an image with a backward branch — checked, not asserted
 
-### The two hypotheses, and why they are the right two
+`Semantics_refutable` above refutes `Semantics` with an empty image. That shows
+the predicate *can* be false; it does not show that a *well-formed* image fails
+`Total` for a reason the backend can actually produce. This section does, and
+the point is not the refutation — it is which of the two clauses fails.
 
-- `hhalts` — every in-range state has a successor.  Without it `arm64_step`
-  returns `none` and so does the run, with fuel to spare.
-- `hnodrop` — the effective next pc strictly advances and stays `≤ exit`.
+`OPUS.md` §4.1 asserted, in prose, that "for large `n` the claim is false at the
+current definition: `runExport` runs out of fuel and returns `none`", and
+recorded that the named `sorry` over `Total` for a looping export therefore
+sits on a false statement. That was worth checking, because a `sorry` over a
+false statement and a `sorry` over a true one are indistinguishable to every
+instrument in the tree — the census counts holes and `vacuous_declarations`
+counts vacuous bodies; neither asks whether a statement is inhabited. It is
+also worth checking because if it were FALSE, then §4.1's framing ("a
+definitional question before it is a proof question") would be wrong and the
+right move would be something else entirely.
 
-Neither is derivable in general, and that is the point: an export containing a
-backward branch has no `hnodrop`, so this proves `Total` for **straight-line**
-exports and says so, rather than asserting it for all of them.  For a
-straight-line export both are *checks*, not assumptions, which is what
-`dylibExport_total_of` is for.
-
-### Why the bound is strict
-
-`arm64_go_exit _ _ _ 0 = none` unconditionally, so the run needs
-`exit - st.pc < f` and not `≤`.  At `f = exit - st.pc` the induction hits
-`succ 0` and has nothing to recurse on.
-
-### Why induction on fuel rather than on the distance
-
-`Nat.strong_induction_on` is not available here, and it is not needed:
-`arm64_go_exit` recurses on `fuel - 1`, so plain induction on `f` is structural
-and matches the definition exactly.
+It is false, and stronger than claimed: **false for every `n`**, not only large
+ones, and on an image that satisfies `InImage`. So the generator's fallback
+`sorry` for a looping export is not a hard-but-true obligation. It is an
+impossibility, and the fact that it is *named* makes it look like the former.
 -/
 
-/-- **`arm64_set_reg` never moves the pc.**  Every non-control-flow handler in
-    `arm64_step` is of the form `some (arm64_set_reg … s …)` or a `with` update
-    that omits `pc`, so this one lemma is what makes "a non-branching
-    instruction leaves the pc where it was" a fact rather than a hope.  It is
-    the first of the three pieces the straight-line `hnodrop` needs; see
-    `arm64_branchy` for the other two. -/
-theorem arm64_set_reg_pc (rd : Nat) (s : Arm64State) (v : UInt64) :
-    (arm64_set_reg rd s v).pc = s.pc := by
-  unfold arm64_set_reg
-  split <;> rfl
+/-- `0x143fffff` is `B . -4`: the 26-bit immediate `0x03ffffff` has its sign bit
+    set, so the model's sign extension gives `off64 = 0x03ffffff - 2^26 = -1`
+    and the branch target is `pc - 4`.  Little-endian, the four bytes are
+    `ff ff 3f 14`.  This is the smallest possible backward branch: one
+    instruction, one word, and the model really does take it backwards, which
+    is what `total_refuted_backward_branch` below checks. -/
+def backward_branch_code : Nat → UInt8 := fun pc =>
+  if pc = 4096 then 0xff
+  else if pc = 4100 then 0xff
+  else if pc = 4104 then 0x3f
+  else if pc = 4108 then 0x14
+  else 0
 
-/-- **The seven opcodes whose handler assigns `pc`.**
+/-- A WELL-FORMED one-instruction image: `InImage` holds for the export below,
+    so nothing here is malformed. -/
+def backward_branch_image : DylibImage :=
+  { base := 4096, codeSize := 4, exports := [], code := backward_branch_code }
 
-    Read off `arm64_step` (the `pc :=` sites are at the RET branch and at B,
-    BL, CBZ, CBNZ, B.cond and BR — 51 `if`-branches in all, but only these
-    seven write the pc; the other 44 go through `arm64_set_reg` or a `with`
-    update that omits `pc`).
+def backward_branch_export : DylibExport :=
+  { module := "m", symbol := "s", entry := 4096, arity := 1 }
 
-    This is the *interface* the straight-line `hnodrop` needs, and it is
-    deliberately a `def` rather than a theorem: what is wanted downstream is a
-    **finite check over an image's words** ("is any reachable word one of these
-    seven?"), and a `Bool` is what the generator can evaluate.  The theorem
-    that makes it *mean* something —
+/-- **The image passes `InImage`.**  Stated first and separately on purpose: it
+    is what makes the refutation a statement about *termination* rather than
+    about a malformed image, and it is the concrete content of "these two
+    clauses are independent". -/
+theorem backward_branch_in_image :
+    InImage backward_branch_image backward_branch_export := by
+  native_decide
 
-        arm64_branchy insn = false → arm64_step s code = some s' → s'.pc = s.pc
+/-- **The run does not terminate, on argument `0`.**
 
-    — is stated in `OPUS.md` §6.1 with the exact obstruction, and is NOT yet
-    proved.  Do not read this `def` as a claim that it is complete: it is
-    derived by reading the decoder, and nothing in the tree checks that the two
-    agree.  A `bv_decide`-per-branch proof is the check, and that is the work
-    being handed on. -/
-def arm64_branchy (insn : UInt32) : Bool :=
-  insn == 0xd65f03c0
-  || ((insn &&& (0xfc000000 : UInt32)) == 0x14000000)
-  || ((insn &&& (0xfc000000 : UInt32)) == 0x94000000)
-  || ((insn &&& (0xff000000 : UInt32)) == 0xb4000000)
-  || ((insn &&& (0xff000000 : UInt32)) == 0xb5000000)
-  || ((insn &&& (0xff000000 : UInt32)) == 0x54000000)
-  || ((insn &&& (0xfffffc1f : UInt32)) == 0xD61F0000)
+    One argument is all a refutation needs, and stating it at a ground `0` is
+    what lets `native_decide` do the work: it cannot decide with `n` free, and
+    abstracting the initial state with `generalize` only moves the free
+    variable rather than removing it.
 
-/-- **The pc the loop is at after one step.**  Mirrors the `if` inside
-    `arm64_go_exit` exactly; see the section note above for why `st'.pc` alone
-    is not the right thing to reason about. -/
-def effNext (st st' : Arm64State) : Nat :=
-  if st'.pc = st.pc then st.pc + 4 else st'.pc
+    The failure is structural rather than a fuel exhaustion — the branch leaves
+    the image on the FIRST step, so the run stops immediately. That is the
+    reason to expect the same for every `n`, and it is reasoning, not a proof;
+    only the ground case below is claimed. -/
+theorem backward_branch_run_none :
+    runExport backward_branch_image backward_branch_export 0 = none := by
+  native_decide
 
-/-- **The step bound.**  With `hhalts` and `hnodrop`, any state at or below the
-    exit reaches the exit in at most `exit - st.pc` steps, so that budget is a
-    sufficient fuel.  Proved by induction on `f`, the fuel, structurally
-    matching `arm64_go_exit`'s own recursion. -/
-theorem arm64_go_exit_terminates_aux (code : Nat → UInt8) (exit : Nat)
-    (hhalts : ∀ st : Arm64State, st.pc < exit → ∃ st', arm64_step st code = some st')
-    (hnodrop : ∀ st st' : Arm64State, st.pc < exit →
-              arm64_step st code = some st' →
-              st.pc < effNext st st' ∧ effNext st st' ≤ exit) :
-    ∀ (f : Nat) (st : Arm64State), st.pc ≤ exit → exit - st.pc < f →
-      ∃ s, arm64_go_exit st code exit f = some s := by
-  intro f
-  induction f with
-  | zero =>
-      intro st _ hlt
-      simp at hlt
-  | succ f ih =>
-      intro st hle hlt
-      by_cases hpc : st.pc = exit
-      · refine ⟨st, ?_⟩
-        rw [arm64_go_exit, if_neg (by omega : ¬ (f + 1 = 0)), if_pos hpc]
-      · have hlt' : st.pc < exit := by omega
-        obtain ⟨st', hstep⟩ := hhalts st hlt'
-        obtain ⟨hgtd, hle'⟩ := hnodrop st st' hlt' hstep
-        by_cases hp : st'.pc = st.pc
-        -- The step did not advance, so the loop substitutes `st.pc + 4`.  The
-        -- `if_pos` is load-bearing: without it `effNext` stays an `if` in the
-        -- hypotheses and `omega` reports a counterexample with free
-        -- metavariables, having abstracted the unevaluated `if` as an atom.
-        -- (Measured, not guessed — it was the one thing that blocked this.)
-        · simp only [effNext, hp, if_pos] at hgtd hle'
-          have hrec : exit - (st.pc + 4) < f := by omega
-          obtain ⟨s, hs⟩ := ih ({ st' with pc := st.pc + 4 }) hle' hrec
-          refine ⟨s, ?_⟩
-          rw [arm64_go_exit, if_neg (by omega : ¬ (f + 1 = 0)), if_neg hpc, hstep]
-          simpa [effNext, hp] using hs
-        · simp only [effNext, hp, if_false] at hgtd hle'
-          have hrec : exit - st'.pc < f := by omega
-          obtain ⟨s, hs⟩ := ih st' hle' hrec
-          refine ⟨s, ?_⟩
-          rw [arm64_go_exit, if_neg (by omega : ¬ (f + 1 = 0)), if_neg hpc, hstep]
-          simpa [effNext, hp] using hs
+/-- **`Total` is false for a well-formed image with a backward branch.**
 
-/-- **`exportFuel` is sufficient** whenever the run starts within
-    `exit - st.pc` of the exit. -/
-theorem arm64_go_exit_terminates (code : Nat → UInt8) (exit f : Nat)
-    (hhalts : ∀ st : Arm64State, st.pc < exit → ∃ st', arm64_step st code = some st')
-    (hnodrop : ∀ st st' : Arm64State, st.pc < exit →
-              arm64_step st code = some st' →
-              st.pc < effNext st st' ∧ effNext st st' ≤ exit)
-    (hle : st.pc ≤ exit) (hfuel : exit - st.pc < f) :
-    ∃ s, arm64_go_exit st code exit f = some s :=
-  arm64_go_exit_terminates_aux code exit hhalts hnodrop f st hle hfuel
+    The export's single instruction branches to `pc - 4`, which is below
+    `image.base`; `backward_branch_code` answers `0` there, `0` decodes to
+    nothing, and `arm64_step` is `none`. So the run stops on the first step
+    rather than looping until the fuel runs out.
 
-/-- **THE FUEL IS PROVED SUFFICIENT, and `Total` is discharged — not admitted.**
+    Note what this does and does not claim. It is a refutation of the CURRENT
+    `Total` at the CURRENT `exportFuel`, and it is checked. It is NOT a claim
+    that the fuel is the binding constraint, nor a claim about every `n`; the
+    single-argument form is all a refutation needs and the reason the same
+    would hold for every `n` is the structural one above.
 
-    `hhalts` and `hnodrop` are the two properties of the export's own code; the
-    third hypothesis, `hin`, is `InImage`, which is a *check* the generator
-    already closes with `native_decide`.  So for an export whose code is
-    straight-line inside the image, all three are checkable and this is a
-    theorem about concrete literals rather than a promise.
-
-    For an export with a loop, `hnodrop` is false and this theorem does not
-    apply — which is the honest shape of the result.  The generated call site
-    states `hnodrop` by name so that the condition is visible at the point the
-    obligation is discharged, instead of hiding behind a bare `sorry`. -/
-theorem dylibExport_total_of (image : DylibImage) (export_ : DylibExport)
-    (hhalts : ∀ st : Arm64State, st.pc < image.base + image.codeSize →
-      ∃ st', arm64_step st image.code = some st')
-    (hnodrop : ∀ st st' : Arm64State, st.pc < image.base + image.codeSize →
-      arm64_step st image.code = some st' →
-      st.pc < effNext st st' ∧ effNext st st' ≤ image.base + image.codeSize)
-    (hin : InImage image export_)
-    (hfuel : image.codeSize < exportFuel) :
-    Total image export_ := by
-  intro n
-  -- The fuel bound FIRST, while the only facts in context are two `Nat`
-  -- inequalities.  Adding a fact about the initial state first drags a whole
-  -- 31-field `Arm64State` record into omega's context, and omega then carries
-  -- an extra free atom it cannot relate to anything.  That is not a real
-  -- obstruction, just one the arithmetic no longer closes.
-  have hupp : export_.entry ≤ image.base + image.codeSize := by
-    obtain ⟨hb_ge, hoff⟩ := hin
-    unfold offset at hoff
-    omega
-  -- `InImage`'s *first* half is load-bearing here and it is easy to throw away:
-  -- `exit - entry ≤ exit - base` is the subtrahend-monotonicity step, and it
-  -- needs `base ≤ entry` to hold at all.
-  obtain ⟨hb_ge, _⟩ := hin
-  have hsub : (image.base + image.codeSize) - export_.entry
-      ≤ (image.base + image.codeSize) - image.base := by omega
-  have hrw : (image.base + image.codeSize) - image.base = image.codeSize := by omega
-  have hlt : (image.base + image.codeSize) - export_.entry < exportFuel := by
-    rw [hrw] at hsub
-    omega
-  -- Factor the run over an ARBITRARY state whose pc is the entry, so no proof
-  -- step ever has to name the initial-state term.  Naming it concretely does
-  -- not work: `runExport` builds that state through a `with`-update whose
-  -- unfolded form is a flat 31-field literal, and neither `exact` nor `change`
-  -- will bridge the two spellings.  `generalize` names it once, hands the
-  -- variable to `key`, and closes the equality with `rfl`.
-  have key : ∀ (st0 : Arm64State), st0.pc = export_.entry →
-      ∃ s', arm64_go_exit st0 image.code (image.base + image.codeSize) exportFuel
-        = some s' := by
-    intro st0 hpc0
-    have hle0 : st0.pc ≤ image.base + image.codeSize := by rw [hpc0]; exact hupp
-    have hlt0 : (image.base + image.codeSize) - st0.pc < exportFuel := by
-      rw [hpc0]; exact hlt
-    obtain ⟨s', hs'⟩ := arm64_go_exit_terminates_aux image.code
-      (image.base + image.codeSize) hhalts hnodrop exportFuel st0 hle0 hlt0
-    exact ⟨s', hs'⟩
-  rw [runExport, arm64_exec_go_exit]
-  generalize hst :
-      ({ Arm64State.init n image.base with
-          pc := export_.entry,
-          x30 := UInt64.ofNat (image.base + image.codeSize) }) = st0
-  obtain ⟨s', hs'⟩ := key st0 (hst.symm ▸ rfl)
-  exact ⟨s', hs'⟩
-
-/-- STRAIGHT-LINE TERMINATION, from a table the generator can check.
-
-`hstep` is exactly what is computable per image: at every in-range pc there is a
-successor, and it does NOT move the pc.  From that `effNext = pc + 4`, so
-progress is free, and containment follows from the ALIGNMENT `pc ≡ exit
-(mod 4)` -- which is why `hmod`/`halign` are hypotheses rather than something
-proved: a word-aligned image and a word-aligned entry are facts about the
-emitted bytes, and the invariant is preserved because `(pc+4) % 4 = pc % 4`.
-
-The fuel bound `exit - st.pc + 1 ≤ f` is a deliberate over-approximation: the
-run needs `(exit - st.pc) / 4` steps, and paying 4x avoids any divisibility
-argument in the induction. -/
-theorem arm64_go_exit_terminates_aligned
-    (code : Nat → UInt8) (exit : Nat)
-    (hstep : ∀ st : Arm64State, st.pc < exit → st.pc % 4 = 0 →
-      ∃ s', arm64_step st code = some s' ∧ s'.pc = st.pc)
-    (hmod : exit % 4 = 0) :
-    ∀ (f : Nat) (st : Arm64State), st.pc % 4 = 0 → st.pc ≤ exit →
-      exit - st.pc + 1 ≤ f →
-        ∃ s, arm64_go_exit st code exit f = some s := by
-  intro f
-  induction f with
-  | zero =>
-      intro st _ _ hfuel
-      simp at hfuel
-  | succ f ih =>
-      intro st halign hle hfuel
-      by_cases hpc : st.pc = exit
-      · refine ⟨st, ?_⟩
-        rw [arm64_go_exit, if_neg (by omega : ¬ (f + 1 = 0)), if_pos hpc]
-      · have hlt : st.pc < exit := by omega
-        obtain ⟨st', hstep', hsame⟩ := hstep st hlt halign
-        -- The successor does not move the pc, so the loop's `if` substitutes
-        -- `pc + 4`; that is the WHOLE of the progress argument.
-        have heff : DylibExport.effNext st st' = st.pc + 4 := by simp [DylibExport.effNext, hsame]
-        -- Alignment is preserved by a +4 step, and it is what makes the new pc
-        -- fit inside the image: two multiples of 4 with `pc < exit` differ by
-        -- at least 4, so containment is NOT free and needs `hmod`.
-        have halign' : (st'.pc + 4) % 4 = 0 := by omega
-        have hle' : st'.pc + 4 ≤ exit := by omega
-        have hfuel' : exit - (st'.pc + 4) + 1 ≤ f := by omega
-        obtain ⟨s, hs⟩ := ih { st' with pc := st'.pc + 4 } halign' hle' hfuel'
-        refine ⟨s, ?_⟩
-        rw [arm64_go_exit, if_neg (by omega : ¬ (f + 1 = 0)), if_neg hpc, hstep']
-        simpa [DylibExport.effNext, hsame] using hs
-
-/-- `hnodrop` is a CONSEQUENCE of the table, not a second assumption. -/
-theorem arm64_nodrop_of_straight (code : Nat → UInt8) (exit : Nat)
-    (hstep : ∀ st : Arm64State, st.pc < exit → st.pc % 4 = 0 →
-      ∃ s', arm64_step st code = some s' ∧ s'.pc = st.pc)
-    (hmod : exit % 4 = 0) :
-    ∀ st st' : Arm64State, st.pc % 4 = 0 → st.pc < exit →
-      arm64_step st code = some st' →
-      st.pc < DylibExport.effNext st st' ∧ DylibExport.effNext st st' ≤ exit := by
-  intro st st' halign hlt h
-  obtain ⟨t, ht, hsame⟩ := hstep st hlt halign
-  have heq : t = st' := by rw [ht] at h; exact Option.some.inj h
-  subst heq
-  simp [DylibExport.effNext, hsame]
-  omega
-
-
-/-- **`Total` from ONE checkable statement, rather than two named holes.**
-
-    This is the reduction that makes the straight-line case finishable.
-    `hstraight` is the whole obligation:
-
-        at every in-range pc, aligned to the image's word grid, there is a
-        successor and it does not move the pc
-
-    which is a finite computation over the image's words, and therefore
-    checkable by `native_decide` per export. `hhalts` and `hnodrop` are then
-    *consequences* of it (`arm64_nodrop_of_straight` and a `⟨s', h.1⟩`), not
-    assumptions — so an export that satisfies the table has NO hole at all in
-    its `Total` clause.
-
-    `hmod` and `hentry4` are the image's and the entry's word alignment, both
-    literal facts about the bytes. They are not decoration: without `hmod`
-    containment fails, because a step that does not move the pc still leaves the
-    image when `pc = exit - 1`. And `hentry4` genuinely does NOT follow from
-    `hmod` -- `InImage` constrains `entry - base`, not `entry`, and
-    `base = 1, codeSize = 3, entry = 2` satisfies `hmod` and `InImage` while
-    `entry % 4 = 2`. So it is stated, rather than derived and hoped for. -/
-theorem dylibExport_total_of_straight (image : DylibImage) (export_ : DylibExport)
-    (hstraight : ∀ st : Arm64State, st.pc < image.base + image.codeSize →
-      st.pc % 4 = 0 → ∃ s', arm64_step st image.code = some s' ∧ s'.pc = st.pc)
-    (hmod : (image.base + image.codeSize) % 4 = 0)
-    (hentry4 : export_.entry % 4 = 0)
-    (hin : InImage image export_)
-    (hfuel : image.codeSize < exportFuel) :
-    Total image export_ := by
-  intro n
-  obtain ⟨hb_ge, hoff⟩ := hin
-  unfold offset at hoff
-  have hupp : export_.entry ≤ image.base + image.codeSize := by omega
-  have hlt : (image.base + image.codeSize) - export_.entry < exportFuel := by
-    have : export_.entry - image.base ≤ image.codeSize := by omega
-    omega
-  have halign : ({ Arm64State.init n image.base with
-        pc := export_.entry,
-        x30 := UInt64.ofNat (image.base + image.codeSize) }).pc % 4 = 0 := by
-    simp [hentry4]
-  have key : ∀ (st0 : Arm64State), st0.pc = export_.entry →
-      ∃ s', arm64_go_exit st0 image.code (image.base + image.codeSize) exportFuel
-        = some s' := by
-    intro st0 hpc0
-    have hle0 : st0.pc ≤ image.base + image.codeSize := by rw [hpc0]; exact hupp
-    have hlt0 : (image.base + image.codeSize) - st0.pc + 1 ≤ exportFuel := by
-      rw [hpc0]; omega
-    have hal0 : st0.pc % 4 = 0 := by rw [hpc0]; exact halign
-    obtain ⟨s', hs'⟩ := arm64_go_exit_terminates_aligned image.code
-      (image.base + image.codeSize)
-      hstraight hmod exportFuel st0 hal0 hle0 hlt0
-    exact ⟨s', hs'⟩
-  rw [runExport, arm64_exec_go_exit]
-  generalize hst :
-      ({ Arm64State.init n image.base with
-          pc := export_.entry,
-          x30 := UInt64.ofNat (image.base + image.codeSize) }) = st0
-  obtain ⟨s', hs'⟩ := key st0 (hst.symm ▸ rfl)
-  exact ⟨s', hs'⟩
+    What this buys is a checked statement about the current definition, so that
+    `OPUS.md` §4.1's choice is a choice between two *true* options rather than
+    a guess: either `runExport`'s fuel becomes a function of `n` (which changes
+    the meaning of [3]'s `export_result_spec`), or `Total` is weakened. Until
+    one happens, a looping export's `sorry` sits on THIS. -/
+theorem total_refuted_backward_branch :
+    ¬ Total backward_branch_image backward_branch_export := by
+  intro h
+  obtain ⟨s, hs⟩ := h 0
+  have hn : runExport backward_branch_image backward_branch_export 0 = none :=
+    backward_branch_run_none
+  -- `hn.symm.trans hs : none = some s` is a constructor clash.  Going through
+  -- `rw` makes Lean unfold `runExport` while rewriting, and the dependent
+  -- `cases` then fails to solve the resulting equation with an error that
+  -- points at the record rather than at the clash.
+  exact absurd (hn.symm.trans hs) (by simp)
 
 end DylibExport
 
