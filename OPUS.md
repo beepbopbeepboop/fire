@@ -212,31 +212,39 @@ they can be developed, iterated and re-checked against nothing but the built
 `.olean`, in about a second, without touching the 27MB library build. That
 scratch loop is what made this tractable and it should be kept.
 
-### 5.2 The end-to-end bench I could not finish, and exactly why
+### 5.2 The end-to-end bench — RESOLVED, and it was not a model gap
 
-The goal was a *zero-sorry* end-to-end instance: a concrete image, `hhalts` and
-`hnodrop` discharged by evaluation, `Total` closed. I got as far as the
-encoding and hit a real question, which is more useful than a guess:
+This is now settled, and the answer is reassuring. The first attempt was:
 
 ```lean
 def benchCode : Nat → UInt8 := fun pc =>
   match pc with
   | 4096 => 0xc0 | 4100 => 0x03 | 4104 => 0x5f | 4108 => 0xd6 | _ => 0
--- bytes c0 03 5f d6 == 0xd65f03c0 == RET
 #eval (arm64_step { Arm64State.init 0 4096 with pc := 4096 } benchCode).isSome
 -- => false
 ```
 
-A `ret` does not step in this model. `lib/ProofLib.lean:1454` does decode
-`0xd65f03c0`, but `lib/ProofLib.lean:1863` (in `arm64_go`) additionally
-requires `st.pc = st.x30.toNat` before accepting the RET sentinel. So the
-question for whoever picks this up is: **what does `arm64_step` do with `ret`
-when `x30 = 0`?** Either it returns `none` (a state-dependent decode — which
-has a large consequence, see §6.1), or it sets `pc := 0` and my `isSome` check
-was looking at the wrong thing. One `#eval` with a nonzero `x30` settles it.
+I flagged this as alarming — it looked like the model might refuse to step on a
+`ret`. **It does not.** Two things were wrong, neither in the model:
 
-I deliberately did not keep drilling, because the answer determines the shape
-of §6.1 and that is a design decision, not a detail.
+1. `arm64_read_insn` (`ProofLib.lean:1388`) is little-endian over the byte
+   list, so bytes `c0 03 5f d6` *should* assemble to `0xd65f03c0`. My
+   hand-written `code` function did not actually return those bytes — the match
+   was malformed, and `#eval arm64_read_insn c 4096` returns `192` (`0xc0`),
+   proving bytes 1–3 came back zero.
+2. The `st.pc = st.x30.toNat` guard I was worried about lives at
+   `ProofLib.lean:1863`, which is in **`arm64_go`**, not `arm64_go_exit`. It is
+   the RET-sentinel condition for the *other* loop. `arm64_step` itself handles
+   RET unconditionally at `ProofLib.lean:1454` with
+   `some { s with pc := s.x30.toNat }`.
+
+So the takeaway for §6.1 is a correction, and it is the important part: **`ret`
+is one of the seven pc-writing opcodes** (below), which is exactly why the
+straight-line argument has to exclude it rather than assume every word advances
+by 4. The lesson for anyone rebuilding this bench: **use `_gen_code_defs`'s
+`code` shape, not a hand-written one** — a `code` function that is wrong in a
+way Lean accepts is a silent-false signal, and it cost me a detour.
+
 
 ---
 
@@ -246,36 +254,81 @@ This is the part I would want a reader to act on. Ordered by value.
 
 ### 6.1 Discharge `hhalts` and `hnodrop` for straight-line exports — the real close
 
-If both become *checks*, the entire `Total` chain closes with zero holes and
-this whole document becomes a solved problem rather than a reduction.
+**This section is now a decomposition, not a suggestion.** I read the decoder
+and the generator's existing opcode machinery, and the work splits into three
+pieces with one genuinely hard member. Two are landed.
 
-The obstacle, and it is a real one: `hhalts` quantifies over `∀ st :
-Arm64State`, and `arm64_step` is **not a function of the code bytes alone** —
-the RET path at `ProofLib.lean:1863` reads `st.x30`, so whether a given pc
-steps can depend on register state. So `hhalts` is not decidable from the code
-by brute force over words.
+**The shape of the obstacle, measured rather than assumed.** `arm64_step` is a
+51-branch `if`-chain, but only **seven** of them assign `pc`; the other 44 go
+through `arm64_set_reg` or a `with` update that omits `pc`. The seven are
+RET, B, BL, CBZ, CBNZ, B.cond, BR. That is small enough to enumerate, and it
+means "a non-branching instruction leaves the pc alone" is a *finite* fact
+about a table, not a 51-way grind.
 
-The route I would take, in order of preference:
+#### Landed
 
-1. **Prove a state-independence lemma for non-control-flow opcodes.** For every
-   opcode in the decode table other than `b`, `b.cond`, `cbz`, `tbz`, `blr`,
-   `br`, `ret` and the PC-writing forms, show
-   `arm64_step st code = some st' → st'.pc = st.pc + 4` and the result depends
-   only on `st.pc` and `st.mem`. One lemma, then:
-   - `hnodrop` is **automatic** for such code — progress is `+4` and containment
-     is `pc + 4 ≤ base + codeSize`, both `omega` on the in-range hypothesis.
-     So `hnodrop` reduces to a *reachability* question, not a per-state one.
-   - `hhalts` reduces to "every word in the reachable pc set decodes", which
-     is decidable because the reachable set is finite and pc-determined.
-2. **Have the generator discharge them per export.** The generator already
-   knows the code bytes and already emits per-pc step lemmas
-   (`_gen_step_lemmas`, `_gen_step_result_lemmas`). If (1) lands, those lemmas
-   are the raw material: emit `{ident}_halts` by dispatching on `st.pc` over
-   the finite set of reachable pcs, and `{ident}_nodrop` as automatic.
-3. **Looped exports** then need a different tool — a ranking function or an
-   idempotence argument — and that is genuinely more work. I would not attempt
-   it before (1) and (2), because until the straight-line case is closed the
-   loop case has nothing to be measured against.
+1. **`arm64_set_reg_pc`** — `(arm64_set_reg rd s v).pc = s.pc`. Proved, zero
+   holes, by `split <;> rfl` over the 32-way register match. This is what makes
+   "44 of the 51 handlers cannot move the pc" a fact rather than a hope, and
+   it is the first thing any of the downstream proofs need.
+
+2. **`arm64_branchy`** — a `Bool`-valued predicate over exactly those seven
+   conditions. It is a `def` rather than a theorem on purpose: what is wanted
+   downstream is a **finite check over an image's words** ("is any reachable
+   word one of these seven?"), and a `Bool` is exactly what the generator can
+   evaluate. **It carries an explicit warning in its docstring that it is
+   derived by reading the decoder and nothing in the tree checks the two
+   agree** — it must not be read as a completeness claim until the lemma below
+   lands.
+
+#### The one hard member
+
+3. **`arm64_branchy insn = false → arm64_step s code = some s' → s'.pc = s.pc`.**
+
+   I attempted this and it is the real cost, so here is the exact obstruction
+   with the exact state it reaches. `split_ifs` is unavailable (core Lean only,
+   no Mathlib), and `split` cannot make progress on `arm64_step` until the
+   opening `let insn := …` is zeta-reduced — without `dsimp only at h` the
+   `repeat` exits on its first try having done nothing at all, which looks
+   exactly like a hard proof and is not. After zeta, the chain does split, but
+   an unrestricted `simp_all` **unfolds `mem_read_u64` and `arm64_reg`**, whose
+   own `ite`s re-enter the chain and the term grows instead of shrinking. The
+   restricted rewrite set
+   (`simp_all only [arm64_branchy, arm64_set_reg_pc, Option.some.injEq,
+   ite_self, …]`) splits ~20 branches correctly and then stalls with the rest
+   of the chain intact in `h`.
+
+   Two routes, and I recommend the second:
+
+   - *Finish the split.* Roughly 30 more branches of the same mechanical loop.
+     Cheap per branch, and every branch is a real check rather than a rewrite.
+   - *Get it from the generator's opcode table instead.* `formal/arm64_proof_gen.py`
+     already has `_STEP_CONDS`, `_step_branch_index(w)` and `_step_facts(w, idx)`,
+     and `_check_step_conds` already enforces that the table **agrees** with
+     the decoder. So "word `w` is not one of the seven" is already a decision
+     the generator can make per instruction, per image, by `bv_decide` — no
+     51-way split needed. Dispatch each in-image word to its `arm64_step_*`
+     lemma and the conclusion is `rfl`. **This is strictly better**: it reuses a
+     consistency check that already exists and is already tested, instead of
+     adding a second, independent copy of the branch table to keep in sync.
+
+#### Then, once (3) lands
+
+4. **The alignment invariant — `st.pc ≡ entry (mod 4)`.** This is the part
+   nobody should skip, and it is *not* a check. Progress is now free (a
+   non-branching step gives `s'.pc = s.pc`, so `effNext = s.pc + 4`), but
+   **containment is not**: `s.pc + 4 ≤ exit` needs `s.pc ≡ exit (mod 4)`, and
+   without it a non-branching step at `exit - 1` walks past the exit — the
+   overshoot hazard from §3.1, arriving by a different route. So the run needs
+   a genuine loop invariant. For straight-line code it is a one-line invariant
+   and induction on fuel; getting it right is why §6.1 is not "just a check".
+
+5. **Dispatch over the reachable set.** Given the invariant, the reachable pcs
+   are the aligned ones in `[entry, exit)`, computable in Python from the code
+   bytes. Emit a *table* lemma keyed on membership in a literal list, then
+   `rcases hp with rfl | rfl | …` — **linear, not exponential**. A `by_cases` per
+   candidate would be `2^n` and must not be written.
+
 
 ### 6.2 `hnodrop` for a *bounded* number of backward edges
 
@@ -335,5 +388,25 @@ the new docstrings rely on.
   down to one literal `native_decide`.
 - `Total` is **derived** at every generated call site, with two precisely
   named, precisely stated residual obligations.
-- `hhalts` / `hnodrop` are **not yet discharged**, and §6.1 says why and how.
-  They are the remaining gap, they are named, and they are the right gap.
+- `arm64_set_reg_pc` **proved**; `arm64_branchy` **defined** (with an explicit
+  warning that it is unverified against the decoder). These are the two
+  building blocks the close needs, landed and building.
+- `hhalts` / `hnodrop` are **not yet discharged**. §6.1 is now a three-piece
+  decomposition with the one hard member identified, its exact obstruction
+  recorded down to the tactic that stalls, and a recommended route that
+  reuses an existing consistency check instead of adding a second copy of the
+  branch table. The alignment invariant (§6.1 step 4) is called out as the
+  part that is a real theorem and must not be skipped.
+
+### Corrections to earlier statements in this document
+
+- §5.2 previously implied `arm64_step` might refuse to step on a `ret`. **It
+  does not**; the bench's `code` function was malformed. `ret` is one of the
+  seven pc-writing opcodes, which strengthens rather than weakens the case for
+  the close. The RET-sentinel guard that caused the confusion is in `arm64_go`,
+  not `arm64_go_exit`.
+- An earlier draft of §6.1 claimed `arm64_step` is "not a function of the code
+  bytes alone" because of an `st.x30` read. That was **wrong**, and it was the
+  same misreading: the `x30` read is in `arm64_go`'s sentinel test. It matters
+  because it wrongly implied `hhalts` was undecidable from the code; it is not.
+

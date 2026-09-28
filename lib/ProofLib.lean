@@ -5151,6 +5151,46 @@ straight-line export both are *checks*, not assumptions, which is what
 and matches the definition exactly.
 -/
 
+/-- **`arm64_set_reg` never moves the pc.**  Every non-control-flow handler in
+    `arm64_step` is of the form `some (arm64_set_reg … s …)` or a `with` update
+    that omits `pc`, so this one lemma is what makes "a non-branching
+    instruction leaves the pc where it was" a fact rather than a hope.  It is
+    the first of the three pieces the straight-line `hnodrop` needs; see
+    `arm64_branchy` for the other two. -/
+theorem arm64_set_reg_pc (rd : Nat) (s : Arm64State) (v : UInt64) :
+    (arm64_set_reg rd s v).pc = s.pc := by
+  unfold arm64_set_reg
+  split <;> rfl
+
+/-- **The seven opcodes whose handler assigns `pc`.**
+
+    Read off `arm64_step` (the `pc :=` sites are at the RET branch and at B,
+    BL, CBZ, CBNZ, B.cond and BR — 51 `if`-branches in all, but only these
+    seven write the pc; the other 44 go through `arm64_set_reg` or a `with`
+    update that omits `pc`).
+
+    This is the *interface* the straight-line `hnodrop` needs, and it is
+    deliberately a `def` rather than a theorem: what is wanted downstream is a
+    **finite check over an image's words** ("is any reachable word one of these
+    seven?"), and a `Bool` is what the generator can evaluate.  The theorem
+    that makes it *mean* something —
+
+        arm64_branchy insn = false → arm64_step s code = some s' → s'.pc = s.pc
+
+    — is stated in `OPUS.md` §6.1 with the exact obstruction, and is NOT yet
+    proved.  Do not read this `def` as a claim that it is complete: it is
+    derived by reading the decoder, and nothing in the tree checks that the two
+    agree.  A `bv_decide`-per-branch proof is the check, and that is the work
+    being handed on. -/
+def arm64_branchy (insn : UInt32) : Bool :=
+  insn == 0xd65f03c0
+  || ((insn &&& (0xfc000000 : UInt32)) == 0x14000000)
+  || ((insn &&& (0xfc000000 : UInt32)) == 0x94000000)
+  || ((insn &&& (0xff000000 : UInt32)) == 0xb4000000)
+  || ((insn &&& (0xff000000 : UInt32)) == 0xb5000000)
+  || ((insn &&& (0xff000000 : UInt32)) == 0x54000000)
+  || ((insn &&& (0xfffffc1f : UInt32)) == 0xD61F0000)
+
 /-- **The pc the loop is at after one step.**  Mirrors the `if` inside
     `arm64_go_exit` exactly; see the section note above for why `st'.pc` alone
     is not the right thing to reason about. -/
