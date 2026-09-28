@@ -7754,6 +7754,162 @@ def struct_constructor_sites(fn, structs_by_name) -> dict:
     return out
 
 
+# ── A frame that OUTLIVES the function that built it ─────────────────────
+#
+# `struct_constructor_sites` above is the whole of a frame's placement today,
+# and it is the whole of the problem: every block belongs to the function that
+# reserved it, and that function's scratch is reclaimed when it returns. So
+# `return <frame>` hands the caller a pointer into dead memory, and the 18 arm64
+# findings that name it are all one shape.
+#
+# The fix is a COPY, and the copy has to land somewhere the CALLER owns. The
+# destination is a block in the CALLER's own scratch, laid out by exactly the
+# same rules as a local constructor site — per CALL SITE, in walk order, in the
+# prologue, so a call in a loop reuses its site and the stack cannot grow
+# without bound.
+#
+# What makes this a layout question rather than a copy question is WHERE. Three
+# regions already have to be kept apart in one scratch, and a fourth cannot be
+# allowed to overlap any of them:
+#
+#   * receiver frames, at the bottom, so a callee's frames and blobs are below
+#     every frame the CALLER owns (`Frame.frameWrite_read_above_sp`);
+#   * list/dict blobs, growing up from above the frames;
+#   * spill slots, at the top, below the saved-pair area.
+#
+# The returned-frame blocks go BETWEEN the blobs and the spill slots. Above the
+# blobs, because a blob growing upward would otherwise run into one; below the
+# spill slots, because those are at the top and are already spoken for. That
+# ordering is the whole of the placement argument and it is why this is a
+# function in the shared model rather than an offset written twice: a scratch
+# laid out one way by arm64 and another by x86-64 is a returned frame that is
+# correct on one machine and a use-after-free on the other.
+#
+# The other half of the fix — telling the CALLEE where the caller's block is —
+# is a calling-convention question and is NOT here; see
+# `returned_frame_convention_refusal` for the three candidates, why two of them
+# cannot work, and what the third costs.
+
+RET_FRAME_REGION_ABOVE_BLOBS = True
+
+
+def struct_returned_frame_sites(fn, structs_by_name, returns_frame) -> dict:
+    """`{id(call): (struct, block_offset, total_bytes)}` — where a frame
+    this function RECEIVES from a callee has to be put.
+
+    The caller's half of `struct_constructor_sites`, and the reason a returned
+    frame has a lifetime this analysis can follow: the block reserved here is
+    in THIS function's scratch, so it lives exactly as long as the holder does.
+
+    `returns_frame` is a predicate over a callee NAME — "this callee returns a
+    frame address" — supplied by the caller rather than recomputed here. The
+    build pass already knows it (it is what `frame_return_refusal` keys on,
+    and it runs the holder fixpoint to a fixed point across the module), and
+    two answers to "does callee F return a frame" is precisely the disagreement
+    that produces a wrong number rather than a refusal: a caller that reserved
+    a block and a callee that did not copy into it builds, runs, and returns
+    whatever the caller's uninitialised scratch held.
+
+    Only DIRECT results are here. `f(g())` needs a block for `g`'s result in
+    `f` as well, and `f` is not the statement whose target binds it — that is a
+    nested-argument case, and it is left out deliberately rather than
+    half-handled: a block reserved for a call that turns out not to need one is
+    harmless (scratch is reserved by a constant), but a call that needs one and
+    does not get it is the silent wrong answer, so the predicate above is
+    deliberately conservative."""
+    framed = framed_struct_names(list(structs_by_name.values()))
+    if not framed:
+        return {}
+    out, offset = {}, 0
+    for node in iter_nodes(getattr(fn, "body", None)):
+        # `q = make()` and the annotated `q: Point = make()` are the same
+        # binding; an annotated target is still an AssignStmt, with the
+        # annotation in `node.annotation` (fire_compiler.py:474). A
+        # MultiAssignStmt binds a tuple and is deliberately not followed —
+        # see `_as_ident_name`.
+        if not isinstance(node, F.AssignStmt) or node.value is None:
+            continue
+        name = _as_ident_name(node.target)
+        if name is None:
+            continue
+        value = node.value
+        if not isinstance(value, F.CallExpr) or not isinstance(value.func, F.IdentExpr):
+            continue
+        st = returns_frame(value.func.name, name)
+        if st is None:
+            continue
+        block = struct_frame_block_bytes(st, structs_by_name)
+        out[id(value)] = (st, offset, block)
+        offset += block
+    return out
+
+
+def _as_ident_name(node):
+    """The bare name an assignment TARGET binds, or None.
+
+    `_split_top_level_comma`-style unpacking targets are deliberately not
+    followed: `a, b = f()` binds a 2-tuple, and a frame holder in a tuple
+    position is a different question (and a refusal) rather than a block to
+    reserve here."""
+    if isinstance(node, F.IdentExpr):
+        return node.name
+    return None
+
+
+def returned_frame_convention_refusal(callee, n_source_args: int) -> str:
+    """The returned-frame convention cannot be applied to this callee.
+
+    The copy needs ONE word: the address of the caller's block. Getting it to
+    the callee is the whole of the remaining design question, and the three
+    candidates were costed rather than guessed.
+
+    1. **A ninth argument register.** Ruled out by measurement, not taste.
+       AAPCS has X0..X7, and X16/X17 are IP0/IP1, which `BL` destroys — so
+       there is no ninth register to use. A variadic argument count is
+       already refused by name on this path for the same reason
+       (`model.variadic_call_refusal`).
+    2. **The callee computes the caller's block itself.** This is the
+       attractive one and it is arithmetically possible: the prologue's
+       `SUB SP, SP, #_SCRATCH` and the epilogue's matching `ADD` are
+       symmetric, so a callee's scratch begins exactly `_SCRATCH` below the
+       caller's, and the callee can address the caller's whole scratch from
+       its own `SP` with nothing but a compile-time constant. What it cannot
+       do is know WHICH of the caller's blocks to copy into: the offsets are
+       assigned per call site in the caller's own walk order
+       (`struct_returned_frame_sites`), and the callee has not read the
+       caller's body. A single fixed slot would work for `a = f(); b = f()` —
+       the same block, reused — and would collide for the one shape that
+       matters, `f(g())`, where the inner and outer results must be live at
+       once.
+    3. **A trailing argument on the returning function** (chosen). The
+       returning function gains one hidden word, and `return <frame>` becomes
+       "copy the block to that word, return that word". This reuses the
+       by-reference receiver convention that already exists — a frame address
+       is one word and the receiver is already passed as one — so it needs no
+       new register, no new calling-convention section, and it leaves the
+       value model, `MojoFunc`, `evalFunc`, `evalBodyEnv` and the machine model
+       untouched. That is the same property the by-reference design was chosen
+       for, and it is why this is a codegen change rather than an ABI one.
+
+       The cost is a limit this has to refuse rather than approximate: the
+       hidden word is a ninth argument, and this path passes at most eight
+       (`_emit_call` drops the rest for compile-only fidelity). A callee that
+       already takes eight arguments cannot be given the word, and a program
+       that does that is refused HERE, by name, instead of being handed a
+       dropped argument and a frame copied into scratch nobody reserved."""
+    if n_source_args >= 8:
+        return (
+            f"{callee} returns a frame address, so it needs one hidden word "
+            f"for the caller's block — and it already takes {n_source_args} "
+            f"argument(s), which is this path's whole argument budget (AAPCS "
+            f"X0..X7, and this backend already drops arguments past eight for "
+            f"compile-only fidelity). Copy the struct's fields out instead of "
+            f"returning the object, which is the same program with a "
+            f"lifetime this analysis can follow, or reduce the callee's "
+            f"parameter count")
+    return ''
+
+
 # What a FRESH one-word value has to hold, and whether this path can produce it.
 #
 # `S()` is not a call; it brings every field up at its default. For a struct of

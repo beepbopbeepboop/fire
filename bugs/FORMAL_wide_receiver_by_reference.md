@@ -1410,3 +1410,142 @@ programs differing in one character of a method body (`self.x` vs `self.y`) get
   Two facts close it: a list domain in the model, and a memory image for the
   blob. A dict lookup still crashes the generator
   (`unsupported edge … loop back-edge`), unchanged and recorded.
+
+---
+
+## Round 2 (agent [4]): the returned frame — the decision, and where it is blocked
+
+The last bullet above ("what is still open") is a list of Lean-side items. This
+section is the OTHER half: the `return <frame>` case, which is 18 findings and
+one design decision, and which is blocked on **ownership**, not on difficulty.
+
+### What the sweep says, measured on this tree
+
+`tools/formal_sweep.py` arm64, 596 files: `PASS=108`, `codegen=128`,
+`codegen/dependency=181`, coverage `108/417 = 25.9%`. The 128 in-file codegen
+findings by family, and the frame-address ones marked:
+
+```
+  receiver passed as an argument                    23   *
+  frame address passed where a value is wanted      19   *
+  frame address escapes: returned by its creator    18   *  <- this section
+  MLIR construct                                    14
+  callee has no definition on this path             12
+  field slot holds a frame address                  10   *
+  frame address escapes: aliased out of a method     9   *
+  nested frame field read                            7   *
+  name has two disagreeing shapes                    4   *
+  comptime does not fold                             2
+  method call on a value                             2
+  self has two kinds of value across call sites      2
+  construction with arguments needs __init__         1
+  module-global name has no storage                  1
+  receiver stored in a container                     1   *
+  unimplemented intrinsic                            1
+  value with no representation                       1
+  variadic call has no ABI                           1
+```
+
+The 12 `callee has no definition on this path` are **not** this design defect
+and the taxonomy is right to separate them: the callee is a bare name with no
+body in the image, so whether the address means anything is a question about
+the dylib, not about frames. Counting them would be the specific way a
+taxonomy gets worse than none — a number in the wrong column.
+
+The 18 are not 18 problems. They are one `raise` at `formal/build.py:2423`, and
+`frame_return_refusal`'s own docstring says the 18 messages are **verbatim
+identical** apart from the struct name, across 18 files and 12 struct types
+(`String` x6, `Interpreter` x2, and ten singletons).
+
+### The decision, made
+
+The copy has to land somewhere the CALLER owns. The candidate regions in one
+scratch, and why a fourth cannot overlap any of them:
+
+| region | where | why it is there |
+|---|---|---|
+| receiver frames | bottom | a callee's frames/blobs are below every frame the CALLER owns (`Frame.frameWrite_read_above_sp`) |
+| list/dict blobs | growing up from above the frames | a blob must not land on a frame |
+| spill slots | top, below the saved-pair area | already spoken for |
+| **returned frames** | **between the blobs and the spill slots** | above the blobs, so a blob growing upward cannot run into one; below the spill slots |
+
+That ordering is the whole of the placement argument, and it is why the layout
+is a function in the shared model (`struct_returned_frame_sites`) rather than an
+offset written in each backend: a scratch laid out one way by arm64 and another
+by x86-64 is a returned frame that is correct on one machine and a
+use-after-free on the other. Per CALL SITE, in walk order, reserved in the
+prologue — the same discipline as `struct_constructor_sites`, so a call inside
+a loop reuses its site and the stack cannot grow without bound.
+
+**Getting the caller's block address to the callee** is the whole of the
+remaining question. Three candidates, costed:
+
+1. **A ninth argument register.** No. AAPCS has X0..X7 and X16/X17 are
+   IP0/IP1, which `BL` destroys. This path already drops arguments past eight
+   for compile-only fidelity (`arm64_codegen.py`, `_emit_call`), so a ninth word
+   is not a register to find.
+2. **The callee computes the caller's block itself.** Arithmetically possible
+   and this is the one that looks like it should work: the prologue's
+   `SUB SP, SP, #_SCRATCH` and the epilogue's matching `ADD` are symmetric, so
+   a callee's scratch begins exactly `_SCRATCH` below the caller's and the
+   callee can address the caller's **whole scratch** from its own `SP` with
+   nothing but a compile-time constant. What it cannot do is know **which** of
+   the caller's blocks to copy into — the offsets are assigned per call site in
+   the *caller's* walk order, and the callee has not read the caller's body. A
+   single fixed slot works for `a = f(); b = f()` (same block, reused) and
+   collides for the one shape that matters, `f(g())`, where the inner and outer
+   results must be live at once.
+3. **A hidden trailing argument on the returning function. CHOSEN.** The
+   returning function gains one hidden word, and `return <frame>` becomes "copy
+   `8 * block_bytes` from my own site into that word, and return that word".
+
+   (3) reuses the by-reference receiver convention that already exists — a
+   frame address is one word, and the receiver is already passed as one — so it
+   needs no new register, no new calling-convention section, and it leaves
+   `MojoFunc`, `evalFunc`, `evalBodyEnv` and the value model untouched. That is
+   the same property the by-reference design was chosen for in the first place,
+   and it is the reason this is a codegen change rather than an ABI change.
+
+   Its cost is a limit that has to be REFUSED rather than approximated: the
+   hidden word is a ninth argument, so a callee that already takes eight
+   arguments cannot be given it. `returned_frame_convention_refusal` says so
+   by name rather than handing back a dropped argument and a frame copied into
+   scratch nobody reserved.
+
+### Why this is blocked, and it is not on the Lean side
+
+Two boundaries, and the first one is a gap in the round's partitioning:
+
+* **`formal/build.py` is in nobody's write set** and is not in §11.2's
+  "Deliberately unowned" list. It is also the file that raises the refusal
+  (`:2423`), so all 18 findings are gated on a line nobody may edit.
+  `bugs/INTERFACE_REQUEST_4_to_formal_build.md` asks the integrator to assign
+  it and states the exact removal.
+* **The proof-side obligation** is a `lib/Refine.lean` predicate — a callee
+  contract variant that carves out the passed-in block rather than the receiver
+  frame, the same additive move as `FrameOk_except`. That is [3]'s file;
+  `bugs/INTERFACE_REQUEST_4_to_3_contracts.md` states the shape the codegen
+  will be written against, so the emitters and the theorem cannot disagree.
+
+### What is landed, and what it is worth
+
+`formal/model.py`: `struct_returned_frame_sites` (the caller's layout),
+`returned_frame_convention_refusal` (the decision above, as a refusal that
+names its own reason), and `RET_FRAME_REGION_ABOVE_BLOBS`. Pinned by
+`test_returned_frame_layout.py` (10 cases).
+
+**It is worth: nothing observable, and that is stated here rather than implied.**
+The sweep is byte-identical before and after — 18 `returned by its creator`
+findings, `108/417 = 25.9%` — and `test_formal_run.py` is 340/340. What landed
+is the piece every later piece needs and that did not exist: the caller's
+destination blocks are computed, by one function both machines read, and the
+convention that moves the address across the call boundary is decided and
+written down instead of being the thing the next session re-derives.
+
+Making the refusals louder was available and was NOT done. The 18 refusals
+already name their cause precisely, and §11.2's trap for this item is exactly
+that: "making the refusals *louder* without changing what is computed. That
+converts a wrong answer into a red test, which is worth something but is not
+this item." These are not wrong answers — they are refusals — and renaming or
+elaborating them would have moved the headline without a line of behaviour
+changing. **The 18 findings are gone when the copy is emitted, and not before.**
