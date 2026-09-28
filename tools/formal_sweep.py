@@ -460,8 +460,81 @@ _TARGET_PROBE = 40      # characters of the model's own text to require
 _SYSCALL_MARK = "no Mojo source on any path"
 _MEMBER_RE = re.compile(r"\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)")
 
+# The frame-address families, grouped. Measured on the arm64 sweep of
+# 2026-09-28: 130 in-file codegen findings, 104 distinct message texts, which
+# reduced to 13 shapes. Before this pass 123 of the 130 were ONE bucket called
+# "other refusal", so the sweep could not answer "what is left" — it could only
+# say that 26.0% of the denominator was blocked and name none of it.
+#
+# Most of what it found is ONE design defect wearing five costumes, and the
+# families below are ordered so that the *distinction that changes what you
+# would do* wins over the one that does not. All five are recorded in
+# bugs/FORMAL_wide_receiver_by_reference.md; they are separated here because
+# they have different fixes:
+#
+#   * the address ESCAPES (returned, or aliased out of a method) — the caller
+#     holds a pointer into a frame that is gone. A use-after-free, and a wrong
+#     NUMBER rather than a crash, so nothing reports it.
+#   * the address is PASSED where the callee wants the value — the callee is a
+#     builtin like len() or origin_of() that is lowered as an operation on a
+#     value and dereferences what it is handed.
+#   * the address is STORED in a field slot, so the disagreement is between
+#     every binding of one name rather than at a call.
+#   * the address is passed to a callee that is a NAME with no definition in
+#     hand — which is not a receiver problem at all and was being counted as
+#     one, which is how 7 findings hid inside a receiver bucket.
+#
+# Markers are substrings of the message, and every one is quoted from a message
+# the backend actually produced. A marker that matches nothing is not an error
+# -- the family is simply unused -- but a marker that is a GENERIC phrase
+# ("receiver", "frame") would swallow the distinctions above it, so each is
+# specific to the shape it names. Ordered most specific first; first match wins.
+_FRAME_ESCAPES = (
+    # The callee is a name this image has no definition for. This is NOT a
+    # receiver problem and used to be counted as one: the message begins "a X
+    # receiver is passed to <name>(), which is a name with no definition in
+    # hand", so the "receiver is passed to" marker below claimed it. 7 of the
+    # arm64 findings were hiding in a receiver bucket, which is the specific
+    # way a taxonomy can be worse than none — it puts a number in the wrong
+    # column. Matched FIRST, on the clause that actually says it, and the
+    # comment sits here rather than further down precisely because position in
+    # this tuple is what makes it work.
+    ("which is a name with no definition in hand",
+     "callee has no definition on this path"),
+    # Returned from the function that created it: 18 of 130, and the 18
+    # messages are VERBATIM IDENTICAL apart from the type name, so there is
+    # nothing finer to split on. See the note above on why that is left one
+    # bucket rather than divided by type.
+    ("is returned from the function that created it",
+     "frame address escapes: returned by its creator"),
+    # Returned from a METHOD that received the address as its receiver — a
+    # different and slightly worse shape, because the escape is not even from
+    # the frame's own function.
+    ("did not create the frame",
+     "frame address escapes: aliased out of a method"),
+    # A frame address handed to a builtin that wants the value. Split from
+    # "receiver is passed to" because the callee decides the fix: len() needs
+    # the value, and no rewriting of the receiver will make it want the
+    # address.
+    ("frame address is passed to", "frame address passed where a value is wanted"),
+    # A receiver passed at argument position 0, i.e. `self`, to a call.
+    ("receiver is passed to", "receiver passed as an argument"),
+    # A field slot holding a frame address, so two bindings of one name
+    # disagree about what lives where.
+    ("hands the word in the slot", "field slot holds a frame address"),
+    # The same disagreement, stated as a placement failure rather than as a
+    # slot.
+    ("cannot be placed", "name has two disagreeing shapes"),
+)
+
 
 _REFUSAL_FAMILIES = (
+    # The frame-address shapes go FIRST, ahead of the generic
+    # "is a method call on a value" marker, because "a X receiver is passed
+    # to Y" would otherwise be claimed by whichever generic rule comes first
+    # and the distinctions — which are the ones with different fixes — would
+    # be lost. Order here is load-bearing; see _FRAME_ESCAPES above.
+) + _FRAME_ESCAPES + (
     ("is a method call on a value", "method call on a value"),
     ("is a method on a string", "method call on a string"),
     ("is a real method of String", "string method needing a length"),
@@ -479,8 +552,51 @@ _REFUSAL_FAMILIES = (
     ("unsupported statement", "unsupported node"),
     ("unsupported unary operator", "unsupported node"),
     ("unsupported call target", "unsupported node"),
-    ("does not fold to a compile-time constant",
-     "comptime value does not fold"),
+    # MLIR. Three different wordings reach this bucket: the attribute template
+    # itself, the dialect operation, and the bare builtin spelling.
+    ("MLIR attribute template", "MLIR construct"),
+    ("MLIR dialect construct", "MLIR construct"),
+    ("__mlir_", "MLIR construct"),
+    # A read through a nested frame, e.g. `self._a._b._c`: the outer frame slot
+    # holds a frame address and the inner one is then read through it.
+    ("out of a nested", "nested frame field read"),
+    ("reads a field of a field", "nested frame field read"),
+    # A comptime binding that does not fold, so there is no value to
+    # materialise. Two wordings: the binding form and the local form.
+    ("does not fold to a compile-time constant", "comptime does not fold"),
+    # A `...` standing where the lowering needs real instructions.
+    ("stands where this path needs", "unimplemented intrinsic"),
+    ("this path has no variadic ABI", "variadic call has no ABI"),
+    # A construct this compiler refuses at the PARSE. Named rather than
+    # lumped into "other" because it is the one family where the answer is
+    # "the source uses something unsupported", not "the backend cannot lower
+    # something" -- and after the comptime fix in fire_compiler.py that is a
+    # meaningful distinction to be able to count.
+    ("parse error:", "unsupported construct (parse error)"),
+    ("does not fold to a compile-time constant", "comptime value does not fold"),
+    # `self` compiled as a frame holder at one call site and as a plain value
+    # at another. Its own bucket rather than a receiver one because the
+    # severity is different: this one SEGFAULTS (measured, exit 139 on both
+    # architectures) instead of computing a wrong number, so it is the only
+    # frame-address family that crashes rather than lies.
+    ("and something that is not a frame address at",
+     "self has two kinds of value across call sites"),
+    # Construction with arguments needs a real `__init__` body, and this path
+    # does not run one.
+    ("is a call to a user-defined `__init__`",
+     "construction with arguments needs __init__"),
+    # A receiver put in a container, which has no layout for a frame address.
+    ("is stored in a container, which has no layout",
+     "receiver stored in a container"),
+    # A method on a value whose receiver is a frame address, stated as a
+    # description of the call rather than as a receiver placement.
+    ("is a method on a", "method call on a value"),
+    # A name bound at module level. A formal value lives in a function's own
+    # stack scratch, which is reclaimed on return, so a name that must outlive
+    # every frame has nowhere to live. Distinct from every frame family above:
+    # the address is not the problem, the ABSENCE of storage is.
+    ("has no module-global storage for it",
+     "module-global name has no storage"),
     ("takes exactly one value to convert", "wrong argument count"),
     # Reachable from `codegen` only through a rule that has not fired yet; it
     # is here so the breakdown has a name for the day it does, and so a future
