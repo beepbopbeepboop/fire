@@ -5336,6 +5336,516 @@ WAVE6_NAME_CASES = [
 ]
 
 
+# ── WAVE 7 / G2: a builtin that wants a VALUE, handed a frame ──────────────
+#
+# The audit this block is the evidence for.  Every builtin and value method
+# that reads or writes its operand was run against a frame-address receiver on
+# both architectures; the table is in the commit message.  Nothing in that audit
+# was ACCEPTED wrongly, which is a result and not an accident, and the two
+# things this block pins are the two things the audit DID find:
+#
+#   1. a FRAME SLOT's declared type was not connected to anything.  A field read
+#      is not a name the function bound, so `len(self.<field>)` was asked for a
+#      kind it had no way to know and refused with "the source does not say what
+#      this operand holds … Annotate it (`x: String`)" — FALSE about a declared
+#      field, and for a list or string field the refusal was of something this
+#      path can answer.  Four of the cases below are that, one per declared type
+#      the model has a representation for;
+#   2. a kind taken from the declaration ALONE is a wrong answer, not a
+#      conservative one.  `S()` does not run `__init__` (premise (B2)), so a
+#      fresh instance's slot holds the class-level default and a field with no
+#      default is a word of zeros: with the kind claimed, `len(self.xs)` for
+#      `var xs: List[Int]` and `len(self.s)` for `var s: String` both BUILT, RAN
+#      and died with SIGSEGV (exit 139) on BOTH architectures — `LDR X0, [X0]`
+#      with X0 zero, and a `BL _strlen` walking the bytes at address 0.  So the
+#      kind is gated on the default being a LITERAL the constructor
+#      materializes, and the two refusals below name the premise rather than
+#      the annotation.  `len_string_literal_default_field` is the other half: a
+#      literal default IS materialized, so that one is ANSWERED, and it did not
+#      build before.
+#
+# Every `refuse:` case is checked on BOTH backends by `run_case` with the SAME
+# words, so a divergence between the architectures cannot come back either.
+WAVE7_G2_CASES = [
+    # ── (1) the four declared types a frame slot can have ──
+    # A CONTAINER field.  Refused, and the reason is premise (B2) rather than
+    # the annotation: the annotation settles the lowering (a list's length is
+    # the count word at offset 0) and what is missing is the VALUE.  Pre-change
+    # this said "the source does not say what this operand holds" and told the
+    # reader to annotate a field that says `List[Int]` two lines above.
+    ("len_frame_slot_declared_container",
+     "struct R:\n"
+     "    var xs: List[Int]\n"
+     "    var n: Int\n"
+     "    def __init__(out self):\n"
+     "        self.xs = [1, 2, 3]\n"
+     "        self.n = 0\n"
+     "    def size(self) -> Int:\n"
+     "        return len(self.xs)\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    return r.size()\n",
+     "refuse:this slot's DECLARED type is 'List[Int]'", None),
+    # A STRING field.  The same premise and a DIFFERENT wrong answer, which is
+    # why it is a separate case: `strlen` does not read eight bytes and call
+    # them a count, it walks the bytes at address 0 looking for a terminator,
+    # so the fault is inside libc rather than one instruction after the load.
+    ("len_frame_slot_declared_string",
+     "struct R:\n"
+     "    var s: String\n"
+     "    var n: Int\n"
+     "    def __init__(out self):\n"
+     "        self.s = \"hello\"\n"
+     "        self.n = 0\n"
+     "    def size(self) -> Int:\n"
+     "        return len(self.s)\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    return r.size()\n",
+     "refuse:a string's length is a `strlen` over its bytes", None),
+    # An INT field.  Here the missing value is NOT what stops the lowering — an
+    # integer has no length either way — so this is the integer row plus the
+    # one fact it cannot know, that the number in the slot is the default.
+    ("len_frame_slot_declared_int",
+     "struct R:\n"
+     "    var n: Int\n"
+     "    var m: Int\n"
+     "    def __init__(out self):\n"
+     "        self.n = 5\n"
+     "        self.m = 0\n"
+     "    def size(self) -> Int:\n"
+     "        return len(self.n)\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    return r.size()\n",
+     "refuse:this slot's DECLARED type is 'Int', and an integer has no length",
+     None),
+    # A field whose declared type is a struct of this module whose receiver is
+    # a frame.  The slot holds the ADDRESS of a frame of 8-byte slots, and
+    # `FRAME_KIND` is what says so — which is the case whose refusal reason was
+    # most worth its own sentence, because offset 0 of a frame is the struct's
+    # FIRST FIELD and `len` over it returns a plausible number meaning nothing.
+    # Pre-change this was filed under "the source does not say".
+    ("len_frame_slot_is_a_frame_address",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def __init__(out self):\n"
+     "        self.a = 1\n"
+     "        self.b = 2\n"
+     "struct Outer:\n"
+     "    var inner: Inner\n"
+     "    var n: Int\n"
+     "    def __init__(out self):\n"
+     "        self.inner = Inner()\n"
+     "        self.n = 5\n"
+     "    def go(self) -> Int:\n"
+     "        return len(self.inner)\n"
+     "def main(k: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    return o.go()\n",
+     "refuse:is len() of a FRAME ADDRESS", None),
+    # ── (2) the two shapes a ONE-WORD struct's receiver takes ──
+    # `self.<field>` was rewritten to `self` long before the emitter runs,
+    # because a single-field struct's receiver IS its field.  So the operand
+    # here is a bare `self` and the declared type has to be recovered from the
+    # struct's one field.  This is the shape `std/collections/binary_heap.mojo`
+    # is in, and it is the shape the 30-file group is blocked on.
+    ("len_one_word_struct_receiver_is_a_list_field",
+     "struct B:\n"
+     "    var _data: List[Int]\n"
+     "    def __len__(self) -> Int:\n"
+     "        return len(self._data)\n"
+     "    def __init__(out self):\n"
+     "        self._data = [1, 2, 3]\n"
+     "def main(k: Int) -> Int:\n"
+     "    var b = B()\n"
+     "    return len(b)\n",
+     "refuse:this slot's DECLARED type is 'List[Int]'", None),
+    # The same one-word struct, read through a LOCAL the constructor was bound
+    # to rather than through the receiver.  `b` is a plain word on this path —
+    # deliberately not a frame holder, because a one-field struct has no frame —
+    # so nothing but the binding says what it holds.
+    ("len_local_bound_to_a_one_word_struct_ctor",
+     "struct B:\n"
+     "    var _data: List[Int]\n"
+     "    def __init__(out self):\n"
+     "        self._data = [1, 2, 3]\n"
+     "def main(k: Int) -> Int:\n"
+     "    var b = B()\n"
+     "    return len(b)\n",
+     "refuse:this slot's DECLARED type is 'List[Int]'", None),
+    # ── (3) the case that is ANSWERED, and is the whole point of the gate ──
+    # A LITERAL class-level default IS materialized by the constructor at every
+    # construction site, so the slot's value is established and `len` is the
+    # `strlen` it always was.  This did not build before the change: the field
+    # was unclassified, so `len(self.s)` was refused with "the source does not
+    # say what this operand holds" about a field that says `String = "hello"`.
+    # 5 on both architectures, and the string methods on the same slot come
+    # with it (`startswith` is the second half of this case's shape).
+    ("len_string_literal_default_field",
+     "struct R:\n"
+     "    var s: String = \"hello\"\n"
+     "    var n: Int = 7\n"
+     "    def size(self) -> Int:\n"
+     "        return len(self.s)\n"
+     "    def pre(self) -> Int:\n"
+     "        if self.s.startswith(\"he\"):\n"
+     "            return 1\n"
+     "        return 0\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    return r.size() + r.pre()\n",
+     6, None),
+    # GUARD (passes before and after), and it is here because it is the case
+    # that would have caught a wrong ACCEPTANCE rather than a wrong refusal:
+    # `printf("%d", self.n)` on a field with a literal default prints 7, which
+    # is what the source says.  It passes pre-change because `printf` of a
+    # MemberExpr does not consult the kind at all, so the field being
+    # unclassified cost nothing here — which is exactly why it cannot be
+    # presented as a demonstration.  What it pins is the gate: a field with NO
+    # default is a different program (the slot holds 0) and is the refusal
+    # above, so this pair is what stops "every declared field is answered"
+    # from being a way of making that one print 0.
+    ("int_literal_default_field_prints_its_value",
+     "struct R:\n"
+     "    var n: Int = 7\n"
+     "    var m: Int\n"
+     "    def show(self) -> Int:\n"
+     "        printf(\"%d\\n\", self.n)\n"
+     "        return 0\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.show()\n"
+     "    return 0\n",
+     0, "7"),
+    # ── (4) the C-library hand-off sets, audited by PROTOTYPE ──
+    # `open(const char *, int, ...)` takes a path and a flag word; it does not
+    # read the struct's storage, and it never mentions a struct.  This set used
+    # to be the "reads the struct's BYTES" one, so the refusal told the reader
+    # to go and compare a field list against the C headers' padding for a
+    # struct the callee does not have.  `close`, `read`, `write`, `readv`,
+    # `writev`, `ioctl`, `fcntl` and `mmap` are the same shape and the same
+    # reason; `stat`/`lstat`/`fstat`/`memcpy`/`memcmp`/`qsort` are the ones that
+    # genuinely take a pointer to the struct, and the next case is the guard
+    # that says so.
+    ("c_call_open_takes_a_value_not_the_structs_bytes",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def __init__(out self):\n"
+     "        self.a = 3\n"
+     "        self.b = 4\n"
+     "def f(open) -> Int:\n"
+     "    return 0\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    n = open(r, 1)\n"
+     "    return 0\n",
+     "refuse:takes a VALUE of a type its own prototype names", None),
+    # GUARD (passes before and after): the storage half of the same table.  If
+    # the set had been emptied rather than corrected, `stat` would get the
+    # value sentence and this case would stop failing.
+    ("c_call_stat_reads_the_structs_bytes",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def __init__(out self):\n"
+     "        self.a = 3\n"
+     "        self.b = 4\n"
+     "def f(stat) -> Int:\n"
+     "    return 0\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    n = stat(r)\n"
+     "    return 0\n",
+     "refuse:reads the struct's BYTES", None),
+    # ── (5) GUARDS: the `len` receiver matrix, one row per operand kind ──
+    # A STRING: `strlen`, the row that has always worked.
+    ("guard_len_on_a_string",
+     "def main(k: Int) -> Int:\n"
+     "    var s: String = \"hello\"\n"
+     "    return len(s)\n", 5, None),
+    # A BLOB: the count field at offset 0.
+    ("guard_len_on_a_blob",
+     "def main(k: Int) -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    return len(xs)\n", 3, None),
+    # An INT: refused, with the integer row.
+    ("guard_len_on_an_int",
+     "def main(k: Int) -> Int:\n"
+     "    n = 5\n"
+     "    return len(n)\n",
+     "refuse:an integer has no length", None),
+    # A FRAME ADDRESS as a bare name: refused by the hand-off check, and the
+    # reason it gives is the value/bytes one rather than "no definition in
+    # hand".  This is the 30-file `binary_heap.mojo` refusal, in miniature.
+    ("guard_len_on_a_frame_address",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def __init__(out self):\n"
+     "        self.a = 3\n"
+     "        self.b = 4\n"
+     "def f(len) -> Int:\n"
+     "    return 0\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    n = len(r)\n"
+     "    return 0\n",
+     "refuse:which is lowered as an operation on a VALUE", None),
+    # ── (6) GUARDS: the value-method receiver matrix ──
+    # A string method against each of the four operand kinds.  Two of these are
+    # the wrong answer rather than a crash if they were lowered kind-blind: on a
+    # BLOB receiver the bytes at the blob's offset 0 are the COUNT and the
+    # string method would scan them as text, and on an INT receiver the word is
+    # the integer and libc would walk whatever it points at.
+    ("guard_string_method_on_a_blob",
+     "def main(k: Int) -> Int:\n"
+     "    var xs = [1, 2, 3]\n"
+     "    if xs.startswith(\"a\"):\n"
+     "        return 1\n"
+     "    return 0\n",
+     "refuse:its receiver is classified as 'list:int' rather than a string",
+     None),
+    ("guard_string_method_on_an_int",
+     "def main(k: Int) -> Int:\n"
+     "    n = 5\n"
+     "    if n.startswith(\"a\"):\n"
+     "        return 1\n"
+     "    return 0\n",
+     "refuse:its receiver is classified as 'int' rather than a string", None),
+    # `write` against a frame address: the `VALUE_METHOD_RECEIVERS` guard, and
+    # the case wave 4 found by RUNNING it — `s.write("x")` passed a __TEXT
+    # address as fd(2), the syscall returned EBADF, nothing checked it, and the
+    # program exited 0 with its output missing.  Same class, frame address.
+    ("guard_write_on_a_frame_address",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def __init__(out self):\n"
+     "        self.a = 3\n"
+     "        self.b = 4\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.write(\"x\")\n"
+     "    return 0\n",
+     "refuse:its receiver has to be a file descriptor", None),
+    # `Pointer(to=stat)` over a frame address is the one hand-off in this family
+    # that is simply CORRECT — it is an identity address constructor, so what
+    # arrives is the answer rather than the mistake.  D4 found this table
+    # already wrong once (`Pointer` sat in the value-only set and its text said
+    # the callee "wants the object itself"), so the row that removed it needs
+    # a test: this builds and runs 0 on both architectures.
+    ("guard_pointer_over_a_frame_address_is_correct",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    def __init__(out self):\n"
+     "        self.a = 3\n"
+     "        self.b = 4\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    var p = Pointer(to=r)\n"
+     "    return 0\n", 0, None),
+    # `write_string` on a frame address: the WRITER_METHODS row, which exists
+    # because `write_string` is the most tempting name in the tree to add next
+    # to the `write` that IS lowered, and adding it would pass a frame address
+    # as fd(2).
+    ("guard_write_string_on_a_frame_address",
+     "struct W:\n"
+     "    var buf: Int\n"
+     "    var n: Int\n"
+     "    def __init__(out self):\n"
+     "        self.buf = 0\n"
+     "        self.n = 0\n"
+     "def main(k: Int) -> Int:\n"
+     "    var w = W()\n"
+     "    w.write_string(\"None\")\n"
+     "    return 0\n",
+     "refuse:is a method on a Writer", None),
+    # ── (7) the CONTAINER family, which is where the audit's one wrong
+    # acceptance was ──
+    #
+    # `len` asks its operand what it is; a SUBSCRIPT, a SLICE, a membership
+    # test and a `for` loop do not — they emit the blob walk, which reads eight
+    # bytes at offset 0 and calls the result a count.  Handed a bare name the
+    # frame-holder analysis holds to be a frame ADDRESS, every one of them
+    # computed on a frame.  Measured on BOTH architectures, on a four-field
+    # struct whose fields running statements had written 11, 22, 33, 44:
+    #
+    #     return r[0]                 ->  22   (the SECOND field)
+    #     return r[1]                 ->  33   (the THIRD field)
+    #     var t = r[0:2]; return 0    ->  arm64 exit 1, x86-64 exit 0
+    #     for i in r: s = s + i       ->  arm64 99, x86-64 53
+    #
+    # Four shapes, three distinct wrong answers, and two of them DISAGREEING
+    # between the architectures.  Which field an index reaches is decided by the
+    # VALUES in the frame rather than by the index, because the bounds check
+    # compared the index against a field's value.  The four cases below are one
+    # per shape; each is checked on both backends with the same words, which is
+    # the assertion that matters most here, because two of the four wrong
+    # answers were the two architectures disagreeing.
+    ("frame_address_subscript_read",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "    var d: Int\n"
+     "    def __init__(out self):\n"
+     "        self.a = 11\n"
+     "        self.b = 22\n"
+     "        self.c = 33\n"
+     "        self.d = 44\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 11\n"
+     "    r.b = 22\n"
+     "    r.c = 33\n"
+     "    r.d = 44\n"
+     "    i = 1\n"
+     "    return r[i]\n",
+     "refuse:is a CONTAINER operation on a R FRAME ADDRESS", None),
+    # The STORE, which is the same address computation reached from
+    # `_emit_subscript_store_reg` — and `r[0] = 7` returned 11 here, i.e. it
+    # wrote through a frame as though the frame were a blob's element area.
+    ("frame_address_subscript_store",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "    var d: Int\n"
+     "    def __init__(out self):\n"
+     "        self.a = 11\n"
+     "        self.b = 22\n"
+     "        self.c = 33\n"
+     "        self.d = 44\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 11\n"
+     "    r.b = 22\n"
+     "    r.c = 33\n"
+     "    r.d = 44\n"
+     "    r[0] = 7\n"
+     "    return r.a\n",
+     "refuse:is a CONTAINER operation on a R FRAME ADDRESS", None),
+    ("frame_address_slice",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "    var d: Int\n"
+     "    def __init__(out self):\n"
+     "        self.a = 11\n"
+     "        self.b = 22\n"
+     "        self.c = 33\n"
+     "        self.d = 44\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 11\n"
+     "    r.b = 22\n"
+     "    r.c = 33\n"
+     "    r.d = 44\n"
+     "    var t = r[0:2]\n"
+     "    return 0\n",
+     "refuse:is a CONTAINER operation on a R FRAME ADDRESS", None),
+    ("frame_address_membership_test",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "    var d: Int\n"
+     "    def __init__(out self):\n"
+     "        self.a = 11\n"
+     "        self.b = 22\n"
+     "        self.c = 33\n"
+     "        self.d = 44\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 11\n"
+     "    r.b = 22\n"
+     "    r.c = 33\n"
+     "    r.d = 44\n"
+     "    if 22 in r:\n"
+     "        return 1\n"
+     "    return 0\n",
+     "refuse:is a CONTAINER operation on a R FRAME ADDRESS", None),
+    # The `for` loop, which is the one that produced a plain wrong NUMBER on
+    # both architectures and a DIFFERENT one on each: 99 and 53 for the same
+    # source.  A struct is not iterable, so there is no right answer to
+    # compare against, which is exactly what makes this shape the worst of the
+    # four — nothing downstream could have detected it.
+    ("frame_address_for_in_iteration",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "    var d: Int\n"
+     "    def __init__(out self):\n"
+     "        self.a = 11\n"
+     "        self.b = 22\n"
+     "        self.c = 33\n"
+     "        self.d = 44\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 11\n"
+     "    r.b = 22\n"
+     "    r.c = 33\n"
+     "    r.d = 44\n"
+     "    s = 0\n"
+     "    for i in r:\n"
+     "        s = s + i\n"
+     "    return s\n",
+     "refuse:is a CONTAINER operation on a R FRAME ADDRESS", None),
+    # GUARD: the same operations on a real blob, so the new refusal cannot be
+    # "everything is refused now".  A list of 11, 22, 33: `xs[1]` is 22, the
+    # sum of a three-element iteration is 66, and `22 in xs` is TRUE, so the
+    # answer is 22 + 66.
+    #
+    # The SLICE is deliberately NOT in this case, and the reason is a separate
+    # pre-existing bug that is not this one and is not fixed here: EVERY arm64
+    # slice of a list exits 1, on every bound spelling measured (`xs[0:2]`,
+    # `xs[0:3]`, `xs[1:3]`, `xs[0:1]`, `xs[1:2]`, `xs[:]`, `xs[1:]`), while
+    # x86-64 returns 0 for all seven.  A two-architecture divergence on a
+    # legitimate program, verified identical on a clean `git archive HEAD`
+    # tree, in `_emit_slice_parts`'s element-append bounds path.  It is a
+    # container lowering bug on a BLOB, not a frame-address one, so folding it
+    # in here would make this case fail for a reason that has nothing to do
+    # with what it is guarding.
+    ("guard_container_ops_on_a_real_blob",
+     "def main(k: Int) -> Int:\n"
+     "    var xs = [11, 22, 33]\n"
+     "    s = 0\n"
+     "    for i in xs:\n"
+     "        s = s + i\n"
+     "    if 22 in xs:\n"
+     "        return xs[1] + s\n"
+     "    return 0\n", 88, None),
+    # GUARD: a container operation on a FRAME SLOT whose declared type is a
+    # list.  `h.xs` is a 64-bit FIELD, not an address, so the blob reading of
+    # it is the only reading there is — this is the distinction the refusal
+    # turns on, and `struct_frame_representable` refuses a container DEFAULT,
+    # so the field is given its value by a running statement here.
+    ("guard_container_op_on_a_declared_list_field",
+     "struct H:\n"
+     "    var xs: List[Int]\n"
+     "    var n: Int\n"
+     "    def __init__(out self):\n"
+     "        self.n = 0\n"
+     "    def at(self, i: Int) -> Int:\n"
+     "        return self.xs[i]\n"
+     "    def size(self) -> Int:\n"
+     "        s = 0\n"
+     "        for i in self.xs:\n"
+     "            s = s + i\n"
+     "        return s\n"
+     "def main(k: Int) -> Int:\n"
+     "    var h = H()\n"
+     "    h.xs = [11, 22, 33]\n"
+     "    return h.at(1) + h.size()\n", 88, None),
+]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -5355,7 +5865,8 @@ def main():
                   + CONSTRUCTION_CASES + CONSTRUCTION_REFUSALS
                   + POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
                   + WAVE6_TRUTHY_CASES
-                  + WAVE6_NAME_CASES + [X86_ONLY_1SLOT_BUG_CASE])
+                  + WAVE6_NAME_CASES + WAVE7_G2_CASES
+                  + [X86_ONLY_1SLOT_BUG_CASE])
     selected = [c for c in everything if not args.cases or c[0] in args.cases]
     known = {c[0] for c in everything}
     if args.cases and len(selected) != len(args.cases):

@@ -1686,8 +1686,11 @@ class X86_64Codegen:
         operand = args[0]
         how = M.len_operand_lowering(self._expr_str_kind(operand), operand)
         if how is None:
-            raise CodegenError(
-                M.len_refusal(self._expr_str_kind(operand), M.spelled(operand)))
+            slot = self._slot_declared_annotation(operand)
+            raise CodegenError(M.len_refusal(
+                self._expr_str_kind(operand), M.spelled(operand),
+                slot[0] if slot else None,
+                slot[1] if slot else None))
         if how == M.LEN_FROM_STRLEN:
             self._emit_expr(operand)          # RAX = the char *
             # RDI, not RAX: an expression leaves its value in RAX and the first
@@ -2631,6 +2634,30 @@ class X86_64Codegen:
             return obj.name in self._string_vars
         return False
 
+    def _refuse_frame_container_operand(self, op: str, obj) -> None:
+        """Raise if `obj` is a BARE NAME holding a frame address.
+
+        The container family reads offset 0 of its operand and calls it a
+        count, and it is the one lowering that never asked what the operand
+        was — so a frame address went straight into the blob walk and `r[0]`
+        returned the struct's second field.  See
+        `model.frame_container_operand_refusal` for the measurement and
+        `model.FRAME_KIND` for why the kind alone does not stop it.
+
+        BARE NAME ONLY, deliberately and for the same reason
+        `build._refuse_holder_use` is: `h.x` is a 64-bit FIELD and reading it
+        as a blob is what a declared `List` field is FOR, while the address
+        itself is the thing with no container reading.  The table is the
+        frame-holder analysis's own, published per function by
+        `formal/build.py`, so this asks the same question the hand-off checks
+        ask rather than re-deriving what a name holds.
+        """
+        if not isinstance(obj, F.IdentExpr) or obj.name not in self._frame_holders:
+            return
+        cands = self._frame_candidates.get(obj.name) or ()
+        raise CodegenError(M.frame_container_operand_refusal(
+            op, M.spelled(obj), [st.name for st in cands]))
+
     def _emit_subscript_addr(self, e: F.SubscriptExpr) -> None:
         """RAX = the ADDRESS of `obj[index]` (not its value).
 
@@ -2648,6 +2675,7 @@ class X86_64Codegen:
         the first. Same language, two architectures, one crashing and one
         confidently wrong. `model.multi_index_refusal_for` is the shared text,
         so the two cannot drift again."""
+        self._refuse_frame_container_operand("a subscript", e.obj)
         if e.attrs is not None:
             raise CodegenError(
                 "type-parameter subscript [...] is not supported on the "
@@ -2918,6 +2946,11 @@ class X86_64Codegen:
                     self._expr_str_kind(right)) is not None):
             self._emit_str_membership(left, right, invert=invert)
             return
+        # A string haystack is answered above and a blob one is refused here.
+        # A FRAME is neither, and the blob scan below would read its first
+        # field as the count — see `model.frame_container_operand_refusal` for
+        # the measurement, which is a wrong answer rather than a crash.
+        self._refuse_frame_container_operand("a membership test", right)
         self._emit_expr(left)
         self._push_slot(Reg.RAX)                   # needle
         self._emit_expr(right)
@@ -2974,6 +3007,11 @@ class X86_64Codegen:
                 raise CodegenError(
                     f"unsupported for-loop iterable {type(it).__name__} on "
                     f"the formal x86-64 path")
+            # The blob walk below reads the count at offset 0 of the iterable
+            # and then elements at `base + 8 + 8k`, so a FRAME ADDRESS here
+            # iterates the struct's fields.  Measured on both architectures:
+            # summing a four-field struct gave 99 on arm64 and 53 on x86-64.
+            self._refuse_frame_container_operand("a for-in iteration", it)
             from mojo.middle.boundnames import _lbn_target_names
             tnames = _lbn_target_names(stmt.target) \
                 if isinstance(stmt.target, str) else []
@@ -3829,6 +3867,7 @@ class X86_64Codegen:
         both backends, `s = "abcde"; printf("[%s]", s[1:])` died with SIGSEGV
         (exit 139). `model.string_slice_refusal` holds the message and the
         argument for lowering the suffix case later."""
+        self._refuse_frame_container_operand("a slice", obj)
         sreason = M.string_slice_refusal(
             self._expr_str_kind(obj), M.spelled(obj))
         if sreason is not None:
@@ -4141,10 +4180,11 @@ class X86_64Codegen:
         """What every local of `fn` holds, from its source alone.
 
         The decision is model.ValueKinds' (it has to come out the same on both
-        backends); this supplies the three hooks that are this backend's: the
+        backends); this supplies the hooks that are this backend's: the
         annotation vocabularies from formal.types, a callee's kind from its
-        declared return type or its return statements, and the local-slot key
-        for a field chain."""
+        declared return type or its return statements, the local-slot key
+        for a field chain, and — since a field's DECLARED type is a fact about
+        the struct rather than about this function — `_declared_kind` below."""
         return self._vkinds_for(fn.name, fn, frozenset())
 
     def _vkinds_for(self, name, fn, stack) -> M.ValueKinds:
@@ -4161,9 +4201,161 @@ class X86_64Codegen:
             int_names=TYPE_NAMES,
             string_names=STRING_TYPE_NAMES,
             func_kind=lambda callee: self._callee_kind(callee, stack | {name}),
-            slot_key=_member_slot_key)
+            slot_key=_member_slot_key,
+            declared_kind=self._declared_kind_for(name))
         self._vkinds_cache[name] = vk
         return vk
+
+    def _declared_kind_for(self, fn_name):
+        """`_declared_kind` bound to the function `fn_name`, for `ValueKinds`.
+
+        Three shapes, and the third is the one that needed measuring.  A METHOD
+        of a struct: `self.<field>` is that struct's field and `self` itself is
+        the struct's only word when the struct has one field, so both are
+        decided by `model.method_owner_struct` finding the owner from the
+        lifted name.  A FRAME SLOT: `h.<field>` is a load at `base + 8k` out of
+        a frame whose layout `formal/build.py` settled, so the holder's
+        candidate structs are the declaration, and the agree-or-refuse in
+        `model.frame_slot_field_kind` is what says they agree.
+
+        The third shape is the CONSTRUCTOR of a one-word struct bound to a
+        local: `r = B()` produces B's only word, so `len(r)` is the same
+        question as `len(self.<f>)` asked one level out.  All three were
+        answered "a word, therefore an integer" before this hook existed, so
+        `var t = self.xs; len(t)` refused with "an integer has no length"
+        about a list — a refusal whose reason is false, and one that sends the
+        reader after an annotation which is already on the declaration line.
+        A `None` from the struct table leaves the old default in place, so
+        nothing that used to decide still decides differently.
+        """
+        owner = M.method_owner_struct(self._structs, fn_name)
+        # BOUND, not read off `self` at query time: `_vkinds_cache` is keyed by
+        # name and lives for the whole compile, so a closure that reached back
+        # into `self._frame_candidates` would answer about whichever function
+        # happened to be emitting when it was asked. The table is per function
+        # and is fixed before `_scan_value_kinds` runs (see `_emit_function`).
+        frame_candidates = dict(self._frame_candidates)
+        structs = self._structs
+
+        def kind_of_slot(expr):
+            if isinstance(expr, F.IdentExpr):
+                name = expr.name
+                if owner is not None and name in M.struct_receivers(owner):
+                    return M.one_word_receiver_kind(
+                        owner, TYPE_NAMES, STRING_TYPE_NAMES, structs)
+                cands = frame_candidates.get(name)
+                if cands:
+                    return M.one_word_receiver_kind(
+                        cands[0], TYPE_NAMES, STRING_TYPE_NAMES, structs)
+                return None
+            if isinstance(expr, F.MemberExpr):
+                # ONE level only.  `a.b.c` is a load of a load and the outer
+                # field's declared type is the type of the WORD, not of
+                # whatever that word points at, so a chain says nothing here.
+                if not isinstance(expr.obj, F.IdentExpr):
+                    return None
+                root = expr.obj.name
+                if owner is not None and root in M.struct_receivers(owner):
+                    cands = [owner]
+                else:
+                    cands = frame_candidates.get(root)
+                if not cands:
+                    return None
+                return M.frame_slot_field_kind(
+                    cands, expr.member, TYPE_NAMES, STRING_TYPE_NAMES,
+                    structs)
+            if isinstance(expr, F.CallExpr) and isinstance(expr.func,
+                                                            F.IdentExpr):
+                return M.one_word_receiver_kind(
+                    structs.get(expr.func.name), TYPE_NAMES,
+                    STRING_TYPE_NAMES, structs)
+            return None
+
+        return kind_of_slot
+
+    def _slot_declared_annotation(self, expr):
+        """`(annotation, kind)` a frame slot's field DECLARES, or None.
+
+        The refusal half of `_declared_kind_for`: that one answers "what does
+        this slot hold" and returns None when the VALUE is not established,
+        which is the right answer for a lowering and the wrong one for a
+        message — "the source does not say what this operand holds" is false
+        about a field that says `var xs: List[Int]` two lines above.  So the
+        annotation is reported separately, ungated by the value, and
+        `model.len_refusal` decides what to do with it.  Same shapes and the
+        same one-level limit as the kind hook; see there for why.
+
+        The fourth shape is a bare NAME that IS a one-word struct's whole value:
+        the receiver of a method of a single-field struct, and a local bound to
+        such a struct's constructor.  `self.<field>` was rewritten to `self` by
+        `_rewrite_self_fields` long before this runs, so without this arm the
+        one-field list-backed struct — the shape 30 stdlib files are blocked on
+        at `binary_heap.mojo` — is reported with no annotation at all, and the
+        message is the "the source does not say" one that is false about
+        `var _data: List[Self.T]`.
+        """
+        owner = M.method_owner_struct(
+            self._structs, getattr(self._cur_fn, "name", None))
+        if isinstance(expr, F.IdentExpr):
+            if owner is not None and expr.name in M.struct_receivers(owner):
+                return self._one_word_slot_ann([owner])
+            cands = self._frame_candidates.get(expr.name)
+            if cands:
+                return self._one_word_slot_ann(list(cands))
+            # A LOCAL bound to a one-word struct's constructor: `r = B()`, so
+            # the name IS the struct's one field.  Found by walking the
+            # function's own bindings rather than by guessing from the name —
+            # the same walk and the same rule as `_one_word_field_map` in
+            # formal/build.py, and it has to agree with it, because that is
+            # what turned `r.<field>` into `r` in the first place.
+            bound = None
+            for node in M.iter_nodes(getattr(self._cur_fn, "body", None)):
+                target = value = None
+                if isinstance(node, F.VarDecl):
+                    target, value = node.name, node.value
+                elif isinstance(node, F.AssignStmt) and isinstance(
+                        node.target, F.IdentExpr):
+                    target, value = node.target.name, node.value
+                if (target == expr.name and isinstance(value, F.CallExpr)
+                        and isinstance(value.func, F.IdentExpr)):
+                    bound = self._structs.get(value.func.name)
+            return self._one_word_slot_ann([bound] if bound else None)
+        if not isinstance(expr, F.MemberExpr) \
+                or not isinstance(expr.obj, F.IdentExpr):
+            return None
+        root = expr.obj.name
+        cands = [owner] if (owner is not None
+                           and root in M.struct_receivers(owner)) \
+            else self._frame_candidates.get(root)
+        if not cands:
+            return None
+        ann = M.frame_slot_declared_annotation(cands, expr.member)
+        if ann is None:
+            return None
+        return self._slot_ann_pair(ann)
+
+    def _one_word_slot_ann(self, cands):
+        """`(annotation, kind)` for a struct that IS its one field, or None."""
+        if not cands or M.struct_field_count(cands[0]) != 1:
+            return None
+        only = M.struct_sole_field_name(cands[0])
+        if only is None:
+            return None
+        ann = M.frame_slot_declared_annotation(cands, only)
+        return self._slot_ann_pair(ann) if ann is not None else None
+
+    def _slot_ann_pair(self, ann):
+        """`(annotation, kind)`, with the kind UNGATED by the value.
+
+        Ungated because `len_refusal` needs it to choose between the container
+        row, the string row and the integer row, and the gate that suppressed
+        the kind from the lowering decision is the reason the refusal is being
+        reached at all.
+        """
+        if ann is None:
+            return None
+        return (ann, M.declared_type_kind(ann, TYPE_NAMES, STRING_TYPE_NAMES,
+                                          self._structs))
 
     def _callee_kind(self, name, stack):
         """What a call to the local function `name` produces, or None."""

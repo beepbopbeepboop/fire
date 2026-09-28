@@ -519,31 +519,62 @@ int mojo_is_registered_list(int64_t addr) {
  * "high address ⇒ string", and _mojo_repr_list's registered-list probe)
  * already discriminates these two shapes everywhere else at runtime:
  * pointer-shaped AND NOT a live registered MojoList ⇒ treat as string.
- * Small values (<65536: None/small ints/bools) are not strings.
+ * Small values (<65536: None/small ints/bools) are not strings. */
+
+/* Is this boxed int64_t plausibly a `char *`?
  *
- * MUST agree with _mojo_tagged_addr_range_ok (defined below, forward-
- * declared here): that predicate's floor is 2 GiB, not 64 KiB, specifically
- * to reject the 31-bit `zlib.crc32(name) & 0x7fffffff` struct type-tags a
- * compiled `type(node)` yields. A `v > 65536` test here classified every
- * such tag as "definitely a string pointer" while the other predicate
- * classified the same value as "definitely not a pointer" — the
- * dereference below then crashed on any self-hosted struct type-tag in
- * the 64 KiB..2 GiB range. See CRASH.md.
+ * DELIBERATELY the RANGE-only predicate (`_mojo_tagged_addr_range_ok`,
+ * defined below, forward-declared here), not the fuller `_mojo_tagged_addr_ok`
+ * the struct-box readers use. That fuller predicate answers a different
+ * question — "may I read an `int64_t __mojo_type_id` at offset 0 of this?" —
+ * and two of its extra checks are properties of THAT read rather than of
+ * pointers in general:
  *
- * Deliberately the RANGE-only predicate, not the fuller `_mojo_tagged_
- * addr_ok` (which additionally requires `malloc_usable_size(addr) >= 8`,
- * for a DIFFERENT caller's DIFFERENT bug — see that function's own
- * docstring): a `char *` this runtime hands back as a genuine string is
- * just as often a STATIC string-literal/interned-pool address (this
- * codegen's `_slit_NNNN` globals) as a heap allocation, and
- * `malloc_size()` on a non-heap pointer returns 0 on every platform this
- * runtime targets — which made `mojo_boxed_is_str` reject every interned
- * string literal reaching it as a boxed int64_t, silently falling to the
- * "must be a plain integer" branch below. Real repro:
- * `lambda k, d=d: d[k]` called with a string-literal argument stringified
- * its own ADDRESS via `mojo_str_from_int` instead of using the string
- * itself, so `d[k]` looked up a garbage decimal key and silently returned
- * the not-found default instead of raising or finding the real entry. */
+ *   - `u & 7`, 8-byte alignment, because the tag is an int64_t at offset 0.
+ *   - `MOJO_MALLOC_USABLE_SIZE(u) >= sizeof(int64_t)`, because that read
+ *     must not run off the end of the allocation holding the address.
+ *
+ * A codegen-emitted string LITERAL is a `char[N]` in __TEXT/__rodata: it is
+ * not a malloc allocation at all, so `malloc_size` returns 0 for it, and 8-
+ * byte alignment is a property of the C compiler's section layout, not
+ * something the emitted `static char * _slit_N = "bb";` (module_gen.py's
+ * pool) can rely on. Measured on that exact declaration shape in a
+ * standalone C file, at both -O0 and -O2: "a" at &7==7, "bb" at 1, "ccc" at
+ * 4, "dddd" at 0, "x" at 3 — i.e. mostly NOT 8-aligned, and differently per
+ * build. The full pipeline's pool has so far come out aligned in every
+ * variant tried (20+ first-key literals × pool padding, each probed at
+ * runtime), so the alignment half is LATENT rather than firing today — but
+ * the malloc_usable_size half, which upstream moved out of this predicate,
+ * was exactly this bug: it trips on EVERY literal, and
+ * `sorted(["bb","a","ccc"], key=lambda s: s)` printed `['bb','a','ccc']`
+ * (the comparator saw three EQUAL keys, so the sort was a no-op) and
+ * `lambda k, d=d: d[k]` called as `f("a")` printed 0. Requiring either
+ * property here demotes a string literal to "not a string", and that is a
+ * SILENT wrong answer rather than a crash — `mojo_cstr_or_int_str` falls
+ * through to `mojo_str_from_int`, so a dict keyed by a literal is looked up
+ * by the decimal of its own address and silently yields the not-found
+ * default. Two checks that are half of a coin flip per build are two checks
+ * that should not be here at all.
+ *
+ * What IS shared with the struct predicate — and is the reason this is a
+ * range test at all — is that a genuine pointer on every platform this
+ * runtime targets sits above 2 GiB, which is what rejects None, small ints,
+ * bools and the 31-bit `zlib.crc32(name) & 0x7fffffff` struct type-tags a
+ * compiled `type(node)` yields in place of a class object. A `v > 65536`
+ * test here classified every such tag as "definitely a string pointer" and
+ * handed it to strlen — CRASH.md's segfault. The upper bound is the struct
+ * predicate's canonical-userspace ceiling (2^47), so a garbage 64-bit word
+ * is not handed to strlen either.
+ *
+ * Being looser here than the struct path is not a new laxity: it accepts
+ * every value the struct path's range test accepts, and is the same
+ * discriminator mojo_str() already applies (any value above 64 KiB is a
+ * `char *`), just with the 2 GiB floor and 2^47 ceiling that the CRASH.md
+ * analysis showed are required.
+ *
+ * Struct-valued boxes (mojo_read_type_tag / mojo_read_type_tag_safe,
+ * isinstance) keep the strict predicate: they are the ones that dereference.
+ */
 static int _mojo_tagged_addr_range_ok(int64_t addr);
 
 int mojo_boxed_is_str(int64_t v) {
@@ -4386,38 +4417,54 @@ int mojo_isinstance_p(int64_t obj, int type_id) {
  * always took the "not this type" branch — found via find_imports() (used by
  * `mojo --dump`'s own do_imports resolution) never recognizing any import
  * statement inside a nested function/if/try block once self-hosted. */
-/* Can `addr` be the address of a codegen-emitted struct (i.e. is it safe
- * to read an `int64_t __mojo_type_id` from it)? Three independent
- * requirements, all of which a genuine struct pointer meets:
+/* The RANGE half of "may I read an `int64_t __mojo_type_id` from this
+ * address?" — and, on its own, the WHOLE of "does this boxed int64_t look
+ * like a `char *`?" (mojo_boxed_is_str, above), which is why nothing here is
+ * a property of the tag read. Two requirements, both met by any genuine
+ * pointer on every platform this runtime targets:
  *
  *   - at least 2 GiB: below that live None, small ints, bools, and the
  *     31-bit `zlib.crc32(name) & 0x7fffffff` struct type-tags themselves,
  *     which a compiled `type(node)` yields in place of a class object;
- *   - 8-byte aligned: `__mojo_type_id` is an int64_t at offset 0, and
- *     every allocator this runtime uses returns 16-byte-aligned blocks,
- *     so a misaligned value is definitionally not a struct pointer;
- *   - canonical: below 2^47, the top of the userspace half on every
- *     platform this runtime targets.
+ *   - canonical: below 2^47, the top of the userspace half, so a garbage
+ *     64-bit word is neither dereferenced nor handed to strlen.
  *
- * The alignment and upper-bound checks were added after the isinstance
- * widening (see mojo_isinstance) let the compiler's own recursive AST
- * scans reach values they had never been handed before: mojo_compiler.py's
- * `_scan_yield_bearing` walked into the sentinel 0x00007fffffffffff — past
- * the low guard, unaligned, and at the very last byte of the address
- * space — and the bare dereference segfaulted. Answering "not a tagged
- * struct" is both correct and non-fatal. */
+ * The upper-bound check was added after the isinstance widening (see
+ * mojo_isinstance) let the compiler's own recursive AST scans reach values
+ * they had never been handed before: mojo_compiler.py's `_scan_yield_bearing`
+ * walked into the sentinel 0x00007fffffffffff — past the low guard and at
+ * the very last byte of the address space. Answering "not a tagged struct"
+ * (and not a string) is both correct and non-fatal. */
 static int _mojo_tagged_addr_range_ok(int64_t addr)
 {
     uint64_t u = (uint64_t)addr;
     if (u < 0x80000000ULL) return 0;
     if (u >= 0x0000800000000000ULL) return 0;
-    if (u & 7ULL) return 0;
     return 1;
 }
 
+/* Can `addr` be the address of a codegen-emitted struct (i.e. is it safe
+ * to read an `int64_t __mojo_type_id` from it)? The range test above, plus
+ * two further requirements of THAT READ — properties of reading an int64_t
+ * at offset 0, not of pointers in general, and so deliberately not shared
+ * with the string path:
+ *
+ *   - 8-byte aligned, because `__mojo_type_id` is an int64_t at offset 0
+ *     and every allocator this runtime uses returns 16-byte-aligned blocks,
+ *     so a misaligned value is definitionally not a struct pointer (this is
+ *     also what let `_scan_yield_bearing`'s walk into the unaligned
+ *     0x00007fffffffffff sentinel segfault before the range ceiling above
+ *     existed);
+ *   - an allocation of at least 8 bytes (below), so the read cannot run off
+ *     the end of it.
+ *
+ * A codegen string literal satisfies NEITHER extra check, which is why
+ * mojo_boxed_is_str above uses the range predicate alone. */
 static int _mojo_tagged_addr_ok(int64_t addr)
 {
+    uint64_t u = (uint64_t)addr;
     if (!_mojo_tagged_addr_range_ok(addr)) return 0;
+    if (u & 7ULL) return 0;
 #if MOJO_HAVE_MALLOC_USABLE_SIZE
     /* The range/alignment checks above only rule out small-int/None/
      * struct-type-tag values — they do NOT guarantee `addr` points at an

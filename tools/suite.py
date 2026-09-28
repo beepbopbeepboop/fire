@@ -355,6 +355,25 @@ test('interporacle', [PY, 'test_interp_oracle.py'], cache=True,
      extra=['test_interp_oracle.py', 'fire_compiler.py', 'myinterpreter.py',
             'fire.py', 'fire_main.py'],
      desc='the interpreter oracle itself, diffed against CPython')
+# Every `formal/examples/*.mojo` parses. Registered in `check` — not in the
+# formal bucket its files feed — because this is a PARSER invariant whose
+# failure mode is invisible from where the files are consumed.
+#
+# `19bc0dd` (merged in as part of ae9877d) made a decorator's parenthesised
+# argument list a real parse where it had been skipped token by token. That
+# is the right fix — `@deco` and `@deco(x)` had become indistinguishable, and
+# every parameterised decorator was inert — but it also imposed Mojo
+# call-argument syntax on a decorator whose arguments are not call arguments.
+# `@spec(fact_spec; fact_spec 0 = 1; ...)` is a `;`-separated specification,
+# so 4 of the 45 examples (`fact`, `fib`, `sum`, `count`) stopped parsing. `make check` stayed green
+# throughout: the only consumers of these files are the `formal*` steps, the
+# most expensive tests in the repo, and the only visible symptom was a
+# coverage number that had quietly gone 41/4/0 -> 26/6/13. A 0.1s,
+# toolchain-free, `expect`-free structural check turns the next one into a
+# `check` failure. See test_examples_parse.py's docstring.
+test('examples-parse', [PY, 'test_examples_parse.py'], cache=True,
+     extra=['test_examples_parse.py', 'fire_compiler.py'],
+     desc='every formal/examples/*.mojo parses; decorator arg shapes distinct')
 
 test('preflight', [PY, '-c',
                    'import fire_compiler, gimple_codegen; '
@@ -603,7 +622,7 @@ BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
     'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
-              'gimplegenerators', 'interporacle'],
+              'gimplegenerators', 'interporacle', 'examples-parse'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps

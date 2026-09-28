@@ -494,6 +494,45 @@ INT_KIND = "int"
 STR_KIND = "str"
 LIST_PREFIX = "list"
 
+# A FRAME ADDRESS, as a kind rather than as prose.  It is the kind of a slot
+# whose agreed declared type is a struct of this module whose receiver is the
+# address of a frame of 8-byte slots (`struct_is_framed`), and it is a kind
+# because the questions a kind is asked are exactly the questions a frame
+# address answers differently from a plain word: `len` cannot read a count out
+# of it, a string method cannot read bytes through it, and truthiness IS the
+# identity test because a frame is never mapped at zero.
+#
+# It was not a kind before, and that is the whole of the wrong refusal it
+# closes: with the slot unclassified, `len(self.inner)` said "the source does
+# not say what this operand holds … Annotate it (`x: String`)" about a field
+# declared `inner: Inner`, which is a frame address whose offset 0 is the
+# struct's FIRST FIELD.  A refusal that is right for the wrong reason sends the
+# next reader after a non-bug; this one sends them to annotate a field that is
+# already annotated.
+#
+# IT IS NOT ENOUGH, on its own, and the reason is the largest hole this audit
+# found: a kind is consulted by the operations that ASK for one, and the
+# CONTAINER operations do not ask.  `r[i]`, `r[a:b]`, `x in r` and
+# `for i in r` all take a base expression and emit the blob walk — read the
+# count at offset 0, bounds-check against it, read elements at `base + 8 + 8k`
+# — without ever consulting `ValueKinds`, because a blob's layout is the
+# emitter's business and the emitter already knows the layout.  Handed a bare
+# name that the frame-holder analysis says is a frame ADDRESS, every one of
+# them therefore computed on a frame.  Measured on BOTH architectures, on a
+# four-field struct with `a=11, b=22, c=33, d=44` written by running
+# statements:
+#
+#     return r[0]                     →  22   (the SECOND field)
+#     return r[1]                     →  33   (the THIRD field)
+#     var t = r[0:2]; return 0        →  arm64 exit 1, x86-64 exit 0
+#     for i in r: s = s + i           →  arm64 99, x86-64 53
+#
+# Two of those are numbers nobody wrote, and two DISAGREE between the
+# architectures, which is the whole of the badness at once: plausible, silent,
+# and not one language.  `frame_container_operand_refusal` below is the
+# decision; the kind is the documentation of it.
+FRAME_KIND = "frame"
+
 
 # ── Calls that are not calls to a symbol ──────────────────────────────────
 #
@@ -929,7 +968,8 @@ def lowers_to_counted_blob(expr) -> bool:
     return False
 
 
-def len_refusal(kind, spelled: str) -> str | None:
+def len_refusal(kind, spelled: str, slot_ann: str = None,
+                 slot_kind: str = None) -> str | None:
     """Why `len({spelled})` cannot be lowered, or None when it can.
 
     One message for both backends, and it says which of the two things is
@@ -940,14 +980,49 @@ def len_refusal(kind, spelled: str) -> str | None:
         length;
       * a blob's length is its count field, so an int has no such field and
         reading offset 0 of it is a word, not a count;
+      * a FRAME ADDRESS is the case that is most worth its own sentence,
+        because the number it would produce is the most plausible-looking one
+        in the whole family: offset 0 of a frame is the struct's FIRST FIELD,
+        so `len(self.inner)` over a two-field struct returns that field's value
+        — a number, of the right magnitude, meaning nothing. Before
+        `FRAME_KIND` existed this case was filed under "the source does not
+        say", which is FALSE about a declared field, and told the reader to
+        annotate a field that is already annotated two lines above;
+      * a DECLARED container field is `frame_slot_value_refusal`, and the
+        annotation is why: the type is settled and the VALUE is not;
       * an unclassified operand is the case that used to produce a number. It
         gets its own sentence, because it is the one a reader has to act on:
         annotate the name, or bind it to something this path can see the type
         of.
+
+    `slot_ann` / `slot_kind` are the DECLARED annotation of the operand's field
+    and the kind that annotation gives, UNGATED by whether the slot's value is
+    established — they are what the `(B2)` row quotes, and the gate in
+    `struct_field_kind` is what suppressed the kind from the lowering decision.
+    Both are PARAMETERS rather than things derived here because answering them
+    needs the struct table and the holder's candidate list, which live on the
+    backend; `frame_slot_declared_annotation` turns the candidates into the one
+    agreed annotation.
     """
     how = len_operand_lowering(kind)
     if how is not None:
         return None
+    if slot_ann is not None:
+        slot = frame_slot_value_refusal(spelled, slot_ann, slot_kind)
+        if slot is not None:
+            return slot
+    if kind == FRAME_KIND:
+        return (
+            f"len({spelled}) is len() of a FRAME ADDRESS — the address of a "
+            f"block of 8-byte slots that is one struct's fields in declaration "
+            f"order. There is no count anywhere in it: a blob's count is a "
+            f"header word the blob itself carries, and a frame has no header. "
+            f"Reading 8 bytes at offset 0 of a frame does not invent a length, "
+            f"it reads the FIRST FIELD's value and calls it a count — which is "
+            f"why the type this slot has was established (a struct of this "
+            f"module whose receiver is a frame) before this refusal was "
+            f"chosen. Read the field you mean: `len(self.xs)` where the field "
+            f"is a list, or return the count from the object that has one")
     if kind is None:
         return (
             f"len({spelled}) — the source does not say what this operand holds, "
@@ -973,6 +1048,62 @@ def len_refusal(kind, spelled: str) -> str | None:
         f"over its bytes to the NUL and a list's is the count field at offset "
         f"0 of its blob; nothing else here carries one, and returning the word "
         f"itself would be a plausible-looking wrong number")
+
+
+def frame_container_operand_refusal(op: str, spelled: str, struct_names):
+    """Why a CONTAINER operation on a FRAME ADDRESS is wrong. Always a refusal.
+
+    The container family — `base[i]`, `base[a:b]`, `x in base`, `for x in
+    base` — is the one that reads offset 0 of its operand and calls it a count,
+    and it is the one that did not ask what the operand was.  `len` asks, and is
+    refused by `frame_receiver_escape_refusal`; a subscript does not ask, so a
+    bare name the frame-holder analysis holds to be a frame address went
+    straight into the blob walk.  Measured on BOTH architectures, on a
+    four-field struct whose four fields running statements had written
+    11, 22, 33, 44:
+
+        return r[0]                ->  22    (the SECOND field)
+        return r[1]                ->  33    (the THIRD field)
+        var t = r[0:2]; return 0   ->  arm64 exit 1, x86-64 exit 0
+        for i in r: s = s + i      ->  arm64 99, x86-64 53
+
+    Four shapes, three distinct wrong answers, and one pair of them disagreeing
+    between the architectures — which is the whole of the badness at once.  The
+    numbers are not off by a little: `r[0]` returned a FIELD, because the count
+    it bounds-checked against was another field, so which field an index reaches
+    is decided by the values in the frame rather than by the index.
+
+    The refusal is unconditional — there is no kind under which this is right,
+    and a function that could return None would be a hole for the next caller to
+    fall through.  A frame is a block of 8-byte slots in declaration order; a
+    blob is a count word followed by elements.  They have no common reading, and
+    the coincidence that makes a one-word struct work (`struct_fits_one_word`:
+    the receiver IS the field, so there is no frame) is not available to a
+    MULTI-field struct, which is the only kind this fires for.
+
+    `op` names the operation, because the reader needs to know which of the four
+    sites to look at and the two architectures reach this from different code.
+    """
+    who = ", ".join(struct_names) if struct_names else "this struct"
+    return (
+        f"{spelled} is a CONTAINER operation on a {who} FRAME ADDRESS, and a "
+        f"frame is not a container. Every one of these lowerings starts by "
+        f"reading eight bytes at offset 0 of its operand and calling the result "
+        f"a COUNT — that is the blob's header word, and a frame has no header: "
+        f"offset 0 of a frame is the struct's FIRST FIELD. Everything after "
+        f"that is decided by those eight bytes rather than by the source: the "
+        f"bounds check compares the index against a field's value, and the "
+        f"element walk reads `base + 8 + 8k`, so `r[0]` returns the SECOND "
+        f"field. Measured on BOTH architectures, on a four-field struct with "
+        f"11, 22, 33, 44 written into it: `r[0]` returned 22 and `r[1]` "
+        f"returned 33, and a slice of it exited 1 on arm64 and 0 on x86-64 — "
+        f"two numbers nobody wrote, and a disagreement between the "
+        f"architectures about the same source. A struct's value on this path "
+        f"has no subscript, no slice, no membership test and no iteration; "
+        f"read the field you mean (`r.a`), or iterate a list you built. A "
+        f"ONE-word struct is a different case and is not this one: its receiver "
+        f"IS its only field, so there is no frame and the container reading of "
+        f"it is the only reading there is")
 
 
 def string_operand_is_string(kind) -> bool:
@@ -1342,6 +1473,400 @@ def truthy_lowering(kind, expr=None) -> str:
     """
     how = len_operand_lowering(kind, expr)
     return how if how is not None else TRUTHY_NONZERO
+
+
+# ── THE KIND OF A FRAME SLOT, from the DECLARED type of the field ──────────
+#
+# THE GAP THIS SECTION CLOSES, measured on both architectures before any of it
+# existed.  `len` used to be asked "what KIND is this operand" and the answer
+# came from one of three places, NONE of which is a declaration:
+#
+#   * a parameter with no annotation is an INT (a word is an int);
+#   * a local bound to a literal takes the literal's kind;
+#   * anything else is None, and None is a REFUSAL.
+#
+# A field read is none of those three, so `self.<field>` classified as None and
+# `len(self.<field>)` was refused — with a message that says the source does not
+# say what the operand holds, and tells the reader to ANNOTATE IT.  That message
+# is false about a declared field, and it was false three ways, once per
+# declared type, all on programs that build and print nothing at all:
+#
+#     struct R:
+#         var xs: List[Int]        # len(self.xs)  → "the source does not say"
+#         var s:  String           # len(self.s)   → "the source does not say"
+#         var n:  Int              # len(self.n)   → "the source does not say"
+#
+# The first two are not merely badly REFUSED, they are ANSWERABLE and were
+# refused: a list field's length is its count field and a `String` field's is a
+# `strlen` over its bytes, which is the same two rows `len_operand_lowering`
+# already has.  The third is a refusal whose REASON is wrong even as a refusal —
+# the source says `Int`, so the integer row is the true one, and a reader sent
+# to the annotation paragraph has been told the field is untyped when the
+# declaration is two lines above.
+#
+# So D2's `frame_field_type_candidates` — the agree-or-refuse rule for a
+# DECLARED type, which asks exactly this question and answers it with the
+# evidence rows every refusal in this file quotes — had no reader on the KIND
+# side at all.  It decided where a frame's NESTED bytes live and nothing ever
+# asked it what a slot's word HOLDS.  These three functions are that reader.
+# Nothing here re-derives the rule: `struct_field_declared_type` and
+# `field_type_rows` are D2's, the rule is "use a declared type only when EVERY
+# binding agrees, and an absent answer IS the answer", and the third function
+# is the one place a caller that has a SET of candidates asks.
+
+# The declared type NAMES this path can turn into a kind, and the decision for
+# each.  A name not here yields None rather than a guess, and the shape of the
+# refusal is then the same one an unclassified operand gets.
+#
+# `Dict` is here because `F.DictExpr` already classifies as `LIST_PREFIX` and
+# `_emit_dict` already lays the blob out as `[count_pairs][k0][v0]…`: the count
+# is the first word for a dict exactly as it is for a list, so leaving a
+# DECLARED dict field out would make `len(d)` answerable for a dict literal and
+# refused for a dict field, which is a difference in how the field was spelled
+# rather than in what it holds.
+#
+# IT IS NOT REACHABLE FROM A FIELD, and `struct_field_kind` is where that is
+# enforced: a container default is refused by `struct_frame_representable`
+# ("the default is not a literal"), so a field's slot never holds one of these
+# on this path.  The name is kept because it is the vocabulary the same
+# question asks elsewhere — a `var xs: List[Int]` ANNOTATION is a real
+# declaration of what the slot is FOR, and the refusal below quotes it.
+BLOB_TYPE_CTORS = frozenset({
+    "List", "list", "Tuple", "tuple", "Set", "set", "Dict", "dict",
+})
+
+
+def frame_slot_value_refusal(spelled: str, ann, slot_kind) -> str | None:
+    """Why a FRAME SLOT's declared type is not enough to answer `len`, or None.
+
+    The fourth row `len_refusal` can be asked for, and the one this whole
+    section exists to supply.  A field read whose declared type this path
+    recognises still cannot be lowered, and the reason is a property of the
+    CONSTRUCTOR rather than of the annotation: `S()` does not run `__init__`
+    (premise (B2)), so a fresh instance's slot holds the class-level default,
+    and a field with no class-level default is a word of zeros.  For a container
+    that means the count word `len` wants to read is at address 0; for a string
+    it means libc would be asked to walk the bytes at address 0.
+
+    Measured, on both architectures, with the kind claimed from the annotation
+    alone and nothing else changed:
+
+        struct R:
+            var xs: List[Int]
+            var n: Int
+            def size(self) -> Int:
+                return len(self.xs)
+        def main(k: Int) -> Int:
+            var r = R()          # __init__ would have put a list here
+            return r.size()
+
+    built, ran, and died with **SIGSEGV (exit 139)** — `LDR X0, [X0]` with X0
+    zero.  The `var s: String` spelling of the same shape died the same way,
+    through `strlen`.  A crash rather than a wrong number, which is the good
+    half of the outcome and not the whole of it: the build stayed green and the
+    emitted code dereferenced a null pointer, so nothing downstream could have
+    told.
+
+    So the answer is a refusal, and the reason names the premise rather than
+    the annotation — the annotation is fine, and `len(self.xs)` is exactly the
+    right thing to write.  What is missing is a VALUE in the slot, and the ways
+    to put one there are spelled out because each is the same program with a
+    representation.
+
+    The INTEGER spelling gets its own sentence and not this one, because there
+    the missing value is not what makes `len` unanswerable — an integer has no
+    length either way — so the row that applies is the integer row, and the
+    only thing this adds to it is that the number in the slot is the default
+    rather than what `__init__` assigns.  That is a true statement about a
+    program whose premise is already broken, and it says so rather than
+    implying the annotation was the problem.
+    """
+    if not isinstance(ann, str) or not ann.strip():
+        return None
+    if is_list_kind(slot_kind):
+        return _frame_slot_blob_refusal(spelled, ann)
+    if slot_kind == STR_KIND:
+        return _frame_slot_string_refusal(spelled, ann)
+    if slot_kind == INT_KIND:
+        return _frame_slot_int_refusal(spelled, ann)
+    return None
+
+
+def _frame_slot_int_refusal(spelled: str, ann) -> str:
+    """`frame_slot_value_refusal`'s integer row: right answer, no missing value.
+
+    The only one of the three where the missing VALUE is not what stops the
+    lowering — an integer has no length whether the slot holds 7 or 0 — so the
+    integer row is the operative one and this adds the one fact that row cannot
+    know, which is that the number in the slot is the class-level default rather
+    than what `__init__` assigns.  That matters because it is what a reader
+    would otherwise conclude: `len(self.n)` saying "an integer has no length"
+    about a field declared `n: Int` is true AND complete as far as `len` goes,
+    but the annotation paragraph it used to be preceded by ("annotate it") is
+    what sent people to a field that is already annotated.
+    """
+    return (
+        f"len({spelled}) — this slot's DECLARED type is {ann!r}, and an integer "
+        f"has no length: there is no count to read at offset 0, and the word "
+        f"there is the integer itself. Worth knowing alongside that, because it "
+        f"is not what the declaration says the number is: `S()` does not run "
+        f"`__init__` on this path (premise {FRAME_FIELD_BLOB_PREMISE_B2}), so a "
+        f"fresh instance's slot holds the class-level default, and a field with "
+        f"no class-level default is a word of zeros")
+
+
+def _frame_slot_blob_refusal(spelled: str, ann) -> str:
+    """`frame_slot_value_refusal`'s container row. See that function.
+
+    The count word is at offset 0 of the blob, so the failure this row replaces
+    is a load through a null pointer: eight bytes read from address 0 and called
+    a length.
+    """
+    return (
+        f"len({spelled}) — this slot's DECLARED type is {ann!r}, so the "
+        f"lowering is settled: a list's length is the count word at offset 0 "
+        f"of its blob. What is missing is the VALUE. `S()` does not run "
+        f"`__init__` on this path (premise {FRAME_FIELD_BLOB_PREMISE_B2}), so a "
+        f"fresh instance's slot holds the class-level default, and a field with "
+        f"no class-level default is a word of zeros: the count word would be "
+        f"read from address 0. Measured with the kind taken from the "
+        f"declaration anyway, on BOTH architectures: this built, ran, and died "
+        f"with SIGSEGV (exit 139). A container default is refused "
+        f"separately and by name (`struct_frame_representable`: the default is "
+        f"not a literal), so there is no way to reach the value from the "
+        f"declaration in either direction. Give the slot a value a running "
+        f"statement puts there — build the list in the caller and assign the "
+        f"field after `S()` — or take the list as a parameter, which is the "
+        f"same program with a lifetime this analysis can see")
+
+
+def _frame_slot_string_refusal(spelled: str, ann) -> str:
+    """`frame_slot_value_refusal`'s string row, and a DIFFERENT failure.
+
+    The same premise (B2) and the same missing value, and not the same wrong
+    answer: `strlen` over a null pointer does not read eight bytes and call them
+    a count, it walks the bytes at address 0 looking for a terminator that is
+    not there.  So the emitted instruction is a `BL _strlen` and the fault is
+    inside libc, one frame deeper than the container row's `LDR X0, [X0]` —
+    which is why the two are named separately rather than sharing a sentence
+    that would have to be true of both.
+
+    Measured on both architectures with the kind taken from the declaration
+    alone: `var s: String` with the value assigned in `__init__`, and
+    `len(self.s)` inside a method, built, ran, and died with SIGSEGV (exit
+    139).
+    """
+    return (
+        f"len({spelled}) — this slot's DECLARED type is {ann!r}, so the "
+        f"lowering is settled: a string's length is a `strlen` over its bytes "
+        f"to the NUL. What is missing is the VALUE. `S()` does not run "
+        f"`__init__` on this path (premise {FRAME_FIELD_BLOB_PREMISE_B2}), so a "
+        f"fresh instance's slot holds the class-level default, and a field with "
+        f"no class-level default is a word of zeros: libc would walk the bytes "
+        f"at address 0 looking for a terminator. Measured with the kind taken "
+        f"from the declaration anyway, on BOTH architectures: this built, ran, "
+        f"and died with SIGSEGV (exit 139), inside the `strlen`. A field with a "
+        f"LITERAL default is answered rather than refused — `var s: String = "
+        f"\"hi\"`, which the constructor materializes at every site — so the "
+        f"declaration is not what is missing here. Give the slot a value a "
+        f"running statement puts there, or take the string as a parameter, "
+        f"which is the same program with a lifetime this analysis can see")
+
+
+def declared_type_kind(ann, int_names=(), string_names=(), decls=None):
+    """The kind a DECLARED type annotation gives, or None for one we cannot map.
+
+    The one question `struct_field_kind` and its callers ask, and it is
+    deliberately narrow: it maps a type NAME this path has a representation for
+    and returns None for everything else, so a name it has never heard of
+    produces the pre-existing unclassified refusal rather than a new one.
+
+    `int_names` / `string_names` are the backend's annotation vocabularies
+    (`formal.types.TYPE_NAMES` / `STRING_TYPE_NAMES`) rather than constants
+    here, for the reason every other shared table in this file takes them from
+    the caller: the two backends must not answer this question from two private
+    lists, and a name is a string, not a representation.
+
+    `decls` is `{name: StructDef}` for the structs THIS MODULE DECLARES, and it
+    is what turns one declared type into `FRAME_KIND`: a slot annotated with a
+    struct of this module whose receiver is a frame holds that struct's ADDRESS,
+    which is a different word from every other value on this path and gets its
+    own row in `len_refusal` and its own answer in `truthy_lowering`.  Without
+    `decls` the same annotation is None, which is the conservative direction —
+    the unclassified refusal — and is why every caller that can pass it does.
+
+    ORDER matters and is the whole of the function: a string is checked before
+    a blob, because `STRING_TYPE_NAMES` and `BLOB_TYPE_CTORS` are disjoint
+    today and if they ever were not, `String` is the answer that is right.  The
+    struct check comes after the scalars and before the blob row, because a
+    struct of this module is a type this image can PLACE, so a framed one is a
+    fact about the value in the slot rather than about the slot's annotation.
+    """
+    if not isinstance(ann, str) or not ann.strip():
+        return None
+    base = annotation_base_name(ann)
+    if base is None:
+        return None
+    if base in string_names:
+        return STR_KIND
+    if base in int_names:
+        return INT_KIND
+    if decls is not None:
+        inner = decls.get(base)
+        if inner is not None and struct_is_framed(inner):
+            return FRAME_KIND
+    if base in BLOB_TYPE_CTORS:
+        return list_kind(None)
+    return None
+
+
+def struct_field_kind(struct_def, name, int_names=(), string_names=(),
+                      decls=None):
+    """The kind `struct_def`'s field `name` HOLDS, or None when it does not say.
+
+    One `StructDef`, so there is no agreement to check: the declaration is the
+    declaration.  The agree-or-refuse is `frame_slot_field_kind` below, which is
+    the same question asked of a name that might be two different structs.
+
+    THE GATE, and it is the whole of what makes this safe: a field's ANNOTATION
+    is a fact about its type, while the word in its slot is a fact about the
+    constructor, and on this path the two come apart.  `S()` does not run
+    `__init__` (premise (B2), `FRAME_FIELD_BLOB_PREMISE_B2`), so a fresh
+    instance's slot holds the class-level DEFAULT, not what the struct's own
+    constructor assigns — and a field with no class-level default at all is a
+    word of zeros.  So a kind is returned only when the slot's value is
+    something this path actually materializes:
+
+      * a LITERAL class-level default, which `struct_field_default` reports as
+        `DEFAULT_INT` / `DEFAULT_STRING` and the constructor stores at every
+        site.  Measured on both architectures: `var s: String = "hello"` gives
+        `len(self.s) == 5` and `var n: Int = 7` gives `self.n == 7`, both
+        correct;
+      * a NESTED FRAMED STRUCT, which the constructor PLACES — see
+        `struct_nested_frame_fields` — so the slot holds a real frame address
+        whatever the defaults are.
+
+    Everything else is None, and None is the answer rather than a gap in the
+    table.  It is what `len(self.xs)` gets for `var xs: List[Int]`, and the
+    reason refusing is right is measured, not inferred: with the kind claimed
+    from the annotation alone, the same program BUILT on both architectures and
+    died with SIGSEGV (exit 139), because the slot held 0 and `len` loaded
+    eight bytes from address 0.  A container default is already refused by
+    name — `struct_frame_representable` says "the default is not a literal" —
+    so the value is unreachable from the declaration in every direction, and
+    `frame_slot_value_refusal` is what says so.
+    """
+    base, ann = struct_field_declared_type(struct_def, name)
+    if base is None:
+        return None
+    kind = declared_type_kind(ann, int_names, string_names, decls)
+    if kind is None or kind == FRAME_KIND:
+        return kind
+    default, _payload = struct_field_default(struct_def, name)
+    if default in (DEFAULT_INT, DEFAULT_STRING):
+        return kind
+    return None
+
+
+def frame_slot_declared_annotation(candidates, name) -> str | None:
+    """The one annotation every candidate declares for `name`, or None.
+
+    The same agree-or-refuse as `frame_slot_field_kind`, asked for the TEXT
+    rather than the kind, because the text is what a refusal has to quote: a
+    reader who is told "this slot holds a list but the value is not there" can
+    only check that against the source if the message spells what the
+    declaration said.  Two candidates that spell the same type two different
+    ways (`List` and `list`) still agree on the base, so the base is what is
+    compared and the first spelling is what is printed.
+    """
+    cands = list(candidates or ())
+    if not cands:
+        return None
+    rows = field_type_rows(cands, name)
+    bases = {base for _sn, base, _ann, _why in rows if base is not None}
+    if len(bases) != 1 or any(base is None for _sn, base, _a, _w in rows):
+        return None
+    return rows[0][2]
+
+
+def frame_slot_field_kind(candidates, name, int_names=(), string_names=(),
+                          decls=None):
+    """The kind a FRAME SLOT's field holds, agreed over the holder's candidates.
+
+    The agree-or-refuse rule, applied to the question the kind tables ask, and
+    built on D2's `struct_field_declared_type` / `field_type_rows` rather than a
+    second walk of the candidates: every candidate must DECLARE the field, and
+    every declaration must reduce to the same base name.  One candidate that
+    does not declare it, or two that name different types, gives None — and
+    None is the answer, not a fallback, because the two cases it is refusing
+    are the two that would otherwise be a wrong number (see the note above).
+
+    A single candidate is the common case and goes through the same rule rather
+    than a shortcut, so `h.f` on a holder of known type and on a holder of
+    doubtful type are decided by one function.
+
+    The per-field `struct_field_kind` gate applies to every candidate: a kind
+    here is a claim about the VALUE in the slot, not only about its type, and
+    a candidate whose field has no materializable default does not support one.
+    """
+    cands = list(candidates or ())
+    if not cands:
+        return None
+    ann = frame_slot_declared_annotation(cands, name)
+    if ann is None:
+        return None
+    kinds = {struct_field_kind(st, name, int_names, string_names, decls)
+             for st in cands}
+    kinds.discard(None)
+    return kinds.pop() if len(kinds) == 1 else None
+
+
+def method_owner_struct(structs, fn_name):
+    """The struct whose method compiles to `fn_name`, or None.
+
+    A struct's methods are lifted to `<Struct>_<method>` (`_struct_methods` in
+    formal/build.py), so the emitter that is emitting `R_size` needs to be able
+    to say "this is a method of R" to type `self.<field>` — and a lifted name is
+    the only record of the owner that reaches a backend, because the method's
+    own `FunctionDef` carries no owner.
+
+    Searched rather than derived from the name's prefix because a struct name
+    may itself contain `_` (`_DictKeyIter`), so the split point is not a
+    function of the spelling; the search is over this module's own methods, so
+    it is a handful of string comparisons per emitted function and the answer
+    is exact rather than a guess about where the name's prefix ends.
+    """
+    for st in (structs or {}).values() if isinstance(structs, dict) else (
+            structs or ()):
+        for m in struct_methods(st):
+            if method_function_name(st.name, m.name) == fn_name:
+                return st
+    return None
+
+
+def one_word_receiver_kind(struct_def, int_names=(), string_names=(),
+                           decls=None):
+    """The kind a ONE-WORD struct's receiver word holds, or None.
+
+    The receiver of a struct with exactly one field IS that field — `self.<f>`
+    is `self`, and the codegen rewrites the two to one name
+    (`_rewrite_self_fields`) — so the receiver's kind is the field's declared
+    kind, read by `struct_field_kind`.  This is the shape that makes
+    `len(self)` on a one-field list-backed struct answerable, and it is the
+    same fact `_one_word_field_map` in formal/build.py already relies on.
+
+    `None` for a struct of more than one field, and that is not a shrug: its
+    receiver is the ADDRESS of a frame of 8-byte slots, and no declared field
+    type describes an address.  `len_refusal`'s frame row is the true message
+    for that one, and it is reached by asking about the OPERAND's type rather
+    than by this function.
+    """
+    if struct_def is None or struct_field_count(struct_def) != 1:
+        return None
+    only = struct_sole_field_name(struct_def)
+    if only is None:
+        return None
+    return struct_field_kind(struct_def, only, int_names, string_names, decls)
 
 
 def string_slice_refusal(base_kind, spelled_obj: str) -> str | None:
@@ -3238,10 +3763,29 @@ FRAME_VALUE_ONLY_CALLS = {
     "chr", "ord", "hex", "oct", "bin", "any", "all",
 }
 
-# Calls by bare name that reach the C library and take the struct's storage.
+# Calls by bare name that reach the C library and take the struct's STORAGE —
+# that is, whose own prototype names a POINTER TO THE STRUCT and reads or
+# writes through it.  Four members, and each is there because of its prototype
+# rather than because of what it feels like:
+#
+#     size_t memcpy(void *, const void *, size_t)
+#     int    memcmp(const void *, const void *, size_t)
+#     void   qsort(void *, size_t, size_t, int (*)(const void *, const void *))
+#     int    stat(const char *, struct stat *)   / lstat / fstat
+#
+# The other nine names this set used to hold take VALUES and never mention the
+# struct's layout: `open(const char *, int, ...)`, `close(int)`,
+# `read`/`write(int, void *, size_t)`, `readv`/`writev(int, const struct iovec
+# *, int)`, `ioctl(int, unsigned long, ...)`, `fcntl(int, int, ...)`,
+# `mmap(void *, size_t, int, int, int, off_t)`.  A frame address handed to any
+# of them is a number where a descriptor, a flag word or a length belongs —
+# which is the OTHER reason, and telling a reader it "reads the struct's BYTES"
+# sends them to go and compare a field list against the C headers' padding for a
+# struct the callee does not have.  They are in `FRAME_C_VALUE_CALLS` now, which
+# is not a tidiness change: the two sets are what the two sentences mean, and a
+# name in the wrong one gets a reason that is not true of it.
 FRAME_C_LIBRARY_CALLS = {
-    "fcntl", "ioctl", "write", "read", "open", "close", "readv", "writev",
-    "mmap", "memcpy", "memcmp", "qsort", "stat", "lstat", "fstat",
+    "memcpy", "memcmp", "qsort", "stat", "lstat", "fstat",
 }
 
 # Calls by bare name that reach the C library and take a VALUE of a type their
@@ -3256,7 +3800,19 @@ FRAME_C_LIBRARY_CALLS = {
 # falling through to the "no definition in hand" branch, which is false (it is
 # libSystem's, and it binds) in a way that would send a reader looking for a
 # missing export.
+#
+# `memcmp` and `qsort` are in BOTH sets, and that is not an oversight: read
+# through a `void *` they want bytes, and read through the frame-address
+# argument convention this file uses they want a word.  `FRAME_C_LIBRARY_CALLS`
+# is consulted first, so they get the storage reading, which is the one that is
+# true of the prototype.  `abs` and `labs` are here and in
+# `FRAME_VALUE_ONLY_CALLS` for the same kind of reason: one name, two
+# implementations in this compiler (a builtin lowered as an ALU sequence, and
+# libSystem's), and the C one is named because a reader who is looking at `abs`
+# is looking at the C library.
 FRAME_C_VALUE_CALLS = {
+    "open", "close", "read", "write", "readv", "writev", "ioctl", "fcntl",
+    "mmap",
     "printf", "sprintf", "snprintf", "fprintf", "vprintf", "vsnprintf",
     "vfprintf", "fputs", "puts", "putchar", "putc", "strlen", "strnlen",
     "strcmp", "strncmp", "memcmp", "atoi", "atol", "atoll", "exit", "abort",
@@ -3913,7 +4469,7 @@ class ValueKinds:
     two different kinds in one function is recorded as undecidable, because
     picking either one would make the answer depend on which use site asked.
 
-    The three hooks are what a backend has to supply, and they are what makes
+    The four hooks are what a backend has to supply, and they are what makes
     this a decision rather than a lowering:
       * `int_names` / `string_names` — the type annotations that mean an
         integer and a string. A parameter's annotation is the only thing that
@@ -3923,18 +4479,40 @@ class ValueKinds:
         its declared return type or, failing that, from its return statements.
       * `slot_key(member_expr)` — the local-slot key for a field chain, so a
         struct field classifies like any other name.
+      * `declared_kind(expr)` — what a FRAME SLOT holds, from the DECLARED type
+        of the field, agreed over the holder's candidates.  Added for the case
+        the other three cannot reach at all: a field read is not a name this
+        function bound, and its kind is a fact about the struct's declaration
+        rather than about this function's flow.  Without it every `len(self.x)`
+        on a declared field was refused with "the source does not say what this
+        operand holds" — false about a declaration, and for a list or string
+        field the refusal was of something this path can answer.  See
+        `declared_type_kind` for the whole of it; the hook is consulted only
+        where the answer would otherwise be a guess, and a `None` from it leaves
+        every existing decision exactly where it was.
     """
 
     def __init__(self, fn, *, int_names=(), string_names=(), func_kind=None,
-                 slot_key=None):
+                 slot_key=None, declared_kind=None):
         self._int_names = frozenset(int_names)
         self._string_names = frozenset(string_names)
         self._func_kind = func_kind or (lambda name: None)
         self._slot_key = slot_key or (lambda expr: None)
+        self._declared_kind = declared_kind or (lambda expr: None)
         self.locals: dict = {}
         self._conflicts: set = set()
         self._returns: set = set()
+        # The names this function's SIGNATURE binds, kept apart from the ones
+        # its body binds, and the reason is the `declared_kind` hook: an
+        # unannotated parameter is seeded INT_KIND above, and for a METHOD
+        # receiver that default is the one thing the declaration can improve on
+        # — `self` of a one-field struct IS that field, so its kind is the
+        # field's declared kind and not "a word, therefore an integer".  A name
+        # the BODY bound is a different question: flow decided it, and flow
+        # wins.
+        self._param_names: set = set()
         for pname, pann in _param_list(fn):
+            self._param_names.add(pname)
             # An unannotated parameter is a word arriving from the caller, and
             # a word is an integer here (see the note on kinds above).
             self.locals[pname] = (
@@ -4074,10 +4652,40 @@ class ValueKinds:
                                            F.BoolLiteral, F.FloatLiteral)):
             return k
         if isinstance(e, F.IdentExpr):
-            return self.name_kind(e.name)
+            kind = self.name_kind(e.name)
+            # A METHOD RECEIVER of a one-word struct is the struct's only
+            # field, so its declaration — not the "a word is an integer"
+            # default the parameter got above — is what says what it holds.
+            # Asked only of a name the SIGNATURE bound: a name the body bound
+            # is flow's business, and flow already recorded it.
+            if (kind == INT_KIND and e.name in self._param_names
+                    and e.name not in self._conflicts):
+                declared = self._declared_kind(e)
+                if declared is not None:
+                    return declared
+            return kind
         if isinstance(e, F.MemberExpr):
+            # A FIELD READ. The declared type of the field is the better
+            # answer than anything flow has: `h.x` is a load out of a frame
+            # whose layout the declaration fixes, and a name flow happened to
+            # bind to a list elsewhere in this function says nothing about
+            # what slot 8k holds.  A `None` from the hook leaves the local-slot
+            # lookup below exactly as it was.
+            declared = self._declared_kind(e)
+            if declared is not None:
+                return declared
             key = self._slot_key(e)
             return self.name_kind(key) if key is not None else None
+        if isinstance(e, F.CallExpr) and isinstance(e.func, F.IdentExpr):
+            # A CONSTRUCTOR of a one-word struct produces that struct's only
+            # word, so `r = B(); len(r)` is answerable for the same reason
+            # `len(self.<f>)` is: the receiver IS the field.  Asked before the
+            # CallExpr arm below, which reaches its answer from the callee
+            # NAME — and a type constructor's name says what it constructs, not
+            # what the word it makes holds.
+            declared = self._declared_kind(e)
+            if declared is not None:
+                return declared
         if isinstance(e, F.UnaryOp):
             if e.op in ("*", "**"):
                 return None              # *args / **kwargs have no single kind

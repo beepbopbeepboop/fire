@@ -275,6 +275,24 @@ class CallExpr:
     col: int = 0
 
 @dataclass
+class DecoratorArgs:
+    """`@name(c1; c2; ...)` — a decorator whose parenthesised argument list is
+    a `;`-separated SPECIFICATION, not a Mojo call argument list. See
+    `Parser._parse_decorator_args` for why that is a different node and not a
+    `CallExpr`.
+
+    `name` is the decorator's dotted name; `clauses` are the `;`-separated
+    pieces, each kept verbatim as token text (whitespace-normalised, so a
+    clause reads back as it was written). Nothing is evaluated and nothing is
+    interpreted: the consumer of a spec — the formal backend, a Lean
+    specification extractor — reads `clauses` and decides for itself.
+    """
+    name: str
+    clauses: list = field(default_factory=list)
+    line: int = 0
+    col: int = 0
+
+@dataclass
 class BinaryOp:
     op: str
     left: object
@@ -2724,6 +2742,108 @@ class Parser:
             kwargs_list.append((_kw_name, _kw_val))
         return args, kwargs_list
 
+    def _parse_decorator_args(self, dec_name: str):
+        """A decorator's parenthesised argument list, with LPAREN current.
+
+        Returns either a `CallExpr` — the ordinary case, `@deco(x, k=1)`, the
+        exact node `_parse_expr`'s own call would build — or a
+        `DecoratorArgs` when the region is a `;`-separated specification.
+
+        WHY the second case exists. A decorator's argument list is NOT a call
+        argument list: the arguments belong to the decorator's own
+        mini-grammar, and at least one real grammar in this tree
+        (`formal/examples/{fact,fib,sum,count}.mojo`'s `@spec(...)`, read by
+        the Lean proof pipeline) is not Mojo expression syntax at all:
+
+            @spec(fact_spec; fact_spec 0 = 1; fact_spec (n+1) = (n+1) * fact_spec n)
+
+        That is a name, then `;`-separated EQUATIONS: juxtaposed application
+        (`fact_spec 0`), a bare `=` in operator position, and a `;` between
+        clauses. Reading it as a call argument list is a `SyntaxError` at the
+        first `;` (it was introduced by 19bc0dd, which made this a real parse
+        where it used to skip the tokens, and it took 13 of 45
+        `formal/examples/*.mojo` out of the parser).
+
+        The `;` is the discriminator, and it is unambiguous rather than a
+        guess: a semicolon is not valid anywhere in a Mojo EXPRESSION — the
+        same file's `_split_on_separators` already states the rule ("real
+        Python has no such thing as a semicolon inside an expression at all")
+        and, crucially, already DELEGATES that case to the bracketed reader by
+        tracking bracket depth so a `;` inside `(...)` is left in place
+        instead of being split off as a statement separator. This is that
+        bracketed reader. A `;` nested inside a further `(`/`[`/`{` does not
+        count, so a `;` that somehow appeared in a real call's arguments would
+        still be reported rather than silently reinterpreted.
+
+        So a decorator region containing no top-level `;` takes the
+        `_parse_paren_args()` path unchanged, which is what every other
+        decorator in the tree uses and what keeps `@deco` and `@deco(x)`
+        distinguishable (the point of 19bc0dd). Nothing is discarded either
+        way: the CallExpr keeps its parsed arguments, and `DecoratorArgs`
+        keeps its clauses as text.
+        """
+        # Look ahead for a top-level SEMICOLON before committing to a shape.
+        # Rewind and re-parse rather than remember a token list: `_parse_
+        # paren_args` is the single definition of what a call's arguments
+        # mean, and a second copy of it would drift from it.
+        start = self._pos
+        self._advance()          # skip LPAREN, so `depth` counts only INNER
+        depth = 0
+        spec = False
+        while True:
+            k = self._peek().kind
+            if k == "LPAREN" or k == "LBRACKET" or k == "LBRACE":
+                depth += 1
+            elif k == "RPAREN" or k == "RBRACKET" or k == "RBRACE":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif k == "SEMICOLON" and depth == 0:
+                spec = True
+            elif k == "EOF":
+                break
+            self._advance()
+        close_line = self._peek().line
+        close_col = self._peek().col
+        self._pos = start
+        if not spec:
+            args, kwargs = self._parse_paren_args()
+            return CallExpr(func=self._dotted_name_expr(dec_name),
+                            args=args, kwargs=kwargs)
+        # The specification form: consume the balanced region and keep each
+        # `;`-separated clause as text. Token values, not source slicing:
+        # Token carries line/col but no source offset, and a STRING token's
+        # `;` is already part of its value rather than a SEMICOLON.
+        self._advance()          # skip LPAREN
+        clauses = []
+        cur = []
+        depth = 0
+        while True:
+            k = self._peek().kind
+            if k == "RPAREN" and depth == 0:
+                self._advance()
+                break
+            if k == "EOF":
+                break
+            if k == "SEMICOLON" and depth == 0:
+                self._advance()
+                clauses.append(" ".join(cur))
+                cur = []
+                # Layout tokens inside the region (a multi-line `@spec(...)`)
+                # are dropped by the filter at the bottom of this loop; no
+                # extra advance here, or the first token of the next clause
+                # is swallowed.
+                continue
+            if k == "LPAREN" or k == "LBRACKET" or k == "LBRACE":
+                depth += 1
+            elif k == "RPAREN" or k == "RBRACKET" or k == "RBRACE":
+                depth -= 1
+            if k != "NEWLINE" and k != "INDENT" and k != "DEDENT":
+                cur.append(self._peek().value)
+            self._advance()
+        clauses.append(" ".join(cur))
+        return DecoratorArgs(name=dec_name, clauses=clauses,
+                             line=close_line, col=close_col)
 
     def _skip_newlines(self):
         while self._peek().kind == "NEWLINE": self._advance()
@@ -3096,10 +3216,13 @@ class Parser:
                 # string, so every existing `X in decorators` check -- the
                 # `staticmethod`/`classmethod`/`property`/`export`/`parameter`
                 # readers across the tree -- is unaffected.
+                #
+                # `_parse_decorator_args` picks between that CallExpr and a
+                # `DecoratorArgs`, whose argument list is a `;`-separated
+                # specification rather than Mojo call syntax (`@spec(...; ...)`);
+                # its docstring has the rule and the regression it fixes.
                 if self._peek().kind == "LPAREN":
-                    dec_args, dec_kwargs = self._parse_paren_args()
-                    decs.append(CallExpr(func=self._dotted_name_expr(dec_name),
-                                         args=dec_args, kwargs=dec_kwargs))
+                    decs.append(self._parse_decorator_args(dec_name))
                     self._skip_newlines()
                     continue
                 decs.append(dec_name)

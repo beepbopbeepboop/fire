@@ -559,3 +559,58 @@ with any of the string work.
   boxed-capture decls") is the likely owner. This is the one job that makes
   `make check` 10/11 and `make gate` red.
 
+### Both of the above are FIXED (wave 7, agent G1) — the two owner attributions in this section were both wrong
+
+Recorded here because this is the document a reader of those numbers will open.
+Nothing about this document's own string work changed; only the two entries
+above, and the two attributions they guessed.
+
+- **`@spec(name; …)` — owner is `19bc0dd`, not the merge, and not
+  `fire_compiler.py`'s tokenizer.** `19bc0dd` ("Roadmap items 0-4 rounds 1-2")
+  replaced the token-skipping decorator-argument reader with a real
+  `_parse_paren_args()` call, which is the right fix (`@deco` and `@deco(x)`
+  had become the same node) but imposes Mojo call-argument syntax on a
+  decorator whose arguments are not call arguments. Fixed forward in
+  `fire_compiler.py` by `Parser._parse_decorator_args`: a decorator region with
+  a **top-level** `;` becomes a new `fire_compiler.DecoratorArgs` node holding
+  the `;`-separated clauses verbatim; anything else still goes through
+  `_parse_paren_args` unchanged. The `;` is a sound discriminator because a
+  semicolon is not valid anywhere in a Mojo expression — the same file's
+  `_split_on_separators` already delegates that case to the bracketed reader.
+  All 45 `formal/examples/*.mojo` parse; `fact`/`fib`/`sum`/`count` are the
+  four that were broken, not 13 files. `test_examples_parse.py` (registered as
+  `examples-parse`, in the `check` bucket) is the new gate.
+- **`gimplerunner` — owner is `e7fc3ec`, not `21f036e`, and it is ONE runtime
+  predicate, not two bugs.** `21f036e`'s `sorted(ci.mut_names)` is a pure
+  declaration-order change and is innocent. `e7fc3ec` rewrote
+  `mojo_boxed_is_str` (the CRASH.md fix) to call `_mojo_tagged_addr_ok`, which
+  is a **struct-tag-plausibility** predicate: it requires 8-byte alignment and
+  a live ≥8-byte `malloc` allocation, both of which are properties of reading
+  an `int64_t __mojo_type_id` at offset 0, not of being a `char *`. A
+  codegen-emitted string **literal** is a `char[N]` in `__TEXT`: measured at
+  `0x1003b3ce8` and `0x102fcbd00`, both 8-byte aligned, both with
+  `malloc_size == 0`, so the allocation check alone demoted every string
+  literal to "not a string" — a silent wrong answer, because
+  `mojo_cstr_or_int_str` then falls through to `mojo_str_from_int` and the dict
+  is keyed by the decimal of its own address. Fixed in
+  `runtime/fire_runtime.c` by moving the `u & 7` alignment check DOWN out of
+  `_mojo_tagged_addr_range_ok` and into `_mojo_tagged_addr_ok`, so the range
+  predicate is range-only — 2 GiB floor (the CRASH.md fix, and the part that
+  must not be given back) and the canonical-userspace ceiling — and the two
+  struct-specific checks are left to the one caller that dereferences.
+  `mojo_boxed_is_str` then uses the range predicate, as it must.
+  The alignment half is the one that is LATENT rather than firing today: the
+  two addresses measured above happened to be 8-byte aligned, and a runtime
+  probe of the real `_slit_` pool found it aligned in all 20+ variants tried
+  — but a `static char * s = "bb";` gets `&7` of 7, 1, 4, 0, 3 at -O0 and -O2
+  in a standalone C file, so the string path must not depend on it. The
+  allocation half is the one that actually broke the two cases above, and
+  `e7fc3ec`'s own refactor had already moved it out.
+  Generated C is byte-identical: 664/664 stdlib modules (1,388,193 lines) hash
+  the same before and after, as do both affected cases.
+- **Consequence for the numbers in this section.** `test_formal.py` on arm64 is
+  now `PASS=29 KNOWN-GAP=6 FAIL=10` and on x86-64 `PASS=44 KNOWN-GAP=0
+  FAIL=1` — the `@spec` files build and typecheck again, so the residual
+  failures are a THIRD `19bc0dd` regression in `formal/`, not string work.
+  See `bugs/FORMAL_default_int_type_typed_flag_collapse.md`.
+

@@ -11,6 +11,7 @@
 .PHONY: run demo check gate check-gimple check-runner check-gimple-runner \
         check-modcache check-selfhost check-runtimediff check-linkmode \
         check-no-new-casts check-coro check-stdlib check-stdlib-interp \
+        check-examples-parse \
         check-stdlib-jit check-ab-native check-native-dumpfull \
         check-formal check-formal-dylib check-formal-run check-formal-x86 \
         check-formal-x86-model check-formal-x86-endtoend check-formal-imports \
@@ -170,6 +171,7 @@ check-runtimediff:    ; $(call suite,runtimediff)
 check-linkmode:       ; $(call suite,linkmode)
 check-no-new-casts:   ; $(call suite,no-new-casts)
 check-coro:           ; $(call suite,coro)
+check-examples-parse: ; $(call suite,examples-parse)
 # The two self-hosted-binary checks name `mojoc` too: the old recipes had it
 # as a Make prerequisite, and dropping it would have turned `make
 # check-native-dumpfull` into "dependency not selected" instead of a build.

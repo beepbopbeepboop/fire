@@ -3437,6 +3437,19 @@ class Interpreter:
                 # discard the argument list, so a parameterised decorator and
                 # a bare one were the same node and both did nothing.
                 decorator = self.eval_expr(d)
+            elif isinstance(d, N.DecoratorArgs):
+                # `@spec(c1; c2; ...)` -- a `;`-separated SPECIFICATION
+                # (`fire_compiler.DecoratorArgs`), not Mojo call syntax: its
+                # clauses are kept as text precisely because they are not
+                # expressions this interpreter could evaluate. So it is an
+                # annotation, in the same family as `@require`/`@ensure` and
+                # the other `_COMPILE_TIME_DECORATORS`: recorded for a
+                # consumer that reads the spec (the formal/Lean pipeline),
+                # and not applied. Skipping it is also the pre-19bc0dd
+                # behaviour for these examples, where the argument list was
+                # discarded and `@spec` was a bare name; raising here instead
+                # would be a new failure mode for source that used to run.
+                continue
             else:
                 raise SyntaxError(
                     f"unsupported decorator on {node.name!r}: {d!r} (expected a "
