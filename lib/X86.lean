@@ -321,6 +321,18 @@ def x86_cond (cc : Nat) (s : X86State) : Bool :=
 def x86_sign_extend32 (v : UInt64) : UInt64 :=
   if x86_msb (x86_trunc32 v) then v ||| 0xffffffff00000000 else v
 
+/-- Sign-extend bit 7 of `v` across the whole word: what `movsx r64, r8`
+    does.  The 8- and 16-bit forms were missing, and `movsx` was reaching for
+    the 32-bit one, which extends bit 31 and so silently computed a different
+    number than the instruction does on hardware. -/
+def x86_sign_extend8 (v : UInt64) : UInt64 :=
+  if v &&& 0x80 != 0 then v ||| 0xffffffffffffff00 else v
+
+/-- Sign-extend bit 15 of `v` across the whole word: `movsx r64, r16`. -/
+def x86_sign_extend16 (v : UInt64) : UInt64 :=
+  if v &&& 0x8000 != 0 then v ||| 0xffffffffffff0000 else v
+
+
 /-- `v` as a signed 64-bit number. -/
 def x86_signed (v : UInt64) : Int :=
   if x86_msb v then (v.toNat : Int) - 18446744073709551616 else (v.toNat : Int)
@@ -546,11 +558,36 @@ def x86_step_rex (s : X86State) (code : Nat → UInt8) (rex op : UInt8) : Option
       some { x86_set_reg s ((modrm.toNat >>> 3 &&& 7) + x86_rex_r rex) (a * b) with rip := rip + 4 }
     else if op2 = 0xb6 || op2 = 0xb7 || op2 = 0xbe || op2 = 0xbf then
       -- movzx / movsx into r64
+      --
+      -- The operand is `sz` BYTES and the extension starts at bit `8*sz - 1`.
+      -- This arm used `x86_sign_extend32` for all four opcodes and took the
+      -- read unmodified, which is wrong twice over, and both halves were
+      -- silent:
+      --
+      --   * `x86_rm_read` with mod = 3 returns the whole register (it is used
+      --     by 8-byte reads too, where that is right), so a 1-byte `movzx`
+      --     left the upper 56 bits of the destination alone. `movzx rbx, bl`
+      --     with rbx = 0xff00 gave 0xff00, not 0xff.
+      --   * `x86_sign_extend32` extends bit 31, so `movsx rbx, bl` with
+      --     bl = 0xff — that is, -1 — gave 0x00000000000000ff, not
+      --     0xffffffffffffffff.
+      --
+      -- Both were CONFIRMED by evaluating the model, not by reading it, and
+      -- both were invisible from outside for the same reason: the only three
+      -- examples that emit a byte `movsx` (n8, sgt8, sle8) had no step lemma
+      -- wired for it, so the value test never reached the comparison. A gap in
+      -- a proof chain hid a defect in the thing the chain was proving things
+      -- about.
       let modrm := code (rip + 3)
       let sz := if op2 = 0xb6 || op2 = 0xbe then 1 else 2
       let sign := op2 = 0xbe || op2 = 0xbf
       match x86_rm_read s code rex modrm (rip + 3) (rip + 4) sz with
-      | some v => some { x86_set_reg s ((modrm.toNat >>> 3 &&& 7) + x86_rex_r rex) (if sign then x86_sign_extend32 v else v) with rip := rip + 4 }
+      | some v =>
+        let narrowed := v &&& (if sz = 1 then 0xFF else 0xFFFF)
+        let ext := if !sign then narrowed
+                   else if sz = 1 then x86_sign_extend8 narrowed
+                   else x86_sign_extend16 narrowed
+        some { x86_set_reg s ((modrm.toNat >>> 3 &&& 7) + x86_rex_r rex) ext with rip := rip + 4 }
       | none => none
     else none
   else none
@@ -779,12 +816,20 @@ theorem x86_step_setle_al (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_plain, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr, x86_rm_read, x86_rm_write, h_rip, h_b0, h_b1, h_b2]
   by_cases h : x86_cond 14 s = true <;> simp [h]
 
-/-- `movzx rax, al` (REX.W 0F B6 /r, mod=3). -/
+/-- `movzx rax, al` (REX.W 0F B6 /r, mod=3).
+
+    **This lemma used to conclude `rax := s.rax`, and that was wrong.** It was
+    a theorem about a model that read the whole register and never narrowed it,
+    so the lemma and the bug agreed with each other and the suite was green.
+    Fixing the model made the two disagree, which is the only reason anyone
+    noticed: the proof is still by `simp`, but now of a statement that says
+    what the instruction does. -/
 theorem x86_step_movzx_rax_al (s : X86State) (code : Nat → UInt8) (m : Nat)
     (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x0f) (h_b2 : code (m + 2) = 0xb6)
     (h_b3 : code (m + 3) = 0xc0) :
-    x86_step s code = some { s with rax := s.rax, rip := m + 4 } := by
+    x86_step s code = some { s with rax := s.rax &&& 0xFF, rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr, x86_rm_read, x86_rm_write, x86_flags_sub, x86_flags_add, x86_flags_logic, x86_msb, h_rip, h_b0, h_b1, h_b2, h_b3]
+
 
 /-- `jz rel32` (0F 84 id): taken lands past the displacement. -/
 theorem x86_step_jz_rel32 (s : X86State) (code : Nat → UInt8) (m : Nat) (off : Int)
