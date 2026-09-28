@@ -859,15 +859,24 @@ CASES = [
     # The needle is the DEREFERENCE half, and it is a needle rather than the old
     # "is a method call on a value" because that blanket text told a reader of
     # this case to add the method to the string table — the exact
-    # mis-implementation the guard exists to prevent. `value` is a load, and the
-    # refusal now says so, names the three things a load needs and this model
-    # has none of, and still ends with the "died in the loader" history so the
-    # two facts are not separated.
+    # mis-implementation the guard exists to prevent.
+    #
+    # The expectation was CHANGED in wave 6 and the change is the point of the
+    # case.  It used to be "is a DEREFERENCE on this path, not an identity",
+    # which is FALSE about 527 of the 528 `value` sites in the stdlib: an enum's
+    # `value()` is its integral, an iterator's is the item it holds, and a
+    # `SIMD`'s is its scalar, and none of those three is a load from an address.
+    # The pointer value model made the pointer case answerable, which left the
+    # refusal describing only the one receiver it was about while claiming all
+    # of them.  It now names the four questions behind the one spelling, which
+    # is true of every receiver and tells a reader that the fix is a DECLARATION
+    # rather than another method to add to a table.  The history sentence about
+    # the loader is kept, so the two facts are not separated.
     ("str_method_unknown_receiver",
      "def main(n):\n"
      "    h = n\n"
      "    return h.value()\n",
-     "refuse:is a DEREFERENCE on this path, not an identity", None),
+     "refuse:is spelled the same for four different questions", None),
     # A string method on a receiver the classifier positively knows is NOT a
     # string. Same refusal family, different wording, and the wording is the
     # point: \"the source does not say\" and \"it is an int\" are different
@@ -1743,7 +1752,7 @@ RECVKIND_CASES = [
  "    ptr = n\n"
  "    k = ptr.value()\n"
  "    return 0\n",
- "refuse:is a DEREFERENCE on this path, not an identity", None),
+ "refuse:is spelled the same for four different questions", None),
  # The same method on a FRAME SLOT — a different SHAPE, and the shape the
  # wave-3 by-reference work exposed: the receiver is a word read out of
  # another function's frame, so what it holds is a question about that
@@ -1760,7 +1769,7 @@ RECVKIND_CASES = [
   "    b = Box()\n"
   "    k = b.ptr.value()\n"
   "    return 0\n",
-  "refuse:is a DEREFERENCE on this path, not an identity", None),
+  "refuse:is spelled the same for four different questions", None),
  # An Optional UNWRAP, which is NOT a dereference and must not be answered as
  # one. The reason is the missing NICHE: `None` and a value are both one word
  # in one frame slot, and `None` is emitted as the integer 0, so treating 0 as
@@ -2233,6 +2242,18 @@ BYREF_CASES = [
     # shape the layouts do not agree on and `byref_two_layouts_disagree` is what
     # that has to say. 502 is the `A` path and 0 the `B` path, so a program that
     # read one object as the other returns the wrong one of the two.
+    #
+    # `touchB` writes `z` so that B's third field is written SOMEWHERE, and it
+    # used to do that through a bare parameter — `def touchB(b): b.z = 1`, which
+    # has no field layout to write into.  Wave 6 (F1) found that store was
+    # silent on BOTH architectures in opposite ways: x86-64's `AssignStmt` for a
+    # MemberExpr target evaluated both sides and returned, DISCARDING it, and
+    # arm64's `_store_var` had no slot and fell through to `mov x19, src`, so the
+    # write landed in the register the NEXT function reads as its first
+    # parameter.  Neither is a wrong value; one is a dropped store and one is a
+    # wrong store, and a case that only checks a return value never notices.
+    # `touchB` now builds its own B, so the write is a real write to a field
+    # this compiler placed, and it still says what it was here to say.
     ("byref_one_name_two_widths_agree",
      "struct A:\n"
      "    var v: Int\n"
@@ -2241,9 +2262,10 @@ BYREF_CASES = [
      "    var v: Int\n"
      "    var w: Int\n"
      "    var z: Int\n\n"
-     "def touchB(b) -> Int:\n"
-     "    b.z = 1\n"
-     "    return 0\n\n"
+     "def touchB() -> Int:\n"
+     "    var q = B()\n"
+     "    q.z = 1\n"
+     "    return q.z\n\n"
      "def pick(c: Int) -> Int:\n"
      "    var x = A()\n"
      "    x.v = 5\n"
@@ -4273,6 +4295,302 @@ SUBSCRIPT_CASES = [
 ]
 
 
+# ── wave 6: `~`, the truthiness conversion, and a slice of a string ────────
+#
+# Three separate defects, all found by RUNNING programs and all in the same
+# family: a value on this path is one 64-bit word, and three constructs reached
+# the integer path without asking what the word held. `~s` did not even reach
+# the compiler — `fire_compiler.py`'s tokenizer had no `~` in its OP
+# alternation, so `~` was dropped as UNK and `r = ~s` built an AST containing
+# `r = s`. That is the worst shape a wrong answer has: not a crash, not a
+# refusal, a program that runs and computes what the source did not say, from a
+# construct that does not parse.
+WAVE6_TRUTHY_CASES = [
+    # `~` ON AN INTEGER — the overwhelmingly common use, and the one that was
+    # ALSO wrong before the lexer fix, for the same reason. `~5` returned 5: the
+    # token was gone, so the expression was just `5`. Every value here is what
+    # Python says for a two's-complement 64-bit word, and the case is worth
+    # having for the arm64 MVN and the x86-64 NOT separately, since they are two
+    # instructions in two files that had to be added independently.
+    ("tilde_int_is_minus_one_less",
+     "def main(n):\n"
+     "    return ~5 + 6\n", 0, None),
+    ("tilde_int_edges",
+     "def main(n):\n"
+     "    printf(\"%d %d %d %d\", ~0, ~1, ~-1, ~~7)\n"
+     "    return 0\n", 0, "-1 -2 0 7"),
+    ("tilde_int_through_a_variable",
+     "def main(n):\n"
+     "    k = 5\n"
+     "    r = ~k\n"
+     "    printf(\"%d\", r)\n"
+     "    return 0\n", 0, "-6"),
+    ("tilde_int32_is_truncated_to_its_width",
+     "def main(n):\n"
+     "    var k: Int32 = 5\n"
+     "    printf(\"%d\", ~k)\n"
+     "    return 0\n", 0, "-6"),
+
+    # `~` ON A STRING. Before the lexer fix this was `r = s` and printed the
+    # ADDRESS of the string (46007208 on arm64, 38761401 on x86-64 — two
+    # architectures, two numbers, neither computed). Now it is a refusal, and
+    # identically worded on both, which is the assertion.
+    ("tilde_string_refused",
+     "def main(n):\n"
+     "    s = \"abc\"\n"
+     "    r = ~s\n"
+     "    printf(\"%d\", r)\n"
+     "    return 0\n",
+     "refuse:unary '~' is refused on a string", None),
+
+    # ── truthiness, and the empty string is the case that matters ──────────
+    #
+    # `if s:` is a CONVERSION, not a special case of `if x:`, and the conversion
+    # depends on what the operand holds. On this path a string is a bare
+    # `char *`, so the identity test this replaces says TRUE for every string
+    # INCLUDING THE EMPTY ONE. Before this, `if e:` where `e = ""` printed
+    # `E-truthy` on both backends: a program testing a string for emptiness was
+    # told the empty string is non-empty, and nothing downstream could tell.
+    ("truthy_empty_string_is_false",
+     "def main(n):\n"
+     "    e = \"\"\n"
+     "    if e:\n"
+     "        printf(\"E-truthy\")\n"
+     "    else:\n"
+     "        printf(\"E-falsy\")\n"
+     "    return 0\n", 0, "E-falsy"),
+    ("truthy_nonempty_string_is_true",
+     "def main(n):\n"
+     "    s = \"abc\"\n"
+     "    if s:\n"
+     "        printf(\"S-truthy\")\n"
+     "    else:\n"
+     "        printf(\"S-falsy\")\n"
+     "    return 0\n", 0, "S-truthy"),
+    # A string that is not a literal and not an int: the interned bytes of a
+    # method result. `strlen` has to be reached through a NAME here, which is
+    # the shape a compile-time special case would miss.
+    ("truthy_lstrip_result_is_true",
+     "def main(n):\n"
+     "    s = \"  hi\".lstrip()\n"
+     "    if s:\n"
+     "        printf(\"S-truthy\")\n"
+     "    else:\n"
+     "        printf(\"S-falsy\")\n"
+     "    return 0\n", 0, "S-truthy"),
+    # A `String`-ANNOTATED parameter, which is what the kind table is for: the
+    # truthiness has to follow the annotation across a call boundary, and it
+    # cannot be told from the literal case — the callee sees a name.
+    ("truthy_annotated_parameter",
+     "def f(s: String):\n"
+     "    if s:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def main(n):\n"
+     "    printf(\"%d %d\", f(\"\"), f(\"x\"))\n"
+     "    return 0\n", 0, "0 1"),
+
+    # A list blob's truthiness is its COUNT, which is at offset 0. `if []:`
+    # was TRUE before this — a fabricated truthiness in the same family, found
+    # while checking the string one and not named in wave 5's list at all.
+    ("truthy_empty_list_is_false",
+     "def main(n):\n"
+     "    a = []\n"
+     "    if a:\n"
+     "        printf(\"L-truthy\")\n"
+     "    else:\n"
+     "        printf(\"L-falsy\")\n"
+     "    return 0\n", 0, "L-falsy"),
+    ("truthy_nonempty_list_is_true",
+     "def main(n):\n"
+     "    a = [1, 2]\n"
+     "    if a:\n"
+     "        printf(\"L-truthy\")\n"
+     "    else:\n"
+     "        printf(\"L-falsy\")\n"
+     "    return 0\n", 0, "L-truthy"),
+    ("truthy_empty_tuple_is_false",
+     "def main(n):\n"
+     "    e = ()\n"
+     "    f = (1,)\n"
+     "    printf(\"%d %d\", 1 if e else 0, 1 if f else 0)\n"
+     "    return 0\n", 0, "0 1"),
+
+    # An int and a FRAME ADDRESS. The int is the identity test and is unchanged
+    # by any of this — it is here to catch a truthiness helper that "fixed"
+    # strings by breaking integers. The frame address is the third kind with an
+    # answer: its truthiness is POINTER truthiness, and a frame is never mapped
+    # at 0, so the identity test is right for it too. D1 established there is no
+    # BOOL kind distinct from INT on this path, so "0/1" and "a bool" are the
+    # same thing and nothing here needed a new representation to say so.
+    ("truthy_int_zero_and_nonzero",
+     "def main(n):\n"
+     "    printf(\"%d %d\", 1 if 0 else 0, 1 if 7 else 0)\n"
+     "    return 0\n", 0, "0 1"),
+    ("truthy_frame_address_is_a_pointer_test",
+     "struct P2:\n"
+     "    x: Int\n"
+     "    y: Int\n"
+     "    def total(self):\n"
+     "        return self.x + self.y\n"
+     "def main(n):\n"
+     "    p = P2()\n"
+     "    p.x = 1\n"
+     "    p.y = 2\n"
+     "    if p:\n"
+     "        printf(\"F-truthy %d\", p.total())\n"
+     "    else:\n"
+     "        printf(\"F-falsy\")\n"
+     "    return 0\n", 0, "F-truthy 3"),
+
+    # ── the OTHER truthiness sites, one case each ──────────────────────────
+    #
+    # `if` is the site everyone checks, and it is the one wave 5 already had
+    # half of (a comparison in a condition bypasses `_emit_binop`, so `if s < t:`
+    # branched on the interning order while `r = s < t` was refused). Every
+    # remaining site is here, because a conversion that is right in one of them
+    # and missing from the next four is the same bug five times over.
+
+    # `while s:` on the empty string DID NOT TERMINATE before this: the loop
+    # condition was the address, the address is never zero, and the body was
+    # never even reachable to change it. So this case is a timeout, not a wrong
+    # answer, and RUN_TIMEOUT is what it used to run into. `i=0` is the whole
+    # assertion: the body never runs, which is what an empty string means.
+    ("truthy_while_empty_string_terminates",
+     "def main(n):\n"
+     "    e = \"\"\n"
+     "    i = 0\n"
+     "    while e:\n"
+     "        i = i + 1\n"
+     "        e = \"\"\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=0"),
+    # The other direction, and the one that needs the CONVERSION rather than
+    # just the exit: a non-empty string enters the body exactly once and the
+    # assignment inside it makes it empty, so the loop stops on the second
+    # test. A lowering that tested the address would never stop.
+    ("truthy_while_runs_once_then_stops",
+     "def main(n):\n"
+     "    s = \"ab\"\n"
+     "    i = 0\n"
+     "    while s:\n"
+     "        i = i + 1\n"
+     "        s = \"\"\n"
+     "    printf(\"i=%d\", i)\n"
+     "    return 0\n", 0, "i=1"),
+    # A ternary. Two lowerings for it on arm64 — a branch and a branchless
+    # CSEL — and the CSEL one is chosen on a purity predicate, so BOTH spellings
+    # are needed or a fix in the branch path is invisible.
+    ("truthy_ternary_branch_form",
+     "def main(n):\n"
+     "    printf(\"%d\", 1 if \"\" else 0)\n"
+     "    return 0\n", 0, "0"),
+    ("truthy_ternary_branchless_form",
+     "def main(n):\n"
+     "    a = 1\n"
+     "    b = 2\n"
+     "    printf(\"%d %d\", a if \"\" else b, a if \"x\" else b)\n"
+     "    return 0\n", 0, "2 1"),
+    # `elif` is a second condition in the same chain and goes down a different
+    # arm of the `if` emitter's loop.
+    ("truthy_elif_chain",
+     "def main(n):\n"
+     "    if \"\":\n"
+     "        printf(\"A\")\n"
+     "    elif 1:\n"
+     "        printf(\"B\")\n"
+     "    else:\n"
+     "        printf(\"C\")\n"
+     "    return 0\n", 0, "B"),
+    # A comprehension guard.
+    ("truthy_comprehension_guard",
+     "def main(n):\n"
+     "    a = [1, 2, 3]\n"
+     "    b = [x for x in a if x]\n"
+     "    printf(\"%d\", len(b))\n"
+     "    return 0\n", 0, "3"),
+    # A short-circuit chain. The one that is NOT just the left operand: `and`/
+    # `or` return an OPER operand, and the operand that survives can be the
+    # empty string or the empty list, whose zeroness as a returned VALUE is the
+    # address and not the answer. `f and e` with `e = []` printed 1 before this.
+    ("truthy_and_or_selects_by_truthiness",
+     "def main(n):\n"
+     "    e = \"\"\n"
+     "    s = \"a\"\n"
+     "    printf(\"%d %d %d %d\", 1 if (e and s) else 0, 1 if (e or s) else 0,\n"
+     "           1 if (s and e) else 0, 1 if (s or e) else 0)\n"
+     "    return 0\n", 0, "0 1 0 1"),
+    ("truthy_and_or_on_lists",
+     "def main(n):\n"
+     "    e = []\n"
+     "    f = [1]\n"
+     "    printf(\"%d %d %d %d\", 1 if (e and f) else 0, 1 if (e or f) else 0,\n"
+     "           1 if (f and e) else 0, 1 if (f or e) else 0)\n"
+     "    return 0\n", 0, "0 1 0 1"),
+    ("truthy_and_or_chain_of_three",
+     "def main(n):\n"
+     "    a = \"\"\n"
+     "    b = []\n"
+     "    c = 0\n"
+     "    d = \"z\"\n"
+     "    printf(\"%d %d %d\", 1 if (a and b and c) else 0,\n"
+     "           1 if (a or b or c) else 0, 1 if (a and b and c and d) else 0)\n"
+     "    return 0\n", 0, "0 0 0"),
+    # `assert` is a truthiness site on both backends, and it is where a
+    # cross-architecture disagreement was found: x86-64 emitted `jcc fail`
+    # immediately followed by `label fail`, so the branch had nothing to skip
+    # and the FALL-THROUGH path went into exit(1). Every `assert` failed on
+    # x86-64 and passed on arm64. Both halves are here — the true one (which
+    # only x86-64 was getting wrong) and the false one (which must still fail).
+    ("truthy_assert_true_survives",
+     "def main(n):\n"
+     "    k = 5\n"
+     "    assert k\n"
+     "    printf(\"passed\")\n"
+     "    return 0\n", 0, "passed"),
+    ("truthy_assert_false_fails",
+     "def main(n):\n"
+     "    assert 0\n"
+     "    printf(\"passed\")\n"
+     "    return 0\n", 1, None),
+    ("truthy_assert_empty_string_fails",
+     "def main(n):\n"
+     "    e = \"\"\n"
+     "    assert e\n"
+     "    printf(\"passed\")\n"
+     "    return 0\n", 1, None),
+
+    # A slice of a string is a container operation on a bare `char *`: the
+    # count is read from offset 0 of the pointer, which is the first eight
+    # CHARACTERS. It SEGFAULTED on both backends (exit 139) rather than
+    # answering wrongly, so this asserts a refusal instead of a crash — and the
+    # needle is the count, because that is the step that is wrong.
+    ("string_slice_refused",
+     "def main(n):\n"
+     "    s = \"abcde\"\n"
+     "    t = s[1:]\n"
+     "    printf(\"[%s]\", t)\n"
+     "    return 0\n",
+     "refuse:a slice of a string is refused", None),
+
+    # GUARDS, not demonstrations: these pass on the pre-change tree too, and
+    # they are here because a truthiness helper that "fixed" strings by
+    # breaking the shape a string has is the failure mode worth pinning. `len`
+    # is the same `strlen` the truthiness conversion makes, so a change to the
+    # symbol or the call shape would show up in both.
+    ("guard_len_of_a_string_is_still_strlen",
+     "def main(n):\n"
+     "    s = \"abc\"\n"
+     "    e = \"\"\n"
+     "    printf(\"%d %d\", len(s), len(e))\n"
+     "    return 0\n", 0, "3 0"),
+    ("guard_and_or_on_ints_still_returns_an_operand",
+     "def main(n):\n"
+     "    printf(\"%d %d\", 5 and 9, 0 or 9)\n"
+     "    return 0\n", 0, "9 9"),
+]
+
+
 def build_formal(src, out, backend=None, tmpdir=None, env=None):
     """`fire.py build --formal --no-prove`, as a (returncode, output) pair.
 
@@ -4470,6 +4788,554 @@ def run_case(name, source, want_exit, want_stdout, tmpdir, verbose):
     return True, ""
 
 
+# ── the POINTER VALUE MODEL (wave 6, F2) ────────────────────────────────────
+#
+# `bugs/FORMAL_pointer_value_model.md` is the long form; the model is
+# `formal/model.py`'s `POINTER_TYPE_CTORS` / `POINTEE_WIDTHS` /
+# `pointee_of_type_text` / `pointer_pointee` / `dereference_lowering`, and these
+# are the cases that hold each decision in place.
+#
+# The shape every one of the answered cases uses is a PARAMETER annotated with
+# its pointee, called with a string — and a string on this path is a `char *`,
+# so a `Pointer[UInt8]` argument gets a real, known, NUL-terminated address to
+# read.  That is what makes the expected answers checkable against Python
+# (`struct.unpack` over `b"ABCDEFGH"`), and the expected values below are those.
+POINTER_DEREF_CASES = [
+    # A `UInt8` pointee: ONE byte.  This is the case D1 refused over, and the
+    # reason the refusal cited it: an 8-byte load of a 1-byte object over-reads
+    # by seven bytes, returns a plausible number assembled from the adjacent
+    # bytes, and faults at a page edge.  With the pointee declared the load is
+    # `LDRB W0, [X0]` / `movzbl (%rax), %eax`, and 'A' is 65 — the FIRST byte
+    # and not the eight-byte word.
+    ("deref_u8_is_one_byte",
+     "def read8(p: Pointer[UInt8]) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    var v = read8(s)\n"
+     "    if v == 65:\n"
+     "        return 1\n"
+     "    return 0\n", 1, None),
+    # The width boundary on the other side, and the STRONGEST of these cases
+    # because it reads the SAME address four ways in one program and asks the
+    # four reads to disagree.  A one-word formal value cannot hold a 4-byte and
+    # an 8-byte read of the same address at once unless the width really comes
+    # from the pointee's declared type: 1 byte is 65, 2 is 16961, 4 is
+    # 1145258561, 8 is 5208208757389214273 (all little-endian over
+    # b"ABCDEFGH", i.e. `struct.unpack` of the same eight bytes).
+    ("deref_four_widths_at_one_address",
+     "def r1(p: Pointer[UInt8]) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def r2(p: Pointer[UInt16]) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def r4(p: Pointer[Int32]) -> Int:\n"
+     "    return Int(p.unsafe_value())\n"
+     "def r8(p: Pointer[Int64]) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    if r1(s) != 65:\n"
+     "        return 10\n"
+     "    if r2(s) != 16961:\n"
+     "        return 11\n"
+     "    if r4(s) != 1145258561:\n"
+     "        return 12\n"
+     "    if r8(s) != 5208208757389214273:\n"
+     "        return 13\n"
+     "    return 1\n", 1, None),
+    # A 4-byte signed pointee.  `LDRSW` sign-extends: the top four bytes of
+    # "ABCDEFGH" are 0x47464544, whose top bit is 0, so this cannot tell a
+    # sign-extend from a zero-extend.  The GUARD for that is `deref_i8_signed`
+    # below, which is the same distinction at one byte where it is visible.
+    ("deref_i32_is_four_bytes",
+     "def read32(p: Pointer[Int32]) -> Int:\n"
+     "    return Int(p.unsafe_value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGHIJKL\"\n"
+     "    var v = read32(s)\n"
+     "    if v == 1145258561:\n"          # struct.unpack('<i', b'ABCD')
+     "        return 1\n"
+     "    return 0\n", 1, None),
+    # A 2-byte pointee, which is the one width this case list does not get from
+    # `deref_four_widths_at_one_address` reading it unsigned.
+    ("deref_i16_is_two_bytes",
+     "def r(p: Pointer[Int16]) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    if r(s) != 16961:\n"           # struct.unpack('<h', b'AB') == 16961
+     "        return 1\n"
+     "    return 0\n", 0, None),
+
+    # A POINTER IN A FRAME FIELD.  `Two` has two fields, so its receiver is a
+    # frame of slots and `h.p` is slot 1 — the shape every C-library pointer
+    # wrapper in the corpus has (`self._data`, `self._ptr`).  This is the case the brief calls the frame-lifetime trap, and the
+    # thing worth pinning is that a `Pointer[UInt8]` in a field is SAFE: the
+    # word is an address to bytes with static storage duration, not a frame
+    # address, so nothing here can outlive anything.  (The unsafe shape — a
+    # `Pointer[SomeStruct]` in a field — is `deref_refuse_struct_pointee`.)
+    #
+    # arm64 only, and the reason is a PRE-EXISTING x86-64 bug recorded in
+    # bugs/FORMAL_pointer_value_model.md: `h.p` on a one-field struct reads 0 on
+    # x86-64 and the field's value on arm64, on the pre-change tree too.
+    # `deref_field_1slot_x86_bug` is the case that pins THAT.
+    ("deref_pointer_in_a_frame_field",
+     "struct Two:\n"
+     "    var tag: Int64\n"
+     "    var p: Pointer[UInt8]\n"
+     "def read_field(h: Two) -> Int:\n"
+     "    return Int(h.p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    var h = Two()\n"
+     "    h.tag = 1\n"
+     "    h.p = s\n"
+     "    if read_field(h) == 65:\n"
+     "        return 1\n"
+     "    return 0\n", 1, None),
+]
+
+POINTER_DEREF_REFUSALS = [
+    # A STRUCT pointee.  The derivation is RIGHT — a struct's value on this path
+    # is a frame address, so the receiver already is the pointee, the same
+    # identity `Pointer()` gives — and it is refused because nothing recognises
+    # a name bound through a pointer as a frame holder, so `q.b` off the result
+    # reads a word of nothing.  Measured with the identity emitted: 0 on both
+    # architectures where the source says 22.  This is the frame-lifetime trap:
+    # a `Pointer[SomeStruct]` IS a frame address, so letting one be dereferenced
+    # without the holder analysis is a use-after-free wearing a pointer's
+    # clothes.  The refusal says all of that, and the next step is one line in
+    # `formal/build.py`'s holder fixpoint rather than a value-model change.
+    ("deref_refuse_struct_pointee",
+     "struct P3:\n"
+     "    var a: Int64\n"
+     "    var b: Int64\n"
+     "    var c: Int64\n"
+     "def read_field(p: Pointer[P3]) -> Int:\n"
+     "    return Int(p.value().b)\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = P3()\n"
+     "    t.b = 22\n"
+     "    return read_field(t)\n",
+     "refuse:a STRUCT, and a struct's value on this path is a frame ADDRESS", None),
+    # A FLOAT pointee.  A formal value has no float kind distinct from an int
+    # (the same absence that refuses `__mlir_bool__`), so a 4-byte float load
+    # would put IEEE binary32 bits in a register the program then treats as an
+    # integer — a wrong answer, not an approximation.
+    ("deref_refuse_float_pointee",
+     "def read_f(p: Pointer[Float32]) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    return read_f(s)\n",
+     "refuse:this path has no float kind distinct from an int", None),
+    # A BLOB pointee.  A list is a frame whose FIRST word is its count, so a
+    # load at the address would answer with the LENGTH — a plausible number the
+    # source never wrote, which is the outcome this table exists to prevent.
+    ("deref_refuse_blob_pointee",
+     "def read_l(p: Pointer[List[Int]]) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    return read_l(s)\n",
+     "refuse:a list is a BLOB on this path", None),
+    # A bare type PARAMETER as the pointee: `Pointer[T]`.  `T` is an identifier
+    # so it reduces to a base name, and no base name is a WIDTH — which is the
+    # unagreed direction, and D2's rule says an absent answer IS the answer.
+    ("deref_refuse_type_parameter_pointee",
+     "def read_t(p: Pointer[T]) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    return read_t(s)\n",
+     "refuse:is not a width this model establishes and not a struct this image declares", None),
+    # The corpus's OWN spelling of the same thing, and by a wide margin: of the
+    # 60-odd `Pointer[…]` spellings in the stdlib, 149 occurrences are
+    # `Pointer[Scalar[dtype]]` and 76 more are `Pointer[mut=True,
+    # Scalar[dtype]]`.  `Scalar[dtype]` does not reduce to a single identifier
+    # — `dtype` is itself a parameter — so it takes the other untyped branch and
+    # gets the other message.  Both messages are the same fact ("the pointee's
+    # value is not knowable here") reached two ways, and the pair pins that
+    # neither is mistaken for a width.
+    ("deref_refuse_scalar_pointee_of_unknown_arity",
+     "def read_c(p: Pointer[Scalar[dtype]]) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    return read_c(s)\n",
+     "refuse:the element count is not spelled as the literal 1", None),
+    # The third untyped spelling, and the one that reaches the remaining
+    # untyped branch: a QUALIFIED pointee that is not a `Self.` type-parameter
+    # access.  `annotation_base_name` returns None for it on purpose —
+    # `ref[self._data]` names the type OF a field and `some.module.Thing` names
+    # nothing this unit declares, and returning the last component would look up
+    # a struct named after a field.
+    ("deref_refuse_qualified_pointee_type",
+     "def read_q(p: Pointer[some.module.Thing]) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    return read_q(s)\n",
+     "refuse:which is a type PARAMETER or a computed type rather than a type name", None),
+    # A 4-byte load at a FRAME SLOT.  `t` is a two-field struct, so its receiver
+    # is a frame address, and this path hands that address to a `Pointer[Int32]`
+    # parameter as an ordinary word — which is what makes the signedness
+    # observable at all, because the interned string bytes are all ASCII and no
+    # byte >= 128 is producible on this path yet (see the bug doc).  The value
+    # in the slot is -1, so the low four bytes are 0xFFFFFFFF and a signed read
+    # must be -1 where a zero-extending one is 4294967295.
+    ("deref_i32_at_a_frame_slot_sign_extends",
+     "struct Two:\n"
+     "    var x: Int64\n"
+     "    var y: Int64\n"
+     "def r(p: Pointer[Int32]) -> Int:\n"
+     "    return Int(p.unsafe_value())\n"
+     "def ru(p: Pointer[UInt32]) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = Two()\n"
+     "    t.x = 0 - 1\n"
+     "    if r(t) != 0 - 1:\n"
+     "        return 1\n"
+     "    if ru(t) != 4294967295:\n"
+     "        return 2\n"
+     "    return 0\n", 0, None),
+    # AN UNDECLARED receiver: a parameter with no annotation.  This is the other
+    # untyped direction, and it is the 14-of-47 `unsafe_value` case — a pointer
+    # that crossed a call boundary and lost its pointee on the way.
+    ("deref_refuse_undeclared_receiver",
+     "def read_x(p) -> Int:\n"
+     "    return Int(p.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    return read_x(s)\n",
+     "refuse:it is a word from the caller and its pointee is not recorded here", None),
+    # The OFFSET SCALE.  `p + k` on this path adds the raw integer, which is C
+    # for a one-byte pointee and wrong for every other one, so a `Pointer[Int64]`
+    # reached through arithmetic is refused rather than loaded at the wrong
+    # address.  This is the one refusal whose fix is a lowering rather than a
+    # model change, and it is recorded as the next step.
+    ("deref_refuse_unscaled_offset",
+     "def read_at(p: Pointer[Int64], k: Int) -> Int:\n"
+     "    var q = p + k\n"
+     "    return Int(q.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    return read_at(s, 1)\n",
+     "refuse:WITHOUT scaling it by the pointee's size", None),
+    # The SAME arithmetic on a ONE-BYTE pointee is ANSWERED, and this is the
+    # guard for the refusal above: refusing the scale must refuse it because
+    # the element is 8 bytes, not because the program mentions `+`.  This case
+    # is a guard — it passes on the pre-change tree too, because there `value()`
+    # on any receiver was refused and this program would not have built.  It is
+    # listed here so that a future change which refuses ALL pointer arithmetic
+    # fails a case rather than passing quietly.
+    ("deref_offset_on_a_one_byte_pointee_is_the_answer",
+     "def read_at(p: Pointer[UInt8], k: Int) -> Int:\n"
+     "    var q = p + k\n"
+     "    return Int(q.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGH\"\n"
+     "    if read_at(s, 3) == 68:\n"       # 'D'
+     "        return 1\n"
+     "    return 0\n", 1, None),
+    # `value` on a receiver that is NOT a pointer and not established as one.
+    # This is the case the table split exists for: pre-change this refused with
+    # "it is a load from the address the receiver holds", which is FALSE about
+    # 527 of the 528 `value` sites in the stdlib (an enum's, an iterator's and a
+    # `SIMD`'s `value()` is an identity, not a load).  The message now names the
+    # four questions behind the one spelling.
+    ("deref_refuse_value_is_not_always_a_dereference",
+     "def main(n: Int) -> Int:\n"
+     "    h = n\n"
+     "    return h.value()\n",
+     "refuse:is spelled the same for four different questions", None),
+    # A method this path has no lowering for.  Two things are pinned here and
+    # the second is the one that is easy to get wrong.
+    #
+    # First, the name is refused by the GENERIC value-method refusal, which is
+    # where it belongs: `h.unicorn()` has no `how` in either table, so
+    # `value_method_refusal` names both tables and says what the receiver
+    # holds.  This is a guard — it behaved this way before this wave.
+    #
+    # Second, and the reason the case is here: `_emit_value_method`'s `else`
+    # used to be `_emit_str_count(e)`, so a method that REACHED that arm was
+    # answered by calling `str.count` on its receiver.  `count`'s own lowering
+    # was that same `else`, so the arm meant two different things.  The visible
+    # symptom, measured while landing the pointer value model, was a `value()`
+    # newly made answerable reporting `str.count() takes exactly one argument
+    # on this path (got 0)` — a reader would have gone looking for a counting
+    # bug in a module with no counting in it.  `count` is now an explicit arm
+    # and the `else` is a refusal that names the unclaimed `how`.  The evidence
+    # that the fall-through is gone is `str_count` above, which passes; and the
+    # evidence that it used to mis-report is the git history of this file.
+    ("deref_refuse_unknown_method_names_both_tables",
+     "def main(n: Int) -> Int:\n"
+     "    h = n\n"
+     "    return h.unicorn()\n",
+     "refuse:is not one of those methods of those receivers", None),
+]
+
+# The x86-64 wrong answer this used to pin, and what replaced it.  A
+# ONE-FIELD struct's receiver IS its field (`struct_is_framed`: "a one-field
+# struct's receiver is its field, so it needs no frame"), and x86-64 did not
+# read it that way: `h.v` returned 0 there and 4242 on arm64, on the pre-change
+# tree, for the same source.  arm64 was right BY ACCIDENT — `h` is argument 0,
+# so it is X19, and `_load_var`'s fall-through read X19; x86-64's fall-through
+# read an immediate 0.  Reproduced on `git archive HEAD` with no diff applied.
+# It is a member-read site in x86_64_codegen.py and NOT a dereference site, so
+# it is out of the pointer value model's lane; it was recorded in
+# bugs/FORMAL_pointer_value_model.md with the exact reproducers.
+#
+# Wave 6 (F1) closed it, and closed it the only way that does not pick a
+# winner: a field access through a name bound as a PARAMETER has no layout on
+# either architecture, so BOTH now refuse by name, from the same
+# `model.field_access_refusal`, and the two architectures can no longer answer
+# this program differently.  The case stays — as a refusal — because the
+# divergence it recorded was real and its replacement is exactly the assertion
+# that says so on both backends.
+X86_ONLY_1SLOT_BUG_CASE = (
+    "one_field_struct_field_read_is_correct_on_arm64",
+    "struct One:\n"
+    "    var v: Int64\n"
+    "def raw(h: One) -> Int:\n"
+    "    return Int(h.v)\n"
+    "def main(n: Int) -> Int:\n"
+    "    var o = One()\n"
+    "    o.v = 4242\n"
+    "    if raw(o) == 4242:\n"
+    "        return 1\n"
+    "    return 0\n",
+    "refuse:is a field access through 'h', and this", None)
+
+
+# ── WHERE A NAME LIVES: module scope, and how a call's arguments bind ──────
+#
+# `G = 5` at module level, read from a function, returned **20 on arm64 and 0
+# on x86-64** where the source says 10 (5 * 2).  The two architectures
+# disagreed about ONE PROGRAM, which is the failure this suite exists to
+# catch, and the register-level cause is in the diff: `_extract_functions`
+# takes only module-level FunctionDefs, so the assignment became NO CODE AT
+# ALL, and the read fell through `_load_var` to whatever the allocator had left
+# — X19, which is callee-saved and which the caller's own `test_input` (10)
+# was sitting in, on arm64; an immediate `movq $0x0, %rax` on x86-64.
+# `_store_var` had the same fall-through (`mov x19, src`), so a WRITE to a name
+# the analysis did not know was a silent store into the register the next
+# function reads as its first parameter.
+#
+# Every case below FAILED on the pre-change tree, each for the reason its
+# comment gives, and each is checked on BOTH backends by `run_case`, so a
+# divergence cannot come back.
+WAVE6_NAME_CASES = [
+    # THE headline.  `G` is written at module level and read from a function
+    # that never touched it, which is the ordinary shape for a constant.  Was
+    # 20 on arm64 and 0 on x86-64.
+    ("modsym_global_read_from_a_function",
+     "G = 5\n\n"
+     "def read_g() -> Int:\n"
+     "    return G\n\n"
+     "def main() -> Int:\n"
+     "    return read_g() * 2\n", 10, None),
+    # A global MUTATED from a function.  In the language a function that
+    # assigns the name binds its OWN local of that name, so this is not a
+    # mutation of the module's value at all — which is exactly the premise
+    # that lets a folded constant be substituted at every read site.  The
+    # local is 7 and the constant is 5, so 12 is the only answer, and a
+    # substitution blind enough to replace the LOCAL would return 10.
+    ("modsym_a_local_shadows_the_module_name",
+     "G = 5\n\n"
+     "def f() -> Int:\n"
+     "    var G = 7\n"
+     "    return G\n\n"
+     "def main() -> Int:\n"
+     "    return f() + G\n", 12, None),
+    # A global read BEFORE the function that would have computed it runs, and
+    # a module-level binding whose value is literal-only arithmetic.  With a
+    # folded value the order cannot matter, which is the point: 3*4 + (-2) is
+    # 10 whatever ran first, and `helper()` adds 1.
+    ("modsym_read_before_the_defining_function_runs",
+     "LIM = 3 * 4\n"
+     "NEG = -2\n\n"
+     "def helper() -> Int:\n"
+     "    return 1\n\n"
+     "def read_first() -> Int:\n"
+     "    return LIM + NEG\n\n"
+     "def main() -> Int:\n"
+     "    return read_first() + helper()\n", 11, None),
+    # The half that needs STORAGE.  `G = compute()` is a real global: its
+    # value is not known before the program runs, so it has to live somewhere
+    # that outlives every frame, and every value a formal program can name
+    # lives in a function's own stack scratch.  Refused BY NAME, and for THAT
+    # reason — on the pre-change tree it read whatever register was left.
+    ("modsym_refuse_a_global_the_build_cannot_fold",
+     "G = compute()\n\n"
+     "def compute() -> Int:\n"
+     "    return 5\n\n"
+     "def read_g() -> Int:\n"
+     "    return G\n\n"
+     "def main() -> Int:\n"
+     "    return read_g() * 2\n",
+     "refuse:is bound at module level, and this path has no module-global storage", None),
+    # The other storage shape: an AUGMENTED assignment at module level.  The
+    # value is `5 + 2` only after the program has started, so folding it would
+    # be a guess about the order of two statements.
+    ("modsym_refuse_a_module_level_augmented_assignment",
+     "G = 5\n"
+     "G += 2\n\n"
+     "def main() -> Int:\n"
+     "    return G\n",
+     "refuse:is bound at module level, and this path has no module-global storage", None),
+    # A module-level `comptime` that does not fold.  `comptime` inside a
+    # FUNCTION is a compile-time value the backend materializes at its read,
+    # and this is a guard for that (`limit_comptime_over_a_runtime_parameter`
+    # above is the refusal of the same shape).  At MODULE level the binding is
+    # not in scope in any function, so there is nothing for a read to consult
+    # and the name must be refused rather than answered from a register.
+    ("modsym_refuse_a_module_level_comptime_that_does_not_fold",
+     "comptime N = len(3)\n\n"
+     "def main() -> Int:\n"
+     "    return N\n",
+     "refuse:is a `comptime` binding declared at module level", None),
+    # A call whose CALLEE this unit does not compile.  A callee is a SYMBOL,
+    # not a read of a value, so the new name check must skip it: refusing it
+    # would report a link-time fact in the grammar of a codegen gap, and a
+    # GUARD in the sense that this program's own `G` is what the case is about.
+    ("modsym_an_uncompiled_callee_is_a_symbol_not_a_read",
+     "G = 5\n\n"
+     "def not_compiled(x) -> Int:\n"
+     "    return x\n\n"
+     "def main() -> Int:\n"
+     "    return G\n", 5, None),
+    # ── *args / **kwargs ──
+    # THE second headline.  `f(1, 2, r)` against `def f(x, *rest)`: `params`
+    # recorded a flat list `['x', '*rest']`, so `rest` was parameter index 1
+    # and index 2 had no parameter at all, and nothing looked.  The index
+    # shape SEGFAULTED on both architectures before this change (measured on
+    # `git archive HEAD`); `len(rest)` was refused by a different rule, which
+    # is the accident E3 recorded — "safe today only because a two-element
+    # list cannot be indexed at 2".
+    ("vararg_refuse_a_read_of_star_args",
+     "def f(x, *rest) -> Int:\n"
+     "    return rest[2]\n\n"
+     "def main() -> Int:\n"
+     "    var r = 3\n"
+     "    return f(1, 2, r)\n",
+     "refuse:its *-parameter, and this path has no variadic ABI", None),
+    # `**kwargs` read: the same absence, and the same refusal, for the other
+    # star.  `kw["y"]` against `def f(x, **kw)` was a subscript through a name
+    # with no home.
+    ("vararg_refuse_a_read_of_double_star_kwargs",
+     "def f(x, **kw) -> Int:\n"
+     "    return kw[\"y\"]\n\n"
+     "def main() -> Int:\n"
+     "    return f(1, y=2)\n",
+     "refuse:its **-parameter, and this path has no variadic ABI", None),
+    # A variadic callee that never READS its variadic parameter.  The extra
+    # arguments are dropped, which is exactly what the language observes, so
+    # this is a GUARD: it behaved this way before this change and must keep
+    # behaving this way, because it is what makes the refusal above about the
+    # READ rather than about the declaration.
+    ("vararg_a_declared_and_unread_star_args_still_runs",
+     "def f(*args) -> Int:\n"
+     "    return 7\n\n"
+     "def main() -> Int:\n"
+     "    return f(1, 2)\n", 7, None),
+    # `**kwargs` the same way, with a keyword argument that has to be dropped
+    # rather than bound.  1 + 40.
+    ("vararg_a_declared_and_unread_double_star_kwargs_still_runs",
+     "def f(x, **kw) -> Int:\n"
+     "    return x + 40\n\n"
+     "def main() -> Int:\n"
+     "    return f(1, y=2, z=3)\n", 41, None),
+    # ── the rest of the binding rule, which the flat list also got wrong ──
+    # A DEFAULT argument the caller omits.  The callee's prologue gives `y` a
+    # register home, the body only READS it, and so nothing ever wrote it.  The
+    # source says 14.  Measured on `git archive HEAD` with no diff, EIGHT
+    # CONSECUTIVE BUILDS AND RUNS PER ARCHITECTURE:
+    #
+    #       arm64   76 76 76 76 76 76 84 84
+    #       x86-64  84 76 76 76 76 84 76 76
+    #
+    # which is the sharpest form of the register-allocation accident this suite
+    # has found: the same program, rebuilt, answers DIFFERENTLY, and never 14.
+    # After the change, eight builds and runs per architecture: 14 every time.
+    # The old comment said "trailing optional parameters the caller omitted are
+    # dropped — the callee's prologue only consumes the registers actually
+    # passed", and the second half of that was the bug: it consumes ALL of
+    # them, it only WRITES the ones it is passed.
+    ("binding_a_default_argument_is_passed_not_dropped",
+     "def f(x, y=10) -> Int:\n"
+     "    return x + y\n\n"
+     "def main() -> Int:\n"
+     "    return f(1) + f(1, 2)\n", 14, None),
+    # Too many positional arguments, no variadic to absorb them.  `f(1, 2, 3)`
+    # against `def f(x, y)` bound `y` to 2 and said nothing, where the
+    # language says a TypeError.  The arity check only ever ran when the call
+    # had a keyword argument, because both copies began with
+    # `if not e.kwargs: return list(e.args)`.
+    ("binding_refuse_too_many_positional_arguments",
+     "def f(x, y) -> Int:\n"
+     "    return y\n\n"
+     "def main() -> Int:\n"
+     "    return f(1, 2, 3)\n",
+     "refuse:too many positional arguments", None),
+    # A KEYWORD-ONLY parameter reached by position.  `def f(a, *, b)` puts `b`
+    # in the flat parameter list at index 1, so `f(1, 2)` bound the 2 to `b`
+    # and returned 3; the language says a positional argument cannot fill `b`.
+    ("binding_refuse_a_positional_for_a_keyword_only_parameter",
+     "def f(a, *, b) -> Int:\n"
+     "    return a + b\n\n"
+     "def main() -> Int:\n"
+     "    return f(1, 2)\n",
+     "refuse:too many positional arguments", None),
+    # ── the field-access shape the fall-throughs were answering ──
+    # `b.z = 1` with `b` a bare parameter.  arm64's `_store_var` had no slot
+    # and fell through to `mov x19, src`; x86-64's `AssignStmt` evaluated both
+    # sides and RETURNED, discarding the store.  One is a wrong store and one
+    # is a dropped store, and neither is a wrong VALUE — which is why no case
+    # that only checked a return value ever noticed.  `main` returns 0 either
+    # way, so the EXIT STATUS cannot witness this one (0 before, 0 after) and
+    # the assertion is the REFUSAL: the store used to be silently absent, and
+    # only the refusal distinguishes "discarded" from "never reached".
+    ("field_refuse_a_store_through_a_parameter",
+     "struct B2:\n"
+     "    var z: Int\n\n"
+     "def touch(b) -> Int:\n"
+     "    b.z = 1\n"
+     "    return 0\n\n"
+     "def main() -> Int:\n"
+     "    return 0\n",
+     "refuse:is a field access through 'b'", None),
+    # The READ half of the same shape, which is the arm64/x86-64 divergence
+    # F2 documented: `h.v` through a parameter returned 4242 on arm64 (X19,
+    # because `h` IS argument 0) and 0 on x86-64.  `X86_ONLY_1SLOT_BUG_CASE`
+    # above is the same program converted to a refusal; this one is here
+    # because the read and the store are two branches and a fix to one is not
+    # a fix to the other.
+    ("field_refuse_a_read_through_a_parameter",
+     "struct One2:\n"
+     "    var v: Int64\n\n"
+     "def raw(h) -> Int:\n"
+     "    return Int(h.v)\n\n"
+     "def main() -> Int:\n"
+     "    var o = One2()\n"
+     "    o.v = 4242\n"
+     "    return raw(o)\n",
+     "refuse:is a field access through 'h'", None),
+    # An MLIR dialect construct the TEMPLATE rules do not cover, so the name
+    # check reached it and refused it as "no home" — a symptom of the register
+    # fall-through, naming the allocator rather than the construct.  Real
+    # stdlib source spells it exactly this way (`std/builtin/value.mojo:203`,
+    # `std/sys/debug.mojo:20`).
+    ("mlir_dialect_name_is_refused_by_construct",
+     "def materialize(value) -> Int:\n"
+     "    return __mlir_op.`lit.materialize_into`[value=value](value)\n\n"
+     "def main() -> Int:\n"
+     "    return materialize(1)\n",
+     "refuse:is an MLIR dialect construct", None),
+]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -4486,7 +5352,10 @@ def main():
                   + DECLARED_TYPE_REFUSALS
                   + BYREF_HANDOFF_CASES + BYREF_HANDOFF_REFUSALS
                   + CROSS_MODULE_CASES + WAVE5_POSITION_CASES
-                  + CONSTRUCTION_CASES + CONSTRUCTION_REFUSALS)
+                  + CONSTRUCTION_CASES + CONSTRUCTION_REFUSALS
+                  + POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
+                  + WAVE6_TRUTHY_CASES
+                  + WAVE6_NAME_CASES + [X86_ONLY_1SLOT_BUG_CASE])
     selected = [c for c in everything if not args.cases or c[0] in args.cases]
     known = {c[0] for c in everything}
     if args.cases and len(selected) != len(args.cases):

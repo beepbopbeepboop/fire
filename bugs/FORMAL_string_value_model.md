@@ -6,11 +6,15 @@ recovered as *computations* over that one word rather than as fields, and the
 two wrong answers that followed from not doing so are fixed on both backends.
 Wave 5 then closed the two items this document left named (`in` and `+=`) and
 found the same defect class in **eleven more operators** — every one measured,
-every one refused, and the residue written down at the bottom with a next step
-for each. What is still NOT fixed, and is the larger thing, is the collision
-between that representation and the stdlib's own `String` struct — which is
-what all 16 of the "a String receiver is returned/passed" refusals in the stdlib
-sweep actually are, and which is not a string-value-model problem at all.
+every one refused. Wave 6 closed the three it left (`~`, the truthiness
+conversion, and a slice of a string) and found **three more** in the same family
+that no list had recorded: `if []:`, a short-circuit chain used as a condition,
+and an x86-64 `assert` that always failed. What is still NOT fixed, and is the
+larger thing, is the collision between that representation and the stdlib's own
+`String` struct — which is what all 16 of the "a String receiver is
+returned/passed" refusals in the stdlib sweep actually are, and which is not a
+string-value-model problem at all. Two regressions that arrived from outside
+this work, with a merge, are at the bottom.
 
 ## The decision, and the reasoning that decides it
 
@@ -326,41 +330,186 @@ wrong answer in another, which no amount of reading `_emit_binop` would show:
   `_emit_subscript_addr`, the single choke point a read, a store and an
   augmented assignment all pass through.
 
-## Also found, and NOT fixed — the residue, with the next step for each
+## Wave 6 (F3): the three residue items closed, and the class was wider than three
 
-These are the ones wave 5 found and did **not** close. Each says what it would
-take.
+All three items wave 5 left named are closed, and all three were **wrong answers
+or a crash measured before and after on both architectures**. Two of them turned
+out to be more than one bug each, and finding the extra ones is the more useful
+half of the result — see "what was found while looking" below.
 
-- **`~` never reaches the parser, so `~s` silently means `s`.** This is the
-  only one of the twelve operators above that is still lowered, and the reason
-  is not in `formal/`: `fire_compiler.py`'s `_TOKEN_RE` has no `~` in its `OP`
-  alternation, and `py_tokenize` drops `UNK` tokens without a word
-  (`if kind in ("WS", "UNK", "XFER"): continue`). So the `~` is gone before
-  `Parser._parse_unary` — whose `t.value in ("-", "+", "~")` branch is correct
-  and unreachable — ever sees it. Measured: `r = ~s; printf("%d", r)` prints
-  **77693904** on arm64 and **74486761** on x86-64, and the AST contains
-  `AssignStmt(target=r, value=IdentExpr(s))` with no `UnaryOp` in it at all.
-  **Next step:** add `~` to the `OP` group in `_TOKEN_RE` (it is unambiguous, so
-  its position in the alternation does not matter). Nothing else is needed:
-  `model.string_unary_refusal` already refuses `~` on a string and both
-  backends already ask for it, and x86-64's `_emit_unary` already has a
-  `~` branch. `fire_compiler.py` was read-only for wave 5 and this is why.
-- **`if s:` and `while s:` are still a fabricated falsity, and `not s` is now a
-  refusal instead.** A string is a pointer and a pointer is never zero, so
-  every string is truthy here INCLUDING THE EMPTY ONE. Measured, both
-  backends: `s = "abc"; e = ""; if s: …; if e: …` prints `S-truthy` and
-  `E-truthy`. `not s` was the same defect in an expression position and IS now
-  refused (`str_not_refused_because_empty_string_is_falsy`), because at a
-  `UnaryOp` site the emitter can see the operand's kind.
-  **Next step:** the condition sites are the remaining half, and they are a
-  *helper*, not a check: one `_emit_truthy(expr, reg)` on each backend that,
-  when `expr`'s kind is `STR_KIND`, emits the `strlen` and tests THAT, and
-  otherwise emits the CBZ/TEST it emits today. The honest test is
-  `strlen(s) != 0`, which is the same computation `len` already makes with a
-  symbol both backends already call. Every truthiness site has to go through
-  the helper or the two spellings disagree again, which is the lesson of the
-  `_emit_binop` / `_emit_branch_unless` pair above. Until then `len(s) == 0`
-  is the spelling to write, and the refusal says so.
+| source | pre-change (both backends) | after (both backends) |
+|---|---|---|
+| `s = "abc"; r = ~s; printf("%d", r)` | **46007208 / 38761401** — the ADDRESS of the string, because `~` was dropped by the tokenizer and the statement was `r = s` | refused, identically worded |
+| `r = ~5` | **5** — same tokenizer drop, and the overwhelmingly common use of `~` was wrong the same way | `-6` |
+| `printf("%d %d %d %d", ~0, ~1, ~-1, ~~7)` | **`0 1 -1 7`** — the operands themselves, printed back | `-1 -2 0 7` |
+| `e = ""; if e:` | **`E-truthy`** | `E-falsy` |
+| `e = ""; while e: i = i + 1` | **never terminates** (60 s timeout) — the condition is an address, and the body is unreachable so it can never change it | `i=0`, terminates |
+| `a = []; if a:` | **`L-truthy`** — a list blob's truthiness is its COUNT, and this was not in wave 5's list at all | `L-falsy` |
+| `f = [1]; e = []; 1 if (f and e) else 0` | **1** | 0 |
+| `1 if "" else 0` | **1** | 0 |
+| `e = ""; assert e` | **exit 0 on arm64, exit 1 on x86-64** | exit 1 on both |
+| `assert 1` | **exit 0 on arm64, exit 1 on x86-64** | exit 0 on both |
+| `s = "abcde"; printf("[%s]", s[1:])` | **SIGSEGV, exit 139** | refused, identically worded |
+
+### 1. `~` never reached the parser. One line, and it was a lexer bug
+
+`fire_compiler.py`'s `_TOKEN_RE` had no `~` in its `OP` alternation, and
+`py_tokenize` drops `UNK` tokens without a word
+(`if kind in ("WS", "UNK", "XFER"): continue`). The `~` was therefore gone
+before `Parser._parse_unary` — whose `t.value in ("-", "+", "~")` branch is
+correct and was unreachable — ever saw it.
+
+**The AST already had the node.** `UnaryOp` (`fire_compiler.py:302`) is a
+dataclass with `op`/`operand`, `_parse_unary` builds one for `~`, the
+interpreter evaluates one (`myinterpreter.py:4971`, `elif op == '~': return
+self._wrap_int(~operand)`), and the compiled path lowers one
+(`mojo/backend_gimple/emit_exprs.py:_lower_UnaryOp`, `c_op = {'-': '-', '~':
+'~'}`). So the fix is the alternation and nothing else: **no new node, and no
+second unary representation.** Measured after: `r = ~5` builds
+`AssignStmt(target=r, value=UnaryOp(op='~', operand=IntLiteral(5)))`.
+
+**`~` on an integer was wrong too, for the same reason, and that is the more
+important half of this item.** `~` is overwhelmingly used on integers, and
+`printf("%d %d %d %d", ~0, ~1, ~-1, ~~7)` printed `0 1 -1 7` — the four
+OPERANDS, each one silently returned unchanged. Every value now matches Python
+on a two's-complement 64-bit word, both architectures: `~5 = -6`, `~0 = -1`,
+`~1 = -2`, `~-1 = 0`, `~~7 = 7`, `~1000000007 = -1000000008`,
+`~4611686018427387904 = -4611686018427387905`, and `~(a+b)` / `~(a*b)` / `~(a<<2)`
+on operands rather than on literals. (`printf("%d")` truncates to 32 bits, so a
+64-bit answer has to be read with `%lld` — the `-1` a `%d` prints for
+`~2**62` is the formatter, not the operator.)
+
+arm64 needed a `~` branch it did not have: x86-64's `_emit_unary` has had one
+for several waves, arm64's inline `UnaryOp` handling had `not`, `-`, `+` and the
+ownership marker and then raised `unsupported unary operator`. Left alone, the
+two backends would have answered `~5` differently — one `-6`, one a
+`CodegenError` — for a construct with one meaning. `encode_mvn_xd_xn` is new in
+`formal/arm64.py` and is spelled as `ORN Rd, ZR, Rn` through
+`encode_orn_xd_xn_xm`, because `MVN` IS that instruction and a second copy of
+the constant is a second thing to keep in step. Both encodings were verified
+against the assembler (`mvn x0, x1` = `0xAA2103E0`).
+
+### 2. Truthiness: one table, and every site routed through it
+
+`model.truthy_lowering` is the table, and it is three rows because
+`len_operand_lowering` already had the two that have a knowable answer:
+
+| operand kind | lowering | why it is right |
+|---|---|---|
+| `str` | `strlen(s)` | a string is a NUL-terminated `char *`; the empty string is a NON-NULL pointer, so "is the word zero" says the empty string is truthy. `strlen("") == 0` |
+| `list` / `tuple` / any counted blob | one load from offset 0 | a blob is `[count:i64][elem…]`, so its truthiness IS its count |
+| everything else — an `int`, a **frame address**, an unclassified word | the word itself | 0 is the only falsy integer, and a frame is never mapped at 0, so pointer truthiness is the right answer for a struct receiver |
+
+The third row is the one worth defending, and it is the reason there is no BOOL
+kind distinct from INT (which is why `__mlir_bool__` is refused) that it needs
+no new representation: the result is a word whose ZERONESS is the answer, so
+`TRUTHY_FROM_STRLEN` and `TRUTHY_FROM_BLOB_FIELD` are literally the two
+`len_operand_lowering` row names, reused rather than respelled, and
+`TRUTHY_NONZERO` needs no instruction at all.
+
+**The compiled path already had this table**, in
+`mojo/backend_gimple/emit_stmts.py::_ensure_bool_cond`: a container's length for
+a container, `mojo_truthy_cstr` (a `strlen != 0`) for a `char *`, a
+pointer-nonzero for any other pointer, a nonzero for an integer. Four rows, the
+same four, decided in one place. So this change brings the FORMAL path into
+agreement with the compiled one rather than inventing an answer.
+
+#### The site enumeration — every site found, and every one routed
+
+`if`/`elif`, `while`, `a if c else b` in BOTH of its lowerings (the branch form
+and the branchless CSEL, which are chosen by a purity predicate and so a fix in
+one is invisible in the other), a comprehension guard, `s and k` / `s or k`,
+`assert`, and the short-circuit chain **used as a condition**. Each is a
+`_emit_truthy_word` call on both backends.
+
+**One site was found by the enumeration and NOT by reading the two backends:
+`a and b` as a CONDITION.** `_emit_and_or` was already converting the chain's
+LEFT operand, and the chain's RESULT is an OPERAND — so when the operand that
+survives is the empty string or the empty list, the outer site tests a returned
+blob ADDRESS for zeroness and gets it wrong. Measured: `f = [1]; e = []; 1 if (f
+and e) else 0` printed `1` where Python prints `0`. The rule needs no kind at
+all — `truthy(a and b) = truthy(a) and truthy(b)`, symmetrically for `or` — so
+`_emit_truthy_word` RECURSES into both operands and never materialises the chain
+as a value. arm64's branchless `and`/`or` form is additionally gated on the left
+needing no conversion, because that form is branchless precisely because the left
+is a load, and a `strlen` is a call that clobbers both X0 and the flags the CSEL
+reads.
+
+**Sites deliberately NOT routed, and why:**
+
+- **`not s`** is still a refusal (`str_not_refused_because_empty_string_is_falsy`).
+  It is not a wrong answer, and it is now a CHOICE rather than a limit:
+  `_emit_truthy_word` can produce the honest answer here too, so the only thing
+  left holding it back is that the refusal is what a test asserts today. Whoever
+  wants it should delete the marker and the message together.
+- **Every `CBZ`/`CBNZ`/`TEST` that tests a compiler-generated invariant** — a
+  division-by-zero guard, a list slice's clamped bound, a `strlen` result of
+  zero inside `count`, a blob's count against a cap, a loop counter against an
+  end bound. These are not user conditions and have no kind to convert. They were
+  enumerated (about 60 sites per backend) and separated from the eight above by
+  asking which ones take an expression the SURFACE wrote.
+- **`for x in y:`** is not a truthiness test of `y`; it is a blob walk, and
+  `range` is the one iterable whose emptiness matters, which `len` already
+  handles through `lowers_to_counted_blob`.
+
+#### The empty string is the case that separates a correct lowering from a null test
+
+`e = ""; if e:` printed `E-truthy` before and prints `E-falsy` after, on both
+backends, and `while e:` did not terminate at all before (the loop body is
+unreachable when the condition is an address, so nothing inside can ever change
+it) and terminates after. A null test cannot tell these two apart, which is
+exactly why they are in the regression suite as separate cases.
+
+### 3. `s[1:]` refused rather than segfaulting
+
+Both `_emit_slice_parts` now refuse a `STR_KIND` base
+(`model.string_slice_refusal`). The reason is the COUNT: the copy loop reads it
+from offset 0 of the object, which for a `char *` is the first eight
+CHARACTERS, so the walk starts inside the string with a length taken from its own
+first two letters. A suffix slice is in fact just `s + k`, an interior pointer
+this path already makes for `lstrip`, so this is a missing LOWERING rather than a
+missing capability — but a BOUNDED slice has no representation at all here (a
+string is NUL-terminated, so a slice of a string that contained a NUL would be
+silently truncated; see the cost list above), so neither does. Lowering half the
+family and not the other half is how two spellings of one question come to
+disagree, which is the `_emit_binop` / `_emit_branch_unless` lesson twice over.
+
+## What was found while looking, and is NOT fixed
+
+- **A SHORT-CIRCUIT CHAIN in a condition was a second truthiness bug**, described
+  above. It is fixed; it is listed here because it was not in wave 5's list and
+  not in this document's residue, and the enumeration is what found it.
+- **`if []:` was a fabricated truthiness that no list had recorded.** A blob's
+  truthiness is its count, and the identity test said an empty blob in a frame at
+  a non-zero address was truthy. Fixed as part of the same table.
+- **x86-64's `assert` ALWAYS failed.** `_emit_jcc(COND_E, fail_label)` was
+  immediately followed by `asm.label(fail_label)`, so the branch had nothing to
+  skip and the FALL-THROUGH path went straight into `exit(1)`. Measured:
+  `assert 1` exited 1 on x86-64 and 0 on arm64. Fixed by the `jmp ok` arm64
+  already had. (Found while enumerating truthiness sites, not while looking for
+  a string bug; the `_emit_mov_imm(Reg.R11, 1)` next to it was also dead — R11 is
+  the divisor, the shift count and the alloc size on this path and an `assert`
+  does none of those — and is gone.)
+- **An UNANNOTATED `String` parameter is still a fabricated truthiness.**
+  `def f(s): if s:` called with `f("")` prints `1`, because `ValueKinds` seeds an
+  unannotated parameter as `INT_KIND` (a word) and nothing downstream can tell a
+  word from a `char *`. A `String`-ANNOTATED parameter is classified correctly and
+  now answers `0 1`. This is the same gap the `ValueKinds` docstring already
+  records for `print` ("A `char *` reaching print through an unannotated
+  parameter is the remaining gap, and it is the gap the annotation exists to
+  close") — it is now a second site rather than a new gap, and the fix belongs
+  in the kind table rather than in `truthy_lowering`. **Next step:** either
+  propagate the CALL SITE's argument kind into the callee (the honest answer,
+  and the same by-reference question as the frame table) or refuse `if <word>:`
+  when the word is unclassified, which is a much larger diagnostic surface.
+  `truthy_lowering` deliberately does NOT refuse the unclassified case: an
+  unclassified operand is a case where the identity test is right for every kind
+  except a string, and refusing would turn every `if <unannotated name>:` in a
+  codebase that annotates almost nothing into a diagnostic.
+- **A comprehension over a list of STRINGS does not filter on truthiness.**
+  `[x for x in ["p", "", "q"] if x]` keeps all three, because the loop variable of
+  a `list:str` is typed as a word by `types.function_var_types`. Same root cause
+  and the same next step as the bullet above, in the `for`-target kind.
 - **`s[i]` gives the BYTE, not a one-character String.** `s[0]` is 97 on both
   backends, which is a true fact about the representation rather than a
   fabricated value, so it is left alone. **Next step:** a one-character String
@@ -368,14 +517,6 @@ take.
   missing buffer as `upper`. It belongs in `LENGTH_DEPENDENT_METHODS` with the
   rest of that family rather than in a refusal, and it is a consequence of the
   representation decision above, not a separate bug.
-- **`s[1:]` — a SLICE of a string — segfaults on both backends** (exit 139).
-  A crash rather than a wrong answer, and the same class: a slice is a blob
-  operation and a string is not a blob. A suffix slice is in fact just
-  `s + k`, an interior pointer this path can already make, so it is a
-  *lowering* rather than a refusal. **Next step:** refuse it in
-  `_emit_slice_parts` for a `STR_KIND` base until someone wants the lowering;
-  nothing is currently wrong-but-quiet here, so it is lower priority than the
-  truthiness helper above.
 - **The proving arm64 build cannot prove `len` or any string method.** Both
   pre-date the representation decision and both are outside it:
   `formal/arm64_proof_gen.py` looks for a function called `len_go` when it
@@ -387,3 +528,34 @@ take.
 - **`lib/ProofLib.lean` still carries two `sorry`s**, at `InImage` and
   `Semantics` (line ~4510). Pre-existing, and recorded here only so the next
   reader of the Lean side knows they are there.
+
+## Two regressions that arrived from OUTSIDE this work, during this wave
+
+Neither is a string problem and neither is wave 6's; both are recorded because
+they move the numbers a reader of this document will compare against, and
+because whoever owns them needs to know they arrived with a merge rather than
+with any of the string work.
+
+- **`ae9877d` ("Merge origin/master into master") landed on this branch
+  mid-wave and its `fire_compiler.py` cannot parse `@spec(name; …)`.** The `;`
+  separator inside a `@spec(...)` argument list is a `SyntaxError`:
+  `1:15: Unexpected SEMICOLON(';')` for `formal/examples/fact.mojo`, at `1824fa2`
+  and at `ae9877d` respectively. It is 13 files' worth of `formal/examples` (so
+  `test_formal.py` reports `PASS=26 KNOWN-GAP=6 FAIL=13` on arm64 and
+  `PASS=40 KNOWN-GAP=0 FAIL=5` on x86-64, of which 4 are these) and 4 files' worth
+  of the repo sweep (`count`, `fact`, `fib`, `sum`). **This is the entire
+  difference between the repo-scope coverage number wave 5 recorded (82/121) and
+  the one this wave measures (78/121)** — not one of the four is attributable to
+  any string change, and each reproduces with the `~` lexer line reverted.
+  **Next step:** the `@spec` argument-list parser in `fire_compiler.py`; the
+  separator is unambiguous and the fix is in the attribute-argument reader, not
+  in the tokenizer.
+- **`gimplerunner` fails `gimple_sorted_string_key` and
+  `gimple_lambda_captures_via_default_arg`.** `sorted()` over string keys returns
+  `['bb', 'a', 'ccc']` where the source says `['a', 'bb', 'ccc']`, and a lambda
+  captured through a default argument returns 0 where the source says 1. Both
+  pass at `1824fa2` and both fail at `ae9877d`, and both fail with the `~` lexer
+  line reverted. The merge commit `21f036e` ("Determinism: sorted() the
+  boxed-capture decls") is the likely owner. This is the one job that makes
+  `make check` 10/11 and `make gate` red.
+
