@@ -1475,3 +1475,120 @@ theorem x86_call_return_slot_separated (s : X86State) (code : Nat → UInt8)
     mem_read_bytes (x86_call_post s m off).mem b w = mem_read_bytes s.mem b w := by
   simp only [x86_call_post]
   exact mem_read_bytes_write_above s.mem (s.rsp - 8).toNat (UInt64.ofNat (m + 5)) 8 w b habove
+
+/-!
+## The `rip` half of the call/return round trip
+
+Everything above stops at the register file on purpose, and the docstring on
+`x86_call_ret_balances_stack` says exactly what was missing: that a `ret` lands
+on `m + 5` reduces to reading back what the `call` pushed, and that
+
+    mem_read_bytes (mem_write_bytes m a v n) a n = v &&& lowMask n
+
+is **false as a general-width claim** — at width 0 the read is 0 whatever `v`
+is — so it needs a mask to induct on. This section supplies the mask, the
+induction, and the theorem the docstring said was not in the file.
+-/
+
+/-- **The `n`-byte mask**: the low `8 * n` bits of a word, all ones.  Defined
+    here rather than in `ProofLib.lean` because this is the only consumer, and
+    the generalisation belongs with the proof that needs it. -/
+def lowMask : Nat → UInt64
+  | 0 => 0
+  | k + 1 => (0xFF : UInt64) ||| (lowMask k <<< 8)
+
+@[simp] theorem lowMask_eight : lowMask 8 = 0xFFFFFFFFFFFFFFFF := by native_decide
+
+/-- **Writing the low byte at `a` disturbs no other address.**  A `k + 1`-byte
+    write at `a` is a one-byte write at `a` followed by a `k`-byte write of the
+    shifted value at `a + 1`, so every address other than `a` sees only the
+    tail.  This is the pointwise lemma the `rip` induction needs, because the
+    tail of the step compares a `k`-write at `a + 1` against a `k + 1`-write at
+    `a` and the two agree everywhere except at `a`. -/
+theorem mem_write_bytes_tail (m : Nat → UInt8) (a k i : Nat) (v : UInt64)
+    (h : i ≠ a) :
+    (mem_write_bytes m a v (k + 1)) i = (mem_write_bytes m (a + 1) (v >>> 8) k) i := by
+  simp [mem_write_bytes, h]
+
+/-- **Reads of `n` bytes depend only on memory over `[a, a + n)`.** -/
+theorem mem_read_bytes_congr {m₁ m₂ : Nat → UInt8} {a n : Nat}
+    (h : ∀ j, a ≤ j → j < a + n → m₁ j = m₂ j) :
+    mem_read_bytes m₁ a n = mem_read_bytes m₂ a n := by
+  induction n generalizing a with
+  | zero => rfl
+  | succ k ih =>
+    show (m₁ a).toUInt64 ||| (mem_read_bytes m₁ (a + 1) k <<< 8)
+        = (m₂ a).toUInt64 ||| (mem_read_bytes m₂ (a + 1) k <<< 8)
+    have ha : m₁ a = m₂ a := h a (Nat.le_refl _) (by omega)
+    have htail : mem_read_bytes m₁ (a + 1) k = mem_read_bytes m₂ (a + 1) k :=
+      ih (fun j hj1 hj2 => h j (by omega) (by omega))
+    rw [ha, htail]
+
+/-- **Reading back an `n`-byte little-endian write returns the value, masked to
+    the `n` bytes actually written.**  The masked form is the honest one: at
+    `n = 0` nothing is written and nothing reads back, so the unmasked claim
+    would be false exactly where the induction starts. -/
+theorem mem_read_bytes_write_same (m : Nat → UInt8) (a : Nat) (v : UInt64) :
+    ∀ n, mem_read_bytes (mem_write_bytes m a v n) a n = v &&& lowMask n := by
+  intro n
+  induction n generalizing m a v with
+  | zero => simp [mem_read_bytes, lowMask]
+  | succ k ih =>
+    show (mem_write_bytes m a v (k + 1) a).toUInt64 |||
+        (mem_read_bytes (mem_write_bytes m a v (k + 1)) (a + 1) k <<< 8)
+        = v &&& lowMask (k + 1)
+    have hself : (mem_write_bytes m a v (k + 1)) a = v.toUInt8 := by
+      simp [mem_write_bytes]
+    have htail : mem_read_bytes (mem_write_bytes m a v (k + 1)) (a + 1) k
+                = mem_read_bytes (mem_write_bytes m (a + 1) (v >>> 8) k) (a + 1) k :=
+      mem_read_bytes_congr (fun j _ _ => mem_write_bytes_tail m a k j v (by omega))
+    rw [hself, htail, ih]
+    simp only [lowMask]
+    have htrunc : v.toUInt8.toUInt64 = v &&& (0xFF : UInt64) := by bv_decide
+    rw [htrunc]
+    bv_decide
+
+/-- **A `ret` returns to the instruction after the `call` that pushed the
+    address.**  This is the `rip` half, and with it the call/return round trip
+    is complete: `x86_call_ret_balances_stack` has the stack pointer, this has
+    the program counter.
+
+    The bound on `m` is a hypothesis rather than a fact, deliberately.  A
+    return address is a `UInt64`, so `UInt64.ofNat (m + 5)` is truncated and
+    the conclusion needs `m + 5` to fit — which is true of every real
+    instruction address and unprovable of a bare `Nat`.  Asserting it without
+    the hypothesis would be the trap this file's own section warns about, so it
+    is stated. -/
+theorem x86_call_ret_restores_rip (s : X86State) (m : Nat) (off : Int) (target : Nat)
+    (hm : m + 5 < 2 ^ 64) :
+    (x86_ret_post (x86_at_target s m off target)).rip = m + 5 := by
+  show (mem_read_bytes (x86_call_post s m off).mem
+          (x86_call_post s m off).rsp.toNat 8).toNat = m + 5
+  show (mem_read_bytes (mem_write_bytes s.mem (s.rsp - 8).toNat (UInt64.ofNat (m + 5)) 8)
+          (s.rsp - 8).toNat 8).toNat = m + 5
+  rw [mem_read_bytes_write_same, lowMask_eight]
+  have hand : ∀ w : UInt64, w &&& 0xFFFFFFFFFFFFFFFF = w := by
+    intro w; bv_decide
+  rw [hand]
+  simp; omega
+
+/-- **Both halves at once**: a `call` and the `ret` that ends its callee leave
+    the machine exactly where the call found it.
+
+    It takes the same three step hypotheses as `x86_call_ret_balances_stack`
+    rather than inventing them.  The first version of this theorem tried to
+    discharge them with `rfl`, which cannot work: they say the `call` and the
+    `ret` actually decoded, and that is a fact about the CODE, not a fact this
+    section can produce.  Passing a dummy `code` would have made the whole
+    statement vacuous -- a theorem about a machine that never ran -- which is
+    the same disease as the old `Semantics`, one layer down. -/
+theorem x86_call_ret_round_trip (s : X86State) (code : Nat → UInt8)
+    (m target : Nat) (off : Int) (hm : m + 5 < 2 ^ 64)
+    (hcall : x86_step s code = some (x86_call_post s m off))
+    (htarget : (Int.ofNat m + 5 + off).toNat = target)
+    (hret : x86_step (x86_at_target s m off target) code
+      = some (x86_ret_post (x86_at_target s m off target))) :
+    (x86_ret_post (x86_at_target s m off target)).rsp = s.rsp
+      ∧ (x86_ret_post (x86_at_target s m off target)).rip = m + 5 :=
+  ⟨x86_call_ret_balances_stack s code m target off hcall htarget hret,
+   x86_call_ret_restores_rip s m off target hm⟩
