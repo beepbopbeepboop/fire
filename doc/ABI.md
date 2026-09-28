@@ -6,6 +6,21 @@
 > on this contract exactly* — it is what makes a content-addressed artifact
 > reusable and what lets other languages interoperate.
 
+**Last verified 2026-09-27 against `7604105`.** Every claim below was checked
+against the tree, not carried forward on trust; four were stale and are fixed
+in this revision — the header name at "Library container types" (renamed
+`mojo_runtime.h` → `fire_runtime.h`), the self-hosting sibling list
+(`mojo_compiler.py` → `fire_compiler.py`), the `Span` row, and the whole
+exception-entry-point list. The two names were cosmetic; the last two were
+**false**, which is the failure mode that matters: a contract that asserts a
+`mojo_try_push` macro and a header-declared `struct Span` sends a C client
+looking for declarations that do not exist. Re-verify rather than extend when
+touching this file — the renames it missed (`mojo_*` → `fire_*`) are exactly
+the kind of change a document at rest does not notice.
+
+The header names, the `mojo_*` ABI prefix, and the `__mojo_reflect` symbol are
+load-bearing elsewhere and are **not** candidates for renaming.
+
 ## Principle
 
 A boundary symbol is an ordinary C function with a stable, plain-C signature.
@@ -46,13 +61,25 @@ All address spaces collapse to a plain C pointer at the ABI.
   recorded in the reflection table and must match on both sides.
 - **`Span[T, _]` / `StringSlice[…]`** → `Span *`, the fat pointer
   `struct Span { char *_data; int64_t _len; }`. `.unsafe_ptr()` reads `_data`;
-  `len()` / `.__len__()` reads `_len`. (Seeded in `gimple_codegen.py`; see the
-  `Span` model added when walking `FileDescriptor.write_bytes`.)
+  `len()` / `.__len__()` reads `_len`.
+
+  **This one is not yet a usable ABI row, and the gap is deliberate and
+  recorded rather than papered over.** The fat pointer is a *hardcoded model
+  inside the lowering* — `mojo/backend_gimple/emit_calls.py:5324` ("Span is
+  erased to a hardcoded fat-pointer `{_data, _len}` struct") and its siblings
+  at `:5864` and `:6022` — not a `struct Span` in `runtime/fire_runtime.h`. So
+  unlike every other row here, a C client has nothing to `#include` to write the
+  declaration against, which is exactly what the Principle section above
+  promises. It is listed because the layout is already load-bearing on both
+  sides of an existing boundary (`test_gimple.py:1603` builds a `struct Span` in
+  a fixture to test `print`'s bottom layer), not because it is closed. Closing
+  it means moving the declaration into the runtime header; that is a change to
+  this contract and belongs in the header, not in a client.
 
 ## Library container types (current runtime representation)
 
 These cross the boundary as opaque pointers to the runtime types in
-`runtime/mojo_runtime.h`:
+`runtime/fire_runtime.h`:
 
 | Mojo | C ABI |
 |---|---|
@@ -92,7 +119,7 @@ These cross the boundary as opaque pointers to the runtime types in
     `mojo build`/`mojo run` invocation (never compiled alongside another
     module in the same dylib, so no collision risk), and this compiler's own
     self-hosting compiles of its `.py` sources (`gimple_codegen.py`,
-    `mojo_compiler.py`, `myinterpreter.py`, `module_loader.py`, …) — their
+    `fire_compiler.py`, `myinterpreter.py`, `module_loader.py`, …) — their
     bootstrap structs (`Scope`, `Parser`, `Interpreter`, …) are exempt by a
     dedicated file-identity gate (current file is a `.py` source under this
     repo's own directory), independent of whether `module_name` happens to
@@ -113,14 +140,61 @@ These cross the boundary as opaque pointers to the runtime types in
 
 ### Exception-handling entry points
 
+**There is no `mojo_try_push` macro.** An earlier version of this document
+specified one, and it was wrong about the current design: `setjmp` is emitted
+**directly into the generated function** by the try lowering
+(`mojo/backend_gimple/emit_stmts.py:3531` sets `gen._func_used_setjmp`, and the
+region is emitted there — `runtime/fire_runtime.h:164-165` says so in as many
+words: *"setjmp is emitted directly in generated functions"*). That is why
+`_mojo_exc_stack` and `_mojo_exc_top` are exported `extern` globals rather than
+reached through an accessor: the generated code indexes them itself. A client
+that wants to establish a catch point increments `_mojo_exc_top` and calls
+`setjmp(_mojo_exc_stack[_mojo_exc_top])` in its *own* frame, for the same reason
+the old macro had to be a macro.
+
 - **`mojo_exc_pop()`** — pops the topmost frame (`void`).
-- **`mojo_raise()`** — `longjmp`s to the current frame (`void`).
-- **`mojo_try_push()`** — *macro*, not a function: `(++_mojo_exc_top, setjmp(_mojo_exc_stack[_mojo_exc_top]))`.
-  Must be a macro so `setjmp` executes in the caller's frame; calling it as
-  a function would push the `setjmp` frame into the wrapper and break `longjmp`
-  (undefined behavior on macOS arm64).
+- **`mojo_raise()`** — `longjmp`s to the current frame (`void`). A real function
+  with no `setjmp` of its own, so it is safe to call from a wrapper
+  (`runtime/fire_runtime.h:166`).
 - **`mojo_exc_msg_set` / `mojo_exc_msg_get`** — set/get the string payload of a `raise` (`void` / `char *`).
 - **`mojo_exc_obj_set` / `mojo_exc_obj_get`** — set/get the opaque typed exception object (`void *`).
+- **`mojo_exc_type_set` / `mojo_exc_type_get`** — set/get the exception type tag
+  (`void` / `int64_t`, over `extern int64_t _mojo_exc_type`;
+  `runtime/fire_runtime.h:185-187`). Added since this section was first
+  written and load-bearing for typed exceptions.
+
+**Cleanup-thunk registry.** `mojo_raise`'s `longjmp` skips every C statement
+between the raise site and the catching `setjmp`, including any `mojo_*_free`
+call the codegen emitted for an owned local — those sit at the function's
+return/fallthrough points, not on the exception path. This registry is a
+userland stand-in for what a real unwinder's landing pads provide: codegen
+pushes a thunk after constructing an owned local, and cancels it at the same
+free call it already emits on the normal path. `mojo_raise` walks and invokes
+every still-live thunk back down to the catching try's checkpoint before it
+`longjmp`s, so an owned local is freed exactly once on whichever path actually
+runs. All `void` except `mojo_cleanup_cancel_n` (`int64_t`);
+`runtime/fire_runtime.h:203-221`, rationale at `:189-202`, and
+`doc/OWNERSHIP_MODEL.md`.
+
+- **`mojo_cleanup_push_dict` / `_list` / `_set`** — push a heap-owning thunk (`void *`).
+- **`mojo_cleanup_push_dict_stack` / `_list_stack` / `_set_stack`** — push a
+  *stack*-allocated thunk. Distinct from the above because an unwind past one
+  of these must call `mojo_*_destroy` (buffer-only teardown) and never
+  `mojo_*_free`, which would `free()` a stack address.
+- **`mojo_cleanup_cancel_n(int64_t n)`** — pop the `n` most-recently-pushed
+  thunks **without invoking them**; called immediately before the inline frees
+  they duplicate.
+- **`mojo_cleanup_checkpoint_save()`** — record the current depth as the
+  catching try's checkpoint.
+
+**Coroutine boundary.** `extern int _mojo_exc_pending` with
+`mojo_exc_pending_set` / `mojo_exc_pending_get` (`runtime/fire_runtime.h:250-252`).
+This is the one entry set a client must not guess at: the generated C++
+generator body calls it at the `extern "C" _resume()` boundary, because an
+ordinary `yield from` delegation loop re-throws as a C++ exception and gets
+unwound for real, while GIMPLE C code calls `mojo_raise()` itself. A callee on
+that boundary that is not a live GIMPLE C frame must not have its `longjmp`
+cross ordinary live C frames (`runtime/fire_runtime.h:240-249`).
 
 ## Generics (forward-looking — Stage 5)
 
