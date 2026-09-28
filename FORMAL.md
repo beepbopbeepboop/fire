@@ -501,35 +501,52 @@ Stated so no reader infers otherwise.
 five agents at once: the `[1]`–`[5]` scopes, each agent's **exclusive** write set,
 the `GMOJO_HOME` isolation, the shared-path audit that makes a shared working
 directory safe, the INTERFACE REQUEST mechanism for anything crossing an ownership
-boundary, and the merge order. It is kept separate rather than folded in here
-because this document is the programme — what the phases are and why — and that one
-is the coordination for a particular week. Two documents with two different
-lifetimes should not be one document.
+boundary, the merge order, and the easy/hard line. It is kept separate rather
+than folded in here because this document is the programme — what the phases are
+and why — and that one is the coordination for a particular week. Two documents
+with two different lifetimes should not be one document.
 
-The short version, so this file is not self-incomplete:
+**This round covers the easy half only: phases 0, 1 and 2, plus measurement.
+Phases 3–6 — the Lean call/return semantics and everything downstream of it —
+are deliberately not assigned, and are to be planned on their own.** §6 of
+`FORMAL-PARALLEL.md` records where that work stands, in enough detail that the
+next plan starts from measurements rather than re-deriving them: the root cause is
+that `lib/ProofLib.lean:1548-1549` gives `BL` no callee, so the model halts at
+the stub and every downstream symptom follows from that one gap. The useful
+sub-finding is that the x86-64 `call_rel32` is **already modelled** at
+`lib/X86.lean:720` and merely unwired, so the deferred round has a genuinely
+independent first step.
+
+The partition, in one line each: **[1]** the gimple build path (holds the only
+known regression, and the only currently-broken user-visible thing);
+**[2]** the per-arch runtime dylib both backends would consume; **[3]** formal
+codegen — the `mojo_*` refusal shaped by ABI, which is the single highest-value
+item on the list and is *not* proof work; **[4]** formal link and import
+resolution; **[5]** the instruments.
+
+The operating rules, so this file is not self-incomplete:
 
 - **The partition is file ownership, not task dependency.** One writer per file at
   every moment. Needing a file you do not own is an INTERFACE REQUEST, never an
   edit.
-- **Nobody runs a gate.** Each agent verifies with its own tests, run directly. The
-  integrator registers new tests, resolves held requests, and runs `make gate`
-  once at the end.
+- **Nobody runs a gate.** Each agent verifies with its own tests, run directly —
+  not even `tools/suite.py <one-test>`, which writes the `build/suite.log` the
+  integrator needs. The integrator registers the new tests, applies held
+  requests, and runs the gate once at the end.
+- **Take the 80/20 and leave a note.** This round is the easy half on purpose. A
+  precise "this costs weeks, and here is why" is a **deliverable**; a
+  half-finished attempt is not. `bugs/FORMAL_known_limits.md` has the table shape
+  for that — measured count, whether the refusal is *true*, what closing it takes.
 - **`GMOJO_HOME` is per-agent, always.** One environment variable, and it removes
   every CAS contention, torn cache entry and dylib overwrite question — including
   `formal/imports`' per-arch dylib directory, which two agents sharing a
   `GMOJO_HOME` would otherwise write into simultaneously.
 - **The one repo-root collision that matters is building the same basename**
-  (`fire.ci` from `fire.py build fire.py`, `./mojoc` from `make mojoc`). Every
-  other build artifact is named after the test that produced it, so two agents
-  running different tests in one directory do not collide.
-- `lib/*.olean` is shared but **safe**: `ensure_library` builds it under an
-  exclusive `flock` and writes via a private temp + `os.replace`, so concurrent
-  callers queue rather than corrupt. The hazard is staleness, not corruption —
-  when `lib/ProofLib.lean` changes, everyone re-runs rather than trusting a cached
-  verdict.
-- **Phase 0 is `[1]`'s**, because it holds the only known regression in the
-  programme (`bugs/CODEGEN_optional_runtime_units_not_linked.md`: the optional-unit
-  registry works and prints the right rows, but breaks `mojoc` with
-  `conflicting types for 'build_config_find_gcc'`, which passes on a clean tree).
-  Everything about "the same code on both paths" starts there, and `[4]` and `[5]`
-  both have interface requests into it.
+  (`fire.ci` from `fire.py build fire.py`, `./mojoc` from `make mojoc`), so only
+  `[1]` may write either. Every other artifact is named after the test that
+  produced it, so two agents running different tests in one directory do not
+  collide.
+- `lib/*.olean` is shared but **safe**: `ensure_library` (`formal/lean.py:150`)
+  builds it under an exclusive `flock` and writes via a private temp +
+  `os.replace`, so concurrent callers queue rather than corrupt. The hazard is
+  staleness, not corruption. Nobody edits a `.lean` file this round.
