@@ -584,24 +584,98 @@ def emit_table_c(exports: list) -> str:
 # dylib's reflection table with this function, so the shipped dylib was
 # advertising 260 of its own 459 runtime entry points — a C client resolving
 # `mojo_c_getenv` through reflection would have been told it did not exist.
+#
+# A THIRD defect, found while FORMAL.md phase 2 needed this scanner to be not
+# merely complete but ACCURATE, and it is why the pattern is now what it is.
+# The fix above made pointer returns MATCH; it did not make them be RECORDED as
+# pointers. The separator's `\*?` consumed the very `*` that belongs to the type,
+# so `char *mojo_str_new(char *s)` came out of the table as
+# `char mojo_str_new (char *s)`, a function returning a string pointer recorded
+# as returning a `char` by value. Every one of the 92 `char *` and 39
+# `MojoList *` returns in `fire_runtime.h` was misstated that way, so a
+# consumer reading the table to decide what a value IS would have been told the
+# opposite of the truth. The return type is a group of its own now, so the stars
+# are captured rather than skipped.
+#
+# The parameter group moved from `[^)]*` to `[^;{}]*` for the same reason: a
+# `)` inside a parameter list (a cast, or a function-pointer parameter) used to
+# end the match early, and neither a `;` nor a brace can appear in one. A
+# `static inline` helper's BODY is a separate matter and is handled by
+# `_NOT_A_RETURN_TYPE` below.
+#
+# `base` is at least one identifier and `name` at least one more, and the two
+# are separated by a REQUIRED separator — either a `*+` (which is captured, into
+# `ptr`) or a `[ \t]+`. C always separates a return type from its declarator
+# that way, and requiring it is what stops the two adjacent groups from
+# splitting one identifier between them: without it `return` parsed as
+# base=`retur` + name=`n`, and every `static inline` body in the runtime
+# contributed a garbage export. A bare call statement (`mojo_foo(l, x());`)
+# cannot match either — it has ONE identifier before the `(`, a declaration has
+# two.
 _PROTO_RE = re.compile(
-    r'^\s*([\w][\w\s\*]*?)\s*\*?\s*(\w+)\s*\(([^)]*)\)\s*;', re.MULTILINE)
+    r'^[ \t]*(?P<base>[A-Za-z_]\w*(?:[ \t]+[A-Za-z_]\w*)*)'
+    r'(?:[ \t]*(?P<ptr>\*+)[ \t]*|[ \t]+)'
+    r'(?P<name>[A-Za-z_]\w*)[ \t]*\((?P<params>[^;{}]*)\)[ \t]*;', re.MULTILINE)
+
+# Words that cannot begin a return type, so a statement inside a `static inline`
+# body is not mistaken for a declaration. `return` is the one that reached the
+# table: `mojo_fnptr_call_0`'s body ends `return ((int64_t (*)(void))fp)();`,
+# and the cast's parentheses are exactly what the old `[^)]*` could not get
+# past — so the scanner read `return mojo_maybe_bound_call_0 (f);`, a statement
+# inside a function with no external symbol, as a prototype, and put
+# `mojo_fnptr_call_0` … `_4` into the *shipped dylib's* reflection table with
+# the address of a `static inline` helper taken. That is the BUG-2026-036 shape
+# (`extern void <sym>();` plus `&sym` with nothing defined behind it) reached
+# from the other direction. `test_runtime_header_scan.py`'s
+# `test_non_exports_stay_excluded` did not catch it because it pins
+# `mojo_bound_method_call_0` and not the `mojo_fnptr_call_*` family.
+_NOT_A_RETURN_TYPE = ('typedef', 'struct', 'union', 'enum', 'static', 'extern',
+                      'inline', 'return', '#')
+
+# Comments, removed before scanning. A regex over raw C text has no notion of a
+# comment, and the runtime headers document their return values in prose that
+# contains parentheses: `/* … Returns NULL on failure. */ void
+# *mojo_sqlite3_query(void *db, const char *sql);` was scanned as
+# base=`SQLITE_OK … Returns`, name=`Returns`, parameters=the entire rest of the
+# comment AND the real prototype — so the table advertised a symbol named
+# `Returns` and lost `mojo_sqlite3_query` itself. The old `[^)]*` parameter group
+# happened to stop at the comment's first `)`, which is the only reason this was
+# ever right; widening the group to admit a cast in a real parameter list is what
+# made it necessary. A blank is left behind rather than nothing, so two
+# declarations either side of a comment cannot be glued into one token.
+_COMMENT_RE = re.compile(r'/\*.*?\*/|//[^\n]*', re.DOTALL)
+
 
 def collect_runtime_exports_h(header_path: str) -> list:
     """Parse a C header for public function prototypes → reflection export entries.
     Used to include fire_runtime.h symbols in the stdlib dylib's reflection table
-    without re-compiling the runtime (it's already linked as a first-class dylib)."""
+    without re-compiling the runtime (it's already linked as a first-class dylib).
+
+    Each entry carries `'ret'` and `'params'` as well as the display
+    `'signature'`, so a consumer that needs to know what a value IS — FORMAL.md
+    phase 2's word/box decision, which refuses a call by the TYPE it would have
+    to move — reads the parsed types rather than re-parsing the signature string
+    with a second, drifting grammar. One scan, one set of types."""
     exports = []
     seen = set()
     with open(header_path) as f:
         content = f.read()
+    content = _COMMENT_RE.sub(' ', content)
     for m in _PROTO_RE.finditer(content):
-        ret, name, params = m.group(1).strip(), m.group(2), m.group(3).strip()
-        if any(kw in ret for kw in ('typedef', 'struct', 'static', '#', 'extern')):
+        base = ' '.join(m.group('base').split())
+        ptr = m.group('ptr')
+        ret = f"{base} {ptr}" if ptr else base
+        name = m.group('name')
+        params = ' '.join(m.group('params').split())
+        if any(kw in ret for kw in _NOT_A_RETURN_TYPE):
             continue
         if name.startswith('_') or name in seen or name in _CLIB_SYMS:
             continue
         seen.add(name)
-        sig = f"{ret} {name} ({params or 'void'})"
-        exports.append({'name': name, 'signature': sig, 'kind': SYM_FUNCTION})
+        # The C spelling, `MojoStr *name(...)` — the stars touch the name, which
+        # is how the header writes it and how a reader reads it back.
+        decl = f"{base} {ptr}{name}" if ptr else f"{base} {name}"
+        sig = f"{decl} ({params or 'void'})"
+        exports.append({'name': name, 'signature': sig, 'kind': SYM_FUNCTION,
+                        'ret': ret, 'params': params})
     return exports

@@ -4123,39 +4123,326 @@ def frame_return_refusal(owner, received: bool, struct_names) -> str:
 # it. That is the worst failure a compiler has: the build reports success and
 # the program dies in the loader with "Symbol not found".
 #
-# So the namespace is REFUSED BY NAME here, before the extern path can reach it.
-# By name rather than by shape, because the shape is not decidable: the
-# repository also has ordinary Mojo functions and ordinary local variables whose
-# names begin `mojo_` (scripts/stage2_mojo_interpreter.mojo defines
-# `mojo_to_python` and takes a parameter called `mojo_file`), and a rule that
-# could not tell those from the runtime's own entry points would refuse correct
-# code. Every caller of is_gimple_runtime_builtin must therefore have already
-# established that the name is NOT a function of this module and NOT an export
-# of a dylib the program explicitly linked; what is left is exactly the set of
-# names that reached the extern path with nowhere to bind.
+# So the namespace is REFUSED here, before the extern path can reach it. The
+# refusal is no longer a test of the NAME. It was one because the shape was not
+# available: this module is deliberately leaf-most (`os` and `fire_compiler` and
+# nothing else, so the two formal architectures cannot drift), and the only
+# thing that could have told a `mojo_list_len` from a `mojo_print` was the
+# header, which is not something this module reads. It reads it now, through a
+# lazy import of the one scanner that already owns it
+# (`reflect.collect_runtime_exports_h`, which FORMAL.md phase 0 built), and the
+# decision is made on the TYPES that header declares. What is left of the prefix
+# is the conservative fallback for a name no header declares, and a name that no
+# header declares has no signature here to check.
+#
+# The repository also has ordinary Mojo functions and ordinary local variables
+# whose names begin `mojo_` (scripts/stage2_mojo_interpreter.mojo defines
+# `mojo_to_python` and takes a parameter called `mojo_file`), so a rule keyed on
+# the spelling still had to be reached only after the caller established that
+# the name is NOT a function of this module and NOT an export of a dylib the
+# program explicitly linked. That precondition is unchanged and is still the
+# caller's to establish.
 GIMPLE_RUNTIME_PREFIX = "mojo_"
 
-# The subset of the namespace whose ARGUMENT is what makes it unfixable by
-# linking the library. `mojo_list_len`/`mojo_list_get_int`/`mojo_list_get_str`
-# take a `MojoList *` — a heap box the gimple runtime owns, with a length and
-# a data pointer inside it — while a list on a formal path is a frame blob whose
-# first word IS its count (see _emit_list in either backend). So these could not
-# be answered by adding libmojostdlib to the link line even in principle: the
-# operand and the answer are of different types, and reading offset 0 of a
-# `MojoList *` would be a plausible-looking wrong number rather than a crash.
-# The refusal says so, because "no library here" is the weaker half of the
-# reason and the one a reader is most likely to try to argue with.
-GIMPLE_LIST_PREFIX = "mojo_list_"
+# ── The runtime ABI, and what a formal image can do with it ───────────────
+#
+# What "answerable on a formal image" means, and why it is not the RETURN type
+# alone. A formal image is freestanding: it links libSystem and nothing else, it
+# embeds no C runtime, and its values are ONE 64-bit word (see the aggregate
+# layout note at the top of this file). So a call to a real runtime entry point
+# is answerable exactly when every value that crosses the call boundary is a
+# single word — the return value AND every argument. The two positions are not
+# symmetric, and reading only the return type is the trap this rule exists to
+# avoid: `mojo_list_get_int(MojoList *, int64_t) -> int64_t` returns a word and
+# is still not callable, because the box is in the ARGUMENT. The runtime's
+# `MojoList` is `{data, len, cap}` on the heap (runtime/fire_runtime.h:257) and
+# a list here is a frame blob whose first word IS its count (BLOB_HEADER_BYTES,
+# above). Reading offset 0 of one as the other is a plausible-looking wrong
+# number rather than a crash, which is exactly why no amount of linking answers
+# it.
+#
+# A POINTER is one word as an ADDRESS, and that is the whole of what makes a
+# `void *` a legitimate argument: this path can carry the handle as a word and
+# hand it straight back to the library that made it, never interpreting it. It
+# is not one word as a RETURN value, because there the CALLER is handed the
+# address and may read what is behind it — and the header does not say what is
+# behind it. `void *mojo_sqlite3_open` and `void *mojo_sqlite3_query` have the
+# SAME declaration type; one is a database handle the program passes on to
+# `mojo_sqlite3_close`, the other is a `MojoList *` of rows it iterates. Nothing
+# in the declaration distinguishes them, so the conservative reading is the only
+# one available and it is also the safe one: a caller of `mojo_sqlite3_query`
+# that treated the result as a word would read offset 0 of a box as a count.
+# `char *` is the one pointer that IS a value on this path, because a string is
+# an interned `char *` with no header (the aggregate layout note again), so a
+# `char *` return is a word like any other and `mojo_c_getenv` is callable.
+#
+# This is the generalisation of the `GIMPLE_LIST_PREFIX` special case that
+# stood here before, and that constant is gone: a hand-kept list of prefixes is
+# a list that rots, and the shape answers the same question for all 546 entry
+# points the headers declare rather than for the 40-odd names one prefix
+# happened to cover.
+
+def _runtime_header_dir() -> str:
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runtime")
+
+
+_RUNTIME_ABI = None      # name -> entry; built once, see runtime_abi()
+
+
+def runtime_abi() -> dict:
+    """Every entry point the runtime headers declare, with its types.
+
+    One table, and it is read out of the headers rather than written down here:
+    `reflect.collect_runtime_exports_h` is the scanner that already exists (and
+    that FORMAL.md phase 0's link audit made complete), so a second hand-kept
+    list of names or signatures is exactly the rot this replaces. Every `.h` in
+    runtime/ is scanned, sorted, so a header added later is picked up without
+    editing anything.
+
+    `reflect` is imported LAZILY and inside the function, deliberately. It
+    imports `gimple_codegen` — the other backend — and this module is
+    leaf-most on purpose so the two formal architectures cannot drift; a
+    module-level edge would put the compiled backend in this module's import
+    closure and undo that. `formal/build.py` takes the same lazy edge to the
+    same module for the same reason (`_abi_symbol`, `_export_entries`).
+
+    Each entry is a dict:
+        name        the C symbol
+        signature   display form, as the header spells it
+        ret         return type, pointer stars included
+        params      the parameter list, as written
+        word        True when every type crossing the boundary is one word
+        boxes       [(where, spelling, base, depth)] for the types that are not
+    """
+    global _RUNTIME_ABI
+    if _RUNTIME_ABI is not None:
+        return _RUNTIME_ABI
+    import reflect          # lazy — see the docstring
+    table = {}
+    hdr_dir = _runtime_header_dir()
+    try:
+        headers = sorted(h for h in os.listdir(hdr_dir) if h.endswith('.h'))
+    except OSError:
+        headers = []
+    for h in headers:
+        for e in reflect.collect_runtime_exports_h(os.path.join(hdr_dir, h)):
+            # First header wins, so the order is decided by a sorted list and
+            # not by which file the scanner happened to reach first.
+            table.setdefault(e['name'], _runtime_abi_entry(e))
+    _RUNTIME_ABI = table
+    return table
+
+
+def _runtime_abi_entry(scan: dict) -> dict:
+    """One scanned prototype, plus the word/box verdict its types imply."""
+    boxes = []
+    rbase, rdepth = _parse_ctype(scan['ret'])
+    if not _ctype_is_word(rbase, rdepth, in_return=True):
+        boxes.append(('its return value', scan['ret'], rbase, rdepth))
+    params = _split_params(scan['params'])
+    if params is None:
+        # A `...`, or a function-pointer parameter: the arity or the shape of
+        # an argument is not in the declaration, so nothing can be decided.
+        boxes.append(('its argument list', scan['params'], '', 0))
+    else:
+        for i, p in enumerate(params, 1):
+            base, depth = _parse_ctype(p, is_param=True)
+            if not _ctype_is_word(base, depth, in_return=False):
+                ordinal = ('its first argument' if i == 1 else
+                           f"its argument {i}")
+                boxes.append((ordinal, p, base, depth))
+    return {'name': scan['name'], 'signature': scan['signature'],
+            'ret': scan['ret'], 'params': scan['params'],
+            'word': not boxes, 'boxes': boxes}
+
+
+# C's own scalar vocabulary — NOT this runtime's entry points, and not a list of
+# types this backend has been asked about. It is the set of type spellings that
+# mean "one machine word" in C, and everything outside it is treated as a box.
+# That direction is the point: a type this rule has never heard of is refused,
+# because treating an unknown spelling as a word is the over-approximation that
+# miscompiles, while refusing one that would have worked only costs a call. Note
+# what is NOT here: `long double`, which is 16 bytes on x86-64 and is the one C
+# scalar that is not a word.
+_WORD_SCALARS = frozenset({
+    'void', 'bool', '_Bool', 'char', 'short', 'int', 'long', 'long long',
+    'float', 'double', 'char16_t', 'char32_t', 'wchar_t',
+    'size_t', 'ptrdiff_t', 'intptr_t', 'uintptr_t', 'intmax_t', 'uintmax_t',
+    'int8_t', 'int16_t', 'int32_t', 'int64_t',
+    'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t',
+    'int_least8_t', 'int_least16_t', 'int_least32_t', 'int_least64_t',
+    'uint_least8_t', 'uint_least16_t', 'uint_least32_t', 'uint_least64_t',
+    'int_fast8_t', 'int_fast16_t', 'int_fast32_t', 'int_fast64_t',
+    'uint_fast8_t', 'uint_fast16_t', 'uint_fast32_t', 'uint_fast64_t',
+})
+
+# Leading type keywords, dropped before the base type is read. `signed` and
+# `unsigned` are here because signedness does not change the size, and this
+# function is only asked "is this one word".
+_CTYPE_QUALIFIERS = ('const ', 'volatile ', 'restrict ', 'struct ', 'union ',
+                     'enum ', 'signed ', 'unsigned ')
+
+
+def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
+    """(base, pointer depth) for a C type spelling, with whitespace collapsed.
+
+    Deliberately not a regex: this module imports `os` and `fire_compiler` and
+    nothing else, and a type declaration is not worth a third import. The
+    grammar is a base type and a run of `*`, which is all a prototype's types
+    are.
+
+    `is_param` says whether the spelling still carries its DECLARATOR NAME,
+    because it does in a parameter list and does not in a return type:
+    `void *db` is a `void *` with a name, `void *` is not. Getting that backwards
+    makes every parameter a type called `void db`, which nothing recognises as a
+    scalar — and a rule that refuses all 546 entry points for that reason looks
+    exactly like a rule that has measured them all and found none reachable.
+
+    The base type is then the LAST word: everything before it is a qualifier
+    (`const`), a sign, or a width modifier, none of which changes the size.
+    `const char *` is a `char`, `unsigned int` is an `int`, `long long` is a
+    `long`."""
+    s = ' '.join(decl.split())
+    depth = s.count('*')
+    s = ' '.join(s.replace('*', ' ').split())
+    if is_param:
+        head, _, last = s.rpartition(' ')
+        s = head or ''
+    changed = True
+    while changed:
+        changed = False
+        for q in _CTYPE_QUALIFIERS:
+            if s.startswith(q):
+                s = s[len(q):]
+                changed = True
+    return s.rpartition(' ')[2], depth
+
+
+def _ctype_is_word(base: str, depth: int, in_return: bool) -> bool:
+    """True when a value of this type is one 64-bit word on a formal image.
+
+    The two positions differ, and the difference is the whole rule — see the
+    note above. A `MojoList *` is a perfectly good ARGUMENT to carry and an
+    impossible thing to be HANDED, and no test of the type alone can tell those
+    apart without this."""
+    if depth == 0:
+        return base in _WORD_SCALARS
+    if in_return:
+        # The caller is handed this address and may read it. Only a string is
+        # something this path has a value for.
+        return base == 'char'
+    # An argument: the callee may read it, so the pointee has to be something
+    # both sides agree on — a string, `void` (an opaque handle, handed straight
+    # back to whoever made it), or another word.
+    return base in ('char', 'void') or _ctype_is_word(base, 0, in_return=False)
+
+
+def _split_params(params: str):
+    """The parameter declarations of a prototype, or None if they are not all
+    plain C types.
+
+    None means "cannot be decided" — a `...` (the header does not say the arity)
+    or a function-pointer parameter (a declaration in its own right, which no
+    rule here reads). Both are refused rather than guessed at; `mojo_type(...)`
+    and `mojo_re_sub_fn`'s callback are the live examples."""
+    p = ' '.join(params.split())
+    if not p or p == 'void':
+        return []
+    out, cur, depth = [], '', 0
+    for ch in p:
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+        if ch == ',' and depth == 0:
+            out.append(cur)
+            cur = ''
+        else:
+            cur += ch
+    out.append(cur)
+    got = []
+    for d in out:
+        d = ' '.join(d.split())
+        if d == '...':
+            return None
+        if not d or d == 'void':
+            continue
+        if '(' in d or ')' in d:
+            return None
+        got.append(d)
+    return got
+
+
+def runtime_abi_entry(name: str):
+    """The header's declaration of `name`, or None if no header declares it."""
+    return runtime_abi().get(name) if isinstance(name, str) else None
 
 
 def is_gimple_runtime_builtin(name: str) -> bool:
-    """True when `name` is spelled as an entry point of the gimple C runtime.
+    """True when `name` belongs to the gimple backend's C runtime.
 
     True for a call this target cannot bind, ASSUMING the caller has already
     established that the name is not a function of the module being compiled and
-    not an export of a dylib the program linked. See the note above for why the
-    test is a prefix and not a shape."""
-    return isinstance(name, str) and name.startswith(GIMPLE_RUNTIME_PREFIX)
+    not an export of a dylib the program linked. See the note above: a header
+    that declares it is the first test, and the `mojo_` namespace is the
+    conservative fallback for one that does not — a name with no declaration
+    anywhere has no signature here to check, and is therefore not callable
+    either."""
+    if not isinstance(name, str):
+        return False
+    return name in runtime_abi() or name.startswith(GIMPLE_RUNTIME_PREFIX)
+
+
+def gimple_runtime_callable(name: str, provided: bool = False) -> bool:
+    """True when a formal image can make this call at all.
+
+    FORMAL.md phase 2's rule, whole: every type crossing the call boundary is
+    one word, AND the symbol is on the link line. The first half is this
+    module's own decision from the header; the second is the caller's, because
+    only the caller knows what the image links — hence the argument rather than
+    a second guess at it here.
+
+    A backend can ask this unconditionally for any extern call, and a name
+    OUTSIDE the `mojo_*` namespace is always answered True, which is what the
+    old `startswith` test amounted to. The namespace check is not redundant
+    beside the table lookup: the headers also declare `input`,
+    `string_strip`, `int64_t_basename` and `py_tokenize`, which are the C
+    library and the compiler's own shims rather than the runtime's ABI, and
+    refusing those would be this rule refusing code it never claimed to cover.
+    """
+    if not isinstance(name, str) or not name.startswith(GIMPLE_RUNTIME_PREFIX):
+        return True
+    entry = runtime_abi_entry(name)
+    if entry is None:
+        return False        # no declaration anywhere: no shape, so not callable
+    return entry['word'] and provided
+
+
+def _box_why(where: str, spelling: str, base: str, depth: int) -> str:
+    """What one un-word-shaped type costs, in the words the refusal must use."""
+    if depth and base == 'MojoList':
+        return (
+            f"{where} is a `MojoList *`, a heap box the gimple runtime owns, "
+            f"where a list on this path is a blob in the frame whose first word "
+            f"is its count — so the operand and the answer are of different "
+            f"types, and reading offset 0 of the box would be a plausible-looking "
+            f"wrong number")
+    if depth:
+        return (
+            f"{where} is `{spelling}`, and that is an address rather than a "
+            f"value. An ARGUMENT can be one: this path carries the word and "
+            f"hands it straight back to the library that made it, never looking "
+            f"at what is behind it. A return is the other way round — the caller "
+            f"is the one who would have to read it, and the declaration does not "
+            f"say what is there. `void *` is spelled the same for a handle a "
+            f"program only passes on and for a container it reads elements out "
+            f"of, and a `MojoStr *` is a struct in the C heap, which a "
+            f"freestanding image has no allocator for. Either way the answer is "
+            f"a box, and it is not a box this path can produce")
+    return (
+        f"{where} is `{spelling}`, a by-value aggregate, which is a struct in "
+        f"memory rather than a word")
 
 
 def gimple_runtime_refusal(name: str) -> str:
@@ -4164,26 +4451,44 @@ def gimple_runtime_refusal(name: str) -> str:
     One function rather than the sentence written out in each backend, because
     the two architectures are one language implementation and a refusal that
     differed between them would be the same class of divergence as an answer
-    that did (test_formal_run.py's `refuse:` cases assert the agreement)."""
-    extra = ""
-    if name.startswith(GIMPLE_LIST_PREFIX):
-        extra = (
-            " It could not be answered by linking that library either: these "
-            "take a `MojoList *`, a heap box the gimple runtime owns, where a "
-            "list on this path is a blob in the frame whose first word is its "
-            "count — so the operand and the answer are of different types, and "
-            "reading offset 0 of the box would be a plausible-looking wrong "
-            "number.")
-    return (
+    that did (test_formal_run.py's `refuse:` cases assert the agreement).
+
+    Callers reach this only having established that the symbol is NOT on the
+    image's link line, which is what the first case below reports. The second is
+    the one this whole change is for: a call no link line can answer, named by
+    the TYPE rather than by a prefix. The third is a name in the namespace that
+    no header declares, where the only honest thing to say is that there is no
+    signature to check — the old wording claimed it was a known entry point,
+    which for those names is a thing the compiler had not looked at."""
+    entry = runtime_abi_entry(name)
+    lead = (
         f"{name} is an entry point of the gimple backend's C runtime (the "
-        f"`{GIMPLE_RUNTIME_PREFIX}*` ABI declared in runtime/fire_runtime.h and "
-        f"runtime/fire_sqlite3.h), and a formal image is freestanding: it links "
-        f"libSystem and nothing else, embeds no C runtime, and its values are "
-        f"one 64-bit word. There is nothing here for the call to bind to, and "
-        f"nothing in it that could be lowered in the backend instead."
-        f"{extra} Refused rather than emitted as a call to a symbol nothing "
-        f"defines, which is what this used to do — the image built and then "
-        f"died in the loader with \"Symbol not found\".")
+        f"`{GIMPLE_RUNTIME_PREFIX}*` ABI declared in runtime/*.h), and a formal "
+        f"image is freestanding: it links libSystem and nothing else, embeds no "
+        f"C runtime, and its values are one 64-bit word.")
+    tail = (
+        " Refused rather than emitted as a call to a symbol nothing defines, "
+        "which is what this used to do — the image built and then died in the "
+        "loader with \"Symbol not found\".")
+    if entry is None:
+        return (
+            f"{name} is an entry point of the gimple backend's C runtime only "
+            f"in name: it carries the `{GIMPLE_RUNTIME_PREFIX}*` prefix those "
+            f"headers give that ABI, and no header in runtime/ declares it, so "
+            f"there is no signature here to check and nothing this path can "
+            f"bind.{tail}")
+    if entry['word']:
+        return (
+            f"{lead} This one is the reachable half: every argument and the "
+            f"return value is a single word — `{entry['signature']}` — and a "
+            f"single word is exactly what a value is on this path, so a formal "
+            f"image could make the call. What is missing is the library: this "
+            f"image's link line does not define {name}, and a freestanding image "
+            f"links none of runtime/.{tail}")
+    why = ' and '.join(_box_why(*b) for b in entry['boxes'])
+    return (
+        f"{lead} It could not be answered by linking that library either: "
+        f"{why}.{tail}")
 
 
 # Python's text mode -> the C library's open(2) flag word. A formal string is a
@@ -4825,6 +5130,41 @@ def is_ellipsis(node) -> bool:
 
     Emits nothing and yields 0, the same "nothing here" a None literal gets."""
     return type(node).__name__ == "EllipsisLiteral"
+
+
+def ellipsis_refusal(node):
+    """The refusal for a `...` standing where a value belongs, or None.
+
+    The generic `unsupported expression EllipsisLiteral on the formal <arch>
+    path` names an AST node the author never wrote and says nothing about what
+    to do instead, which is the definition of a useless diagnostic: a reader
+    sent looking for an `EllipsisLiteral` in their source finds nothing. On
+    x86-64 it was worse than useless, because `_unsupported_expr_message`
+    appended "container and string values are not" to it — a claim that is
+    false of a `...`, and one that sent the reader looking for a list.
+
+    Arch-free and shared, for the same reason every other refusal here is: the
+    two backends are one language implementation, and they had drifted on this
+    one — a construct with two different messages, one of them wrong about the
+    file.
+
+    Measured, both architectures, so the scope claim is a measurement and not an
+    assumption: a `...` in a plain `def`/`fn` body is refused whether or not
+    the function is ever CALLED, because this path lowers every definition it is
+    given; a `...` in a `trait` method builds, because a trait method is a
+    declaration of an interface and there is no body to lower. So the advice is
+    "give the function a body", and the escape hatch is a trait, not an
+    unreferenced call."""
+    if not is_ellipsis(node):
+        return None
+    return (
+        "a `...` stands where this path needs instructions to emit, and there "
+        "are none: a formal image is a compiled program, so every function it "
+        "lowers must have a body. This is the language's own no-implementation "
+        "marker — write the function, or declare it as a `trait` method, which "
+        "is a declaration of an interface and so has no body to lower (a `...` "
+        "in a trait method builds on both architectures, and a `...` in a plain "
+        "function is refused whether or not anything ever calls it)")
 
 
 # ── Type constructors ─────────────────────────────────────────────────────
@@ -7820,6 +8160,33 @@ def name_resolves_without_a_local(name: str) -> bool:
     whole point: the arm64 X19 fall-through and the x86-64 zero fall-through
     were the two architectures' answers to a question neither of them had."""
     return name in _UNRESOLVED_NAME_ALLOWED
+
+
+def comptime_fold_refusal(name: str) -> str:
+    """The refusal for a `comptime NAME = …` whose value is not a constant.
+
+    ARCH-FREE and shared, which is the whole point: arm64 carried the text
+    inline and x86-64 had no version of it at all, so one construct came back
+    with two different messages from the two architectures that are supposed to
+    be one language implementation. x86-64's was worse than merely different —
+    it refused the *statement shape* one layer up, so a program whose only
+    problem was a `len()` over a runtime parameter was told it used a statement
+    this path does not support, and a reader went looking for that statement.
+
+    Saying what is actually wrong is also what makes it actionable, which the
+    shape-based text was not: the initializer is not a compile-time constant,
+    and the two repairs are to make it one (a literal, or an expression over
+    literals and other `comptime` names) or to stop asking for it at compile
+    time (an ordinary `var`, read at run time)."""
+    return (
+        f"comptime {name} = ... does not fold to a compile-time constant on "
+        f"this path, so there is no value to materialize at the reads that "
+        f"follow. A `comptime` binding is compile-time state, which is why it "
+        f"cannot be a value that only exists while the function runs — an "
+        f"initializer over a parameter, or over anything computed, is not "
+        f"knowable here. Make the initializer a literal (or an expression of "
+        f"literals and other `comptime` names), or bind it with an ordinary "
+        f"`var` and read it at run time")
 
 
 def module_global_refusal(name: str, sym, fn_name: str) -> str:
