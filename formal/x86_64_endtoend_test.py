@@ -232,7 +232,16 @@ _SUCCS = {
         "{ $s with mem := mem_write_bytes $s.mem "
         "(Int.ofNat (x86_get_reg $s (5 + x86_rex_b $rex)).toNat + $disp).toNat "
         "(x86_get_reg $s ($reg + x86_rex_r $rex)) 8, rip := $next }",
-    "movzx_r64_r8": "{ $s with rax := $s.rax, rip := $next }",
+    # `&&& 0xFF` is not decoration.  The model used to read the whole register
+    # and leave it alone here, so this row said `rax := $s.rax` and matched.
+    # The model now narrows the operand to its one byte, which is what
+    # `movzx` does, and this row had to follow: the two disagreed in 14
+    # examples, as a "Type mismatch" in the generated file, and the generated
+    # file is right and the table was wrong.  A successor table is a copy of
+    # the model's semantics; when the model is corrected, the copy has to be
+    # corrected with it or it becomes a second, stale statement of the same
+    # fact.
+    "movzx_r64_r8": "{ $s with rax := $s.rax &&& 0xFF, rip := $next }",
     "alu_rr:add":
         "{ x86_set_reg $s ($rm + x86_rex_b $rex) ($res) with rip := $next, zf := ($fa).zf, sf := ($fa).sf, cf := ($fa).cf, of_ := ($fa).of_ }",
     "alu_rr:sub":

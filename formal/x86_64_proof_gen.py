@@ -55,8 +55,17 @@ _TRUST_HEADER = (
     "     1. AST   ⟷ the source semantics (`mojo`)  — `eval_eq_mojo`\n"
     "     2. AST   ⟷ the compiled bytes             — `<fn>_compile_correct`\n"
     "     3. bytes ⟷ the executed state             — the step certificates\n"
-    "   1 is proved (by the shared generator); 2 and 3 are `sorry` so far, so\n"
-    "   the end-to-end theorem below inherits their trust. -/\n")
+    "   1 is proved (by the shared generator) for straight-line functions;\n"
+    "   2 and 3 are `sorry`, so the end-to-end theorem below inherits their\n"
+    "   trust. Read the two as different kinds of remaining hole:\n"
+    "     * 2 is `sorry` with a HYPOTHESIS attached. Its `none` branch is\n"
+    "       `False` and the run's completing is `hrun`, so what it does not\n"
+    "       know is stated rather than absorbed by a `True`.\n"
+    "     * 3 is `sorry` only where a certificate would be FALSE — a division\n"
+    "       whose divisor is a register, so whether it is zero is what the\n"
+    "       program is computing. Those instructions are listed by address\n"
+    "       rather than given a claim that cannot hold.\n"
+    "   Neither is a proof, and a reader should not take this file as one. -/\n")
 
 
 def _byte_list(code: bytes, per_line: int = 16) -> str:
@@ -247,7 +256,29 @@ def _compile_correct_section(func_name: str) -> str:
     `exec_seq` runs the machine model for a bounded number of steps from the
     function's entry, which is the form the toy x86-64 generator used for the
     same boundary. It is not in ProofLib (only the arm64 side has a step
-    composition there), so it is emitted into the proof file itself."""
+    composition there), so it is emitted into the proof file itself.
+
+    **The `none` branch was `True`, and that was a hole shaped like a proof.**
+    The statement quantified over `steps` and matched the run, saying something
+    about `rax` when the run produced a state and `True` when it did not — so
+    the theorem was trivially true of every program that runs out of fuel,
+    which is every program, for large enough `steps`. It read as a claim about
+    compiled code and carried no information, which is the same disease as the
+    old `DylibExport.Semantics` (`forall observable, ... -> True`) one layer
+    up. A reader checking whether this file was honest would have had to notice
+    the `True` to know it was not.
+
+    It is now `False`, with the run's completing supplied as a HYPOTHESIS
+    (`hrun`). That is a strictly stronger statement in the honest direction: the
+    `none` branch is now unreachable *because something was assumed*, and the
+    assumption is visible and dischargeable, where before it was discharged by
+    asserting `True` about a case nobody had to reach.
+
+    The theorem is still `sorry`. That is the honest part and it is not what
+    this round can close: proving the emitted bytes implement the AST is the
+    deepest of the three boundaries and is a project, not a patch. What changes
+    here is the SHAPE — a remaining hole is now a hypothesis a caller can
+    discharge, which is the only form this programme accepts."""
     return (
         f"/-- Run the machine model for `steps` instructions from the entry. -/\n"
         f"def {func_name}_exec_seq (s : X86State) (code : Nat → UInt8)\n"
@@ -259,14 +290,22 @@ def _compile_correct_section(func_name: str) -> str:
         f"    | some s' => {func_name}_exec_seq s' code s'.rip n\n"
         f"    | none => none\n"
         f"\n"
-        f"/-- TRUST BOUNDARY: AST ⟷ compiled bytes. -/\n"
+        f"/-- TRUST BOUNDARY: AST ⟷ compiled bytes.\n\n"
+        f"    `hrun` is the run's completing, and it is a hypothesis rather than\n"
+        f"    an assertion: the theorem below says nothing about a run that stops,\n"
+        f"    because nothing is known about where it stopped. The `none` branch\n"
+        f"    is `False` and not `True` for that reason -- see the note on\n"
+        f"    `_compile_correct_section`. -/\n"
         f"theorem {func_name}_compile_correct (e : MojoExpr)\n"
-        f"    (env : String → UInt64) (s : X86State) :\n"
+        f"    (env : String → UInt64) (s : X86State)\n"
+        f"    (hrun : ∀ steps : Nat,\n"
+        f"      ({func_name}_exec_seq s {func_name}_code {func_name}_offset steps).isSome) :\n"
         f"  ∀ steps : Nat,\n"
         f"    match {func_name}_exec_seq s {func_name}_code {func_name}_offset steps with\n"
         f"    | some s' => s'.rax = evalExpr (fun name arg => mojo arg) e env\n"
-        f"    | none => True := by\n"
+        f"    | none => False := by\n"
         f"  sorry\n")
+
 
 
 #: Forms whose step is not TOTAL, so a "this always steps" certificate would be

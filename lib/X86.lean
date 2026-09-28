@@ -321,6 +321,18 @@ def x86_cond (cc : Nat) (s : X86State) : Bool :=
 def x86_sign_extend32 (v : UInt64) : UInt64 :=
   if x86_msb (x86_trunc32 v) then v ||| 0xffffffff00000000 else v
 
+/-- Sign-extend bit 7 of `v` across the whole word: what `movsx r64, r8`
+    does.  The 8- and 16-bit forms were missing, and `movsx` was reaching for
+    the 32-bit one, which extends bit 31 and so silently computed a different
+    number than the instruction does on hardware. -/
+def x86_sign_extend8 (v : UInt64) : UInt64 :=
+  if v &&& 0x80 != 0 then v ||| 0xffffffffffffff00 else v
+
+/-- Sign-extend bit 15 of `v` across the whole word: `movsx r64, r16`. -/
+def x86_sign_extend16 (v : UInt64) : UInt64 :=
+  if v &&& 0x8000 != 0 then v ||| 0xffffffffffff0000 else v
+
+
 /-- `v` as a signed 64-bit number. -/
 def x86_signed (v : UInt64) : Int :=
   if x86_msb v then (v.toNat : Int) - 18446744073709551616 else (v.toNat : Int)
@@ -546,11 +558,36 @@ def x86_step_rex (s : X86State) (code : Nat → UInt8) (rex op : UInt8) : Option
       some { x86_set_reg s ((modrm.toNat >>> 3 &&& 7) + x86_rex_r rex) (a * b) with rip := rip + 4 }
     else if op2 = 0xb6 || op2 = 0xb7 || op2 = 0xbe || op2 = 0xbf then
       -- movzx / movsx into r64
+      --
+      -- The operand is `sz` BYTES and the extension starts at bit `8*sz - 1`.
+      -- This arm used `x86_sign_extend32` for all four opcodes and took the
+      -- read unmodified, which is wrong twice over, and both halves were
+      -- silent:
+      --
+      --   * `x86_rm_read` with mod = 3 returns the whole register (it is used
+      --     by 8-byte reads too, where that is right), so a 1-byte `movzx`
+      --     left the upper 56 bits of the destination alone. `movzx rbx, bl`
+      --     with rbx = 0xff00 gave 0xff00, not 0xff.
+      --   * `x86_sign_extend32` extends bit 31, so `movsx rbx, bl` with
+      --     bl = 0xff — that is, -1 — gave 0x00000000000000ff, not
+      --     0xffffffffffffffff.
+      --
+      -- Both were CONFIRMED by evaluating the model, not by reading it, and
+      -- both were invisible from outside for the same reason: the only three
+      -- examples that emit a byte `movsx` (n8, sgt8, sle8) had no step lemma
+      -- wired for it, so the value test never reached the comparison. A gap in
+      -- a proof chain hid a defect in the thing the chain was proving things
+      -- about.
       let modrm := code (rip + 3)
       let sz := if op2 = 0xb6 || op2 = 0xbe then 1 else 2
       let sign := op2 = 0xbe || op2 = 0xbf
       match x86_rm_read s code rex modrm (rip + 3) (rip + 4) sz with
-      | some v => some { x86_set_reg s ((modrm.toNat >>> 3 &&& 7) + x86_rex_r rex) (if sign then x86_sign_extend32 v else v) with rip := rip + 4 }
+      | some v =>
+        let narrowed := v &&& (if sz = 1 then 0xFF else 0xFFFF)
+        let ext := if !sign then narrowed
+                   else if sz = 1 then x86_sign_extend8 narrowed
+                   else x86_sign_extend16 narrowed
+        some { x86_set_reg s ((modrm.toNat >>> 3 &&& 7) + x86_rex_r rex) ext with rip := rip + 4 }
       | none => none
     else none
   else none
@@ -779,12 +816,20 @@ theorem x86_step_setle_al (s : X86State) (code : Nat → UInt8) (m : Nat)
   simp [x86_step, x86_step_plain, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr, x86_rm_read, x86_rm_write, h_rip, h_b0, h_b1, h_b2]
   by_cases h : x86_cond 14 s = true <;> simp [h]
 
-/-- `movzx rax, al` (REX.W 0F B6 /r, mod=3). -/
+/-- `movzx rax, al` (REX.W 0F B6 /r, mod=3).
+
+    **This lemma used to conclude `rax := s.rax`, and that was wrong.** It was
+    a theorem about a model that read the whole register and never narrowed it,
+    so the lemma and the bug agreed with each other and the suite was green.
+    Fixing the model made the two disagree, which is the only reason anyone
+    noticed: the proof is still by `simp`, but now of a statement that says
+    what the instruction does. -/
 theorem x86_step_movzx_rax_al (s : X86State) (code : Nat → UInt8) (m : Nat)
     (h_rip : s.rip = m) (h_b0 : code m = 0x48) (h_b1 : code (m + 1) = 0x0f) (h_b2 : code (m + 2) = 0xb6)
     (h_b3 : code (m + 3) = 0xc0) :
-    x86_step s code = some { s with rax := s.rax, rip := m + 4 } := by
+    x86_step s code = some { s with rax := s.rax &&& 0xFF, rip := m + 4 } := by
   simp [x86_step, x86_step_rex, x86_is_rex, x86_get_reg, x86_set_reg, x86_mem_addr, x86_rm_read, x86_rm_write, x86_flags_sub, x86_flags_add, x86_flags_logic, x86_msb, h_rip, h_b0, h_b1, h_b2, h_b3]
+
 
 /-- `jz rel32` (0F 84 id): taken lands past the displacement. -/
 theorem x86_step_jz_rel32 (s : X86State) (code : Nat → UInt8) (m : Nat) (off : Int)
@@ -1475,3 +1520,120 @@ theorem x86_call_return_slot_separated (s : X86State) (code : Nat → UInt8)
     mem_read_bytes (x86_call_post s m off).mem b w = mem_read_bytes s.mem b w := by
   simp only [x86_call_post]
   exact mem_read_bytes_write_above s.mem (s.rsp - 8).toNat (UInt64.ofNat (m + 5)) 8 w b habove
+
+/-!
+## The `rip` half of the call/return round trip
+
+Everything above stops at the register file on purpose, and the docstring on
+`x86_call_ret_balances_stack` says exactly what was missing: that a `ret` lands
+on `m + 5` reduces to reading back what the `call` pushed, and that
+
+    mem_read_bytes (mem_write_bytes m a v n) a n = v &&& lowMask n
+
+is **false as a general-width claim** — at width 0 the read is 0 whatever `v`
+is — so it needs a mask to induct on. This section supplies the mask, the
+induction, and the theorem the docstring said was not in the file.
+-/
+
+/-- **The `n`-byte mask**: the low `8 * n` bits of a word, all ones.  Defined
+    here rather than in `ProofLib.lean` because this is the only consumer, and
+    the generalisation belongs with the proof that needs it. -/
+def lowMask : Nat → UInt64
+  | 0 => 0
+  | k + 1 => (0xFF : UInt64) ||| (lowMask k <<< 8)
+
+@[simp] theorem lowMask_eight : lowMask 8 = 0xFFFFFFFFFFFFFFFF := by native_decide
+
+/-- **Writing the low byte at `a` disturbs no other address.**  A `k + 1`-byte
+    write at `a` is a one-byte write at `a` followed by a `k`-byte write of the
+    shifted value at `a + 1`, so every address other than `a` sees only the
+    tail.  This is the pointwise lemma the `rip` induction needs, because the
+    tail of the step compares a `k`-write at `a + 1` against a `k + 1`-write at
+    `a` and the two agree everywhere except at `a`. -/
+theorem mem_write_bytes_tail (m : Nat → UInt8) (a k i : Nat) (v : UInt64)
+    (h : i ≠ a) :
+    (mem_write_bytes m a v (k + 1)) i = (mem_write_bytes m (a + 1) (v >>> 8) k) i := by
+  simp [mem_write_bytes, h]
+
+/-- **Reads of `n` bytes depend only on memory over `[a, a + n)`.** -/
+theorem mem_read_bytes_congr {m₁ m₂ : Nat → UInt8} {a n : Nat}
+    (h : ∀ j, a ≤ j → j < a + n → m₁ j = m₂ j) :
+    mem_read_bytes m₁ a n = mem_read_bytes m₂ a n := by
+  induction n generalizing a with
+  | zero => rfl
+  | succ k ih =>
+    show (m₁ a).toUInt64 ||| (mem_read_bytes m₁ (a + 1) k <<< 8)
+        = (m₂ a).toUInt64 ||| (mem_read_bytes m₂ (a + 1) k <<< 8)
+    have ha : m₁ a = m₂ a := h a (Nat.le_refl _) (by omega)
+    have htail : mem_read_bytes m₁ (a + 1) k = mem_read_bytes m₂ (a + 1) k :=
+      ih (fun j hj1 hj2 => h j (by omega) (by omega))
+    rw [ha, htail]
+
+/-- **Reading back an `n`-byte little-endian write returns the value, masked to
+    the `n` bytes actually written.**  The masked form is the honest one: at
+    `n = 0` nothing is written and nothing reads back, so the unmasked claim
+    would be false exactly where the induction starts. -/
+theorem mem_read_bytes_write_same (m : Nat → UInt8) (a : Nat) (v : UInt64) :
+    ∀ n, mem_read_bytes (mem_write_bytes m a v n) a n = v &&& lowMask n := by
+  intro n
+  induction n generalizing m a v with
+  | zero => simp [mem_read_bytes, lowMask]
+  | succ k ih =>
+    show (mem_write_bytes m a v (k + 1) a).toUInt64 |||
+        (mem_read_bytes (mem_write_bytes m a v (k + 1)) (a + 1) k <<< 8)
+        = v &&& lowMask (k + 1)
+    have hself : (mem_write_bytes m a v (k + 1)) a = v.toUInt8 := by
+      simp [mem_write_bytes]
+    have htail : mem_read_bytes (mem_write_bytes m a v (k + 1)) (a + 1) k
+                = mem_read_bytes (mem_write_bytes m (a + 1) (v >>> 8) k) (a + 1) k :=
+      mem_read_bytes_congr (fun j _ _ => mem_write_bytes_tail m a k j v (by omega))
+    rw [hself, htail, ih]
+    simp only [lowMask]
+    have htrunc : v.toUInt8.toUInt64 = v &&& (0xFF : UInt64) := by bv_decide
+    rw [htrunc]
+    bv_decide
+
+/-- **A `ret` returns to the instruction after the `call` that pushed the
+    address.**  This is the `rip` half, and with it the call/return round trip
+    is complete: `x86_call_ret_balances_stack` has the stack pointer, this has
+    the program counter.
+
+    The bound on `m` is a hypothesis rather than a fact, deliberately.  A
+    return address is a `UInt64`, so `UInt64.ofNat (m + 5)` is truncated and
+    the conclusion needs `m + 5` to fit — which is true of every real
+    instruction address and unprovable of a bare `Nat`.  Asserting it without
+    the hypothesis would be the trap this file's own section warns about, so it
+    is stated. -/
+theorem x86_call_ret_restores_rip (s : X86State) (m : Nat) (off : Int) (target : Nat)
+    (hm : m + 5 < 2 ^ 64) :
+    (x86_ret_post (x86_at_target s m off target)).rip = m + 5 := by
+  show (mem_read_bytes (x86_call_post s m off).mem
+          (x86_call_post s m off).rsp.toNat 8).toNat = m + 5
+  show (mem_read_bytes (mem_write_bytes s.mem (s.rsp - 8).toNat (UInt64.ofNat (m + 5)) 8)
+          (s.rsp - 8).toNat 8).toNat = m + 5
+  rw [mem_read_bytes_write_same, lowMask_eight]
+  have hand : ∀ w : UInt64, w &&& 0xFFFFFFFFFFFFFFFF = w := by
+    intro w; bv_decide
+  rw [hand]
+  simp; omega
+
+/-- **Both halves at once**: a `call` and the `ret` that ends its callee leave
+    the machine exactly where the call found it.
+
+    It takes the same three step hypotheses as `x86_call_ret_balances_stack`
+    rather than inventing them.  The first version of this theorem tried to
+    discharge them with `rfl`, which cannot work: they say the `call` and the
+    `ret` actually decoded, and that is a fact about the CODE, not a fact this
+    section can produce.  Passing a dummy `code` would have made the whole
+    statement vacuous -- a theorem about a machine that never ran -- which is
+    the same disease as the old `Semantics`, one layer down. -/
+theorem x86_call_ret_round_trip (s : X86State) (code : Nat → UInt8)
+    (m target : Nat) (off : Int) (hm : m + 5 < 2 ^ 64)
+    (hcall : x86_step s code = some (x86_call_post s m off))
+    (htarget : (Int.ofNat m + 5 + off).toNat = target)
+    (hret : x86_step (x86_at_target s m off target) code
+      = some (x86_ret_post (x86_at_target s m off target))) :
+    (x86_ret_post (x86_at_target s m off target)).rsp = s.rsp
+      ∧ (x86_ret_post (x86_at_target s m off target)).rip = m + 5 :=
+  ⟨x86_call_ret_balances_stack s code m target off hcall htarget hret,
+   x86_call_ret_restores_rip s m off target hm⟩
