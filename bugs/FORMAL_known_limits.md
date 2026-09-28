@@ -1,5 +1,12 @@
 # FORMAL_known_limits: the sweep residue, audited — which refusals are true
 
+**Last audited: 2026-09-27 (FORMAL-PARALLEL round 1, agent [5] — §6 added).**
+Sections 1–5 are wave 5's audit and are **not** re-measured here; §6 is a
+separate, later measurement of the same sweep on a tree four other agents were
+editing, and it does not restate or revise §1–§5. §6 answers one question the
+earlier sections could not: ranked by file count and by what closing it costs,
+what is the biggest remaining lever.
+
 **Last audited: 2026-09-26 (wave 5, agent E1).** This is the single home for
 the *verified* limits behind the residue of the formal sweep's codegen classes,
 and for the audit that established which of them are true. It replaces the
@@ -449,3 +456,186 @@ passing cases.
 (`either`, `both`, `fib`) all still fail — `KNOWN-GAP=3` — and
 `EXPECTED_FAILURES_X86_64` is empty and stays empty. `test_formal_run.py` has no
 expected-failure list.
+
+---
+
+# 6. The residue, ranked (2026-09-27, agent [5])
+
+**What this section is.** §1–§3 group the residue by *shape of refusal* and
+establish which of those refusals are true. That is the right axis for deciding
+whether a refusal is a lie. It is the wrong axis for deciding what to do next,
+because it produces a list of 8 files and 1 file and 46 files and never says
+which of them, closed, would move the coverage number the most.
+
+This section re-groups the same findings by **files unblocked per unit of
+work**, measured on the four sweeps, and states a cost for each. It is a
+backlog, not an audit: nothing here revises §1–§5, and every entry here that
+touches a shape §1–§5 already audited points at the section that owns the
+verdict rather than repeating it.
+
+**The measurement, and what it is worth.** Four runs of `tools/formal_sweep.py`
+on this tree, both architectures, both scopes:
+
+| sweep | files | PASS | codegen | codegen/dependency | host-import | target-limit | coverage |
+|---|---|---|---|---|---|---|---|
+| `--no-stdlib` arm64 | 294 | 84 | 39 | 0 | 166 | 5 | 84/123 = 68.3% |
+| `--no-stdlib` x86_64 | 294 | 82 | 39 | 0 | 166 | 5 | 82/121 = 67.8% |
+| default arm64 | 588 | 108 | 127 | 181 | 166 | 5 | 108/416 = 26.0% |
+| default x86_64 | 588 | 105 | 128 | 181 | 166 | 5 | 105/414 = 25.4% |
+
+**Read these with the caveat they deserve.** This tree was being edited by four
+other agents throughout (`formal/imports.py`, `formal/model.py`,
+`gimple_codegen.py`, `fire.py` and others), so the absolute counts move between
+runs and the *family decomposition* is the durable part, not the totals. The
+file COUNT grew from §5.1's 578 to 588 because other agents added files. Two
+`unresolved-extern` files appear on x86-64 and not arm64 and are an artefact of
+a per-arch dylib that exists but cannot be `dlopen`ed on this host — that is
+agent [2]'s territory, not a codegen finding, and it is flagged in §6.4.
+
+## 6.1 The decomposition, by what actually refuses
+
+Direct `codegen` — 127 files on arm64, 128 on x86-64 — decomposes as:
+
+| shape | files | what it is |
+|---|---|---|
+| **by-reference frame escape** (`a X receiver is returned from…`, `… frame address is passed to len()`, `… hands the word in the slot…`, `… cannot be placed: this name holds a frame address…`) | **97** | the widest thing in the whole residue, and it is one design question, not 97 |
+| MLIR attribute / dialect construct | 10 | §2. **Permanent.** |
+| module-level `comptime` binding initialized from an attribute | 1 | §2's twin, the false-PASS shape wave 5 closed |
+| 19 distinct singleton causes | 19 | each its own file; §3 is the right home for these |
+
+`codegen/dependency` — 181 files — is **13 terminal modules**, and the top four
+are 168 of the 181:
+
+| terminal module | files | terminal reason | the refusal is | to close it |
+|---|---|---|---|---|
+| `std/os/env.mojo` | **55** | `external_call['setenv', Int32]` — a subscript whose index is a tuple | **true, but the message names the wrong mechanism** (§6.2) | Stage 5 monomorphization |
+| `std/sys/info.mojo` | 37 | module-level `comptime` binding initialized from an MLIR attribute | true, **permanent** (§2) | nothing on this path |
+| `std/collections/binary_heap.mojo` | 35 | `a BinaryHeap frame address is passed to len()` | true | by-reference receiver work |
+| `std/builtin/builtin_slice.mojo` | 20 | `constructing Slice with 3 argument(s) is a call to a user-defined __init__` | true, and **the best-worded refusal in the residue** | run `__init__` / field-filling construction |
+| `std/sys/_assembly.mojo` | 18 | one generic `inlined_assembly[…]` | true (§1.1) | Stage 5 |
+| `function.mojo` 4, `_io.mojo` 3, `random.mojo` 3, `tile.mojo` 2, `_select.mojo` 1, `_unicode_lookups.mojo` 1, `stat.mojo` 1, `itertools.mojo` 1 | 16 | §1.1, table verbatim | 7 true + permanent | Stage 5, or nothing |
+
+## 6.2 A true refusal with a false explanation, in the largest family
+
+The single largest family in the residue — **55 files, one construct** — is
+refused like this:
+
+```
+env.mojo: external_call['setenv', Int32] is a subscript whose index is a
+tuple. A value here is one 64-bit word and a list is a flat blob of words, so
+a tuple index has no representation on this path. It is one of two things: a
+lookup keyed by the tuple, which is lowered only when the base is a known dict
+and compares the key element-wise; or a two-dimensional index, which needs a
+row stride the source never states.
+```
+
+**The refusal is true and the explanation is wrong**, which is the one
+combination this document has an opinion about. `std/os/env.mojo:22` is
+
+```mojo
+from std.ffi import c_int, external_call, _CPointer
+...
+return external_call["setenv", c_int](name.contents, value.contents, c_int(overwrite))
+```
+
+`external_call` is a *function-like template*, and `external_call["setenv",
+c_int]` applies it at a concrete type argument. It is neither of the two things
+the message offers:
+
+  * it is not a **dict lookup** — `external_call` is not a dict, and the
+    "lowered only when the base is a known dict" clause is answering a
+    question nobody asked;
+  * it is not a **two-dimensional index** — the second tuple element is a TYPE,
+    not a coordinate, and §2.1 of this document already established (across 294
+    stdlib files plus this repository) that `a[i, j]` occurs ~2000 times as a
+    generic's explicit template parameter list and **zero** times as an index.
+    There is no 2-D index hiding here; the message sends a reader to look for
+    one, which is precisely the "a claim that is false is worse than no claim"
+    failure this document exists to prevent.
+
+**The honest refusal is the one §1.1 already gives for a generic**: this is a
+template application with a concrete type argument, a formal value is one word,
+and there is no symbol for the instantiation until the boundary symbol is the
+*monomorphized* function (`doc/ABI.md` §Generics). Which makes it a **§1.1
+family-1 member**, and its cost the same: Stage 5.
+
+**Cost of the rewording alone: under an hour, and it is [3]'s file**
+(`formal/model.py`), not this document's. It is worth doing anyway, because a
+55-file family whose explanation is wrong is a family the next person will
+re-derive from scratch.
+
+## 6.3 Ranked, with costs — the answer to "what is next"
+
+| # | lever | files | cost | why this rank |
+|---|---|---|---|---|
+| **1** | **Stage 5 monomorphization on the formal path** | **89** (55 `env.mojo` + 34 of family 1: 18 `_assembly` + 16 remainder) | **weeks** — §1.2 (a)–(c), plus a 2-D-index-free statement for `external_call`'s tuple | The largest single lever, by a factor of two over anything else, and it is the *same* work for both halves: a monomorphizer, a mangling function that agrees with `doc/ABI.md` and with what the importer computes, and CAS keying by `(template-id, type args, comptime params)` |
+| **2** | **by-reference frame escape** | **97 direct**, of which 29 are in files that also import a host module and so cannot build anyway → **68 actionable** | days-to-weeks, and it is a *design* question, not a patch | Widest single shape in the residue, and already has its own design document (`bugs/FORMAL_wide_receiver_by_reference.md`). Ranks second only because it is harder, not because it is smaller |
+| **3** | `Slice.__init__` — run a declared `__init__` / field-filling construction | 20 | **days**, self-contained | The cheapest *capability* in the residue, and the message that describes it is already exact. Nothing about it needs a new value model |
+| **4** | `env.mojo`'s message, rewritten to name a template application | 0 (55 already unblocked by #1) | **under an hour** | Not a coverage item at all. Listed because a wrong explanation on the largest family costs the next reader more than the fix does |
+| **5** | the 19 singleton direct causes (§3) | 19 | one sitting each | Already audited in §3; several are weak messages rather than capabilities, and §3's own guidance applies: **prefer fixing a wrong message to adding a capability** |
+| — | MLIR attribute templates | 41 | **nothing — permanent** | §2. Not work. Read as a fact about those modules |
+| — | host-import | 166 (160 in reach) | sized, see below | not a limit at all |
+
+**So: the biggest remaining lever is Stage 5 monomorphization, and the numbers
+are 89 files and weeks.** It is the same answer §1.2 reached for family 1
+alone, with `env.mojo`'s 55 added because that family turned out to be family 1
+in disguise (§6.2). The second answer is the by-reference frame work at 68
+actionable files, and the honest comparison is that #1 is 89 files of *plumbing
+the design already specifies* while #2 is 67 files of *design that does not
+exist yet* — which is why #1 is first despite being the larger number only by a
+little.
+
+**Nothing in this list should be started as a side quest.** #1 is a project,
+which is why it is written down here rather than attempted.
+
+## 6.4 Three things that are not findings, and were being counted as work
+
+  * **30 of the 127 direct `codegen` findings are in files that also import a
+    host module** (measured on both arches; `tools/formal_sweep.py` now prints
+    this line). **29 of those 30 are by-reference frame escapes**, which is
+    what makes the number actionable rather than a curiosity: the by-reference
+    work's real prize is 68 files, not 97. The construct refusal is real and
+    the construct is in the file, so `codegen` is the right class — but the
+    file fails on its import the moment the construct is fixed, so closing the
+    finding changes nothing about the file. This is **not** reclassified: moving those 30 out of the
+    denominator would raise the coverage rate from a bookkeeping change, which
+    is the one move that makes a coverage report worthless. It is printed, and
+    the difference is visible.
+  * **`not-answerable/host-import` is 166 files, of which 160 import a module a
+    Mojo-side implementation could in principle provide** (`os` 79, `re` 14,
+    `sys` 14, `struct` 7, `json`, `time`, `io` and the rest) and 6 need a host
+    process or an embedded interpreter. The class blurb used to say all 166 were
+    "not fixable", which is false of the 160. That was agent [4]'s list to
+    split and this document's to measure; both are done and the sweep now says
+    which is which on every run. **`os` is 79 of the 160 and is not close** —
+    the split sizes the work, it does not make it small.
+  * **2 files are `unresolved-extern` on x86-64 and not on arm64**
+    (`example_imports.mojo`, `abfulltest_driver.mojo`), and the reason is
+    `dyld cannot load …/formal-imports/x86_64/*.dylib` — the per-arch formal
+    dylib exists and is the wrong architecture for this host. That is a
+    **per-arch dylib build** item (agent [2]'s, and the thing [2] was asked to
+    build), not a codegen gap, and it is a real load failure reported as one.
+
+## 6.5 Arch drift, still open, still two files
+
+Same sweep, both arches, `set`-diffed. **Zero class changes** — every file is
+in the same class on both architectures — and exactly **two files whose message
+differs**, which is the drift §3 records and which is *not* cosmetic:
+
+  * `std/builtin/swap.mojo` — **arm64 builds it, x86-64 refuses it**
+    (`unsupported unary operator '^' on the formal x86-64 path`). A construct
+    one architecture lowers and the other does not, which is a codegen gap in
+    x86-64, not a wording difference. Pre-existing, unchanged since `dbf3abb`.
+  * `std/math/polynomial.mojo` — arm64 says `comptime num_coefficients = …
+    does not fold to a compile-time constant`, x86-64 says `unsupported call
+    target on the formal x86-64 path (got SubscriptExpr)`. **The two
+    architectures name different limits for one construct**, and only one of
+    them is the operative one. Already pinned by
+    `limit_comptime_over_a_runtime_parameter` with `refuse_either:`.
+  * (`std/builtin/len.mojo` also differs, but only by the architecture's name
+    inside an otherwise identical sentence. Same verdict, same reason, and that
+    is the correct kind of difference.)
+
+Both are x86-64-side work of a sitting each, and both are in
+`formal/x86_64_codegen.py`. Not started: it is [3]'s file and [3] is working in
+it.

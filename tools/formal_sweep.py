@@ -62,9 +62,23 @@ facts. So every verdict now carries a class:
                                     unpack` was reporting another agent's
                                     half-finished edit as a coverage gap
   not-answerable/host-import        imports a CPython host module that has no
-                                    Mojo source anywhere: provably outside
-                                    this backend's reach, and not fixable by
-                                    anyone
+                                    Mojo source anywhere: a fact about the
+                                    TARGET, not a gap in the backend. The
+                                    summary splits it into the modules a
+                                    Mojo-side implementation could in
+                                    principle provide (WORK — `os`, `sys`,
+                                    `math`, `struct`, `time`, `json`, `re`)
+                                    and the ones that need a host process, an
+                                    embedded interpreter or a kernel object
+                                    this image does not have (permanent:
+                                    `subprocess`, `ctypes`, `asyncio`,
+                                    `threading`, `socket`). Both are
+                                    not-answerable today and NEITHER is in
+                                    any rate; the split sizes the work and
+                                    changes no number on purpose, because
+                                    moving the first group into the
+                                    denominator would improve the headline
+                                    without anyone writing code
   not-answerable/unresolved-import  imports a module that is neither host nor
                                     present in this backend's module set
                                     (a sibling module the resolver cannot see
@@ -88,6 +102,19 @@ facts. So every verdict now carries a class:
                                     nothing defines, and the refusal is a fact
                                     about the TARGET (libSystem and nothing
                                     else), not a gap in the backend
+  not-answerable/system-module-call  CALLS into a host module that has no Mojo
+                                    source on any path. The sibling of
+                                    host-import one level down, and its own
+                                    class for a specific reason: the fallback
+                                    for a build message that names no module
+                                    is `codegen`, the class whose count IS a
+                                    gap in the backend and the class that
+                                    fails a run — so a fact about the target
+                                    arriving there is the most expensive
+                                    misclassification this tool can make. It
+                                    is 0 on this tree (the resolver always
+                                    reaches the import first) and the rule
+                                    behind it is live
   tool                              timeout, unreadable file, or an internal
                                     exception in the sweep or the build
                                     driver — no verdict about the source was
@@ -285,6 +312,7 @@ CLASS_HOST = "not-answerable/host-import"
 CLASS_UNRESOLVED = "not-answerable/unresolved-import"
 CLASS_EXTERN = "not-answerable/unresolved-extern"
 CLASS_TARGET = "not-answerable/target-limit"
+CLASS_SYSCALL = "not-answerable/system-module-call"
 CLASS_TOOL = "tool"
 CLASS_CRASH = "backend-crash"
 CLASS_UNKNOWN = "unknown"
@@ -292,8 +320,8 @@ CLASS_UNKNOWN = "unknown"
 # Report order: the findings first, then the reasons there is none, then the
 # buckets that mean the tool itself did not finish the job.
 CLASS_ORDER = (CLASS_PASS, CLASS_CODEGEN, CLASS_CODEGEN_DEP, CLASS_HOST,
-               CLASS_UNRESOLVED, CLASS_EXTERN, CLASS_TARGET, CLASS_CRASH,
-               CLASS_UNKNOWN, CLASS_TOOL)
+               CLASS_UNRESOLVED, CLASS_EXTERN, CLASS_TARGET, CLASS_SYSCALL,
+               CLASS_CRASH, CLASS_UNKNOWN, CLASS_TOOL)
 # ANSWERABLE = the classes in which the backend got to look at the file's
 # constructs and returned a verdict about them. `codegen/dependency` is in it
 # deliberately (see the position taken in the module docstring): a file whose
@@ -346,6 +374,23 @@ _FRAME_RE = re.compile(r'^\s+File "([^"]+)"', re.M)
 _HOST_MARK = "host module (CPython standard library)"
 _UNRESOLVED_MARK = "not a stdlib or sibling module"
 _EXTERN_MARK = "import(s) dyld cannot resolve"
+# The SAME fact, caught a step earlier. `formal/build.py`'s bind audit refuses a
+# build whose image would bind a symbol no linked library provides, and says so
+# in these words; the marker above is this tool's OWN post-build probe finding
+# the same thing in a binary that was produced anyway. Both are
+# "no library on the link line provides a symbol this image binds", so both
+# belong in CLASS_EXTERN — which is `not-answerable`, and is in neither the
+# answerable denominator nor DIRTY.
+#
+# Without this rule the build-time refusal falls through to `codegen`, and that
+# is the most expensive misclassification this tool can make: it counts as a gap
+# in the backend, it deflates the coverage rate, it makes the run exit 1, and it
+# points the next reader at a construct the backend could not lower when the
+# backend was in fact RIGHT to refuse. The dylib path has always produced this
+# message; the executable path (`build --formal`) started producing it when
+# agent [4] extended the same audit there, so the classifier was half-fixed
+# before and is now fully wrong.
+_EXTERN_BUILD_MARK = "symbol(s) that nothing provides"
 _IMPORT_RE = re.compile(r"imports '([^']+)'")
 # A quoted dotted identifier, whatever the sentence around it says. Used only
 # as a CANDIDATE, confirmed against the file's own source below — a codegen
@@ -354,6 +399,7 @@ _IMPORT_RE = re.compile(r"imports '([^']+)'")
 # becomes coverage.
 _QUOTED_NAME_RE = re.compile(r"'([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)'")
 _EXTERN_COUNT_RE = re.compile(r"(\d+) import\(s\) dyld cannot resolve")
+_EXTERN_BUILD_COUNT_RE = re.compile(r"(\d+) symbol\(s\) that nothing provides")
 
 # ── The dependency chain ─────────────────────────────────────────────────────
 # formal/build.py wraps a DEPENDENCY's own error inside the importer's, once
@@ -411,6 +457,10 @@ _TARGET_PROBE = 40      # characters of the model's own text to require
 # shape (no import, no target limit, the build spoke about the code) and the
 # family defaults to "other", which keeps the bucket honest instead of
 # pretending the table is complete.
+_SYSCALL_MARK = "no Mojo source on any path"
+_MEMBER_RE = re.compile(r"\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)")
+
+
 _REFUSAL_FAMILIES = (
     ("is a method call on a value", "method call on a value"),
     ("is a method on a string", "method call on a string"),
@@ -432,8 +482,108 @@ _REFUSAL_FAMILIES = (
     ("does not fold to a compile-time constant",
      "comptime value does not fold"),
     ("takes exactly one value to convert", "wrong argument count"),
+    # Reachable from `codegen` only through a rule that has not fired yet; it
+    # is here so the breakdown has a name for the day it does, and so a future
+    # message that does not match it lands in "other refusal" — visible —
+    # rather than in a family that already claimed the ground.
+    (_SYSCALL_MARK, "call into a system module"),
 )
 _REFUSAL_OTHER = "other refusal"
+
+
+# ── Reach: which host modules a Mojo-side implementation could in principle
+# provide, and which need a host process this target does not have ───────────
+#
+# CLASS_HOST's own blurb calls a host import "outside this backend's reach, and
+# not fixable", and that sentence is FALSE of `os`, `sys`, `math`, `struct`,
+# `time`, `json` and `re` — none of those needs a host process or an embedded
+# interpreter, and a Mojo implementation of each is a thing a person could
+# write. It is true of `subprocess`, `ctypes`, `asyncio`, `threading`, `socket`
+# and `tempfile`. So the class as it stands mixes a permanent property of the
+# target with a work item, and a sweep that counts them together cannot size
+# either.
+#
+# THE OWNERSHIP, and why there is a list here at all. formal/imports.py owns the
+# split — it is the module the build itself consults, and duplicating its
+# membership would be a second list that rots the day it gains an entry. So the
+# split is READ from there (`_host_tiers`), under any of the names an owner
+# might reasonably give it, and this file's copy is a FALLBACK that exists only
+# for the window before it lands. A fallback that can silently disagree with the
+# authority is worse than no fallback, so `test_formal_sweep_truth.py` fails if
+# the two ever differ — the mirror cannot rot unnoticed, and the day [4]'s split
+# lands this constant becomes dead code that the same test tells you to delete.
+# THE REACH SPLIT IS NOT WRITTEN HERE. `formal/imports.py` owns it — it is the
+# module the build itself consults, so a second copy in this file is a list that
+# rots the day an entry is added, and the original plan for this file said so.
+# It is read through `host_module_tier()`, which is the accessor the owner
+# publishes.
+#
+# This constant is a DERIVED VIEW of that authority, not a copy of it, and the
+# difference is the whole point: it cannot disagree with `formal/imports.py`,
+# because it is computed from it. It exists only because
+# `test_formal_sweep_truth.py` reads it by name, and it can be deleted the moment
+# that test does.
+#
+# WHY THIS WAS A REAL BUG AND NOT A NICETY, measured: an earlier version GUESSED
+# at the owner's attribute names from a table of five plausible spellings and
+# fell back to a pinned 7-name mirror when none matched. `formal/imports.py`
+# publishes `HOST_MODELLED` / `HOST_UNREACHABLE` and a `host_module_tier()`
+# function, so none of the five matched, the fallback engaged, and the summary
+# reported 7 in-reach modules when the authority has 49. `argparse`, `ast`,
+# `dataclasses`, `collections`, `itertools`, `pathlib` and `typing` were all
+# called PERMANENT when each is a thing a person could write. The mirror's own
+# anti-rot test stayed green throughout, because it compared the mirror against
+# the same broken reader.
+#
+# THE FALLBACK IS EMPTY, deliberately. If `formal.imports` cannot be imported at
+# all, this file cannot classify a host module either (`_is_cpython_stdlib`
+# needs the same import), so the sweep is already degraded — and an empty
+# in-reach set says "cannot size the work", which is true, where 7 hand-picked
+# names would say "7 modules are reachable", which understates the work by 42
+# and is the exact failure being fixed.
+def _in_reach_from_authority() -> frozenset:
+    """Every host module a Mojo-side implementation could in principle provide.
+
+    Read from `formal/imports.py` through its own accessor, so the rule that
+    decides it — does implementing this need a second process, a thread, a
+    socket, a dynamic loader for foreign code, an embedded CPython, a terminal,
+    or a library outside libSystem — is stated in exactly one place and is not
+    restated as a list of names that can fall out of step with it.
+    """
+    try:
+        from formal import imports as I
+    except Exception:
+        return frozenset()
+    try:
+        return frozenset(n for n in I.HOST_MODULES
+                         if I.host_module_tier(n) == 'modelled')
+    except Exception:
+        return frozenset()
+
+
+IN_REACH_HOST_MODULES = _in_reach_from_authority()
+
+
+def _host_tiers() -> tuple:
+    """(in_reach, unreachable, where) — the split, and which file said so.
+
+    `where` names the authority the answer came from, so the summary can tell a
+    reader whether they are looking at a measurement or at a degraded state; an
+    estimate presented as an authority is the failure mode this function exists
+    to prevent. With the split landed it is always `formal/imports.py`, and the
+    empty set it can return on failure is the honest "cannot size this" rather
+    than a smaller number that reads like a measurement.
+    """
+    in_reach = _in_reach_from_authority()
+    if not in_reach:
+        return set(), set(), None
+    try:
+        from formal import imports as I
+        unreachable = frozenset(n for n in I.HOST_MODULES
+                                if I.host_module_tier(n) == 'unreachable')
+    except Exception:
+        unreachable = frozenset()
+    return set(in_reach), set(unreachable), "formal/imports.py"
 
 
 def _is_cpython_stdlib(name: str) -> bool:
@@ -605,6 +755,68 @@ def _target_limit(term: str):
             f"{name}")
 
 
+# ── A call into a system module with no Mojo source on any path ─────────────
+#
+# The sibling of CLASS_HOST, one level down. CLASS_HOST is "this file IMPORTS a
+# module no Mojo source exists for", which the resolver says before anything is
+# lowered. This is "this file CALLS into one" — and it is a DIFFERENT fact for
+# the sweep, because a construct refusal is `codegen`, the one class whose count
+# is a gap in the backend, the class in the answerable denominator, and the
+# class that makes a run exit 1. So a message that is really about the target
+# arriving in `codegen` is the most expensive misclassification this tool can
+# make: it inflates the finding count, it deflates the coverage rate, and it
+# points the next reader at a construct in a file that could not have built even
+# with that construct lowered.
+#
+# Nothing on this tree raises such a message today — the resolver always gets
+# there first, which is why the class is empty and why the rule below is a
+# forward-looking one rather than a measured one. It is here anyway, and it is
+# here as a CLASS rather than as a family in the breakdown, because a family
+# would still be counted as a finding. `test_formal_sweep_truth.py` pins the
+# rule against a real build message, and the summary says the count so a reader
+# can see that it is zero rather than inferring that the rule is dead.
+#
+# STRUCTURAL, not a wording match, for the same reason the import rules are:
+# formal/ owns the message, and a template here would change class the day it is
+# reworded. The test is that the message NAMES a member of a host module this
+# file imports — `os.getenv`, `json.dumps` — because a construct refusal never
+# does otherwise. `Traceback (most recent call last)` is why the member form has
+# to be dotted and followed by an identifier: `traceback` is a host module and
+# the word appears in every crash this tool prints.
+def _system_module_call(term: str, source=None) -> str:
+    """The host module a refusal is really about, or "" if it is not one.
+
+    Two ways to fire, and the first is deliberately weaker so the second does
+    not have to be right on its own:
+
+      * the build SAYS so — a refusal whose subject is a system module with no
+        Mojo source anywhere, whatever it calls that. This is the shape
+        `formal/` would emit if it wanted the message to be self-describing, and
+        it is a substring rather than a template so a reworded sentence keeps
+        working while a rewording of the surrounding text cannot break it;
+
+      * the build NAMES one — a construct refusal that mentions `mod.member`
+        for a host module `mod` this file actually imports. Structural, and
+        the file's own source is the confirmation, so a coincidental `a.b` in a
+        diagnostic cannot put a file in a class its own text contradicts.
+    """
+    if _SYSCALL_MARK in term:
+        m = _MEMBER_RE.search(term)
+        return m.group(1) if m else "a system module"
+    if not source:
+        return ""
+    declared = _declared_host()
+    try:
+        from formal.imports import HOST_MODULES
+    except Exception:
+        return ""
+    for mod, member in _MEMBER_RE.findall(term):
+        if (mod in HOST_MODULES or mod.split(".")[0] in HOST_MODULES) \
+                and _source_imports(source, mod):
+            return mod
+    return ""
+
+
 def _crash_cause(err: str):
     """CAUSE_* for a build that raised, or None if it refused cleanly.
 
@@ -698,10 +910,14 @@ def classify(ok: bool, detail: str, cause=None, source=None) -> tuple:
 
 def _classify_terminal(detail: str, source=None) -> tuple:
     """(class, reason) for the innermost message of a build's own answer."""
-    if _EXTERN_MARK in detail:
-        m = _EXTERN_COUNT_RE.search(detail)
-        return CLASS_EXTERN, (f"{m.group(1)} unresolved extern(s)" if m
-                              else _short(detail))
+    if _EXTERN_MARK in detail or _EXTERN_BUILD_MARK in detail:
+        m = (_EXTERN_BUILD_COUNT_RE if _EXTERN_BUILD_MARK in detail
+             else _EXTERN_COUNT_RE).search(detail)
+        caught = ("nothing on the link line provides it, caught when the build "
+                  "refused the image" if _EXTERN_BUILD_MARK in detail
+                  else "nothing on the link line provides it")
+        return CLASS_EXTERN, (f"{m.group(1)} unresolved extern(s) — {caught}"
+                              if m else _short(detail))
     # A refusal by name, outside the freestanding target. Before the import
     # rules, because `mojo_list_len` and friends are not modules and no
     # reading of the import rules would place them.
@@ -743,6 +959,12 @@ def _classify_terminal(detail: str, source=None) -> tuple:
         # by. Its own bucket rather than a guess.
         return CLASS_UNKNOWN, (f"import message with no module named: "
                                f"{_short(detail)}")
+    # A call into a system module, checked before the construct fallback
+    # because the fallback is the expensive mistake: it files a fact about the
+    # target as a gap in the backend.
+    sysmod = _system_module_call(detail, source)
+    if sysmod:
+        return CLASS_SYSCALL, f"{sysmod} has no Mojo source on any path"
     # The build spoke, and it spoke about a construct in the file. This is the
     # signal, and it is the fallback precisely because a backend that refuses
     # to lower something is exactly what this sweep exists to find.
@@ -1473,12 +1695,18 @@ CLASS_BLURB = {
     CLASS_CODEGEN_DEP: "the backend refused a construct in a module this file "
                        "imports, so this file did not build either — a failure "
                        "in the denominator, NOT a gap in this file",
-    CLASS_HOST: "imports a CPython host module that has no Mojo source: "
-                "outside this backend's reach, not a gap, not fixable",
+    CLASS_HOST: "imports a CPython host module that has no Mojo source: a fact "
+                "about the TARGET, not a gap in the backend — and NOT all of it "
+                "permanent; the reach line below splits the work from the "
+                "impossible",
     CLASS_UNRESOLVED: "imports a module that is neither host nor in this "
                       "backend's module set (reason not provable from the file)",
     CLASS_EXTERN: "builds, but no library on its link line provides a symbol it "
                   "binds (the printed line names the library and why)",
+    CLASS_SYSCALL: "CALLS into a host module that has no Mojo source on any "
+                   "path: a fact about the TARGET, not a construct the backend "
+                   "failed to lower — its own class because the fallback would "
+                   "have counted it as a gap in the backend",
     CLASS_TARGET: "calls a gimple-runtime `mojo_*` entry point, which a "
                   "freestanding image cannot bind: a limit of the TARGET, not a "
                   "gap in the backend (the printed line names the call)",
@@ -1650,6 +1878,84 @@ def main():
         top = ", ".join(f"{k} x{v}" for k, v in
                         sorted(tally.items(), key=lambda kv: (-kv[1], kv[0])))
         print(f"  {cls} by {'call' if cls == CLASS_TARGET else 'module'}: {top}")
+
+    # ── Reach, the thing CLASS_HOST's blurb gets wrong ──────────────────────
+    # "164 files import a host module" is a number without a cause and with a
+    # cause that is half false: `os` has no Mojo source today, but a Mojo-side
+    # `os` is a thing a person could write, whereas `subprocess` needs a host
+    # process this target does not have. Counting them together cannot size
+    # either, and the class is the sweep's largest single bucket, so the
+    # distinction is worth a line of its own.
+    #
+    # REPORT, NOT RECLASSIFY. Nothing below changes a class, a rate or an exit
+    # status, and the in-reach files stay in `not-answerable`: they are
+    # unanswerable TODAY, and moving them into the denominator would improve the
+    # headline with work nobody has done. The point of the line is to size the
+    # work, which is the opposite of improving the number.
+    in_reach, unreachable, where = _host_tiers()
+    host_modules = {m for _r, c, reason, _d in rows if c == CLASS_HOST
+                    for m in (reason.split(" ")[0],)}
+    reach_files = [m for m in sorted(host_modules)
+                   if m.split(".")[0] in in_reach]
+    n_reach = sum(1 for _r, c, reason, _d in rows if c == CLASS_HOST
+                  and reason.split(" ")[0].split(".")[0] in in_reach)
+    if counts[CLASS_HOST]:
+        src = (f"from {where}" if where else
+               "from this tool's pinned mirror (formal/imports.py publishes "
+               "no reach split yet)")
+        print(f"  of the {counts[CLASS_HOST]} host-import file(s), {n_reach} "
+              f"import a module a Mojo-side implementation could in principle "
+              f"provide and {counts[CLASS_HOST] - n_reach} one that needs a "
+              f"host process, an embedded interpreter or a kernel object this "
+              f"image does not have [{src}]")
+        if reach_files:
+            print(f"    in reach, and therefore WORK rather than a permanent "
+                  f"fact: {', '.join(reach_files)}")
+        print("    `os` and `sys` are most of it. None of this is close, and "
+              "none of it is in the rate above: the point is to size the work, "
+              "not to improve the number")
+
+    # ── A codegen finding in a file no backend change can make build ────────
+    # A construct refusal is `codegen` and that is right: the construct is in
+    # the file and the backend cannot lower it. What the class does not say is
+    # that the file ALSO imports a host module, so it fails on the import the
+    # moment the construct is fixed — closing the finding changes nothing about
+    # the file. That makes the finding real and the implication false, and the
+    # difference is invisible in the class counts, so it is measured here.
+    #
+    # This does NOT reclassify anything. Reclassifying would drop these from the
+    # answerable denominator and raise the coverage rate from a bookkeeping
+    # change, which is the move that makes a coverage report worthless; the
+    # honest form of the finding is "the backend gap is real, and here is how
+    # much of the `codegen` bucket is real in a way anyone can act on".
+    if counts[CLASS_CODEGEN]:
+        blocked = 0
+        for r, c, _reason, _detail in rows:
+            if c != CLASS_CODEGEN:
+                continue
+            try:
+                with open(os.path.join(REPO, r), "r", errors="replace") as f:
+                    text = f.read()
+            except OSError:
+                continue
+            if any(_source_imports(text, m.split(".")[0])
+                   for m in sorted(_declared_host())):
+                blocked += 1
+        if blocked:
+            print(f"  {blocked} of the {counts[CLASS_CODEGEN]} codegen "
+                  f"finding(s) are in files that also import a host module: the "
+                  f"construct is a real gap, and the file could not build even "
+                  f"with it lowered. Still counted as findings — reclassifying "
+                  f"them would raise the rate without anyone writing code")
+
+    if counts[CLASS_SYSCALL]:
+        print(f"  {counts[CLASS_SYSCALL]} file(s) CALL into a host module with "
+              f"no Mojo source on any path — a fact about the target, kept out "
+              f"of the codegen count on purpose")
+    else:
+        print("  no build on this tree refused a call into a system module; "
+              "the rule for that class is live and unfired (see "
+              "not-answerable/system-module-call)")
 
     # WHY each codegen finding is a finding: the family, not the file. 57 (or
     # 110) files is not a finding list, and the same four or five families

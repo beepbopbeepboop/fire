@@ -74,6 +74,18 @@ TARGET_MSG = ("build: mojo_sqlite3_open is an entry point of the gimple "
 EXTERN_MSG = ("builds, but 31 import(s) dyld cannot resolve (one file "
               "compiled, no import resolution): _ZN6mojo5printEPKc, _ZN4mojo"
               "5writeEPKc, _ZN5mojo34read_file_to_stringB5cxx11E ...")
+# The same fact, caught one step EARLIER and now the ordinary case: the bind
+# audit in formal/build.py refuses the image before it is written, so there is
+# no unresolvable binary left to probe. Verbatim from `fire.py build` on a
+# model that calls a symbol nothing defines, so the two messages cannot drift
+# into looking like different facts — which is exactly how a
+# not-answerable-but-real finding becomes an answerable codegen gap.
+EXTERN_BUILD_MSG = (
+    "build: bogus.mojo: the image would bind 1 symbol(s) that nothing "
+    "provides, so it could not be loaded: definitely_not_a_real_symbol_9f3a. "
+    "These are constructs this backend does not lower (a struct type, a "
+    "method call on a value, a compiler intrinsic), not exports that are "
+    "missing. (Provider check: asked the C library (dlsym).)")
 # fire.py prints `build: {e}` for a FormalBuildError AND for any other
 # exception, so a crash is only distinguishable by its traceback. These two are
 # the shapes that decides, taken from how fire.py's handler and CPython's
@@ -156,8 +168,28 @@ class TestClassify(unittest.TestCase):
     def test_dyld_unresolvable_is_not_coverage(self):
         cls, reason = S.classify(False, EXTERN_MSG)
         self.assertEqual(cls, S.CLASS_EXTERN)
-        self.assertEqual(reason, "31 unresolved extern(s)")
+        self.assertIn("31 unresolved extern(s)", reason)
         self.assertNotIn(cls, S.ANSWERABLE)
+
+    def test_a_build_time_bind_refusal_is_not_coverage_either(self):
+        # The expensive half of the misclassification, pinned. When the same
+        # fact is reported by the build-time audit instead of the post-build
+        # probe, it must still be not-answerable: `codegen` counts against the
+        # backend, deflates the coverage rate, makes the run exit 1, and points
+        # the next reader at a construct the backend was RIGHT to refuse. The
+        # two causes are told apart in the reason so a reader can see which
+        # check fired without re-running the build.
+        cls, reason = S.classify(False, EXTERN_BUILD_MSG)
+        self.assertEqual(cls, S.CLASS_EXTERN)
+        self.assertIn("1 unresolved extern(s)", reason)
+        self.assertIn("caught when the build refused the image", reason)
+        self.assertNotIn(cls, S.ANSWERABLE)
+        self.assertNotIn(cls, S.DIRTY)
+        # ...and it is genuinely a different string, so the branch is real
+        # rather than both causes sharing one clause.
+        (probe_cls, probe_reason), = [S.classify(False, EXTERN_MSG)]
+        self.assertEqual(cls, probe_cls)
+        self.assertNotEqual(reason, probe_reason)
 
     def test_silent_nonzero_exit_is_a_codegen_finding(self):
         # No message and no traceback: the backend died on the construct.
@@ -291,25 +323,68 @@ class TestDyldProbe(unittest.TestCase):
             f.write("fn main() -> Int:\n"
                     "    return definitely_not_a_real_symbol_9f3a(1)\n")
         cls.resolvable_img = cls._fire("main.mojo", "arm64")
-        cls.bogus_img = cls._fire("bogus.mojo", "arm64")
+        # `bogus.mojo` used to BUILD and fail to load, and that image was the
+        # true positive for the post-build probe. The bind audit now refuses it
+        # at build time, which is the better behaviour and removes the artifact
+        # these tests wanted. So the refusal is asserted here, and the image the
+        # probe needs is synthesized below the way the sibling tests already do
+        # — the probe is still live code (the dylib path still produces
+        # loadable images with unresolvable binds), and it must stay tested
+        # against a real one.
+        cls.bogus_refusal = cls._fire_expecting_refusal("bogus.mojo", "arm64")
+        if S._EXTERN_BUILD_MARK not in cls.bogus_refusal:
+            raise AssertionError(
+                f"expected the bind audit's refusal, got: "
+                f"{cls.bogus_refusal[-400:]}")
+        # The image the post-build probe still has to be able to catch, built
+        # the way a dylib-path build produces one: one external bind, and a
+        # dylib that IS on the link line and loadable but does not define the
+        # name. The dylib has to be a real one — name a path that does not
+        # exist and dyld reports the missing library before it ever looks at
+        # the symbol, so the check below would be asserting a different
+        # failure than the one the probe exists to corroborate.
+        from formal import macho_linker as ML
+        cls.bogus_img = ML.build_macho_executable_extern(
+            ML.build_macho_executable(b"\x1f\x20\x03\xd5" * 4),
+            ["definitely_not_a_real_symbol_9f3a"], "arm64",
+            dylibs=[{"install_name":
+                     S._load_dylib_names(cls.resolvable_img)[1],
+                     "symbols": set()}])
 
     @classmethod
     def tearDownClass(cls):
         cls._tmp.cleanup()
 
     @classmethod
-    def _fire(cls, name, arch):
+    def _build(cls, name, arch):
         out = os.path.join(cls._tmp.name, name.replace(".mojo", ".aout"))
         p = cls.subprocess.run(
             [sys.executable, os.path.join(S.REPO, "fire.py"), "build",
              "--formal", "--no-prove", f"--backend={arch}", "-o", out,
              os.path.join(cls._tmp.name, name)],
             capture_output=True, text=True, cwd=S.REPO, timeout=300)
+        return out, p
+
+    @classmethod
+    def _fire(cls, name, arch):
+        out, p = cls._build(name, arch)
         if p.returncode != 0:
             raise AssertionError(f"building {name} failed: "
                                  f"{(p.stderr or p.stdout).strip()[-400:]}")
         with open(out, "rb") as f:
             return f.read()
+
+    @classmethod
+    def _fire_expecting_refusal(cls, name, arch):
+        """Build `name`, require a refusal, and return the message it said."""
+        _, p = cls._build(name, arch)
+        if p.returncode == 0:
+            raise AssertionError(
+                f"building {name} was expected to be refused by the bind "
+                "audit, and it succeeded: the audit no longer covers the "
+                "executable path, so the post-build probe is the only thing "
+                "standing between this and a codegen misclassification")
+        return (p.stderr or p.stdout).strip()
 
     def _runs(self, image, name):
         """Run the image; return (returncode, first line of stderr)."""
