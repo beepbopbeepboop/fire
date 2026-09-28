@@ -158,6 +158,24 @@ _FORMS = {
                    "nzx", "notrex"]),
     "jmp_rel32": ("x86_step_jmp_rel32", False,
                   ["rip", "b0", "off"]),
+    # `call rel32`. The step lemma is ALREADY PROVED -- `x86_step_call_rel32`
+    # at lib/X86.lean:720 -- so this entry is pure wiring and admits no `sorry`.
+    # It is the largest single uncovered form: 7 of the x86-64 examples named
+    # `call_rel32` as their missing lemma, which is what `bugs/OPEN_WORK.md` A1
+    # is about. Side conditions in the lemma's own order (h_rip, h_b0, h_imm).
+    #
+    # NOT VERIFIED. This was wired without running the suite, so what is
+    # claimed here is the WIRING (the three entries below are transcribed from
+    # the proved lemma's own statement, and the literal-address substitution
+    # copies the `jmp_rel32` case that already works), not that the tree now
+    # closes. The open risk is the continuation AT the target: a call's `rip`
+    # is `m + 5 + off`, a literal supplied here, and whether the path from
+    # there re-enters a block whose certificate is wired is a question only a
+    # run answers. If it does not, the failure moves from "no step lemma wired
+    # for: call_rel32" to whatever the target needs -- a DIFFERENT and more
+    # specific error, which is progress, but it is not a proof.
+    "call_rel32": ("x86_step_call_rel32", True,
+                   ["rip", "b0", "imm"]),
     # `njcc` is the jcc range's UPPER bound only.  Adding its lower bound as
     # well would be unsatisfiable for every setcc byte -- and a step lemma with
     # contradictory hypotheses still compiles and still proves its goal, it
@@ -227,6 +245,12 @@ _SUCCS = {
         "{ $s with rip := if x86_cond $cc $s = true then $tgt else $fall }",
     "jmp_rel32":
         "{ $s with rip := $tgt }",
+    # Transcribed from `x86_step_call_rel32`'s conclusion (lib/X86.lean:720),
+    # with `$tgt`/`$ret` supplied as literals by the decode branch above.
+    "call_rel32":
+        "{ $s with rip := $tgt, rsp := $s.rsp - 8, mem := "
+        "mem_write_bytes $s.mem ($s.rsp - 8).toNat "
+        "(UInt64.ofNat $ret) 8 }",
     "setcc":
         "{ x86_set_reg $s $rmv (if x86_cond $cc $s then 1 else 0) with"
         " rip := $next }",
@@ -393,6 +417,14 @@ def _resolve(form, raw, addr, prev, k, cases=(), hs_in=None,
         off = int.from_bytes(raw[1:5], "little", signed=True)
         extra_args = " %d" % off
         extra_succ = {"$off": str(off), "$tgt": str(addr + 5 + off)}
+    elif form == "call_rel32":
+        # Same reason as jmp_rel32 above, plus one more: a call has TWO
+        # addresses -- the target it branches to, and the return address it
+        # PUSHES. The pushed value is `UInt64.ofNat (m + 5)`, i.e. `$ret`.
+        off = int.from_bytes(raw[1:5], "little", signed=True)
+        extra_args = " %d" % off
+        extra_succ = {"$off": str(off), "$tgt": str(addr + 5 + off),
+                      "$ret": str(addr + 5)}
     elif form == "setcc":
         op2, modrm = raw[1], raw[2]
         extra_args = " %d %d %d %d" % (op2, modrm, op2 - 0x90, modrm & 7)

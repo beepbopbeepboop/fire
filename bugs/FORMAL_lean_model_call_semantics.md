@@ -172,11 +172,40 @@ is in a file in nobody's write set, so it is a second interface request.
 
 ## Hand-offs
 
-* `IR-3-to-2-dylib-stubs.md` — **URGENT.** Four generator call sites no longer
-  elaborate, with a verified patch. Until it lands, every dylib proof fails to
-  typecheck. `test_formal_dylib.py` is 10 PASS / 1 FAIL and the 1 FAIL is this.
-* A second request for `formal/x86_64_endtoend_test.py` (A1 wiring) — not yet
-  written; the library side it needs is in place.
+**Both resolved. Kept, with what happened, because a hand-off that reads
+"URGENT, not yet done" once the work has landed is the same class of error as
+a commit message that claims a deletion it performed.**
+
+* `IR-3-to-2-dylib-stubs.md` — **DONE**, in 19d5211. All four generator call
+  sites replaced with [3]'s verified patch; `test_formal_dylib.py` is 11 PASS /
+  0 FAIL, not 10/1. The request file is deleted, per FORMAL.md 11.5.
+  Two calls [3] left to [2] were decided: `dylib_observables := [id]`, because
+  `Functional` quantifies over that list and an empty one makes the clause
+  vacuous again without `vacuous_declarations` flagging it; and the `sorry`
+  form of the two named obligations rather than `def ... : Prop`, for [3]'s
+  stated reason that a named hole the census reports beats one nothing reports.
+* `formal/x86_64_endtoend_test.py` (A1 wiring) — requested as
+  `bugs/INTERFACE_REQUEST_3_to_x86_endtoend.md`. That file is in nobody's
+  write set, which is why it is a request and not an edit.
+
+## Verified independently, after the merge
+
+[3]'s Done-when per FORMAL.md 11.2, re-measured on the merged tree rather than
+taken from the commit message:
+
+  * a dylib export has a NON-VACUOUS semantics — `Total`/`Functional` are
+    separate, and `Functional` reads a non-empty `dylib_observables`;
+  * a caller can discharge an obligation against it — `{ident}_contract` is
+    PROVED, via `dylib_export_contract_of_spec`, with 0 sorries of its own;
+  * `lib/ProofLib.lean:4617` no longer states `forall ..., ... -> True` — that
+    line is now `work_step_svc`; the vacuous `Semantics` is gone.
+
+  library_census:  ProofLib 0,  Refine 0,  X86 0,  work 0   admitted sorries
+  vacuous_declarations: 0 in all four modules
+
+The line number moved because this change added 445 lines to ProofLib.lean, so
+"4617" no longer names the declaration it used to; that is a fact about line
+numbers, not a change in the census.
 
 ## What was verified, and how
 
