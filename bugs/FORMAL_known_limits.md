@@ -805,3 +805,84 @@ differs**, which is the drift §3 records and which is *not* cosmetic:
 Both are x86-64-side work of a sitting each, and both are in
 `formal/x86_64_codegen.py`. Not started: it is [3]'s file and [3] is working in
 it.
+
+---
+
+# 7. `comptime <expr>` — measured, and the premise it disproved
+
+**Added 2026-09-28.** `FORMAL.md` §11.2 assigned [4] the job of making the two
+engines "agree about `comptime`, and agree loudly", on a table that said the
+interpreter does not have the construct, the compiled backend has it in
+statement form, and the expression form silently yields 0. The table was
+measured. It is also wrong in a way that matters, and the correction is the
+deliverable.
+
+## What is actually true
+
+| spelling | `python3 fire.py run` | `fire.py build` + run |
+|---|---|---|
+| `comptime n = 6` | `v: 6` | `v: 6` |
+| `comptime if c:` | runs | runs |
+| `comptime for ..:` | runs | runs |
+| `comptime assert e` | runs | runs |
+| `comptime = 5` (a var named `comptime`) | works | works |
+| `def f(comptime: Int)` | works | works |
+| `@comptime` decorator | works | works |
+| `comptime (expr)` | `NameError: name 'comptime' is not defined` | `0`, and prints `comptime: unavailable in compiled mode` |
+| `comptime expr` (bare) | `NameError` | `0`, and prints **nothing** |
+
+So: the interpreter is behind on the expression form (true), the compiled
+backend supports it as a 0-valued stub (true), and **the one genuine silence is
+the bare spelling** — same 0, no diagnostic.
+
+## Why no refusal was added, which is the substantive finding
+
+The obvious fix is to refuse `comptime <expr>` at the parse, where both backends
+go through and parity becomes structural rather than a promise. It was written,
+and it was reverted, because **`comptime <expr>` is real and the standard
+library uses it**:
+
+    std/algorithm/reduction.mojo:251      return comptime (CurrentPlugin.reduce_generator_fn.value())[…]
+    std/math/math.mojo:630
+    std/memory/stack_allocation.mojo:142
+    std/reflection/reflect.mojo
+
+Refusing it took `compile_stdlib.py` from **664 passed / 0 unexpected** to
+**660 / 4**. `U` must never increase, and "the three engines agree" is worth
+less than four real modules compiling. The reverted diff is kept at
+`/tmp/comptime-guard.patch` for the day the evaluator lands.
+
+The same argument kills a narrower version of the guard. A first attempt
+refused on "anything that is not a DOT", which also broke `comptime = 5`,
+`def f(comptime: Int)` and `comptime for i in [...]` — because in this parser a
+keyword *is* an ordinary identifier, and `_CONV_KWS` depends on that. A guard
+that breaks working code is worse than the bug it was written for, and the
+narrowed allow-list that replaced it still had to be abandoned for the reason
+above.
+
+## What is left to do, and where
+
+One cell, in the lowering of a comptime expression — **not** in the parser:
+
+* the parenthesized spelling's `unavailable in compiled mode` diagnostic is
+  emitted from the gimple backend (`mojo/backend_gimple/`, the same weak-stub
+  convention as `module_gen.py`'s skipped generator functions);
+* the bare spelling reaches the same 0 by a path that emits nothing.
+
+Giving the bare spelling the same diagnostic is a small change and would make
+every cell in the table say why. **It is not made here** because
+`mojo/backend_gimple/` is outside this round's write sets — see
+`FORMAL.md` §11.2's "deliberately unowned" list. `test_comptime_parity.py`
+pins the silence as a NOTE rather than a pass, so the day it is fixed the test
+says so, and pins the parenthesized spelling's diagnostic as a hard check so it
+cannot be lost: four stdlib modules depend on that form compiling *and* saying
+why.
+
+## The real fix, for whoever wants it
+
+Neither backend can evaluate a `comptime` expression; the compiled one stubs it
+to 0. A real fix is a constant folder: `gimple_codegen.py` carries an empty
+section header reading "Compile-time constant evaluators (for comptime)" and
+`self._comptime_vals` / `_module_const_int` already track folded values, so the
+scaffolding is half-present. That is a feature, not a fix, and it is the kind of
+item §11.4's easy/hard line sends to a bug doc rather than a session.

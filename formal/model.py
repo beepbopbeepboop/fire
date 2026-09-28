@@ -4115,13 +4115,23 @@ def frame_return_refusal(owner, received: bool, struct_names) -> str:
 # gimple_codegen.py maps the source's own `print` onto `mojo_print` (line 617).
 #
 # None of that exists on a formal target. A formal image is freestanding: it
-# links libSystem and nothing else (formal/build.py), it embeds no interpreter,
-# and its values are one 64-bit word proved by a Lean model. So a call to one of
-# these names is not an external dependency to be satisfied — it is a call into
-# a library that is not part of THIS target, and the default lowering of an
-# unknown bare name is a BL against a symbol spelled the way the source spelled
-# it. That is the worst failure a compiler has: the build reports success and
-# the program dies in the loader with "Symbol not found".
+# embeds no interpreter, and its values are one 64-bit word proved by a Lean
+# model. So a call to one of these names is not an external dependency to be
+# satisfied — it is a call into a library that is not part of THIS target, and
+# the default lowering of an unknown bare name is a BL against a symbol spelled
+# the way the source spelled it. That is the worst failure a compiler has: the
+# build reports success and the program dies in the loader with "Symbol not
+# found".
+#
+# The library is no longer simply absent. `runtime_dylib()`
+# (build_stdlib_dylib.py) builds a per-architecture `-dynamiclib` exporting the
+# whole `mojo_*` namespace, and `formal/build.py`'s `runtime_library` puts it on
+# a formal link line when the program names an entry point of it that a formal
+# image could make. So the second half of the rule below — the symbol has to be
+# on the link line — is now a fact about the image rather than a standing
+# impossibility, and the namespace is refused only for what genuinely cannot be
+# answered: a call whose types are not all one word, and a name no library here
+# can bind.
 #
 # So the namespace is REFUSED here, before the extern path can reach it. The
 # refusal is no longer a test of the NAME. It was one because the shape was not
@@ -4258,16 +4268,33 @@ def _runtime_abi_entry(scan: dict) -> dict:
 
 
 # C's own scalar vocabulary — NOT this runtime's entry points, and not a list of
-# types this backend has been asked about. It is the set of type spellings that
-# mean "one machine word" in C, and everything outside it is treated as a box.
-# That direction is the point: a type this rule has never heard of is refused,
+# types this backend has been asked about. It is the set of type spellings a
+# value IS on this path, and everything outside it is treated as a box. That
+# direction is the point: a type this rule has never heard of is refused,
 # because treating an unknown spelling as a word is the over-approximation that
-# miscompiles, while refusing one that would have worked only costs a call. Note
-# what is NOT here: `long double`, which is 16 bytes on x86-64 and is the one C
-# scalar that is not a word.
+# miscompiles, while refusing one that would have worked only costs a call.
+#
+# The set is deliberately NOT "one machine word" in C's sense. The question
+# `_ctype_is_word` answers is "can a formal value be this", and a formal value
+# is a 64-bit word holding an INTEGER, so the floating-point scalars are not
+# values here at all: a float literal is truncated toward zero on the way in
+# (formal/types.py), which is the right answer for arithmetic on this path and
+# exactly the wrong one for handing a word to a callee that will read it as a
+# `double`.
+#
+# That distinction was latent while every `mojo_*` call was refused, and became
+# a real silent wrong answer the moment the runtime library reached a formal
+# link line (formal/build.py's `runtime_library`). Measured, on
+# `x = 2.5; return mojo_div_double(x, x)`: the image built, ran, and returned
+# 2 — the integer 2.5 truncated, in X0, read by the callee as the bit pattern of
+# a double — where the answer is 1. `mojo_div_double` and 8 other float-typed
+# entry points are refused for this and named as floats by `_box_why`.
+#
+# Note what is NOT here either: `long double`, which is 16 bytes on x86-64 and
+# is the one C scalar that is not even a word.
 _WORD_SCALARS = frozenset({
     'void', 'bool', '_Bool', 'char', 'short', 'int', 'long', 'long long',
-    'float', 'double', 'char16_t', 'char32_t', 'wchar_t',
+    'char16_t', 'char32_t', 'wchar_t',
     'size_t', 'ptrdiff_t', 'intptr_t', 'uintptr_t', 'intmax_t', 'uintmax_t',
     'int8_t', 'int16_t', 'int32_t', 'int64_t',
     'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t',
@@ -4276,6 +4303,15 @@ _WORD_SCALARS = frozenset({
     'int_fast8_t', 'int_fast16_t', 'int_fast32_t', 'int_fast64_t',
     'uint_fast8_t', 'uint_fast16_t', 'uint_fast32_t', 'uint_fast64_t',
 })
+
+# The floating-point scalars, kept as their own set rather than being absent,
+# because the refusal for one has to NAME the mismatch. A generic "not a value
+# on this path" would be true and useless; `mojo_div_double` is refused because
+# the word this path can hand it is not a `double`, and that is the sentence a
+# reader needs. Same membership discipline as `_WORD_SCALARS`: an unrecognised
+# spelling is not in here either, so it falls to the aggregate message, which
+# is the conservative one.
+_FLOAT_SCALARS = frozenset({'float', 'double', 'long double'})
 
 # Leading type keywords, dropped before the base type is read. `signed` and
 # `unsigned` are here because signedness does not change the size, and this
@@ -4325,17 +4361,30 @@ def _ctype_is_word(base: str, depth: int, in_return: bool) -> bool:
     The two positions differ, and the difference is the whole rule — see the
     note above. A `MojoList *` is a perfectly good ARGUMENT to carry and an
     impossible thing to be HANDED, and no test of the type alone can tell those
-    apart without this."""
+    apart without this.
+
+    The pointer cases are all depth-EXACT, and that is the third thing this
+    rule has to get right. At depth 1 the callee is handed an address it may
+    read; at depth 2 and above it is handed an address it will *dereference*,
+    and this path has no way to name one: the only storage a formal image has
+    is a frame blob, reclaimed when the frame returns, and there is no
+    allocator. `char **` (an out-parameter, which the callee writes a string
+    pointer through) and `int64_t *` are therefore refused, where before
+    anything non-`void` at depth 1 was admitted because its base type happened
+    to be a word. That admitted 3 entry points whose first act inside the
+    callee is to scribble over a word the caller believes is a pointer.
+    """
     if depth == 0:
         return base in _WORD_SCALARS
     if in_return:
         # The caller is handed this address and may read it. Only a string is
         # something this path has a value for.
-        return base == 'char'
+        return depth == 1 and base == 'char'
     # An argument: the callee may read it, so the pointee has to be something
-    # both sides agree on — a string, `void` (an opaque handle, handed straight
-    # back to whoever made it), or another word.
-    return base in ('char', 'void') or _ctype_is_word(base, 0, in_return=False)
+    # both sides agree on — a string, which is a value here because it is an
+    # interned `char *` with no header, or `void`, an opaque handle handed
+    # straight back to whoever made it.
+    return depth == 1 and base in ('char', 'void')
 
 
 def _split_params(params: str):
@@ -4420,7 +4469,13 @@ def gimple_runtime_callable(name: str, provided: bool = False) -> bool:
 
 
 def _box_why(where: str, spelling: str, base: str, depth: int) -> str:
-    """What one un-word-shaped type costs, in the words the refusal must use."""
+    """What one un-word-shaped type costs, in the words the refusal must use.
+
+    Ordered most-specific first, and the two branches above the old pair are
+    the ones this change added. Each names the mismatch it is about, because
+    "not a value on this path" is true of all three and useful for none: a
+    reader who is told a `MojoList *` is a heap box and a `double` is not a
+    value is told two different things about what would have to change."""
     if depth and base == 'MojoList':
         return (
             f"{where} is a `MojoList *`, a heap box the gimple runtime owns, "
@@ -4428,6 +4483,33 @@ def _box_why(where: str, spelling: str, base: str, depth: int) -> str:
             f"is its count — so the operand and the answer are of different "
             f"types, and reading offset 0 of the box would be a plausible-looking "
             f"wrong number")
+    if depth >= 2 or (depth and base not in ('char', 'void')):
+        # A pointer this path cannot carry in EITHER position: the callee
+        # dereferences it, and there is nothing on this target to point at.
+        # `char **` is the plainest case — an out-parameter the callee writes a
+        # string pointer through — and it is a different defect from the
+        # `MojoList *` one above, because no allocator would fix it: the problem
+        # is having no addressable storage at all, not having the wrong box.
+        return (
+            f"{where} is `{spelling}`, which the callee DEREFERENCES rather "
+            f"than carries. This path can hand over a string, because a `char *` "
+            f"is a value on it (a string is an interned `char *` with no header), "
+            f"and an opaque `void *` handle, passed straight back to whoever made "
+            f"it. It cannot name a location the callee may read or write "
+            f"through: the only storage a formal image has is a blob in the "
+            f"frame, that frame is reclaimed when the function returns, and "
+            f"there is no allocator here to make one that outlives it")
+    if base in _FLOAT_SCALARS:
+        # The one that is a *plausible-looking wrong number* rather than a
+        # refusal the compiler owes the reader, and therefore the one worth
+        # naming most precisely. `mojo_div_double` is the measured case.
+        return (
+            f"{where} is `{spelling}`, a floating-point value, and a value on "
+            f"this path is one 64-bit word holding an INTEGER — a float literal "
+            f"is truncated toward zero on the way in, which is the right answer "
+            f"for arithmetic here and exactly the wrong one here. The callee "
+            f"would read the bit pattern of an integer as a floating-point "
+            f"number and answer one back, and nothing downstream could tell")
     if depth:
         return (
             f"{where} is `{spelling}`, and that is an address rather than a "
@@ -4464,8 +4546,11 @@ def gimple_runtime_refusal(name: str) -> str:
     lead = (
         f"{name} is an entry point of the gimple backend's C runtime (the "
         f"`{GIMPLE_RUNTIME_PREFIX}*` ABI declared in runtime/*.h), and a formal "
-        f"image is freestanding: it links libSystem and nothing else, embeds no "
-        f"C runtime, and its values are one 64-bit word.")
+        f"image is freestanding: it links libSystem, whatever modules it "
+        f"imports, and nothing of runtime/ unless it names an entry point "
+        f"here — in which case `formal/build.py` puts the per-architecture "
+        f"`{GIMPLE_RUNTIME_PREFIX}*` library on the link line for it. Its values "
+        f"are one 64-bit word.")
     tail = (
         " Refused rather than emitted as a call to a symbol nothing defines, "
         "which is what this used to do — the image built and then died in the "
@@ -4478,13 +4563,25 @@ def gimple_runtime_refusal(name: str) -> str:
             f"there is no signature here to check and nothing this path can "
             f"bind.{tail}")
     if entry['word']:
+        # Reached only when the library is NOT on this image's link line, which
+        # is now a much narrower condition than it was: the linker puts the
+        # runtime library on the line for exactly this case. So the two reasons
+        # left are an image that cannot carry a library at all (an ELF target —
+        # `build_elf` has one `lib_name` and no dependency list) and a name the
+        # library does not export, of which `py_tokenize` is the standing
+        # example: fire_runtime.h declares it, the dylib does not define it, and
+        # `build_stdlib_dylib.runtime_export_entries` already reports that as
+        # UNDEFINED. The message says so rather than implying the mechanism is
+        # broken, because on this tree it is not.
         return (
             f"{lead} This one is the reachable half: every argument and the "
             f"return value is a single word — `{entry['signature']}` — and a "
             f"single word is exactly what a value is on this path, so a formal "
-            f"image could make the call. What is missing is the library: this "
-            f"image's link line does not define {name}, and a freestanding image "
-            f"links none of runtime/.{tail}")
+            f"image could make the call. Nothing about the CALL stops it. What "
+            f"is missing is the library, and only that: nothing on this image's "
+            f"link line defines {name}, so this image is either one that cannot "
+            f"carry a library or one whose library does not export this name."
+            f"{tail}")
     why = ' and '.join(_box_why(*b) for b in entry['boxes'])
     return (
         f"{lead} It could not be answered by linking that library either: "
