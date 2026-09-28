@@ -84,7 +84,7 @@ def _code_function(name: str, base: int) -> str:
             f"  else {name}_code_bytes.getD (addr - {base}) 0\n")
 
 
-def _generate_model(fn, tc):
+def _generate_model(prog, fn, tc):
     """The `<fn>_go` model plus the NAMES of its simp lemmas, from the shared
     generator.
 
@@ -96,10 +96,15 @@ def _generate_model(fn, tc):
     emitting the lemmas twice produces duplicate declarations.  Names go into
     the `eval_eq_mojo` simp set instead, which is where they are wanted.
 
+    `prog` is the whole program, because `_go_defs_for` also emits the models
+    of everything `fn` CALLS: a call to a second function in the same program
+    names a `f_go` that this file has to define, and defining only `fn`'s own
+    model left a call rendering as a reference to nothing.
+
     Raises whatever the shared generator raises for a shape it does not model;
     the caller degrades to a documented gap rather than failing the build."""
     from formal import arm64_proof_gen as AP
-    go_defs = "\n\n".join(AP._gen_go(fn, tc))
+    go_defs = "\n\n".join(AP._go_defs_for(prog, fn, tc))
     return go_defs, list(AP._go_simp_lemmas(fn))
 
 def _returns_string_literal(fn) -> bool:
@@ -541,7 +546,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
 
     # ── source semantics ────────────────────────────────────────────
     try:
-        go_defs, go_lemma_names = _generate_model(fn, tc)
+        go_defs, go_lemma_names = _generate_model(prog, fn, tc)
         model_note = ""
         model_placeholder = False
     except Exception as e:                          # noqa: BLE001
@@ -586,33 +591,24 @@ def generate_x86_64_proof(prog, code, info) -> str:
     parts.append("/-- Mojo semantics: direct Lean model of the source code. -/\n"
                  + model_note + go_defs + "\n")
 
-    # How `mojo` applies the model depends on the model's own parameter type,
-    # so READ it out of the generated definition rather than guessing from
-    # which pattern matched.  The guess was wrong for a `for` loop over
-    # `range`: `_dec_while_pattern` fires, so the argument became `n.toNat`,
-    # while `_gen_go` had produced a UInt64-parameterised model — a type
-    # mismatch that failed the whole proof for a function the model handles
-    # perfectly well.  Deriving one from the other cannot drift.
-    # The shared generator emits two shapes: `def f_go (n : Nat) : UInt64 :=`
-    # for a bounded model, and the curried `def f_model : Nat → UInt64` with
-    # equation clauses for the tree-recursive one.  Both have to be recognised
-    # or the argument is wrong for one of them.
-    import re
-    mojo_fn = (f"{func_name}_model"
-               if re.search(r"def %s_model\b" % func_name, go_defs)
-               else f"{func_name}_go")
-    binder = re.search(r"def %s \((\w+) : (\w+)\)" % mojo_fn, go_defs)
-    ptype = (binder.group(2) if binder
-             else (re.search(r"def %s : (\w+) →" % mojo_fn, go_defs) or [None, "UInt64"])[1]
-             if re.search(r"def %s : (\w+) →" % mojo_fn, go_defs) else "UInt64")
-    # The model is applied POSITIONALLY to `mojo`'s own parameter, which is
-    # always `n` whatever the function's parameter is called — passing the
-    # model's binder name instead left `def mojo (n) := double_go x` for a
-    # function whose parameter is `x`, and `x` is not in scope there.
-    mojo_arg = "n.toNat" if ptype == "Nat" else "n"
+    # How `mojo` applies the model depends on the model's own signature, so
+    # READ it out of the generated definition rather than guessing from which
+    # pattern matched.  The guess was wrong for a `for` loop over `range`:
+    # `_dec_while_pattern` fires, so the argument became `n.toNat`, while
+    # `_gen_go` had produced a UInt64-parameterised model -- a type mismatch
+    # that failed the whole proof for a function the model handles perfectly
+    # well.  The reader is `_model_shape`, shared with the arm64 generator, so
+    # the two cannot drift -- and it handles the NULLARY model
+    # (`def ret42_go : UInt64`, a function the source declares with no
+    # parameters), which this file's own regex did not match: it defaulted to
+    # the argument `n` and emitted `ret42_go n`, which Lean recovers from as a
+    # `sorry` so every `native_decide` downstream then failed with "'mojo'
+    # uses 'sorry'".
+    from formal import arm64_proof_gen as AP
+    mojo_term = AP._go_apply(go_defs, func_name)
     parts.append("/-- The semantic model as a UInt64 -> UInt64 function. -/\n"
                  f"def mojo (n : UInt64) : UInt64 :=\n"
-                 f"  {mojo_fn} {mojo_arg}\n")
+                 f"  {mojo_term}\n")
 
     # ── AST bridge ───────────────────────────────────────────────────
     #
