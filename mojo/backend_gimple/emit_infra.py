@@ -1384,8 +1384,36 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             # Two different pointer types (e.g. MojoList * where MojoDict * is
             # declared, or a struct ptr vs Span *): cast via a temp rather than
             # forwarding an un-typed mismatched pointer (review finding #5).
-            pp = gen._new_val(ptype, f'({ptype}){aval}')
-            coerced_args.append(pp)
+            #
+            # A CAST, though, only converts between two pointer SPELLINGS of
+            # one representation. `MojoDict *` / `MojoList *` / `MojoSet *` /
+            # `MojoBytes *` are four DISTINCT runtime structs with four
+            # different slot layouts (DESIGN.html R2), so casting between
+            # them reinterprets one struct's memory as another's and the
+            # callee reads a `len` that is really a capacity. `_sce_simple_emit`
+            # refuses exactly this pair for that reason — but this branch
+            # SHADOWED it, because `ptype.endswith(' *')` matches before the
+            # arm below that would have routed through `_safe_coerce_emit`.
+            # Real, minimal: `probe(box)` with `box` inferred `MojoList *` at
+            # one call site and handed a `set` at another emitted
+            # `pp = (MojoList *)s;`, and `for x in box` then read
+            # `mojo_list_len`/`mojo_list_get_int` out of a `MojoSet` —
+            # printing `0` for a set holding `10` and `20`, with no
+            # diagnostic and reads past the set's own slot array.
+            #
+            # Where a real conversion exists, use it. Where none does, the
+            # raw cast is KEPT rather than refused, and that is deliberate:
+            # refusing makes the self-host build red (two closure modules
+            # drop out and 738 gcc errors follow) without making anything
+            # true, because both of those modules are parameter-type
+            # INFERENCE disagreements rather than type-confused programs.
+            # The inference is `mojo/middle/infra_infer.py`, not this file's
+            # to fix; see the INTERFACE REQUEST
+            # `bugs/INTERFACE_REQUEST_1_to_middle_infra_infer.md` for both
+            # sites and for what to delete here once it lands.
+            _cv = _convert_container_kind(gen, ptype, atype, aval)
+            coerced_args.append(_cv if _cv is not None
+                                else gen._new_val(ptype, f'({ptype}){aval}'))
         elif ptype and ptype != atype:
             ct = gen._new_temp(ptype)
             gen._safe_coerce_emit(atype, ptype, aval, ct)
@@ -1942,6 +1970,52 @@ def _new_jbp_temp(gen) -> str:
 
 
 
+
+
+def _convert_container_kind(gen, dst_type: str, src_type: str, value: str):
+    """Convert a container of one RUNTIME kind into another, or None.
+
+    `MojoDict *` / `MojoList *` / `MojoSet *` / `MojoBytes *` are four
+    distinct runtime structs (DESIGN.html R2), so no cast converts between
+    them — only a real call does. Exactly two conversions exist in this
+    runtime and both are exact rather than approximate, which is what makes
+    them safe to apply implicitly at a call site whose parameter type was
+    INFERRED and therefore may simply be wrong:
+
+    | from      | to       | call                  | why it is exact                       |
+    |-----------|----------|-----------------------|---------------------------------------|
+    | `MojoSet *`  | `MojoList *` | `mojo_set_to_list` | iterating a set yields its elements in insertion order, which is the order `mojo_set_to_list` returns them in |
+    | `MojoDict *` | `MojoList *` | `mojo_dict_keys`   | iterating a dict yields its KEYS, and `mojo_dict_keys` is exactly the key list |
+
+    The reverse directions, and anything involving `MojoBytes *`, have no
+    builder in this runtime and return None; the caller decides what to do
+    with that (today: the pre-existing raw cast — see its comment there for
+    the two measured closure sites that make refusing it a regression).
+
+    Returning None rather than a cast is the load-bearing half. A set
+    converted to a list is a *value* the callee can consume correctly;
+    conversely a list silently presented as a set would corrupt every
+    subsequent `mojo_set_*` call on it, which is a strictly worse outcome
+    than the disagreement that produced the call.
+
+    Element-type metadata is carried across the conversion so a later
+    `for x in <arg>` inside the callee binds its loop variable with the
+    right accessor: a dict's keys are always `char *`, and a set's element
+    type is the source's own tracked element type when there is one."""
+    _KIND = gimple_ctypes._CONTAINER_KIND_TYPES
+    if dst_type not in _KIND or src_type not in _KIND or src_type == dst_type:
+        return None
+    if dst_type == 'MojoList *' and src_type == 'MojoSet *':
+        res = gen._call_expr('MojoList *', 'mojo_set_to_list', [('MojoSet *', value)])
+        _e = gen._elem_of(value)
+        if _e:
+            gen._elem_types[res] = _e
+        return res
+    if dst_type == 'MojoList *' and src_type == 'MojoDict *':
+        res = gen._call_expr('MojoList *', 'mojo_dict_keys', [('MojoDict *', value)])
+        gen._elem_types[res] = 'char *'
+        return res
+    return None
 
 
 def _coerce_to_type(gen, src_type: str, dst_type: str, value: str) -> str:
