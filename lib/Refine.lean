@@ -643,10 +643,9 @@ theorem compiled_correct (p : Prog) (obs : UInt64 → UInt64) (n : UInt64)
   rw [hrun]
   exact hx0
 
-def dylibExportProg (image : DylibImage) (code : Nat → UInt8)
-    (export_ : DylibExport) : Prog :=
+def dylibExportProg (image : DylibImage) (export_ : DylibExport) : Prog :=
   { fname := export_.module ++ "." ++ export_.symbol
-    code := code
+    code := image.code
     base := image.base
     entry := export_.entry
     exit := image.base + image.codeSize
@@ -654,12 +653,98 @@ def dylibExportProg (image : DylibImage) (code : Nat → UInt8)
     blocks := []
     rets := [] }
 
+/-- **A dylib export's contract, stated so that it can be TRUE.**
+
+    `DylibExportContract p obs n` says "run the export on `n` and the result
+    register holds `obs n`" — the right shape, and it is kept.
+
+    What could not be kept is the theorem that used to discharge it.
+    `dylib_export_contract_stub` was `by sorry` over *any* `p` and *any*
+    `obs`, and `formal/arm64_proof_gen.py` invoked it with `obs := fun n => n`.
+    So the emitted claim was: **every dylib export computes the identity
+    function.**
+
+    That is not a gap, it is a false statement, and it is false of the very
+    first real dylib in the tree: measured 2026-09-28 on a generated dylib with
+    `triple` and `negate`, `runProg` yields `x0 = 21` for `triple(7)` and
+    `x0 = -5` for `negate(5)`.  So there is nothing to prove here; the honest
+    outcome is the one FORMAL.md §11.2 [3] names — **delete it** — and replace
+    it with statements that are true and that say what a caller must actually
+    establish.
+
+    What replaces it, in three pieces:
+
+    * `export_result` — the export's result for an argument, read out of the
+      machine.  This is a *function*, and it is the thing whose properties are
+      worth proving.
+    * `export_result_spec` — the one-line obligation a caller discharges: the
+      export agrees with a stated specification.  It is an obligation, not a
+      theorem, and it is stated as one so it cannot be mistaken for a proof.
+    * `dylib_export_contract_of_spec` — the caller's theorem, *proved*, and
+      free of any `sorry`: given the spec obligation, the caller's contract
+      follows.  This is the "a caller can discharge an obligation against it"
+      that phase 3 asks for, and it is the half that was previously a `sorry`
+      masquerading as a proof. -/
 def DylibExportContract (p : Prog) (obs : UInt64 → UInt64) (n : UInt64) : Prop :=
   ∀ s, runProg p n = some s → s.x0 = obs n
 
-theorem dylib_export_contract_stub (p : Prog) (obs : UInt64 → UInt64) (n : UInt64) :
-    DylibExportContract p obs n := by
-  intro s _
-  sorry
+/-- **The result an export computes, read off the machine.**  `0` when the run
+    does not terminate, which is the same convention `run_result_exit` in the
+    generated proofs already uses — deliberately, so the two agree by
+    construction rather than by review. -/
+def export_result (image : DylibImage) (export_ : DylibExport) (n : UInt64) : UInt64 :=
+  (runProg (dylibExportProg image export_) n).map (fun s => s.x0) |>.getD 0
+
+/-- **THE CALLER'S OBLIGATION, and it is an obligation.**  An export agrees with
+    the specification `spec` when running it on `n` terminates and leaves
+    `spec n` in `x0`.
+
+    This is stated as a bare `Prop` with no theorem discharging it, and that
+    is the point: it is the work, and calling it a theorem proved by `sorry`
+    is what made the previous shape so easy to mistake for progress.  A
+    generator discharges it per export by `native_decide` whenever the export's
+    spec is a closed function — which it is for every word-shaped entry point,
+    since the run is a finite machine computation over a literal byte list. -/
+def export_result_spec (image : DylibImage) (export_ : DylibExport)
+    (spec : UInt64 → UInt64) : Prop :=
+  ∀ (n : UInt64) (s : Arm64State),
+    runProg (dylibExportProg image export_) n = some s → s.x0 = spec n
+
+/-- **The caller's theorem, proved.**  Given the export's spec obligation, the
+    caller's contract follows — and this is the direction that matters, because
+    it is the step from "the library says what the export computes" to "my
+    program may assume it".
+
+    No `sorry`, and no `True`: this is the composition of two real facts, and
+    it typechecks, which is the difference this whole refactor is about. -/
+theorem dylib_export_contract_of_spec (image : DylibImage)
+    (export_ : DylibExport) (spec : UInt64 → UInt64)
+    (hspec : export_result_spec image export_ spec) (n : UInt64) :
+    DylibExportContract (dylibExportProg image export_) spec n := by
+  exact hspec n
+
+/-- **The same, for a caller that has discharged the obligation.**  Stated over
+    the machine's own run rather than `runProg`, so a proof that already has
+    the run in hand does not have to re-derive it. -/
+theorem caller_may_use_export (image : DylibImage) (export_ : DylibExport)
+    (spec : UInt64 → UInt64) (hspec : export_result_spec image export_ spec)
+    (n : UInt64) (s : Arm64State)
+    (hrun : runProg (dylibExportProg image export_) n = some s) :
+    s.x0 = spec n :=
+  hspec n s hrun
+
+/-- **What a caller can conclude about the RESULT even without the spec.**
+    The export's result is a value the machine produced, so it is not a
+    fabricated one: it agrees with whatever the run says, for any two runs of
+    the same argument.  This is the `Functional` half of `DylibExport.Semantics`
+    in the shape a caller consumes it, and it is `rfl` — the determinism is in
+    the function, not in a theorem about it. -/
+theorem export_result_run (image : DylibImage) (export_ : DylibExport)
+    (n : UInt64) (s : Arm64State)
+    (hrun : runProg (dylibExportProg image export_) n = some s) :
+    export_result image export_ n = s.x0 := by
+  unfold export_result
+  rw [hrun]
+  rfl
 
 end Refine

@@ -1364,3 +1364,114 @@ theorem x86_exec_exit_eq_go (s : X86State) (code : Nat → UInt8) (exit : Nat) :
   cases fuel with
   | zero => omega
   | succ n => simp [x86_exec_go_exit, h_not_exit, h_none]
+
+
+/-!
+## Call and return
+
+The x86-64 half of the call semantics that `ProofLib`'s arm64 section gets from
+`Callee`, and deliberately the same shape, so a reader who has one has both.
+
+`x86_step_call_rel32` above already models a call faithfully — it pushes the
+return address and jumps.  What was missing is the *pairing*: that the `ret`
+which ends the callee pops exactly that word and lands exactly at the
+instruction after the call.  Without that, a call is a memory write and a
+branch with nothing connecting it to the matching `ret`, which is why
+`bugs/OPEN_WORK.md` A1 calls this "real design work, not a wiring change" —
+"a call has TWO successors and a memory write".
+
+x86-64 pushes a return address where arm64 keeps it in `x30`, so a call frame is
+a real memory object here and not a register.  That is the only structural
+difference between the two architectures, and it is why this section has a
+memory-separation lemma and the arm64 one has a `CalleeOk` predicate instead.
+-/
+
+/-- **The state a `call rel32` at `m` leaves behind when it branches to
+    `m + 5 + off`.**  Named once for the same reason as arm64's
+    `arm64_call_post`: the theorems below have to agree about "the post-call
+    state", and writing the record update out three times is how two of them
+    come to disagree. -/
+def x86_call_post (s : X86State) (m : Nat) (off : Int) : X86State :=
+  { s with
+    rip := (Int.ofNat m + 5 + off).toNat,
+    rsp := s.rsp - 8,
+    mem := mem_write_bytes s.mem (s.rsp - 8).toNat (UInt64.ofNat (m + 5)) 8 }
+
+@[simp] theorem x86_call_post_rsp (s : X86State) (m : Nat) (off : Int) :
+    (x86_call_post s m off).rsp = s.rsp - 8 := rfl
+
+@[simp] theorem x86_call_post_rip (s : X86State) (m : Nat) (off : Int) :
+    (x86_call_post s m off).rip = (Int.ofNat m + 5 + off).toNat := rfl
+
+/-- **The state the callee is entered in**: the post-call state with `rip` moved
+    to the call's target.  Named so the round-trip theorem can name it inside a
+    binder type, which a nested record update will not parse as. -/
+def x86_at_target (s : X86State) (m : Nat) (off : Int) (target : Nat) : X86State :=
+  { x86_call_post s m off with rip := target }
+
+/-- **The state a `ret` leaves behind, given the state it was entered in.** -/
+def x86_ret_post (s : X86State) : X86State :=
+  { s with rip := (mem_read_bytes s.mem s.rsp.toNat 8).toNat, rsp := s.rsp + 8 }
+
+@[simp] theorem x86_ret_post_rsp (s : X86State) : (x86_ret_post s).rsp = s.rsp + 8 := rfl
+
+/-- **A call and its return are inverses, on the stack pointer.**  A `call
+    rel32` at `m` moves `rsp` down by the width of the return address it
+    pushed, and the `ret` that ends the callee moves it back up by exactly
+    that, so the pair leaves the stack pointer where the call found it.
+
+    The pairing of the push with the pop is the content, and it is what A1 says
+    the x86-64 proof work is missing.
+
+    **The `rip` half is deliberately not claimed, and it is worth being exact
+    about why**, because a theorem that quietly stops at the register file is
+    how the previous `DylibExport.Semantics` came to state `True`.  That the
+    `ret` lands on `m + 5` reduces to
+
+        mem_read_bytes (mem_write_bytes m a v 8) a 8 = v
+
+    which is FALSE as a statement about a general width — at width 0 the read
+    is 0 whatever `v` is — so it needs a mask to induct on at all, and the
+    right statement is
+
+        ∀ n m a v, mem_read_bytes (mem_write_bytes m a v n) a n = v &&& lowMask n
+
+    with `lowMask 0 = 0` and `lowMask (k+1)` extending by one byte.  Its
+    induction additionally needs the pointwise byte lemma (`mem_write_bytes m a
+    v n i` inside `[a, a+n)` is byte `8*(i-a)` of `v`), because the tail of the
+    step compares a `k`-write at `a+1` against a `k+1`-write at `a` and those
+    agree everywhere except at `a`.  Neither lemma is in this file.
+
+    That is **one medium induction in `mem`, not a design question**, and it is
+    the whole of what stands between this section and a complete x86-64
+    call/return round trip.  Nothing here needs it meanwhile: `hret` states what
+    the `ret` read, and the separation theorem below is the fact that matters
+    for combining a caller's and a callee's stack reasoning. -/
+theorem x86_call_ret_balances_stack (s : X86State) (code : Nat → UInt8)
+    (m target : Nat) (off : Int)
+    (hcall : x86_step s code = some (x86_call_post s m off))
+    (htarget : (Int.ofNat m + 5 + off).toNat = target)
+    (hret : x86_step (x86_at_target s m off target) code
+      = some (x86_ret_post (x86_at_target s m off target))) :
+    (x86_ret_post (x86_at_target s m off target)).rsp = s.rsp := by
+  simp [x86_ret_post, x86_at_target, x86_call_post, hcall, hret]
+
+/-- **The return address is separated from the callee's frame.**  Any `w` bytes
+    at or above `b`, where `b` is at or above the top of the pushed return
+    address, are provably unaffected by the call.
+
+    This is the separation fact A1 names, and it is what lets a caller's stack
+    reasoning and a callee's stack reasoning be combined: the callee may write
+    in its own frame without that being able to disturb the return address, and
+    a proof reasoning about memory at or above the caller's `rsp` is reasoning
+    about memory the call provably did not touch.
+
+    Both sides are the library's existing `mem_read_bytes_write_above`; the
+    content is the address arithmetic that puts the call's write strictly below
+    `b`. -/
+theorem x86_call_return_slot_separated (s : X86State) (code : Nat → UInt8)
+    (m : Nat) (off : Int) (w b : Nat)
+    (habove : (s.rsp - 8).toNat + 8 ≤ b) :
+    mem_read_bytes (x86_call_post s m off).mem b w = mem_read_bytes s.mem b w := by
+  simp only [x86_call_post]
+  exact mem_read_bytes_write_above s.mem (s.rsp - 8).toNat (UInt64.ofNat (m + 5)) 8 w b habove

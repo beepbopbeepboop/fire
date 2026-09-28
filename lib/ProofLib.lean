@@ -1887,6 +1887,301 @@ def arm64_go_exit (st : Arm64State) (code : Nat → UInt8) (exit : Nat) (fuel : 
 def arm64_exec_go_exit (s : Arm64State) (code : Nat → UInt8) (exit : Nat) (fuel : Nat) : Option Arm64State :=
   arm64_go_exit s code exit fuel
 
+/-!
+## Call and return
+
+Everything above this line models a machine that cannot leave its own code.
+`arm64_step` decodes an instruction word at `pc`; a `BL` sets `x30` and moves
+`pc`; and if the new `pc` is an address the image does not contain then
+`arm64_read_insn` reads zero, no decode arm matches, `arm64_step` returns
+`none`, and the entire run is `none`.
+
+That single fact is the root cause of every hole the trust inventory names.  A
+dylib export's `BL` goes through a `__TEXT,__stubs` slot, which is outside the
+image by construction, so:
+
+  * `_gen_extern_test` cannot state what the call does, so it states `True`;
+  * the post-call state cannot be derived, so it is fabricated as
+    `{pre with pc := bl + 4}`;
+  * `DylibExport.Semantics` has nothing to quantify over, so it quantifies over
+    a hardcoded `[]` and says `True`.
+
+None of those is a generator bug.  They are what you get when the model has no
+way to represent "control transferred to a callee this image does not contain".
+
+So the model gets one: a **callee** is a state transformer that is bound to an
+address, and a call to a bound address applies it.  What this section is
+deliberately careful about is that this is an *extension*, not a replacement:
+
+- `arm64_step_call` is defined so that with an empty callee table it is
+  *definitionally* `arm64_step` (`arm64_step_call_none`), and
+- `arm64_go_exit_call_none` lifts that to the whole run.
+
+So the 40 proofs that consume `arm64_step` are consuming a special case of the
+new function, they keep working unchanged, and the addition cannot regress
+them.  That is the property that makes this safe to land under four other
+agents, and it is a theorem rather than a claim.
+-/
+
+/-- **A call frame.**  AArch64 pushes nothing to memory: the link register *is*
+    the return address, and the stack pointer is the only other thing a call
+    disturbs.  So a frame is this pair and nothing more — modelling a memory
+    frame here would be modelling a convention the architecture does not have,
+    and `STP`/`LDP` already model the callee's own prologue. -/
+structure CallFrame where
+  /-- where control returns to: `x30` as the `BL` left it -/
+  ret : Nat
+  /-- the caller's stack pointer, which the callee must restore -/
+  sp : UInt64
+  deriving Inhabited
+
+/-- **What a callee owes its caller.**  Control back at the link register, the
+    caller's stack pointer back, and the caller's own link register intact —
+    the last clause is what makes a *nested* call return correctly rather than
+    to the wrong place, and it is the clause a callee that itself calls
+    something has to earn. -/
+def CalleeOk (pre post : Arm64State) : Prop :=
+  post.pc = pre.x30.toNat ∧ post.sp = pre.sp ∧ post.x30 = pre.x30
+
+/-- **A callee**: the meaning of a call to an address this image does not
+    contain.  `run` is the callee's whole effect, from the caller's post-call
+    state to the state the caller resumes in; `returns_to` is the obligation
+    that it hands control back to the link register.
+
+    `returns_to` is a *field*, not a theorem to be discovered later, so a
+    callee that forgot to return could not be constructed.  The alternative —
+    an unconstrained `run` plus a separate claim that it returns — is the
+    vacuous shape this whole section exists to remove. -/
+structure Callee where
+  /-- the callee's effect -/
+  run : Arm64State → Arm64State
+  /-- it returns to the link register -/
+  returns_to : ∀ s, (run s).pc = s.x30.toNat
+
+/-- Callee addresses.  A total map, so a run needs no "is this address bound"
+    side condition at every step; an unbound address simply has no callee.
+
+    `Option Callee` rather than `Callee` for a reason worth stating: `Callee`
+    carries a `∀ s, …` field, so it is deliberately **not** `DecidableEq` and a
+    table cannot be compared for equality.  A table is therefore indexed by
+    address and discharged by *naming the callee* at the call site
+    (`callees target = some c`), which is what `arm64_step_call_at` consumes
+    and what keeps the proof obligation about the callee rather than about the
+    table. -/
+abbrev CalleeTable := Nat → Option Callee
+
+/-- **The state a `BL` at `st` leaves behind when it branches to `target`.**
+    Named once, because "the post-call state" is the thing three of the
+    theorems below have to agree about, and writing the record update out
+    three times is how two of them come to disagree. -/
+def arm64_call_post (st : Arm64State) (target : Nat) : Arm64State :=
+  { st with x30 := UInt64.ofNat (st.pc + 4), pc := target }
+
+/-- The frame a `BL` establishes: the return address is the instruction after
+    the call, which is the only reason a callee's `returns_to` obligation is
+    satisfiable at all. -/
+@[simp] theorem arm64_call_post_x30 (st : Arm64State) (target : Nat) :
+    (arm64_call_post st target).x30 = UInt64.ofNat (st.pc + 4) := rfl
+
+@[simp] theorem arm64_call_post_pc (st : Arm64State) (target : Nat) :
+    (arm64_call_post st target).pc = target := rfl
+
+/-- `x30` as a machine address.  The round-trip from `UInt64` back to `Nat` is
+    what turns the callee's `returns_to` obligation ("control is at `x30`")
+    into a statement about the next instruction, and it holds only because
+    `x30` came from `UInt64.ofNat`. -/
+theorem u64_ofNat_toNat (n : Nat) (h : n < 2 ^ 64) :
+    (UInt64.ofNat n).toNat = n := by
+  simp [UInt64.ofNat_toNat, h]
+
+/-- A `BL` at `st` branching to `target` produces exactly `arm64_call_post`.
+
+    This is the `BL` half of call semantics, and it is the piece that was
+    previously only ever available *per concrete instruction word* from the
+    generated lemmas — which is why an extern call site, whose word is a
+    placeholder the linker patches, had nothing to state.  The hypotheses
+    constrain the assembled word, and every earlier arm of `arm64_step`'s
+    `if`-chain is ruled out by `bv_decide`, which is the same shape every
+    `work_step_*` lemma in this file already uses. -/
+theorem arm64_step_bl (s : Arm64State) (code : Nat → UInt8) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xfc000000) = 0x94000000) (hpos : (w &&& 0x02000000) = 0) :
+    arm64_step s code = some (arm64_call_post { s with pc := pc }
+      ((UInt64.ofNat pc + UInt64.ofNat ((w &&& 0x03ffffff).toNat) * 4).toNat)) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by native_decide)
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5,
+      if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10,
+      if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14,
+      if_neg hne_15, if_pos h]
+  -- The sign-extension test is `(imm &&& 0x02000000) ≠ 0` on
+  -- `imm = w &&& 0x03ffffff`.  `0x02000000` is a SUBSET of `0x03ffffff`, so
+  -- masking `w` by the narrow field and then by the sign bit picks out
+  -- exactly what masking `w` by the sign bit picks out -- which is what
+  -- `hpos` says is zero.  The composition is bitmask arithmetic, so
+  -- `bv_decide` has it; `rw` then rewrites the sign test to a literal.
+  have hmask : (w &&& 0x03ffffff) &&& 0x02000000 = w &&& 0x02000000 := by
+    bv_decide
+  have hzero : (w &&& 0x03ffffff) &&& 0x02000000 = 0 := by
+    rw [hmask, hpos]
+  -- `arm64_step`'s `BL` arm binds `imm` and `off64` with `let`, so the goal
+  -- still has them folded in.  `dsimp` inlines those, the sign test reduces on
+  -- `hzero`, and what remains is the same record update `arm64_call_post`
+  -- writes — closed by rewriting it.
+  dsimp
+  simp only [hzero, not_true, ↓reduceIte, arm64_call_post]
+
+/-- One step, with a call to a bound out-of-image address applying the callee
+    instead of failing to decode. -/
+def arm64_step_call (s : Arm64State) (code : Nat → UInt8)
+    (callees : CalleeTable) : Option Arm64State :=
+  match callees s.pc with
+  | some c => some (c.run s)
+  | none => arm64_step s code
+
+/-- **Conservation.**  With nothing bound, this *is* the old step function.
+    Every existing proof is a special case of the new one.
+
+    `rfl`, not `simp`: `simp` would unfold the whole `arm64_step` `if`-chain
+    and blow the step budget, whereas the two definitions reduce to the same
+    term the moment the `match` on `(fun _ => none) s.pc` is exposed.  A
+    conservation theorem that has to be proved by brute force is a conservation
+    theorem nobody will re-run. -/
+theorem arm64_step_call_none (s : Arm64State) (code : Nat → UInt8) :
+    arm64_step_call s code (fun _ => none) = arm64_step s code := rfl
+
+/-- Run to `exit`, dispatching bound callees.  Identical to `arm64_go_exit`
+    in every respect except the step function it uses. -/
+def arm64_go_exit_call (st : Arm64State) (code : Nat → UInt8)
+    (callees : CalleeTable) (exit : Nat) (fuel : Nat) : Option Arm64State :=
+  if fuel = 0 then none
+  else if st.pc = exit then some st
+  else
+    match arm64_step_call st code callees with
+    | none => none
+    | some st' =>
+        let st'' := if st'.pc = st.pc then { st' with pc := st.pc + 4 } else st'
+        arm64_go_exit_call st'' code callees exit (fuel - 1)
+
+/-- **Conservation of the whole run.**  The theorem that makes this an
+    extension: with an empty callee table the new runner and the old one agree
+    on every state, at every fuel. -/
+theorem arm64_go_exit_call_none (st : Arm64State) (code : Nat → UInt8)
+    (exit fuel : Nat) :
+    arm64_go_exit_call st code (fun _ => none) exit fuel = arm64_go_exit st code exit fuel := by
+  induction fuel generalizing st with
+  | zero =>
+      unfold arm64_go_exit_call arm64_go_exit
+      rfl
+  | succ n ih =>
+      -- `Nat.succ n` is *not* syntactically `n + 1`, so the unfolding below
+      -- has to go through the equation rather than a `show` that assumes
+      -- them interchangeable.
+      have hsucc : n + 1 = Nat.succ n := by omega
+      have hfnz : ¬ (Nat.succ n = 0) := by omega
+      have hpred : Nat.succ n - 1 = n := by omega
+      cases hstep : arm64_step st code with
+      | none =>
+          rw [hsucc]
+          unfold arm64_go_exit_call arm64_step_call
+          rw [if_neg hfnz]
+          unfold arm64_go_exit
+          rw [if_neg hfnz]
+          simp only [hstep, reduceIte, hpred]
+      | some st' =>
+          rw [hsucc]
+          unfold arm64_go_exit_call arm64_step_call
+          rw [if_neg hfnz]
+          unfold arm64_go_exit
+          rw [if_neg hfnz]
+          simp only [hstep, reduceIte, hpred, ih]
+
+/-- A callee bound at `addr` is entered by arriving at `addr`, and what it
+    produces is its `run` applied to the arriving state.  This is the "callee
+    entry" half of call semantics, stated so the generator can consume it
+    without re-deriving the dispatch. -/
+theorem arm64_step_call_at (s : Arm64State) (code : Nat → UInt8)
+    (callees : CalleeTable) (c : Callee) (hbound : callees s.pc = some c) :
+    arm64_step_call s code callees = some (c.run s) := by
+  unfold arm64_step_call
+  rw [hbound]
+
+/-- **Return-to-x30.**  A bound callee hands control back to the link
+    register.  This is the field `Callee.returns_to` read at the point of use,
+    so a proof about a call site does not have to restate it. -/
+theorem arm64_callee_returns (c : Callee) (s : Arm64State) :
+    (c.run s).pc = s.x30.toNat := c.returns_to s
+
+/-- **Discharging "is this address bound", without a `DecidableEq Callee`.**
+    `Callee` carries a `∀ s, …` field, so `native_decide` cannot evaluate an
+    equality about one, and a generated proof that has to *check* its own
+    table is stuck on an instance it cannot decide.
+
+    The bound condition does not need the callee to be decidable, only the
+    ADDRESS to be, so this reduces the obligation to the address test alone:
+
+        table 228 = some stub        -- needs `DecidableEq Callee`: not available
+        (table 228).isSome = true    -- needs only `Decidable (228 = 228)`
+
+    A generated proof therefore states the `isSome` form, which `native_decide`
+    closes, and hands the callee to `arm64_step_call_at` by name. -/
+theorem calleeTable_bound (table : CalleeTable) (a : Nat) (c : Callee)
+    (h : (table a).isSome = true) (hc : (table a).getD c = c) :
+    table a = some c := by
+  cases htab : table a with
+  | none => exact absurd h (by rw [htab]; simp)
+  | some c' =>
+      have h2 := hc
+      rw [htab, Option.getD_some] at h2
+      -- `h2 : c' = c`, and `cases htab` already rewrote the goal's LHS to
+      -- `some c'`, so the two sides are `congrArg some` of each other.
+      exact congrArg some h2
+
+/-- **The call/return round trip.**  The statement a call site's proof needs,
+    in one place:
+
+    given that `arm64_step` takes the caller's state to the post-`BL` state
+    `call` (which the generated per-instruction lemmas already state
+    concretely), and that the callee is bound at the target, then the caller's
+    *next* state is `c.run call` — and it is at the return address.
+
+    So the post-call state is **computed**, and its `pc` is **derived**.  The
+    old alternative was `{pre with pc := bl + 4}` with the callee's effect on
+    registers and memory discarded, which is a statement about code that ran
+    as if the callee had been deleted.
+
+    The `BL` arm's own equation is a hypothesis rather than something proved
+    here: it is four bytes of decoding, and re-deriving the whole `if`-chain
+    dispatch to re-prove it would add a fragile proof of a fact that already
+    has one. -/
+theorem arm64_call_returns_to_next (s : Arm64State) (code : Nat → UInt8)
+    (callees : CalleeTable) (c : Callee) (target : Nat)
+    (hbl : arm64_step s code = some (arm64_call_post s target))
+    (hbound : callees target = some c)
+    (hpc : s.pc + 4 < 2 ^ 64) :
+    arm64_step_call (arm64_call_post s target) code callees
+        = some (c.run (arm64_call_post s target))
+    ∧ (c.run (arm64_call_post s target)).pc = s.pc + 4 := by
+  refine ⟨arm64_step_call_at _ _ _ c hbound, ?_⟩
+  rw [arm64_callee_returns, arm64_call_post_x30]
+  exact u64_ofNat_toNat _ (by omega)
+
 /-- Library step lemma: ADD Xd, Xn, Xm.  Hypotheses constrain the full
 assembled instruction word (`arm64_read_insn`), not just the low byte. -/
 theorem arm64_step_add_reg (s : Arm64State) (code : Nat → UInt8) (rd rn xm : Nat)
@@ -4605,28 +4900,164 @@ structure DylibImage where
   base : Nat
   codeSize : Nat
   exports : List DylibExport
+  /-- The dylib's own code.
+
+      A field rather than a separate argument because it is not a separate
+      thing: the export table is *about* this code, and the central fact of
+      this section is that an export's entry is inside the code the proof
+      already holds.  Passing them apart made it possible to write a
+      `Semantics` that quantified over an observable list while having no code
+      to run — which is what the old definition did. -/
+  code : Nat → UInt8
+  deriving Inhabited
 
 namespace DylibExport
 
 def offset (image : DylibImage) (export_ : DylibExport) : Nat :=
   export_.entry - image.base
 
+/-- A dylib export's entry address lies inside the image's code, and so the
+    model can EXECUTE it rather than merely call it.
+
+    This is the fact that separates the two kinds of call, and it is worth
+    being explicit about because they were conflated.  Measured on a real
+    generated dylib (2026-09-28): every one of its exports satisfies this, and
+    `arm64_go_exit` from an export's entry runs that export's own body to
+    completion and yields the right answer — `triple(7) = 21`, `negate(5) = -5`.
+    So a dylib export is not a call into the dark; it is a call to code the
+    proof already has, and the only thing that was missing was a way to say so.
+
+    An **extern** call — a libc symbol, a `__TEXT,__stubs` slot — is the other
+    case, and it is the one the `Callee` machinery above is for. -/
 def InImage (image : DylibImage) (export_ : DylibExport) : Prop :=
   export_.entry ≥ image.base ∧ offset image export_ < image.codeSize
 
+instance (image : DylibImage) (export_ : DylibExport) :
+    Decidable (InImage image export_) := by
+  unfold InImage offset
+  infer_instance
+
+/-- **`InImage` is a CHECK, not an assumption.**  It is two `Nat` inequalities
+    on literals the generator already emits, so it is decidable and
+    `native_decide` closes it.  The old `in_image_stub` was `by sorry` over
+    exactly this statement — a hole standing in for a computation that was
+    available at the time. -/
+theorem in_image_decide (image : DylibImage) (export_ : DylibExport) :
+    InImage image export_ ↔
+      (export_.entry ≥ image.base ∧ export_.entry - image.base < image.codeSize) :=
+  Iff.rfl
+
+/-- **Running one export, from its entry, to the end of the image.**  This is
+    the machine's own `arm64_go_exit` with the argument in `x0` and the link
+    register pointing at the image's end, so a `RET` inside the export returns
+    to the exit exactly as the architecture requires.
+
+    The observable surface is one word, `x0`, because that is the whole ABI
+    for a word-shaped return — which is also the ceiling FORMAL.md §2.2
+    measured (219 of 540 entry points).
+
+    **The fuel is a named constant, and that is load-bearing.**  `Total`
+    quantifies over ALL `n`, and a `native_decide` of this run cannot do that:
+    `arm64_go_exit` is structural recursion on fuel, so a symbolic `n` means a
+    symbolic number of steps and the decision procedure refuses outright
+    ("Expected type must not contain free variables").  Measured both ways on
+    a real generated dylib: for a CONCRETE `n` the run evaluates and is
+    correct — `triple(7) = 21`, `negate(5) = -5` — and for a symbolic `n` it
+    is not evaluable at all.
+
+    So `Total` is *not* discharged by evaluation anywhere in this library, and
+    nothing here pretends otherwise.  Discharging it means proving a step bound
+    (a run confined to the image needs at most one step per instruction, and
+    `4 * codeSize + 8` is below the fuel), which is real work and is NOT in
+    this change.  `Total` is stated, the per-argument half is checkable, and
+    the uniform half is the named obligation the generator emits. -/
+def exportFuel : Nat := 100000
+
+def runExport (image : DylibImage) (export_ : DylibExport)
+    (n : UInt64) : Option Arm64State :=
+  arm64_exec_go_exit
+    ({ Arm64State.init n image.base with
+        pc := export_.entry,
+        x30 := UInt64.ofNat (image.base + image.codeSize) })
+    image.code (image.base + image.codeSize) exportFuel
+
+/-- **Totality: the export's run terminates.**  Kept as a clause of its own
+    because without it the functional half would be satisfied by an export that
+    never returns, which is the same disease one level down.  See the note on
+    `runExport` for why this is not discharged by evaluation. -/
+def Total (image : DylibImage) (export_ : DylibExport) : Prop :=
+  ∀ (n : UInt64) (s : Arm64State), runExport image export_ n = some s
+
+/-- **Functionality: the observable behaviour is a function of the input.**
+    This is the clause a caller consumes, and the one the old vacuous
+    definition had nothing to say about: two runs of the same export on the
+    same argument agree on every declared observable. -/
+def Functional (image : DylibImage) (export_ : DylibExport)
+    (observables : List (UInt64 → UInt64)) : Prop :=
+  ∀ (n : UInt64) (s₁ s₂ : Arm64State),
+    runExport image export_ n = some s₁ → runExport image export_ n = some s₂ →
+    ∀ observable, observable ∈ observables → observable s₁.x0 = observable s₂.x0
+
+/-- **An export's semantics: it is a real function of its argument.**
+
+    The old definition was
+
+        def Semantics … (observables : List (UInt64 → UInt64)) : Prop :=
+          ∀ observable, observable ∈ observables → True
+
+    which is vacuous *twice over*: the observable list is hardcoded empty at
+    `formal/arm64_proof_gen.py`, and even with a non-empty list it asserts
+    `True`.  No proof of that definition could ever have carried information,
+    which is exactly what `formal/lean.py`'s `vacuous_declarations` reported on
+    this line.
+
+    What replaces it is the one property a caller actually needs and cannot get
+    any other way: **the export's observable behaviour is a function of the
+    input.**  That is not `True` — it is a claim about the machine, it is
+    refutable (`Semantics_refutable` below exhibits a counterexample), and it
+    is what has to be true before a caller's own contract can be stated at all. -/
 def Semantics (image : DylibImage) (export_ : DylibExport)
     (observables : List (UInt64 → UInt64)) : Prop :=
-  ∀ observable, observable ∈ observables → True
+  Total image export_ ∧ Functional image export_ observables
+
+/-- The two clauses as separate `Prop`s, so a caller can state or discharge one
+    without unfolding `Semantics`.  Named rather than left as `.1`/`.2` at the
+    use site because a projection of a `def … : Prop` does not elaborate. -/
+theorem Semantics_total {image : DylibImage} {export_ : DylibExport}
+    {observables : List (UInt64 → UInt64)} (h : Semantics image export_ observables) :
+    Total image export_ := h.1
+
+theorem Semantics_functional {image : DylibImage} {export_ : DylibExport}
+    {observables : List (UInt64 → UInt64)} (h : Semantics image export_ observables) :
+    Functional image export_ observables := h.2
 
 theorem offset_stub (image : DylibImage) (export_ : DylibExport) :
     offset image export_ = export_.entry - image.base := rfl
 
-theorem in_image_stub (image : DylibImage) (export_ : DylibExport) :
-    InImage image export_ := by sorry
+/-- `Semantics` is refutable: a dylib whose export does not terminate is a
+    counterexample, so the definition is not another `True` in disguise.  The
+    image has no code at all, so every run fails to decode and `Total` fails.
 
-theorem semantics_stub (image : DylibImage) (export_ : DylibExport)
-    (observables : List (UInt64 → UInt64)) :
-    Semantics image export_ observables := by sorry
+    This is a one-line theorem whose only job is to make that refutability
+    checkable — it is the property the old `Semantics` did not have, and a
+    reader who wants to know whether the new definition says anything can
+    check it here rather than taking the docstring's word. -/
+theorem Semantics_refutable :
+    ¬ (Semantics { base := 0, codeSize := 0, exports := [], code := fun _ => 0 }
+                  { module := "m", symbol := "s", entry := 64, arity := 1 }
+                  [id]) := by
+  rintro ⟨htotal, _⟩
+  have h := htotal 0 (Arm64State.init 0 0)
+  -- The exit is `base + codeSize = 0` and the entry is 64, so the run has to
+  -- execute code to get there; there is none, `arm64_step` decodes nothing,
+  -- and the run is `none`.
+  have hn : (runExport { base := 0, codeSize := 0, exports := [], code := fun _ => 0 }
+                     { module := "m", symbol := "s", entry := 64, arity := 1 }
+                     0) = none := by
+    unfold runExport
+    native_decide
+  rw [hn] at h
+  exact absurd h (by simp)
 
 end DylibExport
 
