@@ -4991,9 +4991,37 @@ def runExport (image : DylibImage) (export_ : DylibExport)
 /-- **Totality: the export's run terminates.**  Kept as a clause of its own
     because without it the functional half would be satisfied by an export that
     never returns, which is the same disease one level down.  See the note on
-    `runExport` for why this is not discharged by evaluation. -/
+    `runExport` for why this is not discharged by evaluation.
+
+    **The `s` used to be universally quantified, which made this FALSE.**
+
+    The first spelling was
+
+        def Total … := ∀ (n : UInt64) (s : Arm64State), runExport … n = some s
+
+    which does not say "the run terminates" -- it says the run returns *every*
+    possible state.  Read the `s` as arbitrary and the statement is
+    `some ⟨s₁,s₂,…⟩ = some s` for every `s`, so it is refuted by taking `s` to
+    be a state that is not the result.  A toy check, on a function that is total
+    in the plainest possible sense, is unprovable:
+
+        def f : Nat → Option Nat := fun _ => some 0
+        example : (∀ n s, f n = some s) := by intro n s; simp [f]   -- ⊢ 0 = s
+
+    So this was not a theorem that was hard to prove; it was not a theorem at
+    all, and the `sorry` in `formal/arm64_proof_gen.py` was sitting on top of
+    the impossibility without anyone noticing, because a `sorry` compiles.
+
+    Termination is `∀ n, ∃ s, …`: for each input, SOME result.  Uniqueness of
+    that result is not part of `Total` and is not wanted here -- it is
+    `Functional` below, which states agreement of *observables* rather than of
+    whole states, and is the right place for the "same input, same answer"
+    claim.  Note the difference in shape is not cosmetic: `Total` now has an
+    existential witness for `arm64_go_exit_terminates` to produce, and that
+    witness is the whole content of the step bound. -/
+
 def Total (image : DylibImage) (export_ : DylibExport) : Prop :=
-  ∀ (n : UInt64) (s : Arm64State), runExport image export_ n = some s
+  ∀ (n : UInt64), ∃ s, runExport image export_ n = some s
 
 /-- **Functionality: the observable behaviour is a function of the input.**
     This is the clause a caller consumes, and the one the old vacuous
@@ -5054,7 +5082,10 @@ theorem Semantics_refutable :
                   { module := "m", symbol := "s", entry := 64, arity := 1 }
                   [id]) := by
   rintro ⟨htotal, _⟩
-  have h := htotal 0 (Arm64State.init 0 0)
+  -- `Total` is `∀ n, ∃ s, runExport … n = some s`, so it hands us a result for
+  -- input 0 directly.  (Under the old `∀ n s, …` shape this step had to supply
+  -- a `s` as well, which is where the impossible statement showed through.)
+  obtain ⟨s, h⟩ := htotal 0
   -- The exit is `base + codeSize = 0` and the entry is 64, so the run has to
   -- execute code to get there; there is none, `arm64_step` decodes nothing,
   -- and the run is `none`.
@@ -5065,6 +5096,185 @@ theorem Semantics_refutable :
     native_decide
   rw [hn] at h
   exact absurd h (by simp)
+
+/-!
+## The step bound: `exportFuel` is *provably* enough, not merely large
+
+Everything above says the export is `InImage` — a check, closed by
+`native_decide`.  That is the fact that lets the model *execute* the export
+rather than merely call it.  It is not the fact that the run **finishes**, and
+those are different: `InImage` puts the entry inside the code, and says nothing
+about whether stepping from there ever reaches the exit.
+
+That is the remaining content of `Total`, and it is what the old
+`{ident}_semantics_total := by sorry` was standing in for.  The theorem below
+discharges it, for a `Total` that is stated as a real termination claim rather
+than the impossible one it used to be (see the note on `Total` above).
+
+### `effNext`: the pc the loop will *actually* be at next
+
+`arm64_go_exit` has one wrinkle that has to be mirrored exactly.  When
+`arm64_step` returns a state whose `pc` did not move, the loop does not stay
+put — it substitutes `st.pc + 4`:
+
+    let st'' := if st'.pc = st.pc then { st' with pc := st.pc + 4 } else st'
+
+So the pc the next iteration sees is `effNext st st'`, not `st'.pc`.  This
+matters because `st.pc + 4` can **overshoot** the exit: an `nop` at the last
+word of the code advances past `exit`.  A progress hypothesis phrased about
+`st'.pc` would therefore be satisfiable while the run walks off the end.
+`effNext` is the one function that is right in both branches, and stating
+`hnodrop` about it yields progress *and* containment from a single hypothesis.
+
+### The two hypotheses, and why they are the right two
+
+- `hhalts` — every in-range state has a successor.  Without it `arm64_step`
+  returns `none` and so does the run, with fuel to spare.
+- `hnodrop` — the effective next pc strictly advances and stays `≤ exit`.
+
+Neither is derivable in general, and that is the point: an export containing a
+backward branch has no `hnodrop`, so this proves `Total` for **straight-line**
+exports and says so, rather than asserting it for all of them.  For a
+straight-line export both are *checks*, not assumptions, which is what
+`dylibExport_total_of` is for.
+
+### Why the bound is strict
+
+`arm64_go_exit _ _ _ 0 = none` unconditionally, so the run needs
+`exit - st.pc < f` and not `≤`.  At `f = exit - st.pc` the induction hits
+`succ 0` and has nothing to recurse on.
+
+### Why induction on fuel rather than on the distance
+
+`Nat.strong_induction_on` is not available here, and it is not needed:
+`arm64_go_exit` recurses on `fuel - 1`, so plain induction on `f` is structural
+and matches the definition exactly.
+-/
+
+/-- **The pc the loop is at after one step.**  Mirrors the `if` inside
+    `arm64_go_exit` exactly; see the section note above for why `st'.pc` alone
+    is not the right thing to reason about. -/
+def effNext (st st' : Arm64State) : Nat :=
+  if st'.pc = st.pc then st.pc + 4 else st'.pc
+
+/-- **The step bound.**  With `hhalts` and `hnodrop`, any state at or below the
+    exit reaches the exit in at most `exit - st.pc` steps, so that budget is a
+    sufficient fuel.  Proved by induction on `f`, the fuel, structurally
+    matching `arm64_go_exit`'s own recursion. -/
+theorem arm64_go_exit_terminates_aux (code : Nat → UInt8) (exit : Nat)
+    (hhalts : ∀ st : Arm64State, st.pc < exit → ∃ st', arm64_step st code = some st')
+    (hnodrop : ∀ st st' : Arm64State, st.pc < exit →
+              arm64_step st code = some st' →
+              st.pc < effNext st st' ∧ effNext st st' ≤ exit) :
+    ∀ (f : Nat) (st : Arm64State), st.pc ≤ exit → exit - st.pc < f →
+      ∃ s, arm64_go_exit st code exit f = some s := by
+  intro f
+  induction f with
+  | zero =>
+      intro st _ hlt
+      simp at hlt
+  | succ f ih =>
+      intro st hle hlt
+      by_cases hpc : st.pc = exit
+      · refine ⟨st, ?_⟩
+        rw [arm64_go_exit, if_neg (by omega : ¬ (f + 1 = 0)), if_pos hpc]
+      · have hlt' : st.pc < exit := by omega
+        obtain ⟨st', hstep⟩ := hhalts st hlt'
+        obtain ⟨hgtd, hle'⟩ := hnodrop st st' hlt' hstep
+        by_cases hp : st'.pc = st.pc
+        -- The step did not advance, so the loop substitutes `st.pc + 4`.  The
+        -- `if_pos` is load-bearing: without it `effNext` stays an `if` in the
+        -- hypotheses and `omega` reports a counterexample with free
+        -- metavariables, having abstracted the unevaluated `if` as an atom.
+        -- (Measured, not guessed — it was the one thing that blocked this.)
+        · simp only [effNext, hp, if_pos] at hgtd hle'
+          have hrec : exit - (st.pc + 4) < f := by omega
+          obtain ⟨s, hs⟩ := ih ({ st' with pc := st.pc + 4 }) hle' hrec
+          refine ⟨s, ?_⟩
+          rw [arm64_go_exit, if_neg (by omega : ¬ (f + 1 = 0)), if_neg hpc, hstep]
+          simpa [effNext, hp] using hs
+        · simp only [effNext, hp, if_false] at hgtd hle'
+          have hrec : exit - st'.pc < f := by omega
+          obtain ⟨s, hs⟩ := ih st' hle' hrec
+          refine ⟨s, ?_⟩
+          rw [arm64_go_exit, if_neg (by omega : ¬ (f + 1 = 0)), if_neg hpc, hstep]
+          simpa [effNext, hp] using hs
+
+/-- **`exportFuel` is sufficient** whenever the run starts within
+    `exit - st.pc` of the exit. -/
+theorem arm64_go_exit_terminates (code : Nat → UInt8) (exit f : Nat)
+    (hhalts : ∀ st : Arm64State, st.pc < exit → ∃ st', arm64_step st code = some st')
+    (hnodrop : ∀ st st' : Arm64State, st.pc < exit →
+              arm64_step st code = some st' →
+              st.pc < effNext st st' ∧ effNext st st' ≤ exit)
+    (hle : st.pc ≤ exit) (hfuel : exit - st.pc < f) :
+    ∃ s, arm64_go_exit st code exit f = some s :=
+  arm64_go_exit_terminates_aux code exit hhalts hnodrop f st hle hfuel
+
+/-- **THE FUEL IS PROVED SUFFICIENT, and `Total` is discharged — not admitted.**
+
+    `hhalts` and `hnodrop` are the two properties of the export's own code; the
+    third hypothesis, `hin`, is `InImage`, which is a *check* the generator
+    already closes with `native_decide`.  So for an export whose code is
+    straight-line inside the image, all three are checkable and this is a
+    theorem about concrete literals rather than a promise.
+
+    For an export with a loop, `hnodrop` is false and this theorem does not
+    apply — which is the honest shape of the result.  The generated call site
+    states `hnodrop` by name so that the condition is visible at the point the
+    obligation is discharged, instead of hiding behind a bare `sorry`. -/
+theorem dylibExport_total_of (image : DylibImage) (export_ : DylibExport)
+    (hhalts : ∀ st : Arm64State, st.pc < image.base + image.codeSize →
+      ∃ st', arm64_step st image.code = some st')
+    (hnodrop : ∀ st st' : Arm64State, st.pc < image.base + image.codeSize →
+      arm64_step st image.code = some st' →
+      st.pc < effNext st st' ∧ effNext st st' ≤ image.base + image.codeSize)
+    (hin : InImage image export_)
+    (hfuel : image.codeSize < exportFuel) :
+    Total image export_ := by
+  intro n
+  -- The fuel bound FIRST, while the only facts in context are two `Nat`
+  -- inequalities.  Adding a fact about the initial state first drags a whole
+  -- 31-field `Arm64State` record into omega's context, and omega then carries
+  -- an extra free atom it cannot relate to anything.  That is not a real
+  -- obstruction, just one the arithmetic no longer closes.
+  have hupp : export_.entry ≤ image.base + image.codeSize := by
+    obtain ⟨hb_ge, hoff⟩ := hin
+    unfold offset at hoff
+    omega
+  -- `InImage`'s *first* half is load-bearing here and it is easy to throw away:
+  -- `exit - entry ≤ exit - base` is the subtrahend-monotonicity step, and it
+  -- needs `base ≤ entry` to hold at all.
+  obtain ⟨hb_ge, _⟩ := hin
+  have hsub : (image.base + image.codeSize) - export_.entry
+      ≤ (image.base + image.codeSize) - image.base := by omega
+  have hrw : (image.base + image.codeSize) - image.base = image.codeSize := by omega
+  have hlt : (image.base + image.codeSize) - export_.entry < exportFuel := by
+    rw [hrw] at hsub
+    omega
+  -- Factor the run over an ARBITRARY state whose pc is the entry, so no proof
+  -- step ever has to name the initial-state term.  Naming it concretely does
+  -- not work: `runExport` builds that state through a `with`-update whose
+  -- unfolded form is a flat 31-field literal, and neither `exact` nor `change`
+  -- will bridge the two spellings.  `generalize` names it once, hands the
+  -- variable to `key`, and closes the equality with `rfl`.
+  have key : ∀ (st0 : Arm64State), st0.pc = export_.entry →
+      ∃ s', arm64_go_exit st0 image.code (image.base + image.codeSize) exportFuel
+        = some s' := by
+    intro st0 hpc0
+    have hle0 : st0.pc ≤ image.base + image.codeSize := by rw [hpc0]; exact hupp
+    have hlt0 : (image.base + image.codeSize) - st0.pc < exportFuel := by
+      rw [hpc0]; exact hlt
+    obtain ⟨s', hs'⟩ := arm64_go_exit_terminates_aux image.code
+      (image.base + image.codeSize) hhalts hnodrop exportFuel st0 hle0 hlt0
+    exact ⟨s', hs'⟩
+  rw [runExport, arm64_exec_go_exit]
+  generalize hst :
+      ({ Arm64State.init n image.base with
+          pc := export_.entry,
+          x30 := UInt64.ofNat (image.base + image.codeSize) }) = st0
+  obtain ⟨s', hs'⟩ := key st0 (hst.symm ▸ rfl)
+  exact ⟨s', hs'⟩
 
 end DylibExport
 
