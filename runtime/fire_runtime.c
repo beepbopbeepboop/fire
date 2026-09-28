@@ -4939,11 +4939,6 @@ char *mojo_repr_obj(int64_t addr) {
     return buffer;
 }
 
-int mojo_type(...) {
-    /* Stub: returns type identifier. 0 for now */
-    return 0;
-}
-
 int mojo_hasattr(int obj, char *attr) {
     /* Stub: returns 1 for any non-NULL object, since the typed dispatch
        is generated as a static function in each module and not available

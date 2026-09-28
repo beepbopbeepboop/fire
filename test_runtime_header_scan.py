@@ -98,8 +98,19 @@ def test_every_declaration_is_seen():
     with the code it is testing asserts nothing. They are also the cheapest
     possible tripwire for the NEXT declaration shape the scanner cannot parse:
     a new form that is missed shows up here as a count that no longer matches.
+
+    The tripwire cuts both ways, and 459 -> 447 is it firing correctly. Seven
+    prototypes that no object anywhere in the tree defines and no generated C
+    calls were removed from `fire_runtime.h` (`mojo_type`, `mojo_obj_enter`,
+    `mojo_obj_exit`, `int___enter__`, `int___exit__`, `MojoList__write_to`,
+    `tuple` — see the note in that header), and the header scanner then stopped
+    reporting five `mojo_fnptr_call_N` names it had been inventing out of a
+    `return mojo_fnptr_call_0(f);` line inside a `static inline` body. A count
+    assertion has to be rewritten when the runtime loses a function exactly as
+    when it gains one, and the two steps are separately attributable: 459->452
+    is the header, 452->447 is the scanner.
     """
-    for header, want in (('fire_runtime.h', 459),
+    for header, want in (('fire_runtime.h', 447),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),
