@@ -277,8 +277,18 @@ removes.
 Add `fire_sqlite3.c` to the runtime build. Add a registered suite entry that builds
 **and runs** `test_sqlite3.mojo`. Decide the other four translation units: compile
 them, or stop `#include`ing their headers unconditionally — a declaration with no
-definition is a latent link failure either way. Retire
-`test_sqlite3_min_proof.lean`, or state on its face that it is a template.
+definition is a latent link failure either way. **The 2026-09-27 decision:** the
+four are registered in `build_config.OPTIONAL_RUNTIME_UNITS` and compiled on
+demand; `fire_python.c` is deliberately NOT, because its whole surface is
+`#if USE_PYTHON 0` stubs and linking it would convert a loud link error into a
+silent NULL. Its header was never `#include`d either, so the failure stays loud.
+
+`test_sqlite3_min_proof.lean` **cannot** be annotated, which the original version
+of this phase assumed: every `*_proof.lean` is a gitignored build artifact
+(`.gitignore:64`), untracked, rewritten by any formal build. Editing it is
+possible and pointless — the next `fire.py build --formal` clobbers it. The
+finding therefore lives here and in `test_sqlite3_runtime.py`, not in the file
+whose name was the problem.
 
 Add a **link audit** that fails when a program calls a declared-but-undefined
 runtime symbol. This is the test that would have caught §3.3, and it stops it

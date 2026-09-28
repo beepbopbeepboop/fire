@@ -560,8 +560,32 @@ def emit_table_c(exports: list) -> str:
 
 # ── Runtime header reflection ─────────────────────────────────────────────────
 
+# A C prototype: return type, name, parameter list, terminating `;`.
+#
+# The `\*?` between the return type and the name is load-bearing, and was
+# missing until FORMAL.md phase 0's link audit needed this scanner to be
+# trustworthy. The return-type group `[\w][\w\s\*]*?` is NON-GREEDY, and the
+# separator used to be a bare `\s+`, so a declaration written the way C writes
+# a pointer return — `char *mojo_str_new(char *s)`, with the `*` attached to the
+# type — could not match at all: the group stopped at `char`, `\s+` ate the
+# space, and the next character was `*` where a name was required. Every
+# pointer-returning function was therefore dropped from the export list.
+#
+# Measured on this tree, before the fix: `fire_runtime.h` yielded 260 exports
+# of 470 prototypes, `fire_sqlite3.h` 15 of 22, `fire_zlib.h` 2 of 6,
+# `fire_ssl.h` 9 of 13, `fire_ncurses.h` 16 of 18, `fire_python.h` 6 of 15.
+# Every loss was a pointer return — `mojo_str_new`, `mojo_c_getenv`,
+# `mojo_path_join`, `mojo_chr`, `int64_t_basename`, all of `mojo_sqlite3_open`,
+# `_query` and `_query_dict`. After the fix: 459, 22, 6, 13, 18, 15, with the
+# only remaining gaps being `static inline` helpers (no external symbol, so
+# correctly absent) and one name mentioned in a comment.
+#
+# This mattered beyond the audit: `build_stdlib_dylib.py` builds the stdlib
+# dylib's reflection table with this function, so the shipped dylib was
+# advertising 260 of its own 459 runtime entry points — a C client resolving
+# `mojo_c_getenv` through reflection would have been told it did not exist.
 _PROTO_RE = re.compile(
-    r'^\s*([\w][\w\s\*]*?)\s+(\w+)\s*\(([^)]*)\)\s*;', re.MULTILINE)
+    r'^\s*([\w][\w\s\*]*?)\s*\*?\s*(\w+)\s*\(([^)]*)\)\s*;', re.MULTILINE)
 
 def collect_runtime_exports_h(header_path: str) -> list:
     """Parse a C header for public function prototypes → reflection export entries.
