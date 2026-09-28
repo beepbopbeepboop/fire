@@ -1182,15 +1182,28 @@ CASES = [
     # the body — an `...` in a trait method nothing calls compiles, which is
     # correct and is why this case calls the function.
     #
-    # The needle stops before the architecture name because the x86-64 text
-    # carries a different tail ("the integer/boolean surface is lowered…"),
-    # which is irrelevant boilerplate here but does not change the verdict.
+    # The needle was `unsupported expression EllipsisLiteral`, which is what
+    # this backend used to say.  It stopped saying that: the message became
+    # "is a declaration of an interface and so has no body to lower (a `...`
+    # in a trait method builds on both architectures, and a `...` in a plain
+    # function is refused whether or not anything ever calls it)" — which
+    # NAMES THE REASON rather than the node kind, and additionally states the
+    # trait-method case, so the pin was the only thing left describing the old
+    # behaviour.  Verified pre-existing, not introduced by this round: the
+    # message lives in formal/model.py and no commit in the [4]/[5] merge
+    # touched that line, and the pin was last written in dbf3abb.
+    #
+    # The needle is now the REASON ("no body to lower") rather than the whole
+    # sentence, so it survives the next rewording of the advice -- which is the
+    # failure mode this pin has now had once.  It is still a refusal, still
+    # names why, and `refuse:` still asserts BOTH architectures agree; nothing
+    # is silenced, the pin simply stops describing a message nobody emits.
     ("limit_ellipsis_function_body",
      "def slen(value):\n"
      "    ...\n\n"
      "def main(n: Int) -> Int:\n"
      "    return slen(1)\n",
-     "refuse:unsupported expression EllipsisLiteral", None),
+     "refuse:no body to lower", None),
 
     # ── wave 5 (E1): the same limit in the two spellings that FABRICATED ─────
     #
