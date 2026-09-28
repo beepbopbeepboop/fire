@@ -8411,6 +8411,39 @@ def gen_module_impl(self, stmts):
         sym_info = _as_dict(_imp_syms[_sn])
         if sym_info.get('return_type') == 'unknown':
             continue
+        # The `'signature' not in sym_info` escape hatch is LOAD-BEARING, not
+        # an oversight: for a symbol this whole program defines but the module
+        # being emitted only IMPORTS, the definition's own forward-declaration
+        # pass does not run (it reads `func_defs`, which is `stmts` — the local
+        # module — while `inline_defined` is built from `imported_stmts`), so
+        # this block is the ONLY declaration of it. Widening the gate to an
+        # unconditional skip on `_global_inline_defs` was measured: it removes
+        # ~dozens of duplicate externs and then every importer of a
+        # cross-module helper loses its declaration —
+        #   ast_rewriter.py:61: error: implicit declaration of function
+        #   'fire_compiler__as_str_9f63a2'
+        #
+        # It is also a type-mismatch hazard, because this extern is typed from
+        # `module_loader`'s text scan while the definition is typed from the
+        # body's own returns, and those are two independent inferences. When
+        # they disagree, and this TU contains both, the hard gcc error is
+        #   conflicting types for 'build_config_find_gcc'; have 'char *(void)'
+        # (the scan defaults an UNANNOTATED `def` to int64_t; the body returns
+        # a string). So the scanner must not be able to disagree: a compiler
+        # module whose functions are reachable through this path needs real
+        # return annotations. That is what build_config.find_gcc/find_gxx now
+        # carry, and why
+        # bugs/CODEGEN_optional_runtime_units_not_linked.md records the
+        # unannotated case as a hazard rather than fixing it here.
+        #
+        # Separately, and NOT fixed here: the emitting line below guards with
+        # `#ifndef {safe}` -- the bare symbol used as a macro name -- and never
+        # `#define`s it, so the guard is inert and this block re-emits every
+        # extern once per importing module (measured: three copies of
+        # build_config's, for fire.py, driver.py and the module itself).
+        # Adding the `#define` is not a safe standalone fix, because this block
+        # runs first and would win the race to define `_MOJO_STUB_<sym>`,
+        # suppressing the definition pass's own declaration.
         if (_sn in inline_defined
                 or (_sn in self._global_inline_defs and 'signature' not in sym_info)):
             continue

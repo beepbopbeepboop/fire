@@ -20,12 +20,16 @@ import os
 import shutil
 import platform
 import subprocess
+import sys
 
 import cas
 import build_stdlib_dylib as bsd
 import gimple_codegen
 from gimple_codegen import compile_linked
-from build_config import find_gcc, find_gxx
+from build_config import (find_gcc, find_gxx,
+                          optional_unit_compile_failed, optional_unit_libs,
+                          optional_unit_source,
+                          referenced_optional_runtime_units)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.join(HERE, 'runtime')
@@ -52,7 +56,8 @@ def _prog_key(c_code, link_files, gcc, flags, link_driver):
                   for p in sorted(link_files)))
 
 
-def _build(c_code, stdlib, dylibs, objects, target, gcc, objflags, link_driver):
+def _build(c_code, stdlib, dylibs, objects, target, gcc, objflags, link_driver,
+           extra_libs=()):
     """Compile the client object (cached) and link it against the runtime dylib +
     the import dylibs `import` recorded + the objects elaboration produced
     (generic instantiations, possibly including a C++-compiled coroutine
@@ -84,6 +89,7 @@ def _build(c_code, stdlib, dylibs, objects, target, gcc, objflags, link_driver):
     rpaths = sorted({os.path.dirname(d) for d in link_dylibs})
 
     link = [link_driver, '-o', target, client_o] + list(objects) + link_dylibs
+    link += list(extra_libs)
     for rp in rpaths:
         link += [f'-Wl,-rpath,{rp}']
     if platform.system() == 'Darwin':
@@ -131,6 +137,50 @@ def _build_client_cpp_object(cpp_code: str, gcc: str, objflags) -> bytes:
     return cas.get_or_build(key, '.o', _build_fn)[0]
 
 
+class _OptionalUnitFailed(Exception):
+    """Internal: an optional runtime unit's own compile failed. Carries the
+    diagnostic to print. Not raised out of compile_program -- it is caught and
+    turned into the same `return None` every other build failure here uses."""
+
+    def __init__(self, message):
+        super().__init__(message)
+        self.message = message
+
+
+def _compile_optional_unit(unit, src, plain, gcc):
+    """CAS-cached object for one optional runtime unit, or None with the
+    diagnostic already printed if it does not compile.
+
+    Split out of compile_program so the failure is a `return None` sitting
+    next to its reason, rather than a bare CalledProcessError from three
+    frames down inside a CAS callback -- that is what this path used to raise,
+    on the path `fire.py build` normally takes, and its argv named a temp .o
+    rather than the unit that failed.
+
+    The build callback RAISES rather than returning None: cas.get_or_build
+    publishes whatever build_fn returns, so a None here would enter the CAS as
+    a zero-length artifact and every later build would "hit" it.
+    """
+    key = cas.module_key(open(src).read(), [], gcc, plain + (unit,))
+
+    def _build_fn():
+        import tempfile as _tf
+        wd = _tf.mkdtemp(prefix='mojo_optrt_')
+        obj = os.path.join(wd, 'x.o')
+        r = subprocess.run([gcc, *plain, '-c', '-o', obj, src],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise _OptionalUnitFailed(
+                optional_unit_compile_failed(unit, src, r.stderr))
+        return open(obj, 'rb').read()
+
+    try:
+        return cas.get_or_build(key, '.o', _build_fn)[0]
+    except _OptionalUnitFailed as e:
+        print(e.message, file=sys.stderr)
+        return None
+
+
 def compile_program(input_file, src, output=None, run=True,
                     opt_flag=None, debug_flag=None, program_args=None):
     """Compile (and optionally run) a Mojo program through the module-cache system.
@@ -173,6 +223,36 @@ def compile_program(input_file, src, output=None, run=True,
                 return open(_o, 'rb').read()
 
             objects.append(cas.get_or_build(_key, '.o', _mk)[0])
+
+    # Optional runtime units (build_config's registry -- see
+    # bugs/CODEGEN_optional_runtime_units_not_linked.md). runtime/ holds six C
+    # units and only fire_runtime.c was in a build path, while the headers of
+    # the other four are `#include`d into EVERY generated TU (module_gen.py's
+    # preamble) and all their signatures sit in gimple_codegen._KNOWN_SIGS --
+    # so a program calling mojo_sqlite3_open saw a prototype, compiled clean,
+    # and died at link with `Undefined symbols ... _mojo_sqlite3_open`. Same
+    # probe as the coroutine block just above (the generated client .c
+    # references this unit's namespace?) and for the same reason: a program
+    # that never mentions sqlite must not drag libsqlite3 onto its link line.
+    # Plain C, NOT -fgimple, exactly like the coroutine units above.
+    extra_libs = []
+    _plain = ('-fPIC', f'-I{RUNTIME}') + flags
+    for _unit in referenced_optional_runtime_units(c_code, RUNTIME):
+        _up = optional_unit_source(_unit, RUNTIME)
+        _ukey = cas.module_key(open(_up).read(), [], gcc, _plain + (_unit,))
+        # A unit that does not compile is a hard error, not a link failure, so
+        # this does NOT go through the `check=True` path: that raises a bare
+        # CalledProcessError whose argv points at a temp .o and says nothing
+        # about which unit failed or which system headers are missing -- and
+        # this is the path `fire.py build` normally takes. Returns None instead
+        # so fire.py falls back to build_executable, which prints the same
+        # diagnostic; see build_config.optional_unit_compile_failed.
+        _obj = _compile_optional_unit(_unit, _up, _plain, gcc)
+
+        if _obj is None:
+            return None
+        objects.append(_obj)
+        extra_libs += optional_unit_libs(_unit)
     # The stdlib dylib already has runtime/mojo_async_runtime.cpp's own
     # symbols folded in unconditionally (build_stdlib_dylib.py's own
     # production-dylib link step) — a downstream client needing async
@@ -200,7 +280,8 @@ def compile_program(input_file, src, output=None, run=True,
         shutil.copy(hit, target)
         os.chmod(target, 0o755)
     else:
-        if not _build(c_code, stdlib, dylibs, objects, target, gcc, objflags, link_driver):
+        if not _build(c_code, stdlib, dylibs, objects, target, gcc, objflags,
+                      link_driver, extra_libs):
             return None
         cas.publish(pkey, '', open(target, 'rb').read())
 

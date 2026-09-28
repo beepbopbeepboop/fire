@@ -889,6 +889,29 @@ char *mojo_repr_list_pairs(MojoList *l);
 char *mojo_repr_list_pairs_s(MojoList *l);
 char *mojo_repr_list_pairs_d(MojoList *l);
 char *mojo_bool_to_str(int b);
+/* RESTORED, and it has a caller that `nm` on fire_runtime.o cannot see.
+ *
+ * This was removed as a dead stub whose body is `return 0`.  The
+ * zero-caller measurement was taken against the runtime OBJECT, and the
+ * caller is not in the runtime at all: gimple_codegen._RUNTIME_FUNCS maps the
+ * Mojo builtin `type` to this C function, so any generated C for a module
+ * that calls `type(...)` emits a reference to it.  Removing the declaration
+ * therefore broke the self-hosted compile of the compiler's own closure:
+ *
+ *   myinterpreter.py:1750:44: error: 'mojo_type' undeclared here
+ *       (not in a function); did you mean '_mojo_type'?
+ *
+ * "not in a function" is the tell -- the reference is in a DECLARATION, at
+ * file scope, not a call, so it is a prototype the imported-symbol extern
+ * block emits for a builtin it resolved to this name.
+ *
+ * The prototype is now `int mojo_type(int obj)` rather than the old variadic
+ * form.  An ellipsis with no named parameter before it is a hard error in
+ * clang (not a warning), which is what stopped the runtime compiling for the
+ * x86-64 dylib.  `int obj` is this header's own convention for "any boxed
+ * object" -- see mojo_hasattr and mojo_getattr immediately below -- and it is
+ * a real prototype both compilers accept. */
+int mojo_type(int obj);
 int mojo_hasattr(int obj, char *attr);
 int mojo_getattr(int obj, char *attr);
 /* Real per-object dynamic-attribute storage (see mojo_obj_getattr's own

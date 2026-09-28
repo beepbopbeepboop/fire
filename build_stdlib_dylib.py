@@ -1060,9 +1060,11 @@ def runtime_dylib(gcc: str = None, flags: tuple = (), arch: str = None) -> str:
         objs.append(o)
     # The reflection table over the runtime's own public surface, filtered to
     # the symbols this dylib really defines (see runtime_export_entries).
+    # The report is PRINTED inside runtime_export_entries, not here: iterating
+    # a local that a tuple-unpack bound is a shape the self-hosted backend
+    # mis-types, and this module is in mojoc's own compile closure. See that
+    # function's `for line in report:` for the measurement.
     entries, report = runtime_export_entries(cc, objs)
-    for line in report:
-        print(f"  runtime dylib: {line}", file=sys.stderr)
     reflect_src = reflect.emit_table_c(entries)
     rc = os.path.join(wd, '_mojo_reflect.c')
     ro = os.path.join(wd, '_mojo_reflect.o')
@@ -1164,7 +1166,34 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
             misresolved.append(f"{e['name']} -> {sym}")
         else:
             undefined.append(e['name'])
-    return kept, format_export_report(len(exports), misresolved, undefined)
+    report = format_export_report(len(exports), misresolved, undefined)
+    # Printed HERE, and that placement is load-bearing for the self-hosted
+    # build rather than a matter of taste. This module is compiled into `mojoc`,
+    # and the self-hosted backend mis-types `for x in <local>` when the local
+    # was bound by TUPLE-UNPACKING a call's return: it has no element type for
+    # it, so the loop's bounds are computed as `mojo_strlen(local)` and its
+    # element access as `_mojo_at_char(local, i)` — string indexing applied to
+    # a boxed LIST. That is not a wrong value, it is a hard gcc error, and it
+    # took `fire.py build fire.py` out:
+    #
+    #   build_stdlib_dylib.py: error: passing argument 1 of 'mojo_strlen'
+    #       makes pointer from integer without a cast [-Wint-conversion]
+    #   build_stdlib_dylib.py: error: passing argument 1 of '_mojo_at_char'
+    #       makes pointer from integer without a cast [-Wint-conversion]
+    #
+    # (`-Wint-conversion` is an ERROR by default in GCC 14+, not a warning, so
+    # there is no flag that makes this survivable.)
+    #
+    # Iterating a list this function builds by `append` lowers correctly --
+    # `mojo_list_get_str`, with `line` typed `char *` -- so the loop lives
+    # where the list is built. The real fix is in the codegen, not here; see
+    # bugs/FORMAL_known_limits.md.
+    #
+    # A caller that wants the lines as a VALUE still gets them: the tuple is
+    # returned unchanged, and test_runtime_dylib.py reads report[0].
+    for line in report:
+        print(f"  runtime dylib: {line}", file=sys.stderr)
+    return kept, report
 
 
 def format_export_report(total: int, misresolved: list, undefined: list) -> list:

@@ -4939,6 +4939,18 @@ char *mojo_repr_obj(int64_t addr) {
     return buffer;
 }
 
+int mojo_type(int obj) {
+    /* Stub, and deliberately still a stub: returns a type identifier, 0 for
+     * now. Not dead code despite having no in-tree caller -- see
+     * fire_runtime.h's own comment on the declaration, which explains that
+     * gimple_codegen._RUNTIME_FUNCS resolves the Mojo builtin `type` to this
+     * symbol, so generated C references it. `int obj` matches the header and
+     * this file's other boxed-object convention (mojo_hasattr below); the
+     * parameter is unused because the answer does not depend on it yet. */
+    (void)obj;
+    return 0;
+}
+
 int mojo_hasattr(int obj, char *attr) {
     /* Stub: returns 1 for any non-NULL object, since the typed dispatch
        is generated as a static function in each module and not available

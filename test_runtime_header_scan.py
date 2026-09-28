@@ -99,18 +99,34 @@ def test_every_declaration_is_seen():
     possible tripwire for the NEXT declaration shape the scanner cannot parse:
     a new form that is missed shows up here as a count that no longer matches.
 
-    The tripwire cuts both ways, and 459 -> 447 is it firing correctly. Seven
-    prototypes that no object anywhere in the tree defines and no generated C
-    calls were removed from `fire_runtime.h` (`mojo_type`, `mojo_obj_enter`,
-    `mojo_obj_exit`, `int___enter__`, `int___exit__`, `MojoList__write_to`,
-    `tuple` — see the note in that header), and the header scanner then stopped
-    reporting five `mojo_fnptr_call_N` names it had been inventing out of a
-    `return mojo_fnptr_call_0(f);` line inside a `static inline` body. A count
-    assertion has to be rewritten when the runtime loses a function exactly as
-    when it gains one, and the two steps are separately attributable: 459->452
-    is the header, 452->447 is the scanner.
+    The tripwire cuts both ways, and it has now fired in both directions.
+    459 -> 447: seven prototypes that no object in the tree defines and no
+    generated C calls were removed from `fire_runtime.h` (`mojo_type`,
+    `mojo_obj_enter`, `mojo_obj_exit`, `int___enter__`, `int___exit__`,
+    `MojoList__write_to`, `tuple` — see the note in that header), and the header
+    scanner then stopped reporting five `mojo_fnptr_call_N` names it had been
+    inventing out of a `return mojo_fnptr_call_0(f);` line inside a `static
+    inline` body. The steps are separately attributable: 459->452 is the
+    header, 452->447 is the scanner.
+
+    447 -> 448: `mojo_type` went BACK IN, and it is the sixth name on that list
+    whose removal was wrong. The zero-caller evidence for removing it was `nm`
+    on the runtime OBJECT, and the caller is not in the runtime:
+    `gimple_codegen._RUNTIME_FUNCS` maps the Mojo builtin `type` to this C
+    function, so generated C emits a reference to it, and with the declaration
+    gone the self-hosted compile of the compiler's own closure failed with
+        myinterpreter.py: error: 'mojo_type' undeclared here (not in a
+        function); did you mean '_mojo_type'?
+    "not in a function" is the tell that the reference is in a DECLARATION —
+    a prototype the imported-symbol extern block emits for a builtin it
+    resolved to this name — and not a call. So the lesson generalises past this
+    one symbol: a runtime symbol with no in-tree caller can still be reachable
+    from GENERATED code, and `nm` on the runtime cannot see that. It is
+    re-added as `int mojo_type(int obj)` rather than the old `int
+    mojo_type(...)`, because a `(...)` with no named parameter before it is a
+    hard error in clang, which is what the removal was for in the first place.
     """
-    for header, want in (('fire_runtime.h', 447),
+    for header, want in (('fire_runtime.h', 448),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

@@ -572,10 +572,14 @@ def test_the_removed_declarations_are_gone():
 
     Matched as a DECLARATION, not as a substring: the header now explains in
     prose why each of these was removed, so a substring test would fail on its
-    own documentation."""
+    own documentation.
+
+    `mojo_type` is NOT in this list any more, and it is the one removal here
+    that was WRONG — see `test_mojo_type_is_still_reachable` below, which
+    asserts the corrected fact instead. The other five hold: `nm` on the runtime
+    object plus the generated C are both silent about them."""
     import re
     header = open(os.path.join(RUNTIME, 'fire_runtime.h')).read()
-    csrc = open(os.path.join(RUNTIME, 'fire_runtime.c')).read()
     for name, why in (
             ('mojo_obj_enter', '`with` lowers to the defining struct\'s own '
                                'qualified method, never a bare dispatch helper'),
@@ -584,8 +588,6 @@ def test_the_removed_declarations_are_gone():
                               'since ABI v2 module-qualification'),
             ('int___exit__', 'same'),
             ('MojoList__write_to', 'a Mojo method name in a C header'),
-            ('mojo_type', 'a `return 0` stub with no caller, and `(...)` with '
-                          'no named parameter is a hard error in clang'),
     ):
         decl = re.compile(r'^[A-Za-z_][\w\s*]*?\b' + re.escape(name) + r'\s*\(', re.M)
         check(not decl.search(header),
@@ -595,12 +597,70 @@ def test_the_removed_declarations_are_gone():
                                                                      'fire_runtime.h')))
         check(name not in scanned,
               f'and the header scanner no longer reports {name}')
-    check(not re.search(r'^[A-Za-z_][\w\s*]*?\bmojo_type\s*\(', csrc, re.M),
-          'fire_runtime.c no longer DEFINES the mojo_type stub')
+
+
+def test_mojo_type_is_still_reachable():
+    """The correction, pinned so it cannot be removed a second time.
+
+    `mojo_type` was on the list above on the evidence that it is "a `return 0`
+    stub with no caller". That evidence was `nm` on `fire_runtime.o`, and it
+    does not transfer: the caller is not in the runtime. `gimple_codegen.
+    _RUNTIME_FUNCS['type']` maps the Mojo builtin `type` to this C function, so
+    generated C emits a reference to it, and with the declaration gone the
+    self-hosted compile of the compiler's own closure fails:
+
+        myinterpreter.py: error: 'mojo_type' undeclared here (not in a
+        function); did you mean '_mojo_type'?
+
+    "not in a function" is the load-bearing part of that message: the reference
+    is in a DECLARATION at file scope, not a call. `GimpleGen.BUILTIN_VALUE_MAP`
+    maps builtins to C functions "when used as values", so generated C takes
+    this one's ADDRESS rather than calling it, and the extern block emits a
+    prototype for it. That is why no amount of looking at runtime call sites
+    finds the caller.
+
+    So the general lesson, which is why this is a test rather than a comment: a
+    runtime symbol with no in-tree caller can still be reachable from GENERATED
+    code. `nm` on the runtime cannot see that, and `_RUNTIME_FUNCS` is the list
+    that says which names generated code can resolve to.
+
+    The old declaration was the variadic `int mojo_type` form, whose leading
+    ellipsis with no named parameter is a hard error in clang — that part of
+    the removal was right and is preserved by the new prototype.
+    `int mojo_type(int obj)` is
+    this header's own convention for "any boxed object" (see mojo_hasattr and
+    mojo_getattr beside it) and is a real prototype both compilers accept.
+    """
+    import re
+    header = open(os.path.join(RUNTIME, 'fire_runtime.h')).read()
+    csrc = open(os.path.join(RUNTIME, 'fire_runtime.c')).read()
+    decl = re.compile(r'^[A-Za-z_][\w\s*]*?\bmojo_type\s*\(', re.M)
+    check(decl.search(header) is not None,
+          'fire_runtime.h DECLARES mojo_type again (generated C references it '
+          'via _RUNTIME_FUNCS["type"])')
+    check(decl.search(csrc) is not None,
+          'fire_runtime.c DEFINES mojo_type again (a declaration with no '
+          'definition is a link failure waiting for a caller)')
+    scanned = set(e['name'] for e in
+                  reflect.collect_runtime_exports_h(os.path.join(RUNTIME,
+                                                                 'fire_runtime.h')))
+    check('mojo_type' in scanned,
+          'and the header scanner reports it, so the dylib advertises it')
+    # The clang-hostility the removal was for must stay fixed.
+    check(re.search(r'\bmojo_type\s*\(\s*\.\.\.\s*\)', header) is None,
+          'mojo_type is not declared with a bare `(...)` (hard error in clang)')
+    check(re.search(r'\bint\s+mojo_type\s*\(\s*int\s+obj\s*\)', header) is not None,
+          'mojo_type has the real prototype `int mojo_type(int obj)`')
+    import gimple_codegen
+    check(gimple_codegen.GimpleGen.BUILTIN_VALUE_MAP.get('type') == 'mojo_type',
+          'and GimpleGen.BUILTIN_VALUE_MAP still maps the `type` builtin to it, '
+          'which is the reference that made the removal wrong (it is a builtin '
+          'used as a VALUE, so generated C takes its address rather than '
+          'calling it — which is why no call-site search finds it)')
 
 
 def test_clang_can_compile_the_runtime_for_both_architectures():
-    """The cross-arch enabler, pinned. `int mojo_type(...)` was the ONLY thing
+    """The cross-arch enabler, pinned. The variadic `int mojo_type` was the ONLY thing
     in the runtime that clang rejected — and clang is the only compiler on this
     machine that can target x86_64 at all, so that one line stood between the
     x86-64 runtime dylib and existing. If a future edit makes the runtime
@@ -787,6 +847,7 @@ def main():
     test_dyld_refuses_the_other_architectures_dylib()
     test_no_declaration_without_a_definition()
     test_the_removed_declarations_are_gone()
+    test_mojo_type_is_still_reachable()
     test_clang_can_compile_the_runtime_for_both_architectures()
     test_stdlib_dylib_default_output_carries_the_arch()
     test_dylib_link_key_includes_the_arch()
