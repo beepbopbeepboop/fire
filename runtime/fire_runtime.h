@@ -876,6 +876,7 @@ char *mojo_repr_obj(int64_t addr);
 char *mojo_repr_float(double v);
 char *mojo_repr_list_doubles(MojoList *l);
 char *mojo_repr_list_ints(MojoList *l);
+char *mojo_repr_list_bools(MojoList *l);
 char *mojo_repr_list_bytes(MojoList *l);
 /* A list whose per-slot kinds are known but NOT uniform — a `struct.unpack`
    result for a format mixing int/float/bytes fields. `kinds` is one byte per

@@ -1379,6 +1379,17 @@ def _container_literal_locals(body: list) -> dict:
         name = _as_str(n.target.name)
         if name in out:
             return
+        if isinstance(n.value, gimple_ctypes.StringLiteral):
+            # A string/bytes literal is the SAME hazard a container literal
+            # is, not the "genuine scalar" this function's own docstring
+            # excludes: it is a real POINTER, so a caller-side int64_t
+            # default reads a `char *`/`MojoBytes *` bit pattern as a
+            # number instead of failing loudly. `def f(): s = 'abc'; return
+            # s` printed the pointer's decimal address instead of "abc"
+            # until this case was added; the container literals above
+            # already had an identical fix.
+            out[name] = 'MojoBytes *' if n.value.is_bytes else 'char *'
+            return
         t = _CONTAINER_LITERAL_CTYPES.get(type(n.value).__name__)
         if t:
             out[name] = t

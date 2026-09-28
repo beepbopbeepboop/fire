@@ -521,18 +521,33 @@ int mojo_is_registered_list(int64_t addr) {
  * pointer-shaped AND NOT a live registered MojoList ⇒ treat as string.
  * Small values (<65536: None/small ints/bools) are not strings.
  *
- * MUST agree with _mojo_tagged_addr_ok (defined below, forward-declared
- * here): that predicate's floor is 2 GiB, not 64 KiB, specifically to
- * reject the 31-bit `zlib.crc32(name) & 0x7fffffff` struct type-tags a
+ * MUST agree with _mojo_tagged_addr_range_ok (defined below, forward-
+ * declared here): that predicate's floor is 2 GiB, not 64 KiB, specifically
+ * to reject the 31-bit `zlib.crc32(name) & 0x7fffffff` struct type-tags a
  * compiled `type(node)` yields. A `v > 65536` test here classified every
  * such tag as "definitely a string pointer" while the other predicate
  * classified the same value as "definitely not a pointer" — the
  * dereference below then crashed on any self-hosted struct type-tag in
- * the 64 KiB..2 GiB range. See CRASH.md. */
-static int _mojo_tagged_addr_ok(int64_t addr);
+ * the 64 KiB..2 GiB range. See CRASH.md.
+ *
+ * Deliberately the RANGE-only predicate, not the fuller `_mojo_tagged_
+ * addr_ok` (which additionally requires `malloc_usable_size(addr) >= 8`,
+ * for a DIFFERENT caller's DIFFERENT bug — see that function's own
+ * docstring): a `char *` this runtime hands back as a genuine string is
+ * just as often a STATIC string-literal/interned-pool address (this
+ * codegen's `_slit_NNNN` globals) as a heap allocation, and
+ * `malloc_size()` on a non-heap pointer returns 0 on every platform this
+ * runtime targets — which made `mojo_boxed_is_str` reject every interned
+ * string literal reaching it as a boxed int64_t, silently falling to the
+ * "must be a plain integer" branch below. Real repro:
+ * `lambda k, d=d: d[k]` called with a string-literal argument stringified
+ * its own ADDRESS via `mojo_str_from_int` instead of using the string
+ * itself, so `d[k]` looked up a garbage decimal key and silently returned
+ * the not-found default instead of raising or finding the real entry. */
+static int _mojo_tagged_addr_range_ok(int64_t addr);
 
 int mojo_boxed_is_str(int64_t v) {
-    return _mojo_tagged_addr_ok(v) && !mojo_is_registered_list(v);
+    return _mojo_tagged_addr_range_ok(v) && !mojo_is_registered_list(v);
 }
 
 /* A Python tuple literal lowers to the exact same MojoList as a list literal
@@ -4391,12 +4406,18 @@ int mojo_isinstance_p(int64_t obj, int type_id) {
  * the low guard, unaligned, and at the very last byte of the address
  * space — and the bare dereference segfaulted. Answering "not a tagged
  * struct" is both correct and non-fatal. */
-static int _mojo_tagged_addr_ok(int64_t addr)
+static int _mojo_tagged_addr_range_ok(int64_t addr)
 {
     uint64_t u = (uint64_t)addr;
     if (u < 0x80000000ULL) return 0;
     if (u >= 0x0000800000000000ULL) return 0;
     if (u & 7ULL) return 0;
+    return 1;
+}
+
+static int _mojo_tagged_addr_ok(int64_t addr)
+{
+    if (!_mojo_tagged_addr_range_ok(addr)) return 0;
 #if MOJO_HAVE_MALLOC_USABLE_SIZE
     /* The range/alignment checks above only rule out small-int/None/
      * struct-type-tag values — they do NOT guarantee `addr` points at an
@@ -4413,7 +4434,7 @@ static int _mojo_tagged_addr_ok(int64_t addr)
      * the allocation actually holding this pointer" in O(1) (no scan),
      * so reject anything too small for a genuine tagged-struct header
      * instead of trusting range/alignment alone. */
-    if (MOJO_MALLOC_USABLE_SIZE((void *)(intptr_t)u) < sizeof(int64_t)) return 0;
+    if (MOJO_MALLOC_USABLE_SIZE((void *)(intptr_t)addr) < sizeof(int64_t)) return 0;
 #endif
     return 1;
 }
@@ -4640,6 +4661,29 @@ char *mojo_repr_list_ints(MojoList *l) {
     for (int64_t _i = 0; _i < _n; _i++) {
         if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
         _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(l, _i)));
+    }
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+}
+
+char *mojo_repr_list_bools(MojoList *l) {
+    /* Bool-aware repr for a MojoList * whose element type is statically
+     * known (at codegen time, via gimple_codegen.py's _elem_types) to be
+     * `_Bool` (e.g. a `[True, False]` literal). MojoList stores every
+     * element as a raw int64_t slot with no per-element type tag, so the
+     * generic codegen-emitted _mojo_repr_list/_mojo_generic_elem_repr pair
+     * both formats a bool slot with mojo_repr_int (printing 1/0 instead of
+     * True/False) AND treats a False (0) slot as the None sentinel, so
+     * `[True, False]` printed `[1, None]`. Mirrors mojo_repr_list_ints'
+     * exact structure but formats each slot with mojo_repr_bool
+     * unconditionally, with no None-sentinel check. */
+    int _is_tup = l && mojo_is_tuple(l);
+    if (!l) return _is_tup ? "()" : "[]";
+    int64_t _n = mojo_list_len(l);
+    char *_buf = strdup(_is_tup ? "(" : "[");
+    for (int64_t _i = 0; _i < _n; _i++) {
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        _buf = mojo_str_cat(_buf, mojo_repr_bool((int)mojo_list_get_int(l, _i)));
     }
     if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
     return mojo_str_cat(_buf, _is_tup ? ")" : "]");

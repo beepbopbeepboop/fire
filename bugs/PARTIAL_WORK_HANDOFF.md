@@ -29,9 +29,14 @@ now run in `check`.
 
 ## 2. PARTIAL — the recorded gap is fixed, named residue remains
 
-### 2.1 Container-typed ctor args reached via a local or `self.<f>`
-Doc: `bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md:150-210`
-(contains the full mechanism, the measured failure, and the ordered next step).
+### 2.1 Container-typed ctor args reached via a local or `self.<f>` — FIXED 2026-09-27, doc deleted
+Was `bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`. Fixed by a
+third, purely-syntactic evidence pass beside the existing literal-argument
+one in `module_gen.py` (traces an `IdentExpr`/`self.<field>` ctor argument
+to its own container-literal assignment, feeding the same unanimity-gate
+dicts the literal pass already uses) — not the context observer a prior
+attempt wired in and reverted. See `bugs/BUGFIX_ROADMAP.md` item 30 for the
+verification record (`test_gimple.py` 326/326, `test_selfhost.py` green).
 
 Container **literals** are fixed. These two shapes still leave the field
 `int64_t`, so `len`/`[i]` work and `for x in b.items` segfaults:
@@ -94,18 +99,38 @@ direction. The real source file is on disk at
 which is how this got wrong twice. **If you audit a COMPILE_FAIL doc, read
 the real file first.**
 
-### 2.4 `module.Class(...)` construction is unresolved on every path
-Doc: `bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md`
-(its own Status), plus one row of
-`bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md`.
+### 2.4 `module.Class(...)` construction — FIXED 2026-09-27 (qualified form); alias form still OPEN
+Was the highest-leverage item in this file — it gated the struct-collision
+bug entirely. Fixed for the headline shape: `mod_a.Dialog("a")` (a real
+module marker's attribute naming a real, already-inlined struct) lowered to
+a generic method-call fallback that just echoed the module-handle receiver
+back as the "result" (`int64_t.Dialog() stubbed`), so `x` bound to the
+module handle itself and `x.widgetName` raised `AttributeError`. New check
+at the top of `_lower_method_call`
+(`mojo/backend_gimple/emit_methods.py`) routes this shape to
+`_lower_struct_constructor` instead, for both a plain `import mod_a` and a
+`from PKG import submodule` binding. Verified end-to-end (compiles, runs,
+prints `a`); regression `test_gimple_runner.py`'s
+`qualified_module_struct_construction`.
 
-`mod_a.Dialog("a")` lowers to `int64_t.Dialog() stubbed`; the
-`from mod_a import Dialog as ADialog` spelling is worse and compiles to the
-string literal `"a"`. Confirmed on link mode too (`driver.compile_linked`
-returns `dylibs: []`). **This gates the struct-collision bug**: no program can
-exhibit the collision while no program can construct the class, which is why
-that fix is unvalidatable today and was correctly declined rather than landed
-unexercised. Fixing this first is the highest-leverage item in this file.
+**Consequence, confirmed live**: with construction unblocked, the
+struct-collision bug in
+`bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md` is now
+genuinely reachable — a same-arity collision reproduces its predicted
+silent field-coercion as a real running program (see that doc's updated
+Status). The 4-step collision fix itself is still NOT attempted (rated
+moderate-to-high risk, foundational struct-identity machinery) — next
+session's natural continuation.
+
+**Still open, own doc**:
+`bugs/CODEGEN_aliased_imported_struct_construction_unresolved.md` — the
+ALIAS spelling (`from mod_a import Dialog as ADialog; ADialog("a")`) is a
+narrower, separate gap: `gen.struct_field_types` is keyed by the struct's
+bare defining name, never by an import alias, and class aliases are never
+even registered into `gen.imported_symbols` at module scope (only function
+imports are, since that registration is gated on having a `'signature'`).
+Falls through to the generic single-string-arg "opaque constructor"
+fallback, so `ADialog("a")` silently becomes the string `"a"`.
 
 ### 2.5 Yield-kind and capture residue
 - `bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md` — items 2/3: a
@@ -130,18 +155,21 @@ unexercised. Fixing this first is the highest-leverage item in this file.
 
 ## 3. OPEN
 
-`bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md` — a
-function-scoped `from X import Y` records Y's signature/exports and then
-returns without compiling the module, so `X.Y(...)` returns `0` and a class
-attribute read prints `unavailable in compiled mode`, exit 0. The module-scoped
-spelling of the same import works. Pinned: `emit_funcs.py:319-440` records and
-`continue`s at `:440` without ever calling `_compile_imported_module`
-(`emit_resolve.py:362`).
+`bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md` — PARTIAL
+FIXED 2026-09-27 for the single-TU (`do_imports=True`) path: the original
+"`_compile_imported_module` never runs" diagnosis was stale (superseded
+before this session), and the real remaining blocker — a cross-module
+constructor call's field-type evidence never reaching the defining module's
+own struct — is fixed via a new `_xmod_ctor_field_hints` mechanism (see the
+doc's own updated Status). **Link-mode (`fire.py build`'s default pipeline)
+is UNCHANGED, still broken** — confirmed a separate pipeline bug, out of
+scope for this fix.
 
-Also open, outside `bugs/hard/`: `bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md`
-— `f"{a_list}"` / `str(a_list)` print the `MojoList` header as raw bytes,
-while `print` of the same value is correct. The f-string/`%s` site has no
-container branch and receives a `void *` it cannot resolve.
+`bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md` — FIXED 2026-09-27,
+doc deleted. `_stringify_value` gained the same `MojoList *`/`MojoSet *`/
+`MojoDict *` branches (plus boxed-container re-typing) `print`'s dispatch
+already had. See `bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md`'s
+residue note for the fix record.
 
 ---
 
@@ -149,52 +177,77 @@ container branch and receives a `void *` it cannot resolve.
 
 These have **no doc**. They are the reason this file exists.
 
-### 4.1 A function returning a local it just bound is typed `int64_t` ✓ verified
+### 4.1 A function returning a local it just bound is typed `int64_t` — FIXED 2026-09-27
     def f():
         var s = 'abc'
         return s
-    print(f())          # CPython: abc      compiled: 4374205200
+    print(f())          # was 4374205200   -> now abc
 
-Confirmed by me on the current tree. Identical for str and list, so it is not
-struct-specific and is NOT the same root cause as the module-constructor return
-bug that §1 fixed (that one is now a single shared table; this one survives it).
-`myinterpreter.py` traces the truthiness of `var s` through the pipeline.
+The list variant (`s = [1, 2, 3]; return s`) was already correct — the
+recorded claim that it was "identical for str and list" was stale; only
+string/bytes were still broken. Cause: `_container_literal_locals`
+(`mojo/middle/infra_infer.py`, feeding `_infer_return_type`) recorded a
+local's first-binding container-literal type for exactly four node shapes
+(`ListExpr`/`DictExpr`/`SetExpr`/`TupleExpr`) and explicitly excluded
+scalars by design — but a string/bytes literal is a `char *`/`MojoBytes *`
+POINTER, the identical "pointer coerced through the int64_t default" hazard
+a container is, not a genuine scalar. Added a `StringLiteral` case
+(`is_bytes` picks `char *` vs `MojoBytes *`) beside the existing four.
+Verified via `test_gimple_runner.py`'s `gimple_return_local_bound_to_string_literal`.
 
-### 4.2 Container printing is wrong in three more places ✓ verified
-    print([True, False])      # CPython: [True, False]   compiled: [1, None]
-    print({1, 2})             # CPython: {1, 2}          compiled: 515901952  (the set's ADDRESS)
+### 4.2 Container printing — FIXED 2026-09-27 (2 of 3), 1 left OPEN
+    print([True, False])      # was [1, None]        -> now [True, False]
+    print({1, 2})             # was the set's ADDRESS -> now {1, 2}
 
-Confirmed by me. The set one is the `print` dispatch having no `MojoSet *`
-branch (`len` and iteration are correct). Related:
-`print(B4([i for i in range(3)]).v)` → `[None, 1, 2]` — element tracking is
-lost on a field read off a **constructor temporary**; through a local it is
-exactly right.
+Fixed: `mojo_repr_list_bools` (new runtime helper, `runtime/fire_runtime.c`)
+routed via `_list_repr_fn`'s new `_Bool`-elem branch (`emit_infra.py`); a
+new `MojoSet *` dispatch arm in `print`'s type switch (`emit_infra.py`,
+beside the existing `MojoDict *`/`MojoBytes *` arms — it simply had none).
+Verified via `test_gimple_runner.py`'s `gimple_print_bool_list`/
+`gimple_print_set_literal`.
 
-### 4.3 A loop target that rebinds across domains is a SILENT wrong value
+Still open, own doc:
+`bugs/CODEGEN_ctor_temp_field_read_loses_element_type.md` —
+`print(B4([i for i in range(3)]).v)` → `[None, 1, 2]`, element tracking lost
+on a field read off a **constructor temporary** (through a local it is
+exactly right). Needs a new call-site-to-field ELEMENT-type tracer, one
+level deeper than the container-TYPE tracer §2.1 just landed.
+
+### 4.3 A loop target that rebinds across domains — FIXED 2026-09-27
     for x in [1, 2]: ...
-    for x in ['p', 'q']: ...     # prints pointer decimals, exit 0
+    for x in ['p', 'q']: ...     # was pointer decimals, exit 0 -> now p, q
 
-Found by the bytes agent while fixing the loud `MojoBytes *`/`char *` version of
-the same bug (that loud one IS fixed). Cause: `_declare_var`'s deliberate
-first-decl-wins applied to a loop *target*, which is a rebind, not a read. The
-bytes doc records it; the list variant was left open as "wider blast radius".
-This is the same mechanism as §4.2's neighbourhood and probably wants one fix.
+Fixed in `_gen_for_list` (`mojo/backend_gimple/emit_loops.py`), mirroring
+the retype check `_gen_for_set` already had for the loud
+`MojoBytes *`/`char *` conflict: `_declare_var`'s deliberate first-decl-wins
+is wrong for a loop TARGET specifically (a rebind, not a read), so a second
+loop over a different element domain now forces a fresh C declaration
+instead of silently keeping the first loop's. Verified via
+`test_gimple_runner.py`'s `gimple_for_loop_target_rebind_int_then_str`.
 
-### 4.4 `test_coro_nested_async_capture.py` is 0/9, and the recipe is small
-Not in any bucket. 7 of 9 cases name pre-rename `mojo_*` runtime files in
-`_RUNTIME_SRCS` (`:72`-`:74` and `_CORO_CTX_SRC` just above) — all now `fire_*`.
-An agent measured that renaming those 7 strings alone takes it **0/9 → 8/9**.
-The 9th, `test_struct_capture_refused_to_cpp` (`:384`), asserts the
-*pre*-Increment-E answer and so penalises the fix; inverting it to "compiles AND
-boxes AND prints the right value" makes its `except RuntimeError` arm dead code.
-**Do both before registering it** or the gate gains a permanently red step.
+### 4.4 `test_coro_nested_async_capture.py` — FIXED 2026-09-27, registered
+Was 0/9, unregistered. Renamed the 7 pre-rename `mojo_*` runtime paths in
+`_RUNTIME_SRCS`/`_CORO_CTX_SRC` to `fire_*`, and rewrote
+`test_struct_capture_refused_to_cpp` (asserted the *pre*-Increment-E refusal)
+into `test_struct_capture_compiles_boxed_and_correct` (asserts compiles,
+boxes, and prints the CPython-correct answer, verified via `_build_and_run`).
+9/9. Registered in `tools/suite.py` as `coro-nested-capture`, in the
+`coroutine` bucket (gate, alongside `coro`).
 
-### 4.5 Unattributed, needs a parent-commit build
-`test_coro_bugs.py` reports `CFAIL=1 LOWERED=2 RAISE=6` where both coro docs
-record `LOWERED=3/RAISE=6`. The `ipaddress` case lowers to 77 `__mgco_` refs then
-fails `gcc -fgimple -fsyntax-only` with `expected expression before 'sizeof'`.
-Reproduced identically on a pristine pre-fix tree, so not caused by the campaign
-— but it is a real CFAIL and nobody has attributed it.
+### 4.5 Attributed 2026-09-27 — `ipaddress` CFAIL is the known callable-value gap
+`test_coro_bugs.py` now reports `CFAIL=1 COMPILE=1 LOWERED=2 RAISE=5` (was
+`CFAIL=1 LOWERED=2 RAISE=6`; `test_test_string_test_string` moved off RAISE
+to COMPILE as a side effect of this session's fixes — not independently
+chased down further, since COMPILE is already a clean outcome). The
+`ipaddress` CFAIL (77 `__mgco_` refs, then `gcc -fgimple -fsyntax-only`
+fails with `expected expression before 'sizeof'` at
+`Lib/ipaddress.py:1548`, `self.hosts = self.__iter__`) is attributed: its
+own doc, `bugs/CODEGEN_generator_function_Lib_ipaddress.md`, already scopes
+the remaining blocker as needing "a dynamic-class-object-as-callable-value
+model", explicitly "genuinely feature-sized, not attempted" — the SAME
+missing first-class-callable-value representation §2.2 (variadic lambda
+call sites) and §2.3 (kw-only param invoked as callee) are blocked on, just
+a third symptom of it. Not a fresh mystery; no new doc needed.
 
 Generator value cycles (`q1`↔`q2`) bus-error (138) on unbounded mutual
 recursion. A recursion-depth gap, not a value-typing gap; out of scope, and

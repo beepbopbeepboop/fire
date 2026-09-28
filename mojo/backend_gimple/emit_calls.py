@@ -2740,6 +2740,25 @@ def _lower_builtin_sorted_keyed(gen, node, arg0, key_expr, reverse: bool):
             kret_t, kret_v = gen.lower_expr(gimple_ctypes.CallExpr(
                 func=key_expr, args=[gimple_ctypes.IdentExpr(_kvar)],
                 line=getattr(key_expr, 'line', 0), col=getattr(key_expr, 'col', 0)))
+            # A lambda invoked through a function POINTER
+            # (mojo_fnptr_call_N) always reports the generic homogenized
+            # `int64_t` return type, regardless of what the lambda body
+            # actually returns — even when the VALUE handed back is a
+            # genuine `char *` bit pattern (an identity-shaped key,
+            # `lambda s: s`, with `s` bound to `_kelem_t == 'char *'`
+            # above). Without this, `kret_t == 'char *'` just below never
+            # fired for a lambda key, so a STRING key was appended via
+            # `mojo_list_append_int` (the pointer's raw ADDRESS, not its
+            # content) and `mojo_sorted_by_keys` compared addresses:
+            # `sorted(["bb", "a", "ccc"], key=lambda s: s)` silently sorted
+            # by heap layout instead of lexicographically, exit 0. The
+            # param bindings are still in effect here (restored in
+            # `finally`, below), so `_quick_type` sees the same `char *`
+            # `s` the call itself was just made with.
+            if (isinstance(key_expr, gimple_ctypes.LambdaExpr) and kret_t != 'char *'
+                    and gen._quick_type(key_expr.body) == 'char *'):
+                kret_v = gen._coerce_to_type(kret_t, 'char *', kret_v)
+                kret_t = 'char *'
         finally:
             for _pn, _old_t in _saved_param_types.items():
                 if _old_t is None:

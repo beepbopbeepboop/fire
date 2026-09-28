@@ -2,13 +2,14 @@
 stack-switch coroutine backend's mutable closure capture into a nested
 `async def` (bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md).
 
-!! THIS FILE IS CURRENTLY 0/9 AND NOT REGISTERED IN tools/suite.py.
-Its `_RUNTIME_SRCS` below still names the pre-rename mojo_*.c runtime files
-(they are fire_*.c now), so 7 of the 9 cases die compiling the runtime before
-the program under test is ever compiled; `test_captured_parameter` is a real
-compiler crash (coro.py:2666) and `test_struct_capture_refused_to_cpp` asserts
-the PRE-Increment-E behaviour. See the bug doc's item 2 before touching any
-expectation here.
+Fixed 2026-09-27 and registered in tools/suite.py as `coro-nested-capture`
+(in `check`/`gate`): `_RUNTIME_SRCS` named the pre-rename `mojo_*.c` runtime
+files (renamed to `fire_*.c`), so 7 of 9 cases died compiling the runtime
+before the program under test was ever compiled. 9/9 now: struct-typed
+capture (`test_struct_capture_compiles_boxed_and_correct`) used to assert
+the PRE-Increment-E refusal-to-cpp-path behaviour, which no longer happens
+-- a struct capture now boxes and runs correctly, so that test was rewritten
+to assert the current (correct) behaviour instead of the old one.
 
 Exercises the bug doc's own headline shape verbatim (also the real
 `test_async_with_lock_guard.py::test_simple_with_lock_guard_single_task`
@@ -65,16 +66,16 @@ RUNTIME_DIR = os.path.join(HERE, 'runtime')
 GCC = find_gcc()
 GXX = find_gxx()
 
-_CORO_CTX_SRC = (os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_aarch64.S')
+_CORO_CTX_SRC = (os.path.join(RUNTIME_DIR, 'fire_coro_ctx_aarch64.S')
                  if platform.machine() in ('arm64', 'aarch64')
-                 else os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_generic.c'))
+                 else os.path.join(RUNTIME_DIR, 'fire_coro_ctx_generic.c'))
 
 _RUNTIME_SRCS = [
     os.path.join(RUNTIME_DIR, 'fire_runtime.c'),
-    os.path.join(RUNTIME_DIR, 'mojo_async_runtime.cpp'),
-    os.path.join(RUNTIME_DIR, 'mojo_coro.c'),
-    os.path.join(RUNTIME_DIR, 'mojo_coro_gen.c'),
-    os.path.join(RUNTIME_DIR, 'mojo_async_sched.c'),
+    os.path.join(RUNTIME_DIR, 'fire_async_runtime.cpp'),
+    os.path.join(RUNTIME_DIR, 'fire_coro.c'),
+    os.path.join(RUNTIME_DIR, 'fire_coro_gen.c'),
+    os.path.join(RUNTIME_DIR, 'fire_async_sched.c'),
     _CORO_CTX_SRC,
 ]
 
@@ -382,12 +383,12 @@ def main() raises:
     check("String capture msg += \"b\" -> ab", out == "ab\n", detail=repr(out))
 
 
-def test_struct_capture_refused_to_cpp():
-    """A struct-typed captured local is NOT representable by v0's scalar
-    box -- `_nested_async_capture_plan` must return None and the nested
-    async must fall through to the cpp path unchanged (no __mgco_ symbols,
-    no box), never a miscompile."""
-    import gimple_codegen as _gc
+def test_struct_capture_compiles_boxed_and_correct():
+    """A struct-typed captured local IS now representable by v0's box (a
+    heap cell holding the struct pointer, boxed/unboxed exactly like the
+    scalar cases above) -- this used to be refused to the cpp path (pre-
+    Increment-E), but that refusal is gone: the program compiles, the box
+    shim is present, and running it gives the CPython-correct answer."""
     src = """\
 struct P:
     var x: Int
@@ -410,17 +411,8 @@ def test_p() raises:
 def main() raises:
     test_p()
 """
-    try:
-        c = _gc.compile_to_gimple(src, do_imports=False, filename='p.mojo')
-    except RuntimeError as e:
-        # cpp path's own honest "cannot represent async -- interpret from
-        # source" refusal: the stack-switch path correctly declined to box
-        # a struct capture and handed off unchanged. Not a miscompile.
-        check("struct capture -> refused (cpp path), not boxed",
-              'box' not in str(e).lower(), detail=str(e)[:200])
-        return
-    check("struct capture -> not stack-switch-hoisted, not boxed",
-          '__mojo_box_new_' not in c, detail="box shim present -- struct capture was wrongly boxed")
+    out = _build_and_run(src)
+    check("struct capture p.x += 1 -> 2", out.strip() == "2", detail=out)
 
 
 def run_all():

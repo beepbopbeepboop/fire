@@ -1096,6 +1096,28 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
     func = node.func  # MemberExpr
 
+    # `mod_a.Dialog(...)` — a QUALIFIED CONSTRUCTOR CALL: the receiver names
+    # a real module marker and the member names a real, already-inlined
+    # STRUCT, so this is `Dialog(...)` reached through its owning module,
+    # not a genuine method call. Checked first: none of the special-cases
+    # below apply to a struct name (they key on specific method names like
+    # 'send'/'alloc'), and the GENERIC receiver-lowering dispatch further
+    # down has no "construct a class found via module attribute" case at
+    # all — the receiver (the module marker, lowering to a placeholder
+    # int64_t) was echoed straight back as the "result" (the same "generic
+    # fallback just ECHOED the receiver back" class of bug the
+    # collections.Counter special case in `_lower_call` documents), so
+    # `x = mod_a.Dialog("a")` bound `x` to the MODULE HANDLE itself and a
+    # later `x.widgetName` raised a genuine runtime `AttributeError`. See
+    # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md
+    # §4 ("module.Class(...) construction is unresolved on every path").
+    if (isinstance(func.obj, gimple_ctypes.IdentExpr)
+            and func.obj.name in gen.imported_symbols
+            and func.obj.name not in gen.struct_field_types
+            and func.member in gen.struct_field_types
+            and func.member not in gen.var_types):
+        return gen._lower_struct_constructor(func.member, node.args, node.kwargs)
+
     # `g.send(v)` — resuming a compiled generator with a value for the
     # `yield` it is suspended on: the rest of Python's generator protocol
     # alongside `next(g)` (see _lower_call). Checked FIRST, before any of

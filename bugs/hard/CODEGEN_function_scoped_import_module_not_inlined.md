@@ -1,6 +1,45 @@
 # HARD BUG: a function-scoped `from mod import Name` records the import's signatures but never pulls `mod` into the translation unit — the call lowers to the "unavailable in compiled mode" weak stub and silently returns 0
 
-**State: OPEN.** Found 2026-09-26 by re-testing the claims in the now-removed
+**State: PARTIAL — single-TU path FIXED 2026-09-27; link-mode still OPEN.**
+
+Re-verified against the current tree: rows 0-2 of the table below (all
+single-TU, `do_imports=True` — what `compile_stdlib.py`/`test_gimple.py`/the
+gate exercise) now all match CPython. The `_compile_imported_module` call
+this doc's root-cause section says never happens is, on the current tree,
+already reached (verified: the struct typedef, `__init__` and the call site
+all appear correctly in `--dump-full` output) — that diagnosis was accurate
+in 2026-09-26 but had already been superseded before this session started.
+The residue actually blocking rows 0-2 was a DIFFERENT, narrower bug: a
+constructor call whose only field-type evidence is an unannotated
+scalar/container literal argument (`Parameter('v', 7)`) left the field
+`int64_t` in the DEFINING module's own compiled struct, because neither the
+same-module ctor-literal pass nor its local/self.field companion
+(`_ctxlit_*`, `mojo/backend_gimple/module_gen.py`) ever sees a call site in
+a DIFFERENT module — this is true whether the import is function- or
+module-scoped, so it is not really an import-scoping bug at all. Fixed with
+a new cross-module hint mechanism, `_xmod_ctor_field_hints`
+(`gimple_codegen.py`/`module_gen.py`/`emit_resolve.py`), mirroring the
+existing `_xmod_gen_param_hints` pattern one struct field deeper: THIS
+module's own ctor call sites are scanned (before any imported module is
+inlined) for scalar/container LITERAL arguments to a constructor defined in
+an imported module, and the resulting evidence is applied by the DEFINING
+module's own temp_gen directly into its `struct_field_types`. Verified:
+`test_gimple_runner.py`'s `gimple_cross_module_ctor_scalar_field_type`
+(compiles AND runs, was a hard `gcc -fgimple` "non-trivial conversion"
+failure before the fix — a scalar mismatch, unlike the container case's
+silent SIGSEGV).
+
+**Row 3/4 (link-mode) are UNCHANGED, confirmed still broken** —
+`fire.py build`'s default pipeline (`driver.compile_program`, a genuinely
+separate codegen path from the single-TU inline one) still prints
+`can_colorize: unavailable in compiled mode0` for row 0's repro. Out of
+scope for this fix; CLAUDE.md already tracks link-mode as needing its own
+dedicated coverage (`linkmode` gate step) since a bug there is invisible to
+every other check.
+
+## History (found 2026-09-26, before the above fix)
+
+Found 2026-09-26 by re-testing the claims in the now-removed
 `CODEGEN_function_scoped_import_rettype_and_literal_cast_mismatches.md`. All
 four of that doc's mechanisms are genuinely fixed — the GIMPLE type mismatches
 they caused are gone, verified below. What its 2026-09-25 entry verified was

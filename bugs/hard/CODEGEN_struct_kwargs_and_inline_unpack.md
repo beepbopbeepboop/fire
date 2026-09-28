@@ -172,14 +172,16 @@ Verified correct, for the record, so nobody re-opens them:
 
 ## 4. Found while fixing the above, and NOT this doc's bug
 
-`f"{a_list}"` and `str(a_list)` emit `mojo_str((void *)list)` instead of the
-list repr, and print the container header as raw bytes. It is not `struct`-specific
-and not mixed-format-specific: `f"{[1, 2, 3]}"` prints `'\x10ڷ'` in this
-compiler and `'[1, 2, 3]'` in CPython, and the same is true of a UNIFORM
-`struct.unpack` result. The f-string/`%s` path routes through
-`_stringify_value`, which has no container branch, while the `print` path has
-had one for a while. Its own doc:
-`bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md`.
+**FIXED 2026-09-27, doc deleted.** `f"{a_list}"` and `str(a_list)` emitted
+`mojo_str((void *)list)` instead of the list repr, printing the container
+header as raw bytes — not `struct`-specific and not mixed-format-specific.
+`_stringify_value` (`mojo/backend_gimple/emit_infra.py`) gained the
+`MojoList *`/`MojoSet *`/`MojoDict *` branches `print`'s dispatch already
+had (reusing `_list_repr_call`/`_mojo_repr_set`/`_mojo_repr_dict`), plus the
+same boxed-container re-typing check (`_get_actual_type`) `print` does
+before its own branches, so a call result boxed into `int64_t`/`void *`
+resolves too. Regression: `test_gimple_runner.py`'s
+`gimple_fstring_and_str_of_containers`.
 
 ## A claim in the removed doc that did NOT reproduce
 

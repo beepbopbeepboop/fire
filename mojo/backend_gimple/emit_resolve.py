@@ -715,6 +715,13 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # into the coroutine-body emitter's local-elem registry.
                 if getattr(gen, '_xmod_gen_elem_hints', None):
                     temp_gen._xmod_gen_elem_hints = gen._xmod_gen_elem_hints
+                # Cross-module CONSTRUCTOR field-type hints (see
+                # _xmod_ctor_field_hints' docstring) — shared identically;
+                # the temp_gen merges the entries matching its own
+                # module_name straight into its own struct_field_types.
+                if getattr(gen, '_xmod_ctor_field_hints', None):
+                    temp_gen._xmod_ctor_field_hints = gen._xmod_ctor_field_hints
+                    temp_gen._xmod_ctor_field_conflict = gen._xmod_ctor_field_conflict
 
                 # Share the struct-__init__ registries by reference and
                 # pre-register every StructDef.__init__ reachable in the

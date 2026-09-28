@@ -6034,6 +6034,68 @@ def main():
         _PASS += 1
 
     # ------------------------------------------------------------------
+    # bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md's residue: a
+    # container reached the constructor through one extra hop -- a LOCAL
+    # bound to a container literal, or a `self.<field>` read of a field the
+    # caller's own struct sets to a container literal -- instead of the
+    # literal itself. Both used to leave the field `int64_t` (`for x in
+    # b.items` dereferenced the pointer as an int and SIGSEGVed) because the
+    # only observer that could see through the extra hop
+    # (`self._inferred_var_types`/`self.struct_field_types`, consulted by
+    # `_arg_scalar_type`) runs long after the field-write pass that needed
+    # its answer. Fixed by tracing the hop syntactically, at the same point
+    # in the pipeline the literal case is already proven at.
+    # ------------------------------------------------------------------
+    def test_ctor_arg_local_bound_to_container_literal_is_container_typed():
+        global _PASS, _FAIL
+        name = "ctor_arg_local_bound_to_container_literal_is_container_typed"
+        src = """\
+class Box:
+    def __init__(self, items):
+        self.items = items
+
+def main():
+    x = [1, 2, 3]
+    b = Box(x)
+    print(b.items)
+"""
+        ft, c = _ctor_arg_container_field_ctype(src, 'Box', 'items')
+        if ft != 'MojoList *':
+            print(f"FAIL  {name}: field {ft!r}, want 'MojoList *'")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_ctor_arg_self_field_container_read_is_container_typed():
+        global _PASS, _FAIL
+        name = "ctor_arg_self_field_container_read_is_container_typed"
+        src = """\
+class Reader:
+    def __init__(self, items):
+        self.items = items
+
+class Holder:
+    def __init__(self):
+        self._items = [4, 5, 6]
+
+    def make_reader(self):
+        return Reader(self._items)
+
+def main():
+    h = Holder()
+    r = h.make_reader()
+    print(r.items)
+"""
+        ft, c = _ctor_arg_container_field_ctype(src, 'Reader', 'items')
+        if ft != 'MojoList *':
+            print(f"FAIL  {name}: field {ft!r}, want 'MojoList *'")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    # ------------------------------------------------------------------
     # bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md item 2: a field
     # value round-tripped through a LOCAL lost its type, so
     # `t = self.v; return t` inferred an `int64_t` return and `print`
@@ -6231,6 +6293,8 @@ def main():
     test_ctor_arg_container_literal_field_is_container_typed()
     test_ctor_arg_dict_and_set_literal_fields_are_container_typed()
     test_ctor_arg_mixed_container_and_scalar_stays_int64()
+    test_ctor_arg_local_bound_to_container_literal_is_container_typed()
+    test_ctor_arg_self_field_container_read_is_container_typed()
     test_field_value_through_local_keeps_char_star_return_type()
     test_generator_bool_yield_slot_is_bool()
     test_generator_bool_tuple_slot_is_bool()

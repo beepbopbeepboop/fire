@@ -2394,6 +2394,176 @@ fn main():
     print(out)
 """, "45213\n54321\nolleh\n")
 
+    # bugs/PARTIAL_WORK_HANDOFF.md §4.1: a function returning a local it just
+    # bound was typed int64_t regardless of the local's real value, so the
+    # caller printed the pointer's decimal address instead of the string.
+    test_gimple_stdout("gimple_return_local_bound_to_string_literal", """\
+def f():
+    s = 'abc'
+    return s
+
+print(f())
+""", "abc\n")
+
+    # §4.2a: print([True, False]) printed [1, None] -- the generic list repr
+    # both formats a bool slot with %d instead of True/False AND treats a
+    # False (0) slot as the None sentinel.
+    test_gimple_stdout("gimple_print_bool_list", """\
+print([True, False])
+""", "[True, False]\n")
+
+    # §4.2b: print({1, 2}) printed the set's own ADDRESS -- print had no
+    # MojoSet * dispatch branch at all (len()/iteration on the same value
+    # were already correct).
+    test_gimple_stdout("gimple_print_set_literal", """\
+print({1, 2})
+""", "{1, 2}\n")
+
+    # §4.3: a for-loop TARGET name reused across two loops over different
+    # element domains is a REBIND, not a read -- `_declare_var`'s first-
+    # decl-wins default silently kept the FIRST loop's int64_t declaration
+    # for the second (string) loop, printing pointer decimals with exit 0.
+    test_gimple_stdout("gimple_for_loop_target_rebind_int_then_str", """\
+for x in [1, 2]:
+    print(x)
+for x in ['p', 'q']:
+    print(x)
+""", "1\n2\np\nq\n")
+
+    # bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md: a
+    # cross-module constructor call whose only field-type evidence is an
+    # unannotated scalar/container LITERAL argument (`Parameter('v', 7)`,
+    # `Parameter` defined in a SIBLING module) left the field `int64_t` in
+    # the DEFINING module's own compiled struct -- neither the same-module
+    # ctor-literal pass nor its one-hop `_ctxlit_*` companion ever sees a
+    # DIFFERENT module's call site. A scalar mismatch is a hard
+    # `gcc -fgimple` "non-trivial conversion" failure, so this failed to
+    # even COMPILE before the fix (`_xmod_ctor_field_hints`, mirroring the
+    # existing `_xmod_gen_param_hints` cross-module pattern).
+    def _compile_two_files_do_imports_and_run(defn_filename, defn_src,
+                                               use_filename, use_src, timeout=30):
+        """Write two sibling .py files, compile the SECOND with
+        do_imports=True (single-TU inline path), build with gcc -fgimple,
+        run, and return captured stdout. Raises on any failure, with the
+        stage that failed in the message (compile / gcc / run)."""
+        with tempfile.TemporaryDirectory() as wd:
+            open(os.path.join(wd, defn_filename), 'w').write(defn_src)
+            entry = os.path.join(wd, use_filename)
+            open(entry, 'w').write(use_src)
+            from gimple_codegen import compile_to_gimple
+            c_code = compile_to_gimple(use_src, do_imports=True, filename=entry)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
+            f.write(c_code)
+            c_file = f.name
+        exe_file = c_file.replace('.c', '.exe')
+        try:
+            runtime_dir = os.path.join(HERE, 'runtime')
+            result = subprocess.run(
+                [find_gcc(), '-fgimple', f'-I{runtime_dir}', '-o', exe_file,
+                 c_file, os.path.join(runtime_dir, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=timeout)
+            if result.returncode != 0:
+                raise RuntimeError(f"gcc -fgimple failed: {result.stderr[:300]}")
+            return run_executable_stdout(exe_file)
+        finally:
+            try:
+                os.unlink(c_file)
+            except Exception:
+                pass
+            if os.path.exists(exe_file):
+                try:
+                    os.unlink(exe_file)
+                except Exception:
+                    pass
+
+    def test_cross_module_ctor_scalar_field_type():
+        global _PASS, _FAIL, _TIMEOUT
+        name = "cross_module_ctor_scalar_field_type"
+        defn = ("class Parameter:\n"
+                "    def __init__(self, name, kind=0):\n"
+                "        self.name = name\n"
+                "        self.kind = kind\n")
+        use = ("from xmodctor_defn import Parameter\n"
+               "\n"
+               "def f():\n"
+               "    p = Parameter('v', 7)\n"
+               "    return p.name\n"
+               "\n"
+               "print(f())\n")
+        try:
+            out = _compile_two_files_do_imports_and_run(
+                'xmodctor_defn.py', defn, 'xmodctor_use.py', use)
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if out == "v\n":
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected 'v\\n', got {out!r}")
+            _FAIL += 1
+
+    test_cross_module_ctor_scalar_field_type()
+
+    # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md
+    # §4 ("module.Class(...) construction is unresolved on every path"):
+    # `mod_a.Dialog("a")` — a struct constructed through its OWNING MODULE
+    # object rather than its bare name — lowered to a generic "method call"
+    # whose receiver (the module marker) was echoed straight back as the
+    # "result", so `x` bound to the module handle and `x.widgetName` raised
+    # AttributeError at runtime.
+    def test_qualified_module_struct_construction():
+        global _PASS, _FAIL, _TIMEOUT
+        name = "qualified_module_struct_construction"
+        defn = ("class Dialog:\n"
+                "    def __init__(self, widgetName):\n"
+                "        self.widgetName = widgetName\n")
+        use = ("import xmodctor2_defn\n"
+               "\n"
+               "def main():\n"
+               "    x = xmodctor2_defn.Dialog(\"a\")\n"
+               "    print(x.widgetName)\n"
+               "\n"
+               "main()\n")
+        try:
+            out = _compile_two_files_do_imports_and_run(
+                'xmodctor2_defn.py', defn, 'xmodctor2_use.py', use)
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if out == "a\n":
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected 'a\\n', got {out!r}")
+            _FAIL += 1
+
+    test_qualified_module_struct_construction()
+
+    # bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md: f"{container}"
+    # and str(container) read the container's raw header bytes as a C
+    # string (`_stringify_value` had no container branch at all, unlike
+    # `print`'s dispatch, which was already correct for the same values).
+    test_gimple_stdout("gimple_fstring_and_str_of_containers", """\
+l = [1, 2, 3]
+print(f"{l}")
+print(str(l))
+s = {1, 2}
+print(f"{s}")
+d = {'a': 1}
+print(str(d))
+""", "[1, 2, 3]\n[1, 2, 3]\n{1, 2}\n{'a': 1}\n")
+
 
 def main():
     gcc = find_gcc()

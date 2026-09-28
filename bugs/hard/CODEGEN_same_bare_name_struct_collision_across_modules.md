@@ -1,10 +1,52 @@
 # HARD BUG: two different real classes sharing a bare name across modules corrupt each other
 
-**State: OPEN.** NOT fixed. The 4-step plan below (module-qualified field-table
-keys / value-identity propagation / per-owner tables in Phase 2a / typedef-name
-qualification) is still the right fix and is still unattempted — it remains
-foundational, shared struct-identity machinery rated moderate-to-high risk by
-this doc's own Risk section.
+**State: OPEN, and NOW REACHABLE (2026-09-27).** NOT fixed. The 4-step plan
+below (module-qualified field-table keys / value-identity propagation /
+per-owner tables in Phase 2a / typedef-name qualification) is still the
+right fix and is still unattempted — it remains foundational, shared
+struct-identity machinery rated moderate-to-high risk by this doc's own
+Risk section.
+
+**The blocker this doc's own §4 named ("module.Class(...) construction is
+unresolved on every path") is FIXED 2026-09-27** — see
+`bugs/PARTIAL_WORK_HANDOFF.md` §2.4 and `mojo/backend_gimple/
+emit_methods.py`'s new qualified-constructor check in `_lower_method_call`.
+Re-tested with the doc's own §3 collision repro (`mod_a.Dialog(n)` +
+`mod_b.Dialog()`, both constructed from `main.py` via `import mod_a` /
+`import mod_b`) now that construction actually works: it no longer reaches
+§3's silent field-coercion residue at all — it hits a NEW, LOUDER symptom
+first. `mod_b.Dialog()` (0 args) resolves to `mod_a`'s winning
+`__init__` (1 arg), a hard `gcc -fgimple` **compile** error ("too few
+arguments to function 'mod_a_Dialog___init__'; expected 2, have 1") rather
+than a runtime miscompile — `_lower_struct_constructor` resolves the bare
+name "Dialog" to whichever struct won `_struct_name_owner`'s race,
+independent of which MODULE the call was qualified through. This is a
+new, sharper reachability finding, not yet the underlying fix: the 4-step
+plan below is unaffected by it and remains the right shape, but the FIRST
+observable symptom for a real two-arg-mismatched collision is now this
+compile error, not §3's silent value.
+
+**A same-ARITY collision reaches §3's silent coercion as a LIVE, running
+program** — confirmed this session, first real end-to-end reproduction:
+
+    # mod_a.py                      # mod_b.py
+    class Dialog:                   class Dialog:
+        def __init__(self, n):          def __init__(self, unused):
+            self.n = n                      self.n = "hello"
+    # main.py
+    import mod_a, mod_b
+    def main():
+        a = mod_a.Dialog(5)
+        b = mod_b.Dialog(0)
+        print(a.n); print(b.n)
+
+CPython: `5` / `hello`. Compiled (`do_imports=True`, builds and runs clean,
+exit 0): `5` / `0` — `b.n` silently reads through `mod_a`'s winning field
+table (an `int64_t` slot `mod_b_Dialog___init__` never actually writes a
+string into), exactly the "loser's access resolves against the winner's
+field table" mechanism §3 predicted, now genuinely live rather than
+theoretical. This is the shape the 4-step plan below should be fixed
+against and verified with.
 
 **Re-derived 2026-09-26.** The mechanism is unchanged and the plan below still
 stands, but **three of this doc's load-bearing claims are now false** and are

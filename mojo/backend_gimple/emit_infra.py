@@ -2238,6 +2238,12 @@ def _list_repr_fn(gen, rav: str) -> str:
         return 'mojo_repr_list_doubles'
     if et == 'int64_t':
         return 'mojo_repr_list_ints'
+    if et == '_Bool':
+        # `[True, False]` -- the generic path both formats a bool slot as
+        # "1"/"0" (mojo_repr_int, not mojo_repr_bool) AND treats its False
+        # (0) slot as the None sentinel, printing `[1, None]`. Mirrors the
+        # int64_t/double routing just above.
+        return 'mojo_repr_list_bools'
     if et == 'MojoBytes *':
         return 'mojo_repr_list_bytes'
     return '_mojo_repr_list'
@@ -2289,6 +2295,31 @@ def _stringify_value(gen, et: str, ev: str) -> str:
     # %s of such a value emitted `static char * <address> = "<address>"`.
     if et in ('int', 'int64_t') and gen._get_actual_type(et, ev) == 'char *':
         return gen._new_val('char *', f'(char *){ev}')
+    # A boxed container (a call result whose static type is int64_t/void*
+    # but whose real value, per _get_actual_type, is a container) — same
+    # re-typing `print`'s dispatch already does before falling to its own
+    # container branches (emit_infra.py's print-args loop). Without this,
+    # f"{struct.unpack(...)}" / str(a_call_result()) fell straight to the
+    # generic `mojo_str` branch below and read the container's header bytes
+    # as a C string (bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md).
+    if et in ('int', 'int64_t', 'void *'):
+        _real = gen._get_actual_type(et, ev)
+        if _real in ('MojoList *', 'MojoSet *', 'MojoDict *'):
+            et = _real
+            ev = gen._new_val(_real, f'({_real}){ev}')
+    if et == 'MojoList *' or et == 'MojoSet *':
+        # A plain container value (a literal, or a local whose static type
+        # is already known) reaches here directly, same value the `print`
+        # dispatch already knows how to repr — reuse its helper choice
+        # rather than falling through to the generic `mojo_str` branch
+        # below, which reads the container's raw header bytes as text.
+        if et == 'MojoList *':
+            fn, fn_args = gen._list_repr_call(ev)
+        else:
+            fn, fn_args = '_mojo_repr_set', [('MojoSet *', ev)]
+        return gen._call_expr('char *', fn, fn_args)
+    if et == 'MojoDict *':
+        return gen._call_expr('char *', '_mojo_repr_dict', [('MojoDict *', ev)])
     if et == 'MojoBytes *':
         # Python str(b) / f"{b}" both give the b'...' repr text (no decode).
         return gen._call_expr('char *', 'mojo_bytes_repr', [('MojoBytes *', ev)])
@@ -3195,6 +3226,16 @@ def _gen_print(gen, args: list, kwargs: list = None):
             gen._emit(f'  {print_fn} ({rv});')
         elif atype == 'MojoBytes *':
             rv = gen._call_expr('char *', 'mojo_bytes_repr', [('MojoBytes *', aval)])
+            gen._emit(f'  {print_fn} ({rv});')
+        elif atype == 'MojoSet *':
+            # print({1, 2}) with no boxing involved (a set LITERAL's lowered
+            # type is statically MojoSet *, so it never reaches the boxed
+            # int64_t re-typing branch above that already calls
+            # _mojo_repr_set) fell all the way to the generic numeric path
+            # below and printed the set's own ADDRESS -- len() and iteration
+            # on the very same value were already correct, so this was
+            # purely a missing dispatch arm, not a missing repr helper.
+            rv = gen._call_expr('char *', '_mojo_repr_set', [('MojoSet *', aval)])
             gen._emit(f'  {print_fn} ({rv});')
         elif _stat in ('MojoList *', 'MojoSet *', 'MojoDict *', 'MojoBytes *') \
                 and atype not in ('MojoList *', 'MojoSet *', 'MojoDict *', 'MojoBytes *', 'char *'):

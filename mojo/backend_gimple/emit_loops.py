@@ -717,7 +717,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     # never typed) — int64_t matches how mojo_dict_items
                     # boxes the value slot.
                     gen._dict_items_val_elems[_pairs] = 'int64_t'
-                    gen._gen_for_list(var, _pairs, node.body)
+                    gen._gen_for_list(var, _pairs, node.body, share_var_with_sibling_arm=True)
                 else:
                     gen._gen_for_dict(var, dp, node.body)
                 gen._emit(f"  goto {bb_after};")
@@ -727,7 +727,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     # An already-materialized items list: its elements are
                     # the same [key, value] pairs.
                     gen._dict_items_val_elems[lp] = 'int64_t'
-                gen._gen_for_list(var, lp, node.body)
+                gen._gen_for_list(var, lp, node.body, share_var_with_sibling_arm=True)
                 gen._emit(f"  goto {bb_after};")
                 gen._emit_label(bb_after)
             else:
@@ -1343,7 +1343,8 @@ def _gfd_flatten_target(gen, vn: str, acc: list) -> None:
         acc.append(vn)
 
 
-def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | None = None):
+def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | None = None,
+                   share_var_with_sibling_arm: bool = False):
     # Handle tuple unpacking: for (a, b) in list_of_tuples:
     is_tuple = var.startswith('(') and var.endswith(')')
     elem = None if is_tuple else gen._elem_of(it_val)
@@ -1376,7 +1377,37 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             _gfl_declare_target_name(gen, shadow_name, _fl_vn, _fl_se)
     else:
         var_names = None
-        gen._declare_var(var, _as_str(elem) if elem is not None else elem, force=(var == shadow_name))
+        _fl_ctype = _as_str(elem) if elem is not None else elem
+        # Same rebind hazard `_gen_for_set` documents and fixes: a loop
+        # TARGET is not a read of an existing name, so `_declare_var`'s
+        # first-decl-wins default is wrong here -- `for x in [1, 2]:`
+        # followed by `for x in ['p', 'q']:` REBINDS x, and int/str element
+        # domains coerce to genuinely different C types. Where the set path
+        # hits a `gcc -fgimple` type-mismatch error (loud), a list of ints
+        # then a list of strs shares the SAME int64_t-shaped C declaration
+        # (a `char *` slot just gets stored through as if it were an
+        # int64_t, since a str list element is read via a different
+        # accessor than an int one) and compiles clean but prints pointer
+        # decimals for the second loop -- a SILENT wrong value, exit 0.
+        #
+        # EXCEPT when `share_var_with_sibling_arm` is set: the caller is one
+        # runtime-dispatched ARM of a SINGLE source-level `for` loop over a
+        # statically-unknown dict-or-list value (`_gen_for_iter`'s
+        # mojo_is_registered_dict/_list dual dispatch, only one arm ever
+        # actually runs) -- not two separate loops rebinding the same name.
+        # That call site's own comment is explicit that BOTH arms MUST
+        # declare the identical variable so the dead arm's declaration is
+        # accepted rather than rejected as a conflicting type; retyping
+        # here would rename the list arm's `x` to a fresh shadow variable
+        # while the REST of the (already-lowered-once) loop body keeps
+        # referencing the original bare name, silently reading garbage
+        # (measured: `add(x, 10)` inside such a loop body kept reading the
+        # pre-rename `x`, never the shadow copy -- a hard `gcc -fgimple`
+        # "makes integer from pointer without a cast" once the arms'
+        # element types actually differed, str key vs int64 element).
+        _fl_retype = (not share_var_with_sibling_arm
+                      and gen.var_types.get(var) not in (None, _fl_ctype))
+        gen._declare_var(var, _fl_ctype, force=(var == shadow_name) or _fl_retype)
     len64 = gen._new_temp('int64_t')
     len_t = gen._new_temp('int64_t')
     idx_t = gen._new_temp('int64_t')

@@ -1498,6 +1498,102 @@ def gen_module_impl(self, stmts):
                         # just derived transitively.
                         _xg_record_hint(_xg_key, _xg_pnames[_xi], _xg_enc_map[_xa.name])
 
+            # Cross-module CONSTRUCTOR field-type hints (pre-pass, same
+            # "must run before any imported module is inlined" constraint as
+            # the generator contracts above): a scalar/container LITERAL
+            # constructor argument is a PROOF of that field's C type exactly
+            # like it is for a same-module call (the literal pass in the
+            # `_ctor_init_params` block further down, and its `_ctxlit_*`
+            # companion for a local/self.field one hop away) — but when the
+            # STRUCT is defined in an imported module, neither of those runs
+            # against THIS call site at all: the same-module pass only scans
+            # `stmts`/`imported_stmts` of the gen that ends up compiling the
+            # struct's own module, which never includes a DIFFERENT module's
+            # call sites. Mirrors `_xmod_gen_param_hints` exactly, one struct
+            # field deeper: parse the target module's OWN source (it has not
+            # been compiled yet) to find the constructor's param names, then
+            # record each literal argument's ctype under
+            # "<home-qualifier>::<struct>::<param>", for the defining
+            # temp_gen to apply directly into its own struct_field_types.
+            def _xf_struct_init_params(_xfm, _xfs):
+                for _xfstmt in _xg_parse_mod(_xfm):
+                    if isinstance(_xfstmt, StructDef) and _as_str(_xfstmt.name) == _xfs:
+                        for _xfmeth in _xfstmt.methods:
+                            if _as_str(_xfmeth.name) == '__init__':
+                                _xfnames = gimple_ctypes._param_names_stripped(_xfmeth.params)
+                                return [n for n in _xfnames if n != 'self']
+                        return None
+                return None
+
+            def _xf_lit_ctype(_xfa):
+                if isinstance(_xfa, StringLiteral):
+                    return 'char *'
+                if isinstance(_xfa, FloatLiteral):
+                    return 'double'
+                return _gmi_container_ctype(_xfa)
+
+            def _xf_record(_xfkey, _xfct):
+                _xfprev = self._xmod_ctor_field_hints.get(_xfkey, '')
+                if not _xfprev:
+                    self._xmod_ctor_field_hints[_xfkey] = _xfct
+                elif _xfprev != _xfct:
+                    self._xmod_ctor_field_conflict[_xfkey] = True
+
+            # Bound name -> the module's own real dotted name, for a PLAIN
+            # `import mod_a [as alias]` (`mod_a.Dialog(...)`). Deliberately
+            # SEPARATE from `_xg_module_binding` above: that dict's value is
+            # the enclosing PACKAGE of a `from PKG import submodule` binding
+            # (its consumer joins package+binding to get the submodule's own
+            # dotted name via `_join_import_member`) — a plain `import`'s
+            # binding already IS the target module's own real name, joining
+            # it again would mangle it (`_join_import_member('mod_a',
+            # 'mod_a')` is not `'mod_a'`).
+            _xf_plain_import_mod: dict = {}
+            for _xf_n in _walk_ast(stmts):
+                if not isinstance(_xf_n, ImportStmt):
+                    continue
+                for _xf_im_mod, _xf_im_alias in [(_xf_n.module, _xf_n.alias)] + list(_xf_n.extra or []):
+                    _xf_im_bound = _xf_im_alias if _xf_im_alias else _as_str(_xf_im_mod).split('.', 1)[0]
+                    if _xf_plain_import_mod.get(_xf_im_bound, _xf_im_mod) != _xf_im_mod:
+                        _xf_plain_import_mod[_xf_im_bound] = None  # ambiguous
+                    else:
+                        _xf_plain_import_mod[_xf_im_bound] = _as_str(_xf_im_mod)
+
+            for _xf_call, _xf_enclosing in _xg_calls:
+                _xf_mod = None
+                _xf_orig = None
+                if isinstance(_xf_call.func, gimple_ctypes.IdentExpr):
+                    _xf_cname = _xf_call.func.name
+                    if _xf_cname not in _xg_alias_mod:
+                        continue
+                    _xf_mod = _xg_alias_mod.get(_xf_cname)
+                    _xf_orig = _xg_alias_orig.get(_xf_cname)
+                elif (isinstance(_xf_call.func, gimple_ctypes.MemberExpr)
+                        and isinstance(_xf_call.func.obj, gimple_ctypes.IdentExpr)):
+                    _xf_plain_mod = _xf_plain_import_mod.get(_xf_call.func.obj.name)
+                    if _xf_plain_mod:
+                        _xf_mod = _xf_plain_mod
+                        _xf_orig = _xf_call.func.member
+                    else:
+                        _xf_bmod = _xg_module_binding.get(_xf_call.func.obj.name)
+                        if not _xf_bmod:
+                            continue
+                        _xf_mod = gimple_ctypes._join_import_member(_xf_bmod, _xf_call.func.obj.name)
+                        _xf_orig = _xf_call.func.member
+                if not _xf_mod or not _xf_orig:
+                    continue
+                _xf_pnames = _xf_struct_init_params(_xf_mod, _xf_orig)
+                if not _xf_pnames:
+                    continue  # not a known struct constructor in that module
+                _xf_key_base = _xf_mod.replace('.', '_').replace('-', '_') + '::' + _xf_orig
+                for _xfi, _xfa in enumerate(_xf_call.args):
+                    if _xfi >= len(_xf_pnames):
+                        break
+                    _xfct = _xf_lit_ctype(_xfa)
+                    if not _xfct:
+                        continue
+                    _xf_record(_xf_key_base + '::' + _xf_pnames[_xfi], _xfct)
+
         for _mc_iter in sorted(modules_to_compile):
             # FRESH `_mn` local, NOT `module_name = _as_str(module_name)`:
             # reassigning the `for x in sorted(<set of str>)` loop variable
@@ -2523,6 +2619,101 @@ def gen_module_impl(self, stmts):
                     _obs_kind[_okey] = _lit_ct
                 elif _prev != _lit_ct:
                     _obs_conflict[_okey] = True
+
+        # CONTEXT-TRACED container evidence (residue recorded in
+        # bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md): an
+        # argument that is a LOCAL bound to a container literal
+        # (`def mk(src): return Ident(src)` after `src = [1, 2, 3]`), or a
+        # `self.<field>` read of a field the caller's OWN struct sets to a
+        # container literal (`Reader(self._items)`), is exactly as much a
+        # proof as the argument being the literal itself -- the value just
+        # travels through one extra hop. Purely syntactic tracing, on
+        # purpose: `self._inferred_var_types`/`self.struct_field_types`
+        # (the "context" observer down at `_arg_scalar_type`) aren't
+        # populated yet at this point in the pipeline, and threading THIS
+        # evidence through the SAME _obs_kind/_obs_container dicts the
+        # unanimity gate just below already consumes means no new admission
+        # rule is needed -- a traced container answer is adjudicated
+        # identically to a literal one.
+        # NOTE ON NAMING: every local here is `_ctxlit_`-prefixed, including
+        # ones that would ordinarily get a short generic name (`_key`,
+        # `_found`, `_ct`, ...). This whole outer function (`gen_module_impl`)
+        # compiles self-hosted as ONE C function, so a short name shared with
+        # some unrelated nested closure elsewhere in this ~9000-line body
+        # unifies to ONE C variable across both -- measured: `_key` collided
+        # with the unrelated string-typed `_key = f"..."` a couple thousand
+        # lines down and broke `test_selfhost.py` with "assignment to
+        # 'MojoList *' from 'int64_t'" pointing at an entirely different,
+        # untouched function. See this project's established `_xg_`/`_cl_`
+        # prefix convention above for the identical reason.
+        def _ctxlit_ident_container(_ctxlit_body, _ctxlit_name):
+            for _ctxlit_node in _walk_ast(_ctxlit_body):
+                if (isinstance(_ctxlit_node, AssignStmt) and isinstance(_ctxlit_node.target, IdentExpr)
+                        and _ctxlit_node.target.name == _ctxlit_name):
+                    _ctxlit_ct = _gmi_container_ctype(_ctxlit_node.value)
+                    if _ctxlit_ct:
+                        return _ctxlit_ct
+            return None
+
+        _ctxlit_field_cache: dict = {}
+
+        def _ctxlit_self_field_container(_ctxlit_sdef, _ctxlit_field):
+            _ctxlit_cachekey = _as_str(getattr(_ctxlit_sdef, 'name', '')) + '::' + _as_str(_ctxlit_field)
+            if _ctxlit_cachekey in _ctxlit_field_cache:
+                return _ctxlit_field_cache[_ctxlit_cachekey]
+            _ctxlit_result = None
+            for _ctxlit_method in _ctxlit_sdef.methods:
+                for _ctxlit_node2 in _walk_ast(_ctxlit_method.body):
+                    if isinstance(_ctxlit_node2, AssignStmt) and _gmi_self_member(_ctxlit_node2.target) == _ctxlit_field:
+                        _ctxlit_ct2 = _gmi_container_ctype(_ctxlit_node2.value)
+                        if _ctxlit_ct2:
+                            _ctxlit_result = _ctxlit_ct2
+                            break
+                if _ctxlit_result:
+                    break
+            _ctxlit_field_cache[_ctxlit_cachekey] = _ctxlit_result
+            return _ctxlit_result
+
+        _ctxlit_bodies: list = []   # (body, enclosing StructDef or None)
+        for _ctxlit_topstmt in all_struct_defs:
+            if isinstance(_ctxlit_topstmt, FunctionDef):
+                _ctxlit_bodies.append((_ctxlit_topstmt.body, None))
+            elif isinstance(_ctxlit_topstmt, StructDef):
+                for _ctxlit_meth in _ctxlit_topstmt.methods:
+                    _ctxlit_bodies.append((_ctxlit_meth.body, _ctxlit_topstmt))
+
+        for _ctxlit_callerbody, _ctxlit_enclosing in _ctxlit_bodies:
+            for _ctxlit_callnode in _walk_ast(_ctxlit_callerbody):
+                if not (isinstance(_ctxlit_callnode, CallExpr) and isinstance(_ctxlit_callnode.func, IdentExpr)):
+                    continue
+                _ctxlit_cname = _as_str(_ctxlit_callnode.func.name)
+                _ctxlit_pnames = _ctor_init_params.get(_ctxlit_cname)
+                if not _ctxlit_pnames:
+                    continue
+                for _ctxlit_argidx, _ctxlit_argnode in enumerate(_ctxlit_callnode.args):
+                    if _ctxlit_argidx >= len(_ctxlit_pnames):
+                        break
+                    _ctxlit_argct = None
+                    if isinstance(_ctxlit_argnode, IdentExpr):
+                        _ctxlit_argct = _ctxlit_ident_container(_ctxlit_callerbody, _ctxlit_argnode.name)
+                    elif _ctxlit_enclosing is not None:
+                        _ctxlit_selffld = _gmi_self_member(_ctxlit_argnode)
+                        if _ctxlit_selffld:
+                            _ctxlit_argct = _ctxlit_self_field_container(_ctxlit_enclosing, _ctxlit_selffld)
+                    if not _ctxlit_argct:
+                        continue
+                    _okey = _ctxlit_cname + '::' + _ctxlit_pnames[_ctxlit_argidx]
+                    _cprev = _obs_container.get(_okey, '')
+                    if not _cprev:
+                        _obs_container[_okey] = _ctxlit_argct
+                    elif _cprev != _ctxlit_argct:
+                        _obs_container_conflict[_okey] = True
+                    _prev = _obs_kind.get(_okey, '')
+                    if not _prev:
+                        _obs_kind[_okey] = _ctxlit_argct
+                    elif _prev != _ctxlit_argct:
+                        _obs_conflict[_okey] = True
+
         for _cs_name2 in _ctor_init_params:
             _init = _ctor_init_methods.get(_cs_name2)
             if not _init:
@@ -3897,6 +4088,31 @@ def gen_module_impl(self, stmts):
                 _xe_ct = _xe_pmap[_xe_pn]
                 if _xe_ct and not _xe_tgt.get(_xe_pn):
                     _xe_tgt[_xe_pn] = _xe_ct
+    # Cross-module CONSTRUCTOR field-type hints merge (see
+    # _xmod_ctor_field_hints' docstring, gimple_codegen.py): same qualifier
+    # match as the two hint merges above, but the key has a THIRD segment
+    # (struct name) and the target is `struct_field_types` directly rather
+    # than a per-function param map — this fires for THIS gen's own structs
+    # as seen from an IMPORTING module's call sites, which the same-module
+    # ctor-literal pass below (and its `_ctxlit_*` one-hop companion) can
+    # never observe since neither scans a DIFFERENT module's call sites.
+    # Applied here, before struct methods are emitted, so both the typedef
+    # preamble (reads struct_field_types directly) and the `__init__` body's
+    # own store codegen (reads it at emission time, later still) agree.
+    if getattr(self, '_xmod_ctor_field_hints', None) and self.module_name:
+        _xf_self_q = self.module_name.replace('.', '_').replace('-', '_')
+        for _xf_key in self._xmod_ctor_field_hints:
+            _xf_hq, _xf_hstruct, _xf_hfield = _xf_key.split('::', 2)
+            if _xf_hq != _xf_self_q:
+                continue
+            if self._xmod_ctor_field_conflict.get(_xf_key):
+                continue
+            _xf_ct = self._xmod_ctor_field_hints[_xf_key]
+            if not _xf_ct or _xf_hstruct not in self.struct_field_types:
+                continue
+            _xf_cur = self.struct_field_types[_xf_hstruct].get(_xf_hfield)
+            if _xf_cur in (None, 'int', 'int64_t'):
+                self.struct_field_types[_xf_hstruct][_xf_hfield] = _xf_ct
 
     self._inferred_var_types: dict[str, dict[str, str]] = {}  # func_name -> {var_name -> type}
     for s in all_functions:

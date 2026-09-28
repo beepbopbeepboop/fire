@@ -241,21 +241,30 @@ path, `MOJO_CORO=stackswitch`, plus `fire.py build`):
 - **Increment D's honest refusal**, for the shape the doc actually scopes:
   message names the construct and the reason, on both backends.
 
-## Also drifted: a baseline both removed docs cite
+## Also drifted: a baseline both removed docs cite — now attributed
 
-`python3 test_coro_bugs.py` reports `CFAIL=1 LOWERED=2 RAISE=6`, and this was
-measured **identically on a pristine pre-fix copy of the tree on 2026-09-27**,
-so none of it is attributable to the item-1 fix. Both removed docs record the
-baseline as `LOWERED=3/RAISE=6`, so the `CFAIL=1` is a real drift and the
-stale number is the `LOWERED`. The newly-CFAILing
-module is `ipaddress`, which lowers to 77 `__mgco_` refs and then fails
-`gcc -fgimple -fsyntax-only` with `expected expression before 'sizeof'`
-(`Lib/ipaddress.py:1548`) after a long chain of imported-module errors
-(`_collections_abc`, `dis`, `enum`, `dataclasses`, `re._compiler`, `typing`,
-`argparse`, `ast`). **Still not attributed** — pinning it needs a build of the
-parent commit, which the no-git-mutation constraint forbade then and still
-forbids. Flagged so the next session does not read the stale number as
-current.
+`python3 test_coro_bugs.py` reported `CFAIL=1 LOWERED=2 RAISE=6` here
+(2026-09-27), measured **identically on a pristine pre-fix copy of the
+tree**, so none of it was attributable to the item-1 fix. Both removed docs
+record the baseline as `LOWERED=3/RAISE=6`, so the `CFAIL=1` was a real
+drift and the stale number was the `LOWERED`.
+
+**Attributed, same session, later pass**: the CFAILing module is
+`ipaddress` (`Lib/ipaddress.py:1548`, `self.hosts = self.__iter__`, 77
+`__mgco_` refs then `gcc -fgimple -fsyntax-only` fails with `expected
+expression before 'sizeof'`) — its own doc,
+`bugs/CODEGEN_generator_function_Lib_ipaddress.md`, already scopes this as
+needing "a dynamic-class-object-as-callable-value model", explicitly
+"genuinely feature-sized, not attempted": the same missing first-class-
+callable-value representation `CODEGEN_generator_lambda_expr_unsupported.md`
+(variadic lambda call sites) and
+`COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` (kw-only param invoked
+as callee) are both blocked on. Not a fresh mystery. The count is now
+`CFAIL=1 COMPILE=1 LOWERED=2 RAISE=5` — `test_test_string_test_string`
+moved off RAISE to COMPILE as a side effect of unrelated fixes landed the
+same session (container ctor-arg typing, loop-target rebind, `print`
+dispatch); not independently chased down further since COMPILE is already
+a clean outcome.
 
 ## Where
 

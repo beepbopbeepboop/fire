@@ -371,6 +371,11 @@ test('suite-self-test', [PY, 'test_suite.py'], cache=True,
 test('coro', [PY, 'test_coro_runtime.py'], cache=True,
      extra=['test_coro_runtime.py'] + CORO_RUNTIME,
      desc='A3 stack-switch coroutine runtime, every backend at -O0 and -O2')
+test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=True,
+     extra=['test_coro_nested_async_capture.py', 'gimple_codegen.py',
+            'runtime/fire_async_runtime.cpp', 'runtime/fire_async_runtime.h'] + CORO_RUNTIME,
+     desc='nested async-def mutable closure capture under MOJO_CORO=stackswitch '
+          '(was 0/9, unregistered, naming the pre-rename mojo_*.c runtime files)')
 
 # ── The self-hosted BINARY's own compiled codegen ───────────────────────────
 # Everything here runs a mojoc process, so everything is capped, and
@@ -630,7 +635,7 @@ BUCKETS = {
                'formal-sweep', 'formal-x86', 'formal-x86-endtoend',
                'formal-x86-model'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model'],
-    'coroutine': ['coro'],
+    'coroutine': ['coro', 'coro-nested-capture'],
     'smoke': ['preflight', 'suite-self-test'],
     'ab': ['ab-clean', 'ab-aside', 'ab-bside', 'ab-compare'],
 }

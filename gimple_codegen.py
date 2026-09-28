@@ -791,6 +791,26 @@ class GimpleGen:
         # a number instead of a string. Same composite-string-key rationale as
         # _xmod_gen_param_hints above.
         self._xmod_gen_elem_hints: dict[str, dict[str, str]] = {}
+        # Cross-module CONSTRUCTOR field-type hints: "<home-qualifier>::
+        # <struct>::<param>" -> a unanimous scalar/container ctype ('char *'
+        # / 'double' / 'MojoList *' / 'MojoDict *' / 'MojoSet *'), collected
+        # from THIS module's own constructor call sites (`Foo('s')`,
+        # `Foo([1, 2])`) whose target struct is DEFINED in an imported
+        # module, BEFORE that module is inlined — mirrors
+        # `_xmod_gen_param_hints` exactly, for the identical reason: the
+        # struct's OWN `__init__` is compiled by a temp_gen that never sees
+        # THIS module's call sites, so a field whose only evidence is an
+        # unannotated ctor argument stayed the `int64_t` default (a scalar
+        # mismatch is a hard `gcc -fgimple` "non-trivial conversion"
+        # failure; a container mismatch is the silent SIGSEGV
+        # bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md fixed for
+        # the SAME-module case — that fix's new pass runs per-gen and so
+        # already covers an imported module's OWN internal call sites, but
+        # not a call from a DIFFERENT module reaching in). Applied by the
+        # defining temp_gen directly into its own `struct_field_types`,
+        # beside the `_xmod_gen_param_hints` merge.
+        self._xmod_ctor_field_hints: dict[str, str] = {}
+        self._xmod_ctor_field_conflict: dict[str, bool] = {}
         # This module's own free-function generators' param -> element ctype,
         # merged from _xmod_gen_elem_hints entries matching this module_name
         # (plus available for same-module seeding). Consumed only by
@@ -2321,6 +2341,7 @@ class GimpleGen:
         '_mojo_repr_list':           ('char *',    ['MojoList *']),
         'mojo_repr_list_doubles':    ('char *',    ['MojoList *']),
         'mojo_repr_list_ints':       ('char *',    ['MojoList *']),
+        'mojo_repr_list_bools':      ('char *',    ['MojoList *']),
         'mojo_repr_list_bytes':      ('char *',    ['MojoList *']),
         'mojo_repr_list_kinds':      ('char *',    ['MojoList *', 'const char *']),
         '_mojo_repr_dict':           ('char *',    ['MojoDict *']),
@@ -3600,8 +3621,9 @@ class GimpleGen:
         return glo._gen_for_zip(self, node)
     def _gen_for_zip_longest(self, node):
         return glo._gen_for_zip_longest(self, node)
-    def _gen_for_list(self, var: str, it_val: str, body: list, shadow_name: str | None=None):
-        return glo._gen_for_list(self, var, it_val, body, shadow_name)
+    def _gen_for_list(self, var: str, it_val: str, body: list, shadow_name: str | None=None,
+                       share_var_with_sibling_arm: bool=False):
+        return glo._gen_for_list(self, var, it_val, body, shadow_name, share_var_with_sibling_arm)
     def _gen_for_str(self, var: str, it_val: str, body: list, shadow_name: str | None=None):
         return glo._gen_for_str(self, var, it_val, body, shadow_name)
     def _gen_for_cstr(self, var: str, it_val: str, body: list):
