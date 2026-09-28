@@ -311,7 +311,6 @@ MojoList*mojo_list_concat(MojoList *a, MojoList *b);
 MojoList*mojo_list_repeat(MojoList *l, int64_t n);
 
 void mojo_list_print(MojoList *l);
-int64_t MojoList__write_to(MojoList *l, ...);
 
 /* ── String ───────────────────────────────────────────────────────────────*/
 typedef struct {
@@ -890,7 +889,29 @@ char *mojo_repr_list_pairs(MojoList *l);
 char *mojo_repr_list_pairs_s(MojoList *l);
 char *mojo_repr_list_pairs_d(MojoList *l);
 char *mojo_bool_to_str(int b);
-int mojo_type(...);
+/* RESTORED, and it has a caller that `nm` on fire_runtime.o cannot see.
+ *
+ * This was removed as a dead stub whose body is `return 0`.  The
+ * zero-caller measurement was taken against the runtime OBJECT, and the
+ * caller is not in the runtime at all: gimple_codegen._RUNTIME_FUNCS maps the
+ * Mojo builtin `type` to this C function, so any generated C for a module
+ * that calls `type(...)` emits a reference to it.  Removing the declaration
+ * therefore broke the self-hosted compile of the compiler's own closure:
+ *
+ *   myinterpreter.py:1750:44: error: 'mojo_type' undeclared here
+ *       (not in a function); did you mean '_mojo_type'?
+ *
+ * "not in a function" is the tell -- the reference is in a DECLARATION, at
+ * file scope, not a call, so it is a prototype the imported-symbol extern
+ * block emits for a builtin it resolved to this name.
+ *
+ * The prototype is now `int mojo_type(int obj)` rather than the old variadic
+ * form.  An ellipsis with no named parameter before it is a hard error in
+ * clang (not a warning), which is what stopped the runtime compiling for the
+ * x86-64 dylib.  `int obj` is this header's own convention for "any boxed
+ * object" -- see mojo_hasattr and mojo_getattr immediately below -- and it is
+ * a real prototype both compilers accept. */
+int mojo_type(int obj);
 int mojo_hasattr(int obj, char *attr);
 int mojo_getattr(int obj, char *attr);
 /* Real per-object dynamic-attribute storage (see mojo_obj_getattr's own
@@ -948,9 +969,15 @@ MojoList *mojo_set_to_list(MojoSet *s);  /* insertion order, see fire_runtime.c 
 MojoList *mojo_dict_sorted_keys(MojoDict *d);
 MojoList *mojo_dict_items_sorted(MojoDict *d);
 
-/* Context manager protocol */
-int mojo_obj_enter(int obj);
-int mojo_obj_exit(int obj, int exc_type, int exc_val, int exc_tb);
+/* Context manager protocol.
+ * `mojo_obj_enter`/`mojo_obj_exit` used to be declared here and were defined
+ * nowhere, and nothing called them: `with` lowers to the DEFINING struct's own
+ * qualified method symbol (measured in generated C:
+ * `std_runtime_tracing_Trace___enter__`, per doc/ABI.md's module-qualified
+ * rule), never to a bare `int___enter__`-style dispatch helper. There is
+ * nothing left in this section, and that is the correct state — a context
+ * manager's entry point is its own `__enter__`, and a table row here saying
+ * otherwise is a claim about the ABI that is false. */
 
 /* Call a method by name on an opaque object */
 int64_t mojo_obj_call1(int64_t obj, char *method, int64_t arg1);
@@ -1062,16 +1089,19 @@ static inline int64_t __mojo_floordiv(int64_t a, int64_t b) {
 #define SystemExit         1018
 #define RecursionError     1019
 
-/* ── Missing function stubs for interpreter ──────────────────────────────
- * These are called by generated interpreter code and need stub declarations */
+/* ── Interpreter entry points ─────────────────────────────────────────────
+ * Declared here because GENERATED code calls them and this header is what
+ * generated code sees. Each one is defined by whoever links the image — for
+ * `py_tokenize` that is the self-hosted compiler's own transpiled
+ * `fire_compiler.py` (it is in `reflect._NO_MANGLE_FUNCS` and in
+ * `GimpleGen._KNOWN_SIGS` for exactly that reason), NOT this runtime, which
+ * is why the runtime dylib's reflection table must not advertise it. A
+ * declaration with no definition is fine here and only here: the definition
+ * is the linker's business, and the alternative — guessing at one — is a
+ * wrong answer rather than a missing one. */
 
 /* Python builtins that appear as function calls */
 void setattr(int obj, int attr, int value);  /* setattr builtin */
-int tuple(int *args);                         /* tuple constructor */
-
-/* Magic methods for context managers */
-int int___enter__(int obj);   /* __enter__ magic method */
-int int___exit__(int obj, int exc_type, int exc_val, int exc_tb);  /* __exit__ */
 
 /* String utility functions for method access */
 char *int64_t_basename(char *path);    /* basename() from os.path */

@@ -33,6 +33,291 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME = os.path.join(HERE, 'runtime')
 DEFAULT_OUT = os.path.join(HERE, 'build', 'libmojostdlib.dylib')
 
+# ── Target architecture ─────────────────────────────────────────────────────
+#
+# An artifact is built for a TARGET; `platform.machine()` reports the HOST, and
+# the two come apart the moment anything builds for the other member of the
+# pair — which `tools/formal_sweep.py --arch` does, on every run, for both.
+# Until now nothing here had a notion of a target at all: `runtime_dylib()`'s
+# CAS key folded in the *host* (through `toolchain_fingerprint`) and its output
+# name had no architecture in it, so the two were the same cache entry wearing
+# the same file name.
+#
+# Four things have to carry the arch, and the fourth is the one that catches a
+# mistake rather than preventing one:
+#
+#   1. the CAS key, or a hit serves one architecture's bytes for the other;
+#   2. the OUTPUT NAME, or the two overwrite each other on disk even when the
+#      keys are right (a caller may pass any directory it likes — see
+#      `formal/imports.py`'s own note on why a name collision one level up
+#      reintroduces exactly this);
+#   3. the compile and link flags;
+#   4. the VERIFICATION of what came out.
+#
+# (4) is load-bearing because a flag being ACCEPTED is not a flag being
+# obeyed. Measured on this tree: `/opt/local/bin/gcc-mp-15 -arch x86_64 -c`
+# prints "warning: this compiler does not support x86 ('-arch' option
+# ignored)" and emits an **arm64** object, exit 0. A build rule that trusted the
+# flag would produce a dylib named `.x86_64.dylib` containing arm64 code, and
+# the failure would surface at `dlopen` — "mach-o file, but is an incompatible
+# architecture" — in a completely different program, later. So `toolchain_for`
+# MEASURES what each candidate driver can target and `object_arch` reads the
+# arch back out of the emitted Mach-O.
+
+_ARCH_ALIASES = {
+    'aarch64': 'arm64', 'arm64e': 'arm64', 'armv8': 'arm64', 'arm': 'arm64',
+    'amd64': 'x86_64', 'x86-64': 'x86_64', 'x64': 'x86_64', 'x86': 'i386',
+    'i686': 'i386',
+}
+_HOST_ARCH = platform.machine().lower()
+
+
+def normalize_arch(arch: str = None) -> str:
+    """`arch` in one canonical spelling; the host's when `arch` is None or ''.
+
+    Every arch that reaches an artifact's identity passes through here, so
+    'aarch64' and 'arm64' — which `uname -m` and Apple's `-arch` respectively
+    report, and which therefore both occur in this tree — name ONE cache
+    entry rather than two identical builds, and cannot be mistaken for two
+    architectures by a caller that only ever used one spelling.
+    """
+    if not arch:
+        arch = _HOST_ARCH
+    return _ARCH_ALIASES.get(arch.lower(), arch.lower())
+
+
+def arch_flags(arch: str) -> tuple:
+    """The per-target flags for a driver that HONOURS them (see above).
+
+    Empty off Darwin on purpose: the artifact here is a Mach-O dylib (install
+    name, `-dynamiclib`, `@rpath`), so a cross-architecture build of it is a
+    Darwin question, and mapping a foreign arch onto `-m32`/`-m64` would be a
+    different artifact pretending to be the same one.
+    """
+    if platform.system() != 'Darwin':
+        return ()
+    return ('-arch', normalize_arch(arch))
+
+
+def arches_of(path: str) -> frozenset:
+    """The architectures a Mach-O file really contains, read back from the file.
+
+    This is the check that makes the arch in a cache key an assertion rather
+    than a hope, and it deliberately asks the SYSTEM TOOL rather than
+    re-parsing the header: `lipo -archs` is dyld's own view of the thing, so
+    there is no second Mach-O reader in this file to disagree with the loader
+    that will eventually have to load it. `file` is the fallback for a
+    toolchain without `lipo`; if neither exists the answer is UNKNOWN, which
+    callers must treat as "do not claim this artifact is for `arch`" rather
+    than as a pass.
+    """
+    lipo = shutil.which('lipo')
+    if lipo:
+        try:
+            out = subprocess.run([lipo, '-archs', path], capture_output=True,
+                                 text=True).stdout.strip()
+            if out:
+                return frozenset(out.split())
+        except Exception:
+            pass
+    filecmd = shutil.which('file')
+    if filecmd:
+        try:
+            out = subprocess.run([filecmd, '-b', path], capture_output=True,
+                                 text=True).stdout
+        except Exception:
+            out = ''
+        found = set()
+        for name in ('arm64', 'x86_64', 'i386', 'ppc64', 'ppc'):
+            # "Mach-O 64-bit object arm64" / "... universal binary with 2
+            # architectures: [x86_64:...] [arm64:...]"
+            if name in out:
+                found.add(name)
+        if found:
+            return frozenset(found)
+    return frozenset()
+
+
+class ArchError(RuntimeError):
+    """No available toolchain can target the requested architecture, or an
+    artifact came out for a different one than the one that was asked for."""
+
+
+def _arch_or_die(path: str, arch: str, what: str) -> None:
+    """Fail loudly when an artifact is not for the architecture it was built for.
+
+    A silent mismatch is the whole failure this exists to prevent (see the
+    warning at the top): the artifact links, the program builds, and the error
+    appears at `dlopen` in an unrelated program with no thread back to here.
+    """
+    found = arches_of(path)
+    if found and arch in found:
+        return
+    raise ArchError(
+        f"{what} is {'/'.join(sorted(found)) or 'of unknown architecture'}, "
+        f"not {arch}: {path}")
+
+
+# A trivial translation unit, compiled by `toolchain_for` to MEASURE what a
+# driver can target. `int`/nothing/return, so no header, no libc, no language
+# feature — a driver that cannot compile this cannot compile the runtime.
+_PROBE_SRC = 'int mojo_probe(void) { return 0; }\n'
+
+# (driver, arch) -> (works, measured reason). Per-process; the probe is two
+# forks and the answer cannot change while the process lives.
+_driver_probe: dict = {}
+
+
+def _driver_targets(driver: str, arch: str) -> tuple:
+    """(works, why) — can `driver` emit an object FOR `arch`? Measured, not assumed."""
+    key = (driver, arch)
+    if key in _driver_probe:
+        return _driver_probe[key]
+    result = (False, 'not probed')
+    try:
+        wd = tempfile.mkdtemp(prefix='mojo_archprobe_')
+        src = os.path.join(wd, 'probe.c')
+        out = os.path.join(wd, 'probe.o')
+        with open(src, 'w') as f:
+            f.write(_PROBE_SRC)
+        proc = subprocess.run([driver, *arch_flags(arch), '-c', '-o', out, src],
+                              capture_output=True, text=True)
+        if proc.returncode == 0 and os.path.exists(out):
+            made = arches_of(out)
+            if arch in made:
+                result = (True, '')
+            else:
+                result = (False, f"emits {'/'.join(sorted(made)) or 'an object of unknown arch'}"
+                                 f" for -arch {arch}")
+        else:
+            detail = (proc.stderr or proc.stdout or '').strip().splitlines()
+            result = (False, detail[-1] if detail else f'exit {proc.returncode}')
+    except Exception as e:
+        result = (False, str(e))
+    _driver_probe[key] = result
+    return result
+
+
+def toolchain_for(arch: str, gcc: str = None, gxx: str = None) -> tuple:
+    """(cc, cxx) — drivers that can actually TARGET `arch`, or ArchError.
+
+    The configured `build_config.find_gcc()`/`find_gxx()` come first, so for
+    the host architecture this returns exactly what every caller got before
+    and nothing about an ordinary build changes. Only when the preferred driver
+    cannot target the requested architecture does this look further, and then
+    the error it raises names what it measured for each candidate rather than
+    saying "unsupported" — "this compiler does not support x86 ('-arch'
+    option ignored)" is the difference between a bug report that is actionable
+    and one that is not.
+    """
+    arch = normalize_arch(arch)
+    cands_cc = [gcc] if gcc else []
+    cands_cc += ['gcc', 'cc', 'clang']
+    cands_cxx = [gxx] if gxx else []
+    cands_cxx += ['g++', 'c++', 'clang++']
+    cc = ''
+    tried = []
+    for c in cands_cc:
+        if not c:
+            continue
+        # Resolved to a path before it is used or reported: on this machine
+        # `gcc` on PATH is Apple clang, and a log that says "gcc: cannot
+        # target x86_64" when it means /usr/bin/gcc is a message that sends
+        # the next reader to install a gcc that is already installed and
+        # already works.
+        path = shutil.which(c) or (c if os.path.isabs(c) and os.path.exists(c) else '')
+        if not path:
+            continue
+        ok, why = _driver_targets(path, arch)
+        if ok:
+            cc = path
+            break
+        tried.append(f"{path}: {why}")
+    if not cc:
+        raise ArchError(
+            f"no C compiler on this machine can target {arch}"
+            + (" (" + "; ".join(tried) + ")" if tried else " (none found)"))
+    cxx = ''
+    for c in cands_cxx:
+        path = shutil.which(c) or ''
+        if not path:
+            continue
+        ok, _why = _driver_targets(path, arch)
+        if ok:
+            cxx = path
+            break
+    if not cxx:
+        # A C++ driver is only needed for the one .cpp unit. Falling back to
+        # the C driver would fail later with a less useful message, so say so
+        # here and let the caller decide.
+        raise ArchError(
+            f"no C++ compiler on this machine can target {arch}, and the "
+            f"runtime dylib links {_CPP_UNIT}")
+    return cc, cxx
+
+
+# ── The runtime's translation units: ONE table, two callers ─────────────────
+#
+# `build()`'s production path and `runtime_dylib()` used to carry two
+# hand-maintained copies of this list, which is how they came to disagree in
+# every field except the filenames: `runtime_dylib()` took a `flags` argument,
+# put it in its CAS key, and then never passed it to a single compile — so two
+# callers passing different flags got two cache entries holding byte-identical
+# artifacts, and a caller who believed the flag had been honoured was wrong.
+# One table, one flag computation, used by both.
+#
+# (source, language, arch predicate or None for "every architecture").
+# The aarch64 context-switch file is hand-written assembly and has no x86-64
+# counterpart, which is why the pair below is selected on the TARGET and not
+# on the host: selecting on the host is how an x86-64 build ends up assembling
+# aarch64 instructions and getting an assembler error naming a register that
+# does not exist on that architecture.
+_C_UNIT = 'c'
+_CPP_UNIT = 'fire_async_runtime.cpp'
+_ASM_UNIT = 'asm'
+
+_RUNTIME_UNITS = (
+    ('fire_runtime.c', _C_UNIT, None),
+    (_CPP_UNIT, 'c++', None),
+    ('fire_coro.c', _C_UNIT, None),
+    ('fire_coro_gen.c', _C_UNIT, None),
+    ('fire_async_sched.c', _C_UNIT, None),
+    ('fire_coro_ctx_aarch64.S', _ASM_UNIT, 'arm64'),
+    ('fire_coro_ctx_generic.c', _C_UNIT, 'x86_64'),
+)
+
+# Per-language base flags. `fire_async_runtime.cpp` is a real C++20 translation
+# unit (coroutines, exceptions) and is the reason the final link goes through a
+# C++ driver at all — see `_dylink`'s `link_driver`.
+_UNIT_FLAGS = {
+    _C_UNIT: ('-fPIC',),
+    'c++': ('-std=c++20', '-fPIC'),
+    _ASM_UNIT: (),
+}
+
+
+def runtime_units(arch: str, opt_flag: str = None, extra_flags: tuple = ()) -> list:
+    """`(source, language, base_flags)` for every unit of `arch`'s runtime.
+
+    The flags are the per-language base, the runtime's own `-I`, the target
+    flags, `opt_flag`, and the caller's `extra_flags` — in that order, so a
+    caller's flag is the last word and an optimization level applies to every
+    unit rather than to whichever one a caller remembered.
+    """
+    arch = normalize_arch(arch)
+    out = []
+    for src, lang, only in _RUNTIME_UNITS:
+        if only is not None and normalize_arch(only) != arch:
+            continue
+        flags = tuple(_UNIT_FLAGS[lang]) + (f'-I{RUNTIME}',) + arch_flags(arch)
+        if opt_flag:
+            flags += (opt_flag,)
+        flags += tuple(extra_flags)
+        out.append((os.path.join(RUNTIME, src), lang, flags))
+    if not out:
+        raise ArchError(f"no runtime units are defined for {arch}")
+    return out
+
 
 def _excluded_platform(fname: str) -> bool:
     """True if a platform-specific module does not match the host OS. The stdlib
@@ -336,18 +621,26 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tupl
 
 def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = False,
           extra_exports: list = None, jobs: int = 1, opt_flag: str = None,
-          track_local_deps: bool = True) -> str:
+          track_local_deps: bool = True, arch: str = None) -> str:
     """`opt_flag` (e.g. '-O2'): folded into every module's AND the runtime's
-    (fire_runtime.c/fire_async_runtime.cpp) own object-compile flags, and
-    into their CAS keys (so an -O2 build never serves a stale -O0-compiled
-    object, or vice versa) — `_OBJ_FLAGS`/plain `toolchain_fingerprint(gcc,
-    ())` on their own carry NO optimization flag (gcc's implicit -O0),
-    appropriate for the STDLIB dylib (compiled once, used everywhere,
-    optimized for compile time / cache-friendliness) but not for a
-    `mojo dylib`-built artifact meant to be linked into a real program and
-    actually run at speed."""
+    own object-compile flags, and into their CAS keys (so an -O2 build never
+    serves a stale -O0-compiled object, or vice versa) — `_OBJ_FLAGS`/plain
+    `toolchain_fingerprint(gcc, ())` on their own carry NO optimization flag
+    (gcc's implicit -O0), appropriate for the STDLIB dylib (compiled once,
+    used everywhere, optimized for compile time / cache-friendliness) but not
+    for a `mojo dylib`-built artifact meant to be linked into a real program
+    and actually run at speed.
+
+    `arch` is the architecture the dylib is FOR (default: the host's) and
+    reaches every module compile, every runtime object, the runtime dylib this
+    links against, the final link, the CAS keys and the artifact's own
+    verification — see the architecture section at the top of this file for why
+    each of those is separately necessary and why the verification is not
+    optional."""
     gcc = find_gcc()
-    objflags = _OBJ_FLAGS + ((opt_flag,) if opt_flag else ())
+    gxx = find_gxx()
+    arch = normalize_arch(arch)
+    objflags = _OBJ_FLAGS + arch_flags(arch) + ((opt_flag,) if opt_flag else ())
     os.makedirs(os.path.dirname(out), exist_ok=True)
     workdir = tempfile.mkdtemp(prefix='mojostdlib_')
     objs = []
@@ -474,105 +767,54 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         print(f"  ({excluded} modules excluded for symbol collisions)", file=sys.stderr)
 
     # Runtime handling:
-    # - For production (link_runtime=False): compile fire_runtime.c into an object
+    # - For production (link_runtime=False): compile each unit of the runtime
     #   and fold it into the dylib (no separate runtime dylib needed)
-    # - For testing (link_runtime=True): build separate runtime dylib and link against it
-    rt_src = os.path.join(RUNTIME, 'fire_runtime.c')
-    rt_cflags = ('-fPIC', f'-I{RUNTIME}') + ((opt_flag,) if opt_flag else ())
-    rt_key = 'rtobj/' + cas._hash(
-        'mojo-rtobj-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
-        cas.toolchain_fingerprint(gcc, rt_cflags), open(rt_src).read())
-
-    gxx = find_gxx()
+    # - For testing (link_runtime=True): build the standalone runtime dylib and
+    #   link against it
+    #
+    # The unit list is `_RUNTIME_UNITS`, the SAME one `runtime_dylib()` uses.
+    # It used to be written out twice, and the two copies had already drifted
+    # in the way that matters: the copy here picked the context-switch source
+    # from `platform.machine()` (the HOST) while the key for the object it was
+    # about to compile folded in the same host — so a build FOR another
+    # architecture compiled aarch64 assembly under a name that claimed
+    # otherwise. One table, selected on the target, is the fix; the reasoning
+    # for folding each unit in unconditionally is the hand-verified crashes
+    # recorded below and in runtime_dylib()'s own docstring.
+    rt_units = runtime_units(arch, opt_flag)
+    cc, cxx = toolchain_for(arch, gcc, gxx)
 
     if link_runtime:
         # For test modules: link against standalone runtime dylib (which
         # itself now also folds in mojo_async_runtime.o — see
-        # runtime_dylib()'s own docstring).
-        rt_dylib = runtime_dylib(gcc)
+        # runtime_dylib()'s own docstring). Per-arch, for the same reason as
+        # everything else here: a test module built for one architecture and a
+        # runtime dylib built for the other is a link that succeeds and a
+        # dlopen that does not.
+        rt_dylib = runtime_dylib(gcc, arch=arch)
         rt_path = rt_dylib
     else:
-        # For production: include runtime object directly
-        def _build_rt_obj():
-            o = os.path.join(workdir, 'fire_runtime.o')
-            subprocess.run([gcc, *rt_cflags, '-c', '-o', o, rt_src], check=True)
-            return open(o, 'rb').read()
-        rt_o, _ = cas.get_or_build(rt_key, '.o', _build_rt_obj)
-        objs.append(rt_o)
+        # For production: include every runtime object directly. The keys are
+        # per unit (source + flags + toolchain + arch), and the arch is
+        # spelled out in each because `toolchain_fingerprint` folds the FLAGS
+        # — and a driver that ignores its target flag produces identical bytes
+        # under a different name, which is the whole failure this per-arch work
+        # is about.
+        for _src, _lang, _uflags in rt_units:
+            _stem = os.path.splitext(os.path.basename(_src))[0]
+            _driver = cxx if _lang == 'c++' else cc
+            _key = 'rtobj/' + cas._hash(
+                'mojo-rtobj-v2', cas.ABI_VERSION, cas.compiler_fingerprint(),
+                cas.toolchain_fingerprint(_driver, _uflags), arch, _stem,
+                open(_src).read())
 
-        # runtime/fire_async_runtime.cpp's mojo_coro_resume_generic/
-        # mojo_coro_destroy_generic (+ the AsyncRT_DeviceContext_
-        # enqueueHostFunction(Range) stubs) — needed the moment ANY
-        # compiled stdlib module references `_coro_resume_fn`/
-        # `_coro_destroy_fn` as a bare value (device_context.mojo's own
-        # enqueue_cpu_function/enqueue_cpu_range, and std/runtime/
-        # asyncrt.mojo's `_async_execute` generic — see gimple_codegen.py's
-        # BUILTIN_VALUE_MAP entries for these two names) or defines a
-        # compiled async function/closure at all (MojoAsync's own `_start`/
-        # `_is_done`/`_value`/`_destroy` API). A real, hand-verified
-        # regression otherwise: the module itself compiles clean (gcc
-        # -fgimple -fsyntax-only never sees a linker), and this production
-        # dylib link uses `-undefined dynamic_lookup` (below) so even the
-        # DYLIB LINK doesn't fail — the missing symbol only surfaces as a
-        # dyld "symbol not found in flat namespace" crash the first time a
-        # real program actually calls into the affected stdlib code at
-        # runtime. Compiled with g++ (C++20; the .cpp needs real coroutine/
-        # exception support fire_runtime.c's plain-C -fgimple objects
-        # don't), CAS-cached exactly like fire_runtime.o's own object above
-        # — folded into the SAME production dylib (not a separate runtime
-        # piece) via a C++ link driver (find_gxx()) so the final link pulls
-        # in libstdc++ correctly. Scoped to ONLY this (production) branch —
-        # computing it unconditionally added a spurious extra CAS hit/miss
-        # to the link_runtime=True test path's own cas.stats bookkeeping
-        # (test_module_cache.py's stage3 "exactly 2 cache ops" assertions),
-        # even though that path never used the result (runtime_dylib()
-        # already builds its own copy, untracked by cas.stats — see there).
-        async_rt_src = os.path.join(RUNTIME, 'fire_async_runtime.cpp')
-        async_rt_cflags = ('-std=c++20', '-fPIC', f'-I{RUNTIME}') + ((opt_flag,) if opt_flag else ())
-        async_rt_key = 'rtobj/' + cas._hash(
-            'mojo-async-rtobj-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
-            cas.toolchain_fingerprint(gcc, async_rt_cflags), open(async_rt_src).read())
-
-        def _build_async_rt_obj():
-            o = os.path.join(workdir, 'mojo_async_runtime.o')
-            subprocess.run([gxx, *async_rt_cflags, '-c', '-o', o, async_rt_src], check=True)
-            return open(o, 'rb').read()
-        async_rt_o, _ = cas.get_or_build(async_rt_key, '.o', _build_async_rt_obj)
-        objs.append(async_rt_o)
-
-        # A3 stack-switch coroutine runtime (doc/COROUTINE.html §5.5: the
-        # default backend now, gimple_gen_coro.py): the same "fold in
-        # unconditionally" treatment as fire_async_runtime.cpp just above,
-        # for the identical reason -- a stdlib module compiled with a
-        # generator/async function/nested async closure (e.g. std/gpu/
-        # host/device_context.mojo's enqueue_cpu_function, hoisted as a
-        # nested async closure) emits real CALLS to __mojo_coro_*/
-        # __mojo_gen_*/__mojo_box_*, and with `-undefined dynamic_lookup`
-        # below the DYLIB LINK doesn't catch a missing one either -- it
-        # only surfaces as a `dyld: symbol not found` crash the first time
-        # any program actually calls into that stdlib code, even a program
-        # with no coroutine of its own (confirmed via a hand-verified
-        # repro: a plain `def g(x): return x` / `print(g(3.5))` program,
-        # no generator/async anywhere in it, crashed with `symbol not
-        # found ... '___mojo_gen_destroy'` purely from linking against
-        # this dylib). Plain C + one arch-specific file, all -fgimple-free
-        # (unlike fire_runtime.o, these use ordinary strict C / asm).
-        _ss_cflags = ('-fPIC', f'-I{RUNTIME}') + ((opt_flag,) if opt_flag else ())
-        _ss_arch = ('fire_coro_ctx_aarch64.S'
-                    if platform.machine().lower() in ('arm64', 'aarch64')
-                    else 'fire_coro_ctx_generic.c')
-        for _ss_name in ('fire_coro.c', 'fire_coro_gen.c', 'fire_async_sched.c', _ss_arch):
-            _ss_src = os.path.join(RUNTIME, _ss_name)
-            _ss_key = 'rtobj/' + cas._hash(
-                'mojo-ss-rtobj-v1', cas.ABI_VERSION, cas.compiler_fingerprint(),
-                cas.toolchain_fingerprint(gcc, _ss_cflags), open(_ss_src).read(), _ss_name)
-
-            def _build_ss_obj(_ss_src=_ss_src, _ss_name=_ss_name):
-                o = os.path.join(workdir, os.path.splitext(_ss_name)[0] + '.o')
-                subprocess.run([gcc, *_ss_cflags, '-c', '-o', o, _ss_src], check=True)
+            def _build_rt_obj(_src=_src, _uflags=_uflags, _driver=_driver,
+                              _stem=_stem):
+                o = os.path.join(workdir, _stem + '.o')
+                subprocess.run([_driver, *_uflags, '-c', '-o', o, _src], check=True)
                 return open(o, 'rb').read()
-            _ss_o, _ = cas.get_or_build(_ss_key, '.o', _build_ss_obj)
-            objs.append(_ss_o)
+            _o, _ = cas.get_or_build(_key, '.o', _build_rt_obj)
+            objs.append(_o)
         rt_path = None
 
     if extra_exports:
@@ -600,14 +842,29 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     for o in objs:
         all_defs |= _defined_symbols(gcc, o)
     _kept = []
+    _misresolved, _undefined = [], []
     for e in all_exports:
-        if e['kind'] == reflect.SYM_TYPE or ('_' + reflect.export_csym(e)) in all_defs:
+        if e['kind'] == reflect.SYM_TYPE:
             _kept.append(e)
+            continue
+        sym = reflect.export_csym(e)
+        if ('_' + sym) in all_defs:
+            _kept.append(e)
+        elif ('_' + e['name']) in all_defs:
+            # The entry names a symbol the dylib really defines, but the
+            # export-csym rule resolved it to a different one — see
+            # runtime_export_entries' report on why that is measured at 433 of
+            # fire_runtime.h's 459 entry points today, and why the fix is in
+            # reflect.export_csym rather than here. A separate class from the
+            # genuinely-orphaned entry below because nothing is missing here:
+            # the definition is present and the table just is not naming it.
+            _misresolved.append(f"{e['name']} -> {sym}")
         else:
-            print(f"  drop stale export {e['name']!r}: "
-                  f"{reflect.export_csym(e)} has no definition in the built objects",
-                  file=sys.stderr)
+            _undefined.append(e['name'])
     all_exports = _kept
+    for line in format_export_report(len(_kept) + len(_misresolved) + len(_undefined),
+                                     _misresolved, _undefined):
+        print(f"  {line}", file=sys.stderr)
 
     # Reflection table source — deterministic given all_exports, so it can
     # participate in the dylib link key before writing the file.
@@ -615,17 +872,22 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
 
     # Compute dylib link key and check CAS.  The key folds in every .o on the
     # link line (module objects + runtime .o or runtime dylib digest), the
-    # reflect table source, the toolchain, and the link mode — so changing any
-    # object or configuration invalidates the cached dylib.
+    # reflect table source, the toolchain, the target architecture, and the
+    # link mode — so changing any object or configuration invalidates the
+    # cached dylib. The arch is a separate key input rather than only arriving
+    # inside the per-object flags, because the LINK step carries its own
+    # `-arch` and a link that silently ignored it would otherwise be
+    # indistinguishable from a correct one.
     extra_link_digest = cas.file_digest(rt_dylib) if link_runtime else ''
     link_key = cas.dylib_link_key(
-        objs, reflect_src, gcc, undefined=not link_runtime,
-        extra_digest=extra_link_digest)
+        objs, reflect_src, cc, undefined=not link_runtime,
+        extra_digest=extra_link_digest, arch=arch)
     if use_cache:
         cached_dylib = cas.lookup(link_key, '.dylib')
         if cached_dylib:
             cas.stats['hits'] += 1
             shutil.copy(cached_dylib, out)
+            _arch_or_die(out, arch, 'cached dylib')
             return out
         cas.stats['misses'] += 1
 
@@ -638,22 +900,24 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     # `extern void sym();` purely to take its address. Some exported names
     # collide with C builtins (memcmp, nan, isnan, …); without -fno-builtin gcc
     # rejects the unprototyped redeclaration as a conflicting type.
-    subprocess.run([gcc, '-fno-builtin', '-fPIC', f'-I{HERE}', '-c', '-o', reflect_o, reflect_c], check=True)
+    subprocess.run([cc, '-fno-builtin', '-fPIC', f'-I{HERE}', *arch_flags(arch),
+                    '-c', '-o', reflect_o, reflect_c], check=True)
     objs.append(reflect_o)
 
     # Linking depends on whether runtime is included or linked separately.
-    # link_driver=gxx: the production dylib now always folds in mojo_
+    # link_driver=cxx: the production dylib now always folds in mojo_
     # async_runtime.o (a real C++20 translation unit, not plain -fgimple C)
     # — g++ as the final link driver pulls in libstdc++ correctly, mirroring
     # fire.py's own link_executable(cxx=True) convention exactly.
     if link_runtime:
         # For test modules: link against runtime dylib, all symbols must resolve
-        link = _dylink(gcc, out, objs, undefined=False, extra_libs=[rt_path],
-                      rpath=os.path.dirname(rt_path), link_driver=gxx)
+        link = _dylink(cc, out, objs, undefined=False, extra_libs=[rt_path],
+                       rpath=os.path.dirname(rt_path), link_driver=cxx, arch=arch)
     else:
         # For production: cross-module references resolve at load time
-        link = _dylink(gcc, out, objs, undefined=True, link_driver=gxx)
+        link = _dylink(cc, out, objs, undefined=True, link_driver=cxx, arch=arch)
     subprocess.run(link, check=True)
+    _arch_or_die(out, arch, 'linked dylib')
     # Publish the linked dylib to the shared CAS so future builds skip the link
     # (even on use_cache=False runs: the fresh link is the correct artifact).
     with open(out, 'rb') as f:
@@ -661,7 +925,8 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     return out
 
 
-def _dylink(gcc, out, objs, undefined=False, rpath=None, extra_libs=None, link_driver=None):
+def _dylink(gcc, out, objs, undefined=False, rpath=None, extra_libs=None,
+            link_driver=None, install_name=None, arch=None):
     """Platform dylib link command. undefined=True allows unresolved symbols
     (resolved at load from other dylibs, via dyld dynamic lookup).
 
@@ -671,21 +936,40 @@ def _dylink(gcc, out, objs, undefined=False, rpath=None, extra_libs=None, link_d
     matters when `objs` includes at least one C++-derived object (the
     generator-coroutine codegen path, not yet wired into any real build —
     see build_config.find_gxx()'s docstring). Defaults to `gcc`, so ordinary
-    all-C builds are unchanged."""
+    all-C builds are unchanged.
+
+    install_name: override the `@rpath/<name>` install name, which otherwise
+    comes from `out`'s basename. It is a parameter rather than a convention
+    because the runtime dylib links into a work directory and is then MOVED
+    into the CAS under its final name (see runtime_dylib): a dylib's install
+    name is baked into the load command of everything that links it, so
+    deriving it from a staging path and renaming afterwards produces an
+    artifact that disagrees with its own name. Passing the final name makes
+    the two the same statement by construction.
+
+    arch: the target architecture for the LINK step. Distinct from every
+    object's own compile flags, and independently necessary — a driver that
+    cannot target an architecture ignores the flag at link time exactly as it
+    ignores it at compile time, and produces a dylib of the wrong
+    architecture out of correctly-built objects. Defaults to the host, so an
+    ordinary build is unchanged."""
     driver = link_driver or gcc
     if platform.system() == 'Darwin':
         cmd = [driver, '-dynamiclib',
-               '-install_name', '@rpath/' + os.path.basename(out), '-o', out]
+               '-install_name', install_name or ('@rpath/' + os.path.basename(out)),
+               '-o', out]
+        if arch:
+            cmd += ['-arch', normalize_arch(arch)]
         if rpath:
             cmd += ['-Wl,-rpath,' + rpath]
         if undefined:
             cmd += ['-undefined', 'dynamic_lookup']
     else:
         cmd = [driver, '-shared', '-fPIC', '-o', out]
-        if undefined:
-            cmd += ['-Wl,--allow-shlib-undefined']
         if rpath:
             cmd += ['-Wl,-rpath,' + rpath]
+        if undefined:
+            cmd += ['-Wl,--allow-shlib-undefined']
     # Objects first, then extra libs (dependencies must come after the objects that use them)
     result = cmd + objs
     if extra_libs:
@@ -694,7 +978,7 @@ def _dylink(gcc, out, objs, undefined=False, rpath=None, extra_libs=None, link_d
 
 
 
-def runtime_dylib(gcc: str = None, flags: tuple = ()) -> str:
+def runtime_dylib(gcc: str = None, flags: tuple = (), arch: str = None) -> str:
     """Build (or find in the CAS) the runtime dylib that exports mojo_* symbols.
 
     The stdlib dylib now includes the runtime, but test modules and external
@@ -711,44 +995,252 @@ def runtime_dylib(gcc: str = None, flags: tuple = ()) -> str:
     also folds in the stack-switch runtime (fire_coro.c/fire_coro_gen.c/
     fire_async_sched.c + the arch context-switch file) for the identical
     reason — see build()'s own matching comment for the hand-verified crash
-    this fixes."""
-    gcc = gcc or find_gcc()
-    gxx = find_gxx()
-    src = open(os.path.join(RUNTIME, 'fire_runtime.c')).read()
-    async_src = open(os.path.join(RUNTIME, 'fire_async_runtime.cpp')).read()
-    ss_arch = ('fire_coro_ctx_aarch64.S'
-               if platform.machine().lower() in ('arm64', 'aarch64')
-               else 'fire_coro_ctx_generic.c')
-    ss_names = ('fire_coro.c', 'fire_coro_gen.c', 'fire_async_sched.c', ss_arch)
-    ss_srcs = [open(os.path.join(RUNTIME, n)).read() for n in ss_names]
-    key = 'rtdylib/' + cas._hash(
-        'mojo-rtdylib-v3', cas.ABI_VERSION, cas.compiler_fingerprint(),
-        cas.toolchain_fingerprint(gcc, flags), src, async_src, *ss_srcs)
-    out = cas.path_for(key, '.dylib')
-    if not os.path.exists(out):
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        wd = tempfile.mkdtemp(prefix='mojo_rt_')
-        o = os.path.join(wd, 'fire_runtime.o')
-        subprocess.run([gcc, '-fPIC', f'-I{RUNTIME}', '-c', '-o', o,
-                        os.path.join(RUNTIME, 'fire_runtime.c')], check=True)
-        async_o = os.path.join(wd, 'mojo_async_runtime.o')
-        subprocess.run([gxx, '-std=c++20', '-fPIC', f'-I{RUNTIME}', '-c', '-o', async_o,
-                        os.path.join(RUNTIME, 'fire_async_runtime.cpp')], check=True)
-        ss_objs = []
-        for n in ss_names:
-            so = os.path.join(wd, os.path.splitext(n)[0] + '.o')
-            subprocess.run([gcc, '-fPIC', f'-I{RUNTIME}', '-c', '-o', so,
-                            os.path.join(RUNTIME, n)], check=True)
-            ss_objs.append(so)
-        subprocess.run(_dylink(gcc, out, [o, async_o] + ss_objs, undefined=False, link_driver=gxx),
-                       check=True)
+    this fixes. The unit list is `_RUNTIME_UNITS`, shared with build().
+
+    `arch` names the architecture the dylib is FOR, defaulting to the host's.
+    It is in the CAS key, in the file name, in every compile and link flag, and
+    — the part that is not a promise — it is checked against the Mach-O that
+    actually came out (`_arch_or_die`), because the driver this tree is
+    configured with ACCEPTS `-arch x86_64`, warns that it is ignoring it, and
+    emits an arm64 object. Without that check the foreign-architecture build
+    this function exists to provide would be a host-architecture library with a
+    foreign-architecture name, and the failure would be dyld's, in a different
+    program, later.
+
+    `flags` is applied to every unit's compile, which it previously was not:
+    it went into the cache key and from there into nowhere, so two callers
+    passing different flags got two entries holding identical bytes and neither
+    got what it asked for.
+
+    The result carries a `__mojo_reflect` table, derived from the runtime
+    headers by `reflect.collect_runtime_exports_h` and then filtered against
+    what `nm` says the linked objects DEFINE. Both halves matter and they fail
+    in opposite directions: the header alone advertises prototypes nothing
+    implements (a link failure for the first client that calls one, and a
+    dlopen failure for every client, since the table forward-declares and takes
+    the address of all of them), and the object set alone advertises C++
+    template instantiations and libc re-exports that are not an ABI. The
+    intersection is the set that is both promised and real, and the residue is
+    REPORTED rather than dropped silently — see `runtime_export_entries`.
+    """
+    arch = normalize_arch(arch)
+    cc, cxx = toolchain_for(arch, gcc or find_gcc(), find_gxx())
+    units = runtime_units(arch, None, tuple(flags))
+    digest = cas._hash(
+        'mojo-rtdylib-v4', cas.ABI_VERSION, cas.compiler_fingerprint(),
+        cas.toolchain_fingerprint(cc, arch_flags(arch) + tuple(flags)),
+        arch, *[os.path.basename(s) for s, _l, _f in units],
+        *[open(s).read() for s, _l, _f in units])
+    # The arch is in the NAME as well as in the key, and the key alone is not
+    # enough: `formal/imports.py`'s own note on `build_module_dylib` records
+    # that a content-addressed name still collides when a caller passes a
+    # directory of its own choosing, and the failure that causes is one
+    # architecture's library replacing the other's on disk. Here the basename
+    # is also the dylib's install name, so it has to say what it is either way.
+    # `digest` stays content-addressed, so two builds that agree write the same
+    # path and `os.replace` onto it below is idempotent.
+    name = f'libmojostdlib.{arch}.{digest}.dylib'
+    out = cas.path_for(f'rtdylib/libmojostdlib.{arch}.{digest}', '.dylib')
+    if os.path.exists(out):
+        # A cache hit still gets verified. The key is a claim about the
+        # artifact; this is the artifact. A stale entry from before the arch
+        # was in the key at all, or from a driver that lied, must not be
+        # served just because its name is right.
+        _arch_or_die(out, arch, 'cached runtime dylib')
+        return out
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    wd = tempfile.mkdtemp(prefix='mojo_rt_')
+    objs = []
+    for src, lang, unit_flags in units:
+        stem = os.path.splitext(os.path.basename(src))[0]
+        o = os.path.join(wd, stem + '.o')
+        driver = cxx if lang == 'c++' else cc
+        subprocess.run([driver, *unit_flags, '-c', '-o', o, src], check=True)
+        _arch_or_die(o, arch, f'object for {os.path.basename(src)}')
+        objs.append(o)
+    # The reflection table over the runtime's own public surface, filtered to
+    # the symbols this dylib really defines (see runtime_export_entries).
+    # The report is PRINTED inside runtime_export_entries, not here: iterating
+    # a local that a tuple-unpack bound is a shape the self-hosted backend
+    # mis-types, and this module is in mojoc's own compile closure. See that
+    # function's `for line in report:` for the measurement.
+    entries, report = runtime_export_entries(cc, objs)
+    reflect_src = reflect.emit_table_c(entries)
+    rc = os.path.join(wd, '_mojo_reflect.c')
+    ro = os.path.join(wd, '_mojo_reflect.o')
+    with open(rc, 'w') as f:
+        f.write(reflect_src)
+    # -fno-builtin for the same reason build()'s own table compile needs it:
+    # the table redeclares every advertised symbol unprototyped to take its
+    # address, and some of those names are C builtins.
+    subprocess.run([cc, '-fno-builtin', '-fPIC', f'-I{HERE}', *arch_flags(arch),
+                    '-c', '-o', ro, rc], check=True)
+    objs.append(ro)
+    # Linked into the work directory and moved into place, because a dylib's
+    # install name is derived from its output path: linking straight to `out`
+    # and renaming would leave the artifact disagreeing with the load command
+    # baked into everything that links it. `_dylink` is given the final
+    # install name explicitly, so the two cannot drift, and the name is
+    # content-addressed, so `os.replace` onto it is atomic and idempotent.
+    # `arch` on the LINK is not redundant with it on every object, and this is
+    # not a hypothetical: with it omitted, `ld` took the host architecture,
+    # printed "warning: ignoring file ...: found architecture 'x86_64',
+    # required architecture 'arm64'" for EVERY object, exited 0, and wrote an
+    # empty arm64 dylib. A link driver that cannot target an architecture
+    # ignores its flag exactly as quietly as a compiler does.
+    staged = os.path.join(wd, name)
+    subprocess.run(_dylink(cc, staged, objs, undefined=False, link_driver=cxx,
+                           install_name='@rpath/' + name, arch=arch), check=True)
+    _arch_or_die(staged, arch, 'linked runtime dylib')
+    os.replace(staged, out)
     return out
 
 
-def build_stdlib(out: str = DEFAULT_OUT, use_cache: bool = True, jobs: int = 1) -> str:
-    """Build the monolithic stdlib dylib from all auto-discovered library modules."""
-    rt_header = os.path.join(RUNTIME, 'fire_runtime.h')
-    rt_exports = reflect.collect_runtime_exports_h(rt_header)
+# The headers that declare the runtime's public C surface, in the order they
+# are scanned. `fire_runtime.h` is the whole of it for an ordinary client; the
+# coroutine and async headers are here because their objects are in this dylib
+# and a bind audit that does not know about `mojo_box_*`/`mojo_future_*` reports
+# them as symbols nothing provides, which is the same false claim in the other
+# direction.
+_RUNTIME_HEADERS = ('fire_runtime.h', 'fire_async_runtime.h', 'fire_coro_ctx.h')
+
+
+def runtime_export_entries(gcc: str, objs: list) -> tuple:
+    """(entries, report) — the runtime's real export surface: the headers'
+    entry points intersected with what the objects DEFINE.
+
+    Both halves are load-bearing and they fail in opposite directions, which
+    is why the answer is an intersection and not either side alone:
+
+      * header alone advertises prototypes nothing implements. The table
+        forward-declares and takes the address of every entry, so one orphan
+        is a dlopen failure for EVERY client of the dylib, not only for a
+        client that calls it (build()'s own comment records the real crash).
+      * object set alone advertises C++ template instantiations, coroutine
+        internals and libc re-exports, which are not an ABI and are not what
+        `collect_runtime_exports_h` describes.
+
+    `report` is a list of human-readable lines, and it distinguishes the two
+    ways an entry can be dropped, because they are not equally interesting:
+
+      * MISRESOLVED — the header names it `X`, `nm` says the objects define
+        `_X`, and `reflect.export_csym` resolved the entry to some OTHER
+        symbol. Nothing is missing; the shared export-csym rule is computing
+        a Mojo overload-mangled name for a C prototype. This is a real,
+        currently-live defect measured on this tree: with
+        `fire_runtime.h`'s 459 entry points, only 26 survive
+        `build_stdlib()`'s `nm` cross-check, and 433 are dropped for exactly
+        this reason. So the stdlib dylib has never advertised 433 runtime
+        entry points it defines — including all of `mojo_str_*` and every
+        function whose parameters are not word-shaped. The fix belongs in
+        `reflect.export_csym` (agent [3]'s file; see the INTERFACE REQUEST),
+        and nothing here has to change when it lands: an entry that resolves
+        correctly passes this same check and is advertised.
+      * UNDEFINED — the header declares it and no object in the dylib defines
+        it. Either a dead declaration (fire_runtime.h has six) or a prototype
+        satisfied by whoever links against the dylib (`py_tokenize` is
+        defined by the self-hosted compiler image, not by the runtime).
+
+    Reporting rather than silently dropping is the point: a number sends
+    nobody anywhere, and a named symbol sends the next reader to the one line
+    that is wrong.
+    """
+    exports = []
+    seen = set()
+    for hdr in _RUNTIME_HEADERS:
+        for e in reflect.collect_runtime_exports_h(os.path.join(RUNTIME, hdr)):
+            if e['name'] in seen:
+                continue
+            seen.add(e['name'])
+            exports.append(e)
+    defined = set()
+    for o in objs:
+        defined |= _defined_symbols(gcc, o)
+    kept = []
+    misresolved, undefined = [], []
+    for e in exports:
+        sym = reflect.export_csym(e)
+        if ('_' + sym) in defined:
+            kept.append(e)
+        elif ('_' + e['name']) in defined:
+            misresolved.append(f"{e['name']} -> {sym}")
+        else:
+            undefined.append(e['name'])
+    report = format_export_report(len(exports), misresolved, undefined)
+    # Printed HERE, and that placement is load-bearing for the self-hosted
+    # build rather than a matter of taste. This module is compiled into `mojoc`,
+    # and the self-hosted backend mis-types `for x in <local>` when the local
+    # was bound by TUPLE-UNPACKING a call's return: it has no element type for
+    # it, so the loop's bounds are computed as `mojo_strlen(local)` and its
+    # element access as `_mojo_at_char(local, i)` — string indexing applied to
+    # a boxed LIST. That is not a wrong value, it is a hard gcc error, and it
+    # took `fire.py build fire.py` out:
+    #
+    #   build_stdlib_dylib.py: error: passing argument 1 of 'mojo_strlen'
+    #       makes pointer from integer without a cast [-Wint-conversion]
+    #   build_stdlib_dylib.py: error: passing argument 1 of '_mojo_at_char'
+    #       makes pointer from integer without a cast [-Wint-conversion]
+    #
+    # (`-Wint-conversion` is an ERROR by default in GCC 14+, not a warning, so
+    # there is no flag that makes this survivable.)
+    #
+    # Iterating a list this function builds by `append` lowers correctly --
+    # `mojo_list_get_str`, with `line` typed `char *` -- so the loop lives
+    # where the list is built. The real fix is in the codegen, not here; see
+    # bugs/FORMAL_known_limits.md.
+    #
+    # A caller that wants the lines as a VALUE still gets them: the tuple is
+    # returned unchanged, and test_runtime_dylib.py reads report[0].
+    for line in report:
+        print(f"  runtime dylib: {line}", file=sys.stderr)
+    return kept, report
+
+
+def format_export_report(total: int, misresolved: list, undefined: list) -> list:
+    """Human-readable lines for `runtime_export_entries`' two drop classes.
+
+    Capped per class, because a report nobody can read is the same as no
+    report: the counts and the first names are always there, and the tail is
+    reachable by asking. The misresolved class is listed first and in full up
+    to the cap because it is the actionable one — every name in it is a real
+    definition the dylib is not advertising."""
+    lines = [f"export table: {total - len(misresolved) - len(undefined)} of {total} "
+             f"runtime entry points advertised "
+             f"({len(misresolved)} misresolved, {len(undefined)} undefined)"]
+    for label, names in (("defined but not advertised (export_csym resolved them to "
+                          "a different symbol)", misresolved),
+                         ("declared with no definition in this dylib", undefined)):
+        if not names:
+            continue
+        shown = names[:_REPORT_CAP]
+        lines.append(f"  {label}: {', '.join(shown)}"
+                     + (f", +{len(names) - len(shown)} more" if len(names) > len(shown)
+                        else ""))
+    return lines
+
+
+_REPORT_CAP = 24
+
+
+def build_stdlib(out: str = DEFAULT_OUT, use_cache: bool = True, jobs: int = 1,
+                 arch: str = None) -> str:
+    """Build the monolithic stdlib dylib from all auto-discovered library modules.
+
+    `arch` names the architecture the dylib is for; the default output NAME
+    gains it as well, because `build/libmojostdlib.dylib` is a fixed path and
+    two architectures writing to it would make the second build's success
+    depend on which ran last. The name is only defaulted when the caller did
+    not ask for a specific `out`."""
+    arch = normalize_arch(arch)
+    if out == DEFAULT_OUT:
+        out = os.path.join(HERE, 'build', f'libmojostdlib.{arch}.dylib')
+    rt_exports = []
+    seen = set()
+    for hdr in _RUNTIME_HEADERS:
+        for e in reflect.collect_runtime_exports_h(os.path.join(RUNTIME, hdr)):
+            if e['name'] not in seen:
+                seen.add(e['name'])
+                rt_exports.append(e)
     # track_local_deps=False: every module here IS a stdlib module, and the
     # whole stdlib closure is already folded into each one's key via
     # cas.stdlib_fingerprint(). Per-module local-dep tracking would only
@@ -756,13 +1248,20 @@ def build_stdlib(out: str = DEFAULT_OUT, use_cache: bool = True, jobs: int = 1) 
     # cold rebuild. It exists for `mojo dylib` on a PROJECT's own file set
     # (BUG-2026-032), reached via driver.compile_dylib -> build(...).
     return build(stdlib_modules(), out, use_cache=use_cache, extra_exports=rt_exports,
-                 jobs=jobs, track_local_deps=False)
+                 jobs=jobs, track_local_deps=False, arch=arch)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('modules', nargs='*', help='library .mojo modules to bundle (default: all stdlib)')
-    ap.add_argument('-o', '--output', default=DEFAULT_OUT, help='output dylib path')
+    ap.add_argument('-o', '--output', default=None,
+                     help='output dylib path (default: build/libmojostdlib.<arch>.dylib)')
+    ap.add_argument('--arch', default=None,
+                     help='target architecture (default: this host\'s). The '
+                          'architecture is part of the artifact\'s cache key, '
+                          'its file name, every compile and link flag, and a '
+                          'check on the Mach-O that actually came out — see '
+                          'build_stdlib_dylib\'s module docstring.')
     ap.add_argument('--no-cache', action='store_true', help='bypass the CAS')
     ap.add_argument('-j', '--jobs', type=int, default=os.cpu_count(),
                      help='Parallel workers for the per-module Mojo→C→.o compile '
@@ -771,12 +1270,14 @@ def main():
                           'for sequential (deterministic ordering, easier to read '
                           'failures as they happen).')
     args = ap.parse_args()
+    arch = normalize_arch(args.arch)
+    out = args.output or os.path.join(HERE, 'build', f'libmojostdlib.{arch}.dylib')
     modules = stdlib_modules()
     if args.modules:
         modules = list(args.modules)
     cas.reset_stats()
-    out = build(modules, args.output, use_cache=not args.no_cache, jobs=args.jobs)
-    msg = f"built {out} from {len(modules)} module(s) + runtime"
+    built = build(modules, out, use_cache=not args.no_cache, jobs=args.jobs, arch=arch)
+    msg = f"built {built} for {arch} from {len(modules)} module(s) + runtime"
     if not args.no_cache:
         msg += f"  [cas hits={cas.stats['hits']} misses={cas.stats['misses']}]"
     print(msg)

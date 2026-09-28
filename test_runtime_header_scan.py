@@ -98,24 +98,65 @@ def test_every_declaration_is_seen():
     with the code it is testing asserts nothing. They are also the cheapest
     possible tripwire for the NEXT declaration shape the scanner cannot parse:
     a new form that is missed shows up here as a count that no longer matches.
+
+    The tripwire cuts both ways, and it has now fired in both directions.
+    459 -> 447: seven prototypes that no object in the tree defines and no
+    generated C calls were removed from `fire_runtime.h` (`mojo_type`,
+    `mojo_obj_enter`, `mojo_obj_exit`, `int___enter__`, `int___exit__`,
+    `MojoList__write_to`, `tuple` — see the note in that header), and the header
+    scanner then stopped reporting five `mojo_fnptr_call_N` names it had been
+    inventing out of a `return mojo_fnptr_call_0(f);` line inside a `static
+    inline` body. The steps are separately attributable: 459->452 is the
+    header, 452->447 is the scanner.
+
+    447 -> 448: `mojo_type` went BACK IN, and it is the sixth name on that list
+    whose removal was wrong. The zero-caller evidence for removing it was `nm`
+    on the runtime OBJECT, and the caller is not in the runtime:
+    `gimple_codegen._RUNTIME_FUNCS` maps the Mojo builtin `type` to this C
+    function, so generated C emits a reference to it, and with the declaration
+    gone the self-hosted compile of the compiler's own closure failed with
+        myinterpreter.py: error: 'mojo_type' undeclared here (not in a
+        function); did you mean '_mojo_type'?
+    "not in a function" is the tell that the reference is in a DECLARATION —
+    a prototype the imported-symbol extern block emits for a builtin it
+    resolved to this name — and not a call. So the lesson generalises past this
+    one symbol: a runtime symbol with no in-tree caller can still be reachable
+    from GENERATED code, and `nm` on the runtime cannot see that. It is
+    re-added as `int mojo_type(int obj)` rather than the old `int
+    mojo_type(...)`, because a `(...)` with no named parameter before it is a
+    hard error in clang, which is what the removal was for in the first place.
     """
-    # 456, not the 459 an earlier revision of this file asserted, and the
-    # difference is [3]'s rewrite of `_PROTO_RE` being BETTER on both sides:
+    # 450. Three different numbers have been asserted here and all three were
+    # right on the tree that produced them, which is why this is measured
+    # rather than adjusted:
     #
-    #   -5  `mojo_fnptr_call_0..4` are `static inline` (fire_runtime.h:116) and
-    #       have no external symbol, so they must NOT be exported. The old
-    #       regex-based scanner counted them anyway -- which made the old 459
-    #       internally inconsistent with the exclusion rule asserted below it,
-    #       which already required `mojo_bound_method_call_0` to be absent.
-    #   +2  `mojo_re_sub_fn` and `mojo_regex_sub_fn` take a FUNCTION-POINTER
-    #       parameter -- `char *(*callback)(void *, char *)` -- and the old
-    #       pattern's `([^)]*)` parameter group stopped at the first `)`, which
-    #       is inside the function-pointer type. It could not see them at all.
+    #   459  the original regex-based scanner, original header.
+    #   456  after [3] rewrote `reflect._PROTO_RE` into a real parser. It moved
+    #        DOWN while the scanner got strictly more correct, in both
+    #        directions at once:
+    #          -5  `mojo_fnptr_call_0..4` are `static inline`
+    #              (fire_runtime.h:116) with no external symbol, so they must
+    #              NOT be exported. The regex counted them anyway, which made
+    #              the old 459 inconsistent with the exclusion rule asserted
+    #              elsewhere in this file.
+    #          +2  `mojo_re_sub_fn` and `mojo_regex_sub_fn` take a
+    #              FUNCTION-POINTER parameter, `char *(*callback)(void *, char
+    #              *)`, and the regex's `([^)]*)` parameter group stopped at
+    #              the first `)` -- which is inside the function-pointer type.
+    #              It could not see them at all.
+    #   448  [1]+[2]'s figure, on THEIR header. It is not comparable to 456:
+    #        [1] and [2] edit fire_runtime.{h,c} themselves (they removed five
+    #        dead declarations and restored `mojo_type`), and they measured
+    #        with the OLD scanner, because [3]'s reflect.py was not in their
+    #        tree -- [1]'s own message says so.
     #
-    # So the count went DOWN while the scanner got strictly more correct, which
-    # is the case a count assertion exists to catch and the reason the two
-    # function-pointer names are pinned by name below.
-    for header, want in (('fire_runtime.h', 456),
+    # So 450 is 456 with [1]+[2]'s header under [3]'s scanner, and the other
+    # five headers are unchanged at 22/6/13/18/15 across every version. The
+    # composition is verified, not just the total: `mojo_type` is present with
+    # the non-variadic `int mojo_type(int obj)` prototype, the five `static
+    # inline` helpers are still excluded, both function-pointer entry points
+    # are still included, and all five removed declarations are still absent.
+    for header, want in (('fire_runtime.h', 450),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

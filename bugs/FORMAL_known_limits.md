@@ -108,17 +108,99 @@ and a `_CLIB_SYMS` name. Every one of the eight above falls under one of those
 four, so **the refusal is true in all eight cases**, and no fix to the export
 rule would make any of them build.
 
-**One decision changed in wave 5 and it is a real one.** The `_CLIB_SYMS`
-exclusion is right for a CALL — the symbol is already reachable with `dlsym` out
-of the system dylibs — and WRONG for a DEFINITION. `std/sys/terminate.mojo`
-**defines** `exit`; if that module also exported one other symbol, an importer's
-`exit()` would bind libSystem's, silently, with no diagnostic. So a module that
-*defines* a `_CLIB_SYMS` name arguably must export its own. That is a change to
-what the compiler accepts, so it is NOT made here; it is recorded because it is
-the one place in this document where the export rule itself, rather than the
-message about it, is wrong. Cost: small in code, and it needs a decision about
-whether a dylib may shadow a libc symbol an importer would also resolve by
-`dlsym`.
+**§1.1, corrected (2026-09-27, agent [2]): the `_CLIB_SYMS` question is
+settled, and the argument that this section used to make for changing the rule
+was false.** It used to read:
+
+> The `_CLIB_SYMS` exclusion is right for a CALL — the symbol is already
+> reachable with `dlsym` out of the system dylibs — and WRONG for a
+> DEFINITION. `std/sys/terminate.mojo` **defines** `exit`; if that module also
+> exported one other symbol, an importer's `exit()` would bind libSystem's,
+> silently, with no diagnostic. […] Cost: small in code, and it needs a
+> decision about whether a dylib may shadow a libc symbol an importer would
+> also resolve by `dlsym`.
+
+**The claim is false on this tree, and so is the hazard it describes.** Three
+measurements, all reproducible:
+
+1. **`terminate.mojo` defines no `exit` — it defines nothing at all.**
+   Compiling it through the real path (`build_stdlib_dylib.compile_module_to_c`
+   with `module_name='std_sys_terminate'`) and reading the generated C: the
+   only line mentioning `exit` is the module's own docstring, stringified as
+   data. `nm` on the object reports exactly two external definitions,
+   `__std_sys_terminate_toplevel` and `_std_sys_terminate_init`. Neither
+   `def exit()` (whose body is a self-recursive `exit(0)`) nor
+   `def exit[intable](code)` (a template) emits a line. There is no `exit` for
+   an importer to bind the wrong one to.
+
+2. **A module that *does* define a `_CLIB_SYMS` name cannot shadow libc,
+   because the codegen has already renamed it.** The rename is
+   `mojo/middle/types.py:799` — `_c_names` maps a C keyword **or** a
+   `_C_RESERVED_FUNCS` name to `mojo_<name>` — which is `doc/ABI.md`'s
+   "C-keyword names get the documented `mojo_` prefix" extended to the
+   reserved libc names. Measured on the modules that actually declare one:
+
+   | module | Mojo name | C symbol emitted |
+   |---|---|---|
+   | `std/sys/_libc.mojo` | `exit` | `_std_sys__libc_mojo_exit_9f63a2` |
+   | `std/sys/_libc.mojo` | `write` | `_std_sys__libc_mojo_write_37bd8e` |
+   | `std/io/file.mojo` | `open` | `_std_io_file__open_file_1b532c` |
+   | `std/memory/memory.mojo` | `memcpy`, `memmove`, `memset` | none bare |
+
+   `nm` on all four objects finds **no** bare libc name among their external
+   definitions. A dylib built from them exports
+   `_std_sys__libc_mojo_exit_9f63a2`, and libSystem's `exit` is untouched.
+
+3. **The case is real but small.** 18 raw exports across 8 stdlib modules
+   (`string.mojo`, `io/file.mojo`, `memory/memory.mojo`, `os/os.mojo`,
+   `random/random.mojo`, `sys/_libc.mojo`, `sys/terminate.mojo` ×2) carry a
+   `_CLIB_SYMS` name — measured with `reflect.collect_exports` and the
+   exclusion filter bypassed, so this is the population the rule governs, not
+   the population that reaches a dylib.
+
+**Decision: the exclusion stays exactly as it is, and no code change is
+warranted.** The `dlsym` rationale recorded above is the whole of what it is
+doing, and it is the right one: the symbol a Mojo *call* to `open` resolves is
+libc's, so advertising `open` in a reflection table would tell an importer
+"this dylib provides `open`" when what it provides is
+`_std_io_file__open_file_1b532c` under a different name — a table whose `name`
+and `addr` columns disagree, which is worse than no entry. There is no
+shadowing to prevent, so the trade-off that was left open ("may a dylib shadow
+a libc symbol an importer would also resolve by `dlsym`?") does not arise.
+
+**What did change is the export table's completeness, and it was a different
+defect entirely** — one this document did not know about because it lives in
+`reflect.export_csym`, not in the rule. A C *prototype* was being run through
+the Mojo overload-mangler, so `build_stdlib_dylib.build()`'s `nm` cross-check
+rejected 429 of the header's entry points as "stale" and the dylib advertised
+**30 of 459** runtime symbols it defines. **CLOSED 2026-09-27** (agent [2]
+measured, agent [3] applied; `INTERFACE-REQUESTS.md` request `[2] → [3]` A).
+Before/after, on the same `build()` path with the same inputs:
+
+```
+pre-fix : 458 entry points considered, 429 unadvertised
+post-fix: 458 entry points considered,   0 unadvertised
+now     : export table: 458 of 459 runtime entry points advertised
+                       (0 misresolved, 1 undefined — py_tokenize)
+```
+
+**This is now the real export table**, and it is the input
+`FORMAL-PARALLEL.md` §[4] item 1 asks for: 458 symbols read off the headers
+and confirmed against `nm`, per architecture, from
+`build_stdlib_dylib.runtime_export_entries(arch)`. The one entry it does not
+advertise is correct — `py_tokenize` is defined by the self-hosted compiler's
+own transpiled `fire_compiler.py`, not by the runtime.
+
+The build now also reports the shortfall **by class** — *defined but misresolved*
+versus *declared and undefined* — because those two are not equally interesting
+and a single "drop stale export" line for both is what let a 429-entry defect
+sit there looking like routine noise. Both classes are pinned by
+`test_runtime_dylib.py`, in both directions: every advertised symbol is real
+(`test_export_table_entries_are_all_real_definitions`) **and** every defined
+symbol is advertised (`test_every_defined_entry_point_is_advertised`). The
+first held while the table named 30 of 459, because the other 429 were dropped
+rather than advertised wrongly; only the second makes a regression red.
+
 
 ## 1.2 What would close it, and what it costs
 

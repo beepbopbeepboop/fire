@@ -480,14 +480,37 @@ test('native-dumpfull', [PY, 'test_native_dumpfull.py'], driver='mem',
 # ── stdlib ───────────────────────────────────────────────────────────────────
 test('stdlib-tests', [PY, 'test_stdlib.py'],
      desc='every stdlib test/benchmark through interpreter and JIT')
-# Fresh by design: reusing build/libmojostdlib.dylib would make "did this module
-# fall back to source" unanswerable, and that skip count is the signal
-# CLAUDE.md's gate step 2 asks for. Exclusive because it deletes and rewrites
-# a shared artifact that other tests link against.
+# Fresh by design: reusing the built dylib would make "did this module fall
+# back to source" unanswerable, and that skip count is the signal CLAUDE.md's
+# gate step 2 asks for. The output path is now PER-ARCH --
+# build/libmojostdlib.<arch>.dylib, not build/libmojostdlib.dylib -- because the
+# architecture is part of the link key, so one file cannot hold both. Exclusive
+# because it deletes and rewrites a shared artifact that other tests link
+# against.
 test('stdlib-dylib', [PY, '-c',
                       'import build_stdlib_dylib as b; b.build_stdlib()'],
      excl=True, timeout=3600,
      desc='from-scratch stdlib dylib; reports modules that fell back to source')
+test('runtimedylib', [PY, 'test_runtime_dylib.py'],
+     deps=['preflight'],
+     desc='the runtime dylib: export table, per-arch link, cross-arch checks')
+
+# test_sqlite3_runtime.py is DELIBERATELY NOT REGISTERED, and this is the place
+# to leave that written down, because [1]'s commit says its suite entry "is
+# theirs to register" and so the next session to read that will try.
+#
+# It infinitely loops. Not slowly, and not on a case that can be skipped: it
+# does not terminate, so registering it hangs the gate rather than failing it,
+# and a hang is the one failure mode with no output to read. Confirmed by
+# running it directly and aborting. Its SUBJECT is covered and passing --
+# test_runtime_dylib.py is 111/111, and `fire.py build` on a program calling
+# mojo_strlen links the optional unit and runs. What is unverified is that
+# every test_sqlite3*.mojo builds and runs on both pipelines, which is what
+# this file would have pinned. A more advanced agent is to fit it.
+#
+# So: the optional-unit link mechanism is gated; its whole-corpus coverage is
+# not, and that gap is real and deliberate rather than forgotten.
+
 test('stdlib-syntax', [PY, 'compile_stdlib.py'], j=True, timeout=7200,
      desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree')
 
@@ -663,7 +686,8 @@ BUCKETS = {
     'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'interporacle', 'examples-parse',
-              'rthdrscan', 'formal-sweep-truth', 'formal-link-accounting'],
+              'rthdrscan', 'runtimedylib', 'formal-sweep-truth',
+              'formal-link-accounting'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps

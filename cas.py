@@ -558,22 +558,33 @@ def formal_build_key(source: str, path: str, flags: tuple = (),
 
 def dylib_link_key(obj_paths: list, reflect_src: str,
                    gcc: str, undefined: bool,
-                   extra_digest: str = '') -> str:
+                   extra_digest: str = '', arch: str = '') -> str:
     """Key (`dylib-link/<hash>`) for caching the final stdlib dylib link (.dylib).
 
     Folds in the content digest of every .o on the link line, the reflection
-    table source, the toolchain, and the link-mode flag — so changing ANY
-    object or the link configuration invalidates the cached dylib.
+    table source, the toolchain, the link-mode flag, and the target
+    architecture — so changing ANY object or configuration invalidates the
+    cached dylib.
     `extra_digest` folds in content that is not in obj_paths (e.g. a
-    separately-linked runtime dylib)."""
+    separately-linked runtime dylib).
+
+    `arch` is a key input in its own right and not merely something the
+    per-object flags already carry, because the LINK invocation has its own
+    target flag and nothing about the objects distinguishes a link that
+    honoured it from one that ignored it. On the toolchain this tree is
+    configured with, `-arch x86_64` is accepted, warned about, and ignored
+    (see build_stdlib_dylib.arch_flags), so without the arch in the key two
+    builds for different architectures would share one entry and the second
+    would be served the first's bytes. `toolchain_fingerprint` above folds the
+    HOST, which is the wrong fact for this purpose for the same reason."""
     obj_digests = '\0'.join(
         f'{os.path.basename(p)}={file_digest(p)}'
         for p in sorted(obj_paths)
     )
     return 'dylib-link/' + _hash(
-        'mojo-dylib-link-v1', ABI_VERSION, compiler_fingerprint(),
+        'mojo-dylib-link-v2', ABI_VERSION, compiler_fingerprint(),
         toolchain_fingerprint(gcc, ()), obj_digests, reflect_src,
-        'undef' if undefined else 'defined', extra_digest,
+        'undef' if undefined else 'defined', extra_digest, arch or '',
     )
 
 

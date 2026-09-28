@@ -432,6 +432,24 @@ sharpest entry in this table. `lib/` is out of scope for the parallel round, so
 nothing was changed — but the figure is now *read* on every run rather than
 merely known.
 
+**What the FORMAL-PARALLEL round did to phase 2, measured.** The word-shaped
+callable surface is now *unblocked but not yet reachable*, and the distinction
+is the whole remaining step. [3] made the refusal ABI-shaped: a call is refused
+for its type, and a word-in/word-out call is explicitly named as one a formal
+image **could** make. [2] then made the library exist — a per-architecture
+runtime dylib, whose export table now advertises 1964 of 1968 entry points
+with 0 misresolved. And [1] made the optional units link, so the non-formal
+path is whole: a program calling `mojo_strlen` builds, links and prints `5`.
+
+A *formal* image still refuses `mojo_strlen`, and the refusal is now honest
+about why — the image is freestanding, it links libSystem and nothing else, and
+the per-arch runtime dylib is simply not on its link line. That is the next
+piece of work and it is a `formal/build.py` change, not a codegen one: opt the
+formal path into the dylib [2] already builds. Until then the honest statement
+of the surface is "0 of the word-shaped calls are callable from a proof", and
+the number that will move first when that is done is the phase 2 coverage
+figure.
+
 Under this programme a proof will be asked to carry real weight, so the honesty
 mechanism has to see vacuity and not only holes. That is part of phase 3's exit
 criterion, not a separate cleanup.

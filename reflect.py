@@ -506,7 +506,17 @@ def export_csym(e: dict) -> str:
     already carry their mangled name inside the signature. Shared by
     emit_table_c (to forward-declare/address it) and build_stdlib_dylib.py
     (to verify, via `nm`, that the compiled object actually defines it before
-    trusting the export — see that module's `build()`)."""
+    trusting the export — see that module's `build()`).
+
+    An entry that carries its OWN `csym` is taken at its word, before any of
+    that. A C prototype is not a Mojo function declaration: it has no home
+    module to qualify and no overload suffix, because the C compiler already
+    gave it its name. `collect_runtime_exports_h` produces those entries and
+    is the one that knows this, so it states it there rather than leaving it
+    to be inferred here from the ABSENCE of a `module_prefix` — which is also
+    what a hand-built `extra_exports` entry looks like."""
+    if e.get('csym'):
+        return e['csym']
     if e['kind'] == SYM_FUNCTION:
         return _func_export_csym(e['name'], e['signature'], e.get('module_prefix', ''))
     return e['signature'].split('(', 1)[0].strip().split()[-1].lstrip('*')
@@ -677,5 +687,15 @@ def collect_runtime_exports_h(header_path: str) -> list:
         decl = f"{base} {ptr}{name}" if ptr else f"{base} {name}"
         sig = f"{decl} ({params or 'void'})"
         exports.append({'name': name, 'signature': sig, 'kind': SYM_FUNCTION,
-                        'ret': ret, 'params': params})
+                        'ret': ret, 'params': params,
+                        # `csym`: this is a C prototype, so the C symbol IS
+                        # `name` — no module qualifier, no overload suffix.
+                        # Both are Mojo codegen concepts and applying them to a
+                        # C declaration computes a symbol that does not exist,
+                        # which is how 429 of fire_runtime.h's entry points
+                        # went unadvertised (INTERFACE-REQUESTS.md, [2] -> [3]
+                        # section A). Stated HERE because this is the producer
+                        # that knows it, not inferred by the consumer from a
+                        # missing `module_prefix`.
+                        'csym': name})
     return exports

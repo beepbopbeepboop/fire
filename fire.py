@@ -37,7 +37,9 @@ os.environ['PATH'] = '/opt/homebrew/bin:/Users/mrs/bin:/opt/local/bin:/opt/local
 
 # Platform detection for cross-platform build support
 _IS_DARWIN = platform.system() == 'Darwin'
-from build_config import find_gcc, find_gxx
+from build_config import (find_gcc, find_gxx, optional_unit_compile_failed,
+                          optional_unit_libs, optional_unit_source,
+                          referenced_optional_runtime_units)
 _GCC_BIN = find_gcc()
 _GXX_BIN = find_gxx()
 
@@ -745,6 +747,31 @@ def build_executable(input_file: str, src: str, output: str = None,
             py_ldflags += ['-Wl,-stack_size,0x20000000']
         else:
             py_ldflags += ['-Wl,-z,stacksize=536870912']
+
+        # Optional runtime units (build_config's registry -- see
+        # bugs/CODEGEN_optional_runtime_units_not_linked.md). runtime/ holds
+        # six C units and only fire_runtime.c was in a build path, while the
+        # headers of the other four are `#include`d into EVERY generated TU
+        # (module_gen.py's preamble) and all their signatures sit in
+        # gimple_codegen._KNOWN_SIGS. So a program calling mojo_sqlite3_open
+        # saw a prototype, compiled clean, and died at link with
+        # `Undefined symbols ... _mojo_sqlite3_open`. Same probe as the three
+        # blocks above -- does the generated C reference this unit's
+        # namespace? -- and for the same reason: a program that never
+        # mentions sqlite must not drag libsqlite3 onto its link line. After
+        # py_ldflags is built, because the link libraries join it.
+        for _unit in referenced_optional_runtime_units(c_code, runtime_dir):
+            _u_src = optional_unit_source(_unit, runtime_dir)
+            _u_o = f"{basename}_{_unit}_rt.o"
+            _u_c = [_GCC_BIN] + cg_flags + ["-I", runtime_dir] + py_cflags + [
+                "-c", "-o", _u_o, _u_src]
+            _r = subprocess.run(_u_c, capture_output=True, text=True)
+            if _r.returncode != 0:
+                print(optional_unit_compile_failed(_unit, _u_src, _r.stderr),
+                      file=sys.stderr)
+                return False
+            extra_objs.append(_u_o)
+            py_ldflags += optional_unit_libs(_unit)
 
         result = link_executable([o_file, runtime_o] + extra_objs, exe_file, py_ldflags, cxx=cxx_link)
         if result.returncode != 0:
