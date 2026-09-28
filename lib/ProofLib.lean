@@ -5316,6 +5316,128 @@ theorem dylibExport_total_of (image : DylibImage) (export_ : DylibExport)
   obtain ⟨s', hs'⟩ := key st0 (hst.symm ▸ rfl)
   exact ⟨s', hs'⟩
 
+/-- STRAIGHT-LINE TERMINATION, from a table the generator can check.
+
+`hstep` is exactly what is computable per image: at every in-range pc there is a
+successor, and it does NOT move the pc.  From that `effNext = pc + 4`, so
+progress is free, and containment follows from the ALIGNMENT `pc ≡ exit
+(mod 4)` -- which is why `hmod`/`halign` are hypotheses rather than something
+proved: a word-aligned image and a word-aligned entry are facts about the
+emitted bytes, and the invariant is preserved because `(pc+4) % 4 = pc % 4`.
+
+The fuel bound `exit - st.pc + 1 ≤ f` is a deliberate over-approximation: the
+run needs `(exit - st.pc) / 4` steps, and paying 4x avoids any divisibility
+argument in the induction. -/
+theorem arm64_go_exit_terminates_aligned
+    (code : Nat → UInt8) (exit : Nat)
+    (hstep : ∀ st : Arm64State, st.pc < exit → st.pc % 4 = 0 →
+      ∃ s', arm64_step st code = some s' ∧ s'.pc = st.pc)
+    (hmod : exit % 4 = 0) :
+    ∀ (f : Nat) (st : Arm64State), st.pc % 4 = 0 → st.pc ≤ exit →
+      exit - st.pc + 1 ≤ f →
+        ∃ s, arm64_go_exit st code exit f = some s := by
+  intro f
+  induction f with
+  | zero =>
+      intro st _ _ hfuel
+      simp at hfuel
+  | succ f ih =>
+      intro st halign hle hfuel
+      by_cases hpc : st.pc = exit
+      · refine ⟨st, ?_⟩
+        rw [arm64_go_exit, if_neg (by omega : ¬ (f + 1 = 0)), if_pos hpc]
+      · have hlt : st.pc < exit := by omega
+        obtain ⟨st', hstep', hsame⟩ := hstep st hlt halign
+        -- The successor does not move the pc, so the loop's `if` substitutes
+        -- `pc + 4`; that is the WHOLE of the progress argument.
+        have heff : DylibExport.effNext st st' = st.pc + 4 := by simp [DylibExport.effNext, hsame]
+        -- Alignment is preserved by a +4 step, and it is what makes the new pc
+        -- fit inside the image: two multiples of 4 with `pc < exit` differ by
+        -- at least 4, so containment is NOT free and needs `hmod`.
+        have halign' : (st'.pc + 4) % 4 = 0 := by omega
+        have hle' : st'.pc + 4 ≤ exit := by omega
+        have hfuel' : exit - (st'.pc + 4) + 1 ≤ f := by omega
+        obtain ⟨s, hs⟩ := ih { st' with pc := st'.pc + 4 } halign' hle' hfuel'
+        refine ⟨s, ?_⟩
+        rw [arm64_go_exit, if_neg (by omega : ¬ (f + 1 = 0)), if_neg hpc, hstep']
+        simpa [DylibExport.effNext, hsame] using hs
+
+/-- `hnodrop` is a CONSEQUENCE of the table, not a second assumption. -/
+theorem arm64_nodrop_of_straight (code : Nat → UInt8) (exit : Nat)
+    (hstep : ∀ st : Arm64State, st.pc < exit → st.pc % 4 = 0 →
+      ∃ s', arm64_step st code = some s' ∧ s'.pc = st.pc)
+    (hmod : exit % 4 = 0) :
+    ∀ st st' : Arm64State, st.pc % 4 = 0 → st.pc < exit →
+      arm64_step st code = some st' →
+      st.pc < DylibExport.effNext st st' ∧ DylibExport.effNext st st' ≤ exit := by
+  intro st st' halign hlt h
+  obtain ⟨t, ht, hsame⟩ := hstep st hlt halign
+  have heq : t = st' := by rw [ht] at h; exact Option.some.inj h
+  subst heq
+  simp [DylibExport.effNext, hsame]
+  omega
+
+
+/-- **`Total` from ONE checkable statement, rather than two named holes.**
+
+    This is the reduction that makes the straight-line case finishable.
+    `hstraight` is the whole obligation:
+
+        at every in-range pc, aligned to the image's word grid, there is a
+        successor and it does not move the pc
+
+    which is a finite computation over the image's words, and therefore
+    checkable by `native_decide` per export. `hhalts` and `hnodrop` are then
+    *consequences* of it (`arm64_nodrop_of_straight` and a `⟨s', h.1⟩`), not
+    assumptions — so an export that satisfies the table has NO hole at all in
+    its `Total` clause.
+
+    `hmod` and `hentry4` are the image's and the entry's word alignment, both
+    literal facts about the bytes. They are not decoration: without `hmod`
+    containment fails, because a step that does not move the pc still leaves the
+    image when `pc = exit - 1`. And `hentry4` genuinely does NOT follow from
+    `hmod` -- `InImage` constrains `entry - base`, not `entry`, and
+    `base = 1, codeSize = 3, entry = 2` satisfies `hmod` and `InImage` while
+    `entry % 4 = 2`. So it is stated, rather than derived and hoped for. -/
+theorem dylibExport_total_of_straight (image : DylibImage) (export_ : DylibExport)
+    (hstraight : ∀ st : Arm64State, st.pc < image.base + image.codeSize →
+      st.pc % 4 = 0 → ∃ s', arm64_step st image.code = some s' ∧ s'.pc = st.pc)
+    (hmod : (image.base + image.codeSize) % 4 = 0)
+    (hentry4 : export_.entry % 4 = 0)
+    (hin : InImage image export_)
+    (hfuel : image.codeSize < exportFuel) :
+    Total image export_ := by
+  intro n
+  obtain ⟨hb_ge, hoff⟩ := hin
+  unfold offset at hoff
+  have hupp : export_.entry ≤ image.base + image.codeSize := by omega
+  have hlt : (image.base + image.codeSize) - export_.entry < exportFuel := by
+    have : export_.entry - image.base ≤ image.codeSize := by omega
+    omega
+  have halign : ({ Arm64State.init n image.base with
+        pc := export_.entry,
+        x30 := UInt64.ofNat (image.base + image.codeSize) }).pc % 4 = 0 := by
+    simp [hentry4]
+  have key : ∀ (st0 : Arm64State), st0.pc = export_.entry →
+      ∃ s', arm64_go_exit st0 image.code (image.base + image.codeSize) exportFuel
+        = some s' := by
+    intro st0 hpc0
+    have hle0 : st0.pc ≤ image.base + image.codeSize := by rw [hpc0]; exact hupp
+    have hlt0 : (image.base + image.codeSize) - st0.pc + 1 ≤ exportFuel := by
+      rw [hpc0]; omega
+    have hal0 : st0.pc % 4 = 0 := by rw [hpc0]; exact halign
+    obtain ⟨s', hs'⟩ := arm64_go_exit_terminates_aligned image.code
+      (image.base + image.codeSize)
+      hstraight hmod exportFuel st0 hal0 hle0 hlt0
+    exact ⟨s', hs'⟩
+  rw [runExport, arm64_exec_go_exit]
+  generalize hst :
+      ({ Arm64State.init n image.base with
+          pc := export_.entry,
+          x30 := UInt64.ofNat (image.base + image.codeSize) }) = st0
+  obtain ⟨s', hs'⟩ := key st0 (hst.symm ▸ rfl)
+  exact ⟨s', hs'⟩
+
 end DylibExport
 
 

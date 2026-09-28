@@ -312,22 +312,54 @@ about a table, not a 51-way grind.
      consistency check that already exists and is already tested, instead of
      adding a second, independent copy of the branch table to keep in sync.
 
-#### Then, once (3) lands
+#### Landed since the first draft of this section
 
-4. **The alignment invariant — `st.pc ≡ entry (mod 4)`.** This is the part
-   nobody should skip, and it is *not* a check. Progress is now free (a
-   non-branching step gives `s'.pc = s.pc`, so `effNext = s.pc + 4`), but
-   **containment is not**: `s.pc + 4 ≤ exit` needs `s.pc ≡ exit (mod 4)`, and
-   without it a non-branching step at `exit - 1` walks past the exit — the
-   overshoot hazard from §3.1, arriving by a different route. So the run needs
-   a genuine loop invariant. For straight-line code it is a one-line invariant
-   and induction on fuel; getting it right is why §6.1 is not "just a check".
+Two more theorems, both proved, both zero holes, and together they are the
+reduction that makes the straight-line case finishable:
 
-5. **Dispatch over the reachable set.** Given the invariant, the reachable pcs
-   are the aligned ones in `[entry, exit)`, computable in Python from the code
-   bytes. Emit a *table* lemma keyed on membership in a literal list, then
-   `rcases hp with rfl | rfl | …` — **linear, not exponential**. A `by_cases` per
-   candidate would be `2^n` and must not be written.
+- **`arm64_go_exit_terminates_aligned`** — straight-line termination. The input
+  is a *table*, `hstep : every in-range, word-aligned pc has a successor and it
+  does not move the pc`, plus the image's word alignment `hmod`. Progress is
+  then free (`effNext = pc + 4`) and containment follows from alignment. The
+  fuel bound is a deliberate **4× over-approximation**
+  (`exit - st.pc + 1 ≤ f` where the run needs `(exit - st.pc) / 4` steps) so
+  that no divisibility argument appears anywhere in the induction. Alignment is
+  preserved because `(pc + 4) % 4 = pc % 4`.
+
+- **`arm64_nodrop_of_straight`** — `hnodrop` is a *consequence* of the table, not
+  a second assumption. It has to be stated this way: `hhalts` and `hnodrop`
+  quantify over the *actual* successor `s'`, and the table gives a successor
+  `t` with `t.pc = st.pc`; the two are the same state (`Option.some.inj`).
+
+- **`dylibExport_total_of_straight`** — `Total` from **one** checkable
+  statement, the table, plus `hmod`, `hentry4`, `InImage` and
+  `codeSize < exportFuel`. So an export satisfying the table has **no hole at
+  all** in its `Total` clause, where today it has two.
+
+**`hentry4` is stated, not derived, and that is load-bearing.** I tried to derive
+`entry % 4 = 0` from `hmod` and `InImage` and it is false: `base = 1,
+codeSize = 3, entry = 2` satisfies both and gives `entry % 4 = 2`. `InImage`
+constrains `entry - base`, not `entry`. It is a literal check like the rest.
+
+#### The one remaining piece, and it is small
+
+`hstraight` is stated over `st.pc < exit` and `st.pc % 4 = 0` — but that range
+includes pcs **below `image.base`**, where the generator's `_gen_code_defs`
+answers `0`, and `0` does not decode. So the table must be restricted to
+`base ≤ st.pc < exit`, which means the theorem needs one more hypothesis,
+`hbase : image.base ≤ st.pc`, and its preservation is **monotone and immediate**
+(a non-branching step goes to `pc + 4`, so `pc ≥ base` is preserved; and the
+initial state's `pc` is `entry ≥ base` by `InImage`). That is the last edit,
+and I stopped rather than land it unverified: a 27-minute library rebuild was
+not something to spend on a change I could not re-check.
+
+Once `hbase` is in, the generator change is a swap: emit one
+`{ident}_straight` table instead of `{ident}_halts` + `{ident}_nodrop`, and
+`{ident}_semantics_total` becomes
+`dylibExport_total_of_straight … {ident}_straight (by native_decide) …`. The
+table is enumerated by `rcases hp with rfl | rfl | …` over a literal list —
+**linear, never `by_cases` per candidate**, which would be `2^n`.
+
 
 
 ### 6.2 `hnodrop` for a *bounded* number of backward edges
