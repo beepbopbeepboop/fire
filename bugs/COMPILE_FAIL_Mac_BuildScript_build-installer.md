@@ -1,5 +1,84 @@
 # COMPILE_FAIL: Mac/BuildScript/build-installer.py
 
+## Status (2026-09-27 — root cause 1 re-derived in detail and an implementation ATTEMPTED AND REJECTED; the doc's own diagnosis is confirmed correct, and the blocker is now narrower than "high-risk shared machinery")
+
+The doc's analysis below is **confirmed accurate**, re-measured on this tree.
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py`
+still produces **exactly one** own-file error, byte-identical to every prior
+re-verification:
+
+```
+build-installer.py:704:17: error: invalid operands to binary +
+                             (have 'char *' and 'MojoList *')
+```
+
+No code change is landed. An implementation was written, measured, and
+**deliberately reverted** — the reasoning is recorded here because it is the
+expensive part and the next session should not re-derive it.
+
+### What was confirmed
+
+The two-pass structure the doc describes is real and both halves were found:
+
+1. **Phase 1.7's global pre-scan** (`_phase17_infer_global_type` /
+   `_gscan_declare_global`, both in `mojo/backend_gimple/module_gen.py`)
+   walks TOP-LEVEL module statements only. `FW_VERSION_PREFIX` is therefore
+   typed `char *` from its module-level `"--undefined--"` sentinel
+   (`:112`) forever, and the reassignment at `:703` inside `parseOptions()`
+   (which declares `global FW_VERSION_PREFIX` at `:643`) is invisible to it.
+2. **`_phase17_value_type`, the pure RHS-type table Phase 1.7 shares with
+   its branch-join scanners, has no `BinaryOp` row at all.** The `:703` RHS
+   is `FW_PREFIX[:] + ["Versions", getVersion()]` — a `BinaryOp('+')` whose
+   left operand `_quick_type`s to `int64_t` (a slice of an untyped global)
+   and right to `MojoList *`. With no row, it fell to the generic fallback
+   and returned `int64_t`, so the table reports NO container evidence even
+   once the function bodies are scanned. This is a second, independent
+   prerequisite the doc did not name: **scanning function bodies is not
+   sufficient on its own.**
+
+### Why the attempt was rejected
+
+The first working version (a `_phase17_scan_global_reassignments` pass
+joining each `global`-declared name's body-assignment types against the
+module-level type, plus the `BinaryOp '+'` row) DID make `fire.py build`
+succeed with zero errors. It was then rejected for two measured reasons:
+
+- **The inline path never agreed.** `--dump-full` (do_imports=True) still
+  declared `char * FW_VERSION_PREFIX;` in `struct _root_toplev` and cast a
+  `MojoList *` into it at the reassignment. That LINKS — both are
+  pointer-sized — so nothing reports it, while
+  `root__mojo_global_get_FW_VERSION_PREFIX` returns `char *` for a list. A
+  silent miscompile, and precisely the "link mode and inline generated C
+  must agree" bar.
+- **Making it agree regressed link mode from 1 error to 10.** Adding the
+  `BinaryOp` row (needed for the container evidence) changes what
+  `_phase17_value_type` reports for `+` for EVERY caller, not just the new
+  one, and the link-mode field type and the assignment-site coercion
+  (`_global_dst_ctype` -> `_own_overlay_global_ctype`, which prefers a
+  scalar own-overlay conclusion unconditionally) then disagreed.
+
+The unresolved mechanism, for whoever picks this up: **three separate sites
+re-derive this global's type** — Phase 1.7, `_gscan_declare_global`, and the
+`_<mod>_toplev` struct emitter — and they run in an order that lets the
+later ones overwrite the earlier conclusion. A guard placed in
+`_gscan_declare_global` was measured to be a **no-op** (it never fires:
+`gname` is already in `_declared_globals` by then), so the site that
+actually emits `struct _root_toplev`'s field text is still unidentified.
+`global_decls` — the list `_gscan_declare_global` appends to — is **not
+emitted at all** (`module_gen.py:7281`: "kept for compatibility, but won't
+be emitted"), which is why patching it changed nothing.
+
+**Next step:** find the real `_root_toplev` field emitter (it is NOT
+`global_decls`; `_module_globals` at `module_gen.py:7085/7167` builds OTHER
+modules' structs, so the root's own has its own site) and reconcile ALL the
+re-derivation sites against one conclusion, rather than adding a fourth.
+Doing that without regressing link mode is the actual work; the analysis
+above is what makes it tractable.
+
+The attempted implementation is preserved in `stash@{0}` ("WIP on master")
+and as `/tmp/module_gen_item4_attempt.patch` (ephemeral). It is **not**
+landed and should not be popped as-is — it needs the third site too.
+
 Source file: `/Users/mrs/net/Python-3.14.6/Mac/BuildScript/build-installer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)

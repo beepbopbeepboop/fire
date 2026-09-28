@@ -507,6 +507,42 @@ int mojo_is_registered_list(int64_t addr) {
     return mojo_set_contains_int(_mojo_list_registry, addr);
 }
 
+/* The ONE definition of "this int64_t is a real heap/static pointer", shared
+ * by every predicate in this file that has to dereference one. Both
+ * requirements below are what makes that safe, and both were found by
+ * measurement, not by taste:
+ *
+ *   - at least 2 GiB: below that live None, small ints, bools, and the
+ *     31-bit `zlib.crc32(name) & 0x7fffffff` struct type-tags a compiled
+ *     `type(node)` yields in place of a class object. A `v > 65536` test
+ *     classified every such tag as "definitely a pointer" and the
+ *     dereference then segfaulted -- CRASH.md, the mojoc-on-any-input
+ *     SIGSEGV. This is the arm the crash fix was actually about.
+ *   - below 2^47, the top of the userspace half on every platform this
+ *     runtime targets. A codegen-emitted recursive AST scan once walked
+ *     into the sentinel 0x00007fffffffffff -- past this bound -- and the
+ *     bare dereference segfaulted.
+ *
+ * NOT in this predicate, deliberately, because they are properties of what
+ * a given CALLER intends to read, not of the address:
+ *
+ *   - 8-byte alignment, and
+ *   - a live allocation of at least 8 bytes.
+ * A `char *` string has no alignment requirement at all, and a C string
+ * LITERAL is not malloc'd and not even 8-byte aligned: measured on the
+ * literals `"bb"`, `"a"`, `"ccc"` in a real generated .c, the addresses
+ * come out at ...644, ...647, ...649 (i.e. 8-alignment 4/7/1) with
+ * malloc_size() == 0, because they live in a merged .rodata section, not on
+ * the heap. Folding either requirement in here rejected every string
+ * literal in the program. See _mojo_tagged_addr_ok below, which does need
+ * both, and mojo_boxed_is_str above, which needs neither. */
+static int _mojo_ptr_shaped(int64_t addr) {
+    uint64_t u = (uint64_t)addr;
+    if (u < 0x80000000ULL) return 0;
+    if (u >= 0x0000800000000000ULL) return 0;
+    return 1;
+}
+
 /* Runtime str-vs-container discriminator for an AMBIGUOUSLY-typed (boxed
  * int64_t) value — the `isinstance(x, str)` counterpart of
  * mojo_is_registered_list above, sharing its registry so the two verdicts
@@ -523,46 +559,44 @@ int mojo_is_registered_list(int64_t addr) {
 
 /* Is this boxed int64_t plausibly a `char *`?
  *
- * DELIBERATELY the RANGE-only predicate (`_mojo_tagged_addr_range_ok`,
- * defined below, forward-declared here), not the fuller `_mojo_tagged_addr_ok`
- * the struct-box readers use. That fuller predicate answers a different
- * question — "may I read an `int64_t __mojo_type_id` at offset 0 of this?" —
- * and two of its extra checks are properties of THAT read rather than of
- * pointers in general:
+ * DELIBERATELY the RANGE-only predicate (`_mojo_ptr_shaped`, defined above),
+ * not the fuller `_mojo_tagged_addr_ok` the struct-box readers use. That
+ * fuller predicate answers a different question -- "may I read an
+ * `int64_t __mojo_type_id` at offset 0 of this?" -- and two of its extra
+ * checks are properties of THAT read rather than of pointers in general:
  *
  *   - `u & 7`, 8-byte alignment, because the tag is an int64_t at offset 0.
  *   - `MOJO_MALLOC_USABLE_SIZE(u) >= sizeof(int64_t)`, because that read
  *     must not run off the end of the allocation holding the address.
  *
  * A codegen-emitted string LITERAL is a `char[N]` in __TEXT/__rodata: it is
- * not a malloc allocation at all, so `malloc_size` returns 0 for it, and 8-
- * byte alignment is a property of the C compiler's section layout, not
+ * not a malloc allocation at all, so `malloc_size` returns 0 for it, and
+ * 8-byte alignment is a property of the C compiler's section layout, not
  * something the emitted `static char * _slit_N = "bb";` (module_gen.py's
  * pool) can rely on. Measured on that exact declaration shape in a
  * standalone C file, at both -O0 and -O2: "a" at &7==7, "bb" at 1, "ccc" at
- * 4, "dddd" at 0, "x" at 3 — i.e. mostly NOT 8-aligned, and differently per
+ * 4, "dddd" at 0, "x" at 3 -- i.e. mostly NOT 8-aligned, and differently per
  * build. The full pipeline's pool has so far come out aligned in every
- * variant tried (20+ first-key literals × pool padding, each probed at
- * runtime), so the alignment half is LATENT rather than firing today — but
- * the malloc_usable_size half, which upstream moved out of this predicate,
- * was exactly this bug: it trips on EVERY literal, and
+ * variant tried (20+ first-key literals x pool padding, each probed at
+ * runtime), so the alignment half is LATENT rather than firing today -- but
+ * the malloc_usable_size half, which was briefly folded into this
+ * predicate, was exactly this bug: it trips on EVERY literal, and
  * `sorted(["bb","a","ccc"], key=lambda s: s)` printed `['bb','a','ccc']`
  * (the comparator saw three EQUAL keys, so the sort was a no-op) and
  * `lambda k, d=d: d[k]` called as `f("a")` printed 0. Requiring either
  * property here demotes a string literal to "not a string", and that is a
- * SILENT wrong answer rather than a crash — `mojo_cstr_or_int_str` falls
+ * SILENT wrong answer rather than a crash -- `mojo_cstr_or_int_str` falls
  * through to `mojo_str_from_int`, so a dict keyed by a literal is looked up
  * by the decimal of its own address and silently yields the not-found
- * default. Two checks that are half of a coin flip per build are two checks
+ * default. Two checks that are half a coin flip per build are two checks
  * that should not be here at all.
  *
- * What IS shared with the struct predicate — and is the reason this is a
- * range test at all — is that a genuine pointer on every platform this
- * runtime targets sits above 2 GiB, which is what rejects None, small ints,
+ * What IS shared with the struct predicate -- and is the reason this is a
+ * range test at all -- is the 2 GiB floor, which rejects None, small ints,
  * bools and the 31-bit `zlib.crc32(name) & 0x7fffffff` struct type-tags a
  * compiled `type(node)` yields in place of a class object. A `v > 65536`
  * test here classified every such tag as "definitely a string pointer" and
- * handed it to strlen — CRASH.md's segfault. The upper bound is the struct
+ * handed it to strlen -- CRASH.md's segfault. The upper bound is the struct
  * predicate's canonical-userspace ceiling (2^47), so a garbage 64-bit word
  * is not handed to strlen either.
  *
@@ -575,10 +609,8 @@ int mojo_is_registered_list(int64_t addr) {
  * Struct-valued boxes (mojo_read_type_tag / mojo_read_type_tag_safe,
  * isinstance) keep the strict predicate: they are the ones that dereference.
  */
-static int _mojo_tagged_addr_range_ok(int64_t addr);
-
 int mojo_boxed_is_str(int64_t v) {
-    return _mojo_tagged_addr_range_ok(v) && !mojo_is_registered_list(v);
+    return _mojo_ptr_shaped(v) && !mojo_is_registered_list(v);
 }
 
 /* A Python tuple literal lowers to the exact same MojoList as a list literal
@@ -3943,6 +3975,67 @@ static int64_t _set_slot_str_tag(MojoSet *s, char *v, int tag)
 static int64_t _set_slot_str(MojoSet *s, char *v)
 { return _set_slot_str_tag(s, v, 1 /* str domain */); }
 
+/* Place ONE already-owned entry into the freshly-resized table `s`, keeping
+ * the caller's original insertion `seq` and taking a PRIVATE copy of any
+ * string payload. `_set_grow`'s replay is the only caller.
+ *
+ * It exists because routing the replay through the public adders
+ * (`mojo_set_add_int` / `mojo_set_add_str`) was wrong three separate ways,
+ * and all three are silent:
+ *
+ *  1. BYTES ENTRIES WERE DROPPED. The old replay had a `tag == 0` branch
+ *     and a `tag == 1` branch and NO `tag == 2` branch, so every bytes
+ *     element (`mojo_set_add_bytes`, which stamps tag 2 precisely so
+ *     `b'a'` and `'a'` stay distinct) was discarded by the rehash — and its
+ *     `val_s` leaked, since the free lived in the tag-1 branch. Measured
+ *     through the compiled path before this fix:
+ *
+ *         s = {b'a', b'b', b'c', b'd', b'e'}
+ *         print(len(s))          ->  1        (expected 5)
+ *
+ *     `mojo_set_init` starts `cap` at 8 and grows when `used * 2 >= cap`,
+ *     i.e. on the FIFTH insert, so any bytes set of 5+ elements lost all
+ *     but the element that triggered the grow. Tag 1 and tag 2 have
+ *     identical storage (a strdup'd/`cstr_key`'d `val_s` the slot owns) and
+ *     now share one branch.
+ *
+ *  2. EVERY KEY WAS PROBED TWICE. The adders probe to find the slot and
+ *     then the replay called `_set_slot_int` / `_set_slot_str_tag` a SECOND
+ *     time on the same key just to recover the index it had already found.
+ *     Each probe is an O(cap) linear scan under load, and this runs for
+ *     every entry on every rehash.
+ *
+ *  3. EVERY STRING WAS COPIED AND THEN FREED. `mojo_set_add_str` strdups
+ *     its argument; the replay then freed the ORIGINAL. Net effect: one
+ *     malloc + one free per string entry per rehash, to end up with the
+ *     same bytes.
+ *
+ * Plus a fourth, structural one that is not a miscompile but made the
+ * replay need its `next_seq` save/restore at all: the adders re-check
+ * `used * 2 >= cap` and can call `_set_grow` RECURSIVELY while the outer
+ * replay is still walking the old table. It cannot happen — the new
+ * capacity is `2 * old_cap` and the old table held at most `old_cap`
+ * occupied slots, so there is provably room for every entry being
+ * reinserted — which is why this function takes no capacity check and no
+ * retry, and why the replay no longer touches `next_seq` at all (it stamps
+ * `seq` directly instead of letting an adder stamp `next_seq++` and
+ * saving the counter afterwards). `idx < 0` is therefore unreachable; the
+ * guard is kept so a future change to the growth policy degrades to
+ * "drop this one entry" rather than to a write past the end of `slots`. */
+static void _set_replay_entry(MojoSet *s, int tag, int64_t val_i,
+                              char *val_s, int64_t seq)
+{
+    int64_t idx;
+    if (tag == 0) idx = _set_slot_int(s, val_i);
+    else          idx = _set_slot_str_tag(s, val_s, tag);
+    if (idx < 0) return;
+    s->slots[idx].tag   = tag;
+    s->slots[idx].val_i = (tag == 0) ? val_i : 0;
+    s->slots[idx].val_s = (tag == 0) ? NULL : strdup(val_s ? val_s : "");
+    s->slots[idx].seq   = seq;
+    s->used++;
+}
+
 static void _set_grow(MojoSet *s)
 {
     int64_t old_cap = s->cap;
@@ -3952,22 +4045,18 @@ static void _set_grow(MojoSet *s)
     s->slots = malloc((size_t)s->cap * sizeof(_SetSlot));
     for (int64_t i = 0; i < s->cap; i++) { s->slots[i].tag = -1; s->slots[i].seq = 0; }
     /* Re-insert carries each entry's ORIGINAL seq across the rehash, so a
-     * grow never reorders iteration. The adders below stamp `next_seq++`
-     * on a fresh insert, so save/restore it around the replay. */
-    int64_t saved_seq = s->next_seq;
+     * grow never reorders iteration. `next_seq` is deliberately left alone
+     * (the previous code saved and restored it around a replay that went
+     * through the adders, which stamp `next_seq++`): `_set_replay_entry`
+     * writes `seq` straight into the slot, so nothing here can perturb it. */
     for (int64_t i = 0; i < old_cap; i++) {
         if (old[i].tag == 0) {
-            mojo_set_add_int(s, old[i].val_i);
-            int64_t j = _set_slot_int(s, old[i].val_i);
-            if (j >= 0) s->slots[j].seq = old[i].seq;
-        } else if (old[i].tag == 1) {
-            mojo_set_add_str(s, old[i].val_s);
-            int64_t j = _set_slot_str_tag(s, old[i].val_s, old[i].tag);
-            if (j >= 0) s->slots[j].seq = old[i].seq;
+            _set_replay_entry(s, 0, old[i].val_i, NULL, old[i].seq);
+        } else if (old[i].tag == 1 || old[i].tag == 2) {
+            _set_replay_entry(s, old[i].tag, 0, old[i].val_s, old[i].seq);
             free(old[i].val_s);
         }
     }
-    s->next_seq = saved_seq;
     free(old);
 }
 
@@ -4417,53 +4506,29 @@ int mojo_isinstance_p(int64_t obj, int type_id) {
  * always took the "not this type" branch — found via find_imports() (used by
  * `mojo --dump`'s own do_imports resolution) never recognizing any import
  * statement inside a nested function/if/try block once self-hosted. */
-/* The RANGE half of "may I read an `int64_t __mojo_type_id` from this
- * address?" — and, on its own, the WHOLE of "does this boxed int64_t look
- * like a `char *`?" (mojo_boxed_is_str, above), which is why nothing here is
- * a property of the tag read. Two requirements, both met by any genuine
- * pointer on every platform this runtime targets:
- *
- *   - at least 2 GiB: below that live None, small ints, bools, and the
- *     31-bit `zlib.crc32(name) & 0x7fffffff` struct type-tags themselves,
- *     which a compiled `type(node)` yields in place of a class object;
- *   - canonical: below 2^47, the top of the userspace half, so a garbage
- *     64-bit word is neither dereferenced nor handed to strlen.
- *
- * The upper-bound check was added after the isinstance widening (see
- * mojo_isinstance) let the compiler's own recursive AST scans reach values
- * they had never been handed before: mojo_compiler.py's `_scan_yield_bearing`
- * walked into the sentinel 0x00007fffffffffff — past the low guard and at
- * the very last byte of the address space. Answering "not a tagged struct"
- * (and not a string) is both correct and non-fatal. */
-static int _mojo_tagged_addr_range_ok(int64_t addr)
-{
-    uint64_t u = (uint64_t)addr;
-    if (u < 0x80000000ULL) return 0;
-    if (u >= 0x0000800000000000ULL) return 0;
-    return 1;
-}
-
 /* Can `addr` be the address of a codegen-emitted struct (i.e. is it safe
- * to read an `int64_t __mojo_type_id` from it)? The range test above, plus
- * two further requirements of THAT READ — properties of reading an int64_t
- * at offset 0, not of pointers in general, and so deliberately not shared
- * with the string path:
+ * to read an `int64_t __mojo_type_id` from it)? _mojo_ptr_shaped (defined
+ * near the top of this file, where mojo_boxed_is_str's own docstring
+ * explains why it is the shared half) answers "is this a real pointer at
+ * all"; this predicate adds the two further requirements that are
+ * specifically about reading an 8-BYTE TYPE TAG and are therefore NOT
+ * imposed on the plain char* string readers:
  *
- *   - 8-byte aligned, because `__mojo_type_id` is an int64_t at offset 0
- *     and every allocator this runtime uses returns 16-byte-aligned blocks,
+ *   - 8-byte aligned: `__mojo_type_id` is an int64_t at offset 0, and
+ *     every allocator this runtime uses returns 16-byte-aligned blocks,
  *     so a misaligned value is definitionally not a struct pointer (this is
  *     also what let `_scan_yield_bearing`'s walk into the unaligned
- *     0x00007fffffffffff sentinel segfault before the range ceiling above
- *     existed);
- *   - an allocation of at least 8 bytes (below), so the read cannot run off
- *     the end of it.
+ *     0x00007fffffffffff sentinel segfault before the range ceiling in
+ *     _mojo_ptr_shaped existed);
+ *   - a live allocation of at least 8 bytes (see the ASan-confirmed
+ *     heap-buffer-overflow below).
  *
- * A codegen string literal satisfies NEITHER extra check, which is why
- * mojo_boxed_is_str above uses the range predicate alone. */
+ * Both requirements are what a C string LITERAL fails and a struct pointer
+ * never does, which is exactly why mojo_boxed_is_str must not call this. */
 static int _mojo_tagged_addr_ok(int64_t addr)
 {
     uint64_t u = (uint64_t)addr;
-    if (!_mojo_tagged_addr_range_ok(addr)) return 0;
+    if (!_mojo_ptr_shaped(addr)) return 0;
     if (u & 7ULL) return 0;
 #if MOJO_HAVE_MALLOC_USABLE_SIZE
     /* The range/alignment checks above only rule out small-int/None/

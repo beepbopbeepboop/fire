@@ -1,5 +1,87 @@
 # COMPILE_FAIL: Lib/importlib/resources/readers.py
 
+## Status (2026-09-27, latest — blocker #1, the cross-module symbol-name mismatch, is FIXED and verified on the real file)
+
+The first of the two remaining `readers.py`-specific errors is closed. It was
+a shared-machinery naming bug, exactly as the previous entry predicted, and
+it is now a separate, landed fix.
+
+### The bug
+
+`from ._itertools import only` (CPython's
+`Lib/importlib/resources/readers.py:15`) produced, in ONE generated unit:
+
+```
+#ifndef _MOJO_STUB__itertools_only_37bd8e
+int64_t _itertools_only_37bd8e (int64_t, int64_t, int64_t);      /* decl    */
+int64_t _itertools_only_37bd8e (int64_t, int64_t, int64_t) {...} /* def     */
+  _t51 = __itertools_only_37bd8e (one_dir, _t52, _t53);          /* CALL    */
+```
+
+A relative import's leading depth dot is **not** part of the module's name,
+but `_register_sym` (`mojo/middle/module_shared.py`) turned that dot into an
+underscore like any other dot, so the CALL site's prefix gained an underscore
+the DEFINITION side never had. The module's own leading `_` is what made the
+two spellings differ by exactly one character — which is why a sibling named
+`base3` (as `test_root_module_circular_import_symbol` uses) was always fine
+and `_helper`/`_itertools` never was, and why no pre-existing test could have
+caught it.
+
+This function was the **only one of five** sites that mangle a module string
+into a C symbol prefix and omitted the `lstrip('.')` the other four already
+had (`funcs_shared.py:376`, `:602`, `:830`, and `_compile_imported_module`'s
+`_module_key` in `emit_resolve.py`). The same class was already found and
+fixed for the STRUCT side at `funcs_shared.py:830`
+(`bugs/CODEGEN_link_mode_from_submodule_import_symbol_value_call_segfault.md`);
+this was that same fix simply missed on the free-function side. The comment
+immediately below the fixed line states the requirement the old code
+violated: "the qualifier half and suffix half of one mangled symbol always
+mean the same binding ... the DEFINITION side's exact resolver".
+
+### The fix
+
+One token: `s.module` -> `s.module.lstrip('.')`.
+
+### Verified
+
+- **The real file.** `python3 fire.py build
+  /Users/mrs/net/Python-3.14.6/Lib/importlib/resources/readers.py` — the
+  call site at `readers.ci:322744` changed from
+  `__itertools_only_37bd8e` to `_itertools_only_37bd8e`, matching the
+  definition. Diffed the whole generated `.ci` before/after: that one line
+  is the only difference.
+- **A minimal fails-before regression**, `test_module_cache.py`'s
+  `test_underscore_prefixed_sibling_import_symbol`. It asserts the invariant
+  rather than a link result, and that distinction is load-bearing: in the
+  minimal shape the sibling is ALSO compiled to its own translation unit,
+  whose separately-derived symbol happens to satisfy the mismatched call, so
+  the binary links and prints the right answer even while the unit's own
+  call site names something it does not define. A link/exit-code assertion
+  therefore passes on the broken tree. The real failure needs a closure where
+  nothing else supplies the name — which is why `readers.py` (one 10 MB
+  `.ci` for the whole closure) is the shape that actually broke. The test
+  counts distinct C identifier spellings for the imported symbol across its
+  declaration, definition and call site, excluding the `_MOJO_STUB_` guard
+  namespace. Measured: 2 spellings before the fix, 1 after.
+
+### What still blocks this file (unchanged)
+
+1. **`re_finditer`** — no compiled representation of CPython's C-extension
+   `_sre` objects anywhere in this pipeline. Feature-sized, not a quick fix.
+2. **Fifteen sibling modules** in the closure: `pathlib` (19 errors),
+   `importlib/_bootstrap_external` (15), `pathlib/_os` (10), `tokenize` (8),
+   `glob` (7), `statistics` (6), `importlib/resources/_common` (6),
+   `random` (4), `numbers` (4), `importlib/resources/_functional` (4),
+   `tempfile` (2), `importlib/resources/_adapters` (2),
+   `importlib/_bootstrap` (1), `fractions` (1), plus the `shutil`
+   `'open' is ambiguous` module-level refusal. Also newly visible now that
+   this file gets further: `re_compile` unresolved in `tokenize.py`, and
+   `non-trivial conversion in 'component_ref' / 'var_decl'` in
+   `tokenize.py` / `_bootstrap_external.py`.
+
+**This doc is NOT closable on item 2's account.** The doc stays, tracking
+`re_finditer` and the sibling-module corpus.
+
 ## Status (2026-09-27, later — the `@staticmethod`-generator blocker is FIXED on both backends; the file now gets all the way to gcc and fails on two DIFFERENT things)
 
 The feature the previous entry identified as this file's first blocker — a

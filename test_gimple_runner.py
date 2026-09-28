@@ -645,6 +645,96 @@ print(sorted([1, 3, 2], key=negate))
 print(sorted(["bb", "a", "ccc"], key=lambda s: s))
 """, "['a', 'bb', 'ccc']\n")
 
+    # The test above only catches a broken mojo_boxed_is_str BY LUCK: the
+    # three literals it uses sit in a merged .rodata section at ...644,
+    # ...647, ...649 — i.e. ALREADY ASCENDING BY ADDRESS — so comparing the
+    # keys as raw int64_t pointers instead of strings reproduces the input
+    # order, and the assertion only trips because the input is already
+    # sorted. Any other input would pass silently while being sorted by
+    # memory address. This one emits the same three literal CONTENTS in
+    # the opposite order, so the .rodata addresses DESCEND while the
+    # strings must still sort ascending — a regressed discriminator can no
+    # longer pass by coincidence, and the keyless form is pinned alongside
+    # it because it shares the same recovery path.
+    test_gimple_stdout("gimple_sorted_string_key_not_in_address_order", """\
+print(sorted(["ccc", "a", "bb"], key=lambda s: s))
+print(sorted(["ccc", "a", "bb"]))
+""", "['a', 'bb', 'ccc']\n['a', 'bb', 'ccc']\n")
+
+    # A guard rather than a fails-before regression: runtime-BUILT strings
+    # are heap-allocated, so they are 8-byte aligned and malloc_size() >= 8,
+    # and therefore satisfied even the over-strict predicate that used to
+    # reject literals. Pinned anyway, because "literal and heap string are
+    # BOTH strings" is the invariant the discriminator actually has to
+    # hold, and this is the half that a future tightening could break
+    # silently. A runtime that recognises only one of the two shapes is
+    # the bug both this and the two cases above exist to catch.
+    test_gimple_stdout("gimple_sorted_string_key_runtime_built", """\
+def k3(x):
+    return x + "!"
+
+names = ["ccc", "a", "bb"]
+print(sorted(names, key=lambda s: k3(s)))
+print(sorted(names, key=lambda s: s + "!"))
+""", "['a', 'bb', 'ccc']\n['a', 'bb', 'ccc']\n")
+
+    # ── MojoSet rehash: the `tag == 2` (bytes) domain ────────────────────
+    # `_set_grow`'s replay had a `tag == 0` branch and a `tag == 1` branch
+    # and NO `tag == 2` branch, so every BYTES element in a set was
+    # discarded by the rehash — and its `val_s` leaked, because the free
+    # lived in the tag-1 branch. `mojo_set_init` starts `cap` at 8 and
+    # grows when `used * 2 >= cap`, so the first grow is the FOURTH insert
+    # and every bytes set of 4+ elements silently lost all but the element
+    # that triggered the grow:
+    #
+    #     s = {b'a', b'b', b'c', b'd', b'e'}
+    #     print(len(s))          ->  1        (expected 5)
+    #
+    # A silent wrong answer, not a crash: the set is still a valid set
+    # afterwards, so nothing else reports it. Only the compiled path is
+    # affected — the interpreter's set is CPython's.
+    #
+    # The other two element domains are pinned alongside it because the
+    # same replay previously probed every key TWICE (once inside the public
+    # adder, once more to recover the index the adder had already found)
+    # and strdup'd + freed every string entry for a net no-op. Both were
+    # removed by the same rewrite and both are silent if they regress.
+    test_gimple_stdout("gimple_set_bytes_survive_rehash", """\
+s = {b'a', b'b', b'c', b'd', b'e'}
+print(len(s), b'e' in s, b'a' in s, b'c' in s)
+""", "5 True True True\n")
+
+    test_gimple_stdout("gimple_set_bytes_many_rehashes", """\
+s = set()
+for i in range(30):
+    s.add(b'k' + str(i).encode())
+print(len(s), b'k0' in s, b'k29' in s)
+""", "30 True True\n")
+
+    test_gimple_stdout("gimple_set_str_rehash_unchanged", """\
+s = set()
+for i in range(30):
+    s.add('k' + str(i))
+print(len(s), 'k0' in s, 'k29' in s)
+""", "30 True True\n")
+
+    test_gimple_stdout("gimple_set_int_rehash_unchanged", """\
+s = set()
+for i in range(30):
+    s.add(i * 7)
+print(len(s), 0 in s, 203 in s)
+""", "30 True True\n")
+
+    # All three tag domains in ONE set, so a replay that handled only some
+    # of them — the shape the bug actually had — is caught even when each
+    # domain survives on its own. 4 + 10 = 14 elements, so two rehashes.
+    test_gimple_stdout("gimple_set_mixed_domains_rehash", """\
+s = {1, 'a', b'b', 2}
+for i in range(10):
+    s.add(100 + i)
+print(len(s), 1 in s, 'a' in s, b'b' in s, 105 in s)
+""", "14 True True True True\n")
+
     # A container element keeps its real type for the key, so `t[0]` works —
     # binding it as int64_t emitted "conflicting types" from the lambda's
     # forward declaration.
@@ -849,6 +939,20 @@ main()
     # `default is None and pname in var_types` fallback gave every parameter
     # an env field it never read, and the body emitted `_env->v` against a
     # struct with no such member.
+    #
+    # This also happens to be one of only two lowerings in the whole suite
+    # that route a boxed int64_t through mojo_cstr_or_int_str, so it
+    # silently became a regression test for the runtime's str-vs-container
+    # discriminator. The emitted C is correct on its own (`_env->d` is read
+    # properly) and this printed 0 when mojo_boxed_is_str was aliased to
+    # _mojo_tagged_addr_ok: that predicate's 8-byte-alignment and
+    # malloc_usable_size >= 8 requirements are obligations for reading an
+    # int64_t type tag, and a .rodata string literal satisfies NEITHER
+    # (measured: `"a"` lands at an address whose low 3 bits are 7, with
+    # malloc_size() == 0). The literal key was therefore formatted as a
+    # decimal address and the dict lookup missed. See the sorted-key tests
+    # above for the same root cause seen from the other side, and
+    # runtime/fire_runtime.c's mojo_boxed_is_str docstring for the fix.
     test_gimple_stdout("gimple_lambda_captures_via_default_arg", """\
 def main():
     d = {"a": 1}

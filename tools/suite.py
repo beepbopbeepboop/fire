@@ -405,17 +405,31 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # and the only two that are cached by content — see ArtifactCache for why they
 # are safe to cache and the stage trees are not.
 #
-# `bootstrap-stage2-dumps` (below) still carries `expect=SELFHOST_SEGV`:
-# unverified this session whether the compiled compiler still segfaults on
-# arbitrary input — see BLOW.md's own segfault-fix note (fixed on this
-# branch BEFORE the 2026-09-27 session, in runtime/fire_runtime.c /
-# emit_infra.py) if re-checking. Fixing the root SIGSEGV cause is
-# bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md's subject; the
-# marker flips itself to FAIL the moment the binary stops crashing, which
-# is the intended way for it to be removed.
-SELFHOST_SEGV = ('the self-hosted compiler segfaults on ANY input (exit 139 on '
-                 'a two-line program) — one root cause, see '
-                 'bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md')
+# `bootstrap-stage2-dumps` (below) carries `expect=SELFHOST_STAGE2_STALL`.
+# It used to carry the old `SELFHOST_SEGV` marker, and that reason string was
+# MEASURED FALSE on 2026-09-27 and corrected rather than left to rot. The
+# original SIGSEGV is fixed (BLOW.md §0): `./mojoc --dump-full` on a two-line
+# program is now exit 0 / 12.1 MB / 94.6 M instructions, re-measured on this
+# tree. What the stage2 dumps actually do now is NOT a segfault — the marker
+# below names the real blocker, because a marker that says "segfault" would
+# hide the real regression class: a silent-wrong-answer `mojo_unsupported_iter`
+# no-op, which the runner flags per sub-job and which NO exit code reports.
+#
+# The marker is still correct to KEEP — the step's 47 sub-jobs do not all
+# produce a byte-identical dump — but its reason now names the true upstream
+# cause, which is the self-hosting bootstrap pre-pass's cost
+# (bugs/CODEGEN_bootstrap_resource_blowup.md, localised 2026-09-27: 58.6 GB
+# / 1.24 T instructions / SIGTRAP on a real self-host input, a never-frees
+# accumulator of ~670M small objects).
+SELFHOST_STAGE2_STALL = (
+    'the self-hosted binary no longer segfaults (re-measured 2026-09-27: '
+    'exit 0 on a two-line program, 12.1 MB, 94.6 M instructions) but still '
+    'does not reproduce the reference dumps — sub-jobs return '
+    '`mojo_unsupported_iter` no-ops or a wrong dump, a silent-wrong-answer '
+    'class that no exit code reports. The upstream cause is the '
+    'self-hosting bootstrap pre-pass cost: 58.6 GB / 1.24 T instructions on '
+    'a real self-host input, localised (not fixed) in '
+    'bugs/CODEGEN_bootstrap_resource_blowup.md, 2026-09-27 section')
 # `ab-native`/`native-dumpfull` no longer segfault (verified 2026-09-27,
 # BLOW.md §0) but are STILL red for a different, real reason: their corpora
 # legitimately trigger this compiler's self-hosting bootstrap pre-pass
@@ -502,7 +516,7 @@ fanout('bootstrap-stage2-dumps',
        items=BOOTSTRAP_INPUTS, cwd='stage2',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='module',
        deps=['bootstrap-stage2-cc'], reject='mojo_unsupported_iter',
-       expect=SELFHOST_SEGV,
+       expect=SELFHOST_STAGE2_STALL,
        desc='stage2: the compiled binary dumps every source')
 # Same ordering constraint as stage1's: the per-file loop writes fire.ci into
 # stage2/ from a single-module dump, so the closure dump has to go last or

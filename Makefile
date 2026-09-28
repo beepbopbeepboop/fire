@@ -42,6 +42,30 @@ CORO_RUNTIME_SRC = runtime/fire_coro.c runtime/fire_coro_gen.c runtime/fire_asyn
 # The canonical source that all three stages compile
 MOJO_MAIN    = fire.py
 
+# The `mojoc` rule's real prerequisites: the whole self-host closure.
+#
+# This list used to be `$(MOJO_MAIN) $(RUNTIME_SRC) $(RUNTIME_HDR)` — three
+# files, none of which is a codegen source. `mojoc` is a self-compile of the
+# compiler, so an edit to ANY of the 58 files below changes it, and with that
+# prerequisite list `make mojoc` reported "up to date" and did nothing after
+# every one of them. The result was not merely a stale local file: the
+# runner's artifact cache (`tools/suite.py`, `ArtifactCache`) publishes
+# whatever `make mojoc` left behind under a FRESH key computed from
+# cas.selfhost_fingerprint() — the one input set that IS complete. So
+# `--no-cache`, whose whole job is to force a real rebuild, published a
+# binary built from pre-edit sources under a key that claims otherwise, and
+# every later run replayed it. That is precisely the "wrong binary served
+# from cache, silently" failure CLAUDE.md documents, live on this branch.
+#
+# Asked of cas.py rather than restated here, because cas.selfhost_inputs()
+# is already the documented input set for `mojoc`, `stage2/mojo` and the
+# whole-closure dumps, and tools/suite.py's `mojoc` step already keys on
+# cas.selfhost_fingerprint() over the same list. One source of truth, so the
+# Makefile's staleness test and the runner's cache key cannot disagree.
+# ~26 ms, and the closure-completeness check that keeps the list honest is
+# cas.selfhost_closure_is_complete() (walked by test_suite.py).
+SELFHOST_INPUTS = $(shell python3 -c 'import cas; print(" ".join(cas.selfhost_inputs()))' 2>/dev/null)
+
 GCC_MP15     = /opt/local/bin/gcc-mp-15
 BOOTSTRAP_CC = $(shell command -v gcc-15 >/dev/null 2>&1 && echo gcc-15 || (test -x $(GCC_MP15) && echo $(GCC_MP15)) || echo gcc)
 BOOTSTRAP_OPT ?= -O0
@@ -277,7 +301,13 @@ dump-all-stage3:
 # ── Build rules ──────────────────────────────────────────────────────────────
 # One-step self-host build: `mojoc` is stage2/mojo without the staging, and is
 # the binary the `native` bucket's tests run.
-mojoc: $(MOJO_MAIN) $(RUNTIME_SRC) $(RUNTIME_HDR)
+#
+# The prerequisites are the whole self-host closure ($(SELFHOST_INPUTS) — see
+# its definition for why a three-file list was not enough) plus the A3
+# coroutine runtime, which `fire.py build`'s link (driver.py) pulls in when
+# the compiler's own source contains a generator/async function and which was
+# missing here for the same reason: editing it did not rebuild `mojoc`.
+mojoc: $(SELFHOST_INPUTS) $(CORO_RUNTIME_SRC)
 	@echo "=== Building mojoc from $(MOJO_MAIN) ($(MOJO_OPT)) ==="
 	python3 fire.py build fire.py $(MOJO_OPT) -o mojoc
 	@echo "✓ mojoc ready"

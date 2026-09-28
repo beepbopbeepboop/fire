@@ -132,7 +132,7 @@ def _lbn_target_names(t) -> list:
     return []
 
 
-def _lbn_walk(bound, global_declared: set, nodes) -> None:
+def _lbn_walk(bound: set, global_declared: set, nodes) -> None:
     """Hoisted out of `_locally_bound_names` (module-level, not a nested,
     RECURSIVE closure mutating two captured sets) — a real --dump-full
     fire.py crash (SIGSEGV in mojo_set_update -> mojo_set_add_str ->
@@ -145,7 +145,20 @@ def _lbn_walk(bound, global_declared: set, nodes) -> None:
 
     `bound` is any object with `.add`/`.update` (a plain `set` for
     GIMPLE membership tests, or `_OrderedNames` when first-assignment
-    order matters for register allocation)."""
+    order matters for register allocation).
+
+    `bound: set` is the annotation that keeps this compiling, and it is
+    the SAME shape `global_declared` beside it has always carried — see
+    the note on `_lbn_compr_targets` below for the full mechanism, since
+    both parameters were miscompiled the same way and for the same
+    reason. One caller does pass an `_OrderedNames`:
+    `bound_names_in_order` below, which exists for formal's register
+    allocator. That caller is INTERPRETED-ONLY — `formal/` is not in
+    the self-host closure (`cas.selfhost_closure_is_complete('fire.py')`
+    reports it absent), and Python ignores annotations at runtime, so
+    the duck-typing `bound_names_in_order` relies on is untouched. The
+    only compiled call site, `emit_resolve._locally_bound_names`, passes
+    a real `set`."""
     for node in nodes or []:
         if isinstance(node, GlobalStmt):
             global_declared.update(node.names)
@@ -208,8 +221,47 @@ def _lbn_walk(bound, global_declared: set, nodes) -> None:
             _lbn_walk(bound, global_declared, node.body)
 
 
-def _lbn_compr_targets(bound, expr) -> None:
+def _lbn_compr_targets(bound: set, expr) -> None:
     """Bind Comprehension generator targets found anywhere in an expression.
+
+    `bound: set` for the same reason, and with the same blast radius, as
+    `_lbn_walk`'s — see its docstring. The mechanism, recorded here
+    because it is a general hole rather than a local mistake:
+
+    an unannotated parameter that is used as a METHOD RECEIVER gets its C
+    type from the cross-call struct contract in
+    `mojo/backend_gimple/module_gen.py` (`_arg_struct_ptr_type` and the
+    `_struct_obs` application loop), which observes the types passed at
+    the call sites **visible in the same module** and requires them to be
+    unanimous. For this function that set is `{_OrderedNames *}` — the
+    single `bound_names_in_order` call below — so the contract settled on
+    `_OrderedNames *` and emitted
+
+        void _lbn_compr_targets_6b945a (_OrderedNames *, int64_t);
+        void _lbn_walk_f9dd53 (_OrderedNames *, MojoSet *, int64_t);
+
+    `bound`'s other caller, `emit_resolve._locally_bound_names`, lives in
+    ANOTHER module and so is not in the observation set, and it passes a
+    genuine `set` (`bound = set()`). Both the call and the definition
+    compiled; the mismatch is two pointer types, so GCC had nothing to
+    say. At runtime `_OrderedNames_add` read `self._set` at struct offset
+    0 — which on a freshly `mojo_set_new()`ed empty set is the `used`
+    counter, i.e. 0 — and handed that to `mojo_set_add_int`, which
+    dereferenced NULL. That killed the self-hosted compiler on its FIRST
+    statement of a two-line program: `./mojoc --dump-full` on
+    `x = 1 / print(x)` crashed in `mojo_set_add_int` with `s == NULL`,
+    reached from `_reset_func` -> `GimpleGen._locally_bound_names` ->
+    `_lbn_walk` -> `OrderedNames_add`.
+
+    The contract's own `if ann.get(pname) is not None: continue  # respect
+    explicit annotation` makes the annotation the supported way to opt
+    out, which is why both parameters here carry one. The underlying
+    limitation is real and NOT closed by this: a free function's full
+    caller set is invisible to the contract (its sibling
+    `prefer_refined_param` docstring in the same file says as much), so
+    any unannotated struct-typed receiver parameter that is called from
+    two modules with two different types will still be miscompiled
+    silently.
 
     Comprehension targets live in expression positions (AssignStmt value,
     ReturnStmt, conditions, …), not as statement-level ForStmt nodes, so

@@ -71,6 +71,70 @@ def _selfhost_module_name_for_path(sd: str, path: str) -> str:
         return os.path.splitext(os.path.basename(path))[0].replace('-', '_')
     return rel.replace('/', '.')
 
+def _selfhost_parsed_modules(sd: str) -> list:
+    """`[(path, stmts)]` for every compiler implementation source under `sd`,
+    tokenized, parsed and rewritten EXACTLY ONCE per process and shared by
+    all three `_selfhost_*` seed passes below.
+
+    Those three passes (`_selfhost_module_scalar_globals`,
+    `_selfhost_struct_dict_field_val_types`,
+    `_selfhost_homogeneous_tuple_ret_funcs`) each independently did
+    `py_tokenize` + `parse_module` + `ast_rewriter.rewrite` over
+    substantially the same file list, and each cached its RESULT under its
+    own key (`'k'` / `'sdfvt'` / `'httrf'`). Because the three caches hold
+    three results rather than three views of one, the same source was
+    tokenized and parsed three times AND all three AST copies stayed live
+    for the life of the process. That is both the repeated work and a
+    contributor to the never-frees accumulation measured in
+    `bugs/CODEGEN_bootstrap_resource_blowup.md`: one shared parse is ~1/3
+    the instructions and ~1/3 the retained AST nodes.
+
+    The cache is keyed PER FILE on `(path, mtime)`, not on the whole file
+    list. A whole-list key means editing one file re-parses all 43 and
+    invalidates the other two passes wholesale; a per-file key means one
+    file is re-read and the other 42 are reused by all three passes, which
+    is the behaviour the callers actually want (the three lists differ —
+    `_selfhost_module_scalar_globals` covers a superset — so a whole-list
+    key could never be shared between them anyway).
+
+    A file that fails to parse is cached as a parse FAILURE, not
+    re-attempted on every pass: the three call sites all `continue` on
+    exception, and without this the same unparseable file would be
+    tokenized once per pass per call, forever. Read errors are NOT cached
+    (they are not content-derived), so a file that appears later is still
+    picked up.
+    """
+    _files = sorted(_selfhost_impl_py_files(sd)
+                    + [os.path.join(sd, n) for n in
+                       ('fire_compiler.py', 'module_loader.py', 'monomorphize.py',
+                        'ast_rewriter.py', 'imports.py', 'generated_dispatch.py',
+                        'reflect.py', 'mlir.py', 'regex_compile.py', 'cas.py',
+                        'elaborate.py', 'myinterpreter.py')])
+    _out: list = []
+    for _f in _files:
+        if not os.path.isfile(_f):
+            continue
+        try:
+            _mtime = os.path.getmtime(_f)
+        except OSError:
+            continue
+        _ck = (_f, _mtime)
+        if _ck in _SELFHOST_PARSE_CACHE:
+            _entry = _SELFHOST_PARSE_CACHE[_ck]
+        else:
+            _entry = _PARSE_FAILED
+            try:
+                with open(_f) as _fh:
+                    _src = _fh.read()
+                _entry = ast_rewriter.rewrite(
+                    Parser(py_tokenize(_src)).with_filename(_f).parse_module())
+            except Exception:
+                _entry = _PARSE_FAILED
+            _SELFHOST_PARSE_CACHE[_ck] = _entry
+        if _entry is not _PARSE_FAILED:
+            _out.append((_f, _entry))
+    return _out
+
 def _selfhost_module_scalar_globals(sd: str) -> dict:
     """`{global_name: (module_name, semantic_ctype, c_decl_ctype)}` for every
     top-level `NAME = <int|str|bool literal>` / `NAME = frozenset(...)` /
@@ -88,17 +152,6 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
     seeded: those are exactly what `_gscan_declare_global` itself would
     conclude for the same assignment, so the pre-seed can never disagree
     with the eventual per-module scan."""
-    _files = sorted(_selfhost_impl_py_files(sd)
-                    + [os.path.join(sd, n) for n in
-                       ('fire_compiler.py', 'module_loader.py', 'monomorphize.py',
-                        'ast_rewriter.py', 'imports.py', 'generated_dispatch.py',
-                        'reflect.py', 'mlir.py', 'regex_compile.py', 'cas.py',
-                        'elaborate.py', 'myinterpreter.py')])
-    _files = [f for f in _files if os.path.isfile(f)]
-    _key = tuple((f, os.path.getmtime(f)) for f in _files)
-    _hit = _SELFHOST_MODGLOBAL_CACHE.get('k')
-    if _hit is not None and _hit[0] == _key:
-        return _hit[1]
     # Home-side C-decl for a container module global is `int64_t` (boxed)
     # UNLESS it is one of gen_module_impl's hardcoded dispatch tables (which
     # get a bare `MojoDict *` / `MojoSet *` field). Skip those names so the
@@ -106,13 +159,8 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
     _dispatch_only = {'_STMT_DISPATCH', '_EXPR_DISPATCH', '_BIN_OPS', '_TYPE_MAP',
                       '_SIGNED', '_UNSIGNED', '_FLOAT', '_CMP_OPS'}
     _out: dict = {}
-    for _f in _files:
+    for _f, _stmts in _selfhost_parsed_modules(sd):
         _mod = _selfhost_module_name_for_path(sd, _f)
-        try:
-            _stmts: list = ast_rewriter.rewrite(
-                Parser(py_tokenize(open(_f).read())).with_filename(_f).parse_module())
-        except Exception:
-            continue
         for _s in _stmts:
             if not (isinstance(_s, AssignStmt) and isinstance(_s.target, IdentExpr)):
                 continue
@@ -142,7 +190,6 @@ def _selfhost_module_scalar_globals(sd: str) -> dict:
                 # and similar — a char* path string. Home emits an int64_t
                 # (boxed) accessor.
                 _out[_n] = (_mod, 'char *', 'int64_t')
-    _SELFHOST_MODGLOBAL_CACHE['k'] = (_key, _out)
     return _out
 
 def _selfhost_struct_dict_field_val_types(sd: str) -> dict:
@@ -159,21 +206,8 @@ def _selfhost_struct_dict_field_val_types(sd: str) -> dict:
     `_str_pool: dict[str, str]` value type was lost — `for k, v in
     self._str_pool.items()` then unpacked `v` as int64 and `str()`'d the
     pointer (garbage decimal `_slit_N` names in the emitted string pool)."""
-    _files = sorted(_selfhost_impl_py_files(sd)
-                    + [os.path.join(sd, n) for n in
-                       ('module_loader.py', 'fire_compiler.py')])
-    _files = [f for f in _files if os.path.isfile(f)]
-    _key = tuple((f, os.path.getmtime(f)) for f in _files)
-    _hit = _SELFHOST_MODGLOBAL_CACHE.get('sdfvt')
-    if _hit is not None and _hit[0] == _key:
-        return _hit[1]
     _out: dict = {}
-    for _f in _files:
-        try:
-            _stmts: list = ast_rewriter.rewrite(
-                Parser(py_tokenize(open(_f).read())).with_filename(_f).parse_module())
-        except Exception:
-            continue
+    for _f, _stmts in _selfhost_parsed_modules(sd):
         for _s in _stmts:
             if not (isinstance(_s, StructDef) and _s.name):
                 continue
@@ -205,7 +239,6 @@ def _selfhost_struct_dict_field_val_types(sd: str) -> dict:
                     # here would widen this pre-pass's blast radius.
                     if _vt == 'char *':
                         _out.setdefault(_s.name, {}).setdefault(_fname, _vt)
-    _SELFHOST_MODGLOBAL_CACHE['sdfvt'] = (_key, _out)
     return _out
 
 def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
@@ -221,13 +254,6 @@ def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
     importing module — so `GimpleGen._decode_str_literal_text`'s
     `(char*, char*)` return was unpacked via `mojo_list_get_int` and every
     user `StringLiteral`'s text read back as 0 (empty string-pool entries)."""
-    _files = sorted(_selfhost_impl_py_files(sd)
-                    + [os.path.join(sd, n) for n in ('module_loader.py', 'fire_compiler.py')])
-    _files = [f for f in _files if os.path.isfile(f)]
-    _key = tuple((f, os.path.getmtime(f)) for f in _files)
-    _hit = _SELFHOST_MODGLOBAL_CACHE.get('httrf')
-    if _hit is not None and _hit[0] == _key:
-        return _hit[1]
     _out: dict = {}
 
     def _elem(_ann):
@@ -251,12 +277,7 @@ def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
                 return None
         return _ct0 if _ct0 and _ct0 != 'int64_t' else None
 
-    for _f in _files:
-        try:
-            _stmts: list = ast_rewriter.rewrite(
-                Parser(py_tokenize(open(_f).read())).with_filename(_f).parse_module())
-        except Exception:
-            continue
+    for _f, _stmts in _selfhost_parsed_modules(sd):
         for _s in _stmts:
             if isinstance(_s, FunctionDef) and _s.name:
                 _e = _elem(getattr(_s, 'return_type', None))
@@ -267,7 +288,6 @@ def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
                     _e = _elem(getattr(_m, 'return_type', None))
                     if _e is not None:
                         _out.setdefault(f"{_s.name}_{_m.name}", _e)
-    _SELFHOST_MODGLOBAL_CACHE['httrf'] = (_key, _out)
     return _out
 
 def _collect_import_modules(modules_to_compile: dict, node_list):
@@ -449,7 +469,40 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
             ]
     if _sib_qualifier and sym_info:
         if self.do_imports:
-            _qual = (s.module.replace('.', '_')
+            # `lstrip('.')` is LOAD-BEARING and was missing here, making this
+            # the single outlier among five call sites that mangle a module
+            # string into a C symbol prefix (compare
+            # funcs_shared.py:376, :602 and :830, and
+            # emit_resolve.py's `_module_key`, which all strip). Without it a
+            # RELATIVE import's leading depth dot was itself turned into an
+            # underscore, so the call site's prefix gained an underscore the
+            # definition side never had:
+            #
+            #   `from ._itertools import only`  (CPython's
+            #   Lib/importlib/resources/readers.py:15)
+            #     here        : '._itertools' -> '__itertools'  (dot + the
+            #                   module's OWN leading underscore)
+            #     definition : '_itertools'   (leading dot dropped, the
+            #                   module's own underscore kept)
+            #   => call site emitted `__itertools_only_37bd8e(...)` against a
+            #      definition emitted as `_itertools_only_37bd8e(...)`:
+            #      `implicit declaration of function '__itertools_only_...'`
+            #      for every such import. Same root cause and same class as
+            #      the struct-side divergence fixed at funcs_shared.py:830
+            #      (bugs/CODEGEN_link_mode_from_submodule_import_symbol_value
+            #      _call_segfault.md) — this function was simply missed by it.
+            #
+            # The key this writes is `_pair_key(_qual, _sk)` in
+            # `_imported_home_param_types` and the arg to
+            # `_note_own_func_home`, i.e. the "which module defines this
+            # symbol" half of the mangled name — and the comment immediately
+            # below states that requirement in as many words ("the qualifier
+            # half and suffix half of one mangled symbol always mean the
+            # same binding", "the DEFINITION side's exact resolver"). A
+            # qualifier derived from the import STRING cannot honour that;
+            # only the module_name the defining module was itself compiled
+            # under can.
+            _qual = (s.module.lstrip('.').replace('.', '_')
                      .replace('-', '_'))
         else:
             _qual = _sib_qualifier
@@ -1075,9 +1128,6 @@ def _bytes_subclass_new_payload_name(new_fn):
 # Dependencies extracted with the shared API (originally gimple_module_gen.py)
 # ---------------------------------------------------------------------------
 
-# --- dependency _SELFHOST_MODGLOBAL_CACHE (from gimple_module_gen.py) ---
-_SELFHOST_MODGLOBAL_CACHE: dict = {}
-
 # --- dependency _UNKNOWN_FIELD_CTYPE (from gimple_module_gen.py) ---
 _UNKNOWN_FIELD_CTYPE = 'int64_t'
 
@@ -1091,18 +1141,20 @@ def _gmi_as_str(x) -> str:
     return x
 
 
-# ---------------------------------------------------------------------------
-# Dependencies extracted with the shared API (originally gimple_module_gen.py)
-# ---------------------------------------------------------------------------
-
-# --- dependency _SELFHOST_MODGLOBAL_CACHE (from gimple_module_gen.py) ---
-_SELFHOST_MODGLOBAL_CACHE: dict = {}
-
-# --- dependency _UNKNOWN_FIELD_CTYPE (from gimple_module_gen.py) ---
-_UNKNOWN_FIELD_CTYPE = 'int64_t'
-
-
-
-# --- explicit underscore/shared imports (wave2c r1) ---
+# The three `_selfhost_*` seed passes used to cache their RESULTS in a shared
+# `_SELFHOST_MODGLOBAL_CACHE` under three private keys ('k' / 'sdfvt' /
+# 'httrf'). That dict is GONE: three result caches over one shared file list
+# is three parses of the same source and three AST copies retained for the
+# life of the process. `_selfhost_parsed_modules` below keys one cache per
+# FILE on `(path, mtime)` and all three passes read it.
+#
+# `{ (path, mtime): stmts }`, plus one distinguished entry recording a file
+# that failed to parse. Deliberately NOT one whole-list key: the three
+# passes cover different file lists, so a whole-list key could never be
+# shared between them anyway.
+_SELFHOST_PARSE_CACHE: dict = {}
+# A module-level sentinel, not `None`: a parse can legitimately produce
+# `None`, and `None` as a cache value would be indistinguishable from a miss.
+_PARSE_FAILED = object()
 from mojo.middle.exprtypes import _walk_ast
 from mojo.middle.types import _LIST_RETURNING_METHODS, _STR_RETURNING_METHODS, _extract_init_expr, _import_targets, _mojo_type

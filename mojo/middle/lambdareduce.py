@@ -168,46 +168,77 @@ def escapes(body: list, name: str, binder) -> bool:
 def _stmts(body):
     """Top-level statements, not descending into nested FunctionDefs — a
     lambda inside a nested `def` belongs to that def's scope, not this
-    one's."""
+    one's. Returns a list, not a generator, for the reason `_walk` below
+    documents."""
     if body is None:
-        return
-    for s in body:
-        if isinstance(s, gimple_ctypes.FunctionDef):
-            continue
-        yield s
+        return []
+    return [s for s in body
+            if not isinstance(s, gimple_ctypes.FunctionDef)]
 
 
 def _walk_body(body):
-    """Every AST node under a STATEMENT LIST. `_walk` takes a single node
-    and returns immediately for anything without a `__dict__` — which a
-    list is — so passing a body to `_walk` directly yields NOTHING. That is
-    not hypothetical: it silently disabled the escape check, which would
-    have inlined genuinely-escaping lambdas."""
-    if not body:
-        return
-    for stmt in body:
-        yield from _walk(stmt)
+    """Every AST node under a STATEMENT LIST, as a LIST.
+
+    `_walk` takes a single node and returns immediately for anything
+    without a `__dict__` — which a list is — so passing a body to `_walk`
+    directly returns NOTHING. That is not hypothetical: it silently
+    disabled the escape check, which would have inlined
+    genuinely-escaping lambdas."""
+    out: list = []
+    for stmt in (body or []):
+        _walk_into(stmt, out)
+    return out
 
 
 def _walk(node):
     """Every AST node under `node`, not descending into a nested
-    FunctionDef (its locals are a different scope)."""
+    FunctionDef (its locals are a different scope), as a LIST.
+
+    Deliberately NOT a generator, and the reason is the same one
+    `mojo/middle/coro.py`'s identically-named `_walk` gives (see its
+    docstring, and bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md):
+    a `yield`/`yield from` function compiles to a real stack-switching
+    coroutine in this codegen, and the A3 runtime cannot have a
+    `mojo_raise()` longjmp across one. That is a liveness hazard, but the
+    failure this ACTUALLY produced is more prosaic and much worse: this
+    generator did not survive self-compilation at all, so the compiled
+    `mojoc` emitted it as the `weak` "unavailable in compiled mode"
+    stub — which returns nothing and prints a diagnostic per call. Every
+    lambda-capture analysis in this module then silently examined ZERO
+    nodes self-hosted, i.e. the whole `lambdareduce` pass was a no-op in
+    the compiled compiler, and a `for node in _walk_body(body)` loop over
+    a stub-returning call is what turned every `--dump-full` of the
+    self-hosted compiler into a file of nothing but that diagnostic.
+
+    None of this module's four `_walk_body` call sites needs laziness:
+    two scan the whole body to build a set (`callee_ids`, `local_names`),
+    one scans it fully, and `escapes_scope` returns early on the first
+    escape but is bounded by one function body. The accumulator form is
+    the same shape `exprtypes._walk_ast_into` already uses for exactly
+    this reason, so this is a convergence on an existing pattern rather
+    than a new one."""
+    out: list = []
+    _walk_into(node, out)
+    return out
+
+
+def _walk_into(node, out: list) -> None:
+    """`_walk`'s body, appending into a caller-owned accumulator. Split out
+    so the recursion is a plain self-call — a recursive `yield from`
+    inside one function is precisely the shape that needed replacing."""
     if node is None or not hasattr(node, '__dict__'):
         return
-    yield node
+    out.append(node)
     if isinstance(node, gimple_ctypes.FunctionDef):
         return
     for _fname, fval in vars(node).items():
         if _fname in ('line', 'col'):
             continue
-        if isinstance(fval, list):
+        if isinstance(fval, (list, tuple)):
             for x in fval:
-                yield from _walk(x)
-        elif isinstance(fval, tuple):
-            for x in fval:
-                yield from _walk(x)
+                _walk_into(x, out)
         elif hasattr(fval, '__dict__'):
-            yield from _walk(fval)
+            _walk_into(fval, out)
 
 
 def local_names(body: list) -> set:

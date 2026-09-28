@@ -1009,6 +1009,97 @@ def test_root_module_circular_import_symbol(wd):
               repr(rr.stdout) + repr(rr.stderr))
 
 
+def test_underscore_prefixed_sibling_import_symbol(wd):
+    """`from ._helper import only` — a RELATIVE import whose module BASENAME
+    starts with an underscore — through `fire.py build`'s real
+    do_imports=True inline pipeline, the exact shape CPython's
+    `Lib/importlib/resources/readers.py:15` uses
+    (`from ._itertools import only`).
+
+    The module-string mangler that builds a cross-module C symbol prefix
+    disagreed with itself about such a module. A relative import's leading
+    depth dot is not part of the module's NAME, but `_register_sym` in
+    `mojo/middle/module_shared.py` turned that dot into an underscore like
+    any other dot, while the DEFINING side — and the other four sites that
+    mangle a module string (funcs_shared.py:376, :602, :830, and
+    `_compile_imported_module`'s `_module_key`) — dropped it. With
+    `._helper` the call site's prefix became `__helper` against a
+    definition emitted as `_helper`, so the call referenced
+    `__helper_only_<hash>` while the definition was
+    `_helper_only_<hash>`:
+
+        error: implicit declaration of function '__helper_only_37bd8e';
+                               did you mean '_helper_only_37bd8e'?
+
+    The module's OWN leading underscore is what made the two spellings
+    differ by exactly one character, which is why a sibling named `helper`
+    (or `base3`, as `test_root_module_circular_import_symbol` uses) was
+    always fine and `_helper` never was — so no pre-existing test could
+    have caught it.
+
+    Asserted on the generated C of the whole closure, not on a link result,
+    and that distinction is load-bearing rather than stylistic. A link
+    assertion is UNRELIABLE here in both directions: in this minimal shape
+    the sibling also gets compiled to its own translation unit, whose
+    separately-derived symbol happens to satisfy the mismatched call, so
+    the binary links and prints the right answer even while the unit's own
+    call site points at a name that unit does not define. The real failure
+    needs a closure where NO other unit supplies that name — which is
+    exactly CPython's `Lib/importlib/resources/readers.py`, one 10 MB
+    `.ci` for the whole closure, where it became `implicit declaration of
+    function '__itertools_only_37bd8e'`. So the assertion is the invariant
+    itself: within one generated unit, the cross-module function must have
+    exactly ONE identifier spelling across its definition and its call
+    site. `_MOJO_STUB_` guard names are excluded — they are a separate
+    namespace and legitimately spell the mangled name verbatim.
+    """
+    import re
+    import fire
+    proj = os.path.join(wd, 'uscore_sibling')
+    os.makedirs(proj, exist_ok=True)
+    with open(os.path.join(proj, '_helper.py'), 'w') as f:
+        f.write("def only(x, too_long):\n    return x\n")
+    with open(os.path.join(proj, 'main.py'), 'w') as f:
+        f.write("from ._helper import only\n\n"
+                "class C:\n"
+                "    def pick(self, children):\n"
+                "        one_dir = 7\n"
+                "        return only(one_dir, 1)\n\n"
+                "def main():\n"
+                "    print(C().pick(1))\n\n"
+                "main()\n")
+    r = subprocess.run(
+        [sys.executable, os.path.join(HERE, 'fire.py'), '--dump-full',
+         'main.py'],
+        cwd=proj, capture_output=True, text=True, timeout=180)
+    check("underscore-sibling: --dump-full of the closure succeeds",
+          r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}")
+    ci = os.path.join(proj, 'main.ci')
+    if not os.path.exists(ci):
+        check("underscore-sibling: closure .ci produced", False, 'no main.ci')
+        return
+    with open(ci) as f:
+        text = f.read()
+    # Every spelling of the imported symbol. Two exclusions, both required:
+    #   - lines naming `_MOJO_STUB_...` are dropped: that guard macro spells
+    #     the mangled name verbatim as its own macro name, in a namespace of
+    #     its own, and would otherwise register as a second spelling;
+    #   - the leading-underscore run is matched as a WHOLE (`(?<![\w])_+...`)
+    #     rather than with a bare `_helper_only_` pattern, which would match
+    #     happily INSIDE `__helper_only_` and so report one spelling either
+    #     way — which is exactly the bug this test has to see.
+    body = '\n'.join(ln for ln in text.split('\n') if '_MOJO_STUB' not in ln)
+    spellings = set(re.findall(r'(?<![\w])_+helper_only_[0-9a-f]+', body))
+    check("underscore-sibling: the imported `from ._helper import only` has "
+          "exactly ONE C identifier spelling across its declaration, its "
+          "definition and its call site — a second spelling is the "
+          "call-site/definition qualifier disagreement this test exists to "
+          "catch (a leading-dot relative import whose module basename starts "
+          "with `_`)",
+          len(spellings) == 1,
+          f"got {sorted(spellings)} (expected exactly 1)")
+
+
 # ── Codegen-review fixes #3 (monomorphize shadow) and #4 (overload) ───────
 def test_review_fixes_monomorphize_overload(wd):
     import monomorphize as mm
@@ -1082,6 +1173,7 @@ def main():
         test_sb1_mojo_build_cli_wrapper_modules(wd)
         test_sb1_per_scope_import_distinct_modules(wd)
         test_root_module_circular_import_symbol(wd)
+        test_underscore_prefixed_sibling_import_symbol(wd)
     finally:
         shutil.rmtree(wd, ignore_errors=True)
     print()

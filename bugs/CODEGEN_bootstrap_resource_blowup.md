@@ -422,3 +422,108 @@ optimizing a curve whose slope is unknown optimizes the wrong term.
 
 Peak must come back under ~96 GB (the last known-completing footprint) before
 this gate can be un-gated.
+
+---
+
+## 2026-09-27 — the `vmmap` probe this doc's own step 3 asked for, and what it answered
+
+This section answers the **"What to measure next"** step 3 above ("distinguish
+live-set from fragmentation ... `leaks`/`vmmap` on the native binary ...
+cheapest and most valuable of the three; do this first"). It also **supersedes
+§4 of BLOW.md's "do not go looking for the per-module leak first"** — that
+guidance was derived from the *old* 15.84 GB constant, which was a false-
+positive trigger (since fixed, see BLOW.md §0). On the real self-host input
+the picture is different, and the per-module accumulation is back in play.
+
+Measured on the current tree, foreground, `/usr/bin/time -l` and `vmmap -s`:
+
+| input | peak RSS | instructions | wall | exit |
+|---|---:|---:|---:|---:|
+| `./mojoc --dump-full /tmp/tiny.mojo` (not a self-host dir) | **12.1 MB** | 94.6 M | 0.3 s | 0 |
+| `./mojoc --dump-full fire_compiler.py` (real self-host) | **58.6 GB** | 1.24 T | ~45 s | **133 (SIGTRAP)** |
+
+So the false-positive constant is genuinely gone (12.1 MB, was 15.84 GB), and
+the *real* self-host case is **58.6 GB / 1.24 T instructions** — higher than
+the 32.9 GB in BLOW.md §0's "NOT closed", because that was a two-module
+driver and this is the full closure.
+
+### The probe
+
+`vmmap -s <pid>` at t=12 s into the self-host run:
+
+```
+DefaultMallocZone_0x104e18000   SIZE 11.4G   ALLOCATED 11.4G   COUNT 130462322   MAPPINGS 953
+```
+
+**11.4 GB held live across 130,462,322 blocks** — mean 87 bytes — in only
+**953** actual mappings, growing linearly to 58.6 GB by ~45 s. 1% fragment.
+
+### What that rules in and out
+
+- **Ruled out: a single miscomputed fixed-size arena / reserve** (BLOW.md §6
+  hypothesis 2). 953 mappings at 12 s cannot be one oversized region, and
+  growth is *linear in time*, not a step. A reserve would be a step.
+- **Ruled out: "quadratic over a fixed universe" as the mechanism**
+  (hypothesis 3). That predicts a large *instruction* count against a
+  modest footprint; here instruction count and bytes are both linear in the
+  same accumulator.
+- **Ruled out: fragmentation.** 1% frag. The memory is genuinely live
+  objects, i.e. **reachable, not freed** — an allocator that never returns
+  memory, accumulating ~670M small objects over a full run.
+- **Ruled out: the tokenizer's per-character slice as the volume source.**
+  The three `_selfhost_*` seed passes tokenize 43 files / 4.9 MB, three
+  times over = **14.8 MB of source**. Even at one leaked `malloc(2)` per
+  source character that is 14.8M blocks / ~30 MB — two orders of magnitude
+  short of 670M blocks / 58.6 GB. The volume is the **retained ASTs of the
+  whole compiled closure**, not the tokenizer.
+- **Ruled out: O(n²) output assembly.** `mojo_str_join` is a correct two-pass
+  O(n) size-then-fill (`runtime/fire_runtime.c:5212`); `gen_module_impl`
+  builds its result from a bounded number of large joins, not a loop
+  accumulator.
+- **Ruled out: one hot loop.** A 5 s `sample` is flat — `re_match_node`
+  ~5%, `mojo_set_add_int`/`_set_slot_int` ~3%, `mojo_list_new` ~2%, malloc
+  internals ~2%, `ast_rewriter._rewrite_node` ~2%. The cost is *spread*
+  across ordinary compilation, which is the signature of an accumulator,
+  not of a pathological loop.
+- **Not the cause: the `_set_grow` double-probe.** `_set_grow`'s replay calls
+  `mojo_set_add_int` (which probes) and then calls `_set_slot_int` *again*
+  on the same key to recover the slot for its `seq` fixup — a real 2x waste
+  on rehash, but 2x is not 58 GB. Worth fixing on its own merits; not this.
+
+### Why the compiled path is ~1000x worse than the oracle
+
+The same seed work under CPython (`_selfhost_module_scalar_globals` +
+`_selfhost_struct_dict_field_val_types` over the same 43 files): **1.8 s +
+1.7 s, 49.8 MB peak, 87.4 G instructions**. The compiled path does
+**1.24 T instructions — ~14x** — and holds **~1175x** the memory. The
+algorithm is the same; the constant factor is not. Since CPython's 49.8 MB
+is a *live-set* high-water mark (it collects) and the compiled one never
+frees, the honest reading is that **total bytes ever allocated** is what is
+being measured, and that total is ~4 GB in CPython's terms, amplified by
+allocation granularity and the 14x instruction gap.
+
+### What this means for the fix
+
+The next step is **no longer localisation** — that is done above. It is to
+find which retained structures dominate the 670M objects, and the cheapest
+lever is the one the flat profile already points at: **per-module AST
+lifetime**. If a module's AST is released after its `.ci` is emitted instead
+of being retained for the whole closure, the accumulator stops growing
+monotonically. That is a real, testable change, and it is a
+`module_gen.py`-shaped edit, so per CLAUDE.md it owes a full `make gate`.
+
+Two cheaper, independent wins available now that both are confirmed safe:
+
+1. **De-duplicate the three seed passes.** `_selfhost_module_scalar_globals`,
+   `_selfhost_struct_dict_field_val_types` and
+   `_selfhost_homogeneous_tuple_ret_funcs` each independently
+   `py_tokenize` + `parse_module` + `ast_rewriter.rewrite` the *same* file
+   list, caching under three separate keys (`'k'`, `'sdfvt'`, `'httrf'`).
+   Sharing one parsed-AST cache keyed on the same `(file, mtime)` tuple cuts
+   that work by ~3x. This is BLOW.md §0's own suggested next step and is
+   still undone.
+2. **Fix `_set_grow`'s redundant re-probe** (the 2x rehash waste above).
+
+Neither will get 58.6 GB under the 8 GB `small` ceiling on its own. The
+per-module AST lifetime change is the one that could move the order of
+magnitude, and it is untried.
