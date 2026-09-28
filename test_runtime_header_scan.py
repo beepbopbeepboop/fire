@@ -99,7 +99,23 @@ def test_every_declaration_is_seen():
     possible tripwire for the NEXT declaration shape the scanner cannot parse:
     a new form that is missed shows up here as a count that no longer matches.
     """
-    for header, want in (('fire_runtime.h', 459),
+    # 456, not the 459 an earlier revision of this file asserted, and the
+    # difference is [3]'s rewrite of `_PROTO_RE` being BETTER on both sides:
+    #
+    #   -5  `mojo_fnptr_call_0..4` are `static inline` (fire_runtime.h:116) and
+    #       have no external symbol, so they must NOT be exported. The old
+    #       regex-based scanner counted them anyway -- which made the old 459
+    #       internally inconsistent with the exclusion rule asserted below it,
+    #       which already required `mojo_bound_method_call_0` to be absent.
+    #   +2  `mojo_re_sub_fn` and `mojo_regex_sub_fn` take a FUNCTION-POINTER
+    #       parameter -- `char *(*callback)(void *, char *)` -- and the old
+    #       pattern's `([^)]*)` parameter group stopped at the first `)`, which
+    #       is inside the function-pointer type. It could not see them at all.
+    #
+    # So the count went DOWN while the scanner got strictly more correct, which
+    # is the case a count assertion exists to catch and the reason the two
+    # function-pointer names are pinned by name below.
+    for header, want in (('fire_runtime.h', 456),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

@@ -404,19 +404,33 @@ has **no Lean `axiom` and no `opaque`** anywhere; everything is assumed in the
 | 7 | `formal/arm64_proof_gen.py:4077,4258,4790,4797,4875,4891,5089` | `all_goals (first \| done \| sorry)` CFG leaves — 13 sorries in 9 of 43 arm64 proofs, owned by `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md` |
 | 8 | `lib/ProofLib.lean:895` | "All per-node lemmas currently admit" |
 
-**Two holes in the mechanism that checks this**, both of which matter more than any
-single entry above:
+**The two holes in the mechanism that checks this** were both closed in the
+FORMAL-PARALLEL round of 2026-09-27, by [5]'s `formal/lean.py` and the
+integration that followed it. What they were, and what they are now:
 
-- `check_proof_cached` returns `n_sorries` and **nobody reads it**. Tree-wide,
-  `proof_sorries` has exactly two references — `formal/build.py:931` and `:4386` —
-  both writes, zero reads. `fire.py` prints only `proof_cached`. A proof with a
-  thousand sorries is a `PASS`. The census is sound for what it measures and is
-  never gated on it.
-- **Vacuity is invisible to the census.** `extern_<sym>_step : True := by trivial`
-  counts as **0 sorries** while being as uninformative as one.
-  `test_formal_dylib.py:388` greps only the *generated file* for `sorry`, while the
-  three that decide its verdict live in `lib/` and are never emitted as Lean
-  "declaration uses sorry" warnings, being consumed from pre-built `.olean`s.
+- ~~`check_proof_cached` returns `n_sorries` and **nobody reads it**.~~ Now
+  `fire.py` prints the admitted count next to `Proof:` ([4]), `test_formal.py`
+  prints the figure per proof **and** the `lib/` halves ([5] + integration), and
+  the number is Lean-reported rather than a text count, so it does not move for
+  a losing `first | … | sorry` tactic alternative.
+- ~~**Vacuity is invisible to the census.**~~ `vacuous_declarations` finds both
+  vacuous shapes, and `proof_census` returns a `Census` carrying generated-file
+  sorries, library holes and vacuous declarations together. The first thing the
+  new census found, on a tree where nothing had reported it:
+  `lib/ProofLib.lean:4617` `Semantics`, which states `∀ …, … → True` — vacuous
+  by construction, so it carries no information and emits no `sorry` to count.
+  `test_formal_dylib.py` now asks the census for the library holes beside its
+  text grep, because the grep cannot see them.
+
+**And one thing the census made visible that was not previously written down**,
+which is the reason the inventory above is a table and not a paragraph: the
+`dylib_export_contract_stub` hole (row 3) is invoked from
+`formal/arm64_proof_gen.py:8338` with `obs := fun n => n`, which asserts that
+**every** dylib export's behaviour is the identity map. That is not a vacuous
+proof; it is an admitted `sorry` over a claim that is false, and it is the
+sharpest entry in this table. `lib/` is out of scope for the parallel round, so
+nothing was changed — but the figure is now *read* on every run rather than
+merely known.
 
 Under this programme a proof will be asked to carry real weight, so the honesty
 mechanism has to see vacuity and not only holes. That is part of phase 3's exit

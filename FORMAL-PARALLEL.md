@@ -444,6 +444,15 @@ real, updates `FORMAL.md` with what actually landed, deletes
 `bugs/CODEGEN_optional_runtime_units_not_linked.md` **iff** [1] fixed it (a doc
 for a fixed bug is a doc that lies), and then **runs the gate once**.
 
+**An INTERFACE REQUEST file is deleted in the merge that answers it**, for the
+same reason: a file whose seven sections are all resolved is indistinguishable
+from an open one to whoever opens the queue next, and the sections that read
+"OPEN, to=[4], file=formal/build.py:629" are the actively misleading part — the
+line number no longer means what it meant. Each request's *content* is expected
+to have landed as a commit, a test, or a row in `FORMAL.md` §7; none of it lives
+only in the request file. To restate the rule the bug docs already follow: if
+the answer is in the tree, the request is not.
+
 ## 6. What this round deliberately does not do, and where it stands
 
 **Deferred: `FORMAL.md` phases 3–6.** The call/return semantics in the Lean

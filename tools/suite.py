@@ -619,6 +619,17 @@ test('formal-imports', [PY, 'test_formal_imports.py'],
 test('formal-sweep', [PY, 'test_formal_sweep.py'],
      deps=['preflight', 'prooflib'],
      desc='the formal sweep')
+# The two suites that pin the reach claims and the bind audit.  Unregistered
+# until now, and the second is the one standing between a real backend defect
+# and a `codegen` misclassification on the executable path, so its absence
+# from the gate was the gap worth closing.  Neither needs `prooflib` to do
+# anything: the one case that wants a library census SKIPs loudly without it.
+test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
+     deps=['preflight'],
+     desc='the sweep, measured against the interpreter: no invented coverage')
+test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
+     deps=['preflight'],
+     desc='every bound symbol is accounted for, on every container format')
 # output/x86_64/ keeps these from colliding with the arm64 verdicts above, so
 # they can share the machine with them.
 test('formal-x86', [PY, 'test_formal.py', '--backend', 'x86_64'], j=True,
@@ -652,7 +663,7 @@ BUCKETS = {
     'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'interporacle', 'examples-parse',
-              'rthdrscan'],
+              'rthdrscan', 'formal-sweep-truth', 'formal-link-accounting'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps
@@ -681,8 +692,9 @@ BUCKETS = {
     'stdlib-corpus': ['stdlib-tests'],
 
     'proofs': ['formal', 'formal-run', 'formal-dylib', 'formal-imports',
-               'formal-sweep', 'formal-x86', 'formal-x86-endtoend',
-               'formal-x86-model'],
+               'formal-sweep', 'formal-sweep-truth',
+               'formal-link-accounting', 'formal-x86',
+               'formal-x86-endtoend', 'formal-x86-model'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model'],
     'coroutine': ['coro', 'coro-nested-capture'],
     'smoke': ['preflight', 'suite-self-test'],

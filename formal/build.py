@@ -624,10 +624,16 @@ def _unaccounted_report(source_path: str, unaccounted: list, where: str) -> str:
     return (f"{os.path.basename(source_path)}: the {where} would bind "
             f"{len(unaccounted)} symbol(s) that nothing provides, so it could "
             f"not be loaded: {', '.join(unaccounted[:8])}"
-            f"{' …' if len(unaccounted) > 8 else ''}. These are constructs "
-            f"this backend does not lower (a struct type, a method call on a "
-            f"value, a compiler intrinsic), not exports that are missing. "
-            f"(Provider check: {_libsystem_probe_status()}.)")
+            f"{' …' if len(unaccounted) > 8 else ''}. Nothing on this link "
+            f"line defines them: not the C library, and not any library this "
+            f"program linked. Two very different causes produce that, and the "
+            f"distinction is not lost — each name in this list is either a call "
+            f"the codegen emitted (`info['external_syms']`, so some construct "
+            f"was not lowered and the call is dangling) or a name that entered "
+            f"the image as a bare reference with no call site behind it. "
+            f"Deciding which is a question for the assembler, and it is asked "
+            f"nowhere in this backend, so this message stops at the fact both "
+            f"causes share. (Provider check: {_libsystem_probe_status()}.)")
 
 
 def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,

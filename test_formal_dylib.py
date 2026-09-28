@@ -387,6 +387,42 @@ def test_default_prove_emits_checked_proof(tmpdir, shared):
           "generated dylib proof does not mention the exported function")
     check("sorry" not in text and "admit" not in text,
           "generated dylib proof contains sorry/admit")
+    # The check above reads the GENERATED file, and the three holes that decide
+    # this proof's verdict are in lib/, not in it:
+    #
+    #   lib/ProofLib.lean  in_image_stub              := by sorry
+    #   lib/ProofLib.lean  semantics_stub             := by sorry
+    #   lib/Refine.lean    dylib_export_contract_stub := by sorry
+    #
+    # Lean emits no warning for a hole in a module consumed from a pre-built
+    # .olean, so the grep above is green today and would stay green. The census
+    # asks Lean instead, and reports them by name. The text check stays: it
+    # still catches a hole in the generated file, which this one cannot see.
+    #
+    # Pinned as a subset, not asserted empty, and the asymmetry is deliberate.
+    # These three are pre-existing and lib/ is out of scope for this round, so
+    # demanding zero would be a permanent red for something nobody here may fix
+    # -- the exact hole in coverage a permanently-red check becomes. Demanding a
+    # SUBSET fails in the direction that matters: a FOURTH hole appearing is a
+    # regression somebody has to know about, while one of the three closing is
+    # progress and stays green. The count is re-measured either way, so the
+    # figure is read on every run rather than merely known.
+    KNOWN_LIB_HOLES = {"in_image_stub", "semantics_stub",
+                       "dylib_export_contract_stub"}
+    try:
+        from formal.lean import library_census, find_lean
+        lib = library_census(find_lean(HERE), os.path.join(HERE, "lib"))
+        holes = {n for _c, names in lib.values() for n in names}
+        new_holes = holes - KNOWN_LIB_HOLES
+        check(not new_holes,
+              f"the dylib proof rests on holes nobody has recorded: "
+              f"{sorted(new_holes)} (and {sorted(holes & KNOWN_LIB_HOLES)} "
+              f"are the pre-existing ones, being closed separately)")
+        print(f"    note: {len(holes & KNOWN_LIB_HOLES)} of "
+              f"{len(KNOWN_LIB_HOLES)} known lib/ hole(s) still open — "
+              f"the grep above cannot see these")
+    except ImportError:
+        pass
     from formal.lean import check_proof
     ok, detail = check_proof(proof, repo_root=root)
     check(ok, f"lean rejected the generated dylib proof: {detail[-400:]}")

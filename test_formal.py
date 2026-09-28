@@ -193,6 +193,14 @@ def run_group(argv, timeout, cwd=None):
 # serves a cached verdict.  `formal/lean.py::_run_lean` counts what Lean
 # itself reports, so this is the real figure and it goes DOWN as holes close.
 SORRY_CENSUS: dict = {}
+# The other halves of the same census, which the generated file's own count
+# cannot contain: holes in `lib/`, and declarations in it that are vacuously
+# true.  `formal/lean.py::proof_census` already renders both as display lines,
+# so they are carried through verbatim rather than re-derived here — the point
+# of [5]'s request 5 was the opposite of a second implementation.  Keyed by
+# stem; the rendering is deduplicated at print time because the library holes
+# repeat identically for every proof that rests on them.
+CENSUS_LINES: dict = {}
 
 
 def _sorries_in(proof_path):
@@ -207,6 +215,24 @@ def _sorries_in(proof_path):
         return check_proof_cached(proof_path, repo_root=HERE)[3]
     except Exception:
         return None
+
+
+def _census_lines(proof_path):
+    """The `lib/`-side and vacuity findings for one proof, as display lines.
+
+    `proof_census(...).lines` is used directly. Two things that make reading
+    the generated file the wrong answer, both measured here: Lean emits no
+    warning for a hole in a module consumed from a pre-built `.olean`, and a
+    vacuous declaration (`extern_x_step : True := by trivial`) contains no
+    `sorry` to count. Scanning the 29 generated proofs for vacuity finds ZERO
+    in every one — the vacuity is in `lib/`, so a generated-file scan cannot
+    see it at all, and neither can the text check in test_formal_dylib.py.
+    """
+    try:
+        from formal.lean import proof_census
+        return list(proof_census(proof_path, repo_root=HERE).lines or [])
+    except Exception:
+        return []
 
 
 def run_one(stem, backend="arm64", outdir=None):
@@ -231,6 +257,9 @@ def run_one(stem, backend="arm64", outdir=None):
         n = _sorries_in(proof)
         if n is not None:
             SORRY_CENSUS[stem] = n
+        lines = _census_lines(proof)
+        if lines:
+            CENSUS_LINES[stem] = lines
         return True, ""
     except subprocess.TimeoutExpired:
         return False, "timed out"
@@ -331,10 +360,34 @@ def main():
         total = sum(SORRY_CENSUS.values())
         worst = sorted(SORRY_CENSUS.items(), key=lambda kv: (-kv[1], kv[0]))
         with_holes = [(s, n) for s, n in worst if n]
-        print(f"sorry census: {total} declaration(s) still admit a sorry, "
+        print(f"proof census: {total} admitted `sorry` in the generated file, "
               f"in {len(with_holes)} of {len(SORRY_CENSUS)} proof(s) checked")
         for s, n in with_holes:
             print(f"  {s}: {n}")
+        # The other two halves, which the line above cannot contain: a hole in
+        # lib/ is invisible in the generated file's text (Lean emits no warning
+        # for a module consumed from a pre-built .olean), and a vacuous
+        # declaration emits no `sorry` at all, so it never appears in a count
+        # of them.  Printed once each, deduplicated: the same library hole
+        # underlies every proof that rests on it, and repeating it per proof
+        # would bury the generated-file table above.
+        seen = []
+        for lines in CENSUS_LINES.values():
+            for line in lines:
+                # `.lines` renders the GENERATED half too, as a one-line
+                # summary of the same number the table above already tabulated.
+                # Keeping it would print each proof's sorry count twice, in two
+                # formats, in the same summary.
+                if line.lstrip().startswith("proof census:"):
+                    continue
+                if line not in seen:
+                    seen.append(line)
+        if seen:
+            print("  the same verdicts also rest on holes OUTSIDE every "
+                  "generated file:")
+            for line in seen:
+                print(line)
+
     if stale_expected:
         print("\nSTALE expected-failure entries (now passing — remove them):")
         for s in stale_expected:
