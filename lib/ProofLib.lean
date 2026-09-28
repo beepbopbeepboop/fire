@@ -892,8 +892,15 @@ def evalFunc (f : MojoFunc) (callFunc : String → UInt64 → UInt64) (arg : UIn
 
 Each AST node constructor gets a corresponding lemma.  The main dispatch lemma
 `evalFunc_eq_mojo_all` pattern-matches on the function AST and calls per-node
-lemmas.  All per-node lemmas currently admit; each will be incrementally
-replaced with a real proof. -/
+lemmas.  The per-node lemmas are PROVED, not admitted: each is `rfl`, which is
+the whole content of the statement, since `evalExpr` is defined by recursion on
+the AST and a node's evaluation is its own definition unfolded.  What `rfl`
+does NOT give is that `evalExpr` is the function the machine runs -- that is
+the separate AST-to-bytes obligation, emitted per proof file by
+`formal/x86_64_proof_gen.py`'s `_compile_correct_section` as
+`<fn>_compile_correct` and still ending in `sorry`.  It is generator output,
+not something in this file, which is why the gap cannot be closed by editing
+`lib/`. -/
 
 /-- Evaluate a variable reference. -/
 theorem evalExpr_var (callFunc : String → UInt64 → UInt64) (name : String) (env : String → UInt64) :

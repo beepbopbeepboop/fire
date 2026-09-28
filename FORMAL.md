@@ -430,7 +430,7 @@ has **no Lean `axiom` and no `opaque`** anywhere; everything is assumed in the
 | 5 | `formal/x86_64_proof_gen.py:690` | the x86-64 end-to-end theorem |
 | 6 | `formal/arm64_proof_gen.py:6910` | every extern call step (`True := by trivial`) |
 | 7 | `formal/arm64_proof_gen.py:4077,4258,4790,4797,4875,4891,5089` | `all_goals (first \| done \| sorry)` CFG leaves — 13 sorries in 9 of 43 arm64 proofs, owned by `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md` |
-| 8 | `lib/ProofLib.lean:895` | "All per-node lemmas currently admit" |
+| 8 | ~~`lib/ProofLib.lean:895`~~ | **REMOVED 2026-09-28.** This row said "All per-node lemmas currently admit". Read, they do not: all seven `evalExpr_*` lemmas are `rfl`, which is the whole content of each statement, and `lib/ProofLib.lean` contains no `sorry` or `admit` at all. The section comment above them said the same false thing and said so in the present tense; both are corrected. The trust that remains is row 4 — `rfl` proves the unfolding of `evalExpr`, not that `evalExpr` is what the machine runs. |
 
 **The two holes in the mechanism that checks this** were both closed in the
 five-agent round of 2026-09-27, by that round's [5] (`formal/lean.py`) and the
@@ -573,227 +573,163 @@ had to be looked up in a second file was one more thing to go stale. The
 lifetime argument that justified the split has expired — the first round is
 merged, so there is no longer a "this week" to be separate from.
 
-### 11.1 The measured state this round starts from
+### 11.1 Round 1: what landed, measured
 
-Everything below was measured on `21a82d6` + the sqlite work, not inferred. It
-is here because a plan built on the numbers in §2 as they *were* would be
-planning against a fiction.
+Five agents, one tree, merged 2026-09-28 at `77c8b90`. Every number below was
+measured after the merge, not carried over from a commit message.
 
-**The sweep says the backend is much further along than §8 implies.**
-`tools/formal_sweep.py`, arm64: **590 files, PASS=108, coverage 108/416 =
-26.0%** (the denominator excludes the 174 in a not-answerable or tool class,
-because a fact about the target is not a gap in the backend). Of the 127
-in-file codegen findings, **123 are one unnamed family, "other refusal"** — so
-97% of what is actually blocking is not classified at all. That single number
-is the strongest argument for agent [4] below. 30 of the 127 sit in files that
-also import a host module, so closing them would not raise the rate; they are
-counted as findings on purpose, because reclassifying them would improve the
-headline without anyone writing code.
-
-**The sorry counter says the proof side is barely started, and now says so out
-loud.** `formal/lean.py`'s census, over the 29-proof arm64 corpus: **7 admitted
-`sorry` in generated files** across 6 proofs, **2 in `lib/`**
-(`in_image_stub`, `semantics_stub`), **1 vacuous** (`Semantics` at
-`lib/ProofLib.lean:4617`, which states `∀ …, … → True`), plus
-`dylib_export_contract_stub` in `lib/Refine.lean`, invoked with
-`obs := fun n => n` — an admitted `sorry` over a claim that is **false**. None
-of these were visible before the counter existed; all are still open. And the
-number that does *not* appear in any census is the largest one: every extern
-call site generates `extern_<sym>_step : True := by trivial`, which is
-vacuously true and so contributes **zero** sorries while being worth nothing.
-
-**Self-certification — the actual goal — is blocked in three distinct places,
-and only one of them is an error message.** The goal is that the compiled
-`fire.py`, fed the same input as the python3 one, produces the same output.
-Measured:
-
-1. **Proof generation fails on any program that makes a call.**
-   `formal/arm64_proof_gen.py`'s `emit_block` raises
-   `ValueError: unsupported: recursion argument bound (not a dec1 pattern)` for
-   `fn main(): print(42)` and for anything else with a call; only a bare
-   `return` survives. So a large part of the corpus currently has no proof at
-   all, and `fire.py build --formal` prints no `Proof:` line to put a sorry
-   count on. The compiled path is not behind here — it is *absent*.
-2. **The self-hosted binary runs but computes wrong answers.**
-   `bootstrap-stage2-dumps` no longer segfaults (re-measured 2026-09-27: exit 0
-   on a two-line program, 12.1 MB, 94.6 M instructions) but does not reproduce
-   the reference dumps: sub-jobs return `mojo_unsupported_iter` no-ops or a
-   wrong dump. It is emitted from **exactly one place** —
-   `mojo/backend_gimple/emit_loops.py:206`, the generic loop fallback, which
-   emits the call and **runs the body zero times**. The other 16 textual hits
-   across the gimple backend are comments recording this same bug, and they
-   name the forms that fall into it: no `zip()` lowering, no `reversed(<list>)`
-   lowering, `for w in pat.findall(s)`, `with` blocks, and generator
-   expressions. So this is one site with a known list of offenders, not 17
-   independent ones — which makes it a much better-shaped piece of work than
-   the grep count first suggests. A silent no-op is the worst class
-   of defect for this goal: it cannot be caught by an exit code, and it is
-   exactly what a self-certifying compiler must not do to its own input.
-3. **The resource blowup** (`bugs/CODEGEN_bootstrap_resource_blowup.md`,
-   58.6 GB / 1.24 T instructions on a real self-host input) is the documented
-   *upstream* cause and is localised, not fixed. Not assigned below, because it
-   is one optimisation with a known shape rather than five parallel items — but
-   agent [1] is expected to shrink it as a side effect, since a no-op that
-   silently discards work is also work not done.
-
-**`comptime` is the clean example of why a self-certifying compiler needs a
-parity test rather than a test per feature.** Measured, same program both ways:
-
-| | statement form `comptime { … }` | expression form `comptime f()` |
+| | before | after |
 |---|---|---|
-| `python3 fire.py run` | **`NameError: name 'comptime' is not defined`** | **`NameError`** |
-| `fire.py build` then run | works, prints | **prints `0`, where `f()` returns `7`** |
+| `lib/` admitted holes | 3 modules, 4 sorries + 1 vacuous | **zero** (`lib/ProofLib.lean`, `lib/Refine.lean`, `lib/X86.lean` contain no `sorry` or `admit`; verified by reading) |
+| a `mojo_*` call from a formal image | always refused, one reason | **three ways** — linked, refused for its TYPES, refused because the per-arch library does not export the name |
+| proof generation on any program with a call | `ValueError: unsupported: recursion argument bound` | generates; `formal-run` **340/0** (was 338/2, then 339/1) |
+| arm64 sweep codegen findings, named | 123 of 130 in one "other" bucket | **0** unclassified across 20 families |
+| arm64 sweep coverage | 25.9% | 25.9% (595 files; the denominator moved, the rate did not) |
+| `stdlib-syntax` unexpected failures | 0 | **0** — [1]'s compiled-path work regressed nothing |
+| `test_formal_run.py` | 338/2 | **340/0** |
 
-Three different answers for one construct, and the worst one is silent. The
-sweep independently names the same family — `comptime value does not fold`, 2
-findings. The general shape is the point: the interpreter is *behind* the
-compiled backend here, which inverts the usual direction, so a test that only
-exercises the compiled path would pass.
+**The three holes in §7 are closed, and one of them was worse than recorded.**
+`in_image_stub` is a decidable `in_image_decide` check; `Semantics` is split
+into `Total` and `Functional`; and `dylib_export_contract_stub` — the admitted
+`sorry` that asserted *every* dylib export computes the identity — is
+**deleted**, replaced by an `export_result_spec` obligation plus a proved
+`dylib_export_contract_of_spec`. The false claim was measured before it was
+removed: `export_result dylib_image triple 7 = 21`, where the stub's shape
+could not have distinguished that from `7`.
+
+**§7 row 8 was itself wrong and is now struck.** It read "All per-node lemmas
+currently admit" at `lib/ProofLib.lean:895`. Read, they do not: all seven
+`evalExpr_*` lemmas are `rfl`, which is the whole content of each statement,
+and the file contains no admitted hole. The section comment said the same false
+thing in the present tense; both are corrected. The trust that remains is row 4
+— `rfl` proves the unfolding of `evalExpr`, not that `evalExpr` is what the
+machine runs.
+
+**Nothing needed a `sorry` filling, and that is the finding rather than the
+absence of one.** Every unproved obligation the round found is already encoded
+honestly: as a decidable check (`in_image_decide`), as a hypothesis the caller
+must discharge (`Total` is a `def … : Prop`, not an admitted theorem), or as a
+deletion. [2] declined to assert a partial `x86-64` round-trip theorem that
+stops at the register file, and recorded the missing induction in the
+docstring instead — the right call, and the reason the old `Semantics` came to
+state `True` is that a partial theorem can read like a whole one. **Adding
+sorries here would have been a regression in exactly the property this
+programme exists to improve.**
 
 ### 11.2 The five agents
 
-Partitioned so that no two agents share a writable file. The label is how we talk
-about work; put it in commit subjects and in INTERFACE REQUESTs.
+The next round is the one this programme has been deferring: Lean, and the hard
+part of it. Three of the five agents own a `lib/` file outright, which is what
+makes them parallel — the round before could not assign `lib/` to anyone
+because there was no honest way to split a model, and split it wrongly.
 
 | agent | theme | exclusive write set |
 |---|---|---|
-| **[1]** | **the silent no-op class** — make every `mojo_unsupported_iter` correct or loud | `mojo/backend_gimple/emit_loops.py`, `emit_stmts.py`, `emit_exprs.py`, `emit_calls.py`, `emit_funcs.py`, `emit_methods.py`, `emit_infra.py` |
-| **[2]** | **proof generation correctness** — the `ValueError` that kills any program with a call | `formal/arm64_proof_gen.py`, `formal/x86_64_proof_gen.py` |
-| **[3]** | **the Lean model, owned for the first time** — call/return semantics, non-vacuous semantics | `lib/ProofLib.lean`, `lib/Refine.lean`, `lib/X86.lean` |
-| **[4]** | **feature parity and the refusal taxonomy** — `comptime`, and naming the 123 | `myinterpreter.py`, `gimple_codegen.py`, `tools/formal_sweep.py` |
-| **[5]** | **the formal path links the runtime dylib** — the phase-2 payoff | `formal/model.py`, `formal/build.py`, `formal/imports.py` |
+| **[1]** | **x86-64, completed** — the `rip` half, `call_rel32`, and trust boundaries 2 and 3 | `lib/X86.lean`, `formal/x86_64_proof_gen.py`, `formal/x86_64_endtoend_test.py` |
+| **[2]** | **the step bound** — what discharges `Total` | `lib/ProofLib.lean`, `formal/arm64_proof_gen.py` |
+| **[3]** | **per-export contracts** — phase 4 proper, for the surface that is now callable | `lib/Refine.lean`, `lib/work.lean`, **new** `lib/Contracts.lean` |
+| **[4]** | **the frame-address design** — ~45% of every remaining codegen finding | `formal/model.py`, `formal/arm64_codegen.py`, `formal/x86_64_codegen.py` |
+| **[5]** | **the test estate** — what is not tested, and the machinery that would know | `test_suite.py`, `tools/checked_run.py`, `tools/memcap.py`, **new** test files |
 
-Everything not listed above belongs to somebody. If it seems to belong to
-nobody, it belongs to whoever owns the nearest file, or it is an INTERFACE
-REQUEST.
+**Lean running is now expected, not forbidden.** §11.3 still says nobody runs a
+*gate* — that is unchanged and is about `build/suite.log`, not about Lean. An
+agent running its own proofs is how [2] and [3] established that `Total` does
+not evaluate and that `triple(7) = 21`; forbidding it would forbid the only
+thing that distinguishes a proof from an assertion. `lib/*.olean` is shared but
+safe (`ensure_library` takes an exclusive `flock` and writes via private temp +
+`os.replace`), so eight agents proving at once queue rather than corrupt.
 
-**Why these five, and not the phases.** Phases 0–2 landed in the previous round
-and are done. What remains is phase 3 (the Lean model) and its dependants, plus
-the three self-certification blockers above — and those five blockers partition
-cleanly by file, which phases do not: phase 3 is one modelling problem with a
-fan-out, and the self-certification work is three unrelated ones. The write sets
-are disjoint, which is the property that actually makes five agents safe. Order
-matters only in that [1] and [2] are the two whose fixes change what the gate
-measures, so they want merging first.
+**[1] x86-64, completed.** The largest single gap and the most self-contained.
+Three named pieces, in order:
+* the `rip` half of the call/return round trip. `x86_call_ret_balances_stack`
+  proves the stack-pointer half; that `ret` lands on `m + 5` additionally needs
+  `mem_read_bytes (mem_write_bytes m a v n) a n = v &&& lowMask n`, which is
+  **false as a general-width claim** (at width 0 the read is 0 whatever `v` is)
+  and so needs the mask to induct on, and the induction needs the pointwise
+  byte lemma because the tail of the step compares a `k`-write at `a+1` against
+  a `k+1`-write at `a`. That is one medium induction in `mem` and it is the
+  whole of what stands between this and a complete round trip.
+* `call_rel32` wired into the tree. `bugs/OPEN_WORK.md` A1 is **stale about its
+  mechanism** — `_FORMS`/`_SUCCEEDS`/`_resolve` are in
+  `formal/x86_64_endtoend_test.py`, not the generator — but its substance
+  holds: `call_rel32` is why 7 of the x86-64 examples have "no tree", and both
+  successors and a separation fact now exist in `lib/X86.lean`.
+* trust boundaries 2 and 3, which the generator's own header declares as `sorry`.
 
-**Deliberately unowned this round:** `runtime/`, `build_config.py`, `driver.py`,
-`build_stdlib_dylib.py`, `cas.py`, `reflect.py`, `fire_compiler.py`,
-`mojo/middle/*`, and `test_sqlite3_runtime.py`. Those are settled — agents [1]
-and [2] of the *previous* round landed them, and this round is not to reopen
-them. In particular [1] must not "fix" the no-op class by making the compiler
-call into `runtime/`, and nobody edits a `.lean` file except [3].
+*Done when:* an x86-64 proof file contains no `sorry` in any of its three trust
+boundaries, or each remaining one is a hypothesis a caller discharges — never a
+`True`. **Trap:** asserting a theorem that stops at the register file. The old
+`Semantics` did exactly that and read like a whole one.
 
-#### [1] The silent no-op class
+**[2] the step bound.** `Total` is stated and not proved, and the reason is
+measured: `arm64_go_exit` is structural recursion on fuel, so a symbolic `n`
+means a symbolic number of steps and `native_decide` refuses outright
+(`Expected type must not contain free variables`). Both directions were checked
+— concrete `n` evaluates and is correct (`triple(7) = 21`), symbolic `n` does
+not evaluate at all. So it cannot be discharged by evaluation, and this agent
+must not pretend otherwise. Discharging it means proving a step bound: a run
+confined to the image takes at most one step per instruction, and
+`4 * codeSize + 8` is below the fuel. [2] called this "the next piece of phase
+4" and "not a design question", and that assessment is the reason it is assigned
+rather than filed.
 
-*Why first.* It is the only item on this list that makes the compiled compiler
-**lie** rather than fail, and self-certification is precisely the property that
-a lie destroys. Everything else on this list produces a red test.
+*Done when:* `Total` is either proved for the exports it is stated for, or the
+fuel is proved sufficient — and a theorem that assumes it says so at the call
+site. **Trap:** proving it for a concrete `n` and generalising by hand.
 
-*What.* One emission site, `emit_loops.py:206`, reached by a generic fallback
-whenever a loop's iterable has no lowering. It emits the call and the body runs
-**zero times** — a silent wrong answer, and the reason a self-hosted `fire.py`
-compiles and exits 0 while being wrong about its own input.
+**[3] per-export contracts.** Phase 4 proper. `export_result_spec` is an
+obligation and `dylib_export_contract_of_spec` is proved, so a caller's theorem
+now consumes a contract instead of asserting one — but no real *spec* exists
+yet for any actual export. 219 of 540 entry points are word-in/word-out and the
+per-arch library is on the link line, so there is a callable surface with no
+contracts on it, which is the state phase 4 exists to end. Start with the
+exports a caller can actually reach today.
 
-The work is twofold, and the second half is the honest one. Either **lower the
-named forms** — `zip`, `reversed(<list>)`, `re.findall`, `with`, generator
-expressions — each a bounded piece of `emit_loops.py`; or **refuse the
-construct** by name, which is a perfectly good outcome and is what should happen
-to anything whose semantics the backend cannot model, because a loop form the
-backend cannot lower is also a loop form no proof can reason about. What is not
-acceptable is the third option: falling through.
+*Done when:* at least one real export carries a spec that is not the identity
+function, and a caller discharges its obligation against it. **Trap:** writing
+`obs := fun n => n` again — that is the shape that made the old stub false, and
+it typechecks.
 
-*Do not trust the comment count.* Sixteen of the seventeen textual hits are
-comments about this one site. Reading them as a work list produces seventeen
-phantom items; reading them as a *list of offenders* produces the real one.
+**[4] the frame-address design.** The single biggest coverage lever left, and
+not a patch. 45% of every remaining codegen finding is one design defect in five
+costumes (`bugs/FORMAL_wide_receiver_by_reference.md`): the receiver of a
+multi-field struct is the address of a frame that dies when the function
+returns, so returning it is a use-after-free and passing it where a value is
+wanted hands the callee a pointer. Measured with the check removed, the same
+shape returns 10 on arm64 and 0 on x86-64 where the source says 7. One of the
+five families **segfaults** rather than computing a wrong number, so this is the
+one item on the list where the current behaviour is loud as well as wrong.
 
-*Trap.* Making it loud is easy in a way that is useless: refusing every
-unlowered iterable turns the self-host build red without making anything true,
-because the compiler's own source uses these forms. The bar is that each named
-form either computes the right answer or is refused *specifically*, and the
-self-host build still completes. Measure `fire.py build fire.py` before and
-after, and keep the artifact.
+*Done when:* a multi-field struct's receiver has a lifetime the analysis can
+follow, and the 18 "returned by its creator" findings are gone rather than
+renamed. **Trap:** making the refusals *louder* without changing what is
+computed. That converts a wrong answer into a red test, which is worth something
+but is not this item.
 
-*Done when:* the named forms are lowered or individually refused, the
-`bootstrap-stage2-dumps` sub-jobs that currently return no-ops either produce
-reference-matching output or a named refusal, and `make mojoc` still works.
+**[5] the test estate.** The one non-Lean agent, and the one this programme has
+underinvested in: every finding in the last two rounds was found by *writing a
+program and comparing*, not by a suite. The instruction is to find what is not
+tested and say so with evidence — and the standing candidate is already known:
+[1] could not construct an input that changes an outcome for one of its four
+fixes and has no test pinning it, and said so rather than dressing it up.
+`test_silent_noop_iter.py` (16) and `test_formal_call_proof_gen.py` (387) are
+this round's precedent: an agent writing the test that would have caught its own
+bug.
 
-#### [2] Proof generation correctness
+*Done when:* a written, evidence-backed list of what is untested, ordered by
+what a silent wrong answer would cost, and at least the top item pinned. **Trap:**
+writing tests that pass. A test that cannot fail is how
+`test_formal_dylib.py`'s `lib/` grep stayed green through two rounds of
+vacuous theorems.
 
-*What.* `emit_block`'s `ValueError: unsupported: recursion argument bound (not
-a dec1 pattern)` — pre-existing, reproduces on `fn main(): print(42)`, and
-therefore means the arm64 corpus has **no proofs at all** for any program with a
-call. That is upstream of everything in `FORMAL.md` §7's inventory: a `sorry`
-census is meaningless while the generator cannot emit a proof. Then the two
-other Python-side defects the previous round recorded but could not fix:
-post-call state **fabricated** as `{pre with pc := bl+4}`, and the byte-identical
-duplicated blocks (`generate_arm64_proof` at both `:6034` and `:7222`,
-`_gen_extern_test` at both `:5661` and `:6849`, `_find_extern_call` at both
-`:5556` and `:6744` — Python binds the second, so `:6849` is live).
-
-*Order.* De-duplicate **before** the semantic work, not during it. Three copies
-of a function that is about to change is how a fix lands in the dead one.
-
-*Done when:* `fire.py build --formal` emits a `Proof:` line for a
-call-containing program, and the emitted proof for one fixed input is
-byte-identical across two runs.
-
-#### [3] The Lean model, owned for the first time
-
-*Why it was unowned and is not any more.* Every previous round deliberately left
-`lib/*.lean` alone so this work would be owned cleanly rather than inherited
-half-changed. It is now the largest unowned piece of the programme and the
-gate for phases 4–7, so it gets an agent.
-
-*What.* Root cause is mechanical and single: the `BL` arm of `arm64_step`'s dispatch
-(`lib/ProofLib.lean:1549`, whose comment at `:1548` names the encoding) gives
-`BL` a bare `x30`/pc transfer with **no callee**. A dylib or libc branch target
-is a `__TEXT,__stubs` address *outside the image*, so `arm64_go_exit` returns
-`none` and the model halts. One gap, every downstream symptom. Then, in order:
-(1) a call frame, a callee entry, and return-to-`x30`; (2) wire the x86-64
-`call_rel32`, which is **already modelled** at `lib/X86.lean:720` and merely
-unwired from `_FORMS`/`_SUCCS`/`_resolve` (`bugs/OPEN_WORK.md` A1) — the
-cheapest real step in the whole programme; (3) give `DylibExport.Semantics` a
-non-vacuous definition against real observables rather than a hardcoded `[]`;
-(4) either prove `dylib_export_contract_stub` or **delete it**, since asserting
-every export is the identity is false.
-
-*Done when:* a dylib export has a non-vacuous semantics, a caller can discharge
-an obligation against it, and `lib/ProofLib.lean:4617` no longer states
-`∀ …, … → True`.
-
-#### [4] Feature parity, and the refusal taxonomy
-
-*What, first:* `comptime`. The table in §11.1 is the whole bug — the
-interpreter does not have the construct, the compiled backend has it in
-statement form, and in expression form it silently yields `0`. Make all three
-paths agree, and whichever way they agree, make it agree *loudly*.
-
-*What, second:* the 123 "other refusal" findings. 97% of the in-file codegen
-findings are one unnamed family, so the sweep currently cannot answer "what is
-actually left". Naming them is not a cosmetic change — it is what turns 26.0%
-into a plan. Extend the existing `CLASS_*` machinery rather than inventing a
-second taxonomy, and do **not** reclassify a file out of the denominator to
-improve the rate; that is the failure this programme has already committed once.
-
-*Done when:* the sweep's family table has no bucket above ~10% of the findings,
-and `comptime` gives the same answer on all three paths.
-
-#### [5] The formal path links the runtime dylib
-
-*What.* Phase 2's payoff, and the last thing standing between "the ABI is
-word-shaped" and "a proof can call it". The refusal is now honest — a formal
-image is freestanding, links libSystem and nothing else, and the per-arch
-runtime dylib that the previous round built is **not on its link line**. Opt it
-in. Then the number to move is 0 → as much of 219 as the link line can carry.
-
-*Careful.* This is a `formal/build.py` change, not a codegen one, precisely
-because it is not a codegen problem. Do not "fix" it by widening
-`is_gimple_runtime_builtin` — that predicate answers *can this target bind
-this*, and the honest answer stays no until the symbol is genuinely on the line.
-
-*Done when:* a formal image links the per-arch runtime dylib, dyld resolves a
-word-shaped `mojo_*` call, and the call is **not** refused. The box-returning
-321 must still be refused, and the refusal must still name the type.
+**Deliberately unowned:** `gimple_codegen.py`, `myinterpreter.py`,
+`tools/formal_sweep.py`, `fire_compiler.py`, `build_config.py`,
+`build_stdlib_dylib.py`, `driver.py`, `mojo/backend_gimple/*`, `mojo/middle/*`.
+Two known items sit there and are next round, not this one: the `comptime`
+expression evaluator (`bugs/FORMAL_known_limits.md` §7) and the container-kind
+unanimity rule in `mojo/middle/infra_infer.py`
+(`bugs/INTERFACE_REQUEST_1_to_middle_infra_infer.md`, which [2] repointed at
+`module_gen.py` so it is [1]'s own follow-up rather than an orphan).
 
 ### 11.3 The operating rules
 
@@ -844,8 +780,9 @@ word-shaped `mojo_*` call, and the call is **not** refused. The box-returning
 |---|---|
 | anything in your write set that a test can pin | Stage 5 monomorphization (`FORMAL.md` phase 7 — "weeks, not an afternoon"; `FORMAL_known_limits.md` §1.2) |
 | a refusal made **true** rather than more capable | MLIR attribute templates (46 files, a **permanent** limit, `FORMAL_known_limits.md` §2) |
-| a number that is wrong, fixed by measurement | anything needing a heap or allocator — the slab allocator, phase 6, gated behind [3] |
+| a number that is wrong, fixed by measurement | anything needing a heap or allocator — the slab allocator, phase 6, gated behind [4]'s frame-address work |
 | a silent wrong answer turned into a loud one | a `mojo_*` call returning a heap box (needs the ABI decision, not a codegen patch) |
+| a `sorry` that is a *discharged* hole, replaced by a check or a hypothesis | the `comptime` expression evaluator (`FORMAL_known_limits.md` §7) — a feature, and `gimple_codegen.py` is unowned |
 | | adding a **capability** whose value model does not exist yet |
 
 If you hit the wall, the deliverable is a bug doc with a repro and a cost, or an
@@ -877,13 +814,27 @@ is in the tree, the request is not.**
 
 ### 11.6 Merging
 
-1. **[1]** and **[2]** first — they are the two whose fixes change what the gate
-   measures, so everything after them is measured against corrected code.
-2. **[4]** next — it makes the instruments stricter, and applying that to
-   finished work is better than firing halfway through everyone else's.
-3. **[3]** then. It is the deepest change and the one most likely to need a
-   second pass once the others are in.
-4. **[5]** whenever it is ready; it is independent of all of them.
+**Round 1's order, and why it is recorded though that round is merged:** [1] and
+[2] first because their fixes changed what the gate measures, then [4] because
+it made the instruments stricter, then [3], then [5]. It worked, and the
+part that mattered was not the order but the *ownership* — no two agents shared
+a writable file, and the one collision (both [3] and [5] editing
+`bugs/FORMAL_known_limits.md`, because the plan partitioned code files and left
+docs unassigned) auto-merged and cost nothing.
+
+**This round:**
+
+1. **[2]** first. It is the only agent whose work *unblocks* another's claim
+   rather than merely landing beside it: `Total` is what a per-export contract
+   is stated against, so [3] can write its specs while [2] proves the bound,
+   but [3]'s theorems are only sound once [2] lands.
+2. **[1]** next. It is the largest single change and the one most likely to need
+   a second pass once the others are in.
+3. **[4]** with it. Independent file set, and it is the biggest coverage lever,
+   so the sweep should be re-measured against a corrected backend.
+4. **[3]** when [2] has landed.
+5. **[5]** whenever it is ready; it is independent of all of them and its output
+   is a list, which is worth having early rather than late.
 
 The integrator, and only the integrator: applies held requests, registers all new
 test files in `tools/suite.py`, resolves any overlap that turns out to be real,
