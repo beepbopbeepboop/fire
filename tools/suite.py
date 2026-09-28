@@ -295,6 +295,21 @@ test('modcache', [PY, 'test_module_cache.py'], cache=True,
      extra=GIMPLE_SOURCES + ['test_module_cache.py', 'myinterpreter.py',
                              'fire.py', 'fire_main.py'],
      desc='module cache end-to-end stages')
+# Registered 2026-09-27. Found while implementing FORMAL.md phase 0:
+# `reflect._PROTO_RE` could not match a pointer return (`char *name(...)` — the
+# `*` is attached to the type with no space before the name), so it silently
+# dropped every pointer-returning declaration: 210 of fire_runtime.h's 470, 7 of
+# fire_sqlite3.h's 22, and most of fire_python.h. `build_stdlib_dylib.py` builds
+# the stdlib dylib's reflection table with that function, so the shipped dylib
+# was advertising 260 of its own 459 runtime entry points — a C client
+# resolving `mojo_c_getenv` through reflection was told the symbol did not
+# exist. On the gimple path, and predating FORMAL.md.
+test('rthdrscan', [PY, 'test_runtime_header_scan.py'], cache=True,
+     extra=['test_runtime_header_scan.py', 'reflect.py', RUNTIME_SRC,
+            RUNTIME_HDR, 'runtime/fire_sqlite3.h', 'runtime/fire_zlib.h',
+            'runtime/fire_ssl.h', 'runtime/fire_ncurses.h',
+            'runtime/fire_python.h'],
+     desc='runtime header export scan sees every declaration')
 test('selfhost', [PY, 'test_selfhost.py'], cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'fire_main.py', 'test_selfhost.py'],
@@ -636,7 +651,8 @@ BUCKETS = {
     # The everyday green gate — parallel, no exclusive members, minutes.
     'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
-              'gimplegenerators', 'interporacle', 'examples-parse'],
+              'gimplegenerators', 'interporacle', 'examples-parse',
+              'rthdrscan'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps
