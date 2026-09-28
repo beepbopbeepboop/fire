@@ -358,6 +358,28 @@ test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True,
                              'build_config.py', RUNTIME_SRC, RUNTIME_HDR]
          + CORO_RUNTIME,
      desc='compile-and-execute: every generator/coroutine shape, both backends')
+
+# [1]'s round was "the silent no-op class", and this is the test that pins it.
+# It is in `check` and not in a heavyweight bucket because it needs no Lean and
+# no library -- 212 s measured, against `sqliteruntime`'s ~100 s, so it costs
+# `check` about what an existing member already costs. The reason it cannot sit
+# outside the everyday gate is the class itself: a silent wrong answer cannot be
+# caught by an exit code, so a test that only runs in a bucket nobody runs daily
+# is not guarding the property it was written for.
+#
+# `cache=True` with `extra=GIMPLE_SOURCES` is load-bearing rather than
+# boilerplate. GIMPLE_SOURCES is gimple_codegen.py plus every mojo/middle/*.py
+# and mojo/backend_gimple/*.py, which is exactly this test's surface -- and
+# [1]'s three fixes were all in mojo/backend_gimple/emit_{loops,calls,infra}.py.
+# Without those in the key a fix to emit_loops.py would serve a recorded PASS for
+# a test whose whole subject is emit_loops.py, which is the one failure mode
+# `extra` exists to prevent.
+test('silentnoop', [PY, 'test_silent_noop_iter.py'], cache=True,
+     deps=['preflight'], timeout=900,
+     extra=GIMPLE_SOURCES + ['test_silent_noop_iter.py', 'build_config.py',
+                             RUNTIME_SRC, RUNTIME_HDR],
+     desc='the silent no-op class: no loop may iterate zero times, read a '
+          'container as another kind, or drop reversed/findall order')
 # The ORACLE's own suite: myinterpreter vs CPython, on programs written in the
 # subset of syntax that is valid Mojo AND valid Python. Its own test because
 # every other parity test here compares the two ENGINES with each other, which
@@ -628,6 +650,33 @@ test('formal', [PY, 'test_formal.py'], j=True,
      desc='every formal/examples/*.mojo typechecks its generated Lean proof')
 test('formal-run', [PY, 'test_formal_run.py'], deps=['preflight'],
      desc='formal arm64 executables that actually build AND run (no lean)')
+# `deps=['preflight', 'prooflib']` and NOT in `check`: half this file's
+# assertions are "Lean accepts the generated file", and without `prooflib` they
+# SKIP -- which would be a silent coverage hole of exactly the kind `prooflib`
+# exists to prevent. It is in `proofs` rather than `check` because that is the
+# bucket whose members pay for the 27 MB library build, and CLAUDE.md is
+# explicit that `make check` and `make gate` must not.
+#
+# No `cache=True`, deliberately: `formal/lean.py`'s `check_proof_cached` already
+# memoises Lean verdicts on a key that digests the proof bytes AND the .olean
+# files, which is strictly finer than anything a suite-level cache could key on.
+# A second cache in front of that one could only add a way to go stale.
+#
+# The lib/*.lean entries in `extra` are not decoration. Agent [3]'s rewrite of
+# lib/ changed what every generated proof typechecks against, and a test that
+# generates its own proofs inside the run does not need the key to notice --
+# but the recorded-PASS path does, and that is where a library change would
+# have been served stale.
+test('formal-call-proofgen', [PY, 'test_formal_call_proof_gen.py'],
+     deps=['preflight', 'prooflib'], timeout=1200,
+     extra=['test_formal_call_proof_gen.py', 'fire_compiler.py',
+            'formal/arm64_proof_gen.py', 'formal/x86_64_proof_gen.py',
+            'formal/arm64_codegen.py', 'formal/build.py', 'formal/lean.py',
+            'formal/types.py', 'lib/ProofLib.lean', 'lib/Refine.lean',
+            'lib/X86.lean', 'lib/work.lean'],
+     desc='proof generation on programs that CALL: a call must not raise, the '
+          'model must be the model of the call, and no declaration may be '
+          'vacuous')
 test('formal-dylib', [PY, 'test_formal_dylib.py'],
      deps=['preflight', 'prooflib'],
      desc='formal dylib emission, Mach-O re-read, dlopen, prove')
@@ -686,7 +735,7 @@ BUCKETS = {
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'interporacle', 'examples-parse',
               'rthdrscan', 'runtimedylib', 'sqliteruntime',
-              'formal-sweep-truth', 'formal-link-accounting'],
+              'formal-sweep-truth', 'formal-link-accounting', 'silentnoop'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps
@@ -714,7 +763,8 @@ BUCKETS = {
     # of the gate: it is a much longer sweep than a build check.
     'stdlib-corpus': ['stdlib-tests'],
 
-    'proofs': ['formal', 'formal-run', 'formal-dylib', 'formal-imports',
+    'proofs': ['formal', 'formal-call-proofgen',
+               'formal-run', 'formal-dylib', 'formal-imports',
                'formal-sweep', 'formal-sweep-truth',
                'formal-link-accounting', 'formal-x86',
                'formal-x86-endtoend', 'formal-x86-model'],
