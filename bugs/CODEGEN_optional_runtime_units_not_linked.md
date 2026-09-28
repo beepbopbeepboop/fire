@@ -130,8 +130,8 @@ they disagree. The declaration is `char *(void)` — correct for `find_gcc`, whi
 returns a string literal. So a *definition* is arriving with a different
 signature, or a second definition of the same symbol is being emitted into the
 same translation unit. The generated C is one large `fire.ci` with `#line`
-directives, and the reported `reflect.py:814` is past the end of `reflect.py`
-(583 lines) — so the `#line` mapping is itself imprecise, which makes the
+directives, and the "reflect.py:814" in that message is past the end of the
+file it names — so the `#line` mapping is itself imprecise, which makes the
 reported file:line unreliable as a starting point and the *emitted C* the only
 trustworthy place to look.
 

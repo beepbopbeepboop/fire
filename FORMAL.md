@@ -10,8 +10,9 @@ documents this one defers to. What lives *here* is the thesis, the measured curr
 state, the decisions taken, and the order.
 
 Read with: `doc/ABI.md` (the boundary contract this must not contradict),
-`bugs/FORMAL_known_limits.md` (the audited codegen residue),
-`bugs/FORMAL_arm64_known_proof_gaps.md` (the proof census), and
+`FORMAL-PARALLEL.md` (how to run this programme as concurrent agents without
+their work colliding), `bugs/FORMAL_known_limits.md` (the audited codegen
+residue), `bugs/FORMAL_arm64_known_proof_gaps.md` (the proof census), and
 `bugs/OPEN_WORK.md` A1 (the x86-64 `call_rel32`, which phase 3 needs).
 
 **Citations.** Every line number below was verified against **`7604105`**. The tree
@@ -491,3 +492,44 @@ Stated so no reader infers otherwise.
   `_STRUCT_MODULE_FN_RETVALS` (`:360`) exist only to keep a type estimator and a
   lowering in sync by hand. Phases 2 and 5 add a third consumer, which is the point
   at which one table becomes cheaper than three.
+
+---
+
+## 11. Running this as concurrent work
+
+`FORMAL-PARALLEL.md` is the operating contract for executing this programme with
+five agents at once: the `[1]`–`[5]` scopes, each agent's **exclusive** write set,
+the `GMOJO_HOME` isolation, the shared-path audit that makes a shared working
+directory safe, the INTERFACE REQUEST mechanism for anything crossing an ownership
+boundary, and the merge order. It is kept separate rather than folded in here
+because this document is the programme — what the phases are and why — and that one
+is the coordination for a particular week. Two documents with two different
+lifetimes should not be one document.
+
+The short version, so this file is not self-incomplete:
+
+- **The partition is file ownership, not task dependency.** One writer per file at
+  every moment. Needing a file you do not own is an INTERFACE REQUEST, never an
+  edit.
+- **Nobody runs a gate.** Each agent verifies with its own tests, run directly. The
+  integrator registers new tests, resolves held requests, and runs `make gate`
+  once at the end.
+- **`GMOJO_HOME` is per-agent, always.** One environment variable, and it removes
+  every CAS contention, torn cache entry and dylib overwrite question — including
+  `formal/imports`' per-arch dylib directory, which two agents sharing a
+  `GMOJO_HOME` would otherwise write into simultaneously.
+- **The one repo-root collision that matters is building the same basename**
+  (`fire.ci` from `fire.py build fire.py`, `./mojoc` from `make mojoc`). Every
+  other build artifact is named after the test that produced it, so two agents
+  running different tests in one directory do not collide.
+- `lib/*.olean` is shared but **safe**: `ensure_library` builds it under an
+  exclusive `flock` and writes via a private temp + `os.replace`, so concurrent
+  callers queue rather than corrupt. The hazard is staleness, not corruption —
+  when `lib/ProofLib.lean` changes, everyone re-runs rather than trusting a cached
+  verdict.
+- **Phase 0 is `[1]`'s**, because it holds the only known regression in the
+  programme (`bugs/CODEGEN_optional_runtime_units_not_linked.md`: the optional-unit
+  registry works and prints the right rows, but breaks `mojoc` with
+  `conflicting types for 'build_config_find_gcc'`, which passes on a clean tree).
+  Everything about "the same code on both paths" starts there, and `[4]` and `[5]`
+  both have interface requests into it.
