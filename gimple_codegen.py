@@ -1955,6 +1955,8 @@ class GimpleGen:
         self._owned_free_candidates: set = set()
         self._owned_free_pushed: set = set()
         self._owned_stack_allocated: set = set()
+        self._cstr_key_src: dict[str, str] = {}  # see _char_to_cstr(transient=)
+        self._fresh_str_tmps: set = set()  # see emit_infra._emit_str_cat
         self._current_filename: str = ""  # filename for #line directives
         self._emitted_line_pairs: set[tuple[str, int]] = set()  # (filename, line) pairs already emitted
         # external_call["name", Ret](args) targets → (ret_ctype, [arg_ctypes]); first use wins.
@@ -2504,6 +2506,8 @@ class GimpleGen:
         'mojo_div_double':       ('double',    ['double', 'double']),
         'mojo_div_float':        ('float',     ['float', 'float']),
         'mojo_str_from_int':     ('char *',    ['int64_t']),
+        'mojo_cstr_or_int_str':  ('char *',    ['int64_t']),
+        'mojo_cstr_or_int_release': ('void',   ['int64_t', 'char *']),
         'mojo_dict_new':         ('MojoDict *', []),
         'mojo_dict_set_str': ('void',      ['MojoDict *', 'char *', 'char *']),
         'mojo_dict_set_int': ('void',      ['MojoDict *', 'char *', 'int64_t']),
@@ -3911,14 +3915,18 @@ class GimpleGen:
         return ginf._dict_val_of_expr(self, expr)
     def _dict_union_val_type(self, lv, rv) -> str:
         return ginf._dict_union_val_type(self, lv, rv)
+    def _emit_str_cat(self, lv: str, rv: str, free_left: bool=False, free_right: bool=False) -> str:
+        return ginf._emit_str_cat(self, lv, rv, free_left, free_right)
+    def _is_fresh_operand(self, node, val: str) -> bool:
+        return ginf._is_fresh_operand(self, node, val)
     def _emit_call(self, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]]) -> None:
         return ginf._emit_call(self, ret_type, result_var, fname, arg_pairs)
     def _declared_int_ctype(self, val: str) -> str | None:
         return ginf._declared_int_ctype(self, val)
     def _ensure_local(self, ctype: str, val: str) -> str:
         return ginf._ensure_local(self, ctype, val)
-    def _char_to_cstr(self, typ: str, val: str) -> tuple[str, str]:
-        return ginf._char_to_cstr(self, typ, val)
+    def _char_to_cstr(self, typ: str, val: str, transient: bool=False) -> tuple[str, str]:
+        return ginf._char_to_cstr(self, typ, val, transient)
     def _resolve_type(self, ann: str | None) -> str:
         return ginf._resolve_type(self, ann)
     def _infer_param_types(self, func: FunctionDef,

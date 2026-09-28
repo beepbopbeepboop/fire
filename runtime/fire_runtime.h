@@ -957,6 +957,7 @@ char *mojo_repr_bool(int b);
 /* An int64_t used as a C string: itself when it is a boxed char*, else its
    decimal string (see mojo_cstr_or_int_str's comment in the .c). */
 char *mojo_cstr_or_int_str(int64_t v);
+void mojo_cstr_or_int_release(int64_t orig, char *s);
 void *mojo_sorted(void *iterable);
 /* sorted(x, key=f[, reverse]) — `keys` is the caller's per-element key list. */
 MojoList *mojo_sorted_by_keys(MojoList *items, MojoList *keys, int reverse);

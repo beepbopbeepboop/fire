@@ -281,8 +281,11 @@ def _lower_StringLiteral(gen, node):
         if acc_val is None:
             acc_val = part_val
         else:
-            cat_t = gen._new_val('char *', f'mojo_str_cat ({acc_val}, {part_val})')
-            acc_val = cat_t
+            # The running accumulator is a temp this loop built (when it is
+            # itself a previous cat), so it is freed as soon as the next cat
+            # has copied it; the first part may be a literal or a borrowed
+            # variable's string and is never freed here.
+            acc_val = gen._emit_str_cat(acc_val, part_val, acc_val in gen._fresh_str_tmps, False)
     if acc_val is None:
         # Only reachable for an f-string whose parts are all empty
         # literals (e.g. f"{''}") — emit an empty string, not the old
@@ -2634,7 +2637,9 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         lt2, lv2 = _as_charptr(lt, lv, is_string_literal=right_is_lit)
         rt2, rv2 = _as_charptr(rt, rv, is_string_literal=left_is_lit)
         if lt2 == 'char *' and rt2 == 'char *':
-            t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv2), ('char *', rv2)])
+            t = gen._emit_str_cat(lv2, rv2,
+                                  gen._is_fresh_operand(left_node, lv2),
+                                  gen._is_fresh_operand(right_node, rv2))
             return 'char *', t
         # int/int64_t + char* or char* + int/int64_t when one side is a string literal
         # → this is Python string concatenation where one operand is a string stored as int
@@ -2670,14 +2675,14 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             else:
                 nv = gen._to_int64(rt2, rv2)
                 sv = gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
-            return 'char *', gen._call_expr('char *', 'mojo_str_cat', [('char *', lv2), ('char *', sv)])
+            return 'char *', gen._emit_str_cat(lv2, sv, gen._is_fresh_operand(left_node, lv2), True)
         if rt2 == 'char *' and lt2 in ('int', 'int64_t', '_Bool'):
             if gen._actual_types.get(lv2) == 'char':
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', lv2)])
             else:
                 nv = gen._to_int64(lt2, lv2)
                 sv = gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
-            return 'char *', gen._call_expr('char *', 'mojo_str_cat', [('char *', sv), ('char *', rv2)])
+            return 'char *', gen._emit_str_cat(sv, rv2, True, gen._is_fresh_operand(right_node, rv2))
 
     # char * * int → string repetition (e.g., "  " * 3). Also accepts a
     # _Bool RHS ('s' * (n != 1), Python's common boolean-as-0/1
@@ -2896,8 +2901,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             lt == 'char *' or rt == 'char *'
             or gen._actual_types.get(lv) == 'char'
             or gen._actual_types.get(rv) == 'char'):
-        ls = lv if lt == 'char *' else gen._char_to_cstr(lt, lv)[1]
-        rs = rv if rt == 'char *' else gen._char_to_cstr(rt, rv)[1]
+        ls = lv if lt == 'char *' else gen._char_to_cstr(lt, lv, True)[1]
+        rs = rv if rt == 'char *' else gen._char_to_cstr(rt, rv, True)[1]
         cmp_t = gen._call_expr('int', 'mojo_cstr_cmp', [('char *', ls), ('char *', rs)])
         t = gen._new_temp('_Bool')
         gen._emit(f'  {t} = {cmp_t} {op} 0;')
@@ -3760,7 +3765,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
     _dsub_in = gen._dict_subclass_of(rt)
     if _dsub_in and not gen._struct_defines_method(_dsub_in, '__contains__'):
         _dsub_dp = gen._new_val('MojoDict *', f"{rv}->_data")
-        xt, xv = gen._char_to_cstr(xt, xv)
+        xt, xv = gen._char_to_cstr(xt, xv, True)
         gen._emit_call('int', ti, 'mojo_dict_contains',
                        [('MojoDict *', _dsub_dp), (xt, xv)])
     elif rt == 'MojoList *':
@@ -3826,7 +3831,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
                            [('MojoDict *', rv), ('MojoBytes *', xv)])
             return 'int', ti
         # Ensure key is char * for dict operations (all dict keys are strings in runtime)
-        xt, xv = gen._char_to_cstr(xt, xv)
+        xt, xv = gen._char_to_cstr(xt, xv, True)
         gen._emit_call('int', ti, 'mojo_dict_contains', [('MojoDict *', rv), (xt, xv)])
     elif rt == 'MojoSet *':
         # Route through _emit_call so global/_slit_ args are loaded into locals

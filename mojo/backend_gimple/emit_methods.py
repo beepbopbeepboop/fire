@@ -3656,7 +3656,7 @@ def _dict_key_probe(gen, key_type: str, key_val: str) -> tuple[str, str, bool]:
     key. One function, so the next reader cannot forget."""
     if key_type == 'MojoBytes *':
         return 'MojoBytes *', key_val, True
-    kt, kv = gen._char_to_cstr(key_type, key_val)
+    kt, kv = gen._char_to_cstr(key_type, key_val, True)
     return kt, kv, False
 
 

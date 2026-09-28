@@ -2,6 +2,12 @@
 
 ## Status (2026-09-24 — RESOLVED, verified empirically)
 
+> **2026-09-28 correction:** "RESOLVED" holds for the containers the Phase-3
+> analysis admits (assigned once, definitely assigned at function exit). A
+> container declared *inside a loop body* is still never freed — measured
+> ~230-540 B/iter. Tracked in `CODEGEN_block_scoped_container_never_freed.md`;
+> see also `doc/MEMORY.html`.
+
 Codegen now emits the container cleanup calls this doc's "Where the fix
 goes" section asked for (the ownership model's Phase 6): `gimple_gen_*.py`'s
 scope-exit / ownership machinery routes a `MojoDict *`/`MojoList *`/

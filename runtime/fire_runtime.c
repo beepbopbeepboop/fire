@@ -6604,6 +6604,21 @@ char *mojo_cstr_or_int_str(int64_t v) {
     return mojo_str_from_int(v);
 }
 
+/* The other half of mojo_cstr_or_int_str's contract: the result is OWNED by
+   the caller exactly when it is not `v` itself. A boxed string comes back as
+   the very same address (borrowed -- someone else owns it, never free it);
+   an Int comes back as a fresh heap decimal (owned -- the caller must free it
+   once its last use is done). `orig` is the int64_t that was converted and
+   `s` is what mojo_cstr_or_int_str returned for it; this frees `s` iff it is
+   the heap copy. Emitted by the codegen right after the single runtime call
+   that consumes a TRANSIENT key (dict get/set/contains/pop, string compare) --
+   all of which copy or merely read the key. Never call it for a key that was
+   stored by reference (a list element, a __missing__ argument): those keep
+   the unreleased conversion. See doc/MEMORY.html, "Transient keys". */
+void mojo_cstr_or_int_release(int64_t orig, char *s) {
+    if ((int64_t)(intptr_t)s != orig) free(s);
+}
+
 
 void *mojo_range(int64_t start, int64_t stop) {
     MojoList *l = mojo_list_new();

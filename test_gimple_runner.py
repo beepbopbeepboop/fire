@@ -164,6 +164,52 @@ def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
                 pass
 
 
+def test_gimple_bounded_memory(name: str, mojo_src: str, expected_stdout: str, limit_mb: int):
+    """The program prints exactly `expected_stdout` AND its peak RSS stays
+    under `limit_mb`. A leak in a loop shows up as RSS proportional to the
+    iteration count while stdout stays correct, so neither
+    test_gimple_stdout nor an exit-code check can see it; size the loop so
+    the leak, if present, is several times `limit_mb` (see doc/MEMORY.html
+    section 8 for why one size proves nothing about a slope, and why this
+    limit is a tripwire rather than a measurement). Peak RSS is read from a
+    fresh helper interpreter's RUSAGE_CHILDREN so it is this binary's own
+    peak, not the max over every child this suite has ever spawned."""
+    global _PASS, _FAIL, _TIMEOUT
+    exe_path = None
+    try:
+        exe_path = compile_mojo_to_gimple_exe(mojo_src)
+        probe = (
+            "import resource, subprocess, sys\n"
+            "r = subprocess.run([sys.argv[1]], capture_output=True, timeout=60)\n"
+            "sys.stdout.buffer.write(r.stdout)\n"
+            "sys.stderr.write(str(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss))\n"
+        )
+        r = subprocess.run([sys.executable, "-c", probe, exe_path],
+                           capture_output=True, timeout=90)
+        out = r.stdout.decode('utf-8', errors='replace')
+        maxrss = int(r.stderr.decode().strip().splitlines()[-1])
+        rss_mb = maxrss / (1024 * 1024) if sys.platform == 'darwin' else maxrss / 1024
+        if out == expected_stdout and rss_mb <= limit_mb:
+            print(f"PASS  {name}  (peak {rss_mb:.1f} MB <= {limit_mb})")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: stdout {out!r} (want {expected_stdout!r}), "
+                  f"peak RSS {rss_mb:.1f} MB (limit {limit_mb})")
+            _FAIL += 1
+    except subprocess.TimeoutExpired as e:
+        print(f"TIMEOUT {name}: {e}")
+        _TIMEOUT += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+    finally:
+        if exe_path:
+            try:
+                os.unlink(exe_path)
+            except:
+                pass
+
+
 def test_gimple_runtime_error(name: str, mojo_src: str, expected_substr: str):
     """Assert the compiled program FAILS at RUNTIME with `expected_substr` on
     stderr — the shape of a wrong-but-compiles bug's correct counterpart: a
@@ -961,6 +1007,62 @@ def main():
 
 main()
 """, "1\n")
+
+    # ── Transient dict keys / concat temporaries are RELEASED, borrowed ones
+    # are not (doc/MEMORY.html section 4). Two directions, both needed:
+    # the leak (an Int-keyed dict in a loop grew ~48 B/iteration) and the
+    # over-free (freeing a key that was really a borrowed string would crash
+    # or corrupt the dict). 4M iterations leaked ~190 MB before the release;
+    # the limit is a tripwire far below that and far above the ~10 MB floor.
+    test_gimple_bounded_memory("gimple_int_dict_key_release_bounded", """\
+def main():
+    var d: Dict[Int, Int] = {}
+    var total = 0
+    for i in range(3000000):
+        d[i % 10] = i
+        total += d[i % 10] - i + 1
+        if (i % 10) in d:
+            total += 1
+        total += d.get(i % 7, 0) - d.get(i % 7, 0)
+    print(total)
+    print(len(d))
+
+main()
+""", "6000000\n10\n", 40)
+
+    test_gimple_stdout("gimple_dict_key_release_keeps_borrowed_string_key", """\
+def main():
+    d = {"a": 1, "bb": 2}
+    f = lambda k, d=d: d[k]
+    print(f("a"))
+    print(f("bb"))
+    print(f("a") + f("bb"))
+    n = {1: 10, 2: 20}
+    n[3] = 30
+    n[1] += 5
+    print(n[1], n[2], n[3], len(n))
+    print(2 in n, 9 in n)
+    print(n.get(2, 0), n.get(9, -1))
+    del n[2]
+    print(len(n))
+
+main()
+""", "1\n2\n3\n15 20 30 3\nTrue False\n20 -1\n2\n")
+
+    test_gimple_stdout("gimple_concat_chain_does_not_free_aliased_operand", """\
+def main():
+    a = String("ab")
+    s = a + String("cd")
+    t = s + String("ef")
+    u = t + s
+    print(s)
+    print(t)
+    print(u)
+    n = String("n=") + 7 + String("!")
+    print(n)
+
+main()
+""", "abcd\nabcdef\nabcdefabcd\nn=7!\n")
 
     # ── zip() / dict.items() pair shapes ───────────────────────────────
     # zip and dict.items() yield TUPLES. Unmarked, they printed as

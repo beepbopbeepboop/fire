@@ -234,6 +234,17 @@ def _reset_func(gen, body: list = None, params: list = None,
     # temp-name -> (box, pos) for reads of a _tagged_dyn_src local, consulted
     # by use-site dispatch (_tagged_dyn_read / print). Reset per function.
     gen._tagged_dyn_vals: dict = {}
+    # key-temp -> the int64_t local it was converted from, for a dict key /
+    # comparison operand `_char_to_cstr(..., transient=True)` heap-formatted:
+    # `_emit_call` frees it right after the one call that consumes it. Temp
+    # names repeat across functions, so this MUST reset per function (a stale
+    # entry would free a temp that never owned anything). See doc/MEMORY.html.
+    gen._cstr_key_src: dict[str, str] = {}
+    # Temps holding a heap string THIS function's own concatenation lowering
+    # just built (`_emit_str_cat`) and that nothing else can hold yet. The
+    # parent concatenation that consumes one as a direct operand frees it.
+    # Same per-function reset requirement as `_cstr_key_src`.
+    gen._fresh_str_tmps: set = set()
     gen.loop_stack:  list[tuple[str,str]] = []
     gen.exc_depth    = 0
     # Entry `len(loop_stack)` of each currently-open `try` body. A
@@ -1457,6 +1468,58 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         gen._emit(f'  {result_var} = {fname} ({args_str});')
     else:
         gen._emit(f'  {fname} ({args_str});')
+    _release_transient_cstr_args(gen, arg_pairs)
+
+
+def _emit_str_cat(gen, lv: str, rv: str, free_left: bool = False, free_right: bool = False) -> str:
+    """`mojo_str_cat(lv, rv)` -> a fresh heap string temp, freeing the operands
+    that the CALLER has proven are temporaries nobody else can reference.
+
+    `mojo_str_cat` always copies, so an operand that was itself a
+    concatenation result (`a + b + c`, an f-string's running accumulator) or a
+    conversion temp (`String + Int` -> `mojo_str_from_int`) is dead the moment
+    the outer cat returns. Freeing it there is the whole ownership rule for
+    these temporaries: the lowering that created it is the only thing that
+    ever names it, so it is also the thing that frees it. An operand that
+    might be a variable read, a literal, a field or a call result of unknown
+    ownership must NOT be passed as `free_*` (see the two `_is_fresh_operand`
+    call sites). The result is registered fresh so a parent cat can free it in
+    turn.
+    """
+    t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', rv)])
+    if free_left:
+        gen._emit_call('void', '', 'free', [('char *', lv)])
+    if free_right:
+        gen._emit_call('void', '', 'free', [('char *', rv)])
+    gen._fresh_str_tmps.add(t)
+    return t
+
+
+def _is_fresh_operand(gen, node, val: str) -> bool:
+    """True iff `val` is the value of operand expression `node` AND it is a
+    concatenation result `_emit_str_cat` built for exactly that expression.
+    Both halves are required: the syntactic check (`node` is itself a `+`)
+    stops an identifier/field read that merely *aliases* a fresh temp (`s = a
+    + b` then `s + c`: the operand node is an IdentExpr) from being freed
+    out from under the variable."""
+    if val not in gen._fresh_str_tmps:
+        return False
+    return isinstance(node, gimple_ctypes.BinaryOp) and node.op == '+'
+
+
+def _release_transient_cstr_args(gen, arg_pairs: list) -> None:
+    """Free every transient dict-key/compare-operand string among a call's
+    arguments, right after that call (see `_char_to_cstr`'s `transient`).
+    An entry is consumed on release, so a key can be released at most once."""
+    if not gen._cstr_key_src:
+        return
+    for _apair in arg_pairs:
+        _k = _as_str(_apair[1])
+        if _k in gen._cstr_key_src:
+            _orig = gen._cstr_key_src[_k]
+            del gen._cstr_key_src[_k]
+            gen._emit_call('void', '', 'mojo_cstr_or_int_release',
+                           [('int64_t', _orig), ('char *', _k)])
 
 
 def _declared_int_ctype(gen, val: str) -> str | None:
@@ -1559,7 +1622,7 @@ def _tagged_dyn_read(gen, val: str, want: str) -> str | None:
     return gen._new_val('int64_t', f"mojo_tagged_int ((int64_t){box}, {pos})")
 
 
-def _char_to_cstr(gen, typ: str, val: str) -> tuple[str, str]:
+def _char_to_cstr(gen, typ: str, val: str, transient: bool = False) -> tuple[str, str]:
     """Convert a char-type value to char * for string operations.
     Returns (new_type, new_val) — if typ is 'char', calls mojo_char_to_str.
     If typ is 'int64_t' and actual type isn't a pointer, also converts.
@@ -1614,8 +1677,18 @@ def _char_to_cstr(gen, typ: str, val: str) -> tuple[str, str]:
         # with its pointer bits here and nothing recorded — and stringifying
         # that looked the key up by decimal address (`lambda k: d[k]` called
         # with "a" searched for "97" and returned 0).
-        return 'char *', gen._call_expr('char *', 'mojo_cstr_or_int_str',
-                                        [('int64_t', val)])
+        #
+        # `transient=True` is the caller's promise that exactly ONE runtime
+        # call consumes this key and that call copies or merely reads it
+        # (dict get/set/contains/pop copy via strdup; string compare reads).
+        # The heap decimal is then freed right after that call (see
+        # `_release_transient_cstr_args`), so an Int-keyed dict in a hot
+        # loop no longer leaks one string per access. A caller that stores
+        # the pointer, or reuses it across several calls, must not pass it.
+        key = gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', val)])
+        if transient:
+            gen._cstr_key_src[key] = val
+        return 'char *', key
     if typ != 'char *':
         return 'char *', gen._new_val('char *', f'(char *){val}')
     return typ, val

@@ -126,7 +126,7 @@ def test_every_declaration_is_seen():
     mojo_type(...)`, because a `(...)` with no named parameter before it is a
     hard error in clang, which is what the removal was for in the first place.
     """
-    # 450. Three different numbers have been asserted here and all three were
+    # 450 (before the 451 note below). Three different numbers have been asserted here and all three were
     # right on the tree that produced them, which is why this is measured
     # rather than adjusted:
     #
@@ -156,7 +156,9 @@ def test_every_declaration_is_seen():
     # the non-variadic `int mojo_type(int obj)` prototype, the five `static
     # inline` helpers are still excluded, both function-pointer entry points
     # are still included, and all five removed declarations are still absent.
-    for header, want in (('fire_runtime.h', 450),
+    # 450 -> 451 (2026-09-28): `mojo_cstr_or_int_release`, the free half of
+    # `mojo_cstr_or_int_str`'s ownership contract (doc/MEMORY.html section 4).
+    for header, want in (('fire_runtime.h', 451),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),
