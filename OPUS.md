@@ -167,7 +167,9 @@ theorem.
 A `bl` to a sibling export or helper *inside* the image can in principle be
 walked (the executable path handles `bl` with `FrameBound`). That needs the
 `hn` stack-bound premise, which `Total`'s `∀ n` does not have, so the same
-definitional question as 4.1 comes first. A `bl` *out of* the image (libSystem)
+definitional question as 4.1 comes first. **Measured and analysed in §5.0 and
+§5.1** — including why a constant budget does *not* discharge `hn` for free,
+which is the part that is easy to assume and is not true. A `bl` *out of* the image (libSystem)
 is not executable in the model at all, so `Total` there has to be stated
 relative to a callee contract.
 
@@ -193,7 +195,110 @@ clauses can fail independently but only via the entry being nonsense. This one
 has a perfectly good entry and fails on control flow.
 
 
-## 5. Notes for [3]
+## 5. Follow-on work, measured against the scheme in §3
+
+Everything here is framed as *widening the scheme in this document* — the CFG
+walk at constant fuel, discharged through `total_of_halts`. Nothing revives the
+all-states route; §2 is the reason it is gone and that reason has not changed.
+
+### 5.0 Measured: where the scheme's boundary actually falls
+
+A three-export dylib, built through the ordinary path
+(`fire.py dylib --formal`), one export per CFG shape:
+
+| export | shape | `_semantics_total` |
+|---|---|---|
+| `straight` | acyclic, no `bl` | **proved** — `total_of_halts … _halts` |
+| `uses_straight` | calls a sibling export (`bl`) | `sorry` |
+| `looper` | back edge | `sorry` |
+
+So the scheme is not partial in a diffuse way: on a plain arithmetic export it
+is total, and the two exclusions in `_gen_universal_e2e_cfg` are exactly the
+two that bite. `fuel < _TOTAL` never fires in practice — `exportFuel` is
+100000 and no export approaches that instruction count — so it is not a
+constraint worth thinking about. **The binding constraints are `bl` and the back
+edge, one per §4.2 and §4.1.**
+
+This matters for sequencing: §4.1 and §4.2 are not two independent items of
+equal size. §4.1 (loops) is a *definitional* question — no amount of walking
+fixes a constant fuel against a fuel-proportional-to-`n` loop, and §4.1a has
+already shown the failure is not even fuel exhaustion. §4.2 (`bl`) is a
+*proof* question with a concrete obstacle, described next.
+
+### 5.1 `bl` (§4.2): why the constant budget does not discharge `hn` for free
+
+The tempting argument is that a constant fuel bounds the number of calls, hence
+the stack depth, hence `hn` is unnecessary. **That argument is right and it is
+also not enough**, which is worth recording because the gap is structural rather
+than a missing tactic.
+
+`FrameBound` is not a hypothesis the walk *checks* at the end; it is a premise
+**threaded through the recursion**. `hbnd` is an argument of the walk's own
+statement, `frameBound_descend` / `frameBound_descend_le` re-derive it per
+level as the proof descends, and `contract_sound_tree` takes it as a
+parameter. The callee's frame bound is therefore *consumed* on the way down,
+not discharged once at the top. Replacing "assume a frame bound for all `n`"
+with "the budget bounds the depth" therefore means proving, for every level of
+the walk, that the budget implies the bound at that level — which is a theorem
+about the walk, not an edit to its interface.
+
+So the concrete follow-on is: state and prove a *depth-indexed* frame bound
+(`∀ k ≤ depth, FrameBound … at level k`) discharged from the instruction
+count, and re-thread `hbnd` in terms of it. That is real work and I have not
+started it. It is the whole of §4.2.
+
+### 5.2 The last admitted hole in a generated proof is `_spec`, not `_semantics_total`
+
+Measured on the real `proved.dylib` (`def triple(n): return n * 3`): the census
+reports **exactly one** admitted `sorry`, and it is
+`dylib_export_0_triple_spec` — the per-export *spec* obligation.
+`_semantics_total` is derived. So on a plain arithmetic export, termination is
+hole-free and the only thing left is the spec.
+
+[3]'s `IR-3-to-2-dylib-contract-emitter.md` supplies a reference emitter that
+closes it (`Contracts.agrees_of_body`, `ExportBody`, `caller_uses_contract`),
+and §2 of that request contains the finding that matters most for budgeting:
+`bv_decide` discharges the value equation `arm64_reg 0 (bodyStep …) = spec` for
+**symbolic** `n` in one tactic, because every value is a `UInt64` and so the
+prologue/epilogue memory round trip is bitvector computation. Nobody should
+budget address arithmetic for that.
+
+**What blocks it is one line in a file I do not own.** The emitter emits
+`import Contracts`; `formal/lean.py`'s `LIBRARY_MODULES` is still
+`("ProofLib", "X86", "work", "Refine")`, so `lib/Contracts.lean` — tracked in
+git since `c967b5d` — is never built by the project and nothing importing it
+can be checked. `formal/lean.py` is integrator-owned (FORMAL.md §11.3), so this
+is escalated in `IR-2-to-integrator-lib-registration-and-total-shape.md` rather
+than edited. It is now the blocker for **two** agents, which is the argument for
+doing it: it is one line, it is mechanical, and it is unblocking.
+
+One detail from that request that changes an emitted obligation, recorded here
+so it is not lost: `ExportBody.atExit` is stated **for the start state**, not
+for every state at the entry, because the general form is false — a body ends by
+returning, and a return jumps to whatever `x30` holds, so a state at the entry
+with `x30 := 0` returns to `0`. An emitter that emitted the general form would
+emit a false obligation, which is the same trap as §2 and as §4.1a.
+
+### 5.3 Still human-supplied: the spec itself
+
+`fun n => n * 3` is typed into the generator, not derived from the export's
+source AST. `bv_decide` *checks* it against the machine, so a wrong spec is
+rejected rather than believed — but it is a second thing to keep in sync with
+the source, which is the same rot that phase 2 already had to remove once.
+`Refine.evalExpr` already models the expression language, so deriving the spec
+from the AST is the change worth arguing for, and it would make the generated
+file's spec obligation dischargeable with no human input at all. Not started;
+§5.2 is a strict prerequisite.
+
+### 5.4 x86 (§4.3)
+
+Unchanged and still unmeasured. [3]'s §5 notes they did not touch
+`formal/x86_proof_gen.py`, and the `fuel=` argument was added to the arm64
+walker only. The measurement in §5.0 has not been repeated for x86, so "the
+same argument applies" is a hypothesis, not a finding.
+
+## 6. Notes for [3]
+
 
 - `{ident}_semantics_total` keeps its name and its type
   (`DylibExport.Total dylib_image {ident}`). Only its body changed. The names
