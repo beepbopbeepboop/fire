@@ -108,6 +108,11 @@ s` was false and `∀ n, ∃ s, …` is correct. That history is kept in the
 
 ### 4.1 `Total` for exports with loops
 
+> **This subsection and §4.1-MEASURED below are two halves of one change** —
+> mine (the option, and what it does not buy) and [3]'s (the threshold). Read
+> them together. The measured claim lives in §4.1-MEASURED; the walk breakage
+> the first attempt caused, and why, is in §5.7.
+
 A countdown or range loop needs fuel that grows with `n`, and `exportFuel` used
 to be the constant `100000`, which made the claim **false** — see 4.1a, and the
 measurement that settled it. **This option has now been taken:** `exportFuel` is
@@ -431,7 +436,7 @@ down, and it is not a budget problem. See **§5.7**, which supersedes the
 "try `+decide`, then suspect the memory round trip" advice this paragraph used
 to give — that guess was wrong, and the real cause is the `fuel_lean` change.
 
-### 5.7 MEASURED: the `fuel_lean` change is what broke the walk, and it is not a budget problem
+### 5.7 MEASURED: the `fuel_lean` change broke the walk — RESOLVED by `e0af987`
 
 [3]'s `IR-3-to-2-dylib-contract-emitter.md` reports three failures and says of
 `hreg`: *"First thing to try: raise `maxHeartbeats` and measure."* **I measured,
@@ -474,11 +479,27 @@ Lean text. The guard still runs; its *result* is simply never emitted.
      `have : (200000 : Nat) ≤ DylibExport.exportFuel dylib_image n`. The
      generator already knows the base; it checks it and then drops it.
 
-The deeper lesson is the one worth keeping: **replacing a literal with a
-function removes it from every tactic that could see its value.** `omega` and
-`native_decide` both work on literals. The no-drift property was worth having,
-but it has to be paid for by re-supplying the bounds the literal used to carry,
-or `fuel_lean` trades a silent-drift bug for an unsatisfiable-arithmetic bug.
+**RESOLVED, and the resolution is instructive.** `e0af987` fixed this instance
+by going back to LITERAL arithmetic: the emitted fuel is now
+`200000 + 15 * n.toNat`, and line 1806 reads
+`15 + ((200000 + 15 * n.toNat) - 15) = (200000 + 15 * n.toNat)`, which `omega`
+closes. So the fix for "omega cannot see through a function" was to stop hiding
+the number behind one — which also re-supplies the bound for free, so the
+`have` described above is no longer needed either.
+
+The deeper lesson is the one worth keeping, and it is now a hazard rather than
+a live bug: **replacing a literal with a function removes it from every tactic
+that could see its value.** `omega` and `native_decide` both work on literals. A
+no-drift property bought that way has to be paid for by re-supplying the bounds
+the literal used to carry, or it trades a silent-drift bug for an
+unsatisfiable-arithmetic one. This is live for any future swap of the same
+shape — x86 included.
+
+**Cross-reference, per [3]'s note that §4.1 and §5.7 are two accounts of one
+bug:** the premise here is §4.1/§4.1-MEASURED's, and what this section adds is
+*why* the first attempt at it broke the walk. Read them together; the
+measurement in §4.1-MEASURED (halts through `n = 5000`, `none` at `8000`) is
+[3]'s and is not repeated here.
 
 ### 5.6 The golden file — RESOLVED, nothing to escalate
 
