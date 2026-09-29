@@ -1014,6 +1014,82 @@ PASS, FAIL, SKIP, RESOURCE, TIMEOUT, ERROR, EXPECTED = (
 _RANK = {PASS: 0, SKIP: 1, RESOURCE: 2, TIMEOUT: 3, ERROR: 4, FAIL: 5}
 
 
+# ── The tally ────────────────────────────────────────────────────────────────
+# What the summary line and the screen do with each status. `report` RENDERS
+# this table rather than naming statuses inline, because the defect it exists
+# for was a status the runner produced, announced on the screen, and then
+# counted nowhere.
+#
+# Real, measured on a `gate` run of 2026-09-29: the log carried
+#     [ 76/177] TIMEOUT sqliteruntime 600.1s  (0 running)
+# and the run finished
+#     suite: 30 passed, 0 failed, 5 skipped, 1 resource-capped,
+#            2 expected-failure  (177 jobs, 0 replayed from cache, ...)
+# with exit 0. 30+0+5+1+2 = 38, and 39 tests ran: the hang was in no counter,
+# in no screen section, and did not fail the run — a job that vanished, which
+# is the one outcome a tally exists to make impossible.
+#
+# One row per COUNTER, in the order the summary line reads, so the summary, the
+# screen sections and the exit code are all rendered from the same table and
+# cannot disagree about which statuses they cover.
+#
+#   count   wording in the summary line. The three primary verdicts are printed
+#           at zero, because "0 failed" is the number a reader looks for; the
+#           exceptions — a resource breach, a known failure, a hang — print only
+#           when non-zero, because their absence is the normal case.
+#   statuses  the statuses this counter counts. The FIRST is the plain reading
+#           of the section; a member in any other one is tagged with its status
+#           in the listing, so a hang sitting among the failures is named as a
+#           hang rather than as one more failing test.
+#   header  the screen section that lists this counter's members, or '' for one
+#           that is never listed (a pass).
+#   fails   whether a member makes the run exit non-zero.
+#
+# A counter holds more than one status where a reader cannot tell them apart:
+# FAIL and ERROR have always been one number, and a TIMEOUT joins them because
+# a hang IS a failure (its own class, because "killed at its timeout" and
+# "produced the wrong answer" are different bugs and a tally that merged them
+# would hide which one a fix has to address; a failure, because a job killed at
+# its timeout has reported nothing at all, so a run that hangs a test and exits
+# 0 has silently not run the thing it was asked to run).
+class Verdict:
+    __slots__ = ('count', 'statuses', 'header', 'fails', 'zero')
+
+    def __init__(self, count, statuses, header='', fails=True, zero=True):
+        self.count, self.statuses = count, tuple(statuses)
+        self.header, self.fails, self.zero = header, fails, zero
+
+
+TALLY = (
+    Verdict('passed', (PASS,), fails=False),
+    Verdict('failed', (FAIL, ERROR, TIMEOUT), 'FAILED'),
+    Verdict('skipped', (SKIP,), 'SKIPPED', fails=False),
+    Verdict('resource-capped', (RESOURCE,),
+            'RESOURCE-CAPPED (not a verdict on the output)', fails=False,
+            zero=False),
+    Verdict('expected-failure', (EXPECTED,),
+            'EXPECTED (known-broken, tracked not hidden)', fails=False,
+            zero=False),
+)
+
+# Every status the runner can produce is counted by exactly one row, and every
+# status a row names is one the runner can produce. Checked at import rather
+# than trusted: a status added to `_RANK` and not to the tally is exactly the
+# defect above, and refusing to start is the strongest form of "counted" — the
+# runner cannot be used, `--list` included, in a state where it cannot account
+# for one of its own verdicts.
+TALLY_ROW = {s: row for row in TALLY for s in row.statuses}
+_producible = set(_RANK) | {EXPECTED}
+_mismatch = sorted(_producible ^ set(TALLY_ROW))
+if _mismatch or len(TALLY_ROW) != sum(len(r.statuses) for r in TALLY):
+    raise SystemExit(
+        f"suite.py: the tally and the runner disagree about these statuses: "
+        f"{_mismatch or '(a status is listed in two rows)'}\n"
+        f"  the runner can produce: {sorted(_producible)}\n"
+        f"  the tally counts:      {sorted(TALLY_ROW)}\n"
+        f"  Every status needs exactly one Verdict row in TALLY.")
+
+
 class Result:
     __slots__ = ('status', 'secs', 'detail', 'cached', 'peak_gb', 'output')
 
@@ -1547,13 +1623,34 @@ def _line(job, res, done, total, active):
 # The screen gets the failures and one tally. Everything per-test — a PASS
 # line each, with argv, exit code, duration and measured peak — is in the log.
 def report(names, state, results, wall, peak, opts, log: Log):
-    def group(status):
-        return [n for n in names if state.get(n) == status]
+    # Group the run's tests into the tally's counters, one lookup per test, so
+    # a test cannot end up in a bucket nobody reads.
+    by_count = {row.count: [] for row in TALLY}
+    unaccounted = []
+    for name in names:
+        row = TALLY_ROW.get(state.get(name))
+        if row is None:
+            unaccounted.append((name, state.get(name)))
+        else:
+            by_count[row.count].append(name)
 
-    passed = group(PASS)
-    failed = group(FAIL) + group(ERROR)
-    resource, skipped = group(RESOURCE), group(SKIP)
-    expected = group(EXPECTED)
+    # The invariant, checked rather than assumed: the counters must add up to
+    # the number of tests, and every test must be in one. This is the defect
+    # the table above was rebuilt to prevent, and it is verified here so that a
+    # summary that cannot count the run says so instead of looking authoritative.
+    # A plain `if` and not an `assert`: an assertion is removed by `python -O`,
+    # and the one thing this must never be is absent from a run.
+    total = sum(len(m) for m in by_count.values())
+    if unaccounted or total != len(names):
+        for name, status in unaccounted:
+            log.notice(f'  TALLY BUG  {name}  status={status!r}'
+                       + ('   (no result at all)' if status is None
+                          else '   (a status the tally has no row for)'),
+                       force=True)
+        log.notice(f'  TALLY BUG  the counters sum to {total} over {len(names)} '
+                   f'tests, so this summary is NOT a count of the run.',
+                   force=True)
+
     cached = sum(1 for r in results.values() if r.cached)
     secs = {n: max([r.secs for k, r in results.items()
                     if k.split(':')[0] == n] or [0.0]) for n in names}
@@ -1576,13 +1673,14 @@ def report(names, state, results, wall, peak, opts, log: Log):
             if r.detail:
                 log.line(f'               {r.detail}')
 
-    parts = [f'{len(passed)} passed', f'{len(failed)} failed',
-             f'{len(skipped)} skipped']
-    if resource:
-        parts.append(f'{len(resource)} resource-capped')
-    if expected:
-        parts.append(f'{len(expected)} expected-failure')
-    tail = f'{len(results)} jobs, {cached} replayed from cache, {wall:.1f}s wall'
+    parts = [f'{len(by_count[row.count])} {row.count}' for row in TALLY
+             if by_count[row.count] or row.zero]
+    # The test count is in the tail as well as the job count, because those are
+    # the two numbers a reader adds up, and the job count alone is what made the
+    # dropped TIMEOUT impossible to check by eye: that summary reported
+    # "177 jobs" for 39 tests and nothing on the line said so.
+    tail = (f'{len(names)} tests, {len(results)} jobs, {cached} replayed from '
+            f'cache, {wall:.1f}s wall')
     if peak:
         tail += f', peak {peak:.1f} GB'
     tally = f'suite: {", ".join(parts)}  ({tail})'
@@ -1592,20 +1690,31 @@ def report(names, state, results, wall, peak, opts, log: Log):
     if not opts.quiet:
         print()
         print('─' * 78)
-        for label, members in (
-                ('FAILED', failed),
-                ('RESOURCE-CAPPED (not a verdict on the output)', resource),
-                ('EXPECTED (known-broken, tracked not hidden)', expected),
-                ('SKIPPED', skipped)):
-            if not members:
+        # A counter can hold more than one status (FAILED holds FAIL, ERROR and
+        # TIMEOUT). A member whose status is not the counter's plain one is
+        # tagged, per member rather than per section: which of the failures was
+        # the hang is the first thing a reader needs, and a section of names
+        # cannot say it — nor can a section-level tag, which is absent exactly
+        # when a section holds nothing but the one status worth naming.
+        for row in TALLY:
+            members = by_count[row.count]
+            if not members or not row.header:
                 continue
-            print(f'{label}:')
+            print(f'{row.header}:')
             for name in members:
                 why = getattr(REGISTRY.get(name), 'expect', '') or ''
+                status = state[name]
                 print(f'  {name}  ({secs[name]:.0f}s)'
+                      + (f'  [{_TAG.get(status, "?")}]'
+                         if status != row.statuses[0] else '')
                       + (f'  — {why}' if why else ''))
     print(tally + (f'   log: {log.path}' if log.path else ''))
-    return 0 if not failed else 1
+    # Non-zero for any member of a counter that `fails`, and for a summary that
+    # could not account for every test: a run that cannot count itself has not
+    # earned an exit code of 0, whatever else it found.
+    bad = (unaccounted or total != len(names)
+           or any(by_count[row.count] and row.fails for row in TALLY))
+    return 1 if bad else 0
 
 
 def buckets_containing(name):
