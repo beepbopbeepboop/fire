@@ -404,6 +404,12 @@ def _assert_no_unclaimed_bytes(image: bytes, segments: list) -> None:
             f"a byte was inserted past the end of the last segment")
 
 
+def _uleb_bytes(value: int) -> bytes:
+    out = bytearray()
+    _uleb(out, value)
+    return bytes(out)
+
+
 def _uleb(out: bytearray, value: int) -> None:
     while True:
         byte = value & 0x7F
@@ -688,22 +694,168 @@ ID_DYLIB_CMD = 0x0D
 DYLD_EXPORTS_TRIE_CMD = 0x80000033
 
 
-def _export_trie(exports: list) -> bytes:
-    """Flat (single-level) export trie: every symbol is one edge off the root.
+def _trie_insert(root: dict, name: bytes, terminal: bytes) -> None:
+    """Add `name` -> `terminal` to a radix trie, splitting edges as needed.
 
-    The terminal's flags word is 0, i.e. EXPORT_SYMBOL_FLAGS_KIND_REGULAR.
+    A node is `{"term": bytes | None, "kids": {edge: node}}`, and `edge` is
+    the BYTES that follow the parent, so a shared prefix is stored once and
+    the symbols that share it become siblings one level down. That is the
+    whole reason this function exists -- see `_export_trie`.
+
+    One pass per level and an explicit `break` out of the edge scan rather
+    than a `continue`: a `continue` restarts the scan over the node it was
+    written for, and the split case has already moved `node`, so the rescan
+    would insert the new symbol's (now empty) remainder into the WRONG node --
+    an empty edge, and a trie dyld walks off the end of. Written as three
+    explicit cases because the third one is the bug.
+    """
+    node = root
+    rest = name
+    while True:
+        if not rest:
+            node["term"] = terminal
+            return
+        for edge in list(node["kids"]):
+            if rest.startswith(edge):
+                # The whole edge is consumed: descend.
+                node = node["kids"][edge]
+                rest = rest[len(edge):]
+                break
+            if edge.startswith(rest):
+                # `rest` is a PREFIX of an existing edge: split the edge at the
+                # divergence, keep what is left of the old edge under the
+                # split, and the new symbol IS the split.
+                child = node["kids"].pop(edge)
+                split = {"term": terminal,
+                         "kids": {edge[len(rest):]: child}}
+                node["kids"][rest] = split
+                return
+        else:
+            node["kids"][rest] = {"term": terminal, "kids": {}}
+            return
+
+
+def _trie_preorder(root: dict) -> list:
+    """Every node, a parent before its children, edges in sorted order.
+
+    The order the layout walk uses, and the sort is part of the format rather
+    than taste: a trie is emitted with each node's edges in ascending byte
+    order, and dyld's lookup narrows with that ordering.
+    """
+    out = [root]
+    for edge in sorted(root["kids"]):
+        out.extend(_trie_preorder(root["kids"][edge]))
+    return out
+
+
+def _trie_node_size(node: dict, widths: dict) -> int:
+    """Bytes `_trie_emit` will write for `node`, given each offset's width.
+
+    The width is a parameter rather than a measurement because it is the only
+    circularity in the layout: an edge's encoded size includes the ULEB of its
+    child's offset, and that offset is not known until the sizes are. The
+    widths converge -- they only ever grow, and are bounded by the trie's own
+    size -- which is what `_export_trie`'s loop waits for.
+    """
+    term = node["term"] or b""
+    size = 2 + len(term)              # terminalSize, childCount, terminal
+    for edge, kid in node["kids"].items():
+        size += len(edge) + 1 + widths[id(kid)]
+    return size
+
+
+def _trie_emit(node: dict, offsets: dict) -> bytes:
+    """One node: `terminalSize`, the terminal, `childCount`, then the edges.
+
+    **The terminal comes BEFORE the child count, and both are single bytes.**
+    That is the order, and it is worth stating because the prose in Apple's
+    own header puts the child count second, and following the prose produces a
+    file dyld misreads. Ground truth, from a dylib this machine's `cc` linked
+    (`cc -dynamiclib`, two functions `_foo` and `_foobar`), decoded with the
+    order below:
+
+        trie = 00 01 5f 66 6f 6f 00 11 | 00 00 00 00 03 00 e8 05
+               00 03 00 d0 05 01 62 61 72 00 0c 00 00 00 00 00
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^ root: 0 children-of-size,
+                                      one edge `_foo` -> node at 0x11
+               node@0x0c: 03 | 00 e8 05 | 00
+                            tsz   flags=0   nkids=0
+                                  addr=0x2E8          <- `_foobar`
+               node@0x11: 03 | 00 d0 05 | 01 | 62 61 72 00 0c
+                            tsz   flags=0   nkids=1
+                                  addr=0x2D0          <- `_foo`
+                                  edge `bar` -> node at 0x0c
+
+    and `dyld_info -exports` on that same file agrees: `_foo` at 0x2D0,
+    `_foobar` at 0x2E8. With the child count read second instead, the same
+    bytes decode as one root child `_foo` whose terminal is `d0 05 01` — flags
+    720, address 1 — and `_foobar` is not in the trie at all. Both readings
+    are self-consistent on the bytes; only one of them is the format, and the
+    test is which one `dyld_info` reproduces.
+    """
+    term = node["term"] or b""
+    if len(term) > 255:
+        raise ValueError(
+            f"export trie terminal is {len(term)} bytes; the format's "
+            f"terminalSize is one byte")
+    if len(node["kids"]) > 255:
+        raise ValueError(
+            f"export trie node has {len(node['kids'])} children; the format's "
+            f"childCount is one byte")
+    out = bytearray()
+    out.append(len(term))
+    out += term
+    out.append(len(node["kids"]))
+    for edge in sorted(node["kids"]):
+        out += edge + b"\0"
+        _uleb(out, offsets[id(node["kids"][edge])])
+    for edge in sorted(node["kids"]):
+        out += _trie_emit(node["kids"][edge], offsets)
+    return bytes(out)
+
+
+def _export_trie(exports: list) -> bytes:
+    """The module\'s export trie, as a real radix trie.
+
+    The terminal\'s flags word is 0, i.e. EXPORT_SYMBOL_FLAGS_KIND_REGULAR.
     The low two bits of that word are the symbol *kind* (0 = regular,
     1 = thread-local, 2 = absolute), so a nonzero value here does not merely
     look odd: dyld reports every such symbol as "[per-thread]" in
     `dyld_info -exports`, and any consumer that honours the kind (a TLS-aware
-    caller, or dyld's own validation) would treat an ordinary function as a
+    caller, or dyld\'s own validation) would treat an ordinary function as a
     thread-local one.
+
+    **Shared prefixes are split, and that is not an optimisation -- it is the
+    format.** This used to be a FLAT trie: every symbol one whole edge off the
+    root, which is shorter to write and is wrong as soon as one symbol is a
+    prefix of another. dyld narrows a lookup by walking edges, and a flat trie
+    puts `_m_version` and `_m_version_info_major` SIBLINGS; dyld matches the
+    first against the second\'s leading bytes, descends into a node with no
+    children, and does not go back to try the next edge. The longer symbol is
+    then in the file, in the manifest, and unbindable.
+
+    Measured, on the smallest module that shows it (three functions, `version`
+    / `version_info_major` / `other`):
+
+        print(m.other())            -> 3
+        print(m.version())          -> 1
+        print(m.version_info_major())
+          dyld: Symbol not found: _m_version_info_major
+            Referenced from: .../p.aout
+            Expected in:     .../m.<digest>.arm64.dylib
+
+    The image built, passed every static check, and died in the loader for a
+    function that is right there in the trie. Nothing reported it: the module
+    built, the manifest listed the symbol, this tree\'s own trie reader read
+    it back correctly, and only dyld -- the one reader that implements the
+    format -- disagreed. So the trie is a proper radix trie now, with a
+    shared prefix stored once and the two symbols siblings one level down,
+    which is what the format has always meant.
     """
-    ordered = sorted(exports, key=lambda e: e["symbol"])
-    children = []
-    for export in ordered:
+    root = {"term": None, "kids": {}}
+    for export in sorted(exports, key=lambda e: e["symbol"]):
         # The export table holds Mach-O names; `symbol` is the C identifier
-        # the ABI spells (what an importer's bind stream carries, and what
+        # the ABI spells (what an importer\'s bind stream carries, and what
         # dyld prepends its underscore to). Prepending it here keeps the two
         # conventions from drifting: a trie written with the bare C name
         # exports a symbol nothing can bind, and the program dies in dyld with
@@ -714,28 +866,33 @@ def _export_trie(exports: list) -> bytes:
         _uleb(addr, export["entry"] - TEXT_BASE)
         flags = bytearray()
         _uleb(flags, 0)
-        terminal = bytes(flags) + bytes(addr)
-        children.append((raw, bytes([len(terminal)]) + terminal + b"\0"))
-    offsets = [1] * len(ordered)
-    root = b""
+        _trie_insert(root, raw, bytes(flags) + bytes(addr))
+    order = _trie_preorder(root)
+    widths = {id(node): 1 for node in order}
+    offsets = {id(node): 0 for node in order}
+    cursor = 0
     for _ in range(8):
-        root = bytearray([0, len(ordered)])
-        for (raw, _), offset in zip(children, offsets):
-            root += raw
-            root.append(0)
-            _uleb(root, offset)
-        next_offsets = []
-        cursor = len(root)
-        for _, payload in children:
-            next_offsets.append(cursor)
-            cursor += len(payload)
-        if next_offsets == offsets:
+        sizes = {id(node): _trie_node_size(node, widths) for node in order}
+        cursor = 0
+        for node in order:                     # a parent before its children
+            offsets[id(node)] = cursor
+            cursor += sizes[id(node)]
+        measured = {id(node): len(_uleb_bytes(offsets[id(node)]))
+                    for node in order}
+        if measured == widths:
             break
-        offsets = next_offsets
-    out = bytearray(root)
-    for _, payload in children:
-        out += payload
-    return bytes(out)
+        widths = measured
+    else:
+        # Not a "should not happen": a layout whose encoded sizes never settle
+        # is a trie whose edge offsets would be written for the wrong widths,
+        # and the file would be a plausible-looking wrong one. Say so.
+        raise ValueError("export trie layout did not converge")
+    trie = _trie_emit(root, offsets)
+    if len(trie) != cursor:
+        raise ValueError(
+            f"export trie is {len(trie)} bytes but the layout reserved "
+            f"{cursor}: the emitted offsets do not match the layout")
+    return trie
 
 
 def dylib_load_commands(install_name: str, has_externs: bool,

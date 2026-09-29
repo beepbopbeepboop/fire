@@ -101,7 +101,15 @@ HOST_UNREACHABLE = frozenset((
 HOST_MODELLED = frozenset((
     # A libSystem/libc facility: getcwd, stat, clock_gettime, regcomp,
     # arc4random_buf, CommonCrypto for hashlib, the POSIX file calls.
-    "os", "sys", "errno", "stat", "platform", "time", "select", "io",
+    #
+    # `sys` was on this line and is not any more: `<repo>/sys.mojo` is a real
+    # Mojo source for it, and `resolve_module_path`'s FIRST pass finds that
+    # before this set is ever consulted, so the entry had stopped describing
+    # anything the build does. What the module can and cannot answer is written
+    # down at the top of the file itself, and the part it cannot — `argv`,
+    # `path`, the stream objects — is one missing capability rather than nine
+    # missing names, so it is filed once, as a bug, instead of here.
+    "os", "errno", "stat", "platform", "time", "select", "io",
     "pathlib", "glob", "fnmatch", "hashlib", "secrets", "uuid",
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, byte packing, data structures.

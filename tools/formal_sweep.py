@@ -739,6 +739,29 @@ def _short(detail: str, limit: int = 68) -> str:
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
+def _module_has_source(name: str, path) -> bool:
+    """Whether this backend has a source it could compile for module `name`.
+
+    The build's own answer, from the build's own resolver
+    (`formal.imports.resolve_module_path`), resolved from the file that was
+    swept so the search roots are the ones the build used. True means the
+    module EXISTS for this file and any refusal naming it is about a construct
+    rather than about a missing module.
+
+    False for a module with no path (nothing to resolve against) and for a
+    resolver that cannot be imported: both leave the caller's rule exactly as
+    it was, which is the right direction — this narrows a rule, and a rule
+    that cannot answer should not narrow anything.
+    """
+    if not name or not path:
+        return False
+    try:
+        from formal.imports import resolve_module_path
+        return resolve_module_path(name, relative_to=path) is not None
+    except Exception:
+        return False
+
+
 def _source_imports(source, name: str) -> bool:
     """Whether `source` really does import module `name`.
 
@@ -747,6 +770,11 @@ def _source_imports(source, name: str) -> bool:
     around it, the build refused on an IMPORT — which is never a codegen
     finding. This is what lets classify() survive a reworded import error
     without having to recognise the new wording.
+
+    Paired with `_module_has_source`, which is the other half and the one that
+    became necessary when a host module stopped being a host module: a name
+    that is BOTH quoted and imported is only an import failure if the backend
+    has no source for it.
     """
     if not source:
         return False
@@ -956,8 +984,11 @@ def _crash_cause(err: str):
             else CAUSE_DRIVER_CRASH)
 
 
-def classify(ok: bool, detail: str, cause=None, source=None) -> tuple:
-    """(class, reason) for one build outcome. Pure: no I/O, no globals read.
+def classify(ok: bool, detail: str, cause=None, source=None,
+             path=None) -> tuple:
+    """(class, reason) for one build outcome. Message matching is pure; the
+    one I/O is `_module_has_source`, which asks the build's own resolver
+    whether a quoted module exists.
 
     `cause` is run_one's own account of the outcome not being one of the
     build's diagnostics (a timeout, an unreadable file, an internal exception)
@@ -1011,7 +1042,7 @@ def classify(ok: bool, detail: str, cause=None, source=None) -> tuple:
         return CLASS_TOOL, cause
 
     hops, terminal = _split_chain(detail)
-    cls, reason = _classify_terminal(terminal, source)
+    cls, reason = _classify_terminal(terminal, source, path)
     if not hops or cls != CLASS_CODEGEN:
         return cls, reason
     # The refusal is one level down. Name the file that refused and the family
@@ -1024,7 +1055,7 @@ def classify(ok: bool, detail: str, cause=None, source=None) -> tuple:
         f"{_refusal_family(_terminal_reason(terminal))}")
 
 
-def _classify_terminal(detail: str, source=None) -> tuple:
+def _classify_terminal(detail: str, source=None, path=None) -> tuple:
     """(class, reason) for the innermost message of a build's own answer."""
     if _EXTERN_MARK in detail or _EXTERN_BUILD_MARK in detail:
         m = (_EXTERN_BUILD_COUNT_RE if _EXTERN_BUILD_MARK in detail
@@ -1067,8 +1098,22 @@ def _classify_terminal(detail: str, source=None) -> tuple:
     # then says which kind. Matching templates alone is how a reworded import
     # error silently starts counting as coverage, and templates are exactly
     # what another agent editing formal/ will change.
+    #
+    # …and the name must be a module this backend has NO SOURCE for, which is
+    # a question with an authority rather than a template. `sys.mojo` is a real
+    # module now, so a refusal that quotes `sys` — a module attribute read, a
+    # `mod.fn()` whose module exports no such `fn` — is a refusal about a
+    # construct IN A MODULE THAT EXISTS, and filing it as host-import put 14
+    # real files in the not-answerable bucket for a reason that had stopped
+    # being true. `resolve_module_path` is the build's own resolver, in the
+    # build's own order (Mojo source > host module > sibling > stdlib loader),
+    # so the sweep does not get to have an opinion about what exists.
+    #
+    # With no path to resolve against — `classify` called without one, which
+    # is every call in the test suite that does not name a file — the test is
+    # skipped and the rule is the one it always was.
     for name in _QUOTED_NAME_RE.findall(detail):
-        if _source_imports(source, name):
+        if _source_imports(source, name) and not _module_has_source(name, path):
             return _import_class(name)
     if _HOST_MARK in detail or _UNRESOLVED_MARK in detail:
         # Recognisably about an import, but with no module named to classify
@@ -1608,7 +1653,7 @@ def run_one(path, timeout, flags) -> Verdict:
     changed.
     """
     def verdict(ok, detail, cause, cached):
-        cls, reason = classify(ok, detail, cause, source)
+        cls, reason = classify(ok, detail, cause, source, path)
         return Verdict(ok, detail, cause, cached, cls, reason)
 
     source = None
