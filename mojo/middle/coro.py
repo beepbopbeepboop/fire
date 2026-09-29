@@ -1014,9 +1014,19 @@ def _unrepresentable_kwonly(fn: N.FunctionDef) -> list:
     same `param_defaults` dict the call-site padding reads. So a faithful
     default is all the shape ever needed.
     """
+    # Explicit accumulation loop, NOT a `[... for pn in fn.kwonly if
+    # ...]` comprehension: this file compiles itself, and the plain
+    # `fn.kwonly` + `param_defaults.get` + `_cm_as_str` chain is exactly
+    # the shape the plain-unpack guidance here is about (see
+    # `lower`'s `_pn_list` loop). The result is also easier to read as a
+    # statement about which parameters are bad.
     _dflts = getattr(fn, 'param_defaults', None) or {}
-    return [_cm_as_str(pn) for pn in (getattr(fn, 'kwonly', None) or [])
-            if not _default_is_faithful_literal(_dflts.get(_cm_as_str(pn)))]
+    _bad = []
+    for _pn in (getattr(fn, 'kwonly', None) or []):
+        _pn = _cm_as_str(_pn)
+        if not _default_is_faithful_literal(_dflts.get(_pn)):
+            _bad.append(_pn)
+    return _bad
 
 
 def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
