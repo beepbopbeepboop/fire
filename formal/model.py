@@ -7057,10 +7057,9 @@ def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
     to know WHICH LINE of it is responsible, and the two questions have
     different fixes.
     """
-    method, params, positional, _required, _optional = shape
+    method, params, _positional, _required, _optional = shape
     got = len(list(getattr(call, "args", None) or []))
     args = list(getattr(call, "args", None) or [])
-    slots = struct_frame_slots(struct_def)
     receivers = struct_receivers(struct_def)
     framed_names = {name for name, s in (decls or {}).items()
                     if struct_is_framed(s)}
@@ -7074,8 +7073,7 @@ def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
             # effect in the language, so skipping it is the semantics rather
             # than a convenience.
             continue
-        target = getattr(stmt, "target", None) if isinstance(
-            stmt, (F.AssignStmt, F.AugAssignStmt)) else None
+        target = getattr(stmt, "target", None)
         if not isinstance(target, F.MemberExpr) \
                 or not isinstance(target.obj, F.IdentExpr) \
                 or target.obj.name not in receivers:
@@ -7083,13 +7081,21 @@ def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
                 struct_def.name, _init_statement_spelling(stmt)))
         field = target.member
         slot = struct_frame_slot(struct_def, field)
-        if slot is None or field not in slots:
+        if slot is None:
             return (None, construction_init_body_refusal(
                 struct_def.name,
-                f"`{spelled(stmt)}`, which assigns a field "
+                f"`{spelled(target)}`, which assigns a field "
                 f"({struct_field_summary(struct_def)}) this struct does not "
                 f"have"))
         if not isinstance(stmt, F.AssignStmt):
+            # An AUGMENTED assignment reaching here: the target is a field of the
+            # receiver, so the statement spelling above is the wrong one and
+            # this is the only remaining kind.  It is a read AND a write, so its
+            # value depends on what is already in the slot — the object under
+            # construction, which the inline does bring up, but only at the
+            # CLASS-LEVEL default rather than at whatever the constructor has
+            # stored so far, so the two are the same program only for the first
+            # such statement and refusing is the honest answer.
             return (None, construction_init_body_refusal(
                 struct_def.name, _init_statement_spelling(stmt)))
         value, refusal = _init_store_value(struct_def, stmt.value, params, got,
@@ -7110,7 +7116,9 @@ def _init_statement_spelling(stmt) -> str:
     assignment, which is quoted as well as named because `t = a + b` next to
     "a local assignment" saves a trip to the class body.
     """
-    if isinstance(stmt, (F.VarDecl, F.AssignStmt, F.AugAssignStmt)):
+    if isinstance(stmt, F.AugAssignStmt):
+        return f"an augmented assignment to `{spelled(getattr(stmt, 'target', None))}`"
+    if isinstance(stmt, (F.VarDecl, F.AssignStmt)):
         target = getattr(stmt, "target", None) or getattr(stmt, "name", None)
         return f"a local assignment (`{spelled(target)} = …`)"
     if isinstance(stmt, (F.IfStmt, F.WhileStmt, F.ForStmt, F.TryStmt,

@@ -4252,6 +4252,29 @@ CONSTRUCTION_REFUSALS = [
      "    return x.a\n",
      "refuse:whose body this path does not inline: a read of 'a' in the right-hand side",
      None),
+    # (6b) An AUGMENTED assignment.  It is a read AND a write, so the value it
+    # stores depends on what is already in the slot — and the slot holds the
+    # CLASS-LEVEL default at the point the constructor's stores run, not
+    # whatever an earlier statement stored.  Refused rather than answered with
+    # the class default, because that is a different program from the language's
+    # for every statement after the first.  Its own case because the statement
+    # SPELLING is the only thing distinguishing it from a local assignment, and
+    # a reader who saw "a local assignment" for `self.b += b` would go looking
+    # in the wrong place.
+    ("constr_refuse_an_init_body_with_an_augmented_assignment",
+     "struct A6b:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int, b: Int):\n"
+     "        self.a = a\n"
+     "        self.b += b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = A6b(1, 2)\n"
+     "    return x.a\n",
+     "refuse:whose body this path does not inline: an augmented assignment to `self.b`",
+     None),
     # (7) A CONSTRUCTION OF A FRAMED STRUCT inside the body.  Its receiver
     # block is reserved per call SITE, in the prologue of the function whose
     # body names the call; a body inlined into a construction elsewhere has no
