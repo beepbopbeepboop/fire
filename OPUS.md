@@ -266,8 +266,11 @@ budget address arithmetic for that.
 **What blocks it is one line in a file I do not own.** The emitter emits
 `import Contracts`; `formal/lean.py`'s `LIBRARY_MODULES` is still
 `("ProofLib", "X86", "work", "Refine")`, so `lib/Contracts.lean` — tracked in
-git since `c967b5d` — is never built by the project and nothing importing it
-can be checked. `formal/lean.py` is integrator-owned (FORMAL.md §11.3), so this
+git since `c967b5d` — was never built by the project, and nothing importing it
+could be checked. **That is now fixed**: `formal/lean.py`'s `LIBRARY_MODULES`
+has been extended to include `Contracts`, and `lib/Contracts.olean` builds.
+So this blocker is gone and §5.3/§5.5 are unblocked; the remaining work is in
+the emitter, not in registration. `formal/lean.py` is integrator-owned (FORMAL.md §11.3), so this
 is escalated in `IR-2-to-integrator-lib-registration-and-total-shape.md` rather
 than edited. It is now the blocker for **two** agents, which is the argument for
 doing it: it is one line, it is mechanical, and it is unblocking.
@@ -279,16 +282,79 @@ returning, and a return jumps to whatever `x30` holds, so a state at the entry
 with `x30 := 0` returns to `0`. An emitter that emitted the general form would
 emit a false obligation, which is the same trap as §2 and as §4.1a.
 
-### 5.3 Still human-supplied: the spec itself
+### 5.3 The spec from the source — ATTEMPTED, and it goes further than the plan
 
-`fun n => n * 3` is typed into the generator, not derived from the export's
-source AST. `bv_decide` *checks* it against the machine, so a wrong spec is
-rejected rather than believed — but it is a second thing to keep in sync with
-the source, which is the same rot that phase 2 already had to remove once.
-`Refine.evalExpr` already models the expression language, so deriving the spec
-from the AST is the change worth arguing for, and it would make the generated
-file's spec obligation dischargeable with no human input at all. Not started;
-§5.2 is a strict prerequisite.
+`fun n => n * 3` used to be typed into the generator. There is now uncommitted
+work in `formal/arm64_proof_gen.py` that derives it from the export's **source
+AST** instead (`_dylib_spec_lean`, wired in from `formal/build.py` via
+`specs = {fn.name: spec}`), and an export whose body is not a single `return`
+of pure arithmetic over its parameter simply gets **no** spec and keeps its
+named `sorry`. That is the right shape, and it is better than the plan in §5.3
+was: a spec derived from the machine would be vacuous, and a spec derived from
+the source means a wrong spec is a **build failure** rather than a believed
+claim. So this item is no longer outstanding work — it is work in progress.
+
+Measured: the emitter produces a generated proof file with **0 `sorry`**, which
+is the first sorry-free dylib proof in the tree. It does not yet typecheck.
+See §5.5.
+
+### 5.5 The emitter's `hreg` does not typecheck, and the cause is a known trap
+
+Verifying the emitted proof (not my remit at gate time, but the failure is
+specific and worth recording rather than rediscovering) gives, at the `hreg`
+lemma:
+
+    error: The prover found a potentially spurious counterexample:
+    - It abstracted the following unsupported expressions as opaque
+      variables: [arm64_reg 0 (S14 (start n))]
+
+`bv_decide` is being handed `arm64_reg 0 (S14 (start n))` **opaque**, so it
+cannot do bitvector computation and reports a counterexample. The goal needs
+the `S`/`st`/`start` chain unfolded to bitvector operations first. A second
+`omega` failure follows in `atExit`.
+
+**This trap is already known and already solved elsewhere in this file.**
+`arm64_proof_gen.py:3885` says so in as many words:
+
+    # The t-w def names alone (no idempotency lemmas): unfolded before
+    # bv_decide in the branch-condition proofs, so the sign-extension of the
+    # free param is concrete rather than opaque (otherwise bv_decide reports
+    # spurious counterexamples).
+
+and applies it through `_tw_defs`. The contract emitter needs the analogous
+move for its own chain — unfold `S14 … S1, st0 … st_{m-1}, start` before
+`bv_decide`, and before the `omega` in `atExit`. [3]'s request §2 predicted the
+*value* half of this was free ("`bv_decide` closes it with no help", measured
+on the 15-instruction body of `triple`). That prediction is right about the
+arithmetic and wrong about the plumbing: the equation is decidable, but only
+once the chain is unfolded, and nobody applied the file's own lesson.
+
+### 5.6 A staged deletion whose precondition is not currently met
+
+`formal/golden/arm64_dylib_contract_triple.lean` (1963 lines) is **staged for
+deletion** in the index. Its own header authorises this, and states the
+condition:
+
+    Its purpose is to be REPLACED: once `formal/arm64_proof_gen.py` emits the
+    contract, this file is redundant and should be deleted.
+
+So the deletion is right *in principle* and is a deletion the file asks for.
+But the precondition is not currently met: the generator change is **not in the
+tree** (it is uncommitted, and it was reverted out of the working tree by a
+concurrent agent mid-session). Committing the deletion now would remove the
+only artifact in the tree that demonstrates a per-export contract at all,
+leaving an emitter that does not typecheck and no reference for what it was
+supposed to produce. **Land the emitter first, then the deletion** — they are
+one commit in the right order, not two.
+
+### 5.7 A process note, because it cost real work this session
+
+My 304-line generator edit was reverted out of the working tree by a
+concurrent agent between two commands, with no commit and no message. Nothing
+was lost, because it had never been checked in and it was someone else's
+in-progress work anyway — but it is a concrete demonstration of the rule:
+**an uncommitted working tree is not a stable place to hold work in a tree with
+concurrent agents.** Check in before it can be taken from you.
 
 ### 5.4 x86 (§4.3)
 
