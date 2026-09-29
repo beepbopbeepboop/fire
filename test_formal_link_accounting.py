@@ -146,6 +146,15 @@ def test_relative_imports():
 # keeping two lists; here the second list is the expected value, and a
 # deliberate change to the host set is supposed to fail until someone updates
 # the specification on purpose.)
+#
+# `struct` is the one name that has LEFT this set since it was pinned, and it
+# left by being IMPLEMENTED rather than by being reclassified: `struct.mojo` at
+# the repository root is a real module the formal backends compile and link,
+# byte-for-byte against CPython (`test_struct_formal.py`). The set's meaning is
+# "CPython standard library with no Mojo source for this backend", so a name
+# that now HAS Mojo source does not belong in it however reachable the
+# capability is. `_IMPLEMENTED_HOST_MODULES` is that subtraction, named here so
+# the check below reads as the claim it is making rather than as drift.
 PRE_SPLIT_HOST_MODULES = frozenset((
     "os", "sys", "ast", "json", "re", "argparse", "dataclasses", "typing",
     "collections", "itertools", "functools", "math", "random", "time",
@@ -161,6 +170,14 @@ PRE_SPLIT_HOST_MODULES = frozenset((
     "asyncio", "ctypes", "concurrent", "concurrent.futures",
 ))
 
+# Names that were in the pinned list and have since been IMPLEMENTED, so are
+# legitimately gone from the build's host set. Each needs a module the backends
+# can actually compile, and each is checked by the test file named here — an
+# entry with no implementation behind it is just a hole in the refusal.
+_IMPLEMENTED_HOST_MODULES = {
+    "struct": "test_struct_formal.py",
+}
+
 
 def _original_host_modules():
     return set(PRE_SPLIT_HOST_MODULES)
@@ -175,18 +192,38 @@ def test_host_tiers():
           f"sym-diff {sorted(union ^ set(I.HOST_MODULES))}")
     orig = _original_host_modules()
     if orig is not None:
-        check(union == orig,
-              'the union is the ORIGINAL 77-name list: a classification change, '
-              'not a behaviour change',
-              f'added {sorted(union - orig)}, lost {sorted(orig - union)}')
+        # The union may only differ from the pinned list by names that have
+        # since been IMPLEMENTED, and each of those must still have the module
+        # the name claims — otherwise removing it from the host set opened a
+        # hole in the refusal rather than closing one.
+        expected = orig - set(_IMPLEMENTED_HOST_MODULES)
+        check(union == expected,
+              'the union is the pinned 77-name list MINUS the names that have '
+              'since been implemented: a classification change plus a module '
+              'that now exists, and nothing else',
+              f'added {sorted(union - expected)}, '
+              f'lost {sorted(expected - union)}')
+        for name, test_file in sorted(_IMPLEMENTED_HOST_MODULES.items()):
+            src = os.path.join(HERE, f"{name}.mojo")
+            check(os.path.isfile(src),
+                  f'{name} left the host set because {src} implements it, '
+                  f'and that file exists')
+            check(os.path.isfile(os.path.join(HERE, test_file)),
+                  f'{name} left the host set on the strength of '
+                  f'{test_file}, and that test exists')
     else:
         check(False, 'the pre-split HOST_MODULES list could be read from git',
               'git show HEAD:formal/imports.py did not yield it')
     # The claim the split exists to make true: these are reachable, so calling
-    # them "not fixable" was false.
-    for m in ('os', 'sys', 'math', 'struct', 'time', 'json', 're'):
+    # them "not fixable" was false. `struct` is NOT in this list any more —
+    # it is implemented, so it is neither modelled nor unreachable, it is
+    # built, and `test_struct_formal.py` is what says so.
+    for m in ('os', 'sys', 'math', 'time', 'json', 're'):
         check(I.host_module_tier(m) == 'modelled',
               f'{m} is modelled (reachable in principle, not implemented)')
+    for m in _IMPLEMENTED_HOST_MODULES:
+        check(I.host_module_tier(m) == '',
+              f'{m} is implemented, so it is no longer a host module at all')
     for m in ('subprocess', 'ctypes', 'asyncio', 'threading', 'socket',
               'tempfile', 'shutil', 'concurrent.futures', 'zlib', 'traceback'):
         check(I.host_module_tier(m) == 'unreachable',

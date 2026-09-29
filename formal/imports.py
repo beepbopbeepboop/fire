@@ -104,8 +104,17 @@ HOST_MODELLED = frozenset((
     "os", "sys", "errno", "stat", "platform", "time", "select", "io",
     "pathlib", "glob", "fnmatch", "hashlib", "secrets", "uuid",
     # Pure computation over representable values: string and text handling,
-    # numeric containers, pattern matching, byte packing, data structures.
-    "json", "re", "struct", "math", "random", "decimal", "fractions",
+    # numeric containers, pattern matching, data structures.
+    # `struct` was here and is not any more: it is implemented, in
+    # `struct.mojo` at this tree's root, in the subset the formal backends can
+    # lower (see that file's docstring for the four measured limits it is
+    # written around, and `test_struct_formal.py` for the byte-for-byte
+    # comparison against CPython that keeps it honest). An entry here is a
+    # claim that the module is REACHABLE BUT NOT IMPLEMENTED, and leaving a
+    # implemented one in the set is the claim `formal_sweep.py`'s work
+    # accounting is sized from — it would report seven files as blocked on
+    # work that is done.
+    "json", "re", "math", "random", "decimal", "fractions",
     "numbers", "array", "operator", "functools", "itertools", "collections",
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
     "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
