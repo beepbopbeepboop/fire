@@ -1223,6 +1223,12 @@ MojoList *mojo_list_slice(MojoList *l, int64_t start, int64_t stop)
     for (int64_t i = start; i < stop; i++)
         mojo_list_append_int(r, l->data[i]);
     mojo_list_inherit_kinds(r, l);
+    /* A slice of a TUPLE is a tuple (`(1, 2.5)[:]`), and this runtime's
+     * tuple marker is a per-address registry entry rather than a distinct
+     * container type — so without this the slice printed `[1, 2.5]` where
+     * CPython prints `(1, 2.5)`. Every other list->list derivation here
+     * re-derives its own properties for the same reason. */
+    if (mojo_is_tuple(l)) mojo_mark_as_tuple(r);
     return r;
 }
 
@@ -1378,6 +1384,11 @@ MojoList *mojo_list_concat(MojoList *a, MojoList *b)
     MojoList *r = mojo_list_new();
     for (int64_t i = 0; i < a->len; i++) mojo_list_append_int(r, a->data[i]);
     for (int64_t i = 0; i < b->len; i++) mojo_list_append_int(r, b->data[i]);
+    /* `t + t` on a TUPLE is a tuple in Python ((1, 2) + (3, 4) is
+     * (1, 2, 3, 4)), and this runtime's tuple marker is a per-address
+     * registry entry, so the result has to be marked like every other
+     * derivation of one. */
+    if (mojo_is_tuple(a)) mojo_mark_as_tuple(r);
     /* `t + t` and `t + []` are described by the source kinds, repeated to
      * cover the result's slots; anything else (two lists whose kinds differ)
      * has ONE slot array and no single correct answer, so nothing is
@@ -1406,6 +1417,9 @@ MojoList *mojo_list_repeat(MojoList *l, int64_t n)
     for (int64_t rep = 0; rep < n; rep++)
         for (int64_t i = 0; i < l->len; i++)
             mojo_list_append_int(r, l->data[i]);
+    /* `t * n` on a tuple is a tuple, for the same reason as the concat
+     * case above. */
+    if (mojo_is_tuple(l)) mojo_mark_as_tuple(r);
     /* Same as mojo_list_concat: the source kinds, repeated n times to cover
      * the result (a fresh string, since the source's is shared). */
     {

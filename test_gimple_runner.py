@@ -2969,8 +2969,8 @@ fn main():
     print(c + c)
     var s = struct.Struct('>dhh')
     print(list(s.unpack(struct.pack('>dhh', 1.0, 2, 1))))
-""", "(1, 1.0)\n[1, 1.0]\n[1, 1.0]\n[1, 1.0, 1, 1.0]\n"
-       "(1.0, 2, 1)\n[1.0, 2, 1]\n[1.0, 2, 1]\n[1.0, 2, 1, 1.0, 2, 1]\n"
+""", "(1, 1.0)\n[1, 1.0]\n(1, 1.0)\n(1, 1.0, 1, 1.0)\n"
+       "(1.0, 2, 1)\n[1.0, 2, 1]\n(1.0, 2, 1)\n(1.0, 2, 1, 1.0, 2, 1)\n"
        "[1.0, 2, 1]\n")
 
     # A read whose slot index is NOT a compile-time constant. There is no
@@ -2997,7 +2997,7 @@ fn main():
     var s = struct.Struct('<if')
     for z in s.unpack(b):
         print(z)
-""", "1\n1.0\n1.0\n1\n1\n1.0\n1\n1\n1.0\n1\n1.0\n")
+""", "1\n1.0\n1.0\n1\n1\n1.0\n1\n1\n1.0\n")
 
     # The same limit one level lower, without `struct` at all: a
     # HETEROGENEOUS LITERAL. `[1, 2.5]` used to append the int through the
