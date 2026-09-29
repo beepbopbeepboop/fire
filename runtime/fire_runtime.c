@@ -840,12 +840,16 @@ int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
     return (int64_t)(uintptr_t)r->boxes[i];
 }
 
+/* The box read as a double. A value that is NOT a box comes back as its own
+ * numeric value, not 0: the codegen marks a whole READ SITE as possibly
+ * boxed (the runtime decides per slot), so a call here must be correct for
+ * the int slots of the same list too — and promoting an int to a double is
+ * exactly what an operation with a float operand already does to it. */
 double mojo_box_double(int64_t v)
 {
-    MojoBox *bx = (MojoBox *)(intptr_t)v;
-    if (!bx || !mojo_is_boxed(v)) return 0.0;
+    if (!mojo_is_boxed(v)) return (double)v;
     double d;
-    __builtin_memcpy(&d, &bx->bits, 8);
+    __builtin_memcpy(&d, &((MojoBox *)(intptr_t)v)->bits, 8);
     return d;
 }
 

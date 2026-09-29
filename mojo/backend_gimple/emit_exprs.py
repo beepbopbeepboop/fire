@@ -2552,6 +2552,25 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         lv = gen._new_val('MojoBytes *', f"{lv}->_data"); lt = 'MojoBytes *'
     if gen._bytes_subclass_of(rt):
         rv = gen._new_val('MojoBytes *', f"{rv}->_data"); rt = 'MojoBytes *'
+    # An operand read out of a heterogeneous container at an index that is not
+    # a compile-time constant may be a BOX (see mojo_list_get_boxed), and
+    # arithmetic on the box's ADDRESS is a silent wrong value — the float's
+    # IEEE-754 bits were wrong before the box existed and the box's address is
+    # not better. Take the box apart here, ALWAYS as a double: a box only
+    # ever holds a float, and in Python a float operand makes the whole
+    # operation a float one (`1.5 + 1` is 2.5, not 2), so promoting is the
+    # semantics rather than an approximation. The cost of it is that
+    # arithmetic on a NON-float slot of a mixed list now yields a float-typed
+    # result — the same number, printed `2.0` where CPython prints `2` —
+    # because the choice would otherwise have to be a runtime branch around
+    # the whole operand dispatch. A wrong value traded for a wrong format is
+    # the right way round; see the doc's Residue section.
+    if lv in getattr(gen, '_boxed_vals', ()):
+        lv = gen._new_val('double', f"mojo_box_double ({lv})")
+        lt = 'double'
+    if rv in getattr(gen, '_boxed_vals', ()):
+        rv = gen._new_val('double', f"mojo_box_double ({rv})")
+        rt = 'double'
 
     # A list local may be boxed as int64_t (the slice pre-pass hint is the
     # machine word when the sliced object's type isn't yet known); _actual_types

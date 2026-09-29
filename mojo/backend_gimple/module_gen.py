@@ -3963,6 +3963,33 @@ def gen_module_impl(self, stmts):
             break
 
     _p2c_base_var_types = dict(self.func_return_types)
+    # Which functions hand back a value whose per-slot kinds are recorded
+    # on the VALUE (see _infer_return_maybe_kinds). Answered ONCE, before the
+    # fixpoint below, and NOT inside it: it is a pure function of a body, so
+    # the 8 iterations could only ever repeat the same walk, and they do —
+    # measured, putting it in the loop made `test_silent_noop_iter.py` go
+    # from 5m00s to 19m48s on the same machine, because `_walk_ast`
+    # materialises the WHOLE body as a node list and Pass 2c already runs it
+    # over every function (twice: free functions and methods) up to 8 times
+    # per nesting level. Memoised by body identity so a body is walked once
+    # per compile even when the enclosing structure revisits it.
+    _mk_cache: dict = {}
+    def _mk(name, body):
+        _k = id(body)
+        _v = _mk_cache.get(_k)
+        if _v is None:
+            _v = _mk_cache[_k] = _infer_return_maybe_kinds(self, body)
+        if _v:
+            self._return_maybe_kinds.add(name)
+    for s in all_functions:
+        if not _is_foreign_main(s) and isinstance(s, FunctionDef):
+            _mk(s.name, s.body)
+    for s in all_structs_for_methods:
+        if isinstance(s, StructDef):
+            _sk = _as_structdef_node(s)
+            for _m in _sk.methods:
+                if _m.name != '__init__':
+                    _mk(f"{_sk.name}_{_m.name}", _m.body)
     for _pass2c_iter in range(8):
         _c_changed = False
         for s in all_functions:
@@ -3975,15 +4002,6 @@ def gen_module_impl(self, stmts):
             if _ret_elem is not None and self._return_elem_types.get(s.name) != _ret_elem:
                 self._return_elem_types[s.name] = _ret_elem
                 _c_changed = True
-            # The same whole-program-then-lower-the-callee step, for the
-            # per-slot kinds of a returned value (see _infer_return_maybe_kinds).
-            # Independent of _ret_elem, and NOT part of the fixpoint's
-            # convergence test: the answer is a pure function of the body, so
-            # it cannot oscillate, and gating it on _c_changed would leave
-            # the set permanently empty on the (common) run where no return
-            # ELEMENT type was inferred.
-            if _infer_return_maybe_kinds(self, s.body):
-                self._return_maybe_kinds.add(s.name)
         for s in all_structs_for_methods:
             if isinstance(s, StructDef):
                 s = _as_structdef_node(s)  # boxed loop var -> direct field access on the compiled path

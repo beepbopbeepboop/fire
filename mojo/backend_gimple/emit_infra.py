@@ -2663,7 +2663,7 @@ def _stringify_value(gen, et: str, ev: str) -> str:
         # value that is NOT a box it is the same answer, and the same
         # allocation, as the mojo_str_from_int arm below.
         if ev in getattr(gen, '_boxed_vals', ()):
-            nv = gen._to_int64(et, ev)
+            nv = gen._ensure_local('int64_t', ev)
             return gen._call_expr('char *', 'mojo_repr_boxed', [('int64_t', nv)])
         nv = gen._to_int64(et, ev)
         return gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
@@ -2819,6 +2819,18 @@ def _to_int64(gen, ctype: str, val: str) -> str:
     _td = _tagged_dyn_read(gen, val, 'int')
     if _td is not None:
         return _td
+    # A value read out of a heterogeneous container at an index that is not a
+    # compile-time constant may be a BOX (see mojo_list_get_boxed) — a heap
+    # cell, because a float has no int64_t spelling. Every int64_t consumer
+    # reaches its value through here, so this is the one place the box has to
+    # come apart; `mojo_box_int` is Python's own truncation of the float it
+    # holds, and returns the input unchanged when it is not a box. Printing
+    # does NOT come through here (it asks `mojo_repr_boxed`, which resolves
+    # both cases in one call and must see the box itself).
+    if val in getattr(gen, '_boxed_vals', ()):
+        t = gen._new_temp('int64_t')
+        gen._emit(f"  {t} = mojo_box_int ({val});")
+        return t
     if ctype == 'int64_t':
         # GIMPLE: can't redundantly cast global int64_t to int64_t; just load
         return gen._ensure_local('int64_t', val)
