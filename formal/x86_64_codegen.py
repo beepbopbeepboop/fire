@@ -2825,6 +2825,15 @@ class X86_64Codegen:
         confidently wrong. `model.multi_index_refusal_for` is the shared text,
         so the two cannot drift again."""
         self._refuse_frame_container_operand("a subscript", e.obj)
+        if M.is_external_call_template(e):
+            # The twin of arm64's check, and the same reasoning: `M.iter_nodes`
+            # has no parent, so `M.multi_index_refusal_for` cannot tell a
+            # template applied as a callee (lowered) from the same template
+            # read as a value (not lowerable).  `_emit_call` intercepts the
+            # callee form before any address is computed, so getting here means
+            # the source used it as a value — and there is no such value.
+            raise CodegenError(M.external_call_value_refusal(
+                M.external_call_spelling(e)))
         if e.attrs is not None:
             raise CodegenError(
                 "type-parameter subscript [...] is not supported on the "
@@ -4647,24 +4656,46 @@ class X86_64Codegen:
         return False
 
     def _emit_call(self, e: F.CallExpr) -> None:
-        name = _callee_symbol(e.func)
+        # `external_call["sym", RetType](args…)` — a direct call to the C symbol
+        # the bracket names, with `RetType` marshalling the result.  arm64's
+        # twin, and the same two decisions from the same two shared functions in
+        # `M`, so the architectures cannot disagree about what the bracket means
+        # or about which shape of it is not lowerable.  Intercepted BEFORE
+        # `_callee_symbol` because this backend's reader has no branch for a
+        # bracketed callee at all and would refuse the whole construct.
+        ext_return = None
+        is_extern_call = M.is_external_call_template(e.func)
+        if is_extern_call:
+            symbol, ext_return, why = M.external_call_spec(e.func)
+            if why is not None:
+                raise CodegenError(M.external_call_refusal(
+                    M.external_call_spelling(e.func), why))
+            name = symbol
+        else:
+            name = _callee_symbol(e.func)
         if name is None:
             raise CodegenError(
                 "unsupported call target on the formal x86-64 path "
                 f"(got {type(e.func).__name__})")
-        if name == "range":
+        # `external_call["sym", T]` names a C SYMBOL, and `std/os/env.mojo`
+        # defines Mojo functions called `getenv`/`setenv`/`unsetenv` over the
+        # same three C symbols — so a bare name would branch to the module's OWN
+        # `getenv`, read an `Int` where it asked for a `char *`, and fault.
+        # arm64's comment says the whole of this; the rule is the language's,
+        # not one architecture's.
+        if not is_extern_call and name == "range":
             # A range() used as a VALUE rather than as a for-loop iterable:
             # materialize it as a list blob, which is what makes
             # `[i for i in range(n)]` and `for i in list(range(n))` work.
             self._emit_range_list(list(e.args))
             return
-        if name == "len":
+        if not is_extern_call and name == "len":
             self._emit_len(e)
             return
-        if name == "print":
+        if not is_extern_call and name == "print":
             self._emit_print(e)
             return
-        if M.builtin_function(name) == "file_open":
+        if not is_extern_call and M.builtin_function(name) == "file_open":
             self._emit_open(e)
             return
         # A DEREFERENCE.  Intercepted HERE rather than left to the value-method
@@ -4706,7 +4737,7 @@ class X86_64Codegen:
         # also declares as a struct, called with that struct's field count, is
         # a construction of that struct.  `model.type_constructor_prefers_local
         # _struct` is where the arity rule and the two exclusions live.
-        if name not in self._functions:
+        if not is_extern_call and name not in self._functions:
             nargs = len(e.args) + len(e.kwargs or [])
             if not M.type_constructor_prefers_local_struct(
                     name, self._structs, nargs):
@@ -4714,10 +4745,10 @@ class X86_64Codegen:
                 if tkind is not None:
                     self._emit_type_constructor(e, name, tkind)
                     return
-        if name in self._structs:
+        if not is_extern_call and name in self._structs:
             self._emit_struct_constructor(e, name, self._structs[name])
             return
-        is_extern = name not in self._functions
+        is_extern = is_extern_call or name not in self._functions
         # The gimple backend's C runtime is a library of a DIFFERENT target, not
         # an external dependency of this one, and the source spells its ABI as
         # bare `mojo_*` names. Everything a call to one of those could bind to
@@ -4771,6 +4802,25 @@ class X86_64Codegen:
         else:
             self.asm.emit(encode_call_rel32(0))
             self.asm.emit_label_rel32(name, here_offset=-4)
+        if ext_return is not None:
+            self._emit_extern_return(ext_return)
+
+    def _emit_extern_return(self, kind) -> None:
+        """Put the return register into the shape the DECLARED return type says.
+
+        The x86-64 half of arm64's `_emit_extern_return`, over the same shared
+        classification.  SysV puts the low `bits` of a narrow integer return in
+        EAX and leaves the rest unspecified, and an EAX write zero-extends into
+        RAX, so the value that arrives is zero-extended while `Int32`/`c_int`
+        mean the sign-extended one — `0xFFFFFFFF` is 4294967295 as a zero-
+        extended word and -1 as the signed value the source declared.
+        `MOVSXD`/`MOVZX`/`AND` come from `_emit_extend`, the same one an
+        `Int32(x)` conversion uses, so "make this word this width" is one
+        implementation per architecture and not two."""
+        if kind == M.EXTERN_RETURN_VOID or kind == M.EXTERN_RETURN_WORD:
+            return
+        width, signed = kind
+        self._emit_extend(Reg.RAX, IntType(width, signed))
 
 
     def _bind_call_args(self, name: str, e: F.CallExpr) -> list:
