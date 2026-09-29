@@ -163,6 +163,15 @@ def test_relative_imports():
 # keeping two lists; here the second list is the expected value, and a
 # deliberate change to the host set is supposed to fail until someone updates
 # the specification on purpose.)
+#
+# Names have LEFT this set since it was pinned — `sys`, `os` and `struct` — and
+# each left by being IMPLEMENTED rather than by being reclassified. The set's
+# meaning is "CPython standard library with no Mojo source for this backend", so
+# a name that now HAS Mojo source does not belong in it however reachable the
+# capability is. That subtraction is not written here as a list of the names
+# that have left: it is DERIVED from the filesystem by `written_modules()` below,
+# so the next module to be written updates this check by being written, and no
+# hand-kept list can drift away from the tree.
 PRE_SPLIT_HOST_MODULES = frozenset((
     "os", "sys", "ast", "json", "re", "argparse", "dataclasses", "typing",
     "collections", "itertools", "functools", "math", "random", "time",
@@ -216,6 +225,7 @@ def written_modules():
 # without a module behind it fails too.
 IMPLEMENTED_HOST_MODULE_TESTS = {
     "os": "test_formal_os.py",
+    "struct": "test_struct_formal.py",
     "sys": "test_formal_sys.py",
 }
 

@@ -126,9 +126,17 @@ HOST_MODELLED = frozenset((
     #     a `char **` walk; both are bug docs rather than approximations.
     "errno", "stat", "platform", "time", "select", "io",
     "pathlib", "glob", "fnmatch", "hashlib", "secrets", "uuid",
+    #   `struct`  — `struct.mojo` at this tree's root, in the subset the
+    #     formal backends can lower, compared BYTE FOR BYTE against CPython's
+    #     own answers by `test_struct_formal.py`. The four measured limits it
+    #     is written around are in that file's own docstring. It also matters
+    #     for the work accounting: an entry here is the claim
+    #     `formal_sweep.py` sizes its "not answerable" column from, and it
+    #     reported seven files as blocked on a module that now exists.
+    #
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
-    "json", "re", "struct", "math", "random", "decimal", "fractions",
+    "json", "re", "math", "random", "decimal", "fractions",
     "numbers", "array", "operator", "functools", "itertools", "collections",
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
     "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",

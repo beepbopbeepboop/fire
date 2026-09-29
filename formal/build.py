@@ -3168,21 +3168,35 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # `mod` — "is imported from `mod`, so it is a module-level name of
         # another module" — for a call the emitter can already lower, which
         # made `import mod` unusable and left `from mod import f` as the only
-        # spelling of a module call this path had.
+        # spelling of a module call this path had. The refusal was worse than
+        # useless here: its own remedy sentence said "give it a function (a
+        # `struct.fn()` call lowers)", recommending the very spelling it
+        # refused.
+        #
+        # `struct.pack(...)` parses as `CallExpr(func=MemberExpr(obj=
+        # IdentExpr('struct'), member='pack'))`, so the set comprehension above
+        # misses it — `c.func` is a MemberExpr, and the root IdentExpr is never
+        # collected. So the fix is to collect that root, by node IDENTITY (the
+        # only way to name a node again, since `M.iter_nodes` has no parent),
+        # and only in CALLEE position: the same name in a genuine read
+        # (`len(struct)`) is still refused, which is the point — a module
+        # object has no storage either way, and what has no storage is the
+        # READ, not the call through it.
         #
         # Restricted to a root that is an IMPORTED MODULE NAME, which is what
         # makes it safe: a dotted call on anything else — a value's method
-        # (`xs.append`), a struct's field (`h.f.g`) — keeps whatever answer it
-        # had, so this adds a spelling and changes no existing verdict.
+        # (`xs.append`), a struct's field (`h.f.g`), a module-global table with
+        # no storage (`TABLE.lookup`) — keeps whatever answer it had, so this
+        # adds a spelling and changes no existing verdict. Without the gate the
+        # last of those would stop being the precise refusal it is and become a
+        # failure from further in, naming the allocator instead of the
+        # construct.
         imported = imported_module_names or ()
         if imported:
             for c in M.iter_nodes(fn.body):
                 if not isinstance(c, F.CallExpr) \
-                        or not isinstance(c.func, (F.MemberExpr,
-                                                   F.IdentExpr)):
+                        or not isinstance(c.func, F.MemberExpr):
                     continue
-                if isinstance(c.func, F.IdentExpr):
-                    continue          # already collected above
                 root = c.func
                 while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
                     root = root.obj
@@ -3717,6 +3731,18 @@ def load_dylib_manifests(dylib_paths: list) -> list:
         amap = {}
         for e in exports:
             amap.setdefault(e["name"], e["symbol"])
+            # …and the MODULE-QUALIFIED spelling of the same export, because
+            # that is how a caller writes it. `struct.pack(...)` reaches the
+            # codegen as the dotted name `struct.pack`, and without this row
+            # the rewrite found nothing, left the BL pointing at a symbol
+            # spelled `struct.pack`, and the image failed to load on a symbol
+            # the library had defined all along under `struct_pack_<hash>`.
+            # The row is only added when it cannot collide: a library that
+            # exports a function genuinely named `struct.pack` keeps the bare
+            # name to itself.
+            mod = e.get("module")
+            if mod and mod != e["name"]:
+                amap.setdefault(f"{mod}.{e['name']}", e["symbol"])
         out.append({
             "install_name": payload.get("load_path") or payload["dylib"],
             "map": amap,
