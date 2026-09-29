@@ -2300,7 +2300,12 @@ def _gen_stmt_DelStmt(gen, node):
         elif ot == 'MojoList *':
             idx_type, idx_val = gen.lower_expr(target.index)
             idx64 = gen._to_int64(idx_type, idx_val)
-            gen._emit_call('int64_t', '', 'mojo_list_pop_at',
+            # mojo_list_delitem, not mojo_list_pop_at: `del t[0]` and
+            # `t.pop(0)` remove the same slot but are different Python
+            # operations, and CPython refuses them differently on a tuple
+            # (TypeError "doesn't support item deletion" vs AttributeError
+            # "has no attribute 'pop'"). See mojo_list_delitem's definition.
+            gen._emit_call('int64_t', '', 'mojo_list_delitem',
                              [('MojoList *', ov), ('int64_t', idx64)])
         elif ot in ('int', 'int64_t', 'void *'):
             # Fully dynamic: the container's real type isn't known until
@@ -2328,7 +2333,9 @@ def _gen_stmt_DelStmt(gen, node):
             lp = gen._coerce_to_type('int64_t', 'MojoList *', it64)
             lidx_type, lidx_val = gen.lower_expr(target.index)
             lidx64 = gen._to_int64(lidx_type, lidx_val)
-            gen._emit_call('int64_t', '', 'mojo_list_pop_at',
+            # mojo_list_delitem, matching the statically-typed branch above
+            # — this is still `del x[i]`, not `x.pop(i)`.
+            gen._emit_call('int64_t', '', 'mojo_list_delitem',
                              [('MojoList *', lp), ('int64_t', lidx64)])
             gen._emit(f"  goto {bb_after};")
             gen._emit_label(bb_after)

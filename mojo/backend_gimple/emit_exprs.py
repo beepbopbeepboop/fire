@@ -2824,6 +2824,34 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         gen._emit(f"  {t} = {eq_t} {cmp};")
         return '_Bool', t
 
+    # MojoList == / != (lists AND tuples — same representation, see
+    # _lower_tuple_literal) → mojo_list_eq, by VALUE. This fell through to
+    # the generic pointer comparison below, which is IDENTITY: two
+    # separately-built containers with equal contents compared unequal, and
+    # `(1,2) == (1,2)` was False. The element kind the runtime needs is the
+    # statically known one `_elem_of` already tracks — a slot holds a raw
+    # int64_t with no tag, so a list of strings can only be compared as
+    # strings if the CALL SITE says so.
+    if op in ('==', '!=') and lt == 'MojoList *' and rt == 'MojoList *':
+        # The element kind is the statically known one `_elem_of` tracks, and
+        # it is NOT derivable from the C type alone: a bytes element is a
+        # `MojoBytes *` in the slot, and comparing that as a raw int64_t
+        # compares two heap addresses, so `b'ab'.split(b'b') == [b'a', b'']`
+        # was False for two genuinely equal containers. Hence the explicit
+        # bytes case, matching mojo_list_count_bytes's reasoning.
+        _e = gen._elem_of(lv) or ''
+        if _e == 'MojoBytes *':
+            _ekind = 3
+        else:
+            _ekind = {'str': 1, 'double': 2}.get(
+                gimple_ctypes.TypeLattice.list_suffix(_e), 0)
+        eq_t = gen._call_expr('int', 'mojo_list_eq',
+                              [('MojoList *', lv), ('MojoList *', rv), ('int', str(_ekind))])
+        t = gen._new_temp('_Bool')
+        cmp = '!= 0' if op == '==' else '== 0'
+        gen._emit(f"  {t} = {eq_t} {cmp};")
+        return '_Bool', t
+
     # memoryview == bytes (either operand order) → bytewise compare
     if op in ('==', '!=') and 'MojoMemoryView *' in (lt, rt):
         mv, other = (lv, rv) if lt == 'MojoMemoryView *' else (rv, lv)
@@ -4386,11 +4414,6 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     if _inner_ct:
         gen._nested_elem_types[t] = _inner_ct
     gen._emit(f"  {t} = mojo_list_new ();")
-    # Mark as a tuple (not a plain list) so generic repr() picks `(...)`
-    # over `[...]` — see mojo_mark_as_tuple's doc comment in
-    # runtime/fire_runtime.c; there is otherwise no runtime distinction
-    # between the two, since both lower to the same MojoList.
-    gen._emit(f"  mojo_mark_as_tuple ({t});")
     # Explicit loop, NOT `[(el, *gen.lower_expr(el)) for el in ...]`: the
     # 2-tuple return of `lower_expr` unpacked into a comprehension target
     # boxes `et`/`ev` on the self-hosted path, so `_tuple_slot_types[t]`
@@ -4442,6 +4465,14 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
             temp = gen._new_val('char *', f'{ev_cast}')
             ev_cast = temp
         gen._emit(f"  mojo_list_append_{use} ({t}, {ev_cast});")
+    # Mark as a tuple AFTER the elements are in, not before. The mark is
+    # what makes this value a tuple rather than a list (see
+    # mojo_mark_as_tuple's doc comment in runtime/fire_runtime.c), and since
+    # 2026-09-29 every mutating MojoList entry point REFUSES a marked list,
+    # so marking first made every tuple literal raise out of its own
+    # construction. The mark is a statement about the FINISHED value, which
+    # is exactly what placing it last says.
+    gen._emit(f"  mojo_mark_as_tuple ({t});")
     return 'MojoList *', t
 
 

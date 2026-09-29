@@ -307,6 +307,11 @@ int64_t mojo_list_len(MojoList *l);
 int mojo_list_contains_int(MojoList *l, int64_t v);
 int mojo_list_contains_double(MojoList *l, double v);
 int mojo_list_contains_str(MojoList *l, char *v);
+/* `l.count(x)` — occurrence COUNT, not membership; see each definition.
+ * The bytes needle is declared down at the MojoBytes block, which is where
+ * that type is first defined. */
+int64_t   mojo_list_count_int(MojoList *l, int64_t v);
+int64_t   mojo_list_count_str(MojoList *l, char *v);
 
 /* Item mutation and extra accessors */
 void     mojo_list_set_int(MojoList *l, int64_t i, int64_t v);
@@ -324,6 +329,10 @@ void     mojo_list_assign_step(MojoList *l, int has_start, int64_t start,
                                MojoList *repl);
 MojoList*mojo_list_concat(MojoList *a, MojoList *b);
 MojoList*mojo_list_repeat(MojoList *l, int64_t n);
+/* `a == b` on lists/tuples by VALUE. `kind` is the caller's statically
+ * known element kind: 0 int/bits, 1 char* (compared as string CONTENT),
+ * 2 double. See the definition for what it deliberately does not resolve. */
+int      mojo_list_eq(MojoList *a, MojoList *b, int kind);
 
 void mojo_list_print(MojoList *l);
 
@@ -423,6 +432,7 @@ MojoBytes *mojo_bytes_new_lit(const char *data, int64_t len); /* copies `len` by
 /* `x in <list of bytes>`: elements are boxed MojoBytes * pointers, so plain
  * mojo_list_contains_int would compare POINTER identity instead of `==`. */
 int          mojo_list_contains_bytes(MojoList *l, MojoBytes *v);
+int64_t      mojo_list_count_bytes(MojoList *l, MojoBytes *v);
 MojoBytes *mojo_bytes_empty(void);
 MojoBytes *mojo_bytes_zeros(int64_t n);
 MojoBytes *mojo_bytes_from_list(MojoList *l);      /* list of ints 0-255 */
@@ -720,6 +730,9 @@ int         mojo_list_all(MojoList *l);
 int         mojo_list_any(MojoList *l);
 int64_t     mojo_list_pop(MojoList *l);
 int64_t     mojo_list_pop_at(MojoList *l, int64_t idx);
+/* `del lst[i]` — same removal as mojo_list_pop_at, but a different Python
+ * operation with a different refusal on a tuple (see its definition). */
+int64_t     mojo_list_delitem(MojoList *l, int64_t idx);
 void        mojo_list_extend(MojoList *dst, MojoList *src);
 void        mojo_list_sort(MojoList *l);
 void        mojo_list_reverse(MojoList *l);

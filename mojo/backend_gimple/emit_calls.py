@@ -2292,6 +2292,22 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
 
     if type_name in _SCALAR_TYPE_MATCH:
         if obj_type in _SCALAR_TYPE_MATCH[type_name]:
+            # `isinstance(t, list)` where `t` may be a TUPLE. A tuple is a
+            # MojoList carrying the mojo_mark_as_tuple marker (there is no
+            # separate container type — see _lower_tuple_literal), so the
+            # static C type cannot answer this one, and answering it
+            # statically made every tuple report itself a list:
+            # `isinstance(b'a=b'.partition(b'='), list)` was True. Checked
+            # BEFORE the NULL branch below, which is also a pointer case:
+            # a NULL is not a tuple either, so both agree there and the
+            # order is only about keeping this one visible.
+            if obj_type == 'MojoList *' and type_name == 'list':
+                iv = gen._new_val('int64_t', f'(int64_t){obj_val}')
+                isl = gen._call_expr('int', 'mojo_is_registered_list', [('int64_t', iv)])
+                notup = gen._new_val('int', f'!mojo_is_tuple (({obj_type}){obj_val})')
+                both = gen._new_temp('_Bool')
+                gen._emit(f'  {both} = ({isl} != 0) && ({notup} != 0);')
+                return both
             if obj_type.endswith(' *'):
                 # A NULL pointer here means None (e.g. the "default"
                 # branch of a dynamic getattr(obj, attr, None) on a
@@ -3200,9 +3216,27 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
     var = f"_ctor_elem{gen.temp_counter}"
     synth_gen = gimple_ctypes.Generator(target=var, iterable=_arg0, conditions=[],
                      line=node.line, col=node.col)
-    compr = gimple_ctypes.Comprehension(kind=kind, element=gimple_ctypes.IdentExpr(var, node.line, node.col),
+    # `tuple(x)` has no comprehension kind of its own (_lower_comprehension
+    # knows list/set/dict/generator), and adding one would mean teaching the
+    # comprehension machinery a container type that differs from a list in
+    # nothing but its marker. So it builds an ordinary list here and the
+    # marker is applied below, which is exactly what a tuple literal does
+    # (see _lower_tuple_literal). Every OTHER kind is passed through
+    # unchanged — `set`/`dict` have real comprehension lowerings of their
+    # own, and flattening them to 'list' silently turned `set([1,2,3])`
+    # into a list.
+    _compr_kind = 'list' if kind == 'tuple' else kind
+    compr = gimple_ctypes.Comprehension(kind=_compr_kind, element=gimple_ctypes.IdentExpr(var, node.line, node.col),
                            generators=[synth_gen], line=node.line, col=node.col)
-    return gen._lower_comprehension(compr)
+    res_type, res = gen._lower_comprehension(compr)
+    # `tuple(x)` builds a TUPLE, and the marker is the only thing that makes
+    # a value one (see mojo_mark_as_tuple's doc comment). Applied AFTER the
+    # comprehension is complete, which is required: every mutating MojoList
+    # entry point refuses a marked list, so a mark placed before the fills
+    # would make `tuple(x)` raise out of its own construction.
+    if kind == 'tuple':
+        gen._emit(f'  mojo_mark_as_tuple ({res});')
+    return res_type, res
 
 
 def _lower_builtin_set(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -3252,7 +3286,15 @@ def _lower_builtin_list(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and node.args[0].func.name == 'enumerate'
             and not gen._locally_binds_name('enumerate')):
         return _lower_builtin_enumerate_value(gen, node.args[0])
-    return gen._lower_ctor_from_iterable('list', node)
+    # `tuple(x)` shares this path (its dispatch passes 'tuple' below) but
+    # builds a TUPLE, not a list — the constructor's KIND is what says which,
+    # and the comprehension alone cannot tell them apart. An
+    # already-enumerated argument is the enumerate shortcut above, whose
+    # pairs are tuples already (mojo_enumerate marks them), so it is exempt.
+    _kind = 'tuple' if (isinstance(node.func, gimple_ctypes.IdentExpr)
+                        and node.func.name == 'tuple'
+                        and not gen._locally_binds_name('tuple')) else 'list'
+    return gen._lower_ctor_from_iterable(_kind, node)
 
 
 def _lower_builtin_open(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:

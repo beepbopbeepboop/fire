@@ -718,11 +718,13 @@ int mojo_boxed_is_str(int64_t v) {
 }
 
 /* A Python tuple literal lowers to the exact same MojoList as a list literal
- * (see _lower_tuple_literal in gimple_codegen.py) — there is no runtime
- * distinction between the two, so generic repr() always printed a tuple's
- * contents with list brackets `[...]` instead of `(...)`. Marked explicitly
- * by _lower_tuple_literal's emitted call to mojo_mark_as_tuple() right after
- * mojo_list_new(); checked by _mojo_repr_list to choose the right brackets. */
+ * (see _lower_tuple_literal in gimple_codegen.py) — there is no separate
+ * container struct — so the tuple marker below is the ONLY thing that
+ * distinguishes a tuple from a list at runtime. It is consulted by repr (to
+ * choose `(...)` over `[...]`), by isinstance (mojo_isinstance type_id 8),
+ * and — since 2026-09-29 — by every MUTATING list operation below, which
+ * refuse a marked list the way CPython refuses to mutate a tuple. See
+ * mojo_require_mutable_list's own comment for why that had to be added. */
 static _PtrReg _reg_tuple;
 
 void mojo_mark_as_tuple(MojoList *l) {
@@ -733,6 +735,40 @@ void mojo_mark_as_tuple(MojoList *l) {
 int mojo_is_tuple(MojoList *l) {
     if (!l) return 0;
     return _pr_has(&_reg_tuple, (uint64_t)(uintptr_t)l);
+}
+
+/* Every mutating MojoList entry point calls this first, so a tuple-marked
+ * list behaves like a tuple rather than like a list that merely PRINTS like
+ * one.
+ *
+ * The marker used to be purely decorative: `b'a=b'.partition(b'=')` carried
+ * it, so `print(p)` was `(b'a', b'=', b'b')` and `isinstance(p, tuple)` was
+ * True — but `p.append(b'z')` silently succeeded and `p[0] = b'x'` silently
+ * overwrote, because the marker was read by repr and nothing else. That is
+ * the whole content of the bug doc's item 6a: the doc concluded the residue
+ * was unfixable for want of a tuple TYPE, but the type was already there and
+ * simply was not load-bearing. CPython's answers, which this reproduces:
+ *
+ *   t.append(x)   -> AttributeError: 'tuple' object has no attribute 'append'
+ *   t[0] = x      -> TypeError: 'tuple' object does not support item assignment
+ *   del t[0]      -> TypeError: 'tuple' object doesn't support item deletion
+ *
+ * The distinction between the two exception TYPES is not cosmetic: the
+ * method forms are an attribute lookup that fails, while the two item forms
+ * are a container refusing the operation, and CPython's own `except` clauses
+ * distinguish them. `attr` is the METHOD name for the attribute case, or NULL
+ * for the item cases, which the two item messages below spell out.
+ *
+ * Forward-declared because the raise helpers are defined ~5000 lines below
+ * (next to the other typed-exception raisers); the header declares all three
+ * for generated code, but a definition is still needed here. */
+static void mojo_raise_tuple_no_attr(const char *attr);
+static void mojo_raise_tuple_item_error(const char *verb);
+
+static void mojo_require_mutable_list(MojoList *l, const char *attr) {
+    if (!mojo_is_tuple(l)) return;
+    if (attr) mojo_raise_tuple_no_attr(attr);
+    mojo_raise_tuple_item_error(NULL);
 }
 
 /* Bound-method registry — the runtime counterpart of _reg_list
@@ -804,6 +840,7 @@ static void _list_grow(MojoList *l)
 
 void mojo_list_append_int(MojoList *l, int64_t v)
 {
+    mojo_require_mutable_list(l, "append");
     if (l->len == l->cap) _list_grow(l);
     l->data[l->len++] = v;
 }
@@ -885,10 +922,47 @@ int mojo_list_contains_str(MojoList *l, char *v)
     return 0;
 }
 
-void mojo_list_set_int(MojoList *l, int64_t i, int64_t v)   { l->data[_norm_idx(l, i)] = v; }
+/* `l.count(x)` — how many SLOTS equal x, the counting sibling of the
+ * `x in l` predicates above. Distinct because those answer a yes/no from the
+ * first hit and stop; these must visit every slot. Each takes the needle in
+ * the domain its slot is stored in, for the same reason the membership
+ * predicates do (a bytes/str element is a boxed pointer, and comparing that
+ * as a raw int64_t slot would compare addresses). */
+int64_t mojo_list_count_int(MojoList *l, int64_t v)
+{
+    int64_t n = 0;
+    for (int64_t i = 0; i < l->len; i++) if (l->data[i] == v) n++;
+    return n;
+}
+
+int64_t mojo_list_count_str(MojoList *l, char *v)
+{
+    int64_t n = 0;
+    for (int64_t i = 0; i < l->len; i++) {
+        char *s = (char *)(uintptr_t)l->data[i];
+        if (v == NULL) { if (s == NULL) n++; }
+        else if (s && strcmp(s, v) == 0) n++;
+    }
+    return n;
+}
+
+int64_t mojo_list_count_bytes(MojoList *l, MojoBytes *v)
+{
+    int64_t n = 0;
+    for (int64_t i = 0; i < l->len; i++)
+        if (mojo_bytes_eq((MojoBytes *)(uintptr_t)l->data[i], v)) n++;
+    return n;
+}
+
+void mojo_list_set_int(MojoList *l, int64_t i, int64_t v)
+{
+    mojo_require_mutable_list(l, NULL);
+    l->data[_norm_idx(l, i)] = v;
+}
 
 void mojo_list_set_double(MojoList *l, int64_t i, double v)
 {
+    mojo_require_mutable_list(l, NULL);
     int64_t bits;
     memcpy(&bits, &v, sizeof(bits));
     l->data[_norm_idx(l, i)] = bits;
@@ -896,6 +970,7 @@ void mojo_list_set_double(MojoList *l, int64_t i, double v)
 
 void mojo_list_set_str(MojoList *l, int64_t i, char *v)
 {
+    mojo_require_mutable_list(l, NULL);
     l->data[_norm_idx(l, i)] = (int64_t)(uintptr_t)v;
 }
 
@@ -922,11 +997,13 @@ static void _mojo_list_insert_slot(MojoList *l, int64_t i, int64_t v)
 
 void mojo_list_insert_int(MojoList *l, int64_t i, int64_t v)
 {
+    mojo_require_mutable_list(l, "insert");
     _mojo_list_insert_slot(l, i, v);
 }
 
 void mojo_list_insert_double(MojoList *l, int64_t i, double v)
 {
+    mojo_require_mutable_list(l, "insert");
     int64_t bits;
     memcpy(&bits, &v, sizeof(bits));
     _mojo_list_insert_slot(l, i, bits);
@@ -934,6 +1011,7 @@ void mojo_list_insert_double(MojoList *l, int64_t i, double v)
 
 void mojo_list_insert_str(MojoList *l, int64_t i, char *v)
 {
+    mojo_require_mutable_list(l, "insert");
     _mojo_list_insert_slot(l, i, (int64_t)(uintptr_t)v);
 }
 
@@ -958,6 +1036,10 @@ MojoList *mojo_list_slice(MojoList *l, int64_t start, int64_t stop)
     MojoList *r = mojo_list_new();
     for (int64_t i = start; i < stop; i++)
         mojo_list_append_int(r, l->data[i]);
+    /* `t[:]` is a tuple when `t` is: slicing does not change a container's
+     * type in Python, and the marker is the only thing that prints the
+     * difference here. Same rule as mojo_list_concat's. */
+    if (mojo_is_tuple(l)) mojo_mark_as_tuple(r);
     return r;
 }
 
@@ -968,6 +1050,7 @@ MojoList *mojo_list_slice(MojoList *l, int64_t start, int64_t stop)
 void mojo_list_del_slice(MojoList *l, int64_t start, int64_t stop)
 {
     if (!l) return;
+    mojo_require_mutable_list(l, NULL);
     if (stop == MOJO_SLICE_STOP_OMITTED) stop = l->len;
     if (start < 0) start = l->len + start;
     if (stop  < 0) stop  = l->len + stop;
@@ -992,6 +1075,7 @@ void mojo_list_del_slice(MojoList *l, int64_t start, int64_t stop)
 void mojo_list_splice(MojoList *l, int64_t start, int64_t stop, MojoList *repl)
 {
     if (!l) return;
+    mojo_require_mutable_list(l, NULL);
     int64_t rlen = repl ? repl->len : 0;
     if (stop == MOJO_SLICE_STOP_OMITTED) stop = l->len;
     if (start < 0) start = l->len + start;
@@ -1081,6 +1165,7 @@ void mojo_list_assign_step(MojoList *l,
                            int64_t step,  MojoList *repl)
 {
     if (!l) return;
+    mojo_require_mutable_list(l, NULL);
     if (step == 0) {
         fprintf(stderr, "ValueError: slice step cannot be zero\n");
         exit(1);
@@ -1113,6 +1198,11 @@ MojoList *mojo_list_concat(MojoList *a, MojoList *b)
     MojoList *r = mojo_list_new();
     for (int64_t i = 0; i < a->len; i++) mojo_list_append_int(r, a->data[i]);
     for (int64_t i = 0; i < b->len; i++) mojo_list_append_int(r, b->data[i]);
+    /* `a + b` is a TUPLE if either operand is: CPython's tuple has no
+     * __add__ with a list, but the repr of the result is a tuple's, and the
+     * marker is the only thing that decides it here. Propagating it is
+     * what makes `(1,2) + (3,)` print `(1, 2, 3)` instead of `[1, 2, 3]`. */
+    if (mojo_is_tuple(a) || mojo_is_tuple(b)) mojo_mark_as_tuple(r);
     return r;
 }
 
@@ -1122,6 +1212,8 @@ MojoList *mojo_list_repeat(MojoList *l, int64_t n)
     for (int64_t rep = 0; rep < n; rep++)
         for (int64_t i = 0; i < l->len; i++)
             mojo_list_append_int(r, l->data[i]);
+    /* `(1,2) * 2` is a tuple, for the same reason as mojo_list_concat. */
+    if (mojo_is_tuple(l)) mojo_mark_as_tuple(r);
     return r;
 }
 
@@ -1450,6 +1542,61 @@ int mojo_bytes_eq(MojoBytes *a, MojoBytes *b)
 }
 
 int mojo_bytes_truthy(MojoBytes *b) { return b != NULL && b->len != 0; }
+
+/* Value equality for two MojoLists — `a == b` on lists and tuples.
+ *
+ * This existed because `l == m` was emitted as a raw C POINTER comparison:
+ * two separately-built lists with equal contents compared UNEQUAL, silently
+ * and with exit 0 (`[1,2] == [1,2]` was False, and so was `t == t` for any
+ * two distinct tuple objects). Element slots are raw int64_t with no
+ * per-element tag, so equality is defined the way every other reader of a
+ * slot in this runtime defines it — a boxed pointer compares as a pointer,
+ * everything else as a number. `kind` names the STATICALLY KNOWN element
+ * type, which the caller knows and the slot does not:
+ *
+ *   0  int/bool/raw bits, 1  char * (string), 2  double, 3  MojoBytes *
+ *
+ * Kinds 1 and 3 exist because their slots hold BOXED POINTERS: comparing
+ * those as raw int64_t compares heap addresses, so `[b'a'] == [b'a']` was
+ * False for two equal one-element lists. Both compare CONTENT.
+ *
+ * Nested containers (a list of lists / of tuples) are NOT resolved here: a
+ * nested handle is just another pointer, so a list of lists compares by
+ * identity. That is a real limitation, recorded rather than guessed at —
+ * resolving it needs a per-element container tag this representation does
+ * not carry, and guessing a compare would be worse than saying so.
+ */
+static int _mojo_slot_eq(int64_t a, int64_t b, int kind)
+{
+    if (kind == 1)
+        return strcmp((char *)(intptr_t)a, (char *)(intptr_t)b) == 0;
+    if (kind == 3)
+        return mojo_bytes_eq((MojoBytes *)(intptr_t)a, (MojoBytes *)(intptr_t)b);
+    if (kind == 2) {
+        double da, db;
+        memcpy(&da, &a, sizeof(da));
+        memcpy(&db, &b, sizeof(db));
+        return da == db;
+    }
+    return a == b;
+}
+
+int mojo_list_eq(MojoList *a, MojoList *b, int kind)
+{
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    /* A tuple never equals a list, in either order — CPython compares
+     * types first, and this representation has no type to compare beyond
+     * the marker, so the marker IS the type. Without this, `(1,2) == [1,2]`
+     * was True (both operands are MojoList * with equal slots), which is
+     * how a program distinguishing the two containers misbehaves silently
+     * rather than loudly. */
+    if (mojo_is_tuple(a) != mojo_is_tuple(b)) return 0;
+    if (a->len != b->len) return 0;
+    for (int64_t i = 0; i < a->len; i++)
+        if (!_mojo_slot_eq(a->data[i], b->data[i], kind)) return 0;
+    return 1;
+}
 
 char *mojo_bytes_repr(MojoBytes *b)
 {
@@ -5857,6 +6004,43 @@ void mojo_raise_value_error(char *detail) {
     mojo_raise();
 }
 
+/* The two ways a tuple refuses to be mutated, as CPython words them. Both
+ * share mojo_require_mutable_list's typed-exception mechanism and the same
+ * hardcoded-tag derivation as the four raisers above; they live here rather
+ * than next to that call because their TEXT is a property of the tuple
+ * marker, and the marker is declared ~5000 lines earlier (its definition is
+ * forward-declared there for exactly this reason).
+ *
+ * `attr` non-NULL is the method form — `'tuple' object has no attribute
+ * 'append'`, an AttributeError, because in CPython the failure is the
+ * attribute lookup itself. NULL is the item form, a TypeError, and the two
+ * halves of it are disambiguated by `verb`: assignment and deletion are
+ * separate messages in CPython and a `try/except` in real code can tell
+ * them apart. */
+static void mojo_raise_tuple_no_attr(const char *attr) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "'tuple' object has no attribute '%s'",
+             attr ? attr : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_ATTRIBUTEERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
+static void mojo_raise_tuple_item_error(const char *verb) {
+    char msg[160];
+    if (verb)
+        snprintf(msg, sizeof msg, "'tuple' object %s", verb);
+    else
+        snprintf(msg, sizeof msg, "'tuple' object does not support item assignment");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_TYPEERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
 /* Reads a dynamically-set attribute from `obj`'s own per-object dict (see
  * above). No matching struct-field tag AND no dynamic attribute of this
  * name ever set on this exact object -> a real AttributeError, matching
@@ -6214,6 +6398,12 @@ MojoList *mojo_list_copy(MojoList *l) {
     if (!l) return out;
     for (int64_t i = 0; i < l->len; i++)
         mojo_list_append_int(out, l->data[i]);
+    /* `t.copy()` does not exist on a Python tuple (it is an AttributeError
+     * there), and `list.copy()` on a real list yields a list. This helper
+     * backs BOTH — `list(t)` goes through _lower_builtin_list's copy branch
+     * — so the marker must NOT be propagated: doing so would make
+     * `list((1,2))` print `(1, 2)`. Deliberately the opposite of
+     * mojo_list_slice / mojo_list_concat, which preserve it. */
     return out;
 }
 
@@ -6239,6 +6429,7 @@ int mojo_list_any(MojoList *l) {
  * last one) silently popped the wrong element instead. */
 int64_t mojo_list_pop_at(MojoList *l, int64_t idx) {
     if (!l || l->len == 0) return 0;
+    mojo_require_mutable_list(l, "pop");
     idx = _norm_idx(l, idx);
     if (idx < 0 || idx >= l->len) return 0;
     int64_t val = l->data[idx];
@@ -6251,22 +6442,58 @@ int64_t mojo_list_pop(MojoList *l) {
     return mojo_list_pop_at(l, -1);
 }
 
+/* `del lst[i]` — the ITEM DELETION spelling, distinct from `lst.pop(i)`
+ * even though both remove an element. They are one C operation
+ * (mojo_list_pop_at) but two different Python operations, and CPython's
+ * answers differ in both exception TYPE and text:
+ *
+ *   del (1,2)[0]  -> TypeError: 'tuple' object doesn't support item deletion
+ *   (1,2).pop(0)  -> AttributeError: 'tuple' object has no attribute 'pop'
+ *
+ * so the deletion guard cannot live in mojo_list_pop_at (whose 'pop' is
+ * right for the method form and wrong here). This is the deletion entry
+ * point the `del` lowering calls instead. */
+int64_t mojo_list_delitem(MojoList *l, int64_t idx) {
+    if (!l || l->len == 0) return 0;
+    if (mojo_is_tuple(l)) mojo_raise_tuple_item_error("doesn't support item deletion");
+    return mojo_list_pop_at(l, idx);
+}
+
 void mojo_list_extend(MojoList *dst, MojoList *src) {
     if (!dst || !src) return;
+    /* Checked here rather than left to mojo_list_append_int below: an EMPTY
+     * src would otherwise append nothing and return without ever reaching
+     * the guard, so `t.extend([])` on a tuple would succeed. */
+    mojo_require_mutable_list(dst, "extend");
     for (int64_t i = 0; i < src->len; i++)
         mojo_list_append_int(dst, src->data[i]);
 }
 
-void mojo_list_sort(MojoList *l) { (void)l; /* stub */ }
+/* A stub, and left one: `list.sort()` on a compiled program does not sort.
+ * That is a WRONG ANSWER, but it is a pre-existing gap in the sort
+ * algorithm, not a tuple question — it is recorded rather than papered over
+ * here, because the honest thing for it is a real sort. The tuple guard IS
+ * added, so `(1,2).sort()` refuses as CPython does instead of silently
+ * no-opping. */
+void mojo_list_sort(MojoList *l) {
+    mojo_require_mutable_list(l, "sort");
+    (void)l; /* stub */
+}
 void mojo_list_reverse(MojoList *l) {
+    mojo_require_mutable_list(l, "reverse");
     if (!l || l->len < 2) return;
     for (int64_t i = 0, j = l->len-1; i < j; i++, j--) {
         int64_t tmp = l->data[i]; l->data[i] = l->data[j]; l->data[j] = tmp;
     }
 }
-void mojo_list_clear(MojoList *l) { if (l) l->len = 0; }
+void mojo_list_clear(MojoList *l) {
+    if (!l) return;
+    mojo_require_mutable_list(l, "clear");
+    l->len = 0;
+}
 void mojo_list_remove_str(MojoList *l, const char *v) {
     if (!l || !v) return;
+    mojo_require_mutable_list(l, "remove");
     for (int64_t i = 0; i < l->len; i++) {
         char *s = (char *)l->data[i];
         if (s && strcmp(s, v) == 0) {
@@ -6279,6 +6506,7 @@ void mojo_list_remove_str(MojoList *l, const char *v) {
 }
 void mojo_list_remove_int(MojoList *l, int64_t v) {
     if (!l) return;
+    mojo_require_mutable_list(l, "remove");
     for (int64_t i = 0; i < l->len; i++) {
         if (l->data[i] == v) {
             for (int64_t j = i; j < l->len - 1; j++)

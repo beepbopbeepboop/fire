@@ -2613,6 +2613,169 @@ fn main():
     print(b'a=b'.partition(b''))
 """, "ValueError: empty separator")
 
+    # The doc's item 6a residue: `partition`'s container TYPE. The doc
+    # concluded it was unfixable for want of a tuple type; re-tested, that
+    # premise is STALE. A tuple type has existed for some time — a
+    # `mojo_mark_as_tuple` marker on the MojoList (see that function's own
+    # doc comment) — but only repr and `isinstance(x, tuple)` read it, so a
+    # "tuple" was a list that merely PRINTED like one. The fix makes the
+    # marker load-bearing, and these four cases pin each way it is now
+    # observable: the mutation refusals, the value comparison, the
+    # cross-type inequality, and the type predicates.
+    test_gimple_runtime_error("gimple_tuple_append_raises", """\
+fn main():
+    print('before')
+    t = b'a=b'.partition(b'=')
+    t.append(b'z')
+""", "'tuple' object has no attribute 'append'")
+
+    # The two item forms are a TypeError with CPython's exact wording, and
+    # are NOT the same operation as `.pop` even though all three remove an
+    # element — which is why `del t[i]` got its own runtime entry point
+    # (mojo_list_delitem) rather than sharing mojo_list_pop_at's.
+    test_gimple_runtime_error("gimple_tuple_setitem_raises", """\
+fn main():
+    print('before')
+    t = (1, 2, 3)
+    t[0] = 9
+""", "'tuple' object does not support item assignment")
+
+    test_gimple_runtime_error("gimple_tuple_delitem_raises", """\
+fn main():
+    print('before')
+    t = (1, 2, 3)
+    del t[0]
+""", "'tuple' object doesn't support item deletion")
+
+    # The refusals must be TYPED and CATCHABLE, not a print-and-exit: real
+    # code distinguishes AttributeError from TypeError here, and a
+    # program that guards `if not isinstance(p, list): p.append(...)`
+    # depends on being able to catch and continue. Pinned because "raises
+    # the right text" and "raises catchably with the right type" are
+    # different properties and only the second one is load-bearing.
+    test_gimple_stdout("gimple_tuple_mutation_refusals_are_catchable", """\
+fn main():
+    t = (1, 2, 3)
+    try:
+        t.append(9)
+    except AttributeError:
+        print('caught AttributeError')
+    try:
+        t[0] = 9
+    except TypeError:
+        print('caught TypeError set')
+    try:
+        del t[0]
+    except TypeError:
+        print('caught TypeError del')
+    try:
+        t.pop()
+    except AttributeError:
+        print('caught AttributeError pop')
+    try:
+        t.extend([4])
+    except AttributeError:
+        print('caught AttributeError extend')
+    try:
+        t.insert(0, 4)
+    except AttributeError:
+        print('caught AttributeError insert')
+    try:
+        t.remove(1)
+    except AttributeError:
+        print('caught AttributeError remove')
+    try:
+        t.clear()
+    except AttributeError:
+        print('caught AttributeError clear')
+    try:
+        t.reverse()
+    except AttributeError:
+        print('caught AttributeError reverse')
+    try:
+        t.sort()
+    except AttributeError:
+        print('caught AttributeError sort')
+    print(t)
+    # A REAL list is unaffected by any of that.
+    l = [1, 2, 3]
+    l.append(4); l.extend([5]); l.insert(0, 0); l.pop()
+    l.remove(0); l.reverse(); l.clear()
+    print(l, len(l))
+    l = [1, 2, 3]
+    l[0] = 9; del l[0]; l[0:1] = [7, 8]; del l[0:1]
+    print(l)
+""", "caught AttributeError\ncaught TypeError set\ncaught TypeError del\n"
+     "caught AttributeError pop\ncaught AttributeError extend\n"
+     "caught AttributeError insert\ncaught AttributeError remove\n"
+     "caught AttributeError clear\ncaught AttributeError reverse\n"
+     "caught AttributeError sort\n(1, 2, 3)\n[] 0\n[8, 3]\n")
+
+    # The remaining half of the container TYPE: what the marker decides
+    # about the value, not just about mutation. `==` was a raw C POINTER
+    # comparison, so two equal containers compared unequal — including two
+    # equal tuples, and (the other direction) a tuple equalling a list.
+    test_gimple_stdout("gimple_container_value_equality", """\
+fn main():
+    t = (1, 2)
+    u = (1, 2)
+    print(t == u, t == (1, 2), u == t, t != u, t == (1, 3))
+    l = [1, 2]
+    m = [1, 2]
+    print(l == m, l == [1, 2], m == l, l != m, l == [1, 3])
+    # a tuple is never equal to a list, in either order
+    print(t == l, l == t)
+    s = b'ab'.split(b'b')
+    print(s == [b'a', b''], s != [b'a', b'z'])
+    st = (b'a', b'')
+    print(st == (b'a', b''), st == s)
+    # strings compare by content, not by address
+    print(['a', 'b'] == ['a', 'b'], ['a'] == ['b'])
+    # floats stored as raw bits
+    print([1.5, 2.5] == [1.5, 2.5], [1.5] == [2.5])
+    # different lengths
+    print([1, 2] == [1, 2, 3], [] == [], () == ())
+""", "True True True False False\nTrue True True False False\n"
+     "False False\nTrue True\nTrue False\nTrue False\nTrue False\n"
+     "False True True\n")
+
+    # `count` counts OCCURRENCES; `x in l` only asks whether there is one.
+    # There was no `count` case at all for a list, so every `l.count(v)`
+    # fell to the dummy 0-stub and answered 0 for a list that plainly
+    # contained the value — a silent wrong value, not an error.
+    test_gimple_stdout("gimple_list_count_counts_occurrences", """\
+fn main():
+    l = [1, 2, 1]
+    print(l.count(1), l.count(2), l.count(9))
+    m = ['a', 'b', 'a']
+    print(m.count('a'), m.count('b'), m.count('z'))
+    s = b'ab'.split(b'a')
+    print(s.count(b'a'), s.count(b'b'), s.count(b'z'))
+    t = (1, 2, 1)
+    print(t.count(1), t.count(2))
+    print([] .count(1), [1].count(1))
+""", "2 1 0\n2 1 0\n0 1 0\n2 1\n0 1\n")
+
+    # The rest of what the marker decides, beyond mutation and equality:
+    # the operations that PRESERVE a container's type and the two that do
+    # not. `mojo_list_copy` deliberately does NOT propagate the marker
+    # (`list(t)` is a list), while slice/concat/repeat do.
+    test_gimple_stdout("gimple_tuple_type_preserved_by_ops", """\
+fn main():
+    t = (1, 2)
+    l = [1, 2]
+    print(t + (3,), t * 2, t[:], t[:1])
+    print(l + [3], l * 2, l[:], l[:1])
+    print(list(t), tuple(l), list(l))
+    print(isinstance(t, tuple), isinstance(t, list))
+    print(isinstance(l, tuple), isinstance(l, list))
+    print(isinstance(b'a=b'.partition(b'='), tuple))
+    print(isinstance(b'a=b'.partition(b'='), list))
+    print(isinstance((1, 2), (int, str)))
+    print(isinstance((1, 2), (list, str)))
+""", "(1, 2, 3) (1, 2, 1, 2) (1, 2) (1,)\n[1, 2, 3] [1, 2, 1, 2] [1, 2] [1]\n"
+     "[1, 2] (1, 2) [1, 2]\nTrue False\nFalse True\nTrue\nFalse\nFalse\nFalse\n")
+
     test_gimple_stdout("gimple_bytes_fromhex_maketrans_translate", """\
 fn main():
     print(bytes.fromhex('68656c6c6f'))

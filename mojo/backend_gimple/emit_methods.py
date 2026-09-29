@@ -4078,6 +4078,22 @@ def _lower_list_method(gen, ov: str, method: str, args: list) -> tuple:
         if at == 'char *':
             return 'int64_t', gen._call_expr('int64_t', 'mojo_list_index_str', [('MojoList *', ov), ('char *', av)])
         return 'int64_t', gen._call_expr('int64_t', 'mojo_list_index_int', [('MojoList *', ov), ('int64_t', av)])
+    if method == 'count' and args:
+        # `l.count(x)` counts OCCURRENCES; `x in l` only asks whether there
+        # is one, and the two share no runtime helper. This case did not
+        # exist at all, so every `list.count(...)` fell to the dummy 0-stub
+        # below and answered 0 for a list that plainly contained the value:
+        # `[1,2,1].count(1)` was 0 where CPython says 2 — a silent wrong
+        # value, not an error. `mojo_list_count_int` / `_str` / `_bytes`
+        # count slots; the bytes one is needed because a bytes needle is a
+        # boxed pointer, and comparing that as a raw slot would compare
+        # addresses (see mojo_list_contains_bytes's own comment).
+        at, av = gen.lower_expr(args[0])
+        if at == 'char *':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_list_count_str', [('MojoList *', ov), ('char *', av)])
+        if at == 'MojoBytes *':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_list_count_bytes', [('MojoList *', ov), ('MojoBytes *', av)])
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_list_count_int', [('MojoList *', ov), ('int64_t', av)])
     if method == '__len__':
         # The builtin `len(x)` call form already lowers to mojo_list_len
         # (see the len() handling in _lower_call), but the dunder-method
