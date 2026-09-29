@@ -634,9 +634,15 @@ int main(int argc, char **argv)
      * missing silu or a dropped residual shows up here as a large number;
      * agreement to ~1e-6 means the two paths compute the same function. */
     printf("\n=== fused kernel: ONE dispatch for N steps (and does it agree?) ===\n");
-    printf("%-7s %9s %9s %9s %9s %8s %8s %11s\n",
+    /* "sk vs blockedC" is the honest headline and "sk vs naiveC" is kept
+     * beside it so the gap between the two baselines stays visible. This
+     * column used to be labelled "sk vs fast", which reads as a comparison
+     * against the 1-thread GPU path -- it never was. Anyone who took it at
+     * face value was being told the split-K kernel beat something it was
+     * never measured against. */
+    printf("%-7s %9s %9s %9s %9s %13s %12s %11s\n",
            "steps", "C naive", "C blocked", "GPU 1thr", "GPU sk8",
-           "sk vs fast", "sk vs naive", "sk agree");
+           "sk vs blockedC", "sk vs naiveC", "sk agree");
     {
         const int d = 128, dff = 256, layers = 6;
         const int step_counts[] = {1, 10, 24, 100, 300, 1000};

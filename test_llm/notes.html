@@ -51,6 +51,20 @@
       -o /tmp/metal_bench test_llm/bench.c test_llm/metal.m -lm
 /tmp/metal_bench</code></pre>
 
+<p class="note"><b><code>-fobjc-arc</code> is load-bearing, and omitting it
+fails silently.</b> <code>metal.m</code> builds its device, queue, library and
+pipeline states once in <code>mg_init</code> and keeps them in file-scope
+statics for the life of the process. Under ARC those statics are strong and
+retain what is assigned to them. Without ARC they are raw pointers, so every
+object built inside <code>mg_init</code>'s <code>@autoreleasepool</code> is
+released when that pool drains &mdash; while <code>g_ok</code> and
+<code>g_tried</code>, being plain ints, still report success. The result is not
+a compile error and not a message: <code>mg_available()</code> returns true and
+the first dispatch dereferences freed memory, so the benchmark dies with a bare
+<code>Segmentation fault: 11</code> and no output at all. If the bench
+segfaults before printing its first table, check the build flags before
+suspecting the kernels.</p>
+
 <h2>The kernels</h2>
 <p><code>mg_axpy</code>, <code>mg_matvec</code> (one threadgroup per output row plus a threadgroup tree reduction), <code>mg_attn_state</code> (16&times;16 tiles, in place, no temporary), <code>mg_attn_read</code> (<code>o&nbsp;=&nbsp;S&#94;T&nbsp;q</code>), <code>mg_add_scaled</code>. All fp32: <strong>MSL has no <code>double</code> type at all</strong> &mdash; not a hardware limit (Apple Silicon's GPU does fp64), the shading language never exposed it. The ARM C path stays fp64 and is the reference; agreement is ~1e-7 relative, i.e. f32 precision, which is the correct answer for a bf16-weight model.</p>
 

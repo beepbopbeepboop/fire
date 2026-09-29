@@ -123,3 +123,32 @@ one call site: every one of those reads its parameters as untyped scalars.
 Worked around in the LLM by not relying on the registry for the count
 (see that file); the underlying bug is untouched and still affects any
 module that keeps a registry or index in a global.
+
+## Independently found, same root cause
+
+`CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee.md` (recorded
+2026-09-28, one day before this doc) is this same defect seen from the
+`List[String]` angle, and its repro is the sharper one — it is kept here
+rather than in a second file:
+
+```mojo
+def fill(kept: List[String]):
+    kept.append(String("cde"))
+
+def main():
+    var kept: List[String] = []
+    fill(kept)
+    print(len(kept[0]))      # 6581285 (garbage)   -- CPython: 3
+    print(kept[0])           # 4364882704 (a pointer) -- CPython: cde
+    print(kept[0] == "cde")  # True                -- correct
+```
+
+Append and read in the SAME function is correct; split across a call and
+the caller never learns the element type, so the element reads as an int
+and `len()` of it interprets the pointer's bits as a list header. The
+comparison still works because it dispatches on the string-literal side —
+which is why this is so easy to miss. That doc's own suggested fix ("honour
+the `List[String]` annotation on the declaration") treats the annotation
+as the source of truth; the mechanism is the same one described above, and
+the annotation route would leave the un-annotated case (this doc's repro)
+still broken.

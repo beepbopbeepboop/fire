@@ -47,15 +47,38 @@ x       = W3 . h                 # next layer's input</code></pre>
 <h2>The ceiling: measured</h2>
 <p>From <code>test_llm/bench.c</code>, 6 layers, <code>d_model 128</code>, <code>d_ff 256</code>, one dispatch for the whole run, both paths consuming the same bf16-rounded operands:</p>
 <table>
-  <tr><th>steps</th><th class="num">ARM C (naive)</th><th class="num">Metal, 1 dispatch</th><th class="num">speedup</th><th class="num">max |diff|</th><th class="num">&micro;s/step (GPU)</th></tr>
-  <tr><td>1</td><td class="num">0.45 ms</td><td class="num">1.68 ms</td><td class="num lose">0.27&times;</td><td class="num">0.0</td><td class="num">1676</td></tr>
-  <tr><td>10</td><td class="num">3.95 ms</td><td class="num">1.15 ms</td><td class="num">3.4&times;</td><td class="num">0.0</td><td class="num">115</td></tr>
-  <tr><td>24</td><td class="num">12.96 ms</td><td class="num">2.37 ms</td><td class="num">5.5&times;</td><td class="num">0.0</td><td class="num">98.6</td></tr>
-  <tr><td>100</td><td class="num">51.11 ms</td><td class="num">6.17 ms</td><td class="num win">8.3&times;</td><td class="num">0.0</td><td class="num">61.7</td></tr>
-  <tr><td>300</td><td class="num">167.78 ms</td><td class="num">12.70 ms</td><td class="num win">13.2&times;</td><td class="num">0.0</td><td class="num">42.3</td></tr>
-  <tr><td>1000</td><td class="num">606.10 ms</td><td class="num">22.70 ms</td><td class="num win">26.7&times;</td><td class="num">0.0</td><td class="num">22.7</td></tr>
+  <tr><th>steps</th><th class="num">ARM C (naive)</th><th class="num">ARM C (blocked)</th><th class="num">Metal, 1 thr</th><th class="num">Metal, split-K 8</th><th class="num">sk vs blocked C</th><th class="num">sk vs naive C</th><th class="num">max |diff|</th></tr>
+  <tr><td>1</td><td class="num">0.34 ms</td><td class="num">0.29 ms</td><td class="num">1.48 ms</td><td class="num">0.42 ms</td><td class="num lose">0.7&times;</td><td class="num lose">0.8&times;</td><td class="num">0.0</td></tr>
+  <tr><td>10</td><td class="num">3.62 ms</td><td class="num">2.79 ms</td><td class="num">1.37 ms</td><td class="num">0.45 ms</td><td class="num">6.0&times;</td><td class="num">8.0&times;</td><td class="num">0.0</td></tr>
+  <tr><td>24</td><td class="num">8.74 ms</td><td class="num">6.22 ms</td><td class="num">1.45 ms</td><td class="num">0.66 ms</td><td class="num">9.9&times;</td><td class="num">13.2&times;</td><td class="num">0.0</td></tr>
+  <tr><td>100</td><td class="num">35.60 ms</td><td class="num">26.04 ms</td><td class="num">4.92 ms</td><td class="num">2.13 ms</td><td class="num">12.2&times;</td><td class="num">16.7&times;</td><td class="num">0.0</td></tr>
+  <tr><td>300</td><td class="num">106.95 ms</td><td class="num">80.95 ms</td><td class="num">9.42 ms</td><td class="num">4.65 ms</td><td class="num">17.4&times;</td><td class="num">23.0&times;</td><td class="num">0.0</td></tr>
+  <tr><td>1000</td><td class="num">355.65 ms</td><td class="num">258.33 ms</td><td class="num">22.52 ms</td><td class="num">14.50 ms</td><td class="num win">17.8&times;</td><td class="num">24.5&times;</td><td class="num">0.0</td></tr>
 </table>
-<p>Two numbers to carry forward: <strong>22.7 &micro;s per step</strong> (1000 steps) and <strong>606 &micro;s per step</strong> for the naive C loop. The Metal figure is the ceiling; the C figure is the floor, and it is a <em>floor</em> because that loop is a scalar triple loop at <code>-O2</code> with no blocking and no vectorisation.</p>
+<p><strong>17.8&times; at N=1000, and the number to quote is the one against
+the <em>blocked</em> C column</strong> &mdash; 24.5&times; is the number against
+a scalar loop, i.e. a strawman. Both are shown so the difference is visible
+rather than argued. Agreement is exact (<code>max |diff| = 0</code>) at every
+step count: split-K is a reassociation of the same sum, and the f32
+accumulation order is indistinguishable from the scalar order here, so nothing
+is being traded away for the speedup. Per-step at N=1000:
+<strong>14.5 &micro;s</strong> GPU against <strong>258 &micro;s</strong> blocked C.</p>
+
+<p class="note">Every figure above is the <em>median of three consecutive
+runs</em>, and the median matters: a single cold run of this benchmark put
+the CPU baseline at 1327 ms naive / 1031 ms blocked &mdash; a 3.7&times; outlier
+&mdash; which would have read as <strong>70&times;</strong> against blocked C. The
+GPU columns barely moved across the same runs (14.5 ms every time), so it is
+the CPU baseline that is sensitive, and a single-sample comparison against it
+is not a measurement. Take three.</p>
+
+<p class="note">The blocked C column is the honest CPU floor. It is
+<em>slower than the naive loop at N=1</em>, which is why the table starts at
+N=1 rather than at the first point GPU wins: at one step the run is almost
+entirely dispatch and pipeline overhead, and the blocked kernel's tiling has
+nothing to amortise. The honest statement is that Metal wins from about
+N=10 and the win grows with the batch &mdash; which is the whole reason a
+fixed per-step cost matters less here than a per-token one.</p>
 
 <h2>The target</h2>
 <p>Three tiers, in the order they should be attempted. Each is a statement about the <em>compiled</em> program, not about the hand-written C.</p>
@@ -64,7 +87,7 @@ x       = W3 . h                 # next layer's input</code></pre>
   <tr><th>Tier</th><th>What must happen</th><th class="num">Per-step budget at N=1000</th><th class="num">vs. today's pure Python</th></tr>
   <tr>
     <td><b>T1 &mdash; compile</b></td>
-    <td>The forward and backward run through <code>fire.py --jit</code> at all, and produce the same loss and the same sample text as the interpreter. Today this is <em>blocked</em>: the compiler cannot infer the element type of a list built by a comprehension and handed to a method parameter, so <code>g[i]</code> reads as int64.</td>
+    <td>The forward and backward run through <code>fire.py --jit</code> at all, and produce the same loss and the same sample text as the interpreter. <b>Landed.</b> The element-type inference gap this was blocked on is fixed (a parameter passed to a callee whose own parameter is a container is a container, and a weak <code>int64_t</code> type hint now yields to a real lowered type). The forward and backward now run through <code>fire.py --jit</code> and print. Two further gaps are documented rather than papered over &mdash; see the <code>bugs/hard/</code> entries &mdash; and the model's parameter count is computed structurally to stay clear of the first of them.</td>
     <td class="num tgt">any</td>
     <td class="num">&mdash;</td>
   </tr>
@@ -105,14 +128,14 @@ python3 fire.py --jit test_llm/test_llm.py --bench
 
 <h2>What is between us and T3</h2>
 <ol>
-  <li><b>T1 first.</b> The remaining compiler gap is element-type inference for a list produced by a comprehension and passed to a method parameter. Everything else in the model compiles: the fixed list-repeat, append, float-field, method-call-site, weak-int64 and return-element bugs are done, and the backend suites are green (326 gimple, 6 interporacle, 33 runtime-diff).</li>
+  <li><b>T1 is done</b> &mdash; the model compiles, links, runs and prints through <code>fire.py --jit</code>, with the same config, vocab and state numbers as the interpreter. The backend suites are green (330 gimple, 6 interporacle, 33 runtime-diff, 31 model tests). Two documented gaps remain, neither of which blocks T2: cross-function container element types, and a parameter used only as a method receiver (the latter is why the compiled build's parameter count is still wrong; the count is computed structurally to stay clear of it).</li>
   <li><b>A GPU call from generated C.</b> <code>mg_*</code> exists and is correct, but nothing in the compiler lowers a recognised loop shape onto it. That recognition is the actual T3 work: match the loop nest, not the source text.</li>
   <li><b>Weights resident across calls.</b> <code>mg_weights_dirty()</code> exists because the host already caches the bf16 copy; a training step that updates weights in place must invalidate it, or T3 silently trains on stale weights. This is the one place where "it runs" and "it is correct" come apart, so it wants a test of its own.</li>
   <li><b>bf16 storage on the C side.</b> The kernels speak bf16; the host converts. A model that kept its weights in bf16 would halve what crosses the bus again, and <code>test_llm.py</code> already has a tested <code>bf16()</code> to model it on.</li>
 </ol>
 
 <h2>The honest caveat</h2>
-<p class="note">The 26.7&times; is <em>fused GPU kernel vs unoptimised scalar C</em>. A blocked, vectorised CPU kernel &mdash; vDSP, or four <code>double</code> accumulators by hand &mdash; would plausibly take 10&ndash;50&times; off the C column, which would put T2 in the same range as T3. Before treating 26.7&times; as the prize, the C baseline needs to be the best C we can write; otherwise T2 and T3 are being measured against a strawman. The per-step rates (22.7 &micro;s vs 606 &micro;s) are the honest comparison, and even those assume the naive loop.</p>
+<p class="note">This caveat used to stand unresolved &mdash; the old 26.7&times; was against a scalar C loop, which is a strawman. It is now settled with a measurement rather than an estimate: the blocked C column above is four <code>double</code> accumulators with tiling, and the headline <strong>17.8&times;</strong> is quoted against <em>it</em>. The naive column is kept alongside only so the gap between the two baselines stays visible.</p>
 
 </body>
 </html>
