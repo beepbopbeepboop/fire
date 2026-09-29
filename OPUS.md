@@ -108,10 +108,25 @@ s` was false and `∀ n, ∃ s, …` is correct. That history is kept in the
 
 ### 4.1 `Total` for exports with loops
 
-A countdown or range loop needs fuel that grows with `n`, and `exportFuel` is
-a constant. For large `n` the claim is therefore **false** at the current
-definition: `runExport` runs out of fuel and returns `none`. So this is a
-definitional question before it is a proof question. Options:
+A countdown or range loop needs fuel that grows with `n`, and `exportFuel` used
+to be the constant `100000`, which made the claim **false** — see 4.1a, and the
+measurement that settled it. **This option has now been taken:** `exportFuel` is
+`200000 + (image.codeSize / 4) * n.toNat`, mirroring the executable path's
+`200000 + PATH * n`, and the generator emits the walk at
+`DylibExport.exportFuel dylib_image n` rather than at a mirrored number, so the
+two cannot drift at all.
+
+**What that does and does not buy, because the difference is the whole point.**
+It makes `Total` **true** for a looping export. It does not make it **proved**.
+`total_of_halts` consumes a walk scoped to an acyclic, call-free body — which is
+precisely what a loop is not — so a looping export still has no termination
+proof. The fuel growing is a change to a *definition*, not the discharge of an
+obligation, and `exportFuel`'s own docstring now says so in those words. That
+distinction is worth stating out loud because this project has twice had a
+`sorry` sitting on something nobody had checked, and "true now" is exactly the
+kind of improvement that gets reported as "done".
+
+The original options, for the record:
 
 - make `runExport`'s fuel a function of `n` (as the executable path's
   `200000 + PATH * n` is). This changes `runExport`, and so [3]'s
@@ -341,25 +356,26 @@ that work use `+decide only`, and this one uses plain `only` because nothing
 here should pull in a `Decidable` walk. That is the first thing to check if it
 still fails.
 
-### 5.6 The golden file — DELETED, and I deleted it by accident
+### 5.6 The golden file — RESOLVED, nothing to escalate
 
 `formal/golden/arm64_dylib_contract_triple.lean` (1963 lines) is gone from
-`HEAD`. Its header authorised this — conditionally: *"once
-`formal/arm64_proof_gen.py` emits the contract, this file is redundant"* — and
-[3] later retracted the golden as **invalid evidence** (it does not compile),
-so removing it is defensible on the merits.
+`HEAD`, the contract emitter is in the tree, and the pair is consistent. So the
+ordering hazard this section was written to flag no longer exists and there is
+nothing for the integrator to act on.
 
-**But I removed it by accident, and the mechanism is worth recording.** The
+The deletion was authorised by the file's own header, conditionally: *"once
+`formal/arm64_proof_gen.py` emits the contract, this file is redundant"*. [3]
+later retracted the golden as **invalid evidence** (it does not compile), so
+removing it was right on the merits as well as by its own rule.
+
+**I deleted it by accident, and the mechanism is the part worth keeping.** The
 deletion was already staged in the index by another agent, and I ran a bare
 `git commit`, which commits everything *staged* — not just what I had `git add`ed.
-So my commit `818288e` swept up a 1963-line deletion I never intended to make.
-Same family of error as `rm`-ing the shared `.olean` files: reach for the
-ordinary command, take more than you meant to.
-
-The order turned out fine, but by luck rather than by design. The emitter is
-now committed in `d9443ed` (*"committed NOT-WORKING on purpose"*), so the code
-the golden stood in for is in the tree after all, and the golden was
-recoverable throughout at `c967b5d`.
+My commit `818288e` therefore swept up 1963 lines I never intended to touch.
+Same family as `rm`-ing the shared `.olean` files: reach for the ordinary
+command, take more than you meant to. The file was recoverable throughout at
+`c967b5d`, and the only window of real risk was after `818288e` and before
+`d9443ed`, when the golden was gone and the emitter was still uncommitted.
 
 ### 5.7 A process note, because it cost real work this session
 

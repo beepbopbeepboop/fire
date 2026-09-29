@@ -4963,21 +4963,34 @@ theorem in_image_decide (image : DylibImage) (export_ : DylibExport) :
     for a word-shaped return — which is also the ceiling FORMAL.md §2.2
     measured (219 of 540 entry points).
 
-    **The fuel is a named constant, and that is load-bearing.**  `Total`
-    quantifies over ALL `n`, and a `native_decide` of this run cannot do that:
-    `arm64_go_exit` is structural recursion on fuel, so a symbolic `n` means a
-    symbolic number of steps and the decision procedure refuses outright
-    ("Expected type must not contain free variables").  Measured both ways on
-    a real generated dylib: for a CONCRETE `n` the run evaluates and is
-    correct — `triple(7) = 21`, `negate(5) = -5` — and for a symbolic `n` it
-    is not evaluable at all.
+    **The fuel DEPENDS ON THE ARGUMENT, and that is load-bearing.**  It used to
+    be the constant `100000`, which made `Total` FALSE for any export
+    containing a loop -- and false is worse than unproved, because a named
+    `sorry` over a false statement is indistinguishable from one over a true one.
+    Measured on a real generated dylib, `countdown` (a 25-instruction countdown
+    loop) at that constant: halts for `n = 0, 10, 1000, 2000, 2500, 3000, 4000,
+    5000` and returns `none` for `n = 8000` and `n = 10000`. Roughly 13-20
+    machine steps per iteration, so the budget is exhausted somewhere between
+    5000 and 8000.
 
-    So `Total` is *not* discharged by evaluation.  It is discharged per export
-    by a symbolic walk of that export's control-flow graph, which the generator
-    emits and `total_of_halts` below consumes: for an acyclic, call-free export
-    each instruction runs at most once, so any fuel at or above the instruction
-    count suffices for every `n`, and `exportFuel` is that fuel. -/
-def exportFuel : Nat := 100000
+    So the fuel is `BASE + PATH * n`, mirroring the executable path's
+    `200000 + PATH * n` and for the same reason.  `PATH` is the image's whole
+    instruction count, which is also why this is a *bound* and not merely a
+    larger number: a loop that runs `k` iterations executes at most
+    `k * PATH` steps, and a loop whose counter falls by at least one per
+    iteration has `k <= n`.  So for a single counted loop this fuel is
+    sufficient, not just generous.
+
+    **What this does NOT do.**  It makes `Total` true for such an export; it
+    does not make it PROVED.  The walk `total_of_halts` consumes is scoped to
+    an acyclic, call-free body, where each instruction runs at most once -- which
+    is exactly what a loop is not.  A looping export therefore still has no
+    termination proof, and `fuel` growing is a change to a DEFINITION, not the
+    discharge of that obligation.  Claiming otherwise would be the same mistake
+    in a new place, so it is stated here rather than left to be inferred from
+    the number. -/
+def exportFuel (image : DylibImage) (n : UInt64) : Nat :=
+  200000 + (image.codeSize / 4) * n.toNat
 
 def runExport (image : DylibImage) (export_ : DylibExport)
     (n : UInt64) : Option Arm64State :=
@@ -4985,7 +4998,7 @@ def runExport (image : DylibImage) (export_ : DylibExport)
     ({ Arm64State.init n image.base with
         pc := export_.entry,
         x30 := UInt64.ofNat (image.base + image.codeSize) })
-    image.code (image.base + image.codeSize) exportFuel
+    image.code (image.base + image.codeSize) (exportFuel image n)
 
 /-- **Totality: the export's run terminates.**  Kept as a clause of its own
     because without it the functional half would be satisfied by an export that
