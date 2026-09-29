@@ -205,13 +205,28 @@ An ordinary int-list subscript still emits the `mojo_list_get_int` it
 always did: the boxed read is chosen by a compile-time marker
 (`gen._maybe_kinds_vals`), not by changing the general case.
 
-Six new regression tests in `test_gimple_runner.py`:
+Seven new regression tests in `test_gimple_runner.py`:
 `gimple_struct_mixed_reads_survive_a_derivation`,
 `gimple_struct_mixed_reads_without_a_static_index`,
 `gimple_struct_mixed_reads_survive_a_function_boundary`,
 `gimple_heterogeneous_list_literal_keeps_each_slot`,
-`gimple_struct_class_attribute_handle_format_known`, and the extended
+`gimple_struct_class_attribute_handle_format_known`,
+`gimple_heterogeneous_element_arithmetic_unboxes`, and the extended
 `gimple_struct_uniform_formats_still_uniform`.
+
+### The one divergence this bought, and why it is the right way round
+
+Arithmetic on a boxed element is taken apart as a DOUBLE, always: a box
+only ever holds a float, and in Python a float operand makes the whole
+operation a float one. So a boxed read whose runtime slot turns out to be
+an **int** (`t[k] + 1` with `k` a computed 0) is promoted, and the result
+is float-typed — the same number, printed `2.0` where CPython prints `2`.
+Choosing per slot would need a runtime branch around the whole operand
+dispatch, and a wrong value traded for a wrong format is the right way
+round. A read with a *compile-time* index takes no box at all, so `t[0] + 1`
+is exact. Asserted (both halves) in `test_gimple_runner.py`'s
+`gimple_heterogeneous_element_arithmetic_unboxes` so it cannot rot
+unnoticed.
 
 ### What is still missing, and where it is written down
 

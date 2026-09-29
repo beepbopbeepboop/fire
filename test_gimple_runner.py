@@ -2999,6 +2999,42 @@ fn main():
         print(z)
 """, "1\n1.0\n1.0\n1\n1\n1.0\n1\n1\n1.0\n")
 
+    # Arithmetic on an element read out of a heterogeneous container. The
+    # read produces a BOX (a heap cell, because a float has no int64_t
+    # spelling), so the operand has to be taken apart before it can be added
+    # to or multiplied by. Before this, `t[i] + 1` printed 4353979905 — the
+    # box's own address, which is a silent wrong value and the outcome this
+    # repo ranks above every other. `_to_int64` is the hook for an integer
+    # context; `_lower_binary` always unpacks as a DOUBLE, because a box only
+    # ever holds a float and in Python a float operand makes the whole
+    # operation a float one.
+    #
+    # The sixth and ninth lines are the ONE recorded cost of "always a
+    # double", asserted here rather than left to rot: a boxed read whose
+    # runtime slot turns out to be an INT gets promoted, so its arithmetic
+    # result is float-typed and prints `2.0` where CPython prints `2` — the
+    # same number, a different format. Choosing per slot would need a
+    # runtime branch around the whole operand dispatch, and a wrong value
+    # traded for a wrong format is the right way round. Line seven is the
+    # control: a read with a COMPILE-TIME index takes no box at all, so
+    # `t[0] + 1` is exact.
+    test_gimple_stdout("gimple_heterogeneous_element_arithmetic_unboxes", """\
+fn main():
+    var t = struct.unpack('<if', struct.pack('<if', 1, 1.5))
+    var i = 1
+    print(t[i])
+    print(t[i] + 1)
+    print(t[i] * 2.0)
+    print(str(t[i]))
+    print(f"{t[i]}")
+    var k = 0
+    print(t[k] + 1)
+    print(t[0] + 1)
+    var a = [1, 2.5]
+    for x in a:
+        print(x + 1)
+""", "1.5\n2.5\n3.0\n1.5\n1.5\n2.0\n2\n2.0\n3.5\n")
+
     # The same limit one level lower, without `struct` at all: a
     # HETEROGENEOUS LITERAL. `[1, 2.5]` used to append the int through the
     # list-wide 'double' suffix, so the literal printed `[1.0, 2.5]` and
