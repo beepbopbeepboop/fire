@@ -4676,6 +4676,68 @@ def gen_module_impl(self, stmts):
         else:
             d[pname] = (e, ne)
 
+    def _literal_arg_elems(a):
+        """`(elem, nested)` C types for a container LITERAL passed as a call
+        argument, or None when `a` is not one whose element type is statically
+        decidable. The same two answers `note_list_literal` inside
+        `_scan_container_elems` derives for a literal bound to a local, so the
+        two observation sources of this table cannot drift: a list-of-lists is
+        `('MojoList *', <inner elem>)`, anything else is `(<joined elem>,
+        None)`.
+
+        Why this exists at all: `_param_elem_types` was fed ONLY from an
+        argument that is a bare identifier naming a tracked local, so
+        `show(xs)` inherited xs's element type while `show([1.5, 2.5])` —
+        the SAME call with the list written in place — inherited nothing. The
+        callee then read every element through `mojo_list_get_int`, and
+        `print(r)` emitted the floats' raw IEEE-754 bit patterns with exit 0.
+        See bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md
+        ("Item 8")."""
+        if not isinstance(a, ListExpr):
+            return None
+        els = a.elements
+        if not els:
+            return None
+        if isinstance(els[0], ListExpr):
+            return ('MojoList *', self._infer_list_elem_type(els[0].elements))
+        return (self._infer_list_elem_type(els), None)
+
+    def _informative_elem_ctype(e):
+        """True when an observed element ctype tells the callee something the
+        `int64_t` default would not already do.
+
+        `int64_t` is this table's "no information" answer, not a fact about
+        the value: the consumer seeds `_elem_types[bare] = e` and every
+        absent entry falls back to exactly the same `int64_t`
+        (`_elem_of`), so an int list is read identically with or without a
+        contract. Recording it as EVIDENCE can therefore only ever destroy
+        information — it collides with a `char *`/`double` observation from a
+        sibling call site and turns a resolvable param into
+        `(None, None)` = unknown = `int64_t` again, which is what the int
+        observation alone already gave. So a literal argument contributes its
+        element ctype only when it is one the default gets wrong.
+
+        Deliberately NOT applied to the bare-identifier branch below, which
+        predates this: dropping `int64_t` there flips which side of a
+        genuinely-heterogeneous param (`f(int_list)` and `f(str_list)` from
+        different call sites) reads correctly, and that is a coin flip either
+        way — not worth re-rolling real stdlib code on while the breadth
+        number is unmeasured."""
+        return e != 'int64_t' and e != ''
+
+    def _note_literal_arg_elems(callee, pname, a):
+        """Record `pname`'s element ctype from a container-literal argument.
+        No-op unless the literal's element ctype is one the `int64_t` default
+        gets wrong (see `_informative_elem_ctype`)."""
+        pair = _literal_arg_elems(a)
+        if pair is None:
+            return
+        e = pair[0]
+        ne = pair[1]
+        if not _informative_elem_ctype(e):
+            return
+        _record_param_elem(callee, pname, e, ne)
+
     _fn_by_name: dict = {}
     for _fbn_s in all_functions:
         if isinstance(_fbn_s, FunctionDef):
@@ -4703,6 +4765,8 @@ def gen_module_impl(self, stmts):
                 if isinstance(a, IdentExpr) and _as_str(a.name) in elem:
                     _record_param_elem(callee, pnames[i],
                                         elem[_as_str(a.name)], nested.get(_as_str(a.name)))
+                else:
+                    _note_literal_arg_elems(callee, pnames[i], a)
                 st = _arg_scalar_type(caller_name, a)
                 if st:
                     # Split the chained `_scalar_obs.setdefault(callee, {})
@@ -4725,6 +4789,19 @@ def gen_module_impl(self, stmts):
                     _sp_inner = _struct_obs.setdefault(callee, {})
                     _sp_set = _sp_inner.setdefault(pnames[i], set())
                     _sp_set.add(_gmi_as_str(spt))
+            # Keyword arguments name the parameter directly, so the element
+            # contract reads them the same way — `show(data=[1.5, 2.5])` is
+            # the same call as `show([1.5, 2.5])` and used to inherit exactly
+            # as little. Only the literal branch is added here: the scalar and
+            # struct-pointer observations above are a separate pre-existing
+            # contract with its own coverage, and widening those is not this
+            # change's business.
+            for _kw in (getattr(call, 'kwargs', None) or []):
+                _kwn = _as_str(_kw[0])
+                for _ki in range(len(pnames)):
+                    if pnames[_ki] == _kwn:
+                        _note_literal_arg_elems(callee, _kwn, _kw[1])
+                        break
 
     # A container param whose ELEMENTS the callee `isinstance()`-checks
     # against struct types (`for s in stmts: if isinstance(s, FunctionDef)`)
