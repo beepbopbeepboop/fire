@@ -133,11 +133,18 @@ landed, all with regression coverage in `test_generators.py` (interpreter),
   `hard/CODEGEN_bytes_silent_wrong_values.md` had **items 1-5 and 6b closed
   2026-09-27** (plus three more wrong values found on the way:
   `partition`'s swapped no-match arms, its empty-separator case, and four
-  `str` predicates that did not exist and answered `0`), and keeps only
-  **item 6a**: `partition`/`rpartition`'s container TYPE, which cannot be
-  fixed without introducing a tuple type — this runtime has none, and a
-  tuple literal is a marked `MojoList`. Two test expectations that asserted
-  the CPython-wrong answers were corrected, not worked around.
+  `str` predicates that did not exist and answered `0`), and kept only
+  **item 6a**: `partition`/`rpartition`'s container TYPE.
+  **CLOSED AND REMOVED 2026-09-29.** Item 6a's stated blocker — "which
+  cannot be fixed without introducing a tuple type — this runtime has none,
+  and a tuple literal is a marked `MojoList`" — was **false**: a tuple type
+  is exactly that marked `MojoList`, already used at eight construction sites
+  and already read by `isinstance(x, tuple)`. The marker was decorative
+  (read by `repr` only), so the fix was to make it load-bearing, not to add a
+  container type. Twelve further silent wrong values in the
+  bytes/memoryview/`str` surface were found by a differential sweep in the
+  same pass and fixed. Two test expectations that asserted the CPython-wrong
+  answers had been corrected earlier, not worked around.
 - `hard/CODEGEN_coro_nested_async_closure_capture.md` — landed, report removed 2026-09-26; live residue is in `hard/CODEGEN_coro_captured_param_capture_crashes.md` — whose item 1 (capturing an enclosing function's *parameter* crashed the compiler) was **fixed 2026-09-27**, leaving items 2 (the regression file still orphaned at 0/9, one case still asserting the pre-Increment-E answer) and 3 (a capture-independent `async for`-over-a-generator gap) open in that same doc.
 - `COMPILE_FAIL_Tools_build_umarshal.md` and `COMPILE_FAIL_Tools_build_deepfreeze.md` — compile blockers resolved; remaining items are runtime/adjacent and need a new doc if pursued.
 - `hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md` — excluded from this queue because the documented candidate optimizations are unsafe without a new design.

@@ -26,7 +26,6 @@ Last updated 2026-09-26.
 | `CODEGEN_coro_captured_param_capture_crashes.md` | capturing an enclosing function's *parameter* in a nested `async def` raised `ValueError` in the compiler. **FIXED 2026-09-26** — and not with the doc's one-liner: the capture plan is now a named `_Capture` class with one constructor, because the positional 3-tuple that three passes unpacked blindly is what caused the crash. Items 2/3 remain: a cross-closure `async for` neighbour shape that is neither refused nor correct, and a nested async generator driven by `async for` in its own enclosing function. |
 | `CODEGEN_coro_yield_kind_unresolved_callsite.md` | one untypable call site silently re-poisoned the yield slot to `int64_t`. **FIXED 2026-09-26** for cases 1–7, and *correct* rather than refused — the evidence was always reachable, it just was not read. The doc's own docstring parenthetical is implemented, plus six sound widenings (any-annotation is not a hole; a bare identifier bound to a list answers `('list', k)`; `if caller_env:` was truthiness where membership was meant; ordinary `def`s are now scanned too). One shape has no reachable evidence and must stay refused. Case 8 reclassified: it is the ordinary loop lowering, not this subsystem. |
 | `CODEGEN_method_call_on_struct_param_mistyped.md` | a method call on a struct passed as a free-function *parameter* was mistyped by method name alone — 6 crashes plus 2 silent wrong values. **FIXED 2026-09-26** for everything it owns: 8/8 names now correct, via a new cross-call contract in Pass 1.3d plus three supporting fixes. The doc's suggested refusal was not needed; the call site knows the type. One cross-module row remains and is *not* this bug in link mode — `module.Class(...)` construction is unresolved on every path, the larger gap named above. |
-| `CODEGEN_bytes_silent_wrong_values.md` | six `bytes`/`memoryview` paths returning plausible wrong values with exit 0. **5 of 6 FIXED 2026-09-26**, plus several found alongside: a bytes fill char that emitted a heap-address byte, empty-bytes predicates, `memoryview.readonly`, `dict.get`/`pop` on a bytes key, a loop-target rebind that was never bytes-specific, and swapped `partition` arms, a non-raising empty separator, `center` padding on the wrong side and a `width` keyword read as the fill. `isprintable`/`isnumeric` were **removed from `bytes`** (CPython raises; only the buggy code dissented) and added to `str`, where they answered a silent `0`. Two enshrined-wrong test expectations were corrected. Residue: `partition` returns a `MojoList *` because **this runtime has no tuple type at all** — not a bytes fix. |
 | `CODEGEN_struct_kwargs_and_inline_unpack.md` | `struct.*` keyword arguments were silently dropped, and mixed int+float `unpack` returned raw IEEE-754 bits. **BOTH FIXED 2026-09-26.** Keywords are *honoured* rather than refused, bounded to the three names CPython actually accepts (measured by brute force over the real module), including its error-message precedence. The doc's mechanism for the unpack half was wrong: it is not about locals — of six consuming spellings exactly one worked, and the literal-index subscript was the survivor. Residue: a read with no compile-time slot index still needs one C type for a heterogeneous value, which is the runtime's missing container tag. |
 | `CODEGEN_generator_lambda_expr_unsupported.md` | **rewritten 2026-09-26: the recorded residue was stale.** Escaping/rebound capturing lambdas are CLOSED — they take a heap env, and the escape analysis now only picks between two correct lowerings. What remains is the **variadic** shape, and it is a call-site SIGSEGV rather than a lost capture: the lifted definition is correct (`int64_t f (MojoList * a)`) but the call site passes loose args positionally as scalars and never packs the list, so the callee dereferences address 4. Three corpus sites. Still excluded: capturing lambdas inside a coroutine body. |
 | `COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` | **corrected 2026-09-26: both of the doc's conclusions were wrong.** The real file is on disk, and rebuilding the audit against it (every earlier reconstruction had dropped the kw-only callable-parameter indirection) shows **4 of the 6 shapes the doc called "WORKS" are still refused**. The real blocker is *invoking a kw-only param as a callee*, the same missing callable-value representation the lambda doc names, from a different direction. Its shape-5 mapping is RETRACTED: that shape is refused outright, so it never witnessed the `value_ctype` bug at all. |
@@ -45,11 +44,33 @@ a reasonable argument and it was wrong, for a reason the verification pass
 made concrete: on 2026-09-26 two closed reports were re-tested and **both
 still had live, silent, wrong-value residue** that their own text did not
 have. Keeping the file did not prevent that; it hid it, behind a CLOSED
-banner that everyone had stopped reading. The residue is now two new OPEN
-docs above (`CODEGEN_bytes_silent_wrong_values.md`,
+banner that everyone had stopped reading. The residue became new OPEN docs
+(`CODEGEN_bytes_silent_wrong_values.md` and
 `CODEGEN_struct_kwargs_and_inline_unpack.md`), which is the honest home for
 it. Mechanistic knowledge that still matters lives in the source comment
 that explains the mechanism, not in a doc about a bug that no longer exists.
+
+**The bytes doc followed the same arc, one round further, and is now gone
+too.** `CODEGEN_bytes_silent_wrong_values.md` sat in the PARTIAL table below
+with a single named residue — `partition`'s container TYPE — and the reason
+it gave for not fixing it was that "this runtime has no tuple type at all,
+which is a change to every container lowering in the backend". Re-tested on
+2026-09-29, that premise was **false**: a tuple type has existed for some
+time as the `mojo_mark_as_tuple` marker, used at eight construction sites
+and already read by `isinstance(x, tuple)`. The marker was simply not
+*load-bearing* — read by `repr` and nothing else — so a tuple was a list that
+printed like one. Making the marker load-bearing closed the residue and,
+while in the same helper family, turned up two more silent wrong values the
+doc had not: `l == m` was a raw C **pointer** comparison (identity, not
+value) and `list.count(x)` had no lowering at all and answered 0. A
+differential sweep of the bytes/memoryview/`str` surface then found twelve
+more, plus a bytes-literal decoder missing `\a`, `\b`, `\f` and `\v`. The
+doc is removed, per this file's own rule.
+
+This is the second time a residue's stated reason for existing was stale
+rather than the residue itself, which is worth more than the two bugs: it
+means **a doc's explanation of why it is still open deserves the same
+suspicion as its explanation of what is broken.**
 
 Verified-closed and removed on 2026-09-26 — eight reports. **Every single
 one still had live residue when re-tested**, so each removal also produced a
@@ -57,7 +78,7 @@ new OPEN doc above rather than losing the residue:
 
 | removed | residue now tracked in |
 |---|---|
-| `CODEGEN_bytes_value_type.md` | `CODEGEN_bytes_silent_wrong_values.md` |
+| `CODEGEN_bytes_value_type.md` | (both now closed and removed) |
 | `CODEGEN_struct_module.md` | `CODEGEN_struct_kwargs_and_inline_unpack.md` |
 | `CODEGEN_struct_format_shadowed_by_format_attribute.md` | `CODEGEN_return_type_of_module_constructor_result_erased.md` |
 | `CODEGEN_coro_nested_async_closure_capture.md` | `CODEGEN_coro_captured_param_capture_crashes.md` |
