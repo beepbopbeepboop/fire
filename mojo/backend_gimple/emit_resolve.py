@@ -509,6 +509,17 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen.struct_boxed_fields = gen.struct_boxed_fields
                 temp_gen.struct_bool_fields = gen.struct_bool_fields
                 temp_gen._struct_name_owner = gen._struct_name_owner  # share: cross-module same-name collision guard
+                # The module-qualified struct IDENTITY that guard feeds: which
+                # C name each colliding StructDef is emitted under, and which
+                # module owns it. Shared for the same reason — a sibling
+                # module's temp_gen must classify the SAME StructDef node
+                # identically, or the two halves of one class would disagree
+                # about its own name. See GimpleGen._struct_cname_by_id.
+                temp_gen._struct_cname_by_id = gen._struct_cname_by_id
+                temp_gen._struct_cname_of_name = gen._struct_cname_of_name
+                temp_gen._struct_cname_by_home = gen._struct_cname_by_home
+                temp_gen._struct_qualified_cnames = gen._struct_qualified_cnames
+                temp_gen._struct_home_by_id = gen._struct_home_by_id
                 temp_gen._global_var_types = gen._global_var_types
                 temp_gen._global_c_decl_types = gen._global_c_decl_types
                 # share: definition-side free-function signature truth —

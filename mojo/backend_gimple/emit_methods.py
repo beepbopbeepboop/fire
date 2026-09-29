@@ -46,6 +46,11 @@ from mojo.middle.methods_shared import *  # noqa: F401,F403
 from mojo.middle.methods_shared import (
     _SELFHOST_SIBLING_MODULE_PREFIXES, _as_str, _gmm_callexpr_node, _is_selfhost_sibling_alias, _sms_key
 )
+# Module-qualified struct identity — the construction-site resolution for the
+# same-bare-name collision fix. See the qualified-constructor case in
+# `_lower_method_call` below and `_struct_cname_by_id` in
+# GimpleGen.__init__.
+from mojo.middle.funcs_shared import _ctor_cname_via_module, _resolve_struct_cname
 
 # Sentinel for "this api entry has no `receiver` key at all", so a
 # missing key is distinguishable from a recorded empty string (which is a
@@ -1111,12 +1116,21 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # later `x.widgetName` raised a genuine runtime `AttributeError`. See
     # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md
     # §4 ("module.Class(...) construction is unresolved on every path").
+    #
+    # The receiver is the disambiguating signal for a same-bare-named class:
+    # resolve the member through the MODULE it was reached through, so
+    # `mod_b.Dialog(...)` constructs mod_b's `Dialog` and not whichever of two
+    # same-named classes won the bare-name race. With nothing colliding this
+    # returns the bare name verbatim, i.e. the pre-existing behaviour exactly
+    # (bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md).
     if (isinstance(func.obj, gimple_ctypes.IdentExpr)
             and func.obj.name in gen.imported_symbols
             and func.obj.name not in gen.struct_field_types
             and func.member in gen.struct_field_types
             and func.member not in gen.var_types):
-        return gen._lower_struct_constructor(func.member, node.args, node.kwargs)
+        return gen._lower_struct_constructor(
+            _ctor_cname_via_module(gen, func.obj.name, func.member),
+            node.args, node.kwargs)
 
     # `g.send(v)` — resuming a compiled generator with a value for the
     # `yield` it is suspended on: the rest of Python's generator protocol

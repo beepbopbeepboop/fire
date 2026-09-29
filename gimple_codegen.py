@@ -1496,6 +1496,44 @@ class GimpleGen:
         # from a fresh, empty "have I seen this name" view and merge its own
         # fields in regardless of what an earlier temp_gen already decided.
         self._struct_name_owner: dict = {}
+        # id(StructDef) -> the C-level identity ("cname") this struct is
+        # emitted under, and the whole-program maps derived from it. The C
+        # IDENTITY of a struct is the single string every consumer keys on:
+        # `struct_field_types`, `_class_attrs`, the `typedef struct X` name,
+        # the `_alloc_X`/`_mojo_repr_X` helper names, and the `{cname}_
+        # {method}` C symbols. Historically that string was just
+        # `StructDef.name`, so two same-bare-named classes in different
+        # modules collided on it (see
+        # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md
+        # — the loser's field table, its `self->field` accesses and its
+        # `__init__` call sites all resolved against the WINNER's, so a `str`
+        # field was silently stored into the winner's `int64_t` slot). These
+        # maps ARE that identity, made explicit:
+        #   _struct_cname_by_id     id(StructDef) -> cname
+        #   _struct_cname_of_name   bare name -> the OWNER's cname (the
+        #                          first-wins struct, so a name that never
+        #                          collided resolves to the bare name and
+        #                          every non-colliding struct's output is
+        #                          byte-identical to what it was before)
+        #   _struct_cname_by_home   "home_module::Name" -> cname, the
+        #                          MODULE-QUALIFIED lookup a construction /
+        #                          field-access site uses to tell two
+        #                          same-named classes apart
+        #   _struct_qualified_cnames  the cnames that are NOT some struct's
+        #                          own bare name; they already carry their
+        #                          module prefix, so `_struct_method_qualifier`
+        #                          must answer '' for them
+        #   _struct_home_by_id      id(StructDef) -> the module that module's
+        #                          own gen_module call compiled it in. The
+        #                          collision TEST: two same-named StructDefs
+        #                          collide only when their homes DIFFER (same
+        #                          home is one file redefining a class, which
+        #                          the bare-name first-wins already models).
+        self._struct_cname_by_id: dict = {}
+        self._struct_cname_of_name: dict = {}
+        self._struct_cname_by_home: dict = {}
+        self._struct_qualified_cnames: set = set()
+        self._struct_home_by_id: dict = {}
         # struct name -> [base class names]; populated per gen_module call
         # (see the struct-bases scan below). Default empty here so any method
         # lookup that runs before that scan (or on a GimpleGen instance that
