@@ -1,5 +1,24 @@
 INTERFACE REQUEST  from=[2]  to=integrator  file=formal/lean.py
 
+> **RESOLVED — RETIRABLE.** Both items are answered and the answers are in the
+> tree, which is FORMAL.md §11.5's test for a request that no longer exists:
+>
+> * **§1, `LIBRARY_MODULES`** — `formal/lean.py` now reads
+>   `("ProofLib", "X86", "work", "Refine", "Contracts")`, and
+>   `lib/Contracts.olean` builds. The contract emitter's `import Contracts`
+>   works, so this stopped blocking [3] and me.
+> * **§2, `Total`'s shape** — `∀ n s, … = some s` became `∀ n, ∃ s, …`, with the
+>   false-claim diagnosis and the toy that refutes it recorded in
+>   `DylibExport.Total`'s own docstring. Nothing in [3]'s files needed adapting.
+>
+> Nothing here is only in this file: the durable content is §3's "a `sorry`
+> over a false statement is indistinguishable to every instrument we have",
+> which OPUS.md §4.1a now carries, and §4, which OPUS.md §2 supersedes with the
+> measurement that killed the route. **This file can be deleted in the merge
+> that closes the round.** I am not deleting it myself because it now carries
+> [3]'s supersession note below and destroying an edit I did not write is not a
+> call I should make unilaterally.
+
 Two items. The first is a decision that is yours; the second is a heads-up
 about a downstream effect of work already committed.
 
@@ -86,7 +105,13 @@ it is not specific to `Total`.
 
 ## 4. Not a request, just a boundary note
 
-`arm64_branchy` is landed in `lib/ProofLib.lean` as a `def` carrying an explicit
+> **Superseded (2026-09-28).** `arm64_branchy` and the whole
+> `dylibExport_total_of*` route have been deleted. Their hypotheses quantify
+> over every machine state, and that makes them false for any image containing
+> a `ret`, which is every export. `Total` is now proved per export by the CFG
+> walk (`DylibExport.total_of_halts`). See `OPUS.md` §2.
+
+`arm64_branchy` WAS landed in `lib/ProofLib.lean` as a `def` carrying an explicit
 docstring warning that it is **derived by reading the decoder and is not
 verified against it**. Nothing should treat it as complete until the companion
 lemma lands; `OPUS.md` §6.1 has the decomposition and the exact obstruction. I
