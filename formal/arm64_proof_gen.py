@@ -3805,7 +3805,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                            code_name: str = None, sr_name: str = None,
                            exit_at: int = None, thm: str = None,
                            prop: str = None, no_change: bool = False,
-                           halt_only: bool = False, fuel: int = None):
+                           halt_only: bool = False, fuel: int = None,
+                           fuel_lean: str = None):
     """CompCert-style universal e2e driven by the control-flow graph.
 
     The generator is thin: it emits, per basic block, wrapper defs + a
@@ -4116,6 +4117,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
              else f"(200000 + {_PATH0} * n.toNat)")
     if fuel is not None:
         FUEL0 = f"({fuel})"
+    if fuel_lean is not None:
+        # The emitted fuel is the library's own function, never a number, so it
+        # cannot drift from `runExport`'s.  `fuel` above stays a python int for
+        # the budget CHECK, which is about the walk's own step accounting and is
+        # separate from what the theorem says the run's fuel is.
+        FUEL0 = fuel_lean
 
     def _pc_fact_lookup(sc: str):
         sc = sc.strip()
@@ -7621,11 +7628,18 @@ def _lean_export_id(name: str) -> str:
     return ident
 
 
-# `DylibExport.exportFuel` in lib/ProofLib.lean.  Mirrored rather than read,
-# and the mirror cannot drift silently: `DylibExport.total_of_halts` takes the
-# walk's theorem at `runExport`'s own type, so a different number here is a
-# type error in the generated proof, not a proof about a different run.
-_EXPORT_FUEL = 100000
+# The BASE of `DylibExport.exportFuel` in lib/ProofLib.lean, which is now
+# `BASE + PATH * n` (n-dependent, because a constant fuel makes `Total` FALSE for
+# any looping export -- measured: `countdown` returns `none` at n = 8000).
+#
+# The PATH half CANNOT be mirrored, because it is the image's own instruction
+# count, so it is not a constant here.  The no-silent-drift guarantee is instead
+# kept where it is actually checkable: `total_of_halts` takes the walk's theorem
+# at `runExport`'s own type, so if this base disagreed with the library's, the
+# generated proof would be a statement about a different run and Lean would
+# reject it.  Emitted fuel is written as `DylibExport.exportFuel dylib_image n`
+# -- the library's own function, not a number -- so the two cannot drift at all.
+_EXPORT_FUEL_BASE = 200000
 
 
 def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
@@ -7656,7 +7670,8 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
             fn=None, tw_extra="", tc={"typed": False, "vtypes": {}, "call_types": {}},
             cond_branches=set(), code_name="dylib_code", sr_name="dylib",
             frame={"func_end": func_end}, thm=f"{ident}_halts", prop="True",
-            no_change=True, halt_only=True, fuel=_EXPORT_FUEL)
+            no_change=True, halt_only=True, fuel=_EXPORT_FUEL_BASE,
+            fuel_lean="DylibExport.exportFuel dylib_image n")
     except (NotImplementedError, ValueError):
         walk = None
     if walk is None:
