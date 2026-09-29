@@ -1,14 +1,16 @@
-# A module-qualified call `mod.fn()` is refused, and the message tells you to write one
+# A module-qualified call `mod.fn()` was refused, and the message told you to write one — FIXED
 
-**Area:** CODEGEN (formal arm64 + x86-64; `formal/build.py`'s
-`check_module_symbols`). **Found while:** writing `struct.mojo` for the formal
-backend (worker `mod-struct`), which is the change that made
-`import struct` resolve — and so made this the next thing standing in the way
-of the seven files that use it.
+**Area:** CODEGEN (formal arm64 + x86-64): `formal/build.py`'s
+`check_module_symbols` and `load_dylib_manifests`. **Found while:** writing
+`struct.mojo` for the formal backend (worker `mod-struct`), which is the
+change that made `import struct` resolve — and so made this the next thing
+standing in the way of the seven files that use it.
 
-**Severity: a refusal, not a wrong answer** — which is the good case. It stops
-the build at a message a reader can act on. The problem is that the message
-names the wrong repair, and acting on it does not work.
+**Status: FIXED in the same branch that added `struct.mojo`** (both backends,
+by construction — the fix is in the shared front end, `formal/build.py`). The
+write-up below is kept whole because the two halves failed DIFFERENTLY and
+only measuring both showed that; the second one is the half a single-minded
+reading of the first would have got wrong.
 
 ## What I ran
 
@@ -29,9 +31,9 @@ which is reclaimed when the function returns. Give it a function (a
 `struct.fn()` call lowers) or write the value at the use site
 ```
 
-The advice in that message is exactly the program above. It does not lower.
+The advice in that message is exactly the program above. It did not lower.
 
-The other spelling of the same call, which the message does not mention, works:
+The other spelling of the same call, which the message did not mention, worked:
 
 ```
 $ cat AE.py
@@ -45,11 +47,11 @@ $ python3 fire.py build --formal --no-prove AE.py
 Built: AE.bin  [arm64/macho]
 ```
 
-So the module boundary works and `struct.pack` is exported and callable; what
-is refused is the SPELLING, and the diagnostic tells the reader to use the
-spelling that is refused.
+So the module boundary worked and `struct.pack` was exported and callable;
+what was refused was the SPELLING, and the diagnostic told the reader to use
+the spelling that was refused.
 
-## Why
+## Why — and why fixing only this was not enough
 
 `check_module_symbols` walks a function's `IdentExpr` nodes and refuses any it
 cannot place. A call's callee is excluded, because a callee names a symbol
@@ -63,70 +65,109 @@ callees = {id(c.func) for c in M.iter_nodes(fn.body)
 ```
 
 `struct.pack(...)` parses as `CallExpr(func=MemberExpr(obj=IdentExpr('struct'),
-member='pack'))`, so `c.func` is a `MemberExpr` and the root `IdentExpr` is not
-in the set. It then fails the placement test, `M.module_symbol('struct')`
-returns the `imported` symbol, and `model.module_global_refusal` produces the
-message. The refusal itself is CORRECT about the storage — the module object
-truly has nowhere to live — and wrong about the remedy, because the call never
-reads the module; it names a symbol the dylib exports.
+member='pack'))`, so `c.func` is a `MemberExpr`, the root `IdentExpr` is not
+collected, and the placement test refused it as a module-level name with no
+storage. The refusal is CORRECT about the storage — the module object truly has
+nowhere to live — and wrong about the remedy, because the call never reads the
+module; it names a symbol the dylib exports.
 
-The `dylib_syms` machinery downstream already handles the qualified name
-(`formal/arm64_codegen.py`'s `_callee_symbol` flattens `obj.method` to a dotted
-name, and `_dylib_syms.get(name, name)` rewrites it to the exporting library's
-spelling), so the half that would make this work is present and the half that
-refuses it is a missing case in one set comprehension.
+**Fixing only that is not enough, and this is the part worth keeping.** With
+the placement refusal gone, the same program failed differently:
 
-## What it costs, measured
+```
+build: the image would bind 1 symbol(s) that nothing provides: struct.pack.
+Nothing on this link line defines them … (Provider check: asked the C library
+(dlsym).)
+```
 
-Every one of the seven files the sweep reported as blocked on `struct` writes
-`struct.pack(...)` — module-qualified — and all seven are still refused:
+`struct.pack` genuinely is not on the link line — under that spelling. The
+dylib exports it as `struct_pack_02a19a`, and the manifest's `map` is keyed by
+the BARE name (`pack`), because that is how `from struct import pack` writes
+it. `_callee_symbol` flattens `obj.method` to the dotted name `struct.pack` and
+`_dylib_syms.get(name, name)` looks THAT up, so the rewrite found nothing, the
+BL kept pointing at `struct.pack`, and the image died in the loader on a symbol
+the library had defined all along.
+
+So the fix has two halves, in two files, and the second is only visible after
+the first:
+
+1. **`formal/build.py`, `check_module_symbols`** — collect the ROOT of a
+   module-qualified callee by node identity, so the root is a callee and not a
+   read. ROOT identity, and only for a call: the same name in a genuine read
+   position (`len(struct)`) is still refused, which is the point — a module
+   object has no storage either way, and what has no storage is the READ, not
+   the call through it.
+2. **`formal/build.py`, `load_dylib_manifests`** — register the
+   module-qualified spelling of each export alongside the bare one, so the
+   rewrite the codegen already performs has something to find:
+
+   ```python
+   amap.setdefault(e["name"], e["symbol"])
+   mod = e.get("module")
+   if mod and mod != e["name"]:
+       amap.setdefault(f"{mod}.{e['name']}", e["symbol"])
+   ```
+
+   `setdefault`, so a library that exports a function genuinely named
+   `struct.pack` keeps the bare name to itself.
+
+   The one place to put it: the two `dylib_syms` loops in `formal/build.py`
+   (the executable path and the dylib path) each rebuild the same map from
+   `d["map"]`, so the row belongs in the map they both read rather than in
+   either of them.
+
+## What it cost, and what it bought
+
+Before, all seven files the sweep reported as blocked on `struct` still were:
 
 ```
 $ python3 tools/formal_sweep.py formal/arm64.py formal/macho.py
 NOT-ANSWERABLE/HOST-IMPORT: formal/arm64.py  (build: encode_adrp: 'struct' is
   imported from `struct`, so it is a module-level name of another module. …)
-NOT-ANSWERABLE/HOST-IMPORT: formal/macho.py  (build: _build_segment_64: 'struct'
-  is imported from `struct`, …)
+not-answerable/host-import by module: struct (CPython stdlib) x2
 ```
 
-and the sweep still reports `not-answerable/host-import by module: struct x2`,
-which is now a FALSE statement: `struct` has Mojo source, is built into a
-dylib, and exports working `pack`/`unpack_from`/`pack_into`/`calcsize`
-(`test_struct_formal.py`, 142 checks, byte-for-byte against CPython). The
-module is not missing; the call spelling is.
+— a FALSE line, since `struct` had Mojo source, built into a dylib, and
+exported working entry points.
 
-## Next step
+After, `struct` is gone from the report entirely and the seven files fail on
+what is actually wrong with them:
 
-Add the member-callee case to `callees`, keyed by the ROOT of the callee chain
-rather than by the callee node — the same identity the `bracketed` map a few
-lines below already computes:
-
-```python
-callees = {id(c.func) for c in M.iter_nodes(fn.body)
-           if isinstance(c, F.CallExpr) and isinstance(c.func, F.IdentExpr)}
-# …and a MODULE-qualified callee, `mod.fn()`, whose root is the module name.
-# The call names an exported symbol; it does not read the module object, so
-# its root is a callee and not a read.
-for c in M.iter_nodes(fn.body):
-    if isinstance(c, F.CallExpr) and isinstance(c.func, F.MemberExpr):
-        root = c.func.obj
-        while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
-            root = root.obj
-        if isinstance(root, F.IdentExpr):
-            callees.add(id(root))
+```
+CODEGEN: formal/arm64.py  (build: encode_sxtb_wd_wn: '_SXT_BASES' is bound at
+  module level, and this path has no module-global storage for it: …)
+CODEGEN: formal/macho.py  (build: buf.extend() is a method call on a value, and
+  this backend lowers only append, close, write …)
+CODEGEN: formal/macho_linker.py  (build: build_macho_executable:
+  'NOEXTERN_ENTRYOFF' is bound at module level …)
+NOT-ANSWERABLE/HOST-IMPORT: formal/elf.py  (build: elf.py imports 'typing' …)
+NOT-ANSWERABLE/HOST-IMPORT: formal/x86_64.py  (build: x86_64.py imports 'enum' …)
+NOT-ANSWERABLE/HOST-IMPORT: formal/x86_64_decode.py  (… 'dataclasses' …)
+NOT-ANSWERABLE/HOST-IMPORT: test_x86_64_decode.py  (… 'sys' …)
 ```
 
-`model.module_global_refusal`'s "Give it a function (a `mod.fn()` call
-lowers)" sentence then becomes true, which is worth doing in the same commit:
-a diagnostic that recommends the refused form is worse than one that names no
-repair at all, because following it wastes a build.
+Three files now report a REAL construct finding in themselves — a
+module-global table, and a `list.extend` this backend does not lower — and the
+other four are blocked on `typing`/`enum`/`dataclasses`/`sys`, which are other
+workers' claims (`mod-os`, `mod-sys`). Neither is a fact about `struct`
+anymore. `test_struct_formal.py` covers the working spelling end to end:
+`import struct` + `struct.pack("<I", …)` builds, links, and returns CPython's
+bytes.
 
-Two things to settle before landing, both outside my claim area
-(`module:struct`), so I have not touched either:
+## Still owed, and by whom
 
-1. It is a change to `formal/build.py` and therefore owes a full `make gate`.
-2. A name that is BOTH a module and a local (`struct = 5` shadowing an
-   `import struct`) must keep refusing the read. The root-identity exclusion
-   above only exempts a name in callee position, so a real read elsewhere in
-   the same function is still refused — but that is worth a test rather than
-   an argument, and `test_formal_imports.py` is where it belongs.
+This is a change to `formal/build.py`, so it owes a full `make gate` — the
+integrator's job, not the worker's. Two things that gate should be asked to
+confirm, and one that a test now covers:
+
+- `_audit_bound_symbols` receives the enlarged `dylib_syms` map, so the
+  "every extern is accounted for" check now sees both spellings. That is
+  right — both name the same symbol — but it is the kind of change where a
+  count in a coverage report is a claim, so the sweep's own totals are worth
+  reading rather than assuming.
+- A name that is BOTH a module and a local (`struct = 5` shadowing an
+  `import struct`) must keep refusing the read. The root-identity exclusion
+  only exempts a name in callee position, so a real read elsewhere in the same
+  function is still refused — which is an argument, and
+  `test_formal_imports.py`'s `test_host_module_still_refused_despite_same_named_sibling`
+  is the natural home for the assertion that it is a fact.

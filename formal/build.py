@@ -3095,6 +3095,31 @@ def check_module_symbols(functions: list, structs_by_name: dict = None) -> None:
         callees = {id(c.func) for c in M.iter_nodes(fn.body)
                    if isinstance(c, F.CallExpr) and isinstance(c.func,
                                                                F.IdentExpr)}
+        # …and the ROOT of a module-qualified callee, `mod.fn()`, which is the
+        # same thing spelled with a dot.  `struct.pack(...)` parses as
+        # `CallExpr(func=MemberExpr(obj=IdentExpr('struct'), ...))`, so the set
+        # comprehension above misses it: `c.func` is a MemberExpr, the root
+        # `IdentExpr` is not collected, and the placement test below then
+        # refused it as a module-level name with no storage — a refusal whose
+        # own message said "give it a function (a `struct.fn()` call lowers)",
+        # recommending the very spelling that was refused.  The call does not
+        # read the module; it names an exported symbol, which is what
+        # `_callee_symbol` flattens it to and `_dylib_syms` rewrites to the
+        # exporting library's spelling.
+        #
+        # ROOT identity, and only for a call: the same name in a genuine read
+        # position (`len(struct)`) is still refused, which is the point — a
+        # module object has no storage either way, and what has no storage is
+        # the READ, not the call through it.
+        for c in M.iter_nodes(fn.body):
+            if not (isinstance(c, F.CallExpr)
+                    and isinstance(c.func, F.MemberExpr)):
+                continue
+            root = c.func.obj
+            while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
+                root = root.obj
+            if isinstance(root, F.IdentExpr):
+                callees.add(id(root))
         # A BRACKETED or DOTTED form has the same problem one level up:
         # `__mlir_attr[…]`, `__mlir_attr.`lit`` and
         # `__mlir_op.`lit.materialize_into`[value=v]` are a SubscriptExpr and/or
@@ -3624,6 +3649,18 @@ def load_dylib_manifests(dylib_paths: list) -> list:
         amap = {}
         for e in exports:
             amap.setdefault(e["name"], e["symbol"])
+            # …and the MODULE-QUALIFIED spelling of the same export, because
+            # that is how a caller writes it. `struct.pack(...)` reaches the
+            # codegen as the dotted name `struct.pack`, and without this row
+            # the rewrite found nothing, left the BL pointing at a symbol
+            # spelled `struct.pack`, and the image failed to load on a symbol
+            # the library had defined all along under `struct_pack_<hash>`.
+            # The row is only added when it cannot collide: a library that
+            # exports a function genuinely named `struct.pack` keeps the bare
+            # name to itself.
+            mod = e.get("module")
+            if mod and mod != e["name"]:
+                amap.setdefault(f"{mod}.{e['name']}", e["symbol"])
         out.append({
             "install_name": payload.get("load_path") or payload["dylib"],
             "map": amap,
