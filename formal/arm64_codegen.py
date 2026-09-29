@@ -2533,6 +2533,12 @@ class ARM64Codegen:
         bare name, which produced a BL against a symbol nothing defines and an
         image that died in dyld — the failure this whole mechanism was built to
         make a build-time error instead.
+
+        The module is identified by `model.dylib_export_module`, which knows
+        that a manifest keys a package submodule by its ABI prefix
+        (`os.path` → `os_path`) — which is what makes `os.path.join(...)`, the
+        spelling 532 measured call sites in this tree are written with, resolve
+        at all. The x86-64 emitter asks the same question the same way.
         """
         if "." not in name:
             return self._dylib_syms.get(name, name)
@@ -2541,8 +2547,9 @@ class ARM64Codegen:
         if entry is not None:
             return entry.get("symbol") or name
         module, _, leaf = name.rpartition(".")
-        if module in self._dylib_by_module:
-            have = sorted(self._dylib_by_module[module])
+        table = M.dylib_export_module(self._dylib_by_module, module)
+        if table:
+            have = sorted(table)
             shown = ", ".join(have[:8]) + (", …" if len(have) > 8 else "")
             raise CodegenError(
                 f"{name}(): `{module}` is a linked module but it exports no "

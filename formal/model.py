@@ -24,6 +24,7 @@ order in one place, not twice.
 """
 
 import os
+import re
 
 import fire_compiler as F
 
@@ -5266,6 +5267,40 @@ def dylib_export_return_kind(entry) -> str | None:
     return STR_KIND if ret.replace("const", "").strip() == "char *" else None
 
 
+def abi_module_name(dotted: str) -> str:
+    """A dotted module name in the ABI spelling its manifest records.
+
+    A manifest keys an export by the module's ABI PREFIX, and a prefix is a C
+    identifier, so the dots are flattened: `os.path` is `os_path`, and its
+    `join` exports as `os_path_join_2dbb98`. That is not a second naming
+    convention invented here — it is the same substitution the library's own
+    output name is built from (`formal/imports.py`'s `build_module_dylib`), so
+    the spelling a caller writes and the spelling the manifest is keyed by
+    differ in exactly one documented way, and this is that way.
+
+    The name is UNPRECATED: a top-level module's prefix is its own name, which
+    is what every non-package module in this tree has, so for them this is the
+    identity function.
+    """
+    return re.sub(r"[^A-Za-z0-9_]", "_", dotted or "")
+
+
+def dylib_export_module(by_module: dict, qualifier: str) -> dict:
+    """The export table of the module a dotted qualifier names, or `{}`.
+
+    Asked twice of every dotted callee — once for the export it names, and
+    once to tell "this module does not export that" apart from "that is not a
+    module at all", which are different answers with different consequences —
+    so both spellings are resolved here rather than at the two call sites.
+    """
+    if not qualifier:
+        return {}
+    table = by_module.get(qualifier)
+    if table is not None:
+        return table
+    return by_module.get(abi_module_name(qualifier)) or {}
+
+
 def dylib_export_lookup(by_name: dict, by_module: dict, callee: str):
     """The manifest export a callee name reaches, or None.
 
@@ -5274,13 +5309,14 @@ def dylib_export_lookup(by_name: dict, by_module: dict, callee: str):
     `dylib_syms` from and the two cannot answer differently about a bare name.
     `by_module` is `{module identity: {bare name: entry}}`, consulted only for
     a DOTTED callee, whose qualifier names the module that has to own the
-    export.
+    export. The qualifier is resolved by `dylib_export_module`, so a package
+    submodule (`os.path.join`) is found under the prefix its manifest uses.
     """
     if not callee:
         return None
     if "." in callee:
         module, _, leaf = callee.rpartition(".")
-        return (by_module.get(module) or {}).get(leaf)
+        return dylib_export_module(by_module, module).get(leaf)
     return by_name.get(callee)
 
 

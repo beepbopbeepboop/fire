@@ -3183,7 +3183,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # object has no storage either way, and what has no storage is the
         # READ, not the call through it.
         #
-        # Restricted to a root that is an IMPORTED MODULE NAME, which is what
+        # Restricted to a root that names an IMPORTED MODULE, which is what
         # makes it safe: a dotted call on anything else — a value's method
         # (`xs.append`), a struct's field (`h.f.g`), a module-global table with
         # no storage (`TABLE.lookup`) — keeps whatever answer it had, so this
@@ -3191,6 +3191,18 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # last of those would stop being the precise refusal it is and become a
         # failure from further in, naming the allocator instead of the
         # construct.
+        #
+        # A root that is, or is a PACKAGE PREFIX of, an imported name. Not a
+        # detail: `import os.path` binds the name `os` — that is what Python
+        # does, and `os.path.join(...)` is 532 of the measured `os` call sites
+        # in this tree — so the root of that chain is `os` while the only
+        # imported name is `os.path`. Matching for equality refused the one
+        # spelling a package module is written with, and a name that is a
+        # dotted PREFIX of an import cannot be a value: a local, a parameter
+        # and a module-global are all bare names, and nothing in this language
+        # puts an attribute on one. The dotted qualifier itself is resolved by
+        # module identity further in (`_extern_symbol`), where the manifest
+        # says whether that submodule exports the name at all.
         imported = imported_module_names or ()
         if imported:
             for c in M.iter_nodes(fn.body):
@@ -3200,7 +3212,9 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 root = c.func
                 while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
                     root = root.obj
-                if isinstance(root, F.IdentExpr) and root.name in imported:
+                if isinstance(root, F.IdentExpr) and any(
+                        root.name == m or m.startswith(f"{root.name}.")
+                        for m in imported):
                     callees.add(id(root))
         # A BRACKETED or DOTTED form has the same problem one level up:
         # `__mlir_attr[…]`, `__mlir_attr.`lit`` and
@@ -3731,18 +3745,6 @@ def load_dylib_manifests(dylib_paths: list) -> list:
         amap = {}
         for e in exports:
             amap.setdefault(e["name"], e["symbol"])
-            # …and the MODULE-QUALIFIED spelling of the same export, because
-            # that is how a caller writes it. `struct.pack(...)` reaches the
-            # codegen as the dotted name `struct.pack`, and without this row
-            # the rewrite found nothing, left the BL pointing at a symbol
-            # spelled `struct.pack`, and the image failed to load on a symbol
-            # the library had defined all along under `struct_pack_<hash>`.
-            # The row is only added when it cannot collide: a library that
-            # exports a function genuinely named `struct.pack` keeps the bare
-            # name to itself.
-            mod = e.get("module")
-            if mod and mod != e["name"]:
-                amap.setdefault(f"{mod}.{e['name']}", e["symbol"])
         out.append({
             "install_name": payload.get("load_path") or payload["dylib"],
             "map": amap,
