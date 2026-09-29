@@ -298,6 +298,13 @@ Measured: the emitter produces a generated proof file with **0 `sorry`**, which
 is the first sorry-free dylib proof in the tree. It does not yet typecheck.
 See §5.5.
 
+### 5.4 x86 (§4.3)
+
+Unchanged and still unmeasured. [3]'s §5 notes they did not touch
+`formal/x86_proof_gen.py`, and the `fuel=` argument was added to the arm64
+walker only. The measurement in §5.0 has not been repeated for x86, so "the
+same argument applies" is a hypothesis, not a finding.
+
 ### 5.5 The emitter's `hreg` does not typecheck, and the cause is a known trap
 
 Verifying the emitted proof (not my remit at gate time, but the failure is
@@ -355,13 +362,6 @@ was lost, because it had never been checked in and it was someone else's
 in-progress work anyway — but it is a concrete demonstration of the rule:
 **an uncommitted working tree is not a stable place to hold work in a tree with
 concurrent agents.** Check in before it can be taken from you.
-
-### 5.4 x86 (§4.3)
-
-Unchanged and still unmeasured. [3]'s §5 notes they did not touch
-`formal/x86_proof_gen.py`, and the `fuel=` argument was added to the arm64
-walker only. The measurement in §5.0 has not been repeated for x86, so "the
-same argument applies" is a hypothesis, not a finding.
 
 ## 6. Notes for [3]
 
