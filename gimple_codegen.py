@@ -1957,6 +1957,12 @@ class GimpleGen:
         self._owned_stack_allocated: set = set()
         self._cstr_key_src: dict[str, str] = {}  # see _char_to_cstr(transient=)
         self._fresh_str_tmps: set = set()  # see emit_infra._emit_str_cat
+        # Block-scoped destruction state — see emit_infra's block-scope section.
+        self._scoped_free_candidates: set = set()
+        self._scope_armed: set = set()
+        self._scope_live: list = []
+        self._scope_live_depth: list = []
+        self._scope_live_fn: list = []
         self._current_filename: str = ""  # filename for #line directives
         self._emitted_line_pairs: set[tuple[str, int]] = set()  # (filename, line) pairs already emitted
         # external_call["name", Ret](args) targets → (ret_ctype, [arg_ctypes]); first use wins.
@@ -3915,6 +3921,8 @@ class GimpleGen:
         return ginf._dict_val_of_expr(self, expr)
     def _dict_union_val_type(self, lv, rv) -> str:
         return ginf._dict_union_val_type(self, lv, rv)
+    def _gen_loop_body(self, body: list) -> None:
+        return ginf.gen_loop_body(self, body)
     def _emit_str_cat(self, lv: str, rv: str, free_left: bool=False, free_right: bool=False) -> str:
         return ginf._emit_str_cat(self, lv, rv, free_left, free_right)
     def _is_fresh_operand(self, node, val: str) -> bool:

@@ -7,7 +7,7 @@ deliberately conservative, low-recall design.
 """
 
 import fire_compiler as N
-from ownership_destruct import analyze_module
+from ownership_destruct import analyze_module, analyze_function, analyze_scoped_locals
 
 
 def _candidates(src, fname):
@@ -181,13 +181,154 @@ def main():
 ]
 
 
+def _scoped(src, fname):
+    """(whole-function candidates, block-scoped candidates) for `fname`."""
+    tokens = N.py_tokenize(src)
+    stmts = N.Parser(tokens).with_filename("<test>").parse_module()
+    for st in stmts:
+        if isinstance(st, N.FunctionDef) and st.name == fname:
+            whole = analyze_function(st, {}, {})
+            return whole, analyze_scoped_locals(st, {}, {}, whole)
+    return set(), set()
+
+
+# (name, source, function, expected whole-function set, expected scoped set).
+# The scoped set is what a LOOP BODY owns; see analyze_scoped_locals.
+SCOPED_CASES = [
+    ("loop_body_local_read_and_appended", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var l: List[Int] = []
+        l.append(i)
+        t += len(l)
+    return t
+""", "f", set(), {"l"}),
+
+    ("while_body_local", """
+def f(n: Int) -> Int:
+    var t = 0
+    var i = 0
+    while i < n:
+        s = {1, 2}
+        i += 1
+        t += len(s)
+    return t
+""", "f", set(), {"s"}),
+
+    ("nested_loops_each_own_their_local", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var a: List[Int] = []
+        for j in range(3):
+            var b: Dict[String, Int] = {}
+            b["k"] = j
+            t += len(a) + b["k"]
+    return t
+""", "f", set(), {"a", "b"}),
+
+    ("function_level_and_scoped_are_disjoint", """
+def f(n: Int) -> Int:
+    d = {}
+    for i in range(n):
+        l = []
+        l.append(i)
+        d["a"] = len(l)
+    return len(d)
+""", "f", {"d"}, {"l"}),
+
+    ("read_after_the_loop_is_not_scoped", """
+def f(n: Int) -> Int:
+    for i in range(n):
+        l = [1, 2]
+    return len(l)
+""", "f", set(), set()),
+
+    ("iterated_local_is_disqualified_today", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var l: List[Int] = []
+        for x in l:
+            t += x
+    return t
+""", "f", set(), set()),
+
+    ("same_name_declared_in_two_loops", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        l = []
+        t += len(l)
+    for j in range(n):
+        l = []
+        t += len(l)
+    return t
+""", "f", set(), set()),
+
+    ("declaration_not_a_direct_child_of_the_body", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        if i > 1:
+            l = []
+            t += len(l)
+    return t
+""", "f", set(), set()),
+
+    ("loop_with_else_is_skipped", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        l = []
+        t += len(l)
+    else:
+        t += 1
+    return t
+""", "f", set(), set()),
+
+    ("stored_into_outer_container_escapes", """
+def f(n: Int) -> Int:
+    outer = []
+    for i in range(n):
+        l = [i]
+        outer.append(l)
+    return len(outer)
+""", "f", {"outer"}, set()),
+
+    ("returned_from_inside_the_loop_escapes", """
+def f(n: Int) -> Int:
+    for i in range(n):
+        l = [i]
+        if i == 3:
+            return l
+    return 0
+""", "f", set(), set()),
+
+    ("non_constructor_value_is_not_a_candidate", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        l = make(i)
+        t += len(l)
+    return t
+""", "f", set(), set()),
+]
+
+
 def run():
     failures = []
+    for name, src, fname, exp_whole, exp_scoped in SCOPED_CASES:
+        whole, scoped = _scoped(src, fname)
+        if whole != exp_whole or scoped != exp_scoped:
+            failures.append(f"{name!r}: expected whole={exp_whole} scoped={exp_scoped}, "
+                            f"got whole={whole} scoped={scoped}")
     for name, src, fname, expected in CASES:
         got = _candidates(src, fname)
         if got != expected:
             failures.append(f"{name!r}: expected {expected}, got {got}")
-    total = len(CASES)
+    total = len(CASES) + len(SCOPED_CASES)
     passed = total - len(failures)
     for f in failures:
         print("FAIL:", f)

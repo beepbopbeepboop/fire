@@ -1064,6 +1064,103 @@ def main():
 main()
 """, "abcd\nabcdef\nabcdefabcd\nn=7!\n")
 
+    # ── Loop-body-scoped container destruction (doc/MEMORY.html section 7.1).
+    # A container declared directly in a loop body is owned by that body:
+    # freed at the end of each iteration and before every break/continue/
+    # return that leaves it. Two things are pinned at once — the printed
+    # results (so an over-free or a wrong exit path shows up as a wrong
+    # answer or a crash) and peak RSS (so a missing free shows up as a leak
+    # several times the limit; unfixed, each of these grows ~100-300 MB).
+    test_gimple_bounded_memory("gimple_loop_scoped_containers_all_exit_paths", """\
+def early_return(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var l: List[Int] = []
+        l.append(i)
+        l.append(i * 2)
+        if i == 7:
+            return t + len(l) * 100 + l[1]
+        t += len(l)
+    return -1
+
+def brk_cont(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        if i % 5 == 0:
+            continue
+        var d: Dict[String, Int] = {}
+        d["a"] = i
+        if i == 13:
+            break
+        if i % 2 == 0:
+            continue
+        t += d["a"]
+    return t
+
+def nested(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var outer: List[Int] = []
+        outer.append(i)
+        for j in range(4):
+            var inner: Dict[String, Int] = {}
+            inner["k"] = j
+            if j == 2:
+                continue
+            if j == 3:
+                break
+            t += inner["k"] + len(outer)
+        t += len(outer)
+    return t
+
+def while_loop(n: Int) -> Int:
+    var t = 0
+    var i = 0
+    while i < n:
+        var s = {1, 2, 3}
+        s.add(i)
+        i += 1
+        if i == 6:
+            continue
+        t += len(s)
+    return t
+
+def main():
+    print(early_return(20))
+    print(brk_cont(30))
+    print(nested(10))
+    print(while_loop(10))
+    var total = 0
+    for k in range(200000):
+        total += early_return(9) + brk_cont(16) + nested(3) + while_loop(4)
+    print(total)
+""", "228\n31\n40\n33\n56800000\n", 40)
+
+    test_gimple_bounded_memory("gimple_loop_scoped_containers_freed_on_exception_unwind", """\
+def boom(n: Int) raises:
+    if n % 3 == 0:
+        raise Error("boom")
+
+def scan(i: Int) -> Int:
+    var t = 0
+    try:
+        for k in range(4):
+            var l: List[Int] = []
+            l.append(k)
+            l.append(i)
+            boom(k + i)
+            t += len(l)
+    except:
+        t += 100
+    return t
+
+def main():
+    var total = 0
+    for i in range(150000):
+        total += scan(i)
+    print(total)
+""", "15300000\n", 40)
+
     # ── zip() / dict.items() pair shapes ───────────────────────────────
     # zip and dict.items() yield TUPLES. Unmarked, they printed as
     # `[[1, 3], [2, 4]]`; and a pair's first slot is a real value (the 0

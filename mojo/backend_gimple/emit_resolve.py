@@ -890,6 +890,11 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 gen._owned_free_candidates = set()
                 gen._owned_free_pushed = set()
                 gen._owned_stack_allocated = set()
+                gen._scoped_free_candidates = set()
+                gen._scope_armed = set()
+                gen._scope_live = []
+                gen._scope_live_depth = []
+                gen._scope_live_fn = []
                 # Note: _module_globals / _module_global_inits are intentionally NOT
                 # rolled back. Partial data from a failed compilation (e.g. build_stdlib_dylib
                 # failing but having populated its globals) is still needed so that the

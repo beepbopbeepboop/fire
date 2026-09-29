@@ -2417,8 +2417,7 @@ def _gen_stmt_WhileStmt(gen, node):
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
     gen.loop_stack.append((bb_cond, bb_after))
-    for s in node.body:
-        gen.gen_stmt(s)
+    gen._gen_loop_body(node.body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_cond};")
@@ -2799,6 +2798,7 @@ def _emit_try_loop_exit_exc_pops(gen) -> None:
 
 def _gen_stmt_BreakStmt(gen, node):
     if gen.loop_stack:
+        ginf.emit_loop_exit_frees(gen)
         _emit_try_loop_exit_exc_pops(gen)
         gen._emit(f"  goto {gen._loop_break_bb()};")
     else:
@@ -2808,6 +2808,7 @@ def _gen_stmt_BreakStmt(gen, node):
 
 def _gen_stmt_ContinueStmt(gen, node):
     if gen.loop_stack:
+        ginf.emit_loop_exit_frees(gen)
         _emit_try_loop_exit_exc_pops(gen)
         gen._emit(f"  goto {gen._loop_continue_bb()};")
     else:

@@ -345,6 +345,19 @@ def _scan_assign_target_escape(target, facts: _FuncFacts):
     return isinstance(target, N.IdentExpr)
 
 
+def _is_stmt_node(x) -> bool:
+    """True for a node `_scan_stmt` (not `_scan_expr`) must visit when it is
+    nested inside another statement's body. `VarDecl` is a statement whose
+    class name does not end in `Stmt`, so the old `endswith('Stmt')` test
+    sent every NESTED `var x = ...` to the expression scanner, which never
+    records an assignment: a `var` inside a loop/if/try was invisible to
+    the single-assignment rule (rule 2), and a redeclaration of a name
+    inside a nested block did not count against it."""
+    if isinstance(x, (N.FunctionDef, N.VarDecl)):
+        return True
+    return type(x).__name__.endswith('Stmt')
+
+
 def _scan_stmt(stmt, facts: _FuncFacts, funcs, methods):
     if isinstance(stmt, (N.FunctionDef,)):
         for f in dataclasses.fields(stmt):
@@ -409,15 +422,12 @@ def _scan_stmt(stmt, facts: _FuncFacts, funcs, methods):
         if isinstance(val, list):
             for item in val:
                 if _is_node(item):
-                    if isinstance(item, N.FunctionDef):
-                        _scan_stmt(item, facts, funcs, methods)
-                    elif dataclasses.is_dataclass(item) and hasattr(item, 'line') \
-                            and type(item).__name__.endswith('Stmt'):
+                    if _is_stmt_node(item):
                         _scan_stmt(item, facts, funcs, methods)
                     else:
                         _scan_expr(item, facts, funcs, methods)
         elif _is_node(val):
-            if isinstance(val, N.FunctionDef) or (type(val).__name__.endswith('Stmt')):
+            if _is_stmt_node(val):
                 _scan_stmt(val, facts, funcs, methods)
             else:
                 _scan_expr(val, facts, funcs, methods)
@@ -699,6 +709,24 @@ def _definitely_assigned(fn, candidates: set) -> set:
     return candidates & _ia_term
 
 
+def _scan_function(fn, funcs, methods) -> _FuncFacts:
+    """The whole-function escape scan shared by `analyze_function` and
+    `analyze_scoped_locals`: every fact the module docstring's rules 1-8
+    need, accumulated over `fn`'s body. `facts` is explicitly typed
+    `_FuncFacts` for the same self-hosting reason `analyze_function`'s
+    docstring gives — an untyped receiver makes `facts.note_assign(...)`
+    an auto-stubbed no-op."""
+    facts = _FuncFacts()
+    for pname, _ in fn.params:
+        # Parameters are out of scope for v0 (see module docstring) —
+        # mark them disqualified outright so a same-named local shadow
+        # can't accidentally get credited with the parameter's uses.
+        facts.disqualify(pname.lstrip('*'))
+    for stmt in fn.body:
+        _scan_stmt(stmt, facts, funcs, methods)
+    return facts
+
+
 def analyze_function(fn, funcs, methods) -> set:
     """Returns the set of local names in `fn` that are destroy candidates
     per the module docstring's rules 1-8, AND are definitely assigned on
@@ -724,14 +752,7 @@ def analyze_function(fn, funcs, methods) -> set:
     when compiling something else) was correct throughout and never hit
     this at all, which is why it was invisible until the C runtime's
     python3-subprocess fallback was removed."""
-    facts = _FuncFacts()
-    for pname, _ in fn.params:
-        # Parameters are out of scope for v0 (see module docstring) —
-        # mark them disqualified outright so a same-named local shadow
-        # can't accidentally get credited with the parameter's uses.
-        facts.disqualify(pname.lstrip('*'))
-    for stmt in fn.body:
-        _scan_stmt(stmt, facts, funcs, methods)
+    facts = _scan_function(fn, funcs, methods)
     # `_candidates` as its own local, NOT `_definitely_assigned(fn, facts.
     # candidates())` inline — this file's own repeatedly-documented rule
     # (see `_ia_if`/`_ia_try`/`_ia_match`'s identical notes): a `-> set`-
@@ -745,6 +766,110 @@ def analyze_function(fn, funcs, methods) -> set:
     # parameter wasn't reliably typed `MojoSet *` at this call site).
     _candidates = facts.candidates()
     return _definitely_assigned(fn, _candidates)
+
+
+def _count_name(node, name: str) -> int:
+    """How many times the identifier `name` occurs anywhere under `node`,
+    as ANY string-valued field (an `IdentExpr.name`, a `VarDecl.name`, a
+    loop/with/except target, a parameter, ...). Counting every string leaf
+    that equals `name`, rather than only `IdentExpr`, is deliberately
+    over-inclusive: an occurrence this counts that is not really a use can
+    only make a name look MORE widely used, which disqualifies it — never
+    the unsafe direction."""
+    if isinstance(node, str):
+        if node == name:
+            return 1
+        return 0
+    n = 0
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            n += _count_name(item, name)
+        return n
+    if _is_node(node):
+        for f in dataclasses.fields(node):
+            n += _count_name(getattr(node, f.name), name)
+    return n
+
+
+def _collect_loop_bodies(node, out: list) -> None:
+    """Appends the body (statement list) of every `for`/`while` under `node`
+    that has no `else:` clause. A loop with an `else` is skipped: `break`
+    bypasses it, so its exits are not the plain "end of body / break /
+    continue" set the block-scoped free is built for."""
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _collect_loop_bodies(item, out)
+        return
+    if not _is_node(node):
+        return
+    if isinstance(node, (N.ForStmt, N.WhileStmt)) and not node.else_body:
+        out.append(node.body)
+    for f in dataclasses.fields(node):
+        _collect_loop_bodies(getattr(node, f.name), out)
+
+
+def _decl_name(stmt) -> str:
+    """The local a plain single-target declaration/assignment statement
+    binds, or '' if `stmt` is not one."""
+    if isinstance(stmt, N.VarDecl):
+        return _as_str(stmt.name)
+    if isinstance(stmt, N.AssignStmt) and isinstance(stmt.target, N.IdentExpr):
+        return _as_str(stmt.target.name)
+    return ''
+
+
+def analyze_scoped_locals(fn, funcs, methods, whole: set) -> set:
+    """Block-scoped twin of `analyze_function`: the locals that are a
+    destroy candidate for THEIR LOOP BODY rather than for the whole
+    function, i.e. exactly the ones `analyze_function` cannot credit
+    because a loop may run zero times (so they are never "definitely
+    assigned at every function exit") — `whole` is `analyze_function`'s
+    result and is excluded, so each candidate is owned at exactly one level.
+
+    A name qualifies iff ALL of:
+      - it is a candidate by the module docstring's rules 1-8 (assigned
+        exactly once, from a container constructor, never escaping);
+      - that one assignment is a DIRECT child statement of a `for`/`while`
+        body with no `else:` (so every path that reaches the end of the
+        body, or any `break`/`continue`/`return` lexically after the
+        declaration, has executed it — no definite-assignment analysis is
+        needed because straight-line order within one block is the proof);
+      - the name occurs NOWHERE outside that declaration and the rest of
+        that body (`_count_name` over the whole function equals the count
+        over `body[idx:]`). This is what makes the free at the end of the
+        body safe for plain-Python source, where a loop-body local stays
+        visible after the loop: any later read would be a use-after-free.
+    The free itself is emitted per iteration at the end of the body and
+    before each `break`/`continue`/`return` that leaves it (codegen side:
+    mojo/backend_gimple/emit_infra.py's block-scope section)."""
+    out = set()
+    bodies = []
+    _collect_loop_bodies(fn.body, bodies)
+    if not bodies:
+        return out
+    # Cheap pre-check before the full escape scan: is there any loop-body
+    # direct-child constructor declaration at all?
+    have_ctor_decl = False
+    for body in bodies:
+        for st in body:
+            if _decl_name(st) != '' and _is_constructor_expr(st.value):
+                have_ctor_decl = True
+    if not have_ctor_decl:
+        return out
+    facts = _scan_function(fn, funcs, methods)
+    _cands = facts.candidates()
+    for body in bodies:
+        for idx in range(len(body)):
+            st = body[idx]
+            nm = _decl_name(st)
+            if nm == '' or nm not in _cands or nm in whole:
+                continue
+            region = 0
+            for j in range(idx, len(body)):
+                region += _count_name(body[j], nm)
+            if _count_name(fn.body, nm) == region:
+                out.add(nm)
+    return out
 
 
 def analyze_module(stmts):
