@@ -112,6 +112,57 @@ The generator deliberately emits the **named `sorry` obligation** for the spec,
 unchanged, because the alternative is emitting a contract that does not prove
 and turning an honest hole into a build failure.
 
+## Refined diagnosis: it is a HEARTBEAT limit, not just the abstraction
+
+[2] pointed out that this file already solves the "hand `bv_decide` an opaque
+model term" trap at `formal/arm64_proof_gen.py:3885` ("unfolded before
+bv_decide ... otherwise bv_decide reports spurious counterexamples"). I tested
+whether that lead transfers, and it does — but only part of the way, and the
+part it fixes changes what the blocker *is*.
+
+**It transfers, and it is not a `BitVec` model that is needed.** On a
+one-instruction goal:
+
+    -- fails: abstracts arm64_reg 0 (arm64_set_reg 0 (init n 0) n) as opaque
+    bv_decide
+
+    -- closes the goal outright, `bv_decide` never runs
+    simp only [arm64_reg, arm64_set_reg, Arm64State.init]
+
+So the structure accessors are the *only* thing `bv_decide` chokes on, and
+`simp only` on them is enough for a small goal. That kills my earlier framing:
+this is not "you need a symbolic `BitVec 64` machine model" (a much larger
+project), it is a normalisation problem.
+
+**On the real 15-step composed effect, unfolding gets further and then dies on
+heartbeats.** With the accessors *and* the whole `S`/`st` chain unfolded by
+`simp only`, the `hreg` goal no longer reports a spurious counterexample — it
+reaches
+
+    error: (deterministic) timeout at `whnf`, maximum number of heartbeats
+    (20000000) has been reached
+
+So the honest statement of the blocker is: **the 15-step composed effect does
+not reduce to a bitvector normal form within the heartbeat budget.** Two things
+follow, and the first is a cheap experiment nobody should skip:
+
+1. **Measure whether raising `maxHeartbeats` closes it.** The chain is 15 steps
+   over a 6-entry memory list with constant addresses, so it is finite and in
+   principle reducible; whether it is *tractable* is an empirical question I did
+   not get to. This is the first thing to try, and it costs one number.
+2. If it is not tractable, the fix is to make the effect *smaller* before
+   evaluating it — discharge the memory round trip as its own `simp`-closed
+   lemma (the write and the read-back, at constant addresses) and leave `bv_decide`
+   a goal that is already one multiplication. That is a restructure of the
+   emitter, not a new decision procedure.
+
+The two remaining failures stand as recorded: `hx30` (same `bv_decide`
+abstraction) and the pc discipline (`omega` on an unnormalised record).
+
+Stashed: `formal/arm64_proof_gen.py` + `formal/build.py` — the emitter, the
+source-derived spec, and the three emitter bugs. Not landable, because emitting
+the contract makes the dylib `--formal` build fail. `git stash list` has it.
+
 ## Also retracted: the x19 "aside" (this one was right to retract)
 
 Last-but-one turn I flagged that the run returns `x19 = 0` "after a prologue
