@@ -71,13 +71,134 @@ def main():
     d["a"] = 1
 """, "main", {"d"}),
 
-    ("passed_to_mut_param_is_not_a_candidate", """
+    ("passed_to_mut_param_that_never_escapes_is_fine", """
 def modify(mut x: Int):
     pass
 
 def main():
     d = {}
     modify(d)
+""", "main", {"d"}),
+
+    # A callee's parameter is trusted only because the callee's OWN body proves
+    # it does not escape (ownership_destruct._summarize_params) — never because
+    # of its `read`/`mut` keyword: this compiler lowers a copy as the same
+    # pointer, so a `read` parameter that is copied into a field would stay
+    # reachable after the caller frees it. Each case below is a callee that
+    # keeps, or might keep, its parameter.
+    ("callee_returns_its_parameter", """
+def ident(read x: Int) -> Int:
+    return x
+
+def main():
+    d = {}
+    y = ident(d)
+""", "main", set()),
+
+    ("callee_copies_its_read_parameter_into_a_field", """
+struct Box:
+    var items: Int
+
+def stash(read x: Int, b: Box):
+    b.items = x
+
+def main():
+    d = {}
+    b = Box()
+    stash(d, b)
+""", "main", set()),
+
+    ("callee_aliases_its_parameter", """
+def stash(read x: Int):
+    y = x
+    keep.append(y)
+
+def main():
+    d = {}
+    stash(d)
+""", "main", set()),
+
+    ("callee_stores_parameter_in_another_container", """
+def stash(read x: Int):
+    registry.append(x)
+
+def main():
+    d = {}
+    stash(d)
+""", "main", set()),
+
+    ("callee_only_reads_and_mutates_its_parameter", """
+def fill(x: Int, n: Int):
+    for i in range(n):
+        x.append(i)
+    print(len(x))
+
+def main():
+    d = []
+    fill(d, 3)
+""", "main", {"d"}),
+
+    ("callee_passes_parameter_on_to_a_retaining_callee", """
+def inner(x: Int):
+    registry.append(x)
+
+def outer(x: Int):
+    inner(x)
+
+def main():
+    d = {}
+    outer(d)
+""", "main", set()),
+
+    ("callee_passes_parameter_on_to_a_non_retaining_callee", """
+def inner(x: Int):
+    print(len(x))
+
+def outer(x: Int):
+    inner(x)
+
+def main():
+    d = {}
+    outer(d)
+""", "main", {"d"}),
+
+    ("recursive_callee_is_conservative", """
+def rec(x: Int, n: Int):
+    if n > 0:
+        rec(x, n - 1)
+
+def main():
+    d = {}
+    rec(d, 3)
+""", "main", set()),
+
+    ("generator_callee_keeps_its_parameter_alive", """
+def gen(x: Int):
+    yield len(x)
+
+def main():
+    d = {}
+    g = gen(d)
+""", "main", set()),
+
+    ("decorated_callee_may_be_wrapped", """
+@wrap
+def use(x: Int):
+    print(len(x))
+
+def main():
+    d = {}
+    use(d)
+""", "main", set()),
+
+    ("callee_name_shadowed_by_a_local_is_not_resolved", """
+def use(x: Int):
+    print(len(x))
+
+def main():
+    use = other
+    d = {}
+    use(d)
 """, "main", set()),
 
     ("reassigned_twice_is_not_a_candidate", """
@@ -245,17 +366,46 @@ def f(n: Int) -> Int:
     return len(l)
 """, "f", set(), set()),
 
-    ("iterated_local_is_disqualified_today", """
+    ("iterated_local_is_not_an_escape", """
 def f(n: Int) -> Int:
     var t = 0
     for i in range(n):
         var l: List[Int] = []
+        l.append(i)
         for x in l:
             t += x
+        t += len([y for y in l if y > 0])
+    return t
+""", "f", set(), {"l"}),
+
+    ("iterated_function_level_local_is_a_candidate", """
+def f(n: Int) -> Int:
+    var t = 0
+    var l: List[Int] = []
+    l.append(1)
+    for x in l:
+        t += x
+    return t
+""", "f", {"l"}, set()),
+
+    ("returned_after_being_iterated_still_escapes", """
+def f(n: Int) -> List[Int]:
+    var l: List[Int] = []
+    for x in l:
+        pass
+    return l
+""", "f", set(), set()),
+
+    ("iterable_returned_call_result_still_scanned", """
+def f(n: Int) -> Int:
+    var t = 0
+    var l: List[Int] = []
+    for x in keep(l):
+        t += x
     return t
 """, "f", set(), set()),
 
-    ("same_name_declared_in_two_loops", """
+    ("same_name_declared_in_two_sibling_loops_qualifies_in_both", """
 def f(n: Int) -> Int:
     var t = 0
     for i in range(n):
@@ -263,6 +413,50 @@ def f(n: Int) -> Int:
         t += len(l)
     for j in range(n):
         l = []
+        t += len(l)
+    return t
+""", "f", set(), {"l"}),
+
+    ("same_name_in_nested_loops_is_rejected", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        l = []
+        for j in range(n):
+            l = []
+            t += len(l)
+        t += len(l)
+    return t
+""", "f", set(), set()),
+
+    ("same_name_rebound_twice_in_one_body_is_rejected", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        l = []
+        l = [1]
+        t += len(l)
+    return t
+""", "f", set(), set()),
+
+    ("same_name_assigned_outside_any_loop_body_is_rejected", """
+def f(n: Int) -> Int:
+    var t = 0
+    l = []
+    for i in range(n):
+        l = []
+        t += len(l)
+    return t
+""", "f", set(), set()),
+
+    ("one_loop_declares_a_non_constructor_value_is_rejected", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        l = []
+        t += len(l)
+    for j in range(n):
+        l = make(j)
         t += len(l)
     return t
 """, "f", set(), set()),

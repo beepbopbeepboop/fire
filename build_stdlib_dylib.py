@@ -296,11 +296,24 @@ _UNIT_FLAGS = {
 }
 
 
+# The runtime is hand-written C that every compiled program calls in its hot
+# loops (list/dict/set operations, the container registries, the cleanup
+# stack), so unlike the generated stdlib modules — which stay at gcc's
+# implicit -O0 for compile time and cache-friendliness — it is always built
+# optimized. Measured: at -O0 the runtime's own `_pr_home` was not even
+# inlined, and a create/push/drop loop spent most of its time in it. The
+# `mojoc` build has always compiled it at -O2, so this is the level the
+# runtime is already exercised at; an explicit `opt_flag`/`extra_flags` still
+# wins (a debugging `-O0` build stays -O0).
+_RUNTIME_DEFAULT_OPT = '-O2'
+
+
 def runtime_units(arch: str, opt_flag: str = None, extra_flags: tuple = ()) -> list:
     """`(source, language, base_flags)` for every unit of `arch`'s runtime.
 
     The flags are the per-language base, the runtime's own `-I`, the target
-    flags, `opt_flag`, and the caller's `extra_flags` — in that order, so a
+    flags, the optimization level (`opt_flag`, else `_RUNTIME_DEFAULT_OPT` for
+    the C/C++ units), and the caller's `extra_flags` — in that order, so a
     caller's flag is the last word and an optimization level applies to every
     unit rather than to whichever one a caller remembered.
     """
@@ -312,6 +325,8 @@ def runtime_units(arch: str, opt_flag: str = None, extra_flags: tuple = ()) -> l
         flags = tuple(_UNIT_FLAGS[lang]) + (f'-I{RUNTIME}',) + arch_flags(arch)
         if opt_flag:
             flags += (opt_flag,)
+        elif lang != _ASM_UNIT:
+            flags += (_RUNTIME_DEFAULT_OPT,)
         flags += tuple(extra_flags)
         out.append((os.path.join(RUNTIME, src), lang, flags))
     if not out:

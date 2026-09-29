@@ -267,13 +267,17 @@ feature disabled and identical output.
   a stale address can later be misidentified.</li>
 <li><strong>Fixed 256-byte <code>sprintf</code> buffers.</strong> Replace <code>_sprintf_one</code>'s <code>malloc(256)</code> +
   <code>sprintf</code> with a sized <code>snprintf</code> and release it as class C.</li>
-<li><strong>Beef up the solver to stack-home as much as possible (queued 2026-09-28; start once loop-scoped destruction, item 1,
-  is checked in).</strong> Every item above is limited by what the escape solver can prove. Widen it: non-empty container
-  literals, non-escaping struct instances, closure envs and boxed mutable locals; real callee tables (the analysis runs with
-  <code>{}, {}</code> today, so any user-function argument disqualifies a container); the missing safe patterns
-  (<code>for x in local:</code>; a name assigned once per <em>scope</em>, so <code>tmp = []</code> reused across sibling loops
-  qualifies); stack buffers for non-escaping strings and transient decimals; and a GIMPLE-legal way to home storage in
-  <code>__GIMPLE</code> bodies. Tracked in <code>doc/OWNERSHIP_MODEL.md</code>'s TODO list. Success is the §5 table trending to all-flat.</li>
+<li><strong>Beef up the solver to stack-home as much as possible — IN PROGRESS.</strong> Landed 2026-09-28: (a) <code>for x in local:</code>
+  and comprehension clauses over a bare local are non-escaping reads; (b) a name declared in several sibling loop bodies qualifies in each
+  (per-body single declaration; nested, rebound or outside-assigned variants are rejected); (c) real callee information —
+  <code>_summarize_params</code> proves a parameter non-retaining from the callee's own body (never from a <code>read</code> keyword: the
+  compiled path lowers a copy as the same pointer), refusing async/generator/decorated/overloaded/imported-name/recursive callees and
+  bounding depth; (d) non-empty list/dict/set literals are stack-homed via a storage request the literal's own lowering consumes
+  (<code>emit_container_new</code>), falling back to the heap candidate if nothing consumes it; (e) lists carry a 4-slot inline buffer
+  (§10). Still open: containers nested inside a literal (<code>[[1,2],[i]]</code>: the inner lists have no owner); TEMPORARY containers
+  from expressions consumed once (<code>for y in [v for v in a]</code>, <code>l.extend([10, 20])</code>, slice/<code>split</code> results);
+  struct instances, closure envs and boxed mutable locals; string buffers; struct-method callee tables; and a GIMPLE-legal way to home storage in
+  <code>__GIMPLE</code> bodies.</li>
 <li><strong>Dict comprehension keys, <code>__missing__</code> keys.</strong> Route the comprehension's set call through
   <code>_emit_call</code> to opt in; <code>__missing__</code> stays unreleased by contract.</li>
 </ol>
@@ -293,6 +297,52 @@ feature disabled and identical output.
   A memory fix necessarily changes the C, so its evidence is the RSS slope plus unchanged program output.</li>
 <li>Keep a probe for every class in §5; an ownership regression is a slope that reappears.</li>
 </ol>
+
+<h2>10. Speed: containers vs Rust</h2>
+<p><strong>What was measured.</strong> One loop, 50,000,000 iterations: <em>create a list, push 3 values, read <code>len</code> and one
+element, drop it</em>, timed end to end as user CPU time with the process's own startup subtracted (an empty program costs ~0.017 s).
+Ours: the program built by <code>fire.py build</code>. Rust: <code>Vec&lt;i64&gt;</code> with <code>black_box</code> on the pushed value and the read
+so the allocation cannot be optimised away, <code>rustc -O</code>. One machine (Apple silicon, other users logged in), 3 runs each.</p>
+<table>
+<tr><th>Step</th><th>5M-iteration loop, user s</th><th>what changed</th></tr>
+<tr><td>start of this work</td><td>0.21&ndash;0.23</td><td>struct + <code>malloc</code>'d data + hash-set registry, runtime at <code>-O0</code></td></tr>
+<tr><td>4-slot inline buffer</td><td>not timed end to end on its own (the runtime loop alone: 19 &rarr; 9.5 ns)</td><td>no <code>malloc</code> for short lists</td></tr>
+<tr><td>dedicated pointer table for the registries</td><td>0.10&ndash;0.12</td><td>the registry was ~60% of the profile, not the 45% a clean micro-benchmark suggested (§10.2)</td></tr>
+<tr><td>runtime built at <code>-O2</code> instead of gcc's implicit <code>-O0</code></td><td class="ok">0.065&ndash;0.092</td><td>the stdlib dylib (which contains the runtime) had no optimisation flag</td></tr>
+</table>
+<table>
+<tr><th>50M iterations</th><th>user s</th><th>ns / iteration (startup removed)</th></tr>
+<tr><td>ours (stack-homed inline list)</td><td class="ok">0.556&ndash;0.574</td><td class="ok">~11</td></tr>
+<tr><td>Rust <code>Vec&lt;i64&gt;</code></td><td>0.636&ndash;0.693</td><td>~13</td></tr>
+</table>
+<div class="note"><strong>What this does and does not show.</strong> On this one loop the compiled program is ~15% faster than idiomatic Rust
+<code>Vec</code> code, because the solver proved the list does not escape and homed it on the stack with inline storage while <code>Vec</code> always
+allocates. It says nothing about anything else. A Rust programmer who writes a fixed array or <code>SmallVec</code> here removes the allocation too and wins
+easily; dicts, sets, strings, structs and every escaping container are still far behind or unmeasured; and this is one machine, one loop. "Beats Rust" is not
+established by this section — it is the first benchmark that is not embarrassing.</div>
+
+<h3>10.1 The small buffer</h3>
+<p><code>MojoList</code> carries <code>MOJO_LIST_INLINE</code> (4) slots inline. Invariants (<code>runtime/fire_runtime.h</code>): <code>data</code> is never NULL after init and
+<code>cap &gt;= MOJO_LIST_INLINE</code>; <code>data == inl</code> iff the elements are still inline, and only <code>_list_grow</code> (copy out, never
+<code>realloc</code>) and <code>mojo_list_destroy</code> (never <code>free</code>) distinguish the two; a list must not be copied or moved by value while inline.
+Dict and set slot arrays could get the same treatment, but a dict/set of strings still <code>strdup</code>s every key, so "no malloc" is not reachable for those
+without storing short keys inline (a larger change: keys are handed out as borrowed pointers).</p>
+
+<h3>10.2 The registries (<code>_PtrReg</code>)</h3>
+<p>The runtime tells a boxed <code>int64_t</code> that is a list from an int or a string by looking its address up in a registry, populated on every container
+<code>init</code> and cleared on every <code>destroy</code>. They were <code>MojoSet</code>s: 32-byte slots, a <code>%</code> per probe, and a re-hash of the whole cluster
+on every erase. <code>sample</code> on the compiled loop put <code>mojo_list_init</code>+<code>mojo_list_destroy</code>, almost all of it registry probing, at well over half of
+the runtime. They are now <code>_PtrReg</code>: a set of non-zero addresses with power-of-two masking, 8-byte slots, a one-multiply hash and backward-shift deletion (no
+tombstones, so the LIFO add/remove of one address a stack-homed container produces never degrades the table). <code>test_ptr_registry.py</code> checks it against a
+reference model (1.5M random operations, forced collisions, 2M cycles on one address) at <code>-O0</code>, <code>-O2</code> and under AddressSanitizer. The registry is
+still not free (~2 ns per container in the isolated runtime loop) and could be skipped for a stack-homed container the solver proves is never boxed; that needs an
+audit of every place a container pointer becomes an <code>int64_t</code> and is not done.</p>
+
+<h3>10.3 The runtime's optimisation level</h3>
+<p><code>build_stdlib_dylib.runtime_units</code> added an optimisation flag only when a caller passed one, and the stdlib dylib build passes none, so the hand-written
+runtime — every container operation, the registries, the cleanup stack — ran at gcc's implicit <code>-O0</code> in every compiled program (its own <code>static inline</code> hash
+helper was not even inlined). It now defaults to <code>-O2</code> for the C/C++ units (an explicit flag still wins). The generated stdlib modules stay at <code>-O0</code>
+for compile time. <code>mojoc</code> has always built the runtime at <code>-O2</code>, so this is a level it was already exercised at.</p>
 
 <h2>9. Change log for this document's code</h2>
 <ul>

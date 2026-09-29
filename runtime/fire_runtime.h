@@ -254,10 +254,24 @@ int  mojo_exc_pending_get(void);
 /* ── List ─────────────────────────────────────────────────────────────────
  * Flat dynamic array of int64_t slots.  Doubles are stored as bit-casts;
  * string pointers are stored as uintptr_t casts (64-bit only).           */
+/* Small-buffer storage: `data` points at `inl` (inside the struct itself)
+ * until the list outgrows MOJO_LIST_INLINE elements, so a short list — the
+ * overwhelmingly common case — never calls malloc, whether the struct lives
+ * on the stack (a Phase-6 stack-homed local) or on the heap (mojo_list_new:
+ * one allocation instead of two). Invariants every list function relies on:
+ *   - `data` is NEVER NULL after init, and `cap >= MOJO_LIST_INLINE`;
+ *   - `data == inl` iff the elements are still in the inline buffer, and only
+ *     then must the buffer NOT be free()d or realloc()ed — the sole places
+ *     that distinguish the two are _list_grow and mojo_list_destroy;
+ *   - the struct must not be copied or moved by value while `data == inl`
+ *     (the copy's `data` would point into the original). No code does; a
+ *     MojoList is only ever used through a `MojoList *`. */
+#define MOJO_LIST_INLINE 4
 typedef struct {
     int64_t *data;
     int64_t  len;
     int64_t  cap;
+    int64_t  inl[MOJO_LIST_INLINE];
 } MojoList;
 
 MojoList *mojo_list_new(void);

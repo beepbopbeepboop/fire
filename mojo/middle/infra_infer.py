@@ -1707,21 +1707,50 @@ def _is_free_eligible_function(fn) -> bool:
                            # of its own is_async/is_generator flags
     return True
 
-def _compute_owned_free_candidates(fn) -> set:
+def _build_analysis_funcs(stmts) -> dict:
+    """The module-level functions the ownership analysis may resolve a call
+    to, `{name: FunctionDef}`. A name is included only if the analysis can
+    be sure a call spelled `name(...)` in this module reaches THAT body:
+    defined exactly once anywhere in the module (an overload, a conditional
+    or nested redefinition, or a same-named method all poison the name),
+    not rebound by an import, and the function is a plain one (not
+    decorated, async, a generator, or comptime-parametric). Anything else is
+    simply absent, which makes a call to it an unresolved call — the
+    analysis' conservative default."""
+    counts = {}
+    for n in gimple_exprtypes._walk_ast(stmts):
+        if isinstance(n, FunctionDef):
+            counts[n.name] = counts.get(n.name, 0) + 1
+        elif isinstance(n, FromImportStmt):
+            for _fip in (getattr(n, 'name_alias_strs', None) or []):
+                counts[gimple_ctypes._fi_name(_fip)] = 2
+                _al = gimple_ctypes._fi_alias(_fip)
+                if _al:
+                    counts[_al] = 2
+        elif isinstance(n, ImportStmt):
+            _ial = getattr(n, 'alias', None)
+            if _ial:
+                counts[_ial] = 2
+    out = {}
+    for s in stmts:
+        if (isinstance(s, FunctionDef) and counts.get(s.name) == 1
+                and not s.decorators and not s.is_async and not s.is_generator
+                and not s.comptime_params):
+            out[s.name] = s
+    return out
+
+def _compute_owned_free_candidates(fn, funcs: dict = None) -> set:
     """Returns the set of local names in `fn` safe to `mojo_*_free` at
     every return/fallthrough point, or an empty set if `fn` isn't eligible
     at all (see `_is_free_eligible_function`) or the analysis found none.
-    `{}, {}` for ownership_destruct's callee-resolution tables: this
-    codegen layer has no ready-made whole-module function/method lookup
-    to hand it yet, so calls-to-`read`-parameters don't get the analysis'
-    full precision here (a real widening for later) — passing empty
-    tables only ever makes this MORE conservative (fewer candidates
-    found), never unsound, since an unresolved call is already the
-    analysis' safe default."""
+    `funcs` is the module's `_build_analysis_funcs` table (free functions
+    a call can be proven to reach); an absent name is an unresolved call,
+    which is the analysis' conservative default. Struct methods are not
+    resolved here (`{}` methods table) — a real widening for later."""
     if not _is_free_eligible_function(fn):
         return set()
     try:
-        return ownership_destruct.analyze_function(fn, {}, {})
+        return ownership_destruct.analyze_function(fn, funcs or {}, {})
     except Exception:
         # This is an OPTIONAL memory-usage improvement, not a correctness
         # requirement of compiling the program at all — a bug in the
@@ -1730,7 +1759,7 @@ def _compute_owned_free_candidates(fn) -> set:
         # leak, unchanged) rather than raise through gen_func.
         return set()
 
-def _compute_scoped_free_candidates(fn, whole: set) -> set:
+def _compute_scoped_free_candidates(fn, whole: set, funcs: dict = None) -> set:
     """The locals of `fn` that are owned by a LOOP BODY rather than the whole
     function (ownership_destruct.analyze_scoped_locals), or an empty set if
     `fn` is not eligible or the analysis found none. `whole` is
@@ -1740,7 +1769,7 @@ def _compute_scoped_free_candidates(fn, whole: set) -> set:
     if not _is_free_eligible_function(fn):
         return set()
     try:
-        return ownership_destruct.analyze_scoped_locals(fn, {}, {}, whole)
+        return ownership_destruct.analyze_scoped_locals(fn, funcs or {}, {}, whole)
     except Exception:
         return set()
 

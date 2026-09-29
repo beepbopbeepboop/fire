@@ -500,11 +500,112 @@ struct MojoList {
  * each tuple's raw pointer bytes reinterpreted as garbage text via
  * mojo_repr_str. Lazily allocated via mojo_set_new() itself (not tracked
  * in the registry — only MojoLists returned by mojo_list_new() are). */
-static MojoSet *_mojo_list_registry = NULL;
+
+/* _PtrReg: the membership table behind every "is this boxed int64_t a list /
+ * dict / set / tuple / bound method" registry in this file. It answers ONE
+ * question — "is this address registered?" — so it is nothing but a set of
+ * non-zero addresses: open addressing, power-of-two capacity (an AND, not a
+ * `%`), 8-byte slots, a one-multiply hash, and backward-shift deletion (no
+ * tombstones). Every container init/destroy pays one add and one discard, so
+ * this is the hottest code in a program that builds short-lived containers:
+ * the MojoSet these registries used to be (32-byte slots, a `%` per probe, a
+ * re-hash of the cluster on every erase) was measured at well over half the
+ * runtime cost of a stack-homed list. Not thread-safe, exactly like what it
+ * replaces. Its own storage is plain calloc/free, never a MojoSet/MojoList,
+ * so registering can never recurse into registering.
+ *
+ * Invariants: slot value 0 = empty (0 is never registered); `cap` is a power
+ * of two; used*2 <= cap (so a probe always reaches an empty slot). */
+typedef struct {
+    uint64_t *slots;
+    uint64_t  cap;    /* power of two, 0 until first add */
+    uint64_t  used;
+    int       shift;  /* 64 - log2(cap) */
+} _PtrReg;
+
+static inline uint64_t _pr_home(const _PtrReg *r, uint64_t p) {
+    /* >>3: heap/stack addresses are 8/16-byte aligned, the low bits carry no
+     * information. The multiplicative hash's HIGH bits are the well-mixed
+     * ones, hence the shift down rather than a mask of the product. */
+    return ((p >> 3) * 0x9E3779B97F4A7C15ULL) >> r->shift;
+}
+
+static void _pr_grow(_PtrReg *r) {
+    uint64_t ncap = r->cap ? r->cap * 2 : 256;
+    uint64_t *old = r->slots;
+    uint64_t ocap = r->cap;
+    r->slots = (uint64_t *)calloc((size_t)ncap, sizeof(uint64_t));
+    r->cap = ncap;
+    r->shift = 64;
+    for (uint64_t c = ncap; c > 1; c >>= 1) r->shift--;
+    r->used = 0;
+    for (uint64_t i = 0; i < ocap; i++) {
+        if (old[i]) {
+            uint64_t j = _pr_home(r, old[i]);
+            while (r->slots[j]) j = (j + 1) & (ncap - 1);
+            r->slots[j] = old[i];
+            r->used++;
+        }
+    }
+    free(old);
+}
+
+static void _pr_add(_PtrReg *r, uint64_t p) {
+    if (!p) return;
+    if ((r->used + 1) * 2 > r->cap) _pr_grow(r);
+    uint64_t mask = r->cap - 1;
+    uint64_t j = _pr_home(r, p);
+    while (r->slots[j]) {
+        if (r->slots[j] == p) return;
+        j = (j + 1) & mask;
+    }
+    r->slots[j] = p;
+    r->used++;
+}
+
+static int _pr_has(const _PtrReg *r, uint64_t p) {
+    if (!r->used) return 0;
+    uint64_t mask = r->cap - 1;
+    uint64_t j = _pr_home(r, p);
+    while (r->slots[j]) {
+        if (r->slots[j] == p) return 1;
+        j = (j + 1) & mask;
+    }
+    return 0;
+}
+
+static void _pr_del(_PtrReg *r, uint64_t p) {
+    if (!r->used) return;
+    uint64_t mask = r->cap - 1;
+    uint64_t i = _pr_home(r, p);
+    while (r->slots[i] != p) {
+        if (!r->slots[i]) return;          /* not registered */
+        i = (i + 1) & mask;
+    }
+    /* Backward-shift deletion: pull later members of the cluster into the
+     * hole when their home is not strictly inside (i, j], so no tombstone is
+     * ever left and lookups stay short however often the same address is
+     * added and removed (the LIFO stack-homed pattern). */
+    uint64_t j = i;
+    for (;;) {
+        j = (j + 1) & mask;
+        if (!r->slots[j]) break;
+        uint64_t k = _pr_home(r, r->slots[j]);
+        int in_range = (i <= j) ? (i < k && k <= j) : (i < k || k <= j);
+        if (!in_range) {
+            r->slots[i] = r->slots[j];
+            i = j;
+        }
+    }
+    r->slots[i] = 0;
+    r->used--;
+}
+
+static _PtrReg _reg_list;
 
 int mojo_is_registered_list(int64_t addr) {
-    if (!_mojo_list_registry || addr < 65536) return 0;
-    return mojo_set_contains_int(_mojo_list_registry, addr);
+    if (addr < 65536) return 0;
+    return _pr_has(&_reg_list, (uint64_t)addr);
 }
 
 /* The ONE definition of "this int64_t is a real heap/static pointer", shared
@@ -619,58 +720,55 @@ int mojo_boxed_is_str(int64_t v) {
  * contents with list brackets `[...]` instead of `(...)`. Marked explicitly
  * by _lower_tuple_literal's emitted call to mojo_mark_as_tuple() right after
  * mojo_list_new(); checked by _mojo_repr_list to choose the right brackets. */
-static MojoSet *_mojo_tuple_registry = NULL;
+static _PtrReg _reg_tuple;
 
 void mojo_mark_as_tuple(MojoList *l) {
     if (!l) return;
-    if (!_mojo_tuple_registry) _mojo_tuple_registry = mojo_set_new();
-    mojo_set_add_int(_mojo_tuple_registry, (int64_t)(intptr_t)l);
+    _pr_add(&_reg_tuple, (uint64_t)(uintptr_t)l);
 }
 
 int mojo_is_tuple(MojoList *l) {
-    if (!l || !_mojo_tuple_registry) return 0;
-    return mojo_set_contains_int(_mojo_tuple_registry, (int64_t)(intptr_t)l);
+    if (!l) return 0;
+    return _pr_has(&_reg_tuple, (uint64_t)(uintptr_t)l);
 }
 
-/* Bound-method registry — the runtime counterpart of _mojo_list_registry
+/* Bound-method registry — the runtime counterpart of _reg_list
  * above. `mojo_bound_method_new` (previously a static-inline in the
  * header) records every MojoBoundMethod it allocates here so that a
  * dynamically-dispatched call site (mojo_maybe_bound_call_N) can tell a
  * bound-method value apart from a plain function pointer stored in the
  * same void*-typed local. */
-static MojoSet *_mojo_bound_method_registry = NULL;
+static _PtrReg _reg_bound_method;
 
 MojoBoundMethod *mojo_bound_method_new(void *fn, void *self) {
     MojoBoundMethod *bm = (MojoBoundMethod *)malloc(sizeof(MojoBoundMethod));
     bm->fn = fn;
     bm->self = self;
-    if (!_mojo_bound_method_registry) _mojo_bound_method_registry = mojo_set_new();
-    mojo_set_add_int(_mojo_bound_method_registry, (int64_t)(intptr_t)bm);
+    _pr_add(&_reg_bound_method, (uint64_t)(uintptr_t)bm);
     return bm;
 }
 
 int mojo_is_bound_method(void *p) {
     int64_t v = (int64_t)(intptr_t)p;
-    if (!_mojo_bound_method_registry || v < 65536) return 0;
-    return mojo_set_contains_int(_mojo_bound_method_registry, v);
+    if (v < 65536) return 0;
+    return _pr_has(&_reg_bound_method, (uint64_t)v);
 }
 
 /* mojo_list_init/mojo_list_destroy: see mojo_set_init/mojo_set_destroy's
  * comment just above (same Phase 6 rationale, same refactor shape). */
 void mojo_list_init(MojoList *l)
 {
-    l->data = NULL;
+    l->data = l->inl;
     l->len  = 0;
-    l->cap  = 0;
-    if (!_mojo_list_registry) _mojo_list_registry = mojo_set_new();
-    mojo_set_add_int(_mojo_list_registry, (int64_t)(intptr_t)l);
+    l->cap  = MOJO_LIST_INLINE;
+    _pr_add(&_reg_list, (uint64_t)(uintptr_t)l);
 }
 
 void mojo_list_destroy(MojoList *l)
 {
-    if (_mojo_list_registry) mojo_set_discard_int(_mojo_list_registry, (int64_t)(intptr_t)l);
-    if (_mojo_tuple_registry) mojo_set_discard_int(_mojo_tuple_registry, (int64_t)(intptr_t)l);
-    free(l->data);
+    _pr_del(&_reg_list, (uint64_t)(uintptr_t)l);
+    _pr_del(&_reg_tuple, (uint64_t)(uintptr_t)l);
+    if (l->data != l->inl) free(l->data);
 }
 
 MojoList *mojo_list_new(void)
@@ -688,8 +786,16 @@ void mojo_list_free(MojoList *l)
 
 static void _list_grow(MojoList *l)
 {
-    int64_t nc = l->cap == 0 ? 4 : l->cap * 2;
-    l->data = realloc(l->data, (size_t)nc * sizeof(int64_t));
+    int64_t nc = l->cap * 2;
+    if (l->data == l->inl) {
+        /* Leaving the inline buffer: the elements must be COPIED out — the
+         * inline storage is not a malloc block, realloc() on it is UB. */
+        int64_t *nd = malloc((size_t)nc * sizeof(int64_t));
+        memcpy(nd, l->inl, (size_t)l->len * sizeof(int64_t));
+        l->data = nd;
+    } else {
+        l->data = realloc(l->data, (size_t)nc * sizeof(int64_t));
+    }
     l->cap  = nc;
 }
 
@@ -721,7 +827,7 @@ static int64_t _norm_idx(MojoList *l, int64_t i) {
     return i < 0 ? i + l->len : i;
 }
 
-int64_t mojo_list_get_int(MojoList *l, int64_t i)   { if (!l || !l->data) return 0; return l->data[_norm_idx(l, i)]; }
+int64_t mojo_list_get_int(MojoList *l, int64_t i)   { if (!l || l->len == 0) return 0; return l->data[_norm_idx(l, i)]; }
 
 double mojo_list_get_double(MojoList *l, int64_t i)
 {
@@ -830,7 +936,7 @@ void mojo_list_insert_str(MojoList *l, int64_t i, char *v)
 
 char *mojo_list_get_str(MojoList *l, int64_t i)
 {
-    if (!l || !l->data) return "";
+    if (!l || l->len == 0) return "";
     return (char *)(uintptr_t)l->data[_norm_idx(l, i)];
 }
 
@@ -3255,24 +3361,23 @@ static uint64_t _str_hash(char *s)
  * knows (from the RHS's static type) that a `dict[key] = True_or_False`
  * assignment is storing a real bool; checked by _mojo_repr_dict to choose
  * the right value formatting for the whole dict. */
-static MojoSet *_mojo_bool_dict_registry = NULL;
+static _PtrReg _reg_bool_dict;
 
 void mojo_mark_dict_bool_values(MojoDict *d) {
     if (!d) return;
-    if (!_mojo_bool_dict_registry) _mojo_bool_dict_registry = mojo_set_new();
-    mojo_set_add_int(_mojo_bool_dict_registry, (int64_t)(intptr_t)d);
+    _pr_add(&_reg_bool_dict, (uint64_t)(uintptr_t)d);
 }
 
 int mojo_is_bool_dict(MojoDict *d) {
-    if (!d || !_mojo_bool_dict_registry) return 0;
-    return mojo_set_contains_int(_mojo_bool_dict_registry, (int64_t)(intptr_t)d);
+    if (!d) return 0;
+    return _pr_has(&_reg_bool_dict, (uint64_t)(uintptr_t)d);
 }
 
-static MojoSet *_mojo_dict_registry = NULL;
+static _PtrReg _reg_dict;
 
 int mojo_is_registered_dict(int64_t addr) {
-    if (!_mojo_dict_registry || addr < 65536) return 0;
-    return mojo_set_contains_int(_mojo_dict_registry, addr);
+    if (addr < 65536) return 0;
+    return _pr_has(&_reg_dict, (uint64_t)addr);
 }
 
 /* mojo_dict_init/mojo_dict_destroy: see mojo_set_init/mojo_set_destroy's
@@ -3283,14 +3388,13 @@ void mojo_dict_init(MojoDict *d)
     d->used     = 0;
     d->next_seq = 0;
     d->slots = calloc((size_t)d->cap, sizeof(_DictSlot));
-    if (!_mojo_dict_registry) _mojo_dict_registry = mojo_set_new();
-    mojo_set_add_int(_mojo_dict_registry, (int64_t)(intptr_t)d);
+    _pr_add(&_reg_dict, (uint64_t)(uintptr_t)d);
 }
 
 void mojo_dict_destroy(MojoDict *d)
 {
-    if (_mojo_dict_registry) mojo_set_discard_int(_mojo_dict_registry, (int64_t)(intptr_t)d);
-    if (_mojo_bool_dict_registry) mojo_set_discard_int(_mojo_bool_dict_registry, (int64_t)(intptr_t)d);
+    _pr_del(&_reg_dict, (uint64_t)(uintptr_t)d);
+    _pr_del(&_reg_bool_dict, (uint64_t)(uintptr_t)d);
     for (int64_t i = 0; i < d->cap; i++) free(d->slots[i].key);
     free(d->slots);
 }
@@ -3839,18 +3943,17 @@ void mojo_dict_iter_free(MojoDictIter *it) { free(it->order); free(it); }
 /* (struct definitions now in fire_runtime.h) */
 
 /* Registry of every MojoSet this runtime allocates — the set-shaped
- * sibling of _mojo_list_registry above, and for the same reason: a set
+ * sibling of _reg_list above, and for the same reason: a set
  * reaching codegen as a boxed `int64_t` (a cross-module module-global
  * accessor returns int64_t, so `gimple_ctypes._C_RESERVED_FUNCS` and
  * friends arrive type-erased) carries no tag of its own, and without a
  * registry `x in <that value>` had no way to discover it was a set. See
  * mojo_in_dispatch_str. */
-static MojoSet *_mojo_set_registry = NULL;
-static int      _mojo_set_registry_busy = 0;
+static _PtrReg _reg_set;
 
 int mojo_is_registered_set(int64_t addr) {
-    if (!_mojo_set_registry || addr < 65536) return 0;
-    return mojo_set_contains_int(_mojo_set_registry, addr);
+    if (addr < 65536) return 0;
+    return _pr_has(&_reg_set, (uint64_t)addr);
 }
 
 /* mojo_set_init/mojo_set_destroy: the in-place halves of mojo_set_new/
@@ -3869,26 +3972,12 @@ void mojo_set_init(MojoSet *s)
     s->next_seq = 0;
     s->slots = malloc((size_t)s->cap * sizeof(_SetSlot));
     for (int64_t i = 0; i < s->cap; i++) { s->slots[i].tag = -1; s->slots[i].seq = 0; }
-    /* `_busy` breaks the recursion of registering the registry itself
-     * (and of the list registry, which is also a MojoSet). */
-    if (!_mojo_set_registry_busy) {
-        _mojo_set_registry_busy = 1;
-        if (!_mojo_set_registry) _mojo_set_registry = mojo_set_new();
-        mojo_set_add_int(_mojo_set_registry, (int64_t)(uintptr_t)s);
-        _mojo_set_registry_busy = 0;
-    }
+    _pr_add(&_reg_set, (uint64_t)(uintptr_t)s);
 }
 
 void mojo_set_destroy(MojoSet *s)
 {
-    /* `_busy` guard mirrors mojo_set_init's: freeing the registry set
-     * itself (or a set encountered while discarding from it) must not
-     * recurse into mojo_set_discard_int touching the registry mid-walk. */
-    if (_mojo_set_registry && s != _mojo_set_registry && !_mojo_set_registry_busy) {
-        _mojo_set_registry_busy = 1;
-        mojo_set_discard_int(_mojo_set_registry, (int64_t)(intptr_t)s);
-        _mojo_set_registry_busy = 0;
-    }
+    _pr_del(&_reg_set, (uint64_t)(uintptr_t)s);
     for (int64_t i = 0; i < s->cap; i++)
         if (s->slots[i].tag == 1) free(s->slots[i].val_s);
     free(s->slots);

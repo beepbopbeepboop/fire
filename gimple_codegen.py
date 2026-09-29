@@ -1958,6 +1958,9 @@ class GimpleGen:
         self._cstr_key_src: dict[str, str] = {}  # see _char_to_cstr(transient=)
         self._fresh_str_tmps: set = set()  # see emit_infra._emit_str_cat
         # Block-scoped destruction state — see emit_infra's block-scope section.
+        self._analysis_funcs: dict = {}   # see infra_infer._build_analysis_funcs
+        self._literal_storage: str = ''        # see emit_infra.emit_container_new
+        self._literal_storage_ctype: str = ''
         self._scoped_free_candidates: set = set()
         self._scope_armed: set = set()
         self._scope_live: list = []
@@ -3921,6 +3924,10 @@ class GimpleGen:
         return ginf._dict_val_of_expr(self, expr)
     def _dict_union_val_type(self, lv, rv) -> str:
         return ginf._dict_union_val_type(self, lv, rv)
+    def _prepare_analysis_funcs(self, stmts: list) -> None:
+        self._analysis_funcs = ginf._build_analysis_funcs(stmts)
+    def _emit_container_new(self, t: str, ctype: str) -> None:
+        return ginf.emit_container_new(self, t, ctype)
     def _gen_loop_body(self, body: list) -> None:
         return ginf.gen_loop_body(self, body)
     def _emit_str_cat(self, lv: str, rv: str, free_left: bool=False, free_right: bool=False) -> str:
