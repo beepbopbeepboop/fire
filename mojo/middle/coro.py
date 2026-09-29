@@ -3095,15 +3095,37 @@ def lower(stmts: list) -> tuple[list, list]:
         {'name', 'base', 'params' (list of C types), 'value_ctype',
          'body_name', 'nargs'}
     """
-    if not enabled():
-        return stmts, []
     _PARAM_NAMES.clear()
     _ASYNC_METHOD_NAMES.clear()
     _ASYNC_FN_NAMES.clear()
     _STRUCT_NAMES.clear()
+    _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
+    _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
+    if not enabled():
+        # The C++ backend (`MOJO_CORO=cpp`, the escape hatch) lowers nested
+        # async defs itself and never asks this module to hoist anything --
+        # but it still reads `_UNTHREADABLE_NESTED_ASYNC_GENS` to know which
+        # nested async generators it has no capture model for, and that set
+        # used to be filled ONLY by `_hoist_nested_async`, which runs only
+        # on the stack-switch path. So the guard the set was invented for
+        # (see `_nested_async_drive_unthreadable`) never fired here, and the
+        # exact shape it exists to refuse produced a generated-C++
+        # `'acc' was not declared in this scope` error instead. Populate it
+        # on both backends. The scan is read-only apart from that set, so it
+        # does not go through the AST-mutating passes further down, and it
+        # needs no lowering state beyond `_STRUCT_NAMES` (for
+        # `_outer_boxable_locals`' struct-constructor test).
+        #
+        # The clear() above is on BOTH paths deliberately: the two backends
+        # are selected per process by `MOJO_CORO`, but a single test process
+        # can compile modules with either (test_gimple.py's `_force_cpp_coro`
+        # does exactly that, one module at a time), and a set left populated
+        # by the previous stack-switch module would make this module's C++
+        # emitter refuse a same-named nested async generator it can handle.
+        _scan_unthreadable_nested_async_gens(stmts)
+        return stmts, []
     _BOX_STRUCT_OF.clear()
     _WIRED_CAPTURES.clear()
-    _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
     _NO_WD_FORWARD.clear()
     _detect_native_future_classes(stmts)
     stmts = _rewrite_native_future_refs(stmts)
@@ -3116,6 +3138,7 @@ def lower(stmts: list) -> tuple[list, list]:
     _scan_func_ret_kinds(stmts)
     _scan_callsite_param_kinds(stmts)
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
+    _scan_unthreadable_nested_async_gens(stmts)
     _prop_names = _seed_prop_names(stmts)
     for s in stmts:
         if isinstance(s, N.FunctionDef) and (getattr(s, 'is_generator', False)
@@ -3581,13 +3604,14 @@ def _capture_scan_body(stmts: list) -> list:
     return out
 
 
-def _nested_async_capture_plan(inner: N.FunctionDef, outer: N.FunctionDef) -> dict | None:
-    """`{}` if `inner` captures nothing from `outer` (the common case --
-    proceed exactly as before); a non-empty `{name: _Capture}` are the
-    captures to box; `None` when `inner` captures something from `outer`
-    that v0 cannot support -- distinct from "no captures at all" so the
-    caller can refuse (fall through to the cpp path) instead of silently
-    compiling a body that references an unresolved bare name."""
+def _nested_async_free_vars(inner: N.FunctionDef, outer: N.FunctionDef) -> set:
+    """The names `inner` reads that `outer` itself binds -- i.e. what a
+    mutable capture would have to cover. Split out of
+    `_nested_async_capture_plan` because TWO questions need it and they
+    are genuinely different: "can v0 box these?" (the plan) and "does the
+    C++ backend's complete lack of a capture model matter here?"
+    (`_nested_async_drive_unthreadable`), which must be answerable on the
+    C++ backend too, where this module never lowers anything."""
     all_outer = _outer_all_locals(outer)
     used = set()
     for b in _capture_scan_body(inner.body):
@@ -3596,17 +3620,102 @@ def _nested_async_capture_plan(inner: N.FunctionDef, outer: N.FunctionDef) -> di
     # comprehension's target unpack over a `list[tuple[str, str]]` boxes
     # both slots to int64_t self-hosted (this codebase's original,
     # longest-documented instance of this trap class). See
-    # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+    # bugs/CODEGEN_selfhost_actual_types_identifier_field.md.
     _inner_pnames = set()
     for _pn, _pa in inner.params:
         _inner_pnames.add(_pn)
     inner_declared = (_inner_pnames
                        | gimple_ctypes._declared_vars_body(inner.body))
-    captured_names = (used - inner_declared) & all_outer
-    if not captured_names:
-        return {}
+    return (used - inner_declared) & all_outer
+
+
+def _scan_unthreadable_nested_async_gens(stmts: list) -> None:
+    """Populate `_UNTHREADABLE_NESTED_ASYNC_GENS` for a whole module, on
+    BOTH backends. Called from `lower()` before it either lowers anything
+    (stack-switch) or returns untouched (C++) -- see that function's
+    comment for why the C++ path needs it, and
+    `_nested_async_drive_unthreadable` for the decision itself, which this
+    shares rather than re-deriving. Deliberately read-only apart from that
+    set: it does not go through the AST-mutating passes (`_rewrite_native_
+    future_refs`, the eligibility probes' await-hoisting) that the
+    stack-switch path runs, so a module compiled with `MOJO_CORO=cpp` is
+    handed back byte-for-byte the AST it came in with."""
+    for s in stmts:
+        if not (isinstance(s, N.FunctionDef) and not getattr(s, 'is_generator', False)
+                and not getattr(s, 'is_async', False)):
+            continue
+        for inner in s.body:
+            if isinstance(inner, N.FunctionDef) and getattr(inner, 'is_async', False):
+                _nested_async_drive_unthreadable(inner, s)
+
+
+def _nested_async_drive_unthreadable(inner: N.FunctionDef,
+                                     outer: N.FunctionDef) -> bool:
+    """True iff `inner` is a nested `async def` that must NOT be lowered
+    to the stack-switch path, and must be refused by the C++ backend too,
+    because a sibling nested `async def`'s `async for`/await drive loop is
+    one of its call sites: the capture box cannot be threaded into a driven
+    consumer, and the C++ emitter has no capture model at all, so it emits
+    a body referencing the captured name where it does not exist -- a hard
+    "'acc' was not declared in this scope" from the generated .cpp, which
+    blames generated code rather than the program.
+
+    Records the name (bare and `__mgco_<outer>_<name>`-qualified) in
+    `_UNTHREADABLE_NESTED_ASYNC_GENS` as a side effect, which is how
+    `cpp_async.py` learns about it -- see that set's own docstring. The
+    recording used to happen inside `_hoist_nested_async`, which runs ONLY
+    when the stack-switch backend is enabled, so on the C++ backend (the
+    `MOJO_CORO=cpp` escape hatch) the set was always empty and this guard
+    never fired: the exact shape the set was invented for produced a
+    generated-C++ error on that backend instead of the honest refusal the
+    default backend gave. Hence the call from `lower()` on both paths.
+
+    "Captures something" is required, and is the whole reason this is not
+    just `_called_from_nested_async`: a capture-less nested generator
+    driven by a sibling is fine on the C++ backend (measured -- it is the
+    one shape of this family that runs there and prints the right answer),
+    and refusing it would trade a working program for a message."""
+    if not _called_from_nested_async(outer, inner.name):
+        return False
+    if not _nested_async_free_vars(inner, outer):
+        return False
+    _UNTHREADABLE_NESTED_ASYNC_GENS.add(inner.name)
+    _UNTHREADABLE_NESTED_ASYNC_GENS.add(
+        f'__mgco_{_cm_as_str(outer.name)}_{_cm_as_str(inner.name)}')
+    return True
+
+
+def _nested_async_capture_plan(inner: N.FunctionDef, outer: N.FunctionDef) -> dict | None:
+    """`{}` if `inner` captures nothing from `outer` (the common case --
+    proceed exactly as before); a non-empty `{name: _Capture}` are the
+    captures to box; `None` when `inner` captures something from `outer`
+    that v0 cannot support -- distinct from "no captures at all" so the
+    caller can refuse (fall through to the cpp path) instead of silently
+    compiling a body that references an unresolved bare name."""
+    captured_names = _nested_async_free_vars(inner, outer)
+    # BEFORE the "captures nothing" early-out below, deliberately. The
+    # unthreadable-call-site test is about the CALL SITE, not about what
+    # `inner` happens to close over, and running it only for a capturing
+    # `inner` left the capture-less case silently miscompiled: a nested
+    # async GENERATOR with no captures of its own, driven by `async for`
+    # from a sibling nested `async def`, was hoisted, and the call site
+    # inside that sibling's hoisted body was left as the BARE `gen_start`
+    # -- `_rewrite_asyncio_run_stmts` only qualifies a call that still
+    # sits in the enclosing function's own body, and a nested async's
+    # body has been hoisted out of it by then. So the program linked
+    # against a `__mojo_gen_start` that nothing defines, the call site
+    # degraded to the "unavailable in compiled mode" stub returning 0, and
+    # the `async for` loop consumed a generator that never ran:
+    #
+    #     __mgco_gen_start: unavailable in compiled mode0      (CPython: 3)
+    #
+    # Refusing here routes it through the same honest whole-module
+    # refusal a capturing `inner` already got, which is the direction
+    # every other unthreadable shape in this file takes.
     if _called_from_nested_async(outer, inner.name):
         return None            # unthreadable call site -- refuse (cpp path)
+    if not captured_names:
+        return {}
     boxable = _outer_boxable_locals(outer)
     penv = _static_env(outer)          # param annotation kinds + callsite contract
     outer_param_names = set()
@@ -4053,36 +4162,35 @@ def _hoist_nested_async(stmts: list, meta: list):
         for inner in original_body:
             if isinstance(inner, N.FunctionDef) and getattr(inner, 'is_async', False):
                 base = f'__mgco_{s.name}_{inner.name}'
+                # A capture reached only through a sibling nested async's
+                # `async for`/await drive loop cannot have its box handles
+                # threaded to where the generator is actually driven from,
+                # and the C++ path is NOT a safe fallback for it: that
+                # emitter has no capture model at all, so it emits the body
+                # referencing the captured name in a scope where it does
+                # not exist -- `'acc' was not declared in this scope` from
+                # the generated .cpp, a hard compile error pointing at
+                # generated code rather than at the program. Skip it here
+                # and record the name for the C++ emitter (which consults
+                # the set) to refuse too, turning a confusing generated-C
+                # error into an honest one naming the construct. Checked
+                # BEFORE eligibility, because it is a property of the call
+                # site, not of the body.
+                if _nested_async_drive_unthreadable(inner, s):
+                    continue
                 if any(isinstance(n, N.YieldExpr) for n in _walk(inner)):
                     ok, _why = _eligible_async_gen(inner, nested=True)
                     if ok:
                         # Increment D: a mutable outer capture into a nested
                         # async GENERATOR is boxed exactly like the plain
                         # `async def` branch below. A capture v0's box
-                        # cannot represent -- or one reached only through a
-                        # driven `async for` consumer, which the box-handle
-                        # threading does not cover -- yields `None` here and
-                        # falls through to the cpp path unchanged.
+                        # cannot represent yields `None` here and falls
+                        # through to the cpp path unchanged.
                         cap_map = _nested_async_capture_plan(inner, s)
                         if cap_map is None:
-                            # Increment D: the generator captures outer
-                            # locals, but the box handles cannot be threaded
-                            # to where it is actually driven from (a
-                            # further-nested `async def` sibling's
-                            # `async for`/await drive loop -- see
-                            # _called_from_nested_async). Falling through to
-                            # the C++ path is NOT a safe fallback here: that
-                            # emitter has no capture model at all, so it
-                            # emitted the generator body referencing the
-                            # captured name in a scope where it does not
-                            # exist -- `'acc' was not declared in this
-                            # scope` from the generated .cpp, a hard compile
-                            # error pointing at generated code rather than
-                            # at the program. Record the name so the C++
-                                    # emitter refuses it too (it consults
-                                    # this set), turning a confusing generated-C
-                                    # error into an honest one naming the
-                                    # construct.
+                            # Not boxable at all (an opaque initializer, a
+                            # container, ...). Nothing to thread, so this
+                            # one genuinely is the C++ emitter's problem.
                             _UNTHREADABLE_NESTED_ASYNC_GENS.add(inner.name)
                             _UNTHREADABLE_NESTED_ASYNC_GENS.add(base)
                             continue

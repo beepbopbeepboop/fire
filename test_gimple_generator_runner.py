@@ -3782,6 +3782,47 @@ def main() raises:
     outer()
 """, "ordinary function")
 
+    # A nested async GENERATOR with NO captures of its own, driven by
+    # `async for` from a sibling nested `async def`. The unthreadable-
+    # call-site test used to run only for a generator that captured
+    # something, so this one was hoisted -- and the call site inside the
+    # sibling's hoisted body was left as the BARE `gen_start`, because
+    # `_rewrite_asyncio_run_stmts` can only qualify a call that is still in
+    # the enclosing function's own body, and a nested async's body has
+    # been hoisted out of it by then. The program linked against a
+    # `__mgco_gen_start` nothing defines, the call degraded to the
+    # "unavailable in compiled mode" stub, and the loop consumed a
+    # generator that never ran:
+    #
+    #     __mgco_gen_start: unavailable in compiled mode0    (CPython: 3)
+    #
+    # A refusal is the correct outcome here, and it is the one the
+    # capturing version of this shape already got. (The C++ backend
+    # compiles and runs this one correctly -- see
+    # `nested_async_gen_no_capture_drive_compiles_on_cpp_backend` in
+    # test_gimple.py -- because it needs no capture model, which is exactly
+    # why the guard is not simply "driven by a nested async".)
+    test_generator_refused("nested_captureless_gen_driven_by_nested_async_refused", """\
+def outer() raises:
+    var acc = 0
+
+    async def gen():
+        yield 1
+        yield 2
+
+    @parameter
+    async def consume():
+        async for x in gen():
+            acc = acc + x
+
+    var t = create_task(consume())
+    t.wait()
+    print(acc)
+
+def main() raises:
+    outer()
+""", "cannot compile module")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
