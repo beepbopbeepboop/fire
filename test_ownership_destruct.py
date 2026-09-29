@@ -6,8 +6,11 @@ nothing," which matters as much as a non-empty hit given this module's
 deliberately conservative, low-recall design.
 """
 
+import gimple_codegen  # noqa: F401  (must load before infra_infer: circular imports)
 import fire_compiler as N
-from ownership_destruct import analyze_module, analyze_function, analyze_scoped_locals
+import mojo.middle.infra_infer as II
+from ownership_destruct import (analyze_module, analyze_function, analyze_scoped_locals,
+                                analyze_returns_fresh)
 
 
 def _candidates(src, fname):
@@ -92,7 +95,7 @@ def ident(read x: Int) -> Int:
 
 def main():
     d = {}
-    y = ident(d)
+    print(ident(d))
 """, "main", set()),
 
     ("callee_copies_its_read_parameter_into_a_field", """
@@ -102,9 +105,8 @@ struct Box:
 def stash(read x: Int, b: Box):
     b.items = x
 
-def main():
+def main(b: Box):
     d = {}
-    b = Box()
     stash(d, b)
 """, "main", set()),
 
@@ -178,7 +180,8 @@ def gen(x: Int):
 
 def main():
     d = {}
-    g = gen(d)
+    for v in gen(d):
+        pass
 """, "main", set()),
 
     ("decorated_callee_may_be_wrapped", """
@@ -449,7 +452,7 @@ def f(n: Int) -> Int:
     return t
 """, "f", set(), set()),
 
-    ("one_loop_declares_a_non_constructor_value_is_rejected", """
+    ("a_call_result_declaration_is_a_maybe_fresh_candidate_per_declaration", """
 def f(n: Int) -> Int:
     var t = 0
     for i in range(n):
@@ -459,7 +462,27 @@ def f(n: Int) -> Int:
         l = make(j)
         t += len(l)
     return t
+""", "f", set(), {"l"}),
+
+    ("read_after_the_loop_only_inside_an_fstring_is_still_a_use", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        l = [1, 2, 3]
+        t += len(l)
+    print(f"last has {len(l)} items")
+    return t
 """, "f", set(), set()),
+
+    ("an_fstring_inside_the_loop_body_is_within_the_region", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        l = [1, 2, 3]
+        t += len(l)
+        print(f"has {len(l)} items")
+    return t
+""", "f", set(), {"l"}),
 
     ("declaration_not_a_direct_child_of_the_body", """
 def f(n: Int) -> Int:
@@ -500,19 +523,383 @@ def f(n: Int) -> Int:
     return 0
 """, "f", set(), set()),
 
-    ("non_constructor_value_is_not_a_candidate", """
+    ("call_result_is_a_maybe_fresh_candidate_codegen_decides", """
 def f(n: Int) -> Int:
     var t = 0
     for i in range(n):
         l = make(i)
         t += len(l)
     return t
+""", "f", set(), {"l"}),
+
+    ("slice_concat_and_comprehension_results_are_maybe_fresh", """
+def f(base: List[Int], n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        a = base[0:2]
+        b = a + base
+        c = [v for v in b]
+        t += len(a) + len(b) + len(c)
+    return t
+""", "f", set(), {"b", "c"}),   # `a` is an operand of `+`: not a recognized safe read
+
+    ("slicing_a_local_reads_it_and_is_not_an_escape", """
+def f(n: Int) -> Int:
+    var t = 0
+    var l: List[Int] = [1, 2, 3]
+    for i in range(n):
+        t += len(l[0:2])
+    return t
+""", "f", {"l"}, set()),
+
+]
+
+
+def _returns_fresh(src, fname):
+    tokens = N.py_tokenize(src)
+    stmts = N.Parser(tokens).with_filename("<test>").parse_module()
+    for st in stmts:
+        if isinstance(st, N.FunctionDef) and st.name == fname:
+            return analyze_returns_fresh(st, {}, {})
+    return None
+
+
+# (name, source, function, expected). True means EVERY call returns a brand-new
+# container the caller may own and free; each False case is a way that free
+# would crash or be a use-after-free.
+FRESH_RETURN_CASES = [
+    ("builds_a_local_and_returns_it", """
+def mk(i: Int) -> List[Int]:
+    var l: List[Int] = []
+    l.append(i)
+    return l
+""", "mk", True),
+
+    ("returns_an_empty_display", """
+def mk() -> List[Int]:
+    return []
+""", "mk", True),
+
+    ("returns_a_populated_display", """
+def mk(i: Int) -> List[Int]:
+    return [i, 1, 2]
+""", "mk", True),
+
+    ("two_branches_each_returning_fresh_is_conservative", """
+def mk(c: Bool) -> List[Int]:
+    if c:
+        return []
+    else:
+        x = [1]
+        return x
+""", "mk", False),   # `x` is assigned at one exit only; the check needs EVERY exit (conservative)
+
+    ("iterating_the_local_before_returning_it", """
+def mk(n: Int) -> List[Int]:
+    var l: List[Int] = []
+    for i in range(n):
+        l.append(i)
+    for x in l:
+        print(x)
+    return l
+""", "mk", True),
+
+    ("returns_the_local_with_the_move_operator", """
+def mk(i: Int) -> List[Int]:
+    var l: List[Int] = []
+    l.append(i)
+    return l^
+""", "mk", True),
+
+    ("moving_a_parameter_out_is_not_fresh", """
+def mk(l: List[Int]) -> List[Int]:
+    return l^
+""", "mk", False),
+
+    ("returns_its_parameter", """
+def mk(l: List[Int]) -> List[Int]:
+    return l
+""", "mk", False),
+
+    ("returns_a_field_it_does_not_own", """
+def get(self) -> List[Int]:
+    return self.items
+""", "get", False),
+
+    ("returns_a_call_result", """
+def mk() -> List[Int]:
+    return other()
+""", "mk", False),
+
+    ("bare_return_hands_back_null", """
+def mk(c: Bool) -> List[Int]:
+    l = []
+    if c:
+        return
+    return l
+""", "mk", False),
+
+    ("a_path_falls_off_the_end", """
+def mk(c: Bool) -> List[Int]:
+    if c:
+        return []
+""", "mk", False),
+
+    ("returned_local_assigned_twice", """
+def mk(c: Bool) -> List[Int]:
+    l = []
+    if c:
+        l = [1]
+    return l
+""", "mk", False),
+
+    ("returned_local_also_stored_in_a_field", """
+def mk(self) -> List[Int]:
+    l = []
+    self.cache = l
+    return l
+""", "mk", False),
+
+    ("returned_local_also_appended_to_a_registry", """
+def mk() -> List[Int]:
+    l = []
+    registry.append(l)
+    return l
+""", "mk", False),
+
+    ("returned_through_an_alias", """
+def mk() -> List[Int]:
+    l = []
+    y = l
+    return y
+""", "mk", False),
+
+    ("returned_local_not_assigned_on_every_exit_is_rejected", """
+def mk(c: Bool) -> List[Int]:
+    if c:
+        l = []
+        return l
+    return []
+""", "mk", False),
+
+    ("returned_local_assigned_only_in_a_loop", """
+def mk(n: Int) -> List[Int]:
+    for i in range(n):
+        l = []
+    return l
+""", "mk", False),
+
+    ("returns_a_tuple_of_locals", """
+def mk() -> Int:
+    a = []
+    b = []
+    return a, b
+""", "mk", False),
+
+    ("contains_a_nested_def", """
+def mk() -> List[Int]:
+    l = []
+    def inner():
+        return l
+    return l
+""", "mk", False),
+
+    ("is_a_generator", """
+def mk():
+    l = []
+    yield 1
+    return l
+""", "mk", False),
+
+    ("is_decorated", """
+@cache
+def mk() -> List[Int]:
+    return []
+""", "mk", False),
+]
+
+
+def _struct_scoped(src, fname):
+    """(whole, scoped) for `fname` with the module's struct and function tables,
+    built exactly as codegen builds them."""
+    tokens = N.py_tokenize(src)
+    stmts = N.Parser(tokens).with_filename("<test>").parse_module()
+    funcs = II._build_analysis_funcs(stmts)
+    structs = II._build_analysis_structs(stmts)
+    for st in stmts:
+        if isinstance(st, N.FunctionDef) and st.name == fname:
+            whole = analyze_function(st, funcs, {}, structs)
+            return whole, analyze_scoped_locals(st, funcs, {}, whole, structs)
+    return set(), set()
+
+
+_PT = """
+struct Pt:
+    var x: Int
+    var y: Int
+
+    def __init__(out self, x: Int, y: Int):
+        self.x = x
+        self.y = y
+
+    def total(self) -> Int:
+        return self.x + self.y
+
+    def leak(self):
+        registry.append(self)
+
+    def link(self, other: Pt):
+        other.peer = self
+
+    def keep(self, items: List[Int]):
+        self.items = items
+
+    def scaled(self, k: Int) -> Int:
+        return self.total() * k
+"""
+
+# (name, function source appended to the struct, function, whole, scoped)
+STRUCT_CASES = [
+    ("struct_local_with_field_access_only", """
+def f(n: Int) -> Int:
+    p = Pt(n, 2)
+    return p.x + p.y
+""", "f", {"p"}, set()),
+
+    ("struct_local_in_a_loop_body", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        p = Pt(i, 2)
+        t += p.x + p.y
+    return t
+""", "f", set(), {"p"}),
+
+    ("struct_local_calling_a_method_that_only_reads_self", """
+def f(n: Int) -> Int:
+    p = Pt(n, 2)
+    return p.total() + p.scaled(3)
+""", "f", {"p"}, set()),
+
+    ("method_that_registers_self_is_an_escape", """
+def f(n: Int) -> Int:
+    p = Pt(n, 2)
+    p.leak()
+    return 0
 """, "f", set(), set()),
+
+    ("method_that_stores_self_into_another_object_is_an_escape", """
+def f(n: Int, other: Pt) -> Int:
+    p = Pt(n, 2)
+    p.link(other)
+    return 0
+""", "f", set(), set()),
+
+    ("bound_method_taken_as_a_value_captures_self", """
+def f(n: Int) -> Int:
+    p = Pt(n, 2)
+    g = p.total
+    return g()
+""", "f", set(), set()),
+
+    ("unknown_method_name_is_an_escape", """
+def f(n: Int) -> Int:
+    p = Pt(n, 2)
+    return p.not_a_method()
+""", "f", set(), set()),
+
+    ("returned_struct_is_an_escape", """
+def f(n: Int) -> Pt:
+    p = Pt(n, 2)
+    return p
+""", "f", set(), set()),
+
+    ("struct_passed_to_an_unresolved_function_is_an_escape", """
+def f(n: Int) -> Int:
+    p = Pt(n, 2)
+    return unknown(p)
+""", "f", set(), set()),
+
+    ("struct_passed_to_a_function_that_only_reads_it", """
+def peek(q: Pt) -> Int:
+    return q.x
+
+def f(n: Int) -> Int:
+    p = Pt(n, 2)
+    return peek(p)
+""", "f", {"p"}, set()),
+
+    ("struct_passed_to_a_function_that_stores_it", """
+def stash(q: Pt):
+    registry.append(q)
+
+def f(n: Int) -> Int:
+    p = Pt(n, 2)
+    stash(p)
+    return 0
+""", "f", set(), set()),
+
+    ("method_that_keeps_an_argument_makes_the_argument_escape", """
+def f(n: Int) -> Int:
+    p = Pt(n, 2)
+    l = [1, 2, 3]
+    p.keep(l)
+    return len(l)
+""", "f", {"p"}, set()),
+
+    ("method_used_before_the_binding_in_a_loop_is_still_checked", """
+def f(n: Int) -> Int:
+    for i in range(n):
+        if i > 0:
+            p.leak()
+        p = Pt(i, 2)
+    return 0
+""", "f", set(), set()),
+
+    ("field_assignment_stores_into_the_struct_and_is_not_an_escape_of_it", """
+def f(n: Int) -> Int:
+    p = Pt(n, 2)
+    p.x = 5
+    return p.x
+""", "f", {"p"}, set()),
+
+    ("struct_with_a_retaining_init_is_not_owned", """
+struct Reg:
+    var v: Int
+
+    def __init__(out self, v: Int):
+        self.v = v
+        registry.append(self)
+
+def f(n: Int) -> Int:
+    r = Reg(n)
+    return r.v
+""", "f", set(), set()),
+
+    ("struct_with_a_base_class_is_not_in_the_table_so_never_vetted_as_a_struct", """
+struct Child(Base):
+    var z: Int
+
+def f(n: Int) -> Int:
+    c = Child(n)
+    c.leak()
+    return c.z
+""", "f", {"c"}, set()),   # analysis credits a plain call result; codegen drops it (not fresh)
 ]
 
 
 def run():
     failures = []
+    for name, body, fname, exp_whole, exp_scoped in STRUCT_CASES:
+        src = body if "struct " in body else _PT + body
+        whole, scoped = _struct_scoped(src, fname)
+        if whole != exp_whole or scoped != exp_scoped:
+            failures.append(f"{name!r}: expected whole={exp_whole} scoped={exp_scoped}, "
+                            f"got whole={whole} scoped={scoped}")
+    for name, src, fname, expected in FRESH_RETURN_CASES:
+        got = _returns_fresh(src, fname)
+        if got != expected:
+            failures.append(f"{name!r}: expected returns_fresh={expected}, got {got}")
     for name, src, fname, exp_whole, exp_scoped in SCOPED_CASES:
         whole, scoped = _scoped(src, fname)
         if whole != exp_whole or scoped != exp_scoped:
@@ -522,7 +909,7 @@ def run():
         got = _candidates(src, fname)
         if got != expected:
             failures.append(f"{name!r}: expected {expected}, got {got}")
-    total = len(CASES) + len(SCOPED_CASES)
+    total = len(CASES) + len(SCOPED_CASES) + len(FRESH_RETURN_CASES) + len(STRUCT_CASES)
     passed = total - len(failures)
     for f in failures:
         print("FAIL:", f)

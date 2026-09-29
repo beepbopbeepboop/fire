@@ -210,6 +210,7 @@ void mojo_cleanup_push_set(void *p);
 void mojo_cleanup_push_dict_stack(void *p);
 void mojo_cleanup_push_list_stack(void *p);
 void mojo_cleanup_push_set_stack(void *p);
+void mojo_cleanup_push_ptr(void *p);   /* a struct instance: unwinding free()s the block */
 /* Pop the `n` most-recently-pushed thunks WITHOUT invoking them -- call
  * immediately at a point that is itself about to (or just did) free those
  * same `n` locals inline. */

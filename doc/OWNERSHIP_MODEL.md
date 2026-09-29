@@ -290,28 +290,28 @@ destructor dispatch, loop-body-scoped destruction (item 1's own
 follow-up, above — LANDED 2026-09-28, see doc/MEMORY.html §7.1), and
 Phase 4-6 (real calling convention, move-vs-copy, stack allocation).
 
-- [ ] **Beef up the solver to stack-home as much as possible — IN PROGRESS
-  (2026-09-28).** Landed (each with fixtures in `test_ownership_destruct.py`
-  and a bounded-memory runner test):
-  - [x] `for x in local:` / comprehension clauses over a bare local are
-    non-escaping reads;
+- [x] **Beef up the solver to stack-home as much as possible — LANDED 2026-09-28** (each with fixtures
+  in `test_ownership_destruct.py` and a bounded-memory or values test in `test_gimple_runner.py` that
+  fails when the rule is disabled; measurements in doc/MEMORY.html §5 and §10):
+  - [x] `for x in local:` / comprehension clauses over a bare local are non-escaping reads; slicing a
+    local reads it;
   - [x] the same name declared in sibling loop bodies qualifies in each;
-  - [x] real callee information: `ownership_destruct._summarize_params`
-    proves a parameter non-retaining from the callee's own body (not from the
-    `read` keyword — the compiled path lowers a copy as the same pointer);
-    codegen passes `_build_analysis_funcs(stmts)` (plain, uniquely-named,
-    non-imported free functions only);
-  - [x] non-empty list/dict/set literals are stack-homed
-    (`emit_container_new` consumes a storage request; unconsumed -> heap);
-  - [x] lists have a 4-slot inline buffer: no `malloc` for short lists, stack
-    or heap (doc/MEMORY.html §10).
-  Still open: containers nested inside a literal; temporary containers from
-  expressions consumed once (comprehension/slice/split results, arguments to
-  `extend`); struct instances, closure envs, boxed mutable locals; string
-  buffers; struct-method callee tables; storage homing in `__GIMPLE` bodies;
-  the container-kind registry's cost (~45% of a short list's remaining time);
-  inline slot arrays for dicts/sets. Success = the doc/MEMORY.html §5 table
-  all-flat and §10's end-to-end numbers measured against Rust.
+  - [x] real callee information from the callee's own body (`_summarize_params`), not the `read` keyword;
+  - [x] non-empty list/dict/set literals are stack-homed (`emit_container_new`);
+  - [x] lists have a 4-slot inline buffer: no `malloc` for short lists;
+  - [x] a local bound from a slice/comprehension/`+`/call is owned when codegen proves the value fresh at
+    the declaration; user functions proven to return a fresh container hand ownership to the caller
+    (`analyze_returns_fresh`, also `return l^`);
+  - [x] fresh temporaries are freed by their one consumer (`for` iterable, `extend`, list `+`, `len`);
+  - [x] struct instances are owned (freed with `free`, cleanup kind `MOJO_CLEANUP_PTR`) while nothing retains
+    `self` (method and `__init__` summaries; bound method as a value is an escape);
+  - [x] the registries are a dedicated pointer table; the runtime is built at `-O2`.
+  Decided against, with numbers: skipping the registry for a stack-homed container (~0.5 ns of 5.8 ns, and
+  it needs a never-boxed proof); a half-measure for closures (see the bug doc).
+  Still open: containers nested inside a literal; strings bound to locals (bugs/CODEGEN_call_result_container_never_freed.md);
+  closure environments / bound methods / boxed mutable locals (bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md);
+  struct-method callee tables beyond `self`; storage homing in `__GIMPLE` bodies; inline slot arrays for dicts/sets
+  (a string key still `strdup`s); a real int-keyed dict slot (Int keys are formatted and hashed as text today).
 
 ## Why this matters, not just "more spec compliance"
 

@@ -158,7 +158,9 @@ def test_every_declaration_is_seen():
     # are still included, and all five removed declarations are still absent.
     # 450 -> 451 (2026-09-28): `mojo_cstr_or_int_release`, the free half of
     # `mojo_cstr_or_int_str`'s ownership contract (doc/MEMORY.html section 4).
-    for header, want in (('fire_runtime.h', 451),
+    # 451 -> 452 (2026-09-28): `mojo_cleanup_push_ptr`, the cleanup-stack kind
+    # for an owned struct instance (doc/MEMORY.html section 3.B).
+    for header, want in (('fire_runtime.h', 452),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

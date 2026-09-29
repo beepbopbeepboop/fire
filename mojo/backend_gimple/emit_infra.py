@@ -58,7 +58,7 @@ from ownership_check import _block_terminates
 from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
-    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _build_analysis_funcs, _compute_owned_free_candidates, _compute_scoped_free_candidates, _scope_decl_name, _empty_ctor_ctype,
+    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _compute_owned_free_candidates, _compute_scoped_free_candidates, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
     _pair_key, _prepass_list_elem, _ptr_slot_in_range, _resolve_member_expr_type, _resolve_type, _scan_container_elems,
     _seed_addressed_locals, _type_of
@@ -240,6 +240,7 @@ def _reset_func(gen, body: list = None, params: list = None,
     # names repeat across functions, so this MUST reset per function (a stale
     # entry would free a temp that never owned anything). See doc/MEMORY.html.
     gen._cstr_key_src: dict[str, str] = {}
+    gen._fresh_vals: set = set()   # per function: temp names repeat across functions
     # Temps holding a heap string THIS function's own concatenation lowering
     # just built (`_emit_str_cat`) and that nothing else can hold yet. The
     # parent concatenation that consumes one as a direct operand frees it.
@@ -929,6 +930,83 @@ def _emit_imported_global_accessors(gen, stmts) -> None:
             gen._link_import_decl_list.append(decl)
 
 
+# Runtime functions that ALWAYS return a container they just allocated and
+# keep no other reference to. Each was checked against its source in
+# runtime/fire_runtime.c (every `return` yields a value created by
+# mojo_{list,dict,set}_new/_copy in the same function). NOT here:
+# mojo_set_sorted (one return is a call whose result ownership is unclear), any
+# in-place sort that returns its argument, and anything that may hand back a
+# stored container.
+_FRESH_CONTAINER_RETURNS = frozenset([
+    'mojo_list_slice', 'mojo_list_copy', 'mojo_list_concat', 'mojo_list_repeat',
+    'mojo_reversed', 'mojo_str_split', 'mojo_str_splitlines', 'mojo_range',
+    'mojo_range3', 'mojo_dict_copy', 'mojo_set_copy', 'mojo_dict_keys',
+    'mojo_dict_values', 'mojo_dict_items', 'mojo_zip', 'mojo_set_union',
+    'mojo_set_intersection', 'mojo_set_difference',
+])
+
+
+def note_fresh_result(gen, t: str) -> None:
+    """A container-display lowering (`[...]`, `{...}`, a comprehension) calls
+    this with the temp it is about to return: the display always builds a new
+    container, so the value is fresh for whoever consumes it next."""
+    gen._fresh_vals.add(t)
+
+
+def is_fresh_container_operand(gen, node, val: str) -> bool:
+    """True iff `val`, the lowered value of operand expression `node`, is a
+    container that NOTHING else can reference, so the code that consumes it may
+    free it. Two conditions, both required:
+      - `node` is a kind of expression that produces a value (a display, a
+        call, a slice, a `+`) — never an identifier or a field read, which
+        merely name a container somebody else owns; and
+      - `val` is a value a fresh-producing action created and that no consumer
+        has claimed yet (`_fresh_vals`). A temp is never bound to a name or
+        stored by the code that produces it, and a consumer removes it from the
+        set the moment it frees or claims it.
+    Freeing a value that fails either test would be a use-after-free, so the
+    default answer is False."""
+    if val == '' or val not in gen._fresh_vals:
+        return False
+    return isinstance(node, (ListExpr, DictExpr, SetExpr, Comprehension,
+                             CallExpr, SubscriptExpr, SliceExpr, BinaryOp))
+
+
+def free_fresh_container(gen, val: str, ctype: str) -> None:
+    """Free a fresh container operand after its consumer has read it, and
+    forget it so it can never be freed twice."""
+    fn = _owned_free_runtime_fn(ctype)
+    if fn != '':
+        gen._emit(f"  {fn} ({val});")
+        gen._fresh_vals.discard(val)
+
+
+def claim_loop_iterable_temp(gen, node, val: str, ctype: str) -> None:
+    """`for x in <fresh container>:` — the iterable is consumed only by the
+    loop, so it is a scoped entry that lives until the loop STATEMENT ends
+    (`emit_statement_temp_frees`), which covers a normal exit, `break`, the
+    `else:` clause and (via the live list) `return`. Registered at the OUTER
+    loop depth, so a `break`/`continue` inside the loop body never frees it.
+    Its cleanup thunk keeps an exception unwinding through the loop from
+    leaking it."""
+    if not is_fresh_container_operand(gen, node, val):
+        return
+    push_fn = _owned_push_runtime_fn(ctype)
+    free_fn = _owned_free_runtime_fn(ctype)
+    if push_fn == '' or free_fn == '':
+        return
+    gen._emit(f"  {push_fn} ({val});")
+    _scope_register(gen, val, free_fn)
+    gen._fresh_vals.discard(val)
+
+
+def emit_statement_temp_frees(gen, mark: int) -> None:
+    """After a statement that may have registered temporaries (a `for`), free
+    those still live beyond `mark` and forget them."""
+    if len(gen._scope_live) > mark:
+        _emit_scope_end(gen, mark)
+
+
 def _new_bb(gen) -> str:
     gen.bb_counter += 1
     return f"bb_{gen.bb_counter}"
@@ -936,6 +1014,16 @@ def _new_bb(gen) -> str:
 
 def _emit(gen, line: str):
     gen.body_lines.append(line)
+    # Track values produced by a runtime call that always returns a brand-new
+    # container (see `_FRESH_CONTAINER_RETURNS`). A consumer that receives
+    # exactly such a value, from an operand node that can only have produced
+    # it, may free it once it has read it.
+    _fi = line.find(' = mojo_')
+    if _fi > 0:
+        _rest = line[_fi + 3:]
+        _pi = _rest.find(' (')
+        if _pi > 0 and _rest[:_pi] in _FRESH_CONTAINER_RETURNS:
+            gen._fresh_vals.add(line[:_fi].strip())
     # Track whether this is a terminal statement (can't have code after it)
     stripped = line.strip()
     if stripped.startswith('return ') or stripped.startswith('goto ') or stripped == 'return;':
@@ -3711,6 +3799,20 @@ def _owned_push_runtime_fn(ctype) -> str:
     return ''
 
 
+def _struct_ptr_owned(gen, name: str, ctype) -> bool:
+    """`name` is a local bound to a struct instance this function owns: its C
+    type is a pointer to a struct the analysis vetted AND it passed the
+    declaration gate (`maybe_push_owned_local` pushed it). The second condition
+    matters: a candidate that never went through the gate — whatever its type —
+    must never be freed just because it is a candidate."""
+    if ctype is None or not ctype.endswith(' *'):
+        return False
+    base = ctype[:-2].strip()
+    if base not in gen._analysis_structs or base not in gen.struct_field_types:
+        return False
+    return name in gen._owned_free_pushed
+
+
 def _owned_stack_push_runtime_fn(ctype) -> str:
     """The cleanup-stack push for a STACK-homed container of `ctype` (the
     `_STACK` kinds tear down buffers only, never `free()` the struct); an
@@ -3760,7 +3862,7 @@ def emit_container_new(gen, t: str, ctype: str) -> None:
         gen._emit(f"  {t} = mojo_list_new ();")
 
 
-def maybe_push_owned_local(gen, name: str) -> None:
+def maybe_push_owned_local(gen, name: str, value=None) -> None:
     """Call once, right after lowering ANY statement whose sole target is
     the plain identifier `name` (a `VarDecl` or a single-target
     `AssignStmt`) — see the two call sites in gimple_gen_stmts.py's
@@ -3788,6 +3890,20 @@ def maybe_push_owned_local(gen, name: str) -> None:
     pushed = gen._owned_free_pushed
     if name in pushed:
         return
+    # A declaration whose value is not a container display (a call, a slice, a
+    # comprehension, a `+`) only MAY have built a fresh container — the
+    # analysis credited the name on that "maybe". Ownership is kept only when
+    # the value is provably fresh HERE: a producer expression whose lowered
+    # value is a temp a fresh-returning action created and nothing has claimed.
+    # Anything else (a call returning a stored container, an alias) means the
+    # name does not own its value, so it stops being a candidate at this
+    # declaration and nothing about it is ever freed.
+    if value is not None and not _is_ctor_display(value):
+        rhs = gen._decl_rhs_val
+        if rhs == '' or not is_fresh_container_operand(gen, value, rhs):
+            candidates.discard(name)
+            return
+        gen._fresh_vals.discard(rhs)
     ctype = gen.var_types.get(name)
     # A non-empty literal was lowered with a stack-storage request
     # (`maybe_stack_alloc_owned_ctor`): consumed -> the value lives in that
@@ -3805,6 +3921,16 @@ def maybe_push_owned_local(gen, name: str) -> None:
     else:
         push_fn = _owned_push_runtime_fn(ctype)
         free_fn = _owned_free_runtime_fn(ctype)
+        if push_fn == '' and ctype is not None and ctype.endswith(' *'):
+            # A struct instance (a constructor call of a vetted struct): a plain
+            # heap block, torn down with free() and, on an exception, by a PTR
+            # thunk. Vetting is the analysis table; here only its C type is
+            # checked, because `_lower_call` marks only vetted constructors
+            # fresh, which the declaration gate above already required.
+            _base = ctype[:-2].strip()
+            if _base in gen._analysis_structs and _base in gen.struct_field_types:
+                push_fn = 'mojo_cleanup_push_ptr'
+                free_fn = 'free'
     if push_fn:
         gen._emit(f"  {push_fn} ({name});")
         pushed.add(name)
@@ -3852,6 +3978,8 @@ def _emit_owned_local_frees(gen):
             runtime_fn = _owned_destroy_runtime_fn(ctype)
         else:
             runtime_fn = _owned_free_runtime_fn(ctype)
+            if runtime_fn == '' and _struct_ptr_owned(gen, name, ctype):
+                runtime_fn = 'free'
         if runtime_fn:
             gen._emit(f"  {runtime_fn} ({name});")
             freed += 1
@@ -4179,12 +4307,12 @@ def begin_function(gen, fn) -> None:
     just triggered manually instead of automatically at the one
     assignment site automatic propagation can't reach — is correct
     permanently, not a one-off workaround for today's specific bug."""
-    gen._owned_free_candidates = _compute_owned_free_candidates(fn, gen._analysis_funcs)
+    gen._owned_free_candidates = _compute_owned_free_candidates(fn, gen._analysis_funcs, gen._analysis_structs)
     gen._field_elem_types.setdefault('GimpleGen', {})['_owned_free_candidates'] = 'char *'
     gen._owned_free_pushed = set()
     gen._owned_stack_allocated = set()
     _reset_scope_state(gen)
-    gen._scoped_free_candidates = _compute_scoped_free_candidates(fn, gen._owned_free_candidates, gen._analysis_funcs)
+    gen._scoped_free_candidates = _compute_scoped_free_candidates(fn, gen._owned_free_candidates, gen._analysis_funcs, gen._analysis_structs)
 
 
 def reset_no_candidates(gen) -> None:

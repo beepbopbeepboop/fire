@@ -4018,7 +4018,13 @@ def _lower_list_method(gen, ov: str, method: str, args: list) -> tuple:
         return 'int', gen._new_val('int', '0')
     if method == 'extend' and args:
         at, av = gen.lower_expr(args[0])
+        # `mojo_list_extend` copies the elements out of its source, so a source
+        # that is a fresh container (`l.extend([10, 20])`, `l.extend(s.split())`)
+        # is dead once it returns.
+        _ext_fresh = at == 'MojoList *' and gen._is_fresh_container_operand(args[0], av)
         gen._emit_call('void', '', 'mojo_list_extend', [('MojoList *', ov), (at, av)])
+        if _ext_fresh:
+            gen._free_fresh_container(av, 'MojoList *')
         if at == 'MojoList *' and av in gen._elem_types:
             gen._elem_types[ov] = gen._elem_types[av]
             if av in gen._nested_elem_types:

@@ -1957,8 +1957,13 @@ class GimpleGen:
         self._owned_stack_allocated: set = set()
         self._cstr_key_src: dict[str, str] = {}  # see _char_to_cstr(transient=)
         self._fresh_str_tmps: set = set()  # see emit_infra._emit_str_cat
+        self._fresh_vals: set = set()  # see emit_infra.is_fresh_container_operand
         # Block-scoped destruction state — see emit_infra's block-scope section.
         self._analysis_funcs: dict = {}   # see infra_infer._build_analysis_funcs
+        self._fresh_returning: set = set()   # names whose calls return a fresh container
+        self._analysis_structs: dict = {}    # see infra_infer._build_analysis_structs
+        self._decl_value_node = None   # see lower_expr: the decl statement's RHS node
+        self._decl_rhs_val: str = ''   # and the value it lowered to
         self._literal_storage: str = ''        # see emit_infra.emit_container_new
         self._literal_storage_ctype: str = ''
         self._scoped_free_candidates: set = set()
@@ -3286,7 +3291,20 @@ class GimpleGen:
     def _ident_call_name(self, func_node) -> str:
         return ggc._ident_call_name(self, func_node)
     def _lower_call(self, node: CallExpr) -> tuple[str, str]:
-        return ggc._lower_call(self, node)
+        _ct, _cv = ggc._lower_call(self, node)
+        # A call to a module function proven to return a brand-new container
+        # (analysis_funcs / analyze_returns_fresh): its result is fresh for
+        # whoever binds or consumes it. Not when the name is a local of this
+        # function (a function pointer / parameter shadowing the module name).
+        if (isinstance(node.func, IdentExpr) and node.func.name in self._fresh_returning
+                and node.func.name not in self.var_types):
+            self._fresh_vals.add(_cv)
+        # A constructor call of a struct the ownership analysis vetted
+        # (infra_infer._build_analysis_structs) builds a brand-new instance.
+        if (isinstance(node.func, IdentExpr) and node.func.name in self._analysis_structs
+                and node.func.name not in self.var_types):
+            self._fresh_vals.add(_cv)
+        return _ct, _cv
 
     def _lower_pointer_alloc(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_pointer_alloc(self, node)
@@ -3750,7 +3768,13 @@ class GimpleGen:
     def _lower_strided(self, node, store: bool):
         return gex._lower_strided(self, node, store)
     def lower_expr(self, node) -> tuple[str, str]:
-        return gex.lower_expr(self, node)
+        _lt, _lv = gex.lower_expr(self, node)
+        # The declaration being lowered wants to know which temp its right-hand
+        # side produced (emit_infra.maybe_push_owned_local checks it for
+        # freshness); the top-level RHS node is the one to remember.
+        if node is self._decl_value_node:
+            self._decl_rhs_val = _lv
+        return _lt, _lv
     def _lower_IntLiteral(self, node) -> tuple[str, str]:
         return gex._lower_IntLiteral(self, node)
     def _lower_FloatLiteral(self, node) -> tuple[str, str]:
@@ -3926,8 +3950,18 @@ class GimpleGen:
         return ginf._dict_union_val_type(self, lv, rv)
     def _prepare_analysis_funcs(self, stmts: list) -> None:
         self._analysis_funcs = ginf._build_analysis_funcs(stmts)
+        self._analysis_structs = ginf._build_analysis_structs(stmts)
+        self._fresh_returning = ginf._build_fresh_returning(self._analysis_funcs, self._analysis_structs)
     def _emit_container_new(self, t: str, ctype: str) -> None:
         return ginf.emit_container_new(self, t, ctype)
+    def _note_fresh_result(self, t: str) -> None:
+        return ginf.note_fresh_result(self, t)
+    def _is_fresh_container_operand(self, node, val: str) -> bool:
+        return ginf.is_fresh_container_operand(self, node, val)
+    def _free_fresh_container(self, val: str, ctype: str) -> None:
+        return ginf.free_fresh_container(self, val, ctype)
+    def _claim_loop_iterable_temp(self, node, val: str, ctype: str) -> None:
+        return ginf.claim_loop_iterable_temp(self, node, val, ctype)
     def _gen_loop_body(self, body: list) -> None:
         return ginf.gen_loop_body(self, body)
     def _emit_str_cat(self, lv: str, rv: str, free_left: bool=False, free_right: bool=False) -> str:

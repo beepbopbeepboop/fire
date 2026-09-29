@@ -2120,7 +2120,17 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         'MojoSet *':  f'mojo_set_len ({av})',
     }
     if at in _LEN_FNS:
-        return 'int64_t', gen._new_val('int64_t', _LEN_FNS[at])
+        # `len(<fresh container>)` (`len(mk(i))`, `len(s.split())`, `len([..])`)
+        # reads the length once and the operand is never seen again, so it is
+        # freed here. This is the builtin call only: the same `mojo_list_len`
+        # also backs truthiness tests, whose operand the caller may reuse, which
+        # is why the free lives in this lowering and not in the runtime call.
+        _len_fresh = (at in ('MojoList *', 'MojoDict *', 'MojoSet *')
+                      and gen._is_fresh_container_operand(node.args[0], av))
+        _len_t = gen._new_val('int64_t', _LEN_FNS[at])
+        if _len_fresh:
+            gen._free_fresh_container(av, at)
+        return 'int64_t', _len_t
     if at == 'char *':
         # A plain string (the overwhelmingly common representation of
         # Mojo/Python `str` in this compiler) had no case here at all —

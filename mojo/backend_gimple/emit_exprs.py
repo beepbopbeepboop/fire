@@ -2558,16 +2558,36 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     if op == '+' and alt == 'MojoList *' and art == 'MojoList *':
         lcast = lv if lt == 'MojoList *' else gen._coerce_to_type(lt, 'MojoList *', lv)
         rcast = rv if rt == 'MojoList *' else gen._coerce_to_type(rt, 'MojoList *', rv)
+        # `mojo_list_concat` copies both operands into a new list, so an operand
+        # that is itself a fresh container (a display, a slice, a previous `+`)
+        # is dead once it returns. Freshness is decided BEFORE the call is
+        # emitted, and only for an operand that needed no cast, so what is freed
+        # is exactly the pointer the concat read.
+        _free_l = lt == 'MojoList *' and lv != rv and gen._is_fresh_container_operand(left_node, lv)
+        _free_r = rt == 'MojoList *' and lv != rv and gen._is_fresh_container_operand(right_node, rv)
         t = gen._new_val('MojoList *', f"mojo_list_concat ({lcast}, {rcast})")
         if lcast in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[lcast]
+        if _free_l:
+            gen._free_fresh_container(lv, 'MojoList *')
+        if _free_r:
+            gen._free_fresh_container(rv, 'MojoList *')
         return 'MojoList *', t
 
     # MojoList + MojoList → mojo_list_concat
     if op == '+' and lt == 'MojoList *' and rt == 'MojoList *':
+        # `mojo_list_concat` copies both operands into a new list, so an operand
+        # that is itself a fresh container (a display, a slice, a previous `+`)
+        # is dead once it returns. Decide freshness BEFORE the call is emitted.
+        _free_l = lv != rv and gen._is_fresh_container_operand(left_node, lv)
+        _free_r = lv != rv and gen._is_fresh_container_operand(right_node, rv)
         t = gen._new_val('MojoList *', f"mojo_list_concat ({lv}, {rv})")
         if lv in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[lv]
+        if _free_l:
+            gen._free_fresh_container(lv, 'MojoList *')
+        if _free_r:
+            gen._free_fresh_container(rv, 'MojoList *')
         return 'MojoList *', t
 
     # MojoList * + int/int64_t → identity (DynamicVector not supported; treat as no-op)
@@ -4206,6 +4226,7 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
         # type (char * vs int64_t vs double) — see BUG-2026-044.
         if et == 'MojoDict *' and ev in gen._dict_val_types:
             gen._dict_val_types[t] = gen._dict_val_types[ev]
+    gen._note_fresh_result(t)
     return 'MojoList *', t
 
 
@@ -4223,6 +4244,7 @@ def _lower_dict_literal(gen, node: gimple_ctypes.DictExpr) -> tuple[str, str]:
             gen._dict_val_types[t] = 'int64_t'
     for key_expr, val_expr in node.pairs:
         _emit_dict_pair_store(gen, t, key_expr, val_expr)
+    gen._note_fresh_result(t)
     return 'MojoDict *', t
 
 
@@ -4328,6 +4350,7 @@ def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:
         else:
             ev64 = gen._to_int64(et, ev)
             gen._emit_call('void', '', 'mojo_set_add_int', [('MojoSet *', t), ('int64_t', ev64)])
+    gen._note_fresh_result(t)
     return 'MojoSet *', t
 
 
@@ -4560,6 +4583,7 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     else:
         gen._emit(f"  /* TODO: comprehension over {it_type} */")
 
+    gen._note_fresh_result(res)
     return res_type, res
 
 # fp-probe
