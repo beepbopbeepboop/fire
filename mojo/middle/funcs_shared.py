@@ -518,33 +518,62 @@ def _parsed_import(gen, module: str):
         try:
             import imports as _imp
             path = _imp.resolve_source(module) or gen._resolve_test_relative_module(module)
-            # A LEADING-DOT relative ref (`from .base import triple`) can
-            # never be resolved by either helper above: `imports.py`'s
-            # resolver only understands MOJO_PATH-relative dotted names
-            # (`_find`'s `name.replace('.', os.sep)` turns a leading dot
-            # into a leading path separator, which `os.path.join` then
-            # treats as absolute and silently DISCARDS the search
-            # directory it was joined onto — `os.path.join('/foo',
-            # '/base.mojo') == '/base.mojo'`), and
-            # `_resolve_test_relative_module` only tries the `.mojo`
-            # extension and mis-splits a leading dot into an empty path
-            # component. Both gaps are real but harmless everywhere else
-            # `_parsed_import` is called from (struct/generic lookups
+            # Neither helper above resolves a LOCAL PROJECT SIBLING, which
+            # is most of what this compiler is asked to compile:
+            #
+            #  * `imports.py`'s `resolve_source` only understands
+            #    MOJO_PATH-relative dotted names (`_find`'s
+            #    `name.replace('.', os.sep)` turns a leading dot into a
+            #    leading path separator, which `os.path.join` then treats
+            #    as absolute and silently DISCARDS the search directory it
+            #    was joined onto — `os.path.join('/foo', '/base.mojo') ==
+            #    '/base.mojo'`), and
+            #  * `_resolve_test_relative_module` only tries the `.mojo`
+            #    extension, so a bare `insp` next to a `insp.py` never
+            #    matches, and it mis-splits a leading dot into an empty
+            #    path component.
+            #
+            # Both gaps used to be "harmless everywhere else
+            # `_parsed_import` is called from" (struct/generic lookups
             # degrade to "not found" the same as any other unresolvable
-            # module) — the one place they turned into a genuine crash is
-            # `_register_link_imports` (link mode's `mojo build`): failing
-            # to resolve `.base` meant `triple` never got registered at
-            # all, `f = triple` fell through to the generic "undeclared
-            # identifier" placeholder (a literal `0`), and calling through
-            # that placeholder (`f(14)`) called a NULL function pointer —
-            # `Segmentation fault: 11` (see bugs/CODEGEN_link_mode_from_
-            # submodule_import_symbol_value_call_segfault.md). Reuse
-            # `_module_candidate_paths`, the do_imports=True inline path's
-            # OWN relative-import resolver (anchors at the IMPORTING
-            # file's directory, handles the dot-count-as-level Python
-            # semantics, and tries `.py` before `.mojo`) — it was already
-            # correct, just never wired into this cache-filling helper.
-            if not path and (module.startswith('.') or closure_module):
+            # module). They are not harmless, and the first place they
+            # turned into a genuine crash was `_register_link_imports`
+            # (link mode's `mojo build`): failing to resolve `.base` meant
+            # `triple` never got registered at all, `f = triple` fell
+            # through to the generic "undeclared identifier" placeholder
+            # (a literal `0`), and calling through that placeholder
+            # (`f(14)`) called a NULL function pointer — `Segmentation
+            # fault: 11` (see bugs/CODEGEN_link_mode_from_submodule_import_
+            # symbol_value_call_segfault.md). The second was SILENT and is
+            # why this is no longer restricted to dotted/closure names: a
+            # function-scoped `from _colorize2 import can_colorize` in a
+            # sibling `.py` (this compiler's own `Lib/argparse.py`'s
+            # `from _colorize import can_colorize`, inside a method) made
+            # `_exports` return `(exports={}, from_reflection=False,
+            # source=None)`, so the `if source:` fallbacks below all
+            # short-circuited, NOTHING was registered, and the call bound
+            # to the extern-preamble's `weak` "unavailable in compiled
+            # mode" stub — printing into the program's own stdout and
+            # returning 0, exit 0 (bugs/hard/CODEGEN_function_scoped_
+            # import_module_not_inlined.md, row 0). The module was never
+            # inlined because this helper could not find it, not because
+            # the single-TU path deliberately skips function-scoped
+            # imports.
+            #
+            # Reuse `_submodule_source_path` (i.e.
+            # `_module_candidate_paths`), the do_imports=True inline
+            # path's OWN resolver — it anchors at the IMPORTING file's
+            # directory and its ancestors, honours recorded
+            # `sys.path.insert(...)` dirs, handles the
+            # dot-count-as-level Python semantics, and tries `.py` before
+            # `.mojo`. It was already correct for every one of these
+            # shapes, just gated to dotted/closure names here, which left
+            # it inconsistent with `_compile_imported_module`, which calls
+            # the same function for EVERY module name. Unconditional
+            # because the two resolvers must agree: a name this helper
+            # cannot resolve is a name `_compile_imported_module` will
+            # not inline either, and that divergence is the whole bug.
+            if not path:
                 path = gen._submodule_source_path(module)
             src = open(path).read() if path else ''
             cache[module] = (path, src,
