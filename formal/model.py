@@ -4044,19 +4044,31 @@ def frame_holder_disagreement_refusal(callee: str, position, param,
 
 
 def frame_return_refusal(owner, received: bool, struct_names) -> str:
-    """A frame address RETURNED.  `owner` is the struct whose method the
-    returning function is, or None for a plain function; `received` says the
-    frame was NOT built here.
+    """A frame address RETURNED, in a function the convention does not cover.
+
+    **The convention covers the ordinary case and this is what is left of it.**
+    `formal/build.py`'s `_frame_return_status` decides, for the whole image,
+    whether a function returns a frame; when it does, the callee copies the
+    block into one the caller reserved (`struct_returned_frame_sites`,
+    `returned_frame_convention_refusal`) and this message is not reached. The
+    residual is a return of a name the analysis holds as a frame but could not
+    decide the width of — a candidate set with no struct in it, so the copy has
+    no `n` — and it is kept rather than deleted because that is a
+    representation the guard should refuse and not compute, and because the
+    sweep's family classifier (`tools/formal_sweep.py`) and
+    `test_refusal_taxonomy.py` both key on this text.
+
+    `owner` is the struct whose method the returning function is, or None for a
+    plain function; `received` says the frame was NOT built here.
 
     "Returned from the function that created it" is true for a frame a function
     built and false for one that arrived as a PARAMETER, and the second is the
     larger half of this family: the holder fixpoint makes a callee's parameter a
     holder — in every position since the position rule was split out of this
     one — so `def fwd(r): return r` in a program whose object was made by `main`
-    was reported as a return from the creator. The refusal is right — nothing
-    here establishes that the creator is still on the stack — and the sentence
-    was naming the wrong function, which sends the reader to look at `fwd` for a
-    construction that is in `main`.
+    was reported as a return from the creator. The refusal was right, the
+    sentence named the wrong function, and it sent the reader to look at `fwd`
+    for a construction that is in `main`.
 
     Which is why nothing here says "first parameter" any more.  It said that
     because the fixpoint only followed index 0, and it became false the moment
@@ -4064,12 +4076,13 @@ def frame_return_refusal(owner, received: bool, struct_names) -> str:
     the frame as its SECOND parameter, and a message naming the first one
     points the reader at a parameter the source does not use.
 
-    The hazard is measured, not asserted, and it is a use-after-free rather than
-    a wrong number in the shape that matters: with the creator one frame
+    The hazard is measured, not asserted, and it is a use-after-free rather
+    than a wrong number in the shape that matters: with the creator one frame
     deeper, `def stash(x, y): return y` called as `outer(1)`, the program built,
     ran, and returned **10 on arm64 and 0 on x86-64** where the source says 7 —
     the bytes the address names had been reused, and the two architectures
     disagreed about what was in them."""
+
     who = ", ".join(struct_names) if struct_names else "this struct"
     tail = (f" Returning the address hands the caller a pointer into a frame "
             f"whose lifetime this pass cannot follow, and the failure is a "
