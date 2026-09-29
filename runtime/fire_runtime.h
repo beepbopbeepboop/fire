@@ -287,6 +287,21 @@ int mojo_in_dispatch_str(int64_t container, char *needle);
 int mojo_in_dispatch_int(int64_t container, int64_t needle);
 void mojo_mark_as_tuple(MojoList *l);
 int mojo_is_tuple(MojoList *l);
+/* Per-slot element kinds (see the MojoList comment above for why a flat
+ * int64_t array cannot carry one). `kinds` is one byte per slot, from
+ * 'i' int / 'd' double / 's' bytes / 'p' str / 'l' nested list / 'n' None,
+ * and must outlive the list it describes (a `struct` format's compiled
+ * field, or a codegen string-pool constant — never a temporary). Passing
+ * NULL clears. A list that never had kinds costs one failed probe per
+ * read and nothing anywhere else.
+ * `mojo_list_slot_kind` answers 'i' for any slot this does not describe,
+ * which is the same answer the int accessor would have given.
+ * `mojo_list_inherit_kinds` is what every list->list copy calls, so
+ * `list(t)` / `t[:]` / `t + t` of a heterogeneous list stay describable. */
+void        mojo_list_set_kinds(MojoList *l, const char *kinds);
+const char *mojo_list_get_kinds(MojoList *l);
+char        mojo_list_slot_kind(MojoList *l, int64_t i);
+void        mojo_list_inherit_kinds(MojoList *dst, MojoList *src);
 void      mojo_list_free(MojoList *l);
 /* mojo_list_init/mojo_list_destroy: the in-place halves of mojo_list_new/
  * mojo_list_free, for a stack-declared MojoList (doc/OWNERSHIP_MODEL.md

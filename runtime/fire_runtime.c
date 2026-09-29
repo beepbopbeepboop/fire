@@ -611,6 +611,147 @@ int mojo_is_registered_list(int64_t addr) {
     return _pr_has(&_reg_list, (uint64_t)addr);
 }
 
+/* ── Per-slot element kinds on a MojoList ────────────────────────────────
+ *
+ * A MojoList's `data` is a flat `int64_t` array with NO per-element type
+ * tag: a double is stored as a bit-cast and a `MojoBytes *` as a pointer
+ * cast, so a reader that does not already know what a slot holds has no way
+ * to find out. That is why every uniform-list reader in this file (and the
+ * codegen's own subscript/repr helpers) is chosen per LIST and not per SLOT.
+ *
+ * Where the kinds ARE known — a `struct` format string, or a heterogeneous
+ * list literal — the right answer is per slot, and this table is how that
+ * travels with the VALUE instead of dying with the one compile-time name the
+ * codegen happened to see it under. It is a payload-carrying open-addressed
+ * map (the same shape as _PtrReg, plus a parallel `vals` array), keyed by the
+ * live MojoList address, holding one INTERNED byte per slot from the
+ * alphabet below. Deliberately a SIDE TABLE and not a field on MojoList:
+ * changing that struct's layout would move every stack-declared list in
+ * every generated program, plus the C++ backend's own copy of the container
+ * (mojo/backend_gimple/cpp_core.py) and the self-host's emitted structs.
+ *
+ * Only lists that are genuinely heterogeneous are ever added, so a program
+ * that never builds one pays a single failed probe per heterogeneous read
+ * and nothing at all anywhere else — the same "no cost until you need it"
+ * shape _reg_tuple above already pays.
+ *
+ * Alphabet (mirrors the codegen's _STRUCT_KIND_BYTE, plus the two kinds a
+ * heterogeneous list literal can hold and a struct format cannot):
+ *   'i' int64_t          (all of b B h H i I l L q Q ? and 'c')
+ *   'd' double           (f d)
+ *   's' MojoBytes *      (s)
+ *   'p' char *           (a str held in a list slot)
+ *   'l' MojoList *       (a nested container held in a list slot)
+ *   'n' None
+ * An index past the end of the string reads as 'i', which is the same
+ * answer mojo_repr_list_kinds already gave for an uncovered slot.
+ */
+
+/* Interned kinds strings. A copy/slice/concat records the SAME pointer, so
+ * a thousand derived lists share one allocation and the table holds one
+ * entry per live list rather than one string per list. The string itself is
+ * not copied: both call sites hand over a pointer that outlives every list
+ * it reaches — a strdup'd `MojoStructFmt` field the compiler never frees,
+ * and a codegen string-pool constant — so `mojo_list_inherit_kinds` below
+ * really does share rather than alias a temporary. */
+typedef struct {
+    const char **keys;   /* the MojoList address, as a uintptr_t */
+    char       **vals;   /* the per-slot kinds string */
+    uint64_t     cap;    /* power of two, 0 until first add */
+    uint64_t     used;
+} _KindReg;
+
+static _KindReg _reg_kinds;
+
+static void _kinds_grow(_KindReg *r)
+{
+    uint64_t ncap = r->cap ? r->cap * 2 : 64;
+    const char **ok = r->keys;
+    char       **ov = r->vals;
+    uint64_t ocap = r->cap;
+    r->keys = (const char **)calloc((size_t)ncap, sizeof(char *));
+    r->vals = (char **)calloc((size_t)ncap, sizeof(char *));
+    r->cap  = ncap;
+    r->used = 0;
+    for (uint64_t i = 0; i < ocap; i++) {
+        if (!ok[i]) continue;
+        uint64_t j = (uint64_t)(uintptr_t)ok[i] & (ncap - 1);
+        while (r->keys[j]) j = (j + 1) & (ncap - 1);
+        r->keys[j] = ok[i];
+        r->vals[j] = ov[i];
+        r->used++;
+    }
+    free(ok);
+    free(ov);
+}
+
+static void _kinds_forget(uint64_t addr)
+{
+    if (!_reg_kinds.cap) return;
+    uint64_t mask = _reg_kinds.cap - 1;
+    uint64_t i = addr & mask;
+    for (;;) {
+        if (!_reg_kinds.keys[i]) return;
+        if ((uint64_t)(uintptr_t)_reg_kinds.keys[i] == addr) {
+            _reg_kinds.keys[i] = NULL;
+            _reg_kinds.used--;
+            return;
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+const char *mojo_list_get_kinds(MojoList *l)
+{
+    if (!l || !_reg_kinds.cap) return NULL;
+    uint64_t mask = _reg_kinds.cap - 1;
+    uint64_t addr = (uint64_t)(uintptr_t)l;
+    uint64_t i = addr & mask;
+    for (;;) {
+        if (!_reg_kinds.keys[i]) return NULL;
+        if ((uint64_t)(uintptr_t)_reg_kinds.keys[i] == addr) return _reg_kinds.vals[i];
+        i = (i + 1) & mask;
+    }
+}
+
+void mojo_list_set_kinds(MojoList *l, const char *kinds)
+{
+    if (!l) return;
+    uint64_t addr = (uint64_t)(uintptr_t)l;
+    /* Clearing a list that never had kinds is the overwhelmingly common
+     * call, so it must not grow the table. */
+    if ((!kinds || !*kinds) && !_reg_kinds.cap) return;
+    if (!_reg_kinds.cap) _kinds_grow(&_reg_kinds);
+    if ((_reg_kinds.used + 1) * 2 > _reg_kinds.cap) _kinds_grow(&_reg_kinds);
+    _kinds_forget(addr);
+    if (!kinds || !*kinds) return;
+    uint64_t mask = _reg_kinds.cap - 1;
+    uint64_t i = addr & mask;
+    while (_reg_kinds.keys[i]) i = (i + 1) & mask;
+    _reg_kinds.keys[i] = (const char *)addr;
+    _reg_kinds.vals[i] = (char *)kinds;
+    _reg_kinds.used++;
+}
+
+/* The kind of one slot, 'i' for anything this table does not describe. */
+char mojo_list_slot_kind(MojoList *l, int64_t i)
+{
+    const char *k = mojo_list_get_kinds(l);
+    if (!k || i < 0 || !k[i]) return 'i';
+    return k[i];
+}
+
+/* `dst` is a fresh list built slot-for-slot out of `src`: it holds the same
+ * values, so it describes them the same way. Every list->list copy in this
+ * file calls this; that is the whole reason `list(mixed_tuple)` and
+ * `m[1:]` are right rather than only the original. */
+void mojo_list_inherit_kinds(MojoList *dst, MojoList *src)
+{
+    if (!dst || !src) return;
+    const char *k = mojo_list_get_kinds(src);
+    if (k) mojo_list_set_kinds(dst, k);
+}
+
 /* The ONE definition of "this int64_t is a real heap/static pointer", shared
  * by every predicate in this file that has to dereference one. Both
  * requirements below are what makes that safe, and both were found by
@@ -771,6 +912,7 @@ void mojo_list_destroy(MojoList *l)
 {
     _pr_del(&_reg_list, (uint64_t)(uintptr_t)l);
     _pr_del(&_reg_tuple, (uint64_t)(uintptr_t)l);
+    _kinds_forget((uint64_t)(uintptr_t)l);
     if (l->data != l->inl) free(l->data);
 }
 
@@ -958,6 +1100,7 @@ MojoList *mojo_list_slice(MojoList *l, int64_t start, int64_t stop)
     MojoList *r = mojo_list_new();
     for (int64_t i = start; i < stop; i++)
         mojo_list_append_int(r, l->data[i]);
+    mojo_list_inherit_kinds(r, l);
     return r;
 }
 
@@ -1113,6 +1256,25 @@ MojoList *mojo_list_concat(MojoList *a, MojoList *b)
     MojoList *r = mojo_list_new();
     for (int64_t i = 0; i < a->len; i++) mojo_list_append_int(r, a->data[i]);
     for (int64_t i = 0; i < b->len; i++) mojo_list_append_int(r, b->data[i]);
+    /* `t + t` and `t + []` are described by the source kinds, repeated to
+     * cover the result's slots; anything else (two lists whose kinds differ)
+     * has ONE slot array and no single correct answer, so nothing is
+     * recorded rather than something wrong. The repeated string is a fresh
+     * allocation because the source's is shared with every copy of it. */
+    {
+        const char *ka = mojo_list_get_kinds(a);
+        const char *kb = mojo_list_get_kinds(b);
+        int64_t na = a->len, nb = b->len;
+        if (ka && nb == 0) {
+            mojo_list_set_kinds(r, ka);
+        } else if (ka && kb && na == nb && strcmp(ka, kb) == 0) {
+            char *kk = (char *)malloc((size_t)(na + nb) + 1);
+            memcpy(kk, ka, (size_t)na);
+            memcpy(kk + na, kb, (size_t)nb);
+            kk[na + nb] = '\0';
+            mojo_list_set_kinds(r, kk);
+        }
+    }
     return r;
 }
 
@@ -1122,6 +1284,18 @@ MojoList *mojo_list_repeat(MojoList *l, int64_t n)
     for (int64_t rep = 0; rep < n; rep++)
         for (int64_t i = 0; i < l->len; i++)
             mojo_list_append_int(r, l->data[i]);
+    /* Same as mojo_list_concat: the source kinds, repeated n times to cover
+     * the result (a fresh string, since the source's is shared). */
+    {
+        const char *k = mojo_list_get_kinds(l);
+        if (k && n > 0) {
+            char *kk = (char *)malloc((size_t)(l->len * n) + 1);
+            for (int64_t rep = 0; rep < n; rep++)
+                memcpy(kk + rep * l->len, k, (size_t)l->len);
+            kk[l->len * n] = '\0';
+            mojo_list_set_kinds(r, kk);
+        }
+    }
     return r;
 }
 
@@ -2528,6 +2702,9 @@ struct MojoStructFmt {
     int64_t       nops;
     MojoStructOp *ops;
     char         *format;      /* original format string (struct.Struct.format) */
+    char         *kinds;       /* one per-slot kind byte for `ops`, or NULL
+                                * when the format is uniform (the common case,
+                                * and the one that needs no side table) */
 };
 
 void mojo_struct_raise_error(const char *msg)
@@ -2556,6 +2733,19 @@ static void _struct_type_info(char code, int native, int *sz, int *align)
     }
     if (sz)    *sz = s;
     if (align) *align = native ? s : 1;
+}
+
+/* One slot of an unpack result, in the alphabet mojo_list_set_kinds
+ * documents: 'd' for a float/double op, 's' for the bytes an 's'/'c' op
+ * produces, 'i' for everything else (including '?', which packs as a
+ * byte but is an int to every reader). The ONE definition, shared by the
+ * format compiler below and by _struct_unpack_at, so a kinds string and
+ * the value stored in the slot cannot drift apart. */
+static char _struct_op_kind(char code)
+{
+    if (code == 'f' || code == 'd') return 'd';
+    if (code == 's' || code == 'c') return 's';
+    return 'i';
 }
 
 MojoStructFmt *mojo_struct_compile(const char *fmt)
@@ -2625,6 +2815,26 @@ MojoStructFmt *mojo_struct_compile(const char *fmt)
     }
     f->size   = off;
     f->format = strdup(fmt);
+    /* The per-slot kinds, derived from the ops just built rather than by
+     * re-parsing the format: each op's `code` already says how its slot was
+     * written in _struct_unpack_at, so this cannot disagree with it. A
+     * UNIFORM format records nothing — its readers are all chosen from the
+     * format at compile time and need no side table, and leaving it NULL
+     * keeps every uniform `struct` use (the overwhelming majority) paying
+     * exactly nothing for this. */
+    {
+        int mixed = 0;
+        for (int64_t i = 0; i < f->nops; i++) {
+            char k = _struct_op_kind(f->ops[i].code);
+            if (i > 0 && k != _struct_op_kind(f->ops[0].code)) { mixed = 1; break; }
+        }
+        if (mixed) {
+            char *ks = (char *)malloc((size_t)f->nops + 1);
+            for (int64_t i = 0; i < f->nops; i++) ks[i] = _struct_op_kind(f->ops[i].code);
+            ks[f->nops] = '\0';
+            f->kinds = ks;
+        }
+    }
     return f;
 }
 
@@ -2745,6 +2955,12 @@ static MojoList *_struct_unpack_at(MojoStructFmt *f, MojoBytes *buf, int64_t off
         }
     }
     mojo_mark_as_tuple(out);
+    /* Hand the per-slot kinds to the VALUE, not to a compile-time name: the
+     * result can now be copied, sliced, returned from a function or stored
+     * in a container and still be read back correctly, which is the whole
+     * point of the side table (see mojo_list_set_kinds). A uniform format
+     * records nothing, so this is one call with a NULL argument for it. */
+    mojo_list_set_kinds(out, f->kinds);
     return out;
 }
 
@@ -4963,7 +5179,25 @@ char *mojo_repr_float(double v) {
     return strdup(buffer);
 }
 
+/* A list that records its OWN per-slot kinds (mojo_list_set_kinds) is
+   described by them more precisely than any single-accessor reader chosen
+   for the whole list can be, so every uniform list repr below defers to it
+   first and returns NULL when there is nothing to defer to. The one caller
+   that cannot see the kinds at all is the one that most needs this: the
+   codegen picks a uniform helper from a compile-time element type, and a
+   DERIVED value (`list(t)`, `t[:]`, a `t` returned from a function) is
+   built by a runtime helper the codegen knows nothing about. Costs a load
+   and a branch when no heterogeneous list has ever been built, and one
+   open-addressed probe otherwise. */
+static char *_mojo_repr_defers_to_kinds(MojoList *l) {
+    return (l && mojo_list_get_kinds(l)) ? mojo_repr_list_kinds(l, NULL) : NULL;
+}
+
 char *mojo_repr_list_doubles(MojoList *l) {
+    /* A list that brought its own per-slot kinds is described by them
+       (see _mojo_repr_defers_to_kinds). */
+    char *_dk = _mojo_repr_defers_to_kinds(l);
+    if (_dk) return _dk;
     /* Double-aware repr for a MojoList * whose element type is statically
      * known (at codegen time, via gimple_codegen.py's _elem_types) to be
      * double. MojoList stores every element as a raw int64_t slot with no
@@ -4988,6 +5222,10 @@ char *mojo_repr_list_doubles(MojoList *l) {
 }
 
 char *mojo_repr_list_ints(MojoList *l) {
+    /* A list that brought its own per-slot kinds is described by them
+       (see _mojo_repr_defers_to_kinds). */
+    char *_dk = _mojo_repr_defers_to_kinds(l);
+    if (_dk) return _dk;
     /* Int-aware repr for a MojoList * whose element type is statically
      * known (at codegen time, via gimple_codegen.py's _elem_types) to be a
      * genuinely homogeneous int64_t (never a boxed pointer/None sentinel
@@ -5016,6 +5254,10 @@ char *mojo_repr_list_ints(MojoList *l) {
 }
 
 char *mojo_repr_list_bools(MojoList *l) {
+    /* A list that brought its own per-slot kinds is described by them
+       (see _mojo_repr_defers_to_kinds). */
+    char *_dk = _mojo_repr_defers_to_kinds(l);
+    if (_dk) return _dk;
     /* Bool-aware repr for a MojoList * whose element type is statically
      * known (at codegen time, via gimple_codegen.py's _elem_types) to be
      * `_Bool` (e.g. a `[True, False]` literal). MojoList stores every
@@ -5110,6 +5352,10 @@ char *mojo_repr_list_pairs_s(MojoList *l) { return _mojo_repr_pairlist(l, 1); }
 char *mojo_repr_list_pairs_d(MojoList *l) { return _mojo_repr_pairlist(l, 2); }
 
 char *mojo_repr_list_bytes(MojoList *l) {
+    /* A list that brought its own per-slot kinds is described by them
+       (see _mojo_repr_defers_to_kinds). */
+    char *_dk = _mojo_repr_defers_to_kinds(l);
+    if (_dk) return _dk;
     /* repr for a MojoList * whose element type is statically known to be
      * `MojoBytes *` (e.g. b.split(sep)). Each int64_t slot holds a
      * MojoBytes pointer; format each via mojo_bytes_repr. */
@@ -5128,20 +5374,31 @@ char *mojo_repr_list_bytes(MojoList *l) {
 
 char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
     /* repr for a MojoList * whose per-slot element kinds are known but NOT
-     * uniform — a `struct.unpack` result for a format that mixes int, float
-     * and bytes fields. The three uniform helpers above each read every slot
-     * through one accessor, which is exact for them because the whole list
-     * really does hold that one kind; for a mixed format that choice is
-     * wrong for the other slots, and a float read as an int prints its raw
-     * IEEE-754 bit pattern (`(1, 4607182418800017408)` for '<if'). Here
-     * `kinds` carries one byte per slot — 'i' int, 'd' double, 's' bytes —
-     * which the CALLER knows because a `struct` format string is a
-     * compile-time constant (mojo/backend_gimple/emit_methods.py's
-     * _struct_slot_kinds). A slot kind the string does not cover (a longer
-     * list than the format describes, which no real call produces) falls
-     * back to the int accessor, the same answer the uniform int helper
-     * gives. Mirrors mojo_repr_list_doubles' exact structure (tuple parens,
-     * single-element trailing comma, [..] otherwise). */
+     * uniform. The uniform helpers above each read every slot through one
+     * accessor, which is exact for them because the whole list really does
+     * hold that one kind; for a mixed list that choice is wrong for the
+     * other slots, and a float read as an int prints its raw IEEE-754 bit
+     * pattern (`(1, 4607182418800017408)` for '<if', `[1.0, 2.5]` for the
+     * literal `[1, 2.5]`).
+     *
+     * TWO sources for the kind string, in this order:
+     *   - the `kinds` argument, which the CALLER passes when it knows them
+     *     statically — a `struct` format string is a compile-time constant
+     *     (mojo/backend_gimple/emit_methods.py's _struct_slot_kinds), so the
+     *     direct `struct.unpack(...)` case still needs no runtime table;
+     *   - otherwise the kinds recorded on the VALUE itself
+     *     (mojo_list_set_kinds), which is what makes every DERIVED list
+     *     right: `list(t)`, `t[:]`, `t + t`, and a `t` returned from a
+     *     function all carry them because the runtime hands them along. The
+     *     codegen used to lose them there and print raw IEEE-754 bits for a
+     *     copy of a mixed tuple.
+     *
+     * A slot the string does not cover (a longer list than the kinds
+     * describe, which no real call produces) falls back to the int accessor,
+     * the same answer the uniform int helper gives. Mirrors
+     * mojo_repr_list_doubles' exact structure (tuple parens, single-element
+     * trailing comma, [..] otherwise). */
+    if (!kinds) kinds = mojo_list_get_kinds(l);
     int _is_tup = l && mojo_is_tuple(l);
     if (!l) return _is_tup ? "()" : "[]";
     int64_t _n = mojo_list_len(l);
@@ -5154,6 +5411,16 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
         } else if (_k == 's') {
             MojoBytes *_b = (MojoBytes *)(uintptr_t)mojo_list_get_int(l, _i);
             _buf = mojo_str_cat(_buf, mojo_bytes_repr(_b));
+        } else if (_k == 'p') {
+            char *_p = (char *)(intptr_t)mojo_list_get_int(l, _i);
+            _buf = mojo_str_cat(_buf, mojo_repr_str(_p));
+        } else if (_k == 'l') {
+            /* A nested list/tuple slot: recurse through the same kinds-aware
+             * repr, so `[[1, 2.5], 3]` describes its inner list too. */
+            MojoList *_in = (MojoList *)(intptr_t)mojo_list_get_int(l, _i);
+            _buf = mojo_str_cat(_buf, mojo_repr_list_kinds(_in, NULL));
+        } else if (_k == 'n') {
+            _buf = mojo_str_cat(_buf, "None");
         } else {
             _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(l, _i)));
         }
@@ -6214,6 +6481,7 @@ MojoList *mojo_list_copy(MojoList *l) {
     if (!l) return out;
     for (int64_t i = 0; i < l->len; i++)
         mojo_list_append_int(out, l->data[i]);
+    mojo_list_inherit_kinds(out, l);
     return out;
 }
 
@@ -7085,6 +7353,19 @@ MojoList *mojo_list_reversed(MojoList *l) {
     for (int64_t i = 0, j = l->len - 1; i < j; i++, j--) {
         int64_t t = l->data[i]; l->data[i] = l->data[j]; l->data[j] = t;
     }
+    /* The slots moved, so the kinds have to move with them. A FRESH string
+     * rather than an in-place reverse: the recorded one is shared with
+     * every copy and slice taken from this list (mojo_list_inherit_kinds
+     * hands over the same pointer), and reversing it in place would
+     * re-describe all of those. */
+    const char *k = mojo_list_get_kinds(l);
+    if (k) {
+        int64_t n = mojo_list_len(l);
+        char *rk = (char *)malloc((size_t)n + 1);
+        for (int64_t i = 0; i < n; i++) rk[i] = k[n - 1 - i];
+        rk[n] = '\0';
+        mojo_list_set_kinds(l, rk);
+    }
     return l;
 }
 
@@ -7106,6 +7387,9 @@ MojoList *mojo_list_reversed(MojoList *l) {
    list), decided ONCE for the whole sort so the ordering stays consistent. */
 MojoList *mojo_sorted_by_keys(MojoList *items, MojoList *keys, int reverse) {
     MojoList *dst = mojo_list_copy(items);
+    /* Same reason as mojo_list_sorted_str: the sort permutes the slots, so
+     * the copied per-slot kinds would end up describing the wrong ones. */
+    mojo_list_set_kinds(dst, NULL);
     if (!keys) return dst;
     int64_t n = dst->len;
     if (keys->len < n) n = keys->len;
@@ -7186,6 +7470,12 @@ static int _mojo_sorted_str_cmp(int64_t a_raw, int64_t b_raw) {
 
 MojoList *mojo_list_sorted_str(MojoList *src) {
     MojoList *dst = mojo_list_copy(src);
+    /* Sorting PERMUTES the slots, so the per-slot kinds copied along no
+     * longer describe them; drop them rather than let a reader trust a
+     * string that is now attached to the wrong slots. (Python refuses to
+     * sort a mixed-type sequence at all, so nothing that reaches here is a
+     * case where a correct answer exists.) */
+    mojo_list_set_kinds(dst, NULL);
     for (int64_t i = 0; i < dst->len; i++) {
         for (int64_t j = i + 1; j < dst->len; j++) {
             if (_mojo_sorted_str_cmp(dst->data[i], dst->data[j]) > 0) {

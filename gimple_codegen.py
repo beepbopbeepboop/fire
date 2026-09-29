@@ -2687,6 +2687,7 @@ class GimpleGen:
         'mojo_list_all':         ('int',        ['MojoList *']),
         'mojo_list_any':         ('int',        ['MojoList *']),
         'mojo_list_copy':        ('MojoList *', ['MojoList *']),
+        'mojo_list_inherit_kinds': ('void',     ['MojoList *', 'MojoList *']),
         'mojo_cstr_reverse':     ('char *',     ['char *']),
         'mojo_bytes_reverse':    ('MojoBytes *', ['MojoBytes *']),
         'mojo_list_extend':      ('void',       ['MojoList *', 'MojoList *']),
