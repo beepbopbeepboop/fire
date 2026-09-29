@@ -968,18 +968,32 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             # stdlib modules regress) — see A5-BUG.md. Keep this patch in
             # the tree as the starting point for resolving the frontier.
             # POSITIVE EVIDENCE the boxed handle is a LIST: a tracked element
-            # type that is a real (non-boxed) pointer can only have been
-            # recorded for a list. Take the list path directly instead of
-            # emitting the runtime dict-or-list dispatch below, whose dict
-            # arm would bind this same loop variable to a `char *` KEY.
-            # `_declare_var` is first-decl-wins, so the two arms otherwise
-            # declare one variable with two incompatible types and GCC
-            # rejects the dead dict arm outright ("assignment to
+            # type at all, i.e. one the `int64_t` default would get wrong.
+            # `_elem_types` is only ever recorded for a LIST value (a literal,
+            # a cross-call param contract, a struct field), and a dict's keys
+            # are always strings -- so a known element ctype of ANY kind,
+            # `double` included, is positive evidence the value is a list and
+            # the dict arm is provably dead for it. Take the list path
+            # directly instead of emitting the runtime dict-or-list dispatch
+            # below, whose dict arm would bind this same loop variable to a
+            # `char *` KEY. `_declare_var` is first-decl-wins, so the two arms
+            # otherwise declare one variable with two incompatible types and
+            # GCC rejects the dead dict arm outright ("assignment to
             # 'FunctionDef *' from incompatible pointer type 'char *'").
-            # The dict arm is provably dead for such a value anyway.
+            #
+            # The `double` half is what closes a GENERATOR's version of this:
+            # a generator's params cross as untyped `int64_t` slots, so
+            # `def rows(data): for r in data: yield r` called
+            # `rows([1.5, 2.5])` had no element type here at all, the dict arm
+            # won the shared `r`, and the `double` yield slot could not be fed
+            # from a `char *` (a hard `gcc -fgimple` "pointer value used where a
+            # floating-point was expected"). The element ctype reaches
+            # `_elem_types` via `_mojo_coro_param_elem_kinds` ->
+            # `_param_elem_types` -> `gen_func`. See
+            # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
             _boxed_elem = gen._elem_of(it_val)
             if (it_type in ('int', 'int64_t', 'void *') and _boxed_elem
-                    and _boxed_elem != 'int64_t' and _boxed_elem.endswith(' *')):
+                    and _boxed_elem != 'int64_t'):
                 _lp_known = gen._coerce_to_type(
                     'int64_t', 'MojoList *', gen._to_int64(it_type, it_val))
                 gen._elem_types[_lp_known] = _boxed_elem

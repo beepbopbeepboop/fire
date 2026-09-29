@@ -2244,6 +2244,55 @@ def _mark_coro_body(body_fd):
     return body_fd
 
 
+def _mark_coro_param_elem_kinds(body_fd, real_params, env):
+    """Attach the C element ctype of every LIST-typed parameter to a
+    synthesized coroutine body, as `body_fd._mojo_coro_param_elem_kinds`
+    ({param name: element C type}).
+
+    A generator's parameters cross the stack-switch ABI as untyped
+    `int64_t` slots (`__mojo_gen_arg`), so a `for <t> in <param>:` in the
+    body reaches the ORDINARY loop lowering as a boxed handle with no
+    container type — and with no element type either. The evidence is
+    available here and nowhere downstream: `env` (`_static_env`, seeded from
+    the unanimous cross-call-site contract) already holds `('list', k)` for
+    `rows([1.5, 2.5])`, and by the time the backend sees the body the
+    generator's own FunctionDef is GONE — the lowering replaced it with
+    `__mgco_<g>_body` — so no whole-module call-site scan downstream can
+    recover it. `kinds/ctypes` is `'i'/'b'/'p'/'d'`, mapped through the one
+    `_KIND_CTYPE` every other answer in this file goes through.
+
+    Without this, a generator that iterates a list parameter and yields its
+    elements declared the loop target `char *` (the dict arm of the runtime
+    dict-or-list dispatch wins the shared variable) and the yield slot `double`
+    could not be fed from it: a hard `gcc -fgimple` "pointer value used where
+    a floating-point was expected", i.e. an honest refusal. With it, the
+    element type reaches `_elem_types` through the ordinary cross-call
+    element-type contract (`module_gen`'s `_param_elem_types` ->
+    `emit_funcs.gen_func`), so the loop takes the list path directly.
+    See bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md ("Item 8").
+
+    Only LIST params are recorded, and only a scalar element kind: a
+    container-of-container has no single C type either (it needs the nested
+    slot the ordinary lowering carries in `_nested_elem_types`), and an
+    `int64_t` element is the default the loop target assumes anyway.
+
+    Part of the same contract as `_mark_coro_body` and marked the same way
+    (an attribute, not a name-suffix guess) for the same reason: the backend
+    must be able to ask "is this a coroutine body, and what did its params
+    look like" without a parallel naming convention to keep in sync."""
+    kinds: dict = {}
+    for pname, _pann in real_params:
+        v = env.get(_cm_as_str(pname))
+        if isinstance(v, tuple) and len(v) == 2 and v[0] == 'list' \
+                and isinstance(v[1], str) and v[1] in _KIND_CTYPE:
+            ct = _KIND_CTYPE[v[1]]
+            if ct != 'int64_t':
+                kinds[_cm_as_str(pname)] = ct
+    if kinds:
+        body_fd._mojo_coro_param_elem_kinds = kinds
+    return body_fd
+
+
 def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
                          struct_name: str | None = None, struct_def=None) -> N.FunctionDef:
     base, is_method, real_params, prologue, body_params, c_params = \
@@ -3976,6 +4025,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     body_fd.is_generator = False
     body_fd.is_async = False
     body_fd = _mark_coro_body(body_fd)
+    _mark_coro_param_elem_kinds(body_fd, real_params, env)
 
     _lead = ([f'{struct_name} *'] if has_self else
              ['int64_t'] if is_classmethod else [])

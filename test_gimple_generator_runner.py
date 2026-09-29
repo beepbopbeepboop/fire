@@ -3216,6 +3216,74 @@ def main():
         print(r)
 """, "yields ['x'], whose call sites do not all pass the same")
 
+    # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md "Item 8", the
+    # GENERATOR half: `for <t> in <list param>:` inside a generator. A
+    # generator's params cross the stack-switch ABI as untyped `int64_t`
+    # slots, so the loop reached the ordinary lowering as a boxed handle with
+    # no container type and no element type; the runtime dict-or-list
+    # dispatch's dict arm then won the shared `r` (dict keys are `char *`)
+    # and the `double` yield slot could not be fed from it. Before the fix
+    # this was an honest COMPILE ERROR ("pointer value used where a
+    # floating-point was expected"); it now prints what CPython prints.
+    #
+    # Both element kinds are covered, and both are CPython-verified on the
+    # identical program text.
+    test_generator_stdout("generator_for_over_list_param_from_float_literal", """\
+def rows(data):
+    for r in data:
+        yield r
+
+def main():
+    for v in rows([1.5, 2.5]):
+        print(v)
+""", "1.5\n2.5\n")
+
+    # A string element was ALREADY correct before this change -- `char *` is a
+    # pointer, so it satisfied the guard's old `_boxed_elem.endswith(' *')`
+    # condition and the list path was taken. Pinned anyway, because the guard
+    # is what this change widened and this is the half that used to depend on
+    # the narrow form of it.
+    test_generator_stdout("generator_for_over_list_param_from_str_literal", """\
+def rows(data):
+    for r in data:
+        yield r
+
+def main():
+    for v in rows(["a", "b"]):
+        print(v)
+""", "a\nb\n")
+
+    # Same shape through a list-typed LOCAL rather than a literal, so the
+    # contract is read off the caller's env: the loop target's type must not
+    # depend on how the caller spelled the list.
+    test_generator_stdout("generator_for_over_list_param_from_local", """\
+def rows(data):
+    for r in data:
+        yield r
+
+def main():
+    xs = [1.5, 2.5]
+    for v in rows(xs):
+        print(v)
+""", "1.5\n2.5\n")
+
+    # The dict arm must stay: a parameter with NO list evidence at all (here
+    # the argument is a dict local, which the callsite scan cannot type into a
+    # `('list', k)` answer) must keep the runtime dict-or-list dispatch, or
+    # every `for k in <dict>` through a generator would silently iterate
+    # nothing. This is the negative half of the guard above.
+    test_generator_stdout("generator_for_over_unknown_param_still_dispatches", """\
+def rows(data):
+    for r in data:
+        print(r)
+    yield 0
+
+def main():
+    var d = {"k": 7}
+    for v in rows(d):
+        print(v)
+""", "k\n0\n")
+
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
         raise SystemExit(1)
