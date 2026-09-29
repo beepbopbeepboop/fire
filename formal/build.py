@@ -3092,9 +3092,31 @@ def check_module_symbols(functions: list, structs_by_name: dict = None) -> None:
         # missing local.  Collected by node identity because `M.iter_nodes`
         # has no parent, and an un-compiled callee is the common case in a
         # file that calls into a dylib.
-        callees = {id(c.func) for c in M.iter_nodes(fn.body)
-                   if isinstance(c, F.CallExpr) and isinstance(c.func,
-                                                               F.IdentExpr)}
+        #
+        # SPECIALIZATION, included, and it is not a nicety. A comptime
+        # specialization is a call whose callee is a `SubscriptExpr`, so
+        # keying on `isinstance(c.func, F.IdentExpr)` alone misses every one
+        # of them, and the ROOT of the bracket is then walked as if it were a
+        # read of a value. That is the false diagnosis the arm64 sweep reported
+        # for seventeen files: `std/sys/_assembly.mojo` spells
+        # `_get_kgen_string[asm]()` and was told `'_get_kgen_string' is
+        # imported from std.collections.string.string_slice, so it is a
+        # module-level name of another module` — which names a storage problem
+        # the file does not have. The name is a CALLEE. What crosses the dylib
+        # boundary is the instantiation, and whether this path has a symbol for
+        # it is a question for the export rule and the linker, not for the
+        # allocator's local table; that question is asked where it belongs (see
+        # `_callee_defs` for the generic's base name, and the export rule in
+        # `no_public_api_reason` for what a generic can bind as).
+        callees = set()
+        for c in M.iter_nodes(fn.body):
+            if not isinstance(c, F.CallExpr):
+                continue
+            if isinstance(c.func, F.IdentExpr):
+                callees.add(id(c.func))
+            elif isinstance(c.func, F.SubscriptExpr) \
+                    and isinstance(c.func.obj, F.IdentExpr):
+                callees.add(id(c.func.obj))
         # A BRACKETED or DOTTED form has the same problem one level up:
         # `__mlir_attr[…]`, `__mlir_attr.`lit`` and
         # `__mlir_op.`lit.materialize_into`[value=v]` are a SubscriptExpr and/or
@@ -3133,10 +3155,22 @@ def check_module_symbols(functions: list, structs_by_name: dict = None) -> None:
             if why is not None:
                 bracketed[id(root_ident)] = why
         for node in M.iter_nodes(fn.body):
-            if not isinstance(node, F.IdentExpr) or id(node) in callees:
+            if not isinstance(node, F.IdentExpr):
                 continue
+            # `bracketed` is asked BEFORE the callee exemption, and the order
+            # is load-bearing rather than tidiness. A construct refusal is
+            # about the whole expression — `external_call['setenv', Int32]`
+            # assembles a two-element subscript, and `Int32` inside it is a
+            # TYPE ARGUMENT rather than a read of a value. Skipping a callee
+            # root without asking first made the type argument the reported
+            # failure, which names an allocator table the reader has to go and
+            # look up instead of the subscript they wrote; measured, it
+            # replaced the tuple-index refusal on every `external_call[…]` in
+            # the stdlib with `'Int32' has no home`.
             if id(node) in bracketed:
                 raise CodegenError(bracketed[id(node)])
+            if id(node) in callees:
+                continue
             name = node.name
             if name in placed or name in frame_slots \
                     or M.module_constant_literal(name) is not None \
