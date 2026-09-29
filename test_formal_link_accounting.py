@@ -178,7 +178,7 @@ def _original_host_modules():
     return set(PRE_SPLIT_HOST_MODULES)
 
 
-def Written_modules():
+def written_modules():
     """The host-set names that have been WRITTEN, and so have left the set.
 
     A name belongs here when `resolve_module_path` finds real source for it in
@@ -222,13 +222,13 @@ def test_host_tiers():
               'nothing has been ADDED to the host set: a name enters it when a '
               'module is unreachable, never because one is hard to write',
               f'added {sorted(union - orig)}')
-        check(Written_modules() <= (orig - union),
+        check(written_modules() <= (orig - union),
               'every name that left the host set is one with real source '
               'behind it',
-              f'left without source {sorted((orig - union) - Written_modules())}')
-        check(set(orig) - union == Written_modules(),
+              f'left without source {sorted((orig - union) - written_modules())}')
+        check(set(orig) - union == written_modules(),
               'the account of what left the host set is exact',
-              f'unaccounted {sorted((orig - union) ^ Written_modules())}')
+              f'unaccounted {sorted((orig - union) ^ written_modules())}')
     else:
         check(False, 'the pre-split HOST_MODULES list could be read from git',
               'git show HEAD:formal/imports.py did not yield it')
