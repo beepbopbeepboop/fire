@@ -925,24 +925,19 @@ class ARM64Codegen:
                 # Already in X19 by the unconditional save above, which also
                 # keeps the no-parameter case (unknown-name reads fall back to
                 # X19 and so still see the entry argument).
-                home, src = 19, 19
-            else:
-                # Past the 10 callee-saved registers a parameter's home is a
-                # spill slot, and the incoming register is written there now
-                # or its first read in the body would load whatever the slot
-                # happened to hold.  NOT reachable today — the caller only ever
-                # passes 8 arguments (AAPCS X0-X7, see `_emit_call`), so at
-                # most 8 parameters exist to be spilled — but it is written
-                # rather than left as a silent-wrong-value trap for whoever
-                # raises that limit.
-                home = self._load_home_from_reg(pname, i)
-                if home is None:
-                    continue
-                src = home
-            if ptype is None:
-                continue         # a comptime parameter: already a full word
-            self._emit_extend(home, src,
-                              resolve(parse_type_name(ptype) or DEFAULT_INT_TYPE))
+                if ptype is None:
+                    continue     # a comptime parameter: already a full word
+                self._emit_extend(19, 19,
+                                  resolve(parse_type_name(ptype)
+                                          or DEFAULT_INT_TYPE))
+                continue
+            # Past the 10 callee-saved registers a parameter's home is a spill
+            # slot, and the incoming register is written there now or its first
+            # read in the body would load whatever the slot happened to hold.
+            # Unreachable until the returned-frame hidden word made an
+            # eleventh local possible; see `_load_home_from_reg` for the bug
+            # that was waiting there.
+            self._load_home_from_reg(pname, i, ptype)
         # The RETURNED-FRAME hidden word, moved from the register the caller
         # passed it in to its home, in the same place and for the same reason
         # as the parameters above: every incoming argument is caller-saved, so
@@ -1117,27 +1112,46 @@ class ARM64Codegen:
         # store. Refused, by name, with the same reason the read half gives.
         raise CodegenError(self._no_home(name))
 
-    def _load_home_from_reg(self, name: str, src: int):
-        """X<src> → this local's home. Returns the register holding it, or None.
+    def _load_home_from_reg(self, name: str, src: int, ptype=None):
+        """X<src> → this local's home, and the register it ended up in.
 
         ONE routine for "an incoming argument register becomes a local",
         because there are two callers with the same requirement and the
         second one (the returned-frame hidden word) is not a parameter: it is
         an address, so it must not be narrowed to a declared width, and it
         still has to be out of the caller-saved X0..X7 before the body runs.
-        A spill slot is addressed exactly as `_store_var` addresses one, which
-        is what keeps the two from computing different addresses for the same
-        slot."""
-        home = self._var_regs.get(name)
-        if home is not None:
+
+        The SPILL half of it was wrong before this existed and is what the
+        returned-frame convention made reachable: it moved `X<src>` into X17
+        and then stored X17 *through* X17, so the slot received the ADDRESS of
+        itself instead of the value. It was unreachable while a function had
+        at most eight parameters and ten callee-saved registers; a
+        frame-returning function's hidden word is an eleventh local, so a
+        program with ten locals reached it. A parameter is written to its slot
+        first and then EXTENDED through a register, because the slot is what
+        the body reads later and a stale high word poisons every comparison —
+        which the old `continue` skipped, since that path could not be taken."""
+        if name in self._var_regs:
+            home = self._var_regs[name]
             if home != src:
                 self.asm.emit(encode_mov_zr_xn(home, src))
+            if ptype is not None:
+                self._emit_extend(home, home, resolve(
+                    parse_type_name(ptype) or DEFAULT_INT_TYPE))
             return home
         if name in self._var_spills:
-            self.asm.emit(encode_mov_zr_xn(17, src))
-            _emit_sub_imm(self.asm, 17, 17, self._spill_off(name))
-            self.asm.emit(encode_str_xt_xn_imm(17, 17, 0))
-            return 17
+            # Park the value in a register the address scratch is not, so the
+            # extend has something to work on and the store has the right
+            # operand whichever way round it goes.
+            if src == 17:
+                self.asm.emit(encode_mov_zr_xn(16, src))
+                src = 16
+            if ptype is not None:
+                self._emit_extend(16, src, resolve(
+                    parse_type_name(ptype) or DEFAULT_INT_TYPE))
+                src = 16
+            self._store_var(name, src)
+            return None
         return None
 
     def _no_home(self, name: str) -> str:
