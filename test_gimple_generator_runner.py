@@ -455,7 +455,180 @@ main()
 """)
 
 
+def test_generator_a3_ineligible(name: str, mojo_src: str, gen_name: str,
+                                 expected_substr: str):
+    """Assert the A3 stack-switch backend refuses `name` with a reason
+    containing `expected_substr`, i.e. the generator is left untouched and
+    falls through to the C++20-coroutine path.
+
+    Asserting on the A3 DECISION rather than on a whole-module compile is
+    deliberate: the two backends have different kwonly policies (the cpp
+    path has never had a kwonly gate for a sync generator, so it accepts
+    `*, extra=[1, 2]` and pads the omitted argument with `_default_
+    expr_to_pair`'s typed-`0` fallback). A whole-module compile would
+    therefore report the cpp backend's answer and never reach the gate
+    under test.
+    """
+    global _PASS, _FAIL
+    import fire_compiler
+    import mojo.middle.coro as _coro
+    try:
+        stmts = fire_compiler.Parser(
+            fire_compiler.py_tokenize(mojo_src)).parse_module()
+        _coro.lower(stmts)      # populates the registries _eligible reads
+        for s in stmts:
+            if (isinstance(s, fire_compiler.FunctionDef) and s.name == gen_name):
+                ok, why = _coro._eligible(s)
+                if ok:
+                    print(f"FAIL  {name}: A3 accepted it")
+                    _FAIL += 1
+                elif expected_substr in why:
+                    print(f"PASS  {name}")
+                    _PASS += 1
+                else:
+                    print(f"FAIL  {name}: refused for the wrong reason: {why}")
+                    _FAIL += 1
+                return
+        print(f"FAIL  {name}: no such generator in the fixture")
+        _FAIL += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+
+
+def run_callable_param_tests():
+    # Cluster: bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md --
+    # "the real blocker is INVOKING a kw-only parameter as a callee", the
+    # shape `Tools/c-analyzer/c_common/fsutil.py`'s `walk_tree(root, *,
+    # walk=_walk_tree)` / `iter_files_by_suffix(..., *, _iter_files=
+    # iter_files)` are built from. Each of these compiled-and-ran BEFORE the
+    # fix only by accident of a different bug: the omitted `walk=` argument
+    # was padded with `('int', '0')`, i.e. a NULL function pointer, so the
+    # body called address 0 (SIGSEGV, exit 139, no diagnostic) -- the
+    # minimal repro the bug doc quotes. So the FIRST assertion here is not
+    # "it does not crash", it is that CPython's exact text comes out.
+    test_generator_stdout("kwonly_callable_default_for_loop_over_result", """\
+def leaf(root):
+    yield root + "/a"
+    yield root + "/b"
+
+def consume(root, *, walk=leaf):
+    for f in walk(root):
+        yield f
+
+def main():
+    for x in consume("/r"):
+        print(x)
+
+main()
+""", "/r/a\n/r/b\n")
+
+    # The same shape consumed by `yield from` rather than a for-loop. The
+    # value slot is what differs: a `yield from` through a callable-valued
+    # parameter contributed an UNKNOWN kind to `_generator_value_kind`, so
+    # the generator kept the `int64_t` default and every string came out as
+    # its own pointer, printed in decimal (verified before the fix:
+    # `4377024576\n4377024592`).
+    test_generator_stdout("kwonly_callable_default_yield_from", """\
+def leaf(root):
+    yield root + "/a"
+    yield root + "/b"
+
+def consume(root, *, walk=leaf):
+    yield from walk(root)
+
+def main():
+    for x in consume("/r"):
+        print(x)
+
+main()
+""", "/r/a\n/r/b\n")
+
+    # A caller that OVERRIDES the parameter. The compiled answer is typed
+    # from the DECLARED DEFAULT (that is the only callee identity a
+    # signature can carry), so this pins the behaviour rather than leaving
+    # it undefined: both call sites run, each with its own generator's
+    # values, in order.
+    test_generator_stdout("kwonly_callable_default_overridden_at_call_site", """\
+def leaf(root):
+    yield root + "/a"
+
+def other(root):
+    yield root + "/X"
+
+def consume(root, *, walk=leaf):
+    for f in walk(root):
+        yield f
+
+def main():
+    for x in consume("/r"):
+        print(x)
+    for x in consume("/r", walk=other):
+        print(x)
+
+main()
+""", "/r/a\n/r/X\n")
+
+    # Positional-with-default, not keyword-only: same callable-value
+    # representation, and it was NULL there too.
+    test_generator_stdout("positional_callable_default_iterated", """\
+def leaf(root):
+    yield root + "/a"
+
+def consume(root, walk=leaf):
+    for f in walk(root):
+        yield f
+
+def main():
+    for x in consume("/r"):
+        print(x)
+
+main()
+""", "/r/a\n")
+
+    # The eligibility gate replaced a blanket `kwonly params (v0)` refusal
+    # with "is every keyword-only default faithfully lowerable?". These two
+    # are the answers it must still give NO on, because admitting either
+    # would trade the whole-module fallback (gen_module interprets the
+    # module from source, which is always right) for a compiled NULL
+    # container pointer: `calls_shared._default_expr_to_pair` pads anything
+    # it cannot represent with a typed `0`, which is not a list.
+    test_generator_a3_ineligible("kwonly_default_container_literal_refused", """\
+def leaf(root):
+    yield root
+
+def consume(root, *, extra=[1, 2]):
+    for f in leaf(root):
+        yield f
+""", "consume", "kwonly params (v0): ['extra']")
+    test_generator_a3_ineligible("kwonly_default_computed_refused", """\
+def leaf(root):
+    yield root
+
+def consume(root, *, extra=len("ab")):
+    for f in leaf(root):
+        yield f
+""", "consume", "kwonly params (v0): ['extra']")
+    # ...and a faithful one IS accepted, so the gate is not simply always
+    # saying no (the two refusals above are only meaningful next to this).
+    test_generator_stdout("kwonly_default_literal_still_accepted", """\
+def leaf(root):
+    yield root + "/a"
+
+def consume(root, *, extra=0, name=None):
+    for f in leaf(root):
+        yield f
+
+def main():
+    for x in consume("/r"):
+        print(x)
+
+main()
+""", "/r/a\n")
+
+
 def run_tests():
+    run_callable_param_tests()
     run_lambda_capture_tests()
     run_mixed_yield_kind_tests()
     run_next_method_tests()
