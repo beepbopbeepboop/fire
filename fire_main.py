@@ -1,5 +1,5 @@
 """
-mojo_main.py - Bootstrap compiler (Python version for Stage 1)
+fire_main.py - Bootstrap compiler (Python version for Stage 1)
 
 Uses Python implementation:
 - fire_compiler (Python tokenizer, parser)
