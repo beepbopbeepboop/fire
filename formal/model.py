@@ -24,6 +24,7 @@ order in one place, not twice.
 """
 
 import os
+import re
 
 import fire_compiler as F
 
@@ -5196,6 +5197,132 @@ def _flat_callee(call) -> str | None:
 
 def _param_list(fn):
     return list(getattr(fn, "params", None) or [])
+
+
+# ── What a linked module's export table says about a call ──────────────────
+#
+# A module dylib is built from a source file, and its MANIFEST is the contract
+# it publishes: for every public function, the boundary symbol, the module that
+# owns it, and the C signature `doc/ABI.md` records. `formal/build.py` reads
+# that manifest to rewrite each call site to the exported spelling; the two
+# questions answered here are the ones that read raises but the emitters could
+# not.
+#
+# Both were open, and both were visible as a module that did not work.
+#
+#   * THE RETURNED VALUE'S KIND. `ValueKinds` classifies a call by asking
+#     `func_kind(callee)`, and a callee that is not a function of the unit
+#     being compiled has no answer, so a dylib call's result was unclassified.
+#     The manifest already says `char * platform_name (void)`, and the emitter
+#     already prints what it is told: `print(platform_name())` formatted the
+#     POINTER as an integer and printed `4335747904`. The manifest is the
+#     declaration; nothing was reading it for this.
+#   * THE DOTTED SPELLING. `from mod import f` binds a BARE name, and the flat
+#     `{name: symbol}` map answers it. `import mod` binds the module, and
+#     `mod.f(...)` spells the same function with a qualifier this path had no
+#     table for — so the only Python spelling of a module call that worked was
+#     the one that renames what it calls.
+#
+# Keyed by MODULE IDENTITY, not by bare name, and that is the whole safety
+# argument for the dotted table: `mod.f` can only ever reach an export of the
+# library built for `mod`, so two modules that both define `helper` cannot
+# cross-bind, and a bare `f()` cannot reach either of them through the dotted
+# table. (The flat bare-name map is a different, older, coarser answer and
+# stays where it is; `bugs/FORMAL_known_limits.md` §1.1 is why a `_CLIB_SYMS`
+# name is not advertised there at all.)
+
+
+def signature_return_type(signature: str) -> str:
+    """The return type a C signature string declares, or `''`.
+
+    `char * platform_name (void)` → `char *`. The head is `<return type>
+    <name>` and the name is the LAST whitespace-separated token of it —
+    qualified (`int64_t probe.maxsize`) or not — so the return type is
+    everything before that token. Splitting on the argument list first is what
+    makes the name the last token rather than a parameter.
+    """
+    if not signature:
+        return ""
+    head = signature.split("(", 1)[0].strip()
+    parts = head.rsplit(None, 1)
+    return parts[0].strip() if len(parts) == 2 else head
+
+
+def dylib_export_return_kind(entry) -> str | None:
+    """`STR_KIND` when a manifest export returns a string, else None.
+
+    STRICTLY ADDITIVE, and that is a deliberate limit rather than an
+    incomplete table: a `char *` return becomes classified, and every other
+    return stays unclassified exactly as it was. Answering `INT_KIND` for
+    everything else would look more thorough and would be a new claim — a
+    dylib function returning a list blob or a frame address is a word that is
+    not an integer, and the existing "unclassified" answer is the honest one
+    for it. Only a `char *` is a kind this model can be sure of from the
+    signature, because only a `char *` is the one pointer whose pointee the
+    emitters already know how to walk.
+    """
+    if not entry:
+        return None
+    ret = signature_return_type(entry.get("signature") or "")
+    return STR_KIND if ret.replace("const", "").strip() == "char *" else None
+
+
+def abi_module_name(dotted: str) -> str:
+    """A dotted module name in the ABI spelling its manifest records.
+
+    A manifest keys an export by the module's ABI PREFIX, and a prefix is a C
+    identifier, so the dots are flattened: `os.path` is `os_path`, and its
+    `join` exports as `os_path_join_2dbb98`.
+
+    This is the ONE place that substitution is written, and the producer side
+    is `formal/imports.py`'s `build_module_dylib`, which calls it to name the
+    library whose manifest keys the exports by it. That is not a shared helper
+    picked for tidiness: the spelling a caller writes (`os.path.join`) and the
+    spelling the manifest is keyed by (`os_path`) differ in exactly this one
+    documented way, and two copies of the rule are two chances for them to
+    disagree — which is a link error in the last image built rather than in
+    either of the two functions.
+
+    The name is UNPRECATED: a top-level module's prefix is its own name, which
+    is what every non-package module in this tree has, so for them this is the
+    identity function.
+    """
+    return re.sub(r"[^A-Za-z0-9_]", "_", dotted or "")
+
+
+def dylib_export_module(by_module: dict, qualifier: str) -> dict:
+    """The export table of the module a dotted qualifier names, or `{}`.
+
+    Asked twice of every dotted callee — once for the export it names, and
+    once to tell "this module does not export that" apart from "that is not a
+    module at all", which are different answers with different consequences —
+    so both spellings are resolved here rather than at the two call sites.
+    """
+    if not qualifier:
+        return {}
+    table = by_module.get(qualifier)
+    if table is not None:
+        return table
+    return by_module.get(abi_module_name(qualifier)) or {}
+
+
+def dylib_export_lookup(by_name: dict, by_module: dict, callee: str):
+    """The manifest export a callee name reaches, or None.
+
+    `by_name` is the flat `{bare name: entry}` table in LINK ORDER with
+    `setdefault`, so it is the same resolution `formal/build.py` builds
+    `dylib_syms` from and the two cannot answer differently about a bare name.
+    `by_module` is `{module identity: {bare name: entry}}`, consulted only for
+    a DOTTED callee, whose qualifier names the module that has to own the
+    export. The qualifier is resolved by `dylib_export_module`, so a package
+    submodule (`os.path.join`) is found under the prefix its manifest uses.
+    """
+    if not callee:
+        return None
+    if "." in callee:
+        module, _, leaf = callee.rpartition(".")
+        return dylib_export_module(by_module, module).get(leaf)
+    return by_name.get(callee)
 
 
 def _target_names(target):

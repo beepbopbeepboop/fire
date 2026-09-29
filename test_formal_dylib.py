@@ -17,7 +17,10 @@ What is asserted, in order:
   3. dlopen() accepts the file and every exported function is callable and
      computes the right answer, while a `_`-prefixed function is *not*
      reachable through dlsym;
-  4. `--no-prove` writes a dylib and no proof; the default (prove) path
+  4. a symbol that PREFIXES another symbol is still bindable — the case the
+     trie's layout decides and the only reading that can see it is dyld's
+     (`dlsym`), because a flat trie and a radix trie both decode here;
+  5. `--no-prove` writes a dylib and no proof; the default (prove) path
      writes a proof that Lean typechecks.
 
 Invoked via `make check-formal-dylib` or directly:
@@ -350,6 +353,59 @@ def test_exported_functions_execute(tmpdir, shared):
     except AttributeError:
         return
     raise TestFailure("dlsym resolved the private _hidden function")
+
+
+def test_a_symbol_that_prefixes_another_is_still_exported(tmpdir, shared):
+    """`_m_version` and `_m_version_info_major` are BOTH bindable.
+
+    The export trie was written FLAT — every symbol one whole edge off the
+    root — which is wrong as soon as one symbol is a prefix of another, and
+    wrong in the one way nothing here could see. dyld narrows a lookup by
+    walking edges; a flat trie makes the two symbols SIBLINGS, dyld matches
+    the short one against the long one's leading bytes, descends into a node
+    with no children, and does not go back to try the next edge. So the long
+    symbol was in the file, in the manifest, and in this file's own trie
+    reader, and dyld reported "Symbol not found" for it from a program that
+    had built and passed every static check.
+
+    Three independent readings, because the one that was wrong is the one
+    everybody agreed on:
+
+      * this file's trie reader, which walks the format's own layout;
+      * `dlsym`, which is dyld — the only reader here that IMPLEMENTS the
+        format rather than sharing the writer's assumption;
+      * a real program that links the library and calls both, which is the
+        only one that cannot be argued with.
+
+    A shared prefix is now a shared trie node, so the two names are siblings
+    one level down and neither is reachable only by luck.
+    """
+    src = os.path.join(tmpdir, "prefixes.mojo")
+    with open(src, "w") as f:
+        f.write("def version():\n  return 11\n\n"
+                "def version_info_major():\n  return 22\n\n"
+                "def unrelated():\n  return 33\n")
+    out, data = build_dylib(tmpdir, [src], "prefixes.dylib")
+    info = parse_macho(data)
+    got = sorted(n.lstrip("_") for n in (info["exports"] or {}))
+    check(got == ["prefixes_unrelated", "prefixes_version",
+                  "prefixes_version_info_major"],
+          f"the trie carries {got}, expected all three symbols")
+    # dlsym is the reading that failed: with a flat trie the longer symbol was
+    # in the file and unbindable, and this is the assertion that says so.
+    check(call_exported_by_name(out, "version", 0) == 11,
+          "the short symbol does not bind")
+    check(call_exported_by_name(out, "version_info_major", 0) == 22,
+          "the symbol that PREFIXES nothing else but follows one does not "
+          "bind: the export trie is flat, and a flat trie cannot hold a "
+          "symbol that extends another (see formal/macho_linker.py's "
+          "_export_trie)")
+    # …and the two must not share an address, which is what a trie that put
+    # them at one node would produce.
+    exports = info["exports"] or {}
+    addrs = {n: v[1] for n, v in exports.items()}
+    check(len(set(addrs.values())) == len(addrs),
+          f"two symbols share an export address: {addrs}")
 
 
 def test_no_prove_skips_proof(tmpdir, shared):
@@ -754,6 +810,8 @@ def test_dylib_calls_out_to_libSystem(tmpdir, shared):
 TESTS = [
     ("dylib structure and export trie", test_dylib_structure_and_exports),
     ("exported functions execute", test_exported_functions_execute),
+    ("a symbol that prefixes another is still exported",
+     test_a_symbol_that_prefixes_another_is_still_exported),
     ("--no-prove skips proof generation", test_no_prove_skips_proof),
     ("default path emits a checked proof", test_default_prove_emits_checked_proof),
     ("overloads build and export once", test_overloads_do_not_collide),

@@ -220,6 +220,146 @@ def test_import_links_and_runs(tmpdir, _shared):
     check(code == 42, f"program returned {code}, expected 42; stderr: {err}")
 
 
+def test_module_qualified_call_runs(tmpdir, _shared):
+    """`import mylib` then `mylib.helper(x)` — the other spelling of an import.
+
+    `PROG` above uses `from mylib import helper`, which is one of the two
+    ways to write the same call, and the other one was REFUSED: the callee
+    exclusion in `check_module_symbols` is collected by node identity and only
+    for a callee that is an `IdentExpr`, so the root of a `MemberExpr` callee
+    (`mylib` in `mylib.helper`) was read as a module-level name with no
+    storage. The refusal's own message recommended the form it refused
+    ("give it a function (a `mylib.fn()` call lowers)").
+
+    Both halves are needed and only measuring them in order shows that. With
+    the placement refusal gone, the call then failed on an unresolved symbol,
+    because the manifest's flat map is keyed by the BARE name (`helper` — the
+    spelling `from mylib import helper` writes) while `_callee_symbol` hands
+    the codegen the DOTTED one (`mylib.helper`). That is answered by
+    `model.dylib_export_lookup`, which resolves a DOTTED callee from the
+    export table of the library built for that module and never from the flat
+    map — so `mod.f` cannot bind some other library's `f` either. A test that
+    only checked the first half would have traded one refusal for another.
+
+    This is the top-level form; `pkg.sub` is the same call one level down and
+    has its own two tests below, because that is where the manifest's key and
+    the name a caller writes stop being the same string.
+    """
+    qualified = ("import mylib\n\n"
+                 "def main():\n  return mylib.helper(41)\n")
+    root = os.path.join(tmpdir, "qualified_call")
+    os.makedirs(root)
+    write_tree(root, {"mylib/__init__.mojo": LIB, "prog.mojo": qualified})
+    fresh_cas()
+    _result, out = build(root, "prog.aout")
+    code, err = run(out)
+    check(code == 42,
+          f"`import mylib` + `mylib.helper(41)` returned {code}, expected 42; "
+          f"a module-qualified call is a call through an exported symbol, not "
+          f"a read of a module object: {err}")
+
+
+def test_a_module_name_read_as_a_value_is_still_refused(tmpdir, _shared):
+    """The other half of the above, and the one that could have regressed.
+
+    Exempting the root of a `mod.fn()` callee must not exempt a READ of the
+    same name elsewhere in the function: a module object genuinely has no
+    storage on this path (every formal value lives in a function's own stack
+    scratch), so `len(mylib)` is still refused, and that refusal is correct.
+    This is the assertion that the fix is scoped to call position rather than
+    to the name.
+    """
+    reads_module = ("import mylib\n\n"
+                    "def main():\n  return len(mylib)\n")
+    root = os.path.join(tmpdir, "read_module")
+    os.makedirs(root)
+    write_tree(root, {"mylib/__init__.mojo": LIB, "prog.mojo": reads_module})
+    fresh_cas()
+    result = run_fire(["build", "--formal", "--no-prove", "-o",
+                       os.path.join(root, "prog.aout"),
+                       os.path.join(root, "prog.mojo")], cwd=root)
+    text = result.stderr + result.stdout
+    check(result.returncode != 0,
+          "`len(mylib)` built and ran — a read of a module object was "
+          "exempted along with the call through it, and a module has no "
+          "storage to read")
+    check("module-level name" in text,
+           f"the refusal must say what is wrong (a module-level name has no "
+           f"storage), not name some other construct: {text[-300:]}")
+
+
+def test_package_submodule_call_runs(tmpdir, _shared):
+    """`import pkg.sub` then `pkg.sub.helper(x)` — the same call, one level down.
+
+    The two halves of a module-qualified call both have to agree about WHERE a
+    module's name lives, and a package is where they disagree:
+
+      * the name check asks "is this root an imported module?", and the root
+        of `pkg.sub.helper` is `pkg` while the only imported name is
+        `pkg.sub` — matching for equality refused the spelling a package
+        submodule is written with, and the refusal's own remedy sentence
+        ("give it a function, a `pkg.fn()` call lowers") recommended it;
+      * the manifest keys an export by the module's ABI PREFIX, and a prefix
+        is a C identifier, so `pkg.sub`'s exports are keyed `pkg_sub`. The
+        emitter looked the qualifier up as written, found nothing, and left
+        the call pointing at `pkg.sub.helper` — a symbol nothing defines,
+        caught by the bind audit, but only after the whole image was built.
+
+    `os.path.join` is 532 measured call sites in this tree, so this is not a
+    corner: it is the form the largest module in the tree is written with.
+    """
+    qualified = ("import pkg.sub\n\n"
+                 "def main():\n  return pkg.sub.helper(41)\n")
+    root = os.path.join(tmpdir, "pkg_sub_call")
+    os.makedirs(root)
+    write_tree(root, {"pkg/__init__.mojo": "def unused(x):\n  return x\n",
+                      "pkg/sub.mojo": LIB, "prog.mojo": qualified})
+    fresh_cas()
+    _result, out = build(root, "prog.aout")
+    code, err = run(out)
+    check(code == 42,
+          f"`import pkg.sub` + `pkg.sub.helper(41)` returned {code}, "
+          f"expected 42; a package submodule is a module, under its dotted "
+          f"name in the source and its ABI prefix in the manifest: {err}")
+    # …and the manifest really does spell it the other way, so this test is
+    # testing the normalization rather than agreeing with it.
+    m = manifest(module_dylib("pkg_sub"))
+    check(any(e["module"] == "pkg_sub" and e["name"] == "helper"
+              for e in m["exports"]),
+          f"the library does not key its export by the ABI prefix this "
+          f"resolution depends on: {m['exports'][:2]}")
+
+
+def test_package_submodule_unexported_name_is_refused(tmpdir, _shared):
+    """The other half of the above, under the same normalization.
+
+    A call to a name the submodule does not export has to be refused HERE,
+    naming the module and what it does export, and not emitted as a call
+    against a symbol nothing defines. Under the ABI-prefix spelling that is
+    one lookup away from being missed: the table is not empty, it is simply
+    not the table the qualifier as written names.
+    """
+    missing = ("import pkg.sub\n\n"
+               "def main():\n  return pkg.sub.nosuchfunction(1)\n")
+    root = os.path.join(tmpdir, "pkg_sub_missing")
+    os.makedirs(root)
+    write_tree(root, {"pkg/__init__.mojo": "def unused(x):\n  return x\n",
+                      "pkg/sub.mojo": LIB, "prog.mojo": missing})
+    fresh_cas()
+    result = run_fire(["build", "--formal", "--no-prove", "-o",
+                       os.path.join(root, "prog.aout"),
+                       os.path.join(root, "prog.mojo")], cwd=root)
+    text = result.stderr + result.stdout
+    check(result.returncode != 0,
+          "`pkg.sub.nosuchfunction(1)` built — the module is linked, so the "
+          "call has a table to be missing from and must be a build error")
+    check("exports no `nosuchfunction`" in text
+          and "pkg.sub" in text and "helper" in text,
+          f"the refusal must name the module, the name and what the module "
+          f"does export, so a reader is not left to diff two lists: {text[-400:]}")
+
+
+
 def test_module_compiled_in_full(tmpdir, _shared):
     """The point of compiling a whole file rather than the referenced
     functions: an unreferenced function must still be there, compiled and
@@ -1389,6 +1529,14 @@ def test_the_exclusion_table_does_not_change_the_export_set(tmpdir, _shared):
 TESTS = [
     ("an import links the module and the program runs",
      test_import_links_and_runs),
+    ("a module-qualified call `mod.fn()` links and runs",
+     test_module_qualified_call_runs),
+    ("a module name READ as a value is still refused",
+     test_a_module_name_read_as_a_value_is_still_refused),
+    ("a package submodule's qualified call links and runs",
+     test_package_submodule_call_runs),
+    ("a name a package submodule does not export is refused",
+     test_package_submodule_unexported_name_is_refused),
     ("the imported module is compiled in full", test_module_compiled_in_full),
     ("a package is identified by its module name",
      test_package_identity_is_module_name),
