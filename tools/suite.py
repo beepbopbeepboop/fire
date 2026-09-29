@@ -304,6 +304,9 @@ test('modcache', [PY, 'test_module_cache.py'], cache=True,
 # was advertising 260 of its own 459 runtime entry points — a C client
 # resolving `mojo_c_getenv` through reflection was told the symbol did not
 # exist. On the gimple path, and predating FORMAL.md.
+test('ptrreg', [PY, 'test_ptr_registry.py'], cache=True,
+     extra=['test_ptr_registry.py', RUNTIME_SRC, RUNTIME_HDR],
+     desc='runtime unit test: pointer-registry table + inline-buffer lists (-O0/-O2/ASan)')
 test('rthdrscan', [PY, 'test_runtime_header_scan.py'], cache=True,
      extra=['test_runtime_header_scan.py', 'reflect.py', RUNTIME_SRC,
             RUNTIME_HDR, 'runtime/fire_sqlite3.h', 'runtime/fire_zlib.h',
@@ -742,7 +745,7 @@ BUCKETS = {
     'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'interporacle', 'examples-parse',
-              'rthdrscan', 'runtimedylib', 'sqliteruntime',
+              'rthdrscan', 'ptrreg', 'runtimedylib', 'sqliteruntime',
               'formal-sweep-truth', 'formal-link-accounting', 'silentnoop'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
