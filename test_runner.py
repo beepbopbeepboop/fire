@@ -1,20 +1,18 @@
 """Test runner that compiles and executes mojo programs.
 
-Uses the mojo CLI to compile mojo source to dylib, then loads and executes
-the resulting shared library to verify behavior.
+Compiles mojo source to C with `gimple_codegen.compile_to_c`, links it against
+the C runtime with gcc, and executes the resulting executable to verify
+behavior. Nothing here runs a prebuilt compiler binary: this suite is a test of
+codegen, driven from python3 through the reference path, so it needs no
+`build/` artifact at all.
 """
 import os
 import sys
 import subprocess
 import tempfile
-import ctypes
-from ctypes import c_int, CFUNCTYPE
-from io import StringIO
 from build_config import find_gcc
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MOJO_CLI = os.path.join(HERE, 'build', 'mojo')
-RUNTIME_HDR = os.path.join(HERE, 'runtime', 'fire_runtime.h')
 
 _PASS = 0
 _FAIL = 0
@@ -330,10 +328,6 @@ def main() -> Int:
 
 
 def main():
-    if not os.path.exists(MOJO_CLI):
-        print(f"ERROR: {MOJO_CLI} not found. Run 'make stdlib' first.", file=sys.stderr)
-        sys.exit(1)
-
     print("=" * 60)
     print("MOJO EXECUTION TESTS")
     print("=" * 60)

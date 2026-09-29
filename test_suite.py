@@ -44,8 +44,10 @@ cache in front of the runner rather than the runner:
 Run:  python3 test_suite.py         (or `make check-suite`, part of `smoke`)
 """
 
+import ast
 import io
 import os
+import re
 import sys
 from contextlib import redirect_stdout
 
@@ -953,6 +955,197 @@ def test_every_test_file_is_registered():
           f'reason, {len(undeclared)} undeclared')
 
 
+def _module_const_paths(src, tree):
+    """`<NAME> = os.path.join(..., 'build', '<name>')` -> {NAME: that source text}.
+
+    The `build/mojo` guard read `os.path.exists(MOJO_CLI)`, not an inline join,
+    so a detector that only looked at the call's own argument would have missed
+    the exact shape it was written for. Resolving one level of module-level
+    constant is enough for how these paths are actually spelled, and a path
+    built through a chain deeper than that is not the thing to chase.
+    """
+    out = {}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            continue
+        seg = ast.get_source_segment(src, node.value) or ''
+        if 'build' in seg:
+            out[node.targets[0].id] = ' '.join(seg.split())
+    return out
+
+
+def _existence_call(node):
+    """The `os.path.exists`/`isfile`/`isdir` call `node` is built around, or None."""
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ('exists', 'isfile', 'isdir') and node.args):
+        return node
+    return None
+
+
+def _aborts(body):
+    """Does this statement list end the process — `sys.exit` / `raise SystemExit`?
+
+    The distinction this check turns on. `if os.path.exists(log): read(log)` is a
+    test reading back a file it just wrote, and needs nothing built. The bug in
+    `test_runner.py` was `if not os.path.exists(MOJO_CLI): sys.exit(1)` — a
+    *fatal* gate, where absence of an unbuilt artifact ends a run that had
+    nothing else to do with it. Only the second is a dependency on the build.
+    """
+    for node in ast.walk(ast.Module(body=list(body), type_ignores=[])):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr == 'exit' \
+                and isinstance(node.func.value, ast.Name) \
+                and node.func.value.id == 'sys':
+            return True
+        if isinstance(node, ast.Raise) and node.exc is not None \
+                and 'SystemExit' in ast.dump(node.exc):
+            return True
+    return False
+
+
+def _preflight_gates_in(src):
+    """Every `build/` path a file gates its whole run on.
+
+    A gate is `if [not] os.path.exists(<build path>): <aborts>`, where the path
+    is spelled inline or through a module-level constant. Both halves matter:
+    the abort is what makes it fatal, and the constant is how the one that
+    shipped was written.
+    """
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return []
+    consts = _module_const_paths(src, tree)
+
+    def path_text(arg):
+        if isinstance(arg, ast.Name):
+            return consts.get(arg.id, '')
+        return ' '.join((ast.get_source_segment(src, arg) or '').split())
+
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        call = _existence_call(node.test)
+        if call is None and isinstance(node.test, ast.UnaryOp) \
+                and isinstance(node.test.op, ast.Not):
+            call = _existence_call(node.test.operand)
+        if call is None or not _aborts(node.body):
+            continue
+        seg = path_text(call.args[0])
+        if re.search(r"""['"]build['"]|['"]build/""", seg):
+            found.append((node.lineno, seg))
+    return found
+
+
+def _makefile_targets():
+    """Every target name the Makefile has a rule for, as repo-relative paths."""
+    names = set()
+    with open(os.path.join(HERE, 'Makefile')) as f:
+        for line in f:
+            m = re.match(r'^([A-Za-z0-9_][\w./$-]*):(?!=)', line)
+            if m:
+                names.add(m.group(1))
+    return names
+
+
+# The three source shapes the detector has to tell apart, kept as fixtures
+# beside the check that uses them so they cannot drift apart. PROBE is the guard
+# `test_runner.py` shipped, verbatim in structure: a module-level constant, read
+# by name, and fatal when it is missing. REAL_RULE_PROBE is that same shape
+# naming a file the Makefile really builds. READBACK_PROBE is the shape that
+# must NOT count — checking a log the test itself just wrote, which depends on
+# nothing and is what a too-broad version of this check flagged 9 times.
+PROBE = ("import os, sys\n"
+         "HERE = os.path.dirname(os.path.abspath(__file__))\n"
+         "MOJO_CLI = os.path.join(HERE, 'build', 'mojo')\n"
+         "if not os.path.exists(MOJO_CLI):\n"
+         "    print('ERROR', file=sys.stderr)\n"
+         "    sys.exit(1)\n")
+
+REAL_RULE_PROBE = ("import os, sys\n"
+                   "HERE = os.path.dirname(os.path.abspath(__file__))\n"
+                   "FIRE = os.path.join(HERE, 'build', 'fire')\n"
+                   "if not os.path.exists(FIRE):\n"
+                   "    sys.exit(1)\n")
+
+READBACK_PROBE = ("import os\n"
+                  "HERE = os.path.dirname(os.path.abspath(__file__))\n"
+                  "log = os.path.join(HERE, 'build', 'x.log')\n"
+                  "text = open(log).read() if os.path.exists(log) else ''\n")
+
+
+def test_no_test_preflights_on_an_unbuildable_artifact():
+    """A test may not gate itself on a `build/` file no rule in this Makefile
+    produces.
+
+    This is the failure `test_runner.py` shipped for its whole life, and it is
+    invisible in the checkout it was written in. `main()` opened with
+
+        if not os.path.exists(MOJO_CLI):   # MOJO_CLI = build/mojo
+            print("ERROR: ... Run 'make stdlib' first.")
+
+    and `MOJO_CLI` was read NOWHERE else — `compile_mojo_to_executable` goes
+    through `gimple_codegen.compile_to_c` and gcc, so the guard gated the whole
+    suite on a binary the test never runs. Two things then had to be true for it
+    to look healthy, and neither is a property of the code: some process had to
+    leave an untracked, gitignored `build/mojo` lying around (the main checkout
+    had one dated 2026-09-15, eight days stale), and a human had to not read the
+    error. The mojo->fire rename had already renamed the rule that produces that
+    file (`build/fire`, Makefile's own success line still said `build/mojo`), so
+    in every FRESH worktree the suite died at line 1 with an error naming a
+    target that no longer exists and a remedy — `make stdlib` — that runs
+    `stdlib-syntax` and builds nothing at all.
+
+    The general shape: gating a whole run on a build artifact is a *dependency*
+    on the build, and a dependency that no Makefile rule produces is one the
+    next fresh checkout pays for. So the check is that every fatal `build/`
+    gate resolves to a target, and the check is scoped to gates that ABORT: a
+    test reading back a log it just wrote is not depending on anything.
+
+    The two probes below are the detector's own tests, and they are load-bearing
+    rather than decorative: an earlier version of this check only inspected the
+    argument of the `os.path.exists` call, so it could not see the guard that
+    actually shipped (which read a module-level `MOJO_CLI`), and it would have
+    reported green forever. A guard that cannot see its own bug is a comment.
+    """
+    targets = _makefile_targets()
+    offenders = []
+    for rel in _test_files_in_repo():
+        with open(os.path.join(HERE, rel)) as f:
+            for lineno, expr in _preflight_gates_in(f.read()):
+                for m in re.finditer(r"""['"]build['"]\s*,\s*['"]([\w./-]+)['"]""", expr):
+                    if os.path.join('build', m.group(1)) not in targets:
+                        offenders.append(f'{rel}:{lineno} gates on build/{m.group(1)}')
+                for m in re.finditer(r"""['"](build/[\w./-]+)['"]""", expr):
+                    if m.group(1) not in targets:
+                        offenders.append(f'{rel}:{lineno} gates on {m.group(1)}')
+
+    def _gated(path_probe, want):
+        """Does the detector see `path_probe`'s `build/<x>`, and is it resolved?"""
+        hits = [e for _, e in _preflight_gates_in(path_probe)
+                if re.search(r"""['"]build['"]\s*,\s*['"]([\w./-]+)['"]""", e)]
+        if not hits:
+            return False
+        named = re.search(r"""['"]build['"]\s*,\s*['"]([\w./-]+)['"]""", hits[0]).group(1)
+        return (os.path.join('build', named) in targets) is want
+
+    check('preflight: the Makefile has targets to resolve against', len(targets) > 20,
+          f'only {len(targets)}; the check below would be vacuous')
+    check('preflight: the detector sees the build/mojo shape it is for',
+          _gated(PROBE, want=False),
+          'the detector no longer recognises the aborting guard it was written for')
+    check('preflight: a gate on a real rule resolves, not flags',
+          _gated(REAL_RULE_PROBE, want=True),
+          'the detector flags build/fire, which the Makefile really builds')
+    check('preflight: a non-aborting existence check is not a gate',
+          not _preflight_gates_in(READBACK_PROBE),
+          'reading back a file the test just wrote was counted as a dependency')
+    check('preflight: no test gates on a build artifact no rule produces',
+          not offenders, '; '.join(sorted(set(offenders))))
+
+
 def main():
     for fn in (test_cmd_driver, test_reject_pattern, test_mem_driver,
                test_make_driver, test_j_forwarded, test_deps_order_and_skip,
@@ -964,7 +1157,8 @@ def main():
                test_checked_run_key_covers_what_it_names,
                test_checked_run_replays_a_pass_and_reruns_a_failure,
                test_cached_spec_names_its_own_test,
-               test_every_test_file_is_registered):
+               test_every_test_file_is_registered,
+               test_no_test_preflights_on_an_unbuildable_artifact):
         fn()
     print()
     print(f'Results: {PASSES} passed, {len(FAILURES)} failed')
