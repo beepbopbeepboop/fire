@@ -7852,6 +7852,26 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
                f"  {{ entry_pc := {entry}, pcs := {pcs}, "
                f"step := fun s => S{m - 1} s }}")
 
+    # THE UNFOLD SET.  `bv_decide` and `omega` can only see bitvector/arithmetic
+    # structure that is already unfolded; left folded, `S{m-1} (start n)` is an
+    # opaque `Arm64State` term and `bv_decide` reports a SPURIOUS counterexample
+    # ("abstracted the following unsupported expressions as opaque variables:
+    # [arm64_reg 0 (S14 (start n))]") rather than failing.  Same for the `if`
+    # inside each `S` step, which reaches `omega` in `noEarly` as an
+    # unevaluated `if` and yields a counterexample with a free metavariable.
+    #
+    # This is not a new idea: `arm64_proof_gen.py` already documents the trap
+    # and answers it, at the `_tw_defs` comment -- "unfolded before bv_decide in
+    # the branch-condition proofs, so the sign-extension of the free param is
+    # concrete rather than opaque (otherwise bv_decide reports spurious
+    # counterexamples)" -- and every other value site uses the same
+    # `arm64_reg, arm64_set_reg, _VSP` idiom.  The contract emitter was the one
+    # place that emitted a raw `intro n; bv_decide` and so missed it.
+    _UNF = ", ".join(
+        [f"S{k}" for k in range(m, 0, -1)]
+        + [f"st{j}" for j in range(m)]
+        + ["start", "body", "arm64_reg", "arm64_set_reg", _VALUE_SIMP])
+
     # the value, and x30, checked against the machine
     out.append(
         f"/-- THE SPEC, checked against the machine: the result register is the\n"
@@ -7860,13 +7880,13 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
         f"    `UInt64` -- there is no address arithmetic to do by hand. -/\n"
         f"theorem hreg : ∀ n : UInt64,\n"
         f"    arm64_reg 0 (S{m - 1} (start n)) = {spec} n := by\n"
-        f"  intro n\n  bv_decide")
+        f"  intro n\n  simp only [{_UNF}]\n  bv_decide")
     out.append(
         f"/-- `x30` survives the frame, which is what makes the return land on\n"
         f"    the exit rather than somewhere else. -/\n"
         f"theorem hx30 : ∀ n : UInt64,\n"
         f"    arm64_reg 30 (S{m - 2} (start n)) = UInt64.ofNat {exit_pat} := by\n"
-        f"  intro n\n  bv_decide")
+        f"  intro n\n  simp only [{_UNF}]\n  bv_decide")
 
     # the pc discipline: after k steps the pc is instruction k's address
     for k in range(1, m):
@@ -7923,7 +7943,7 @@ def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
             f"    · rw [runsTo{u} (start n) rfl] at hrun\n"
             f"      injection hrun with h\n"
             f"      rw [h" + (f", S{u}_pc (start n) rfl]" if u else "]")
-            + "\n      omega"
+            + f"\n      simp only [{_UNF}]\n      omega"
             for u in range(m)))
 
     # THE CONTRACT, and the caller

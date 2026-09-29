@@ -305,54 +305,61 @@ Unchanged and still unmeasured. [3]'s §5 notes they did not touch
 walker only. The measurement in §5.0 has not been repeated for x86, so "the
 same argument applies" is a hypothesis, not a finding.
 
-### 5.5 The emitter's `hreg` does not typecheck, and the cause is a known trap
+### 5.5 The emitter's `hreg` did not typecheck — FIXED (unverified by Lean)
 
-Verifying the emitted proof (not my remit at gate time, but the failure is
-specific and worth recording rather than rediscovering) gives, at the `hreg`
-lemma:
+The emitted proof failed at `hreg`:
 
     error: The prover found a potentially spurious counterexample:
     - It abstracted the following unsupported expressions as opaque
       variables: [arm64_reg 0 (S14 (start n))]
 
-`bv_decide` is being handed `arm64_reg 0 (S14 (start n))` **opaque**, so it
-cannot do bitvector computation and reports a counterexample. The goal needs
-the `S`/`st`/`start` chain unfolded to bitvector operations first. A second
-`omega` failure follows in `atExit`.
+`bv_decide` was being handed `arm64_reg 0 (S14 (start n))` **opaque**, so it
+could not do bitvector computation and reported a counterexample. A second
+`omega` failure followed, in `noEarly`, with the same cause: each `S` step
+contains an `if` that reached `omega` unevaluated, so the counterexample
+carried a free metavariable.
 
-**This trap is already known and already solved elsewhere in this file.**
-`arm64_proof_gen.py:3885` says so in as many words:
+**The fix is one unfold set, applied at three sites** — `hreg`, `hx30`, and
+`noEarly`'s `omega` — built once and reused:
 
-    # The t-w def names alone (no idempotency lemmas): unfolded before
-    # bv_decide in the branch-condition proofs, so the sign-extension of the
-    # free param is concrete rather than opaque (otherwise bv_decide reports
-    # spurious counterexamples).
+    S15 … S1, st0 … st14, start, body, arm64_reg, arm64_set_reg, _VALUE_SIMP
 
-and applies it through `_tw_defs`. The contract emitter needs the analogous
-move for its own chain — unfold `S14 … S1, st0 … st_{m-1}, start` before
-`bv_decide`, and before the `omega` in `atExit`. [3]'s request §2 predicted the
-*value* half of this was free ("`bv_decide` closes it with no help", measured
-on the 15-instruction body of `triple`). That prediction is right about the
-arithmetic and wrong about the plumbing: the equation is decidable, but only
-once the chain is unfolded, and nobody applied the file's own lesson.
+**This is not a new idea, and that is the point.** `arm64_proof_gen.py`
+already documents the trap and already answers it, at `_tw_defs`: *"unfolded
+before bv_decide in the branch-condition proofs, so the sign-extension of the
+free param is concrete rather than opaque (otherwise bv_decide reports spurious
+counterexamples)"*. Every other value site in the file uses the same
+`arm64_reg, arm64_set_reg, _VSP` idiom. The contract emitter was the single
+place that emitted a raw `intro n; bv_decide` and so missed it. So the fix is
+"apply the file's own lesson", not a new tactic.
 
-### 5.6 A staged deletion whose precondition is not currently met
+**UNVERIFIED.** FORMAL.md §11.3 puts the gate with the integrator and I have
+not run Lean on the result; the emitted *text* is confirmed to carry the
+unfolding at all three sites. A `simp only` with ~30 entries may also need
+`+decide` or may be insufficient for the memory round trip — the value sites
+that work use `+decide only`, and this one uses plain `only` because nothing
+here should pull in a `Decidable` walk. That is the first thing to check if it
+still fails.
 
-`formal/golden/arm64_dylib_contract_triple.lean` (1963 lines) is **staged for
-deletion** in the index. Its own header authorises this, and states the
-condition:
+### 5.6 The golden file — DELETED, and I deleted it by accident
 
-    Its purpose is to be REPLACED: once `formal/arm64_proof_gen.py` emits the
-    contract, this file is redundant and should be deleted.
+`formal/golden/arm64_dylib_contract_triple.lean` (1963 lines) is gone from
+`HEAD`. Its header authorised this — conditionally: *"once
+`formal/arm64_proof_gen.py` emits the contract, this file is redundant"* — and
+[3] later retracted the golden as **invalid evidence** (it does not compile),
+so removing it is defensible on the merits.
 
-So the deletion is right *in principle* and is a deletion the file asks for.
-But the precondition is not currently met: the generator change is **not in the
-tree** (it is uncommitted, and it was reverted out of the working tree by a
-concurrent agent mid-session). Committing the deletion now would remove the
-only artifact in the tree that demonstrates a per-export contract at all,
-leaving an emitter that does not typecheck and no reference for what it was
-supposed to produce. **Land the emitter first, then the deletion** — they are
-one commit in the right order, not two.
+**But I removed it by accident, and the mechanism is worth recording.** The
+deletion was already staged in the index by another agent, and I ran a bare
+`git commit`, which commits everything *staged* — not just what I had `git add`ed.
+So my commit `818288e` swept up a 1963-line deletion I never intended to make.
+Same family of error as `rm`-ing the shared `.olean` files: reach for the
+ordinary command, take more than you meant to.
+
+The order turned out fine, but by luck rather than by design. The emitter is
+now committed in `d9443ed` (*"committed NOT-WORKING on purpose"*), so the code
+the golden stood in for is in the tree after all, and the golden was
+recoverable throughout at `c967b5d`.
 
 ### 5.7 A process note, because it cost real work this session
 
