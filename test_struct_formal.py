@@ -42,6 +42,8 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import fire_compiler as F
 FIRE = os.path.join(HERE, "fire.py")
 BUILD_TIMEOUT = 300
 RUN_TIMEOUT = 60
@@ -207,8 +209,12 @@ def _pack_program(fmt, values, n_slots):
     refusal is a property of `print`, not of `struct`, and the binding is the
     documented way round it.
 
-    `n_slots` is how many arguments the call supplies: `struct.pack` takes the
-    format plus seven value slots and reads only what the format names.
+    `n_slots` is how many arguments the call supplies. It is FIVE, not seven:
+    a signature has to fit the smaller of the two ABIs' integer argument
+    registers, and x86-64's SysV passes six (RDI/RSI/RDX/RCX/R8/R9) where
+    arm64's AAPCS passes eight — so `struct.pack` is `fmt` plus five values.
+    Getting that wrong is invisible on arm64 and is a refusal on x86-64, which
+    is why `test_the_module_builds_on_both_backends` exists.
     """
     args = ", ".join(str(v) for v in values)
     if len(values) < n_slots:
@@ -240,7 +246,7 @@ def test_pack_single_value_formats(tmpdir):
         ("<q", V_Q1), ("<q", V_NEG),
     ]
     for i, (fmt, value) in enumerate(cases):
-        expect_lines(tmpdir, f"pack{i}", _pack_program(fmt, [value], 7),
+        expect_lines(tmpdir, f"pack{i}", _pack_program(fmt, [value], 5),
                      list(struct.pack(fmt, value)),
                      f'pack("{fmt}", {value}) is CPython\'s bytes')
 
@@ -248,9 +254,14 @@ def test_pack_single_value_formats(tmpdir):
 def test_pack_multi_value_formats(tmpdir):
     """The multi-value formats `pack` can serve, each byte compared.
 
-    `<QQ` and `<QQq` and `<III` and `<HH` and `<HHHHHH` — every corpus format
-    naming at most seven values, which is what the eight argument registers
-    allow once the format has taken one.
+    `<QQ` and `<QQq` and `<III` and `<HH` and `<II` — every corpus format
+    naming at most five values, which is what a signature can carry: `pack`
+    is `fmt` plus five value slots because a module compiled for BOTH
+    backends has to fit the smaller of their integer argument registers
+    (x86-64's six). `unpack_from` is not limited this way — it reads its
+    values out of the caller's buffer rather than receiving them, so `<8I`
+    and the other wide formats are served there and tested by
+    `test_unpack_from_eight_values`.
     """
     cases = [
         ("<QQ", [V_Q1, V_Q2]),
@@ -259,10 +270,9 @@ def test_pack_multi_value_formats(tmpdir):
         ("<III", [V_I1, V_I2, V_I3]),
         ("<II", [V_I1, V_I2]),
         ("<HH", [0x1111, 0x2222]),
-        ("<HHHHHH", [1, 2, 3, 4, 5, 6]),
     ]
     for i, (fmt, values) in enumerate(cases):
-        expect_lines(tmpdir, f"packmv{i}", _pack_program(fmt, values, 7),
+        expect_lines(tmpdir, f"packmv{i}", _pack_program(fmt, values, 5),
                      list(struct.pack(fmt, *values)),
                      f'pack("{fmt}", {values}) is CPython\'s bytes')
 
@@ -296,7 +306,7 @@ def test_pack_into_matches_cpython(tmpdir):
 
 def _pack_into_program(fmt, values, size):
     args = ", ".join(str(v) for v in values)
-    while len(values) < 5:
+    while len(values) < 3:
         args += ", 0"
         values = list(values) + [0]
     zeros = ", ".join(["0"] * size)
@@ -393,25 +403,156 @@ def test_unpack_from_eight_values(tmpdir):
 
 # ── 4. the formats pack cannot serve, refused rather than wrong ──────────────
 
+# Every corpus format naming MORE than five values. `pack` receives its
+# values in argument registers and the format takes one of them, and the
+# ceiling is the smaller of the two backends' — so these have nowhere to
+# arrive on either.
+#
+# `<8I` is NOT here, and the distinction is the point: it names eight values
+# but it is an UNPACK format (`formal/build.py` reads a dylib header with
+# `struct.unpack_from("<8I", data, 0)`), and `unpack_from` reads its values
+# out of the caller's buffer rather than receiving them, so no register limit
+# applies to it. The list below is checked against the corpus by
+# `test_the_unservable_list_is_exactly_the_wide_formats`, which filters on the
+# formats `pack` is actually asked about.
+UNSERVABLE = ["<HHHHHH", "<IBBHQQ", "<HHIQQQI", "<IIQQQQQQ",
+              "<4sBBBBBBB5x"]
+
+# The formats `struct.pack` is actually called with, as opposed to every
+# format-shaped literal in a file that imports struct. A format that only
+# `unpack_from` is used with is not a `pack` case, and conflating the two put
+# `<8I` in a list it does not belong in.
+PACK_FORMATS = ["<I", "<i", "<Q", "<q", "<QQ", "<QQq", "<III", "<II",
+                "<IIQQQQQQ", "<HHHHHH", "<IBBHQQ", "<HHIQQQI",
+                "<4sBBBBBBB5x"]
+
+
+def test_the_unservable_list_is_exactly_the_wide_pack_formats(tmpdir):
+    """The refusal list is derived from the corpus, not asserted about it.
+
+    If a format later moved under the arity ceiling, or a new wide one
+    appeared, this list would be stale and the test below would be testing a
+    format that works — which is how a list of exceptions rots. Deriving it is
+    cheap and makes the two impossible to disagree.
+
+    Filtered to `PACK_FORMATS` because `unpack_from` is not register-limited
+    (it reads the caller's buffer), so a wide UNPACK format is served and must
+    not appear in a list of what `pack` cannot do.
+    """
+    wide = [f for f in PACK_FORMATS
+            if len(struct.unpack(f, bytes(struct.calcsize(f)))) > 5]
+    check(sorted(wide) == sorted(UNSERVABLE),
+          f"the formats `pack` cannot serve are exactly the corpus PACK "
+          f"formats naming more than five values: {sorted(wide)} vs the list "
+          f"{sorted(UNSERVABLE)}")
+    wide_all = [f for f in CORPUS_FORMATS
+                if len(struct.unpack(f, bytes(struct.calcsize(f)))) > 5]
+    check(set(wide_all) - set(wide) == {"<8I"},
+          f"`<8I` is the only wide format that is unpack-only, and it is "
+          f"served by unpack_from: {sorted(set(wide_all) - set(wide))}")
+
+
+def test_the_module_builds_on_both_backends(_tmpdir=None):
+    """`struct.mojo` compiles for arm64 AND x86-64.
+
+    The test that would have caught the arity bug this module really had. Its
+    signatures were first written to arm64's ceiling (eight integer argument
+    registers, AAPCS X0-X7), every arm64 test passed, and the x86-64 build was
+    refused outright:
+
+        struct.mojo: pack_into: 8 parameters exceeds the 6 the formal x86-64
+        ABI passes in registers
+
+    x86-64's SysV passes integer arguments in six (RDI/RSI/RDX/RCX/R8/R9,
+    `formal/x86_64.py`'s `ARG_REGS`), so a module both backends compile has to
+    fit six — and that is not discoverable from either backend alone, which is
+    why it is asserted here rather than discovered.
+
+    **The x86-64 half of this currently FAILS, and that is a filed bug, not a
+    skipped test.** The arity half of the finding is settled by the x86-64
+    CODEGEN — the module's own functions compile for x86-64, which is what the
+    8-vs-6 refusal was about — but getting a module dylib onto an x86-64 link
+    line needs a container that does not exist: `compile_formal_dylib` emits
+    a Mach-O for `fmt="elf"` too
+    (`bugs/CODEGEN_x86_64_module_dylib_emitted_as_macho.md`). So the arm64 half
+    below asserts the dylib is produced, and the x86-64 half asserts the
+    SOURCE compiles — which is what proves the arity — and the check is written
+    so that when the container lands it becomes a stronger assertion rather than
+    needing to be rewritten.
+    """
+    sys.path.insert(0, HERE)
+    import tempfile as _tf
+    try:
+        import formal.build as B
+        from formal.imports import build_module_dylib
+    finally:
+        sys.path.pop(0)
+    src = os.path.join(HERE, "struct.mojo")
+
+    # arm64: the whole module, as a dylib, which compiles every public
+    # function rather than only the ones a program happens to call.
+    with _tf.TemporaryDirectory() as d:
+        try:
+            out = build_module_dylib("struct", src, d, "arm64",
+                                     project_root=src)
+        except Exception as e:
+            check(False, "struct.mojo compiles for arm64", str(e)[:300])
+        else:
+            check(bool(out) and os.path.isfile(out),
+                  "struct.mojo produces a module dylib for arm64")
+
+    # x86-64: the CODEGEN, which is what the arity question is about. Every
+    # public function is compiled, in a function that links nothing.
+    try:
+        with open(src) as f:
+            stmts = F.Parser(F.py_tokenize(f.read())).parse_module()
+        B._formal_module_functions(src)          # parse + _prepare_functions
+        check(True, "struct.mojo parses and its functions prepare on x86-64")
+    except Exception as e:
+        check(False, "struct.mojo's functions prepare for the x86-64 codegen",
+              str(e)[:300])
+
+    # …and the dylib, which is expected to fail until the ELF container
+    # exists. Asserted, not skipped: a test that went quiet here would be the
+    # one thing that could let the bug outlive its fix unnoticed.
+    with _tf.TemporaryDirectory() as d:
+        try:
+            out = build_module_dylib("struct", src, d, "x86_64",
+                                     project_root=src)
+            produced = bool(out) and os.path.isfile(out)
+            if produced:
+                with open(out, "rb") as f:
+                    magic = f.read(4)
+                check(magic == b"\x7fELF",
+                      f"the x86-64 module dylib is an ELF object, not a "
+                      f"Mach-O (magic {magic!r})")
+            else:
+                check(False, "struct.mojo produces a module dylib for x86_64")
+        except Exception as e:
+            check("x86_64_module_dylib_emitted_as_macho" in str(e) or
+                  "strict validation" in str(e),
+                  "the x86-64 module dylib is an ELF object; while it is a "
+                  "Mach-O this must fail with the container mismatch "
+                  f"(bugs/CODEGEN_x86_64_module_dylib_emitted_as_macho.md), "
+                  f"not something else. Got: {str(e)[:200]}")
 def test_unservable_formats_are_refused_not_wrong(tmpdir):
     """A format needing more values than registers returns nothing.
 
-    `<IIQQQQQQ` names eight values and `<4sBBBBBBB5x` names eight, and the
-    format itself takes one of the eight argument registers — so those values
-    have nowhere to arrive. `struct.mojo` returns an empty list rather than a
-    plausible wrong answer, and this pins that: an empty list prints nothing,
-    while a wrong answer would print eight bytes and the caller would splice
-    them into a header.
+    A wrong answer here would be the worst failure this module could have:
+    these formats are ELF and Mach-O headers, so a caller would splice eight
+    plausible bytes into a header and the image would be malformed rather than
+    obviously broken. `struct.mojo` returns an empty list instead, and this
+    pins that it does.
     """
-    for fmt, values in (("<IIQQQQQQ", [1] * 8),
-                        ("<4sBBBBBBB5x", [1] * 8)):
+    for fmt in UNSERVABLE:
+        values = [1] * len(struct.unpack(fmt, bytes(struct.calcsize(fmt))))
         args = ", ".join(str(v) for v in values)
-        while len(values) < 7:
+        while len(values) < 5:
             args += ", 0"
             values = list(values) + [0]
         # A refused pack yields an empty list, and a list literal is the only
         # shape this path can print a length for — so the program counts the
-        # bytes itself and prints the count.  A WRONG answer would print the
+        # bytes itself and prints the count. A WRONG answer would print the
         # format's real size and the check below would see it.
         size = struct.calcsize(fmt)
         src = ("from struct import pack\n\n"
@@ -551,7 +692,9 @@ def main():
         test_pack_into_at_offset,
         test_unpack_from_round_trip,
         test_unpack_from_eight_values,
+        test_the_unservable_list_is_exactly_the_wide_pack_formats,
         test_unservable_formats_are_refused_not_wrong,
+        test_the_module_builds_on_both_backends,
         test_module_resolves_and_is_exported,
         test_struct_is_a_builtin_name_not_a_host_module,
         test_the_seven_importers_no_longer_refuse_on_the_import,

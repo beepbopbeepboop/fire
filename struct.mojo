@@ -60,20 +60,24 @@ FOUR LIMITS THIS FILE IS WRITTEN AROUND — all measured
    Consequence here: the format is recognised by `==` against literals, never
    by indexing it.
 
-2. **No variadic ABI, and only EIGHT arguments cross a call boundary.**
-   `_refuse_variadic_reads` refuses a body that reads `*args`, and a call to
-   a callee with DEFAULTS leaves unsupplied parameters as whatever was in the
-   argument registers — measured, `two(1, 2)` into an eight-parameter callee
-   returned 677441874805190 where 12000000 is correct. So `pack` and
-   `pack_into` take FIXED signatures and read only as many values as the
-   format names. The unread parameters being garbage is not observable:
-   measured across the boundary, `pick2(7, 9)` returns 709 and
-   `pick5(1,2,3,4,5)` returns 123405, both correct. Eight is also the
-   register count (AAPCS X0-X7) and it is a HARD ceiling, not a convention:
-   a nine-argument call to a nine-parameter callee returned 36 where the
-   source says 45, because the ninth argument is dropped. Hence `pack`'s
-   seven value slots and `pack_into`'s five — each signature is exactly eight
-   arguments wide.
+2. **No variadic ABI, and the two backends pass DIFFERENT numbers of
+   arguments.** `_refuse_variadic_reads` refuses a body that reads `*args`,
+   and a call to a callee with DEFAULTS leaves unsupplied parameters as
+   whatever was in the argument registers — measured, `two(1, 2)` into an
+   eight-parameter callee returned 677441874805190 where 12000000 is correct.
+   So `pack` and `pack_into` take FIXED signatures and read only as many
+   values as the format names. The unread parameters being garbage is not
+   observable: measured across the boundary, `pick2(7, 9)` returns 709 and
+   `pick5(1,2,3,4,5)` returns 123405, both correct.
+
+   The ceiling is the SMALLER of the two ABIs, which is six: arm64's AAPCS
+   passes integer arguments in X0-X7 (eight), while x86-64's SysV passes them
+   in RDI/RSI/RDX/RCX/R8/R9 (six, `formal/x86_64.py`'s `ARG_REGS`). Sized to
+   arm64 alone, this module built on arm64 and was REFUSED on x86-64 —
+   `pack_into: 8 parameters exceeds the 6 the formal x86-64 ABI passes in
+   registers` — which is the whole reason the signatures below are six
+   arguments wide and not eight. A cross-backend module has to be written to
+   the intersection, and that is not discoverable from either backend alone.
 
 3. **`len()` of a list a CALLEE returned is refused** — the callee's declared
    return type carries no list-ness, so `len(w)` after `w = f()` is refused
@@ -266,7 +270,7 @@ def _get(buf, at: Int, width: Int) -> int:
 
 # ── the public surface ───────────────────────────────────────────────────────
 
-def pack_into(fmt: String, buf, off: Int, v0, v1, v2, v3, v4) -> int:
+def pack_into(fmt: String, buf, off: Int, v0, v1, v2) -> int:
     """Write `fmt`'s values into `buf` at byte `off`. Returns 0.
 
     The lifetime-independent form and the one the twelve `pack_into` call
@@ -275,21 +279,18 @@ def pack_into(fmt: String, buf, off: Int, v0, v1, v2, v3, v4) -> int:
     the CALLER's list, which is what makes this sound where a list built here
     would not be (limit 4).
 
-    FIVE value slots, not seven, and that is arithmetic rather than taste:
-    this signature is eight arguments wide (`fmt`, `buf`, `off`, five
-    values) because a call across the dylib boundary delivers exactly eight —
-    AAPCS has X0-X7 and the ninth argument is dropped, measured: a
-    nine-argument call to a nine-parameter callee returned 36 where the
-    source says 45. `pack` gets seven value slots because its signature is
-    `fmt` plus values, so it is already at the ceiling; `pack_into` spends
-    two of its eight on the buffer and the offset. Every `pack_into` call site
-    in the corpus passes at most three values (measured: the widest is
-    `formal/macho_linker.py:111`), so five is not a restriction in practice
-    — and a format needing more is left unwritten rather than written wrong,
-    because the extra value would be garbage this function cannot detect.
+    THREE value slots, and that is arithmetic rather than taste: the whole
+    signature is six arguments wide (`fmt`, `buf`, `off`, three values)
+    because SIX is the smaller of the two ABIs' integer argument registers
+    (limit 2) and a module this backend compiles has to fit both. Three is
+    not a restriction in practice: every `pack_into` call site in the corpus
+    passes at most three values, measured — `formal/macho_linker.py:111` is the
+    widest (`<III`), and the `patch(off, fmt, *vals)` sites pass one or two.
+    A format needing more is left unwritten rather than written wrong, because
+    the extra value would be garbage this function cannot detect.
     """
     n = _nvalues(fmt)
-    if n == 0 or n > 5:
+    if n == 0 or n > 3:
         return 0
     p = off
     k = 0
@@ -299,12 +300,8 @@ def pack_into(fmt: String, buf, off: Int, v0, v1, v2, v3, v4) -> int:
             v = v0
         elif k == 1:
             v = v1
-        elif k == 2:
-            v = v2
-        elif k == 3:
-            v = v3
         else:
-            v = v4
+            v = v2
         b = 0
         while b < w:
             buf[p] = _byte(v, b * 8)
@@ -357,8 +354,8 @@ def unpack_from(fmt: String, buf, off: Int):
     return out
 
 
-def pack(fmt: String, v0, v1, v2, v3, v4, v5, v6):
-    """Bytes for `fmt` and up to seven values, as a list of ints.
+def pack(fmt: String, v0, v1, v2, v3, v4):
+    """Bytes for `fmt` and up to five values, as a list of ints.
 
     The buffer is a literal of the format's own size, chosen by a ladder of
     `if`s on `calcsize`. That is not decoration: a list literal is the only
@@ -368,11 +365,14 @@ def pack(fmt: String, v0, v1, v2, v3, v4, v5, v6):
     loop runs. The sizes are exactly the ones the corpus needs, and every one
     of them is measured to fill correctly.
 
-    A format naming more than SEVEN values cannot be packed here: eight is the
-    register count and one slot is the format (limit 2). `<IIQQQQQQ` names
-    eight, so it returns an empty list rather than a wrong answer — the one
-    corpus format `pack` cannot serve, stated rather than hidden. `pack_into`
-    has no such limit: its values come from the caller's frame, not registers.
+    FIVE value slots: the signature is six arguments wide because six is the
+    smaller of the two ABIs' integer argument registers (limit 2). A format
+    naming more than five values cannot be packed here, and the three corpus
+    formats that do — `<HHHHHH` (6), `<HHIQQQI` (7), `<IIQQQQQQ` (8) — return
+    an empty list rather than a wrong answer. `pack_into` has no such limit
+    for the corpus's formats: every `pack_into` call site needs at most three
+    values, and it reads its buffer from the CALLER's frame, so the limit that
+    bites is the value count and not where the bytes come from.
     """
     total = calcsize(fmt)
     if total == 0:
@@ -402,7 +402,7 @@ def pack(fmt: String, v0, v1, v2, v3, v4, v5, v6):
                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     else:
         return []
-    if _nvalues(fmt) > 7:
+    if _nvalues(fmt) > 5:
         return []
     p = 0
     k = 0
@@ -416,14 +416,8 @@ def pack(fmt: String, v0, v1, v2, v3, v4, v5, v6):
             v = v2
         elif k == 3:
             v = v3
-        elif k == 4:
-            v = v4
-        elif k == 5:
-            v = v5
-        elif k == 6:
-            v = v6
         else:
-            v = 0
+            v = v4
         b = 0
         while b < w:
             out[p] = _byte(v, b * 8)
