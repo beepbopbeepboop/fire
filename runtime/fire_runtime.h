@@ -440,6 +440,10 @@ MojoBytes *mojo_bytes_from_str(char *s, char *encoding); /* 'utf-8'/'ascii' */
 MojoBytes *mojo_bytes_from_cstr(const char *s);   /* NUL-terminated copy */
 int64_t    mojo_bytes_len(MojoBytes *b);
 int64_t    mojo_bytes_get(MojoBytes *b, int64_t i); /* -> int 0-255, neg idx ok */
+/* `b[i]` at an explicit subscript: same read, but an out-of-range index
+ * RAISES IndexError rather than answering 0. The lenient form above is
+ * kept for the iteration loop, which bounds its own index. */
+int64_t    mojo_bytes_get_checked(MojoBytes *b, int64_t i);
 int        mojo_bytes_eq(MojoBytes *a, MojoBytes *b);
 int        mojo_bytes_truthy(MojoBytes *b);
 char      *mojo_bytes_repr(MojoBytes *b);
@@ -456,6 +460,14 @@ int64_t    mojo_bytes_rfind(MojoBytes *hay, MojoBytes *needle);
 int64_t    mojo_bytes_find_from(MojoBytes *hay, MojoBytes *needle, int64_t start, int64_t stop);
 int64_t    mojo_bytes_rfind_from(MojoBytes *hay, MojoBytes *needle, int64_t start, int64_t stop);
 /* index/count of a single byte VALUE (bytes/bytearray `.index(0xNN)`). */
+/* find/rfind over a byte VALUE answer -1 when absent; index/rindex are the
+ * same search that RAISES ValueError instead. They were one function, which
+ * made `b'abc'.index(b'z')` answer -1 with exit 0. */
+/* `index`/`rindex`'s failure mode over a BYTES needle: -1 becomes a
+ * ValueError, since the search itself is shared with find/rfind. */
+int64_t    _mojo_bytes_index_or_raise(int64_t at);
+int64_t    mojo_bytes_find_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop);
+int64_t    mojo_bytes_rfind_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop);
 int64_t    mojo_bytes_index_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop);
 int64_t    mojo_bytes_rindex_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop);
 int64_t    mojo_bytes_count_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop);
@@ -491,6 +503,15 @@ MojoBytes *mojo_bytes_fromhex(char *s);
 char      *mojo_bytes_cstr_key(MojoBytes *b);
 MojoBytes *mojo_bytes_maketrans(MojoBytes *from, MojoBytes *to);
 MojoBytes *mojo_bytes_translate(MojoBytes *b, MojoBytes *table);
+/* `b.translate(table, delete)` — `delete` was silently dropped without it. */
+MojoBytes *mojo_bytes_translate_del(MojoBytes *b, MojoBytes *table, MojoBytes *delbytes);
+/* `b.expandtabs([tabsize])` — the bytes twin of mojo_str_expandtabs; this
+ * had no bytes implementation and answered a raw int 0. */
+MojoBytes *mojo_bytes_expandtabs(MojoBytes *b, int64_t tabsize);
+/* startswith/endswith WITH the optional [start[, end]] window, which was
+ * silently ignored when only the prefix/suffix was passed. */
+int        mojo_bytes_startswith_from(MojoBytes *b, MojoBytes *p, int64_t start, int64_t stop);
+int        mojo_bytes_endswith_from(MojoBytes *b, MojoBytes *p, int64_t start, int64_t stop);
 /* The bytes.isX() predicates, selected by `kind` (the MOJO_IS_* codes in
  * fire_runtime.c). `kind` is deliberately restricted to the eight
  * predicates CPython actually defines on `bytes` — isalnum isalpha
@@ -728,6 +749,15 @@ MojoDict   *mojo_dict_from_pairs(MojoList *pairs);  /* dict(list_of_pairs) */
 MojoList   *mojo_list_copy(MojoList *l);
 int         mojo_list_all(MojoList *l);
 int         mojo_list_any(MojoList *l);
+/* The same four over a `bytes` object, whose iteration yields INTEGERS.
+ * Without these every such call answered the codegen's constant stub. */
+int         mojo_bytes_all(MojoBytes *b);
+int         mojo_bytes_any(MojoBytes *b);
+int64_t     mojo_bytes_sum(MojoBytes *b);
+MojoList   *mojo_bytes_reversed_list(MojoBytes *b);
+MojoList   *mojo_bytes_sorted_list(MojoBytes *b);
+int         mojo_bytes_max(MojoBytes *b);
+int         mojo_bytes_min(MojoBytes *b);
 int64_t     mojo_list_pop(MojoList *l);
 int64_t     mojo_list_pop_at(MojoList *l, int64_t idx);
 /* `del lst[i]` — same removal as mojo_list_pop_at, but a different Python
@@ -788,6 +818,7 @@ void        mojo_raise_type_error(char *detail);
  * operation rejects its ARGUMENT rather than failing to find something
  * (mojo_bytes_partition's empty separator). */
 void        mojo_raise_value_error(char *detail);
+void        mojo_raise_index_error(char *detail);
 /* Runtime %-style string formatting with a DYNAMIC (non-literal) template:
  *
  *   char *out = mojo_str_format_dict("usage: %(prog)s v%(ver)d", d);
@@ -1109,6 +1140,12 @@ char *input(char *prompt);       /* weak in the runtime; stdlib's overrides it *
 char *string_strip(char *str);         /* Strip whitespace */
 char *string_lower(char *str);         /* Convert to lowercase */
 char *string_upper(char *str);         /* Convert to uppercase */
+/* str.casefold / swapcase / title / capitalize — had no lowering at all
+ * and answered the unknown-method stub's raw int 0. */
+char *mojo_str_casefold(char *str);
+char *mojo_str_swapcase(char *str);
+char *mojo_str_title(char *str);
+char *mojo_str_capitalize(char *str);
 char *mojo_str_lstrip(char *str);
 char *mojo_str_rstrip(char *str);
 char *mojo_str_rstrip_chars(char *str, char *chars);

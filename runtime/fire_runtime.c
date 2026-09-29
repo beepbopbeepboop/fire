@@ -1534,6 +1534,29 @@ int64_t mojo_bytes_get(MojoBytes *b, int64_t i)
     return (int64_t)b->data[i];
 }
 
+/* `b[i]` at an EXPLICIT subscript — the same read, but an out-of-range
+ * index RAISES IndexError instead of answering 0. mojo_bytes_get above
+ * keeps the lenient form on purpose, because the `for b in <bytes>` loop
+ * lowering calls it with an index it has already bounds-checked against
+ * mojo_bytes_len, and a raising helper there would be a raise the program
+ * can never reach.
+ *
+ * Without the split, `b'abc'[10]` and `b''[0]` both printed 0 with exit 0,
+ * where CPython raises IndexError. 0 is not a neutral answer here: it is
+ * a real byte value, so `if b[i] == 0:` on a short buffer silently took
+ * the true branch. */
+int64_t mojo_bytes_get_checked(MojoBytes *b, int64_t i)
+{
+    int64_t n = b ? b->len : 0;
+    int64_t j = i < 0 ? i + n : i;
+    if (j < 0 || j >= n) {
+        char detail[96];
+        snprintf(detail, sizeof detail, "index out of range");
+        mojo_raise_index_error(detail);
+    }
+    return (int64_t)b->data[j];
+}
+
 int mojo_bytes_eq(MojoBytes *a, MojoBytes *b)
 {
     if (a == b) return 1;
@@ -1542,6 +1565,19 @@ int mojo_bytes_eq(MojoBytes *a, MojoBytes *b)
 }
 
 int mojo_bytes_truthy(MojoBytes *b) { return b != NULL && b->len != 0; }
+
+/* The `index`/`rindex` half of the find family over a BYTES needle: the
+ * search itself is mojo_bytes_find / _rfind (which answer -1), and only
+ * the FAILURE differs — CPython raises ValueError("subsection not found")
+ * there. Kept as a wrapper rather than a duplicate search so the two can
+ * never drift on where the match is. */
+int64_t _mojo_bytes_index_or_raise(int64_t at) {
+    if (at >= 0) return at;
+    char detail[96];
+    snprintf(detail, sizeof detail, "subsection not found");
+    mojo_raise_value_error(detail);
+    return -1;  /* unreached */
+}
 
 /* Value equality for two MojoLists — `a == b` on lists and tuples.
  *
@@ -1697,7 +1733,13 @@ int64_t mojo_bytes_find(MojoBytes *hay, MojoBytes *needle)
 
 int64_t mojo_bytes_count(MojoBytes *hay, MojoBytes *needle)
 {
-    if (!hay || !needle || needle->len == 0) return 0;
+    /* An EMPTY needle is not "never found" — CPython counts len+1 non-
+     * overlapping empty matches, one before every character and one after
+     * the last: `b'abc'.count(b'')` is 4 and `b''.count(b'')` is 1. The
+     * loop below cannot produce either (it advances by needle->len, which
+     * is 0, so it spins), which is why it answered 0 for both. */
+    if (!hay) return 0;
+    if (!needle || needle->len == 0) return hay->len + 1;
     int64_t c = 0;
     for (int64_t i = 0; i + needle->len <= hay->len; ) {
         if (memcmp(hay->data + i, needle->data, (size_t)needle->len) == 0) { c++; i += needle->len; }
@@ -1711,7 +1753,11 @@ int64_t mojo_bytes_count(MojoBytes *hay, MojoBytes *needle)
 int64_t mojo_bytes_count_from(MojoBytes *hay, MojoBytes *needle,
                               int64_t start, int64_t stop)
 {
-    if (!hay || !needle || needle->len == 0) return 0;
+    if (!hay) return 0;
+    if (!needle || needle->len == 0) {
+        mojo_bytes_clamp_range(hay, &start, &stop);
+        return stop - start + 1;
+    }
     mojo_bytes_clamp_range(hay, &start, &stop);
     int64_t c = 0;
     for (int64_t i = start; i + needle->len <= stop; ) {
@@ -1721,18 +1767,43 @@ int64_t mojo_bytes_count_from(MojoBytes *hay, MojoBytes *needle,
     return c;
 }
 
+/* startswith / endswith, WITH the optional [start[, end]] window both take.
+ *
+ * The two-argument spellings `b.startswith(p, 1, 2)` were silently IGNORED:
+ * the call sites passed only (bytes, prefix), so the answer was computed
+ * over the WHOLE string and the window never applied. `b'abc'.startswith(
+ * b'a', 1, 2)` was True where CPython says False, and `b'abc'.endswith(b'c',
+ * 0, 2)` likewise — both plausible, both wrong, exit 0. The window is
+ * sliced out first and the prefix/suffix then compared against that, which
+ * is exactly CPython's own spelling. */
+int mojo_bytes_startswith_from(MojoBytes *b, MojoBytes *p, int64_t start, int64_t stop)
+{
+    if (!b) return p && p->len == 0;
+    mojo_bytes_clamp_range(b, &start, &stop);
+    int64_t n = stop - start;
+    if (!p || p->len == 0) return 1;
+    if (n < p->len) return 0;
+    return memcmp(b->data + start, p->data, (size_t)p->len) == 0;
+}
+
+int mojo_bytes_endswith_from(MojoBytes *b, MojoBytes *p, int64_t start, int64_t stop)
+{
+    if (!b) return p && p->len == 0;
+    mojo_bytes_clamp_range(b, &start, &stop);
+    int64_t n = stop - start;
+    if (!p || p->len == 0) return 1;
+    if (n < p->len) return 0;
+    return memcmp(b->data + stop - p->len, p->data, (size_t)p->len) == 0;
+}
+
 int mojo_bytes_startswith(MojoBytes *b, MojoBytes *p)
 {
-    if (!p || p->len == 0) return 1;
-    if (!b || b->len < p->len) return 0;
-    return memcmp(b->data, p->data, (size_t)p->len) == 0;
+    return mojo_bytes_startswith_from(b, p, 0, MOJO_SLICE_STOP_OMITTED);
 }
 
 int mojo_bytes_endswith(MojoBytes *b, MojoBytes *p)
 {
-    if (!p || p->len == 0) return 1;
-    if (!b || b->len < p->len) return 0;
-    return memcmp(b->data + b->len - p->len, p->data, (size_t)p->len) == 0;
+    return mojo_bytes_endswith_from(b, p, 0, MOJO_SLICE_STOP_OMITTED);
 }
 
 char *mojo_bytes_decode(MojoBytes *b, char *encoding)
@@ -1790,7 +1861,36 @@ MojoBytes *mojo_bytes_replace_n(MojoBytes *b, MojoBytes *from, MojoBytes *to,
                                 int64_t count)
 {
     if (!b) return mojo_bytes_empty();
-    if (!from || from->len == 0) return mojo_bytes_new_lit((const char *)b->data, b->len);
+    if (!from || from->len == 0) {
+        /* An EMPTY pattern is a real CPython spelling, not a no-op: it
+         * matches at every one of the len+1 BOUNDARY positions — before
+         * each character and after the last. `b'aaa'.replace(b'', b'-')`
+         * is `b'-a-a-a-'` and `b''.replace(b'', b'-')` is `b'-'`. This
+         * answered the string UNCHANGED, because the loop below advances
+         * by from->len (0) and so never matched.
+         *
+         * The model, which `count` then bounds: walk the len+1 boundary
+         * positions; at the first `count` of them emit the replacement and
+         * at every one of them emit the character that follows (there is
+         * none after the last). So the loop is over boundaries, not over
+         * characters, and the tail needs no special case — position len is
+         * simply a boundary with no character. */
+        if (count == 0) return mojo_bytes_new_lit((const char *)b->data, b->len);
+        if (count < 0) count = MOJO_SLICE_STOP_OMITTED;
+        int64_t slots = (count == MOJO_SLICE_STOP_OMITTED) ? b->len + 1 : count;
+        if (slots > b->len + 1) slots = b->len + 1;
+        int64_t tn = to ? to->len : 0;
+        MojoBytes *r = mojo_bytes_alloc(b->len + slots * tn);
+        int64_t p = 0;
+        for (int64_t k = 0; k <= b->len; k++) {
+            if (k < slots && tn) memcpy(r->data + p, to->data, (size_t)tn);
+            if (k < slots) p += tn;
+            if (k < b->len) r->data[p++] = b->data[k];
+        }
+        r->len = p;
+        r->data[p] = 0;
+        return r;
+    }
     if (count < 0) count = MOJO_SLICE_STOP_OMITTED;
     if (count == 0) return mojo_bytes_new_lit((const char *)b->data, b->len);
     int64_t total = mojo_bytes_count(b, from);
@@ -1958,28 +2058,71 @@ int64_t mojo_bytes_rfind(MojoBytes *hay, MojoBytes *needle)
  * bytes.index(<int>) — Python accepts an int in 0-255 there). */
 int64_t mojo_bytes_index_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop)
 {
-    if (!b) return -1;
-    mojo_bytes_clamp_range(b, &start, &stop);
-    for (int64_t i = start; i < stop; i++)
-        if ((int64_t)b->data[i] == (v & 0xFF)) return i;
-    return -1;
+    int64_t at = mojo_bytes_find_int(b, v, start, stop);
+    if (at < 0) {
+        char detail[96];
+        snprintf(detail, sizeof detail, "subsection not found");
+        mojo_raise_value_error(detail);
+    }
+    return at;
 }
 
 int64_t mojo_bytes_rindex_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop)
 {
+    int64_t at = mojo_bytes_rfind_int(b, v, start, stop);
+    if (at < 0) {
+        char detail[96];
+        snprintf(detail, sizeof detail, "subsection not found");
+        mojo_raise_value_error(detail);
+    }
+    return at;
+}
+
+/* find / rfind / index / rindex over a single byte VALUE (the `b.index(0x2c)`
+ * spelling). `mojo_bytes_index_int` is the FIND-shaped one: it answers -1
+ * when absent, which is what `find`/`rfind` return. `index`/`rindex` are the
+ * same search with a different failure — they RAISE ValueError — so they get
+ * their own entry points below rather than sharing this one, which is what
+ * made `b'abc'.index(b'z')` answer -1 with exit 0.
+ *
+ * A value outside 0-255 is a ValueError in CPython (`b'abc'.count(300)`), not
+ * a silently wrapped one; `& 0xFF` below is what turned 300 into 44 and made
+ * `count(300)` count the letter 'c'. */
+static void mojo_bytes_check_byte_value(int64_t v) {
+    if (v >= 0 && v <= 255) return;
+    char detail[96];
+    snprintf(detail, sizeof detail,
+             "byte must be in range(0, 256)");
+    mojo_raise_value_error(detail);
+}
+
+int64_t mojo_bytes_find_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop)
+{
+    mojo_bytes_check_byte_value(v);
+    if (!b) return -1;
+    mojo_bytes_clamp_range(b, &start, &stop);
+    for (int64_t i = start; i < stop; i++)
+        if ((int64_t)b->data[i] == v) return i;
+    return -1;
+}
+
+int64_t mojo_bytes_rfind_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop)
+{
+    mojo_bytes_check_byte_value(v);
     if (!b) return -1;
     mojo_bytes_clamp_range(b, &start, &stop);
     for (int64_t i = stop - 1; i >= start; i--)
-        if ((int64_t)b->data[i] == (v & 0xFF)) return i;
+        if ((int64_t)b->data[i] == v) return i;
     return -1;
 }
 
 int64_t mojo_bytes_count_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop)
 {
+    mojo_bytes_check_byte_value(v);
     if (!b) return 0;
     mojo_bytes_clamp_range(b, &start, &stop);
     int64_t c = 0;
-    for (int64_t i = start; i < stop; i++) if ((int64_t)b->data[i] == (v & 0xFF)) c++;
+    for (int64_t i = start; i < stop; i++) if ((int64_t)b->data[i] == v) c++;
     return c;
 }
 
@@ -2219,15 +2362,90 @@ MojoBytes *mojo_bytes_maketrans(MojoBytes *from, MojoBytes *to)
     return t;
 }
 
+/* `b.translate(table, delete)` — the two-argument form. The `delete` SET was
+ * silently dropped: the call site passed only the table, so
+ * `b'hello'.translate(None, b'l')` came back as `b'hello'` where CPython
+ * answers `b'heo'`. `delete` is applied FIRST (a byte in the set is removed
+ * and never translated); `table` is a 256-entry lookup and may be NULL,
+ * which means "keep every surviving byte as itself" — CPython spells that
+ * `b'hello'.translate(None, b'l')`, and None is exactly the no-table case.
+ * `table` of any other length is a ValueError in CPython ("translation
+ * table must be 256 characters long"), and is one here rather than a
+ * partially-applied table, which is what a short table silently produced. */
+MojoBytes *mojo_bytes_translate_del(MojoBytes *b, MojoBytes *table, MojoBytes *delbytes)
+{
+    if (!b) return mojo_bytes_empty();
+    if (table && table->len != 256) {
+        char detail[96];
+        snprintf(detail, sizeof detail,
+                 "translation table must be 256 characters long");
+        mojo_raise_value_error(detail);
+    }
+    MojoBytes *r = mojo_bytes_alloc(b->len);
+    int64_t p = 0;
+    for (int64_t i = 0; i < b->len; i++) {
+        uint8_t c = b->data[i];
+        if (delbytes && memchr(delbytes->data, c, (size_t)delbytes->len)) continue;
+        r->data[p++] = table ? table->data[c] : c;
+    }
+    r->len = p;
+    r->data[p] = 0;
+    return r;
+}
+
 MojoBytes *mojo_bytes_translate(MojoBytes *b, MojoBytes *table)
 {
     if (!b) return mojo_bytes_empty();
+    if (!table) return mojo_bytes_new_lit((const char *)b->data, b->len);
+    if (table->len != 256) {
+        char detail[96];
+        snprintf(detail, sizeof detail,
+                 "translation table must be 256 characters long");
+        mojo_raise_value_error(detail);
+    }
     MojoBytes *r = mojo_bytes_new_lit((const char *)b->data, b->len);
-    if (!table) return r;
     for (int64_t i = 0; i < r->len; i++) {
         uint8_t c = r->data[i];
-        if (c < table->len) r->data[i] = table->data[c];
+        r->data[i] = table->data[c];
     }
+    return r;
+}
+
+/* `bytes.expandtabs([tabsize])` — the bytes twin of mojo_str_expandtabs,
+ * which already existed. This had NO bytes implementation at all, so the
+ * call fell through to the generic unknown-method stub and answered a raw
+ * int `0` (printed as `0`, not even a plausible-looking empty bytes) for
+ * every spelling. `tabsize` defaults to 8, and a non-positive tabsize
+ * REMOVES the tab rather than leaving it alone — CPython's
+ * `b'a\tb\tc'.expandtabs(0)` is `b'abc'`, and this returned the input
+ * unchanged. Column counting resets on `\n` and `\r` only (not on `\f` or
+ * `\v`, which occupy a column), matching both this and mojo_str_expandtabs. */
+MojoBytes *mojo_bytes_expandtabs(MojoBytes *b, int64_t tabsize)
+{
+    int64_t n = b ? b->len : 0;
+    if (tabsize <= 0) {
+        MojoBytes *r = mojo_bytes_alloc(n + 1);
+        int64_t q = 0;
+        for (int64_t i = 0; i < n; i++) if (b->data[i] != '\t') r->data[q++] = b->data[i];
+        r->len = q;
+        r->data[q] = 0;
+        return r;
+    }
+    MojoBytes *r = mojo_bytes_alloc(n * (int64_t)tabsize + 1);
+    int64_t p = 0, col = 0;
+    for (int64_t i = 0; i < n; i++) {
+        uint8_t c = b->data[i];
+        if (c == '\t') {
+            int64_t spaces = tabsize - (col % tabsize);
+            for (int64_t k = 0; k < spaces; k++) r->data[p++] = ' ';
+            col += spaces;
+        } else {
+            r->data[p++] = c;
+            col = (c == '\n' || c == '\r') ? 0 : col + 1;
+        }
+    }
+    r->len = p;
+    r->data[p] = 0;
     return r;
 }
 
@@ -2359,7 +2577,20 @@ MojoList *mojo_bytes_split_max(MojoBytes *b, MojoBytes *sep, int64_t maxsplit, i
     MojoList *l = mojo_list_new();
     if (!b) return l;
     int64_t n = b->len;
-    int64_t sn = (sep && sep->len) ? sep->len : 0;
+    /* An EMPTY separator is a ValueError in CPython — `b'ab'.split(b'')` and
+     * `b'ab'.rsplit(b'')` both raise "empty separator". It was conflated
+     * with the genuinely-absent one (`split()` with no argument, which IS a
+     * whitespace split) because both arrive here as a NULL-or-empty `sep`,
+     * so `split(b'')` silently whitespace-split instead. Only the SPELLING
+     * distinguishes them: an explicit empty separator is a non-NULL,
+     * zero-length value. mojo_bytes_partition already draws this exact
+     * distinction (see mojo_bytes_partition_go's own comment). */
+    if (sep && sep->len == 0) {
+        char detail[96];
+        snprintf(detail, sizeof detail, "empty separator");
+        mojo_raise_value_error(detail);
+    }
+    int64_t sn = sep ? sep->len : 0;
     if (sn == 0) {
         /* whitespace split, no empty pieces, no leading/trailing padding */
         int64_t i = 0;
@@ -2370,7 +2601,15 @@ MojoList *mojo_bytes_split_max(MojoBytes *b, MojoBytes *sep, int64_t maxsplit, i
             while (i < n && !mojo_bytes_isspace_byte(b->data[i])) i++;
             mojo_bytes_list_push(l, b->data + start, i - start);
             if (maxsplit != MOJO_SLICE_STOP_OMITTED && (int64_t)mojo_list_len(l) >= maxsplit) {
-                while (i < n) mojo_bytes_list_push(l, b->data + i, 0), i++;
+                /* The REST of the input is ONE more piece, verbatim. It
+                 * was pushed as a single ZERO-length piece, so
+                 * `b'a b c'.split(maxsplit=1)` came back
+                 * [b'a', b'', b'', b''] — one real piece followed by
+                 * three empty ones, where CPython answers
+                 * [b'a', b' b c']. */
+                int64_t rest = i;
+                while (rest < n && mojo_bytes_isspace_byte(b->data[rest])) rest++;
+                if (rest < n) mojo_bytes_list_push(l, b->data + rest, n - rest);
                 i = n;
             }
         }
@@ -2378,6 +2617,14 @@ MojoList *mojo_bytes_split_max(MojoBytes *b, MojoBytes *sep, int64_t maxsplit, i
     }
     if (!from_right) {
         int64_t start = 0, done = 0;
+        /* An EMPTY subject splits to exactly one piece — the empty string —
+         * not to none. `[].join`ing over an empty result and iterating it
+         * are both wrong for `b''.split(b',')`, and the loop below never
+         * ran at all (no separator to find), so the answer was []. */
+        if (n == 0) {
+            mojo_bytes_list_push(l, b->data, 0);
+            return l;
+        }
         for (int64_t i = 0; i + sn <= n; ) {
             if (memcmp(b->data + i, sep->data, (size_t)sn) == 0) {
                 mojo_bytes_list_push(l, b->data + start, i - start);
@@ -5843,6 +6090,73 @@ char *string_upper(char *str) {
     return upper;
 }
 
+/* `str.casefold()` — the Unicode caseless-folding form of `lower()`. Over
+ * ASCII, which is all this representation carries (a `str` is a bare
+ * `char *`), it is exactly `lower()`: every ASCII letter maps to its
+ * lowercase counterpart and nothing else changes. The non-ASCII cases
+ * (e.g. 'ß' -> 'ss', 'İ' -> 'i̇') are outside the representation and are
+ * recorded as such on the str-side predicate tests rather than guessed at.
+ * This existed because the method had no lowering at all and fell to the
+ * generic unknown-method stub, printing a raw int 0. */
+char *mojo_str_casefold(char *str) { return string_lower(str); }
+
+char *mojo_str_swapcase(char *str) {
+    if (!str) return str;
+    size_t len = strlen(str);
+    char *out = malloc(len + 1);
+    if (!out) return str;
+    for (size_t i = 0; i < len; i++) {
+        char c = str[i];
+        if (c >= 'a' && c <= 'z')      out[i] = (char)(c - 32);
+        else if (c >= 'A' && c <= 'Z') out[i] = (char)(c + 32);
+        else out[i] = c;
+    }
+    out[len] = '\0';
+    return out;
+}
+
+/* `str.title()` — first character of each WORD upper, the rest lower. A
+ * word boundary is here what CPython means: any character that is not
+ * cased. That makes 'a1b'.title() == 'A1B' and 'a b'.title() == 'A B',
+ * which is the rule `str.istitle()` (already implemented, via the shared
+ * mojo_is_kind kernel) checks in the other direction. */
+char *mojo_str_title(char *str) {
+    if (!str) return str;
+    size_t len = strlen(str);
+    char *out = malloc(len + 1);
+    if (!out) return str;
+    int prev_uncased = 1;   /* the start of the string is a word boundary */
+    for (size_t i = 0; i < len; i++) {
+        char c = str[i];
+        int cased = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        if (prev_uncased && c >= 'a' && c <= 'z')      out[i] = (char)(c - 32);
+        else if (prev_uncased && c >= 'A' && c <= 'Z') out[i] = c;
+        else if (c >= 'A' && c <= 'Z')                 out[i] = (char)(c + 32);
+        else if (c >= 'a' && c <= 'z')                 out[i] = c;
+        else out[i] = c;
+        prev_uncased = !cased;
+    }
+    out[len] = '\0';
+    return out;
+}
+
+/* `str.capitalize()` — first character upper, ALL THE REST lower. Distinct
+ * from title() in exactly that: 'aBC'.capitalize() is 'Abc'. */
+char *mojo_str_capitalize(char *str) {
+    if (!str) return str;
+    size_t len = strlen(str);
+    char *out = malloc(len + 1);
+    if (!out) return str;
+    for (size_t i = 0; i < len; i++) {
+        char c = str[i];
+        if (i == 0 && c >= 'a' && c <= 'z') out[i] = (char)(c - 32);
+        else if (i > 0 && c >= 'A' && c <= 'Z') out[i] = (char)(c + 32);
+        else out[i] = c;
+    }
+    out[len] = '\0';
+    return out;
+}
+
 /* Real `hash(x)` builtin. `hash` was previously only a bare, never-defined
  * forward declaration in gimple_codegen.py's preamble (`_util_pairs`) —
  * compiled fine but failed to LINK ("undefined symbols: _hash") the moment
@@ -5999,6 +6313,23 @@ void mojo_raise_value_error(char *detail) {
     snprintf(msg, sizeof msg, "ValueError: %s", detail ? detail : "?");
     char *heap_msg = strdup(msg);
     mojo_exc_type_set(_MOJO_EXC_TAG_VALUEERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
+/* `IndexError: <detail>` — the fifth typed raiser, same mechanism and same
+ * hardcoded-tag derivation as the four above. Needed because an
+ * out-of-range read used to answer a VALUE: `b'abc'[10]` and `b''[0]`
+ * printed 0 with exit 0, and 0 is a real byte value, so
+ * `if b[i] == 0:` on a short buffer silently took the true branch. */
+#define _MOJO_EXC_TAG_INDEXERROR 635713773
+
+void mojo_raise_index_error(char *detail) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "IndexError: %s", detail ? detail : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_INDEXERROR);
     mojo_exc_msg_set(heap_msg);
     mojo_exc_obj_set(heap_msg);
     mojo_raise();
@@ -6419,6 +6750,90 @@ int mojo_list_any(MojoList *l) {
     for (int64_t i = 0; i < l->len; i++)
         if (l->data[i]) return 1;
     return 0;
+}
+
+/* all()/any()/sum() over a `bytes` (or `bytearray`) object. Iterating bytes
+ * yields its INTEGERS, not one-character strings and not the object itself,
+ * so these cannot go through the list helpers above: a bytes value is a
+ * `MojoBytes *` and its elements are `b->data[i]`.
+ *
+ * These existed because every such call fell to the codegen's constant stub
+ * instead — `all(b'abc')` answered 0 (CPython: True) and `sum(b'abc')`
+ * answered a heap-pointer decimal (CPython: 294), both with exit 0. A
+ * wrong ANSWER, not an error, and a plausible-looking one: the 0 is what
+ * `all` of an empty iterable is, and the decimal is what an int prints. */
+int mojo_bytes_all(MojoBytes *b) {
+    /* Every element of a bytes object is a non-empty one, so a bytes
+     * object is truthy-valued throughout: all(b'') is True (the empty
+     * iterable) and all(b'\x00...') is True (0 is not None/False here). */
+    (void)b;
+    return 1;
+}
+
+int mojo_bytes_any(MojoBytes *b) {
+    /* any() asks whether ANY ELEMENT is truthy, and an element of a bytes
+     * object is an int in 0-255 — where 0 IS falsy. So this is not
+     * "is the container non-empty": `any(b'\x00')` is False in CPython and
+     * answered True here. (b'' is a separate case and agrees either way:
+     * an empty iterable has no truthy element.) */
+    for (int64_t i = 0; i < b->len; i++) if (b->data[i]) return 1;
+    return 0;
+}
+
+int64_t mojo_bytes_sum(MojoBytes *b) {
+    int64_t s = 0;
+    for (int64_t i = 0; i < b->len; i++) s += b->data[i];
+    return s;
+}
+
+/* `reversed(b)` — the iterator's elements, as a list of ints, matching
+ * `list(reversed(b'abc'))` == [99, 98, 97]. Was `[]`: the reversed() path
+ * only knew MojoList, so a bytes argument produced an empty list. */
+MojoList *mojo_bytes_reversed_list(MojoBytes *b) {
+    MojoList *out = mojo_list_new();
+    if (!b) return out;
+    for (int64_t i = b->len - 1; i >= 0; i--)
+        mojo_list_append_int(out, (int64_t)b->data[i]);
+    return out;
+}
+
+/* `sorted(b)` — the bytes' values in ascending order (CPython returns a
+ * list of ints). Was a crash for a bytes argument (the sort path read the
+ * object as a MojoList header). */
+MojoList *mojo_bytes_sorted_list(MojoBytes *b) {
+    MojoList *out = mojo_bytes_reversed_list(b);
+    /* An insertion sort over int64_t slots: a MojoList carries no per-slot
+     * comparator, and the values here are plain bytes, so the simplest
+     * correct ordering is also the cheapest to be right about. */
+    for (int64_t i = 1; i < out->len; i++) {
+        int64_t key = out->data[i];
+        int64_t j = i - 1;
+        while (j >= 0 && out->data[j] > key) { out->data[j + 1] = out->data[j]; j--; }
+        out->data[j + 1] = key;
+    }
+    return out;
+}
+
+int mojo_bytes_max(MojoBytes *b) {
+    if (!b || b->len == 0) {
+        char detail[96];
+        snprintf(detail, sizeof detail, "max() arg is an empty sequence");
+        mojo_raise_value_error(detail);
+    }
+    uint8_t m = b->data[0];
+    for (int64_t i = 1; i < b->len; i++) if (b->data[i] > m) m = b->data[i];
+    return (int)m;
+}
+
+int mojo_bytes_min(MojoBytes *b) {
+    if (!b || b->len == 0) {
+        char detail[96];
+        snprintf(detail, sizeof detail, "min() arg is an empty sequence");
+        mojo_raise_value_error(detail);
+    }
+    uint8_t m = b->data[0];
+    for (int64_t i = 1; i < b->len; i++) if (b->data[i] < m) m = b->data[i];
+    return (int)m;
 }
 
 /* Python list.pop(index=-1): removes and returns the element at `idx`

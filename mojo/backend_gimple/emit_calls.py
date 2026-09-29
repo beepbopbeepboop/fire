@@ -1749,6 +1749,15 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # MojoDict*/MojoSet* argument was reinterpreted as a list header
         # (the exact R2-violation shape) rather than just an ad-hoc cast
         # in this codegen.
+        if at == 'MojoBytes *':
+            # Iterating `bytes` yields its INTEGERS, so this is a sum of
+            # byte values. Materializing it as a list first would WORK but
+            # allocate a container to throw away; before this case existed
+            # the argument was reinterpreted as a MojoList* — the exact
+            # R2-violation shape the comment above names — so `sum(b'abc')`
+            # summed whatever the bytes header's first words happened to be
+            # and printed a heap-pointer decimal where CPython prints 294.
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_bytes_sum', [('MojoBytes *', av)])
         if at != 'MojoList *':
             av = gen._materialize_as_list(at, av)
             at = 'MojoList *'
@@ -2498,7 +2507,18 @@ def _lower_builtin_all_any(gen, fname_raw: str, node: gimple_ctypes.CallExpr) ->
     stub_val   = '1'             if fname_raw == 'all' else '0'
     at, av = gen.lower_expr(node.args[0])
     t = gen._new_temp('int')
-    if at == 'MojoList *' or at == 'MojoDict *' or at == 'MojoSet *' \
+    if at == 'MojoBytes *':
+        # Checked BEFORE the pointer branch below, which `at.endswith(' *')`
+        # would otherwise claim: a `bytes` value is a `MojoBytes *`, and it
+        # was being handed to _materialize_as_list, which built an EMPTY
+        # list for it — so `all(b'abc')` was `all([])`, i.e. True-by-
+        # accident for `any` and, for `all`, whatever the materialization
+        # produced. Iterating `bytes` yields its INTEGERS, so the list
+        # helpers above are the wrong ones regardless; this is its own case
+        # because the representation is not a MojoList.
+        bf = 'mojo_bytes_all' if fname_raw == 'all' else 'mojo_bytes_any'
+        gen._emit_call('int', t, bf, [('MojoBytes *', av)])
+    elif at == 'MojoList *' or at == 'MojoDict *' or at == 'MojoSet *' \
             or (at.endswith(' *') and at != 'char *'):
         # DESIGN.html R1/R5: dict/set materialization (all(d)/any(s) over a
         # dict's keys / a set's elements, not a reinterpret of the header —
@@ -2934,6 +2954,16 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
         t = gen._call_expr('MojoList *', 'mojo_dict_sorted_keys', [(at, av)])
         gen._elem_types[t] = 'char *'   # dict keys are always strings
         return 'MojoList *', t
+    if at == 'MojoBytes *':
+        # Iterating `bytes` yields its INTEGERS, so `sorted(b'cba')` is
+        # `[97, 98, 99]`. Not routed through the branch below on purpose:
+        # that one hands a non-MojoList to _materialize_as_list and then to
+        # mojo_sorted, which walks it as a MojoList header — `sorted` of a
+        # bytes object SEGFAULTED (rc -11), reading the MojoBytes struct's
+        # first words as a data pointer and length.
+        t = gen._call_expr('MojoList *', 'mojo_bytes_sorted_list', [(at, av)])
+        gen._elem_types[t] = 'int64_t'
+        return 'MojoList *', t
     if at == 'MojoList *' and gen._elem_of(av) == 'char *':
         t = gen._call_expr('MojoList *', 'mojo_list_sorted_str', [(at, av)])
     else:
@@ -3199,6 +3229,23 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
     # more in fire_compiler.py's own translation unit. mojo_set_copy
     # dispatches per slot on its tag, so both kinds survive.
     _arg0 = node.args[0]
+    # `list(reversed(<bytes>))` — the general comprehension route below
+    # cannot iterate a `reversed(...)` call (it builds a Generator over the
+    # CallExpr, whose iteration path does not know the reversed shim), so it
+    # produced an EMPTY list: `list(reversed(b'abc'))` was `[]` where CPython
+    # says `[99, 98, 97]`. `reversed(b)` and `bytes(reversed(b))` and a
+    # `for x in reversed(b)` loop were all already correct — only the
+    # materialization through `list()` was wrong, which is why this is
+    # narrow. The elements are the bytes' INTEGERS, as iteration yields.
+    if (kind == 'list' and isinstance(_arg0, gimple_ctypes.CallExpr)
+            and isinstance(_arg0.func, gimple_ctypes.IdentExpr)
+            and _arg0.func.name == 'reversed'
+            and len(_arg0.args) == 1
+            and not gen._locally_binds_name('reversed')):
+        _rit, _riv = gen.lower_expr(_arg0.args[0])
+        if _rit == 'MojoBytes *':
+            return 'MojoList *', gen._call_expr(
+                'MojoList *', 'mojo_bytes_reversed_list', [('MojoBytes *', _riv)])
     if kind == 'set':
         _at, _av = gen.lower_expr(_arg0)
         _at = gen._get_actual_type(_at, _av) or _at
@@ -5033,6 +5080,16 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
                     'double', f"mojo_{fname_raw}_double", [('void *', lp)])
             return 'int64_t', gen._call_expr(
                 'int64_t', f"mojo_{fname_raw}", [('void *', lp)])
+        if at == 'MojoBytes *':
+            # Iterating `bytes` yields its INTEGERS, so `max(b'abc')` is the
+            # largest byte value, 99. The `MojoList *` list above is not in
+            # this branch's condition, so a bytes argument fell to the
+            # scalar ternary-fold further down, which treated the
+            # `MojoBytes *` as a number and compared its ADDRESS:
+            # `max(b'abc')` printed a heap pointer and `min(b'abc')` printed
+            # 0 — the same value `min` prints for a genuinely-zero argument.
+            return 'int64_t', gen._call_expr(
+                'int64_t', f'mojo_bytes_{fname_raw}', [('MojoBytes *', av)])
 
     # min/max over scalar args → fold into nested ternaries (avoids the
     # mojo_min(void*) variadic-pack signature, which we don't emit packs for).
@@ -5725,7 +5782,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     if _bsub_r and not gen._struct_defines_method(_bsub_r, '__getitem__'):
         bp = gen._new_val('MojoBytes *', f"{ov}->_data")
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-        return 'int64_t', gen._new_val('int64_t', f"mojo_bytes_get ({bp}, {idx64})")
+        return 'int64_t', gen._new_val('int64_t', f"mojo_bytes_get_checked ({bp}, {idx64})")
 
     if ot == 'MojoList *':
         elem = gen._elem_of(ov)
@@ -5796,9 +5853,12 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
 
     if ot == 'MojoBytes *':
         # b[i] -> int 0-255 (never a 1-char str; bytes is not conflated
-        # with str). Negative index handled in mojo_bytes_get.
+        # with str). Negative index handled in mojo_bytes_get. An
+        # out-of-range index RAISES (the _checked helper): it used to answer
+        # 0, which is not a neutral value here — 0 is a real byte, so
+        # `if b[i] == 0:` on a short buffer silently took the true branch.
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-        t = gen._new_val('int64_t', f"mojo_bytes_get ({ov}, {idx64})")
+        t = gen._new_val('int64_t', f"mojo_bytes_get_checked ({ov}, {idx64})")
         return 'int64_t', t
 
     if ot == 'MojoMemoryView *':
@@ -6113,6 +6173,25 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
             step_v = gen._to_int64(_kt, kv)
         else:
             step_v = '1'
+        # `x[a:b:0]` is a ValueError in CPython — a zero step is a
+        # contradiction, not an empty range. Every slice helper here treats
+        # step 0 as "step 1" (the `if (step == 0) step = 1;` in
+        # mojo_bytes_slice and mojo_list_slice), so the compiled path
+        # answered the WHOLE sequence: `b'abc'[1:2:0]` was `b'abc'` and
+        # `[1,2,3][0:3:0]` was `[1, 2, 3]`, where CPython raises for both.
+        # The check lives HERE rather than in each runtime slice helper
+        # because only a lowered call site knows a step was spelled at all:
+        # an omitted step passes the literal 1, and the runtime's own
+        # defensive default stays for the paths that pass 0 deliberately.
+        _zst = gen._new_val('int64_t', '(int64_t)0')
+        _stepzero = gen._new_val('_Bool', f'({step_v} == {_zst})')
+        _bb = gen._new_bb(); _bo = gen._new_bb()
+        gen._emit(f'  if ({_stepzero}) goto {_bb}; else goto {_bo};')
+        gen._emit_label(_bb)
+        gen._emit_call('void', '', 'mojo_raise_value_error',
+                       [('char *', gen._intern_string('slice step cannot be zero'))])
+        gen._emit(f'  goto {_bo};')
+        gen._emit_label(_bo)
         # Omitted start: pass the OMITTED sentinel (not 0) so mojo_bytes_slice
         # can pick the right endpoint for a negative step (`b[::-1]`).
         bstart_v = 'MOJO_SLICE_STOP_OMITTED' if node.start is None else start_v
@@ -6129,6 +6208,21 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         return 'MojoMemoryView *', t
 
     if ot == 'MojoList *':
+        # A list slice has no step in this runtime (mojo_list_slice takes
+        # only start/stop), but the SPELLING `l[a:b:0]` still has to be
+        # refused: CPython raises ValueError, and dropping the step
+        # silently answered the plain slice `l[a:b]`. The bytes branch
+        # above carries the identical check and the identical reasoning.
+        if getattr(node, 'step', None) is not None:
+            _kt, kv = gen.lower_expr(node.step)
+            _stepzero = gen._new_val('_Bool', f'({gen._to_int64(_kt, kv)} == 0)')
+            _lb = gen._new_bb(); _lo = gen._new_bb()
+            gen._emit(f'  if ({_stepzero}) goto {_lb}; else goto {_lo};')
+            gen._emit_label(_lb)
+            gen._emit_call('void', '', 'mojo_raise_value_error',
+                           [('char *', gen._intern_string('slice step cannot be zero'))])
+            gen._emit(f'  goto {_lo};')
+            gen._emit_label(_lo)
         t = gen._new_val('MojoList *', f"mojo_list_slice ({ov}, {start_v}, {stop_v})")
         # propagate elem type
         if ov in gen._elem_types:
