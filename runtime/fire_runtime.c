@@ -2832,8 +2832,15 @@ int64_t mojo_memoryview_get(MojoMemoryView *m, int64_t i)
     if (!m) return 0;
     if (i < 0) i += m->len;
     if (i < 0 || i >= m->len) {
-        fprintf(stderr, "IndexError: index out of bounds on memoryview\n");
-        exit(1);
+        /* A real, catchable IndexError, not a print-and-exit. The
+         * print-and-exit could not be caught, so a program guarding an
+         * optional read (`try: v = mv[n] except IndexError: v = None`)
+         * died instead of taking the fallback — and the plain
+         * `mv[n]` for n past the end still raises, just one that behaves
+         * like every other raise in this runtime. */
+        char detail[96];
+        snprintf(detail, sizeof detail, "index out of bounds on memoryview");
+        mojo_raise_index_error(detail);
     }
     return (int64_t)m->data[i];
 }
@@ -2895,6 +2902,54 @@ char *mojo_memoryview_format(MojoMemoryView *m, char *fmt)
 MojoBytes *mojo_memoryview_obj(MojoMemoryView *m)
 {
     return mojo_bytes_new_lit(m ? (const char *)m->data : "", m ? m->len : 0);
+}
+
+/* The DESCRIPTIVE shape attributes. All four are exact for this
+ * representation, which is always a 1-D, C-contiguous, non-strided view of
+ * `len` elements — that is not an approximation of a general memoryview, it
+ * is what a `MojoMemoryView` IS here. None of them existed, so each fell to
+ * the generic unknown-member stub and printed its own heap address as a
+ * decimal: `mv.shape` printed 4340423136, `mv.ndim` printed 4340426608, and
+ * a program testing `mv.ndim == 1` silently took the false branch.
+ *
+ * The tuples are returned as STRINGS (the "(4,)" spelling) rather than as
+ * MojoLists because there is no caller-side shape for a 1-tuple here and the
+ * repr of a boxed list would be `[4]`, not `(4,)`. Printing the string
+ * gives CPython's exact text. */
+char *mojo_memoryview_shape_str(MojoMemoryView *m)
+{
+    char buf[32];
+    snprintf(buf, sizeof buf, "(%lld,)", (long long)(m ? m->len : 0));
+    return strdup(buf);
+}
+
+char *mojo_memoryview_strides_str(MojoMemoryView *m)
+{
+    /* Stride is the distance between consecutive elements, in BYTES. */
+    char buf[32];
+    snprintf(buf, sizeof buf, "(%lld,)", (long long)(m ? m->itemsize : 0));
+    return strdup(buf);
+}
+
+char *mojo_memoryview_suboffsets_str(void) { return strdup("()"); }
+
+int64_t mojo_memoryview_ndim(MojoMemoryView *m) { (void)m; return 1; }
+
+/* Contiguity: a 1-D window over `len` bytes with no gaps is C-contiguous,
+ * which for 1 dimension is also F-contiguous and simply "contiguous". */
+int mojo_memoryview_c_contiguous(MojoMemoryView *m) { (void)m; return 1; }
+int mojo_memoryview_f_contiguous(MojoMemoryView *m) { (void)m; return 1; }
+int mojo_memoryview_contiguous(MojoMemoryView *m) { (void)m; return 1; }
+
+/* `mv.tolist()` — the view's elements as a real list of ints. This
+ * answered a raw int 0 from the unknown-member stub. */
+MojoList *mojo_memoryview_tolist(MojoMemoryView *m)
+{
+    MojoList *out = mojo_list_new();
+    if (!m) return out;
+    for (int64_t i = 0; i < m->len; i++)
+        mojo_list_append_int(out, (int64_t)m->data[i]);
+    return out;
 }
 
 char *mojo_memoryview_repr(MojoMemoryView *m)

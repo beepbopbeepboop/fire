@@ -584,6 +584,18 @@ int             mojo_memoryview_eq(MojoMemoryView *m, MojoBytes *b);
 char           *mojo_memoryview_hex(MojoMemoryView *m);
 MojoMemoryView *mojo_memoryview_cast(MojoMemoryView *m, char *fmt);
 char           *mojo_memoryview_repr(MojoMemoryView *m);
+/* The descriptive shape attributes. Exact for this representation, which is
+ * always 1-D and contiguous; they previously had no lowering at all and
+ * printed their own heap address as a decimal. The tuple-valued ones return
+ * the SPELLING string, since there is no 1-tuple shape on this side. */
+char           *mojo_memoryview_shape_str(MojoMemoryView *m);
+char           *mojo_memoryview_strides_str(MojoMemoryView *m);
+char           *mojo_memoryview_suboffsets_str(void);
+int64_t         mojo_memoryview_ndim(MojoMemoryView *m);
+int             mojo_memoryview_c_contiguous(MojoMemoryView *m);
+int             mojo_memoryview_f_contiguous(MojoMemoryView *m);
+int             mojo_memoryview_contiguous(MojoMemoryView *m);
+MojoList       *mojo_memoryview_tolist(MojoMemoryView *m);
 int64_t         mojo_memoryview_itemsize(MojoMemoryView *m);
 int64_t         mojo_memoryview_nbytes(MojoMemoryView *m);
 char           *mojo_memoryview_format(MojoMemoryView *m, char *fmt);

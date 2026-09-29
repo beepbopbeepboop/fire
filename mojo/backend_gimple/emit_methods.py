@@ -5019,10 +5019,35 @@ def _lower_memoryview_method(gen, ov: str, method: str, args: list, kwargs=None)
         t = gen._call_expr('int', 'mojo_memoryview_readonly', [('MojoMemoryView *', ov)])
         return '_Bool', gen._new_val('_Bool', f'{t} != 0')
     if method in ('c_contiguous', 'f_contiguous', 'contiguous'):
-        # Genuinely constant: a 1-D byte window over contiguous memory is
-        # C-contiguous by construction, and `f_contiguous`/`contiguous` are
-        # the same fact under this representation.
-        return '_Bool', gen._new_val('_Bool', '1')
+        # A 1-D byte window over contiguous memory is C-contiguous by
+        # construction, and `f_contiguous`/`contiguous` are the same fact
+        # under this representation. Asked of the runtime rather than
+        # folded here, so all three come from ONE place (the other memoryview
+        # attributes are queries) instead of this call site being the only
+        # one that knows the rule.
+        fn = 'mojo_memoryview_' + method
+        t = gen._call_expr('int', fn, [('MojoMemoryView *', ov)])
+        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
+    if method in ('shape', 'strides', 'suboffsets'):
+        # Tuple-valued descriptors. They have no lowering at all, so each
+        # fell to the unknown-member stub and printed its own heap ADDRESS as
+        # a decimal: `mv.shape` printed 4340423136 where CPython prints
+        # `(4,)`. The runtime returns the spelling string, which is exact for
+        # this always-1-D representation.
+        if method == 'suboffsets':
+            return 'char *', gen._call_expr(
+                'char *', 'mojo_memoryview_suboffsets_str', [])
+        t = gen._call_expr('char *', 'mojo_memoryview_' + method + '_str',
+                           [('MojoMemoryView *', ov)])
+        return 'char *', t
+    if method == 'ndim':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_ndim',
+                                         [('MojoMemoryView *', ov)])
+    if method == 'tolist':
+        # The view's elements as a real list of ints; this answered a raw
+        # int 0 from the unknown-member stub.
+        return 'MojoList *', gen._call_expr('MojoList *', 'mojo_memoryview_tolist',
+                                            [('MojoMemoryView *', ov)])
     if method in ('release', '__enter__', '__exit__'):
         # No refcount model — context-manager / release is a no-op that
         # yields the view itself (so `with memoryview(x) as m:` binds m).

@@ -1578,7 +1578,8 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     if ot == 'MojoMemoryView *' and node.member in ('nbytes', 'itemsize', 'format',
                                                      'obj', 'readonly',
                                                      'c_contiguous', 'f_contiguous',
-                                                     'contiguous'):
+                                                     'contiguous', 'shape', 'strides',
+                                                     'suboffsets', 'ndim'):
         mp = gen._ensure_local('MojoMemoryView *', ov)
         if node.member in ('nbytes', 'itemsize'):
             fn = ('mojo_memoryview_nbytes' if node.member == 'nbytes'
@@ -1590,6 +1591,22 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if node.member == 'obj':
             return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_memoryview_obj',
                                                  [('MojoMemoryView *', mp)])
+        if node.member in ('shape', 'strides', 'suboffsets'):
+            # The tuple-valued descriptors. Neither this member read nor the
+            # call form (_lower_memoryview_method) had a case, so each fell
+            # to the generic unknown-member path and printed its own heap
+            # ADDRESS as a decimal: `mv.shape` printed 4341225952 where
+            # CPython prints `(4,)`. The runtime returns the spelling string,
+            # which is exact for this always-1-D representation.
+            if node.member == 'suboffsets':
+                return 'char *', gen._call_expr(
+                    'char *', 'mojo_memoryview_suboffsets_str', [])
+            return 'char *', gen._call_expr(
+                'char *', 'mojo_memoryview_' + node.member + '_str',
+                [('MojoMemoryView *', mp)])
+        if node.member == 'ndim':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_ndim',
+                                             [('MojoMemoryView *', mp)])
         if node.member == 'readonly':
             # A real query, not a constant fold: the answer is the
             # MUTABILITY of the object the view was taken over, which the
@@ -1605,8 +1622,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                                [('MojoMemoryView *', mp)])
             return '_Bool', gen._new_val('_Bool', f'{t} != 0')
         # A 1-D byte window over contiguous memory is C-contiguous by
-        # construction, so these two really are constant.
-        return '_Bool', gen._new_val('_Bool', '1')
+        # construction, so these really are constant — but they are asked of
+        # the runtime rather than folded here, so all three come from ONE
+        # place instead of this being the only site that knows the rule.
+        t = gen._call_expr('int', 'mojo_memoryview_' + node.member,
+                           [('MojoMemoryView *', mp)])
+        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
 
     # MojoList field name remapping: Mojo List uses _len/_capacity/elems; C MojoList uses len/cap/data
     _sn = gimple_exprtypes._struct_name_of(ot)

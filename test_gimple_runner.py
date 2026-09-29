@@ -3253,6 +3253,60 @@ fn main():
     print(memoryview(ba).readonly)
 """, "4 1 B\nb'abcd'\nTrue True\n4\nFalse True\nTrue False\nTrue True\nFalse\n")
 
+    # The rest of the memoryview descriptor surface, found by the same
+    # differential sweep. None of these had a lowering at either the member
+    # read or the call form, so each fell to the generic unknown-member path
+    # and printed ITS OWN HEAP ADDRESS as a decimal: `mv.shape` printed
+    # 4341225952 where CPython prints `(4,)`. That is a silent wrong value
+    # twice over — it is not a shape, and it changes every run, so a program
+    # comparing it against anything took a branch decided by the allocator.
+    test_gimple_stdout("gimple_memoryview_shape_descriptors", """\
+fn main():
+    var mv = memoryview(b'abcd')
+    print(mv.shape)
+    print(mv.strides)
+    print(mv.suboffsets)
+    print(mv.ndim)
+    print(mv.c_contiguous, mv.f_contiguous, mv.contiguous)
+    print(memoryview(b'').shape)
+    print(memoryview(bytearray(b'abc')).shape)
+    print(mv[1:3].shape)
+    # The CALL form must agree with the member read, or a program that
+    # writes `mv.shape` and one that writes `mv.__getattribute__('shape')`
+    # would not.
+    print(len(str(mv.shape)))
+""", "(4,)\n(1,)\n()\n1\nTrue True True\n(0,)\n(3,)\n(2,)\n4\n")
+
+    test_gimple_stdout("gimple_memoryview_tolist", """\
+fn main():
+    print(memoryview(b'abcd').tolist())
+    print(memoryview(bytearray(b'abc')).tolist())
+    print(memoryview(b'').tolist())
+    print(memoryview(b'abcd')[1:3].tolist())
+    for x in memoryview(b'ab').tolist():
+        print(x)
+""", "[97, 98, 99, 100]\n[97, 98, 99]\n[]\n[98, 99]\n97\n98\n")
+
+    # An out-of-range memoryview read raises a real, CATCHABLE IndexError.
+    # It was a print-and-exit, so a program guarding an optional read
+    # (`try: v = mv[n] except IndexError: v = None`) died instead of
+    # taking the fallback.
+    test_gimple_stdout("gimple_memoryview_index_error_is_catchable", """\
+fn main():
+    var mv = memoryview(b'abcd')
+    print(mv[0], mv[3], mv[-1], mv[-4])
+    try:
+        print(mv[10])
+    except IndexError:
+        print('caught IndexError')
+    try:
+        print(mv[-10])
+    except IndexError:
+        print('caught IndexError neg')
+    print(bytes(mv[1:100]), bytes(mv[1:3]))
+""", "97 100 100 97\ncaught IndexError\ncaught IndexError neg\n"
+     "b'bcd' b'bc'\n")
+
     # ── constructor-call-site inference reaches METHOD bodies and
     # MemberExpr/BinaryOp arguments ───────────────────────────────────────
     # `Reader(self._p)` / `Reader(self._p + "!")` inside a method: the
