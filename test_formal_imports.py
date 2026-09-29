@@ -233,10 +233,17 @@ def test_module_qualified_call_runs(tmpdir, _shared):
 
     Both halves are needed and only measuring them in order shows that. With
     the placement refusal gone, the call then failed on an unresolved symbol,
-    because the manifest's map is keyed by the BARE name and `_callee_symbol`
-    hands the codegen the DOTTED one — so `load_dylib_manifests` also
-    registers the qualified spelling. A test that only checked the first half
-    would have traded one refusal for another.
+    because the manifest's flat map is keyed by the BARE name (`helper` — the
+    spelling `from mylib import helper` writes) while `_callee_symbol` hands
+    the codegen the DOTTED one (`mylib.helper`). That is answered by
+    `model.dylib_export_lookup`, which resolves a DOTTED callee from the
+    export table of the library built for that module and never from the flat
+    map — so `mod.f` cannot bind some other library's `f` either. A test that
+    only checked the first half would have traded one refusal for another.
+
+    This is the top-level form; `pkg.sub` is the same call one level down and
+    has its own two tests below, because that is where the manifest's key and
+    the name a caller writes stop being the same string.
     """
     qualified = ("import mylib\n\n"
                  "def main():\n  return mylib.helper(41)\n")

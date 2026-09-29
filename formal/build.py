@@ -3716,7 +3716,18 @@ def load_dylib_manifests(dylib_paths: list) -> list:
     "exports"}`. A library whose manifest is missing is an error rather than a
     silently ignored dependency: the executable would emit calls to symbols
     nothing defines and produce an image that dies in dyld at launch — which
-    is exactly the failure this mechanism exists to prevent."""
+    is exactly the failure this mechanism exists to prevent.
+
+    The `map` is keyed by the BARE name and only by the bare name, and that is
+    the whole contract: it is what a BARE callee resolves through, first
+    library on the line winning. A DOTTED callee — `mod.f`, the spelling
+    `import mod` binds — is answered from `exports` by module identity
+    (`model.dylib_export_lookup`), because the flat map cannot say which module
+    owns a name and answering it from here would let `mod.f` bind some other
+    library's `f`. The two spellings of the same export are therefore NOT both
+    written into the map: there is one resolution per spelling, and each is
+    where it can see the module the name is qualified by.
+    """
     import json
     out = []
     for dylib in dylib_paths or []:

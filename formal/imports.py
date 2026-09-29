@@ -23,7 +23,6 @@ that imports it.
 """
 
 import os
-import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,6 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cas
 import fire_compiler as F
 
+from formal import model as _model
 from formal.build import ImportBuildError  # noqa: E402  (cycle-free: build
 # imports this module lazily, inside the function)
 
@@ -894,7 +894,13 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     # everywhere else. The digest is the module's own source, so editing it
     # invalidates the path rather than leaving a stale library reachable
     # under a name that looks current.
-    prefix = re.sub(r"[^A-Za-z0-9_]", "_", module_identity)
+    # `model.abi_module_name`, not a second `re.sub` of the same rule: the
+    # prefix here is what the manifest keys every export by, and
+    # `dylib_export_module` is what a caller writing `os.path.join` resolves
+    # the qualifier through. Two copies of the substitution are two chances for
+    # them to disagree, and the disagreement is a link error in the last image
+    # built rather than in either of the two functions.
+    prefix = _model.abi_module_name(module_identity)
     with open(source_path, "rb") as f:
         src_digest = cas.hash_parts(f.read())[:12]
     out = os.path.join(out_dir, f"{prefix}.{src_digest}.{arch}.dylib")

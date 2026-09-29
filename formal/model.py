@@ -5272,11 +5272,16 @@ def abi_module_name(dotted: str) -> str:
 
     A manifest keys an export by the module's ABI PREFIX, and a prefix is a C
     identifier, so the dots are flattened: `os.path` is `os_path`, and its
-    `join` exports as `os_path_join_2dbb98`. That is not a second naming
-    convention invented here — it is the same substitution the library's own
-    output name is built from (`formal/imports.py`'s `build_module_dylib`), so
-    the spelling a caller writes and the spelling the manifest is keyed by
-    differ in exactly one documented way, and this is that way.
+    `join` exports as `os_path_join_2dbb98`.
+
+    This is the ONE place that substitution is written, and the producer side
+    is `formal/imports.py`'s `build_module_dylib`, which calls it to name the
+    library whose manifest keys the exports by it. That is not a shared helper
+    picked for tidiness: the spelling a caller writes (`os.path.join`) and the
+    spelling the manifest is keyed by (`os_path`) differ in exactly this one
+    documented way, and two copies of the rule are two chances for them to
+    disagree — which is a link error in the last image built rather than in
+    either of the two functions.
 
     The name is UNPRECATED: a top-level module's prefix is its own name, which
     is what every non-package module in this tree has, so for them this is the
