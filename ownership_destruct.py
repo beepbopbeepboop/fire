@@ -155,6 +155,23 @@ def _is_constructor_expr(node):
     return False
 
 
+def _is_maybe_fresh_expr(node) -> bool:
+    """A right-hand side that MAY build a brand-new container the assigned name
+    would solely own: a call (a runtime function such as `.split()`/`.keys()`,
+    or a user function), a slice, a comprehension, or a `+` (list concat).
+    "May" is the point — the analysis cannot tell `x = s.split(" ")` (a fresh
+    list) from `x = self.items` reached through a call (a stored one). It
+    credits the name as a candidate, and CODEGEN, which knows what the value
+    really is, keeps ownership only when it can prove the value fresh at the
+    declaration (emit_infra.maybe_push_owned_local); otherwise the name is
+    dropped from the candidates right there."""
+    if isinstance(node, (N.CallExpr, N.SliceExpr, N.Comprehension)):
+        return True
+    if isinstance(node, N.BinaryOp) and node.op == '+':
+        return True
+    return False
+
+
 class _FuncFacts:
     """Accumulated, whole-function facts about every plain-identifier local
     — see module docstring for exactly what each disqualifies."""
@@ -171,11 +188,26 @@ class _FuncFacts:
         # right now, so a recursive call is treated as escaping.
         self.memo = {}
         self.visiting = []
+        # analyze_returns_fresh scans a callee with a bare `return name` allowed
+        # (recorded, not an escape) and needs to know which names were built
+        # ONLY by container displays, not merely by "maybe fresh" calls.
+        self.allow_return = False
+        self.all_display = {}        # name -> bool: every assignment a display
+        # Struct instances. `structs` maps a struct name to {method name:
+        # FunctionDef} for the module's structs whose constructor the caller has
+        # vetted (see infra_infer._build_analysis_structs); `struct_bound` maps
+        # a local to the struct name it was constructed as. A struct local is
+        # a candidate only while every use is a field access or a call to one of
+        # its methods that provably does not retain `self`.
+        self.structs = {}
+        self.struct_bound = {}
 
-    def note_assign(self, name: str, is_ctor: bool):
+    def note_assign(self, name: str, is_ctor: bool, is_display: bool = False):
         self.assign_count[name] = self.assign_count.get(name, 0) + 1
         prev = self.all_ctor_assigns.get(name, True)
         self.all_ctor_assigns[name] = prev and is_ctor
+        prev_d = self.all_display.get(name, True)
+        self.all_display[name] = prev_d and is_display
 
     def disqualify(self, name: str):
         self.disqualified.add(name)
@@ -237,7 +269,7 @@ def _resolve_callee(func, funcs, methods):
     return None
 
 
-def _summarize_params(callee, funcs, methods, memo: dict, visiting: list) -> str:
+def _summarize_params(callee, funcs, methods, memo: dict, visiting: list, structs=None) -> str:
     """'|'-joined names of `callee`'s parameters that PROVABLY do not escape
     it, by the same escape rules this module applies to a local: analysing
     the callee's own body with its parameters treated as ordinary names, a
@@ -267,6 +299,8 @@ def _summarize_params(callee, funcs, methods, memo: dict, visiting: list) -> str
     sub = _FuncFacts()
     sub.memo = memo
     sub.visiting = visiting + [key]
+    sub.structs = structs or {}
+    _prescan_struct_binds(callee.body, sub)
     for stmt in callee.body:
         _scan_stmt(stmt, sub, funcs, methods)
     out = ''
@@ -278,8 +312,47 @@ def _summarize_params(callee, funcs, methods, memo: dict, visiting: list) -> str
     return out
 
 
+def _struct_ctor_name(node, facts: _FuncFacts) -> str:
+    """The struct a call constructs (`Pt(...)` for a struct the caller vetted),
+    or ''."""
+    if (isinstance(node, N.CallExpr) and isinstance(node.func, N.IdentExpr)
+            and node.func.name in facts.structs):
+        return _as_str(node.func.name)
+    return ''
+
+
+def _prescan_struct_binds(node, facts: _FuncFacts) -> None:
+    """Record every `name = Struct(...)` / `var name = Struct(...)` in `node`
+    BEFORE the escape scan runs. The scan is a single forward walk, and a use of
+    `name.method()` that appears lexically before the binding (a loop body, a
+    branch) would otherwise be judged as a plain container receiver, i.e. safe.
+    A name bound as two different structs is disqualified."""
+    if not facts.structs:
+        return
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _prescan_struct_binds(item, facts)
+        return
+    if not _is_node(node):
+        return
+    nm = ''
+    if isinstance(node, N.VarDecl):
+        nm = _as_str(node.name)
+    elif isinstance(node, N.AssignStmt) and isinstance(node.target, N.IdentExpr):
+        nm = _as_str(node.target.name)
+    if nm != '':
+        sname = _struct_ctor_name(node.value, facts)
+        if sname != '':
+            prev = facts.struct_bound.get(nm, '')
+            if prev != '' and prev != sname:
+                facts.disqualify(nm)
+            facts.struct_bound[nm] = sname
+    for f in dataclasses.fields(node):
+        _prescan_struct_binds(getattr(node, f.name), facts)
+
+
 def _param_is_nonescaping(callee, pname: str, funcs, methods, facts: _FuncFacts) -> bool:
-    summary = _summarize_params(callee, funcs, methods, facts.memo, facts.visiting)
+    summary = _summarize_params(callee, funcs, methods, facts.memo, facts.visiting, facts.structs)
     return pname in summary.split('|')
 
 
@@ -345,6 +418,23 @@ def _scan_expr(node, facts: _FuncFacts, funcs, methods, in_closure=False):
             # The caller assigns or receives a local of this name (a function
             # pointer, a parameter): it is not the module-level function.
             callee = None
+        # `p.method(...)` where `p` is a struct instance this function
+        # constructed: the call is safe for `p` only if that method provably
+        # does not retain `self`; the method then also supplies the parameter
+        # conventions for the remaining arguments.
+        struct_recv = ''
+        if (callee is None and not in_closure and isinstance(node.func, N.MemberExpr)
+                and isinstance(node.func.obj, N.IdentExpr)):
+            _rn = _as_str(node.func.obj.name)
+            _sn = facts.struct_bound.get(_rn, '')
+            if _sn != '':
+                struct_recv = _rn
+                _m = facts.structs.get(_sn, {}).get(node.func.member)
+                if (_m is not None and _m.params
+                        and _param_is_nonescaping(_m, _m.params[0][0], funcs, methods, facts)):
+                    callee = _m
+                else:
+                    facts.disqualify(_rn)
         is_whitelisted_builtin = (not in_closure and isinstance(node.func, N.IdentExpr)
                                    and node.func.name in _NONRETAINING_BUILTINS)
         param_names = [p[0] for p in callee.params] if callee else []
@@ -383,14 +473,36 @@ def _scan_expr(node, facts: _FuncFacts, funcs, methods, in_closure=False):
         # `node.func`: for `obj.method(...)`, `obj` is a safe receiver
         # (see docstring) — scanning `node.func` generically would hit
         # the MemberExpr case below, which already carries that same
-        # safe-receiver logic, so no special-casing is needed here.
-        _scan_expr(node.func, facts, funcs, methods, in_closure)
+        # safe-receiver logic, so no special-casing is needed here. A struct
+        # receiver was fully decided above (and would look like a bound-method
+        # VALUE to the MemberExpr rule).
+        if struct_recv == '':
+            _scan_expr(node.func, facts, funcs, methods, in_closure)
         return
 
     if isinstance(node, N.MemberExpr):
         if not isinstance(node.obj, N.IdentExpr):
             _scan_expr(node.obj, facts, funcs, methods, in_closure)
+        else:
+            _rn2 = _as_str(node.obj.name)
+            _sn2 = facts.struct_bound.get(_rn2, '')
+            if _sn2 != '' and node.member in facts.structs.get(_sn2, {}):
+                # `p.method` NOT in call position (a call is handled in the
+                # CallExpr case): a bound method captures `self`, so `p` now
+                # lives wherever that value goes.
+                facts.disqualify(_rn2)
         # else: bare-identifier receiver of `.member` — safe (see docstring)
+        return
+
+    if isinstance(node, N.SliceExpr):
+        # `name[a:b]` READS `name` and builds a new container from it (the
+        # runtime copies the elements), exactly like `name[i]`: a bare
+        # identifier receiver is safe, the bounds are scanned normally.
+        if not isinstance(node.obj, N.IdentExpr):
+            _scan_expr(node.obj, facts, funcs, methods, in_closure)
+        _scan_expr(node.start, facts, funcs, methods, in_closure)
+        _scan_expr(node.stop, facts, funcs, methods, in_closure)
+        _scan_expr(node.step, facts, funcs, methods, in_closure)
         return
 
     if isinstance(node, N.SubscriptExpr):
@@ -458,14 +570,23 @@ def _scan_stmt(stmt, facts: _FuncFacts, funcs, methods):
         is_simple_target = (isinstance(stmt, N.VarDecl)
                              or _scan_assign_target_escape(stmt.target, facts))
         if is_simple_target and name is not None:
-            is_ctor = _is_constructor_expr(value)
+            is_ctor = _is_constructor_expr(value) or _is_maybe_fresh_expr(value)
+            _sname = _struct_ctor_name(value, facts)
+            if _sname != '':
+                # The constructor runs user code with `self`: a struct whose
+                # `__init__` keeps `self` (registers it, stores it) is not owned
+                # by this name.
+                _init = facts.structs[_sname].get('__init__')
+                if _init is not None and (not _init.params or not _param_is_nonescaping(
+                        _init, _init.params[0][0], funcs, methods, facts)):
+                    facts.disqualify(name)
             if not is_ctor and isinstance(value, N.IdentExpr):
                 # `x = y`: y is now aliased by x — a value with more than
                 # one believed owner. Disqualify the ALIASED name (y) too:
                 # even if y itself was otherwise a clean single-assignment
                 # constructor, x now holds the same pointer.
                 facts.disqualify(value.name)
-            facts.note_assign(name, is_ctor)
+            facts.note_assign(name, is_ctor, _is_constructor_expr(value))
             _scan_expr(value, facts, funcs, methods)
         else:
             # Non-identifier target (subscript/member): its RHS is now
@@ -479,11 +600,19 @@ def _scan_stmt(stmt, facts: _FuncFacts, funcs, methods):
 
     if isinstance(stmt, N.ReturnStmt):
         if isinstance(stmt.value, N.IdentExpr):
-            facts.disqualify(stmt.value.name)  # rule 3
+            if not facts.allow_return:
+                facts.disqualify(stmt.value.name)  # rule 3
         elif isinstance(stmt.value, N.TupleExpr):
             for e in stmt.value.elements:
                 if isinstance(e, N.IdentExpr):
                     facts.disqualify(e.name)
+        if facts.allow_return and (isinstance(stmt.value, N.IdentExpr)
+                                   or _moved_name(stmt.value) != ''):
+            # `return name` (or `return name^`, the move that is how Mojo code
+            # returns a local) is recorded, not an escape, in a callee scan for
+            # analyze_returns_fresh; the generic scan below would disqualify
+            # the bare identifier all the same.
+            return
         _scan_expr(stmt.value, facts, funcs, methods)
         return
 
@@ -811,7 +940,7 @@ def _definitely_assigned(fn, candidates: set) -> set:
     return candidates & _ia_term
 
 
-def _scan_function(fn, funcs, methods) -> _FuncFacts:
+def _scan_function(fn, funcs, methods, structs=None) -> _FuncFacts:
     """The whole-function escape scan shared by `analyze_function` and
     `analyze_scoped_locals`: every fact the module docstring's rules 1-8
     need, accumulated over `fn`'s body. `facts` is explicitly typed
@@ -819,6 +948,8 @@ def _scan_function(fn, funcs, methods) -> _FuncFacts:
     docstring gives — an untyped receiver makes `facts.note_assign(...)`
     an auto-stubbed no-op."""
     facts = _FuncFacts()
+    facts.structs = structs or {}
+    _prescan_struct_binds(fn.body, facts)
     for pname, _ in fn.params:
         # Parameters are out of scope for v0 (see module docstring) —
         # mark them disqualified outright so a same-named local shadow
@@ -829,7 +960,7 @@ def _scan_function(fn, funcs, methods) -> _FuncFacts:
     return facts
 
 
-def analyze_function(fn, funcs, methods) -> set:
+def analyze_function(fn, funcs, methods, structs=None) -> set:
     """Returns the set of local names in `fn` that are destroy candidates
     per the module docstring's rules 1-8, AND are definitely assigned on
     every path to every point the function can exit (see
@@ -854,7 +985,7 @@ def analyze_function(fn, funcs, methods) -> set:
     when compiling something else) was correct throughout and never hit
     this at all, which is why it was invisible until the C runtime's
     python3-subprocess fallback was removed."""
-    facts = _scan_function(fn, funcs, methods)
+    facts = _scan_function(fn, funcs, methods, structs)
     # `_candidates` as its own local, NOT `_definitely_assigned(fn, facts.
     # candidates())` inline — this file's own repeatedly-documented rule
     # (see `_ia_if`/`_ia_try`/`_ia_match`'s identical notes): a `-> set`-
@@ -877,9 +1008,19 @@ def _count_name(node, name: str) -> int:
     that equals `name`, rather than only `IdentExpr`, is deliberately
     over-inclusive: an occurrence this counts that is not really a use can
     only make a name look MORE widely used, which disqualifies it — never
-    the unsafe direction."""
+    the unsafe direction.
+
+    An f-string / t-string is one string leaf here: its `{expr}` interpolations
+    are parsed only later, at codegen, so a use of `name` inside one is
+    invisible as an identifier. A string containing `{` and the name as a
+    substring is therefore counted as an occurrence. Without this, a loop-local
+    container that is read after the loop ONLY inside an f-string
+    (`print(f"{len(l)}")`) looked unused there, was credited to its loop body
+    and freed before that read."""
     if isinstance(node, str):
         if node == name:
+            return 1
+        if '{' in node and name in node:
             return 1
         return 0
     n = 0
@@ -920,7 +1061,7 @@ def _decl_name(stmt) -> str:
     return ''
 
 
-def analyze_scoped_locals(fn, funcs, methods, whole: set) -> set:
+def analyze_scoped_locals(fn, funcs, methods, whole: set, structs=None) -> set:
     """Block-scoped twin of `analyze_function`: the locals that are a
     destroy candidate for THEIR LOOP BODY rather than for the whole
     function, i.e. exactly the ones `analyze_function` cannot credit
@@ -958,11 +1099,12 @@ def analyze_scoped_locals(fn, funcs, methods, whole: set) -> set:
     have_ctor_decl = False
     for body in bodies:
         for st in body:
-            if _decl_name(st) != '' and _is_constructor_expr(st.value):
+            if _decl_name(st) != '' and (_is_constructor_expr(st.value)
+                                         or _is_maybe_fresh_expr(st.value)):
                 have_ctor_decl = True
     if not have_ctor_decl:
         return out
-    facts = _scan_function(fn, funcs, methods)
+    facts = _scan_function(fn, funcs, methods, structs)
     _cands = facts.ctor_names()
     for nm in sorted(_cands):
         if nm in whole:
@@ -992,6 +1134,111 @@ def analyze_scoped_locals(fn, funcs, methods, whole: set) -> set:
                 and _count_name(fn.body, nm) == region:
             out.add(nm)
     return out
+
+
+def _moved_name(node) -> str:
+    """`name^` (a transfer of a local) -> `name`, else ''."""
+    if (isinstance(node, N.UnaryOp) and node.op == '^'
+            and isinstance(node.operand, N.IdentExpr)):
+        return _as_str(node.operand.name)
+    return ''
+
+
+def _collect_returns(node, out: list) -> None:
+    """Appends every `return` statement under `node`, not descending into a
+    nested `def`/`lambda` (their returns are their own)."""
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _collect_returns(item, out)
+        return
+    if not _is_node(node) or isinstance(node, (N.FunctionDef, N.LambdaExpr)):
+        return
+    if isinstance(node, N.ReturnStmt):
+        out.append(node)
+        return
+    for f in dataclasses.fields(node):
+        _collect_returns(getattr(node, f.name), out)
+
+
+def _has_nested_scope(node) -> bool:
+    """True if a nested `def`/`lambda` appears anywhere under `node`: a closure
+    could capture a container the function goes on to return."""
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            if _has_nested_scope(item):
+                return True
+        return False
+    if not _is_node(node):
+        return False
+    if isinstance(node, (N.FunctionDef, N.LambdaExpr)):
+        return True
+    for f in dataclasses.fields(node):
+        if _has_nested_scope(getattr(node, f.name)):
+            return True
+    return False
+
+
+def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
+    """True iff EVERY call to `fn` provably returns a brand-new container that
+    nothing else references, so the caller may own it (and free it).
+
+    Every condition below closes a specific way that a caller's `mojo_*_free`
+    of the result would be a crash or a use-after-free:
+      - `fn` is a plain function (not async/a generator/decorated: a
+        coroutine/generator returns a frame object, a decorator may wrap or
+        cache the result) with no nested `def`/`lambda` (a closure could keep
+        the returned container);
+      - EVERY path returns a value: the body ends in a terminator and no
+        `return` is bare. A path that falls off the end or returns None hands
+        the caller a NULL pointer, and freeing that crashes;
+      - each returned value is a container DISPLAY (`return []`,
+        `return [a, b]`), or a bare local that (i) is assigned exactly once,
+        from a display, (ii) is definitely assigned on every path to every
+        exit (else the return reads an uninitialised pointer) and (iii) never
+        escapes any way OTHER than this return — the module docstring's
+        rules, with `return name` recorded instead of disqualifying. A
+        returned call result is deliberately NOT accepted: whether it is
+        fresh is exactly the question being asked.
+    """
+    if fn.is_async or fn.is_generator or fn.decorators:
+        return False
+    if not fn.body or _has_nested_scope(fn.body) or not _block_terminates(fn.body):
+        return False
+    rets = []
+    _collect_returns(fn.body, rets)
+    if not rets:
+        return False
+    facts = _FuncFacts()
+    facts.allow_return = True
+    facts.structs = structs or {}
+    _prescan_struct_binds(fn.body, facts)
+    for pname, _ in fn.params:
+        facts.disqualify(pname.lstrip('*'))
+    for stmt in fn.body:
+        _scan_stmt(stmt, facts, funcs, methods)
+    names = set()
+    for r in rets:
+        v = r.value
+        if v is None:
+            return False
+        if _is_constructor_expr(v):
+            continue
+        nm = _moved_name(v)
+        if nm == '':
+            if not isinstance(v, N.IdentExpr):
+                return False
+            nm = _as_str(v.name)
+        if nm in facts.disqualified:
+            return False
+        if facts.assign_count.get(nm) != 1 or not facts.all_display.get(nm):
+            return False
+        names.add(nm)
+    if names:
+        _da = _definitely_assigned(fn, names)
+        for nm in names:
+            if nm not in _da:
+                return False
+    return True
 
 
 def analyze_module(stmts):

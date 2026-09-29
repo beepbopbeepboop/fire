@@ -750,6 +750,12 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             gen._dataclass_fields_vars.discard(var)
         raise
 
+    # `for x in <fresh container>:` (a display, a comprehension, a slice, a
+    # `.split()`/`.keys()` result): nothing else can reference the iterable, so
+    # it is freed when the loop statement ends. Claimed HERE, before any code
+    # below emits a call on it.
+    gen._claim_loop_iterable_temp(node.iterable, it_val, it_type)
+
     # Check if this is an int64_t-stored pointer (from method call returning pointer)
     it_type = gen._get_actual_type(it_type, it_val)
 

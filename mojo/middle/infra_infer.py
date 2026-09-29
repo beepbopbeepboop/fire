@@ -1739,7 +1739,63 @@ def _build_analysis_funcs(stmts) -> dict:
             out[s.name] = s
     return out
 
-def _compute_owned_free_candidates(fn, funcs: dict = None) -> set:
+def _build_analysis_structs(stmts) -> dict:
+    """The module's structs the ownership analysis may reason about,
+    `{struct name: {method name: FunctionDef}}`. A struct is included only if a
+    constructor call `Name(...)` provably builds a fresh instance and its
+    methods can be resolved by name: the name is defined exactly once in the
+    module (as a struct, function or import), the struct has no base class (an
+    inherited `__init__`/method is not in its own method list), and it defines
+    no `__new__` (which may return an existing object). Within a struct, only
+    plain, uniquely named, undecorated methods with a `self` parameter are
+    listed; a method that is missing from the table makes every call to it an
+    unresolved call, the analysis' conservative default."""
+    counts = {}
+    for n in gimple_exprtypes._walk_ast(stmts):
+        if isinstance(n, (FunctionDef, StructDef)):
+            counts[n.name] = counts.get(n.name, 0) + 1
+        elif isinstance(n, FromImportStmt):
+            for _fip in (getattr(n, 'name_alias_strs', None) or []):
+                counts[gimple_ctypes._fi_name(_fip)] = 2
+                _al = gimple_ctypes._fi_alias(_fip)
+                if _al:
+                    counts[_al] = 2
+        elif isinstance(n, ImportStmt):
+            _ial = getattr(n, 'alias', None)
+            if _ial:
+                counts[_ial] = 2
+    out = {}
+    for s in stmts:
+        if not isinstance(s, StructDef) or counts.get(s.name) != 1 or s.bases:
+            continue
+        mcounts = {}
+        for m in s.methods:
+            mcounts[m.name] = mcounts.get(m.name, 0) + 1
+        if '__new__' in mcounts:
+            continue
+        table = {}
+        for m in s.methods:
+            if (mcounts.get(m.name) == 1 and m.params and not m.decorators
+                    and not m.is_async and not m.is_generator):
+                table[m.name] = m
+        out[s.name] = table
+    return out
+
+def _build_fresh_returning(funcs: dict, structs: dict = None) -> set:
+    """Names in the analysis table whose every call provably returns a
+    brand-new container (ownership_destruct.analyze_returns_fresh). A failure
+    inside the analysis drops the name: an optional optimisation must never
+    fail a build, and "not proven" is the conservative answer."""
+    out = set()
+    for name in funcs:
+        try:
+            if ownership_destruct.analyze_returns_fresh(funcs[name], funcs, {}, structs):
+                out.add(name)
+        except Exception:
+            pass
+    return out
+
+def _compute_owned_free_candidates(fn, funcs: dict = None, structs: dict = None) -> set:
     """Returns the set of local names in `fn` safe to `mojo_*_free` at
     every return/fallthrough point, or an empty set if `fn` isn't eligible
     at all (see `_is_free_eligible_function`) or the analysis found none.
@@ -1750,7 +1806,7 @@ def _compute_owned_free_candidates(fn, funcs: dict = None) -> set:
     if not _is_free_eligible_function(fn):
         return set()
     try:
-        return ownership_destruct.analyze_function(fn, funcs or {}, {})
+        return ownership_destruct.analyze_function(fn, funcs or {}, {}, structs)
     except Exception:
         # This is an OPTIONAL memory-usage improvement, not a correctness
         # requirement of compiling the program at all — a bug in the
@@ -1759,7 +1815,7 @@ def _compute_owned_free_candidates(fn, funcs: dict = None) -> set:
         # leak, unchanged) rather than raise through gen_func.
         return set()
 
-def _compute_scoped_free_candidates(fn, whole: set, funcs: dict = None) -> set:
+def _compute_scoped_free_candidates(fn, whole: set, funcs: dict = None, structs: dict = None) -> set:
     """The locals of `fn` that are owned by a LOOP BODY rather than the whole
     function (ownership_destruct.analyze_scoped_locals), or an empty set if
     `fn` is not eligible or the analysis found none. `whole` is
@@ -1769,9 +1825,15 @@ def _compute_scoped_free_candidates(fn, whole: set, funcs: dict = None) -> set:
     if not _is_free_eligible_function(fn):
         return set()
     try:
-        return ownership_destruct.analyze_scoped_locals(fn, funcs or {}, {}, whole)
+        return ownership_destruct.analyze_scoped_locals(fn, funcs or {}, {}, whole, structs)
     except Exception:
         return set()
+
+def _is_ctor_display(node) -> bool:
+    """`node` is a container constructor (`[..]`, `{..}`, `dict()`/`list()`/
+    `set()`): a value that is a brand-new container by construction, as
+    opposed to a call/slice/`+` that only MAY be one."""
+    return ownership_destruct._is_constructor_expr(node)
 
 def _scope_decl_name(stmt) -> str:
     """The local a plain single-target `var x = ...`/`x = ...` statement

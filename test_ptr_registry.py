@@ -8,6 +8,8 @@ runtime is built on (doc/MEMORY.html sections 10 and 3.A):
     into a dedicated open-addressing table with backward-shift deletion; this
     checks it against a reference model, including forced collisions and the
     LIFO add/remove of ONE address that a stack-homed container produces.
+  * the Int-key path's fast itoa + block pool and the dict's resize (moves keys, keeps
+    insertion order), which the Int-keyed dict benchmark depends on;
   * MojoList's 4-slot inline buffer: growth across the boundary, a stack
     struct that is init'd/destroyed repeatedly, and (under AddressSanitizer,
     when the toolchain has it) that destroy never frees the inline storage.
@@ -87,9 +89,44 @@ static void test_list_inline(void) {
     }
 }
 
+static void test_dict_and_itoa(void) {
+    /* itoa against snprintf at every boundary. A KEPT decimal (mojo_str_from_int)
+     * is an ordinary malloc'd string; the TRANSIENT one (mojo_cstr_or_int_str)
+     * is a pool block and is the only thing mojo_cstr_or_int_release accepts. */
+    int64_t vals[] = {0,1,-1,9,10,-10,99,100,12345,-98765,2147483647LL,-2147483648LL,4294967296LL,
+                      9223372036854775807LL, (int64_t)(-9223372036854775807LL-1)};
+    for (unsigned i = 0; i < sizeof vals / sizeof *vals; i++) {
+        char ref[32]; snprintf(ref, sizeof ref, "%lld", (long long)vals[i]);
+        char *kept = mojo_str_from_int(vals[i]); assert(strcmp(kept, ref) == 0); free(kept);
+        char *t = mojo_cstr_or_int_str(vals[i]); assert(strcmp(t, ref) == 0);
+        mojo_cstr_or_int_release(vals[i], t);
+    }
+    /* a released transient block is the next one handed out */
+    char *a = mojo_cstr_or_int_str(42); mojo_cstr_or_int_release(42, a);
+    char *b = mojo_cstr_or_int_str(-7); assert(b == a && strcmp(b, "-7") == 0); mojo_cstr_or_int_release(-7, b);
+    /* a kept decimal never enters the pool: it is not the block just released */
+    char *kept2 = mojo_str_from_int(5); assert(kept2 != a); assert(strcmp(kept2, "5") == 0); free(kept2);
+    /* a borrowed boxed string is returned unchanged and never pooled */
+    char lit[] = "abc";
+    char *same = mojo_cstr_or_int_str((int64_t)(intptr_t)lit); assert(same == lit);
+    mojo_cstr_or_int_release((int64_t)(intptr_t)lit, same);
+    char *c = mojo_cstr_or_int_str(1); assert(c != lit); mojo_cstr_or_int_release(1, c);
+    /* many keys across several resizes: all present, absent stays absent, insertion order kept */
+    MojoDict *d = mojo_dict_new();
+    for (int i = 0; i < 5000; i++) { char *k = mojo_cstr_or_int_str(i); mojo_dict_set_int(d, k, i * 3); mojo_cstr_or_int_release(i, k); }
+    assert(d->used == 5000);
+    for (int i = 0; i < 5000; i++) { char *k = mojo_cstr_or_int_str(i); assert(mojo_dict_contains(d, k)); assert(mojo_dict_get_int(d, k) == i * 3); mojo_cstr_or_int_release(i, k); }
+    char *k = mojo_cstr_or_int_str(5001); assert(!mojo_dict_contains(d, k)); mojo_cstr_or_int_release(5001, k);
+    MojoList *keys = mojo_dict_keys(d); assert(keys->len == 5000);
+    for (int i = 0; i < 5000; i++) { char ref[16]; snprintf(ref, sizeof ref, "%d", i); assert(strcmp(mojo_list_get_str(keys, i), ref) == 0); }
+    mojo_list_free(keys);
+    mojo_dict_free(d);
+}
+
 int main(void) {
     test_ptrreg();
     test_list_inline();
+    test_dict_and_itoa();
     printf("ok\n");
     return 0;
 }

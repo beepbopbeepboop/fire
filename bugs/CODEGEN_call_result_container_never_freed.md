@@ -1,38 +1,37 @@
-# CODEGEN: a container (or string) bound from a CALL RESULT is never freed
+# CODEGEN: a STRING (or a call whose freshness cannot be proven) bound to a local is never freed
 
-## Status (2026-09-28 — OPEN, measured, not started)
+## Status (2026-09-28 — PARTLY CLOSED; the container half is fixed, the string half is open)
 
-Loop-body containers built from a constructor (`[]`, `{}`, `set()`, literals)
-are now freed per iteration (`ownership_destruct.analyze_scoped_locals`,
-`doc/MEMORY.html` §7.1). What is left is the same shape with a different
-right-hand side. Peak RSS at 100k vs 400k iterations, `fire.py build`:
+Fixed and pinned by regression tests (`doc/MEMORY.html` §3.B/C, §5): a container bound from a slice,
+comprehension, `+`, or a runtime call that always returns a new container is owned by the local;
+a user function proven to return a fresh container (`ownership_destruct.analyze_returns_fresh`,
+including `return l^`) hands ownership to its caller; a fresh temporary is freed by its one
+consumer (`for`, `extend`, `+`, `len`); a struct instance is owned while nothing retains `self`.
+Measured flat: `x = f(i)`, `len(mk(i))`, slices, comprehensions, struct locals.
+
+What still leaks (peak-RSS slope, 100k vs 400k iterations, `fire.py build`):
 
 | loop body | B/iter |
 |---|---|
-| `String("a b c").split(" ")` (runtime call returning a fresh list) | ~280 |
-| `x = f(i)` where `f` builds and returns a `List` | ~232 |
-| `var p = Pt(i, 2)` (struct: `_alloc_<S>` `calloc`) | ~28 |
+| one string bound to a local (`+`, `String(i)`, `.upper()`, slice, callee returning `String`) | ~6 |
 | `var s = String("n=") + String(i)` | ~28 |
-| one string bound to a local (`+`, `String(i)`, `.upper()`, slice) | ~7 |
+| `String("a b c").split(" ")` (the list is freed; its three strings are not) | ~48 |
+| a call whose result the analysis cannot prove fresh, bound to a local | (not freed; by design) |
 
 ## Cause
 
-`ownership_destruct` rule 1 credits a name only when EVERY assignment to it is a
-container constructor, because a bare-name RHS is an alias. A call result is
-neither: the analysis cannot tell a fresh, unshared value (a runtime helper that
-always allocates) from one the callee also keeps.
+A string local needs an owner, and strings have a shorter safe-pattern list than containers:
+`+`, comparisons and f-strings all take bare identifiers as operands, which the escape analysis
+treats as an escape. There is also a borrowed/owned split to respect (list-of-`str` elements, dict
+values and literals are borrowed and must never be freed).
 
 ## Fix
 
-Give the analysis an "owned result" fact for calls: a runtime function known to
-return fresh heap memory (the ~105 in `doc/MEMORY.html` §2.1), and a user
-function whose every `return` yields a fresh local it built (the ownership doc's
-Phase 4 calling convention, `owned` = move). A name bound from such a call then
-follows the same escape rules and the same block-scoped free. Strings need the
-borrowed/owned split first (list-of-`str` elements, dict values and literals are
-borrowed; see §3.D). Structs additionally need their `__del__`/field ownership.
+Give strings the same declaration gate as containers (own a local only when the lowered value
+is a provably fresh `mojo_str_cat`/`mojo_str_from_int`/... result), add `+`/comparison/f-string
+reads to the safe patterns for names known to be strings, and free the strings a fresh
+`split()` list holds when that list is freed.
 
 ## Done when
 
-The rows above are flat between 100k and 400k iterations, output unchanged,
-`make gate` green.
+The rows above are flat between 100k and 400k iterations, output unchanged, `make gate` green.

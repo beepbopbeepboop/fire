@@ -52,7 +52,8 @@ void mojo_exc_pop(void)
  * call `free()` on the struct pointer itself (`mojo_*_free` would free a
  * stack address — undefined behavior, corrupting the heap allocator). */
 typedef enum { MOJO_CLEANUP_DICT, MOJO_CLEANUP_LIST, MOJO_CLEANUP_SET,
-               MOJO_CLEANUP_DICT_STACK, MOJO_CLEANUP_LIST_STACK, MOJO_CLEANUP_SET_STACK
+               MOJO_CLEANUP_DICT_STACK, MOJO_CLEANUP_LIST_STACK, MOJO_CLEANUP_SET_STACK,
+               MOJO_CLEANUP_PTR   /* a plain malloc/calloc block: a struct instance */
              } mojo_cleanup_kind_t;
 #define MOJO_CLEANUP_STACK_MAX 8192
 static mojo_cleanup_kind_t _mojo_cleanup_kind[MOJO_CLEANUP_STACK_MAX];
@@ -85,6 +86,7 @@ void mojo_cleanup_push_set(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_SET, p); 
 void mojo_cleanup_push_dict_stack(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_DICT_STACK, p); }
 void mojo_cleanup_push_list_stack(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_LIST_STACK, p); }
 void mojo_cleanup_push_set_stack(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_SET_STACK, p); }
+void mojo_cleanup_push_ptr(void *p)        { _mojo_cleanup_push(MOJO_CLEANUP_PTR, p); }
 
 void mojo_cleanup_cancel_n(int64_t n)
 {
@@ -121,6 +123,7 @@ static void _mojo_cleanup_unwind_to(int chk)
             case MOJO_CLEANUP_DICT_STACK: mojo_dict_destroy((MojoDict *)ptr); break;
             case MOJO_CLEANUP_LIST_STACK: mojo_list_destroy((MojoList *)ptr); break;
             case MOJO_CLEANUP_SET_STACK:  mojo_set_destroy((MojoSet *)ptr);  break;
+            case MOJO_CLEANUP_PTR:        free(ptr);                         break;
         }
     }
 }
@@ -3440,9 +3443,10 @@ void mojo_dict_clear(MojoDict *d)
  * says they are instead of silently aliasing one onto the other. */
 static _DictSlot *_dict_find_k(MojoDict *d, char *key, int64_t keykind)
 {
-    uint64_t h = _str_hash(key) % (uint64_t)d->cap;
+    uint64_t mask = (uint64_t)d->cap - 1;      /* cap is a power of two */
+    uint64_t h = _str_hash(key) & mask;
     for (int64_t i = 0; i < d->cap; i++) {
-        int64_t idx = (int64_t)((h + (uint64_t)i) % (uint64_t)d->cap);
+        int64_t idx = (int64_t)((h + (uint64_t)i) & mask);
         _DictSlot *sl = &d->slots[idx];
         if (!sl->key) return sl;          /* empty — insertion point */
         if (sl->keykind == keykind && strcmp(sl->key, key) == 0) return sl;
@@ -3496,12 +3500,19 @@ static void _dict_grow(MojoDict *d)
     int64_t old_cap = d->cap;
     _DictSlot *old  = d->slots;
     d->cap   *= 2;
-    d->used  = 0;
     d->slots = calloc((size_t)d->cap, sizeof(_DictSlot));
-    for (int64_t i = 0; i < old_cap; i++)
-        if (old[i].key) _dict_set_raw_seq_kind_k(d, old[i].key, old[i].val,
-                                                 old[i].seq, old[i].kind, old[i].keykind);
-    for (int64_t i = 0; i < old_cap; i++) free(old[i].key);
+    uint64_t mask = (uint64_t)d->cap - 1;
+    /* Move each occupied slot whole into the new array: the key string's
+     * ownership moves with it, so a resize no longer strdup()s and free()s
+     * every key. Keys are already unique (a bytes key and a str key with the
+     * same characters are distinct entries), so the probe only needs an empty
+     * slot, never a comparison; `used`, `seq` and `next_seq` are unchanged. */
+    for (int64_t i = 0; i < old_cap; i++) {
+        if (!old[i].key) continue;
+        uint64_t j = _str_hash(old[i].key) & mask;
+        while (d->slots[j].key) j = (j + 1) & mask;
+        d->slots[j] = old[i];
+    }
     free(old);
 }
 
@@ -3550,9 +3561,11 @@ void mojo_dict_set_str(MojoDict *d, char *key, char *v)
 static _DictSlot *_dict_lookup_k(MojoDict *d, char *key, int64_t keykind)
 {
     if (!d || !d->cap || !d->slots) return NULL;
-    uint64_t h = _str_hash(key) % (uint64_t)d->cap;
+    /* cap is always a power of two (mojo_dict_init: 8, _dict_grow: doubles). */
+    uint64_t mask = (uint64_t)d->cap - 1;
+    uint64_t h = _str_hash(key) & mask;
     for (int64_t i = 0; i < d->cap; i++) {
-        int64_t idx = (int64_t)((h + (uint64_t)i) % (uint64_t)d->cap);
+        int64_t idx = (int64_t)((h + (uint64_t)i) & mask);
         _DictSlot *sl = &d->slots[idx];
         if (!sl->key) return NULL;
         if (sl->keykind == keykind && strcmp(sl->key, key) == 0) return sl;
@@ -6674,6 +6687,47 @@ int64_t mojo_obj_call1(int64_t obj, char *method, int64_t arg1) {
    exist, and a bool argument arrives as 0/1 anyway. */
 char *mojo_repr_bool(int b) { return b ? "True" : "False"; }
 
+/* Decimal formatting for an int64_t. `tmp` is a scratch buffer of
+ * _INT_STR_BLOCK bytes (24: "-9223372036854775808" is 20 characters, plus the
+ * NUL); the returned pointer is INSIDE it, so the string is
+ * tmp + sizeof tmp - result bytes long including the NUL. A hand-rolled itoa:
+ * snprintf("%lld") was half the cost of an Int-keyed dict access (vfprintf,
+ * locale lookup, buffer setup) for what is a divide loop. */
+#define _INT_STR_BLOCK 24
+static char *_fmt_int(int64_t v, char *tmp) {
+    char *p = tmp + _INT_STR_BLOCK;
+    uint64_t u = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
+    *--p = '\0';
+    do { *--p = (char)('0' + (u % 10)); u /= 10; } while (u);
+    if (v < 0) *--p = '-';
+    return p;
+}
+
+/* The TRANSIENT decimal strings of `mojo_cstr_or_int_str` (an Int dict key or
+ * compare operand) are blocks from this small free list: one per access,
+ * released the moment the call that consumed it returns
+ * (`mojo_cstr_or_int_release`), so a tight loop of Int-keyed lookups reuses the
+ * same block instead of a malloc/free pair per access. The pool only ever holds
+ * blocks that came from `_int_str_block`. Not thread-safe, like the rest. */
+static char *_int_str_pool;   /* free list; the next pointer lives in a block's first 8 bytes */
+
+static char *_int_str_block(void) {
+    char *b = _int_str_pool;
+    if (b) {
+        _int_str_pool = *(char **)b;
+        return b;
+    }
+    return (char *)malloc(_INT_STR_BLOCK);
+}
+
+static char *_int_str_transient(int64_t v) {
+    char tmp[_INT_STR_BLOCK];
+    char *p = _fmt_int(v, tmp);
+    char *out = _int_str_block();
+    memcpy(out, p, (size_t)(tmp + sizeof tmp - p));
+    return out;
+}
+
 /* An int64_t being used where a C string is needed (a dict key, an f-string
    field, ...): return it AS itself when it is really a boxed `char *`, else
    its decimal string.
@@ -6690,7 +6744,7 @@ char *mojo_repr_bool(int b) { return b ? "True" : "False"; }
    ask it here rather than guessing a direction. */
 char *mojo_cstr_or_int_str(int64_t v) {
     if (mojo_boxed_is_str(v)) return (char *)(intptr_t)v;
-    return mojo_str_from_int(v);
+    return _int_str_transient(v);
 }
 
 /* The other half of mojo_cstr_or_int_str's contract: the result is OWNED by
@@ -6705,7 +6759,11 @@ char *mojo_cstr_or_int_str(int64_t v) {
    stored by reference (a list element, a __missing__ argument): those keep
    the unreleased conversion. See doc/MEMORY.html, "Transient keys". */
 void mojo_cstr_or_int_release(int64_t orig, char *s) {
-    if ((int64_t)(intptr_t)s != orig) free(s);
+    if ((int64_t)(intptr_t)s == orig) return;     /* a borrowed boxed string */
+    /* `s` is the decimal `mojo_cstr_or_int_str` made through mojo_str_from_int,
+     * i.e. a block from `_int_str_block`: back to the pool it came from. */
+    *(char **)s = _int_str_pool;
+    _int_str_pool = s;
 }
 
 
@@ -7104,10 +7162,16 @@ float  mojo_div_float(float a, float b)    { return a / b; }
    concatenated with a numeric operand (String + Int) so codegen never has
    to emit an invalid `char* + int` expression. */
 char *mojo_str_from_int(int64_t v) {
-    char buf[32];
-    snprintf(buf, sizeof buf, "%lld", (long long)v);
-    char *out = (char *)malloc(strlen(buf) + 1);
-    strcpy(out, buf);
+    /* A string that is KEPT (concatenated into a result, stored as a dict
+     * value, bound to a local) gets an exact-size allocation. The pooled
+     * fixed-size blocks below are only for the transient Int dict-key path,
+     * which releases them; giving kept strings 24-byte blocks made every such
+     * leak ~4x larger. */
+    char tmp[_INT_STR_BLOCK];
+    char *p = _fmt_int(v, tmp);
+    size_t n = (size_t)(tmp + sizeof tmp - p);
+    char *out = (char *)malloc(n);
+    memcpy(out, p, n);
     return out;
 }
 

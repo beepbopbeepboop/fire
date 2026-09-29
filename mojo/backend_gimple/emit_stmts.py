@@ -117,16 +117,22 @@ def gen_stmt(gen, node):
         if isinstance(node.name, str) and ginf.maybe_stack_alloc_owned_ctor(gen, node.name, node.value):
             pass  # fully handled — see gimple_gen_infra.py's Phase 6 section
         else:
+            gen._decl_value_node = node.value
+            gen._decl_rhs_val = ''
             gen._gen_stmt_VarDecl(node)
-            ginf.maybe_push_owned_local(gen, node.name)
+            ginf.maybe_push_owned_local(gen, node.name, node.value)
+            gen._decl_value_node = None
     elif isinstance(node, gimple_ctypes.AssignStmt):
         if (isinstance(node.target, IdentExpr)
                 and ginf.maybe_stack_alloc_owned_ctor(gen, node.target.name, node.value)):
             pass  # fully handled — see gimple_gen_infra.py's Phase 6 section
         else:
+            gen._decl_value_node = node.value
+            gen._decl_rhs_val = ''
             gen._gen_stmt_AssignStmt(node)
             if isinstance(node.target, IdentExpr):
-                ginf.maybe_push_owned_local(gen, node.target.name)
+                ginf.maybe_push_owned_local(gen, node.target.name, node.value)
+            gen._decl_value_node = None
     elif isinstance(node, gimple_ctypes.AugAssignStmt):
         gen._gen_stmt_AugAssignStmt(node)
     elif isinstance(node, gimple_ctypes.MultiAssignStmt):
@@ -138,7 +144,9 @@ def gen_stmt(gen, node):
     elif isinstance(node, gimple_ctypes.WhileStmt):
         gen._gen_stmt_WhileStmt(node)
     elif isinstance(node, gimple_ctypes.ForStmt):
+        _for_mark = len(gen._scope_live)
         gen._gen_stmt_ForStmt(node)
+        ginf.emit_statement_temp_frees(gen, _for_mark)
     elif isinstance(node, gimple_ctypes.BreakStmt):
         gen._gen_stmt_BreakStmt(node)
     elif isinstance(node, gimple_ctypes.ContinueStmt):

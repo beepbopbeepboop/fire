@@ -1281,6 +1281,239 @@ def main():
     print(acc)
 """, "153\n197099\n2 2 6 6\n16500000\n")
 
+    # ── Temporary containers (doc/MEMORY.html section 7): a container built by
+    # an expression and consumed exactly once — a `for` iterable (display,
+    # comprehension), an `extend` source (display, slice, `+` result), a `+`
+    # operand — is freed by its consumer. Every exit from the loop over a
+    # temporary is exercised (normal, `break`, `continue`, an early `return`),
+    # and the printed values pin that nothing was freed before it was read.
+    test_gimple_bounded_memory("gimple_temporary_containers_freed_by_consumer", """\
+def work(n: Int) -> Int:
+    var t = 0
+    var base: List[Int] = [1, 2, 3]
+    for i in range(n):
+        for z in [v * 2 for v in base]:
+            t += z
+            if z == 4:
+                break
+        var acc: List[Int] = []
+        acc.extend([i, 1])
+        acc.extend(base[0:2])
+        acc.extend([1, 2] + [3])
+        t += len(acc) + acc[0]
+        for q in [10, 20]:
+            if i == n - 1 and q == 20:
+                return t * 100 + q
+            if q == 10:
+                continue
+            t += q
+    return t
+
+def main():
+    print(work(1))
+    print(work(5))
+    var total = 0
+    for k in range(60000):
+        total += work(4) % 1000
+    print(total)
+""", "1320\n15520\n49200000\n", 40)
+
+    # A local bound from a CALL RESULT (a slice, a comprehension, `.keys()`, a
+    # `+`) owns its value only when codegen can prove the value fresh at the
+    # declaration (emit_infra.maybe_push_owned_local). The other half of this
+    # test is the point: `stored = h.get()` returns `self.items`, a container
+    # the struct still owns, so it must NEVER be freed — if the freshness check
+    # were wrong the second call would read a freed list, and the final sum of
+    # `h.items` (printed last) would not be 6.
+    test_gimple_bounded_memory("gimple_call_result_locals_owned_only_when_fresh", """\
+struct Holder:
+    var items: List[Int]
+
+    def __init__(out self):
+        self.items = [1, 2, 3]
+
+    def get(self) -> List[Int]:
+        return self.items
+
+def work(h: Holder, base: List[Int], d: Dict[String, Int], n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var a = base[0:2]
+        var c = [v + i for v in base]
+        var k = d.keys()
+        var s = base + base
+        var stored = h.get()
+        t += len(a) + a[1] + len(c) + c[2] + len(k) + len(s) + s[4] + len(stored) + stored[0]
+        if i == 2:
+            continue
+        if i == 3:
+            break
+    return t
+
+def main():
+    var h = Holder()
+    var base: List[Int] = [5, 6, 7]
+    var d: Dict[String, Int] = {"x": 1, "y": 2}
+    print(work(h, base, d, 2))
+    print(work(h, base, d, 9))
+    print(len(h.items))
+    var total = 0
+    for k in range(50000):
+        total += work(h, base, d, 6) % 1000
+    print(total)
+    print(h.items[0] + h.items[1] + h.items[2])
+""", "73\n150\n3\n7500000\n6\n", 40)
+
+    # A caller owns what a user function returns only when the function is
+    # PROVEN to hand back a brand-new container (ownership_destruct.
+    # analyze_returns_fresh: every path returns a display or a local built once
+    # from one that escapes only through the return, or `return l^`). `mk`/
+    # `mk_direct` qualify, also when only their length is read (`len(mk(i))`);
+    # `Box.get` returns a list the struct still owns, so `s = bx.get()` must
+    # never be freed — the last printed value (the sum of `bx.items`, 24) is
+    # what a wrongly freed list would corrupt.
+    test_gimple_bounded_memory("gimple_fresh_returning_functions_owned_by_caller", """\
+struct Box:
+    var items: List[Int]
+
+    def __init__(out self):
+        self.items = [7, 8, 9]
+
+    def get(self) -> List[Int]:
+        return self.items
+
+def mk(i: Int) -> List[Int]:
+    var l: List[Int] = []
+    l.append(i)
+    l.append(i + 1)
+    return l^
+
+def mk_direct(i: Int) -> List[Int]:
+    return [i, 2]
+
+def work(bx: Box, n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var a = mk(i)
+        var b = mk_direct(i)
+        var s = bx.get()
+        t += len(a) + a[1] + b[0] + b[1] + s[0] + s[2]
+        t += len(mk(i)) + len(mk_direct(i)) + len(bx.get())
+        if i == 1:
+            continue
+        if i == 4:
+            break
+    return t
+
+def main():
+    var bx = Box()
+    print(work(bx, 3))
+    print(work(bx, 9))
+    var total = 0
+    for k in range(60000):
+        total += work(bx, 6) % 1000
+    print(total)
+    print(bx.items[0] + bx.items[1] + bx.items[2])
+""", "90\n160\n9600000\n24\n", 40)
+
+    # ── Struct instances (doc/MEMORY.html section 7): a local bound to a
+    # constructor call of a VETTED struct is owned — freed at scope exit — only
+    # while every use is a field access, a method that provably never retains
+    # `self`, or a function whose parameter provably is not kept; and only if
+    # `__init__` does not retain `self`. The first program is the positive case
+    # under a memory bound. The second has, next to an owned struct, one that
+    # `enroll` stores into a list the caller keeps: it must NOT be freed, and the
+    # checksum over the enrolled structs (printed 4th) is read after `work` has
+    # returned, so a wrongly freed struct corrupts it.
+    test_gimple_bounded_memory("gimple_struct_locals_owned_when_never_retained", """\
+struct Pt:
+    var x: Int
+    var y: Int
+
+    def __init__(out self, x: Int, y: Int):
+        self.x = x
+        self.y = y
+
+    def total(self) -> Int:
+        return self.x + self.y
+
+def peek(q: Pt) -> Int:
+    return q.x * 2
+
+def work(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var p = Pt(i, 3)
+        t += p.total() + peek(p) + p.x
+        p.x = 1
+        t += p.x
+        if i == 2:
+            continue
+        if i == 4:
+            break
+    return t
+
+def once(k: Int) -> Int:
+    var p = Pt(k, 5)
+    return p.total() + peek(p)
+
+def main():
+    print(work(3))
+    print(work(9))
+    var total = 0
+    for r in range(400000):
+        total += work(6) % 1000 + once(r % 100)
+    print(total)
+""", "24\n60\n85400000\n", 40)
+
+    test_gimple_stdout("gimple_struct_local_retained_by_a_method_is_not_freed", """\
+struct Pt:
+    var x: Int
+    var y: Int
+
+    def __init__(out self, x: Int, y: Int):
+        self.x = x
+        self.y = y
+
+    def total(self) -> Int:
+        return self.x + self.y
+
+    def enroll(self, into: List[Pt]):
+        into.append(self)
+
+def peek(q: Pt) -> Int:
+    return q.x * 2
+
+def work(n: Int, kept: List[Pt]) -> Int:
+    var t = 0
+    for i in range(n):
+        var p = Pt(i, 3)
+        t += p.total() + peek(p) + p.x
+        var q = Pt(i + 1, 4)
+        q.enroll(kept)
+        t += q.y
+        if i == 2:
+            continue
+        if i == 4:
+            break
+    return t
+
+def main():
+    var kept: List[Pt] = []
+    print(work(3, kept))
+    print(work(9, kept))
+    print(len(kept))
+    var s = 0
+    for k in range(len(kept)):
+        s += kept[k].x * 10 + kept[k].y
+    print(s)
+    var total = 0
+    for r in range(40000):
+        var kk: List[Pt] = []
+        total += work(6, kk) % 1000 + len(kk)
+    print(total)
+""", "33\n75\n8\n242\n3200000\n")
+
     # ── zip() / dict.items() pair shapes ───────────────────────────────
     # zip and dict.items() yield TUPLES. Unmarked, they printed as
     # `[[1, 3], [2, 4]]`; and a pair's first slot is a real value (the 0
