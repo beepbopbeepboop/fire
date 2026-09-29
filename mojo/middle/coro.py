@@ -3102,6 +3102,7 @@ def lower(stmts: list) -> tuple[list, list]:
     _ASYNC_FN_NAMES.clear()
     _STRUCT_NAMES.clear()
     _BOX_STRUCT_OF.clear()
+    _WIRED_CAPTURES.clear()
     _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
     _NO_WD_FORWARD.clear()
     _detect_native_future_classes(stmts)
@@ -3246,6 +3247,38 @@ _BOX_SHIMS = {
     'd': ('__mojo_box_new_d',   '__mojo_box_get_d',   '__mojo_box_set_d'),
     'p': ('__mojo_box_new_p',   '__mojo_box_get_p',   '__mojo_box_set_p'),
 }
+
+
+def _boxed_init_kind(value) -> str | None:
+    """The box kind of an initializer that is ALREADY a box
+    (`var n = __mojo_box_new_i64(<init>)`), else None.
+
+    `_apply_nested_async_capture` rewrites a captured local's declaring
+    VarDecl IN PLACE, so a second nested `async def` capturing the SAME
+    local sees `var n = __mojo_box_new_i64(1)`, not `var n = 1` -- an
+    initializer `_strict_init_kind` cannot type, which is what used to
+    make the second capture plan `None` and drop that async to the C++
+    backend. There the C++ emitter (which has no capture model at all)
+    threaded a capture parameter into `{base}_start` that the `create_task`
+    call site never passed, so the program died with a generated-C
+    diagnostic:
+
+        prog.mojo:13:10: error: too few arguments to function
+        '_mojoasync_run_a2_start'; expected 1, have 0
+
+    -- an error blaming generated code rather than the program, for a
+    shape that is a two-line variant of one that already works. Reading
+    the box back out is what lets the second (and third, ...) sibling
+    share the FIRST one's box, which is the whole point: the captures
+    must be the same cell. Inverted direction is safe by construction
+    and needs no separate table -- see `_apply_nested_async_capture`,
+    which must not re-wrap an initializer this returns a kind for."""
+    if not (isinstance(value, N.CallExpr) and isinstance(value.func, N.IdentExpr)):
+        return None
+    for _k, _shims in _BOX_SHIMS.items():
+        if value.func.name == _shims[0]:
+            return _k
+    return None
 
 
 # Same-module `def name(...) -> <ann>` -> scalar box kind ('i'/'d'/'p'),
@@ -3452,16 +3485,29 @@ def _outer_boxable_locals(outer: N.FunctionDef) -> dict:
     (string) (Increment C). Increment A: the initializer no longer has to
     be a bare int literal, only statically confident in kind (explicit
     `Int`/`Float64`/`String`-family annotation, or a `_strict_init_kind`
-    match)."""
+    match).
+
+    A local a SIBLING nested async already boxed counts, at that box's
+    own kind (`_boxed_init_kind`) -- two nested `async def`s capturing one
+    enclosing local must share one cell, and after the first capture the
+    initializer is the box, not the original expression. The struct name
+    comes from the same `_BOX_STRUCT_OF` entry the first capture
+    registered, so a struct cell round-trips back to its real `T *` here
+    too rather than degrading to a raw int64_t cell."""
     env = _static_env(outer)
     out = {}
     for s in outer.body:
         if not isinstance(s, N.VarDecl):
             continue
+        boxed = _boxed_init_kind(s.value)
         k = _ann_kind(s.type_ann)
         sname = None
-        if k is None:
-            k = _strict_init_kind(s.value, env)
+        if boxed is not None:
+            k = boxed
+            sname = _BOX_STRUCT_OF.get(s.name)
+        else:
+            if k is None:
+                k = _strict_init_kind(s.value, env)
             # Increment E: a local initialised from a same-module class
             # constructor holds a struct POINTER. It boxes through the
             # existing `i64` cell (a pointer is pointer-sized); record the
@@ -3604,6 +3650,15 @@ def _nested_async_capture_plan(inner: N.FunctionDef, outer: N.FunctionDef) -> di
 # `T *` passed to an int64_t setter is "makes integer from pointer without a
 # cast". Both are fixed by these, not by a new cell type.
 _BOX_STRUCT_OF: dict = {}
+
+# Enclosing-function name -> the captured local names whose box has ALREADY
+# been wired into that function's body by `_apply_nested_async_capture`.
+# `_hoist_nested_async` calls that function once per nested `async def`, and
+# two nested asyncs capturing the SAME local must share ONE cell, so the
+# second call has to know which of its captures are already done. Same
+# per-module lifetime as `_BOX_STRUCT_OF`; see
+# `_apply_nested_async_capture`'s docstring.
+_WIRED_CAPTURES: dict = {}
 
 
 def _box_get_call(cident: str, kind: str):
@@ -3766,14 +3821,27 @@ def _append_box_args(call, cap_map: dict) -> None:
     name by string concatenation (not by subscripting a local dict
     comprehension) so the self-hosted compiler infers it as `char *`."""
     for n in cap_map:
-        call.args.append(_c_ident(_hidden_box_name(n)))
+        _append_box_arg(call, _hidden_box_name(n))
+
+
+def _append_box_arg(call, argname: str) -> None:
+    """Append `argname` as a trailing IdentExpr argument, unless the call
+    already carries it. Two nested `async def`s capturing the same
+    enclosing local both thread the SAME box handle into a shared sibling
+    function, so a second pass over one call site would otherwise pass the
+    same handle twice and the callee would read the box out of its own
+    first argument."""
+    for a in call.args:
+        if isinstance(a, N.IdentExpr) and a.name == argname:
+            return
+    call.args.append(_c_ident(argname))
 
 
 def _append_cap_args(call, cap_map: dict) -> None:
     """Append each captured NAME itself (the enclosing function's own
     now-boxed local) as a trailing IdentExpr argument to `call`."""
     for n in cap_map:
-        call.args.append(_c_ident(n))
+        _append_box_arg(call, n)
 
 
 def _apply_nested_async_capture(inner: N.FunctionDef, outer: N.FunctionDef, cap_map: dict):
@@ -3804,10 +3872,28 @@ def _apply_nested_async_capture(inner: N.FunctionDef, outer: N.FunctionDef, cap_
     transitive-closure-through-an-ordinary-nested-function shape the
     ordinary compiled path's own 2026-07-27 fix solved for plain
     `{mut}` closures, done here as a pure AST rewrite over the plain
-    `int64_t` box handle."""
+    `int64_t` box handle.
+
+    IDEMPOTENT PER CAPTURED LOCAL, which is what makes two nested
+    `async def`s sharing one enclosing local work at all. `_hoist_nested_
+    async` calls this once per nested async, so the second call sees an
+    `outer` whose body has ALREADY been rewritten: the local is a box
+    handle and its reads already go through `_BOX_SHIMS`. Re-boxing it
+    would allocate a second cell the first nested body never sees (its
+    mutation vanishes silently), and re-running the enclosing-body rewrite
+    would double-wrap every read (`__mojo_box_get_i64(__mojo_box_get_i64
+    (n))` -- reading the box POINTER as if it were its contents, i.e. a
+    heap address). `_WIRED_CAPTURES` records which locals of which
+    enclosing function are already wired; the enclosing-body half runs for
+    the not-yet-wired ones, and the nested-async half (this async's own
+    body, params, and call sites) runs for all of them, because each async
+    genuinely needs its own handle parameter."""
     box_kind = {n: c.kind for n, c in cap_map.items()}
     hidden = {n: (_hidden_box_name(n), box_kind[n]) for n in cap_map}
     outer_box = {n: (n, box_kind[n]) for n in cap_map}
+    wired = _WIRED_CAPTURES.setdefault(_cm_as_str(outer.name), set())
+    fresh = {n: c for n, c in cap_map.items() if n not in wired}
+    fresh_box = {n: outer_box[n] for n in fresh}
     # Increment E: register which box handle carries a struct POINTER, so
     # each scope's read/write round-trips it through UnsafePointer[T](...)
     # / `.address`. The handle name is scope-local and unique, so both the
@@ -3820,7 +3906,7 @@ def _apply_nested_async_capture(inner: N.FunctionDef, outer: N.FunctionDef, cap_
         _BOX_STRUCT_OF[_hidden_box_name(_n)] = _c.struct_name
 
     prepend: list = []
-    for name, c in cap_map.items():
+    for name, c in fresh.items():
         newshim = _BOX_SHIMS[c.kind][0]
         if c.decl is not None:
             c.decl.value = _call(newshim, [c.decl.value])
@@ -3837,12 +3923,16 @@ def _apply_nested_async_capture(inner: N.FunctionDef, outer: N.FunctionDef, cap_
     if prepend:
         outer.body = prepend + list(outer.body)
 
-    outer.body = _cap_rewrite_stmts(outer.body, outer_box)
+    # Only the not-yet-wired locals: a name already rewritten in a previous
+    # call for a sibling nested async would be wrapped a second time here
+    # (see this function's docstring).
+    outer.body = _cap_rewrite_stmts(outer.body, fresh_box)
     inner.body = _cap_rewrite_stmts(inner.body, hidden)
     inner.params = list(inner.params) + [(_hidden_box_name(n), "Int") for n in cap_map]
 
     # ── transitive threading through ordinary nested sibling functions ──
-    _thread_box_through_siblings(inner.name, outer, cap_map, hidden, set(cap_map))
+    _thread_box_through_siblings(inner.name, outer, cap_map, hidden, set(cap_map), wired)
+    wired.update(cap_map)
     # `outer.body` (reassigned just above, prepend + rewrites included) is
     # now the live body; `_hoist_nested_async` finishes by filtering the
     # hoisted async defs out of THIS list, so nothing is lost.
@@ -3857,13 +3947,23 @@ def _fn_body_calls(fn: N.FunctionDef, name: str) -> list:
 
 
 def _thread_box_through_siblings(inner_name: str, outer: N.FunctionDef,
-                                 cap_map: dict, hidden: dict, cap_names: set) -> None:
+                                 cap_map: dict, hidden: dict, cap_names: set,
+                                 wired: set) -> None:
     """See `_apply_nested_async_capture`'s docstring, cross-closure case.
     `inner_name` is the hoisted nested async's bare name; every ordinary
     function nested in `outer` that (transitively) calls it or references
     a captured local receives the box handle(s) as hidden trailing
     params, with its calls and the call to it from `outer` given the
-    matching trailing arguments."""
+    matching trailing arguments.
+
+    `wired` (the enclosing function's already-wired capture names) is what
+    keeps a SECOND call for a sibling nested async from wiring the same
+    sibling twice: a sibling a previous call already gave the box handle
+    to has that read/writes already rewritten and that parameter already
+    declared, so only the not-yet-wired names are re-done here. The
+    trailing ARGUMENTS are still appended for all of `cap_map` -- the
+    sibling's call to THIS async genuinely needs all of them -- and
+    `_append_box_arg` drops one a call already carries."""
     nested_funcs: dict = {}
     for st in outer.body:
         if (isinstance(st, N.FunctionDef) and not getattr(st, 'is_async', False)
@@ -3892,10 +3992,16 @@ def _thread_box_through_siblings(inner_name: str, outer: N.FunctionDef,
                 changed = True
     for fname in needy:
         fn = nested_funcs[fname]
-        fn.body = _cap_rewrite_stmts(fn.body, hidden)
+        todo = {n: hidden[n] for n in cap_map if n not in wired}
+        if todo:
+            fn.body = _cap_rewrite_stmts(fn.body, todo)
         new_params: list = list(fn.params)
+        have = set()
+        for _pn, _pa in new_params:
+            have.add(_pn)
         for n in cap_map:
-            new_params.append((_hidden_box_name(n), 'Int'))
+            if _hidden_box_name(n) not in have:
+                new_params.append((_hidden_box_name(n), 'Int'))
         fn.params = new_params
         targets: list = [inner_name]
         for other in needy:

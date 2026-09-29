@@ -3169,6 +3169,251 @@ def main():
     run(1, 1.0, "a")
 """, "2 2.0 ab 2\n")
 
+    # ── TWO nested asyncs capturing the SAME enclosing local ────────────
+    # Found by re-testing bugs/hard/CODEGEN_coro_captured_param_capture_
+    # crashes.md's own "Verified genuinely fixed" list rather than by
+    # reading code, and the mechanism is the one the doc's item-1 fix
+    # describes without having hit it: `_apply_nested_async_capture` is
+    # called ONCE PER nested async, and it rewrites the enclosing local's
+    # initializer IN PLACE. So the second nested async's capture plan saw
+    # `var n = __mojo_box_new_i64(1)` -- an initializer it could not type
+    # -- concluded the capture was unboxable, and dropped that async to
+    # the C++ backend, which has no capture model at all and threaded a
+    # capture parameter into `{base}_start` that the `create_task` call
+    # site never passed:
+    #
+    #     prog.mojo:13:10: error: too few arguments to function
+    #     '_mojoasync_run_a2_start'; expected 1, have 0
+    #
+    # A hard error blaming generated code, for a shape that is a two-line
+    # variant of one that already worked. It is also the shape where the
+    # naive repair is a silent wrong VALUE rather than a loud one: boxing
+    # the local a second time allocates a second cell, and re-running the
+    # enclosing-body rewrite wraps every read twice
+    # (`__mojo_box_get_i64(__mojo_box_get_i64(n))` -- reading the box
+    # POINTER as its contents, i.e. a heap address), which prints instead
+    # of erroring. Hence the plan now recognises an already-boxed local
+    # and the wiring is idempotent per captured name.
+    test_generator_matches_cpython("two_nested_asyncs_share_one_captured_local", """\
+def run() raises:
+    var n = 1
+
+    @parameter
+    async def a1():
+        n += 1
+
+    @parameter
+    async def a2():
+        n += 1
+
+    var t0 = create_task(a1())
+    t0.wait()
+    var t1 = create_task(a2())
+    t1.wait()
+    print(n)
+
+def main() raises:
+    run()
+""", """\
+import asyncio
+
+async def run():
+    n = 1
+
+    async def a1():
+        nonlocal n
+        n += 1
+
+    async def a2():
+        nonlocal n
+        n += 1
+
+    await a1()
+    await a2()
+    print(n)
+
+asyncio.run(run())
+""")
+
+    # Three, over all three boxable kinds AND a struct cell, so the shared
+    # box is exercised for every `_BOX_SHIMS` entry plus Increment E's
+    # pointer round-trip -- the struct case is the one where a second cell
+    # would not merely lose the write but leave the two nested bodies with
+    # incompatible element types.
+    test_generator_matches_cpython("three_nested_asyncs_share_mixed_captures", """\
+struct Point:
+    var x: Int
+    fn __init__(out self, x: Int):
+        self.x = x
+
+def run(seed: Int, ratio: Float64, tag: String) raises:
+    var p = Point(0)
+
+    @parameter
+    async def a1():
+        seed += 1
+        ratio += 1.0
+        tag += "b"
+        p.x += 1
+
+    @parameter
+    async def a2():
+        seed += 10
+        ratio += 10.0
+        tag += "c"
+        p.x += 10
+
+    @parameter
+    async def a3():
+        seed += 100
+        ratio += 100.0
+        tag += "d"
+        p.x += 100
+
+    var t0 = create_task(a1())
+    t0.wait()
+    var t1 = create_task(a2())
+    t1.wait()
+    var t2 = create_task(a3())
+    t2.wait()
+    print(seed, ratio, tag, p.x)
+
+def main() raises:
+    run(1, 1.0, "a")
+""", """\
+import asyncio
+
+class Point:
+    def __init__(self, x):
+        self.x = x
+
+async def run(seed, ratio, tag):
+    p = Point(0)
+
+    async def a1():
+        nonlocal seed, ratio, tag, p
+        seed += 1
+        ratio += 1.0
+        tag += "b"
+        p.x += 1
+
+    async def a2():
+        nonlocal seed, ratio, tag, p
+        seed += 10
+        ratio += 10.0
+        tag += "c"
+        p.x += 10
+
+    async def a3():
+        nonlocal seed, ratio, tag, p
+        seed += 100
+        ratio += 100.0
+        tag += "d"
+        p.x += 100
+
+    await a1()
+    await a2()
+    await a3()
+    print(seed, ratio, tag, p.x)
+
+asyncio.run(run(1, 1.0, "a"))
+""")
+
+    # The cross-closure shape (the doc's item 4) with a SECOND nested async
+    # in the mix: the shared box is threaded through the ordinary nested
+    # sibling `caller()`, which calls both. This is where the hidden
+    # trailing parameter is declared per sibling, so a second pass that
+    # appended it again would produce a duplicated declaration.
+    test_generator_matches_cpython("two_nested_asyncs_shared_capture_through_sibling", """\
+def run(n: Int) raises:
+    @parameter
+    async def a1():
+        n += 1
+
+    @parameter
+    async def a2():
+        n += 1
+
+    def caller() raises:
+        var t = create_task(a1())
+        t.wait()
+        var u = create_task(a2())
+        u.wait()
+
+    caller()
+    print(n)
+
+def main() raises:
+    run(0)
+""", """\
+import asyncio
+
+async def run(n):
+    async def a1():
+        nonlocal n
+        n += 1
+
+    async def a2():
+        nonlocal n
+        n += 1
+
+    async def caller():
+        await a1()
+        await a2()
+
+    await caller()
+    print(n)
+
+asyncio.run(run(0))
+""")
+
+    # A nested async that captures NOTHING beside one that does: the
+    # non-capturing one must be unaffected by the shared-box bookkeeping
+    # (it has an empty plan, so it must neither claim the name nor have a
+    # hidden parameter added).
+    test_generator_matches_cpython("capturing_and_noncapturing_nested_async", """\
+def run() raises:
+    var n = 0
+
+    @parameter
+    async def noop():
+        pass
+
+    @parameter
+    async def bump():
+        n += 1
+
+    var t0 = create_task(noop())
+    t0.wait()
+    var t1 = create_task(bump())
+    t1.wait()
+    var t2 = create_task(bump())
+    t2.wait()
+    print(n)
+
+def main() raises:
+    run()
+""", """\
+import asyncio
+
+async def run():
+    n = 0
+
+    async def noop():
+        pass
+
+    async def bump():
+        nonlocal n
+        n += 1
+
+    await noop()
+    await bump()
+    await bump()
+    print(n)
+
+asyncio.run(run())
+""")
+
     # ── call-site yield-kind evidence: the holes and the fixes ─────────
     # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md. A call
     # site the static scan cannot type used to leave the slot neither
