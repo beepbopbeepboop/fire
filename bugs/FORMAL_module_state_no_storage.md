@@ -106,6 +106,27 @@ So 117 of the 167 `sys` uses in those files are `argv` and `stderr`, and both ar
 the same missing capability. `sys.exit` is the next largest and is closed by a
 different, already-settled decision.
 
+Over the WHOLE tree (every `.py`/`.mojo` outside `doc/`, `bugs/` and `build/`)
+the shape is the same and the two blocked names are bigger still:
+
+| `sys` name | uses, whole tree | blocked by |
+|---|---|---|
+| `sys.exit` | 194 | the settled export rule, above — not this document |
+| `sys.argv` | 167 | (1)+(2)+(4) |
+| `sys.stderr` | 137 | (2)+(3) |
+| `sys.path` | 103 | (1)+(2) — a mutable list of strings |
+| `sys.executable` | 43 | (1) again, one step on: libSystem's `_NSGetExecutablePath` answers it and writes into a CALLER-SUPPLIED buffer, so the missing thing is a place to put a path. Not a capability this target lacks. |
+| `sys.platform` | 31 | no honest value; see the table above |
+| `sys.modules` | 16 | (1)+(2)+(3) — a dict of live module objects |
+| `sys.stdout` / `sys.stdin` | 24 | (2)+(3) |
+| `sys.version_info` | 8 | (3) — a tuple |
+
+`sys.executable` is worth its own line because it is the case where reading this
+document would otherwise produce the wrong conclusion: the capability IS
+reachable (libSystem has the call), and what is missing is storage for its
+answer. That distinction is the whole difference between option A and option B
+below.
+
 ## What `sys.mojo` does instead, and why it is not a dodge
 
 `sys.write_stdout(s)` / `sys.write_stderr(s)` are `write(1|2, s, strlen(s))`
