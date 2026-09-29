@@ -2078,9 +2078,16 @@ def main():
         if reach_files:
             print(f"    in reach, and therefore WORK rather than a permanent "
                   f"fact: {', '.join(reach_files)}")
-        print("    `os` and `sys` are most of it. None of this is close, and "
-              "none of it is in the rate above: the point is to size the work, "
-              "not to improve the number")
+        # The two names that used to be hardcoded here, and why neither is any
+        # more: they were a standing editorial claim that `os` and `sys` were
+        # "most of it", which is a statement about the WORK and goes stale the
+        # moment one of them is written. `sys` now has a Mojo source
+        # (`sys.mojo`), so it is not in the in-reach set at all, and printing a
+        # name that is no longer there would be worse than printing nothing.
+        # What is left is the part that is still true whatever the set holds.
+        print("    None of this is close, and none of it is in the rate "
+              "above: the point is to size the work, not to improve the "
+              "number")
 
     # ── A codegen finding in a file no backend change can make build ────────
     # A construct refusal is `codegen` and that is right: the construct is in

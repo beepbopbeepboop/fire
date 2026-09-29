@@ -16,6 +16,10 @@ silently change verdicts if they broke:
    asserted equal, because a name that quietly migrated between tiers, or one
    that was added to one tier and forgotten in the other, changes a verdict in
    the coverage report with no diff anyone reads.
+   Less the names that have since been IMPLEMENTED -- `sys`, for which
+   `sys.mojo` now exists (see `IMPLEMENTED_HOST_MODULES`): that one IS a
+   change in what the build accepts, and it is checked against the filesystem
+   in both directions so it cannot rot either way.
 
 3. **The C-library provider is the real library, not a 19-name list.** And not
    the global namespace either: `CDLL(None)` answers questions about the
@@ -166,6 +170,21 @@ def _original_host_modules():
     return set(PRE_SPLIT_HOST_MODULES)
 
 
+# Names deliberately REMOVED from the host set because a Mojo source for them
+# now exists in this tree, so `resolve_module_path`'s first pass finds it and
+# the host list is never consulted for them. Each is a real change in what the
+# build accepts — a file importing one used to be refused and no longer is — so
+# it is listed here rather than folded into the specification above, which
+# exists to prove the tier SPLIT was a classification change and nothing else.
+#
+# The list is not trusted: `test_host_tiers` checks that every name in it
+# really does resolve to a source, which is the only reason a name may leave
+# the set. A name removed without one fails that check, and a name left in the
+# set while a source exists for it also fails it — so the specification cannot
+# rot in either direction.
+IMPLEMENTED_HOST_MODULES = ("sys",)
+
+
 def test_host_tiers():
     check(I._host_tier_conflicts() == [],
           'no host module is in both tiers', str(I._host_tier_conflicts()))
@@ -175,16 +194,36 @@ def test_host_tiers():
           f"sym-diff {sorted(union ^ set(I.HOST_MODULES))}")
     orig = _original_host_modules()
     if orig is not None:
-        check(union == orig,
-              'the union is the ORIGINAL 77-name list: a classification change, '
-              'not a behaviour change',
-              f'added {sorted(union - orig)}, lost {sorted(orig - union)}')
+        check(union == orig - set(IMPLEMENTED_HOST_MODULES),
+              'the union is the ORIGINAL 77-name list less the modules that '
+              'now have a Mojo source: a classification change plus a '
+              'deliberate, listed removal',
+              f'added {sorted(union - orig)}, '
+              f'lost {sorted(orig - union - set(IMPLEMENTED_HOST_MODULES))}')
     else:
         check(False, 'the pre-split HOST_MODULES list could be read from git',
               'git show HEAD:formal/imports.py did not yield it')
+    # …and the removals are justified by the FILESYSTEM, not by this list: a
+    # name may leave the host set exactly when a Mojo source for it exists and
+    # is reachable. Checked in both directions, so neither a removal without a
+    # source nor a leftover entry with one can pass.
+    from formal.imports import resolve_module_path
+    import os
+    repo = os.path.dirname(os.path.abspath(__file__))
+    for m in IMPLEMENTED_HOST_MODULES:
+        found = resolve_module_path(m, relative_to=os.path.join(repo, "t1.mojo"))
+        check(found is not None and found.endswith(f"{m}.mojo"),
+              f'{m} was removed from the host set but no Mojo source for it '
+              f'resolves (got {found!r})')
+        check(m not in union,
+              f'{m} still classifies as a host module although a Mojo source '
+              f'exists for it, so the entry is now false and the build is '
+              f'reached through the resolver instead')
     # The claim the split exists to make true: these are reachable, so calling
-    # them "not fixable" was false.
-    for m in ('os', 'sys', 'math', 'struct', 'time', 'json', 're'):
+    # them "not fixable" was false. `sys` has left this list because it is now
+    # IMPLEMENTED, not because it became unreachable — see
+    # IMPLEMENTED_HOST_MODULES above.
+    for m in ('os', 'math', 'struct', 'time', 'json', 're'):
         check(I.host_module_tier(m) == 'modelled',
               f'{m} is modelled (reachable in principle, not implemented)')
     for m in ('subprocess', 'ctypes', 'asyncio', 'threading', 'socket',
@@ -196,9 +235,11 @@ def test_host_tiers():
               f'the dotted form {m} still classifies')
     check(I.host_module_tier('json') == I.host_module_tier('json.decoder'),
           'a dotted form follows its top-level component')
-    for m in ('__future__', 'sys', 'nosuchmodule'):
-        if m == 'sys':
-            continue
+    # `sys` is in this list and skipped on purpose: it WAS a host module and is
+    # not any more, so asserting it here would pin the removal as permanent
+    # rather than as a consequence of `sys.mojo` existing. The check that keeps
+    # it honest is the pair in IMPLEMENTED_HOST_MODULES above.
+    for m in ('__future__', 'nosuchmodule'):
         check(I.host_module_tier(m) == '',
               f'{m} is not a host module')
     check(I._is_inert_module('__future__') and '__future__' not in I.HOST_MODULES,

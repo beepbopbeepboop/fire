@@ -114,6 +114,31 @@ descriptor, and it is the only spelling available: `sys.stderr` would have to be
 an object, and (2)+(3) say an object cannot cross the boundary. The module says
 so at each definition, names what it cannot do and why, and cites this document.
 
+## What moved, measured, so nobody has to re-derive it
+
+All fourteen files the sweep listed for `sys` at the start, swept from a CLEARED
+CAS (see `bugs/FORMAL_sweep_cache_ignores_imports.md` for why that matters),
+`python3 tools/formal_sweep.py --no-stdlib <the fourteen>`:
+
+| file | class before | class after | what stops it now |
+|---|---|---|---|
+| `t1.mojo` | not-answerable/host-import (`sys`) | **pass** | nothing — but the pass is hollow, see `FORMAL_toplevel_statements_dropped.md`: its body is top-level, so it exits 0 where it says `sys.exit(3)` |
+| `t_argv.mojo` | not-answerable/host-import (`sys`) | **codegen** | this document: `sys.argv` |
+| `tools/ci_line.py` | not-answerable/host-import (`sys`) | **codegen** | `f.readlines()` — a value method the path does not lower |
+| `unescape_c.py` | not-answerable/host-import (`sys`) | **codegen** | `len(s)` where `s` classifies as an int |
+| `fire.py`, `build_module.py`, `mojo.mojo`, `scripts/run_mojo_main.py`, `tools/compile_one.py` | not-answerable/host-import (`sys`) | not-answerable/host-import (**`os`**) | `os` — the `module:os` claim |
+| `fire_main.py`, `mojo/middle/comptime.py`, `test_async_parsing.py`, `test_yield_parsing.py` | not-answerable/host-import (`sys`) | not-answerable/host-import (**`re`**, through `fire_compiler`) | `re` — **unclaimed** |
+| `test_refactor_bugs.py` | not-answerable/host-import (`sys`) | not-answerable/host-import (**`os`**, through `gimple_codegen`) | `os` |
+
+So three of the fourteen moved out of the `sys` refusal, and **eleven were never
+blocked by `sys` alone** — they hit `os` or `re` first, which is the sweep
+reporting the FIRST thing wrong with a file rather than every thing wrong with
+it. `sys` was the whole of the answer for three files, and for the other eleven
+it was one line among several.
+
+`re` is worth calling out separately: it blocks four of the fourteen and no
+worker holds it.
+
 ## The exact next step, for whoever takes it
 
 Two options, and they are different sizes. Both are changes to the VALUE MODEL,
