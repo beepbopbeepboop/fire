@@ -757,6 +757,166 @@ int mojo_is_bound_method(void *p) {
     return _pr_has(&_reg_bound_method, (uint64_t)v);
 }
 
+/* ── Variadic callables ──────────────────────────────────────────────────
+ * A sibling of the bound-method registry above, for the same reason and
+ * with the same shape: a variadic callable's VALUE is not a bare function
+ * pointer, so a dynamically-dispatched call site has to be able to tell
+ * it apart from one. What the callee really wants is its arguments
+ * PACKED — `*args` into a MojoList, `**kwargs` into a MojoDict — and the
+ * packed form is built here rather than at the call site because the call
+ * site is the only place that knows the arity, while this is the only
+ * place that knows the callee's real parameter list.
+ *
+ * The `v < 65536` guard is _mojo_ptr_shaped's, for the reason spelled out
+ * on mojo_is_bound_method above. */
+static _PtrReg _reg_vararg_fn;
+
+MojoVarargFn *mojo_vararg_fn_new(void *fn, void *self, int64_t n_fixed, int64_t kind,
+                                 int64_t has_env) {
+    MojoVarargFn *vf = (MojoVarargFn *)malloc(sizeof(MojoVarargFn));
+    vf->fn = fn;
+    vf->self = self;
+    vf->n_fixed = n_fixed;
+    vf->kind = kind;
+    vf->has_env = has_env;
+    _pr_add(&_reg_vararg_fn, (uint64_t)(uintptr_t)vf);
+    return vf;
+}
+
+int mojo_is_vararg_fn(void *p) {
+    int64_t v = (int64_t)(intptr_t)p;
+    if (v < 65536) return 0;
+    return _pr_has(&_reg_vararg_fn, (uint64_t)v);
+}
+
+/* One packing routine, five arity wrappers. `a`/`n` are the arguments the
+ * call site wrote, `kw` its already-packed keyword dict (NULL when it
+ * passed none).
+ *
+ * The first `n_fixed` of them are ORDINARY leading parameters — the callee
+ * declares them before its `*args`, so they stay positional and are passed
+ * straight through as scalars. Everything after them is what `*args`
+ * collects, packed into a fresh MojoList.
+ *
+ * `n_fixed` is bounded to 4 by the wrappers below (the call site has at
+ * most 4 arguments to give), so the leading-parameter count can never
+ * exceed the arity, and a callee wanting more fixed parameters than the
+ * call site supplied is a call with too few arguments — real Python raises
+ * TypeError for that; the extra slots read as 0 here, matching how every
+ * other too-few-arguments call in this runtime behaves rather than
+ * dereferencing past the end of `a`.
+ */
+static int64_t _mojo_vararg_invoke(MojoVarargFn *vf, const int64_t *a, int64_t n, MojoDict *kw) {
+    int64_t nf = vf->n_fixed;
+    if (nf < 0) nf = 0;
+    if (nf > n) nf = n;
+    /* `*args` collects everything past the fixed leading parameters. */
+    MojoList *packed = 0;
+    if (vf->kind != 2) {
+        packed = mojo_list_new();
+        for (int64_t i = nf; i < n; i++)
+            mojo_list_append_int(packed, a[i]);
+    }
+    /* A `**kwargs` callee must never see NULL: `k['x']` on a NULL dict is a
+     * segfault, and `len(k)` is a legitimate spelling. An empty dict is
+     * the correct answer for a call that passed no keywords. */
+    MojoDict *k = kw;
+    if (vf->kind >= 1 && !k) k = mojo_dict_new();
+    if (vf->kind == 0) k = 0;
+    if (!vf->has_env) {
+        /* No captures: the lifted callee has NO leading `self` parameter,
+         * so passing one would shift every real parameter a slot left. */
+        switch (nf) {
+        case 0:
+            if (vf->kind == 0) return ((int64_t (*)(MojoList *))vf->fn)(packed);
+            if (vf->kind == 1) return ((int64_t (*)(MojoList *, MojoDict *))vf->fn)(packed, k);
+            return ((int64_t (*)(MojoDict *))vf->fn)(k);
+        case 1:
+            if (vf->kind == 0) return ((int64_t (*)(int64_t, MojoList *))vf->fn)(a[0], packed);
+            if (vf->kind == 1) return ((int64_t (*)(int64_t, MojoList *, MojoDict *))vf->fn)(a[0], packed, k);
+            return ((int64_t (*)(int64_t, MojoDict *))vf->fn)(a[0], k);
+        case 2:
+            if (vf->kind == 0) return ((int64_t (*)(int64_t, int64_t, MojoList *))vf->fn)(a[0], a[1], packed);
+            if (vf->kind == 1) return ((int64_t (*)(int64_t, int64_t, MojoList *, MojoDict *))vf->fn)(a[0], a[1], packed, k);
+            return ((int64_t (*)(int64_t, int64_t, MojoDict *))vf->fn)(a[0], a[1], k);
+        case 3:
+            if (vf->kind == 0) return ((int64_t (*)(int64_t, int64_t, int64_t, MojoList *))vf->fn)(a[0], a[1], a[2], packed);
+            if (vf->kind == 1) return ((int64_t (*)(int64_t, int64_t, int64_t, MojoList *, MojoDict *))vf->fn)(a[0], a[1], a[2], packed, k);
+            return ((int64_t (*)(int64_t, int64_t, int64_t, MojoDict *))vf->fn)(a[0], a[1], a[2], k);
+        default:
+            if (vf->kind == 0) return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, MojoList *))vf->fn)(a[0], a[1], a[2], a[3], packed);
+            if (vf->kind == 1) return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, MojoList *, MojoDict *))vf->fn)(a[0], a[1], a[2], a[3], packed, k);
+            return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, MojoDict *))vf->fn)(a[0], a[1], a[2], a[3], k);
+        }
+    }
+    switch (nf) {
+    case 0:
+        if (vf->kind == 0) return ((int64_t (*)(void *, MojoList *))vf->fn)(vf->self, packed);
+        if (vf->kind == 1) return ((int64_t (*)(void *, MojoList *, MojoDict *))vf->fn)(vf->self, packed, k);
+        return ((int64_t (*)(void *, MojoDict *))vf->fn)(vf->self, k);
+    case 1:
+        if (vf->kind == 0) return ((int64_t (*)(void *, int64_t, MojoList *))vf->fn)(vf->self, a[0], packed);
+        if (vf->kind == 1) return ((int64_t (*)(void *, int64_t, MojoList *, MojoDict *))vf->fn)(vf->self, a[0], packed, k);
+        return ((int64_t (*)(void *, int64_t, MojoDict *))vf->fn)(vf->self, a[0], k);
+    case 2:
+        if (vf->kind == 0) return ((int64_t (*)(void *, int64_t, int64_t, MojoList *))vf->fn)(vf->self, a[0], a[1], packed);
+        if (vf->kind == 1) return ((int64_t (*)(void *, int64_t, int64_t, MojoList *, MojoDict *))vf->fn)(vf->self, a[0], a[1], packed, k);
+        return ((int64_t (*)(void *, int64_t, int64_t, MojoDict *))vf->fn)(vf->self, a[0], a[1], k);
+    case 3:
+        if (vf->kind == 0) return ((int64_t (*)(void *, int64_t, int64_t, int64_t, MojoList *))vf->fn)(vf->self, a[0], a[1], a[2], packed);
+        if (vf->kind == 1) return ((int64_t (*)(void *, int64_t, int64_t, int64_t, MojoList *, MojoDict *))vf->fn)(vf->self, a[0], a[1], a[2], packed, k);
+        return ((int64_t (*)(void *, int64_t, int64_t, int64_t, MojoDict *))vf->fn)(vf->self, a[0], a[1], a[2], k);
+    default:
+        if (vf->kind == 0) return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, MojoList *))vf->fn)(vf->self, a[0], a[1], a[2], a[3], packed);
+        if (vf->kind == 1) return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, MojoList *, MojoDict *))vf->fn)(vf->self, a[0], a[1], a[2], a[3], packed, k);
+        return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, MojoDict *))vf->fn)(vf->self, a[0], a[1], a[2], a[3], k);
+    }
+}
+
+int64_t mojo_vararg_call_0(void *fp, void *kw) {
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, 0, 0, (MojoDict *)kw);
+}
+int64_t mojo_vararg_call_1(void *fp, void *kw, int64_t a) {
+    int64_t v[1]; v[0] = a;
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, v, 1, (MojoDict *)kw);
+}
+int64_t mojo_vararg_call_2(void *fp, void *kw, int64_t a, int64_t b) {
+    int64_t v[2]; v[0] = a; v[1] = b;
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, v, 2, (MojoDict *)kw);
+}
+int64_t mojo_vararg_call_3(void *fp, void *kw, int64_t a, int64_t b, int64_t c) {
+    int64_t v[3]; v[0] = a; v[1] = b; v[2] = c;
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, v, 3, (MojoDict *)kw);
+}
+int64_t mojo_vararg_call_4(void *fp, void *kw, int64_t a, int64_t b, int64_t c, int64_t d) {
+    int64_t v[4]; v[0] = a; v[1] = b; v[2] = c; v[3] = d;
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, v, 4, (MojoDict *)kw);
+}
+
+int64_t mojo_vararg_call_5(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4) {
+    int64_t v[5]; v[0] = _a0; v[1] = _a1; v[2] = _a2; v[3] = _a3; v[4] = _a4;
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, v, 5, (MojoDict *)kw);
+}
+
+int64_t mojo_vararg_call_6(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5) {
+    int64_t v[6]; v[0] = _a0; v[1] = _a1; v[2] = _a2; v[3] = _a3; v[4] = _a4; v[5] = _a5;
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, v, 6, (MojoDict *)kw);
+}
+
+int64_t mojo_vararg_call_7(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6) {
+    int64_t v[7]; v[0] = _a0; v[1] = _a1; v[2] = _a2; v[3] = _a3; v[4] = _a4; v[5] = _a5; v[6] = _a6;
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, v, 7, (MojoDict *)kw);
+}
+
+int64_t mojo_vararg_call_8(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6, int64_t _a7) {
+    int64_t v[8]; v[0] = _a0; v[1] = _a1; v[2] = _a2; v[3] = _a3; v[4] = _a4; v[5] = _a5; v[6] = _a6; v[7] = _a7;
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, v, 8, (MojoDict *)kw);
+}
+
+
+
+
+
 /* mojo_list_init/mojo_list_destroy: see mojo_set_init/mojo_set_destroy's
  * comment just above (same Phase 6 rationale, same refactor shape). */
 void mojo_list_init(MojoList *l)

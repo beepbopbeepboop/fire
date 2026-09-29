@@ -96,6 +96,58 @@ typedef struct { void *fn; void *self; } MojoBoundMethod;
  * self.m; f()`). */
 MojoBoundMethod *mojo_bound_method_new(void *fn, void *self);
 int mojo_is_bound_method(void *p);
+
+/* ── Variadic callables ───────────────────────────────────────────────────
+ * A `lambda *a, **k: ...` (or any function whose real C signature is
+ * `(MojoList *, MojoDict *)` rather than N scalars) cannot be called
+ * through mojo_fnptr_call_N: that helper is ARITY-based — it casts the
+ * callee to `int64_t(*)(int64_t, ...)` and passes the arguments written
+ * at the call site positionally. A variadic callee expects them PACKED
+ * into a MojoList/MojoDict pair, so the first argument arrives as the
+ * integer 4 where a `MojoList *` is wanted and the callee dereferences
+ * address 4 — a hard SIGSEGV, not a wrong value.
+ *
+ * So a variadic callable's VALUE is not a bare function pointer but one
+ * of these, which records the signature the call site cannot see. The
+ * packing itself stays here in the runtime, which is the only place that
+ * knows both the call's arity and the callee's real parameter list — the
+ * same reason mojo_fnptr_call_N dispatches on MojoBoundMethod above
+ * rather than at each call site.
+ *
+ *   kind   0 = `*args` only            -> fn(void *self, MojoList *a)
+ *          1 = `*args, **kwargs`       -> fn(void *self, MojoList *a, MojoDict *k)
+ *          2 = `**kwargs` only         -> fn(void *self, MojoDict *k)
+ *   n_fixed  number of ORDINARY leading parameters declared before the
+ *           `*args`. Those stay positional (the callee really does take
+ *           them as scalars) and are passed straight through; the rest of
+ *           the call's arguments are what gets packed into the list.
+ *   self    the closure env, or NULL for a non-capturing variadic lambda.
+ *   has_env whether the lifted callee actually DECLARES that leading
+ *           `self` parameter. It does only when it captures something:
+ *           passing `self` to a callee that has no such parameter would
+ *           shift every real parameter one slot left, which is a silent
+ *           wrong value (a `MojoList *a` parameter receiving the NULL env).
+ */
+typedef struct { void *fn; void *self; int64_t n_fixed; int64_t kind; int64_t has_env; } MojoVarargFn;
+
+MojoVarargFn *mojo_vararg_fn_new(void *fn, void *self, int64_t n_fixed, int64_t kind,
+                                 int64_t has_env);
+int mojo_is_vararg_fn(void *p);
+/* Packing entry points. `kw` is the call site's keyword arguments already
+ * packed into a MojoDict (NULL when the call site passed none); it is
+ * IGNORED unless the callee declares `**kwargs`, so an ordinary call site
+ * can use the same helper unconditionally. Real (not inline) because they
+ * build the MojoList/MojoDict and dispatch on a runtime-recorded kind —
+ * fire_runtime.c is the one TU that has all of those declared. */
+int64_t mojo_vararg_call_0(void *fp, void *kw);
+int64_t mojo_vararg_call_1(void *fp, void *kw, int64_t a);
+int64_t mojo_vararg_call_2(void *fp, void *kw, int64_t a, int64_t b);
+int64_t mojo_vararg_call_3(void *fp, void *kw, int64_t a, int64_t b, int64_t c);
+int64_t mojo_vararg_call_4(void *fp, void *kw, int64_t a, int64_t b, int64_t c, int64_t d);
+int64_t mojo_vararg_call_5(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4);
+int64_t mojo_vararg_call_6(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5);
+int64_t mojo_vararg_call_7(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6);
+int64_t mojo_vararg_call_8(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6, int64_t _a7);
 static inline int64_t mojo_bound_method_call_0(MojoBoundMethod *bm) {
     return ((int64_t (*)(void *))bm->fn)(bm->self);
 }
@@ -112,27 +164,152 @@ static inline int64_t mojo_bound_method_call_4(MojoBoundMethod *bm, int64_t a, i
     return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, a, b, c, d);
 }
 
+static inline int64_t mojo_bound_method_call_5(MojoBoundMethod *bm, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4) {
+    return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, _a0, _a1, _a2, _a3, _a4);
+}
+
+static inline int64_t mojo_bound_method_call_6(MojoBoundMethod *bm, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5) {
+    return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, _a0, _a1, _a2, _a3, _a4, _a5);
+}
+
+static inline int64_t mojo_bound_method_call_7(MojoBoundMethod *bm, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6) {
+    return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+}
+
+static inline int64_t mojo_bound_method_call_8(MojoBoundMethod *bm, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6, int64_t _a7) {
+    return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+}
+
+
+
+
+
+
+
+
+
 
 static inline int64_t mojo_fnptr_call_0(void *fp) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_0(fp, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_0((MojoBoundMethod *)fp);
     return ((int64_t (*)(void))fp)();
 }
 static inline int64_t mojo_fnptr_call_1(void *fp, int64_t a) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_1(fp, 0, a);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_1((MojoBoundMethod *)fp, a);
     return ((int64_t (*)(int64_t))fp)(a);
 }
 static inline int64_t mojo_fnptr_call_2(void *fp, int64_t a, int64_t b) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_2(fp, 0, a, b);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_2((MojoBoundMethod *)fp, a, b);
     return ((int64_t (*)(int64_t, int64_t))fp)(a, b);
 }
 static inline int64_t mojo_fnptr_call_3(void *fp, int64_t a, int64_t b, int64_t c) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_3(fp, 0, a, b, c);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_3((MojoBoundMethod *)fp, a, b, c);
     return ((int64_t (*)(int64_t, int64_t, int64_t))fp)(a, b, c);
 }
 static inline int64_t mojo_fnptr_call_4(void *fp, int64_t a, int64_t b, int64_t c, int64_t d) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_4(fp, 0, a, b, c, d);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_4((MojoBoundMethod *)fp, a, b, c, d);
     return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
 }
+
+static inline int64_t mojo_fnptr_call_5(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_5(fp, 0, _a0, _a1, _a2, _a3, _a4);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_5((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4);
+}
+
+static inline int64_t mojo_fnptr_call_6(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_6(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_6((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4, _a5);
+}
+
+static inline int64_t mojo_fnptr_call_7(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_7(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_7((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4, _a5, _a6);
+}
+
+static inline int64_t mojo_fnptr_call_8(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6, int64_t _a7) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_8(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_8((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+}
+
+
+
+
+
+
+
+
+
+/* The same dispatch, for a call site that PASSES KEYWORD ARGUMENTS. A
+ * callee that declares no `**kwargs` must not see them (real Python binds
+ * them to named parameters, which needs a signature this value does not
+ * carry — see the mojo_vararg_call_N comment), so the packed dict is
+ * handed to the vararg path and dropped by the bound-method / bare-fnptr
+ * paths, exactly as the pre-keyword helpers dropped it. */
+static inline int64_t mojo_fnptr_call_kw_0(void *fp, void *kw) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_0(fp, kw);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_0((MojoBoundMethod *)fp);
+    return ((int64_t (*)(void))fp)();
+}
+static inline int64_t mojo_fnptr_call_kw_1(void *fp, void *kw, int64_t a) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_1(fp, kw, a);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_1((MojoBoundMethod *)fp, a);
+    return ((int64_t (*)(int64_t))fp)(a);
+}
+static inline int64_t mojo_fnptr_call_kw_2(void *fp, void *kw, int64_t a, int64_t b) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_2(fp, kw, a, b);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_2((MojoBoundMethod *)fp, a, b);
+    return ((int64_t (*)(int64_t, int64_t))fp)(a, b);
+}
+static inline int64_t mojo_fnptr_call_kw_3(void *fp, void *kw, int64_t a, int64_t b, int64_t c) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_3(fp, kw, a, b, c);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_3((MojoBoundMethod *)fp, a, b, c);
+    return ((int64_t (*)(int64_t, int64_t, int64_t))fp)(a, b, c);
+}
+static inline int64_t mojo_fnptr_call_kw_4(void *fp, void *kw, int64_t a, int64_t b, int64_t c, int64_t d) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_4(fp, kw, a, b, c, d);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_4((MojoBoundMethod *)fp, a, b, c, d);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
+}
+
+static inline int64_t mojo_fnptr_call_kw_5(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_5(fp, kw, _a0, _a1, _a2, _a3, _a4);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_5((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4);
+}
+
+static inline int64_t mojo_fnptr_call_kw_6(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_6(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_6((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4, _a5);
+}
+
+static inline int64_t mojo_fnptr_call_kw_7(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_7(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_7((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4, _a5, _a6);
+}
+
+static inline int64_t mojo_fnptr_call_kw_8(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6, int64_t _a7) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_8(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_8((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+}
+
+
+
+
+
+
+
+
 
 /* Dynamic dispatch through a value that may be EITHER a MojoBoundMethod*
  * or a plain function pointer — the callee identity isn't known
@@ -140,25 +317,125 @@ static inline int64_t mojo_fnptr_call_4(void *fp, int64_t a, int64_t b, int64_t 
  * `self.method` value). A registered bound method re-supplies its
  * receiver via mojo_bound_method_call_N; anything else is a bare fnptr. */
 static inline int64_t mojo_maybe_bound_call_0(void *f) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_0(f, 0);
     if (mojo_is_bound_method(f)) return mojo_bound_method_call_0((MojoBoundMethod *)f);
     return mojo_fnptr_call_0(f);
 }
 static inline int64_t mojo_maybe_bound_call_1(void *f, int64_t a) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_1(f, 0, a);
     if (mojo_is_bound_method(f)) return mojo_bound_method_call_1((MojoBoundMethod *)f, a);
     return mojo_fnptr_call_1(f, a);
 }
 static inline int64_t mojo_maybe_bound_call_2(void *f, int64_t a, int64_t b) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_2(f, 0, a, b);
     if (mojo_is_bound_method(f)) return mojo_bound_method_call_2((MojoBoundMethod *)f, a, b);
     return mojo_fnptr_call_2(f, a, b);
 }
 static inline int64_t mojo_maybe_bound_call_3(void *f, int64_t a, int64_t b, int64_t c) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_3(f, 0, a, b, c);
     if (mojo_is_bound_method(f)) return mojo_bound_method_call_3((MojoBoundMethod *)f, a, b, c);
     return mojo_fnptr_call_3(f, a, b, c);
 }
 static inline int64_t mojo_maybe_bound_call_4(void *f, int64_t a, int64_t b, int64_t c, int64_t d) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_4(f, 0, a, b, c, d);
     if (mojo_is_bound_method(f)) return mojo_bound_method_call_4((MojoBoundMethod *)f, a, b, c, d);
     return mojo_fnptr_call_4(f, a, b, c, d);
 }
+
+static inline int64_t mojo_maybe_bound_call_5(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_5(fp, 0, _a0, _a1, _a2, _a3, _a4);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_5((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4);
+    return mojo_fnptr_call_5(fp, _a0, _a1, _a2, _a3, _a4);
+}
+
+static inline int64_t mojo_maybe_bound_call_6(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_6(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_6((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5);
+    return mojo_fnptr_call_6(fp, _a0, _a1, _a2, _a3, _a4, _a5);
+}
+
+static inline int64_t mojo_maybe_bound_call_7(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_7(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_7((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    return mojo_fnptr_call_7(fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+}
+
+static inline int64_t mojo_maybe_bound_call_8(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6, int64_t _a7) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_8(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_8((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+    return mojo_fnptr_call_8(fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+}
+
+
+
+
+
+
+
+
+
+/* Keyword-argument twin of the mojo_maybe_bound_call_N family, for a local
+ * branch-joined from a variadic lambda and something else that is called
+ * WITH keywords. Same rule as mojo_fnptr_call_kw_N: the packed dict reaches
+ * the vararg path (whose callee declares `**kwargs`) and is dropped by the
+ * bound-method / bare-fnptr paths. */
+static inline int64_t mojo_maybe_bound_call_kw_0(void *f, void *kw) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_0(f, kw);
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_0((MojoBoundMethod *)f);
+    return mojo_fnptr_call_kw_0(f, kw);
+}
+static inline int64_t mojo_maybe_bound_call_kw_1(void *f, void *kw, int64_t a) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_1(f, kw, a);
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_1((MojoBoundMethod *)f, a);
+    return mojo_fnptr_call_kw_1(f, kw, a);
+}
+static inline int64_t mojo_maybe_bound_call_kw_2(void *f, void *kw, int64_t a, int64_t b) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_2(f, kw, a, b);
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_2((MojoBoundMethod *)f, a, b);
+    return mojo_fnptr_call_kw_2(f, kw, a, b);
+}
+static inline int64_t mojo_maybe_bound_call_kw_3(void *f, void *kw, int64_t a, int64_t b, int64_t c) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_3(f, kw, a, b, c);
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_3((MojoBoundMethod *)f, a, b, c);
+    return mojo_fnptr_call_kw_3(f, kw, a, b, c);
+}
+static inline int64_t mojo_maybe_bound_call_kw_4(void *f, void *kw, int64_t a, int64_t b, int64_t c, int64_t d) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_4(f, kw, a, b, c, d);
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_4((MojoBoundMethod *)f, a, b, c, d);
+    return mojo_fnptr_call_kw_4(f, kw, a, b, c, d);
+}
+
+static inline int64_t mojo_maybe_bound_call_kw_5(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_5(fp, kw, _a0, _a1, _a2, _a3, _a4);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_5((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4);
+    return mojo_fnptr_call_kw_5(fp, kw, _a0, _a1, _a2, _a3, _a4);
+}
+
+static inline int64_t mojo_maybe_bound_call_kw_6(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_6(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_6((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5);
+    return mojo_fnptr_call_kw_6(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5);
+}
+
+static inline int64_t mojo_maybe_bound_call_kw_7(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_7(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_7((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    return mojo_fnptr_call_kw_7(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+}
+
+static inline int64_t mojo_maybe_bound_call_kw_8(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6, int64_t _a7) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_8(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_8((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+    return mojo_fnptr_call_kw_8(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+}
+
+
+
+
+
+
+
+
 
 
 /* ── Exception stack (for try/except/raise) ──────────────────────────────
