@@ -594,7 +594,7 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
                              comptime_hook=comptime_hook,
                              dylib_exports=dylib_exports)
     raise FormalBuildError(
-        f"unknown arch {arch!r} (expected one of {ARCHES})")
+        f"unknown arch {arch!r} (expected one of {', '.join(ARCHES)})")
 
 
 def _audit_bound_symbols(external_syms, dylib_syms, where: str,

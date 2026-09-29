@@ -700,12 +700,12 @@ def _trie_insert(root: dict, name: bytes, terminal: bytes) -> None:
     A node is `{"term": bytes | None, "kids": {edge: node}}`, and `edge` is
     the BYTES that follow the parent, so a shared prefix is stored once and
     the symbols that share it become siblings one level down. That is the
-    whole reason this function exists -- see `_export_trie`.
+    whole reason this function exists — see `_export_trie`.
 
     One pass per level and an explicit `break` out of the edge scan rather
     than a `continue`: a `continue` restarts the scan over the node it was
     written for, and the split case has already moved `node`, so the rescan
-    would insert the new symbol's (now empty) remainder into the WRONG node --
+    would insert the new symbol's (now empty) remainder into the WRONG node —
     an empty edge, and a trie dyld walks off the end of. Written as three
     explicit cases because the third one is the bug.
     """
@@ -754,11 +754,12 @@ def _trie_node_size(node: dict, widths: dict) -> int:
     The width is a parameter rather than a measurement because it is the only
     circularity in the layout: an edge's encoded size includes the ULEB of its
     child's offset, and that offset is not known until the sizes are. The
-    widths converge -- they only ever grow, and are bounded by the trie's own
-    size -- which is what `_export_trie`'s loop waits for.
+    widths converge — they only ever grow, and are bounded by the trie's own
+    size — which is what `_export_trie`'s loop waits for.
     """
     term = node["term"] or b""
-    size = 2 + len(term)              # terminalSize, childCount, terminal
+    size = 2 + len(term)              # terminalSize + childCount + the
+    #                                # terminal, in _trie_emit's order
     for edge, kid in node["kids"].items():
         size += len(edge) + 1 + widths[id(kid)]
     return size
@@ -815,22 +816,22 @@ def _trie_emit(node: dict, offsets: dict) -> bytes:
 
 
 def _export_trie(exports: list) -> bytes:
-    """The module\'s export trie, as a real radix trie.
+    """The module's export trie, as a real radix trie.
 
-    The terminal\'s flags word is 0, i.e. EXPORT_SYMBOL_FLAGS_KIND_REGULAR.
+    The terminal's flags word is 0, i.e. EXPORT_SYMBOL_FLAGS_KIND_REGULAR.
     The low two bits of that word are the symbol *kind* (0 = regular,
     1 = thread-local, 2 = absolute), so a nonzero value here does not merely
     look odd: dyld reports every such symbol as "[per-thread]" in
     `dyld_info -exports`, and any consumer that honours the kind (a TLS-aware
-    caller, or dyld\'s own validation) would treat an ordinary function as a
+    caller, or dyld's own validation) would treat an ordinary function as a
     thread-local one.
 
-    **Shared prefixes are split, and that is not an optimisation -- it is the
+    **Shared prefixes are split, and that is not an optimisation — it is the
     format.** This used to be a FLAT trie: every symbol one whole edge off the
     root, which is shorter to write and is wrong as soon as one symbol is a
     prefix of another. dyld narrows a lookup by walking edges, and a flat trie
     puts `_m_version` and `_m_version_info_major` SIBLINGS; dyld matches the
-    first against the second\'s leading bytes, descends into a node with no
+    first against the second's leading bytes, descends into a node with no
     children, and does not go back to try the next edge. The longer symbol is
     then in the file, in the manifest, and unbindable.
 
@@ -846,16 +847,16 @@ def _export_trie(exports: list) -> bytes:
 
     The image built, passed every static check, and died in the loader for a
     function that is right there in the trie. Nothing reported it: the module
-    built, the manifest listed the symbol, this tree\'s own trie reader read
-    it back correctly, and only dyld -- the one reader that implements the
-    format -- disagreed. So the trie is a proper radix trie now, with a
+    built, the manifest listed the symbol, this tree's own trie reader read
+    it back correctly, and only dyld — the one reader that implements the
+    format — disagreed. So the trie is a proper radix trie now, with a
     shared prefix stored once and the two symbols siblings one level down,
     which is what the format has always meant.
     """
     root = {"term": None, "kids": {}}
     for export in sorted(exports, key=lambda e: e["symbol"]):
         # The export table holds Mach-O names; `symbol` is the C identifier
-        # the ABI spells (what an importer\'s bind stream carries, and what
+        # the ABI spells (what an importer's bind stream carries, and what
         # dyld prepends its underscore to). Prepending it here keeps the two
         # conventions from drifting: a trie written with the bare C name
         # exports a symbol nothing can bind, and the program dies in dyld with

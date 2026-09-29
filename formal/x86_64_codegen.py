@@ -4569,8 +4569,12 @@ class X86_64Codegen:
                 f"export: {shown}. A name `doc/ABI.md`'s export rule excludes "
                 f"(a leading `_`, a generic template, an overload, or a C "
                 f"library symbol such as `exit` or `write`) is not advertised, "
-                f"so a module that defines one cannot be called by that name — "
-                f"see bugs/FORMAL_module_attribute_access.md")
+                f"so a module that defines one cannot be called by that name. "
+                f"The exclusion is measured and settled in "
+                f"bugs/FORMAL_known_limits.md 1.1; a module that needs to "
+                f"publish mutable state rather than functions is a different "
+                f"gap, written down in "
+                f"bugs/FORMAL_module_state_no_storage.md")
         return self._dylib_syms.get(name, name)
 
     def _callee_kind(self, name, stack):
