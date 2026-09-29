@@ -6510,13 +6510,18 @@ def struct_field_assigned_type(struct_def, name, decls: dict) -> tuple:
     (`annotation_base_name` and every kind table downstream read it unchanged),
     so nothing after this function has to know there are two sources.
 
-    TWO assignment shapes are read, because the second is ordinary Python and
-    skipping it produces a refusal whose reason is not operating:
-    `self.x = T()` and `self.x, self.y = T(), U()`.  The second is the one
-    `tools/procrun.py` writes (`self.limit, self._chunks, self._size = limit,
-    [], 0`), and reading only the first said "its __init__ does not assign it"
-    about a field the `__init__` plainly assigns — the reader is sent to look
-    for an assignment that is two lines above the one they are looking at.
+    TWO assignment shapes are RECOGNISED, and only one of them is EVIDENCE.
+    `self.x = T()` and `self.x, self.y = T(), U()` are both read, because
+    `tools/procrun.py` writes the second and skipping it says "its __init__ does
+    not assign it" about a field the `__init__` plainly assigns — the reader is
+    sent to look for an assignment that is two lines above the one they are
+    looking at.  The second is not usable as EVIDENCE, and the reason is
+    measured rather than stylistic: a tuple store to a FIELD is refused by name
+    on x86-64 and ACCEPTED-AND-DROPPED on arm64, where
+    `self.p, self.q, self.r = 3, 4, 7` in a `__init__` builds, runs, and
+    computes 0.  So a type read out of a store the emitter does not perform
+    would be a type of a slot nothing was ever written to.  It is named in the
+    refusal instead, which is the fact a reader needs.
     """
     init = next((m for m in struct_methods(struct_def)
                  if m.name == "__init__"), None)
@@ -6528,21 +6533,28 @@ def struct_field_assigned_type(struct_def, name, decls: dict) -> tuple:
     for node in iter_nodes(getattr(init, "body", None)):
         if not isinstance(node, (F.AssignStmt, F.AugAssignStmt)):
             continue
-        value = _assigned_value_for(node, name, receivers)
-        if value is _NOT_THIS_FIELD:
+        how, value = _assigned_value_for(node, name, receivers)
+        if how == "elsewhere":
             continue
-        if value is None:
+        if how == "augmented":
             untyped = (f"__init__ also does an augmented assignment to "
                        f"self.{name}, which is a read and a write and so says "
                        f"nothing about the type")
-            continue
-        made = _constructed_struct_name(value, decls)
-        if made is None:
-            untyped = (f"__init__ assigns `self.{name} = "
-                       f"{expr_spelling(value)}`, which is not a construction "
-                       f"of a struct declared in this module")
-        elif made not in names:
-            names.append(made)
+        elif how == "tuple":
+            untyped = (f"__init__ assigns `self.{name} = {expr_spelling(value)}` "
+                       f"as one element of a tuple target, and a tuple store to "
+                       f"a FIELD is not a store this path performs — x86-64 "
+                       f"refuses it by name and arm64 accepts it and leaves the "
+                       f"slot as it was — so what the slot holds is not settled "
+                       f"by that line")
+        else:
+            made = _constructed_struct_name(value, decls)
+            if made is None:
+                untyped = (f"__init__ assigns `self.{name} = "
+                           f"{expr_spelling(value)}`, which is not a "
+                           f"construction of a struct declared in this module")
+            elif made not in names:
+                names.append(made)
     if not names:
         return (None, None, untyped or
                 f"{struct_def.name} declares {name!r} nowhere and its __init__ "
@@ -6555,43 +6567,43 @@ def struct_field_assigned_type(struct_def, name, decls: dict) -> tuple:
     return (names[0], names[0], None)
 
 
-# The three answers `_assigned_value_for` gives: this assignment does not touch
-# the field, it is a plain store, and it is an augmented one (a read AND a
-# write, so it is evidence of nothing).
-_NOT_THIS_FIELD = object()
+# The four shapes `_assigned_value_for` reports, and why the tuple one is not
+# evidence is on `struct_field_assigned_type`'s own docstring.
+_STORE_ELSEWHERE = "elsewhere"
+_STORE_PLAIN = "plain"
+_STORE_AUGMENTED = "augmented"
+_STORE_TUPLE = "tuple"
 
 
 def _assigned_value_for(node, name, receivers):
-    """The value `node` stores into `self.<name>`, or `_NOT_THIS_FIELD` / None.
+    """`(how, value)` for what `node` stores into `self.<name>`.
 
-    None means the node DOES write the field and the value is not a name this
-    can hand back — which today is only the augmented assignment, since its
-    right-hand side is a compound expression rather than the field's new value.
+    `how` is one of the four `_STORE_*` names; `value` is the right-hand side
+    for the two shapes that have one.  A starred target (`self.a, *rest = …`)
+    has no positional answer and a target that pairs a member with something
+    else is not a per-field store, so both come back `_STORE_ELSEWHERE` and the
+    field stays untyped — the absent answer, in the same direction.
     """
     target = getattr(node, "target", None)
     if isinstance(target, F.MemberExpr):
         if not (isinstance(target.obj, F.IdentExpr)
                 and target.obj.name in receivers and target.member == name):
-            return _NOT_THIS_FIELD
-        return None if isinstance(node, F.AugAssignStmt) \
-            else getattr(node, "value", None)
-    # `self.a, self.b = X(), Y()` — positionally paired, and only when the two
-    # sides actually pair up.  A starred target (`self.a, *rest = ...`) has no
-    # positional answer, and one that pairs a member with a nested attribute
-    # (`self.a, b.c = X(), Y()`) is not a per-field store either; both fall to
-    # `_NOT_THIS_FIELD` and the field stays untyped, which is the absent answer.
+            return (_STORE_ELSEWHERE, None)
+        return ((_STORE_AUGMENTED, None) if isinstance(node, F.AugAssignStmt)
+                else (_STORE_PLAIN, getattr(node, "value", None)))
     if isinstance(target, (F.TupleExpr, F.ListExpr)):
         value = getattr(node, "value", None)
-        if not isinstance(value, (F.TupleExpr, F.ListExpr)):
-            return _NOT_THIS_FIELD
+        if (isinstance(node, F.AugAssignStmt)
+                or not isinstance(value, (F.TupleExpr, F.ListExpr))):
+            return (_STORE_ELSEWHERE, None)
         targets, values = list(target.elements or []), list(value.elements or [])
-        if len(targets) != len(values) or isinstance(node, F.AugAssignStmt):
-            return _NOT_THIS_FIELD
+        if len(targets) != len(values):
+            return (_STORE_ELSEWHERE, None)
         for i, elt in enumerate(targets):
             if (isinstance(elt, F.MemberExpr) and isinstance(elt.obj, F.IdentExpr)
                     and elt.obj.name in receivers and elt.member == name):
-                return values[i]
-    return _NOT_THIS_FIELD
+                return (_STORE_TUPLE, values[i])
+    return (_STORE_ELSEWHERE, None)
 
 
 def _constructed_struct_name(value, decls: dict):
