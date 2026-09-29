@@ -539,10 +539,13 @@ def test_the_sweep_calls_a_sys_refusal_a_codegen_finding(tmp, _shared):
           f"a `sys.argv` refusal is classified {cls!r}; with sys.mojo in the "
           f"tree it is a codegen finding, not a fact about the target")
     # And a module with NO source still classifies as the host import it is —
-    # the narrowing must not reach past the case that needed it.
+    # the narrowing must not reach past the case that needed it. `math` is the
+    # example now: `os`, which was this check's example when it was written,
+    # has source in the tree for the same reason `sys` has, so the resolver
+    # finds it and the narrowing applies to it as it must.
     host_cls, _ = S.classify(
-        False, detail.replace("'sys'", "'os'"),
-        source="import os\n", path=os.path.join(HERE, "t_argv.mojo"))
+        False, detail.replace("'sys'", "'math'"),
+        source="import math\n", path=os.path.join(HERE, "t_argv.mojo"))
     check(host_cls == S.CLASS_HOST,
           f"a module with no source is classified {host_cls!r}; the "
           f"resolver-backed test must narrow only the modules that HAVE one")

@@ -102,17 +102,32 @@ HOST_MODELLED = frozenset((
     # A libSystem/libc facility: getcwd, stat, clock_gettime, regcomp,
     # arc4random_buf, CommonCrypto for hashlib, the POSIX file calls.
     #
-    # `sys` was on this line and is not any more: `<repo>/sys.mojo` is a real
-    # Mojo source for it, and `resolve_module_path`'s FIRST pass finds that
-    # before this set is ever consulted, so the entry had stopped describing
-    # anything the build does. What the module can and cannot answer is written
-    # down at the top of the file itself, and the part it cannot — `argv`,
-    # `path`, the stream objects — is one missing capability rather than nine
-    # missing names, so it is filed once, as a bug, instead of here.
-    "os", "errno", "stat", "platform", "time", "select", "io",
+    # A module on this list is a CLAIM: CPython has it, this tree can
+    # eventually compile it. The claim stops being true the moment a Mojo
+    # source for it exists here, because `resolve_module_path`'s FIRST pass
+    # finds that source before this set is ever consulted — an entry left
+    # behind would refuse a file AFTER the module that answers it is sitting
+    # in the tree, which is a false statement rather than a conservative one.
+    # So a name LEAVES here by being WRITTEN, and each says in one line what
+    # it is written in and what it still cannot do; the omissions are bug
+    # docs, stated at the function that lacks the capability, not here.
+    #
+    #   `sys`  — `<repo>/sys.mojo`, checked by `test_formal_sys.py`. What it
+    #     cannot answer is written at the top of the file itself: `argv`,
+    #     `path` and the stream objects are ONE missing capability (an
+    #     argument vector with no place to put it, and streams), not nine
+    #     missing names, so they are filed once, as a bug.
+    #   `os`  — `os/__init__.mojo`, `os/path/__init__.mojo` (CPython's
+    #     posixpath) and `os/_syscalls.mojo` (every libSystem call it makes,
+    #     once), all three built and RUN by `test_formal_os.py`: 436 path
+    #     answers against CPython's own, 75 filesystem operations against the
+    #     real filesystem. `listdir` and `walk` need a run-time-length
+    #     sequence, which a list on this path cannot be, and `environ` needs
+    #     a `char **` walk; both are bug docs rather than approximations.
+    "errno", "stat", "platform", "time", "select", "io",
     "pathlib", "glob", "fnmatch", "hashlib", "secrets", "uuid",
     # Pure computation over representable values: string and text handling,
-    # numeric containers, pattern matching, byte packing, data structures.
+    # numeric containers, pattern matching, data structures.
     "json", "re", "struct", "math", "random", "decimal", "fractions",
     "numbers", "array", "operator", "functools", "itertools", "collections",
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
