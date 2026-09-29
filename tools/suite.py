@@ -340,6 +340,14 @@ test('runtimediff', [PY, 'test_runtime_diff.py'], cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'test_runtime_diff.py'],
      desc='interpreter vs JIT: identical stdout and exit code')
+test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True,
+     extra=GIMPLE_SOURCES + ['test_metal_codegen.py',
+                             'mojo/middle/metal_ops.py',
+                             'mojo/backend_gimple/device_select.py',
+                             'mojo/backend_gimple/emit_metal.py'],
+     desc='Metal codegen: op tables, device-region selection, MSL emission, '
+          'and the generated MSL compiled by Apple\'s real compiler and run '
+          'on the GPU against a CPU reference')
 test('linkmode', [PY, 'test_link_mode.py'], cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'driver.py', 'test_link_mode.py'],
