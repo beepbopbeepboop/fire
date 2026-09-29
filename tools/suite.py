@@ -307,6 +307,25 @@ test('modcache', [PY, 'test_module_cache.py'], cache=True,
 test('ptrreg', [PY, 'test_ptr_registry.py'], cache=True,
      extra=['test_ptr_registry.py', RUNTIME_SRC, RUNTIME_HDR],
      desc='runtime unit test: pointer-registry table + inline-buffer lists (-O0/-O2/ASan)')
+# The two instruments from the previous round, which existed and ran by nothing
+# for the same reason until agent [5]'s estate check reported them. The taxonomy
+# is what makes the coverage number honest, and `comptime` parity pins the one
+# cell where it is silently 0 — an instrument nothing runs is a claim.
+test('refusal-taxonomy', [PY, 'test_refusal_taxonomy.py'],
+     deps=['preflight'],
+     desc='the sweep\'s refusal families stay a taxonomy, and stay out of "other"')
+# ~275 s, because it builds and runs real programs on both paths. `proofs`, not
+# `check`: the everyday inner loop should not pay for it every time.
+test('comptime-parity', [PY, 'test_comptime_parity.py'],
+     deps=['preflight'],
+     desc='comptime measured on both paths, including the one silent cell')
+# [4]'s returned-frame layout, which existed and ran by NOTHING until agent
+# [5]'s test-estate check reported it.  That is the whole argument for that
+# check in one line: the test was written, it passes 10/10, and a suite with
+# no inventory of test files could not tell you it was not running.
+test('returned-frame-layout', [PY, 'test_returned_frame_layout.py'],
+     deps=['preflight'],
+     desc="a frame that outlives its creator has a place to live, or is refused by name")
 test('rthdrscan', [PY, 'test_runtime_header_scan.py'], cache=True,
      extra=['test_runtime_header_scan.py', 'reflect.py', RUNTIME_SRC,
             RUNTIME_HDR, 'runtime/fire_sqlite3.h', 'runtime/fire_zlib.h',
@@ -412,8 +431,85 @@ test('interporacle', [PY, 'test_interp_oracle.py'], cache=True,
 # toolchain-free, `expect`-free structural check turns the next one into a
 # `check` failure. See test_examples_parse.py's docstring.
 test('examples-parse', [PY, 'test_examples_parse.py'], cache=True,
-     extra=['test_examples_parse.py', 'fire_compiler.py'],
+     # The 45 example files are hashed as a DIRECTORY, not as 45 paths.
+     # `fire_compiler.py` is redundant here — it is already in
+     # cas._COMPILER_SOURCES, so cas.compiler_fingerprint() covers it — and it
+     # was standing in for the real subject. `checked_run.py` hashes a
+     # directory's whole recursive contents by relative path in sorted order,
+     # so the 46th example is covered the day it is added and a rename moves
+     # the key. Measured by [5]: this key read 48 repo files and 0 under
+     # formal/examples/, so a SyntaxError in any of the 45 could not invalidate
+     # it and a recorded PASS replayed. See bugs/UNTESTED.md 3.1.
+     extra=['test_examples_parse.py', 'formal/examples'],
      desc='every formal/examples/*.mojo parses; decorator arg shapes distinct')
+
+
+# ── the test estate, inventoried by [5] in bugs/UNTESTED.md ────────────────
+#
+# 50 test files were named by no registered spec, and 21 of those exited
+# non-zero. Measured per file here rather than read out of a bug doc, because
+# the two lists disagree: `test_x86_64_containers.py` appears in [5]'s Tier 1
+# ("mostly green") AND its Tier 2, and it is red. Registering is still the
+# right move in both directions -- a declared red is a report and an unrun red
+# is silence -- and `expect=` is how a red is declared rather than silenced.
+# The anti-rot then FAILS any of these that starts passing, which is the
+# signal worth having.
+test('x86-examples', [PY, 'test_x86_64_examples.py'],
+     deps=['preflight'],
+     desc='the x86-64 examples build, run and agree with the source')
+test('arm64-encoders', [PY, 'test_arm64_encoders.py'],
+     deps=['preflight'],
+     desc='every arm64 encoder: the immediate, the shifted, the REX forms')
+test('x86-decode', [PY, 'test_x86_64_decode.py'],
+     deps=['preflight'],
+     desc='the x86-64 decoder, byte at a time, against hand-written encodings')
+test('ownership-destruct', [PY, 'test_ownership_destruct.py'],
+     deps=['preflight'],
+     desc='an owned value is destructed exactly once')
+test('x86-containers', [PY, 'test_x86_64_containers.py'],
+     deps=['preflight'],
+     expect='bugs/CODEGEN_nested_comprehension.md — red on nested-comprehension',
+     desc='bugs/CODEGEN_nested_comprehension.md — red on nested-comprehension')
+test('mutable-async-capture', [PY, 'test_mutable_async_capture.py'],
+     deps=['preflight'],
+     expect='async capture of a mutable binding — behaviour gap, not registered before this',
+     desc='async capture of a mutable binding — behaviour gap, not registered before this')
+test('transitive-closure-capture', [PY, 'test_transitive_closure_capture.py'],
+     deps=['preflight'],
+     expect='closure capture through a transitive import — behaviour gap',
+     desc='closure capture through a transitive import — behaviour gap')
+test('gimple-async-runner', [PY, 'test_gimple_async_runner.py'],
+     deps=['preflight'],
+     expect='36 failing: the gimple async runner, an area with no gate coverage until now',
+     desc='36 failing: the gimple async runner, an area with no gate coverage until now')
+test('coro-future-await', [PY, 'test_coro_future_await.py'],
+     deps=['preflight'],
+     expect='17 failing: `await` on a Future in the coroutine runtime',
+     desc='17 failing: `await` on a Future in the coroutine runtime')
+test('async-void-return', [PY, 'test_async_void_return.py'],
+     deps=['preflight'],
+     expect='3 failing: an async function with no return value',
+     desc='3 failing: an async function with no return value')
+test('taskgroup', [PY, 'test_taskgroup.py'],
+     deps=['preflight'],
+     expect='3 failing: TaskGroup',
+     desc='3 failing: TaskGroup')
+test('async-with-lock-guard', [PY, 'test_async_with_lock_guard.py'],
+     deps=['preflight'],
+     expect='2 failing: `async with` holding a lock guard across a suspension',
+     desc='2 failing: `async with` holding a lock guard across a suspension')
+test('nested-async-generic', [PY, 'test_nested_async_generic.py'],
+     deps=['preflight'],
+     expect='2 failing: a generic inside a nested async',
+     desc='2 failing: a generic inside a nested async')
+test('coro-detached-async', [PY, 'test_coro_detached_async.py'],
+     deps=['preflight'],
+     expect='2 failing: a detached coroutine task',
+     desc='2 failing: a detached coroutine task')
+test('async-runtime-scaffold', [PY, 'test_async_runtime_scaffold.py'],
+     deps=['preflight'],
+     expect='1 of 2: toolchain/runtime proof for step A of compiled-path async/await',
+     desc='1 of 2: toolchain/runtime proof for step A of compiled-path async/await')
 
 test('preflight', [PY, '-c',
                    'import fire_compiler, gimple_codegen; '
@@ -746,7 +842,8 @@ BUCKETS = {
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'interporacle', 'examples-parse',
               'rthdrscan', 'ptrreg', 'runtimedylib', 'sqliteruntime',
-              'formal-sweep-truth', 'formal-link-accounting', 'silentnoop'],
+              'formal-sweep-truth', 'formal-link-accounting', 'silentnoop',
+              'refusal-taxonomy', 'returned-frame-layout'],
 
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps
@@ -777,7 +874,9 @@ BUCKETS = {
     'proofs': ['formal', 'formal-call-proofgen',
                'formal-run', 'formal-dylib', 'formal-imports',
                'formal-sweep', 'formal-sweep-truth',
-               'formal-link-accounting', 'formal-runtime-link', 'formal-x86',
+               'formal-link-accounting', 'formal-runtime-link',
+               'refusal-taxonomy', 'comptime-parity',
+               'returned-frame-layout', 'formal-x86',
                'formal-x86-endtoend', 'formal-x86-model'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model'],
     'coroutine': ['coro', 'coro-nested-capture'],
