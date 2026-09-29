@@ -390,7 +390,7 @@ Unchanged and still unmeasured. [3]'s §5 notes they did not touch
 walker only. The measurement in §5.0 has not been repeated for x86, so "the
 same argument applies" is a hypothesis, not a finding.
 
-### 5.5 The emitter's `hreg` did not typecheck — FIXED (unverified by Lean)
+### 5.5 The emitter's `hreg` did not typecheck — the unfold was right, but see 5.7
 
 The emitted proof failed at `hreg`:
 
@@ -418,13 +418,61 @@ counterexamples)"*. Every other value site in the file uses the same
 place that emitted a raw `intro n; bv_decide` and so missed it. So the fix is
 "apply the file's own lesson", not a new tactic.
 
-**UNVERIFIED.** FORMAL.md §11.3 puts the gate with the integrator and I have
-not run Lean on the result; the emitted *text* is confirmed to carry the
-unfolding at all three sites. A `simp only` with ~30 entries may also need
-`+decide` or may be insufficient for the memory round trip — the value sites
-that work use `+decide only`, and this one uses plain `only` because nothing
-here should pull in a `Decidable` walk. That is the first thing to check if it
-still fails.
+**MEASURED SINCE — and the verdict is "right idea, not the whole story."**
+The unfold does clear `bv_decide`'s opaque abstraction, which was the symptom
+described here. But the file still fails, for a *different* reason one level
+down, and it is not a budget problem. See **§5.7**, which supersedes the
+"try `+decide`, then suspect the memory round trip" advice this paragraph used
+to give — that guess was wrong, and the real cause is the `fuel_lean` change.
+
+### 5.7 MEASURED: the `fuel_lean` change is what broke the walk, and it is not a budget problem
+
+[3]'s `IR-3-to-2-dylib-contract-emitter.md` reports three failures and says of
+`hreg`: *"First thing to try: raise `maxHeartbeats` and measure."* **I measured,
+and that is not where the time or the failure is.** Truncating the generated
+file just past `hx30` — so Lean checks the walk and `hreg` and nothing else —
+gives:
+
+    11.4s, and the error is at line 1806, which is INSIDE the walk.
+
+So `hreg` costs about eleven seconds, and raising the budget to 1e9 does not
+help: the whole file then runs past an hour without finishing. This is an
+arithmetic problem, not a budget one.
+
+**The cause is the `exportFuel` change, and it is a real interaction between
+two correct-looking edits.** `fuel_lean` replaced the emitted fuel *literal*
+`100000` with the library *function* `DylibExport.exportFuel dylib_image n` so
+the two could not drift. Good. But the walk's own step-accounting goals are
+`omega` calls, and `omega` cannot unfold a library function:
+
+    1806:  15 + (exportFuel dylib_image n - 15) = exportFuel dylib_image n
+
+which is true for any fuel `≥ 15` and provable the moment the definition is
+visible. Adding `simp [DylibExport.exportFuel]; omega` **fixes that line** —
+verified, the error moves on.
+
+The next one is the interesting one:
+
+    1809:  arm64_go_exit_hit … (exportFuel dylib_image n - 15) (by omega)
+
+which needs the fuel to be **large**, and no numeric lower bound is in scope —
+because the thing that used to *be* the number, and that the generator's
+`fuel < _TOTAL` guard checked on the python side, is now an opaque term in the
+Lean text. The guard still runs; its *result* is simply never emitted.
+
+**So the fix is two things, and neither is a heartbeat:**
+
+  1. Unfold `DylibExport.exportFuel` in the walk's fuel arithmetic — the same
+     "make it concrete rather than opaque" lesson as §5.5, one level down.
+  2. Emit the base bound the guard computed, as a Lean hypothesis:
+     `have : (200000 : Nat) ≤ DylibExport.exportFuel dylib_image n`. The
+     generator already knows the base; it checks it and then drops it.
+
+The deeper lesson is the one worth keeping: **replacing a literal with a
+function removes it from every tactic that could see its value.** `omega` and
+`native_decide` both work on literals. The no-drift property was worth having,
+but it has to be paid for by re-supplying the bounds the literal used to carry,
+or `fuel_lean` trades a silent-drift bug for an unsatisfiable-arithmetic bug.
 
 ### 5.6 The golden file — RESOLVED, nothing to escalate
 
@@ -447,7 +495,7 @@ command, take more than you meant to. The file was recoverable throughout at
 `c967b5d`, and the only window of real risk was after `818288e` and before
 `d9443ed`, when the golden was gone and the emitter was still uncommitted.
 
-### 5.7 A process note, because it cost real work this session
+### 5.8 A process note, because it cost real work this session
 
 My 304-line generator edit was reverted out of the working tree by a
 concurrent agent between two commands, with no commit and no message. Nothing
