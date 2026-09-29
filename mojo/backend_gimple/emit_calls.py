@@ -5760,7 +5760,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             return 'int64_t', gen._call_expr('int64_t', 'mojo_dict_get_bytes_int',
                                              [('MojoDict *', ov), ('MojoBytes *', iv)])
         # Ensure index is char * for dict subscript access (all dict keys are strings in runtime)
-        idx_type, iv = gen._char_to_cstr(idx_type, iv, True)
+        idx_type, iv = gen._char_to_cstr(idx_type, iv, True, True)
         val_ctype = gen._dict_val_of(ov)
         if val_ctype == 'double':
             t = gen._call_expr('double', 'mojo_dict_get_double', [('MojoDict *', ov), (idx_type, iv)])
@@ -5829,7 +5829,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             if ov in gen._dict_val_types:
                 gen._dict_val_types[dp] = gen._dict_val_types[ov]
             # Ensure index is char * for dict access (all dict keys are strings in runtime)
-            idx_type_for_dict, idx_for_dict = gen._char_to_cstr(idx_type, iv, True)
+            idx_type_for_dict, idx_for_dict = gen._char_to_cstr(idx_type, iv, True, True)
             val_ctype = gen._dict_val_of(dp)
             if val_ctype == 'double':
                 t = gen._call_expr('double', 'mojo_dict_get_double', [('MojoDict *', dp), (idx_type_for_dict, idx_for_dict)])

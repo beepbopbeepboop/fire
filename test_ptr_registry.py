@@ -8,6 +8,8 @@ runtime is built on (doc/MEMORY.html sections 10 and 3.A):
     into a dedicated open-addressing table with backward-shift deletion; this
     checks it against a reference model, including forced collisions and the
     LIFO add/remove of ONE address that a stack-homed container produces.
+  * integer dict keys: canonical-decimal detection, int/string equivalence in both directions, strings that only
+    look numeric staying separate, bytes keys staying separate, the `_kw` entry points against a reference model;
   * the Int-key path's fast itoa + block pool and the dict's resize (moves keys, keeps
     insertion order), which the Int-keyed dict benchmark depends on;
   * MojoList's 4-slot inline buffer: growth across the boundary, a stack
@@ -123,10 +125,89 @@ static void test_dict_and_itoa(void) {
     mojo_dict_free(d);
 }
 
+static void test_dict_int_keys(void) {
+    /* Which strings are canonical integers (and so live in integer slots). */
+    struct { const char *s; int ok; long long v; } tab[] = {
+        {"0",1,0},{"5",1,5},{"-12",1,-12},{"9223372036854775807",1,9223372036854775807LL},
+        {"-9223372036854775808",1,(long long)(-9223372036854775807LL-1)},
+        {"05",0,0},{"+5",0,0},{"-0",0,0},{"",0,0},{"-",0,0},{"5a",0,0},{" 5",0,0},{"5 ",0,0},
+        {"9223372036854775808",0,0},{"-9223372036854775809",0,0},{"12345678901234567890",0,0},
+        {"00",0,0},{"1.5",0,0},{"0x10",0,0},
+    };
+    for (unsigned i = 0; i < sizeof tab / sizeof *tab; i++) {
+        int64_t v = 0; int ok = _canon_int(tab[i].s, &v);
+        assert(ok == tab[i].ok);
+        if (ok) assert(v == tab[i].v);
+    }
+    /* int and string spellings of a key are ONE entry, in both directions. */
+    MojoDict *d = mojo_dict_new();
+    mojo_dict_set_int_kw(d, 5, 50);
+    assert(mojo_dict_get_int(d, "5") == 50 && mojo_dict_contains(d, "5"));
+    mojo_dict_set_int(d, "7", 70);
+    assert(mojo_dict_get_int_kw(d, 7) == 70 && mojo_dict_contains_kw(d, 7));
+    mojo_dict_set_int(d, "5", 51);                       /* overwrites, does not add */
+    assert(d->used == 2 && mojo_dict_get_int_kw(d, 5) == 51);
+    /* strings that merely LOOK numeric are their own keys, distinct from the int */
+    mojo_dict_set_int(d, "007", 1); mojo_dict_set_int(d, "+7", 2); mojo_dict_set_int(d, "-0", 3);
+    assert(d->used == 5);
+    assert(mojo_dict_get_int(d, "007") == 1 && mojo_dict_get_int(d, "+7") == 2 && mojo_dict_get_int(d, "-0") == 3);
+    assert(mojo_dict_get_int_kw(d, 7) == 70 && !mojo_dict_contains_kw(d, 0) && !mojo_dict_contains_kw(d, 6));
+    /* a boxed string word goes to the string path */
+    static char abc[] = "abc";
+    mojo_dict_set_int_kw(d, (int64_t)(intptr_t)abc, 99);
+    assert(mojo_dict_get_int(d, "abc") == 99 && mojo_dict_get_int_kw(d, (int64_t)(intptr_t)abc) == 99);
+    /* bytes keys stay their own domain even when their bytes spell an integer */
+    MojoBytes *b5 = mojo_bytes_from_cstr("5");
+    mojo_dict_set_bytes_int(d, b5, 555);
+    assert(mojo_dict_get_bytes_int(d, b5) == 555 && mojo_dict_get_int_kw(d, 5) == 51);
+    /* iteration: integer keys come back as their decimal strings, in insertion order */
+    MojoList *keys = mojo_dict_keys(d);
+    const char *want[] = {"5", "7", "007", "+7", "-0", "abc", "5"};
+    assert(keys->len == 7);
+    for (int i = 0; i < 7; i++) assert(strcmp(mojo_list_get_str(keys, i), want[i]) == 0);
+    mojo_list_free(keys);
+    /* pop by int and by string; the rest survive, order kept */
+    assert(mojo_dict_pop_int_kw(d, 5) == 51 && !mojo_dict_contains(d, "5") && !mojo_dict_contains_kw(d, 5));
+    assert(mojo_dict_pop_int(d, "7") == 70 && !mojo_dict_contains_kw(d, 7));
+    assert(mojo_dict_pop_int_kw(d, 12345) == 0);           /* absent */
+    assert(mojo_dict_get_int(d, "007") == 1 && mojo_dict_get_bytes_int(d, b5) == 555 && d->used == 4);
+    mojo_dict_free(d);
+
+    /* against a reference model: set/get/contains/pop/setdefault, negatives and extremes */
+    enum { M = 3000 };
+    static int64_t val[M]; static int present[M];
+    int64_t keyv[M];
+    for (int i = 0; i < M; i++) keyv[i] = (i % 7 == 0) ? -(int64_t)i * 1000003
+                                       : (i % 11 == 0) ? (int64_t)i * 4294967311LL : (int64_t)i;
+    keyv[1] = INT64_MAX; keyv[2] = INT64_MIN + 1; keyv[3] = 0;
+    /* the word test: keys that look like pointers would be read as strings, so keep them out of
+     * the [2^31, 2^47) window the boxed-string test claims (a documented, pre-existing limit) */
+    for (int i = 0; i < M; i++) {
+        uint64_t u = (uint64_t)keyv[i];
+        if (u >= 0x80000000ULL && u < 0x0000800000000000ULL) keyv[i] = -(int64_t)i - 1;
+    }
+    srand(777);
+    MojoDict *m = mojo_dict_new();
+    for (int round = 0; round < 400000; round++) {
+        int i = rand() % M; int op = rand() % 5;
+        if (op == 0) { mojo_dict_set_int_kw(m, keyv[i], round); val[i] = round; present[i] = 1; }
+        else if (op == 1) { int64_t r = mojo_dict_pop_int_kw(m, keyv[i]); assert(r == (present[i] ? val[i] : 0)); present[i] = 0; }
+        else if (op == 2) { assert(mojo_dict_contains_kw(m, keyv[i]) == present[i]); }
+        else if (op == 3) { int64_t r = mojo_dict_setdefault_int_kw(m, keyv[i], 42);
+                            if (!present[i]) { val[i] = 42; present[i] = 1; assert(r == 42); } else assert(r == val[i]); }
+        else { assert(mojo_dict_get_int_kw(m, keyv[i]) == (present[i] ? val[i] : 0)); }
+    }
+    int64_t live = 0;
+    for (int i = 0; i < M; i++) { assert(mojo_dict_contains_kw(m, keyv[i]) == present[i]); live += present[i]; }
+    assert(m->used == live);
+    mojo_dict_free(m);
+}
+
 int main(void) {
     test_ptrreg();
     test_list_inline();
     test_dict_and_itoa();
+    test_dict_int_keys();
     printf("ok\n");
     return 0;
 }

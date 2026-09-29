@@ -150,6 +150,15 @@ decorated, overloaded, imported-name and recursive callees are refused, and dept
 <code>__init__</code> must not retain <code>self</code>; a bound method taken as a value (<code>g = p.total</code>) captures <code>self</code> and is an escape. A struct-typed name is freed at an exit only if it also passed the declaration gate, never merely because it is a candidate.
 Bindings are pre-scanned so a use lexically before the binding (in a loop) is still judged as a struct use.</p>
 
+<p><strong>String locals.</strong> A local bound to a provably <em>fresh</em> string is owned and freed with <code>free</code> (cleanup kind <code>MOJO_CLEANUP_PTR</code>). Freshness is <em>earned</em>, not assumed:
+<code>_FRESH_STRING_RETURNS</code> holds the 10 runtime functions (<code>mojo_str_cat</code>, <code>mojo_str_from_int</code>, <code>mojo_char_to_str</code>, <code>mojo_cstr_slice</code>/<code>repeat</code>/<code>reverse</code>, <code>mojo_repr_str</code>, <code>mojo_hex</code>/<code>oct</code>/<code>bin</code>) that a mechanical pass over
+all 92 <code>char *</code>-returning functions found to allocate on <em>every</em> return path; <code>upper</code>, <code>lower</code>, <code>strip</code>, <code>replace</code>, <code>join</code>, <code>expandtabs</code>, the padders and <code>repr_float</code> failed it (they return their own argument, or a static <code>""</code>/<code>"nan"</code>) and a
+<code>free</code> of either would crash. Strings needed three rules containers did not:
+(1) <code>str</code> is off the non-retaining builtin list (for a string it is the identity: <code>x = str(s)</code> lowers to <code>x = s</code>);
+(2) a method call on the string is allowed only where its result is consumed on the spot (<code>ownership_destruct.receiver_results_consumed</code>: a bare statement, a <code>len</code>/<code>print</code>/<code>bool</code> argument, a read-only operator operand, a condition), because many string methods return their receiver and <code>t = s.strip()</code> would alias it;
+(3) reads that only look at the value are not escapes for a non-struct name: the left operand of <code>+ * % == != &lt; &gt; &lt;= &gt;=</code>, a right operand after a string literal, <code>not s</code>, an <code>if</code>/<code>while</code>/ternary condition. Never <code>and</code>/<code>or</code> (the result <em>is</em> an operand), never a right operand after an identifier (the left one may be a user type whose <code>__add__</code> keeps it), never a struct.
+Both aliasing rules are mutation-tested: with either removed, the negative test's stored strings read as freed memory under <code>MallocScribble</code> and its comparisons fail.</p>
+
 <h3>C. Transient temporaries (owned by the expression that created them)</h3>
 <p>A heap value that one lowering creates, one runtime call consumes, and nothing else can name.
 The creator frees it immediately after the consumer. This is the class the leak belonged to; §4.</p>
@@ -193,6 +202,8 @@ void  mojo_cstr_or_int_release(int64_t orig, char *s); /* frees s iff s != (char
   dict-subclass <code>__missing__</code> path (the key is passed to user code that may keep it), the dict
   comprehension (it emits its set call as a raw string, not via <code>_emit_call</code>), and
   <code>list.insert</code> on a <code>str</code> list (the list stores the pointer).</li>
+<li><strong>Superseded for dict operations (§10.4):</strong> a dict get/set/<code>in</code>/<code>pop</code>/<code>setdefault</code> whose key is an untracked <code>int64_t</code> no longer builds this string at all;
+  it passes the raw word to a <code>_kw</code> entry point. The conversion and release described here remain for string comparisons and as the fallback when a placeholder reaches a function with no <code>_kw</code> twin.</li>
 <li><strong>Failure mode:</strong> a transient key whose consuming call raises leaks one small string
   (the release is on the fall-through path only). Freeing a wrong pointer is not reachable: the entry only
   exists for a heap conversion this same site made.</li>
@@ -226,9 +237,9 @@ after the last two fixes.</p>
 <tr><td><code>var p = Pt(i, 2)</code> (struct)</td><td class="ok">0</td><td>an owned struct instance, freed at scope exit (§3.B); was 28</td></tr>
 <tr><td><code>var m = [[1, 2], [i]]</code> (nested literal)</td><td class="leak">212</td><td>the inner lists have no owner (§7)</td></tr>
 <tr><td><code>var f = lambda x: x + i</code></td><td class="leak">74</td><td>closure env + bound method never freed (§7; <code>bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md</code>)</td></tr>
-<tr><td><code>String.split(" ")</code></td><td class="leak">48</td><td>the result list is freed; its three strings are not</td></tr>
-<tr><td><code>String + String</code>, <code>String(i)</code>, <code>.upper()</code>, slice, callee returning <code>String</code></td><td class="leak">~6</td><td>the one string bound to a local (§7)</td></tr>
-<tr><td><code>"n=" + String(i)</code></td><td class="leak">28</td><td>result string + a kept decimal</td></tr>
+<tr><td><code>var s = String("n=") + String(i)</code>, <code>String(i)</code>, <code>"n=" + String(i) + "!"</code>, a slice</td><td class="ok">0</td><td>a string local owned because the value is a provably fresh <code>mojo_str_cat</code>/<code>mojo_str_from_int</code>/<code>mojo_cstr_slice</code> result (§3.B); was 6&ndash;28</td></tr>
+<tr><td><code>String("abc").upper()</code>, callee returning <code>String</code></td><td class="leak">~6</td><td><code>upper</code> may return its own argument, so its result is not provably fresh and is not owned (§7.1)</td></tr>
+<tr><td><code>String.split(" ")</code></td><td class="leak">48</td><td>the result list is freed; the strings inside it are not</td></tr>
 </table>
 <div class="note">
 <code>String.format</code> measures flat, but the probe did not confirm that it exercises the f-string lowering; treat that row as
@@ -272,15 +283,16 @@ the runtime built at <code>-O2</code>. What is left, most valuable first:</p>
 <ol>
 <li><strong>Containers nested inside a literal</strong> (<code>[[1, 2], [i]]</code>, 212 B/iter). The outer list is owned; its inner lists have no owner. Freeing them with the outer is only sound if
   no element read from the outer can escape (<code>x = m[0]; return x</code> would then return a freed list), which needs an analysis of element reads that does not exist. Left leaking on purpose.</li>
-<li><strong>Strings bound to locals</strong> (~6&ndash;48 B/iter; the largest population by count). A string local needs the same escape analysis as a container, and the safe-pattern list is
-  short for strings (<code>+</code>, comparisons and f-strings all take identifiers as operands). Also the strings a fresh <code>split()</code> list holds.</li>
+<li><strong>Strings: what is left</strong> (~6&ndash;48 B/iter). Locals bound to a provably fresh string are owned now (§3.B). Still leaking: results of <code>upper</code>/<code>lower</code>/<code>strip</code>/<code>replace</code>/<code>join</code>/padding (not provably fresh: the functions can return their argument; making them always
+  return a copy would add them to the fresh list and let the receiver-result rule relax), and the strings inside a <code>split()</code> list.</li>
 <li><strong>Closure environments, bound methods, boxed mutable locals</strong> (~90 B/iter measured). Decided against a half measure: it needs closure-escape analysis, the exclusion of functions
   containing a nested <code>def</code>/<code>lambda</code> from ownership analysis has two traps (the receiver rules are not switched off inside a closure; a nested function's <code>begin_function</code> resets the parent's
   ownership state), and <code>_reg_bound_method</code> needs a way to drop an entry. Written up in <code>bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md</code>.</li>
 <li><strong>Bound-method registry</strong>: stale addresses can be misidentified after reuse. Either drop the registry (in-band tag) or discard on free.</li>
 <li><strong>Fixed 256-byte <code>sprintf</code> buffers</strong> in <code>%</code>-format: replace with a sized <code>snprintf</code> and release it as class C.</li>
 <li><strong>Dict comprehension keys, <code>__missing__</code> keys</strong>: route the comprehension's set call through <code>_emit_call</code>; <code>__missing__</code> stays unreleased by contract.</li>
-<li><strong>Speed still behind Rust:</strong> Int-keyed dicts (2.6x) and string building (1.7x) — §10.4.</li>
+<li><strong>Speed still behind Rust:</strong> string building (1.7x); the string-keyed dict may have slipped to ~1.1x (§10.4). Int-keyed dicts are now within ~1.1x.</li>
+<li><strong>Iterating an Int-keyed dict returns string keys</strong> (already wrong; <code>bugs/CODEGEN_iterating_an_int_keyed_dict_yields_string_keys.md</code>).</li>
 </ol>
 <p><strong>Considered and declined (measured):</strong> skipping the container registry for a stack-homed container the solver proves is never boxed. After the pointer-table rewrite the registry costs
 ~0.5 ns of a 5.8 ns list lifecycle (~8%), and skipping it means proving no <code>int64_t</code> ever holds the pointer, which an untyped callee parameter breaks; a misclassified pointer is a
@@ -310,6 +322,8 @@ wrong-behaviour bug, not a leak. Not worth the risk for 8%.</p>
 <li><code>runtime/fire_runtime.{c,h}</code>: <code>mojo_cstr_or_int_release</code> and the transient-decimal block pool; <code>_PtrReg</code> replacing the six <code>MojoSet</code> registries; <code>MojoList</code> inline buffer;
   <code>MOJO_CLEANUP_PTR</code>/<code>mojo_cleanup_push_ptr</code>; masked dict probing and a key-moving resize; a hand-rolled itoa.</li>
 <li><code>build_stdlib_dylib.py</code>: the runtime units default to <code>-O2</code>.</li>
+<li>Integer dict slots: <code>_DictSlot.ikey</code> and <code>keykind == 2</code>, <code>_canon_int</code>/<code>_ik_hash</code>/<code>_dict_find_ik</code>/<code>_dict_lookup_ik</code>, normalization in <code>_dict_find_k</code>/<code>_dict_lookup_k</code>/<code>_dict_set_raw_seq_kind_k</code>,
+  <code>_dict_remove_slot</code> (pop by slot address), ten <code>mojo_dict_*_kw</code> entry points; codegen <code>_char_to_cstr(word_ok)</code>, <code>_apply_kw_keys</code>, <code>_KW_DICT_FNS</code>.</li>
 <li><code>ownership_destruct.py</code>: <code>analyze_scoped_locals</code>, <code>analyze_returns_fresh</code>, <code>_summarize_params</code>, the struct rules (<code>_prescan_struct_binds</code>, method/<code>__init__</code> summaries),
   <code>for</code>/comprehension/slice safe receivers, per-loop declarations, and the fix that routes a NESTED <code>VarDecl</code> to the statement scanner.</li>
 <li><code>infra_infer.py</code>: <code>_build_analysis_funcs</code>, <code>_build_analysis_structs</code>, <code>_build_fresh_returning</code>, the <code>_compute_*</code> entry points.</li>
@@ -372,16 +386,25 @@ for compile time. <code>mojoc</code> has always built the runtime at <code>-O2</
 with <code>black_box</code> on the inputs so nothing is optimised away.</p>
 <table>
 <tr><th>Benchmark</th><th>before</th><th>now</th><th>Rust</th><th>now vs Rust</th></tr>
-<tr><td>Int-keyed dict: 1M inserts + 3M lookups, 1000 keys</td><td>0.241 s</td><td>0.055 s</td><td>0.021 s</td><td class="leak">2.6x slower</td></tr>
-<tr><td>String-keyed dict, same counts</td><td>0.061 s</td><td>0.040 s</td><td>0.039 s</td><td class="ok">parity</td></tr>
+<tr><td>Int-keyed dict: 1M inserts + 3M lookups, 1000 keys</td><td>0.241 s</td><td>0.026 s</td><td>0.023 s</td><td class="ok">1.04&ndash;1.13x</td></tr>
+<tr><td>String-keyed dict, same counts</td><td>0.061 s</td><td>0.050 s</td><td>0.045 s</td><td>1.1x (was parity; see below)</td></tr>
 <tr><td>Set of Int: 3M adds + 3M lookups</td><td>would not build (below)</td><td>0.024 s</td><td>0.028 s</td><td class="ok">0.86x</td></tr>
 <tr><td>Struct alloc: 5M constructions + field reads</td><td>not comparable</td><td>0.047 s</td><td>0.046 s</td><td class="ok">parity</td></tr>
 <tr><td>String building: 3M of <code>"n=" + String(i) + "!"</code></td><td>0.213 s</td><td>0.108 s</td><td>0.063 s</td><td class="leak">1.7x slower</td></tr>
 </table>
-<p>What moved them: a hand-rolled decimal formatter instead of <code>snprintf</code> (half of an Int-keyed access was <code>vfprintf</code>), a small block pool for the
-transient key string, masked probing instead of a modulo per probe, and a dict resize that moves each key pointer into the new slot array instead of <code>strdup</code>ing and freeing every key.
-The remaining Int-key gap is structural: the dict stores string keys, so an Int key is formatted and hashed as text on every access; a real int-keyed slot would remove that but changes what
-<code>keys()</code> returns for such a dict, so it needs its own design. String building still allocates a result per concatenation and does not free the bound result (§7.2).
+<p>What moved them, in order. (1) A hand-rolled decimal formatter instead of <code>snprintf</code> (half of an Int-keyed access was <code>vfprintf</code>), a block pool for the transient key string, masked probing instead of a modulo per
+probe, and a dict resize that moves each key pointer instead of <code>strdup</code>ing and freeing every key: 2.6x behind Rust. (2) <strong>Integer dict slots</strong>: the last two thirds of the remaining gap was formatting the key to text, hashing the text and
+<code>strcmp</code>ing it on every access, so an integer key is now stored as an integer.</p>
+<p><strong>How integer slots work.</strong> A slot has <code>keykind == 2</code> and an <code>ikey</code> field; that integer is what is hashed (a murmur finalizer) and compared. The slot also keeps the key's decimal string in <code>key</code>, exactly the string it always held, so
+everything that reads a key as text (iteration, <code>repr</code>, <code>copy</code>, <code>update</code>, <code>pop</code>'s rebuild, %-format) is unchanged. <strong>Normalization:</strong> any key that is a canonical decimal integer (<code>"5"</code>, <code>"-12"</code>; never <code>"05"</code>, <code>"+5"</code>, <code>"-0"</code>, or a
+value that overflows <code>int64_t</code>) is stored as an integer slot whether it arrived as the integer 5 or the string <code>"5"</code>, so the two remain ONE key, as they always were here. Strings that only look numeric stay separate, and so do bytes keys.
+Codegen changes only the dict operations whose key is an untracked <code>int64_t</code>: <code>_char_to_cstr(word_ok=True)</code> returns a placeholder and <code>_emit_call</code> swaps the call for its <code>mojo_dict_*_kw</code> twin, passing the raw word. The twin makes the same "boxed string or integer?"
+decision <code>mojo_cstr_or_int_str</code> made (<code>mojo_boxed_is_str</code>), so which words count as strings did not change. If a placeholder ever reaches a function with no twin, that function gets the string built the old way and released after the call. String comparisons keep that path.
+Pinned by: a reference-model test of the runtime layer (400,000 operations, negatives, extremes, canonical-integer detection, int/string equivalence in both directions, numeric-looking strings and bytes keys staying separate; gcc <code>-O0</code>/<code>-O2</code> and AddressSanitizer), a C-shape test that the emitted code contains the <code>_kw</code> calls and no
+string conversion, and a program checked against CPython through every operation.</p>
+<p><strong>What it cost.</strong> The slot grew from 40 to 48 bytes (the <code>ikey</code> field), and the string-keyed dict measures ~1.1x Rust where it measured parity before. The machine was ~15% slower on the later run (Rust's own time moved by the same amount), so part of that is noise; part may be the wider slot. Not separated.</p>
+<p><strong>What it did not fix:</strong> iterating an Int-keyed dict still hands back the keys as strings, so <code>for k in d: total += k</code> adds string pointers (this was already wrong; it returns different garbage now). Filed as
+<code>bugs/CODEGEN_iterating_an_int_keyed_dict_yields_string_keys.md</code> with the fix path: record a dict's key type and iterate it through integer-returning entry points. String building still allocates a result per concatenation and does not free the bound result (§7.2).
 A first version of the set benchmark failed to build: <code>var s: Set[Int] = {}</code> is refused (filed, §7).</p>
 
 </body>

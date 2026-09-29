@@ -1829,6 +1829,15 @@ def _compute_scoped_free_candidates(fn, whole: set, funcs: dict = None, structs:
     except Exception:
         return set()
 
+def _string_uses_ok(body, name: str) -> bool:
+    """Every method call on `name` in `body` has its result consumed at once
+    (ownership_destruct.receiver_results_consumed), so a string local cannot be
+    aliased through one. A failure inside the check answers False."""
+    try:
+        return ownership_destruct.receiver_results_consumed(body, name, False)
+    except Exception:
+        return False
+
 def _is_ctor_display(node) -> bool:
     """`node` is a container constructor (`[..]`, `{..}`, `dict()`/`list()`/
     `set()`): a value that is a brand-new container by construction, as

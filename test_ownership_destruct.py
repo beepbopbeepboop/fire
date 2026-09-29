@@ -541,7 +541,72 @@ def f(base: List[Int], n: Int) -> Int:
         c = [v for v in b]
         t += len(a) + len(b) + len(c)
     return t
-""", "f", set(), {"b", "c"}),   # `a` is an operand of `+`: not a recognized safe read
+""", "f", set(), {"a", "b", "c"}),   # `a` is the LEFT operand of `+`: a read
+
+    ("string_local_read_by_len_compare_condition_and_left_operand", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        s = String("n=") + String(i)
+        t += len(s)
+        if s == "n=5":
+            t += 1
+        if s:
+            t += 2
+        u = s + "!"
+        t += len(u)
+    return t
+""", "f", set(), {"s", "u"}),
+
+    ("right_operand_after_a_string_literal_is_a_read", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        s = String("n=") + String(i)
+        u = "id:" + s
+        t += len(u)
+    return t
+""", "f", set(), {"s", "u"}),
+
+    ("right_operand_after_an_identifier_may_run_user_code_so_escapes", """
+def f(n: Int, other: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        s = String("n=") + String(i)
+        u = other + s
+        t += len(u)
+    return t
+""", "f", set(), {"u"}),
+
+    ("or_returns_an_operand_as_its_value_so_it_escapes", """
+def f(n: Int, other: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        s = String("n=") + String(i)
+        z = s or other
+        t += len(z)
+    return t
+""", "f", set(), set()),   # `z` is an `or`, not a maybe-fresh expression, and `s` escapes through it
+
+    ("str_of_a_string_is_the_identity_so_it_aliases", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        s = String("n=") + String(i)
+        x = str(s)
+        t += len(x)
+    return t
+""", "f", set(), {"x"}),
+
+    ("ternary_branch_value_escapes_but_its_condition_does_not", """
+def f(n: Int, other: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        s = String("n=") + String(i)
+        y = s if len(s) > 2 else other
+        t += len(y)
+    return t
+""", "f", set(), set()),   # `y` is a ternary; `s` as a branch value escapes
 
     ("slicing_a_local_reads_it_and_is_not_an_escape", """
 def f(n: Int) -> Int:
@@ -855,6 +920,16 @@ def f(n: Int) -> Int:
         p = Pt(i, 2)
     return 0
 """, "f", set(), set()),
+
+    ("struct_operand_runs_user_operators_so_it_escapes", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        p = Pt(i, 2)
+        q = p + 1
+        t += q.x
+    return t
+""", "f", set(), {"q"}),
 
     ("field_assignment_stores_into_the_struct_and_is_not_an_escape_of_it", """
 def f(n: Int) -> Int:

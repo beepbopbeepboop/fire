@@ -110,7 +110,51 @@ def test_raises(name: str, mojo_src: str, expected_substr: str):
 # Test cases
 # ---------------------------------------------------------------------------
 
+def test_c_shape(name: str, mojo_src: str, must_have: list, must_not_have: list):
+    """The generated C compiles AND contains every `must_have` substring and none
+    of the `must_not_have` ones. For a change whose point is WHICH runtime call
+    the compiler emits, where a wrong-but-equivalent lowering would still print
+    the right answer."""
+    global _PASS, _FAIL
+    ok, c_src, stderr = gimple_compiles(mojo_src)
+    missing = [m for m in must_have if m not in c_src]
+    present = [m for m in must_not_have if m in c_src]
+    if ok and not missing and not present:
+        print(f"PASS  {name}")
+        _PASS += 1
+    else:
+        print(f"FAIL  {name}: compiles={ok} missing={missing} unexpectedly_present={present}")
+        if not ok:
+            for line in stderr.splitlines()[:8]:
+                print(f"      {line}")
+        _FAIL += 1
+
+
 def run_tests():
+    # Integer dict keys go to the runtime as a raw WORD (`_kw` entry points), not
+    # as a decimal string built per access: nothing to format, nothing to release.
+    test_c_shape("dict_int_key_ops_emit_word_key_calls", """\
+def f(d: Dict[Int, Int], i: Int) -> Int:
+    d[i] = 1
+    d[i] += 2
+    var t = d[i]
+    if i in d:
+        t += d.get(i, 0)
+    t += d.pop(i)
+    return t
+""", must_have=["mojo_dict_set_int_kw (", "mojo_dict_get_int_kw (",
+                "mojo_dict_contains_kw (", "mojo_dict_pop_int_kw ("],
+       must_not_have=["= mojo_cstr_or_int_str (", "mojo_cstr_or_int_release ("])
+
+    # A string comparison against an untracked int64_t operand still needs a real
+    # string, so that path keeps the conversion and its release.
+    test_c_shape("string_compare_of_untracked_operand_keeps_the_conversion", """\
+def f(x: Int) -> Int:
+    if x < "b":
+        return 1
+    return 0
+""", must_have=["mojo_cstr_or_int_str ("], must_not_have=[])
+
     # 1. Empty void function (pass body)
     test("hello_gimple", """\
 def foo():

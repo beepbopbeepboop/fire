@@ -99,7 +99,17 @@ import fire_compiler as N
 from ownership_check import _terminates, _block_terminates
 
 
-_NONRETAINING_BUILTINS = {'len', 'print', 'str', 'repr', 'bool', 'hash', 'id'}
+# `str` is deliberately NOT here. For a container it builds a new string, but for
+# a string it is the identity (`x = str(s)` lowers to `x = s`), so a call on a
+# name that might be a string can return its own argument: an alias. The rest
+# either return a number or a freshly built string.
+_NONRETAINING_BUILTINS = {'len', 'print', 'repr', 'bool', 'hash', 'id'}
+
+# Binary operators whose result is a NEW value (a concatenation, a repeat, a
+# formatted string, a bool): the operands are read, never handed on. Comparisons
+# with a single `==`/`<`/... parse as a plain BinaryOp, not a CompareChain.
+# `and`/`or` are deliberately absent: their result IS one of their operands.
+_READ_ONLY_BINOPS = ('+', '*', '%', '==', '!=', '<', '>', '<=', '>=')
 
 
 def _as_str(x: str) -> str:
@@ -165,7 +175,7 @@ def _is_maybe_fresh_expr(node) -> bool:
     really is, keeps ownership only when it can prove the value fresh at the
     declaration (emit_infra.maybe_push_owned_local); otherwise the name is
     dropped from the candidates right there."""
-    if isinstance(node, (N.CallExpr, N.SliceExpr, N.Comprehension)):
+    if isinstance(node, (N.CallExpr, N.SliceExpr, N.Comprehension, N.TstringLiteral)):
         return True
     if isinstance(node, N.BinaryOp) and node.op == '+':
         return True
@@ -351,6 +361,16 @@ def _prescan_struct_binds(node, facts: _FuncFacts) -> None:
         _prescan_struct_binds(getattr(node, f.name), facts)
 
 
+def _scan_operand(op, read_only_position: bool, facts: _FuncFacts, funcs, methods) -> None:
+    """One operand of an operator/condition: a bare identifier in a position that
+    only reads it is not an escape (unless it is a struct instance, whose
+    operators run user code); anything else is scanned normally."""
+    if (isinstance(op, N.IdentExpr) and read_only_position
+            and facts.struct_bound.get(_as_str(op.name), '') == ''):
+        return
+    _scan_expr(op, facts, funcs, methods)
+
+
 def _param_is_nonescaping(callee, pname: str, funcs, methods, facts: _FuncFacts) -> bool:
     summary = _summarize_params(callee, funcs, methods, facts.memo, facts.visiting, facts.structs)
     return pname in summary.split('|')
@@ -517,6 +537,33 @@ def _scan_expr(node, facts: _FuncFacts, funcs, methods, in_closure=False):
         _scan_expr(getattr(node, 'attrs', None), facts, funcs, methods, in_closure)
         return
 
+    # Operators and conditions that only READ a bare local. Left operand of `+`,
+    # `*`, `%` and the first operand of a comparison: the runtime copies (concat,
+    # repeat) or compares, and never keeps the operand. A RIGHT operand is only
+    # safe when the left one is a string literal (`"n=" + s`): otherwise the
+    # left operand may be a user type whose `__add__`/`__eq__` receives it and
+    # can keep it. Never for `and`/`or` (the result IS one of the operands) and
+    # never for a struct instance (its operators run user code).
+    if isinstance(node, N.BinaryOp) and node.op in _READ_ONLY_BINOPS and not in_closure:
+        _lit_left = isinstance(node.left, (N.StringLiteral, N.TstringLiteral))
+        _scan_operand(node.left, True, facts, funcs, methods)
+        _scan_operand(node.right, _lit_left, facts, funcs, methods)
+        return
+    if isinstance(node, N.CompareChain) and not in_closure:
+        _prev_lit = False
+        for _op in node.operands:
+            _scan_operand(_op, _prev_lit or _op is node.operands[0], facts, funcs, methods)
+            _prev_lit = isinstance(_op, (N.StringLiteral, N.TstringLiteral))
+        return
+    if isinstance(node, N.UnaryOp) and node.op == 'not' and not in_closure:
+        _scan_operand(node.operand, True, facts, funcs, methods)
+        return
+    if isinstance(node, N.TernaryExpr) and not in_closure:
+        _scan_operand(node.condition, True, facts, funcs, methods)
+        _scan_expr(node.then_val, facts, funcs, methods, in_closure)
+        _scan_expr(node.else_val, facts, funcs, methods, in_closure)
+        return
+
     if isinstance(node, N.Generator):
         # A comprehension clause `for x in <name>`: the comprehension is
         # lowered inline as a loop over the container, which reads it and
@@ -650,6 +697,10 @@ def _scan_stmt(stmt, facts: _FuncFacts, funcs, methods):
 
     for f in dataclasses.fields(stmt):
         val = getattr(stmt, f.name)
+        if (f.name == 'condition' and isinstance(stmt, (N.IfStmt, N.WhileStmt))
+                and isinstance(val, N.IdentExpr)
+                and facts.struct_bound.get(_as_str(val.name), '') == ''):
+            continue   # `if s:` / `while s:` reads the value; it does not keep it
         if isinstance(val, list):
             for item in val:
                 if _is_node(item):
@@ -1238,6 +1289,77 @@ def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
         for nm in names:
             if nm not in _da:
                 return False
+    return True
+
+
+_CONSUMING_BUILTINS = ('len', 'print', 'bool')
+
+
+def receiver_results_consumed(node, name: str, consumed: bool = False) -> bool:
+    """True iff EVERY use of `name` as the receiver of a method call under `node`
+    has its result consumed on the spot, so it cannot become an alias of `name`.
+
+    Why this exists (strings only; the container rules never needed it): many
+    string methods return their own receiver when there is nothing to change
+    (`strip`, `lstrip`, `replace`, `ljust`, ...), so `t = s.strip()` may make `t`
+    the very same pointer as `s`. If `s` is a local the function owns and frees at
+    scope exit, `t` then dangles the moment it outlives that exit. A method call
+    on `name` is therefore acceptable only where the result is read immediately:
+    a bare statement, an argument of `len`/`print`/`bool`, an operand of a
+    read-only operator or comparison, or a condition. Assigned, returned, passed
+    to another function, subscripted, or stored — all rejected. A bound method
+    taken as a value (`f = s.strip`) captures the receiver and is rejected too.
+    (Text inside an f-string is invisible here; an interpolation consumes its
+    value immediately, so that is fine.)"""
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            if not receiver_results_consumed(item, name, False):
+                return False
+        return True
+    if not _is_node(node):
+        return True
+    if isinstance(node, N.CallExpr):
+        is_recv = (isinstance(node.func, N.MemberExpr)
+                   and isinstance(node.func.obj, N.IdentExpr)
+                   and _as_str(node.func.obj.name) == name)
+        if is_recv and not consumed:
+            return False
+        arg_consumed = (isinstance(node.func, N.IdentExpr)
+                        and _as_str(node.func.name) in _CONSUMING_BUILTINS)
+        for a in node.args:
+            if not receiver_results_consumed(a, name, arg_consumed):
+                return False
+        for kw in (node.kwargs or []):
+            if not receiver_results_consumed(kw[1], name, arg_consumed):
+                return False
+        if not is_recv:
+            return receiver_results_consumed(node.func, name, False)
+        return True
+    if isinstance(node, N.MemberExpr):
+        if isinstance(node.obj, N.IdentExpr) and _as_str(node.obj.name) == name:
+            return False        # `s.method` not in call position: a bound method
+        return receiver_results_consumed(node.obj, name, False)
+    if isinstance(node, N.ExprStmt):
+        return receiver_results_consumed(node.value, name, True)
+    if isinstance(node, N.BinaryOp) and node.op in _READ_ONLY_BINOPS:
+        return (receiver_results_consumed(node.left, name, True)
+                and receiver_results_consumed(node.right, name, True))
+    if isinstance(node, N.CompareChain):
+        for _op in node.operands:
+            if not receiver_results_consumed(_op, name, True):
+                return False
+        return True
+    if isinstance(node, N.UnaryOp) and node.op == 'not':
+        return receiver_results_consumed(node.operand, name, True)
+    if isinstance(node, (N.IfStmt, N.WhileStmt, N.TernaryExpr)):
+        for f in dataclasses.fields(node):
+            v = getattr(node, f.name)
+            if not receiver_results_consumed(v, name, f.name == 'condition'):
+                return False
+        return True
+    for f in dataclasses.fields(node):
+        if not receiver_results_consumed(getattr(node, f.name), name, False):
+            return False
     return True
 
 

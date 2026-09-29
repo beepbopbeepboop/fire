@@ -3785,7 +3785,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
     _dsub_in = gen._dict_subclass_of(rt)
     if _dsub_in and not gen._struct_defines_method(_dsub_in, '__contains__'):
         _dsub_dp = gen._new_val('MojoDict *', f"{rv}->_data")
-        xt, xv = gen._char_to_cstr(xt, xv, True)
+        xt, xv = gen._char_to_cstr(xt, xv, True, True)
         gen._emit_call('int', ti, 'mojo_dict_contains',
                        [('MojoDict *', _dsub_dp), (xt, xv)])
     elif rt == 'MojoList *':
@@ -3851,7 +3851,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
                            [('MojoDict *', rv), ('MojoBytes *', xv)])
             return 'int', ti
         # Ensure key is char * for dict operations (all dict keys are strings in runtime)
-        xt, xv = gen._char_to_cstr(xt, xv, True)
+        xt, xv = gen._char_to_cstr(xt, xv, True, True)
         gen._emit_call('int', ti, 'mojo_dict_contains', [('MojoDict *', rv), (xt, xv)])
     elif rt == 'MojoSet *':
         # Route through _emit_call so global/_slit_ args are loaded into locals

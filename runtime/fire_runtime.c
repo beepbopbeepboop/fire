@@ -3441,8 +3441,71 @@ void mojo_dict_clear(MojoDict *d)
  * (mojo_bytes_cstr_key for bytes), so strcmp still does the matching, but
  * the tag keeps `d[b'x']` and `d['x']` as the two distinct entries Python
  * says they are instead of silently aliasing one onto the other. */
+/* Canonical decimal integer: "0", "5", "-12". Not "+5", not "05", not "-0", not
+ * a value that overflows int64_t. A key like this is stored as an INTEGER slot
+ * (keykind 2) however it arrived, so `d[5]` and `d["5"]` stay one entry (as they
+ * always were) and an int lookup never formats a string. */
+static int _canon_int(const char *s, int64_t *out)
+{
+    if (!s) return 0;
+    const char *p = s;
+    int neg = 0;
+    if (*p == '-') { neg = 1; p++; }
+    if (*p < '0' || *p > '9') return 0;
+    if (*p == '0' && (p[1] != '\0' || neg)) return 0;
+    uint64_t v = 0;
+    int n = 0;
+    for (; *p; p++, n++) {
+        if (*p < '0' || *p > '9') return 0;
+        if (n >= 19) return 0;
+        v = v * 10 + (uint64_t)(*p - '0');
+    }
+    if (!neg && v > (uint64_t)INT64_MAX) return 0;
+    if (neg && v > (uint64_t)INT64_MAX + 1) return 0;
+    *out = neg ? (int64_t)((uint64_t)0 - v) : (int64_t)v;
+    return 1;
+}
+
+static inline uint64_t _ik_hash(int64_t k)
+{
+    uint64_t x = (uint64_t)k;          /* the murmur3 64-bit finalizer */
+    x ^= x >> 33; x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return x;
+}
+
+/* The slot for integer key `k`: the matching slot if present, else the empty
+ * slot where it would go. (`_dict_find_k` is the string-key twin.) */
+static _DictSlot *_dict_find_ik(MojoDict *d, int64_t k)
+{
+    uint64_t mask = (uint64_t)d->cap - 1;
+    uint64_t h = _ik_hash(k) & mask;
+    for (int64_t i = 0; i < d->cap; i++) {
+        _DictSlot *sl = &d->slots[(h + (uint64_t)i) & mask];
+        if (!sl->key) return sl;
+        if (sl->keykind == 2 && sl->ikey == k) return sl;
+    }
+    return NULL;
+}
+
+static _DictSlot *_dict_lookup_ik(MojoDict *d, int64_t k)
+{
+    if (!d || !d->cap || !d->slots) return NULL;
+    uint64_t mask = (uint64_t)d->cap - 1;
+    uint64_t h = _ik_hash(k) & mask;
+    for (int64_t i = 0; i < d->cap; i++) {
+        _DictSlot *sl = &d->slots[(h + (uint64_t)i) & mask];
+        if (!sl->key) return NULL;
+        if (sl->keykind == 2 && sl->ikey == k) return sl;
+    }
+    return NULL;
+}
+
 static _DictSlot *_dict_find_k(MojoDict *d, char *key, int64_t keykind)
 {
+    int64_t iv;
+    if (keykind == 0 && _canon_int(key, &iv)) return _dict_find_ik(d, iv);
     uint64_t mask = (uint64_t)d->cap - 1;      /* cap is a power of two */
     uint64_t h = _str_hash(key) & mask;
     for (int64_t i = 0; i < d->cap; i++) {
@@ -3466,10 +3529,17 @@ static void _dict_set_raw_seq_kind_k(MojoDict *d, char *key, int64_t val,
                                      int64_t seq, int64_t kind, int64_t keykind)
 {
     if (d->used * 2 >= d->cap) _dict_grow(d);
+    if (keykind == 2) keykind = 0;   /* a re-insert of an integer slot: the string domain, re-normalised below */
     _DictSlot *sl = _dict_find_k(d, key, keykind);
     if (!sl->key) {
         sl->key = strdup(key);
-        sl->keykind = keykind;
+        int64_t iv;
+        if (keykind == 0 && _canon_int(key, &iv)) {
+            sl->keykind = 2;
+            sl->ikey = iv;
+        } else {
+            sl->keykind = keykind;
+        }
         sl->seq = (seq >= 0) ? seq : d->next_seq++;
         if (sl->seq >= d->next_seq) d->next_seq = sl->seq + 1;
         d->used++;
@@ -3509,7 +3579,8 @@ static void _dict_grow(MojoDict *d)
      * slot, never a comparison; `used`, `seq` and `next_seq` are unchanged. */
     for (int64_t i = 0; i < old_cap; i++) {
         if (!old[i].key) continue;
-        uint64_t j = _str_hash(old[i].key) & mask;
+        uint64_t j = (old[i].keykind == 2 ? _ik_hash(old[i].ikey)
+                                          : _str_hash(old[i].key)) & mask;
         while (d->slots[j].key) j = (j + 1) & mask;
         d->slots[j] = old[i];
     }
@@ -3561,6 +3632,8 @@ void mojo_dict_set_str(MojoDict *d, char *key, char *v)
 static _DictSlot *_dict_lookup_k(MojoDict *d, char *key, int64_t keykind)
 {
     if (!d || !d->cap || !d->slots) return NULL;
+    int64_t iv;
+    if (keykind == 0 && _canon_int(key, &iv)) return _dict_lookup_ik(d, iv);
     /* cap is always a power of two (mojo_dict_init: 8, _dict_grow: doubles). */
     uint64_t mask = (uint64_t)d->cap - 1;
     uint64_t h = _str_hash(key) & mask;
@@ -5951,6 +6024,25 @@ char *mojo_dict_setdefault_str(MojoDict *d, char *key, char *dflt) {
     return dflt;
 }
 
+/* Remove the entry at slot `sl` (a pointer INTO d->slots) by rebuilding the
+ * table without it. The slot is identified by address, not by comparing keys:
+ * an integer slot and a string slot of the same characters cannot be told apart
+ * by strcmp. */
+static void _dict_remove_slot(MojoDict *d, _DictSlot *sl) {
+    int64_t old_cap = d->cap;
+    _DictSlot *old = d->slots;
+    int64_t skip = (int64_t)(sl - old);
+    d->slots = calloc((size_t)old_cap, sizeof(_DictSlot));
+    d->used = 0;
+    for (int64_t i = 0; i < old_cap; i++) {
+        if (old[i].key && i != skip)
+            _dict_set_raw_seq_kind_k(d, old[i].key, old[i].val, old[i].seq,
+                                     old[i].kind, old[i].keykind);
+    }
+    for (int64_t i = 0; i < old_cap; i++) free(old[i].key);
+    free(old);
+}
+
 /* Remove the entry for `key` in the given key DOMAIN (see _DictSlot.keykind)
  * and return its value (0 when absent). */
 static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind) {
@@ -5969,17 +6061,7 @@ static int64_t _dict_pop_k(MojoDict *d, char *key, int64_t keykind) {
      * the size doubling) is simpler to get right and this table is never
      * large enough for the O(cap) cost to matter. Preserves each surviving
      * key's original `seq` so insertion-order dump/iteration is unaffected. */
-    int64_t old_cap = d->cap;
-    _DictSlot *old = d->slots;
-    d->slots = calloc((size_t)old_cap, sizeof(_DictSlot));
-    d->used = 0;
-    for (int64_t i = 0; i < old_cap; i++) {
-        if (old[i].key && !(old[i].keykind == keykind && strcmp(old[i].key, key) == 0))
-            _dict_set_raw_seq_kind_k(d, old[i].key, old[i].val, old[i].seq,
-                                     old[i].kind, old[i].keykind);
-    }
-    for (int64_t i = 0; i < old_cap; i++) free(old[i].key);
-    free(old);
+    _dict_remove_slot(d, sl);
     return val;
 }
 
@@ -6764,6 +6846,113 @@ void mojo_cstr_or_int_release(int64_t orig, char *s) {
      * i.e. a block from `_int_str_block`: back to the pool it came from. */
     *(char **)s = _int_str_pool;
     _int_str_pool = s;
+}
+
+/* ── Dict operations keyed by a raw machine WORD ───────────────────────────
+ * The key is an untracked int64_t: a boxed string pointer or an integer. The
+ * decision is exactly `mojo_cstr_or_int_str`'s (`mojo_boxed_is_str`), so nothing
+ * changes about which words are strings; what changes is that an integer is
+ * looked up as an integer. Before, it was formatted to a decimal string, hashed
+ * as text, compared with strcmp, and the string released afterwards — over half
+ * of an Int-keyed dict access. A string word takes the ordinary string path. */
+
+/* Insert or overwrite the entry for integer key `k`. A NEW key also gets its
+ * decimal string (the slot's `key`), so iteration/repr/copy/pop see what they
+ * always saw; that one small allocation per NEW key replaces a strdup. */
+static void _dict_set_ik(MojoDict *d, int64_t k, int64_t val, int64_t kind)
+{
+    if (!d) return;
+    if (d->used * 2 >= d->cap) _dict_grow(d);
+    _DictSlot *sl = _dict_find_ik(d, k);
+    if (!sl->key) {
+        char tmp[_INT_STR_BLOCK];
+        char *p = _fmt_int(k, tmp);
+        size_t n = (size_t)(tmp + sizeof tmp - p);
+        sl->key = (char *)malloc(n);
+        memcpy(sl->key, p, n);
+        sl->keykind = 2;
+        sl->ikey = k;
+        sl->seq = d->next_seq++;
+        d->used++;
+    }
+    sl->val = val;
+    sl->kind = kind;
+}
+
+int64_t mojo_dict_get_int_kw(MojoDict *d, int64_t kw)
+{
+    if (mojo_boxed_is_str(kw)) return mojo_dict_get_int(d, (char *)(intptr_t)kw);
+    _DictSlot *sl = _dict_lookup_ik(d, kw);
+    return sl ? sl->val : 0;
+}
+
+double mojo_dict_get_double_kw(MojoDict *d, int64_t kw)
+{
+    if (mojo_boxed_is_str(kw)) return mojo_dict_get_double(d, (char *)(intptr_t)kw);
+    _DictSlot *sl = _dict_lookup_ik(d, kw);
+    if (!sl) return 0.0;
+    double v;
+    memcpy(&v, &sl->val, sizeof(v));
+    return v;
+}
+
+char *mojo_dict_get_str_kw(MojoDict *d, int64_t kw)
+{
+    if (mojo_boxed_is_str(kw)) return mojo_dict_get_str(d, (char *)(intptr_t)kw);
+    _DictSlot *sl = _dict_lookup_ik(d, kw);
+    return sl ? (char *)(uintptr_t)sl->val : NULL;
+}
+
+void mojo_dict_set_int_kw(MojoDict *d, int64_t kw, int64_t v)
+{
+    if (mojo_boxed_is_str(kw)) { mojo_dict_set_int(d, (char *)(intptr_t)kw, v); return; }
+    _dict_set_ik(d, kw, v, 0);
+}
+
+void mojo_dict_set_double_kw(MojoDict *d, int64_t kw, double v)
+{
+    if (mojo_boxed_is_str(kw)) { mojo_dict_set_double(d, (char *)(intptr_t)kw, v); return; }
+    int64_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    _dict_set_ik(d, kw, bits, 1);
+}
+
+void mojo_dict_set_str_kw(MojoDict *d, int64_t kw, char *v)
+{
+    if (mojo_boxed_is_str(kw)) { mojo_dict_set_str(d, (char *)(intptr_t)kw, v); return; }
+    _dict_set_ik(d, kw, (int64_t)(uintptr_t)v, 2);
+}
+
+int mojo_dict_contains_kw(MojoDict *d, int64_t kw)
+{
+    if (mojo_boxed_is_str(kw)) return mojo_dict_contains(d, (char *)(intptr_t)kw);
+    return _dict_lookup_ik(d, kw) != NULL;
+}
+
+int64_t mojo_dict_pop_int_kw(MojoDict *d, int64_t kw)
+{
+    if (mojo_boxed_is_str(kw)) return mojo_dict_pop_int(d, (char *)(intptr_t)kw);
+    _DictSlot *sl = _dict_lookup_ik(d, kw);
+    if (!sl) return 0;
+    int64_t val = sl->val;
+    _dict_remove_slot(d, sl);
+    return val;
+}
+
+int64_t mojo_dict_setdefault_int_kw(MojoDict *d, int64_t kw, int64_t dflt)
+{
+    if (!d) return dflt;
+    if (mojo_dict_contains_kw(d, kw)) return mojo_dict_get_int_kw(d, kw);
+    mojo_dict_set_int_kw(d, kw, dflt);
+    return dflt;
+}
+
+char *mojo_dict_setdefault_str_kw(MojoDict *d, int64_t kw, char *dflt)
+{
+    if (!d) return dflt;
+    if (mojo_dict_contains_kw(d, kw)) return mojo_dict_get_str_kw(d, kw);
+    mojo_dict_set_str_kw(d, kw, dflt);
+    return dflt;
 }
 
 

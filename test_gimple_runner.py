@@ -79,12 +79,19 @@ def run_executable(exe_path: str) -> int:
     return result.returncode
 
 
+# Freed memory is filled with 0x55 bytes (macOS libmalloc; ignored elsewhere), so a
+# use-after-free reads garbage deterministically instead of "usually still the old
+# value". Ownership-freeing tests are only worth having if a wrong free is visible.
+_SCRIBBLE_ENV = dict(os.environ, MallocScribble='1')
+
+
 def run_executable_stdout(exe_path: str) -> str:
     """Execute the program and return its captured stdout, decoded."""
     result = subprocess.run(
         [exe_path],
         capture_output=True,
-        timeout=10
+        timeout=10,
+        env=_SCRIBBLE_ENV
     )
     return result.stdout.decode('utf-8', errors='replace')
 
@@ -180,7 +187,9 @@ def test_gimple_bounded_memory(name: str, mojo_src: str, expected_stdout: str, l
         exe_path = compile_mojo_to_gimple_exe(mojo_src)
         probe = (
             "import resource, subprocess, sys\n"
-            "r = subprocess.run([sys.argv[1]], capture_output=True, timeout=60)\n"
+            "import os\n"
+            "r = subprocess.run([sys.argv[1]], capture_output=True, timeout=60,\n"
+            "                   env=dict(os.environ, MallocScribble='1'))\n"
             "sys.stdout.buffer.write(r.stdout)\n"
             "sys.stderr.write(str(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss))\n"
         )
@@ -1513,6 +1522,149 @@ def main():
         total += work(6, kk) % 1000 + len(kk)
     print(total)
 """, "33\n75\n8\n242\n3200000\n")
+
+    # ── Strings bound to locals (doc/MEMORY.html section 3.B). A local bound
+    # to a provably FRESH string (a `+` result, `String(i)`, a slice) is owned and
+    # freed at scope exit, but only when every use is a read: `len`, a comparison,
+    # a condition, the left operand of `+`, a right operand after a string
+    # literal, and method calls whose result is consumed on the spot. The second
+    # program is the other half: `z.strip()` and `str(y)` can RETURN their own
+    # receiver/argument, so `a2`/`b2` alias `z`/`y`, which are then stored in a
+    # list the caller keeps. Neither `z` nor `y` may be freed; the runner
+    # scribbles freed memory, so a wrong free makes the comparisons (printed 4th)
+    # fail instead of usually passing.
+    test_gimple_bounded_memory("gimple_string_locals_owned_when_only_read", """\
+def work(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var s = String("n=") + String(i)
+        t += len(s)
+        if s == "n=3":
+            t += 100
+        var u = s + "!"
+        t += len(u)
+        var w = "id:" + s
+        t += len(w)
+        if len(s) > 2:
+            t += 1
+        if i == 2:
+            continue
+        if i == 4:
+            break
+    return t
+
+def once(k: Int) -> Int:
+    var s = String("k") + String(k)
+    return len(s) + len(s + "z")
+
+def main():
+    print(work(3))
+    print(work(9))
+    var total = 0
+    for r in range(300000):
+        total += work(6) % 1000 + once(r % 100)
+    print(total)
+""", "42\n170\n53040000\n", 40)
+
+    test_gimple_stdout("gimple_string_local_aliased_by_strip_or_str_is_not_freed", """\
+def work(n: Int, kept: List[String]) -> Int:
+    var t = 0
+    for i in range(n):
+        var s = String("n=") + String(i)
+        t += len(s)
+        var z = String("x") + String(i)
+        var a2 = z.strip()
+        kept.append(a2)
+        var y = String("y") + String(i)
+        var b2 = str(y)
+        kept.append(b2)
+        if i == 2:
+            continue
+        if i == 4:
+            break
+    return t
+
+def main():
+    var kept: List[String] = []
+    print(work(3, kept))
+    print(work(9, kept))
+    print(len(kept))
+    var hits = 0
+    for k in range(len(kept)):
+        if kept[k] == "x0":
+            hits += 1
+        if kept[k] == "x1":
+            hits += 10
+        if kept[k] == "y2":
+            hits += 100
+        if kept[k] == "x4":
+            hits += 1000
+        if kept[k] == "y3":
+            hits += 10000
+    print(hits)
+    var total = 0
+    for r in range(20000):
+        var kk: List[String] = []
+        total += work(6, kk) % 1000
+    print(total)
+""", "9\n15\n16\n11222\n300000\n")
+
+    # ── Integer dict keys (doc/MEMORY.html section 10.4). An Int key is stored as an
+    # INTEGER slot (its decimal string kept alongside, so iteration/repr/copy/pop
+    # are unchanged) and looked up through `_kw` entry points that take the raw
+    # word. Every operation is exercised — set, get, augmented set, `in`,
+    # `get(k, default)`, `pop`, `del`, `setdefault`, negative/zero/large keys, a
+    # string-keyed dict next to them, and a dict created and dropped in a loop —
+    # against CPython's answers. (The C shape is pinned in test_gimple.py.)
+    test_gimple_stdout("gimple_int_dict_keys_word_lookup_all_operations", """\
+def main():
+    var d: Dict[Int, Int] = {}
+    for i in range(1000):
+        d[i % 37] = i
+    var acc = 0
+    for i in range(1000):
+        acc += d[i % 37] % 5
+        if (i % 41) in d:
+            acc += 1
+    d[5] += 100
+    acc += d[5] % 1000
+    acc += d.get(9999, -3) + d.get(3, 0)
+    acc += d.pop(4)
+    del d[6]
+    acc += len(d)
+    print(acc)
+    var n: Dict[Int, Int] = {}
+    n[0] = 7
+    n[-1] = 8
+    n[-2000000000] = 9
+    n[2000000000] = 10
+    n[12] = 11
+    n[12] += 1
+    print(n[0] + n[-1] + n[-2000000000] + n[2000000000] + n[12])
+    print(len(n))
+    print(-1 in n)
+    print(-2 in n)
+    print(n.setdefault(77, 5))
+    print(n.setdefault(0, 99))
+    print(len(n))
+    var s: Dict[String, Int] = {}
+    s["abc"] = 1
+    s["12"] = 2
+    s["abd"] = 3
+    print(s["abc"] + s["12"] + s["abd"])
+    print(len(s))
+    print("12" in s)
+    print("13" in s)
+    var tot = 0
+    for r in range(20000):
+        var e: Dict[Int, Int] = {}
+        for k in range(10):
+            e[k * 3 - 7] = k
+        tot += e[2] + len(e)
+        if (r % 3) in e:
+            tot += 1
+    print(tot)
+""", "5017\n46\n5\nTrue\nFalse\n5\n7\n6\n6\n3\nTrue\nFalse\n266666\n")
 
     # ── zip() / dict.items() pair shapes ───────────────────────────────
     # zip and dict.items() yield TUPLES. Unmarked, they printed as

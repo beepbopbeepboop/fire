@@ -631,7 +631,16 @@ typedef struct {
     int64_t  keykind; /* key DOMAIN, since every key is stored as its own
                      * characters in `key` and matched with strcmp: 0 = a str
                      * key, 1 = a bytes key. Keeps `d[b'x']` and `d['x']` the
-                     * two distinct entries Python says they are. */
+                     * two distinct entries Python says they are.
+                     * 2 = an INTEGER key: `key` still holds its decimal
+                     * string (so iteration, repr, copy and pop see exactly
+                     * what they always did), and `ikey` holds the integer,
+                     * which is what is hashed and compared. Every key that is
+                     * a canonical decimal integer ("5", "-12", never "05" or
+                     * "+5") is stored this way whether it arrived as the int 5
+                     * or the string "5", so the two remain one key as before
+                     * but a lookup by int needs no formatting at all. */
+    int64_t  ikey;    /* the integer, for keykind == 2; otherwise unused */
 } _DictSlot;
 
 /* Value-kind tags for _DictSlot.kind. Kept in the header so generated code
@@ -664,6 +673,21 @@ void        mojo_mark_dict_bool_values(MojoDict *d);
 int         mojo_is_bool_dict(MojoDict *d);
 
 void        mojo_dict_set_int(MojoDict *d, char *key, int64_t v);
+/* `_kw` variants: the key arrives as a raw machine WORD that is either a boxed
+ * string pointer or an integer, and the same decision mojo_cstr_or_int_str
+ * makes (mojo_boxed_is_str) is made here — but an integer is looked up directly,
+ * with no decimal string built and nothing to release. Emitted by codegen for
+ * dict operations whose key is an untracked int64_t. */
+int64_t     mojo_dict_get_int_kw(MojoDict *d, int64_t kw);
+double      mojo_dict_get_double_kw(MojoDict *d, int64_t kw);
+char       *mojo_dict_get_str_kw(MojoDict *d, int64_t kw);
+void        mojo_dict_set_int_kw(MojoDict *d, int64_t kw, int64_t v);
+void        mojo_dict_set_double_kw(MojoDict *d, int64_t kw, double v);
+void        mojo_dict_set_str_kw(MojoDict *d, int64_t kw, char *v);
+int         mojo_dict_contains_kw(MojoDict *d, int64_t kw);
+int64_t     mojo_dict_pop_int_kw(MojoDict *d, int64_t kw);
+int64_t     mojo_dict_setdefault_int_kw(MojoDict *d, int64_t kw, int64_t dflt);
+char       *mojo_dict_setdefault_str_kw(MojoDict *d, int64_t kw, char *dflt);
 void        mojo_dict_set_double(MojoDict *d, char *key, double v);
 void        mojo_dict_set_bytes_double(MojoDict *d, MojoBytes *key, double v);
 void        mojo_dict_set_str(MojoDict *d, char *key, char *v);

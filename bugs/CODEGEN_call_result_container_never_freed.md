@@ -13,24 +13,24 @@ What still leaks (peak-RSS slope, 100k vs 400k iterations, `fire.py build`):
 
 | loop body | B/iter |
 |---|---|
-| one string bound to a local (`+`, `String(i)`, `.upper()`, slice, callee returning `String`) | ~6 |
-| `var s = String("n=") + String(i)` | ~28 |
+| `String("abc").upper()`, a callee returning `String` (not provably fresh) | ~6 |
 | `String("a b c").split(" ")` (the list is freed; its three strings are not) | ~48 |
-| a call whose result the analysis cannot prove fresh, bound to a local | (not freed; by design) |
+
+Fixed since this doc was first written (`doc/MEMORY.html` §3.B): a local bound to a provably fresh
+STRING (`+`, `String(i)`, slices, f-strings) is owned and freed; `var s = String("n=") + String(i)` and
+`"n=" + String(i) + "!"` measure flat.
 
 ## Cause
 
-A string local needs an owner, and strings have a shorter safe-pattern list than containers:
-`+`, comparisons and f-strings all take bare identifiers as operands, which the escape analysis
-treats as an escape. There is also a borrowed/owned split to respect (list-of-`str` elements, dict
-values and literals are borrowed and must never be freed).
+`upper`, `lower`, `strip`, `lstrip`, `rstrip`, `replace`, `join`, `expandtabs` and the padding
+functions return their own argument (or a static `""`) in edge cases, so their result cannot be
+freed and a method call on a string local may alias it. Only the 10 runtime functions whose every
+return path allocates are treated as fresh.
 
 ## Fix
 
-Give strings the same declaration gate as containers (own a local only when the lowered value
-is a provably fresh `mojo_str_cat`/`mojo_str_from_int`/... result), add `+`/comparison/f-string
-reads to the safe patterns for names known to be strings, and free the strings a fresh
-`split()` list holds when that list is freed.
+Make those functions always return a copy (then add them to `_FRESH_STRING_RETURNS`, and relax the
+receiver-result rule for them), and free the element strings when a fresh `split()` list is freed.
 
 ## Done when
 
