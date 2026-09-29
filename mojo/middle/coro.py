@@ -1946,6 +1946,113 @@ def _forward_tagged(cvar: str, val_expr) -> N.ExprStmt:
                                   [_c_ident(cvar), val_expr, N.IntLiteral(value=1)]))
 
 
+# ── "can this coroutine ever hand a wait-descriptor upward?" ────────────
+#
+# A coroutine's yield channel carries EITHER a real value (is_wd=0) or a
+# wait-descriptor for the scheduler (is_wd=1) -- see mojo_coro.h. Every
+# parking `await` in a body hands one upward (`_forward_plain` /
+# `_forward_tagged`, plus the shims that yield the descriptor themselves,
+# e.g. `__mojo_async_await_sleep`). A `yield e` never does.
+#
+# That distinction is invisible from the consuming side when the consumer
+# has no channel of its own to forward into -- an ordinary (never-suspended)
+# function driving `async for x in gen():`. It has no `__c` to forward a
+# descriptor on, so a descriptor that reached it would be read as the loop
+# variable: real, silent, garbage. Measured before this analysis existed --
+# `async def gen(): await asyncio.sleep(0); yield 10` consumed that way
+# printed a heap ADDRESS instead of `10`, exit 0, no diagnostic.
+#
+# `_NO_WD_FORWARD` is the set of this module's async functions (keyed exactly
+# like every other registry here: bare name top-level, `Struct_method`,
+# `outer_inner` nested) PROVEN never to forward one. Populated once per
+# `lower()` by `_compute_no_wd_forward` and read by both meta producers
+# (`_lower_one_async` / `_lower_one_async_gen`), which is what lets the
+# ordinary-function `async for` driver in gimple_gen_loops.py either drive
+# the generator for real or refuse it, instead of guessing.
+_NO_WD_FORWARD: set = set()
+
+# Same keying as `_NO_WD_FORWARD`, but every `async def` in the module,
+# eligible or not, plus the bare-name/method-name ambiguity set used to
+# decide whether an awaited bare name resolves unambiguously.
+_ASYNC_FN_DEFS: dict = {}
+_AMBIGUOUS_ASYNC_NAMES: set = set()
+
+
+def _await_needs_channel(fn: N.FunctionDef, proven_clean: set) -> bool:
+    """True iff `fn` can put a wait-descriptor on its own yield channel.
+
+    The classification is deliberately the EXACT complement of the ONE
+    non-parking branch of `_await_drive_stmts` below (its final
+    `name = _await_target_name(inner)` case, an inline nested drive): every
+    other shape that function lowers -- sleep, sock_recv, an Event/Future
+    `.wait()`, a handle held in a struct field, a bare Future handle, a
+    create_task handle -- parks. So a bare `await f(...)` counts as
+    parking unless `f` is itself proven channel-free, which makes this a
+    fixed point rather than a one-pass scan (a clean `f` is only known once
+    everything `f` awaits is known)."""
+    for n in _walk(fn):
+        if not isinstance(n, N.AwaitExpr):
+            continue
+        t = _await_target_name(n.value)
+        if t is not None and t in proven_clean:
+            continue                      # inline drive of a never-parking callee
+        return True
+    return False
+
+
+def _compute_no_wd_forward(stmts: list) -> None:
+    """Fill `_NO_WD_FORWARD` / `_ASYNC_FN_DEFS` for one `lower()` call.
+
+    Greatest fixed point: start by assuming EVERY async function is
+    channel-free, then relax until the answer stops shrinking. Starting
+    from the optimistic (smallest) set instead would be a least fixed
+    point, which is the unsound direction under mutual recursion -- a
+    cycle of awaits would each conclude the other is clean and neither
+    would be listed. Every other unresolvable case (an awaited name that
+    is not an `async def` of this module, or one that is also a struct
+    method's name, so its `__mgco_*_start` base is ambiguous) resolves to
+    "parks", so a hole here is a refusal upstream, never a miscompile."""
+    global _ASYNC_FN_DEFS, _AMBIGUOUS_ASYNC_NAMES, _NO_WD_FORWARD
+    fns: dict = {}
+    ambiguous: set = set()
+    for s in stmts:
+        if isinstance(s, N.FunctionDef) and getattr(s, 'is_async', False):
+            key = _cm_as_str(s.name)
+            if key in fns:
+                ambiguous.add(key)        # two top-level async defs, one name
+            fns[key] = s
+        if isinstance(s, N.StructDef):
+            for m in s.methods:
+                if isinstance(m, N.FunctionDef) and getattr(m, 'is_async', False):
+                    fns[f'{_cm_as_str(s.name)}_{_cm_as_str(m.name)}'] = m
+                    ambiguous.add(_cm_as_str(m.name))
+        # nested `async def` locals -- keyed by their enclosing function, the
+        # same `__mgco_<outer>_<inner>` qualification `_hoist_nested_async`
+        # gives them, and why two enclosing functions may each define a
+        # same-named nested helper.
+        if isinstance(s, N.FunctionDef):
+            for inner in s.body:
+                if isinstance(inner, N.FunctionDef) and getattr(inner, 'is_async', False):
+                    fns[f'{_cm_as_str(s.name)}_{_cm_as_str(inner.name)}'] = inner
+    proven = set(fns)
+    while True:
+        nxt = {name for name, fn in fns.items()
+               if not _await_needs_channel(fn, proven - ambiguous)}
+        if nxt == proven:
+            break
+        proven = nxt
+    _ASYNC_FN_DEFS = fns
+    _AMBIGUOUS_ASYNC_NAMES = ambiguous
+    _NO_WD_FORWARD = proven
+
+
+def _base_is_channel_free(base: str) -> bool:
+    """The same question `_compute_no_wd_forward` answered, asked of one
+    already-lowered coroutine by its `__mgco_*` base (whose suffix is the
+    registry key: `name`, `Struct_name`, or `outer_name`)."""
+    return base[len('__mgco_'):] in _NO_WD_FORWARD
+
+
 def _await_drive_stmts(cvar: str, inner, forward=_forward_plain) -> tuple[list, object]:
     """The statement sequence driving one `await <inner>` to completion.
     Returns (stmts, result_expr). `forward` builds the ExprStmt that
@@ -2263,6 +2370,7 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
         'params': c_params,
         'nargs': len(real_params), 'value_ctype': 'int64_t', 'value_kind': 'i',
         'tuple_slot_ctypes': None,
+        'no_wd_forward': _base_is_channel_free(base),
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
     })
     return body_fd
@@ -2286,6 +2394,7 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
         'params': c_params,
         'nargs': len(real_params), 'value_ctype': 'int64_t', 'value_kind': 'i',
         'tuple_slot_ctypes': None,
+        'no_wd_forward': _base_is_channel_free(base),
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
     })
     return body_fd
@@ -2994,6 +3103,7 @@ def lower(stmts: list) -> tuple[list, list]:
     _STRUCT_NAMES.clear()
     _BOX_STRUCT_OF.clear()
     _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
+    _NO_WD_FORWARD.clear()
     _detect_native_future_classes(stmts)
     stmts = _rewrite_native_future_refs(stmts)
     # Before anything calls `_static_env`: the sibling set a generator's
@@ -3038,6 +3148,12 @@ def lower(stmts: list) -> tuple[list, list]:
     # generator is lowered, since a generator's kind depends on the kinds of
     # the generators it yields from.
     _register_generator_value_kinds(stmts)
+    # Before ANY coroutine is lowered, so each one's meta entry can answer
+    # "can this body ever put a wait-descriptor on its yield channel?" --
+    # the question the ordinary-function `async for` driver needs in order
+    # to drive it for real rather than bind the descriptor as the loop
+    # variable. See `_compute_no_wd_forward`.
+    _compute_no_wd_forward(stmts)
     for s in stmts:
         if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False):
             ok, _why = _eligible(s, prop_names=_prop_names)
@@ -4289,6 +4405,14 @@ def register(gen, meta: list) -> None:
             'tuple_slot_nested': m.get('tuple_slot_nested'),
             'has_return_value': True,
             'is_async_gen': m.get('is_async_gen', False),
+            # Whether this coroutine's body can EVER put a wait-descriptor
+            # on its yield channel (see `_compute_no_wd_forward`). An
+            # ordinary (never-suspended) function driving `async for x in
+            # gen():` has no channel of its own to forward one into, so it
+            # may only drive a generator this says is clean; anything else
+            # has to be refused rather than binding the descriptor as the
+            # loop variable, which is a silent garbage value.
+            'no_wd_forward': m.get('no_wd_forward', False),
         }
         if m.get('defaults'):
             api['defaults'] = m['defaults']

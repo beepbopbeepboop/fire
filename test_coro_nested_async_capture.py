@@ -5,11 +5,20 @@ stack-switch coroutine backend's mutable closure capture into a nested
 Fixed 2026-09-27 and registered in tools/suite.py as `coro-nested-capture`
 (in `check`/`gate`): `_RUNTIME_SRCS` named the pre-rename `mojo_*.c` runtime
 files (renamed to `fire_*.c`), so 7 of 9 cases died compiling the runtime
-before the program under test was ever compiled. 9/9 now: struct-typed
+before the program under test was ever compiled. 9/9 then: struct-typed
 capture (`test_struct_capture_compiles_boxed_and_correct`) used to assert
 the PRE-Increment-E refusal-to-cpp-path behaviour, which no longer happens
 -- a struct capture now boxes and runs correctly, so that test was rewritten
 to assert the current (correct) behaviour instead of the old one.
+
+10/10 as of 2026-09-29, with the bug doc's item 3 added
+(`test_nested_async_generator_driven_by_async_for`): a nested async
+GENERATOR consumed by `async for` in its own enclosing function built, ran,
+exited 0 and printed `0` where CPython prints `11`. A comment in this file
+still claimed the cross-closure stress shape below was uncovered and
+unreachable; it has been covered (and passing) since the
+`_rewrite_asyncio_run_stmts` local_map merge, so that claim is corrected
+here rather than left to mislead the next reader.
 
 Exercises the bug doc's own headline shape verbatim (also the real
 `test_async_with_lock_guard.py::test_simple_with_lock_guard_single_task`
@@ -40,16 +49,19 @@ to go through the box. `with BlockingScopedLock(lock):` itself is elided
 gimple_gen_coro.py's own `_is_lock_with` docstring), matching the cpp
 path's identical treatment.
 
-NOT covered (still open, see the bug doc's own item 4 / this file's own
-Status note): the cross-closure stress-test shape
-(`test_locks_mojo_shaped_10000_task_stress`), where a DIFFERENT sibling
-nested function (`caller()`) calls the hoisted `inc()` -- the qualified-
-rename `local_maps` this project's create_task/detached-async plumbing
-uses is keyed by the DIRECT enclosing function only, not propagated into
-further-nested sibling scopes, so that shape still hits the pre-existing
-"TaskGroup.create_task(...) is only supported for a call to another
-compiled async function this module already compiled" honest refusal
-(falls back to interpreting the module from source, not a miscompile).
+STILL not covered here, and deliberately so:
+  * the wait-descriptor boundary of `async for` -- an async generator whose
+    body can PARK, consumed by a function with no yield channel of its own.
+    That is a compile-time refusal, and the shape needs `import asyncio`
+    plus a real scheduler, so it lives with its siblings in
+    test_gimple_generator_runner.py (`async_for_over_parking_async_gen_
+    refused` and the three other cases beside it), whose harness compiles
+    the same way this one does.
+  * any `async for` whose iterable is not a plain call (a variable, an
+    attribute, an expression) -- `_async_for_ok` refuses the containing
+    coroutine outright for that, and the ordinary loop lowering's
+    `MojoGenerator *` route is what the item-3 fix is about, not this
+    file's capture plan.
 """
 import os
 import platform
@@ -413,6 +425,90 @@ def main() raises:
 """
     out = _build_and_run(src)
     check("struct capture p.x += 1 -> 2", out.strip() == "2", detail=out)
+
+
+def _cpython_stdout(py_src: str) -> str:
+    """The oracle for the case below, measured at test time rather than
+    transcribed: this file's harness has always asserted a hand-written
+    expected string, which is precisely how bugs/hard/
+    CODEGEN_bytes_silent_wrong_values.md's anti-tests came to encode the
+    CPython-WRONG answer. The `async for` shape's failure mode is a
+    SILENT wrong value, so the expected answer is the one CPython actually
+    produces for the reference twin, not one written down here."""
+    wd = tempfile.mkdtemp(prefix='mojo_coro_capture_cpy_')
+    p = os.path.join(wd, 'ref.py')
+    with open(p, 'w') as f:
+        f.write(py_src)
+    r = subprocess.run(['python3', p], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        raise RuntimeError(f"the CPython reference program itself failed: {r.stderr}")
+    return r.stdout
+
+
+def test_nested_async_generator_driven_by_async_for():
+    """bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md item 3, the
+    doc's own §3 repro verbatim: a nested async GENERATOR that mutates a
+    captured enclosing local, consumed by `async for` in that local's OWN
+    enclosing (ordinary, never-suspended) function.
+
+    This is the shape the doc proved was neither refused nor correct: it
+    built, linked, ran, exited 0, and printed `0` where CPython prints
+    `11`. The `mojo_unsupported_iter` warning it did emit names a
+    `MojoGenerator *`, so it looked handled from the outside.
+
+    Not a capture bug: the identical wrong `0` appeared with no capture at
+    all, and the cause is that a nested `async def gen()`'s call site is
+    rewritten by coro.py to its QUALIFIED `__mgco_outer_gen_start`, which
+    the bare-name `_generator_api` lookup the ordinary `for`-loop lowering
+    uses cannot see -- so the loop found no generator api and dropped its
+    body. The capture box IS threaded (this file's `_build_and_run`
+    requires `__mojo_box_new_*` in the C, and asserts it), which is exactly
+    why the failure looked like a capture problem.
+
+    The wait-descriptor half of the same boundary -- an async generator
+    that can PARK under `async for` driven by a function with no yield
+    channel -- is covered in test_gimple_generator_runner.py, which has
+    this harness's compile-only sibling; see `async_for_over_parking_
+    async_gen_refused` there."""
+    src = """\
+def outer() raises:
+    var acc = 0
+
+    async def gen():
+        acc = acc + 1
+        yield 10
+
+    async for x in gen():
+        acc = acc + x
+    print(acc)
+
+
+def main() raises:
+    outer()
+"""
+    out = _build_and_run(src)
+    want = _cpython_stdout("""\
+import asyncio
+
+
+async def outer():
+    acc = 0
+
+    async def gen():
+        nonlocal acc
+        acc = acc + 1
+        yield 10
+
+    async for x in gen():
+        acc = acc + x
+    print(acc)
+
+
+asyncio.run(outer())
+""")
+    check("nested async gen consumed by `async for` in its own enclosing "
+          f"function -> {want.strip()!r}", out == want, detail=f"got {out!r}, "
+          f"CPython {want!r}")
 
 
 def run_all():

@@ -200,6 +200,44 @@ def test_generator_refused(name: str, mojo_src: str, expected_substr: str):
             _FAIL += 1
 
 
+def _cpython_stdout(py_src: str) -> str:
+    wd = tempfile.mkdtemp(prefix='mojo_gen_cpy_')
+    p = os.path.join(wd, 'ref.py')
+    with open(p, 'w') as f:
+        f.write(py_src)
+    r = subprocess.run(['python3', p], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        raise RuntimeError(f"the CPython reference program itself failed: {r.stderr}")
+    return r.stdout
+
+
+def test_generator_matches_cpython(name: str, mojo_src: str, cpython_src: str):
+    """Compile+link+RUN the Mojo program and require its stdout to equal
+    the stdout CPython produces for the reference twin -- the oracle
+    measured at test time rather than a constant, so a fixture that drifts
+    cannot silently start asserting this compiler's own (wrong) answer.
+
+    Used for the `async for` / async-generator shapes, where the failure
+    mode this file most has to catch is a SILENT wrong value (a dropped
+    loop body, or a wait-descriptor bound as the loop variable) that
+    `test_generator_stdout`'s hand-written expected string would happily
+    have been written to match after the fact."""
+    global _PASS, _FAIL
+    try:
+        want = _cpython_stdout(cpython_src)
+        exe = _build_generator_program(mojo_src)
+        got = subprocess.run([exe], capture_output=True, timeout=10).stdout.decode()
+        if got == want:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: CPython {want!r}, compiled {got!r}")
+            _FAIL += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+
+
 def run_next_method_tests():
     test_generator_stdout("generator_next_method_values_and_shared_cursor", """\
 def counter():
@@ -3215,6 +3253,289 @@ def main():
     for r in g(pick(1, 2)):
         print(r)
 """, "yields ['x'], whose call sites do not all pass the same")
+
+    # ── `async for` over a compiled async generator, driven by an ORDINARY
+    # function -- bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md
+    # item 3. An async generator is consumed by `async for`, and the
+    # consumer need not be a coroutine itself: real Python lets an ordinary
+    # `async def`-less function do it, and the doc's own repro does exactly
+    # that. This compiler had no lowering for that consumer at all --
+    # `_gen_for_iter` saw a `MojoGenerator *` it could not resolve to a
+    # generator api (a NESTED `async def gen()`'s call site is rewritten by
+    # coro.py to the qualified `__mgco_outer_gen_start`, which no
+    # bare-name `_generator_api` lookup can see) and dropped the loop body
+    # with a `mojo_unsupported_iter` warning: CPython printed 11, the
+    # compiled program printed 0, exit 0, no error.
+    #
+    # Every case below is asserted against CPython run on a reference twin
+    # AT TEST TIME (`test_generator_matches_cpython`), because every
+    # failure mode in this area is a silent wrong value and a
+    # hand-transcribed "expected" string is exactly how one gets enshrined.
+    test_generator_matches_cpython("nested_async_gen_driven_by_async_for", """\
+def outer() raises:
+    var acc = 0
+
+    async def gen():
+        acc = acc + 1
+        yield 10
+
+    async for x in gen():
+        acc = acc + x
+    print(acc)
+
+def main() raises:
+    outer()
+""", """\
+import asyncio
+
+async def outer():
+    acc = 0
+
+    async def gen():
+        nonlocal acc
+        acc = acc + 1
+        yield 10
+
+    async for x in gen():
+        acc = acc + x
+    print(acc)
+
+asyncio.run(outer())
+""")
+
+    # The no-capture neighbour, which is the doc's own attribution check:
+    # the same wrong `0` appeared with no capture at all, so the defect was
+    # the loop lowering, not the capture boxing. It must be driven here too
+    # (this one already worked via the bare-name path -- the nested one did
+    # not -- which is exactly why both are here).
+    test_generator_matches_cpython("nested_async_gen_multiple_yields", """\
+def outer() raises:
+    var acc = 0
+
+    async def gen():
+        yield 3
+        yield 4
+        yield 5
+
+    async for x in gen():
+        acc = acc + x
+    print(acc)
+
+def main() raises:
+    outer()
+""", """\
+import asyncio
+
+async def outer():
+    acc = 0
+
+    async def gen():
+        yield 3
+        yield 4
+        yield 5
+
+    async for x in gen():
+        acc = acc + x
+    print(acc)
+
+asyncio.run(outer())
+""")
+
+    # `break` inside the driven loop, plus a STRING capture in the same
+    # generator, so the drive loop is exercised alongside a non-int box kind.
+    test_generator_matches_cpython("nested_async_gen_async_for_with_break", """\
+def outer() raises:
+    var acc = 0
+    var msg = String("a")
+
+    async def gen():
+        msg += "b"
+        yield 7
+        yield 8
+        yield 9
+
+    async for x in gen():
+        if x == 8:
+            break
+        acc = acc + x
+    print(acc, msg)
+
+def main() raises:
+    outer()
+""", """\
+import asyncio
+
+async def outer():
+    acc = 0
+    msg = "a"
+
+    async def gen():
+        nonlocal msg
+        msg += "b"
+        yield 7
+        yield 8
+        yield 9
+
+    async for x in gen():
+        if x == 8:
+            break
+        acc = acc + x
+    print(acc, msg)
+
+asyncio.run(outer())
+""")
+
+    # A TOP-LEVEL async generator driven the same way: already worked (its
+    # call site does reach the bare-name `_generator_api` path), kept as the
+    # control that the nested fix did not change the existing route.
+    test_generator_matches_cpython("toplevel_async_gen_driven_by_async_for", """\
+async def gen():
+    yield 3
+    yield 4
+
+def outer() raises:
+    var acc = 0
+    async for x in gen():
+        acc = acc + x
+    print(acc)
+
+def main() raises:
+    outer()
+""", """\
+import asyncio
+
+async def gen():
+    yield 3
+    yield 4
+
+async def outer():
+    acc = 0
+    async for x in gen():
+        acc = acc + x
+    print(acc)
+
+asyncio.run(outer())
+""")
+
+    # ── the wait-descriptor boundary ────────────────────────────────────
+    # A coroutine's yield channel carries EITHER a real value (`yield e`)
+    # OR a wait-descriptor (every parking `await`, is_wd=1) -- see
+    # mojo_coro.h. An ordinary function has no channel of its own to
+    # forward a descriptor into, so a descriptor reaching it would be
+    # BOUND AS THE LOOP VARIABLE. Measured before this was fixed: a
+    # generator that awaited `asyncio.sleep(0)` and then yielded 10 printed
+    # a heap ADDRESS instead of 10, exit 0, no diagnostic -- a real silent
+    # miscompile, on the top-level route as much as the nested one.
+    #
+    # It is now a compile-time REFUSAL, which is what the C++ backend has
+    # always done for this consumer shape (there, for an unrelated reason:
+    # `async for` is only legal inside an async body). Deliberately NOT
+    # special-cased on the input -- the question asked is the fixed point of
+    # "can this body ever park", so the next case shows the analysis is not
+    # simply "any await at all".
+    test_generator_refused("async_for_over_parking_async_gen_refused", """\
+import asyncio
+
+async def gen():
+    await asyncio.sleep(0)
+    yield 10
+
+def outer() raises:
+    var acc = 0
+    async for x in gen():
+        acc = acc + x
+    print(acc)
+
+def main() raises:
+    outer()
+""", "ordinary function")
+
+    # ... and the same through a nested generator, i.e. the case the new
+    # call-site registration newly made reachable at all.
+    test_generator_refused("async_for_over_nested_parking_async_gen_refused", """\
+import asyncio
+
+def outer() raises:
+    var acc = 0
+
+    async def gen():
+        await asyncio.sleep(0)
+        yield 10
+
+    async for x in gen():
+        acc = acc + x
+    print(acc)
+
+def main() raises:
+    outer()
+""", "ordinary function")
+
+    # A generator whose awaits are all of a coroutine that provably never
+    # parks is driven for real: `await clean()` lowers to an inline nested
+    # drive loop whose resume never yields a descriptor, so the fixed point
+    # resolves this body to "never forwards" and the loop is complete. If
+    # the analysis were only "contains an await", this would be refused --
+    # which is why it is here, as the counterweight to the two above.
+    test_generator_matches_cpython("async_for_over_nonparking_await", """\
+async def clean() -> Int:
+    return 5
+
+async def gen():
+    await clean()
+    yield 10
+
+def outer() raises:
+    var acc = 0
+    async for x in gen():
+        acc = acc + x
+    print(acc)
+
+def main() raises:
+    outer()
+""", """\
+import asyncio
+
+async def clean():
+    return 5
+
+async def gen():
+    await clean()
+    yield 10
+
+async def outer():
+    acc = 0
+    async for x in gen():
+        acc = acc + x
+    print(acc)
+
+asyncio.run(outer())
+""")
+
+    # The fixed point has to be a GREATEST one, or mutual recursion is a
+    # hole: `a` awaits `b` and `b` parks, so neither is channel-free, so
+    # driving `a` from an ordinary function cannot forward `b`'s descriptor.
+    # Under a least fixed point each would conclude the other is clean and
+    # this would compile to the heap-address answer again.
+    test_generator_refused("async_for_over_mutually_awaiting_gen_refused", """\
+import asyncio
+
+async def a():
+    await b()
+    yield 1
+
+async def b():
+    await asyncio.sleep(0)
+    return 0
+
+def outer() raises:
+    var acc = 0
+    async for x in a():
+        acc = acc + x
+    print(acc)
+
+def main() raises:
+    outer()
+""", "ordinary function")
 
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")

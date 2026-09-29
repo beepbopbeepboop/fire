@@ -1210,6 +1210,35 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if fname_raw in gen._generator_api:
         return 'MojoGenerator *', _emit_generator_start_call(
             gen, node, gen._generator_api[fname_raw], fname_raw)
+    # A coroutine nested INSIDE an ordinary function (`@parameter async def
+    # wrapper()` / a nested `async def gen()`), whose call site coro.py's
+    # `_rewrite_asyncio_run` has ALREADY rewritten from the bare name to
+    # the QUALIFIED `{base}_start(...)` -- two different enclosing
+    # functions may each define a same-named nested helper, so a bare-name
+    # lookup cannot work (see `_hoist_nested_async`'s own docstring, and
+    # cpp_async's identical `_ss_base` recovery for the same reason).
+    # The bare-name dispatch above can therefore not see it, and without
+    # this branch the call fell through to the ordinary function-call
+    # lowering: the handle was constructed (func_return_types says
+    # `MojoGenerator *`) but NOTHING recorded which generator it is, so
+    # every later consumer of the value — `async for x in gen():` in the
+    # enclosing function above all — found no api in `_generator_var_api`
+    # and dropped the loop body with a `mojo_unsupported_iter` warning.
+    # That is exactly bugs/hard/CODEGEN_coro_captured_param_capture_
+    # crashes.md item 3: CPython prints 11, the compiled program printed
+    # 0, exit 0, no error.
+    #
+    # Keyed on the STRIPPED `_start` name rather than a bare name, so it
+    # is exactly the set of NESTED bases (a top-level generator registers
+    # under its bare name and is handled above), and gated on the callee's
+    # own registered return type so an ordinary function that happens to be
+    # spelled `<something>_start` can never be mistaken for one.
+    _ss_base = (fname_raw[:-len('_start')] if fname_raw.endswith('_start')
+                else None)
+    if (_ss_base is not None and _ss_base in gen._generator_api
+            and gen.func_return_types.get(fname_raw) == 'MojoGenerator *'):
+        return 'MojoGenerator *', _emit_generator_start_call(
+            gen, node, gen._generator_api[_ss_base], _ss_base)
     # Same construction, but the callee is a generator this module only
     # knows through an (optionally aliased) cross-module import (`from a
     # import walk as walk_a`): _imported_generator_bindings — populated at

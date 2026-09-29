@@ -880,6 +880,40 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             # nonexistent MojoGenerator___has_next__/__next__).
             api = gen._generator_var_api.get(it_val)
             if api is not None:
+                # `async for x in gen():` in an ORDINARY (never-suspended)
+                # function -- the one place an async generator can be
+                # consumed by a consumer with no yield channel of its own,
+                # so it is also the one place `_gen_for_generator_iter`'s
+                # resume/value pair below is not automatically right: this
+                # coroutine's channel carries a wait-descriptor (is_wd=1)
+                # for every parking `await` and a real value (is_wd=0) for
+                # every `yield`, and an ordinary C function has no `__c` to
+                # forward a descriptor on. Binding it as the loop variable
+                # is real silent garbage, not merely a wrong answer to the
+                # loop count -- measured, a generator awaiting
+                # `asyncio.sleep(0)` printed a heap ADDRESS instead of its
+                # yield value. So drive it only when the coroutine is
+                # proven never to produce a descriptor, and refuse it
+                # otherwise. The analysis is coro.py's
+                # `_compute_no_wd_forward` fixpoint, carried on the api as
+                # `no_wd_forward`; `_cpp_async_for_stmt` refuses the same
+                # consumer shape for the C++ backend on unrelated grounds
+                # (`async for` is only legal inside an async body), so
+                # this is the stackswitch path's matching honest refusal,
+                # not a new restriction. See
+                # bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md
+                # item 3.
+                if (getattr(node, 'is_async', False) and api.get('is_async_gen')
+                        and not api.get('no_wd_forward')):
+                    raise RuntimeError(
+                        "cannot compile module: `async for` over async "
+                        f"generator {api.get('base') or it_val!r} in an "
+                        "ordinary function — that generator's body can "
+                        "suspend (it has an `await` that may park), so its "
+                        "yield channel carries a wait-descriptor the "
+                        "enclosing function has no channel of its own to "
+                        "forward; drive it from an `async def` body "
+                        "(`await asyncio.run(...)`) instead")
                 # Only auto-destroy the coroutine when this `for` loop's
                 # iterable expression IS the generator construction call
                 # itself (`for x in counter(3):`) — that value has no
