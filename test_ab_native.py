@@ -196,9 +196,15 @@ def test_dump_full_multi(name: str, files: dict, driver: str):
     path-sensitivity reason as test_inline_source.
     """
     written = []
+    saved = {}      # path -> the bytes a file of that name held before we wrote it
     try:
         for basename, source in files.items():
             path = os.path.join(HERE, basename)
+            # `abfulltest_driver.mojo` / `abfulltest_leaf.mojo` are also tracked
+            # corpus files: put back what was there rather than deleting them.
+            if os.path.exists(path):
+                with open(path, 'rb') as f:
+                    saved[path] = f.read()
             with open(path, 'w') as f:
                 f.write(source)
             written.append(path)
@@ -220,7 +226,10 @@ def test_dump_full_multi(name: str, files: dict, driver: str):
         return match
     finally:
         for p in written:
-            if os.path.exists(p):
+            if p in saved:
+                with open(p, 'wb') as f:
+                    f.write(saved[p])
+            elif os.path.exists(p):
                 os.remove(p)
         driver_ci = os.path.join(HERE, os.path.splitext(driver)[0] + '.ci')
         if os.path.exists(driver_ci):

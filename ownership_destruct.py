@@ -162,6 +162,13 @@ def _is_constructor_expr(node):
     if (isinstance(node, N.CallExpr) and isinstance(node.func, N.IdentExpr)
             and node.func.name in ('dict', 'list', 'set')):
         return True
+    # `List[T]()` / `Dict[K, V]()` / `Set[T]()` with nothing in the parentheses:
+    # the typed spelling of an empty container, lowered to a brand-new one.
+    if (isinstance(node, N.CallExpr) and isinstance(node.func, N.SubscriptExpr)
+            and isinstance(node.func.obj, N.IdentExpr)
+            and _as_str(node.func.obj.name) in ('List', 'Dict', 'Set')
+            and not node.args and len(node.kwargs or []) == 0):
+        return True
     return False
 
 
@@ -1294,6 +1301,15 @@ def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
 
 _CONSUMING_BUILTINS = ('len', 'print', 'bool')
 
+# String methods whose lowering for a `char *` receiver always returns a NEW
+# heap string, never the receiver or a pointer into it (emit_methods.py's
+# `_CSTR_METHODS`, `_char_replace_impl`, `mojo_str_join`, `mojo_str_expandtabs`;
+# runtime `_str_fresh_copy`). A call to one of these cannot make its result an
+# alias of the receiver, so it needs no "consumed on the spot" condition.
+_FRESH_RESULT_STR_METHODS = frozenset([
+    'upper', 'lower', 'strip', 'lstrip', 'rstrip', 'replace', 'join', 'expandtabs',
+])
+
 
 def receiver_results_consumed(node, name: str, consumed: bool = False) -> bool:
     """True iff EVERY use of `name` as the receiver of a method call under `node`
@@ -1322,7 +1338,8 @@ def receiver_results_consumed(node, name: str, consumed: bool = False) -> bool:
         is_recv = (isinstance(node.func, N.MemberExpr)
                    and isinstance(node.func.obj, N.IdentExpr)
                    and _as_str(node.func.obj.name) == name)
-        if is_recv and not consumed:
+        if (is_recv and not consumed
+                and _as_str(node.func.member) not in _FRESH_RESULT_STR_METHODS):
             return False
         arg_consumed = (isinstance(node.func, N.IdentExpr)
                         and _as_str(node.func.name) in _CONSUMING_BUILTINS)
@@ -1359,6 +1376,142 @@ def receiver_results_consumed(node, name: str, consumed: bool = False) -> bool:
         return True
     for f in dataclasses.fields(node):
         if not receiver_results_consumed(getattr(node, f.name), name, False):
+            return False
+    return True
+
+
+
+def _name_uses_consumed(node, name: str, consumed: bool = False) -> bool:
+    """True iff EVERY use of the identifier `name` under `node` is a read whose
+    result cannot outlive the statement it is in: an operand of a read-only
+    operator or comparison, a condition, an argument of `len`/`print`/`bool`, an
+    index (`x[name]`), a statement of its own, or a receiver whose method result is
+    consumed at once (or a method that always returns a new string). Anything else
+    — assigned, returned, appended, passed to a call, stored in a tuple/list —
+    could keep the pointer alive and is rejected. The sibling of
+    `receiver_results_consumed`, which only vets the receiver position."""
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            if not _name_uses_consumed(item, name, False):
+                return False
+        return True
+    if not _is_node(node):
+        return True
+    if isinstance(node, N.IdentExpr):
+        return consumed or _as_str(node.name) != name
+    if isinstance(node, N.CallExpr):
+        is_recv = (isinstance(node.func, N.MemberExpr)
+                   and isinstance(node.func.obj, N.IdentExpr)
+                   and _as_str(node.func.obj.name) == name)
+        if is_recv and not consumed and _as_str(node.func.member) not in _FRESH_RESULT_STR_METHODS:
+            return False
+        arg_consumed = (isinstance(node.func, N.IdentExpr)
+                        and _as_str(node.func.name) in _CONSUMING_BUILTINS)
+        for a in node.args:
+            if not _name_uses_consumed(a, name, arg_consumed):
+                return False
+        for kw in (node.kwargs or []):
+            if not _name_uses_consumed(kw[1], name, arg_consumed):
+                return False
+        if not is_recv:
+            return _name_uses_consumed(node.func, name, False)
+        return True
+    if isinstance(node, N.MemberExpr):
+        if isinstance(node.obj, N.IdentExpr) and _as_str(node.obj.name) == name:
+            return False        # a bound method taken as a value
+        return _name_uses_consumed(node.obj, name, False)
+    if isinstance(node, N.SubscriptExpr):
+        # the element read out of `name` is `name`'s own memory when `name` is a pair
+        return (_name_uses_consumed(node.obj, name, consumed)
+                and _name_uses_consumed(node.index, name, True))
+    if isinstance(node, N.ExprStmt):
+        return _name_uses_consumed(node.value, name, True)
+    if isinstance(node, N.BinaryOp) and node.op in _READ_ONLY_BINOPS:
+        return (_name_uses_consumed(node.left, name, True)
+                and _name_uses_consumed(node.right, name, True))
+    if isinstance(node, N.CompareChain):
+        for _op in node.operands:
+            if not _name_uses_consumed(_op, name, True):
+                return False
+        return True
+    if isinstance(node, N.UnaryOp) and node.op == 'not':
+        return _name_uses_consumed(node.operand, name, True)
+    if isinstance(node, (N.IfStmt, N.WhileStmt, N.TernaryExpr)):
+        for f in dataclasses.fields(node):
+            v = getattr(node, f.name)
+            if not _name_uses_consumed(v, name, f.name == 'condition'):
+                return False
+        return True
+    for f in dataclasses.fields(node):
+        if not _name_uses_consumed(getattr(node, f.name), name, False):
+            return False
+    return True
+
+
+def _key_view_source(it, name: str) -> str:
+    """'keys' when the iterable `it` walks `name`'s keys/elements (`name` or
+    `name.keys()`), 'items' for `name.items()`, else ''."""
+    if isinstance(it, N.IdentExpr) and _as_str(it.name) == name:
+        return 'keys'
+    if (isinstance(it, N.CallExpr) and isinstance(it.func, N.MemberExpr)
+            and isinstance(it.func.obj, N.IdentExpr) and _as_str(it.func.obj.name) == name
+            and not it.args and _as_str(it.func.member) in ('keys', 'items')):
+        return _as_str(it.func.member)
+    return ''
+
+
+def _target_key_names(target, source: str) -> list:
+    """The loop variables that hold a KEY view of the dict (all of them for
+    `keys`; the first slot, or a lone pair variable, for `items`)."""
+    t = _as_str(target).strip()
+    if t.startswith('(') and t.endswith(')'):
+        t = t[1:-1]
+    names = [p.strip() for p in t.split(',') if p.strip()]
+    if source == 'items' and len(names) > 1:
+        return names[:1]
+    return names
+
+
+def key_views_consumed(fn_body, name: str) -> bool:
+    """True iff a dict or set local `name` may be freed at scope exit without
+    leaving a dangling key. A dict OWNS its key strings and a set OWNS its string
+    elements: `for k in d`, `d.keys()` and `d.items()` hand out pointers into
+    them, so a loop variable that is appended, returned or stored would outlive
+    the free. Every such variable must therefore be `_name_uses_consumed`
+    throughout the function; iterating `name` any other way (a comprehension,
+    `.keys()` outside a `for`, `.popitem()`) is rejected outright."""
+    keyvars = []
+    if not _collect_key_views(fn_body, name, keyvars):
+        return False
+    for kv in keyvars:
+        if not _name_uses_consumed(fn_body, kv, False):
+            return False
+    return True
+
+
+def _collect_key_views(node, name: str, keyvars: list) -> bool:
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            if not _collect_key_views(item, name, keyvars):
+                return False
+        return True
+    if not _is_node(node):
+        return True
+    if isinstance(node, N.ForStmt):
+        src = _key_view_source(node.iterable, name)
+        if src != '':
+            for kn in _target_key_names(node.target, src):
+                keyvars.append(kn)
+            return (_collect_key_views(node.body, name, keyvars)
+                    and _collect_key_views(node.else_body, name, keyvars))
+    if isinstance(node, N.Generator) and _key_view_source(node.iterable, name) != '':
+        return False
+    if (isinstance(node, N.CallExpr) and isinstance(node.func, N.MemberExpr)
+            and isinstance(node.func.obj, N.IdentExpr) and _as_str(node.func.obj.name) == name
+            and _as_str(node.func.member) in ('keys', 'items', 'popitem', '__iter__')):
+        return False        # a key view outside a `for` header
+    for f in dataclasses.fields(node):
+        if not _collect_key_views(getattr(node, f.name), name, keyvars):
             return False
     return True
 

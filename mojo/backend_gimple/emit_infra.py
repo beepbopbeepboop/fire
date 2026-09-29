@@ -58,7 +58,7 @@ from ownership_check import _block_terminates
 from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
-    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _compute_owned_free_candidates, _compute_scoped_free_candidates, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
+    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
     _pair_key, _prepass_list_elem, _ptr_slot_in_range, _resolve_member_expr_type, _resolve_type, _scan_container_elems,
     _seed_addressed_locals, _type_of
@@ -336,6 +336,9 @@ def _reset_func(gen, body: list = None, params: list = None,
     # `int`, truncating a list pointer to 32 bits -> SEGV in the compiled
     # `_collect_return_elems`).
     gen._dict_items_val_elems: dict[str, str] = {}
+    gen._dict_items_int_keys: set = set()
+    gen._dict_item_int_key_vars: set = set()
+    gen._int_key_loop_vars: set = set()
     gen._tuple_slot_types: dict[str, list] = {}
     gen._dict_item_pair_vars: dict[str, str] = {}
     # `it = iter(<list>)` inside ordinary codegen (incl. an A3 stack-switch
@@ -942,7 +945,7 @@ _FRESH_CONTAINER_RETURNS = frozenset([
     'mojo_list_slice', 'mojo_list_copy', 'mojo_list_concat', 'mojo_list_repeat',
     'mojo_reversed', 'mojo_str_split', 'mojo_str_splitlines', 'mojo_range',
     'mojo_range3', 'mojo_dict_copy', 'mojo_set_copy', 'mojo_dict_keys',
-    'mojo_dict_values', 'mojo_dict_items', 'mojo_zip', 'mojo_set_union',
+    'mojo_dict_values', 'mojo_dict_items', 'mojo_dict_items_int', 'mojo_zip', 'mojo_set_union',
     'mojo_set_intersection', 'mojo_set_difference',
 ])
 
@@ -960,6 +963,12 @@ _FRESH_STRING_RETURNS = frozenset([
     'mojo_str_cat', 'mojo_str_from_int', 'mojo_char_to_str', 'mojo_cstr_slice',
     'mojo_cstr_repeat', 'mojo_cstr_reverse', 'mojo_repr_str',
     'mojo_hex', 'mojo_oct', 'mojo_bin',
+    # The str methods: each returns a copy the caller owns, never its receiver
+    # (runtime/fire_runtime.c, `_str_fresh_copy`).
+    'string_upper', 'string_lower', 'string_strip', 'mojo_str_lstrip',
+    'mojo_str_rstrip', 'mojo_str_lstrip_chars', 'mojo_str_rstrip_chars',
+    'mojo_str_rjust', 'mojo_str_ljust', 'mojo_str_center',
+    'mojo_str_expandtabs', 'mojo_str_join',
 ])
 
 
@@ -1037,6 +1046,8 @@ def _emit(gen, line: str):
     # exactly such a value, from an operand node that can only have produced
     # it, may free it once it has read it.
     _fi = line.find(' = mojo_')
+    if _fi < 0:
+        _fi = line.find(' = string_')
     if _fi > 0:
         _rest = line[_fi + 3:]
         _pi = _rest.find(' (')
@@ -3940,6 +3951,22 @@ def emit_container_new(gen, t: str, ctype: str) -> None:
         gen._emit(f"  {t} = mojo_list_new ();")
 
 
+def _drop_owned_candidate(gen, name: str) -> None:
+    """`name` stops being owned: not a function-level candidate and not armed
+    for its loop body, so no allocation, push or free is ever emitted for it."""
+    gen._owned_free_candidates.discard(name)
+    gen._scope_armed.discard(name)
+
+
+def _container_keys_safe(gen, name: str, ctype) -> bool:
+    """A dict or set owns its key/element strings, so it may be torn down at
+    scope exit only if no key it handed out by iteration can outlive it
+    (ownership_destruct.key_views_consumed). Any other type is unaffected."""
+    if ctype != 'MojoDict *' and ctype != 'MojoSet *':
+        return True
+    return _key_views_ok(gen._own_fn_body, name)
+
+
 def maybe_push_owned_local(gen, name: str, value=None) -> None:
     """Call once, right after lowering ANY statement whose sole target is
     the plain identifier `name` (a `VarDecl` or a single-target
@@ -3989,6 +4016,9 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
             candidates.discard(name)
             return
     ctype = gen.var_types.get(name)
+    if not _container_keys_safe(gen, name, ctype):
+        _drop_owned_candidate(gen, name)
+        return
     # A non-empty literal was lowered with a stack-storage request
     # (`maybe_stack_alloc_owned_ctor`): consumed -> the value lives in that
     # storage and is torn down with `_destroy`; still pending -> nothing took
@@ -4002,6 +4032,13 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
         gen._owned_stack_allocated.add(name)
         push_fn = _owned_stack_push_runtime_fn(ctype)
         free_fn = _owned_destroy_runtime_fn(ctype)
+        if push_fn == '' and ctype is not None and ctype.endswith(' *'):
+            # A stack-homed struct instance has nothing to tear down (no
+            # buffers of its own are owned through it) and nothing to unwind:
+            # record the name as handled and register no free.
+            pushed.add(name)
+            if name in gen._scope_armed:
+                _scope_register(gen, name, '')
     else:
         push_fn = _owned_push_runtime_fn(ctype)
         free_fn = _owned_free_runtime_fn(ctype)
@@ -4296,6 +4333,19 @@ _OWNED_STACK_PUSH_RUNTIME_FN = {
 
 
 
+def _vetted_struct_ctor_name(gen, value) -> str:
+    """`S` when `value` is a constructor call `S(...)` of a struct the ownership
+    analysis vetted (its `__init__` retains nothing, no base class) and whose
+    layout codegen knows; '' otherwise."""
+    if not (isinstance(value, CallExpr) and isinstance(value.func, IdentExpr)):
+        return ''
+    sname = _as_str(value.func.name)
+    if sname in gen._analysis_structs and sname in gen.struct_field_types \
+            and sname not in gen._dict_subclass_structs:
+        return sname
+    return ''
+
+
 def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
     """Call from gimple_gen_stmts.py's central `gen_stmt` dispatcher
     BEFORE lowering a `VarDecl`/single-target `AssignStmt` normally (a
@@ -4313,6 +4363,10 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
     if name in pushed:
         return False
     ctype = _empty_ctor_ctype(value)
+    _kind = ctype if ctype is not None else _literal_ctor_ctype(value)
+    if _kind is not None and not _container_keys_safe(gen, name, _kind):
+        _drop_owned_candidate(gen, name)
+        return False
     if ctype is None:
         # A NON-EMPTY literal (`[1, 2, i]`, `{"a": 1}`, `{1, 2}`) keeps its own
         # element-type inference and per-element population, so it is not
@@ -4325,6 +4379,15 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
         # ordinary heap candidate. Returns False: the caller lowers normally.
         lit = _literal_ctor_ctype(value)
         if lit is None:
+            # A constructor call of a vetted struct: reserve frame storage for
+            # the instance the same way (consumed by `_lower_struct_constructor`).
+            _sname = _vetted_struct_ctor_name(gen, value)
+            if _sname == '':
+                return False
+            gen.temp_counter += 1
+            gen.decls.append(f"  {_sname} _owned_storage{gen.temp_counter}_{name};")
+            gen._literal_storage = f'_owned_storage{gen.temp_counter}_{name}'
+            gen._literal_storage_ctype = f"{_sname} *"
             return False
         _init_fn, _struct = _OWNED_STACK_KIND[lit]
         gen.temp_counter += 1
@@ -4399,6 +4462,7 @@ def begin_function(gen, fn) -> None:
     gen._owned_stack_allocated = set()
     _reset_scope_state(gen)
     gen._own_fn_body = fn.body
+    gen._int_keyed_dicts = _compute_int_keyed_dicts(fn)
     gen._scoped_free_candidates = _compute_scoped_free_candidates(fn, gen._owned_free_candidates, gen._analysis_funcs, gen._analysis_structs)
 
 
@@ -4425,6 +4489,7 @@ def reset_no_candidates(gen) -> None:
     gen._owned_free_candidates = set()
     gen._owned_free_pushed = set()
     gen._owned_stack_allocated = set()
+    gen._int_keyed_dicts = set()
     _reset_scope_state(gen)
 
 

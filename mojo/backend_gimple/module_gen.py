@@ -637,7 +637,7 @@ def _emit_reflection_dispatch(self, parts):
                "  for (int64_t _oi = 0; _oi < d->used; _oi++) {\n"
                "    int64_t _i = _order[_oi];\n"
                "    if (_oi > 0) _buf = mojo_str_cat(_buf, \", \");\n"
-               "    _buf = mojo_str_cat(_buf, mojo_repr_str(d->slots[_i].key));\n"
+               "    _buf = mojo_str_cat(_buf, mojo_repr_str(mojo_dict_slot_key(d, _i)));\n"
                "    _buf = mojo_str_cat(_buf, \": \");\n"
                 "    if (_is_booldict)\n"
                 "      _buf = mojo_str_cat(_buf, d->slots[_i].val ? \"True\" : \"False\");\n"
@@ -8354,20 +8354,33 @@ def gen_module_impl(self, stmts):
         # inferred.
         _dsub_init = ("  _dd = mojo_dict_new ();\n"
                       f"  _p->_data = (MojoDict *) _dd;\n") if _is_dict_sub else ""
+        # `_init_S` puts a block of `sizeof(S)` bytes into the state a fresh
+        # instance starts in (zeroed, type tag, class attributes); `_alloc_S`
+        # is a heap block plus that; a stack-homed instance (an owned local
+        # that never escapes, see emit_infra.maybe_stack_alloc_owned_ctor) is
+        # frame storage plus that. One definition of "a new S", two homes.
+        # Plain C, not `__GIMPLE`: `sizeof(S)` is not accepted inside a GIMPLE
+        # body for a helper that only takes `S *`.
+        parts.append(
+            f"static void _init_{sn} ({sn} * _p)\n"
+            f"{{\n"
+            f"{_dsub_decls}"
+            f"  memset (_p, 0, sizeof({sn}));\n"
+            f"  _p->__mojo_type_id = (int64_t){_struct_type_id(sn)};\n"
+            f"{_dsub_init}"
+            f"{attr_inits}"
+            f"}}"
+        )
+        parts.append('')
         parts.append(
             f"static {sn} * __GIMPLE _alloc_{sn} (void)\n"
             f"{{\n"
             f"  {sn} * _p;\n"
             f"  void * _vp;\n"
-            f"  int64_t _tag;\n"
-            f"{_dsub_decls}"
             f"\nbb_2:\n"
-            f"  _vp = calloc (1, sizeof({sn}));\n"
+            f"  _vp = malloc (sizeof({sn}));\n"
             f"  _p = ({sn} *) _vp;\n"
-            f"  _tag = (int64_t){_struct_type_id(sn)};\n"
-            f"  _p->__mojo_type_id = _tag;\n"
-            f"{_dsub_init}"
-            f"{attr_inits}"
+            f"  _init_{sn} (_p);\n"
             f"  return _p;\n"
             f"}}"
         )

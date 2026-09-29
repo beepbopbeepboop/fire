@@ -158,11 +158,15 @@ def test_every_declaration_is_seen():
     # are still included, and all five removed declarations are still absent.
     # 450 -> 451 (2026-09-28): `mojo_cstr_or_int_release`, the free half of
     # `mojo_cstr_or_int_str`'s ownership contract (doc/MEMORY.html section 4).
+    # 464 -> 465 (2026-09-29): mojo_dict_slot_key, the accessor that builds an integer
+    # key's decimal string on demand (generated repr code read the field directly).
+    # 462 -> 464 (2026-09-28): mojo_dict_iter_key_int and mojo_dict_items_int, the
+    # integer-key readers for a loop over a Dict[Int, V].
     # 452 -> 462 (2026-09-28): the ten `mojo_dict_*_kw` entry points (integer dict
     # keys passed as a raw word; doc/MEMORY.html section 10.4).
     # 451 -> 452 (2026-09-28): `mojo_cleanup_push_ptr`, the cleanup-stack kind
     # for an owned struct instance (doc/MEMORY.html section 3.B).
-    for header, want in (('fire_runtime.h', 462),
+    for header, want in (('fire_runtime.h', 465),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

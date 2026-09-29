@@ -12,6 +12,8 @@ runtime is built on (doc/MEMORY.html sections 10 and 3.A):
     look numeric staying separate, bytes keys staying separate, the `_kw` entry points against a reference model;
   * the Int-key path's fast itoa + block pool and the dict's resize (moves keys, keeps
     insertion order), which the Int-keyed dict benchmark depends on;
+  * the dict's and set's 8-slot inline first table and the integer key's lazy decimal string: a small stack
+    dict/set allocates nothing, growth/pop/copy/iteration/keys stay correct across the boundary;
   * MojoList's 4-slot inline buffer: growth across the boundary, a stack
     struct that is init'd/destroyed repeatedly, and (under AddressSanitizer,
     when the toolchain has it) that destroy never frees the inline storage.
@@ -203,11 +205,76 @@ static void test_dict_int_keys(void) {
     mojo_dict_free(m);
 }
 
+static void test_dict_set_inline(void) {
+    /* A stack MojoDict keeps its first table inside the struct and, with integer keys, allocates
+     * nothing: no table, no key strings (the decimal is built only when read). */
+    MojoDict d; mojo_dict_init(&d);
+    assert(d.slots == d.inl && d.cap == MOJO_DICT_INLINE);
+    for (int i = 0; i < 4; i++) mojo_dict_set_int_kw(&d, 100 + i, i);
+    assert(d.slots == d.inl && d.used == 4);
+    for (int i = 0; i < MOJO_DICT_INLINE; i++) assert(d.slots[i].key == NULL || d.slots[i].key == _ikey_lazy);
+    /* reading keys as text materializes them, once, and they are then owned by the slot */
+    MojoList *ks = mojo_dict_keys(&d);
+    assert(ks->len == 4 && strcmp(mojo_list_get_str(ks, 0), "100") == 0 && strcmp(mojo_list_get_str(ks, 3), "103") == 0);
+    mojo_list_free(ks);
+    char *k0 = mojo_dict_slot_key(&d, 0); (void)k0;
+    /* pop inside the inline table keeps the survivors and their order, and stays inline */
+    assert(mojo_dict_pop_int_kw(&d, 101) == 1 && d.used == 3 && d.slots == d.inl);
+    assert(mojo_dict_get_int_kw(&d, 100) == 0 && mojo_dict_get_int_kw(&d, 102) == 2 && mojo_dict_get_int_kw(&d, 103) == 3);
+    /* a copy and an update read integer slots without text */
+    MojoDict *cp = mojo_dict_copy(&d);
+    assert(cp->used == 3 && mojo_dict_get_int_kw(cp, 102) == 2 && mojo_dict_contains(cp, "103"));
+    /* the fifth key crosses the half-full mark: the table moves to the heap, entries intact */
+    for (int i = 0; i < 6; i++) mojo_dict_set_int_kw(&d, 200 + i, i);
+    assert(d.slots != d.inl && d.used == 9);
+    for (int i = 0; i < 6; i++) assert(mojo_dict_get_int_kw(&d, 200 + i) == i);
+    assert(mojo_dict_get_int_kw(&d, 100) == 0 && mojo_dict_get_int_kw(&d, 103) == 3);
+    /* iteration hands back integers and their pairs */
+    MojoDictIter *it = mojo_dict_iter_new(&d); int64_t sum = 0;
+    while (mojo_dict_iter_next(it)) sum += mojo_dict_iter_key_int(it);
+    mojo_dict_iter_free(it);
+    assert(sum == 100 + 102 + 103 + 200 + 201 + 202 + 203 + 204 + 205);
+    MojoList *pairs = mojo_dict_items_int(&d); assert(pairs->len == 9);
+    MojoList *p0 = (MojoList *)(intptr_t)mojo_list_get_int(pairs, 0);
+    assert(mojo_list_get_int(p0, 0) == 100 && mojo_list_get_int(p0, 1) == 0);
+    mojo_list_free(pairs);
+    mojo_dict_destroy(&d);
+    mojo_dict_free(cp);
+    /* string keys in an inline table, cleared and reused; a heap dict cleared after growth */
+    for (int round = 0; round < 3; round++) {
+        MojoDict e; mojo_dict_init(&e);
+        mojo_dict_set_int(&e, "a", 1); mojo_dict_set_int(&e, "b", 2); mojo_dict_set_int(&e, "7", 3);
+        assert(e.slots == e.inl && mojo_dict_get_int(&e, "b") == 2 && mojo_dict_get_int_kw(&e, 7) == 3);
+        assert(mojo_dict_pop_int(&e, "a") == 1 && mojo_dict_pop_int(&e, "7") == 3 && mojo_dict_get_int(&e, "b") == 2);
+        mojo_dict_clear(&e); assert(e.used == 0 && !mojo_dict_contains(&e, "b"));
+        mojo_dict_set_int(&e, "c", 4); assert(mojo_dict_get_int(&e, "c") == 4);
+        mojo_dict_destroy(&e);
+    }
+    /* the same for a set: ints and strings across the inline boundary, popped, grown, destroyed */
+    MojoSet st; mojo_set_init(&st);
+    assert(st.slots == st.inl && st.cap == MOJO_SET_INLINE);
+    for (int i = 0; i < 4; i++) mojo_set_add_int(&st, i * 10);
+    assert(st.slots == st.inl && st.used == 4);
+    mojo_set_add_str(&st, "x"); mojo_set_add_str(&st, "y");
+    for (int i = 4; i < 40; i++) mojo_set_add_int(&st, i * 10);
+    assert(st.slots != st.inl && st.used == 42);
+    for (int i = 0; i < 40; i++) assert(mojo_set_contains_int(&st, i * 10));
+    assert(mojo_set_contains_str(&st, "x") && mojo_set_contains_str(&st, "y") && !mojo_set_contains_int(&st, 5));
+    mojo_set_destroy(&st);
+    for (int round = 0; round < 3; round++) {
+        MojoSet t; mojo_set_init(&t);
+        mojo_set_add_int(&t, 1); mojo_set_add_int(&t, 2);
+        assert(t.slots == t.inl && mojo_set_contains_int(&t, 2));
+        mojo_set_destroy(&t);
+    }
+}
+
 int main(void) {
     test_ptrreg();
     test_list_inline();
     test_dict_and_itoa();
     test_dict_int_keys();
+    test_dict_set_inline();
     printf("ok\n");
     return 0;
 }

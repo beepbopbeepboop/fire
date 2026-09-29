@@ -283,8 +283,9 @@ the runtime built at <code>-O2</code>. What is left, most valuable first:</p>
 <ol>
 <li><strong>Containers nested inside a literal</strong> (<code>[[1, 2], [i]]</code>, 212 B/iter). The outer list is owned; its inner lists have no owner. Freeing them with the outer is only sound if
   no element read from the outer can escape (<code>x = m[0]; return x</code> would then return a freed list), which needs an analysis of element reads that does not exist. Left leaking on purpose.</li>
-<li><strong>Strings: what is left</strong> (~6&ndash;48 B/iter). Locals bound to a provably fresh string are owned now (§3.B). Still leaking: results of <code>upper</code>/<code>lower</code>/<code>strip</code>/<code>replace</code>/<code>join</code>/padding (not provably fresh: the functions can return their argument; making them always
-  return a copy would add them to the fresh list and let the receiver-result rule relax), and the strings inside a <code>split()</code> list.</li>
+<li><strong>Strings: what is left</strong> (~48 B/iter). Locals bound to a provably fresh string are owned (§3.B), and since 2026-09-29 so are the results of <code>upper</code>/<code>lower</code>/<code>strip</code>/<code>lstrip</code>/<code>rstrip</code>/<code>replace</code>/<code>join</code>/<code>expandtabs</code>/padding: the runtime functions always return a copy
+  (<code>_str_fresh_copy</code>; the price is a copy where Python returns the same object for an unchanged string), so they are on the fresh list, the receiver-result rule is relaxed for them, and a temporary receiver (<code>s.lower().lstrip()</code>) is freed after the call.
+  Still leaking: the strings inside a <code>split()</code> list.</li>
 <li><strong>Closure environments, bound methods, boxed mutable locals</strong> (~90 B/iter measured). Decided against a half measure: it needs closure-escape analysis, the exclusion of functions
   containing a nested <code>def</code>/<code>lambda</code> from ownership analysis has two traps (the receiver rules are not switched off inside a closure; a nested function's <code>begin_function</code> resets the parent's
   ownership state), and <code>_reg_bound_method</code> needs a way to drop an entry. Written up in <code>bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md</code>.</li>
@@ -292,12 +293,13 @@ the runtime built at <code>-O2</code>. What is left, most valuable first:</p>
 <li><strong>Fixed 256-byte <code>sprintf</code> buffers</strong> in <code>%</code>-format: replace with a sized <code>snprintf</code> and release it as class C.</li>
 <li><strong>Dict comprehension keys, <code>__missing__</code> keys</strong>: route the comprehension's set call through <code>_emit_call</code>; <code>__missing__</code> stays unreleased by contract.</li>
 <li><strong>Speed still behind Rust:</strong> string building (1.7x); the string-keyed dict may have slipped to ~1.1x (§10.4). Int-keyed dicts are now within ~1.1x.</li>
-<li><strong>Iterating an Int-keyed dict returns string keys</strong> (already wrong; <code>bugs/CODEGEN_iterating_an_int_keyed_dict_yields_string_keys.md</code>).</li>
+<li><strong>Not yet done:</strong> stack-homing inside lifted loop bodies (not investigated), and <code>Dict</code>/<code>Set</code> string keys still <code>strdup</code> per key (an integer-keyed or integer-element small dict/set now allocates nothing when stack-homed).</li>
+<li><strong>Int-keyed iteration is name-scoped:</strong> <code>for k in d</code> / <code>.keys()</code> / <code>.items()</code> return integer keys only when <code>d</code> is a local or parameter annotated <code>Dict[Int, V]</code> at every binding (<code>_compute_int_keyed_dicts</code>). A dict reached any other way (field, call result, unannotated) still yields string keys.</li>
 </ol>
 <p><strong>Considered and declined (measured):</strong> skipping the container registry for a stack-homed container the solver proves is never boxed. After the pointer-table rewrite the registry costs
 ~0.5 ns of a 5.8 ns list lifecycle (~8%), and skipping it means proving no <code>int64_t</code> ever holds the pointer, which an untyped callee parameter breaks; a misclassified pointer is a
 wrong-behaviour bug, not a leak. Not worth the risk for 8%.</p>
-<p><strong>Bugs found on the way, filed:</strong> <code>bugs/CODEGEN_unannotated_int_local_is_32_bit.md</code> (an inferred <code>var a = 0</code> wraps at 32 bits),
+<p><strong>Bugs found on the way, filed:</strong> (fixed since: an inferred <code>var a = 0</code> was a 32-bit int and wrapped; it is now 64-bit),
 <code>bugs/CODEGEN_set_annotated_empty_braces_lowered_as_dict.md</code> (<code>var s: Set[Int] = {}</code> does not compile), and
 <code>bugs/CODEGEN_call_result_container_never_freed.md</code> (partly closed by this work).</p>
 
@@ -322,6 +324,10 @@ wrong-behaviour bug, not a leak. Not worth the risk for 8%.</p>
 <li><code>runtime/fire_runtime.{c,h}</code>: <code>mojo_cstr_or_int_release</code> and the transient-decimal block pool; <code>_PtrReg</code> replacing the six <code>MojoSet</code> registries; <code>MojoList</code> inline buffer;
   <code>MOJO_CLEANUP_PTR</code>/<code>mojo_cleanup_push_ptr</code>; masked dict probing and a key-moving resize; a hand-rolled itoa.</li>
 <li><code>build_stdlib_dylib.py</code>: the runtime units default to <code>-O2</code>.</li>
+<li>2026-09-29, small dict/set with no malloc: <code>MojoDict</code>/<code>MojoSet</code> carry an 8-slot inline first table (<code>MOJO_DICT_INLINE</code>/<code>MOJO_SET_INLINE</code>; <code>slots == inl</code> until the first growth; every free of <code>slots</code> checks it);
+  an integer dict key's decimal string is built on demand (<code>_ikey_lazy</code> sentinel, <code>_slot_key</code>, <code>mojo_dict_slot_key</code> for generated repr code); <code>_dict_remove_slot</code> moves slots whole. Struct instances: <code>_init_S</code> (plain C) is factored out of
+  <code>_alloc_S</code>, and an owned, non-escaping struct local is initialised in frame storage (<code>maybe_stack_alloc_owned_ctor</code>/<code>_lower_struct_constructor</code>). Struct methods run the same ownership analysis as functions; an empty <code>List[T]()</code>/<code>Dict[K,V]()</code>/<code>Set[T]()</code> is a container literal.
+  <code>mojo_dict_iter_key_int</code>/<code>mojo_dict_items_int</code> serve Int-keyed loops (<code>_compute_int_keyed_dicts</code>); an unannotated integer local is 64-bit.</li>
 <li>Integer dict slots: <code>_DictSlot.ikey</code> and <code>keykind == 2</code>, <code>_canon_int</code>/<code>_ik_hash</code>/<code>_dict_find_ik</code>/<code>_dict_lookup_ik</code>, normalization in <code>_dict_find_k</code>/<code>_dict_lookup_k</code>/<code>_dict_set_raw_seq_kind_k</code>,
   <code>_dict_remove_slot</code> (pop by slot address), ten <code>mojo_dict_*_kw</code> entry points; codegen <code>_char_to_cstr(word_ok)</code>, <code>_apply_kw_keys</code>, <code>_KW_DICT_FNS</code>.</li>
 <li><code>ownership_destruct.py</code>: <code>analyze_scoped_locals</code>, <code>analyze_returns_fresh</code>, <code>_summarize_params</code>, the struct rules (<code>_prescan_struct_binds</code>, method/<code>__init__</code> summaries),
@@ -403,8 +409,7 @@ decision <code>mojo_cstr_or_int_str</code> made (<code>mojo_boxed_is_str</code>)
 Pinned by: a reference-model test of the runtime layer (400,000 operations, negatives, extremes, canonical-integer detection, int/string equivalence in both directions, numeric-looking strings and bytes keys staying separate; gcc <code>-O0</code>/<code>-O2</code> and AddressSanitizer), a C-shape test that the emitted code contains the <code>_kw</code> calls and no
 string conversion, and a program checked against CPython through every operation.</p>
 <p><strong>What it cost.</strong> The slot grew from 40 to 48 bytes (the <code>ikey</code> field), and the string-keyed dict measures ~1.1x Rust where it measured parity before. The machine was ~15% slower on the later run (Rust's own time moved by the same amount), so part of that is noise; part may be the wider slot. Not separated.</p>
-<p><strong>What it did not fix:</strong> iterating an Int-keyed dict still hands back the keys as strings, so <code>for k in d: total += k</code> adds string pointers (this was already wrong; it returns different garbage now). Filed as
-<code>bugs/CODEGEN_iterating_an_int_keyed_dict_yields_string_keys.md</code> with the fix path: record a dict's key type and iterate it through integer-returning entry points. String building still allocates a result per concatenation and does not free the bound result (§7.2).
+<p><strong>Follow-up fix:</strong> iterating an Int-keyed dict used to hand back the keys as strings (<code>for k in d: total += k</code> added string pointers). Loops over an annotated <code>Dict[Int, V]</code> name now read integer keys (<code>mojo_dict_iter_key_int</code>, <code>mojo_dict_items_int</code>); see §7. String building still allocates a result per concatenation and does not free the bound result (§7.2).
 A first version of the set benchmark failed to build: <code>var s: Set[Int] = {}</code> is refused (filed, §7).</p>
 
 </body>

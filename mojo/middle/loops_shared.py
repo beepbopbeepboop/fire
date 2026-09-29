@@ -125,7 +125,8 @@ def _tuple_unpack_slot_elems(gen, it_val: str, nslots: int) -> list:
     # segfault on the single-TU `--dump myinterpreter.py`.
     for i in range(nslots):
         if is_dict_items:
-            elems.append('char *' if i == 0 else _as_str(value_elem or 'int64_t'))
+            elems.append(('int64_t' if it_val in gen._dict_items_int_keys else 'char *') if i == 0
+                         else _as_str(value_elem or 'int64_t'))
         elif slot_types is not None and i < len(slot_types):
             elems.append(_as_str(slot_types[i]))
         else:

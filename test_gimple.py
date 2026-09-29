@@ -131,6 +131,34 @@ def test_c_shape(name: str, mojo_src: str, must_have: list, must_not_have: list)
 
 
 def run_tests():
+    # A vetted struct constructor bound to an owned local is initialised in frame storage.
+    test_c_shape("owned_struct_local_is_initialised_in_the_frame", """\
+struct P:
+    var x: Int
+
+    def __init__(out self, x: Int):
+        self.x = x
+
+def f(n: Int) -> Int:
+    var p = P(n)
+    return p.x
+""", must_have=["_init_P (&_owned_storage"], must_not_have=["= _alloc_P ();"])
+
+    # An unannotated integer local is 64-bit storage, like Mojo's `Int` and Python's
+    # int: it used to be a 32-bit `int` whenever every assignment was a small
+    # literal or 32-bit arithmetic (`var a = 0; a += 2000000000` wrapped).
+    test_c_shape("unannotated_integer_local_is_64_bit", """\
+def f(n: Int) -> Int:
+    var a = 0
+    b = 1
+    var c = 2
+    c = 3
+    for i in range(n):
+        a += 2000000000
+    return a + b + c
+""", must_have=["int64_t a;", "int64_t b;", "int64_t c;"],
+       must_not_have=["  int a;", "  int b;", "  int c;"])
+
     # Integer dict keys go to the runtime as a raw WORD (`_kw` entry points), not
     # as a decimal string built per access: nothing to format, nothing to release.
     test_c_shape("dict_int_key_ops_emit_word_key_calls", """\

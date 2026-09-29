@@ -10,7 +10,8 @@ import gimple_codegen  # noqa: F401  (must load before infra_infer: circular imp
 import fire_compiler as N
 import mojo.middle.infra_infer as II
 from ownership_destruct import (analyze_module, analyze_function, analyze_scoped_locals,
-                                analyze_returns_fresh)
+                                analyze_returns_fresh, receiver_results_consumed,
+                                key_views_consumed)
 
 
 def _candidates(src, fname):
@@ -21,6 +22,23 @@ def _candidates(src, fname):
 
 
 CASES = [
+    ("typed_empty_constructor_is_an_owned_container", """
+def f(n: Int) -> Int:
+    l = List[Int]()
+    e = Dict[Int, Int]()
+    s = Set[Int]()
+    l.append(n)
+    e[n] = n
+    s.add(n)
+    return len(l) + len(e) + len(s)
+""", "f", {"l", "e", "s"}),
+
+    ("typed_constructor_with_arguments_is_not_assumed_fresh", """
+def f(n: Int) -> Int:
+    l = List[Int](n, n)
+    return len(l)
+""", "f", {"l"}),   # a call: credited as "maybe fresh"; codegen decides
+
     ("never_escapes_own_methods_only", """
 def main():
     d = {}
@@ -963,6 +981,108 @@ def f(n: Int) -> Int:
 ]
 
 
+# receiver_results_consumed: a str method call on the local may bind its result
+# only if the method always returns a NEW string (upper/lower/strip/lstrip/rstrip/
+# replace/join/expandtabs); every other method's result must be consumed on the spot.
+RECEIVER_CASES = [
+    ("fresh_method_result_may_be_bound", """
+def f(s: String) -> Int:
+    t = s.strip()
+    return len(t)
+""", "s", True),
+    ("fresh_method_result_may_be_returned", """
+def f(s: String) -> String:
+    return s.upper()
+""", "s", True),
+    ("other_method_result_bound_is_rejected", """
+def f(s: String) -> Int:
+    t = s.removeprefix("a")
+    return len(t)
+""", "s", False),
+    ("other_method_result_consumed_is_fine", """
+def f(s: String) -> Int:
+    return len(s.removeprefix("a"))
+""", "s", True),
+    ("bound_method_as_value_is_rejected_even_when_fresh", """
+def f(s: String) -> Int:
+    g = s.strip
+    return 0
+""", "s", False),
+]
+
+
+def _receiver(src, name):
+    stmts = N.Parser(N.py_tokenize(src)).with_filename("<test>").parse_module()
+    return receiver_results_consumed([st for st in stmts if isinstance(st, N.FunctionDef)][0].body, name)
+
+
+# key_views_consumed: a dict/set OWNS its key strings, so it may be freed at scope
+# exit only when no key handed out by iteration can outlive it.
+KEYVIEW_CASES = [
+    ("keys_only_compared_and_indexed", """
+def f(d: Dict[String, Int], o: Dict[String, Int]) -> Int:
+    m = {}
+    m["a"] = 1
+    t = 0
+    for k in m:
+        if k == "a":
+            t += o[k]
+    return t
+""", "m", True),
+    ("key_appended_to_a_list_escapes", """
+def f() -> List[String]:
+    m = {}
+    m["a"] = 1
+    out = []
+    for k in m:
+        out.append(k)
+    return out
+""", "m", False),
+    ("items_key_stored_in_a_tuple_escapes", """
+def f() -> List[String]:
+    m = {}
+    m["a"] = 1
+    out = []
+    for k, v in m.items():
+        out.append((k, v))
+    return out
+""", "m", False),
+    ("key_assigned_to_another_name_escapes", """
+def f() -> String:
+    m = {}
+    m["a"] = 1
+    last = ""
+    for k in m:
+        last = k
+    return last
+""", "m", False),
+    ("keys_call_outside_a_for_is_rejected", """
+def f() -> Int:
+    m = {}
+    m["a"] = 1
+    ks = m.keys()
+    return len(ks)
+""", "m", False),
+    ("comprehension_over_the_dict_is_rejected", """
+def f() -> List[String]:
+    m = {}
+    m["a"] = 1
+    return [k for k in m]
+""", "m", False),
+    ("values_and_len_are_fine", """
+def f() -> Int:
+    m = {}
+    m["a"] = 1
+    return len(m) + m["a"]
+""", "m", True),
+]
+
+
+def _keyviews(src, name):
+    stmts = N.Parser(N.py_tokenize(src)).with_filename("<test>").parse_module()
+    return key_views_consumed([st for st in stmts if isinstance(st, N.FunctionDef)][0].body, name)
+
+
 def run():
     failures = []
     for name, body, fname, exp_whole, exp_scoped in STRUCT_CASES:
@@ -984,7 +1104,16 @@ def run():
         got = _candidates(src, fname)
         if got != expected:
             failures.append(f"{name!r}: expected {expected}, got {got}")
-    total = len(CASES) + len(SCOPED_CASES) + len(FRESH_RETURN_CASES) + len(STRUCT_CASES)
+    for name, src, var, expected in RECEIVER_CASES:
+        got = _receiver(src, var)
+        if got != expected:
+            failures.append(f"{name!r}: expected receiver_results_consumed={expected}, got {got}")
+    for name, src, var, expected in KEYVIEW_CASES:
+        got = _keyviews(src, var)
+        if got != expected:
+            failures.append(f"{name!r}: expected key_views_consumed={expected}, got {got}")
+    total = (len(CASES) + len(SCOPED_CASES) + len(FRESH_RETURN_CASES) + len(STRUCT_CASES)
+             + len(RECEIVER_CASES) + len(KEYVIEW_CASES))
     passed = total - len(failures)
     for f in failures:
         print("FAIL:", f)

@@ -646,11 +646,20 @@ typedef struct {
 /* Value-kind tags for _DictSlot.kind. Kept in the header so generated code
  * never needs them — only runtime internals read/write kind today. */
 
+/* The first slot table lives INSIDE the struct: a dict that stays within
+ * MOJO_DICT_INLINE slots (it grows at half full, so up to 4 entries) never
+ * allocates a table, and a stack-homed one allocates nothing at all. `slots`
+ * points at `inl` until the first growth, after which `inl` is unused and
+ * `slots` is a heap table. Anything that frees `slots` must first check
+ * `slots != inl`; anything that copies a MojoDict struct by value would leave
+ * `slots` pointing into the original and must not. */
+#define MOJO_DICT_INLINE 8
 typedef struct {
     _DictSlot *slots;
     int64_t    used;
     int64_t    cap;
     int64_t    next_seq;
+    _DictSlot  inl[MOJO_DICT_INLINE];
 } MojoDict;
 
 MojoDict   *mojo_dict_new(void);
@@ -700,6 +709,7 @@ char       *mojo_dict_setdefault_str(MojoDict *d, char *key, char *dflt);
 MojoList   *mojo_dict_keys(MojoDict *d);
 MojoList   *mojo_dict_values(MojoDict *d);
 MojoList   *mojo_dict_items(MojoDict *d);
+MojoList   *mojo_dict_items_int(MojoDict *d);
 void        mojo_dict_update(MojoDict *dst, MojoDict *src);
 int64_t     mojo_dict_pop_int(MojoDict *d, char *key);
 MojoDict   *mojo_dict_copy(MojoDict *d);
@@ -820,6 +830,8 @@ typedef struct {
 MojoDictIter  *mojo_dict_iter_new(MojoDict *d);
 int            mojo_dict_iter_next(MojoDictIter *it);     /* 1=has entry, 0=done */
 char *mojo_dict_iter_key(MojoDictIter *it);
+char *mojo_dict_slot_key(MojoDict *d, int64_t i);
+int64_t mojo_dict_iter_key_int(MojoDictIter *it);
 int64_t        mojo_dict_iter_val_int(MojoDictIter *it);
 double         mojo_dict_iter_val_double(MojoDictIter *it);
 char *mojo_dict_iter_val_str(MojoDictIter *it);
@@ -834,11 +846,15 @@ typedef struct {
     int64_t seq;   /* insertion order; see mojo_set_order_indices */
 } _SetSlot;
 
+/* As MojoDict: the first table is inside the struct (`slots == inl` until the
+ * first growth), so a small set allocates no table. */
+#define MOJO_SET_INLINE 8
 typedef struct {
     _SetSlot *slots;
     int64_t   used;
     int64_t   cap;
     int64_t   next_seq;
+    _SetSlot  inl[MOJO_SET_INLINE];
 } MojoSet;
 
 MojoSet *mojo_set_new(void);

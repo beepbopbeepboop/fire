@@ -13,24 +13,20 @@ What still leaks (peak-RSS slope, 100k vs 400k iterations, `fire.py build`):
 
 | loop body | B/iter |
 |---|---|
-| `String("abc").upper()`, a callee returning `String` (not provably fresh) | ~6 |
+| a callee returning `String` (not provably fresh) | ~6 |
 | `String("a b c").split(" ")` (the list is freed; its three strings are not) | ~48 |
 
 Fixed since this doc was first written (`doc/MEMORY.html` §3.B): a local bound to a provably fresh
-STRING (`+`, `String(i)`, slices, f-strings) is owned and freed; `var s = String("n=") + String(i)` and
-`"n=" + String(i) + "!"` measure flat.
-
-## Cause
-
-`upper`, `lower`, `strip`, `lstrip`, `rstrip`, `replace`, `join`, `expandtabs` and the padding
-functions return their own argument (or a static `""`) in edge cases, so their result cannot be
-freed and a method call on a string local may alias it. Only the 10 runtime functions whose every
-return path allocates are treated as fresh.
+STRING (`+`, `String(i)`, slices, f-strings) is owned and freed; the str methods `upper`, `lower`,
+`strip`, `lstrip`, `rstrip`, `replace`, `join`, `expandtabs` and the padding functions now always
+return a copy (`_str_fresh_copy`), are on `_FRESH_STRING_RETURNS`, and a temporary receiver
+(`s.lower().lstrip()`) is freed after the call.
 
 ## Fix
 
-Make those functions always return a copy (then add them to `_FRESH_STRING_RETURNS`, and relax the
-receiver-result rule for them), and free the element strings when a fresh `split()` list is freed.
+Free the element strings when a fresh `split()` list is freed (needs the list known to be the sole
+owner of freshly allocated elements), and prove a user function returns a fresh string
+(`analyze_returns_fresh` for strings).
 
 ## Done when
 

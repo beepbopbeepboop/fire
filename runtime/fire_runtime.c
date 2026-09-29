@@ -3383,14 +3383,64 @@ int mojo_is_registered_dict(int64_t addr) {
     return _pr_has(&_reg_dict, (uint64_t)addr);
 }
 
+/* Decimal formatting for an int64_t. `tmp` is a scratch buffer of
+ * _INT_STR_BLOCK bytes (24: "-9223372036854775808" is 20 characters, plus the
+ * NUL); the returned pointer is INSIDE it, so the string is
+ * tmp + sizeof tmp - result bytes long including the NUL. A hand-rolled itoa:
+ * snprintf("%lld") was half the cost of an Int-keyed dict access (vfprintf,
+ * locale lookup, buffer setup) for what is a divide loop. */
+#define _INT_STR_BLOCK 24
+static char *_fmt_int(int64_t v, char *tmp) {
+    char *p = tmp + _INT_STR_BLOCK;
+    uint64_t u = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
+    *--p = '\0';
+    do { *--p = (char)('0' + (u % 10)); u /= 10; } while (u);
+    if (v < 0) *--p = '-';
+    return p;
+}
+
+/* An integer dict key's decimal string is built only when something asks for
+ * it. Until then the slot's `key` points at this shared, never-freed sentinel
+ * (so `key != NULL` still means "occupied") and `ikey` holds the value; the
+ * hash and every integer probe use `ikey` alone. `_slot_key` materializes the
+ * string (owned by the slot from then on) for the readers that need text:
+ * iteration, repr, `.keys()`/`.items()`. A dict that is only ever indexed by
+ * integer therefore allocates no key strings at all. */
+static char _ikey_lazy[1] = {0};
+
+static char *_slot_key(_DictSlot *sl)
+{
+    if (sl->key == _ikey_lazy) {
+        char tmp[_INT_STR_BLOCK];
+        char *p = _fmt_int(sl->ikey, tmp);
+        size_t n = (size_t)(tmp + sizeof tmp - p);
+        sl->key = (char *)malloc(n);
+        memcpy(sl->key, p, n);
+    }
+    return sl->key;
+}
+
+static void _slot_free_key(_DictSlot *sl)
+{
+    if (sl->key != _ikey_lazy) free(sl->key);
+}
+
+/* For generated code (the compiler's dict repr) that used to read
+ * `d->slots[i].key` directly. */
+char *mojo_dict_slot_key(MojoDict *d, int64_t i)
+{
+    return _slot_key(&d->slots[i]);
+}
+
 /* mojo_dict_init/mojo_dict_destroy: see mojo_set_init/mojo_set_destroy's
  * comment (same Phase 6 rationale, same refactor shape). */
 void mojo_dict_init(MojoDict *d)
 {
-    d->cap      = 8;
+    d->cap      = MOJO_DICT_INLINE;
     d->used     = 0;
     d->next_seq = 0;
-    d->slots = calloc((size_t)d->cap, sizeof(_DictSlot));
+    d->slots    = d->inl;       /* the first table lives inside the struct */
+    memset(d->inl, 0, sizeof d->inl);
     _pr_add(&_reg_dict, (uint64_t)(uintptr_t)d);
 }
 
@@ -3398,8 +3448,8 @@ void mojo_dict_destroy(MojoDict *d)
 {
     _pr_del(&_reg_dict, (uint64_t)(uintptr_t)d);
     _pr_del(&_reg_bool_dict, (uint64_t)(uintptr_t)d);
-    for (int64_t i = 0; i < d->cap; i++) free(d->slots[i].key);
-    free(d->slots);
+    for (int64_t i = 0; i < d->cap; i++) _slot_free_key(&d->slots[i]);
+    if (d->slots != d->inl) free(d->slots);
 }
 
 MojoDict *mojo_dict_new(void)
@@ -3429,7 +3479,7 @@ void mojo_dict_clear(MojoDict *d)
 {
     if (!d) return;
     for (int64_t i = 0; i < d->cap; i++) {
-        free(d->slots[i].key);
+        _slot_free_key(&d->slots[i]);
         d->slots[i].key = NULL;
     }
     d->used = 0;
@@ -3521,6 +3571,7 @@ static _DictSlot *_dict_find(MojoDict *d, char *key)
 { return _dict_find_k(d, key, 0 /* str key */); }
 
 static void _dict_grow(MojoDict *d);
+static void _dict_set_ik(MojoDict *d, int64_t k, int64_t val, int64_t kind);
 
 /* seq >= 0 preserves an already-assigned insertion sequence number (used
  * only by _dict_grow's rehash, so a key's original insertion order survives
@@ -3532,12 +3583,13 @@ static void _dict_set_raw_seq_kind_k(MojoDict *d, char *key, int64_t val,
     if (keykind == 2) keykind = 0;   /* a re-insert of an integer slot: the string domain, re-normalised below */
     _DictSlot *sl = _dict_find_k(d, key, keykind);
     if (!sl->key) {
-        sl->key = strdup(key);
         int64_t iv;
         if (keykind == 0 && _canon_int(key, &iv)) {
+            sl->key = _ikey_lazy;
             sl->keykind = 2;
             sl->ikey = iv;
         } else {
+            sl->key = strdup(key);
             sl->keykind = keykind;
         }
         sl->seq = (seq >= 0) ? seq : d->next_seq++;
@@ -3584,7 +3636,7 @@ static void _dict_grow(MojoDict *d)
         while (d->slots[j].key) j = (j + 1) & mask;
         d->slots[j] = old[i];
     }
-    free(old);
+    if (old != d->inl) free(old);
 }
 
 /* Slot indices for d->slots, in insertion order (ascending by _DictSlot.seq).
@@ -3786,7 +3838,7 @@ void mojo_dict_print(MojoDict *d)
     for (int64_t i = 0; i < d->cap; i++) {
         if (!d->slots[i].key) continue;
         if (!first) printf(", ");
-        printf("\"%s\": %lld", d->slots[i].key, (long long)d->slots[i].val);
+        printf("\"%s\": %lld", _slot_key(&d->slots[i]), (long long)d->slots[i].val);
         first = 0;
     }
     printf("}");
@@ -4001,7 +4053,17 @@ int mojo_dict_iter_next(MojoDictIter *it)
 
 char *mojo_dict_iter_key(MojoDictIter *it)
 {
-    return it->dict->slots[it->order[it->pos]].key;
+    return _slot_key(&it->dict->slots[it->order[it->pos]]);
+}
+
+/* The current key as an INTEGER, for a loop over a Dict[Int, V]. An integer
+ * slot (keykind 2) holds it directly; any other slot is a key that was never
+ * canonical decimal, so parse what it holds rather than invent a value. */
+int64_t mojo_dict_iter_key_int(MojoDictIter *it)
+{
+    _DictSlot *s = &it->dict->slots[it->order[it->pos]];
+    if (s->keykind == 2) return s->ikey;
+    return s->key ? (int64_t)strtoll(s->key, NULL, 10) : 0;   /* not an integer slot: parse its text */
 }
 
 int64_t mojo_dict_iter_val_int(MojoDictIter *it)
@@ -4053,10 +4115,10 @@ int mojo_is_registered_set(int64_t addr) {
  * convention, not a special case for this feature). */
 void mojo_set_init(MojoSet *s)
 {
-    s->cap   = 8;
+    s->cap   = MOJO_SET_INLINE;
     s->used  = 0;
     s->next_seq = 0;
-    s->slots = malloc((size_t)s->cap * sizeof(_SetSlot));
+    s->slots = s->inl;          /* the first table lives inside the struct */
     for (int64_t i = 0; i < s->cap; i++) { s->slots[i].tag = -1; s->slots[i].seq = 0; }
     _pr_add(&_reg_set, (uint64_t)(uintptr_t)s);
 }
@@ -4066,7 +4128,7 @@ void mojo_set_destroy(MojoSet *s)
     _pr_del(&_reg_set, (uint64_t)(uintptr_t)s);
     for (int64_t i = 0; i < s->cap; i++)
         if (s->slots[i].tag == 1) free(s->slots[i].val_s);
-    free(s->slots);
+    if (s->slots != s->inl) free(s->slots);
 }
 
 MojoSet *mojo_set_new(void)
@@ -4232,7 +4294,7 @@ static void _set_grow(MojoSet *s)
             free(old[i].val_s);
         }
     }
-    free(old);
+    if (old != s->inl) free(old);
 }
 
 void mojo_set_add_int(MojoSet *s, int64_t v)
@@ -5355,6 +5417,20 @@ __attribute__((weak)) char *input(char *prompt) {
 
 /* String utilities — stdlib-equivalent implementations */
 
+/* A fresh heap copy of `s`. Every string method below returns a string the
+ * CALLER owns — never its receiver, an interior pointer into it, or a static
+ * literal — so the caller can free the result without asking where it came
+ * from (codegen lists these in emit_infra._FRESH_STRING_RETURNS and frees
+ * bound results at scope exit). The price is one copy where Python would
+ * return the same object for an unchanged string. */
+static char *_str_fresh_copy(const char *s) {
+    size_t n = strlen(s);
+    char *out = (char *)malloc(n + 1);
+    if (!out) abort();
+    memcpy(out, s, n + 1);
+    return out;
+}
+
 char *string_strip(char *str) {
     if ((intptr_t)str < 65536) return str;
     if (!str) return str;
@@ -5365,8 +5441,9 @@ char *string_strip(char *str) {
         start++;
     }
 
-    /* Nothing but whitespace — return as-is */
-    if (!*start) { return str; }
+    /* Nothing but whitespace — an empty string (a fresh one, like every
+     * other result of this function) */
+    if (!*start) { return _str_fresh_copy(""); }
 
     /* Find end (skip trailing whitespace) */
     char *end = str + strlen(str) - 1;
@@ -5376,7 +5453,7 @@ char *string_strip(char *str) {
 
     size_t len = (end - start) + 1;
     if (start == str && len == strlen(str)) {
-        return str;  /* nothing to strip */
+        return _str_fresh_copy(str);  /* nothing to strip */
     }
     /* Return a fresh heap copy rather than stripping in place: the input may
        be a read-only string literal (the generated preamble's interned
@@ -5395,7 +5472,7 @@ char *string_strip(char *str) {
 char *mojo_str_lstrip(char *str) {
     if (!str) return str;
     while (*str && (*str == ' ' || *str == '\t' || *str == '\n' || *str == '\r')) str++;
-    return str;
+    return _str_fresh_copy(str);
 }
 
 char *mojo_str_rstrip(char *str) {
@@ -5437,7 +5514,7 @@ char *mojo_str_lstrip_chars(char *str, char *chars) {
     char *start = str;
     while (*start && chars && strchr(chars, *start))
         start++;
-    if (start == str) return str;
+    if (start == str) return _str_fresh_copy(str);
     char *out = (char *)malloc(len - (start - str) + 1);
     if (!out) return str;
     strcpy(out, start);
@@ -5449,7 +5526,7 @@ static char *_str_pad(char *s, int64_t width, char *fill, int mode) {
     if (!s) s = (char *)"";
     if (width < 0) width = 0;
     size_t len = strlen(s);
-    if ((int64_t)len >= width) return s;
+    if ((int64_t)len >= width) return _str_fresh_copy(s);
     size_t pad = (size_t)width - len;
     char fc = (fill && fill[0]) ? fill[0] : ' ';
     size_t left = 0, right = 0;
@@ -5502,7 +5579,7 @@ char *mojo_str_expandtabs(char *str, int tabsize) {
 }
 
 char *mojo_str_join(char *sep, MojoList *parts) {
-    if (!parts || parts->len == 0) return "";
+    if (!parts || parts->len == 0) return _str_fresh_copy("");
     if (!sep) sep = "";
     size_t sep_len = strlen(sep);
     size_t total = 0;
@@ -5512,7 +5589,7 @@ char *mojo_str_join(char *sep, MojoList *parts) {
         if (i < parts->len - 1) total += sep_len;
     }
     char *out = (char *)malloc(total + 1);
-    if (!out) return "";
+    if (!out) abort();
     char *p = out;
     for (int64_t i = 0; i < parts->len; i++) {
         char *s = mojo_list_get_str(parts, i);
@@ -5947,7 +6024,7 @@ MojoList *mojo_dict_keys(MojoDict *d) {
     if (!d) return out;
     int64_t *order = mojo_dict_order_indices(d);
     for (int64_t oi = 0; oi < d->used; oi++)
-        mojo_list_append_str(out, d->slots[order[oi]].key);
+        mojo_list_append_str(out, _slot_key(&d->slots[order[oi]]));
     free(order);
     return out;
 }
@@ -5987,7 +6064,7 @@ MojoList *mojo_dict_items(MojoDict *d) {
     for (int64_t oi = 0; oi < d->used; oi++) {
         int64_t i = order[oi];
         MojoList *pair = mojo_list_new();
-        mojo_list_append_str(pair, d->slots[i].key);
+        mojo_list_append_str(pair, _slot_key(&d->slots[i]));
         mojo_list_append_int(pair, d->slots[i].val);
         /* Same reason as mojo_zip's: `dict.items()` yields (key, value)
          * TUPLES, so mark them — `print({"a": 1}.items())` printed
@@ -5999,12 +6076,37 @@ MojoList *mojo_dict_items(MojoDict *d) {
     return out;
 }
 
+/* dict.items() of a Dict[Int, V]: the same [key, value] pairs, with the key
+ * slot an INTEGER (read it with mojo_list_get_int). Only for consumers that
+ * know the dict is integer-keyed — every other reader of an items pair
+ * assumes a string in slot 0. */
+MojoList *mojo_dict_items_int(MojoDict *d) {
+    MojoList *out = mojo_list_new();
+    if (!d) return out;
+    int64_t *order = mojo_dict_order_indices(d);
+    for (int64_t oi = 0; oi < d->used; oi++) {
+        _DictSlot *s = &d->slots[order[oi]];
+        MojoList *pair = mojo_list_new();
+        mojo_list_append_int(pair, s->keykind == 2 ? s->ikey
+                             : (s->key ? (int64_t)strtoll(s->key, NULL, 10) : 0));
+        mojo_list_append_int(pair, s->val);
+        mojo_mark_as_tuple(pair);
+        mojo_list_append_int(out, (int64_t)(intptr_t)pair);
+    }
+    free(order);
+    return out;
+}
+
 void mojo_dict_update(MojoDict *dst, MojoDict *src) {
     if (!dst || !src) return;
     for (int64_t i = 0; i < src->cap; i++)
-        if (src->slots[i].key)
-            _dict_set_raw_seq_kind_k(dst, src->slots[i].key, src->slots[i].val,
-                                     -1, src->slots[i].kind, src->slots[i].keykind);
+        if (src->slots[i].key) {
+            if (src->slots[i].keykind == 2)
+                _dict_set_ik(dst, src->slots[i].ikey, src->slots[i].val, src->slots[i].kind);
+            else
+                _dict_set_raw_seq_kind_k(dst, src->slots[i].key, src->slots[i].val,
+                                         -1, src->slots[i].kind, src->slots[i].keykind);
+        }
 }
 
 /* dict.setdefault(key, default): return the value for `key`, inserting
@@ -6029,18 +6131,28 @@ char *mojo_dict_setdefault_str(MojoDict *d, char *key, char *dflt) {
  * an integer slot and a string slot of the same characters cannot be told apart
  * by strcmp. */
 static void _dict_remove_slot(MojoDict *d, _DictSlot *sl) {
-    int64_t old_cap = d->cap;
-    _DictSlot *old = d->slots;
-    int64_t skip = (int64_t)(sl - old);
-    d->slots = calloc((size_t)old_cap, sizeof(_DictSlot));
+    int64_t cap = d->cap;
+    int64_t skip = (int64_t)(sl - d->slots);
+    /* Move every entry out to a scratch copy, clear the table in place, and
+     * move the survivors back: a slot moves WHOLE, so its key (a lazy integer
+     * sentinel or an owned string) travels with it and nothing is re-hashed
+     * from text. The table itself is unchanged, which is what lets the first,
+     * inline table be rebuilt without a second one to put it in. */
+    _DictSlot *tmp = (_DictSlot *)malloc((size_t)cap * sizeof(_DictSlot));
+    memcpy(tmp, d->slots, (size_t)cap * sizeof(_DictSlot));
+    memset(d->slots, 0, (size_t)cap * sizeof(_DictSlot));
     d->used = 0;
-    for (int64_t i = 0; i < old_cap; i++) {
-        if (old[i].key && i != skip)
-            _dict_set_raw_seq_kind_k(d, old[i].key, old[i].val, old[i].seq,
-                                     old[i].kind, old[i].keykind);
+    uint64_t mask = (uint64_t)cap - 1;
+    for (int64_t i = 0; i < cap; i++) {
+        if (!tmp[i].key || i == skip) continue;
+        uint64_t j = (tmp[i].keykind == 2 ? _ik_hash(tmp[i].ikey)
+                                          : _str_hash(tmp[i].key)) & mask;
+        while (d->slots[j].key) j = (j + 1) & mask;
+        d->slots[j] = tmp[i];
+        d->used++;
     }
-    for (int64_t i = 0; i < old_cap; i++) free(old[i].key);
-    free(old);
+    if (tmp[skip].key) _slot_free_key(&tmp[skip]);
+    free(tmp);
 }
 
 /* Remove the entry for `key` in the given key DOMAIN (see _DictSlot.keykind)
@@ -6469,18 +6581,19 @@ char *int64_t_expanduser(char *path) {
 
 int64_t _char_replace_impl(int64_t s_i, int64_t old_i, int64_t new_i) {
     char *s = (char *)s_i, *old_s = (char *)old_i, *new_s = (char *)new_i;
-    if (!s || !old_s || !new_s) return s_i;
+    if (!s) return s_i;
+    if (!old_s || !new_s) return (int64_t)_str_fresh_copy(s);
     size_t old_len = strlen(old_s), new_len = strlen(new_s);
-    if (old_len == 0) return s_i;
+    if (old_len == 0) return (int64_t)_str_fresh_copy(s);
     int count = 0;
     const char *p = s;
     while ((p = strstr(p, old_s)) != NULL) { count++; p += old_len; }
-    if (count == 0) return s_i;
+    if (count == 0) return (int64_t)_str_fresh_copy(s);
     size_t slen = strlen(s);
     size_t result_len = slen + (size_t)count * new_len
                         - (size_t)count * old_len + 1;
     char *result = (char *)malloc(result_len);
-    if (!result) return s_i;
+    if (!result) abort();
     char *r = result; const char *q = s;
     while (*q) {
         if (strncmp(q, old_s, old_len) == 0) {
@@ -6769,22 +6882,6 @@ int64_t mojo_obj_call1(int64_t obj, char *method, int64_t arg1) {
    exist, and a bool argument arrives as 0/1 anyway. */
 char *mojo_repr_bool(int b) { return b ? "True" : "False"; }
 
-/* Decimal formatting for an int64_t. `tmp` is a scratch buffer of
- * _INT_STR_BLOCK bytes (24: "-9223372036854775808" is 20 characters, plus the
- * NUL); the returned pointer is INSIDE it, so the string is
- * tmp + sizeof tmp - result bytes long including the NUL. A hand-rolled itoa:
- * snprintf("%lld") was half the cost of an Int-keyed dict access (vfprintf,
- * locale lookup, buffer setup) for what is a divide loop. */
-#define _INT_STR_BLOCK 24
-static char *_fmt_int(int64_t v, char *tmp) {
-    char *p = tmp + _INT_STR_BLOCK;
-    uint64_t u = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
-    *--p = '\0';
-    do { *--p = (char)('0' + (u % 10)); u /= 10; } while (u);
-    if (v < 0) *--p = '-';
-    return p;
-}
-
 /* The TRANSIENT decimal strings of `mojo_cstr_or_int_str` (an Int dict key or
  * compare operand) are blocks from this small free list: one per access,
  * released the moment the call that consumed it returns
@@ -6856,20 +6953,15 @@ void mojo_cstr_or_int_release(int64_t orig, char *s) {
  * as text, compared with strcmp, and the string released afterwards — over half
  * of an Int-keyed dict access. A string word takes the ordinary string path. */
 
-/* Insert or overwrite the entry for integer key `k`. A NEW key also gets its
- * decimal string (the slot's `key`), so iteration/repr/copy/pop see what they
- * always saw; that one small allocation per NEW key replaces a strdup. */
+/* Insert or overwrite the entry for integer key `k`. A NEW key allocates
+ * nothing: its decimal string is built on first read (`_slot_key`). */
 static void _dict_set_ik(MojoDict *d, int64_t k, int64_t val, int64_t kind)
 {
     if (!d) return;
     if (d->used * 2 >= d->cap) _dict_grow(d);
     _DictSlot *sl = _dict_find_ik(d, k);
     if (!sl->key) {
-        char tmp[_INT_STR_BLOCK];
-        char *p = _fmt_int(k, tmp);
-        size_t n = (size_t)(tmp + sizeof tmp - p);
-        sl->key = (char *)malloc(n);
-        memcpy(sl->key, p, n);
+        sl->key = _ikey_lazy;
         sl->keykind = 2;
         sl->ikey = k;
         sl->seq = d->next_seq++;

@@ -316,8 +316,8 @@ Phase 4-6 (real calling convention, move-vs-copy, stack allocation).
   Still open: containers nested inside a literal; strings whose producer is not provably fresh (`upper`/`strip`/`replace`/`join`)
   and the strings inside a `split()` list (bugs/CODEGEN_call_result_container_never_freed.md);
   closure environments / bound methods / boxed mutable locals (bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md);
-  struct-method callee tables beyond `self`; storage homing in `__GIMPLE` bodies; inline slot arrays for dicts/sets and a lazy
-  decimal string for integer slots; iterating an Int-keyed dict returns string keys (bugs/CODEGEN_iterating_an_int_keyed_dict_yields_string_keys.md).
+  struct-method callee tables beyond `self`; storage homing in lifted loop bodies (struct methods, struct instances, small dicts/sets
+  and integer-key strings landed 2026-09-29).
 
 ## Why this matters, not just "more spec compliance"
 

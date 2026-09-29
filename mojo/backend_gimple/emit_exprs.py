@@ -925,6 +925,9 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         _pv_type = gen._dict_item_pair_vars[node.obj.name]
         _pv_raw = gen._cname(node.obj.name)
         _pair = gen._coerce_to_type('int64_t', 'MojoList *', _pv_raw)
+        if node.member == 'key' and node.obj.name in gen._dict_item_int_key_vars:
+            return 'int64_t', gen._new_val(
+                'int64_t', f"mojo_list_get_int ({_pair}, 0)")
         if node.member == 'key':
             return 'char *', gen._new_val(
                 'char *', f"mojo_list_get_str ({_pair}, 0)")

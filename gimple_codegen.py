@@ -184,6 +184,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_dict_iter_new':         'MojoDictIter *',
     'mojo_dict_iter_next':        'int',
     'mojo_dict_iter_key':         'char *',
+    'mojo_dict_iter_key_int':     'int64_t',
     'mojo_dict_iter_val_int':     'int64_t',
     'mojo_dict_iter_val_double':  'double',
     'mojo_dict_iter_val_str':     'char *',
@@ -1297,6 +1298,13 @@ class GimpleGen:
         # the value slot's real type to pick get_str vs get_int; the key slot
         # is always a string. Side-table pattern, like _generator_var_api.
         self._dict_items_val_elems: dict[str, str] = {}
+        # Dict[Int, V] iteration: items-list temps whose key slot is an
+        # INTEGER (mojo_dict_items_int), the pair loop vars bound to such a
+        # pair, and the function's provably Int-keyed dict names.
+        self._dict_items_int_keys: set = set()
+        self._dict_item_int_key_vars: set = set()
+        self._int_key_loop_vars: set = set()
+        self._int_keyed_dicts: set = set()
         # `for item in <d.items()>:` — a SINGLE loop var bound to a whole
         # dict-item PAIR (as opposed to the `for k, v in ...` tuple-target
         # shape, which _gen_for_list unpacks slot-by-slot). Maps the loop
@@ -2622,6 +2630,7 @@ class GimpleGen:
         'mojo_dict_keys':        ('MojoList *', ['MojoDict *']),
         'mojo_dict_values':      ('MojoList *', ['MojoDict *']),
         'mojo_dict_items':       ('MojoList *', ['MojoDict *']),
+        'mojo_dict_items_int':   ('MojoList *', ['MojoDict *']),
         'mojo_sorted':           ('MojoList *', ['void *']),
         'mojo_list_sorted_str':  ('MojoList *', ['MojoList *']),
         'mojo_set_sorted':       ('MojoList *', ['MojoSet *']),
@@ -3682,8 +3691,8 @@ class GimpleGen:
         return glo._gen_for_bytes(self, var, it_val, body)
     def _gen_for_memoryview(self, var: str, it_val: str, body: list):
         return glo._gen_for_memoryview(self, var, it_val, body)
-    def _gen_for_dict(self, var: str, it_val: str, body: list, shadow_name: str | None=None):
-        return glo._gen_for_dict(self, var, it_val, body, shadow_name)
+    def _gen_for_dict(self, var: str, it_val: str, body: list, shadow_name: str | None=None, int_keys: bool=False):
+        return glo._gen_for_dict(self, var, it_val, body, shadow_name, int_keys)
     def _gen_for_set(self, var: str, it_val: str, body: list, shadow_name: str | None=None):
         return glo._gen_for_set(self, var, it_val, body, shadow_name)
     def _gen_lifted_closure(self, ci: ClosureInfo, outer_name: str=None) -> str:

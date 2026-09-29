@@ -1829,6 +1829,96 @@ def _compute_scoped_free_candidates(fn, whole: set, funcs: dict = None, structs:
     except Exception:
         return set()
 
+def _is_int_keyed_dict_annotation(ann) -> bool:
+    """`ann` is `Dict[Int, V]`/`dict[int, V]` (an integer key type)."""
+    if not isinstance(ann, str):
+        return False
+    s = ann.strip()
+    if not (s.startswith('Dict[') or s.startswith('dict[')):
+        return False
+    parts = gimple_ctypes._split_top_level_commas(s.split('[', 1)[1].rstrip(']').strip())
+    return len(parts) >= 2 and parts[0].strip() in ('Int', 'int')
+
+_IDENT_TOKEN_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+
+def _bound_names_in(x, out: set) -> None:
+    """Every identifier in a binding target: a str (`k`, `(a, b)`), an
+    IdentExpr, or a tuple/list of those."""
+    if isinstance(x, str):
+        for m in _IDENT_TOKEN_RE.findall(x):
+            out.add(m)
+    elif isinstance(x, IdentExpr):
+        out.add(x.name)
+    elif isinstance(x, (list, tuple)):
+        for e in x:
+            _bound_names_in(e, out)
+    elif hasattr(x, 'elements'):
+        _bound_names_in(x.elements, out)
+
+def _int_dict_scan(node, ok: set, other: set) -> None:
+    if isinstance(node, (list, tuple)):
+        for e in node:
+            _int_dict_scan(e, ok, other)
+        return
+    if isinstance(node, VarDecl):
+        if ',' not in node.name and _is_int_keyed_dict_annotation(node.type_ann):
+            ok.add(node.name)
+        else:
+            _bound_names_in(node.name, other)
+    elif isinstance(node, AssignStmt):
+        if isinstance(node.target, IdentExpr) and _is_int_keyed_dict_annotation(node.type_ann):
+            ok.add(node.target.name)
+        else:
+            _bound_names_in(node.target, other)
+    elif isinstance(node, MultiAssignStmt):
+        _bound_names_in(node.targets, other)
+    elif isinstance(node, ForStmt):
+        _bound_names_in(node.target, other)
+    elif isinstance(node, WalrusExpr):
+        other.add(node.name)
+    elif isinstance(node, (GlobalStmt, NonlocalStmt)):
+        _bound_names_in(node.names, other)
+    elif isinstance(node, FunctionDef):
+        for pn, pt in node.params:
+            if _is_int_keyed_dict_annotation(pt):
+                ok.add(pn)
+            else:
+                other.add(pn)
+    elif isinstance(node, Comprehension):
+        for g in node.generators:
+            _bound_names_in(g, other)
+    elif hasattr(node, 'alias') and not isinstance(node, (ImportStmt, FromImportStmt)):
+        _bound_names_in(node.alias, other)
+    elif hasattr(node, 'handlers'):
+        for h in node.handlers:
+            _bound_names_in(h.name, other)
+    if not hasattr(node, '__dict__'):
+        return
+    for v in node.__dict__.values():
+        if isinstance(v, (list, tuple)) or hasattr(v, '__dict__'):
+            _int_dict_scan(v, ok, other)
+
+def _compute_int_keyed_dicts(fn) -> set:
+    """The locals/params of `fn` that are provably `Dict[Int, V]`: every place
+    the name is bound in the function (nested scopes included) is an annotated
+    `Dict[Int, V]` declaration or parameter. A dict iterated through such a
+    name hands its keys back as integers; any name this cannot vouch for keeps
+    the string keys it has always had. A failure answers "none"."""
+    try:
+        ok, other = set(), set()
+        _int_dict_scan(fn, ok, other)
+        return ok - other
+    except Exception:
+        return set()
+
+def _key_views_ok(body, name: str) -> bool:
+    """A dict/set local may be freed without dangling a key it handed out (see
+    ownership_destruct.key_views_consumed). A failure inside the check answers False."""
+    try:
+        return ownership_destruct.key_views_consumed(body, name)
+    except Exception:
+        return False
+
 def _string_uses_ok(body, name: str) -> bool:
     """Every method call on `name` in `body` has its result consumed at once
     (ownership_destruct.receiver_results_consumed), so a string local cannot be
@@ -1863,6 +1953,10 @@ def _empty_ctor_ctype(node) -> str | None:
     if (isinstance(node, CallExpr) and isinstance(node.func, IdentExpr)
             and not node.args and len(node.kwargs or []) == 0):
         return {'dict': 'MojoDict *', 'list': 'MojoList *', 'set': 'MojoSet *'}.get(node.func.name)
+    if (isinstance(node, CallExpr) and isinstance(node.func, SubscriptExpr)
+            and isinstance(node.func.obj, IdentExpr)
+            and not node.args and len(node.kwargs or []) == 0):
+        return {'Dict': 'MojoDict *', 'List': 'MojoList *', 'Set': 'MojoSet *'}.get(node.func.obj.name)
     return None
 
 

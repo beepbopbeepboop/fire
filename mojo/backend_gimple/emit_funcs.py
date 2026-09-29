@@ -3638,8 +3638,15 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     gen._genexp_narrow_names = set()
     gen._genexp_list_locals = {}
     gen._seed_genexp_list_narrowing(node)
+    # A method body is analyzed and freed exactly like a plain function's: its
+    # locals are the same kind of local, `self` is a parameter (never a
+    # candidate), and a store into `self.x` is an escape the analysis already
+    # knows. The candidates computed here replace the empty set
+    # `reset_no_candidates` left above.
+    ginf.begin_function(gen, node)
     for stmt in node.body:
         gen.gen_stmt(stmt)
+    ginf.emit_fallthrough_frees(gen, node)
 
     # Store per-overload param types so forward declarations can match definitions exactly
     param_ctypes_only = [s.rsplit(' ', 1)[0].strip() for s in param_strs]

@@ -1043,6 +1043,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # Generic container constructors: List[T](...), Dict[K,V](...), Set[T](...), Optional[T](...)
     if isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr):
         base = node.func.obj.name
+        # An EMPTY `List[T]()` / `Dict[K, V]()` / `Set[T]()` is a container
+        # literal in all but spelling: it takes the stack storage the solver
+        # reserved for the statement, or a fresh heap one, and is registered
+        # fresh, exactly as `[]` / `{}` are.
+        _generic_ctype = {'List': 'MojoList *', 'Dict': 'MojoDict *',
+                          'Set': 'MojoSet *'}.get(base, '')
+        if _generic_ctype != '' and not node.args and len(node.kwargs or []) == 0:
+            t = gen._new_temp(_generic_ctype)
+            gen._emit_container_new(t, _generic_ctype)
+            gen._note_fresh_result(t)
+            return _generic_ctype, t
         if base in ('List', 'InlineList', 'SmallVector', 'DynamicVector', 'InlineArray',
                     'Buffer', 'NDBuffer'):
             t = gen._new_val('MojoList *', 'mojo_list_new ()')
@@ -5190,7 +5201,17 @@ def _lower_struct_constructor(gen, struct_name: str,
     ctype  = f"{struct_name} *"
     t      = gen._new_temp(ctype)
     gen._struct_allocs_needed.add(struct_name)
-    gen._emit(f"  {t} = _alloc_{struct_name} ();")
+    # An owned local that never escapes may have reserved frame storage for
+    # this very constructor (maybe_stack_alloc_owned_ctor): initialise that in
+    # place instead of allocating. Consumed at ENTRY, before the arguments are
+    # lowered, so a nested constructor of the same struct never takes it.
+    _st = gen._literal_storage
+    if _st != '' and gen._literal_storage_ctype == ctype:
+        gen._literal_storage = ''
+        gen._emit(f"  _init_{struct_name} (&{_st});")
+        gen._emit(f"  {t} = &{_st};")
+    else:
+        gen._emit(f"  {t} = _alloc_{struct_name} ();")
 
     # builtin-`bytes` subclass (`class _Extra(bytes)`): populate the
     # synthesized `_data: MojoBytes *` payload from the constructor

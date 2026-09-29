@@ -823,6 +823,25 @@ def _infer_return_elem_type(gen, body, func_def=None,
             gen._actual_types, _ps = _saved
         gen._prepass_struct = _ps
 
+def _local_value_type(gen, value) -> str:
+    """The C type an unannotated local takes from one assigned VALUE, for the
+    local-variable pre-pass.
+
+    An integer LITERAL contributes `int64_t`, not the `int` `_quick_type` reports
+    for a small literal. `int` is what a literal's own type is (right for an
+    argument or an operand, where it is converted at the use), but as the
+    storage type of a LOCAL it is 32 bits: `var a = 0` followed by `a += 2000000000`
+    three times printed 1705032704 where Mojo's 64-bit `Int` and CPython both give
+    6000000000, while `var b: Int = 0` was correct. The type lattice already
+    widens `int` to `int64_t` when any other assignment to the local is 64-bit, so
+    only a local whose every assignment is a small literal or 32-bit arithmetic
+    stayed `int`; those accumulators are exactly the ones that overflow.
+    Bool literals and everything else keep `_quick_type`'s answer."""
+    if isinstance(value, gimple_ctypes.IntLiteral):
+        return 'int64_t'
+    return gen._quick_type(value)
+
+
 def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, str]:
     """Infer local variable types from all assignments in function body.
 
@@ -881,7 +900,7 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                     # = ivals[0], ivals[1], ivals[2]).
                     if (isinstance(_as_node.value, gimple_ctypes.TupleExpr)
                             and len(_as_node.value.elements) == len(targets)):
-                        elem_types = [gen._quick_type(e) for e in _as_node.value.elements]
+                        elem_types = [_local_value_type(gen, e) for e in _as_node.value.elements]
                     else:
                         # Unpacking a single iterable: per-element type is
                         # unknown here; use the int64_t storage default.
@@ -902,7 +921,7 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                         elem_types = [('char *' if _is_decode else 'int64_t')] * len(targets)
                 else:
                     targets = [_as_node.target]
-                    elem_types = [gen._quick_type(_as_node.value)]
+                    elem_types = [_local_value_type(gen, _as_node.value)]
                 # Index both lists in parallel — `for target, vtype in
                 # zip(targets, elem_types)` unpacks a zip 2-tuple, the
                 # established boxing bug.
@@ -952,7 +971,7 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                     except Exception:
                         _vt = ''
                 if (not _vt or _vt == 'int64_t') and _vd_node.value is not None:
-                    _vt = gen._quick_type(_vd_node.value)
+                    _vt = _local_value_type(gen, _vd_node.value)
                 if _vt:
                     inferred.setdefault(vname, []).append(_vt)
             elif isinstance(node, gimple_ctypes.MultiAssignStmt):
@@ -967,7 +986,7 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
                 # scan's int64_t default regardless of the RHS's real
                 # type. See bugs/hard/CODEGEN_multi_assign_local_var_
                 # type_not_inferred.md.
-                vtype = gen._quick_type(_ma_node.value)
+                vtype = _local_value_type(gen, _ma_node.value)
                 for target in _ma_node.targets:
                     if isinstance(target, gimple_ctypes.IdentExpr):
                         vname = _as_str(target.name)

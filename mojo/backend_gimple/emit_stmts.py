@@ -359,6 +359,16 @@ def _gen_stmt_VarDecl(gen, node):
         # Type inference: if no annotation, use the value's type instead of 'int'
         if node.type_ann is None:
             ctype = vtype
+            # An unannotated integer local is Int (64-bit), not the C
+            # `int` an int32-range literal lowers to: the pre-pass
+            # (`_infer_local_var_types`) already widened it, so honour
+            # that hint exactly as the plain-assignment path does.
+            if (ctype == 'int' and isinstance(node.name, str)
+                    and node.name not in gen.var_types):
+                _hint = gen._inferred_var_types.get(
+                    gen.current_func_name, {}).get(node.name)
+                if _hint == 'int64_t':
+                    ctype = 'int64_t'
         else:
             ctype = gen._resolve_type(node.type_ann)
         gen._declare_var(node.name, ctype)
