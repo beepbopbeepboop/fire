@@ -6,11 +6,14 @@ them were **stale for the wrong reason** — a reason that was true before the
 by-reference receiver gave a multi-field struct a block to fill, and stopped
 being the reason at the moment that block landed.
 
-**Status: two of the three shapes lower on both machines, the third (`S()`) is
-byte-identical to before, and every remaining refusal is named with the fact
-that is actually wrong.** Two of wave 4's over-refusals are closed. One new
-refusal was needed and is the most interesting thing here: a **declared
-`__init__`**, without which the arity message is a lie.
+**Status: all four shapes lower on both machines. `S()` is byte-identical to
+before; `S(a, b)` and `S(x)` landed in wave 5; and a construction with arguments
+on a struct that DECLARES an `__init__` — the fourth shape, added after this file
+was written — lowers by inlining the selected constructor's stores at the
+construction site. Every remaining refusal is named with the fact that is
+actually wrong.** Two of wave 4's over-refusals are closed. The declared
+`__init__` is why the arity message had to stop being a lie, and it is the
+reason this file existed at all.
 
 Wave 5's other groups are separate documents. This one is the construction
 family and nothing else.
@@ -225,9 +228,9 @@ already built.
 | a frame address as a ONE-WORD struct's whole value | a framed object has a BLOCK and a block is confined; a one-field struct has no block, its receiver IS the field, and a plain word is passed around with no frame-lifetime check seeing it |
 | an argument on a PLACED NESTED FRAME's slot | the constructor placed a frame in that slot, in the object's own block; storing a word over it leaves a value where `self.<field>.<field>` computes a frame base |
 | a container returned by a callee | see the blob section above |
-| **a declared `__init__`** | see below |
+| **a declared `__init__`** | lowered, by inlining the selected overload's stores — and what the inline cannot supply is four separate refusals, see below |
 
-### `__init__` — the refusal the brief did not ask for, and the reason it exists
+### `__init__` — the refusal the brief did not ask for, and what closed it
 
 This one was found by **running the sweep, not by reading the rule.** With the
 arity check in place, `std/builtin/builtin_slice.mojo` reported
@@ -246,7 +249,8 @@ constructor, not a two-field construction of a three-field struct.
 
 It was also the first blocking fact for **twenty stdlib files**, replacing a
 correct deeper message with a false one. So `model.struct_init_overloads` reads
-the shapes and `construction_init_overload_refusal` fires BEFORE the arity one:
+the shapes and the declared-`__init__` check fires BEFORE the arity one — as a
+refusal first:
 
 ```
 build: constructing Slice with 3 argument(s) is a call to a user-defined
@@ -261,6 +265,56 @@ The overload SHAPES are spelled, because "it has a constructor" is not actionabl
 and `Slice`'s two shapes are. `constr_zero_arg_still_ignores_a_declared_init` is
 the guard on the other side: `S()` on a struct with an `__init__` is premise (B2)
 and must keep working.
+
+**That refusal is now a lowering.** The sentence "this path does NOT run it" was
+true, and the conclusion drawn from it — that a construction with arguments is a
+call whose body nothing here has lowered — did not follow. **A constructor does
+not have to be CALLED to be RUN.** A body that is a straight line of
+`self.<field> = <expr>` stores is the same program as the construction followed
+by those stores, and the construction-followed-by-stores is a shape this path
+has emitted since wave 5. So the argument COUNT selects the overload — the only
+thing a call site carries, since nothing on this path resolves by type — and the
+selected body's stores are the plan, emitted into the same fresh block at the
+same site. `model.CONSTRUCTION_INIT` is the fourth shape.
+
+Three things in `Slice` decide whether the family is answered, and all three are
+in the source rather than in a general mechanism:
+
+* the two-parameter overload's `self.step = None` is **the language's own
+  singleton reaching an inlined body as a name** — not a parameter, not a local.
+  `model._INIT_SINGLETON_NAMES` lets it past the free-name refusal, and both
+  backends already materialize it to a word before `_load_var` is reached;
+* the four-parameter overload's `__slice_literal__` is a parameter the caller
+  omits and the body never reads, so the arity window is `required ..
+  required + defaulted` and not the parameter count;
+* a field the body does not assign **keeps its class-level default**, which is
+  the language's rule (the object is default-initialized before the constructor
+  runs) and is what `CONSTRUCTION_INIT` leaves by bringing every slot up first,
+  exactly as `S()` does.
+
+`StridedSlice.__init__` (`self._inner = Slice(start, end, stride)`) is the shape
+that had to be got right in the other direction: that `Slice(…)` is a call in the
+body of a method the backend emits in its own right, so it lowers as an ordinary
+construction with its own reserved site, and nothing about it needs the inline.
+
+**What is still refused is what the inline genuinely cannot supply**, each with
+its own message and its own fix: a count no declared arity admits; a count TWO
+overloads admit, which is a refusal rather than a choice because nothing here
+resolves by type and picking either would be running a constructor the program
+did not choose; a body that is not only those stores; a read of the receiver or
+of a name the body binds, neither of which exists in the calling function; and a
+construction of a framed struct, whose receiver block is reserved per call SITE
+in the prologue of the function whose body names the call.
+
+Measured on the 294-file stdlib sweep, before and after: **21 findings move out
+of this family and no verdict changes class in either direction** (pass 24,
+codegen 88, codegen/dependency 181, not-answerable 1, both runs). The 20
+`builtin_slice.mojo` dependents land on the same single next fact —
+`Slice___eq__`'s `other.start`, a field read through a method parameter — and
+the twenty-first (`std/gpu/host/func_attribute.mojo`, the one in-file finding)
+lands on the module-level symbol table gap, both recorded where they belong:
+`bugs/FORMAL_method_param_field_access.md` and
+`bugs/FORMAL_frame_receiver_handoff.md` §9.
 
 ## Two wrong answers found and fixed, both from running things
 
