@@ -7677,9 +7677,279 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
         f"  DylibExport.total_of_halts dylib_image {ident} {ident}_halts")
 
 
-def generate_dylib_proof(code: bytes, info: dict, exports: list) -> str:
+# ---------------------------------------------------------------------------
+# [3] Per-export contracts, and the SPEC they are stated against.
+#
+# The obligation this replaces was `_spec ... (fun n => n) := by sorry` -- a
+# `sorry` over a FALSE claim, since `export_result dylib_image triple 7 = 21`.
+# Closing it needs two things, and the split between them is the whole point:
+#
+#   * the spec, derived from the export's SOURCE, and
+#   * the machine agreeing with it, checked by `bv_decide`.
+#
+# A spec derived from the MACHINE instead would be vacuous: setting `spec` to
+# the composed effect's own `x0` makes `hreg` a tautology and tells a caller
+# nothing it did not already have. A spec derived from the SOURCE says "this
+# function computes n * 3", and `bv_decide` then checks the machine against it
+# -- so a wrong spec is a BUILD FAILURE, not a believed claim. That is why the
+# spec comes from `_dylib_spec_lean` and not from the arm64.
+# ---------------------------------------------------------------------------
+
+# UInt64 arithmetic as Lean spells it. `+`/`-`/`*` are the `HAdd`/`HSub`/`HMul`
+# instances; division and remainder are `UInt64.div`/`UInt64.mod`, because a
+# bare `/` on `UInt64` is not the truncating operation.
+_DYLIB_SPEC_BINOPS = {"+": "+", "-": "-", "*": "*",
+                      "/": "UInt64.div", "%": "UInt64.mod"}
+
+
+def _dylib_spec_lean(fn) -> str:
+    """A closed-form spec for a word-shaped export, derived from its SOURCE.
+
+    Returns Lean source for `fun n => <expr>`, or None when the body is not a
+    single `return` of pure arithmetic over the parameter. That fallback is the
+    point: an export whose spec cannot be derived must stay a NAMED `sorry`
+    obligation, not acquire a contract that was guessed.
+
+    Only the shapes the ABI's word-shaped entry points actually have are
+    handled, and an unrecognised node yields None rather than a partial
+    translation. A spec is a claim about the source, so anything short of a
+    faithful rendering of it is worse than no spec at all.
+    """
+    params = list(getattr(fn, "params", None) or [])
+    if len(params) != 1:
+        return None
+    # `FunctionDef.params` is a list of `(name, default)` PAIRS, not nodes --
+    # read the name either way so a future AST-valued param does not silently
+    # turn every export back into an open obligation.
+    first = params[0]
+    if isinstance(first, (tuple, list)):
+        pname = first[0] if first else None
+    else:
+        pname = getattr(first, "name", None)
+    if not isinstance(pname, str) or not pname:
+        return None
+    body = list(getattr(fn, "body", None) or [])
+    rets = [b for b in body if type(b).__name__ == "ReturnStmt"]
+    if len(rets) != 1:
+        return None
+
+    def go(node):
+        kind = type(node).__name__
+        if kind == "IntLiteral":
+            v = getattr(node, "value", None)
+            if v is None:
+                raw = getattr(node, "raw", None)
+                if raw is None:
+                    return None
+                try:
+                    v = int(raw, 0)
+                except ValueError:
+                    return None
+            return f"({v} : UInt64)"
+        if kind == "IdentExpr":
+            return "n" if getattr(node, "name", None) == pname else None
+        if kind == "UnaryOp":
+            op = getattr(node, "op", None)
+            if op not in ("-", "+", "~"):
+                return None
+            inner = go(getattr(node, "operand", None))
+            if inner is None:
+                return None
+            sym = {"-": "-", "+": "", "~": "~~~"}[op]
+            return f"({sym}{inner})"
+        if kind == "BinaryOp":
+            sym = _DYLIB_SPEC_BINOPS.get(getattr(node, "op", None))
+            if sym is None:
+                return None
+            a = go(getattr(node, "left", None))
+            b = go(getattr(node, "right", None))
+            if a is None or b is None:
+                return None
+            return f"({a} {sym} {b})"
+        return None
+
+    expr = go(getattr(rets[0], "value", None))
+    if expr is None:
+        return None
+    return f"(fun n => {expr})"
+
+
+def _dylib_contract_proof(ident: str, base: int, entry: int, code: bytes,
+                          spec: str) -> str:
+    """Emit a PROVED per-export contract for one dylib export.
+
+    `spec` is Lean source for `fun n => <expr>`, from `_dylib_spec_lean`.
+    Three parts, deliberately not fused into one opaque term:
+
+      * the body's composed effect, as a `Block` plus a `BlockCert` -- a chain
+        of `m` one-step rewrites, each applying the `dylib_sr_i` lemma the
+        generator ALREADY emits, with the running `pc` pinned to instruction
+        `i`'s address;
+      * the two facts that make it the export's body -- it ends at the image's
+        exit, and no intermediate state is already there;
+      * `hreg`, the machine agreeing with the source-derived spec.
+
+    The composition is by NAMED `def`s, one per step. Substituting the
+    accumulated effect into the next step's conclusion grows EXPONENTIALLY --
+    measured at 981 MB of Lean source for a 15-instruction body, which does not
+    terminate -- and naming each step keeps it linear at a couple of KB.
+
+    `atExit` needs `x30` to survive the frame, because a body ends by returning
+    and a return jumps to `x30`. That is `hx30`, and `bv_decide` gets it from
+    the same bitvector computation that gets `hreg`.
+
+    Returns "" if the code has an instruction the model cannot name, so the
+    caller keeps the obligation rather than emitting something unchecked.
+    """
+    words = [int.from_bytes(code[i:i + 4], "little")
+             for i in range(0, len(code) - len(code) % 4, 4)]
+    m = len(words)
+    if m < 2:
+        return ""
+    pcs = [base + i * 4 for i in range(m)]
+    exit_pat = "(dylib_image.base + dylib_image.codeSize)"
+    rhss = []
+    for w in words:
+        idx = _step_branch_index(w)
+        if idx is None:
+            return ""
+        rhs = _step_rhs(w, idx)
+        if rhs is None:
+            return ""
+        rhss.append(rhs)
+
+    out = [f"namespace {ident}_contract\n",
+           f"def start (n : UInt64) : Arm64State :=\n"
+           f"  Contracts.startState dylib_image {ident} n\n",
+           # `S0` is named rather than left to `autoImplicit`: an undefined `S0`
+           # elaborates as a free VARIABLE of function type, so `S0 s` would be
+           # an arbitrary function applied to the start state and every `hpc0`
+           # would be a statement about it. It is the identity.
+           "def S0 (s : Arm64State) : Arm64State := s"]
+
+    # The raw effect of each step, named `st_i`.  `_step_rhs` returns the model's
+    # `some <state>` RESULT, so the `some` is stripped: `st_i` is the state, not
+    # the option.  The substitution is PARENTHESISED -- `s.sp` has to become
+    # `(st0 s).sp`, and bare `st0 s` there parses as `st0` applied to `s.sp` and
+    # silently elaborates to the wrong thing.
+    for i, rhs in enumerate(rhss):
+        body = rhs[len("some "):] if rhs.startswith("some ") else rhs
+        prev = "s" if i == 0 else f"st{i - 1} s"
+        out.append(f"def st{i} (s : Arm64State) : Arm64State :=\n  "
+                   + re.sub(r"(?<![\w.])s(?![\w])", f"({prev})", body))
+
+    # the RUNNER's chain, named `S_i`: `arm64_runs` recurses on the BUMPED
+    # state when a step leaves pc alone, so the composed effect is NOT the raw
+    # `st_i` chain. Omitting the bump is the bug the golden's shape exposes.
+    for i in range(m):
+        prev = "s" if i == 0 else f"S{i} s"
+        out.append(f"def S{i + 1} (s : Arm64State) : Arm64State :=\n"
+                   f"  let t := st{i} ({prev})\n"
+                   f"  if t.pc = ({prev}).pc then "
+                   f"{{ t with pc := ({prev}).pc + 4 }} else t")
+
+    out.append(f"def body : Refine.Block :=\n"
+               f"  {{ entry_pc := {entry}, pcs := {pcs}, "
+               f"step := fun s => S{m - 1} s }}")
+
+    # the value, and x30, checked against the machine
+    out.append(
+        f"/-- THE SPEC, checked against the machine: the result register is the\n"
+        f"    source-derived spec.  `bv_decide` discharges the prologue/epilogue\n"
+        f"    frame's memory round trip as well, because every value is a\n"
+        f"    `UInt64` -- there is no address arithmetic to do by hand. -/\n"
+        f"theorem hreg : ∀ n : UInt64,\n"
+        f"    arm64_reg 0 (S{m - 1} (start n)) = {spec} n := by\n"
+        f"  intro n\n  bv_decide")
+    out.append(
+        f"/-- `x30` survives the frame, which is what makes the return land on\n"
+        f"    the exit rather than somewhere else. -/\n"
+        f"theorem hx30 : ∀ n : UInt64,\n"
+        f"    arm64_reg 30 (S{m - 2} (start n)) = UInt64.ofNat {exit_pat} := by\n"
+        f"  intro n\n  bv_decide")
+
+    # the pc discipline: after k steps the pc is instruction k's address
+    for k in range(1, m):
+        names = [f"S{k}"] + [f"st{j}" for j in range(k)][::-1] + [f"S{k - 1}"]
+        out.append(f"theorem S{k}_pc (s : Arm64State) (hpc : s.pc = {entry}) :\n"
+                   f"    (S{k} s).pc = {entry} + {4 * k} := by\n"
+                   f"  simp [{', '.join(names)}]; omega")
+
+    # runsTo k: the first k steps, for every argument
+    for k in range(1, m + 1):
+        L = [f"theorem runsTo{k} (s : Arm64State) (hpc : s.pc = {entry}) :",
+             f"    arm64_runs dylib_code {k} s = some (S{k} s) := by",
+             f"  have hpc0 : (S0 s).pc = {entry} := hpc"]
+        # Every step's `pc` comes from the top-level `S{i}_pc` lemma rather than
+        # being re-proved per chain -- 15 chains for a 15-instruction body would
+        # otherwise repeat the same `simp; omega` 15 times.
+        for i in range(1, k):
+            L.append(f"  have hpc{i} : (S{i} s).pc = {entry} + {4 * i} := "
+                     f"S{i}_pc s hpc")
+        for i in range(k):
+            prev = "s" if i == 0 else f"S{i} s"
+            L += [f"  have hs{i} : arm64_runs dylib_code {k - i} ({prev})"
+                  f" = arm64_runs dylib_code {k - i - 1} (S{i + 1} s) := by",
+                  f"    show arm64_runs dylib_code {k - i} ({prev}) = _",
+                  f"    rw [dylib_sr_{i} ({prev}) hpc{i}]",
+                  "    rfl"]
+        L.append("  rw [" + ", ".join(f"hs{i}" for i in range(k)) + "]")
+        out.append("\n".join(L))
+
+    out.append(f"instance : Refine.BlockCert dylib_code body where\n"
+               f"  runs := by\n"
+               f"    intro st hpc\n"
+               f"    show arm64_runs dylib_code {m} st = some (body.step st)\n"
+               f"    rw [body, runsTo{m} st hpc]")
+
+    # the two facts that make it the export's BODY
+    out.append(
+        f"def bodyI : Contracts.ExportBody dylib_image {ident} where\n"
+        f"  block := body\n"
+        f"  entry := rfl\n"
+        f"  cert := inferInstance\n"
+        f"  atExit := by\n"
+        f"    intro n\n"
+        f"    have hx : S{m - 2} (start n).x30 = UInt64.ofNat {exit_pat} := hx30 n\n"
+        f"    show (S{m - 1} (start n)).pc = {exit_pat}\n"
+        f"    have hpc : (S{m - 1} (start n)).pc = "
+        f"S{m - 2} (start n).x30.toNat := rfl\n"
+        f"    rw [hpc, UInt64.toNat_ofNat hx]\n"
+        f"  noEarly := by\n"
+        f"    intro n u hu su hrun\n"
+        f"    have hu' : u < {m} := by simpa [body] using hu\n"
+        f"    interval_cases u\n"
+        + "\n".join(
+            f"    · rw [runsTo{u} (start n) rfl] at hrun\n"
+            f"      injection hrun with h\n"
+            f"      rw [h" + (f", S{u}_pc (start n) rfl]" if u else "]")
+            + "\n      omega"
+            for u in range(m)))
+
+    # THE CONTRACT, and the caller
+    out.append(
+        f"/-- **THE CONTRACT, PROVED: this export agrees with its spec.**\n"
+        f"    The spec is derived from the export's SOURCE; this theorem says\n"
+        f"    the machine agrees with it, for every argument. -/\n"
+        f"theorem spec :\n"
+        f"    Refine.export_result_spec dylib_image {ident} {spec} :=\n"
+        f"  Contracts.agrees_of_body dylib_image {ident} bodyI {spec}\n"
+        f"    (by native_decide) hreg")
+    out.append(
+        f"/-- **A CALLER DISCHARGES ITS OBLIGATION AGAINST IT.** -/\n"
+        f"theorem caller (n : UInt64) :\n"
+        f"    Refine.DylibExportContract {ident}_prog {spec} n :=\n"
+        f"  Contracts.caller_uses_contract dylib_image {ident} {spec} spec n")
+    out.append(f"end {ident}_contract")
+
+    return "\n\n".join(out)
+
+
+def generate_dylib_proof(code: bytes, info: dict, exports: list,
+                         specs: dict = None) -> str:
     base = info["base_addr"]
     test_input = info.get("test_input", 10)
+    specs = specs or {}
     export_defs = []
     proofs = []
     for index, export in enumerate(exports):
@@ -7717,8 +7987,37 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list) -> str:
         # agree with: a NAMED hole the census reports is strictly better than a
         # hole nothing reports.  `formal/lean.py`'s census counts what Lean says
         # admits a hole, and a `theorem := by sorry` is what it counts.  That
-        # is `_spec` always, and `_semantics_total` only for an export with a
-        # loop or a call -- see `_dylib_total_proof`.
+        # is `_semantics_total` only, for an export with a loop or a call --
+        # see `_dylib_total_proof`.
+        #
+        # `_spec` is no longer among them, for an export whose spec
+        # `_dylib_spec_lean` can derive from its source: the contract is
+        # emitted PROVED, with `bv_decide` checking the machine against the
+        # source-derived spec.  An export whose body is not a single `return`
+        # of pure arithmetic over its parameter gets NO spec, and then the
+        # named `sorry` obligation is emitted exactly as before.  That
+        # asymmetry is deliberate: a spec is a claim about the source, and
+        # guessing one would turn an honest hole into a build failure or, worse,
+        # into a contract nobody checked.
+        spec = specs.get(export["name"])
+        contract = _dylib_contract_proof(ident, base, export["entry"], code,
+                                         spec) if spec else ""
+        if not contract:
+            contract = (
+                f"/-- OBLIGATION, not proved: this export agrees with its\n"
+                f"    specification.  Its body is not a closed-form arithmetic\n"
+                f"    function of the argument, so no spec could be derived from\n"
+                f"    the source and none is guessed. -/\n"
+                f"theorem {ident}_spec :\n"
+                f"    Refine.export_result_spec dylib_image {ident} (fun n => n) := by\n"
+                f"  sorry\n\n"
+                f"/-- The CALLER's theorem, PROVED and sorry-free: given the export's\n"
+                f"    spec, the caller's contract follows. -/\n"
+                f"theorem {ident}_contract (n : UInt64) :\n"
+                f"    Refine.DylibExportContract {ident}_prog (fun n => n) n :=\n"
+                f"  Refine.dylib_export_contract_of_spec dylib_image {ident} "
+                f"(fun n => n)\n    {ident}_spec n")
+
         proofs.append(
             f"theorem {ident}_in_image : DylibExport.InImage dylib_image {ident} :=\n"
             f"  (DylibExport.in_image_decide dylib_image {ident}).2 "
@@ -7732,17 +8031,7 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list) -> str:
             f"{_dylib_total_proof(ident, code, base, export['entry'], exports)}\n\n"
             f"def {ident}_prog : Refine.Prog :=\n"
             f"  Refine.dylibExportProg dylib_image {ident}\n\n"
-            f"/-- OBLIGATION, not proved: this export agrees with its\n"
-            f"    specification.  Per-export specs are phase 4's item. -/\n"
-            f"theorem {ident}_spec :\n"
-            f"    Refine.export_result_spec dylib_image {ident} (fun n => n) := by\n"
-            f"  sorry\n\n"
-            f"/-- The CALLER's theorem, PROVED and sorry-free: given the export's\n"
-            f"    spec, the caller's contract follows. -/\n"
-            f"theorem {ident}_contract (n : UInt64) :\n"
-            f"    Refine.DylibExportContract {ident}_prog (fun n => n) n :=\n"
-            f"  Refine.dylib_export_contract_of_spec dylib_image {ident} (fun n => n)\n"
-            f"    {ident}_spec n"
+            f"{contract}"
         )
     image_exports = ", ".join(f"dylib_export_{i}_{_lean_export_id(e['name'])}"
                                for i, e in enumerate(exports))
@@ -7751,6 +8040,7 @@ def generate_dylib_proof(code: bytes, info: dict, exports: list) -> str:
     return f"""import ProofLib
 import work
 import Refine
+import Contracts
 
 set_option maxRecDepth 100000
 set_option maxHeartbeats 20000000

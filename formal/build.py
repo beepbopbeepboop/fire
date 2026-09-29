@@ -4926,8 +4926,19 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     }
 
     if prove:
-        from formal.arm64_proof_gen import generate_dylib_proof
-        proof = generate_dylib_proof(code, info, exports)
+        from formal.arm64_proof_gen import generate_dylib_proof, _dylib_spec_lean
+        # The spec comes from the export's SOURCE, and the proof checks the
+        # machine against it (`bv_decide`), so a wrong spec is a build failure
+        # rather than a believed claim.  An export whose body is not a single
+        # `return` of pure arithmetic over its parameter gets no spec, and the
+        # proof keeps naming that export's contract as an open obligation
+        # instead of guessing one.
+        specs = {}
+        for fn in ordered:
+            spec = _dylib_spec_lean(fn)
+            if spec is not None:
+                specs[fn.name] = spec
+        proof = generate_dylib_proof(code, info, exports, specs)
         proof_path = os.path.splitext(output)[0] + "_proof.lean"
         if os.path.exists(proof_path):
             os.chmod(proof_path, 0o644)
