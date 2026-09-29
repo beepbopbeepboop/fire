@@ -212,6 +212,12 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_str_to_int':            'int64_t',
     'mojo_str_to_float':          'double',
     # bytes
+    # `sys.stdout.write(s)` & friends. The ast_rewriter rules for those
+    # (`sys_stdout_write` / `sys_stderr_write` / `sys_stdin_write`) lower
+    # to this one call, because `sys.<stream>` is a POSIX fd boxed as an
+    # opaque handle and there is no file-object model to dispatch a
+    # `.write()` against. See the runtime function's own comment.
+    'mojo_stream_write':         'void',
     'mojo_bytes_new_lit':         'MojoBytes *',
     'mojo_bytes_empty':           'MojoBytes *',
     'mojo_bytes_zeros':           'MojoBytes *',
@@ -363,6 +369,7 @@ from mojo.middle.types import (
     _method_overload_id, demangle_overload, _COMMON_METHOD_NAMES, _C_KEYWORDS,
     _CPP_KEYWORD_FIELDS, _C_PARAM_EXTRA_KEYWORDS, _C_MACRO_NAMES,
     _PSEUDO_DUNDER_ATTRS, _safe_field, _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED,
+    _LIBM_FN_RETVALS,
     _safe_name, _stub_guard_name, _c_field_name, _import_targets, _c_escape,
     _str_literal_value_is_fstring, _extract_init_expr, _module_toplevel_name,
     _module_init_name, _used_idents_node, _CPP_CALLABLE_CTYPE,
@@ -619,6 +626,22 @@ import mojo.backend_gimple.emit_resolve as grsl
 class GimpleGen:
     # Map Python builtin names to their C/runtime equivalents when used as values
     BUILTIN_VALUE_MAP: dict[str, str] = {
+        # The libm entries (`sqrt`, `exp`, `log`, ...) are generated from
+        # the KEYS of mojo.middle.types._LIBM_FN_RETVALS — the single place
+        # that says which math functions this compiler supports. The value
+        # is the identity because the C symbol and the Python name are the
+        # same string for all of them; the RETURN TYPE lives in that table
+        # and is read separately at the call site. (Putting the return type
+        # here instead is a real trap: BUILTIN_VALUE_MAP's value is a
+        # symbol, so `sqrt` mapped to `double` and the auto-stub pass
+        # emitted `int64_t double(...);`.)
+        #
+        # `math` is not a resolvable module in this project (module_loader's
+        # `can_resolve_module_path('math')` is False), so without these the
+        # name fell through `_safe_name` to a `mojo_<name>` stub nothing
+        # defines. See that table for the exact scope and for what is
+        # deliberately excluded.
+        **{_k: _k for _k in _LIBM_FN_RETVALS},
         'print': 'mojo_print',
         'len': 'mojo_len',
         'range': 'mojo_range',
@@ -1284,6 +1307,13 @@ class GimpleGen:
         self._global_dict_val_types: dict[str, str] = {}
         self._struct_field_owners: dict[str, list[tuple[str, str]]] = {}
         self._return_elem_types: dict[str, str] = {}
+        # Function name -> per-slot C types of a MULTI-VALUE return's
+        # tuple handle (`return cfg, Model(cfg)`). Deliberately module
+        # scope, NOT re-created per function the way the value-keyed
+        # `_tuple_slot_types` is: the whole point is to carry a callee's
+        # slot types to a call site EMITTED LATER, which a per-function
+        # reset would erase between the two.
+        self._return_slot_types: dict[str, list] = {}
         # dict.items()/values() result temp -> the dict's VALUE type. The
         # runtime stores item pairs as [char* key, boxed value] (append_str +
         # append_int — see mojo_dict_items), so the for-loop tuple branch needs

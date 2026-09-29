@@ -1250,7 +1250,19 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             if _cattrs and node.member in _cattrs:
                 gname = _cattrs[node.member]
                 gtype = gen._global_var_types.get(gname, 'int64_t')
-                return gtype, gen._new_val(gtype, f'{gname}')
+                _gv = gen._new_val(gtype, f'{gname}')
+                # Carry the attribute's recorded ELEMENT type onto the read
+                # value, so iterating or subscripting it downstream uses
+                # the right accessor. A class-level container is stored as
+                # one `_classattr_<Cls>__<name>` global; without this the
+                # element type recorded against that global (seeded in
+                # module_gen, and by the first `.append()` through
+                # `_lower_list_method`) stayed invisible to every reader.
+                _ge = gen._elem_types.get(gname)
+                if _ge and _ge != 'int64_t':
+                    gen._elem_types[_gv] = _ge
+                    gen._actual_types[_gv] = 'MojoList *'
+                return gtype, _gv
             # Not a comptime alias — a genuine class-level access this
             # compiler doesn't yet resolve statically (unimplemented,
             # not merely unreached); stub with a clearly-marked value.
@@ -2759,6 +2771,23 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     if op == '*' and lt == 'MojoList *' and rt in ('int', 'int64_t', 'uint64_t'):
         cnt = gen._new_val('int64_t', f"(int64_t){rv}")
         t = gen._call_expr('MojoList *', 'mojo_list_repeat', [('MojoList *', lv), ('int64_t', cnt)])
+        # The repeat copies the source's ELEMENTS, so the result's element
+        # type is the source's — but the result is a FRESH temp, and every
+        # consumer keys element type off the value name. Without this copy
+        # `[0.0] * n` produced an untyped list: a field assigned that
+        # recorded no element type (emit_stmts' self.<f> = <list>
+        # propagation keys on `_elem_types[v]`), so a later
+        # `for g in self.field:` bound `g` as int64_t and read the doubles'
+        # raw IEEE-754 bits as integers — silently wrong, exit 0 (real:
+        # g*g in an accumulator over such a field). It is also what makes
+        # `mojo_list_get_double` vs `mojo_list_get_int` pick correctly on
+        # every later subscript/iteration of the repeated list.
+        if lv in gen._elem_types:
+            gen._elem_types[t] = gen._elem_types[lv]
+        if lv in gen._nested_elem_types:
+            gen._nested_elem_types[t] = gen._nested_elem_types[lv]
+        if lv in gen._dict_val_types:
+            gen._dict_val_types[t] = gen._dict_val_types[lv]
         return 'MojoList *', t
 
     # MojoBytes + MojoBytes → concat ; MojoBytes * int → repeat
@@ -4404,7 +4433,16 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # e.g. (Float64, Span*) both look like non-str, but list_suffix maps
     # Float64 -> 'double' and Span* -> 'int' (its generic pointer bucket), so a
     # single list-wide suffix would append-cast the pointer as a double.
-    per_element = len(scalar_sufs) > 1
+    # Two DISTINCT slot ctypes also need per-slot recording even when both
+    # slots use the same accessor: `(cfg, model)` appends both as plain
+    # ints, so `scalar_sufs` is a single 'int' and `per_element` was False —
+    # yet each slot's real type (`Config *` vs `Model *`) is exactly what
+    # the caller's destructuring needs to read them back as. Keyed on the
+    # CTYPES, not the accessor, which is the same question asked properly.
+    _slot_cts = [_as_str(_slt[1]) for _slt in lowered
+                 if not (isinstance(_slt[0], gimple_ctypes.UnaryOp)
+                         and _slt[0].op in ('*', '**'))]
+    per_element = len(scalar_sufs) > 1 or len(set(_slot_cts)) > 1
     # Record per-slot element types when elements are stored by their own
     # type — a later `for a, b in <list of these tuples>:` needs each
     # slot's real accessor (get_str vs get_int). The joined `elem` is

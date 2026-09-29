@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Metal backend for the inner loops &mdash; notes and measurements</title>
+<style>
+  :root { --fg:#1a1a1a; --muted:#666; --line:#d8d8d8; --bg:#fff; --code:#f6f6f4; --good:#0a7a37; --bad:#b3261e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e8e8e6; --muted:#9a9a97; --line:#3a3a38; --bg:#17171a; --code:#232327; --good:#5ddb8b; --bad:#ff8a80; }
+  }
+  body { background:var(--bg); color:var(--fg); margin:0 auto; max-width:56rem;
+         padding:2.5rem 1.25rem 5rem; font:16px/1.6 -apple-system,BlinkMacSystemFont,"SF Pro Text",Segoe UI,sans-serif; }
+  h1 { font-size:1.9rem; line-height:1.25; margin:0 0 .3rem; letter-spacing:-.01em; }
+  h2 { font-size:1.25rem; margin:2.5rem 0 .6rem; padding-top:.6rem; border-top:1px solid var(--line); }
+  h3 { font-size:1.02rem; margin:1.6rem 0 .4rem; color:var(--muted); font-weight:600; }
+  p, li { color:var(--fg); }
+  .sub { color:var(--muted); margin:0 0 2rem; }
+  code, pre { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.87em; }
+  code { background:var(--code); padding:.12em .38em; border-radius:4px; }
+  pre { background:var(--code); padding:.9rem 1rem; border-radius:8px; overflow-x:auto; line-height:1.5; }
+  pre code { background:none; padding:0; }
+  table { border-collapse:collapse; width:100%; margin:1rem 0; font-size:.92rem; }
+  th, td { text-align:left; padding:.45rem .6rem; border-bottom:1px solid var(--line); }
+  th { font-weight:600; color:var(--muted); font-size:.85rem; text-transform:uppercase; letter-spacing:.04em; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .win { color:var(--good); font-weight:600; }
+  .lose { color:var(--bad); font-weight:600; }
+  .note { border-left:3px solid var(--line); padding:.1rem 0 .1rem 1rem; color:var(--muted); }
+  .files { list-style:none; padding:0; }
+  .files li { padding:.3rem 0; border-bottom:1px solid var(--line); }
+  .files b { font-family:ui-monospace,Menlo,monospace; font-size:.9em; }
+</style>
+</head>
+<body>
+
+<h1>Metal backend for the inner loops</h1>
+<p class="sub">Notes and measurements &mdash; built 2026-09-29 on an Apple M5 Max. Everything here lives in <code>test_llm/</code>.</p>
+
+<h2>What is here</h2>
+<ul class="files">
+  <li><b>kernels.metal</b> &mdash; the inner loops as MSL compute kernels (f32, plus native bf16 variants)</li>
+  <li><b>kernels.metal.inc</b> &mdash; <em>generated</em> from the above: the MSL as a C string, so the shipped artifact needs no build-time Metal step</li>
+  <li><b>metal.h</b> &mdash; the C API: <code>mg_*</code> (one dispatch, synchronous) and <code>mg_batch_*</code> (many dispatches, one wait)</li>
+  <li><b>metal.m</b> &mdash; the ObjC host: device / queue / library / pipelines, buffer upload, both APIs, with a scalar C fallback in every entry point</li>
+  <li><b>bench.c</b> &mdash; the benchmark: every kernel, the model's inner loops at real widths, the crossover sweep, and f32 vs bf16</li>
+  <li><b>test_llm.py</b> &mdash; the ~1M-parameter pure-Python model these kernels exist for</li>
+</ul>
+
+<pre><code>clang -fobjc-arc -O2 -I test_llm -framework Foundation -framework Metal \
+      -o /tmp/metal_bench test_llm/bench.c test_llm/metal.m -lm
+/tmp/metal_bench</code></pre>
+
+<h2>The kernels</h2>
+<p><code>mg_axpy</code>, <code>mg_matvec</code> (one threadgroup per output row plus a threadgroup tree reduction), <code>mg_attn_state</code> (16&times;16 tiles, in place, no temporary), <code>mg_attn_read</code> (<code>o&nbsp;=&nbsp;S&#94;T&nbsp;q</code>), <code>mg_add_scaled</code>. All fp32: <strong>MSL has no <code>double</code> type at all</strong> &mdash; not a hardware limit (Apple Silicon's GPU does fp64), the shading language never exposed it. The ARM C path stays fp64 and is the reference; agreement is ~1e-7 relative, i.e. f32 precision, which is the correct answer for a bf16-weight model.</p>
+
+<h3>The <code>-std</code> setting, and what it actually buys</h3>
+<p>The <code>macos-metal*</code> names top out at 2.4 and are a dead end. The real ones are the generic language versions:</p>
+<pre><code>xcrun -sdk macosx metal -std=metal3.2 ...      # 3.0 / 3.1 / 3.2 / 4.0 exist</code></pre>
+<p>and for the runtime-compiled path, the same thing as an option:</p>
+<pre><code>MTLCompileOptions *o = [[MTLCompileOptions alloc] init];
+o.languageVersion = MTLLanguageVersion3_2;      // what metal.m does
+id&lt;MTLLibrary&gt; lib = [dev newLibraryWithSource:src options:o error:&amp;err];</code></pre>
+
+<table>
+  <tr><th>Versions</th><th>Effect</th></tr>
+  <tr><td>2.4 &rarr; 3.2</td><td><b>Native <code>bfloat</code></b>: bf16 buffers, arithmetic and rounding in the GPU. Below 3.2 you get <code>unknown type name 'bfloat'</code>.</td></tr>
+  <tr><td>any version</td><td><b><code>double</code> is never available.</b> Rejected identically at 2.4, 3.0, 4.0 and 4.1. MSL has no double at all; this is the language, not a setting.</td></tr>
+  <tr><td>4.1</td><td>Not selectable &mdash; the enum's max is <code>MTLLanguageVersion4_1</code> but the compiler's is <code>metal4.0</code>, and there is no <code>metal5</code> or MTL5 in this SDK. <code>system_profiler</code> reports Metal 4.</td></tr>
+</table>
+
+<p>The Metal <b>4 API</b> (<code>MTL4CommandQueue</code>, argument tables &mdash; the low-overhead dispatch path that would fix the round trip measured below) <em>is</em> reachable at runtime: <code>[dev newMTL4CommandQueue]</code> exists and returns a live queue, and <code>-[MTL4CommandQueue commandAllocator]</code> answers <code>respondsToSelector:</code>. Neither is <em>declared</em> in this SDK's public protocols, so building on it means reverse-engineering the surface.</p>
+
+<h3>f32 vs native bf16, measured</h3>
+<p>bf16 is the model's real precision, so this is the case that matters.</p>
+<table>
+  <tr><th>matvec</th><th class="num">ARM (ms)</th><th class="num">Metal f32</th><th class="num">Metal bf16</th><th class="num">bf16 gain</th><th class="num">rel. err vs fp64</th></tr>
+  <tr><td>128&times;128</td><td class="num">1.41</td><td class="num">43.57</td><td class="num">41.67</td><td class="num">1.05&times;</td><td class="num">2.1e-3</td></tr>
+  <tr><td>512&times;512</td><td class="num">2.57</td><td class="num">6.94</td><td class="num">6.29</td><td class="num">1.10&times;</td><td class="num">2.2e-3</td></tr>
+  <tr><td>2048&times;2048</td><td class="num">9.17</td><td class="num">8.74</td><td class="num">6.32</td><td class="num">1.38&times;</td><td class="num">2.1e-3</td></tr>
+</table>
+<p>2.1e-3 relative is exactly bf16 precision (8 mantissa bits) and is the <em>correct</em> answer for a bf16-weight model &mdash; the Metal result is not "less accurate", it is <em>as</em> accurate as the numbers it is multiplying. The gain grows with size because bf16 halves what crosses the bus.</p>
+
+<h3>MSL facts that cost real time</h3>
+<ul>
+  <li>Thread indices come from <code>[[thread_position_in_grid]]</code> / <code>[[threadgroup_position_in_grid]]</code> / <code>[[thread_position_in_threadgroup]]</code>. Declaring an extra <code>constant unsigned int &amp;gid</code> parameter compiles clean and binds it to whatever the next buffer index is: every thread then computes with <code>gid == 0</code> and only element 0 is written.</li>
+  <li>A scalar kernel argument is <code>constant T &amp;name</code> (by reference) or bare &mdash; not <code>constant T name</code>. And <code>uint</code> is a <em>vector</em> type, so scalars are <code>unsigned int</code>.</li>
+  <li>This SDK only has <code>newBufferWithBytesNoCopy:length:options:deallocator:</code> (a nil deallocator is the no-copy form) and <code>newComputePipelineStateWithFunction:error:</code> &mdash; there is no <code>&hellip;WithFunctionName:error:</code> and no <code>MTLComputePipelineDescriptor</code>.</li>
+  <li><code>[queue commandBuffer]</code> returns a <em>command buffer</em>; the encoder comes from <code>[cb computeCommandEncoder]</code>. Calling <code>setComputePipelineState:</code> on the command buffer throws at runtime.</li>
+  <li>Never hand an f64 buffer to an f32 kernel zero-copy: it reinterprets the mantissa halves, writes plausible-looking numbers, and is completely wrong. Convert at the boundary.</li>
+</ul>
+
+<h2>Measurements</h2>
+<p>The dominant fact, and it decides everything else:</p>
+<pre><code>bare no-op kernel, commit only        12.3 us/call
+bare no-op kernel, commit + wait     173.3 us/call</code></pre>
+<p>A Metal round trip here costs ~173&nbsp;&micro;s. The model's inner loops are 16K MACs &mdash; a few &micro;s of arithmetic. So per-loop dispatch can never win; the whole question is how much work a dispatch has to carry.</p>
+
+<h3>Crossover</h3>
+<p>Same matvec kernel, weights uploaded once per batch:</p>
+<table>
+  <tr><th>n &times; n</th><th class="num">ARM C (ms)</th><th class="num">Metal (ms)</th><th class="num">speedup</th></tr>
+  <tr><td>128</td><td class="num">2.83</td><td class="num">95.92</td><td class="num lose">0.03&times;</td></tr>
+  <tr><td>256</td><td class="num">12.68</td><td class="num">109.60</td><td class="num lose">0.12&times;</td></tr>
+  <tr><td>512</td><td class="num">6.45</td><td class="num">19.92</td><td class="num lose">0.32&times;</td></tr>
+  <tr><td>1024</td><td class="num">26.70</td><td class="num">51.26</td><td class="num lose">0.52&times;</td></tr>
+  <tr><td>2048</td><td class="num">25.44</td><td class="num">38.51</td><td class="num lose">0.66&times;</td></tr>
+  <tr><td>4096</td><td class="num">98.62</td><td class="num">159.86</td><td class="num lose">0.62&times;</td></tr>
+</table>
+<p>Metal approaches but never passes a naive C triple loop &mdash; and the ARM column is an unoptimised <code>-O2</code> scalar loop, so a blocked/vectorised C kernel would only widen the gap. A 173&nbsp;&micro;s wait against kernels of this size is the signature of a virtualised GPU, so the honest reading is that these numbers characterise <em>this environment</em>, not Metal on an M5 Max.</p>
+
+<h3>One forward step of the real model</h3>
+<p><code>seq_len 24, d_model 128, d_ff 256, 6 layers</code>; the inner loops are exactly the model's, the surrounding bookkeeping (residuals, norms, softmax, optimizer) stays in ARM C. 20 steps:</p>
+<table>
+  <tr><th>path</th><th class="num">ms/step</th><th class="num"></th></tr>
+  <tr><td>ARM C, every inner loop in C</td><td class="num">8.44</td><td class="num">reference</td></tr>
+  <tr><td>Metal, one dispatch+wait per loop</td><td class="num">255.9</td><td class="num lose">0.03&times;</td></tr>
+  <tr><td>Metal, batched into one submission</td><td class="num">18.4</td><td class="num lose">0.44&times;</td></tr>
+</table>
+<p>All three produce an identical checksum to f32. Batching is worth 5.6&times; over per-loop dispatch, and the operand cache inside a batch (the same weight matrix is handed to the same kernel once per token; re-uploading it each time was 100&nbsp;MB of malloc+copy per step) is worth another 2.9&times;. What remains is <em>entirely</em> dispatch overhead: 1620 dispatches &times; 12&nbsp;&micro;s &asymp; the whole 18&nbsp;ms.</p>
+
+<h2>Verdict</h2>
+<p>The split works and is correct &mdash; ARM keeps all control flow and issues the inner loops, the GPU does the arithmetic, and the result is verified against fp64. The performance verdict on this machine is <strong>no</strong>: at transformer-layer widths a 173&nbsp;&micro;s round trip cannot be amortised, and even at 4096&times;4096 the GPU only reaches 0.62&times; of a naive C loop.</p>
+
+<h3>What would change the answer</h3>
+<ol>
+  <li><b>One dispatch per step, not per loop.</b> A persistent/fused kernel that loops over tokens and layers internally turns 1620 dispatches into 1 &mdash; ~12&nbsp;&micro;s of overhead against ~7M MACs of work. This is the only change that makes the current arithmetic worth a GPU, and it is the design the <code>mg_batch</code> API is shaped for.</li>
+  <li><b>Resident weights across steps</b>, not just within one: the cache is per-batch today, so a model-level cache would remove the 64&nbsp;KB/token re-upload of W entirely.</li>
+  <li><b>A better C baseline.</b> The ARM column is a scalar triple loop. Any honest claim about the GPU needs the CPU side blocked and vectorised first &mdash; with vDSP or OpenMP the crossover moves right, not left.</li>
+  <li><b>bf16 end to end.</b> The hardware has bf16 and Metal 3.2 exposes it; the C side is still fp64, so every operand pays a conversion. A bf16 model that keeps its weights in bf16 on the CPU side would halve the transfer again &mdash; and <code>test_llm.py</code> already has a tested <code>bf16()</code> to model that on.</li>
+</ol>
+
+</body>
+</html>

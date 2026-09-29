@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codegen performance target</title>
+<style>
+  :root { --fg:#1a1a1a; --muted:#666; --line:#d8d8d8; --bg:#fff; --code:#f6f6f4; --good:#0a7a37; --bad:#b3261e; --warn:#8a5a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e8e8e6; --muted:#9a9a97; --line:#3a3a38; --bg:#17171a; --code:#232327; --good:#5ddb8b; --bad:#ff8a80; --warn:#e0b050; }
+  }
+  body { background:var(--bg); color:var(--fg); margin:0 auto; max-width:56rem;
+         padding:2.5rem 1.25rem 5rem; font:16px/1.6 -apple-system,BlinkMacSystemFont,"SF Pro Text",Segoe UI,sans-serif; }
+  h1 { font-size:1.9rem; line-height:1.25; margin:0 0 .3rem; letter-spacing:-.01em; }
+  h2 { font-size:1.25rem; margin:2.5rem 0 .6rem; padding-top:.6rem; border-top:1px solid var(--line); }
+  h3 { font-size:1.02rem; margin:1.6rem 0 .4rem; color:var(--muted); font-weight:600; }
+  code, pre { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.87em; }
+  code { background:var(--code); padding:.12em .38em; border-radius:4px; }
+  pre { background:var(--code); padding:.9rem 1rem; border-radius:8px; overflow-x:auto; line-height:1.5; }
+  pre code { background:none; padding:0; }
+  table { border-collapse:collapse; width:100%; margin:1rem 0; font-size:.92rem; }
+  th, td { text-align:left; padding:.45rem .6rem; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-weight:600; color:var(--muted); font-size:.85rem; text-transform:uppercase; letter-spacing:.04em; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .win { color:var(--good); font-weight:600; }
+  .lose { color:var(--bad); font-weight:600; }
+  .tgt { color:var(--warn); font-weight:600; }
+  .sub { color:var(--muted); margin:0 0 2rem; }
+  .note { border-left:3px solid var(--line); padding:.1rem 0 .1rem 1rem; color:var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>Codegen performance target</h1>
+<p class="sub">What <code>fire.py</code> has to produce, measured against the Metal kernel it is meant to be able to call. Set 2026-09-29.</p>
+
+<h2>The workload</h2>
+<p>One forward step of the model in <code>test_llm/test_llm.py</code>: <code>d_model 128, d_ff 256, 6 layers</code>, bf16 weights, gated linear attention with one <code>d&times;d</code> state per layer. A "step" is <code>N</code> tokens through all six layers:</p>
+<pre><code>q, k, v = W1[0..2] . x
+S       = alpha * S + k (x) v
+o       = S^T q
+x       = x + W1[3] . o
+h       = silu(W2[0] . x) * W2[1] . x
+x       = W3 . h                 # next layer's input</code></pre>
+<p>This is the only workload the target is defined against. It is chosen because it is what the model actually spends its time on, and because it is the shape the fused Metal kernel already computes &mdash; so the two are comparable term for term.</p>
+
+<h2>The ceiling: measured</h2>
+<p>From <code>test_llm/bench.c</code>, 6 layers, <code>d_model 128</code>, <code>d_ff 256</code>, one dispatch for the whole run, both paths consuming the same bf16-rounded operands:</p>
+<table>
+  <tr><th>steps</th><th class="num">ARM C (naive)</th><th class="num">Metal, 1 dispatch</th><th class="num">speedup</th><th class="num">max |diff|</th><th class="num">&micro;s/step (GPU)</th></tr>
+  <tr><td>1</td><td class="num">0.45 ms</td><td class="num">1.68 ms</td><td class="num lose">0.27&times;</td><td class="num">0.0</td><td class="num">1676</td></tr>
+  <tr><td>10</td><td class="num">3.95 ms</td><td class="num">1.15 ms</td><td class="num">3.4&times;</td><td class="num">0.0</td><td class="num">115</td></tr>
+  <tr><td>24</td><td class="num">12.96 ms</td><td class="num">2.37 ms</td><td class="num">5.5&times;</td><td class="num">0.0</td><td class="num">98.6</td></tr>
+  <tr><td>100</td><td class="num">51.11 ms</td><td class="num">6.17 ms</td><td class="num win">8.3&times;</td><td class="num">0.0</td><td class="num">61.7</td></tr>
+  <tr><td>300</td><td class="num">167.78 ms</td><td class="num">12.70 ms</td><td class="num win">13.2&times;</td><td class="num">0.0</td><td class="num">42.3</td></tr>
+  <tr><td>1000</td><td class="num">606.10 ms</td><td class="num">22.70 ms</td><td class="num win">26.7&times;</td><td class="num">0.0</td><td class="num">22.7</td></tr>
+</table>
+<p>Two numbers to carry forward: <strong>22.7 &micro;s per step</strong> (1000 steps) and <strong>606 &micro;s per step</strong> for the naive C loop. The Metal figure is the ceiling; the C figure is the floor, and it is a <em>floor</em> because that loop is a scalar triple loop at <code>-O2</code> with no blocking and no vectorisation.</p>
+
+<h2>The target</h2>
+<p>Three tiers, in the order they should be attempted. Each is a statement about the <em>compiled</em> program, not about the hand-written C.</p>
+
+<table>
+  <tr><th>Tier</th><th>What must happen</th><th class="num">Per-step budget at N=1000</th><th class="num">vs. today's pure Python</th></tr>
+  <tr>
+    <td><b>T1 &mdash; compile</b></td>
+    <td>The forward and backward run through <code>fire.py --jit</code> at all, and produce the same loss and the same sample text as the interpreter. Today this is <em>blocked</em>: the compiler cannot infer the element type of a list built by a comprehension and handed to a method parameter, so <code>g[i]</code> reads as int64.</td>
+    <td class="num tgt">any</td>
+    <td class="num">&mdash;</td>
+  </tr>
+  <tr>
+    <td><b>T2 &mdash; C-class scalar code</b></td>
+    <td>One forward step of the compiled program lands within <b>2&times;</b> of the naive C loop, i.e. within 300&ndash;1200 &micro;s per step. This is the honest bar for a straight scalar lowering with no GPU involved.</td>
+    <td class="num tgt">&le; 300 &micro;s</td>
+    <td class="num tgt">&ge; 2&times;</td>
+  </tr>
+  <tr>
+    <td><b>T3 &mdash; inner loops to Metal</b></td>
+    <td>The compiled program recognises the inner loops and issues them through <code>mg_*</code> instead of emitting scalar C, batching a whole step into <strong>one</strong> dispatch. Measured today at 22.7 &micro;s per step, so the target is the compiled program reaching that same shape.</td>
+    <td class="num tgt">&le; 45 &micro;s</td>
+    <td class="num tgt">&ge; 250&times;</td>
+  </tr>
+</table>
+
+<h3>The pure-Python baseline to beat</h3>
+<table>
+  <tr><th>Path</th><th class="num">--bench total</th><th class="num">fwd+bwd (8 tok)</th><th class="num">Adam over 993,792 params</th></tr>
+  <tr><td>CPython, <code>test_llm/test_llm.py</code></td><td class="num">1.454 s</td><td class="num">0.771 s</td><td class="num">0.424 s</td></tr>
+  <tr><td>compiled (<code>fire.py --jit</code>)</td><td class="num tgt">not yet reachable</td><td class="num tgt">&mdash;</td><td class="num tgt">&mdash;</td></tr>
+</table>
+<p>Note the Adam column: 0.424 s to touch 993,792 parameters is <b>elementwise</b> work with no reuse, and it is the one part of a training step the GPU cannot help with as written &mdash; a fused kernel helps only if the update is batched into one dispatch over the whole parameter set. Any target that ignores it is measuring forward only.</p>
+
+<h2>How to measure</h2>
+<pre><code># the ceiling
+clang -fobjc-arc -O2 -I test_llm -framework Foundation -framework Metal \
+      -o /tmp/mb test_llm/bench.c test_llm/metal.m -lm
+/tmp/mb 20                       # the table above
+
+# the compiled path, once T1 lands
+python3 fire.py --jit test_llm/test_llm.py --bench
+
+# agreement is not optional: the bench prints max |diff| per size and the
+# comparison is NaN-hardened, because a step full of NaN once reported
+# "agree" (comparing NaN with &gt; is false, so worst stayed 0.0)</code></pre>
+
+<h2>What is between us and T3</h2>
+<ol>
+  <li><b>T1 first.</b> The remaining compiler gap is element-type inference for a list produced by a comprehension and passed to a method parameter. Everything else in the model compiles: the fixed list-repeat, append, float-field, method-call-site, weak-int64 and return-element bugs are done, and the backend suites are green (326 gimple, 6 interporacle, 33 runtime-diff).</li>
+  <li><b>A GPU call from generated C.</b> <code>mg_*</code> exists and is correct, but nothing in the compiler lowers a recognised loop shape onto it. That recognition is the actual T3 work: match the loop nest, not the source text.</li>
+  <li><b>Weights resident across calls.</b> <code>mg_weights_dirty()</code> exists because the host already caches the bf16 copy; a training step that updates weights in place must invalidate it, or T3 silently trains on stale weights. This is the one place where "it runs" and "it is correct" come apart, so it wants a test of its own.</li>
+  <li><b>bf16 storage on the C side.</b> The kernels speak bf16; the host converts. A model that kept its weights in bf16 would halve what crosses the bus again, and <code>test_llm.py</code> already has a tested <code>bf16()</code> to model it on.</li>
+</ol>
+
+<h2>The honest caveat</h2>
+<p class="note">The 26.7&times; is <em>fused GPU kernel vs unoptimised scalar C</em>. A blocked, vectorised CPU kernel &mdash; vDSP, or four <code>double</code> accumulators by hand &mdash; would plausibly take 10&ndash;50&times; off the C column, which would put T2 in the same range as T3. Before treating 26.7&times; as the prize, the C baseline needs to be the best C we can write; otherwise T2 and T3 are being measured against a strawman. The per-step rates (22.7 &micro;s vs 606 &micro;s) are the honest comparison, and even those assume the naive loop.</p>
+
+</body>
+</html>

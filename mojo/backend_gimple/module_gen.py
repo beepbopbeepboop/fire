@@ -2854,6 +2854,22 @@ def gen_module_impl(self, stmts):
                     else:
                         ctype = 'int64_t'
                 self._global_var_types[mangled] = ctype
+                # A container-valued class attribute keeps its ELEMENT
+                # type on the `_classattr_...` global, the same side-table
+                # a local list uses. Without it a class-level registry of
+                # objects (`T.registry = []` ... `T.registry.append(self)`)
+                # reads back as an untyped handle, and every element of it
+                # types as int64_t — so `p.numel()` became
+                # `int64_t.numel() stubbed` and a model's parameter count
+                # came back as a pointer-sized garbage number. An EMPTY
+                # literal has no evidence and is left alone; the first
+                # `.append()` on the attribute records the type (see
+                # `_lower_list_method`'s pointer branch, which writes
+                # `_elem_types[ov]`).
+                if isinstance(v, (ListExpr, TupleExpr, SetExpr)) and v.elements:
+                    _cel = self._infer_list_elem_type(v.elements)
+                    if _cel and _cel != 'int64_t':
+                        self._elem_types[mangled] = _cel
                 # UPGRADE an already-registered instance field's type —
                 # do NOT create one for a pure class-level attribute. A
                 # container-valued class attr (`Parser._CONV_KWS = {...}`)
@@ -4036,6 +4052,18 @@ def gen_module_impl(self, stmts):
                     self._elaborated_externs.append(bare_decl)
 
     self._inferred_param_types: dict[str, dict[str, str]] = {}  # func_name -> {param_name -> type}
+    # Function name -> its parameter NAMES in order. Populated here, in the
+    # same pass that fills `_inferred_param_types`, because that map is keyed
+    # by param NAME while a call site identifies a callee's parameter only by
+    # POSITION: `analyze_param_usage` records `callee + _FC_SEP + arg_index`
+    # and the decision step needs to turn that index back into a name to ask
+    # "what did the callee infer for that parameter?". Looked up, never
+    # computed, so there is no inference recursion.
+    self._func_param_names: dict[str, list[str]] = {}
+    for s in all_functions:
+        if isinstance(s, FunctionDef):
+            self._func_param_names[_as_str(s.name)] = [
+                _as_str(pn) for pn, _pt in (s.params or []) if not _as_str(pn).startswith('*')]
     for s in all_functions:
         if isinstance(s, FunctionDef):
             self._inferred_param_types[s.name] = self._infer_param_types(s)
@@ -4169,6 +4197,15 @@ def gen_module_impl(self, stmts):
           and a free function's full caller set is not visible to any
           fixpoint here, so such a flip cannot be made consistent.
         """
+        # Unary +/- in front of a literal: `-1` and `-3.5` parse as
+        # UnaryOp('-', <literal>), NOT as a negative literal node, so
+        # without looking through them every NEGATIVE literal argument was
+        # invisible here — a param reached only from `f(-3.5)` got no
+        # observation and kept its int64_t default, so `abs(x)` inside `f`
+        # truncated the double (printed 3 for 3.5). The sign cannot change
+        # the type, so the operand's own answer is the answer.
+        if isinstance(a, UnaryOp) and a.op in ('-', '+'):
+            return _arg_scalar_type(caller_name, a.operand, deep_str, prefer_refined_param, caller_struct)
         if isinstance(a, FloatLiteral):
             return 'double'
         if isinstance(a, StringLiteral):
@@ -4686,6 +4723,61 @@ def gen_module_impl(self, stmts):
     # `_scalar_obs`' set) and applied by the struct contract below.
     _struct_obs: dict[str, dict[str, set]] = {}
 
+
+    # ...and the METHOD half of the same contract. The walk above only
+    # recognises a callee spelled as a bare `IdentExpr`, so every
+    # `self.q.backward(gq, n)` / `obj.method(xs)` call site was invisible:
+    # a container passed into a METHOD kept no element type, and the
+    # callee read it with mojo_list_get_int whatever the caller stored.
+    # For a list of doubles that returns the raw IEEE-754 bit pattern,
+    # which then flows through arithmetic as a perfectly ordinary-looking
+    # int64_t — a SILENT wrong answer, exit 0 (real: a hand-written
+    # neural-net's `g[i]` incoming-gradient read in a Linear.backward,
+    # where `gi == 0.0` then compared a bit pattern against zero and never
+    # matched, so every gradient silently went the wrong way).
+    #
+    # Receiver resolution mirrors `_collect_method_scalar_obs` exactly
+    # (self.<field> via the caller's own struct, a local via
+    # _inferred_var_types), because it answers the same question: which
+    # struct owns this method call.
+    def _static_arg_elems(a, elem, nested):
+        """(element, nested-element) C types provable for one argument
+        expression, or (None, None). IdentExpr defers to the caller's
+        scanned local map; a container LITERAL is provable on the spot,
+        which is what the IdentExpr-only walk above could not see either
+        (`total([1.0, 2.0])` read its argument as int64 bits)."""
+        if isinstance(a, gimple_ctypes.IdentExpr):
+            _n = _gmi_as_str(a.name)
+            if _n in elem:
+                _e = _gmi_as_str(elem[_n])
+                # An `int64_t` element type is NOT positive evidence: it is
+                # both the honest answer for a list of ints AND this
+                # codegen's "cannot tell" default (an empty literal, an
+                # int/double join, a subscript store whose value type was
+                # unresolvable). Recording it changes nothing at the read --
+                # the default accessor already is mojo_list_get_int -- but
+                # it DOES collide in `_record_param_elem`'s conflict rule
+                # and erase the real answer from a sibling call site, so a
+                # method reached from both a float-list and a not-yet-typed
+                # call site lost its element type outright (real:
+                # Linear.backward's incoming gradient -- three double call
+                # sites in GatedLinearAttention, two untyped ones in
+                # SwiGLU -- joined to (None, None), and every `g[i]` in it
+                # read back as raw int64 bits).
+                if _e == 'int64_t':
+                    return None, None
+                return _e, _gmi_as_str(nested.get(_n))
+            return None, None
+        if isinstance(a, gimple_ctypes.ListExpr):
+            _e = self._infer_list_elem_type(a.elements)
+            if _e == 'int64_t':
+                return None, None
+            if not self._literal_elements_include_none(a.elements):
+                if a.elements and isinstance(a.elements[0], gimple_ctypes.ListExpr):
+                    return 'MojoList *', self._infer_list_elem_type(a.elements[0].elements)
+                return _gmi_as_str(_e), None
+        return None, None
+
     for caller_name, body in _caller_bodies:
         elem, nested, _ = self._scan_container_elems(body)
         calls = []
@@ -4700,9 +4792,9 @@ def gen_module_impl(self, stmts):
             for i, a in enumerate(call.args):
                 if i >= len(pnames):
                     break
-                if isinstance(a, IdentExpr) and _as_str(a.name) in elem:
-                    _record_param_elem(callee, pnames[i],
-                                        elem[_as_str(a.name)], nested.get(_as_str(a.name)))
+                _fe, _fne = _static_arg_elems(a, elem, nested)
+                if _fe is not None:
+                    _record_param_elem(callee, pnames[i], _fe, _fne)
                 st = _arg_scalar_type(caller_name, a)
                 if st:
                     # Split the chained `_scalar_obs.setdefault(callee, {})
@@ -4725,6 +4817,57 @@ def gen_module_impl(self, stmts):
                     _sp_inner = _struct_obs.setdefault(callee, {})
                     _sp_set = _sp_inner.setdefault(pnames[i], set())
                     _sp_set.add(_gmi_as_str(spt))
+
+    for caller_name, caller_struct, cbody in _method_caller_bodies:
+        _melem, _mnested, _ = self._scan_container_elems(cbody)
+        _mcalls = []
+        self._calls_in_stmts(cbody, _mcalls)
+        for _mcall in _mcalls:
+            if not isinstance(_mcall.func, MemberExpr):
+                continue
+            _mrecv = _mcall.func.obj
+            _mrstruct = None
+            if isinstance(_mrecv, IdentExpr):
+                if _mrecv.name == 'self':
+                    _mrstruct = caller_struct
+                else:
+                    _mt = self._inferred_var_types.get(caller_name, {}).get(_mrecv.name)
+                    if isinstance(_mt, str) and _mt.endswith(' *'):
+                        _mrstruct = _mt[:-2]
+            elif (isinstance(_mrecv, MemberExpr) and isinstance(_mrecv.obj, IdentExpr)
+                    and _mrecv.obj.name == 'self' and caller_struct
+                    and caller_struct in self.struct_field_types):
+                _mft = self.struct_field_types[caller_struct].get(_mrecv.member)
+                if isinstance(_mft, str) and _mft.endswith(' *'):
+                    _mrstruct = _mft[:-2]
+            if not _mrstruct:
+                continue
+            _mmeth = _method_scalar_ann.get(_mrstruct, {}).get(_mcall.func.member)
+            if _mmeth is None:
+                continue
+            _mpn = []
+            _meth_is_cls = 'classmethod' in (getattr(_mmeth, 'decorators', None) or [])
+            for _pn, _pt in (_mmeth.params or []):
+                _pn = _gmi_as_str(_pn)
+                # `self` (and a classmethod's `cls`) is bound by the
+                # RECEIVER, not by any argument, so it must not consume
+                # call-arg slot 0 — `_collect_method_scalar_obs` drops them
+                # for exactly this reason, and copying its rule is what
+                # keeps the two contracts aligned. Getting it wrong
+                # records arg 0's element type against `self` and shifts
+                # every later argument one slot up.
+                if _pn != 'self' and not (_meth_is_cls and _pn == 'cls') \
+                        and not _pn.startswith('*'):
+                    _mpn.append(_pn)
+            if not _mpn:
+                continue
+            _mcallee = f"{_gmi_as_str(_mrstruct)}_{_gmi_as_str(_mcall.func.member)}"
+            for _mi, _ma in enumerate(_mcall.args):
+                if _mi >= len(_mpn):
+                    break
+                _me, _mne = _static_arg_elems(_ma, _melem, _mnested)
+                if _me is not None:
+                    _record_param_elem(_mcallee, _mpn[_mi], _me, _mne)
 
     # A container param whose ELEMENTS the callee `isinstance()`-checks
     # against struct types (`for s in stmts: if isinstance(s, FunctionDef)`)

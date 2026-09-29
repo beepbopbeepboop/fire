@@ -336,6 +336,12 @@ def _reset_func(gen, body: list = None, params: list = None,
     # `_collect_return_elems`).
     gen._dict_items_val_elems: dict[str, str] = {}
     gen._tuple_slot_types: dict[str, list] = {}
+    # NOTE: `gen._return_slot_types` (the name-keyed, CROSS-function half of
+    # per-slot tuple types, written at a return and read at a later call
+    # site) is deliberately NOT re-created here. It is initialized once per
+    # MODULE in gimple_codegen.py's setup, next to `_return_elem_types` —
+    # resetting it per function would discard every callee whose body was
+    # emitted before the caller's.
     gen._dict_item_pair_vars: dict[str, str] = {}
     # `it = iter(<list>)` inside ordinary codegen (incl. an A3 stack-switch
     # generator body): C-name of the iterator local -> {'list','cursor','elem'}.
@@ -2301,7 +2307,18 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         gen._elem_types[_dk] = 'char *'  # dict keys are always strings
         return _dk
     if src_type == 'MojoSet *':
-        return gen._call_expr('MojoList *', 'mojo_set_to_list', [('MojoSet *', value)])
+        _sl = gen._call_expr('MojoList *', 'mojo_set_to_list', [('MojoSet *', value)])
+        # Carry the set's element type onto the list, exactly as the dict
+        # branch just above does for its keys. `set.to_list` only reboxes;
+        # without this the list is untyped and every later consumer reads
+        # it with the int accessor — `for i, c in enumerate(sorted(
+        # set(text)))` bound `c` as int64_t and then passed those raw
+        # pointer bits to `stoi[c] = i`, which gimple rejects ("invalid
+        # argument to gimple call": mojo_dict_set_int takes char *).
+        _se = gen._elem_of(value)
+        if _se and _se != 'int64_t':
+            gen._elem_types[_sl] = _se
+        return _sl
     if src_type == 'MojoGenerator *':
         return _generator_to_list(gen, value)
     if src_type in ('int64_t', 'int', 'void *') or src_type.endswith(' *'):
@@ -2349,6 +2366,33 @@ def _quick_container_elem(gen, node) -> str | None:
         # `[f(x) for _, x in it]` — element type is the mapped expression's
         # container-elem (or scalar-leaf) type.
         return gen._quick_container_elem(node.element)
+    if isinstance(node, gimple_ctypes.MemberExpr):
+        # `return self.data` — a list FIELD's element type, from the
+        # cross-method contract `_field_elem_types` records whenever the
+        # field is assigned a container literal (or appended to). Without
+        # this arm a method returning one of its own float-list fields
+        # inferred no return element type, so every call site typed the
+        # result's elements by the unknown-element default — and a
+        # comprehension binding them (`[a + gi * v for a, v in zip(gx,
+        # self.w.row(i))]`) declared `v` as a MojoList* and emitted
+        # `MojoList * * double`, a hard gcc error.
+        _pst = getattr(gen, '_prepass_struct', None)
+        if _pst and _pst in gen.struct_field_types:
+            _ft = gen.struct_field_types[_pst].get(node.member)
+            if _ft in ('MojoList *', 'MojoSet *'):
+                return gen._field_elem_types.get(_pst, {}).get(node.member)
+        return None
+    if isinstance(node, gimple_ctypes.SubscriptExpr):
+        # `return self.data[a:b]` — a list SLICE is a fresh list of the
+        # SAME elements, so it carries the sliced list's element type.
+        # A str slice is itself a str, not a container, so it answers
+        # None rather than a char* element type.
+        if isinstance(getattr(node, 'index', None), gimple_ctypes.SliceExpr):
+            _ot = gen._quick_type(node.obj) if hasattr(gen, '_quick_type') else None
+            if _ot == 'char *':
+                return None
+            return gen._quick_container_elem(node.obj)
+        return None
     if isinstance(node, gimple_ctypes.TernaryExpr):
         a = gen._quick_container_elem(getattr(node, 'if_true', None) or getattr(node, 'body', None))
         b = gen._quick_container_elem(getattr(node, 'if_false', None) or getattr(node, 'orelse', None))

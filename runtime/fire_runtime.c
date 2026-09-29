@@ -3054,6 +3054,17 @@ static char *_read_all(int fd) {
     return buf;
 }
 
+void mojo_stream_write(int64_t fd, char *s) {
+    if (!s) return;
+    /* Only the three standard streams: this handle is an fd, and a
+     * handle that is not one must not become a wild write(). */
+    if (fd < 0 || fd > 2) return;
+    /* fwrite, not write(2): stdio may have buffered output already, and
+     * mixing a raw write(2) with buffered stdio reorders the two. */
+    fwrite(s, 1, strlen(s), fd == 0 ? stdin : (fd == 1 ? stdout : stderr));
+    fflush(fd == 0 ? stdin : (fd == 1 ? stdout : stderr));
+}
+
 char *mojo_stdin_read(void) {
     return _read_all(STDIN_FILENO);
 }

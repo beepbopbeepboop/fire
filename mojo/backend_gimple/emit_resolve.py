@@ -2375,7 +2375,14 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     identical index-loop shape, just over mojo_strlen/_mojo_at_char
     instead of mojo_str_len/mojo_str_char_at."""
     _iv = _as_str(it_val)   # see _compr_list_loop
-    gen._declare_var(gen0.target, 'char')
+    # A comprehension over a str yields 1-char STRINGS, same rule as
+    # _gen_for_cstr (see its comment for why `char` was wrong and what it
+    # broke). This is the path `set(s)` / `sorted(s)` / `list(s)` all take,
+    # since _lower_ctor_from_iterable rewrites them into comprehensions —
+    # so with the target typed `char` they produced a set of character
+    # CODES, and `sorted(set("hello world"))` came back as
+    # [32, 100, 101, ...] instead of [' ', 'd', 'e', ...].
+    gen._declare_var(gen0.target, 'char *')
     len64 = gen._new_val('int64_t', f'mojo_strlen ({_iv})')
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
@@ -2386,8 +2393,12 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
     gen._ptr_helpers_needed.add('char')
-    addr = gen._new_val('char *', f"_mojo_at_char ({_iv}, {idx64})")
-    gen._emit(f"  {gen._cname(gen0.target)} = *{addr};")
+    # `mojo_cstr_slice` rather than a `char`-taking helper: gimple
+    # rejects a `char` argument ("invalid argument to gimple call"), since
+    # a char is promoted to int64_t non-trivially. See _gen_for_cstr.
+    _one_cs = gen._new_val('int64_t', "(int64_t)1")
+    _end_cs = gen._new_val('int64_t', f"{idx64} + {_one_cs}")
+    gen._emit(f"  {gen._cname(gen0.target)} = mojo_cstr_slice ({_iv}, {idx64}, {_end_cs});")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
@@ -2477,6 +2488,18 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         else:
             ev64 = gen._to_int64(et, ev)
             gen._emit_call('void', '', 'mojo_set_add_int', [('MojoSet *', res), ('int64_t', ev64)])
+        # Record the element type, exactly as the list branch just above
+        # does for its own result. Without it the set is correct but
+        # UNDESCRIBABLE: `sorted(set(text))` reads the set's element type
+        # to type its result (`_lower_builtin_sorted`'s MojoSet branch),
+        # found nothing, and the sorted list came back untyped — so
+        # `sorted(set(s))` yielded raw char* DECIMALS
+        # (4358361792, 4358361408, ...) instead of one-character strings.
+        # The append above already dispatches on `et`, so the information
+        # was available; it just was not written down where the consumer
+        # looks for it.
+        if et and et != 'int64_t':
+            gen._elem_types[res] = et
     elif node.kind == 'dict':
         kt, kv = gen.lower_expr(node.element)   # element = key expression in dict compr
         vt, vv = gen.lower_expr(node.key)        # key field holds the value expression

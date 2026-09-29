@@ -3380,6 +3380,43 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # Per-function, same reason and same placement as gen_func's.
     gen._inlined_lambdas = {}
     ginf.reset_no_candidates(gen)
+    # Seed container element types for this method's params and locals —
+    # gen_func does both of these (the cross-call `_param_elem_types`
+    # contract at its `_pe` seeding, and `_scan_container_elems` for
+    # locals) and a method body got NEITHER, so a list handed to a method
+    # (`self.q.backward(gq, n)`) was read back with mojo_list_get_int
+    # whatever the caller stored: for a list of doubles that is the raw
+    # IEEE-754 bit pattern flowing on as an ordinary int64_t — silently
+    # wrong, exit 0. Keyed by the QUALIFIED `Struct_method` name the
+    # call-site pre-pass records under.
+    _mkey = f"{_as_str(struct_name)}_{_as_str(node.name)}"
+    _mpe = getattr(gen, '_param_elem_types', {}).get(_mkey, {})
+    for _mbare in _mpe:
+        _mpe_v = _mpe[_mbare]
+        _me = _as_str(_mpe_v[0])
+        _mne = _as_str(_mpe_v[1])
+        if _me:
+            gen._elem_types[_mbare] = _me
+            if _mne:
+                gen._nested_elem_types[_mbare] = _mne
+    _mloc_elem, _mloc_nested, _mloc_dict_val = gen._scan_container_elems(node.body)
+    for _mv in _mloc_elem:
+        gen._elem_types.setdefault(_as_str(_mv), _as_str(_mloc_elem[_mv]))
+    for _mv2 in _mloc_nested:
+        gen._nested_elem_types.setdefault(_as_str(_mv2), _as_str(_mloc_nested[_mv2]))
+    for _mv3 in _mloc_dict_val:
+        gen._dict_val_types.setdefault(_as_str(_mv3), _as_str(_mloc_dict_val[_mv3]))
+
+    # Seed container element types for this method's params and locals —
+    # gen_func does both of these (the cross-call `_param_elem_types`
+    # contract at its `_pe` seeding, and `_scan_container_elems` for
+    # locals) and a method body got NEITHER, so a list handed to a method
+    # (`self.q.backward(gq, n)`, `Linear.forward(x, cache)`) was read
+    # back with mojo_list_get_int regardless of what the caller stored:
+    # for a list of doubles that is the raw IEEE-754 bit pattern flowing
+    # on as an ordinary int64_t — silently wrong, exit 0. Same two seeds,
+    # same helpers, keyed by the QUALIFIED `Struct_method` name the
+    # pre-pass records under.
     # Set module context for global field access -- mirrors the identical
     # line in gen_func/_gen_toplevel (this method was missing it entirely).
     # Without this, `self._current_module_ctx` keeps whatever value the

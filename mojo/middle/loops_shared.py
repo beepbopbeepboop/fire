@@ -68,6 +68,27 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
                     'int64_t', 'MojoBytes *', _bp)
             return 'int64_t', gen._new_val(
                 'int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+        # Per-slot types recorded for this exact value, when it has them:
+        # a heterogeneous tuple literal, or a multi-value return's tuple
+        # re-keyed onto the call result (see gen._return_slot_types). Each
+        # slot is then read with ITS OWN type instead of the container's
+        # single joined element type — which for `(cfg, model)` is the
+        # useless int64_t, and produced a `Config *` local assigned an
+        # int64_t read (GIMPLE: "internal compiler error: in build2").
+        _pst = gen._tuple_slot_types.get(v)
+        if _pst is not None and 0 <= idx < len(_pst):
+            _pc = _pst[idx]
+            if _pc == 'double':
+                return 'double', gen._new_val('double', f"mojo_list_get_double ({lp}, {idx64})")
+            if _pc == 'char *':
+                return 'char *', gen._new_val('char *', f"mojo_list_get_str ({lp}, {idx64})")
+            if _pc in ('int64_t', 'int', '_Bool', 'double', 'char', '', 'unknown'):
+                return 'int64_t', gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+            # Any other slot type is a boxed pointer: read the raw slot and
+            # put it back through the coercion chokepoint rather than an
+            # ad-hoc cast (same rule as the bytes slot above).
+            _pr = gen._new_val('int64_t', f"mojo_list_get_int ({lp}, {idx64})")
+            return _pc, gen._coerce_to_type('int64_t', _pc, _pr)
         if suf == 'str':
             return 'char *', gen._new_val('char *', f"mojo_list_get_str ({lp}, {idx64})")
         if suf == 'double':

@@ -42,6 +42,15 @@ import mojo.backend_gimple.emit_calls as ggc
 # Re-export shared helpers from mojo.middle.methods_shared via explicit imports.
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
+from mojo.middle.types import (
+    # The struct format-string analysis (codes / per-slot kinds / element
+    # ctype) is pure and lives in the middle tier beside
+    # _STRUCT_MODULE_FN_RETVALS, because the static type estimator in
+    # mojo/middle/resolve_shared.py needs the same answer to write a
+    # function PROTOTYPE that the lowering here then has to satisfy.
+    # Underscore-prefixed, so `import *` would not carry them.
+    _struct_value_codes, _struct_slot_kinds, _struct_elem_ctype,
+)
 from mojo.middle.methods_shared import *  # noqa: F401,F403
 from mojo.middle.methods_shared import (
     _SELFHOST_SIBLING_MODULE_PREFIXES, _as_str, _gmm_callexpr_node, _is_selfhost_sibling_alias, _sms_key
@@ -535,100 +544,6 @@ def _lower_bound_method_call_value(gen, bm: str, node: gimple_ctypes.CallExpr,
 # to the Python type CPython's "not callable" message names for its value.
 # See _lower_struct_attr_call, which is the only consumer.
 _STRUCT_FMT_DATA_ATTRS = {'format': 'str', 'size': 'int'}
-
-
-def _struct_value_codes(fmt: str | None):
-    """The per-VALUE format codes of a const-foldable struct format string
-    ('4h' -> ['h','h','h','h'], 'x' padding dropped, '10s' -> ['s']), or
-    None if the format isn't statically known. Used to pick the right
-    MojoList append (int vs double vs bytes-pointer) per argument and the
-    element type of an unpack result."""
-    if not isinstance(fmt, str):
-        return None
-    codes = []
-    i, n = 0, len(fmt)
-    if i < n and fmt[i] in '<>=!@':
-        i += 1
-    while i < n:
-        c = fmt[i]
-        if c in ' \t\n':
-            i += 1
-            continue
-        count = None
-        if c.isdigit():
-            count = 0
-            while i < n and fmt[i].isdigit():
-                count = count * 10 + int(fmt[i]); i += 1
-            if i >= n:
-                return None
-            c = fmt[i]
-        i += 1
-        if c not in 'xbBhHiIlLqQfds?c':
-            return None
-        if c in 'sc':
-            codes.append('s')
-        elif c == 'x':
-            continue
-        else:
-            codes.extend([c] * (1 if count is None else count))
-    return codes
-
-
-def _struct_slot_kinds(codes):
-    """Per-slot element kind for an unpack format: one of 'int'/'double'/
-    'bytes' per value, in wire order.
-
-    A `MojoList` holds ONE element ctype, which is why a format mixing ints
-    and floats used to degrade wholesale to int64 slots — the float came
-    back as its raw IEEE bits (`struct.unpack('<if', ...)` giving
-    `1 4607182418800017408`). But the format string is a compile-time
-    constant here, so each slot's real kind is statically known and only
-    the CONTAINER is untyped. Recording the per-slot kinds lets every
-    statically-indexed read of the result pick the right accessor for that
-    slot: the subscript (emit_calls.py's MojoList branch), the `a, b = t`
-    destructuring target (loops_shared._tuple_elem_value), and the
-    whole-result repr (`_list_repr_fn` -> `mojo_repr_list_kinds`). It is a
-    property of the VALUE, not of whether it was bound to a local; a read
-    with no compile-time slot index (iteration, a computed subscript) still
-    has no single right C type, which is the residue named in
-    bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
-    """
-    out = []
-    for c in codes or ():
-        if c in 'fd':
-            out.append('double')
-        elif c == 's' or c == 'c':
-            out.append('bytes')
-        else:
-            out.append('int')
-    return out
-
-
-def _struct_elem_ctype(codes):
-    """Uniform MojoList element ctype for an unpack tuple, or 'int64_t'
-    when the codes are mixed / unknown (the common integer-format case is
-    exact; a genuinely mixed int+float format degrades to int64 slots).
-
-    That degradation is now confined to reads with no compile-time slot
-    index: `_struct_slot_kinds` carries the real per-slot kinds, and the
-    subscript, the `a, b = t` destructuring target and the whole-result repr
-    all consult it. See
-    bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md."""
-    if not codes:
-        return 'int64_t'
-    kinds = set()
-    for c in codes:
-        if c in 'fd':
-            kinds.add('double')
-        elif c == 's':
-            kinds.add('bytes')
-        else:
-            kinds.add('int')
-    if kinds == {'double'}:
-        return 'double'
-    if kinds == {'bytes'}:
-        return 'MojoBytes *'
-    return 'int64_t'
 
 
 def _struct_build_value_list(gen, arg_nodes, codes):
@@ -3975,6 +3890,26 @@ def _lower_list_method(gen, ov: str, method: str, args: list) -> tuple:
                     if _sn not in gen._field_elem_types:
                         gen._field_elem_types[_sn] = {}
                     gen._field_elem_types[_sn][_fn] = 'char *'
+        elif at == 'double':
+            # A double appended through mojo_list_append_int is TRUNCATED,
+            # not widened: `a = []; a.append(1.5); print(a[0])` compiled to
+            # `append_int(l, 1)` and printed 1. Every float this codegen
+            # stored by append — a numeric literal, `x * y` over two
+            # doubles, a value read back out of another float list — was
+            # silently floored, exit 0, and the corruption stays invisible
+            # until enough of them accumulate to look obviously wrong.
+            # Same dispatch the list LITERAL lowering already does per
+            # element (`_lower_list_literal`'s `list_suffix` fan-out); the
+            # element type is recorded here too, or a later iteration over
+            # this list reads the (now double) slots back as int64 bits.
+            gen._emit_call('void', '', 'mojo_list_append_double',
+                           [('MojoList *', ov), ('double', av)])
+            gen._elem_types[ov] = 'double'
+            if ov in gen._struct_field_owners:
+                for _sn, _fn in gen._struct_field_owners[ov]:
+                    if _sn not in gen._field_elem_types:
+                        gen._field_elem_types[_sn] = {}
+                    gen._field_elem_types[_sn][_fn] = 'double'
         else:
             # Coerce a bare `int`/`_Bool` literal to `int64_t` HERE rather
             # than leaving it to `_emit_call`'s param-type lookup: in the
@@ -4010,6 +3945,15 @@ def _lower_list_method(gen, ov: str, method: str, args: list) -> tuple:
                 # `->block_type` field access (AttributeError: block_type
                 # in dlopen'd dylibs — box.3d/game's
                 # DYLIB_dlopen_extern_fn_attributeerror.md).
+                # Same record, for a class-LEVEL container: the read was
+                # linked to its `_classattr_...` global, so write the type
+                # there. A class attribute holding a list of instances
+                # (`T.registry = []` then `T.registry.append(self)`) had
+                # its element type land on a temporary and be lost, so
+                # every later read of the attribute was untyped and each
+                # element typed int64_t — `p.numel()` degraded to
+                # `int64_t.numel() stubbed`, returning a pointer-sized
+                # garbage number where a parameter count belonged.
                 if ov in gen._struct_field_owners:
                     for _sn, _fn in gen._struct_field_owners[ov]:
                         if _sn not in gen._field_elem_types:

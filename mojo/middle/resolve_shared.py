@@ -17,6 +17,10 @@ from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
 import gimple_codegen  # constants used by some extracted helpers
+from mojo.middle.types import (  # underscore names: `import *` won't carry these
+    _struct_value_codes, _struct_slot_kinds, _struct_elem_ctype,
+    _SCALAR_FLOAT_TYPES, _LIBM_FN_RETVALS, _BUILTIN_RET_CTYPES,
+)
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.comptime as comptime_eval
 import mojo.middle.solvers as gimple_solvers
@@ -66,6 +70,41 @@ def _closure_value_locals(gen, body: list) -> dict:
 
     _walk(body)
     return result
+
+def _struct_unpack_elem_ctype(gen, call, index):
+    """C type of `struct.unpack(fmt, ...)[index]`, or None if `call` is not a
+    statically-formattable struct unpack (or the index is not a literal).
+
+    Only the module-level `struct.unpack` / `struct.unpack_from` form is
+    answered here: its format is an argument, so it is statically
+    available. The bound instance form (`s = struct.Struct(fmt)`; then
+    `s.unpack(buf)`) keeps the emitter's `gen._struct_formats` lookup,
+    which needs a resolved handle value and is not a pre-pass question —
+    so that shape stays on the `int64_t` fallback here and is still typed
+    correctly at the emission site that can actually see the handle.
+    Per-slot kinds come from `_struct_slot_kinds` when the index is a
+    literal, else the uniform `_struct_elem_ctype`.
+    """
+    if not isinstance(call, gimple_ctypes.CallExpr):
+        return None
+    fn = call.func
+    fmt_node = None
+    if (isinstance(fn, gimple_ctypes.MemberExpr)
+            and isinstance(fn.obj, gimple_ctypes.IdentExpr) and fn.obj.name == 'struct'
+            and fn.member in ('unpack', 'unpack_from')):
+        fmt_node = call.args[0] if call.args else None
+    if fmt_node is None:
+        return None
+    codes = _struct_value_codes(gen._try_const_fold_str(fmt_node))
+    if not codes:
+        return None
+    if isinstance(index, gimple_ctypes.IntLiteral):
+        try:
+            return _struct_slot_kinds(codes)[int(index.value)]
+        except (IndexError, ValueError):
+            return None
+    return _struct_elem_ctype(codes)
+
 
 def _quick_type(gen, node) -> str:
     """Estimate C type of an expression without emitting code."""
@@ -150,29 +189,7 @@ def _quick_type(gen, node) -> str:
         # defaulted to int64_t and the list printed as its ADDRESS (the value
         # was right, the declaration was not).
         #
-        _BUILTIN_CTORS = {'set': 'MojoSet *', 'dict': 'MojoDict *', 'list': 'MojoList *',
-                          # sorted()/reversed() both materialise a MojoList*
-                          # (see _lower_builtin_sorted / _lower_builtin_reversed).
-                          'sorted': 'MojoList *', 'reversed': 'MojoList *',
-                          # enumerate() in VALUE position builds a list of
-                          # (index, value) pair-lists; as a `for` target it is
-                          # an iterator instead, but that path dispatches on
-                          # the call's own shape, not on this type.
-                          'enumerate': 'MojoList *',
-                          # zip() chains mojo_zip, which walks MojoLists and
-                          # returns a new one of pair-lists.
-                          'zip': 'MojoList *',
-                          # mojo_range/mojo_range3 return a MojoList*.
-                          'range': 'MojoList *',
-                          # tuple(x) lowers to the same MojoList as list(x).
-                          'tuple': 'MojoList *',
-                          # map(f, xs) / filter(f, xs) build their result in
-                          # the CODEGEN (_build_per_element_list), not in the
-                          # runtime: mojo_map/mojo_filter are identity stubs
-                          # because a char* function pointer cannot call back
-                          # into a GIMPLE-compiled body. Both really do
-                          # produce a MojoList of results / kept elements.
-                          'map': 'MojoList *', 'filter': 'MojoList *'}
+        _BUILTIN_CTORS = _BUILTIN_RET_CTYPES
         # Same `_locally_binds_name` gate as `_BUILTIN_SCALARS` just
         # below — `set`/`dict`/`list` are ordinary identifiers a module
         # could shadow with its own top-level def/import.
@@ -201,6 +218,24 @@ def _quick_type(gen, node) -> str:
                             # type (see bugs/hard/CODEGEN_comprehension_
                             # return_type_defaults_int64.md's follow-up note).
                             'isinstance': '_Bool', 'all': '_Bool', 'any': '_Bool'}
+        # `abs(x)` returns x's own type, so it cannot sit in that table
+        # (which answers without looking at arguments) — it is answered
+        # here, where the argument is available. Without it the estimator
+        # said int64_t, the PROTOTYPE said int64_t, and the correctly-
+        # inlined double body was truncated by a cast on the way out:
+        # `def a(x): return abs(x)` called as `a(-3.5)` printed 3.
+        # A libm call: `double sqrt(double)` returns double whatever the
+        # argument infers as, and the estimator is what writes this
+        # function's PROTOTYPE. Without the entry the enclosing function was
+        # declared int64_t and the correctly-double body was truncated on
+        # return — `def f(x): return sqrt(x) + exp(x) + log(x)` printed 3
+        # where CPython prints 3.718281828459045, with every intermediate
+        # already a proper double in the emitted C.
+        if (fname in _LIBM_FN_RETVALS and not gen._locally_binds_name(fname)):
+            return _LIBM_FN_RETVALS[fname]
+        if fname in ('abs', 'mojo_abs') and node.args:
+            _at = _quick_type(gen, node.args[0])
+            return _at if _at in _SCALAR_FLOAT_TYPES else 'int64_t'
         # `all`/`any`/`isinstance` (and in principle any other name in
         # this table) are ordinary identifiers a module can legally
         # shadow with its own top-level def — e.g. tokenize.py's own
@@ -614,7 +649,35 @@ def _quick_type(gen, node) -> str:
                 and obj.func.obj.obj.name == 'os' and obj.func.obj.member == 'path'
                 and obj.func.member in ('splitext', 'split', 'splitdrive', 'splitroot')):
             return 'char *'
+        # struct.unpack("<f", buf)[0] / struct.unpack_from(fmt, buf, 0)[2]:
+        # the callee's own type is 'MojoList *' (the CallExpr case above),
+        # but a subscript of it needs the ELEMENT type, and that is a
+        # property of the compile-time format string. Same shape as the
+        # os.path.splitext case above: a statically answerable subscript of
+        # a call the estimator otherwise only knows the container type of.
+        #
+        # Without it the enclosing function's PROTOTYPE said int64_t, the
+        # body then computed the right double and `(int64_t)` truncated it
+        # on return: `def h(): return struct.unpack("<f", b)[0]` returned
+        # `1` where CPython returns `1.00390625`. Wrong with no error, in
+        # the exact code path this LLM's bf16 rounding depends on.
+        _st = _struct_unpack_elem_ctype(gen, obj, node.index)
+        if _st is not None:
+            return _st
         if isinstance(obj, gimple_ctypes.IdentExpr):
+            # `s[i]` where s is a plain char* string: the element is a
+            # ONE-CHAR STRING, not a scalar. `_elem_types` has no entry for
+            # a string (it is not a container in this runtime), so the
+            # subscript fell through to the int64_t default and every
+            # consumer read a character CODE where a string belonged —
+            # `len("z"[0])` boxed the pointer and answered 0, and
+            # `"z"[0] == "z"` compared a pointer to a literal. The
+            # emission side answers `char *` (see the char-indexing branch
+            # in emit_calls.py's subscript lowering); the estimator has to
+            # agree or the enclosing function's prototype contradicts its
+            # own body.
+            if _as_str(getattr(gen, 'var_types', {}).get(_as_str(obj.name))) == 'char *':
+                return 'char *'
             e = gen._elem_types.get(obj.name)
             if e:
                 return e

@@ -9,6 +9,14 @@ gimple_codegen re-imports them so unqualified internal references and
 external `from gimple_codegen import X` keep working unchanged.
 """
 from __future__ import annotations
+
+# `_RUNTIME_FUNCS` (runtime function name -> C return type) is defined ONCE,
+# in gimple_codegen.py, and re-exported here: this file previously held
+# a second, STALE copy that had drifted (it was missing eight entries,
+# so a new runtime function added to the real table was invisible to
+# anything reading this one). gimple_codegen is the module the rest of
+# the compiler imports the name from, so it stays the definition and
+# this is a re-export rather than the reverse.
 import hashlib
 import os
 import re
@@ -255,7 +263,58 @@ class TypeLattice:
             return '%u'
         return '%d'
 _TYPE_MAP: dict[str | None, str] = {'Int': 'int64_t', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt': 'uint64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Float16': '__fp16', 'Float32': 'float', 'Float64': 'double', 'float': 'double', 'Bool': '_Bool', 'bool': 'int', 'String': 'char *', 'str': 'char *', 'List': 'MojoList *', 'list': 'MojoList *', 'Dict': 'MojoDict *', 'dict': 'MojoDict *', 'Set': 'MojoSet *', 'set': 'MojoSet *', 'Str': 'MojoStr *', 'bytes': 'MojoBytes *', 'bytearray': 'MojoBytes *', 'memoryview': 'MojoMemoryView *', 'None': 'void', 'object': 'int64_t'}
+# Python builtin name -> the C type it evaluates to. ONE table, because
+# two consumers need it and they were two lists: `_quick_type` (which
+# types the enclosing function's PROTOTYPE and every local) and
+# `_gmi_collect_self_assigns` (which types `self.<field> = <builtin>(...)`).
+# The second list was missing every builtin here that is not a literal
+# ctor — `sorted`, `reversed`, `map`, `filter`, `range`, `tuple`,
+# `enumerate`, `zip` — so `self.itos = sorted(set(text))` declared the
+# field `int64_t`, the MojoList* was boxed on the store, and every later
+# read of `self.itos` went through the dynamic tagged path with no element
+# type: `for i, c in enumerate(self.itos)` bound `c` as int64_t and passed
+# those raw pointer bits to `stoi[c] = i`, which gimple rejects outright
+# ("invalid argument to gimple call" — mojo_dict_set_int takes char *).
+_BUILTIN_RET_CTYPES = {
+    'set': 'MojoSet *', 'dict': 'MojoDict *', 'list': 'MojoList *',
+    # sorted()/reversed() both materialise a MojoList*
+    # (see _lower_builtin_sorted / _lower_builtin_reversed).
+    'sorted': 'MojoList *', 'reversed': 'MojoList *',
+    # enumerate() in VALUE position builds a list of (index, value)
+    # pair-lists; as a `for` target it is an iterator instead, but that
+    # path dispatches on the call's own shape, not on this type.
+    'enumerate': 'MojoList *',
+    # zip() chains mojo_zip, which walks MojoLists and returns a new one
+    # of pair-lists.
+    'zip': 'MojoList *',
+    # mojo_range/mojo_range3 return a MojoList*.
+    'range': 'MojoList *',
+    # tuple(x) lowers to the same MojoList as list(x).
+    'tuple': 'MojoList *',
+    # map(f, xs) / filter(f, xs) build their result in the CODEGEN
+    # (_build_per_element_list), not in the runtime: mojo_map/mojo_filter
+    # are identity stubs because a char* function pointer cannot call back
+    # into a GIMPLE-compiled body. Both really do produce a MojoList of
+    # results / kept elements.
+    'map': 'MojoList *', 'filter': 'MojoList *',
+    # Bytes/bytearray materialize a MojoBytes*, not a container.
+    'bytes': 'MojoBytes *', 'bytearray': 'MojoBytes *',
+    # Naming the runtime constructors too, so a `self.x = mojo_list_new()`
+    # -shaped call is answered from the same place.
+    'mojo_list_new': 'MojoList *', 'mojo_dict_new': 'MojoDict *',
+    'mojo_set_new': 'MojoSet *',
+    # The Mojo spellings of the container types.
+    'DynamicVector': 'MojoList *', 'Dict': 'MojoDict *', 'Set': 'MojoSet *',
+    'frozenset': 'MojoSet *',
+}
+
 _SCALAR_INT_TYPES = frozenset({'int', 'char', '_Bool', 'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'})
+# The floating counterparts, next to _SCALAR_INT_TYPES and for the same
+# reason: a builtin that has to branch on "is this argument numeric, and
+# if so which" (abs, min, max) should not each re-spell the two sets.
+# `float` is a real C float here and `double` is this compiler's default
+# for a Python float, so both are in it.
+_SCALAR_FLOAT_TYPES = frozenset({'float', 'double', '__fp16'})
 _CONTAINER_KIND_TYPES = frozenset({'MojoDict *', 'MojoList *', 'MojoSet *', 'MojoBytes *'})
 _EMPTY_CONTAINER_CTOR = {'MojoDict *': 'mojo_dict_new ()', 'MojoList *': 'mojo_list_new ()', 'MojoSet *': 'mojo_set_new ()'}
 
@@ -332,7 +391,6 @@ def reify_empty_container_literal(gen, value_type: str, declared_type: str, valu
     if getattr(value_node, 'elements', None) or getattr(value_node, 'pairs', None):
         return None
     return gen._new_val(declared_type, _EMPTY_CONTAINER_CTOR[declared_type])
-_RUNTIME_FUNCS: dict[str, str] = {'mojo_exc_pop': 'void', 'mojo_raise': 'void', 'mojo_exc_msg_set': 'void', 'mojo_exc_msg_get': 'char *', 'mojo_list_new': 'MojoList *', 'mojo_list_len': 'int64_t', 'mojo_list_get_int': 'int64_t', 'mojo_list_get_double': 'double', 'mojo_list_get_str': 'char *', 'mojo_list_contains_int': 'int', 'mojo_list_contains_double': 'int', 'mojo_list_contains_str': 'int', 'mojo_list_contains_bytes': 'int', 'mojo_list_set_int': 'void', 'mojo_list_set_double': 'void', 'mojo_list_set_str': 'void', 'mojo_list_slice': 'MojoList *', 'mojo_list_concat': 'MojoList *', 'mojo_dict_new': 'MojoDict *', 'mojo_dict_get_int': 'int64_t', 'mojo_dict_get_double': 'double', 'mojo_dict_get_str': 'char *', 'mojo_dict_setdefault_int': 'int64_t', 'mojo_dict_setdefault_str': 'char *', 'mojo_dict_contains': 'int', 'mojo_dict_set_bytes_int': 'void', 'mojo_dict_set_bytes_str': 'void', 'mojo_dict_set_bytes_double': 'void', 'mojo_dict_get_bytes_int': 'int64_t', 'mojo_dict_get_bytes_str': 'char *', 'mojo_dict_get_bytes_double': 'double', 'mojo_dict_contains_bytes': 'int', 'mojo_dict_setdefault_bytes_int': 'int64_t', 'mojo_dict_pop_bytes_int': 'int64_t', 'mojo_dict_pop_bytes_str': 'char *', 'mojo_dict_pop_bytes_double': 'double', 'mojo_dict_len': 'int64_t', 'mojo_dict_iter_new': 'MojoDictIter *', 'mojo_dict_iter_next': 'int', 'mojo_dict_iter_key': 'char *', 'mojo_dict_iter_val_int': 'int64_t', 'mojo_dict_iter_val_double': 'double', 'mojo_dict_iter_val_str': 'char *', 'mojo_dict_iter_free': 'void', 'mojo_set_new': 'MojoSet *', 'mojo_set_contains_int': 'int', 'mojo_set_contains_str': 'int', 'mojo_set_add_bytes': 'void', 'mojo_set_contains_bytes': 'int', 'mojo_set_val_bytes': 'MojoBytes *', 'mojo_set_iter_pos': 'int64_t', 'mojo_set_len': 'int64_t', 'mojo_set_iter_new': 'MojoSetIter *', 'mojo_set_iter_next': 'int', 'mojo_set_iter_val_int': 'int64_t', 'mojo_set_iter_val_str': 'char *', 'mojo_set_iter_free': 'void', 'mojo_str_new': 'MojoStr *', 'mojo_str_concat': 'MojoStr *', 'mojo_str_len': 'int64_t', 'mojo_str_data': 'char *', 'mojo_str_char_at': 'char', 'mojo_str_eq': 'int', 'mojo_str_contains': 'int', 'mojo_str_slice': 'MojoStr *', 'mojo_cstr_slice': 'char *', 'mojo_cstr_region_eq': 'int', 'mojo_str_from_char': 'MojoStr *', 'mojo_str_repeat': 'MojoStr *', 'mojo_str_to_int': 'int64_t', 'mojo_str_to_float': 'double', 'mojo_bytes_new_lit': 'MojoBytes *', 'mojo_bytes_empty': 'MojoBytes *', 'mojo_bytes_zeros': 'MojoBytes *', 'mojo_bytes_from_list': 'MojoBytes *', 'mojo_bytes_from_str': 'MojoBytes *', 'mojo_bytes_from_cstr': 'MojoBytes *', 'mojo_bytes_len': 'int64_t', 'mojo_bytes_get': 'int64_t', 'mojo_bytes_eq': 'int', 'mojo_bytes_truthy': 'int', 'mojo_bytes_repr': 'char *', 'mojo_bytes_concat': 'MojoBytes *', 'mojo_bytes_repeat': 'MojoBytes *', 'mojo_bytes_slice': 'MojoBytes *', 'mojo_bytes_contains': 'int', 'mojo_bytes_find': 'int64_t', 'mojo_bytes_rfind': 'int64_t', 'mojo_bytes_find_from': 'int64_t', 'mojo_bytes_rfind_from': 'int64_t', 'mojo_bytes_index_int': 'int64_t', 'mojo_bytes_rindex_int': 'int64_t', 'mojo_bytes_count_int': 'int64_t', 'mojo_bytes_count': 'int64_t', 'mojo_bytes_count_from': 'int64_t', 'mojo_bytes_startswith': 'int', 'mojo_bytes_endswith': 'int', 'mojo_bytes_decode': 'char *', 'mojo_bytes_hex': 'char *', 'mojo_bytes_removeprefix': 'MojoBytes *', 'mojo_bytes_removesuffix': 'MojoBytes *', 'mojo_bytes_title': 'MojoBytes *', 'mojo_bytes_capitalize': 'MojoBytes *', 'mojo_bytes_swapcase': 'MojoBytes *', 'mojo_bytes_ljust': 'MojoBytes *', 'mojo_bytes_rjust': 'MojoBytes *', 'mojo_bytes_center': 'MojoBytes *', 'mojo_bytes_zfill': 'MojoBytes *', 'mojo_bytes_fill_byte': 'int', 'mojo_bytes_partition': 'MojoList *', 'mojo_bytes_rpartition': 'MojoList *', 'mojo_bytes_fromhex': 'MojoBytes *', 'mojo_bytes_cstr_key': 'char *', 'mojo_bytes_maketrans': 'MojoBytes *', 'mojo_bytes_translate': 'MojoBytes *', 'mojo_bytes_is': 'int', 'mojo_bytes_replace': 'MojoBytes *', 'mojo_bytes_replace_n': 'MojoBytes *', 'mojo_bytes_strip': 'MojoBytes *', 'mojo_bytes_upper': 'MojoBytes *', 'mojo_bytes_lower': 'MojoBytes *', 'mojo_bytes_split': 'MojoList *', 'mojo_bytes_rsplit': 'MojoList *', 'mojo_bytes_split_max': 'MojoList *', 'mojo_bytes_splitlines': 'MojoList *', 'mojo_bytes_splitlines_keep': 'MojoList *', 'mojo_bytes_join': 'MojoBytes *', 'mojo_bytes_copy': 'MojoBytes *', 'mojo_bytearray_new': 'MojoBytes *', 'mojo_bytearray_copy': 'MojoBytes *', 'mojo_bytearray_mark': 'MojoBytes *', 'mojo_bytearray_pop': 'int64_t', 'mojo_bytearray_insert': 'void', 'mojo_bytearray_remove': 'void', 'mojo_memoryview_new': 'MojoMemoryView *', 'mojo_memoryview_from_bytes': 'MojoMemoryView *', 'mojo_memoryview_len': 'int64_t', 'mojo_memoryview_get': 'int64_t', 'mojo_memoryview_slice': 'MojoMemoryView *', 'mojo_memoryview_tobytes': 'MojoBytes *', 'mojo_memoryview_eq': 'int', 'mojo_memoryview_hex': 'char *', 'mojo_memoryview_cast': 'MojoMemoryView *', 'mojo_memoryview_repr': 'char *', 'mojo_memoryview_nbytes': 'int64_t', 'mojo_memoryview_itemsize': 'int64_t', 'mojo_memoryview_format': 'char *', 'mojo_memoryview_obj': 'MojoBytes *', 'mojo_memoryview_readonly': 'int', 'mojo_struct_compile': 'MojoStructFmt *', 'mojo_struct_new': 'MojoStructFmt *', 'mojo_struct_calcsize': 'int64_t', 'mojo_struct_size': 'int64_t', 'mojo_struct_format': 'char *', 'mojo_struct_pack_list': 'MojoBytes *', 'mojo_struct_pack_h': 'MojoBytes *', 'mojo_struct_unpack': 'MojoList *', 'mojo_struct_unpack_from': 'MojoList *', 'mojo_struct_unpack_h': 'MojoList *', 'mojo_struct_unpack_from_h': 'MojoList *', 'input': 'char *', 'string_lower': 'char *', 'string_strip': 'char *', 'string_upper': 'char *', 'compile_to_gimple': 'char *', 'py_tokenize': 'MojoList *', 'Parser': 'Parser *', 'Interpreter': 'Interpreter *'}
 _FLOAT_TYPES = {'double', 'float', '__fp16'}
 # The `struct` module's module-level function surface, mapped to the C type
 # each call's VALUE has. This is the SINGLE source of that answer, consulted by
@@ -366,6 +424,143 @@ _STRUCT_MODULE_FN_RETVALS = {
     'iter_unpack': 'MojoList *',
     'pack_into': 'int',
 }
+def _struct_value_codes(fmt: str | None):
+    """The per-VALUE format codes of a const-foldable struct format string
+    ('4h' -> ['h','h','h','h'], 'x' padding dropped, '10s' -> ['s']), or
+    None if the format isn't statically known. Used to pick the right
+    MojoList append (int vs double vs bytes-pointer) per argument and the
+    element type of an unpack result."""
+    if not isinstance(fmt, str):
+        return None
+    codes = []
+    i, n = 0, len(fmt)
+    if i < n and fmt[i] in '<>=!@':
+        i += 1
+    while i < n:
+        c = fmt[i]
+        if c in ' \t\n':
+            i += 1
+            continue
+        count = None
+        if c.isdigit():
+            count = 0
+            while i < n and fmt[i].isdigit():
+                count = count * 10 + int(fmt[i]); i += 1
+            if i >= n:
+                return None
+            c = fmt[i]
+        i += 1
+        if c not in 'xbBhHiIlLqQfds?c':
+            return None
+        if c in 'sc':
+            codes.append('s')
+        elif c == 'x':
+            continue
+        else:
+            codes.extend([c] * (1 if count is None else count))
+    return codes
+
+
+def _struct_slot_kinds(codes):
+    """Per-slot element kind for an unpack format: one of 'int'/'double'/
+    'bytes' per value, in wire order.
+
+    A `MojoList` holds ONE element ctype, which is why a format mixing ints
+    and floats used to degrade wholesale to int64 slots — the float came
+    back as its raw IEEE bits (`struct.unpack('<if', ...)` giving
+    `1 4607182418800017408`). But the format string is a compile-time
+    constant here, so each slot's real kind is statically known and only
+    the CONTAINER is untyped. Recording the per-slot kinds lets every
+    statically-indexed read of the result pick the right accessor for that
+    slot: the subscript (emit_calls.py's MojoList branch), the `a, b = t`
+    destructuring target (loops_shared._tuple_elem_value), and the
+    whole-result repr (`_list_repr_fn` -> `mojo_repr_list_kinds`). It is a
+    property of the VALUE, not of whether it was bound to a local; a read
+    with no compile-time slot index (iteration, a computed subscript) still
+    has no single right C type, which is the residue named in
+    bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
+    """
+    out = []
+    for c in codes or ():
+        if c in 'fd':
+            out.append('double')
+        elif c == 's' or c == 'c':
+            out.append('bytes')
+        else:
+            out.append('int')
+    return out
+
+
+def _struct_elem_ctype(codes):
+    """Uniform MojoList element ctype for an unpack tuple, or 'int64_t'
+    when the codes are mixed / unknown (the common integer-format case is
+    exact; a genuinely mixed int+float format degrades to int64 slots).
+
+    That degradation is now confined to reads with no compile-time slot
+    index: `_struct_slot_kinds` carries the real per-slot kinds, and the
+    subscript, the `a, b = t` destructuring target and the whole-result repr
+    all consult it. See
+    bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md."""
+    if not codes:
+        return 'int64_t'
+    kinds = set()
+    for c in codes:
+        if c in 'fd':
+            kinds.add('double')
+        elif c == 's':
+            kinds.add('bytes')
+        else:
+            kinds.add('int')
+    if kinds == {'double'}:
+        return 'double'
+    if kinds == {'bytes'}:
+        return 'MojoBytes *'
+    return 'int64_t'
+
+
+# Python `math` name -> the C type that function returns in C, for the
+# libm functions whose Python and C signatures are identical. The C symbol
+# is the same name, so this table is ALSO the identity map that tells the
+# backend which real symbol to call — gimple_codegen builds its
+# BUILTIN_VALUE_MAP entries from these keys rather than restating the
+# names, so "which C function" and "what does it return" cannot drift.
+#
+# `math` is not a resolvable module in this project
+# (module_loader's `can_resolve_module_path('math')` is False), so these
+# had no lowering at all: the name fell through `_safe_name` to a
+# `mojo_<name>` stub that nothing defines, which linked only against the
+# auto-stub (answering 0) and failed to link in a whole-closure build.
+#
+# Only functions that are genuinely 1:1 belong here. Deliberately ABSENT,
+# each for a concrete reason:
+#   - `round`    Python rounds half-to-EVEN and returns int for one arg;
+#                C `round` rounds half-away-from-zero and returns double.
+#   - `trunc`    kept (C trunc IS Python's math.trunc), but note `int()`
+#                is the floor-based one — different function, different name.
+#   - `degrees`/`radians`/`gcd`/`factorial`/`fsum`/`isqrt`/`dist`/`comb`/
+#     `perm`/`prod`   no same-named C function; mapping them would be a lie.
+#   - `frexp`/`modf`   return `double *` through an out-parameter, which
+#                this single-type table cannot express.
+#   - `pow` with integer arguments and `hypot` with >2 args are fine as
+#     double (C promotes), so both stay.
+_LIBM_FN_RETVALS = {
+    'sqrt': 'double', 'exp': 'double', 'log': 'double', 'log2': 'double',
+    'log10': 'double', 'sin': 'double', 'cos': 'double', 'tan': 'double',
+    'asin': 'double', 'acos': 'double', 'atan': 'double', 'atan2': 'double',
+    'sinh': 'double', 'cosh': 'double', 'tanh': 'double',
+    'asinh': 'double', 'acosh': 'double', 'atanh': 'double',
+    'pow': 'double', 'fabs': 'double', 'floor': 'double', 'ceil': 'double',
+    'trunc': 'double', 'fmod': 'double', 'expm1': 'double', 'log1p': 'double',
+    'cbrt': 'double', 'hypot': 'double', 'copysign': 'double',
+    'erf': 'double', 'erfc': 'double', 'lgamma': 'double', 'tgamma': 'double',
+    'ldexp': 'double', 'remainder': 'double', 'nextafter': 'double',
+    'fma': 'double',
+    # C returns int; Python returns bool, and _Bool would be the closer
+    # match, but `int` is what the surrounding scalar conventions use for
+    # a truth value and converts to either without a cast.
+    'isnan': 'int', 'isinf': 'int', 'isfinite': 'int',
+}
+
 _SCALAR_CTORS = {'Float32': 'float', 'Float64': 'double', 'Float16': '__fp16', 'BFloat16': '__fp16', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Int': 'int64_t', 'UInt': 'uint64_t', 'Bool': '_Bool'}
 _STR_WRAPPER_CTORS = frozenset({'StringSlice', 'StaticString'})
 
