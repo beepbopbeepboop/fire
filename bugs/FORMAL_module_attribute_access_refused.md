@@ -102,9 +102,19 @@ beside a module in the same commit.
 ## What `os` does in the meantime, and what it costs
 
 `os` and `os.path` are complete and tested; they are reached with
-`from os.path import join`. Of the 87 files the sweep lists for `os`, exactly
-one — `determinism_trace.py` — imports nothing else that is a host module, so
-it is the one file whose build now stops HERE rather than on a module it has
-not got yet. That is the whole measured cost of this item on the sweep today,
-and the whole measured benefit of fixing it is those 87 files' worth of
-`os.path.*` call sites becoming reachable at all.
+`from os.path import join`. Sweeping all 87 files this list names, with `os`
+out of `HOST_MODELLED`: **0 still stop at `os`.** 85 stop at the next host
+module in the same file — `subprocess` 22, `re` 18 (one of them through
+`fire_compiler.py`), `sys` 15, `platform` 5, `struct`, `socket`, `shutil`,
+`functools` and one repository sibling — and the remaining 2 are the two whose
+ONLY host import was `os`: `determinism_trace.py`, which reaches the refusal
+this document is about, and `formal/model.py`, which reaches `fire_compiler.py`
+and its `re` before it stops.
+
+So the class does not move for 85 of the 87: they import other host modules
+too, and `sys` and `re` are what decides it now. Those are other modules with
+their own owners, and `struct` and `sys` are being written in parallel with
+this. **What this item is worth is not the sweep class — it is that 532
+measured `os.path.join` call sites and the rest of the `os.path` surface are
+unreachable at all until it lands**, and that one of the 87 files is already
+stopped here rather than stopped short.
