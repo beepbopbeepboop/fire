@@ -18,7 +18,9 @@ part that makes it a module:
      the pointer's own value (measured 4335747904 for a string that says
      "darwin"). The manifest already declared `char *` and nothing read it;
   4. the dotted spelling resolves by MODULE IDENTITY — two modules that both
-     export `helper` cannot cross-bind through it;
+     export `helper` cannot cross-bind through it — and a MODULE can call
+     another module, so the same contract holds inside a dylib's own
+     compilation and not only inside the program's;
   5. a dotted call the module does NOT export is refused, naming the module
      and what it does export, instead of emitting a `BL` against a symbol
      nothing defines. `sys.exit(3)` is the real instance and is pinned
@@ -115,6 +117,46 @@ CALL_LIBC_EXIT = """\
 def main():
   print("before")
   exit(3)
+  return 0
+"""
+
+# A three-level chain, so the module-call contract is tested where it is
+# hardest: program -> midy.dylib -> leafy.dylib -> libSystem, with a `str`
+# crossing BOTH dylib boundaries. A module that itself calls another module is
+# the dylib path's own version of the same contract, and it is a different
+# call site from the program's: `compile_formal_dylib` resolves its
+# dependencies and hands their export tables to its emitter, and the name it
+# needs there is the same shape.
+LEAFY = """\
+def base(x) -> int:
+  return x * 2
+
+
+def label(x: int) -> str:
+  if x > 10:
+    return "big"
+  return "small"
+"""
+
+MIDY = """\
+import leafy
+
+
+def twice(x) -> int:
+  return leafy.base(x) * 2
+
+
+def tag(x: int) -> str:
+  return leafy.label(x)
+"""
+
+CHAIN = """\
+import midy
+
+
+def main():
+  print(midy.twice(21))
+  print(midy.tag(30))
   return 0
 """
 
@@ -329,6 +371,30 @@ def test_the_dotted_spelling_runs_on_both_backends(tmp, _shared):
               f"number")
 
 
+def test_a_module_can_call_another_module(tmp, _shared):
+    """program -> midy -> leafy, and a string comes back across both.
+
+    The same contract one level down: `midy`'s own dylib calls `leafy`'s, so
+    the dotted resolution and the return kind are exercised inside a LIBRARY's
+    compilation rather than only inside the program's. `tag` returns the
+    `char *` that `leafy.label` returned, so one string crosses two dylib
+    boundaries and is classified at each hop -- print the pointer instead of
+    `big` and this fails.
+
+    arm64, for the reason in `test_the_python_spelling_runs`: a dylib with a
+    dependency cannot be codesigned for x86-64 on this host
+    (bugs/FORMAL_x86_64_dylib_externs_unsigned.md).
+    """
+    root = workdir(tmp, "chain")
+    for name, text in (("leafy", LEAFY), ("midy", MIDY)):
+        with open(os.path.join(root, name + ".mojo"), "w") as f:
+            f.write(text)
+    ran = build_and_run(root, "chain", CHAIN)
+    check(ran.stdout == "84\nbig\n",
+          f"printed {ran.stdout!r}: expected 84 (21 * 2 * 2, through two "
+          f"modules) and then the string leafy.label returned")
+
+
 def test_a_string_comes_back_as_a_string(tmp, _shared):
     """A `char *` return crosses the dylib boundary as a string.
 
@@ -488,6 +554,7 @@ TESTS = [
     ("the Python spelling runs", test_the_python_spelling_runs),
     ("the dotted spelling runs on both backends",
      test_the_dotted_spelling_runs_on_both_backends),
+    ("a module can call another module", test_a_module_can_call_another_module),
     ("a string comes back as a string", test_a_string_comes_back_as_a_string),
     ("the two writers reach the right descriptors",
      test_the_two_writers_reach_the_right_descriptors),
