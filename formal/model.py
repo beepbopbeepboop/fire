@@ -1756,7 +1756,7 @@ def struct_field_kind(struct_def, name, int_names=(), string_names=(),
     so the value is unreachable from the declaration in every direction, and
     `frame_slot_value_refusal` is what says so.
     """
-    base, ann = struct_field_declared_type(struct_def, name)
+    base, ann, _ev, _why = struct_field_type(struct_def, name, decls)
     if base is None:
         return None
     kind = declared_type_kind(ann, int_names, string_names, decls)
@@ -1768,7 +1768,7 @@ def struct_field_kind(struct_def, name, int_names=(), string_names=(),
     return None
 
 
-def frame_slot_declared_annotation(candidates, name) -> str | None:
+def frame_slot_declared_annotation(candidates, name, decls=None) -> str | None:
     """The one annotation every candidate declares for `name`, or None.
 
     The same agree-or-refuse as `frame_slot_field_kind`, asked for the TEXT
@@ -1778,13 +1778,18 @@ def frame_slot_declared_annotation(candidates, name) -> str | None:
     declaration said.  Two candidates that spell the same type two different
     ways (`List` and `list`) still agree on the base, so the base is what is
     compared and the first spelling is what is printed.
+
+    "Declared" is the older half of what this now reads: `decls` brings the
+    constructor spelling in, so the text may be a type `__init__` assigns rather
+    than one the class body annotates — the same answer, from
+    `struct_field_type`, with the same agreement rule over the same candidates.
     """
     cands = list(candidates or ())
     if not cands:
         return None
-    rows = field_type_rows(cands, name)
-    bases = {base for _sn, base, _ann, _why in rows if base is not None}
-    if len(bases) != 1 or any(base is None for _sn, base, _a, _w in rows):
+    rows = field_type_rows(cands, name, decls)
+    bases = {base for _sn, base, _ann, _why, _ev in rows if base is not None}
+    if len(bases) != 1 or any(base is None for _sn, base, _a, _w, _e in rows):
         return None
     return rows[0][2]
 
@@ -1812,7 +1817,7 @@ def frame_slot_field_kind(candidates, name, int_names=(), string_names=(),
     cands = list(candidates or ())
     if not cands:
         return None
-    ann = frame_slot_declared_annotation(cands, name)
+    ann = frame_slot_declared_annotation(cands, name, decls)
     if ann is None:
         return None
     kinds = {struct_field_kind(st, name, int_names, string_names, decls)
@@ -2929,14 +2934,14 @@ def _member_pointee(fn, node, decls, functions):
                       f"pointee — is not available")
     if isinstance(cands, dict):
         cands = [cands]
-    rows = field_type_rows(cands, node.member)
+    rows = field_type_rows(cands, node.member, decls)
     found = set()
-    for _sn, base_t, ann, why in rows:
+    for _sn, base_t, ann, why, _ev in rows:
         if base_t is None:
-            return (None, f"{dotted_receiver(node)} declares nothing: {why}")
+            return (None, f"{dotted_receiver(node)} is not typed: {why}")
         found.add(ann)
     if len(found) > 1:
-        return (None, f"{dotted_receiver(node)} is declared "
+        return (None, f"{dotted_receiver(node)} is typed "
                       f"{field_type_disagreement(cands, node.member, rows)}, so "
                       f"there is no single pointee")
     ann = found.pop()
@@ -2957,7 +2962,7 @@ def _member_declared_text(fn, node, decls):
     cands = _member_candidates(fn, node, decls)
     if not cands:
         return None
-    anns = {r[2] for r in field_type_rows(cands, node.member) if r[2]}
+    anns = {r[2] for r in field_type_rows(cands, node.member, decls) if r[2]}
     return anns.pop() if len(anns) == 1 else None
 
 
@@ -6433,6 +6438,12 @@ def struct_field_declared_type(struct_def, name) -> tuple:
     has two answers, and picking one is the whole class of bug this section is
     arranged to prevent.
 
+    This function reads the DECLARATION and only the declaration; the
+    constructor-assignment spelling (`struct_field_assigned_type`) is a second
+    evidence source and the two are combined by `struct_field_type`, so a
+    caller that wants a type and a caller that wants to see whether it was
+    *declared* are not the same question.
+
     The `why` is returned rather than discarded because a reader of a refusal has
     to be able to see WHY a name was or was not treated as typed — that is the
     difference between a rule and a guess.
@@ -6449,10 +6460,10 @@ def struct_field_declared_type(struct_def, name) -> tuple:
                     anns.append(spelling)
     if not anns:
         return (None, f"{struct_def.name} does not declare {name!r}, so nothing "
-                      f"here says what the slot holds — a class that assigns "
-                      f"its fields in __init__ and declares none, and a field "
-                      f"named only by __slots__ or only by a method's read of "
-                      f"self.{name}, are both that shape")
+                      f"here says what the slot holds — a field named only by "
+                      f"__slots__ or only by a method's read of self.{name}, "
+                      f"and one only ever handed a value this path cannot type, "
+                      f"are both that shape")
     if len(anns) > 1:
         return (None, f"{struct_def.name} declares {name!r} more than once and "
                       f"the declarations disagree — {', '.join(map(repr, anns))} "
@@ -6461,19 +6472,221 @@ def struct_field_declared_type(struct_def, name) -> tuple:
     return (annotation_base_name(anns[0]), anns[0])
 
 
-def field_type_rows(structs, name):
-    """`[(struct_name, base_or_None, annotation_or_None, why)]` per candidate.
+# The second evidence source for a field's type, and the one that unblocks the
+# largest remaining group in the sweep: a class that ASSIGNS its fields in
+# `__init__` and declares none.  Both shapes are ordinary Python and both are
+# the whole field set (`struct_field_names` already counts the `self.<name>`
+# reads, which is why such a class measures as a multi-field framed struct at
+# all) — so the slot exists, the frame exists, and the only thing missing was
+# the name of the type in it.
+#
+# Why the assignment is EVIDENCE rather than a guess, and the answer is premise
+# (B2) rather than anything about `__init__`.  `S()` does not run `__init__` on
+# this path (`FRAME_FIELD_BLOB_PREMISE_B2`): every slot's value is the
+# constructor's, and for a typed-nested field the constructor's value is the
+# nested frame it PLACES.  So what `__init__` says about the field's type is not
+# a description of a store that happens — it is the only place the source NAMES
+# the type, and the type is all the decision needs.  That is also why a
+# conditional, repeated or `None`-defaulted assignment inside `__init__` is not a
+# problem here while it would be in any other inference: the value that matters
+# never comes from those lines.
+#
+# What it is NOT allowed to be is a type this module cannot lay out.  The
+# inference names a struct only when `decls` has it, so it can never turn an
+# unknown name into "provably a plain value" — `field_type_is_value`'s
+# dangerous direction — by accident.  A call to something else, a name, a
+# literal, an augmented assignment: all of them yield no evidence, which is the
+# absent answer, and the field stays refused with the disagreement spelled.
+def struct_field_assigned_type(struct_def, name, decls: dict) -> tuple:
+    """`(base_name, spelling, why)` for the type `__init__` ASSIGNS, or `(None, None, why)`.
+
+    `decls` is `{name: StructDef}` for the structs THIS MODULE DECLARES, and it
+    is required rather than optional because it is the gate: only a name it
+    holds can become an answer, so a name it does not hold stays on the
+    untyped side of `frame_field_type_candidates` exactly as it did before.
+
+    The returned `spelling` is the constructed type's own name, which is
+    deliberately the same shape a DECLARATION would have produced
+    (`annotation_base_name` and every kind table downstream read it unchanged),
+    so nothing after this function has to know there are two sources.
+
+    TWO assignment shapes are read, because the second is ordinary Python and
+    skipping it produces a refusal whose reason is not operating:
+    `self.x = T()` and `self.x, self.y = T(), U()`.  The second is the one
+    `tools/procrun.py` writes (`self.limit, self._chunks, self._size = limit,
+    [], 0`), and reading only the first said "its __init__ does not assign it"
+    about a field the `__init__` plainly assigns — the reader is sent to look
+    for an assignment that is two lines above the one they are looking at.
+    """
+    init = next((m for m in struct_methods(struct_def)
+                 if m.name == "__init__"), None)
+    if init is None:
+        return (None, None, f"{struct_def.name} declares {name!r} nowhere and "
+                            f"has no __init__ that assigns it")
+    receivers = struct_receivers(struct_def)
+    names, untyped = [], None
+    for node in iter_nodes(getattr(init, "body", None)):
+        if not isinstance(node, (F.AssignStmt, F.AugAssignStmt)):
+            continue
+        value = _assigned_value_for(node, name, receivers)
+        if value is _NOT_THIS_FIELD:
+            continue
+        if value is None:
+            untyped = (f"__init__ also does an augmented assignment to "
+                       f"self.{name}, which is a read and a write and so says "
+                       f"nothing about the type")
+            continue
+        made = _constructed_struct_name(value, decls)
+        if made is None:
+            untyped = (f"__init__ assigns `self.{name} = "
+                       f"{expr_spelling(value)}`, which is not a construction "
+                       f"of a struct declared in this module")
+        elif made not in names:
+            names.append(made)
+    if not names:
+        return (None, None, untyped or
+                f"{struct_def.name} declares {name!r} nowhere and its __init__ "
+                f"does not assign it")
+    if len(names) > 1:
+        return (None, None, f"__init__ assigns self.{name} more than one type — "
+                            f"{' and '.join(map(repr, names))} — so there is "
+                            f"no single answer, and one of them would be a "
+                            f"guess")
+    return (names[0], names[0], None)
+
+
+# The three answers `_assigned_value_for` gives: this assignment does not touch
+# the field, it is a plain store, and it is an augmented one (a read AND a
+# write, so it is evidence of nothing).
+_NOT_THIS_FIELD = object()
+
+
+def _assigned_value_for(node, name, receivers):
+    """The value `node` stores into `self.<name>`, or `_NOT_THIS_FIELD` / None.
+
+    None means the node DOES write the field and the value is not a name this
+    can hand back — which today is only the augmented assignment, since its
+    right-hand side is a compound expression rather than the field's new value.
+    """
+    target = getattr(node, "target", None)
+    if isinstance(target, F.MemberExpr):
+        if not (isinstance(target.obj, F.IdentExpr)
+                and target.obj.name in receivers and target.member == name):
+            return _NOT_THIS_FIELD
+        return None if isinstance(node, F.AugAssignStmt) \
+            else getattr(node, "value", None)
+    # `self.a, self.b = X(), Y()` — positionally paired, and only when the two
+    # sides actually pair up.  A starred target (`self.a, *rest = ...`) has no
+    # positional answer, and one that pairs a member with a nested attribute
+    # (`self.a, b.c = X(), Y()`) is not a per-field store either; both fall to
+    # `_NOT_THIS_FIELD` and the field stays untyped, which is the absent answer.
+    if isinstance(target, (F.TupleExpr, F.ListExpr)):
+        value = getattr(node, "value", None)
+        if not isinstance(value, (F.TupleExpr, F.ListExpr)):
+            return _NOT_THIS_FIELD
+        targets, values = list(target.elements or []), list(value.elements or [])
+        if len(targets) != len(values) or isinstance(node, F.AugAssignStmt):
+            return _NOT_THIS_FIELD
+        for i, elt in enumerate(targets):
+            if (isinstance(elt, F.MemberExpr) and isinstance(elt.obj, F.IdentExpr)
+                    and elt.obj.name in receivers and elt.member == name):
+                return values[i]
+    return _NOT_THIS_FIELD
+
+
+def _constructed_struct_name(value, decls: dict):
+    """The struct of THIS MODULE a `… = <expr>` value constructs, or None.
+
+    Only the plain construction shape is read — a call whose callee is a bare
+    name `decls` holds.  A subscripted callee (`List[Self.T]()`), an attribute
+    callee (`other.Inner()`), a bare name, a literal and a container display all
+    return None, and that is the conservative direction: a type this path has no
+    StructDef for has no frame layout here, so nothing downstream could act on
+    it even if it were named.
+    """
+    if not isinstance(value, F.CallExpr):
+        return None
+    callee = value.func
+    if not isinstance(callee, F.IdentExpr):
+        return None
+    return callee.name if decls.get(callee.name) is not None else None
+
+
+def struct_field_type(struct_def, name, decls=None) -> tuple:
+    """`(base, spelling, evidence, why)` — a field's type, and WHERE it came from.
+
+    The one place the two evidence sources are combined, so the decision
+    (`frame_field_type_candidates`), the placement (`struct_nested_frame_fields`)
+    and the diagnostic (`field_type_disagreement`) cannot answer differently
+    about the same field.
+
+    `evidence` is `"declared"`, `"assigned"`, or None, and it is carried rather
+    than discarded because a message that says a class "declares" a field the
+    class only ever assigns is a refusal with a reason that is not operating —
+    the exact defect this section exists to prevent, one level down.
+
+    A DECLARATION wins over an assignment, and not by preference: premise (B2)
+    says the assignment does not execute, so the declaration is the better
+    evidence about the word the slot actually holds.  The two are therefore not
+    a disagreement, and cross-checking them would refuse correct code.
+
+    A declaration that is itself a disagreement (the same field declared twice
+    with two annotations) is NOT overridden by an assignment: there is nothing
+    to override, because no single declaration exists to be the better one, and
+    an assignment spelling would turn a refusal that names both annotations into
+    one that names neither.
+    """
+    base, why = struct_field_declared_type(struct_def, name)
+    if _has_declaration(struct_def, name):
+        if base is None:                       # declared twice, disagreeing
+            return (None, None, None, why)
+        return (base, why, "declared", None)
+    if decls is None:
+        return (None, None, None, why)
+    assigned, spelling, why = struct_field_assigned_type(struct_def, name, decls)
+    if assigned is None:
+        return (None, None, None, why)
+    return (assigned, spelling, "assigned", None)
+
+
+def _has_declaration(struct_def, name) -> bool:
+    """True when this struct spells an annotation for `name` anywhere in its body.
+
+    `struct_field_declared_type` returns `(None, why)` for two very different
+    things — no annotation at all, and two annotations that disagree — and
+    `struct_field_type` has to tell them apart before it falls back to the
+    assignment spelling: the first has a second source to try, the second is
+    already a refusal and must not be papered over by one.
+    """
+    for field in struct_fields(struct_def):
+        if struct_field_name(field) != name:
+            continue
+        for spelling in (getattr(field, "type_ann", None),
+                         getattr(field.target, "type_ann", None)
+                         if isinstance(field, F.AssignStmt) else None):
+            if isinstance(spelling, str) and spelling.strip():
+                return True
+    return False
+
+
+def field_type_rows(structs, name, decls=None):
+    """`[(struct_name, base, annotation, why, evidence)]` per candidate.
 
     The evidence a refusal quotes, computed once and shared: which candidate
-    declared what, and — for a candidate that cannot answer — why.  Split out
-    from `frame_field_type_candidates` so the diagnostic and the decision read
-    the same table rather than two walks of the same candidates that could
-    disagree.
+    declared — or, failing that, assigned — what, and, for a candidate that
+    cannot answer, why.  Split out from `frame_field_type_candidates` so the
+    diagnostic and the decision read the same table rather than two walks of the
+    same candidates that could disagree.
+
+    `decls` is what makes the second source reachable; a reader with no
+    declaration table has no way to tell a struct of this module from any other
+    name, so it gets the declaration-only answer rather than a guess.  It is
+    `frame_field_type_candidates` and `_member_pointee` that pass it.
     """
     out = []
     for st in structs:
-        base, ann = struct_field_declared_type(st, name)
-        out.append((st.name, base, ann, None if base is not None else ann))
+        base, ann, evidence, why = struct_field_type(st, name, decls)
+        out.append((st.name, base, ann, why, evidence))
     return out
 
 
@@ -6509,8 +6722,8 @@ def frame_field_type_candidates(structs, name, decls: dict):
     places.  `field_type_is_value` below is the accessor for that, so no caller
     has to re-derive the distinction from `rows` and get it subtly wrong.
     """
-    rows, bases, have = field_type_rows(structs, name), set(), 0
-    for _sn, base, _ann, _why in rows:
+    rows, bases, have = field_type_rows(structs, name, decls), set(), 0
+    for _sn, base, _ann, _why, _ev in rows:
         if base is not None:
             bases.add(base)
             have += 1
@@ -6527,7 +6740,7 @@ def field_type_is_value(structs, name, decls: dict) -> bool:
     """True when every candidate AGREES the field is not a frame of this unit.
 
     The other answer, and it is an answer rather than a failure: if every
-    candidate declares the field and they all name the same base, and that base
+    candidate types the field and they all name the same base, and that base
     is not one of this module's framed structs, then the word in the slot is
     PROVABLY a plain value — an `Int32`, a `List`, a `SIMD`, a pointer, a type
     this image does not compile.  Nothing about the frame layout is in question
@@ -6543,7 +6756,7 @@ def field_type_is_value(structs, name, decls: dict) -> bool:
         return False
     bases = set()
     for st in structs:
-        base, _ann = struct_field_declared_type(st, name)
+        base, _ann, _ev, _why = struct_field_type(st, name, decls)
         if base is None:
             return False
         bases.add(base)
@@ -6564,13 +6777,24 @@ def field_type_disagreement(structs, name, rows) -> str:
     candidates that agreed are listed too — a refusal that only prints the
     problem rows leaves the reader unable to tell an absent annotation from a
     contradicted one.
+
+    An agreed row says WHERE its type came from, in the source's own words for
+    each: `declares 'x' as 'Inner'` for a declaration and
+    ``assigns ``self.x = Inner()`` in ``__init__`` `` for the constructor
+    spelling.  Printing "declares" for the second is a reason that is not
+    operating — the class declares nothing, and a reader sent to look for a
+    declaration that does not exist loses the thread.
     """
     parts = []
-    for sn, base, ann, why in rows:
-        parts.append(f"{sn} declares {name!r} as {ann!r} (base {base})"
-                     if base is not None
-                     else f"{sn}: {why}")
-    return "; ".join(parts) if parts else "no candidate declares it"
+    for sn, base, ann, why, evidence in rows:
+        if base is None:
+            parts.append(f"{sn}: {why}")
+        elif evidence == "assigned":
+            parts.append(f"{sn} assigns {name!r} a {ann} in __init__ "
+                         f"(base {base})")
+        else:
+            parts.append(f"{sn} declares {name!r} as {ann!r} (base {base})")
+    return "; ".join(parts) if parts else "no candidate types it"
 
 
 def struct_frame_block_bytes(struct_def, decls: dict,
@@ -8530,7 +8754,13 @@ def member_chain_text(expr) -> str:
     The read of the base for a diagnostic. `_member_slot_key` (per backend)
     answers the same question for the ACCESS path and returns None when the
     root is not a plain name — which is exactly the case a refusal is about,
-    so the two cannot be one function."""
+    so the two cannot be one function.
+
+    THE member-chain spelling, and the reason there is one: three refusals in
+    two files used to spell this three ways, and a diagnostic that can print
+    `a.b` and `a.b.…` and `a.b?` for the same source is a diagnostic a reader
+    has to learn three conventions to read.  `formal/build.py` was the third
+    copy; it now calls this."""
     parts = []
     node = expr
     while isinstance(node, F.MemberExpr):
@@ -8539,6 +8769,38 @@ def member_chain_text(expr) -> str:
     parts.append(node.name if isinstance(node, F.IdentExpr) else "…")
     parts.reverse()
     return ".".join(parts)
+
+
+def expr_spelling(node) -> str:
+    """The source's own spelling of an expression, as far as a name needs one.
+
+    A refusal that quotes `CallExpr` where the source wrote `mid(1)` sends the
+    reader to the AST to find the call, which is the opposite of what a
+    diagnostic quoting a call site is for.  A shape with no short spelling is
+    named by its type, which is at least a true statement and is obviously a
+    placeholder to anyone who reads it.
+
+    Lives here, beside `member_chain_text` rather than in `formal/build.py`,
+    because the model now needs it for a refusal of its own
+    (`struct_field_assigned_type` has to name the value it could not type) and
+    a model function must not reach up into the build pass for a string."""
+    if isinstance(node, F.IdentExpr):
+        return node.name
+    if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr):
+        return f"{node.func.name}({', '.join(expr_spelling(a) for a in (node.args or []))})"
+    if isinstance(node, F.MemberExpr):
+        return member_chain_text(node)
+    if isinstance(node, (F.ListExpr, F.TupleExpr)):
+        inner = ", ".join(expr_spelling(e) for e in (node.elements or []))
+        return (f"[{inner}]" if isinstance(node, F.ListExpr)
+                else f"({inner})")
+    if isinstance(node, F.DictExpr):
+        return "{…}"
+    for attr in ("value", "name"):
+        v = getattr(node, attr, None)
+        if isinstance(v, (str, int, float, bool)):
+            return str(v)
+    return type(node).__name__
 
 
 def field_access_refusal(name: str, fn_name: str, root: str,
