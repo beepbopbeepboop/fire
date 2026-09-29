@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """version.py — the single source of truth for the Mojo compiler version.
 
-Shown by `mojo -v`, and folded into the CAS and JIT cache keys so artifacts built
+Shown by `fire -v`, and folded into the CAS and JIT cache keys so artifacts built
 by a different compiler version are never reused. Resolution order:
 
   1. RELEASE — a baked-in constant when set (production: "1.0", "1.1", "2.0", …);
