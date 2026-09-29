@@ -634,6 +634,38 @@ def _generator_value_kind(fn: N.FunctionDef,
     if has_tuple:
         return ('tuple', '') if _generator_tuple_slots(fn, env) is not None \
             else (None, 'tuple yield with inconsistent shape (v0)')
+    # A `None` here is a HOLE, not a kind: `_yield_kind` could not type that
+    # one yield expression. Beside a yield that DID get a kind, the question
+    # is whether picking that kind MISREADS the hole, and the answer is
+    # exactly "is the slot a type the hole would not get anyway".
+    #
+    # `int64_t` — whether it is the one positive kind or there is no positive
+    # kind at all — is a NO-OP here: an unresolvable expression is read as an
+    # `int64_t` everywhere else in this codegen (that is what
+    # `_KIND_TO_SLOT_CTYPE[None]` and the `return 'i', ''` default below both
+    # mean), so the slot a hole sits beside is already the slot the hole gets.
+    # Refusing there would disqualify ordinary untyped code: measured, it
+    # refused `def g(): yield 1; [x] = [42]; yield x` and
+    # `def g(): var ba = bytearray(); ...; yield len(ba)`, both of which are
+    # genuinely all-int and both of which compiled and printed right before
+    # this check existed. That is the same reasoning the mixed bool/int
+    # DECISION below records, for the same reason.
+    #
+    # `char *` and `double` ARE a refusal, because the hole would be read
+    # through a type it never got. Measured, not argued:
+    # `for i, x in enumerate(xs): yield i; yield "s"` printed `(null)` then
+    # `s` where CPython prints `0` then `s`, and
+    # `for k, v in d.items(): yield v; yield "s"` printed nothing at all --
+    # both exit 0. Every check below SKIPS `None` explicitly
+    # (`kinds - {'d', None}`), so a hole beside a positive kind sailed through
+    # all of them and landed on the `int64_t` default, which is the identical
+    # silent truncation the call-site half of this slot's contract was fixed
+    # for (see `_scan_callsite_param_kinds` and
+    # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md).
+    if None in kinds and (kinds - {None, 'i'}):
+        return None, ('a `yield` whose value kind could not be resolved, '
+                      'beside one that requires a non-int64_t value slot '
+                      '(v0)')
     if 'd' in kinds and (kinds - {'d', None}):
         return None, f'mixed float / non-float yields (v0)'
     if 'd' in kinds:

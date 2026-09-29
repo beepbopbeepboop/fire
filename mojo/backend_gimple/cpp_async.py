@@ -893,7 +893,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     if value_ctype is None:
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"{fn.name}: every `yield` must carry a value, and all "
-            "values must agree on one scalar type (int64_t/double/_Bool)")
+            "values must agree on one scalar type (int64_t/double/_Bool) "
+            "— they disagree, or one of them's value kind could not be "
+            "resolved at all")
     if (value_ctype.endswith(' *') and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *')
             and value_ctype[:-2] in gen.struct_field_types):
         gen._cpp_value_struct_names.add(value_ctype[:-2])

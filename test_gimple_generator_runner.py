@@ -362,6 +362,61 @@ def gen():
     yield False
 """)
 
+    # ── A yield whose value kind could NOT BE RESOLVED ──────────────────
+    # The checks above are on the SET of kinds, and every one of them
+    # explicitly SKIPS an unresolved one (`kinds - {'d', None}`). So a yield
+    # the static scan could not type, sitting beside one it could, sailed
+    # through all of them and landed on the `int64_t` default — the identical
+    # silent truncation the CALL-SITE half of the same one-slot contract was
+    # fixed for (bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md).
+    # Both of these compiled, ran, exit 0, and printed wrong values:
+    #   `for i, x in enumerate(xs): yield i; yield "s"`  -> `(null)` then `s`
+    #   `for k, v in d.items(): yield v; yield "s"`      -> nothing at all
+    # The hole is a HOLE beside a slot that is NOT int64_t; see
+    # `_generator_value_kind`'s own note for why `int64_t` is excluded from
+    # the refusal (an unresolved expression is read as an `int64_t` anyway,
+    # so refusing there would disqualify ordinary untyped generators).
+    test_generator_refused("generator_unresolvable_yield_kind_beside_str", """\
+def gen(xs):
+    for i, x in enumerate(xs):
+        yield i
+        yield "s"
+""", "all values must agree on one scalar type")
+
+    test_generator_refused("generator_unresolvable_yield_kind_beside_double", """\
+def gen(pairs):
+    for a, b in pairs:
+        yield a
+        yield 2.5
+""", "all values must agree on one scalar type")
+
+    test_generator_refused("generator_unresolvable_yield_kind_beside_dict_value", """\
+def gen(d):
+    for k, v in d.items():
+        yield v
+        yield "s"
+""", "all values must agree on one scalar type")
+
+    # And the excluded half must keep compiling — an unresolvable yield
+    # beside an int one is NOT a refusal, because the slot the hole would get
+    # is the slot the int kind picks. Both of these are genuinely all-int
+    # and both compiled and printed correctly before the check existed; a
+    # blanket `None in kinds` refusal took them out of the compiled path.
+    test_generator_c_compiles("generator_unresolvable_yield_kind_beside_int", """\
+def gen():
+    yield 1
+    [x] = [42]
+    yield x
+""")
+
+    test_generator_c_compiles("generator_unresolvable_yield_kind_beside_int_len", """\
+def gen():
+    var ba = bytearray()
+    ba.append(5)
+    yield ba[0]
+    yield len(ba)
+""")
+
     # Mixed kinds reached through `yield from` are caught by the same check.
     # A `yield from` re-yields everything the sub-generator yields, so the
     # sub-generator's kind lands in the OUTER generator's single value slot
