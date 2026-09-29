@@ -79,12 +79,19 @@ def run_executable(exe_path: str) -> int:
     return result.returncode
 
 
+# Freed memory is filled with 0x55 bytes (macOS libmalloc; ignored elsewhere), so a
+# use-after-free reads garbage deterministically instead of "usually still the old
+# value". Ownership-freeing tests are only worth having if a wrong free is visible.
+_SCRIBBLE_ENV = dict(os.environ, MallocScribble='1')
+
+
 def run_executable_stdout(exe_path: str) -> str:
     """Execute the program and return its captured stdout, decoded."""
     result = subprocess.run(
         [exe_path],
         capture_output=True,
-        timeout=10
+        timeout=10,
+        env=_SCRIBBLE_ENV
     )
     return result.stdout.decode('utf-8', errors='replace')
 
@@ -180,7 +187,9 @@ def test_gimple_bounded_memory(name: str, mojo_src: str, expected_stdout: str, l
         exe_path = compile_mojo_to_gimple_exe(mojo_src)
         probe = (
             "import resource, subprocess, sys\n"
-            "r = subprocess.run([sys.argv[1]], capture_output=True, timeout=60)\n"
+            "import os\n"
+            "r = subprocess.run([sys.argv[1]], capture_output=True, timeout=60,\n"
+            "                   env=dict(os.environ, MallocScribble='1'))\n"
             "sys.stdout.buffer.write(r.stdout)\n"
             "sys.stderr.write(str(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss))\n"
         )
@@ -1513,6 +1522,364 @@ def main():
         total += work(6, kk) % 1000 + len(kk)
     print(total)
 """, "33\n75\n8\n242\n3200000\n")
+
+    # ── Strings bound to locals (doc/MEMORY.html section 3.B). A local bound
+    # to a provably FRESH string (a `+` result, `String(i)`, a slice) is owned and
+    # freed at scope exit, but only when every use is a read: `len`, a comparison,
+    # a condition, the left operand of `+`, a right operand after a string
+    # literal, and method calls whose result is consumed on the spot. The second
+    # program is the other half: `str(y)` can RETURN its own argument, so `b2`
+    # aliases `y`, which is then stored in a list the caller keeps, and `y` may not
+    # be freed. (`z.strip()` no longer aliases `z`: the str methods always return a
+    # copy, so `z` IS freed while `a2` lives on in the list.) The runner scribbles
+    # freed memory, so a wrong free makes the comparisons (printed 4th) fail
+    # instead of usually passing.
+    test_gimple_bounded_memory("gimple_string_locals_owned_when_only_read", """\
+def work(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var s = String("n=") + String(i)
+        t += len(s)
+        if s == "n=3":
+            t += 100
+        var u = s + "!"
+        t += len(u)
+        var w = "id:" + s
+        t += len(w)
+        if len(s) > 2:
+            t += 1
+        if i == 2:
+            continue
+        if i == 4:
+            break
+    return t
+
+def once(k: Int) -> Int:
+    var s = String("k") + String(k)
+    return len(s) + len(s + "z")
+
+def main():
+    print(work(3))
+    print(work(9))
+    var total = 0
+    for r in range(300000):
+        total += work(6) % 1000 + once(r % 100)
+    print(total)
+""", "42\n170\n53040000\n", 40)
+
+    # The str methods always return a copy (runtime `_str_fresh_copy`), so a local bound
+    # to `s.strip()` / `.upper()` / `.replace()` / `.lower().lstrip()` is owned and freed
+    # each iteration, and a method chain no longer keeps the receiver alive.
+    test_gimple_bounded_memory("gimple_string_method_results_are_owned", """\
+def work(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var s = String("  n=") + String(i) + String("  ")
+        var a = s.strip()
+        var b = a.upper()
+        var c = b.replace("N", "M")
+        var d = c.lower().lstrip()
+        t += len(a) + len(b) + len(c) + len(d)
+        if c == "M=3":
+            t += 100
+    return t
+
+def main():
+    print(work(3))
+    print(work(9))
+    var total = 0
+    for r in range(300000):
+        total += work(6) % 1000
+    print(total)
+""", "36\n208\n51600000\n", 40)
+
+    test_gimple_stdout("gimple_string_local_aliased_by_strip_or_str_is_not_freed", """\
+def work(n: Int, kept: List[String]) -> Int:
+    var t = 0
+    for i in range(n):
+        var s = String("n=") + String(i)
+        t += len(s)
+        var z = String("x") + String(i)
+        var a2 = z.strip()
+        kept.append(a2)
+        var y = String("y") + String(i)
+        var b2 = str(y)
+        kept.append(b2)
+        if i == 2:
+            continue
+        if i == 4:
+            break
+    return t
+
+def main():
+    var kept: List[String] = []
+    print(work(3, kept))
+    print(work(9, kept))
+    print(len(kept))
+    var hits = 0
+    for k in range(len(kept)):
+        if kept[k] == "x0":
+            hits += 1
+        if kept[k] == "x1":
+            hits += 10
+        if kept[k] == "y2":
+            hits += 100
+        if kept[k] == "x4":
+            hits += 1000
+        if kept[k] == "y3":
+            hits += 10000
+    print(hits)
+    var total = 0
+    for r in range(20000):
+        var kk: List[String] = []
+        total += work(6, kk) % 1000
+    print(total)
+""", "9\n15\n16\n11222\n300000\n")
+
+    # ── Integer dict keys (doc/MEMORY.html section 10.4). An Int key is stored as an
+    # INTEGER slot (its decimal string kept alongside, so iteration/repr/copy/pop
+    # are unchanged) and looked up through `_kw` entry points that take the raw
+    # word. Every operation is exercised — set, get, augmented set, `in`,
+    # `get(k, default)`, `pop`, `del`, `setdefault`, negative/zero/large keys, a
+    # string-keyed dict next to them, and a dict created and dropped in a loop —
+    # against CPython's answers. (The C shape is pinned in test_gimple.py.)
+    test_gimple_stdout("gimple_int_dict_keys_word_lookup_all_operations", """\
+def main():
+    var d: Dict[Int, Int] = {}
+    for i in range(1000):
+        d[i % 37] = i
+    var acc = 0
+    for i in range(1000):
+        acc += d[i % 37] % 5
+        if (i % 41) in d:
+            acc += 1
+    d[5] += 100
+    acc += d[5] % 1000
+    acc += d.get(9999, -3) + d.get(3, 0)
+    acc += d.pop(4)
+    del d[6]
+    acc += len(d)
+    print(acc)
+    var n: Dict[Int, Int] = {}
+    n[0] = 7
+    n[-1] = 8
+    n[-2000000000] = 9
+    n[2000000000] = 10
+    n[12] = 11
+    n[12] += 1
+    print(n[0] + n[-1] + n[-2000000000] + n[2000000000] + n[12])
+    print(len(n))
+    print(-1 in n)
+    print(-2 in n)
+    print(n.setdefault(77, 5))
+    print(n.setdefault(0, 99))
+    print(len(n))
+    var s: Dict[String, Int] = {}
+    s["abc"] = 1
+    s["12"] = 2
+    s["abd"] = 3
+    print(s["abc"] + s["12"] + s["abd"])
+    print(len(s))
+    print("12" in s)
+    print("13" in s)
+    var tot = 0
+    for r in range(20000):
+        var e: Dict[Int, Int] = {}
+        for k in range(10):
+            e[k * 3 - 7] = k
+        tot += e[2] + len(e)
+        if (r % 3) in e:
+            tot += 1
+    print(tot)
+""", "5017\n46\n5\nTrue\nFalse\n5\n7\n6\n6\n3\nTrue\nFalse\n266666\n")
+
+    # ── An unannotated integer local is 64-bit (bugs/CODEGEN_unannotated_int_local_is_32_bit.md).
+    # `var a = 0` used to be a 32-bit `int`, so the accumulator wrapped at 2^31 while
+    # `var b: Int = 0` and CPython both reached 6000000000.
+    test_gimple_stdout("gimple_unannotated_integer_local_is_64_bit", """\
+def main():
+    var a = 0
+    var b: Int = 0
+    for i in range(3):
+        a += 2000000000
+        b += 2000000000
+    print(a)
+    print(b)
+    var c = 1
+    for i in range(40):
+        c = c * 2
+    print(c)
+    var d = 5
+    d = d * 1000000000
+    print(d)
+""", "6000000000\n6000000000\n1099511627776\n5000000000\n")
+
+    # ── Struct methods get the same ownership treatment as plain functions, and the typed
+    # empty constructors `List[T]()` / `Dict[K, V]()` / `Set[T]()` are containers like `[]`/`{}`:
+    # stack-homed when they do not escape, freed at scope exit when they must live on the heap.
+    # A method that stores a local into `self` (or returns it) must NOT free it.
+    test_gimple_bounded_memory("gimple_struct_method_locals_and_typed_constructors_are_owned", """\
+struct Acc:
+    var total: Int
+    var held: List[Int]
+
+    def __init__(out self):
+        self.total = 0
+        self.held = List[Int]()
+
+    def work(mut self, n: Int):
+        for i in range(n):
+            var l = [i, i + 1, i + 2]
+            var d: Dict[Int, Int] = {}
+            d[i] = i
+            var s = String("k") + String(i)
+            self.total += len(l) + len(d) + len(s)
+
+    def build(self, n: Int) -> Int:
+        var l = List[Int]()
+        for i in range(n):
+            l.append(i)
+        var e = Dict[Int, Int]()
+        e[1] = 2
+        var t = Set[Int]()
+        t.add(3)
+        return len(l) + len(e) + len(t)
+
+    def remember(mut self, n: Int):
+        var l = List[Int]()
+        l.append(n)
+        self.held = l
+
+    def make(self, n: Int) -> List[Int]:
+        var l = List[Int]()
+        l.append(n)
+        return l
+
+def main():
+    var a = Acc()
+    for r in range(200000):
+        a.work(6)
+        a.total += a.build(5)
+    a.remember(41)
+    var m = a.make(7)
+    print(a.total)
+    print(a.held[0])
+    print(m[0])
+    print(len(a.held) + len(m))
+""", "8600000\n41\n7\n2\n", 40)
+
+    # ── A struct instance that is an owned local and never escapes lives in the frame
+    # (`_init_P (&storage)`), not on the heap; one that is returned or stored in a list is
+    # still heap-allocated and must survive its function (the runner scribbles freed memory).
+    test_gimple_bounded_memory("gimple_owned_struct_locals_live_in_the_frame", """\
+struct P:
+    var x: Int
+    var y: Int
+
+    def __init__(out self, x: Int, y: Int):
+        self.x = x
+        self.y = y
+
+    def sum(self) -> Int:
+        return self.x + self.y
+
+def work(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var p = P(i, i + 1)
+        t += p.sum()
+        var q = P(p.y, p.x)
+        t += q.x - q.y
+    return t
+
+def once(k: Int) -> Int:
+    var p = P(k, 2)
+    return p.sum()
+
+def make(k: Int) -> P:
+    var p = P(k, 5)
+    return p
+
+def keep(k: Int, out_list: List[P]):
+    var p = P(k, 9)
+    out_list.append(p)
+
+def main():
+    print(work(4))
+    var total = 0
+    for r in range(300000):
+        total += work(6) % 1000 + once(r % 10)
+    print(total)
+    var m = make(3)
+    var kept: List[P] = []
+    for k in range(3):
+        var p = P(k, 9)
+        kept.append(p)
+    print(m.x + m.y)
+    print(kept[0].y + kept[1].x + kept[2].sum())
+""", "20\n14550000\n8\n21\n", 40)
+
+    # ── A dict owns its key strings: a key that escapes by iteration (`for k in d: out.append(k)`)
+    # must keep the dict from being freed, or the returned list dangles (the runner scribbles freed
+    # memory and a second allocation reuses the block). Real: fire_compiler's Parser._parse_paren_args.
+    test_gimple_stdout("gimple_dict_key_escaping_by_iteration_is_not_freed_with_the_dict", """\
+def pairs(n: Int) -> List[String]:
+    var keywords: Dict[String, Int] = {}
+    keywords["alpha" + String(n)] = n
+    keywords["beta" + String(n)] = n + 1
+    var out: List[String] = []
+    for k in keywords:
+        out.append(k)
+    return out
+
+def main():
+    var a = pairs(1)
+    var b = pairs(2)
+    var junk = String("zzzzzzzzzzzz") + String(7)
+    print(len(a))
+    print(a[0])
+    print(a[1])
+    print(b[0])
+""", "2\nalpha1\nbeta1\nalpha2\n")
+
+    # ── Iterating a Dict[Int, V] yields integer keys (bugs/CODEGEN_iterating_an_int_keyed_dict_yields_string_keys.md).
+    # The keys used to come back as decimal STRINGS typed `char *`, so `ks += k` added
+    # pointers. Covers `for k in d`, `.keys()`, `.items()` (pair and unpacked forms, a
+    # parameter) and a string-keyed dict reusing the loop name (which must stay strings).
+    test_gimple_stdout("gimple_int_keyed_dict_iteration_yields_ints", """\
+def total(d: Dict[Int, Int]) -> Int:
+    var t = 0
+    for k, v in d.items():
+        t += k * 100 + v
+    return t
+
+def main():
+    var d: Dict[Int, Int] = {}
+    d[5] = 50
+    d[7] = 70
+    d[1] = 10
+    var ks = 0
+    for k in d:
+        ks += k
+    print(ks)
+    var tot = 0
+    for kv in d.items():
+        tot += kv[0] + kv[1]
+    print(tot)
+    var t2 = 0
+    for kv in d.items():
+        t2 += kv.key * 2
+    print(t2)
+    var t3 = 0
+    for k in d.keys():
+        t3 += k
+    print(t3)
+    print(total(d))
+    var s: Dict[String, Int] = {}
+    s["a"] = 1
+    for k in s:
+        print(k)
+""", "13\n143\n26\n13\n1430\na\n")
 
     # ── zip() / dict.items() pair shapes ───────────────────────────────
     # zip and dict.items() yield TUPLES. Unmarked, they printed as

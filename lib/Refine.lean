@@ -649,7 +649,11 @@ def dylibExportProg (image : DylibImage) (export_ : DylibExport) : Prog :=
     base := image.base
     entry := export_.entry
     exit := image.base + image.codeSize
-    fuel := fun _ => 100000
+    -- The SAME fuel `DylibExport.runExport` uses, deliberately: `Total` is
+    -- stated over `runExport` and a contract over `runProg`, and if the two
+    -- disagreed then the two claims would be about different runs and the
+    -- caller's theorem would be bridging a gap nobody stated.
+    fuel := fun n => DylibExport.exportFuel image n
     blocks := []
     rets := [] }
 

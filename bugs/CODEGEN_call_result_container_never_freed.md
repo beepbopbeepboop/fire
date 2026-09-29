@@ -13,24 +13,20 @@ What still leaks (peak-RSS slope, 100k vs 400k iterations, `fire.py build`):
 
 | loop body | B/iter |
 |---|---|
-| one string bound to a local (`+`, `String(i)`, `.upper()`, slice, callee returning `String`) | ~6 |
-| `var s = String("n=") + String(i)` | ~28 |
+| a callee returning `String` (not provably fresh) | ~6 |
 | `String("a b c").split(" ")` (the list is freed; its three strings are not) | ~48 |
-| a call whose result the analysis cannot prove fresh, bound to a local | (not freed; by design) |
 
-## Cause
-
-A string local needs an owner, and strings have a shorter safe-pattern list than containers:
-`+`, comparisons and f-strings all take bare identifiers as operands, which the escape analysis
-treats as an escape. There is also a borrowed/owned split to respect (list-of-`str` elements, dict
-values and literals are borrowed and must never be freed).
+Fixed since this doc was first written (`doc/MEMORY.html` §3.B): a local bound to a provably fresh
+STRING (`+`, `String(i)`, slices, f-strings) is owned and freed; the str methods `upper`, `lower`,
+`strip`, `lstrip`, `rstrip`, `replace`, `join`, `expandtabs` and the padding functions now always
+return a copy (`_str_fresh_copy`), are on `_FRESH_STRING_RETURNS`, and a temporary receiver
+(`s.lower().lstrip()`) is freed after the call.
 
 ## Fix
 
-Give strings the same declaration gate as containers (own a local only when the lowered value
-is a provably fresh `mojo_str_cat`/`mojo_str_from_int`/... result), add `+`/comparison/f-string
-reads to the safe patterns for names known to be strings, and free the strings a fresh
-`split()` list holds when that list is freed.
+Free the element strings when a fresh `split()` list is freed (needs the list known to be the sole
+owner of freshly allocated elements), and prove a user function returns a fresh string
+(`analyze_returns_fresh` for strings).
 
 ## Done when
 

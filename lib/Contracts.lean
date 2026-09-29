@@ -226,17 +226,26 @@ structure ExportBody (image : DylibImage) (export_ : DylibExport) where
     that `omega` closes. -/
 theorem runs_to_body (image : DylibImage) (export_ : DylibExport)
     (b : ExportBody image export_)
-    (hfuel : b.block.pcs.length + 1 ≤ DylibExport.exportFuel)
+    (hfuel : b.block.pcs.length + 1 ≤ DylibExport.exportFuel image 0)
     (n : UInt64) :
     Refine.runProg (Refine.dylibExportProg image export_) n
       = some (b.block.step (startState image export_ n)) := by
-  have hlen : b.block.pcs.length < DylibExport.exportFuel := by omega
+  have hlen : b.block.pcs.length < DylibExport.exportFuel image 0 := by omega
+  -- `exportFuel` is `BASE + PATH * n`, so it is monotone in `n` and the bound
+  -- the caller supplies at `n = 0` -- the minimum over all arguments -- is a
+  -- bound at every argument.  This is the step that makes an n-dependent fuel
+  -- cost the contract nothing: a straight-line body needs its own LENGTH, which
+  -- is a literal, not a function of the argument.
+  have hlen' : b.block.pcs.length < DylibExport.exportFuel image n := by
+    have hmono : DylibExport.exportFuel image 0 ≤ DylibExport.exportFuel image n := by
+      simp [DylibExport.exportFuel]
+    omega
   have hmain : arm64_go_exit (startState image export_ n) image.code
-      (image.base + image.codeSize) DylibExport.exportFuel
+      (image.base + image.codeSize) (DylibExport.exportFuel image n)
       = some (b.block.step (startState image export_ n)) :=
     go_exit_within image.code (image.base + image.codeSize) _
       (startState image export_ n) (b.block.step (startState image export_ n)) ⟨
-      b.block.pcs.length, hlen,
+      b.block.pcs.length, hlen',
       b.cert.runs _ b.entry,
       b.atExit n,
       by
@@ -245,7 +254,7 @@ theorem runs_to_body (image : DylibImage) (export_ : DylibExport)
   -- `runProg` at the export's `Prog` IS that `go_exit`, by definition
   have hshape : Refine.runProg (Refine.dylibExportProg image export_) n
       = arm64_go_exit (startState image export_ n) image.code
-          (image.base + image.codeSize) DylibExport.exportFuel := rfl
+          (image.base + image.codeSize) (DylibExport.exportFuel image n) := rfl
   rw [hshape]
   exact hmain
 
@@ -261,7 +270,7 @@ theorem runs_to_body (image : DylibImage) (export_ : DylibExport)
     that can be wrong — invisible. -/
 theorem agrees_of_body (image : DylibImage) (export_ : DylibExport)
     (b : ExportBody image export_) (spec : UInt64 → UInt64)
-    (hfuel : b.block.pcs.length + 1 ≤ DylibExport.exportFuel)
+    (hfuel : b.block.pcs.length + 1 ≤ DylibExport.exportFuel image 0)
     (hreg : ∀ n, arm64_reg 0 (b.block.step (startState image export_ n)) = spec n) :
     Refine.export_result_spec image export_ spec := by
   intro n s hrun

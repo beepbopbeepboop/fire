@@ -644,17 +644,35 @@ typedef struct {
     int64_t  keykind; /* key DOMAIN, since every key is stored as its own
                      * characters in `key` and matched with strcmp: 0 = a str
                      * key, 1 = a bytes key. Keeps `d[b'x']` and `d['x']` the
-                     * two distinct entries Python says they are. */
+                     * two distinct entries Python says they are.
+                     * 2 = an INTEGER key: `key` still holds its decimal
+                     * string (so iteration, repr, copy and pop see exactly
+                     * what they always did), and `ikey` holds the integer,
+                     * which is what is hashed and compared. Every key that is
+                     * a canonical decimal integer ("5", "-12", never "05" or
+                     * "+5") is stored this way whether it arrived as the int 5
+                     * or the string "5", so the two remain one key as before
+                     * but a lookup by int needs no formatting at all. */
+    int64_t  ikey;    /* the integer, for keykind == 2; otherwise unused */
 } _DictSlot;
 
 /* Value-kind tags for _DictSlot.kind. Kept in the header so generated code
  * never needs them — only runtime internals read/write kind today. */
 
+/* The first slot table lives INSIDE the struct: a dict that stays within
+ * MOJO_DICT_INLINE slots (it grows at half full, so up to 4 entries) never
+ * allocates a table, and a stack-homed one allocates nothing at all. `slots`
+ * points at `inl` until the first growth, after which `inl` is unused and
+ * `slots` is a heap table. Anything that frees `slots` must first check
+ * `slots != inl`; anything that copies a MojoDict struct by value would leave
+ * `slots` pointing into the original and must not. */
+#define MOJO_DICT_INLINE 8
 typedef struct {
     _DictSlot *slots;
     int64_t    used;
     int64_t    cap;
     int64_t    next_seq;
+    _DictSlot  inl[MOJO_DICT_INLINE];
 } MojoDict;
 
 MojoDict   *mojo_dict_new(void);
@@ -677,6 +695,21 @@ void        mojo_mark_dict_bool_values(MojoDict *d);
 int         mojo_is_bool_dict(MojoDict *d);
 
 void        mojo_dict_set_int(MojoDict *d, char *key, int64_t v);
+/* `_kw` variants: the key arrives as a raw machine WORD that is either a boxed
+ * string pointer or an integer, and the same decision mojo_cstr_or_int_str
+ * makes (mojo_boxed_is_str) is made here — but an integer is looked up directly,
+ * with no decimal string built and nothing to release. Emitted by codegen for
+ * dict operations whose key is an untracked int64_t. */
+int64_t     mojo_dict_get_int_kw(MojoDict *d, int64_t kw);
+double      mojo_dict_get_double_kw(MojoDict *d, int64_t kw);
+char       *mojo_dict_get_str_kw(MojoDict *d, int64_t kw);
+void        mojo_dict_set_int_kw(MojoDict *d, int64_t kw, int64_t v);
+void        mojo_dict_set_double_kw(MojoDict *d, int64_t kw, double v);
+void        mojo_dict_set_str_kw(MojoDict *d, int64_t kw, char *v);
+int         mojo_dict_contains_kw(MojoDict *d, int64_t kw);
+int64_t     mojo_dict_pop_int_kw(MojoDict *d, int64_t kw);
+int64_t     mojo_dict_setdefault_int_kw(MojoDict *d, int64_t kw, int64_t dflt);
+char       *mojo_dict_setdefault_str_kw(MojoDict *d, int64_t kw, char *dflt);
 void        mojo_dict_set_double(MojoDict *d, char *key, double v);
 void        mojo_dict_set_bytes_double(MojoDict *d, MojoBytes *key, double v);
 void        mojo_dict_set_str(MojoDict *d, char *key, char *v);
@@ -689,6 +722,7 @@ char       *mojo_dict_setdefault_str(MojoDict *d, char *key, char *dflt);
 MojoList   *mojo_dict_keys(MojoDict *d);
 MojoList   *mojo_dict_values(MojoDict *d);
 MojoList   *mojo_dict_items(MojoDict *d);
+MojoList   *mojo_dict_items_int(MojoDict *d);
 void        mojo_dict_update(MojoDict *dst, MojoDict *src);
 int64_t     mojo_dict_pop_int(MojoDict *d, char *key);
 MojoDict   *mojo_dict_copy(MojoDict *d);
@@ -809,6 +843,8 @@ typedef struct {
 MojoDictIter  *mojo_dict_iter_new(MojoDict *d);
 int            mojo_dict_iter_next(MojoDictIter *it);     /* 1=has entry, 0=done */
 char *mojo_dict_iter_key(MojoDictIter *it);
+char *mojo_dict_slot_key(MojoDict *d, int64_t i);
+int64_t mojo_dict_iter_key_int(MojoDictIter *it);
 int64_t        mojo_dict_iter_val_int(MojoDictIter *it);
 double         mojo_dict_iter_val_double(MojoDictIter *it);
 char *mojo_dict_iter_val_str(MojoDictIter *it);
@@ -823,11 +859,15 @@ typedef struct {
     int64_t seq;   /* insertion order; see mojo_set_order_indices */
 } _SetSlot;
 
+/* As MojoDict: the first table is inside the struct (`slots == inl` until the
+ * first growth), so a small set allocates no table. */
+#define MOJO_SET_INLINE 8
 typedef struct {
     _SetSlot *slots;
     int64_t   used;
     int64_t   cap;
     int64_t   next_seq;
+    _SetSlot  inl[MOJO_SET_INLINE];
 } MojoSet;
 
 MojoSet *mojo_set_new(void);

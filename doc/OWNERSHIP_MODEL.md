@@ -305,13 +305,19 @@ Phase 4-6 (real calling convention, move-vs-copy, stack allocation).
   - [x] fresh temporaries are freed by their one consumer (`for` iterable, `extend`, list `+`, `len`);
   - [x] struct instances are owned (freed with `free`, cleanup kind `MOJO_CLEANUP_PTR`) while nothing retains
     `self` (method and `__init__` summaries; bound method as a value is an escape);
-  - [x] the registries are a dedicated pointer table; the runtime is built at `-O2`.
+  - [x] the registries are a dedicated pointer table; the runtime is built at `-O2`;
+  - [x] a local bound to a provably fresh STRING is owned (verified fresh-producer list; `str` is not
+    non-retaining; a method call on the string must be consumed on the spot; read-only operator/condition
+    operands are not escapes) — see doc/MEMORY.html §3.B;
+  - [x] integer dict keys are stored as integer slots (canonical decimal strings normalise to them) and looked
+    up through `_kw` word entry points: no formatting, nothing to release (§10.4).
   Decided against, with numbers: skipping the registry for a stack-homed container (~0.5 ns of 5.8 ns, and
   it needs a never-boxed proof); a half-measure for closures (see the bug doc).
-  Still open: containers nested inside a literal; strings bound to locals (bugs/CODEGEN_call_result_container_never_freed.md);
+  Still open: containers nested inside a literal; strings whose producer is not provably fresh (`upper`/`strip`/`replace`/`join`)
+  and the strings inside a `split()` list (bugs/CODEGEN_call_result_container_never_freed.md);
   closure environments / bound methods / boxed mutable locals (bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md);
-  struct-method callee tables beyond `self`; storage homing in `__GIMPLE` bodies; inline slot arrays for dicts/sets
-  (a string key still `strdup`s); a real int-keyed dict slot (Int keys are formatted and hashed as text today).
+  struct-method callee tables beyond `self`; storage homing in lifted loop bodies (struct methods, struct instances, small dicts/sets
+  and integer-key strings landed 2026-09-29).
 
 ## Why this matters, not just "more spec compliance"
 

@@ -4122,7 +4122,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         # cannot drift from `runExport`'s.  `fuel` above stays a python int for
         # the budget CHECK, which is about the walk's own step accounting and is
         # separate from what the theorem says the run's fuel is.
-        FUEL0 = fuel_lean
+        FUEL0 = f"({fuel_lean})"
 
     def _pc_fact_lookup(sc: str):
         sc = sc.strip()
@@ -7667,11 +7667,33 @@ def _dylib_total_proof(ident: str, code: bytes, base: int, entry: int,
     try:
         walk = _gen_universal_e2e_cfg(
             f"{ident}_walk", code, base, entry, recursive=False, go_lemmas=[],
-            fn=None, tw_extra="", tc={"typed": False, "vtypes": {}, "call_types": {}},
+            # `DylibExport.exportFuel` must be UNFOLDED before the walk's own
+            # `omega`s: it is a function of the argument, so `omega` sees it as an
+            # opaque atom and cannot relate it to the walk's step count. Unfolding
+            # it exposes `BASE + PATH * n.toNat`, and `omega` uses `n.toNat >= 0`.
+            fn=None, tw_extra="DylibExport.exportFuel",
+            tc={"typed": False, "vtypes": {}, "call_types": {}},
             cond_branches=set(), code_name="dylib_code", sr_name="dylib",
             frame={"func_end": func_end}, thm=f"{ident}_halts", prop="True",
             no_change=True, halt_only=True, fuel=_EXPORT_FUEL_BASE,
-            fuel_lean="DylibExport.exportFuel dylib_image n")
+            # The fuel is emitted in its ARITHMETIC form, `BASE + PATH * n`, not
+            # as a call to the library's `exportFuel`. Two reasons, and the
+            # second is the important one.
+            #
+            # 1. The walk's own `omega`s need the arithmetic. With the fuel an
+            #    opaque function application, `omega` treats
+            #    `exportFuel dylib_image n` as an atom and cannot relate it to
+            #    the walk's step count -- measured: two unsolved goals, and
+            #    `tw_extra` does not reach them. Emitting `200000 + PATH * n`
+            #    is what the executable path already does, for the same reason.
+            # 2. Drift is still caught, and caught LOUDLY, which is the property
+            #    the old `_EXPORT_FUEL` mirror existed for: `total_of_halts`
+            #    takes the walk's hypothesis at `runExport`'s own type, so if
+            #    this PATH disagreed with the library's `image.codeSize / 4` the
+            #    generated proof would be a statement about a different run and
+            #    Lean would reject it. The check moved from "same number in two
+            #    places" to "the typechecker agrees", which cannot rot silently.
+            fuel_lean=f"{_EXPORT_FUEL_BASE} + {max(1, len(code) // 4)} * n.toNat")
     except (NotImplementedError, ValueError):
         walk = None
     if walk is None:

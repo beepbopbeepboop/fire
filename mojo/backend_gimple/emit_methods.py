@@ -3288,7 +3288,20 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
 
     # char* string method calls
     if ot == 'char *':
-        return gen._lower_str_method(ov, method, node.args)
+        _sres = gen._lower_str_method(ov, method, node.args)
+        # `s.lower().lstrip()`: these methods always return a COPY, so a
+        # temporary receiver (a `+`, or a call known to return a fresh string)
+        # is dead once the call has read it. Only methods whose lowering
+        # provably copies qualify (upper/lower/strip/lstrip/rstrip, and replace
+        # with its two arguments); anything that might hand the receiver back
+        # (join's no-iterable path, identity accessors) must not free it.
+        if ((method in ('upper', 'lower', 'strip', 'lstrip', 'rstrip')
+             or (method == 'replace' and len(node.args) >= 2))
+                and isinstance(node.func, gimple_ctypes.MemberExpr)
+                and gen._is_fresh_operand(node.func.obj, ov)):
+            gen._emit_call('void', '', 'free', [('char *', ov)])
+            gen._fresh_vals.discard(ov)
+        return _sres
 
     # File handle operations (int64_t handles from mojo_open_file)
     if ot in ('int', 'int64_t'):
@@ -3571,7 +3584,7 @@ def _dict_key_probe(gen, key_type: str, key_val: str) -> tuple[str, str, bool]:
     key. One function, so the next reader cannot forget."""
     if key_type == 'MojoBytes *':
         return 'MojoBytes *', key_val, True
-    kt, kv = gen._char_to_cstr(key_type, key_val, True)
+    kt, kv = gen._char_to_cstr(key_type, key_val, True, True)
     return kt, kv, False
 
 
@@ -4334,7 +4347,9 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
         t = gen._new_temp('int64_t')
         gen._emit_call('int64_t', t, '_char_replace_impl',
                          [('char *', cstr_ov), (arg0_type, arg_vals[0]), (arg1_type, arg_vals[1])])
-        return 'char *', gen._new_val('char *', f"(char *){t}")
+        _rep = gen._new_val('char *', f"(char *){t}")
+        gen._fresh_vals.add(_rep)   # _char_replace_impl always returns a copy
+        return 'char *', _rep
     # Character-class predicates (str.isalnum/isdigit/...) — real runtime
     # helpers, previously hardcoded-0 stubs (always False), which broke
     # e.g. fire_compiler.py's own `raw[i].isdigit()` / `prev.isalnum()`.

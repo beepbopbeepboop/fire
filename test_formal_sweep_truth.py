@@ -93,21 +93,30 @@ class TestVacuity(unittest.TestCase):
         self.assertEqual([(n, sh) for n, sh, _ in got],
                          [("Semantics", L._VACUOUS_GOAL)])
 
-    def test_the_librarys_semantics_is_reported(self):
+    def test_the_librarys_semantics_is_not_vacuous(self):
         """Run against this tree's real lib/, not a fixture.
 
-        A scanner tested only against text it wrote itself tests its own
-        assumptions; this one is the shape in a file nobody may edit this round.
+        `DylibExport.Semantics` WAS `∀ o, o ∈ l → True`, and this test pinned
+        that the scanner reported it.  [3] replaced it with `Total ∧
+        Functional`, a real claim about the machine (`Semantics_refutable`
+        exhibits an export that fails it), so the real-tree assertion is now
+        the negative one: the scanner must NOT report it.  The fixture test
+        above still pins that the old shape IS reported, so the scanner is
+        tested in both directions.
         """
         path = os.path.join(LIB, "ProofLib.lean")
         if not os.path.isfile(path):
             self.skipTest("lib/ProofLib.lean is not here")
         with open(path) as f:
-            got = L.vacuous_declarations(f.read())
-        self.assertIn("Semantics", [n for n, _s, _l in got],
-                      "DylibExport.Semantics is `∀ o, o ∈ l → True` on this "
-                      "tree and is the proposition every dylib proof's "
-                      "semantics theorem is stated with")
+            text = f.read()
+        self.assertIn("def Semantics (image : DylibImage)", text,
+                      "DylibExport.Semantics is gone or renamed; this negative "
+                      "check would then pass for the wrong reason")
+        got = L.vacuous_declarations(text)
+        self.assertNotIn("Semantics", [n for n, _s, _l in got],
+                         "DylibExport.Semantics is reported vacuous again -- it "
+                         "is the proposition every dylib proof's semantics "
+                         "theorem is stated with")
 
     def test_a_real_theorem_is_not_vacuous(self):
         """The negative half, and it is the half that keeps the census honest.
@@ -188,15 +197,22 @@ class TestLibraryCensus(unittest.TestCase):
         self.assertEqual(L._lib_from_record({}, -1, ""), {})
         self.assertEqual(L._lib_totals({}), (L._LIB_UNMEASURED, ""))
 
-    def test_the_library_has_known_holes_and_they_are_named(self):
+    def test_the_library_holes_are_exactly_the_known_ones(self):
         """The measured claim, on this tree, with Lean.
 
-        Three declarations in `lib/` admit a `sorry` and every one of them is
-        load-bearing: `in_image_stub` and `semantics_stub` in ProofLib.lean and
-        `dylib_export_contract_stub` in Refine.lean, which is what
-        `formal/arm64_proof_gen.py` invokes for every dylib export contract
-        with `obs := fun n => n` — asserting every export is the identity map.
-        Skipped without Lean, never asserted as zero.
+        There used to be three holes in `lib/` (`in_image_stub`,
+        `semantics_stub`, `dylib_export_contract_stub`), and this test pinned
+        that the census found and named them.  All three are closed: the first
+        is the decidable `in_image_decide`, the second went with the vacuous
+        `Semantics`, the third was deleted for asserting every export is the
+        identity.  So the set of known holes is now empty, which is the same
+        set `test_formal_dylib.py`'s `KNOWN_LIB_HOLES` pins.
+
+        "The census reports zero" is only evidence of "there are zero" if the
+        census can see a hole at all, and that is what `TestLeanOutput` pins
+        against the toolchain's real output.  Here, every library module must
+        have been MEASURED, so a module the census silently failed to reach
+        does not read as clean.  Skipped without Lean.
         """
         lean = _lean()
         if not lean:
@@ -215,18 +231,17 @@ class TestLibraryCensus(unittest.TestCase):
                   "(run the `prooflib` step, or any proof check on a cold "
                   "store, to measure it)")
             return
-        self.assertTrue(lib, "no library module could be measured at all")
-        total = sum(got[0] for got in lib.values())
-        self.assertGreaterEqual(
-            total, 1,
-            "the library admits no `sorry` on this tree any more — if that is "
-            "true, the three named in FORMAL.md 6 are fixed and the docs are "
-            "stale; if it is not, the census is broken and this says so")
+        self.assertIn("ProofLib", lib,
+                      f"ProofLib was not measured (measured: {sorted(lib)}); "
+                      f"an unmeasured module reads exactly like a clean one")
+        KNOWN_LIB_HOLES: set = set()
         named = {name for _count, names in lib.values() for name in names}
-        self.assertIn("dylib_export_contract_stub", named,
-                      "Refine.lean's contract stub is the hole every dylib "
-                      "proof's contract theorem rests on, and it must be NAMED "
-                      "— a count of 3 does not tell a reader where to look")
+        total = sum(got[0] for got in lib.values())
+        self.assertEqual(
+            named - KNOWN_LIB_HOLES, set(),
+            f"lib/ admits {total} `sorry`(s) nobody has recorded: "
+            f"{sorted(named - KNOWN_LIB_HOLES)} -- every dylib proof rests on "
+            f"these, and Lean does not warn about a hole in an imported .olean")
 
 
 class TestLeanOutput(unittest.TestCase):

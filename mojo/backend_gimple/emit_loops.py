@@ -620,6 +620,39 @@ def _gen_for_findall_loop(gen, node: gimple_ctypes.ForStmt) -> None:
     gen._gen_for_list(node.target, _tmp, node.body)
 
 
+def _int_dict_loop_source(gen, it) -> tuple:
+    """`(mode, receiver)` for a `for` iterable that walks a provably
+    Dict[Int, V] name (gen._int_keyed_dicts): mode 'keys' for `d` / `d.keys()`
+    and 'items' for `d.items()`, receiver being the bare name `d`. `('', None)`
+    for everything else, which keeps the string keys the runtime has always
+    produced. Decided from the loop statement alone (never from a side table
+    keyed by value names) so no other consumer of a dict's keys can be handed
+    an integer where it expects a string."""
+    if isinstance(it, gimple_ctypes.IdentExpr):
+        return ('keys', it) if it.name in gen._int_keyed_dicts else ('', None)
+    if (isinstance(it, gimple_ctypes.CallExpr) and not it.args
+            and isinstance(it.func, gimple_ctypes.MemberExpr)
+            and it.func.member in ('keys', 'items')
+            and isinstance(it.func.obj, gimple_ctypes.IdentExpr)
+            and it.func.obj.name in gen._int_keyed_dicts):
+        return it.func.member, it.func.obj
+    return '', None
+
+
+def _lower_int_dict_items(gen, recv) -> tuple:
+    """`d.items()` of an Int-keyed dict `d`: the (key, value) pair list with
+    an INTEGER key slot (mojo_dict_items_int), remembered in
+    gen._dict_items_int_keys so the pair readers use get_int for slot 0."""
+    dt, dv = gen.lower_expr(recv)
+    dt = gen._get_actual_type(dt, dv)
+    if dv in gen.var_types and gen.var_types[dv] == 'int64_t':
+        dv = gen._coerce_to_type('int64_t', 'MojoDict *', dv)
+    t = gen._new_val('MojoList *', f"mojo_dict_items_int ({dv})")
+    gen._dict_items_val_elems[t] = gen._dict_val_of(_as_str(recv.name))
+    gen._dict_items_int_keys.add(t)
+    return 'MojoList *', t
+
+
 def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # `for m in <compile-time-known-pattern>.finditer(text):` — see
     # regex_compile.py / BACKLOG-CODEGEN.md §4f. Checked structurally,
@@ -743,8 +776,16 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
         _gen_for_list_iter_cursor(gen, node, var)
         return
 
+    # A loop over a provably Dict[Int, V] name (`for k in d`, `d.keys()`,
+    # `d.items()`) gets its keys back as integers; see _int_dict_loop_source.
+    _int_mode, _int_recv = _int_dict_loop_source(gen, it)
     try:
-        it_type, it_val = gen.lower_expr(node.iterable)
+        if _int_mode == 'items':
+            it_type, it_val = _lower_int_dict_items(gen, _int_recv)
+        elif _int_mode:
+            it_type, it_val = gen.lower_expr(_int_recv)
+        else:
+            it_type, it_val = gen.lower_expr(node.iterable)
     except Exception:
         if is_dataclass_fields_loop:
             gen._dataclass_fields_vars.discard(var)
@@ -754,7 +795,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # `.split()`/`.keys()` result): nothing else can reference the iterable, so
     # it is freed when the loop statement ends. Claimed HERE, before any code
     # below emits a call on it.
-    gen._claim_loop_iterable_temp(node.iterable, it_val, it_type)
+    gen._claim_loop_iterable_temp(_int_recv if _int_mode == 'keys' else node.iterable, it_val, it_type)
 
     # Check if this is an int64_t-stored pointer (from method call returning pointer)
     it_type = gen._get_actual_type(it_type, it_val)
@@ -827,7 +868,8 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
         elif it_type == 'MojoMemoryView *':
             gen._gen_for_memoryview(var, it_val, node.body)
         elif it_type == 'MojoDict *':
-            gen._gen_for_dict(var, it_val, node.body, shadow_name=shadow_name)
+            gen._gen_for_dict(var, it_val, node.body, shadow_name=shadow_name,
+                              int_keys=bool(_int_mode))
         elif it_type == 'MojoSet *':
             gen._gen_for_set(var, it_val, node.body, shadow_name=shadow_name)
         elif it_type == 'MojoGenerator *':
@@ -1817,6 +1859,14 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     _saved_pair = gen._dict_item_pair_vars.get(var, '')
     if _is_pair_var:
         gen._dict_item_pair_vars[var] = gen._dict_items_val_elems[it_val]
+    # `item.key` reads slot 0 as an integer when the pairs came from an
+    # Int-keyed dict; scoped to the body like the pair var itself.
+    _int_pair = _is_pair_var and it_val in gen._dict_items_int_keys
+    _had_int_pair = var in gen._dict_item_int_key_vars
+    if _int_pair:
+        gen._dict_item_int_key_vars.add(var)
+    else:
+        gen._dict_item_int_key_vars.discard(var)
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
     if _is_pair_var:
@@ -1824,6 +1874,10 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             gen._dict_item_pair_vars[var] = _saved_pair
         else:
             gen._dict_item_pair_vars.pop(var, None)
+    if _had_int_pair:
+        gen._dict_item_int_key_vars.add(var)
+    else:
+        gen._dict_item_int_key_vars.discard(var)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
@@ -2009,7 +2063,8 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
     gen._emit_label(bb_after)
 
 
-def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | None = None):
+def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | None = None,
+                  int_keys: bool = False):
     """for k in dict — iterates over keys as char *."""
     # Handle tuple target like '(name, alias)' — declare each name separately
     is_tuple = var.startswith('(') and var.endswith(')')
@@ -2043,11 +2098,28 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # `for vname, vtype in ci.captures:`).
         _slot_ctypes = []
         for i, vn in enumerate(var_names):
-            _want = 'char *' if i == 0 else 'int64_t'
-            gen._declare_var(vn, _want, force=(vn == shadow_name))
+            _want = ('int64_t' if int_keys else 'char *') if i == 0 else 'int64_t'
+            _retype = (int_keys and i == 0 and gen.var_types.get(vn, _want) != _want) \
+                or (not int_keys and i == 0 and vn in gen._int_key_loop_vars)
+            gen._declare_var(vn, _want, force=(vn == shadow_name) or _retype)
+            if i == 0:
+                if int_keys:
+                    gen._int_key_loop_vars.add(vn)
+                else:
+                    gen._int_key_loop_vars.discard(vn)
             _slot_ctypes.append(gen.var_types.get(vn, _want))
+    elif int_keys:
+        # The key is an integer: retype a name an earlier loop declared as a
+        # string rather than let first-decl-wins keep the pointer type.
+        gen._declare_var(var, 'int64_t', force=(var == shadow_name)
+                         or gen.var_types.get(var, 'int64_t') != 'int64_t')
+        gen._int_key_loop_vars.add(var)
     else:
-        gen._declare_var(var, 'char *', force=(var == shadow_name))
+        # ...and the reverse: a name an Int-keyed loop declared int64_t must
+        # become a string again, not box the string pointer into an integer.
+        gen._declare_var(var, 'char *', force=(var == shadow_name)
+                         or var in gen._int_key_loop_vars)
+        gen._int_key_loop_vars.discard(var)
     # If it_val is int64_t (boxed pointer), cast to MojoDict *
     if it_val in gen.var_types and gen.var_types[it_val] == 'int64_t':
         it_val = gen._coerce_to_type('int64_t', 'MojoDict *', it_val)
@@ -2065,7 +2137,23 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
 
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
-    key_tmp = gen._new_val('const char *', f"mojo_dict_iter_key ({iter_t})")
+    if int_keys:
+        ikey_tmp = gen._new_val('int64_t', f"mojo_dict_iter_key_int ({iter_t})")
+        if is_tuple:
+            gen._emit(f"  {gen._cname(var_names[0])} = {ikey_tmp};")
+            for _vi in range(1, len(var_names)):
+                _vt = _slot_ctypes[_vi]
+                if _vt in ('int64_t', 'int', 'int32_t'):
+                    gen._emit(f"  {gen._cname(var_names[_vi])} = (int64_t)0;")
+                elif _vt.endswith(' *'):
+                    gen._emit(f"  {gen._cname(var_names[_vi])} = ({_vt})0;")
+                else:
+                    gen._emit(f"  {gen._cname(var_names[_vi])} = (char *)0;")
+        else:
+            gen._emit(f"  {gen._cname(var)} = {ikey_tmp};")
+        key_tmp = None
+    else:
+        key_tmp = gen._new_val('const char *', f"mojo_dict_iter_key ({iter_t})")
     # Every write goes through _cname: a loop variable whose Mojo name is a
     # C keyword (`for char in s.codepoints():` — real, in stdlib's
     # _unicode.mojo) is DECLARED as the renamed `_char` by _declare_var,
@@ -2074,7 +2162,9 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     # expression before 'char'" parse error. Latent until the boxed
     # dict/list runtime dispatch (A5-BUG.md §1) started generating this
     # branch for real; _gen_for_list has always done this correctly.
-    if is_tuple:
+    if int_keys:
+        pass    # the integer key was stored above
+    elif is_tuple:
         # Assign key to first name, NULL (zero) to remaining names
         vn0 = var_names[0]
         cvn0 = gen._cname(vn0)

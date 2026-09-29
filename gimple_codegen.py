@@ -162,6 +162,13 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_dict_setdefault_int':   'int64_t',
     'mojo_dict_setdefault_str':   'char *',
     'mojo_dict_contains':         'int',
+    'mojo_dict_get_int_kw':       'int64_t',
+    'mojo_dict_get_double_kw':    'double',
+    'mojo_dict_get_str_kw':       'char *',
+    'mojo_dict_setdefault_int_kw': 'int64_t',
+    'mojo_dict_setdefault_str_kw': 'char *',
+    'mojo_dict_contains_kw':      'int',
+    'mojo_dict_pop_int_kw':       'int64_t',
     'mojo_dict_set_bytes_int':    'void',
     'mojo_dict_set_bytes_str':    'void',
     'mojo_dict_set_bytes_double': 'void',
@@ -177,6 +184,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_dict_iter_new':         'MojoDictIter *',
     'mojo_dict_iter_next':        'int',
     'mojo_dict_iter_key':         'char *',
+    'mojo_dict_iter_key_int':     'int64_t',
     'mojo_dict_iter_val_int':     'int64_t',
     'mojo_dict_iter_val_double':  'double',
     'mojo_dict_iter_val_str':     'char *',
@@ -1320,6 +1328,13 @@ class GimpleGen:
         # the value slot's real type to pick get_str vs get_int; the key slot
         # is always a string. Side-table pattern, like _generator_var_api.
         self._dict_items_val_elems: dict[str, str] = {}
+        # Dict[Int, V] iteration: items-list temps whose key slot is an
+        # INTEGER (mojo_dict_items_int), the pair loop vars bound to such a
+        # pair, and the function's provably Int-keyed dict names.
+        self._dict_items_int_keys: set = set()
+        self._dict_item_int_key_vars: set = set()
+        self._int_key_loop_vars: set = set()
+        self._int_keyed_dicts: set = set()
         # `for item in <d.items()>:` — a SINGLE loop var bound to a whole
         # dict-item PAIR (as opposed to the `for k, v in ...` tuple-target
         # shape, which _gen_for_list unpacks slot-by-slot). Maps the loop
@@ -1986,12 +2001,14 @@ class GimpleGen:
         self._owned_free_pushed: set = set()
         self._owned_stack_allocated: set = set()
         self._cstr_key_src: dict[str, str] = {}  # see _char_to_cstr(transient=)
+        self._kw_key_src: dict[str, str] = {}    # see _char_to_cstr(word_ok=)
         self._fresh_str_tmps: set = set()  # see emit_infra._emit_str_cat
         self._fresh_vals: set = set()  # see emit_infra.is_fresh_container_operand
         # Block-scoped destruction state — see emit_infra's block-scope section.
         self._analysis_funcs: dict = {}   # see infra_infer._build_analysis_funcs
         self._fresh_returning: set = set()   # names whose calls return a fresh container
         self._analysis_structs: dict = {}    # see infra_infer._build_analysis_structs
+        self._own_fn_body: list = []   # the analysed function's body (string receiver pre-scan)
         self._decl_value_node = None   # see lower_expr: the decl statement's RHS node
         self._decl_rhs_val: str = ''   # and the value it lowered to
         self._literal_storage: str = ''        # see emit_infra.emit_container_new
@@ -2560,6 +2577,16 @@ class GimpleGen:
         'mojo_dict_setdefault_int': ('int64_t', ['MojoDict *', 'char *', 'int64_t']),
         'mojo_dict_setdefault_str': ('char *',  ['MojoDict *', 'char *', 'char *']),
         'mojo_dict_contains':    ('int',       ['MojoDict *', 'char *']),
+        'mojo_dict_get_int_kw':     ('int64_t',  ['MojoDict *', 'int64_t']),
+        'mojo_dict_get_double_kw':  ('double',   ['MojoDict *', 'int64_t']),
+        'mojo_dict_get_str_kw':     ('char *',   ['MojoDict *', 'int64_t']),
+        'mojo_dict_set_int_kw':     ('void',     ['MojoDict *', 'int64_t', 'int64_t']),
+        'mojo_dict_set_double_kw':  ('void',     ['MojoDict *', 'int64_t', 'double']),
+        'mojo_dict_set_str_kw':     ('void',     ['MojoDict *', 'int64_t', 'char *']),
+        'mojo_dict_contains_kw':    ('int',      ['MojoDict *', 'int64_t']),
+        'mojo_dict_pop_int_kw':     ('int64_t',  ['MojoDict *', 'int64_t']),
+        'mojo_dict_setdefault_int_kw': ('int64_t', ['MojoDict *', 'int64_t', 'int64_t']),
+        'mojo_dict_setdefault_str_kw': ('char *',  ['MojoDict *', 'int64_t', 'char *']),
         'mojo_replace_argv':   ('void',    ['MojoList *']),
         'mojo_is_registered_list': ('int',     ['int64_t']),
         'mojo_is_registered_dict': ('int',     ['int64_t']),
@@ -2633,6 +2660,7 @@ class GimpleGen:
         'mojo_dict_keys':        ('MojoList *', ['MojoDict *']),
         'mojo_dict_values':      ('MojoList *', ['MojoDict *']),
         'mojo_dict_items':       ('MojoList *', ['MojoDict *']),
+        'mojo_dict_items_int':   ('MojoList *', ['MojoDict *']),
         'mojo_sorted':           ('MojoList *', ['void *']),
         'mojo_list_sorted_str':  ('MojoList *', ['MojoList *']),
         'mojo_set_sorted':       ('MojoList *', ['MojoSet *']),
@@ -3693,8 +3721,8 @@ class GimpleGen:
         return glo._gen_for_bytes(self, var, it_val, body)
     def _gen_for_memoryview(self, var: str, it_val: str, body: list):
         return glo._gen_for_memoryview(self, var, it_val, body)
-    def _gen_for_dict(self, var: str, it_val: str, body: list, shadow_name: str | None=None):
-        return glo._gen_for_dict(self, var, it_val, body, shadow_name)
+    def _gen_for_dict(self, var: str, it_val: str, body: list, shadow_name: str | None=None, int_keys: bool=False):
+        return glo._gen_for_dict(self, var, it_val, body, shadow_name, int_keys)
     def _gen_for_set(self, var: str, it_val: str, body: list, shadow_name: str | None=None):
         return glo._gen_for_set(self, var, it_val, body, shadow_name)
     def _gen_lifted_closure(self, ci: ClosureInfo, outer_name: str=None) -> str:
@@ -4004,8 +4032,8 @@ class GimpleGen:
         return ginf._declared_int_ctype(self, val)
     def _ensure_local(self, ctype: str, val: str) -> str:
         return ginf._ensure_local(self, ctype, val)
-    def _char_to_cstr(self, typ: str, val: str, transient: bool=False) -> tuple[str, str]:
-        return ginf._char_to_cstr(self, typ, val, transient)
+    def _char_to_cstr(self, typ: str, val: str, transient: bool=False, word_ok: bool=False) -> tuple[str, str]:
+        return ginf._char_to_cstr(self, typ, val, transient, word_ok)
     def _resolve_type(self, ann: str | None) -> str:
         return ginf._resolve_type(self, ann)
     def _infer_param_types(self, func: FunctionDef,

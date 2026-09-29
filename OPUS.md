@@ -108,6 +108,11 @@ s` was false and `∀ n, ∃ s, …` is correct. That history is kept in the
 
 ### 4.1 `Total` for exports with loops
 
+> **This subsection and §4.1-MEASURED below are two halves of one change** —
+> mine (the option, and what it does not buy) and [3]'s (the threshold). Read
+> them together. The measured claim lives in §4.1-MEASURED; the walk breakage
+> the first attempt caused, and why, is in §5.7.
+
 A countdown or range loop needs fuel that grows with `n`, and `exportFuel` used
 to be the constant `100000`, which made the claim **false** — see 4.1a, and the
 measurement that settled it. **This option has now been taken:** `exportFuel` is
@@ -137,6 +142,82 @@ The original options, for the record:
 Until one of those happens, the named `sorry` over `Total` for a looping export
 sits on a statement that is false for large `n`. It is recorded here so it is
 not mistaken for a hard-but-true obligation.
+
+#### 4.1 MEASURED: the premise holds, the threshold is 5000-8000, and neither listed option closes the item
+
+[3], 2026-09-28. Checked rather than assumed, per §4.1a's own method note. A real
+generated dylib, `formal/examples/countdown.mojo` (25 instructions, a counted
+loop), `DylibExport.runExport … n` by `native_decide` at the constant
+`exportFuel = 100000`:
+
+| `n` | 0 | 10 | 1000 | 5000 | 8000 | 10000 |
+|---|---|---|---|---|---|---|
+| `runExport` | `some` | `some` | `some` | `some` | **`none`** | **`none`** |
+
+So §4.1 is right, and this is NOT §4.1a's backward-branch case: there the run
+died on step one, here it dies after thousands of steps, which is the fuel story
+§4.1 describes. Roughly 13-20 machine steps per iteration.
+
+**The structural finding, which makes option 1 cheaper than it looks.**
+`Refine.Prog.fuel` is ALREADY `UInt64 → Nat` and `runProg` already calls
+`p.fuel n`; `dylibExportProg` just filled it with `fun _ => 100000`, and
+`DylibExport.runExport` bypassed it with the bare constant. The n-dependence
+exists in the type and is unused. And option 1 does NOT touch
+`export_result_spec`, which quantifies over `runProg` — changing the fuel
+*function* leaves its statement identical. Only `Total`, stated over
+`runExport`, is affected.
+
+**But option 1 alone does not close this item, and that is the part worth
+recording.** Raising the fuel makes `Total` TRUE; it does not make it PROVED.
+`total_of_halts` is fed by a walk whose own comment scopes it to "an acyclic,
+call-free export each instruction runs at most once" — which is exactly what a
+loop is not. So option 1 lands a true statement with no proof, and option 2
+(`∃ fuel`) is honest but weaker. **The item closes on a loop-aware termination
+bound** — a ranking argument, e.g. a countdown strictly decreases its variable
+per iteration so it runs at most `n` times, needing `PATH * n` steps — which is
+the same "needs induction over the back edge" `bugs/OPEN_WORK.md` A4 names for
+the x86-64 side.
+
+**Implemented and measured, but NOT landed, and it is mid-flight.** Taken
+forward in a scratch tree, not committed:
+
+  * `exportFuel` becomes `image → n → Nat := 200000 + (image.codeSize / 4) * n.toNat`,
+    mirroring the executable path's `200000 + PATH * n` and for the same reason:
+    a loop running `k` iterations costs at most `k * PATH` steps, and a counter
+    falling by ≥1 per iteration has `k <= n`, so for a single counted loop this
+    is a BOUND, not merely a larger number. `dylibExportProg` is given the same
+    function so `Total` and a contract describe the same run.
+  * `countdown` then halts at `n = 8000, 10000, 20000` — the failing cases are
+    fixed. **`Total` is no longer false for a looping export.**
+  * `Contracts.runs_to_body` survives an n-dependent fuel at no cost: the body
+    needs its own LENGTH, a literal, and `exportFuel` is monotone, so the bound
+    supplied at `n = 0` is a bound at every `n`. That is a real result about the
+    contract path, and it is why the contract work was not disturbed.
+  * **The regression this introduced is FIXED.** The halt-only CFG walk states
+    its step-budget hypothesis against the fuel, so with the fuel as a function
+    its two `omega`s saw `exportFuel dylib_image n` as an opaque atom and
+    failed — which broke `fire dylib --formal` for ACYLIC exports. The fix is
+    to emit the fuel in its **arithmetic** form, `200000 + PATH * n`, which is
+    what the executable path already does and for the same reason. Drift is
+    still caught and caught LOUDLY: `total_of_halts` takes the walk's hypothesis
+    at `runExport`'s own type, so a `PATH` disagreeing with the library's
+    `image.codeSize / 4` makes the generated proof a statement about a different
+    run and Lean rejects it. The check moved from "the same number in two
+    places" — which rots silently — to "the typechecker agrees", which cannot.
+    `tw_extra` does *not* work for this; feeding the walk's simp set leaves both
+    goals unsolved.
+
+  * **Re-verified after the fix:** acyclic `triple`'s `Total` proof compiles
+    with 0 errors and 0 holes, and `countdown` halts at `n = 8000, 10000, 20000`.
+    Both the false-statement fix and the proof of the acyclic case stand
+    together. The remaining `fire dylib --formal` failure is the contract
+    emitter's `hreg`, which is a separate item and unrelated to the fuel.
+
+> **See also [2]'s §5.7**, which measures the same walk breakage from the
+> other side. Its problem statement is **resolved by `e0af987`**, which landed
+> the arithmetic-form fuel this section calls for. Two accounts of one bug; fold
+> them when convenient. The full consolidated state of both is
+> `bugs/FORMAL_contract_work_handoff.md`.
 
 #### 4.1a RESOLVED as a diagnosis: the `sorry` is on a false statement, and that is now CHECKED
 
@@ -320,7 +401,7 @@ Unchanged and still unmeasured. [3]'s §5 notes they did not touch
 walker only. The measurement in §5.0 has not been repeated for x86, so "the
 same argument applies" is a hypothesis, not a finding.
 
-### 5.5 The emitter's `hreg` did not typecheck — FIXED (unverified by Lean)
+### 5.5 The emitter's `hreg` did not typecheck — the unfold was right, but see 5.7
 
 The emitted proof failed at `hreg`:
 
@@ -348,13 +429,77 @@ counterexamples)"*. Every other value site in the file uses the same
 place that emitted a raw `intro n; bv_decide` and so missed it. So the fix is
 "apply the file's own lesson", not a new tactic.
 
-**UNVERIFIED.** FORMAL.md §11.3 puts the gate with the integrator and I have
-not run Lean on the result; the emitted *text* is confirmed to carry the
-unfolding at all three sites. A `simp only` with ~30 entries may also need
-`+decide` or may be insufficient for the memory round trip — the value sites
-that work use `+decide only`, and this one uses plain `only` because nothing
-here should pull in a `Decidable` walk. That is the first thing to check if it
-still fails.
+**MEASURED SINCE — and the verdict is "right idea, not the whole story."**
+The unfold does clear `bv_decide`'s opaque abstraction, which was the symptom
+described here. But the file still fails, for a *different* reason one level
+down, and it is not a budget problem. See **§5.7**, which supersedes the
+"try `+decide`, then suspect the memory round trip" advice this paragraph used
+to give — that guess was wrong, and the real cause is the `fuel_lean` change.
+
+### 5.7 MEASURED: the `fuel_lean` change broke the walk — RESOLVED by `e0af987`
+
+[3]'s `IR-3-to-2-dylib-contract-emitter.md` reports three failures and says of
+`hreg`: *"First thing to try: raise `maxHeartbeats` and measure."* **I measured,
+and that is not where the time or the failure is.** Truncating the generated
+file just past `hx30` — so Lean checks the walk and `hreg` and nothing else —
+gives:
+
+    11.4s, and the error is at line 1806, which is INSIDE the walk.
+
+So `hreg` costs about eleven seconds, and raising the budget to 1e9 does not
+help: the whole file then runs past an hour without finishing. This is an
+arithmetic problem, not a budget one.
+
+**The cause is the `exportFuel` change, and it is a real interaction between
+two correct-looking edits.** `fuel_lean` replaced the emitted fuel *literal*
+`100000` with the library *function* `DylibExport.exportFuel dylib_image n` so
+the two could not drift. Good. But the walk's own step-accounting goals are
+`omega` calls, and `omega` cannot unfold a library function:
+
+    1806:  15 + (exportFuel dylib_image n - 15) = exportFuel dylib_image n
+
+which is true for any fuel `≥ 15` and provable the moment the definition is
+visible. Adding `simp [DylibExport.exportFuel]; omega` **fixes that line** —
+verified, the error moves on.
+
+The next one is the interesting one:
+
+    1809:  arm64_go_exit_hit … (exportFuel dylib_image n - 15) (by omega)
+
+which needs the fuel to be **large**, and no numeric lower bound is in scope —
+because the thing that used to *be* the number, and that the generator's
+`fuel < _TOTAL` guard checked on the python side, is now an opaque term in the
+Lean text. The guard still runs; its *result* is simply never emitted.
+
+**So the fix is two things, and neither is a heartbeat:**
+
+  1. Unfold `DylibExport.exportFuel` in the walk's fuel arithmetic — the same
+     "make it concrete rather than opaque" lesson as §5.5, one level down.
+  2. Emit the base bound the guard computed, as a Lean hypothesis:
+     `have : (200000 : Nat) ≤ DylibExport.exportFuel dylib_image n`. The
+     generator already knows the base; it checks it and then drops it.
+
+**RESOLVED, and the resolution is instructive.** `e0af987` fixed this instance
+by going back to LITERAL arithmetic: the emitted fuel is now
+`200000 + 15 * n.toNat`, and line 1806 reads
+`15 + ((200000 + 15 * n.toNat) - 15) = (200000 + 15 * n.toNat)`, which `omega`
+closes. So the fix for "omega cannot see through a function" was to stop hiding
+the number behind one — which also re-supplies the bound for free, so the
+`have` described above is no longer needed either.
+
+The deeper lesson is the one worth keeping, and it is now a hazard rather than
+a live bug: **replacing a literal with a function removes it from every tactic
+that could see its value.** `omega` and `native_decide` both work on literals. A
+no-drift property bought that way has to be paid for by re-supplying the bounds
+the literal used to carry, or it trades a silent-drift bug for an
+unsatisfiable-arithmetic one. This is live for any future swap of the same
+shape — x86 included.
+
+**Cross-reference, per [3]'s note that §4.1 and §5.7 are two accounts of one
+bug:** the premise here is §4.1/§4.1-MEASURED's, and what this section adds is
+*why* the first attempt at it broke the walk. Read them together; the
+measurement in §4.1-MEASURED (halts through `n = 5000`, `none` at `8000`) is
+[3]'s and is not repeated here.
 
 ### 5.6 The golden file — RESOLVED, nothing to escalate
 
@@ -377,7 +522,7 @@ command, take more than you meant to. The file was recoverable throughout at
 `c967b5d`, and the only window of real risk was after `818288e` and before
 `d9443ed`, when the golden was gone and the emitter was still uncommitted.
 
-### 5.7 A process note, because it cost real work this session
+### 5.8 A process note, because it cost real work this session
 
 My 304-line generator edit was reverted out of the working tree by a
 concurrent agent between two commands, with no commit and no message. Nothing

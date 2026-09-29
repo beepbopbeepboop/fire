@@ -58,7 +58,7 @@ from ownership_check import _block_terminates
 from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
-    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _compute_owned_free_candidates, _compute_scoped_free_candidates, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
+    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
     _pair_key, _prepass_list_elem, _ptr_slot_in_range, _resolve_member_expr_type, _resolve_type, _scan_container_elems,
     _seed_addressed_locals, _type_of
@@ -240,6 +240,7 @@ def _reset_func(gen, body: list = None, params: list = None,
     # names repeat across functions, so this MUST reset per function (a stale
     # entry would free a temp that never owned anything). See doc/MEMORY.html.
     gen._cstr_key_src: dict[str, str] = {}
+    gen._kw_key_src: dict[str, str] = {}
     gen._fresh_vals: set = set()   # per function: temp names repeat across functions
     # Temps holding a heap string THIS function's own concatenation lowering
     # just built (`_emit_str_cat`) and that nothing else can hold yet. The
@@ -335,6 +336,9 @@ def _reset_func(gen, body: list = None, params: list = None,
     # `int`, truncating a list pointer to 32 bits -> SEGV in the compiled
     # `_collect_return_elems`).
     gen._dict_items_val_elems: dict[str, str] = {}
+    gen._dict_items_int_keys: set = set()
+    gen._dict_item_int_key_vars: set = set()
+    gen._int_key_loop_vars: set = set()
     gen._tuple_slot_types: dict[str, list] = {}
     # NOTE: `gen._return_slot_types` (the name-keyed, CROSS-function half of
     # per-slot tuple types, written at a return and read at a later call
@@ -947,8 +951,30 @@ _FRESH_CONTAINER_RETURNS = frozenset([
     'mojo_list_slice', 'mojo_list_copy', 'mojo_list_concat', 'mojo_list_repeat',
     'mojo_reversed', 'mojo_str_split', 'mojo_str_splitlines', 'mojo_range',
     'mojo_range3', 'mojo_dict_copy', 'mojo_set_copy', 'mojo_dict_keys',
-    'mojo_dict_values', 'mojo_dict_items', 'mojo_zip', 'mojo_set_union',
+    'mojo_dict_values', 'mojo_dict_items', 'mojo_dict_items_int', 'mojo_zip', 'mojo_set_union',
     'mojo_set_intersection', 'mojo_set_difference',
+])
+
+
+# Runtime functions that ALWAYS return a string they just allocated. Unlike the
+# container list this one is EARNED, not assumed: a mechanical pass over every
+# `char *`-returning function in runtime/fire_runtime.c kept only those whose every
+# `return` is a value allocated by malloc/calloc/strdup in that same function.
+# Notably absent, because they return their own argument or a static string in
+# an edge case (a free() of either would crash): string_upper, string_lower,
+# string_strip, mojo_str_rstrip, mojo_str_lstrip_chars, mojo_str_expandtabs,
+# _str_pad, mojo_str_join (returns "" for an empty list), mojo_repr_float
+# ("nan"/"inf"). mojo_repr_int is absent too (its comment says it reuses a buffer).
+_FRESH_STRING_RETURNS = frozenset([
+    'mojo_str_cat', 'mojo_str_from_int', 'mojo_char_to_str', 'mojo_cstr_slice',
+    'mojo_cstr_repeat', 'mojo_cstr_reverse', 'mojo_repr_str',
+    'mojo_hex', 'mojo_oct', 'mojo_bin',
+    # The str methods: each returns a copy the caller owns, never its receiver
+    # (runtime/fire_runtime.c, `_str_fresh_copy`).
+    'string_upper', 'string_lower', 'string_strip', 'mojo_str_lstrip',
+    'mojo_str_rstrip', 'mojo_str_lstrip_chars', 'mojo_str_rstrip_chars',
+    'mojo_str_rjust', 'mojo_str_ljust', 'mojo_str_center',
+    'mojo_str_expandtabs', 'mojo_str_join',
 ])
 
 
@@ -975,7 +1001,8 @@ def is_fresh_container_operand(gen, node, val: str) -> bool:
     if val == '' or val not in gen._fresh_vals:
         return False
     return isinstance(node, (ListExpr, DictExpr, SetExpr, Comprehension,
-                             CallExpr, SubscriptExpr, SliceExpr, BinaryOp))
+                             CallExpr, SubscriptExpr, SliceExpr, BinaryOp,
+                             TstringLiteral))
 
 
 def free_fresh_container(gen, val: str, ctype: str) -> None:
@@ -1025,10 +1052,13 @@ def _emit(gen, line: str):
     # exactly such a value, from an operand node that can only have produced
     # it, may free it once it has read it.
     _fi = line.find(' = mojo_')
+    if _fi < 0:
+        _fi = line.find(' = string_')
     if _fi > 0:
         _rest = line[_fi + 3:]
         _pi = _rest.find(' (')
-        if _pi > 0 and _rest[:_pi] in _FRESH_CONTAINER_RETURNS:
+        if _pi > 0 and (_rest[:_pi] in _FRESH_CONTAINER_RETURNS
+                        or _rest[:_pi] in _FRESH_STRING_RETURNS):
             gen._fresh_vals.add(line[:_fi].strip())
     # Track whether this is a terminal statement (can't have code after it)
     stripped = line.strip()
@@ -1208,6 +1238,7 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
     For each argument, if the declared parameter type differs from the
     passed type, emit an intermediate temp with the correct cast.
     """
+    fname, arg_pairs = _apply_kw_keys(gen, fname, arg_pairs)
     # Rename certain C library functions to mojo_* wrappers with void* params
     fname = gen._CALL_RENAMES.get(fname, fname)
     sig = gen._KNOWN_SIGS.get(fname)
@@ -1583,8 +1614,10 @@ def _emit_str_cat(gen, lv: str, rv: str, free_left: bool = False, free_right: bo
     t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', rv)])
     if free_left:
         gen._emit_call('void', '', 'free', [('char *', lv)])
+        gen._fresh_vals.discard(lv)
     if free_right:
         gen._emit_call('void', '', 'free', [('char *', rv)])
+        gen._fresh_vals.discard(rv)
     gen._fresh_str_tmps.add(t)
     return t
 
@@ -1596,9 +1629,52 @@ def _is_fresh_operand(gen, node, val: str) -> bool:
     stops an identifier/field read that merely *aliases* a fresh temp (`s = a
     + b` then `s + c`: the operand node is an IdentExpr) from being freed
     out from under the variable."""
-    if val not in gen._fresh_str_tmps:
-        return False
-    return isinstance(node, gimple_ctypes.BinaryOp) and node.op == '+'
+    if val in gen._fresh_str_tmps:
+        return isinstance(node, gimple_ctypes.BinaryOp) and node.op == '+'
+    # A fresh string that did not come from a `+` of this function's own cat
+    # (`String(i)`, a slice, an f-string): still a value a fresh-producing
+    # runtime call created that no consumer has claimed, from an expression that
+    # can only have produced it (never an identifier).
+    return is_fresh_container_operand(gen, node, val)
+
+
+# Dict runtime functions that have a `_kw` twin taking the key as a raw word.
+_KW_DICT_FNS = frozenset([
+    'mojo_dict_get_int', 'mojo_dict_get_double', 'mojo_dict_get_str',
+    'mojo_dict_set_int', 'mojo_dict_set_double', 'mojo_dict_set_str',
+    'mojo_dict_contains', 'mojo_dict_pop_int',
+    'mojo_dict_setdefault_int', 'mojo_dict_setdefault_str',
+])
+
+
+def _apply_kw_keys(gen, fname: str, arg_pairs: list):
+    """Resolve the placeholder keys `_char_to_cstr(word_ok=True)` handed out.
+    For a dict function with a `_kw` twin: call the twin and pass the raw
+    integer word. For anything else: build the decimal string now, exactly as
+    the non-word path would have, and let the release hook free it after the
+    call. Returns `(fname, arg_pairs)`."""
+    reg = gen._kw_key_src
+    if not reg:
+        return fname, arg_pairs
+    out = []
+    renamed = False
+    for _apair in arg_pairs:
+        _k = _as_str(_apair[1])
+        if _k in reg:
+            _word = reg[_k]
+            del reg[_k]
+            if fname in _KW_DICT_FNS:
+                out.append(('int64_t', _word))
+                renamed = True
+            else:
+                _s = gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', _word)])
+                gen._cstr_key_src[_s] = _word
+                out.append(('char *', _s))
+        else:
+            out.append(_apair)
+    if renamed:
+        return fname + '_kw', out
+    return fname, out
 
 
 def _release_transient_cstr_args(gen, arg_pairs: list) -> None:
@@ -1716,7 +1792,7 @@ def _tagged_dyn_read(gen, val: str, want: str) -> str | None:
     return gen._new_val('int64_t', f"mojo_tagged_int ((int64_t){box}, {pos})")
 
 
-def _char_to_cstr(gen, typ: str, val: str, transient: bool = False) -> tuple[str, str]:
+def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: bool = False) -> tuple[str, str]:
     """Convert a char-type value to char * for string operations.
     Returns (new_type, new_val) — if typ is 'char', calls mojo_char_to_str.
     If typ is 'int64_t' and actual type isn't a pointer, also converts.
@@ -1779,6 +1855,19 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False) -> tuple[str
         # `_release_transient_cstr_args`), so an Int-keyed dict in a hot
         # loop no longer leaks one string per access. A caller that stores
         # the pointer, or reuses it across several calls, must not pass it.
+        if transient and word_ok:
+            # A dict operation's key that is an untracked int64_t: hand the
+            # consumer the raw machine WORD instead of a string. `_emit_call`
+            # turns the dict call into its `_kw` twin, which decides string vs
+            # integer at runtime exactly as `mojo_cstr_or_int_str` does but looks
+            # an integer up directly (nothing formatted, nothing to release). The
+            # `char *` returned here is only a placeholder for `_apply_kw_keys` to
+            # recognise; if it reaches a function without a `_kw` twin, that
+            # function materialises the string the old way.
+            ipw = gen._new_val('int64_t', f'(int64_t){val}')
+            marker = gen._new_val('char *', f'(char *){ipw}')
+            gen._kw_key_src[marker] = val
+            return 'char *', marker
         key = gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', val)])
         if transient:
             gen._cstr_key_src[key] = val
@@ -3852,7 +3941,7 @@ def _struct_ptr_owned(gen, name: str, ctype) -> bool:
     if ctype is None or not ctype.endswith(' *'):
         return False
     base = ctype[:-2].strip()
-    if base not in gen._analysis_structs or base not in gen.struct_field_types:
+    if ctype != 'char *' and (base not in gen._analysis_structs or base not in gen.struct_field_types):
         return False
     return name in gen._owned_free_pushed
 
@@ -3906,6 +3995,22 @@ def emit_container_new(gen, t: str, ctype: str) -> None:
         gen._emit(f"  {t} = mojo_list_new ();")
 
 
+def _drop_owned_candidate(gen, name: str) -> None:
+    """`name` stops being owned: not a function-level candidate and not armed
+    for its loop body, so no allocation, push or free is ever emitted for it."""
+    gen._owned_free_candidates.discard(name)
+    gen._scope_armed.discard(name)
+
+
+def _container_keys_safe(gen, name: str, ctype) -> bool:
+    """A dict or set owns its key/element strings, so it may be torn down at
+    scope exit only if no key it handed out by iteration can outlive it
+    (ownership_destruct.key_views_consumed). Any other type is unaffected."""
+    if ctype != 'MojoDict *' and ctype != 'MojoSet *':
+        return True
+    return _key_views_ok(gen._own_fn_body, name)
+
+
 def maybe_push_owned_local(gen, name: str, value=None) -> None:
     """Call once, right after lowering ANY statement whose sole target is
     the plain identifier `name` (a `VarDecl` or a single-target
@@ -3948,7 +4053,16 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
             candidates.discard(name)
             return
         gen._fresh_vals.discard(rhs)
+        # A fresh STRING is owned only if no method call on it can hand back
+        # the receiver itself (`t = s.strip()` may alias `s`): see
+        # ownership_destruct.receiver_results_consumed.
+        if gen.var_types.get(name) == 'char *' and not _string_uses_ok(gen._own_fn_body, name):
+            candidates.discard(name)
+            return
     ctype = gen.var_types.get(name)
+    if not _container_keys_safe(gen, name, ctype):
+        _drop_owned_candidate(gen, name)
+        return
     # A non-empty literal was lowered with a stack-storage request
     # (`maybe_stack_alloc_owned_ctor`): consumed -> the value lives in that
     # storage and is torn down with `_destroy`; still pending -> nothing took
@@ -3962,6 +4076,13 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
         gen._owned_stack_allocated.add(name)
         push_fn = _owned_stack_push_runtime_fn(ctype)
         free_fn = _owned_destroy_runtime_fn(ctype)
+        if push_fn == '' and ctype is not None and ctype.endswith(' *'):
+            # A stack-homed struct instance has nothing to tear down (no
+            # buffers of its own are owned through it) and nothing to unwind:
+            # record the name as handled and register no free.
+            pushed.add(name)
+            if name in gen._scope_armed:
+                _scope_register(gen, name, '')
     else:
         push_fn = _owned_push_runtime_fn(ctype)
         free_fn = _owned_free_runtime_fn(ctype)
@@ -3972,7 +4093,8 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
             # checked, because `_lower_call` marks only vetted constructors
             # fresh, which the declaration gate above already required.
             _base = ctype[:-2].strip()
-            if _base in gen._analysis_structs and _base in gen.struct_field_types:
+            if (_base in gen._analysis_structs and _base in gen.struct_field_types) or ctype == 'char *':
+                # A struct instance or a heap string: a plain malloc block.
                 push_fn = 'mojo_cleanup_push_ptr'
                 free_fn = 'free'
     if push_fn:
@@ -4080,6 +4202,7 @@ def _reset_scope_state(gen) -> None:
     declaring body is being lowered right now."""
     gen._literal_storage = ''
     gen._literal_storage_ctype = ''
+    gen._own_fn_body = []
     gen._scoped_free_candidates = set()
     gen._scope_armed = set()
     gen._scope_live = []
@@ -4254,6 +4377,19 @@ _OWNED_STACK_PUSH_RUNTIME_FN = {
 
 
 
+def _vetted_struct_ctor_name(gen, value) -> str:
+    """`S` when `value` is a constructor call `S(...)` of a struct the ownership
+    analysis vetted (its `__init__` retains nothing, no base class) and whose
+    layout codegen knows; '' otherwise."""
+    if not (isinstance(value, CallExpr) and isinstance(value.func, IdentExpr)):
+        return ''
+    sname = _as_str(value.func.name)
+    if sname in gen._analysis_structs and sname in gen.struct_field_types \
+            and sname not in gen._dict_subclass_structs:
+        return sname
+    return ''
+
+
 def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
     """Call from gimple_gen_stmts.py's central `gen_stmt` dispatcher
     BEFORE lowering a `VarDecl`/single-target `AssignStmt` normally (a
@@ -4271,6 +4407,10 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
     if name in pushed:
         return False
     ctype = _empty_ctor_ctype(value)
+    _kind = ctype if ctype is not None else _literal_ctor_ctype(value)
+    if _kind is not None and not _container_keys_safe(gen, name, _kind):
+        _drop_owned_candidate(gen, name)
+        return False
     if ctype is None:
         # A NON-EMPTY literal (`[1, 2, i]`, `{"a": 1}`, `{1, 2}`) keeps its own
         # element-type inference and per-element population, so it is not
@@ -4283,6 +4423,15 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
         # ordinary heap candidate. Returns False: the caller lowers normally.
         lit = _literal_ctor_ctype(value)
         if lit is None:
+            # A constructor call of a vetted struct: reserve frame storage for
+            # the instance the same way (consumed by `_lower_struct_constructor`).
+            _sname = _vetted_struct_ctor_name(gen, value)
+            if _sname == '':
+                return False
+            gen.temp_counter += 1
+            gen.decls.append(f"  {_sname} _owned_storage{gen.temp_counter}_{name};")
+            gen._literal_storage = f'_owned_storage{gen.temp_counter}_{name}'
+            gen._literal_storage_ctype = f"{_sname} *"
             return False
         _init_fn, _struct = _OWNED_STACK_KIND[lit]
         gen.temp_counter += 1
@@ -4356,6 +4505,8 @@ def begin_function(gen, fn) -> None:
     gen._owned_free_pushed = set()
     gen._owned_stack_allocated = set()
     _reset_scope_state(gen)
+    gen._own_fn_body = fn.body
+    gen._int_keyed_dicts = _compute_int_keyed_dicts(fn)
     gen._scoped_free_candidates = _compute_scoped_free_candidates(fn, gen._owned_free_candidates, gen._analysis_funcs, gen._analysis_structs)
 
 
@@ -4382,6 +4533,7 @@ def reset_no_candidates(gen) -> None:
     gen._owned_free_candidates = set()
     gen._owned_free_pushed = set()
     gen._owned_stack_allocated = set()
+    gen._int_keyed_dicts = set()
     _reset_scope_state(gen)
 
 

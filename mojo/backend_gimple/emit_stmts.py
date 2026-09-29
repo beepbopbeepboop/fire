@@ -369,6 +369,16 @@ def _gen_stmt_VarDecl(gen, node):
         # Type inference: if no annotation, use the value's type instead of 'int'
         if node.type_ann is None:
             ctype = vtype
+            # An unannotated integer local is Int (64-bit), not the C
+            # `int` an int32-range literal lowers to: the pre-pass
+            # (`_infer_local_var_types`) already widened it, so honour
+            # that hint exactly as the plain-assignment path does.
+            if (ctype == 'int' and isinstance(node.name, str)
+                    and node.name not in gen.var_types):
+                _hint = gen._inferred_var_types.get(
+                    gen.current_func_name, {}).get(node.name)
+                if _hint == 'int64_t':
+                    ctype = 'int64_t'
         else:
             ctype = gen._resolve_type(node.type_ann)
         gen._declare_var(node.name, ctype)
@@ -1340,7 +1350,7 @@ def _gen_stmt_AssignStmt(gen, node):
                                     [('MojoDict *', obj_v), ('MojoBytes *', idx_v), (vtype, v)])
                 key_tmp = None
             else:
-                _, key_tmp = gen._char_to_cstr(it, idx_v, True)
+                _, key_tmp = gen._char_to_cstr(it, idx_v, True, True)
             if key_tmp is None:
                 pass
             elif vtype == 'char *':
@@ -1404,7 +1414,7 @@ def _gen_stmt_AssignStmt(gen, node):
                     ip = gen._new_temp('int64_t')
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
-                    _, key_tmp2 = gen._char_to_cstr(it, idx_v, True)
+                    _, key_tmp2 = gen._char_to_cstr(it, idx_v, True, True)
                     if isinstance(node.value, gimple_ctypes.BoolLiteral):
                         gen._emit(f"  mojo_mark_dict_bool_values ({dp});")
                     # Pass actual vtype so _emit_call can coerce pointers to int64_t
@@ -1414,7 +1424,7 @@ def _gen_stmt_AssignStmt(gen, node):
                 # `d[k] = v` on a builtin-`dict` subclass with no
                 # `__setitem__` override: store into the backing MojoDict.
                 _dsw_dp = gen._new_val('MojoDict *', f"{obj_v}->_data")
-                _dsw_kt, _dsw_kv = gen._char_to_cstr(it, idx_v, True)
+                _dsw_kt, _dsw_kv = gen._char_to_cstr(it, idx_v, True, True)
                 if vtype == 'char *':
                     gen._emit_call('void', '', 'mojo_dict_set_str',
                                     [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
@@ -1799,7 +1809,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
             # on a dict pointer — invalid GIMPLE, "non-register as LHS of
             # unary operation". Found via mojolib BUG-2026-031: a closure
             # capturing an outer dict and doing `counts[key] += 1` inside it.
-            _, key_tmp = gen._char_to_cstr(it, idx_v, True)
+            _, key_tmp = gen._char_to_cstr(it, idx_v, True, True)
             if vtype == 'char *':
                 gen._emit_call('void', '', 'mojo_dict_set_str',
                                 [('MojoDict *', obj_v), ('char *', key_tmp), ('char *', v)])
@@ -1833,7 +1843,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
                 ip = gen._new_temp('int64_t')
                 gen._emit(f"  {ip} = (int64_t){obj_v};")
                 dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
-                _, key_tmp2 = gen._char_to_cstr(it, idx_v, True)
+                _, key_tmp2 = gen._char_to_cstr(it, idx_v, True, True)
                 if vtype == 'char *':
                     gen._emit_call('void', '', 'mojo_dict_set_str',
                                     [('MojoDict *', dp), ('char *', key_tmp2), ('char *', v)])
@@ -1852,7 +1862,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
             # through the backing MojoDict (the read half already went
             # through _lower_subscript's dict-subclass branch).
             _dsa_dp = gen._new_val('MojoDict *', f"{obj_v}->_data")
-            _dsa_kt, _dsa_kv = gen._char_to_cstr(it, idx_v, True)
+            _dsa_kt, _dsa_kv = gen._char_to_cstr(it, idx_v, True, True)
             if vtype == 'char *':
                 gen._emit_call('void', '', 'mojo_dict_set_str',
                                 [('MojoDict *', _dsa_dp), ('char *', _dsa_kv),
@@ -2349,7 +2359,7 @@ def _gen_stmt_DelStmt(gen, node):
             continue
         if ot == 'MojoDict *':
             key_type, key_val = gen.lower_expr(target.index)
-            key_type, key_val = gen._char_to_cstr(key_type, key_val, True)
+            key_type, key_val = gen._char_to_cstr(key_type, key_val, True, True)
             gen._emit_call('int64_t', '', 'mojo_dict_pop_int',
                              [('MojoDict *', ov), (key_type, key_val)])
         elif ot == 'MojoList *':
@@ -2375,7 +2385,7 @@ def _gen_stmt_DelStmt(gen, node):
             gen._emit_label(bb_dict)
             dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
             dkey_type, dkey_val = gen.lower_expr(target.index)
-            dkey_type, dkey_val = gen._char_to_cstr(dkey_type, dkey_val, True)
+            dkey_type, dkey_val = gen._char_to_cstr(dkey_type, dkey_val, True, True)
             gen._emit_call('int64_t', '', 'mojo_dict_pop_int',
                              [('MojoDict *', dp), (dkey_type, dkey_val)])
             gen._emit(f"  goto {bb_after};")
@@ -2667,7 +2677,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 ev_cast = gen._cast_for_list(vtype, v, suf)
                 gen._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
             elif ot == 'MojoDict *':
-                _, key_tmp = gen._char_to_cstr(it2, idx_v, True)
+                _, key_tmp = gen._char_to_cstr(it2, idx_v, True, True)
                 if isinstance(node.value, gimple_ctypes.BoolLiteral):
                     gen._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
                 gen._emit_call('void', '', 'mojo_dict_set_int',
@@ -2695,7 +2705,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     ip = gen._new_temp('int64_t')
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
-                    _, key_tmp2 = gen._char_to_cstr(it2, idx_v, True)
+                    _, key_tmp2 = gen._char_to_cstr(it2, idx_v, True, True)
                     if isinstance(node.value, gimple_ctypes.BoolLiteral):
                         gen._emit(f"  mojo_mark_dict_bool_values ({dp});")
                     gen._emit_call('void', '', 'mojo_dict_set_int',
