@@ -4072,6 +4072,17 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         elif _kind < 0:
             _n_fixed += 1
     if _kind >= 0:
+        if _n_fixed > 4:
+            # mojo_vararg_call_N passes at most four leading scalars through
+            # un-packed, so a callee wanting more would be handed the wrong
+            # arguments. Refuse loudly rather than emit that: the backend's
+            # RuntimeError makes the module fall back to interpreting from
+            # source, which is right. (`lambda a, b, c, d, e, *rest: ...` —
+            # five ordinary parameters ahead of a `*args` — is not a shape
+            # real code writes; `lambda a, b, c, d, *rest: ...` works.)
+            raise RuntimeError(
+                f"a lambda with {_n_fixed} ordinary parameters before its "
+                f"*args is not supported (at most 4)")
         # Materialize the env exactly as the closing-lambda path below does;
         # a variadic lambda that ALSO captures is the same `self, then the
         # real parameters` convention, just with the tail packed.

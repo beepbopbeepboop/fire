@@ -625,6 +625,76 @@ BUILTIN_PROGRAMS = {
         def main():
             print(outer(True))
     """),
+    # A VARIADIC lambda, called every way a real program holds one: through
+    # a local, as an argument, returned, rebound across branches, and as a
+    # `sorted(key=)` / `map` / `filter` callable. Its lifted C signature is
+    # the PACKED form (`MojoList *` for `*args`, `MojoDict *` for
+    # `**kwargs`) while the call site writes loose arguments, so the compiled
+    # path used to hand the callee a raw integer where a `MojoList *` was
+    # wanted and dereference it — a SIGSEGV in both engines' shared shape.
+    # Belongs HERE rather than in test_interp_oracle.py because the compiled
+    # path now supports it, and this harness additionally proves the two
+    # engines agree (a strictly stronger assertion).
+    #
+    # `sorted(key=lambda *a: ...)` / `map(lambda *a: ...)` are deliberately
+    # NOT here: the COMPILED path handles them (test_gimple_runner.py's
+    # `gimple_variadic_lambda_works_through_every_holder` covers both), but
+    # handing a variadic lambda to a builtin crashes the INTERPRETER, so this
+    # harness could not compare anything. Tracked in
+    # bugs/CODEGEN_interpreter_variadic_lambda_as_builtin_callback.md.
+    "variadic_lambda_packs_its_arguments": textwrap.dedent("""\
+        def add(a, b):
+            return a + b
+
+        def apply(f, v):
+            return f(v, v)
+
+        def mk(n):
+            return lambda *a: a[0] * n
+
+        class Box:
+            def __init__(self):
+                self.fn = None
+
+        def main():
+            print(apply(lambda *a: a[0] + a[1], 3))
+            print(mk(2)(21))
+            n = 7
+            cap = lambda *args, **kwargs: add(n, args[0])
+            print(cap(1))
+            b = Box()
+            b.fn = lambda *a: a[0] + 1
+            print(b.fn(41))
+            if 1:
+                r = lambda *a: a[0]
+            else:
+                r = lambda *a: a[1]
+            print(r(7, 8))
+            e = lambda *a, **k: len(a) * 100 + len(k)
+            print(e(1, 2, z=9))
+            f = lambda *a: len(a)
+            print(f(1, 2, 3, 4, 5, 6, 7))
+    """),
+    # `*args` and `**kwargs` together, with keyword arguments at the call
+    # site and a zero-argument call (which must still hand the callee a real
+    # empty dict, never NULL).
+    "variadic_lambda_kwargs_at_the_call_site": textwrap.dedent("""\
+        def walk(*a, **k):
+            return len(a) * 10 + len(k)
+
+        def main():
+            e = lambda *a, **k: len(a) * 100 + len(k)
+            print(e(1, 2))
+            print(e(1, 2, z=9))
+            only = lambda **k: len(k)
+            print(only(a=1, b=2, c=3))
+            print(only())
+            both = lambda *a, **k: walk(*a, **k)
+            print(both(1, 2, 3))
+            print(both(1, z=5))
+            two = lambda f, g, *a: f * g + len(a)
+            print(two(3, 4, 1, 2))
+    """),
 }
 
 

@@ -462,6 +462,147 @@ fn main():
     print(apply(e, 1))
 """, "8\n")
 
+    # A VARIADIC lambda. The lifted definition was always correct — its
+    # parameters are the PACKED forms (`MojoList *` for `*args`, `MojoDict *`
+    # for `**kwargs`) — but the lambda's VALUE was a bare function pointer,
+    # and `mojo_fnptr_call_N` is arity-based: it casts the callee to
+    # `int64_t(*)(int64_t, ...)` and passes the arguments written at the call
+    # positionally. So `e(4, 5)` handed the callee `a = 4` where a
+    # `MojoList *` was wanted, and the body dereferenced address 4 — every one
+    # of these SIGSEGV'd before the fix, whatever the lambda captured.
+    # `_lower_LambdaExpr` now materializes a `MojoVarargFn` (callee, env,
+    # leading-parameter count, and which of the three shapes it has), and the
+    # runtime dispatch helpers pack. See
+    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
+    test_gimple_stdout("gimple_variadic_lambda_positional_args_packed", """\
+def add(a, b):
+    return a + b
+
+def main():
+    e = lambda *a: add(a[0], a[1])
+    print(e(4, 5))
+""", "9\n")
+
+    # A variadic lambda's `*args` really is a sequence: len(), iteration and
+    # indexing all read the packed list, and the ZERO-argument call packs an
+    # empty one rather than passing a stray scalar.
+    test_gimple_stdout("gimple_variadic_lambda_args_is_a_sequence", """\
+def main():
+    e = lambda *a: len(a) * 10 + a[0]
+    print(e())
+    print(e(1, 2, 3))
+""", "0\n31\n")
+
+    # CAPTURING + variadic: the closure env leads the packed parameters, and
+    # the capture is read through it. This is the corpus shape
+    # `Lib/importlib/util.py`'s LazyLoader factory has
+    # (`lambda *args, **kwargs: cls(loader(*args, **kwargs))`).
+    test_gimple_stdout("gimple_variadic_lambda_captures_env", """\
+def add(a, b):
+    return a + b
+
+def main():
+    n = 7
+    e = lambda *args, **kwargs: add(n, args[0])
+    print(e(1))
+    m = 2
+    f = lambda *args, **kwargs: m * 100 + len(args) + len(kwargs)
+    print(f(1, 2, z=3))
+""", "8\n203\n")
+
+    # Keyword arguments at the call site reach a `**kwargs` callee, packed
+    # into the MojoDict the lifted body reads. A call with none must still
+    # hand the callee a real (empty) dict, never NULL: `len(k)` and `k['x']`
+    # are ordinary spellings and NULL segfaults on the second.
+    test_gimple_stdout("gimple_variadic_lambda_kwargs_reach_the_callee", """\
+def main():
+    e = lambda *a, **k: len(a) * 100 + len(k)
+    print(e(1, 2))
+    print(e(1, 2, z=9))
+    only = lambda **k: len(k)
+    print(only(a=1, b=2, c=3))
+    print(only())
+""", "200\n201\n3\n0\n")
+
+    # ORDINARY leading parameters ahead of the `*args` stay POSITIONAL — the
+    # callee declares them before its `*args`, so they must not be packed —
+    # and everything after them is what `*args` collects. This shape did not
+    # compile at all before the fix: the forward declaration built for the
+    # lambda silently dropped its `*`-prefixed parameters, so GCC rejected
+    # `int64_t f(int64_t)` against a definition of `int64_t f(int64_t,
+    # MojoList *)` as conflicting types.
+    test_gimple_stdout("gimple_variadic_lambda_fixed_prefix_stays_positional", """\
+def main():
+    two = lambda f, g, *a: f * g + len(a)
+    print(two(3, 4, 1, 2))
+    four = lambda a, b, c, d, *rest: a + b + c + d + len(rest)
+    print(four(1, 2, 3, 4, 5, 6))
+""", "14\n12\n")
+
+    # Because the packing happens at the RUNTIME dispatch point rather than
+    # at each call site, every way of holding the value works at once: passed
+    # as an argument, returned, stored in a dict, stored in a struct field,
+    # rebound across branches, and used as a `sorted(key=)` / `map` / `filter`
+    # callable. The `Lib/doctest.py` shape this bug doc names is the struct
+    # field one (`_colorize.can_colorize = lambda *args, **kwargs: False`).
+    test_gimple_stdout("gimple_variadic_lambda_works_through_every_holder", """\
+def apply(f, v):
+    return f(v, v)
+
+def mk():
+    return lambda *a: a[0] * 2
+
+class Box:
+    def __init__(self):
+        self.fn = None
+
+def main():
+    print(apply(lambda *a: a[0] + a[1], 3))
+    print(mk()(21))
+    d = {}
+    d['k'] = lambda *a: a[0] + a[1]
+    from_dict = d['k']
+    print(from_dict(2, 3))
+    b = Box()
+    b.fn = lambda *a: a[0] + 1
+    print(b.fn(41))
+    if 1:
+        r = lambda *a: a[0]
+    else:
+        r = lambda *a: a[1]
+    print(r(7, 8))
+    print(sorted([1, 2, 3], key=lambda *a: -a[0]))
+    print(list(map(lambda *a: a[0] * 10, [1, 2])))
+""", "6\n42\n5\n42\n7\n[3, 2, 1]\n[10, 20]\n")
+
+    # More than four arguments. `mojo_fnptr_call_N` used to stop at four and
+    # silently drop the rest — for a `*args` callee that means losing
+    # elements, so the helpers now go to eight. (The truncation was a silent
+    # wrong value for every five-or-more-argument indirect call, not only
+    # this one.)
+    test_gimple_stdout("gimple_fnptr_call_carries_more_than_four_args", """\
+def main():
+    f = lambda *a: len(a)
+    print(f(1, 2, 3, 4, 5, 6, 7))
+""", "7\n")
+
+    # `lambda *a, **k: <expr>` forwarding its own arguments on, which is what
+    # every one of the three real corpus occurrences does.
+    test_gimple_stdout("gimple_variadic_lambda_forwards_its_arguments", """\
+def add3(a, b, c):
+    return a + b + c
+
+def walk(*a, **k):
+    return len(a) * 10 + len(k)
+
+def main():
+    unpack = lambda *a: add3(*a)
+    print(unpack(1, 2, 3))
+    both = lambda *a, **k: walk(*a, **k)
+    print(both(1, 2, 3))
+    print(both(1, z=5))
+""", "6\n30\n11\n")
+
     # 10a3. Heterogeneous stack drained with .pop(), each popped value
     # discriminated with `isinstance(top, tuple)`. `isinstance(x, tuple)`
     # had no real lowering (fell through to an always-false runtime stub),
