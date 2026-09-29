@@ -513,7 +513,7 @@ The Mojo reference implementation consists of:
 
 ## CLI Frontend
 
-The Mojo CLI (`build/mojo`) provides upstream-compatible command interface:
+The Mojo CLI (`fire.py`) provides upstream-compatible command interface:
 
 | Command | Description |
 |---------|-------------|
@@ -525,7 +525,15 @@ The Mojo CLI (`build/mojo`) provides upstream-compatible command interface:
 | `mojo --help` / `-h` | Display usage information |
 | `mojo --version` / `-v` | Show version string |
 
-**Implementation**: `build_mojo_cli.py` generates the CLI script at build time. The script wraps `gimple_codegen.py` to compile Mojo source to C with `__GIMPLE` annotations, then uses system `gcc` (or `gcc-mp-15` on macOS) to link and execute.
+**Implementation**: `fire.py` is the CLI, run directly as `python3 fire.py <command>`. It wraps `gimple_codegen.py` to compile Mojo source to C with `__GIMPLE` annotations, then uses system `gcc` (or `gcc-mp-15` on macOS) to link and execute. `make mojoc` builds the same CLI as a self-hosted native binary.
+
+> **Stale:** `build_mojo_cli.py` used to generate a separate `build/mojo`
+> script, and this section used to name it as the CLI. Nothing imports or runs
+> that generator any more — `fire.py` is the entry point — and the
+> `mojo`→`fire` rename left its output path, docstring and banner untouched.
+> It is still listed in `cas.py`'s self-host fingerprint, so deleting it is a
+> compiled-path change tracked in
+> `bugs/TOOLS_dead_build_mojo_cli_in_selfhost_fingerprint.md`.
 
 ---
 
