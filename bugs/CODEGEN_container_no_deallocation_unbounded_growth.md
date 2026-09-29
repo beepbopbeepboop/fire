@@ -2,11 +2,12 @@
 
 ## Status (2026-09-24 — RESOLVED, verified empirically)
 
-> **2026-09-28 correction:** "RESOLVED" holds for the containers the Phase-3
-> analysis admits (assigned once, definitely assigned at function exit). A
-> container declared *inside a loop body* is still never freed — measured
-> ~230-540 B/iter. Tracked in `CODEGEN_block_scoped_container_never_freed.md`;
-> see also `doc/MEMORY.html`.
+> **2026-09-28:** the loop-body case this doc's repro exercises was still
+> leaking after the Phase 3 fix (~230-540 B/iter for `var x: T = <ctor>` in a
+> loop) and is now fixed by block-scoped destruction (`doc/MEMORY.html` §7.1,
+> `ownership_destruct.analyze_scoped_locals`); measured flat at 100k vs 400k
+> iterations. A container bound from a CALL RESULT is still never freed —
+> tracked in `CODEGEN_call_result_container_never_freed.md`.
 
 Codegen now emits the container cleanup calls this doc's "Where the fix
 goes" section asked for (the ownership model's Phase 6): `gimple_gen_*.py`'s

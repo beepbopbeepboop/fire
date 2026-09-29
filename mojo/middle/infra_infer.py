@@ -1730,6 +1730,25 @@ def _compute_owned_free_candidates(fn) -> set:
         # leak, unchanged) rather than raise through gen_func.
         return set()
 
+def _compute_scoped_free_candidates(fn, whole: set) -> set:
+    """The locals of `fn` that are owned by a LOOP BODY rather than the whole
+    function (ownership_destruct.analyze_scoped_locals), or an empty set if
+    `fn` is not eligible or the analysis found none. `whole` is
+    `_compute_owned_free_candidates(fn)`, excluded so no name is owned at two
+    levels. Same fail-open-to-"free nothing" contract as its sibling: a bug in
+    this optional analysis must never fail a build."""
+    if not _is_free_eligible_function(fn):
+        return set()
+    try:
+        return ownership_destruct.analyze_scoped_locals(fn, {}, {}, whole)
+    except Exception:
+        return set()
+
+def _scope_decl_name(stmt) -> str:
+    """The local a plain single-target `var x = ...`/`x = ...` statement
+    binds, '' for any other statement (ownership_destruct._decl_name)."""
+    return ownership_destruct._decl_name(stmt)
+
 def _empty_ctor_ctype(node) -> str | None:
     """`node` (an AssignStmt/VarDecl's `.value`) is an EMPTY container
     constructor -> its ctype ('MojoDict *'/'MojoList *'/'MojoSet *'), else

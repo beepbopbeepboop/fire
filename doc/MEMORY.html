@@ -43,12 +43,12 @@ and <code>ownership_destruct.py</code> (the analysis that is actually implemente
   functions return freshly allocated memory; the codegen emits a <code>free</code> for none of the
   string ones. Two classes of string are provably temporaries and are now released (§4); everything
   else is still immortal.</li>
-<li><strong>Containers are freed only in a narrow case.</strong> A container local is freed (and, for an
-  empty literal, homed on the stack) only if it is assigned once and definitely assigned at function
-  exit. A container declared <em>inside a loop body</em> is never a candidate, so
-  <code>for ...: var l: List[Int] = []; ...</code> leaks the whole container every iteration
-  (<span class="leak">~230&ndash;540 B/iter</span>, §5). This is the largest remaining hole and the
-  natural next step (§7, item 1).</li>
+<li><strong>Containers built from a constructor are now freed, including inside loops.</strong> A container local is freed
+  (and, for an empty literal, homed on the stack) when it is assigned once from a constructor and never escapes. Function-level
+  candidates must also be definitely assigned at function exit; a container declared <em>directly in a loop body</em> is now owned by
+  that body and freed at the end of each iteration and before every <code>break</code>/<code>continue</code>/<code>return</code> that
+  leaves it (§3.B, §7.1). Measured: loop-local dict/list/set went from 540/232/456 B per iteration to <span class="ok">flat</span>. What still
+  leaks is a container or string bound from a <em>call result</em>, a struct, and a string local (§5, §7.2&ndash;7.4).</li>
 <li><strong>The rule that makes all of this tractable:</strong> data is homed on the stack when the
   solver can prove it does not outlive the frame; otherwise it has exactly one named owner, and the owner
   is the code that emits the free. Anything without an owner is a leak by definition (§3).</li>
@@ -117,6 +117,21 @@ emitted at each <code>return</code> and at fall-through. <strong>Exception path:
 (<code>mojo_cleanup_push_*</code>) that <code>mojo_raise</code> unwinds to the catching level's
 checkpoint; the inline free cancels its own entry.</p>
 
+<p><strong>Block-scoped owner (loop bodies).</strong> <code>ownership_destruct.analyze_scoped_locals</code> credits a name to the loop
+body that declares it when: it is a candidate by the rules above; its one assignment is a <em>direct child statement</em> of a
+<code>for</code>/<code>while</code> body without <code>else:</code>; and the name is mentioned nowhere outside that declaration and the rest of
+that body (so plain-Python source that reads a loop local after the loop is left alone). Straight-line order inside one block is the
+proof that every path to the end of the body, or to a <code>break</code>/<code>continue</code>/<code>return</code> after the declaration, executed
+it — no definite-assignment analysis is needed. Emission is in <code>emit_infra</code>'s block-scope section: <code>gen_loop_body</code> (the single
+place every loop lowering routes its body through) opens and closes the scope; <code>emit_loop_exit_frees</code> handles
+<code>break</code>/<code>continue</code>; <code>_emit_owned_local_frees</code> adds the live scoped names at each <code>return</code>. An empty-literal
+declaration is homed on the stack and re-<code>_init</code>'d each iteration; the exception path is the same cleanup-thunk stack (push at the
+declaration, cancel at the free).
+<strong>Fail-closed:</strong> a name is freed only if <code>gen_loop_body</code> armed it, so a loop lowering not routed through it (the regex-scan
+helpers, the compile-time-unrolled loop) keeps today's leak and can never double-free; <code>break</code>/<code>continue</code> free only entries
+whose recorded loop depth equals the current <code>len(gen.loop_stack)</code>, so a <code>break</code> in an unhooked inner loop cannot free an
+enclosing loop's locals; and the free function is recorded at the declaration (matching the pushed thunk), not re-derived at the exit.</p>
+
 <h3>C. Transient temporaries (owned by the expression that created them)</h3>
 <p>A heap value that one lowering creates, one runtime call consumes, and nothing else can name.
 The creator frees it immediately after the consumer. This is the class the leak belonged to; §4.</p>
@@ -182,12 +197,12 @@ is one small string or struct per iteration.</p>
 <tr><td><code>d.get(i % 3, 0)</code></td><td class="ok">0</td><td>fixed</td></tr>
 <tr><td><code>d["a"] = i; d["a"]</code> (str key, outer dict)</td><td class="ok">0</td><td>—</td></tr>
 <tr><td>function taking a <code>Dict</code> argument</td><td class="ok">0</td><td>borrow is free</td></tr>
-<tr><td><code>var d: Dict[String,Int] = {}</code> declared in the loop</td><td class="leak">540</td><td>container struct + slots + key copy + registry entries (class E)</td></tr>
-<tr><td><code>var s = {1, 2, i}</code> in the loop</td><td class="leak">456</td><td>same, set</td></tr>
-<tr><td><code>var l: List[Int] = []</code> + appends in the loop</td><td class="leak">232</td><td>same, list</td></tr>
-<tr><td><code>var l = [1, 2, 3, i]</code> in the loop</td><td class="leak">232</td><td>same</td></tr>
-<tr><td><code>var l: List[String]</code> + <code>append("x")</code></td><td class="leak">232</td><td>same (the literal is borrowed)</td></tr>
-<tr><td>callee builds and returns a <code>List</code>; caller uses it</td><td class="leak">232</td><td>returned container bound by the caller has no owner</td></tr>
+<tr><td><code>var d: Dict[String,Int] = {}</code> declared in the loop</td><td class="ok">0</td><td>fixed (was 540): block-scoped destruction, stack-homed</td></tr>
+<tr><td><code>var s = {1, 2, i}</code> in the loop</td><td class="ok">0</td><td>fixed (was 456)</td></tr>
+<tr><td><code>var l: List[Int] = []</code> + appends in the loop</td><td class="ok">0</td><td>fixed (was 232)</td></tr>
+<tr><td><code>var l = [1, 2, 3, i]</code> in the loop</td><td class="ok">0</td><td>fixed (was 232): non-empty literal, heap struct freed per iteration</td></tr>
+<tr><td><code>var l: List[String]</code> + <code>append("x")</code></td><td class="ok">0</td><td>fixed (was 232); the literal is borrowed, never freed</td></tr>
+<tr><td>callee builds and returns a <code>List</code>; caller uses it</td><td class="leak">232</td><td>returned container bound by the caller has no owner — <code>bugs/CODEGEN_call_result_container_never_freed.md</code></td></tr>
 <tr><td><code>String("a b c").split(" ")</code></td><td class="leak">280</td><td>result list + 3 strings</td></tr>
 <tr><td><code>String + String</code>, <code>String(i)</code>, <code>.upper()</code>, slice, callee returning <code>String</code></td><td class="leak">~7</td><td>the one string bound to a local</td></tr>
 <tr><td><code>"n=" + String(i)</code></td><td class="leak">28</td><td>result + its conversion (the conversion temp is freed only on the <code>String + Int</code> operator path)</td></tr>
@@ -195,11 +210,12 @@ is one small string or struct per iteration.</p>
 </table>
 <div class="note">
 <code>String.format</code> measured flat, but the probe did not confirm that it exercises the f-string
-lowering; treat the f-string row as unmeasured. The earlier bug doc
-(<code>bugs/CODEGEN_container_no_deallocation_unbounded_growth.md</code>) reports the container-in-loop shape
-as fixed at ~9 MB flat. The rows above contradict that for annotated <code>var x: T = []</code> declared in
-a loop inside <code>main</code>; the generated C (<code>mojo_list_new()</code> per iteration, no free) confirms the
-leak, and the analysis's own documented limitation (loop-body assignments are never credited; see <code>ownership_destruct.py</code>'s module docstring) accounts for it (§7.1). That doc's Status should be corrected when item 1 lands.
+lowering; treat the f-string row as unmeasured. The loop-local container rows above were 540/456/232/232/232 before
+block-scoped destruction landed (the earlier bug doc <code>CODEGEN_container_no_deallocation_unbounded_growth.md</code>
+had reported that shape as already fixed; it was not — the analysis credited only names definitely assigned at function
+exit, which a loop-body name never is). Two further tests pin it: every exit path (early return, break, continue, nested
+loops, while) and exception unwind through a loop-scoped container both stay under 2 MB, versus 3007 MB and 84 MB with the
+feature disabled and identical output.
 </div>
 
 <h2>6. Design: stack first, one owner otherwise</h2>
@@ -231,15 +247,11 @@ leak, and the analysis's own documented limitation (loop-body assignments are ne
 
 <h2>7. Remaining gaps, in the order they should be closed</h2>
 <ol>
-<li><strong>Block-scoped container destruction (largest win; ~230&ndash;540 B per iteration).</strong> Extend the
-  Phase-3 candidate rule from "assigned once, definitely assigned at function exit" to "assigned once, and
-  definitely assigned at the end of its declaring block". Free (or <code>_destroy</code> for a stack candidate) at the end of
-  that block on fall-through and before every <code>break</code>/<code>continue</code>/<code>return</code> that leaves it. The
-  escape rules stay as they are; the change is in <code>_definitely_assigned</code>'s notion of "exit point" and in
-  <code>_emit_owned_local_frees</code> being called at block ends. Risks to plan for: the analysis module is itself
-  self-hosted and has a long history of compiled-path divergences (see its docstrings) — the
-  full gate including bootstrap byte-identity is mandatory; and stack-homed storage is then re-initialised each
-  iteration, so <code>_init</code> must follow <code>_destroy</code> on the same storage.</li>
+<li><strong>Block-scoped container destruction — LANDED 2026-09-28.</strong> See §3.B for the design and §5 for the measurement. Known
+  limits, each a solver-widening item below: a local that is iterated (<code>for x in l:</code>) is disqualified because the analysis treats
+  any bare identifier outside its safe patterns as an escape; a name declared in two sibling loops (assigned twice per function) is not
+  credited; a declaration that is not a direct child of the body (inside an <code>if</code>) is not credited; a loop with <code>else:</code>
+  is skipped; and the analysis is called with empty callee tables, so passing the local to any user function disqualifies it.</li>
 <li><strong>Returned containers.</strong> <code>x = f()</code> where <code>f</code> returns a fresh container: the caller
   becomes the owner. Needs the callee's "returns a fresh, unshared container" fact (the ownership doc's Phase 4 calling
   convention: <code>owned</code> = move) and then the same class-B free at the caller.</li>
@@ -255,6 +267,13 @@ leak, and the analysis's own documented limitation (loop-body assignments are ne
   a stale address can later be misidentified.</li>
 <li><strong>Fixed 256-byte <code>sprintf</code> buffers.</strong> Replace <code>_sprintf_one</code>'s <code>malloc(256)</code> +
   <code>sprintf</code> with a sized <code>snprintf</code> and release it as class C.</li>
+<li><strong>Beef up the solver to stack-home as much as possible (queued 2026-09-28; start once loop-scoped destruction, item 1,
+  is checked in).</strong> Every item above is limited by what the escape solver can prove. Widen it: non-empty container
+  literals, non-escaping struct instances, closure envs and boxed mutable locals; real callee tables (the analysis runs with
+  <code>{}, {}</code> today, so any user-function argument disqualifies a container); the missing safe patterns
+  (<code>for x in local:</code>; a name assigned once per <em>scope</em>, so <code>tmp = []</code> reused across sibling loops
+  qualifies); stack buffers for non-escaping strings and transient decimals; and a GIMPLE-legal way to home storage in
+  <code>__GIMPLE</code> bodies. Tracked in <code>doc/OWNERSHIP_MODEL.md</code>'s TODO list. Success is the §5 table trending to all-flat.</li>
 <li><strong>Dict comprehension keys, <code>__missing__</code> keys.</strong> Route the comprehension's set call through
   <code>_emit_call</code> to opt in; <code>__missing__</code> stays unreleased by contract.</li>
 </ol>
@@ -286,6 +305,11 @@ leak, and the analysis's own documented limitation (loop-body assignments are ne
   (<code>_dict_key_probe</code>: <code>get</code>/<code>pop</code>/<code>setdefault</code>).</li>
 <li>Concatenation: <code>emit_exprs</code> f-string accumulator and the <code>+</code> operator's char*/char*,
   String+Int and Int+String paths.</li>
+<li>Block-scoped destruction: <code>ownership_destruct.py</code> (<code>analyze_scoped_locals</code>, <code>_scan_function</code>, and the fix that
+  routes a NESTED <code>VarDecl</code> to the statement scanner instead of the expression scanner); <code>infra_infer.py</code>
+  (<code>_compute_scoped_free_candidates</code>); <code>emit_infra.py</code> block-scope section (<code>gen_loop_body</code>,
+  <code>emit_loop_exit_frees</code>, <code>_scope_register</code>, <code>_emit_scope_frees</code>); 18 loop lowerings in
+  <code>emit_loops.py</code>/<code>emit_stmts.py</code> routed through <code>gen._gen_loop_body</code>; <code>break</code>/<code>continue</code> hooks.</li>
 </ul>
 
 </body>

@@ -58,7 +58,7 @@ from ownership_check import _block_terminates
 from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
-    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _compute_owned_free_candidates, _empty_ctor_ctype,
+    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _compute_owned_free_candidates, _compute_scoped_free_candidates, _scope_decl_name, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
     _pair_key, _prepass_list_elem, _ptr_slot_in_range, _resolve_member_expr_type, _resolve_type, _scan_container_elems,
     _seed_addressed_locals, _type_of
@@ -3734,7 +3734,7 @@ def maybe_push_owned_local(gen, name: str) -> None:
     # instead of defaulting them to `int64_t` (see `begin_function`'s
     # own docstring for the full story and the segfault this caused).
     candidates = gen._owned_free_candidates
-    if not candidates or name not in candidates:
+    if name not in candidates and name not in gen._scope_armed:
         return
     pushed = gen._owned_free_pushed
     if name in pushed:
@@ -3743,6 +3743,8 @@ def maybe_push_owned_local(gen, name: str) -> None:
     if push_fn:
         gen._emit(f"  {push_fn} ({name});")
         pushed.add(name)
+        if name in gen._scope_armed:
+            _scope_register(gen, name, _owned_free_runtime_fn(gen.var_types.get(name)))
 
 
 def _emit_owned_local_frees(gen):
@@ -3788,6 +3790,9 @@ def _emit_owned_local_frees(gen):
         if runtime_fn:
             gen._emit(f"  {runtime_fn} ({name});")
             freed += 1
+    # Block-scoped candidates still live at this exit (a `return` inside a
+    # loop body, after the declaration): the same free, the same cancel.
+    freed += _emit_scope_frees(gen, 0)
     # Cancel exactly the thunks this free just handled inline, so
     # mojo_raise's unwind (if this exact return/fallthrough is later
     # re-executed... it can't be, but see below) never double-frees them.
@@ -3801,6 +3806,140 @@ def _emit_owned_local_frees(gen):
     # merely conservative.
     if freed:
         gen._emit(f"  mojo_cleanup_cancel_n ({freed});")
+
+
+# ── Block-scoped destruction (doc/MEMORY.html §7.1) ─────────────────────────
+#
+# `ownership_destruct.analyze_scoped_locals` names the locals that a LOOP BODY
+# owns: assigned once, from a constructor, as a direct child statement of the
+# body, never escaping, and mentioned nowhere outside the body from that
+# declaration on. Because the declaration is straight-line inside one block,
+# every path that reaches the end of the body, or a `break`/`continue`/
+# `return` lexically after it, has executed it — so the free needs no
+# definite-assignment proof, only these three emission points:
+#
+#   1. the end of the body           -> `gen_loop_body` (falls through)
+#   2. `break`/`continue`            -> `emit_loop_exit_frees`
+#   3. `return` anywhere inside      -> `_emit_owned_local_frees`
+#
+# and an exception is covered by the same cleanup-thunk stack the function-
+# level candidates use (a push at the declaration, a cancel at the free).
+#
+# FAIL-CLOSED by construction. A name is only freed if `gen_loop_body` ARMED it
+# — i.e. lowered the very body it is declared in — so a loop lowering that has
+# not been routed through `gen_loop_body` (the regex-scan helpers, the
+# compile-time-unrolled comprehension loop) simply keeps today's behaviour: the
+# container leaks, nothing is freed twice. `break`/`continue` free only the
+# entries whose recorded loop depth equals the current `len(gen.loop_stack)`, so
+# a `break` in an unhooked inner loop can never free an enclosing loop's locals.
+# What `gen._scope_live*` records per declared name is the free function chosen
+# AT THE DECLARATION (matching the thunk that was pushed), not re-derived at the
+# exit from `var_types`, so the push and its cancel cannot disagree.
+
+def _reset_scope_state(gen) -> None:
+    """Per-function block-scope state. `_scope_live*` are parallel lists (name,
+    loop depth at the declaration, free function or '' when nothing was
+    pushed) in declaration order; `_scope_armed` is the set of names whose
+    declaring body is being lowered right now."""
+    gen._scoped_free_candidates = set()
+    gen._scope_armed = set()
+    gen._scope_live = []
+    gen._scope_live_depth = []
+    gen._scope_live_fn = []
+    # See `begin_function`'s note: self-hosting cannot infer a set/list
+    # field's element type from an assignment, only from this table.
+    _fet = gen._field_elem_types.setdefault('GimpleGen', {})
+    _fet['_scoped_free_candidates'] = 'char *'
+    _fet['_scope_armed'] = 'char *'
+    _fet['_scope_live'] = 'char *'
+    _fet['_scope_live_fn'] = 'char *'
+
+
+def _scope_register(gen, name: str, fn: str) -> None:
+    """Record that `name` is now live in the enclosing loop body, to be freed by
+    `fn` (a runtime free/destroy function name) at every exit of that body."""
+    gen._scope_live.append(name)
+    gen._scope_live_depth.append(len(gen.loop_stack))
+    gen._scope_live_fn.append(fn)
+
+
+def _emit_scope_frees(gen, lo: int) -> int:
+    """Emit the free of every live entry from index `lo` to the end (newest
+    first) and return how many frees were emitted — the caller adds the
+    matching `mojo_cleanup_cancel_n`. An entry whose declaration pushed no
+    thunk has fn '' and is skipped, so frees and cancels always pair."""
+    n = 0
+    i = len(gen._scope_live) - 1
+    while i >= lo:
+        fn = gen._scope_live_fn[i]
+        if fn != '':
+            gen._emit(f"  {fn} ({gen._cname(gen._scope_live[i])});")
+            n += 1
+        i -= 1
+    return n
+
+
+def _emit_scope_end(gen, mark: int) -> None:
+    """Close a loop body: free what it declared (unless the body already ended
+    in a jump/return, in which case every exit was handled where it happened)
+    and forget those entries."""
+    if len(gen._scope_live) <= mark:
+        return
+    if not gen._last_was_terminal:
+        n = _emit_scope_frees(gen, mark)
+        if n:
+            gen._emit(f"  mojo_cleanup_cancel_n ({n});")
+    gen._scope_live = gen._scope_live[:mark]
+    gen._scope_live_depth = gen._scope_live_depth[:mark]
+    gen._scope_live_fn = gen._scope_live_fn[:mark]
+
+
+def gen_loop_body(gen, body: list) -> None:
+    """THE way to lower the statements of a `for`/`while` body. Every loop
+    lowering routes through here so block-scoped locals have exactly one place
+    where their scope opens and closes (a body that declares none costs one
+    set lookup)."""
+    scoped = gen._scoped_free_candidates
+    if not scoped:
+        for s in body:
+            gen.gen_stmt(s)
+        return
+    names: list = []
+    for s in body:
+        nm = _scope_decl_name(s)
+        if nm != '' and nm in scoped:
+            names.append(nm)
+    mark = len(gen._scope_live)
+    for nm in names:
+        gen._scope_armed.add(nm)
+        # A body can be lowered more than once (the dict-vs-list dynamic
+        # dispatch lowers it once per arm): each lowering is its own emission
+        # of the declaration, with its own storage, push and free.
+        gen._owned_free_pushed.discard(nm)
+        gen._owned_stack_allocated.discard(nm)
+    for s in body:
+        gen.gen_stmt(s)
+    _emit_scope_end(gen, mark)
+    for nm in names:
+        gen._scope_armed.discard(nm)
+
+
+def emit_loop_exit_frees(gen) -> None:
+    """Call from `break`/`continue` lowering, before the jump: free the locals
+    declared directly in the loop body being left (the entries recorded at the
+    current loop depth, which are always the newest ones)."""
+    if not gen._scope_live or gen._last_was_terminal:
+        return
+    cur = len(gen.loop_stack)
+    end = len(gen._scope_live)
+    lo = end
+    while lo > 0 and gen._scope_live_depth[lo - 1] == cur:
+        lo -= 1
+    if lo == end:
+        return
+    n = _emit_scope_frees(gen, lo)
+    if n:
+        gen._emit(f"  mojo_cleanup_cancel_n ({n});")
 
 
 # ── Phase 6 (doc/OWNERSHIP_MODEL.md) — stack allocation ─────────────────
@@ -3887,7 +4026,7 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
     handled, which single static assignment should make impossible)."""
     # Direct attribute access — see `maybe_push_owned_local`'s note.
     candidates = gen._owned_free_candidates
-    if not candidates or name not in candidates:
+    if name not in candidates and name not in gen._scope_armed:
         return False
     pushed = gen._owned_free_pushed
     if name in pushed:
@@ -3906,6 +4045,8 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
     gen._emit(f"  {push_fn} ({gen._cname(name)});")
     pushed.add(name)
     gen._owned_stack_allocated.add(name)
+    if name in gen._scope_armed:
+        _scope_register(gen, name, _owned_destroy_runtime_fn(ctype))
     return True
 
 
@@ -3958,6 +4099,8 @@ def begin_function(gen, fn) -> None:
     gen._field_elem_types.setdefault('GimpleGen', {})['_owned_free_candidates'] = 'char *'
     gen._owned_free_pushed = set()
     gen._owned_stack_allocated = set()
+    _reset_scope_state(gen)
+    gen._scoped_free_candidates = _compute_scoped_free_candidates(fn, gen._owned_free_candidates)
 
 
 def reset_no_candidates(gen) -> None:
@@ -3983,6 +4126,7 @@ def reset_no_candidates(gen) -> None:
     gen._owned_free_candidates = set()
     gen._owned_free_pushed = set()
     gen._owned_stack_allocated = set()
+    _reset_scope_state(gen)
 
 
 def emit_return_frees(gen) -> None:
@@ -3991,7 +4135,7 @@ def emit_return_frees(gen) -> None:
     why it's safe to run unconditionally before evaluating the returned
     expression)."""
     # Direct attribute access — see `maybe_push_owned_local`'s note.
-    if gen._owned_free_candidates:
+    if gen._owned_free_candidates or gen._scope_live:
         _emit_owned_local_frees(gen)
 
 

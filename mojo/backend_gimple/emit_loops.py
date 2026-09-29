@@ -161,8 +161,7 @@ def _gen_for_range(gen, node: gimple_ctypes.ForStmt):
     else:
         gen._safe_coerce_emit('int64_t', _loop_var_ctype, ctr, gen._write_dest(var))
     gen.loop_stack.append((bb_post, bb_after))
-    for s in node.body:
-        gen.gen_stmt(s)
+    gen._gen_loop_body(node.body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
@@ -376,8 +375,7 @@ def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
     # `if kind in ("WS", "UNK", "XFER"): continue`.
     gen.loop_stack.append((bb_post, bb_after))
     try:
-        for s in node.body:
-            gen.gen_stmt(s)
+        gen._gen_loop_body(node.body)
     finally:
         gen.loop_stack.pop()
         gen._loop_depth -= 1
@@ -1153,8 +1151,7 @@ def _gen_for_zip_longest(gen, node):
     finally:
         del gen._ziptmp
 
-    for s in node.body:
-        gen.gen_stmt(s)
+    gen._gen_loop_body(node.body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
 
@@ -1351,8 +1348,7 @@ def _gen_for_zip(gen, node):
     gen.loop_stack.append((bb_post, bb_after))
     for _bi in range(len(tgt_names)):
         _zip_bind_slot(gen, tgt_names[_bi], seq_ptrs[_bi], seq_elems[_bi], idx_t)
-    for s in node.body:
-        gen.gen_stmt(s)
+    gen._gen_loop_body(node.body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
 
@@ -1408,8 +1404,7 @@ def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None
     gen._ptr_helpers_needed.add('char')
     addr = gen._new_val('char *', f"_mojo_at_char ({s_val}, {idx_t})")
     gen._emit(f"  {cval_var} = *{addr};")
-    for st in node.body:
-        gen.gen_stmt(st)
+    gen._gen_loop_body(node.body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
@@ -1576,8 +1571,7 @@ def _gen_for_enumerate(gen, node):
         else:
             gen._emit(f"  {cval_var} = {elem64};")
 
-    for s in node.body:
-        gen.gen_stmt(s)
+    gen._gen_loop_body(node.body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
 
@@ -1812,8 +1806,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     if _is_pair_var:
         gen._dict_item_pair_vars[var] = gen._dict_items_val_elems[it_val]
     gen.loop_stack.append((bb_post, bb_after))
-    for s in body:
-        gen.gen_stmt(s)
+    gen._gen_loop_body(body)
     if _is_pair_var:
         if _had_pair:
             gen._dict_item_pair_vars[var] = _saved_pair
@@ -1850,8 +1843,7 @@ def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
     gen._emit(f"  {gen._cname(var)} = mojo_str_char_at ({it_val}, {idx_t});")
     gen.loop_stack.append((bb_post, bb_after))
-    for s in body:
-        gen.gen_stmt(s)
+    gen._gen_loop_body(body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
@@ -1883,8 +1875,7 @@ def _gen_for_bytes(gen, var: str, it_val: str, body: list):
     byte_t = gen._new_val('int64_t', f"mojo_bytes_get ({it_val}, {idx_t})")
     gen._emit(f"  {gen._cname(var)} = {byte_t};")
     gen.loop_stack.append((bb_post, bb_after))
-    for s in body:
-        gen.gen_stmt(s)
+    gen._gen_loop_body(body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
@@ -1916,8 +1907,7 @@ def _gen_for_memoryview(gen, var: str, it_val: str, body: list):
     byte_t = gen._new_val('int64_t', f"mojo_memoryview_get ({it_val}, {idx_t})")
     gen._emit(f"  {gen._cname(var)} = {byte_t};")
     gen.loop_stack.append((bb_post, bb_after))
-    for s in body:
-        gen.gen_stmt(s)
+    gen._gen_loop_body(body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
@@ -1973,8 +1963,7 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
     addr = gen._new_val('char *', f"_mojo_at_char ({it_val}, {idx_t})")
     gen._emit(f"  {gen._cname(var)} = *{addr};")
     gen.loop_stack.append((bb_post, bb_after))
-    for s in body:
-        gen.gen_stmt(s)
+    gen._gen_loop_body(body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
@@ -2085,8 +2074,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         else:
             gen._emit(f"  {cvar} = (char *) {key_tmp};")
     gen.loop_stack.append((bb_post, bb_after))
-    for s in body:
-        gen.gen_stmt(s)
+    gen._gen_loop_body(body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
@@ -2152,8 +2140,7 @@ def _gen_for_set(gen, var: str, it_val: str, body: list, shadow_name: str | None
     else:
         gen._emit(f"  {gen._cname(var)} = {_read} ({iter_t});")
     gen.loop_stack.append((bb_post, bb_after))
-    for s in body:
-        gen.gen_stmt(s)
+    gen._gen_loop_body(body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
@@ -2514,8 +2501,7 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     else:
         gen._emit(f"  {gen._cname(var)} = {val};")
     gen.loop_stack.append((bb_post, bb_after))
-    for s in body:
-        gen.gen_stmt(s)
+    gen._gen_loop_body(body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
@@ -2577,8 +2563,7 @@ def _gen_for_list_iter_cursor(gen, node, var: str) -> None:
     ev = gen._new_val(vct, f"mojo_list_get_{suf} ({lst}, {cur})")
     gen._emit(f"  {gen._cname(var)} = {ev};")
     gen.loop_stack.append((bb_post, bb_after))
-    for s in node.body:
-        gen.gen_stmt(s)
+    gen._gen_loop_body(node.body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
@@ -2625,8 +2610,7 @@ def _gen_for_enumerate_generator(gen, node, gen_val: str, api: dict,
     gen._emit(f"  {cidx} = {ctr};")
     gen._emit(f"  {cval} = {val};")
     gen.loop_stack.append((bb_post, bb_after))
-    for s in node.body:
-        gen.gen_stmt(s)
+    gen._gen_loop_body(node.body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
@@ -2688,8 +2672,7 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         gimple_ctypes._debug_note('iterator loop body has no __next__', iter_base)
         gen._emit(f"  /* TODO: no __next__ on {iter_base} */")
     gen.loop_stack.append((bb_post, bb_after))
-    for s in body:
-        gen.gen_stmt(s)
+    gen._gen_loop_body(body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
