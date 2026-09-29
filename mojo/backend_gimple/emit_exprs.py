@@ -443,7 +443,22 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             return 'void *', t
     # C function name used as a value (e.g. tokenize, MojoParser passed to Scope_define).
     # Can't use a function name as rvalue in GIMPLE — use a pre-declared static void*.
-    if (name in gen.func_return_types and name not in gen.var_types
+    #
+    # `name in gen._generator_api` is the OTHER half of the membership
+    # test, and it was missing: a generator this compile already lowered
+    # has no entry in `func_return_types` under its OWN name (only its
+    # `<base>_start/_resume/_value/_destroy` do), so a generator read as
+    # a value fell through every branch here to the "unknown identifier"
+    # placeholder at the bottom — a literal `(int64_t)0` — and the
+    # consumer then CALLED it: `consume("/r", leaf)` (passing a module
+    # generator to a function that iterates what it is handed) compiled
+    # and linked, then took SIGSEGV calling address 0. gen_module's
+    # `_funcptr_target` already redirects a generator's bare csym to
+    # `<base>_start` when it emits the static — which is exactly right
+    # here, since calling a generator FUNCTION is what constructs the
+    # generator object without running its body.
+    if ((name in gen.func_return_types or name in gen._generator_api)
+            and name not in gen.var_types
             and name not in gen.struct_field_types and name not in gen._global_var_types):
         # Use the overload-mangled C symbol so &fn points at the real
         # definition. Membership + subscript, NOT

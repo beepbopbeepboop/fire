@@ -166,6 +166,16 @@ def _reset_func(gen, body: list = None, params: list = None,
     gen.decls:       list[str]         = []
     gen.body_lines:  list[str]         = []
     gen.var_types:   dict[str, str]    = {}
+    # This function's higher-order parameters whose declared default names
+    # a compiled generator of this compile — `{param: generator api}`.
+    # Per-FUNCTION, like every other map here (and reset HERE, not left to
+    # `gen_func`, because a lifted closure's body runs `_reset_func` too and
+    # would otherwise read the enclosing function's entries for a parameter
+    # name that means something else here). `_lower_fnptr_call` reads it to
+    # type the result of `walk(root)`; `gen_func` seeds it right after this
+    # call, once `param_defaults` is in hand. See
+    # `calls_shared._callable_param_generator_apis`.
+    gen._callable_param_gen_api: dict[str, dict] = {}
     # `{mut}`-capture-spec preloaded pointer temps (see _gen_lifted_
     # closure) -- reset per function so a stale entry from a
     # previously-compiled closure can never leak into an unrelated

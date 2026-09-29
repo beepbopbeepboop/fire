@@ -388,7 +388,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             # than folded into the literal branch below) so the IdentExpr
             # and literal paths keep their exact previous reach: a call can
             # never be a list literal, so the two cannot both apply.
-            ek = _sibling_gen_kind(it)
+            ek = _sibling_gen_kind(it, fn)
         else:
             lk = _literal_kind(it)
             if isinstance(lk, tuple) and lk[0] == 'list':
@@ -623,7 +623,14 @@ def _generator_value_kind(fn: N.FunctionDef,
             # which is what left `yield from <int sub>` + `yield "a"`
             # SEGFAULTING and `yield from <str sub>` + `yield 1` printing a
             # raw address.
-            dk = delegated(n.value) if delegated is not None else None
+            # `fn` is threaded into the hook so a `yield from` through a
+            # HIGHER-ORDER PARAMETER (`def iter_files_by_suffix(root,
+            # suffixes, relparent=None, *, _iter_files=iter_files)` doing
+            # `yield from _iter_files(root, suffix, relparent)`) resolves
+            # exactly as a direct sibling delegation does -- fsutil's
+            # `iter_files_by_suffix`, see
+            # bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md.
+            dk = delegated(n.value, fn) if delegated is not None else None
             kinds.add(dk)
             if dk == 'tuple':
                 has_tuple = True
@@ -832,7 +839,7 @@ def _resolve_gen_kind(name):
 _SCALAR_GEN_KINDS = ('i', 'b', 'p', 'd')
 
 
-def _sibling_gen_kind(iterable):
+def _sibling_gen_kind(iterable, fn: N.FunctionDef = None):
     """Yield kind of `for <target> in <iterable>():` when `iterable` is a
     call to one of THIS MODULE's top-level generators, else None.
 
@@ -856,13 +863,29 @@ def _sibling_gen_kind(iterable):
     Only the CALL form is recognised. A bare `for v in inner:` names the
     generator FUNCTION, not an instance, so it is not a generator call at
     all and must keep falling through to unknown.
+
+    `fn` (the enclosing generator, which only `_static_env` has) adds one
+    more CALL form: a HIGHER-ORDER PARAMETER whose declared default names
+    one of this module's generators — `def walk_tree(root, *, walk=
+    _walk_tree)` doing `for filename in walk(root):`, the shape
+    `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` records as
+    fsutil's real blocker. The default is resolved to its generator and the
+    kind read from THAT, exactly as for a direct sibling call; a parameter
+    whose default is not a module generator (or is not a default at all —
+    a caller-supplied callable) stays unknown, which is the honest answer
+    and leaves the consumer refusing rather than guessing.
     """
     if not (isinstance(iterable, N.CallExpr)
             and isinstance(iterable.func, N.IdentExpr)):
         return None
-    name = iterable.func.name
+    name = _cm_as_str(iterable.func.name)
     if name not in _GEN_DEFS:
-        return None
+        if fn is None:
+            return None
+        _d = (getattr(fn, 'param_defaults', None) or {}).get(name)
+        if not (isinstance(_d, N.IdentExpr) and _cm_as_str(_d.name) in _GEN_DEFS):
+            return None
+        name = _cm_as_str(_d.name)
     k = _resolve_gen_kind(name)[0]
     return k if k in _SCALAR_GEN_KINDS else None
 
@@ -877,23 +900,123 @@ def _register_generator_value_kinds(stmts) -> None:
         _resolve_gen_kind(_n)
 
 
-def _delegated(value):
+def _delegated(value, fn: N.FunctionDef = None):
     # `yield from sub` / `yield from sub(...)` where `sub` is a module-level
     # generator in this module. Anything else (a method call, an attribute, a
-    # computed callable) stays unknown, as before.
+    # computed callable) stays unknown, as before. `fn` adds the
+    # higher-order-parameter form -- `yield from _iter_files(root, suffix,
+    # relparent)` where `_iter_files` is a keyword-only parameter defaulting
+    # to this module's `iter_files` -- resolved through the SAME
+    # `_callable_param_generator_names` mapping the lowering itself uses, so
+    # the value slot and the drive agree by construction rather than by two
+    # separate guesses.
     target = value.func if isinstance(value, N.CallExpr) else value
-    if isinstance(target, N.IdentExpr) and target.name in _GEN_DEFS:
-        return _resolve_gen_kind(target.name)[0]
-    return None
+    if not isinstance(target, N.IdentExpr):
+        return None
+    name = _cm_as_str(target.name)
+    if name not in _GEN_DEFS and fn is not None:
+        name = (_callable_param_generator_names(fn) or {}).get(name, '')
+    if not name or name not in _GEN_DEFS:
+        return None
+    return _resolve_gen_kind(name)[0]
 
 
-def _delegated_yield_kind(value):
+def _delegated_yield_kind(value, fn: N.FunctionDef = None):
     """`_generator_value_kind`'s `delegated` hook, backed by
-    `_GEN_VALUE_KINDS` (see `_register_generator_value_kinds`)."""
+    `_GEN_VALUE_KINDS` (see `_register_generator_value_kinds`), with the
+    same higher-order-parameter fallback `_delegated` has (the memoized
+    table is read here purely so the two hooks cannot disagree about a
+    module-level generator's kind)."""
     target = value.func if isinstance(value, N.CallExpr) else value
-    if isinstance(target, N.IdentExpr):
-        return _GEN_VALUE_KINDS.get(target.name, (None, ''))[0]
-    return None
+    if not isinstance(target, N.IdentExpr):
+        return None
+    name = _cm_as_str(target.name)
+    if name not in _GEN_DEFS and fn is not None:
+        name = (_callable_param_generator_names(fn) or {}).get(name, '')
+    if not name:
+        return None
+    return _GEN_VALUE_KINDS.get(name, (None, ''))[0]
+
+
+def _default_is_faithful_literal(node) -> bool:
+    """True for the default expressions whose C lowering is the VALUE and
+    not a placeholder: `None`/`True`/`False`, an int/float/str literal, or a
+    reference to one of THIS MODULE's own functions or generators
+    (`_default_is_module_func_ref`).
+
+    Deliberately STRICTER than `calls_shared._default_expr_to_pair`, which
+    pads anything it cannot represent (a list/tuple/dict/set literal, an
+    arbitrary expression) with a typed `0`. That fallback is fine for an
+    ordinary function's omitted scalar argument; admitting one HERE would
+    trade today's honest whole-MODULE refusal — gen_module escalates a
+    single ineligible generator into interpreting the whole module from
+    source, which is always correct — for a compiled NULL container
+    pointer.
+
+    An IMPORTED module's function (`_walk=os.walk`,
+    `_glob=glob.iglob` — two of the four higher-order parameters in
+    `Tools/c-analyzer/c_common/fsutil.py`) is NOT accepted, and that is a
+    real gap rather than a shortcut: this decision runs in `lower()`, before
+    any GimpleGen exists, so nothing here can know whether the imported
+    function will be resolved by the time the default is padded (it will
+    under `do_imports=True`, and will not under `do_imports=False`, where
+    the whole point is that imports are NOT inlined). Guessing "resolved"
+    would compile the generator and then pad a NULL function pointer into
+    the call — trading a refusal for a crash. The ordinary (non-generator)
+    path has no such gate and does resolve those defaults correctly; see
+    `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`.
+    """
+    if node is None:
+        return False
+    if isinstance(node, (N.IntLiteral, N.FloatLiteral, N.StringLiteral)):
+        return True
+    if isinstance(node, N.IdentExpr) and _cm_as_str(node.name) in (
+            'None', 'True', 'False'):
+        return True
+    return _default_is_module_func_ref(node)
+
+
+def _default_is_module_func_ref(node) -> bool:
+    """True when `node` is a bare name this module's own top-level
+    statements define as a function (a generator counts — `lower()` has
+    already registered every module-level generator in `_GEN_DEFS` by the
+    time this runs, see `lower`'s own ordering comment).
+
+    Only the bare-name spelling, deliberately: a `module.attr` reference is
+    discussed in `_default_is_faithful_literal`'s docstring."""
+    if not isinstance(node, N.IdentExpr):
+        return False
+    return _cm_as_str(node.name) in _MODULE_FUNC_NAMES
+
+
+def _unrepresentable_kwonly(fn: N.FunctionDef) -> list:
+    """The names of `fn`'s keyword-only parameters whose declared default
+    cannot be faithfully lowered to a C value at an omitted-argument call
+    site — empty when all of them can.
+
+    This REPLACES a blanket `if fn.kwonly: return False, 'kwonly params
+    (v0)'`, which refused a generator merely for HAVING keyword-only
+    parameters. That refusal is what made
+    `Tools/c-analyzer/c_common/fsutil.py` unbuildable: `_walk_tree(root, *,
+    _walk=os.walk)`, `walk_tree(root, *, suffix=None, walk=_walk_tree)`,
+    `glob_tree(root, *, suffix=None, _glob=glob.iglob)` and
+    `iter_files_by_suffix(root, suffixes, relparent=None, *, walk=
+    walk_tree, _iter_files=iter_files)` were all rejected before the real
+    blocker (CALLING the parameter) was ever reached — see
+    `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`.
+
+    The gate that replaces it asks the question that actually matters: can
+    each omitted argument be filled with the RIGHT value? A keyword-only
+    parameter is just a parameter no call site may fill positionally, and
+    the stack-switch lowering already carries every one of them —
+    `_lower_one` builds `<base>_start` over `fn.params` (the parser records
+    keyword-only names in that same list) and `meta['defaults']` from the
+    same `param_defaults` dict the call-site padding reads. So a faithful
+    default is all the shape ever needed.
+    """
+    _dflts = getattr(fn, 'param_defaults', None) or {}
+    return [_cm_as_str(pn) for pn in (getattr(fn, 'kwonly', None) or [])
+            if not _default_is_faithful_literal(_dflts.get(_cm_as_str(pn)))]
 
 
 def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
@@ -967,7 +1090,9 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
         if pann not in _SCALARISH:
             return False, f'param {pname!r} type {pann!r} (v0 scalar-only)'
     if getattr(fn, 'kwonly', None):
-        return False, 'kwonly params (v0)'
+        _kwbad = _unrepresentable_kwonly(fn)
+        if _kwbad:
+            return False, f'kwonly params (v0): {_kwbad}'
     kind, why = _generator_value_kind(fn, _static_env(fn, struct_def),
                                    _delegated_yield_kind)
     if kind is None:
@@ -3000,6 +3125,18 @@ def lower(stmts: list) -> tuple[list, list]:
     # value kind can be derived from has to be known to every one of them,
     # not just to `_register_generator_value_kinds` further down.
     _register_generator_defs(stmts)
+    # Same ordering requirement for `_unrepresentable_kwonly`, which runs
+    # inside `_eligible` below and answers "does this default name a
+    # function of this module?". Registered here, next to the generator
+    # registry it overlaps with, so the two can never disagree about what
+    # this module defines.
+    _MODULE_FUNC_NAMES.clear()
+    for _s in stmts:
+        if isinstance(_s, N.StructDef):
+            for _m in (_s.methods or []):
+                _MODULE_FUNC_NAMES.add(_cm_as_str(_m.name))
+        elif isinstance(_s, N.FunctionDef):
+            _MODULE_FUNC_NAMES.add(_cm_as_str(_s.name))
     # Before `_scan_callsite_param_kinds`, which reaches the table through
     # `_argkind` to type a call argument that is itself a call.
     _scan_func_ret_kinds(stmts)
@@ -3143,6 +3280,19 @@ _BOX_SHIMS = {
 # and refusing an ordinary shape. Same single-module lifetime as
 # _PARAM_NAMES.
 _FUNC_RET_KIND: dict[str, str] = {}
+
+
+# Every function name THIS module's own top-level statements define,
+# generators included. Registered by `lower()` before any eligibility
+# decision runs, and consumed only by `_default_is_module_func_ref` — the
+# one question asked here that needs a set of the module's own defs (a
+# keyword-only parameter whose default names one of them is representable
+# as a callable value at an omitted-argument call site; see that helper's
+# docstring, which also says why an IMPORTED module's function is not
+# accepted). Plain a `set` of names built with `.add` in a plain loop,
+# like every other registry in this file, for this file's own reasons (see
+# `_register_generator_value_kinds`'s sibling notes on self-compile).
+_MODULE_FUNC_NAMES: set = set()
 
 
 def _literal_return_kind(fn: N.FunctionDef) -> str | None:
@@ -4001,8 +4151,44 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'tuple_slot_ctypes': _generator_tuple_slots(fn, env) if kind == 'tuple' else None,
         'tuple_slot_nested': _generator_nested_slots(fn, env) if kind == 'tuple' else None,
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
+        # Parameters whose declared DEFAULT names one of this module's own
+        # generators (`def walk_tree(root, *, walk=_walk_tree)`), as
+        # `{param: generator name}`. Names, not apis: an api (`base` /
+        # `value_ctype` / `tuple_slot_ctypes`) only exists once `register`
+        # has run, and it is `register`'s own SECOND pass that turns these
+        # into `{param: api}` on the body -- see `_lower_one`'s `prologue`
+        # for why the info has to travel on the meta at all (the lowered
+        # `__mgco_<g>_body` has MOVED every source parameter into a
+        # `var p = __mojo_gen_arg(...)` local and so carries none of the
+        # source's `param_defaults`).
+        'callable_param_generators': _callable_param_generator_names(fn),
     })
     return body_fd
+
+
+def _callable_param_generator_names(fn: N.FunctionDef) -> dict:
+    """`{param: generator name}` for the parameters of `fn` whose declared
+    default names one of THIS module's generators (`_GEN_DEFS`).
+
+    A bare-name test only, which is all that is knowable at `lower()` time
+    and all the ordinary path then needs: the generator is defined in the
+    same module, so it is compiled into the same translation unit under the
+    same `_generator_api` key, and the address
+    `calls_shared._callable_value_symbol` emits for it is real. An IMPORTED
+    module's generator is deliberately out of reach here -- see
+    `_default_is_faithful_literal`'s docstring for why, which is the same
+    reason a `mod.attr` default is not accepted as a kwonly eligibility
+    gate."""
+    _dflts = getattr(fn, 'param_defaults', None) or {}
+    _out = {}
+    for _pn, _pann in (getattr(fn, 'params', None) or []):
+        _pn = _cm_as_str(_pn)
+        if _pn.startswith('*'):
+            continue
+        _d = _dflts.get(_pn)
+        if isinstance(_d, N.IdentExpr) and _cm_as_str(_d.name) in _GEN_DEFS:
+            _out[_pn] = _cm_as_str(_d.name)
+    return _out
 
 
 def _deep_copy_stmt(node):
@@ -4338,3 +4524,26 @@ def register(gen, meta: list) -> None:
             gen.func_param_types.setdefault('__mojo_gen_last_yield_was_wd', ['int64_t'])
             gen.func_return_types.setdefault('__mojo_gen_last_yield_was_wd', 'int64_t')
         units.append(emit_c(m))
+    # SECOND pass, after EVERY generator above is registered: turn each
+    # body's `callable_param_generators` (`{param: generator name}`, see
+    # `_callable_param_generator_names`) into `{param: api}` and hang it on
+    # the BODY function, which is the FunctionDef the ordinary codegen
+    # actually emits. `gen_func` copies it into the per-function
+    # `_callable_param_gen_api` map `_lower_fnptr_call_value` reads, so a
+    # call through `def walk_tree(root, *, walk=_walk_tree)`'s `walk` is
+    # driven as the generator it defaults to instead of falling into the
+    # `mojo_unsupported_iter` zero-iteration stub. It has to be a separate
+    # pass because `_lower_one` runs in `lower()`, before any api exists,
+    # and because the callee may be declared LATER in the module than the
+    # consumer.
+    for m in meta:
+        _cpg = m.get('callable_param_generators') or {}
+        if not _cpg:
+            continue
+        _by_param = {}
+        for _pn, _gn in _cpg.items():
+            _api = gen._generator_api.get(_gn)
+            if _api is not None:
+                _by_param[_pn] = _api
+        if _by_param:
+            gen._coro_body_callable_param_apis[m['body_name']] = _by_param

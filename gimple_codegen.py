@@ -886,6 +886,19 @@ class GimpleGen:
         # extern "C" resume/value/destroy functions to call without having
         # to re-derive it from the (long gone, by then) original CallExpr.
         self._generator_var_api: dict[str, dict] = {}
+        # A3 stack-switch lowered BODY function name -> `{param: generator
+        # api}` for the SOURCE parameters whose declared default names one
+        # of this module's generators (`def walk_tree(root, *,
+        # walk=_walk_tree)`). Populated by
+        # `mojo.middle.coro.register`'s second pass; read by `gen_func`,
+        # which copies the entry into the per-function
+        # `_callable_param_gen_api` that `_lower_fnptr_call_value` consults
+        # so a call through such a parameter is driven as the generator it
+        # defaults to. Keyed by BODY name (not the source name) because the
+        # stack-switch lowering moves every source parameter into a
+        # `var p = __mojo_gen_arg(...)` local, so the body FunctionDef the
+        # ordinary codegen emits is what `gen_func` actually sees.
+        self._coro_body_callable_param_apis: dict[str, dict] = {}
         # Step I (create_task/Task/TaskGroup/RaisingTask project): mirrors
         # self._generator_var_api exactly, but for a `MojoAsync *` value
         # produced by `create_task(...)`/`create_raising_task(...)` and held
@@ -3415,8 +3428,8 @@ class GimpleGen:
     def _lower_fnptr_call_value(self, fp_type: str, fp_raw: str, node: CallExpr, ret_type: str='int64_t') -> tuple[str, str]:
         return ggc._lower_fnptr_call_value(self, fp_type, fp_raw, node, ret_type)
 
-    def _default_expr_to_pair(self, _dflt) -> tuple:
-        return ggc._default_expr_to_pair(self, _dflt)
+    def _default_expr_to_pair(self, _dflt, cxx: bool = False) -> tuple:
+        return ggc._default_expr_to_pair(self, _dflt, cxx=cxx)
 
     def _pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread=False):
         return ggc._pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)
