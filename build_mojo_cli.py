@@ -1,9 +1,12 @@
 """
-Build script to create a mojo CLI executable in the build directory.
+Build script to create the CLI executable in the build directory.
 
-This creates a simple mojo command that can handle:
-  mojo build <input.mojo> -o <output.dylib>
-  mojo --version
+The generated file is `build/mojo`, and it prints the name it was invoked as
+(see _tool_name() below) rather than a name written into its help text — same
+rule as fire.py's, so a rename of either file cannot leave the other lying
+about what to type. It can handle:
+  <cli> build <input.mojo> -o <output.dylib>
+  <cli> --version
   etc.
 """
 import os
@@ -15,8 +18,8 @@ BUILD_DIR = os.path.join(HERE, 'build')
 
 MOJO_CLI_SCRIPT = '''#!/usr/bin/env python3
 """
-Mojo CLI - compiler and REPL frontend.
-Supports: mojo repl, mojo run <file>, mojo build <file>, mojo <file> (run shorthand)
+CLI - compiler and REPL frontend.
+Supports: repl, run <file>, build <file>, <file> (run shorthand)
 Also: --dump-{tokens,ast,c,gimple,all} for bootstrap verification.
 """
 import sys
@@ -30,10 +33,22 @@ sys.path.insert(0, os.path.dirname(HERE))
 
 VERSION = "0.1.0"
 
+def _tool_name():
+    """The name to print when this CLI names ITSELF: the name it was run as.
+
+    Read off argv[0] so the text can never disagree with the file the user
+    typed (this one is written to build/mojo, but that is this generator's
+    choice, not a promise baked into the help).
+    """
+    name = os.path.splitext(os.path.basename(sys.argv[0]))[0]
+    return name if name and not name.startswith('-') else 'fire'
+
+TOOL = _tool_name()
+
 def main():
     if len(sys.argv) < 2:
-        print("mojo: missing command")
-        print("Use 'mojo --help' for usage information")
+        print(f"{TOOL}: missing command")
+        print(f"Use '{TOOL} --help' for usage information")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -44,12 +59,12 @@ def main():
         return
 
     if cmd in ('-v', '--version'):
-        print(f"mojo {VERSION} (APEX reference implementation)")
+        print(f"{TOOL} {VERSION} (APEX reference implementation)")
         return
 
     if cmd in ('--dump-tokens', '--dump-ast', '--dump-c', '--dump-gimple', '--dump-all'):
         if len(sys.argv) < 3:
-            print(f"mojo {cmd}: no input file specified")
+            print(f"{TOOL} {cmd}: no input file specified")
             sys.exit(1)
         handle_dump(cmd, sys.argv[2])
         return
@@ -70,27 +85,27 @@ def main():
         handle_compile(sys.argv[2:])
         return
 
-    # Shorthand: mojo <file.mojo> is equivalent to mojo run <file.mojo>
+    # Shorthand: <cli> <file.mojo> is equivalent to <cli> run <file.mojo>
     if cmd.endswith('.mojo') or cmd.endswith('.\\U0001f525'):
         handle_run([cmd] + sys.argv[2:])
         return
 
-    print(f"mojo: unknown command '{cmd}'")
-    print("Use 'mojo --help' for usage information")
+    print(f"{TOOL}: unknown command '{cmd}'")
+    print(f"Use '{TOOL} --help' for usage information")
     sys.exit(1)
 
 def print_help():
-    help_text = f"""mojo {VERSION} - Mojo language compiler and REPL
+    help_text = f"""{TOOL} {VERSION} - Mojo language compiler and REPL
 
 USAGE:
-    mojo [OPTIONS] [COMMAND] [ARGS]
+    {TOOL} [OPTIONS] [COMMAND] [ARGS]
 
 COMMANDS:
     repl                          Start interactive REPL
     run <file.mojo>               Run a Mojo file
     build <file.mojo> -o <out>    Build to ELF executable
     compile <file.mojo>           Compile to object file
-    <file.mojo>                   Shorthand for 'mojo run <file.mojo>'
+    <file.mojo>                   Shorthand for '{TOOL} run <file.mojo>'
 
 OPTIONS:
     -h, --help                    Show this help message
@@ -103,11 +118,11 @@ OPTIONS:
     --dump-all <file>             Print all four dumps with section headers
 
 EXAMPLES:
-    mojo repl                     Start the REPL
-    mojo run hello.mojo           Run hello.mojo
-    mojo hello.mojo               Same as above (shorthand)
-    mojo build hello.mojo -o out  Build to executable 'out'
-    mojo --dump-all hello.mojo    Dump all intermediate representations
+    {TOOL} repl                     Start the REPL
+    {TOOL} run hello.mojo           Run hello.mojo
+    {TOOL} hello.mojo               Same as above (shorthand)
+    {TOOL} build hello.mojo -o out  Build to executable 'out'
+    {TOOL} --dump-all hello.mojo    Dump all intermediate representations
 """
     print(help_text)
 
@@ -200,7 +215,7 @@ def _compile_transitive_interpreter(entry_path):
 def handle_dump(flag, input_file):
     """Dump intermediate representations for bootstrap verification."""
     if not os.path.exists(input_file):
-        print(f"mojo {flag}: file not found: {input_file}")
+        print(f"{TOOL} {flag}: file not found: {input_file}")
         sys.exit(1)
 
     try:
@@ -261,10 +276,10 @@ def handle_dump(flag, input_file):
                     print(f"/* gimple: {gimple_err} */")
 
     except ImportError as e:
-        print(f"mojo {flag}: compiler not initialized ({e})")
+        print(f"{TOOL} {flag}: compiler not initialized ({e})")
         sys.exit(1)
     except Exception as e:
-        print(f"mojo {flag}: {e}")
+        print(f"{TOOL} {flag}: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
@@ -347,14 +362,14 @@ def _gimple_to_elf(gimple, output, runtime_dir):
             pass
 
 def handle_run(args):
-    """Execute: mojo run <input.mojo>"""
+    """Execute: <cli> run <input.mojo>"""
     if not args:
-        print("mojo run: no input file specified")
+        print(f"{TOOL} run: no input file specified")
         sys.exit(1)
 
     input_file = args[0]
     if not os.path.exists(input_file):
-        print(f"mojo run: file not found: {input_file}")
+        print(f"{TOOL} run: file not found: {input_file}")
         sys.exit(1)
 
     try:
@@ -377,17 +392,17 @@ def handle_run(args):
                 pass
 
     except ImportError as e:
-        print(f"mojo run: compiler not initialized ({e})")
+        print(f"{TOOL} run: compiler not initialized ({e})")
         print("Run 'make' or 'python run.py' first")
         sys.exit(1)
     except Exception as e:
-        print(f"mojo run error: {e}")
+        print(f"{TOOL} run error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
 
 def handle_build(args):
-    """Handle: mojo build <input.mojo> -o <output>"""
+    """Handle: <cli> build <input.mojo> -o <output>"""
     input_file = None
     output = None
 
@@ -403,10 +418,10 @@ def handle_build(args):
             i += 1
 
     if not input_file:
-        print("mojo build: no input file specified")
+        print(f"{TOOL} build: no input file specified")
         sys.exit(1)
     if not output:
-        print("mojo build: -o output not specified")
+        print(f"{TOOL} build: -o output not specified")
         sys.exit(1)
 
     try:
@@ -419,18 +434,18 @@ def handle_build(args):
             print(f"Compilation failed: {result.stderr}")
             sys.exit(1)
     except ImportError as e:
-        print(f"mojo build: compiler not initialized ({e})")
+        print(f"{TOOL} build: compiler not initialized ({e})")
         sys.exit(1)
     except Exception as e:
-        print(f"mojo build error: {e}")
+        print(f"{TOOL} build error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
 
 def handle_compile(args):
-    """Handle: mojo compile <input.mojo> (compatibility)"""
+    """Handle: <cli> compile <input.mojo> (compatibility)"""
     if not args:
-        print("mojo compile: no input file specified")
+        print(f"{TOOL} compile: no input file specified")
         sys.exit(1)
     handle_build(args + ['-o', args[0].replace('.mojo', '')])
 
@@ -439,7 +454,7 @@ if __name__ == '__main__':
 '''
 
 def create_mojo_cli():
-    """Create the mojo CLI script in build/mojo"""
+    """Create the CLI script in build/mojo"""
     os.makedirs(BUILD_DIR, exist_ok=True)
 
     mojo_path = os.path.join(BUILD_DIR, 'mojo')

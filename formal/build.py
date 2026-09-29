@@ -3606,7 +3606,7 @@ def load_dylib_manifests(dylib_paths: list) -> list:
         except OSError as e:
             raise FormalBuildError(
                 f"cannot read the export manifest for {dylib} ({mpath}): {e}. "
-                f"It is written next to the dylib by `mojo dylib --formal`.")
+                f"It is written next to the dylib by `fire dylib --formal`.")
         exports = payload.get("exports") or []
         if not exports and payload.get("kind") != "namespace":
             raise FormalBuildError(
