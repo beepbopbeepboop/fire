@@ -347,6 +347,12 @@ test('linkmode', [PY, 'test_link_mode.py'], cache=True,
 test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
      extra=GIMPLE_SOURCES + ['test_no_new_container_casts.py'],
      desc='grow-only allowlist on ad-hoc container casts (text scan)')
+# The tool prints the name it was INVOKED as (fire / mojoc / stage2/mojo), not a
+# hard-coded one. Registered by the integrator: the test landed with help-rename
+# but in no bucket, which turned `suite-self-test`'s estate check red.
+test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True,
+     extra=['test_cli_usage_text.py', 'fire.py', 'fire_main.py', 'fire_compiler.py'],
+     desc='the tool prints the name it was invoked as, in usage, -v and every error')
 # `nonlocal` on both execution paths. Its own test because the feature spans
 # the parser (a new statement node), the interpreter (scope resolution) and
 # the closure-capture pass (by-reference capture), and a regression in any one
