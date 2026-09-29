@@ -126,31 +126,43 @@ def key_compare_is_structural(needle) -> bool:
 # two-dimensional subscript, and the corpus says so unambiguously: across the
 # 294 stdlib files and every source in this repository there is not one
 # instance whose base is a value. Every one names a generic — `SIMD[dtype,
-# width]`, `size_of[type, target]`, `external_call["sym", RetType]`,
-# `UnsafePointer[NoneType, MutAnyOrigin]` — or is an `__mlir_attr[...]`
-# template. Those are COMPILE-TIME EXPLICIT-PARAMETER LISTS: they select an
-# instantiation and hand it a type or a comptime value, and no runtime word
-# corresponds to any of them.
+# width]`, `size_of[type, target]`, `UnsafePointer[NoneType, MutAnyOrigin]` —
+# is an `external_call["sym", RetType]`, or is an `__mlir_attr[...]` template.
 #
-# So the four readings this construct could have are settled by the source
-# that uses it, and none of them is "index a flat buffer at i*stride + j":
-#   * a comptime parameter list — what every corpus instance is. Lowering it
-#     means resolving the parameter binding, which needs the callee's type
+# The `external_call` is called out because it was the expensive mistake here,
+# and the shape is why: its bracket is the SAME AST node as a generic's, so
+# lumping it in with them looked free and cost a 55-file family several waves
+# of re-derivation (bugs/FORMAL_known_limits.md §6.2.1). A shared shape is not
+# a shared meaning. What the bracket holds is what decides it, and for
+# `external_call` it holds a C SYMBOL and a declared return type — see that
+# section below, which is not a comptime parameter list and does not need a
+# monomorphizer, because the callee is a symbol that already exists rather than
+# a template this compiler must emit.
+#
+# So the readings this construct could have are settled by the source that uses
+# it, and none of them is "index a flat buffer at i*stride + j":
+#   * a comptime parameter list — what nearly every corpus instance is. Lowering
+#     it means resolving the parameter binding, which needs the callee's type
 #     table; there is none here, and guessing a value (e.g. claiming
 #     `size_of[DType.int]` is 8) would be a fabricated answer.
 #   * an MLIR attribute template — what `__mlir_attr[...]` is. Not a value at
 #     all on this path.
-#   * a dict keyed by tuples — real, and the ONE case lowered, by the
+#   * an `external_call[...]` template application — LOWERED, to a direct call
+#     to the C symbol the bracket names. Not a refusal and not a kind; it is
+#     asked about in `multi_index_refusal_for` above, which is why this list
+#     does not have a row for it.
+#   * a dict keyed by tuples — real, and the one case lowered here, by the
 #     element-wise key comparison above. It requires a KNOWN DICT base, which
 #     only the backend knows; `multi_index_kind` takes that as an argument.
 #   * a 2-D index into a flat buffer — needs a row stride. The source never
 #     states one, so any stride would be invented.
 #
-# Therefore every non-dict case is refused, and `multi_index_refusal` says
-# which of the above it is so the diagnostic names the construct rather than
-# the symptom. The text is deliberately ARCH-FREE: arm64 and x86-64 return the
-# same string, so the two architectures cannot drift on what a subscript means
-# (see test_formal_run.py's `refuse:` cases, which assert they do not).
+# Therefore every non-dict, non-external_call case is refused, and
+# `multi_index_refusal` says which of the above it is so the diagnostic names
+# the construct rather than the symptom. The text is deliberately ARCH-FREE:
+# arm64 and x86-64 return the same string, so the two architectures cannot
+# drift on what a subscript means (see test_formal_run.py's `refuse:` cases,
+# which assert they do not).
 
 MULTI_INDEX_MLIR_TEMPLATE = "mlir-template"
 MULTI_INDEX_COMPTIME_PARAMS = "comptime-parameters"

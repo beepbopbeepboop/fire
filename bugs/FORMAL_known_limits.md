@@ -693,16 +693,23 @@ are 168 of the 181:
 
 | terminal module | files | terminal reason | the refusal is | to close it |
 |---|---|---|---|---|
-| `std/os/env.mojo` | **55** | `external_call['setenv', Int32]` — a subscript whose index is a tuple | **true, but the message names the wrong mechanism** (§6.2) | Stage 5 monomorphization |
+| ~~`std/os/env.mojo`~~ | ~~**55**~~ **0** | ~~`external_call['setenv', Int32]` — a subscript whose index is a tuple~~ | **CLOSED 2026-09-29** — the analysis in §6.2 was right about the misdiagnosis and wrong about the cost; see below | **done, and it did not need Stage 5** |
 | `std/sys/info.mojo` | 37 | module-level `comptime` binding initialized from an MLIR attribute | true, **permanent** (§2) | nothing on this path |
 | `std/collections/binary_heap.mojo` | 35 | `a BinaryHeap frame address is passed to len()` | true | by-reference receiver work |
 | `std/builtin/builtin_slice.mojo` | 20 | `constructing Slice with 3 argument(s) is a call to a user-defined __init__` | true, and **the best-worded refusal in the residue** | run `__init__` / field-filling construction |
 | `std/sys/_assembly.mojo` | 18 | one generic `inlined_assembly[…]` | true (§1.1) | Stage 5 |
 | `function.mojo` 4, `_io.mojo` 3, `random.mojo` 3, `tile.mojo` 2, `_select.mojo` 1, `_unicode_lookups.mojo` 1, `stat.mojo` 1, `itertools.mojo` 1 | 16 | §1.1, table verbatim | 7 true + permanent | Stage 5, or nothing |
 
-## 6.2 A true refusal with a false explanation, in the largest family
+## 6.2 A true refusal with a false explanation, in the largest family — CLOSED
 
-The single largest family in the residue — **55 files, one construct** — is
+**Status: closed 2026-09-29 (`4ad34f3`).** The analysis below was right about
+the misdiagnosis and **wrong about the cost**, and the second half of that is
+the part that mattered: it said the family is a §1.1 family-1 member and needs
+Stage 5 monomorphization, and it does not. Read the rest of this section for
+why, and `bugs/FORMAL_env_family_next_terminal.md` for the measurement and for
+where the 55 files landed.
+
+The single largest family in the residue — **55 files, one construct** — was
 refused like this:
 
 ```
@@ -749,26 +756,74 @@ family-1 member**, and its cost the same: Stage 5.
 55-file family whose explanation is wrong is a family the next person will
 re-derive from scratch.
 
+### 6.2.1 …and then it turned out not to be a monomorphization at all
+
+The last two paragraphs above were **half right in a way that cost more than
+they saved**, so they are corrected here rather than deleted.
+
+`external_call` looks like a §1.1 family-1 member because the shape is the
+shape: a subscript over a name, with a type in the bracket. But the thing the
+bracket selects is not a *function to monomorphize* — it is a **C symbol that
+already exists**, named by a string literal in the source. There is no
+instantiation to mangle and no boundary symbol to invent: the target is
+`setenv`, and `setenv` is on the link line whether or not anybody has compiled
+a Mojo function. Stage 5 is what you need when the callee is a template this
+compiler must EMIT; `external_call`'s callee is a template this compiler must
+NOT emit. Conflating the two is what made a 55-file family look like weeks of
+work, and it is the same confusion §2.1 of this document warns about one
+section earlier — deciding what a construct means from its SPELLING.
+
+So the repair was not a monomorphizer. It was: recognise the construct by its
+base name (`M.is_external_call_template`), read the symbol and the declared
+return type out of the bracket (`M.external_call_spec`), and let both
+architectures take the extern path they already had for every other external
+call — plus the one thing an extern call cannot know and this construct states
+outright, the **declared return type**, which is what says whether the return
+register holds the whole answer or the low half of one. Measured: **55 files
+left the family and 0 entered it.** `bugs/FORMAL_env_family_next_terminal.md`
+has the before/after table and the next terminal.
+
+Two things this document should have said and did not, and which are the real
+transferable lesson:
+
+  * **A shape shared with a construct that needs work is not evidence that it
+    needs that work.** The bracket in `external_call["sym", T]` and the bracket
+    in `size_of[type, target]` are the same AST node. One of them needs a
+    monomorphizer and the other needs a `BL`. Nothing in the refusal, in the
+    sweep, or in the family count could tell you which, and the ranking in §6.3
+    inherited the answer from the family it was lumped in with.
+  * **The measurement that settles a construct's cost is a program, not a
+    count.** The family was 55 files and the doc had been re-deriving 55 for
+    several waves. Writing the three functions of `env.mojo` out as a
+    standalone program, with the `std.ffi`/`std.sys` imports dropped so the
+    import closure could not answer for it, took minutes and showed the bodies
+    lower and run correctly on both architectures — which is the fact the
+    whole ranking hinged on and which no amount of reading had produced.
+
 ## 6.3 Ranked, with costs — the answer to "what is next"
 
 | # | lever | files | cost | why this rank |
 |---|---|---|---|---|
-| **1** | **Stage 5 monomorphization on the formal path** | **89** (55 `env.mojo` + 34 of family 1: 18 `_assembly` + 16 remainder) | **weeks** — §1.2 (a)–(c), plus a 2-D-index-free statement for `external_call`'s tuple | The largest single lever, by a factor of two over anything else, and it is the *same* work for both halves: a monomorphizer, a mangling function that agrees with `doc/ABI.md` and with what the importer computes, and CAS keying by `(template-id, type args, comptime params)` |
-| **2** | **by-reference frame escape** | **97 direct**, of which 29 are in files that also import a host module and so cannot build anyway → **68 actionable** | days-to-weeks, and it is a *design* question, not a patch | Widest single shape in the residue, and already has its own design document (`bugs/FORMAL_wide_receiver_by_reference.md`). Ranks second only because it is harder, not because it is smaller |
+| **1** | **Stage 5 monomorphization on the formal path** | **34** (family 1: 18 `_assembly` + 16 remainder) — **was 89; the 55 `env.mojo` files left on 2026-09-29** (§6.2.1) | **weeks** — §1.2 (a)–(c) | The largest single lever, and it is the *same* work for both halves: a monomorphizer, a mangling function that agrees with `doc/ABI.md` and with what the importer computes, and CAS keying by `(template-id, type args, comptime params)`. It was ranked first on a 89 that included 55 files that turned out not to need it; the 34 that remain are the real size, and the re-ranking against #2 below is a judgement call now that the numbers are this close |
+| **2** | **by-reference frame escape** | **97 direct**, of which 29 are in files that also import a host module and so cannot build anyway → **68 actionable** | days-to-weeks, and it is a *design* question, not a patch | Widest single shape in the residue, and already has its own design document (`bugs/FORMAL_wide_receiver_by_reference.md`) |
 | **3** | `Slice.__init__` — run a declared `__init__` / field-filling construction | 20 | **days**, self-contained | The cheapest *capability* in the residue, and the message that describes it is already exact. Nothing about it needs a new value model |
-| **4** | `env.mojo`'s message, rewritten to name a template application | 0 (55 already unblocked by #1) | **under an hour** | Not a coverage item at all. Listed because a wrong explanation on the largest family costs the next reader more than the fix does |
+| **4** | ~~`env.mojo`'s message, rewritten to name a template application~~ | ~~0~~ **55** | **done 2026-09-29** | The reword was never needed: the message was replaced by a **lowering** (§6.2.1). Listed here struck through because a ranking that still carries it would send the next reader to edit text that no longer exists |
 | **5** | the 19 singleton direct causes (§3) | 19 | one sitting each | Already audited in §3; several are weak messages rather than capabilities, and §3's own guidance applies: **prefer fixing a wrong message to adding a capability** |
 | — | MLIR attribute templates | 41 | **nothing — permanent** | §2. Not work. Read as a fact about those modules |
 | — | host-import | 166 (160 in reach) | sized, see below | not a limit at all |
 
 **So: the biggest remaining lever is Stage 5 monomorphization, and the numbers
-are 89 files and weeks.** It is the same answer §1.2 reached for family 1
-alone, with `env.mojo`'s 55 added because that family turned out to be family 1
-in disguise (§6.2). The second answer is the by-reference frame work at 68
-actionable files, and the honest comparison is that #1 is 89 files of *plumbing
-the design already specifies* while #2 is 67 files of *design that does not
-exist yet* — which is why #1 is first despite being the larger number only by a
-little.
+are 34 files and weeks.** It is the same answer §1.2 reached for family 1
+alone; `env.mojo`'s 55 were added to that number on the reasoning that the
+family "turned out to be family 1 in disguise" (§6.2), and that reasoning was
+**wrong** — see §6.2.1, where the 55 are closed and the cost was under a day.
+The second answer is the by-reference frame work at 68 actionable files, so
+the honest comparison is now 34 files of *plumbing the design already
+specifies* against 68 files of *design that does not exist yet* — which
+inverts the old order on the numbers, and leaves the ranking a judgement call
+rather than a fact. Read the design cost as the thing that has actually been
+estimated and the file count as the thing that has been re-measured most
+recently.
 
 **Nothing in this list should be started as a side quest.** #1 is a project,
 which is why it is written down here rather than attempted.
