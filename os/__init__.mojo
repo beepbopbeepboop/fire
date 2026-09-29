@@ -5,6 +5,17 @@ links libSystem and nothing else can actually be asked for. The shape of the
 restriction is the same everywhere in this module and is worth stating once,
 because it is not a matter of taste:
 
+  * ARM64 ONLY TODAY, and not because of anything in this source. A module
+    dylib that makes a call into the C library is arm64-only on this backend:
+    the same two-line module builds and RUNS with `--backend=arm64` and
+    produces an image the loader refuses with ``main executable failed strict
+    validation`` under `--backend=x86_64``, which is the unclaimed-trailing-byte
+    failure `formal/macho_linker.py`'s `_assert_no_unclaimed_bytes` exists for.
+    Every function below needs the C library, so all of them are arm64-only
+    until that is fixed; `test_formal_os.py` skips a non-arm64 host and the
+    reason it has to is here. Filed as
+    `bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md`.
+
   * A CONSTANT IS A CALL. `os.sep` is a module-level name, and a module-level
     name is not exported as a word across a dylib boundary — there is no
     storage for one, because every value a formal program can name lives in a

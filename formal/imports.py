@@ -101,7 +101,20 @@ HOST_UNREACHABLE = frozenset((
 HOST_MODELLED = frozenset((
     # A libSystem/libc facility: getcwd, stat, clock_gettime, regcomp,
     # arc4random_buf, CommonCrypto for hashlib, the POSIX file calls.
-    "os", "sys", "errno", "stat", "platform", "time", "select", "io",
+    #
+    # `os` was in this set and is not any more: it is WRITTEN, in
+    # `os/_syscalls.mojo` (every libSystem call it makes, once), `os/path`
+    # (CPython's posixpath) and `os` itself, and `test_formal_os.py` builds
+    # and RUNS all of it — 436 path answers against CPython's own, 75
+    # filesystem operations against the real filesystem. What of CPython's
+    # `os` is not here is stated on each function that lacks it (`listdir` and
+    # `walk` need a run-time-length sequence, which a list on this path cannot
+    # be; `environ` needs a `char **` walk) rather than approximated, and both
+    # omissions are bug docs. The entry has to go: leaving it would mean a file
+    # that imports `os` is refused AFTER the module that answers it exists,
+    # and the refusal would be a claim about a module that is sitting right
+    # there.
+    "sys", "errno", "stat", "platform", "time", "select", "io",
     "pathlib", "glob", "fnmatch", "hashlib", "secrets", "uuid",
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, byte packing, data structures.

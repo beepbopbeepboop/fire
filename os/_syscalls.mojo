@@ -32,6 +32,17 @@ and nowhere else. Three reasons, in the order they mattered while writing it.
 WHAT IS NOT HERE, AND WHY — each measured on this target before it was left
 out rather than guessed at:
 
+  * ARM64 ONLY TODAY, and not because of anything in this source. A module
+    dylib that makes a call into the C library is arm64-only on this backend:
+    the same two-line module builds and RUNS with `--backend=arm64` and
+    produces an image the loader refuses with ``main executable failed strict
+    validation`` under `--backend=x86_64``, which is the unclaimed-trailing-byte
+    failure `formal/macho_linker.py`'s `_assert_no_unclaimed_bytes` exists for.
+    Every function below needs the C library, so all of them are arm64-only
+    until that is fixed; `test_formal_os.py` skips a non-arm64 host and the
+    reason it has to is here. Filed as
+    `bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md`.
+
   * BYTE READS. `p[0]` on a `Pointer[UInt8]` is NOT a one-byte load. It takes
     the blob path in `_emit_subscript_addr`, which reads a COUNT from offset 0
     and bounds-checks against it: `byteat("ab")` returns -1879048144, which is

@@ -125,9 +125,21 @@ def test_relative_imports():
                                     project_root=os.path.join(REPO, 'fire.py'))
               == os.path.join(REPO, 'gimple_codegen.py'),
               'an absolute sibling name is unchanged')
-        check(I.resolve_module_path('os', relative_to=leaf,
+        # A host module with NO source still resolves to nothing, whatever the
+        # relative-import machinery does — this is the property the pass-1-first
+        # ordering exists to protect, and `os` used to be the example for it.
+        # `math` is the example now, because `os` has source: a name with a file
+        # beside the project resolves from ANY directory, since the repository
+        # root is one of the search roots, and that is the behaviour worth
+        # pinning in its place.
+        check(I.resolve_module_path('math', relative_to=leaf,
                                     project_root=leaf) is None,
               'a host module still resolves to nothing (pass 2 unaffected)')
+        check(I.resolve_module_path('os', relative_to=leaf,
+                                    project_root=leaf)
+              == os.path.join(REPO, 'os', '__init__.mojo'),
+              'a module with real source resolves from an unrelated directory, '
+              'because the repository root is a search root')
     finally:
         import shutil
         shutil.rmtree(d, ignore_errors=True)
@@ -166,6 +178,29 @@ def _original_host_modules():
     return set(PRE_SPLIT_HOST_MODULES)
 
 
+def Written_modules():
+    """The host-set names that have been WRITTEN, and so have left the set.
+
+    A name belongs here when `resolve_module_path` finds real source for it in
+    this tree. That is the whole test: the host set exists to say "there is
+    nothing here to compile", and a module with a file is not in that
+    condition however much of CPython it covers. `os` is the first entry —
+    87 files of the arm64 sweep stopped on it — and the entry is derived rather
+    than typed, so writing the next module updates this by being written.
+    """
+    found = set()
+    for name in sorted(PRE_SPLIT_HOST_MODULES):
+        if name in I.HOST_MODULES:
+            continue
+        try:
+            path = I.resolve_module_path(name, project_root=HERE)
+        except Exception:
+            path = None
+        if path and os.path.isfile(path):
+            found.add(name)
+    return found
+
+
 def test_host_tiers():
     check(I._host_tier_conflicts() == [],
           'no host module is in both tiers', str(I._host_tier_conflicts()))
@@ -175,23 +210,50 @@ def test_host_tiers():
           f"sym-diff {sorted(union ^ set(I.HOST_MODULES))}")
     orig = _original_host_modules()
     if orig is not None:
-        check(union == orig,
-              'the union is the ORIGINAL 77-name list: a classification change, '
-              'not a behaviour change',
-              f'added {sorted(union - orig)}, lost {sorted(orig - union)}')
+        # The union was the ORIGINAL list plus nothing, because splitting it in
+        # two was a classification change and not a behaviour change. It is now
+        # the original list MINUS the modules that have been WRITTEN, which is
+        # a behaviour change and a deliberate one: a name leaves this set when
+        # there is real source for it, and stays while there is not. So the
+        # check is a SUBSET relation plus an exact account of what left, rather
+        # than equality — equality would make writing a module a test failure,
+        # and a name that comes BACK would pass unnoticed.
+        check(union <= orig,
+              'nothing has been ADDED to the host set: a name enters it when a '
+              'module is unreachable, never because one is hard to write',
+              f'added {sorted(union - orig)}')
+        check(Written_modules() <= (orig - union),
+              'every name that left the host set is one with real source '
+              'behind it',
+              f'left without source {sorted((orig - union) - Written_modules())}')
+        check(set(orig) - union == Written_modules(),
+              'the account of what left the host set is exact',
+              f'unaccounted {sorted((orig - union) ^ Written_modules())}')
     else:
         check(False, 'the pre-split HOST_MODULES list could be read from git',
               'git show HEAD:formal/imports.py did not yield it')
     # The claim the split exists to make true: these are reachable, so calling
-    # them "not fixable" was false.
-    for m in ('os', 'sys', 'math', 'struct', 'time', 'json', 're'):
+    # them "not fixable" was false. `os` is no longer in the set at all — it is
+    # WRITTEN (os/__init__.mojo, os/path/__init__.mojo, os/_syscalls.mojo, with
+    # test_formal_os.py building and running all of it) — so it is checked as
+    # the other kind of fact: not a host module, and a real file.
+    check(not I._is_host_module('os') and I.host_module_tier('os') == '',
+          'os is no longer a host module: it has source now')
+    check(not I._is_host_module('os.path') and I.host_module_tier('os.path') == '',
+          'the dotted form os.path is not a host module either')
+    for name in ('os', 'os.path'):
+        got = I.resolve_module_path(name, project_root=HERE)
+        check(got is not None and os.path.isfile(got),
+              f'{name} resolves to a real source file',
+              f'resolved to {got!r}')
+    for m in ('sys', 'math', 'struct', 'time', 'json', 're'):
         check(I.host_module_tier(m) == 'modelled',
               f'{m} is modelled (reachable in principle, not implemented)')
     for m in ('subprocess', 'ctypes', 'asyncio', 'threading', 'socket',
               'tempfile', 'shutil', 'concurrent.futures', 'zlib', 'traceback'):
         check(I.host_module_tier(m) == 'unreachable',
               f'{m} is unreachable (needs an object the target does not have)')
-    for m in ('os.path', 'unittest.mock', 'importlib.util'):
+    for m in ('unittest.mock', 'importlib.util'):
         check(I.host_module_tier(m) != '',
               f'the dotted form {m} still classifies')
     check(I.host_module_tier('json') == I.host_module_tier('json.decoder'),
