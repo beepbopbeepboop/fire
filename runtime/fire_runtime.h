@@ -302,6 +302,21 @@ void        mojo_list_set_kinds(MojoList *l, const char *kinds);
 const char *mojo_list_get_kinds(MojoList *l);
 char        mojo_list_slot_kind(MojoList *l, int64_t i);
 void        mojo_list_inherit_kinds(MojoList *dst, MojoList *src);
+/* A read whose slot index is not known at compile time (`for x in
+ * struct.unpack('<if', buf)`, `t[i]`) has to land in ONE C type, and for a
+ * heterogeneous list no single accessor is right for every slot. This
+ * returns the raw word for every slot that is not a float, and the ADDRESS
+ * OF A BOX for a float slot — so the int64_t it returns is the box's, and
+ * `mojo_is_boxed` is how a consumer tells the two apart. `mojo_box_double`
+ * and `mojo_box_int` read a box (each returns the input unchanged if it is
+ * not one), and `mojo_repr_boxed` is the whole resolution in one call for a
+ * value that is only going to be printed. Boxes are cached per (list, slot),
+ * so a loop boxes each slot once, and the cache is released with the list. */
+int64_t     mojo_list_get_boxed(MojoList *l, int64_t i);
+int         mojo_is_boxed(int64_t v);
+double      mojo_box_double(int64_t v);
+int64_t     mojo_box_int(int64_t v);
+char       *mojo_repr_boxed(int64_t v);
 void      mojo_list_free(MojoList *l);
 /* mojo_list_init/mojo_list_destroy: the in-place halves of mojo_list_new/
  * mojo_list_free, for a stack-declared MojoList (doc/OWNERSHIP_MODEL.md

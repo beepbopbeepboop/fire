@@ -415,6 +415,38 @@ def _class_attr_ctype(v) -> str | None:
     if isinstance(v, CallExpr) and isinstance(v.func, MemberExpr) and isinstance(v.func.obj, IdentExpr) and (v.func.obj.name == 'struct') and (v.func.member == 'Struct'):
         return 'MojoStructFmt *'
     return None
+
+
+def _struct_ctor_format(v) -> str | None:
+    """The const-folded format string of a `struct.Struct('<fmt>')`
+    initializer, or None for anything else.
+
+    A `struct.Struct` handle is a runtime `MojoStructFmt *`: the format
+    travels inside it, not in the C type. A codegen that can read the
+    format back out of the SOURCE recovers the per-slot kinds of that
+    handle's `unpack` result, which is what a mixed format's float slot
+    needs to be read as a float rather than as its raw IEEE-754 bits
+    (`self.F.unpack(data)` with `var F = struct.Struct('<if')` is the case
+    that motivated this: a class-attribute handle has no local name for the
+    codegen to have recorded the format against).
+
+    Only a literal format is answered, which is the same
+    compile-time-constant bar the module-level `struct.unpack('<if', b)`
+    path already uses. A computed format yields None, and the caller then
+    has no static kinds — where the runtime's own record of the unpack
+    result's per-slot kinds (runtime/fire_runtime.c's
+    `mojo_list_set_kinds`) is what keeps the answer right."""
+    if not (isinstance(v, CallExpr) and isinstance(v.func, MemberExpr)
+            and isinstance(v.func.obj, IdentExpr)
+            and v.func.obj.name == 'struct' and v.func.member == 'Struct'):
+        return None
+    if len(v.args) != 1 or getattr(v, 'kwargs', None):
+        return None
+    a = v.args[0]
+    if isinstance(a, StringLiteral):
+        val = a.value
+        return val if isinstance(val, str) and not a.is_bytes else None
+    return None
 _FIXED_ARRAY_ANN_RE = re.compile('^\\[\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*;\\s*([A-Za-z_0-9]+)\\s*\\]$')
 
 

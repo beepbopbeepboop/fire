@@ -1711,6 +1711,19 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         _fl_retype = (not share_var_with_sibling_arm
                       and gen.var_types.get(var) not in (None, _fl_ctype))
         gen._declare_var(var, _fl_ctype, force=(var == shadow_name) or _fl_retype)
+        # ...unless the iterated list records its OWN per-slot kinds, in which
+        # case the target is the BOXED word `mojo_list_get_boxed` produces and
+        # must be declared int64_t. A heterogeneous list's tracked element
+        # type is its PROMOTED one — 'double' for `[1, 2.5]` — so declaring
+        # that here is exactly what made `for y in [1, 2.5]` store a box (or
+        # a small int) into a `double` variable and print 4311182544.0. The
+        # variable is only *stored* as an int64_t here; the body's use of it
+        # resolves the box (gen._boxed_vals).
+        if (not share_var_with_sibling_arm
+                and (it_val in getattr(gen, '_maybe_kinds_vals', ())
+                     or _as_str(it_val) in getattr(gen, '_maybe_kinds_vals', ()))
+                and gen.var_types.get(var) != 'int64_t'):
+            gen._declare_var(var, 'int64_t', force=True)
     len64 = gen._new_temp('int64_t')
     len_t = gen._new_temp('int64_t')
     idx_t = gen._new_temp('int64_t')
@@ -1810,7 +1823,29 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     else:
         cvar = gen._cname(var)
         suf = gimple_ctypes.TypeLattice.list_suffix(elem)
-        if suf == 'double':
+        # A list that records its OWN per-slot kinds (a `struct.unpack` of a
+        # format that mixes int and float, a heterogeneous list literal) is
+        # read through the runtime, which boxes a float slot so the loop
+        # variable can BE a float instead of its raw IEEE-754 bits —
+        # `for x in struct.unpack('<if', buf): print(x)` printed
+        # 4607182418800017408 for 1.0, and `for y in [1, 2.5]` printed 1.0
+        # for the int. Checked BEFORE the uniform-suffix branches on purpose:
+        # a heterogeneous list's tracked element type is the promoted one
+        # ('double' for `[1, 2.5]`), which is exactly the answer that is
+        # wrong for its other slots. A list with no kinds of its own takes
+        # the identical accessor it always did and yields the identical
+        # word, so this costs only a set membership test at compile time.
+        _mkv = (it_val in getattr(gen, '_maybe_kinds_vals', ())
+                or list_ptr in getattr(gen, '_maybe_kinds_vals', ()))
+        if _mkv:
+            elem64 = gen._new_val('int64_t',
+                                  f"mojo_list_get_boxed ({list_ptr}, {idx_t})")
+            # The loop TARGET is a new name, not a read of an existing one,
+            # so it is the cname that the print/str resolution is keyed on
+            # (gen._boxed_vals).
+            gen._boxed_vals.add(cvar)
+            gen._emit(f"  {cvar} = (int64_t) {elem64};")
+        elif suf == 'double':
             gen._emit(f"  {cvar} = mojo_list_get_double ({list_ptr}, {idx_t});")
         elif suf == 'str':
             # mojo_list_get_str returns char*, but var might be int64_t

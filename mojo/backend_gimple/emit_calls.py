@@ -3228,6 +3228,8 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
     if _copy_src is not None and _copy_src != _rv:
         gen._emit_call('void', '', 'mojo_list_inherit_kinds',
                        [('MojoList *', _rv), ('MojoList *', _copy_src)])
+        if _copy_src in gen._maybe_kinds_vals:
+            gen._maybe_kinds_vals.add(_rv)
     return _rt, _rv
 
 
@@ -5739,6 +5741,23 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                     'int64_t', f"mojo_list_get_int ({ov}, {idx64})")
         suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
+        # A list that records its OWN per-slot kinds, read at an index that is
+        # not a compile-time constant, is the one read with no static answer:
+        # the loop variable of `for x in struct.unpack('<if', buf)` and the
+        # value of `struct.unpack('<if', buf)[i]` both used to come out of
+        # one accessor, which hands back a float slot's raw IEEE-754 bits.
+        # The runtime knows the kind, so read it there and let the box carry
+        # it out of the slot; the consumer resolves it (see gen._boxed_vals).
+        # Checked BEFORE the uniform-suffix branches, because a heterogeneous
+        # list's tracked element type is its PROMOTED one — 'double' for
+        # `[1, 2.5]` — which is exactly the answer that is wrong for its int
+        # slot. A list with no kinds of its own is unaffected: a set
+        # membership test at compile time, and the identical accessor
+        # otherwise.
+        if ov in getattr(gen, '_maybe_kinds_vals', ()):
+            t = gen._new_val('int64_t', f"mojo_list_get_boxed ({ov}, {idx64})")
+            gen._boxed_vals.add(t)
+            return 'int64_t', t
         if suf == 'double':
             t = gen._new_val('double', f"mojo_list_get_double ({ov}, {idx64})")
             return 'double', t

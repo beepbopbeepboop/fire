@@ -2655,6 +2655,16 @@ def _stringify_value(gen, et: str, ev: str) -> str:
         return gen._call_expr('char *', 'mojo_bool_to_str', [('int', ev)])
     if et in ('int', 'int64_t', 'int8_t', 'int16_t', 'int32_t',
               'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'):
+        # A value read through `mojo_list_get_boxed` (a slot of a
+        # heterogeneous list whose index was not a compile-time constant)
+        # may be a BOX: a heap cell whose payload is a float, because a
+        # float has no int64_t spelling. `mojo_repr_boxed` resolves both
+        # cases in one call, so nothing below has to branch — and for a
+        # value that is NOT a box it is the same answer, and the same
+        # allocation, as the mojo_str_from_int arm below.
+        if ev in getattr(gen, '_boxed_vals', ()):
+            nv = gen._to_int64(et, ev)
+            return gen._call_expr('char *', 'mojo_repr_boxed', [('int64_t', nv)])
         nv = gen._to_int64(et, ev)
         return gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
     if et in ('double', 'float'):
@@ -3533,6 +3543,16 @@ def _gen_print(gen, args: list, kwargs: list = None):
                 _stat = '_Bool'
         if atype == 'char *':
             gen._emit(f'  {print_fn} ({aval});')
+        elif atype in ('int', 'int64_t') and aval in getattr(gen, '_boxed_vals', ()):
+            # A slot read out of a heterogeneous list at a NON-constant index
+            # is a BOX when its runtime kind is a float: a heap cell, because
+            # a float has no int64_t spelling and the generic `%ld` path
+            # below would print the box's own address. `mojo_repr_boxed`
+            # answers both cases in one call, so no branch is needed, and for
+            # a value that is not a box it is the same integer text (and the
+            # same allocation) the generic path produces.
+            rv = gen._call_expr('char *', 'mojo_repr_boxed', [('int64_t', aval)])
+            gen._emit(f'  {print_fn} ({rv});')
         elif atype in ('double', 'float', '__fp16'):
             dv = aval if atype == 'double' else gen._new_val('double', f'(double){aval}')
             rv = gen._call_expr('char *', 'mojo_repr_float', [('double', dv)])

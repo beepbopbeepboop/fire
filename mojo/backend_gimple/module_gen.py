@@ -2860,6 +2860,40 @@ def gen_module_impl(self, stmts):
                 mangled = f"_classattr_{s.name}__{aname}"
                 self._class_attrs[s.name][aname] = mangled
                 ctype = _class_attr_ctype(v)
+                # A class attribute holding a `struct.Struct('<fmt>')` with a
+                # literal format: remember the format under the attribute
+                # NAME, so `self.F.unpack(buf)` on it can recover the same
+                # per-slot kinds the module-level `struct.unpack` path reads
+                # straight off its own format argument. Without it, a mixed
+                # format read through a class attribute gave its float slot
+                # back as raw IEEE-754 bits on every statically-indexed read
+                # (`t[1]`), because the handle is a runtime `MojoStructFmt *`
+                # with no local name to record the format against.
+                #
+                # Keyed by NAME and not by (class, attr) on purpose, and only
+                # recorded when that name is unambiguous: the read site
+                # reaches the attribute through a lowered C value whose owning
+                # type is not always recoverable (a free function's local, a
+                # `Class.attr` spelled three different ways), and guessing
+                # between two DIFFERENT formats is exactly the wrong-static-
+                # answer failure this table exists to remove. A collision
+                # records nothing and the read falls back to the runtime's
+                # own kinds, which is right for the whole-result repr and
+                # merely untyped for the rest.
+                # Keyed BOTH ways, because the read site can usually name the
+                # owner and sometimes cannot: `(cls, attr)` is the precise
+                # key, and the name-only entry is what a read whose owner is
+                # not recoverable falls back to — recorded only while it
+                # stays unambiguous, and set to None the moment a second
+                # class declares the same name with a DIFFERENT format, so a
+                # guess is never made between two of them.
+                _sfmt = gimple_ctypes._struct_ctor_format(v)
+                if _sfmt is not None:
+                    self._struct_attr_formats_scoped[(s.name, aname)] = _sfmt
+                    if aname not in self._struct_attr_formats:
+                        self._struct_attr_formats[aname] = _sfmt
+                    elif self._struct_attr_formats[aname] != _sfmt:
+                        self._struct_attr_formats[aname] = None
                 if ctype is None:
                     if isinstance(v, StringLiteral):
                         ctype = 'char *'
