@@ -208,6 +208,12 @@ forward in a scratch tree, not committed:
     together. The remaining `fire dylib --formal` failure is the contract
     emitter's `hreg`, which is a separate item and unrelated to the fuel.
 
+> **See also [2]'s §5.7**, which measures the same walk breakage from the
+> other side. Its problem statement is **resolved by `e0af987`**, which landed
+> the arithmetic-form fuel this section calls for. Two accounts of one bug; fold
+> them when convenient. The full consolidated state of both is
+> `bugs/FORMAL_contract_work_handoff.md`.
+
 #### 4.1a RESOLVED as a diagnosis: the `sorry` is on a false statement, and that is now CHECKED
 
 The paragraph above was an assertion, and it is worth checking rather than

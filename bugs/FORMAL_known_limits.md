@@ -32,6 +32,25 @@ and a module-level `comptime` initializer, which between them made
 project has — and a crash in `reflect.collect_exports_src` that stopped the
 export probe dead on any module with a dataclass field carrying a default.
 
+## Two open items in the arm64 per-export-contract work (agent [3])
+
+Not part of the sweep families above, and not re-measured by this audit. Both
+are **true** claims, both unfinished; the single home for their full state —
+every measurement, every trap hit on the way, and the exact next step — is:
+
+> **`FORMAL_contract_work_handoff.md`** — read §1 and §3 of it to start.
+
+| item | measured | is the claim true? | what closes it |
+|---|---|---|---|
+| a per-export contract for a real dylib export (the emitter exists, `hreg` does not evaluate) | `formal-dylib` is RED, deliberately, 10 PASS / 1 FAIL | **true, unfinished** | shrink the composed effect so `bv_decide` sees one multiplication; **not** a budget problem (40× `maxHeartbeats` measured, did not help) |
+| `Total` for a looping export | was **FALSE** at a constant fuel (`countdown` returns `none` at n = 8000); now TRUE, still unproved | **true since `e0af987`** | a loop-aware ranking argument; the acyclic-only CFG walk cannot supply it. Mirrored x86-64 gap: `OPEN_WORK.md` A4 |
+
+The tree is intentionally red on the first row. Do not make it green by
+reverting the emitter: a red that needs fixing gets fixed, and a green that does
+not do what we want is technical debt.
+
+---
+
 ## The three families, and what each one actually is
 
 Measured on the four sweeps of this tree (`tools/formal_sweep.py`, both
