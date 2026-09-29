@@ -1224,19 +1224,32 @@ CASES = [
     # `std/sys/info.mojo:32` and `std/builtin/type_aliases.mojo:146/149/153`.
     # A `MemberExpr` reaches no subscript and no address computation at all,
     # which is why it fell all the way through to a load of an undefined name.
+    #
+    # It still refuses, and the reason it gives is now the SHARPEST statement
+    # in the family. It stopped saying "there is no MLIR on this path for the
+    # template to become" on 2026-09-29, and that was a false claim about the
+    # file: the same `current_target`, queried one step further
+    # (`target_get_field<current_target, "arch">`), now BUILDS and prints
+    # `aarch64`, because a formal image is compiled for one target and that
+    # question has one right answer. So the needle is the part that is still
+    # true — the target has no VALUE on this path — and the case that proves
+    # the split is `sub_multi_index_mlir_template` above.
     ("limit_mlir_template_dotted_spelling",
      "def main(n: Int) -> Int:\n"
      "    var t = __mlir_attr.`#kgen.param.expr<current_target> : !kgen.target`\n"
      "    return n\n",
-     "refuse:assembles an MLIR attribute from a template", None),
+     "refuse:asks for the current TARGET itself, which is not a value", None),
     # The single-element bracket: `__mlir_type[x]` is a template exactly as
     # `__mlir_type[x, y]` is, and the comma was the only thing that made the
-    # difference visible.
+    # difference visible. `__mlir_type` names a TYPE rather than an attribute,
+    # and the message says so — it used to call it an attribute, which is
+    # false of `std/sys/info.mojo`'s `_TargetType` and of every other
+    # `__mlir_type` binding in the stdlib.
     ("limit_mlir_template_single_element_bracket",
      "def main(n: Int) -> Int:\n"
      "    var t = __mlir_type[`!kgen.never`]\n"
      "    return n\n",
-     "refuse:assembles an MLIR attribute from a template", None),
+     "refuse:names an MLIR TYPE, not a value", None),
     # A MODULE-LEVEL `comptime` binding is not part of the function-body
     # expression walk at all — `compile()` is handed the prepared FUNCTION list
     # and lowers nothing else — so the multi-element template, the exact shape
@@ -1244,7 +1257,10 @@ CASES = [
     # read an undefined name. That made `std/builtin/type_aliases.mojo` a FALSE
     # PASS: four such bindings (lines 146/149/153/157) and the sweep counted the
     # file as one that built. The needle is this refusal's own, so the two
-    # arches cannot name different limits for one construct.
+    # arches cannot name different limits for one construct — with "type"
+    # rather than "attribute" where the initializer is a `__mlir_type`, which
+    # this one is (`!lit.origin<…>`), and which the old fixed word got wrong
+    # about every `__mlir_type` binding it was ever printed for.
     ("limit_module_level_comptime_mlir_template",
      "comptime OriginSet = __mlir_type[\n"
      "    `!lit.origin<`, 1, `>`\n"
@@ -1252,7 +1268,7 @@ CASES = [
      "def main(n: Int) -> Int:\n"
      "    return n\n",
      "refuse:module-level comptime binding 'OriginSet' is initialized from an "
-     "MLIR attribute template", None),
+     "MLIR type template", None),
     # The walk RECURSES, so a template nested two levels down inside a call's
     # keyword argument is caught too — which is where `type_aliases.mojo` keeps
     # its `__mlir_attr[…]` ones, under `Origin[0, _mlir_origin=…]()`. Without
@@ -4273,11 +4289,35 @@ SUBSCRIPT_CASES = [
     # is. `std/sys/info.mojo` has 27 of these and nothing else the backend
     # reaches first; the old text called it a "multi-index subscript", which
     # is a misdiagnosis — it is not a subscript and no index is involved.
+    #
+    # It used to assert the REFUSAL, and it stopped doing so on 2026-09-29
+    # because the construct stopped being one refusal: a `#kgen.param.expr<…>`
+    # template that asks a QUESTION this build can answer is not an MLIR
+    # attribute with nowhere to go — `formal/model.py`'s target-query evaluator
+    # answers it at build time, from the `arch`/`fmt` pair the linker is about
+    # to act on. `eq(1, 2)` is decidable without any target at all, so this
+    # case is now an EXECUTED value assertion rather than a refusal: the image
+    # has to take the false branch, which is what a fabricated 1 would fail.
     ("sub_multi_index_mlir_template",
      "def main(n):\n"
      "    x = __mlir_attr[`#kgen.param.expr<eq,`, 1, `, 2> : i1`]\n"
+     "    if x:\n"
+     "        return 1\n"
+     "    return 0\n", 0, None),
+    # The half of the family that is still refused, and WHY, which is the
+    # point of keeping a refusal next to the value case: `target_has_feature`
+    # is a question about a CPU, and this build names the architecture it emits
+    # and never a CPU. A hand-kept feature table would have made this pass, and
+    # would have been a wrong answer nobody could detect the rot of.
+    ("sub_multi_index_mlir_template_unanswerable",
+     "def main(n):\n"
+     "    x = __mlir_attr[\n"
+     "        `#kgen.param.expr<target_has_feature,`,\n"
+     "        __mlir_attr.`#kgen.param.expr<current_target> : !kgen.target`,\n"
+     "        `, \"neon\"`,\n"
+     "        `> : i1`]\n"
      "    return 0\n",
-     "refuse:assembles an MLIR attribute from a template", None),
+     "refuse:target_has_feature('neon') is not decidable on this path", None),
     # `del a[i, j]`. arm64 reaches the subscript here and refuses with the
     # shared message; x86-64 has no `del` at all and refuses the STATEMENT
     # first, which is correct and complete but names a different thing. Both

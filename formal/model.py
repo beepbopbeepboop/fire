@@ -261,17 +261,661 @@ def mlir_template_spelling(e) -> str:
     return _spell(e)
 
 
+def is_mlir_type_template(e) -> bool:
+    """True when `e` is a `__mlir_type` / `__mlir_deferred_type` TEMPLATE.
+
+    The two halves of `MLIR_TEMPLATE_NAMES` are different things and the
+    refusal used to call both of them an ATTRIBUTE, which is false of half of
+    them: `__mlir_attr.`#kgen.param.expr<current_target> : !kgen.target`` is an
+    attribute and `comptime _TargetType = __mlir_type.`!kgen.target`` (which is
+    what `std/sys/info.mojo` declares) is a TYPE. A type is not a value a
+    register could hold, so it is refused as a type — and the message has to
+    say that, because the sibling `target_get_field` on the SAME target does
+    answer, and a reader told "there is no MLIR on this path" for the type
+    would be sent looking for a missing MLIR rather than for a type."""
+    return _base_name(getattr(e, "obj", None)) in MLIR_TYPE_TEMPLATE_NAMES
+
+
+def mlir_type_template_refusal(e) -> str:
+    """The refusal for an MLIR TYPE template. Distinct from the attribute one."""
+    return (
+        f"{mlir_template_spelling(e)} names an MLIR TYPE, not a value: the "
+        "template's elements are backtick-quoted type fragments and the whole "
+        "thing denotes a type, and a type is not something a register can hold "
+        "on a path where the only value is a 64-bit word. Refused rather than "
+        "read out of a register, which would give a program a number no source "
+        "wrote."
+    )
+
+
 def mlir_template_refusal(e):
     """The refusal for an MLIR template in any spelling, or None if `e` is not one.
 
     The text is `multi_index_refusal`'s, unchanged and still ARCH-FREE: it was
     already correct for the one spelling that reached it, and the defect was
     that the other two spellings did not. Naming the construct — not the
-    symptom — is what makes it usable on a file nobody has read."""
+    symptom — is what makes it usable on a file nobody has read.
+
+    A template that ASKS THE TARGET A QUESTION is not this refusal: the
+    target-query evaluator below answers it, because a formal image is compiled
+    for one known target and the question has exactly one right answer for it.
+    That check comes first and it comes from here rather than from either
+    backend, so arm64 and x86-64 cannot disagree about whether a given
+    `__mlir_attr[...]` is answerable."""
     if not is_mlir_template(e):
         return None
+    if is_mlir_type_template(e):
+        return mlir_type_template_refusal(e)
+    answered = target_template(e)
+    if answered is not None and answered[0] in ("value", "unanswered"):
+        return answered[1] if answered[0] == "unanswered" else None
+    if answered is not None and answered[0] == "target":
+        return target_value_refusal(e)
     return multi_index_refusal(MULTI_INDEX_MLIR_TEMPLATE,
                                mlir_template_spelling(e))
+
+
+# ── Build-time target queries ─────────────────────────────────────────────
+#
+# `formal/model.py` refuses every MLIR attribute template on the ground that
+# "there is no MLIR on this path for the template to become". That ground is
+# right about a DIALECT ATTRIBUTE — `#kgen.simd<1>`, `#pop.float_literal<nan>`,
+# `#lit.struct<{…}>` — and wrong about the one family whose meaning is not an
+# MLIR object at all: a `#kgen.param.expr<…>` TARGET QUERY.
+#
+# `std/sys/info.mojo` is built entirely out of them, and it is the module that
+# 35 of the 46 files in this family are blocked behind:
+#
+#     comptime _TargetType = __mlir_type.`!kgen.target`
+#     def _current_target() -> _TargetType:
+#         return __mlir_attr.`#kgen.param.expr<current_target> : !kgen.target`
+#     def __arch() -> __mlir_type.`!kgen.string`:
+#         return __mlir_attr[
+#             `#kgen.param.expr<target_get_field,`, Self.value,
+#             `, "arch" : !kgen.string`, `> : !kgen.string`]
+#
+# A formal image is compiled for ONE target and that target is stated by the
+# build itself: `compile_formal(arch=…, fmt=…)` is about to emit an arm64 (or
+# x86-64) Mach-O (or ELF) for this machine. "What is the current target's arch"
+# therefore has exactly one correct answer for this build, and answering it at
+# build time is not a guess — it is the same fact the linker is about to act on.
+# What the backend CANNOT answer is equally decidable, and is refused: a CPU
+# feature (`target_has_feature`) is a property of a CPU the build never names,
+# and a field the backend has no source for (`"triple"`, `"stdlib_plugin"`)
+# would be a string this file never wrote. See `Target.field`.
+#
+# Everything here is leaf-most on purpose: `os` and `fire_compiler` only, like
+# the rest of this module, so the two architectures cannot drift on what a
+# target query means — the same rule `is_mlir_template` and
+# `multi_index_refusal` already follow.
+
+# The two halves of `MLIR_TEMPLATE_NAMES`, split because they are refused for
+# different reasons. See `is_mlir_type_template`.
+MLIR_TYPE_TEMPLATE_NAMES = frozenset(("__mlir_type", "__mlir_deferred_type"))
+
+
+class Target:
+    """The target a formal image is for, and the answers this build can state.
+
+    Every field is DERIVED from the two things the build already commits to —
+    the architecture the codegen emits, and the container format it wraps the
+    result in — and every one is a fact about the EMITTED IMAGE rather than
+    about the machine doing the compiling. That is the whole reason these
+    answers are not fabrications: a Mach-O image runs on Darwin whatever host
+    emitted it, and the word size of a path this module already describes as
+    "one 64-bit word" is 64 whatever the CPU.
+
+    `field(name)` returns None for a field this build has no source for, and
+    `unanswerable(name, why)` says which. A hand-kept feature table is exactly
+    what that exists to avoid, so there isn't one: `target_has_feature` is
+    refused outright rather than answered from a list that would rot into a
+    wrong answer nobody could detect.
+    """
+
+    __slots__ = ("arch", "fmt", "os", "host_arch", "_fields", "_numerics")
+
+    def __init__(self, arch: str, fmt: str):
+        self.arch = arch
+        self.fmt = fmt
+        # The emitted container decides the OS: a Mach-O image is a Darwin
+        # image. `build.default_format` is where the build already makes this
+        # choice, and asking for the other format on purpose (a Linux host
+        # asking for a Mach-O to exercise the emitter) is a target change, not
+        # a contradiction.
+        self.os = "darwin" if fmt == "macho" else "linux"
+        try:
+            self.host_arch = os.uname().machine
+        except (AttributeError, OSError):
+            self.host_arch = ""
+        # `arch` is the backend's own name; the value is the spelling
+        # `std/sys/info.mojo`'s `__arch` documents ("x86_64", "aarch64"), which
+        # is also what LLVM calls the first one.
+        self._fields = {
+            "arch": {"arm64": "aarch64", "x86_64": "x86_64"}[arch],
+            "os": self.os,
+            # Both architectures this backend emits are little-endian, and that
+            # is a property of the architecture name rather than of the host.
+            "endianness": "little",
+        }
+        self._numerics = {
+            # "a formal value is one 64-bit word" is this module's own model
+            # of every value it handles, and an `index` IS a pointer width.
+            "pointer_width": 64,
+            # 128 is the vector register width of both architectures: NEON on
+            # AArch64, and the baseline XMM/YMM pair on x86-64.
+            "simd_bit_width": 128,
+        }
+
+    def field(self, name: str):
+        """The value of the string-valued target field `name`, or None."""
+        return self._fields.get(name)
+
+    def numeric_field(self, name: str):
+        """The value of the integer-valued target field `name`, or None."""
+        return self._numerics.get(name)
+
+    def is_cross_compilation(self) -> bool:
+        """True when the emitted image is not for the machine that built it.
+
+        Measured, not assumed: the codegen names the architecture it is about
+        to emit and `os.uname()` names the one running, so `--arch=x86_64` on
+        an arm64 Mac is cross-compiling and the default arm64 build is not.
+        `std/gpu/host/compile.mojo` asks exactly this (`cross_compilation`),
+        and a build that answered it from a constant would be wrong for half
+        the backend's own configurations."""
+        return bool(self.host_arch) and self.host_arch != self.arch
+
+    def describe(self) -> str:
+        return (f"{self.arch}/{self.os} (a {self.fmt} image for "
+                f"{self.host_arch or 'an unknown host'})")
+
+    def __repr__(self) -> str:
+        return f"Target({self.arch!r}, {self.fmt!r})"
+
+
+def target_for(arch: str, fmt: str) -> Target:
+    """The `Target` for an image of `arch` in `fmt`."""
+    return Target(arch, fmt)
+
+
+_TARGET: Target = None
+
+
+def publish_target(t: Target) -> None:
+    """Install `t` as the current build's target.
+
+    Published rather than threaded, and for the reason `publish_module_symbols`
+    is: the consumers are a node walk with no unit in hand (the module-symbol
+    folder, the function-body rewrite) and the evaluator they call, and neither
+    has an `arch` to be handed. Replaces, never merges — a dylib and its
+    dependent are compiled for the same target, and a table that accumulated
+    both would be a target that is neither."""
+    global _TARGET
+    _TARGET = t
+
+
+def target() -> Target:
+    """The published `Target`, or None before anything published one.
+
+    None is NOT "unknown target, answer nothing": every caller treats it as
+    "there is no build to fold against", which is what makes a query refuse
+    with its own reason rather than with a fabricated default."""
+    return _TARGET
+
+
+# The `#kgen.param.expr<OP, …>` operations this evaluator answers, and the
+# REASON each one is answerable or not. A name absent from both tables is
+# refused, and the refusal quotes the operation — which is the one piece of
+# information the reader needs and did not have.
+#
+# Each entry is (arity, evaluator). Zero-arg operations are `current_target`,
+# `cross_compilation` and `accelerator_arch`; the rest take their operands from
+# the template's own argument list.
+_TARGET_QUERY_OPS = {
+    "current_target": (0, None),
+    "target_get_field": (2, "_op_target_get_field"),
+    "target_has_feature": (2, "_op_target_has_feature"),
+    "eq": (2, "_op_eq"),
+    "add": (2, "_op_add"),
+    "cross_compilation": (0, "_op_cross_compilation"),
+    "accelerator_arch": (0, "_op_accelerator_arch"),
+}
+
+# A `#kgen.param.expr<…>` result TYPE and the Python type that type is. The
+# declared type is checked against the value the evaluator produced, so a fold
+# that produced a number for a `!kgen.string` is a refusal rather than a wrong
+# answer — the check is what makes "correct values" mean anything.
+_TARGET_RESULT_TYPES = {
+    "!kgen.string": str,
+    "index": int,
+    "i64": int,
+    "i32": int,
+    "i1": bool,
+    "!kgen.scalar<bool>": bool,
+    "!kgen.target": "target",
+}
+
+
+def _backtick_text(name: str):
+    """The literal inside a backtick-quoted fragment, or None if not one."""
+    if isinstance(name, str) and len(name) >= 2 and name[0] == "`" \
+            and name[-1] == "`":
+        return name[1:-1]
+    return None
+
+
+def _template_fragments(e):
+    """(text, holes) for an MLIR template node in any spelling.
+
+    `text` is the backtick fragments concatenated with a `{n}` placeholder for
+    each sub-expression, so the whole template is one string plus a list of
+    sub-expressions regardless of how the source wrapped it. That is what makes
+    the evaluator indifferent to the wrapping: `std/sys/info.mojo` splits one
+    query across four lines, the same query written on one line parses the
+    same way, and a line-continuation-style concatenation cannot make the two
+    disagree.
+
+    Returns None for a node that is not a template at all, or whose elements
+    are not all either a backtick fragment or a sub-expression the caller can
+    evaluate — which is itself an answer: this path cannot read the template."""
+    base = _base_name(getattr(e, "obj", None))
+    if base not in MLIR_TEMPLATE_NAMES:
+        return None
+    if isinstance(e, F.MemberExpr):
+        text = _backtick_text(e.member)
+        return None if text is None else (text, [])
+    if not isinstance(e, F.SubscriptExpr):
+        return None
+    index = e.index
+    if isinstance(index, (F.TupleExpr, F.ListExpr)):
+        elements = list(index.elements)
+    else:
+        elements = [index]
+    out = []
+    holes = []
+    for el in elements:
+        if base in MLIR_TYPE_TEMPLATE_NAMES and isinstance(el, F.IdentExpr):
+            # A TYPE template's elements are type fragments, and a hole in one
+            # is a type expression this path cannot evaluate.
+            return None
+        if isinstance(el, F.IdentExpr):
+            text = _backtick_text(el.name)
+            if text is None:
+                holes.append(el)
+                out.append("{%d}" % (len(holes) - 1))
+                continue
+            out.append(text)
+            continue
+        if base in MLIR_TYPE_TEMPLATE_NAMES:
+            return None
+        holes.append(el)
+        out.append("{%d}" % (len(holes) - 1))
+    return "".join(out), holes
+
+
+def _split_top_level(text: str, sep: str) -> list:
+    """`text` split on `sep` outside quotes and outside <>/()/[] nesting."""
+    parts = []
+    depth = 0
+    in_quote = False
+    start = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_quote:
+            if ch == "\\":
+                i += 1
+            elif ch == '"':
+                in_quote = False
+        elif ch == '"':
+            in_quote = True
+        elif ch in "<([{":
+            depth += 1
+        elif ch in ">)]}":
+            depth -= 1
+        elif ch == sep and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+        i += 1
+    parts.append(text[start:])
+    return parts
+
+
+def _unquote(token: str):
+    """A `"…"` token's text, or None if `token` is not one."""
+    token = token.strip()
+    if len(token) >= 2 and token[0] == '"' and token[-1] == '"':
+        return token[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    return None
+
+
+def _arg_operand(token: str, holes: list, tgt: Target):
+    """One argument of a target query: its value, the target marker, or None.
+
+    Four shapes occur in the corpus, and the fourth is why this is a function
+    rather than a lookup. A `{n}` hole is a sub-EXPRESSION: either another
+    query, recursively (that is how `target_get_field` receives the nested
+    `#kgen.param.expr<current_target>` the source wrote inside it) or an
+    ordinary literal, which is the common case — `#kgen.param.expr<eq, 1, 2>`
+    in `test_formal_run.py` and `` + 1 `` inside an `add` in
+    `std/_plugin/selector.mojo` are both literals the source wrote beside the
+    fragments. A `"…"` token is a string literal. Anything else is a bare MLIR
+    token, of which only an integer and the two boolean spellings have a value
+    on this path; a type or an operation name in argument position has none, and
+    saying so is the honest answer rather than dropping it."""
+    token = token.strip()
+    if not token:
+        return None
+    if token[0] == "{" and token[-1] == "}" and token[1:-1].isdigit():
+        idx = int(token[1:-1])
+        if idx >= len(holes):
+            return None
+        hole = holes[idx]
+        got = target_template(hole, tgt)
+        if got is not None:
+            # A value, or the target marker. `unanswered` is None here because
+            # the caller reports the OUTER reason, and the inner one is a
+            # sub-expression of an argument the outer query cannot be answered
+            # without.
+            return None if got[0] == "unanswered" else got[1]
+        if isinstance(hole, F.BoolLiteral):
+            return bool(hole.value)
+        return fold_literal_expr(hole)
+    lit = _unquote(token)
+    if lit is not None:
+        return lit
+    if token == "true":
+        return True
+    if token == "false":
+        return False
+    if token.lstrip("+-").isdigit():
+        return int(token)
+    return None
+
+
+def _op_target_get_field(args: list, tgt: Target):
+    """`target_get_field(TARGET, "field")` — the field this build can state."""
+    if not isinstance(args[0], Target):
+        return ("unanswered",
+                "the first argument of target_get_field is not the current "
+                "target, and this build can only read a field of the target it "
+                "is emitting")
+    name = args[1]
+    if not isinstance(name, str):
+        return ("unanswered",
+                "the second argument of target_get_field is not a field name, "
+                "so there is no field to read")
+    value = tgt.field(name)
+    if value is None:
+        value = tgt.numeric_field(name)
+    if value is None:
+        return ("unanswered", target_field_refusal(name, tgt))
+    return ("value", value)
+
+
+def target_field_refusal(name: str, tgt: Target) -> str:
+    """Why target field `name` has no answer on this path."""
+    return (
+        f'the current target {tgt.describe()} has no {name!r} for this build to '
+        f"state: the field is a property of a target DESCRIPTION, and the only "
+        f"facts this build commits to are the architecture it emits and the "
+        f"container it wraps it in. Which of those two the field would need is "
+        f"not decidable from the source, and a plausible string here is a "
+        f"number the program never wrote."
+    )
+
+
+def _op_target_has_feature(args: list, tgt: Target):
+    """`target_has_feature(TARGET, "feature")` — refused, and that is the point.
+
+    A CPU feature is a property of a CPU. The build names the architecture it
+    emits and never names a CPU, and there is no feature database on a path
+    that links libSystem and nothing else — so the two rules that could answer
+    it without a database ("a feature of another architecture is impossible"
+    and "one this architecture mandates is present") would still leave every
+    optional extension undecided, and answering those two while refusing the
+    rest would be a hand-kept table pretending to be a derivation.
+
+    So the whole operation refuses, with the one fact the reader can act on: it
+    is a per-CPU question, and this build has no per-CPU input. It is
+    `std/sys/info.mojo`'s `_has_feature`, and it is the reason that module does
+    not build even with every field query answered — see
+    bugs/FORMAL_target_query_evaluator.md."""
+    if not isinstance(args[0], Target) or not isinstance(args[1], str):
+        return ("unanswered",
+                "target_has_feature is not decidable on this path: a CPU "
+                "feature is a property of a CPU, and this build names the "
+                "architecture it emits and never a CPU")
+    return ("unanswered",
+            f"target_has_feature({args[1]!r}) is not decidable on this path: a "
+            f"CPU feature is a property of a CPU, and this build names the "
+            f"architecture it emits and never a CPU, so there is no "
+            f"feature database here to answer it from")
+
+
+def _op_eq(args: list, tgt: Target):
+    """`eq(a, b)` — equality of two values that both already folded."""
+    if isinstance(args[0], Target) or isinstance(args[1], Target):
+        return ("unanswered",
+                "eq compares two values, and one of them is the current target "
+                "attribute, which has no value on this path")
+    try:
+        return ("value", args[0] == args[1])
+    except Exception:
+        return ("unanswered", "eq's operands are not comparable here")
+
+
+def _op_add(args: list, tgt: Target):
+    """`add(a, b)` on two integers that both already folded."""
+    if not (isinstance(args[0], int) and isinstance(args[1], int)) \
+            or isinstance(args[0], bool) or isinstance(args[1], bool):
+        return ("unanswered",
+                "add is integer addition on this path, and at least one "
+                "operand is not an integer this build could fold")
+    return ("value", args[0] + args[1])
+
+
+def _op_cross_compilation(args: list, tgt: Target):
+    return ("value", tgt.is_cross_compilation())
+
+
+def _op_accelerator_arch(args: list, tgt: Target):
+    """`accelerator_arch` — "" for an image with no accelerator on the link line.
+
+    `std/sys/info.mojo`'s own docstring states the contract: "If there is no
+    accelerator on the system, this function returns an empty string." A formal
+    image links the platform C library and nothing else — there is no CUDA
+    runtime, no Metal device, no plugin — so the answer is the empty string and
+    it is a fact about the link line rather than about the source."""
+    return ("value", "")
+
+
+def _parse_param_expr(text: str):
+    """(op, arg_texts, result_type) for a `#kgen.param.expr<…> : T` template.
+
+    None for anything else, including a template that is not a param expr at
+    all (`#kgen.simd<1>`, `#pop.float_literal<nan>`, `#index<cmp_predicate
+    ult>`) — those are dialect attributes whose meaning is an MLIR object, and
+    `is_mlir_template` refuses them with the MLIR wording."""
+    text = text.strip()
+    prefix = "#kgen.param.expr<"
+    if not text.startswith(prefix):
+        return None
+    depth = 0
+    in_quote = False
+    end = -1
+    i = len(prefix) - 1
+    while i < len(text):
+        ch = text[i]
+        if in_quote:
+            if ch == "\\":
+                i += 1
+            elif ch == '"':
+                in_quote = False
+        elif ch == '"':
+            in_quote = True
+        elif ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+        i += 1
+    if end < 0:
+        return None
+    body = text[len(prefix):end]
+    tail = text[end + 1:].strip()
+    result_type = None
+    if tail.startswith(":"):
+        result_type = tail[1:].strip()
+    elif tail:
+        return None
+    parts = _split_top_level(body, ",")
+    op = parts[0].strip()
+    if not op:
+        return None
+    return op, [p.strip() for p in parts[1:]], result_type
+
+
+def target_template(e, tgt: Target = None):
+    """What an MLIR template node means for a build targeting `tgt`.
+
+    None when `e` is not a template this evaluator reads. Otherwise a
+    four-valued answer, because four things are true and a two-valued one
+    would have to lie about two of them:
+
+      * `("value", v)` — `v` is the int / bool / str the query denotes for this
+        target, and `v` may legitimately be `False`, `0` or `""`, which is why
+        this is not `(v or None)`.
+      * `("target", t)` — the current TARGET itself. Not a value: the target
+        attribute has no representation on this path. It is still an answer,
+        because the next query in the same template takes it as an argument
+        (`target_get_field<current_target, "arch">`), and refusing the inner
+        one would refuse an outer one this build CAN answer.
+      * `("unanswered", why)` — a query about the target that this build has no
+        honest answer to, with the reason, so the caller can refuse with a
+        sentence that names the missing fact instead of the construct.
+      * `None` — not a query about the target at all: a dialect attribute, or
+        something that is not a template.
+    """
+    if tgt is None:
+        tgt = _TARGET
+    if tgt is None:
+        return None
+    frag = _template_fragments(e)
+    if frag is None:
+        return None
+    text, holes = frag
+    parsed = _parse_param_expr(text)
+    if parsed is None:
+        return None
+    op, arg_texts, result_type = parsed
+    entry = _TARGET_QUERY_OPS.get(op)
+    if entry is None:
+        return None
+    arity, impl = entry
+    if arity != len(arg_texts):
+        return ("unanswered",
+                f"the {op!r} target query is written here with "
+                f"{len(arg_texts)} argument(s) and this path knows it with "
+                f"{arity}, so it will not guess what the operands mean")
+    # An argument may carry its own type annotation (`"arch" : !kgen.string`),
+    # which describes the operand and is not itself an operand.
+    operands = []
+    for arg_text in arg_texts:
+        operand = _arg_operand(arg_text.split(" : ")[0], holes, tgt)
+        if operand is None:
+            return ("unanswered",
+                    f"an argument of the {op!r} target query is one this build "
+                    f"cannot fold: it is neither a literal nor another target "
+                    f"query it can read. The whole query reads "
+                    f"{_spell_template(frag)}.")
+        operands.append(operand)
+    if impl is None:
+        # The one operation that is a value only as an argument.
+        if result_type not in (None, "!kgen.target"):
+            return ("unanswered",
+                    f"the {op!r} target query is declared to produce "
+                    f"{result_type} and the current target is a target, not a "
+                    f"{result_type}")
+        return ("target", tgt)
+    result = globals()[impl](operands, tgt)
+    if result[0] != "value":
+        return result
+    value = result[1]
+    if result_type is not None:
+        want = _TARGET_RESULT_TYPES.get(result_type)
+        if want is None:
+            return ("unanswered",
+                    f"the {op!r} target query declares a result of "
+                    f"{result_type}, and this path has no Python type to lower "
+                    f"that to — refusing rather than materializing the value "
+                    f"as something the source did not declare")
+        if want == "target" or isinstance(want, type) \
+                and not isinstance(value, want):
+            return ("unanswered",
+                    f"the {op!r} target query declares a result of "
+                    f"{result_type} but evaluates to "
+                    f"{type(value).__name__}, which is a different value than "
+                    f"the source declared. Refused rather than materialized "
+                    f"as one.")
+    return ("value", value)
+
+
+def _spell_template(frag) -> str:
+    """One template rendered the way the source wrote it, holes included.
+
+    A diagnostic that quotes the evaluator's internal `{0}` placeholder tells
+    the reader nothing they can find in their file, which is the one thing a
+    message about a source construct has to do. This renders the fragments and
+    the sub-expressions together, so the sentence names the query the way the
+    author wrote it."""
+    text, holes = frag
+    for i, hole in enumerate(holes):
+        text = text.replace("{%d}" % i, _spell(hole), 1)
+    return text.replace("`", "")
+
+
+def fold_target_template(e, tgt: Target = None):
+    """The int / bool / str a target query denotes for this build, or None.
+
+    The convenience read for a caller that wants the value and has its own
+    refusal for None: a module-level `comptime` binding that folds, and a
+    function body the shared rewrite replaces with a literal."""
+    got = target_template(e, tgt)
+    if got is not None and got[0] == "value":
+        return got[1]
+    return None
+
+
+def target_value_refusal(e) -> str:
+    """The refusal for a template whose VALUE is the current target itself.
+
+    The target is not a value on this path, and this is the one place in the
+    family where the MLIR wording was actively misleading: the same file's
+    `target_get_field` on the same target DOES answer, so a reader told "there
+    is no MLIR on this path" for `current_target` would look for a missing MLIR
+    instead of for a value that has no representation. The message therefore
+    says what would work."""
+    spelled = mlir_template_spelling(e)
+    return (
+        f"{spelled} asks for the current TARGET itself, which is not a value on "
+        f"this path: a target is a description of what to compile for, it has no "
+        f"64-bit-word representation, and materializing one would put a pointer "
+        f"to a frame blob where the source wrote a target. Refused as a VALUE "
+        f"and nothing else — the same target's FIELDS are answerable, and "
+        f"'target_get_field' on it is how a program asks this build what it is "
+        f"compiling for."
+    )
+
+
+def target_query_refusal(e, tgt: Target = None):
+    """The refusal for a target query this build cannot answer, else None."""
+    got = target_template(e, tgt)
+    if got is not None and got[0] == "unanswered":
+        return got[1]
+    return None
 
 
 def refuse_module_level_mlir_templates(stmts) -> None:
@@ -307,7 +951,17 @@ def refuse_module_level_mlir_templates(stmts) -> None:
     both front ends (executable and dylib) hand their parsed module to, so
     there is a single call site rather than one per backend and the two
     architectures cannot name different limits for one construct — the failure
-    `limit_comptime_over_a_runtime_parameter` is pinned against."""
+    `limit_comptime_over_a_runtime_parameter` is pinned against.
+
+    It refuses only what is still unanswerable. `mlir_template_refusal` is the
+    one reader both the backends and this function ask, and it now returns None
+    for a `#kgen.param.expr<…>` target query this build can answer — so
+    `comptime ARCH = __mlir_attr[target_get_field<current_target, "arch">]`
+    passes here and is FOLDED by `collect_module_symbols` a few lines later,
+    which is the module-constant path that already substitutes a folded value
+    at every read. A binding the evaluator declines, and a binding that is a
+    template about anything other than the target, is refused exactly as
+    before."""
     for st in stmts:
         value = getattr(st, "value", None)
         if value is None or not isinstance(st, F.ComptimeVarStmt):
@@ -315,10 +969,16 @@ def refuse_module_level_mlir_templates(stmts) -> None:
         for node in iter_nodes(value):
             why = mlir_template_refusal(node)
             if why is not None:
+                # "attribute" vs "type" is the node's own base name, not a
+                # fixed word: `__mlir_type.`!kgen.target`` — which is what
+                # `std/sys/info.mojo` declares as `_TargetType` — is a TYPE, and
+                # calling it an attribute in a message about that file is a
+                # claim about the file that is false.
+                kind = "type" if is_mlir_type_template(node) else "attribute"
                 raise CodegenError(
                     f"the module-level comptime binding "
                     f"{getattr(st, 'target', '?')!r} is initialized from an MLIR "
-                    f"attribute template: {why} Module-level `comptime` "
+                    f"{kind} template: {why} Module-level `comptime` "
                     f"bindings are not part of the function-body expression "
                     f"walk on this path, so nothing used to refuse this and the "
                     f"binding read as an undefined name at every use site.")
@@ -8235,6 +8895,34 @@ def fold_literal_expr(node):
     return None
 
 
+def fold_module_value(node):
+    """The value of a module-level INITIALIZER this build knows, or None.
+
+    Two folders, deliberately separate and deliberately in this order.
+    `fold_literal_expr` stays literal-only — its own comment is right that every
+    operator added there is one more way for a fold to be wrong, and it is
+    shared with the struct-field and class-constant readers, which have no
+    target to consult. This second folder answers the one initializer shape
+    that is not a value the source wrote but a QUESTION the build can answer:
+    a `#kgen.param.expr<…>` template about the target this build is emitting
+    (`std/sys/info.mojo`'s `_TargetType` machinery, and the `_PLUGIN_COUNT`
+    arithmetic beside it).
+
+    The result is not a guess because the target is not a guess: it is the
+    `arch`/`fmt` pair `compile_formal` was called with, which the linker is
+    about to act on. What the build cannot state — a CPU feature, the target's
+    own triple spelling — comes back as None, which is the same "does not know"
+    the literal folder returns, so the caller keeps one code path and a
+    non-folding binding keeps its existing refusal."""
+    folded = fold_literal_expr(node)
+    if folded is not None:
+        return folded
+    got = target_template(node)
+    if got is not None and got[0] == "value":
+        return got[1]
+    return None
+
+
 def _module_binding_name(stmt):
     """The single name a module-level binding statement binds, else None.
 
@@ -8305,7 +8993,7 @@ def collect_module_symbols(stmts: list) -> dict:
             table[name] = GlobalSymbol(name, None, "rebound", None,
                                        getattr(stmt, "line", 0) or 0)
             continue
-        folded = fold_literal_expr(value)
+        folded = fold_module_value(value)
         if folded is None:
             table[name] = GlobalSymbol(
                 name, None,
@@ -8334,14 +9022,19 @@ def _folded_node(folded, template):
     Same line/col as the value it replaces, so a diagnostic raised at a read
     site after the substitution still points at the read, not at the
     module-level line the value came from."""
+    line = getattr(template, "line", 0) or 0
+    col = getattr(template, "col", 0) or 0
     if isinstance(folded, str):
-        return F.StringLiteral(value=folded,
-                               line=getattr(template, "line", 0) or 0,
-                               col=getattr(template, "col", 0) or 0,
-                               is_bytes=False)
-    return F.IntLiteral(value=folded,
-                        line=getattr(template, "line", 0) or 0,
-                        col=getattr(template, "col", 0) or 0, raw="")
+        return F.StringLiteral(value=folded, line=line, col=col, is_bytes=False)
+    if isinstance(folded, bool):
+        # A BoolLiteral, not an IntLiteral of 0/1: a `comptime if` over this
+        # binding must take the branch the source wrote, and only a
+        # `BoolLiteral` is what `eval_const_bool` reads as True/False rather
+        # than as a number. The literal folder returns 1/0 for a `BoolLiteral`
+        # and so never reaches here, so this arm is the target-query folder's
+        # alone.
+        return F.BoolLiteral(value=folded, line=line, col=col)
+    return F.IntLiteral(value=folded, line=line, col=col, raw="")
 
 
 def _imported_names(stmt) -> list:
