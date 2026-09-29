@@ -112,6 +112,17 @@ environment (git HEAD, dirty count, gcc, jobs, MEMLIMIT_GB) — goes to
 on purpose: memcap killed the process for memory before it finished, so it
 says nothing about whether the output was right.
 
+The tally counts **every** test exactly once, and that is enforced rather than
+hoped for: the summary, the screen sections and the exit code are rendered
+from one table (`suite.TALLY`), the runner refuses to start if a status it can
+produce has no row in it, and a summary whose counters do not add up to the
+test count says so on the screen and exits non-zero. So add the numbers up and
+they must equal the `N tests` in the tail. A hang is a failure in its own
+class: it is listed under `FAILED:` tagged `[TIMEOUT]`, and it is not one a
+`expect=` marker can forgive — a job killed at its timeout has reported
+nothing, so letting a marker absorb it would be a way to not run a test and
+call the run green.
+
 Memory: every job that runs a `mojoc` binary, or a whole-closure compile
 standing in for one, is capped by `tools/memcap.py` at the ceiling its
 `memclass` names (`small` 8 GB, `module` 24, `program` 55, `stage` 96 — see
