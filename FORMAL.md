@@ -573,7 +573,9 @@ had to be looked up in a second file was one more thing to go stale. The
 lifetime argument that justified the split has expired — the first round is
 merged, so there is no longer a "this week" to be separate from.
 
-### 11.1 Round 1: what landed, measured
+### 11.1 What landed, measured
+
+#### Round 1
 
 Five agents, one tree, merged 2026-09-28 at `77c8b90`. Every number below was
 measured after the merge, not carried over from a commit message.
@@ -615,6 +617,67 @@ docstring instead — the right call, and the reason the old `Semantics` came to
 state `True` is that a partial theorem can read like a whole one. **Adding
 sorries here would have been a regression in exactly the property this
 programme exists to improve.**
+
+#### Round 2
+
+Five agents, one tree, merged 2026-09-28. Every figure measured after the merge.
+
+| | round 1 left it | round 2 |
+|---|---|---|
+| `lib/` admitted holes | 0 | **0** — and 0 `axiom`, 0 vacuous, across all five files |
+| a dylib export's `Total` | stated, unproved | **proved**, and the statement was **false** before [2] looked |
+| x86-64 call/return | stack pointer only | **both halves** — the `rip` half is a theorem |
+| x86-64 `call_rel32` | wired, unverified | **verified on all 45 examples** |
+| a `True` in a theorem statement | boundary 2 concluded `\| none => True` | **`False`**, with the completing as a hypothesis |
+| silent wrong answers in the x86-64 model | 2, unmasked by a gap in the proof chain | **found and fixed** |
+| test files run by a registered spec | 34 of 83 | **52 of 83**, 0 undeclared, 21 previously-red now reported |
+| arm64 sweep codegen findings named | 0 of 130 in "other" | **0 of 131** |
+| `stdlib-syntax` unexpected | 0 | **0** |
+
+**[2] found that `Total` was not merely unproved but FALSE.**
+`DylibExport.Total` was `∀ (n : UInt64) (s : Arm64State), runExport … n = some s`
+— with `s` arbitrary that says the run returns *every* state, and it is refuted
+by taking `s` to be a state that is not the result. Unprovable even for a
+trivially total function. So the generator's `{ident}_semantics_total := by
+sorry` was not standing on a hard theorem; it was standing on an impossibility,
+and a named `sorry` is exactly what the hole census is trusted about. `Total` is
+now `∀ n, ∃ s, …`, and the witness is the entire content of the step bound
+[2] then proved. `Semantics_refutable` had to be restated accordingly, which is
+the tell that the old shape was wrong.
+
+**[1] found two silent wrong answers in the machine model, and a gap in a proof
+chain is what hid them.** `x86_rm_read` with mod = 3 returns the whole register —
+right for the 8-byte reads it also serves — and the movzx/movsx arm used
+`x86_sign_extend32`, which extends **bit 31**, for the byte form too. So
+`movzx rbx, bl` with `rbx = 0xff42` gave `0xff42`, and `movsx rbx, bl` with
+`bl = 0xff` — that is, −1 — gave **255**. Confirmed by evaluating the model.
+It was invisible because the only three examples emitting a byte `movsx` had no
+step lemma wired, so the value test stopped at "no lemma" and never reached the
+comparison. Correcting the model also broke `x86_step_movzx_rax_al`, which had
+concluded `rax := s.rax` and been proved by `simp`: the theorem and the defect
+had agreed with each other. And correcting it broke 14 examples until the
+successor table in the test file — a second hand-written copy of the model's
+semantics, correct only while the model was wrong — was corrected with it.
+
+**[5]'s inventory is the round's quietest and most useful result.** 83 test
+files; 50 were named by no registered spec and **21 of those exited non-zero**,
+carrying known-failing assertions that no gate, tally or coverage number
+reported. Between their measurement and the merge, three more had been added
+and still ran by nothing — [4]'s `test_returned_frame_layout.py`, and my own two
+instruments from the previous round, which I had flagged as integrator work and
+then not done. 16 orphans are now registered, and the 11 red ones carry
+`expect=` with a reason each: a declared red is a report and an unrun red is
+silence, and the anti-rot now fails any of them that starts passing.
+
+**And a green test that could never have failed.** `examples-parse` is
+`cache=True` and its subject is the 45 files of `formal/examples/`, and its
+cache key read 48 repo files and **none** of them under `formal/examples/`. A
+`SyntaxError` in any of the 45 could not invalidate the key, so a recorded PASS
+replayed — which is not hypothetical: `19bc0dd` took 4 of those files out of the
+parser and the only symptom was a coverage number 4 points low.
+`checked_run.py` now takes a **directory** in `--extra` and hashes its recursive
+contents by relative path, so the 46th example is covered the day it is added
+and a rename moves the key.
 
 ### 11.2 The five agents
 

@@ -31,6 +31,41 @@ import sys
 REPO = os.path.dirname(os.path.abspath(__file__))
 CAST_RE = re.compile(r'\((?:MojoList|MojoDict|MojoSet|MojoBytes) \*\)')
 
+
+def strip_comments(src: str) -> str:
+    """The source with every COMMENT token removed.
+
+    This scanner counts a *cast*, and before this it counted a cast written
+    inside a comment — which is how the gate went red on a fix rather than on a
+    regression. `1a7b1f4` replaced an ad-hoc `(MojoList *)s` that made a `set`
+    read as a list, and then wrote down what it had replaced:
+
+        #  `pp = (MojoList *)s;`, and `for x in box` then read
+
+    Documenting the defect you removed is the opposite of reintroducing it, and
+    the count went to 35 and the suite reported "+1 new". The baseline was then
+    either bumped to 35, which records a lie, or left, which leaves the gate
+    permanently red on a comment.
+
+    `tokenize` rather than a regex, because the cheap version -- strip `#` to
+    end of line -- also eats a `#` inside a string, and a source that mentions
+    a cast inside a string literal is exactly the case where a text scan is
+    most likely to be wrong in the direction that matters. A file that does not
+    tokenize is returned unchanged, so the count degrades to the old behaviour
+    rather than to nothing.
+    """
+    import io
+    import tokenize
+    out = []
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+            if tok.type == tokenize.COMMENT:
+                continue
+            out.append(tok.string)
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return src
+    return " ".join(out)
+
 # Baseline as of commit 634852c (2026-09-13), the day the R2 chokepoint
 # refusal shipped. Bump this ONLY for a new site with a comment justifying
 # why it can't go through the chokepoint - not to silence a failure.
@@ -105,7 +140,14 @@ CAST_RE = re.compile(r'\((?:MojoList|MojoDict|MojoSet|MojoBytes) \*\)')
 # back toward the number of REAL sites (3) only together with a metric
 # change that stops matching comments and C text — the metric itself is
 # the weak link here, not the code.
-BASELINE_COUNT = 34
+# 34 -> 17 (2026-09-28, comment-aware counting).  NOT a drop in real casts: 18
+# of the 34 were inside COMMENTS, so the old number was measuring prose. The
+# scanner counted a cast written in a comment, which is how the gate went red
+# on `1a7b1f4` — the commit that REMOVED an ad-hoc `(MojoList *)s` making a set
+# read as a list, and then wrote down what it had removed. 17 is the count of
+# casts that exist, and lowering the baseline is what makes the next one a
+# regression rather than a new normal.
+BASELINE_COUNT = 17
 
 
 def count_casts() -> int:
@@ -119,7 +161,7 @@ def count_casts() -> int:
         if base in ("emit_resolve.py", "gimple_gen_resolve.py"):
             continue
         with open(path) as f:
-            total += len(CAST_RE.findall(f.read()))
+            total += len(CAST_RE.findall(strip_comments(f.read())))
     return total
 
 

@@ -26,6 +26,21 @@ What is pinned, and why each one matters:
   reporting    one tally at the end, and the log file gets the detail the
                screen does not.
 
+Three more, added after the audit in `bugs/UNTESTED.md`, and they are about the
+cache in front of the runner rather than the runner:
+
+  cache keys   `checked_run.check_key` covers what `--extra` names, including a
+               DIRECTORY's whole recursive contents. It used to hash a
+               directory as one opaque name, so a test whose subject is a set of
+               files could not express that at all without a hand-kept list that
+               rots the moment a file is added.
+  cache replay a recorded PASS is replayed, a recorded FAILURE is re-run, and a
+               changed input re-runs. This is the asymmetry the whole `check`
+               bucket rests on and NOTHING executed it: `checked_run.py` had no
+               test importing it, so its behaviour was trusted, not checked.
+  the estate   every `test_*.py` in the repo is named by a registered spec, or
+               is in a list that says why not. 50 of 81 were named by nothing.
+
 Run:  python3 test_suite.py         (or `make check-suite`, part of `smoke`)
 """
 
@@ -453,6 +468,491 @@ def test_log_has_passes_screen_does_not():
     check('log: the plan is recorded', 'plan:' in text, 'no plan in the log')
 
 
+# ── the result cache in front of the runner (checked_run.py) ───────────────
+#
+# `checked_run.py` decides whether a check re-runs or replays a recorded result,
+# and 12 of the specs in `check` and `gate` are `cache=True`. A wrong answer
+# there is not one red test: a replayed PASS is a green test that never ran, and
+# a replayed FAILURE is a red that no fix can clear. Nothing imported this file
+# before `bugs/UNTESTED.md`, so the properties below were documented and never
+# executed.
+
+def _key_tree(tag):
+    """A scratch `--extra` tree, unique per process.
+
+    Per PROCESS and not per test, for the reason `test_artifact_cache` gives:
+    the store is persistent and outlives the run, so a fixed name means run N's
+    "changed input" step finds run N-1's published key already there and
+    reports a hit for a key nothing published this time.
+    """
+    import tempfile
+    d = os.path.join(tempfile.mkdtemp(prefix=f'crkey_{tag}_'), 'subject')
+    os.makedirs(d)
+    for i in range(3):
+        with open(os.path.join(d, f'f{i}.txt'), 'w') as f:
+            f.write('v1')
+    return d
+
+
+def test_checked_run_key_covers_what_it_names():
+    """The key moves for every change to the inputs and for nothing else.
+
+    A FILE is the easy half and is a regression guard. A DIRECTORY is the half
+    that was broken: `--extra <dir>` hashed the directory as one opaque name, so
+    editing a file inside it, adding one, or removing one all left the key
+    still. That is not a theoretical gap — `examples-parse` is `cache=True` and
+    guards the 45 files of `formal/examples/`, which its `extra` cannot name
+    without a list that rots on the 46th. Measured in `bugs/UNTESTED.md`.
+    """
+    import checked_run
+    d = _key_tree(os.getpid())
+    K = lambda p: checked_run.check_key(f'keyprobe{os.getpid()}', [p])
+
+    def moved(label, before, want_moved=True):
+        after = K(d)
+        check(f'cache key: {label}', (after != before) == want_moved,
+              f'key {"moved" if after != before else "did not move"}, wanted '
+              f'{"a move" if want_moved else "no move"}')
+        return after
+
+    a = K(d)
+    # The walk has to have found something, or every "did not move" below is
+    # passing because the key hashes nothing at all.
+    with open(os.path.join(d, 'f0.txt'), 'w') as f:
+        f.write('v2')
+    b = moved('a file inside a --extra DIRECTORY changing moves it', a)
+    with open(os.path.join(d, 'added.txt'), 'w') as f:
+        f.write('the 46th example')
+    c = moved('a file ADDED to it moves it (this is the 46th example)', b)
+    os.unlink(os.path.join(d, 'f2.txt'))
+    e = moved('a file REMOVED from it moves it', c)
+    os.rename(os.path.join(d, 'f1.txt'), os.path.join(d, 'f1b.txt'))
+    g = moved('a file RENAMED inside it moves it (a list of paths cannot)', e)
+    # …and nothing that is not an input.
+    os.makedirs(os.path.join(d, '__pycache__'), exist_ok=True)
+    with open(os.path.join(d, '__pycache__', 'x.pyc'), 'w') as f:
+        f.write('derived')
+    h = moved('a __pycache__ appearing does NOT move it', g, want_moved=False)
+    # Two independent defences, asserted separately so neither can be removed
+    # while the other hides it: the DIRECTORY is never descended into (whatever
+    # is in it), and a `.pyc` is never hashed (wherever it is). A real
+    # `__pycache__` holds only `.pyc`, so the directory half needs a
+    # deliberately wrong file in it — which is the point: the rule is about the
+    # directory being derived, not about its usual contents.
+    with open(os.path.join(d, '__pycache__', 'stale.py'), 'w') as f:
+        f.write('a stale copy of something')
+    moved('a non-.pyc file inside a __pycache__ does NOT move it either', h,
+          want_moved=False)
+    with open(os.path.join(d, 'stray.pyc'), 'w') as f:
+        f.write('derived')
+    h2 = moved('a stray .pyc outside a __pycache__ does NOT move it', h,
+               want_moved=False)
+    with open(os.path.join(d, 'outside.txt'), 'w') as f:
+        f.write('inside, so it IS a subject')
+    j = moved('a file anywhere inside the directory DOES move it, which is '
+              'the whole point of naming a directory', h2)
+    with open(os.path.join(os.path.dirname(d), 'sibling.txt'), 'w') as f:
+        f.write('a different directory entirely')
+    moved('a file in a SIBLING directory does NOT move it', j,
+          want_moved=False)
+    covered = sum(len(fs) for _r, _d, fs in os.walk(d))
+    check('cache key: the directory walk saw the files it claims to hash',
+          covered >= 3, f'walk saw {covered}, so "did not move" may mean '
+                        f'"hashed nothing"')
+
+    # IDENTITY IS PART OF THE KEY, asserted on its own because none of the
+    # "did not move" checks above can see it: `os.walk` yields in whatever
+    # order the filesystem hands back, so a key built from walk order differs
+    # between two machines holding the same tree. The cost there is a cache
+    # that never hits, not a wrong result, which is exactly why removing the
+    # sort shows up in none of the movement checks. Two directories with
+    # different NAMES and identical contents must therefore produce different
+    # keys — otherwise a test could be served a result computed against
+    # somebody else's directory.
+    import tempfile
+    a_dir = os.path.join(tempfile.mkdtemp(prefix='crid_a_'), 't')
+    b_dir = os.path.join(tempfile.mkdtemp(prefix='crid_b_'), 't')
+    for d_ in (a_dir, b_dir):
+        os.makedirs(d_)
+        for name in ('one.txt', 'two.txt', 'three.txt'):
+            with open(os.path.join(d_, name), 'w') as f:
+                f.write(name)
+    check('cache key: two directories with identical CONTENTS but different '
+          'names get different keys',
+          checked_run.check_key(f'idprobe{os.getpid()}', [a_dir])
+          != checked_run.check_key(f'idprobe{os.getpid()}', [b_dir]),
+          'the given path is not in the key, so two directories can collide')
+
+    # A plain file, and a file that does not exist.
+    one = os.path.join(d, 'solo.txt')
+    with open(one, 'w') as f:
+        f.write('a')
+    k1 = K(one)
+    with open(one, 'w') as f:
+        f.write('b')
+    check('cache key: a plain --extra FILE\'s content moves it', K(one) != k1,
+          'a file input does not invalidate')
+    # …and its NAME does too, which the movement checks above cannot see: two
+    # inputs with byte-identical contents are different inputs, and a key built
+    # from content alone would let one test be served another test's result.
+    # Both are written the SAME content first — the preceding check left `one`
+    # holding 'b', and comparing files of different contents would pass on
+    # content alone and prove nothing about the path.
+    twin = os.path.join(d, 'twin.txt')
+    for path in (one, twin):
+        with open(path, 'w') as f:
+            f.write('identical')
+    check('cache key: two FILES with identical contents get different keys',
+          K(one) != K(twin), 'the given path is not in the key for a file')
+    check('cache key: and that is still true when both are named together',
+          checked_run.check_key(f'twinprobe{os.getpid()}', [one, twin])
+          != checked_run.check_key(f'twinprobe{os.getpid()}', [one]),
+          'membership of the --extra list is not in the key')
+    # …and the ORDER of the list must not matter, or every caller has to sort
+    # it correctly and a mistake there is a silent cache miss on every run.
+    check('cache key: the order of the --extra list does not matter',
+          checked_run.check_key(f'twinprobe{os.getpid()}', [one, twin])
+          == checked_run.check_key(f'twinprobe{os.getpid()}', [twin, one]),
+          'the list is hashed in the order given, so a caller that does not '
+          'sort it gets a different key for the same inputs')
+    gone = os.path.join(d, 'not-here.txt')
+    k2, k3 = K(gone), K(gone)
+    check('cache key: a missing path is a CONSTANT, which is why main() warns',
+          k2 == k3, 'a missing input still invalidates, so nothing to warn about')
+    del j
+
+
+def test_checked_run_replays_a_pass_and_reruns_a_failure():
+    """The asymmetry, end to end through the real CLI.
+
+    A recorded PASS is replayed, which is what makes `make check` fast. A
+    recorded FAILURE is re-run, because it is a claim about a past run and the
+    key covers the `--extra` files and not the rest of the machine. A changed
+    input re-runs either way.
+
+    **How "did it run" is observed matters, and getting it wrong is the trap
+    this test exists beside.** A replay reproduces the recorded stdout BYTE FOR
+    BYTE, so a probe that greps the output for a marker the command printed
+    concludes the command ran, on the run where it provably did not. The
+    observation has to be a SIDE EFFECT outside the captured streams — a
+    counter file, as `test_artifact_cache` already does for the same reason —
+    and the replay has to be confirmed from the announcement on stderr as well,
+    because "the counter did not move" and "the cache hit" are the same claim
+    from two directions and only one of them is a behaviour.
+    """
+    import subprocess
+    import tempfile
+    # Unique per PROCESS: the store persists, so a fixed name lets a previous
+    # run's published result answer this one's first step.
+    tag = f'replay{os.getpid()}'
+    work = tempfile.mkdtemp(prefix='crreplay_')
+    counter = os.path.join(work, 'count')
+    inp = os.path.join(work, 'in.txt')
+    with open(inp, 'w') as f:
+        f.write('v1')
+    body = ('import sys\n'
+            f'open({counter!r}, "a").write("x")\n'
+            'sys.exit(int(sys.argv[1]))')
+
+    def go(code, rerun=True, input_path=inp, no_cache=False):
+        cmd = [PY, os.path.join(HERE, 'checked_run.py'), tag, '--extra', input_path]
+        if rerun:
+            cmd.append('--rerun-failures')
+        if no_cache:
+            cmd.append('--no-cache')
+        cmd += ['--', PY, '-c', body, str(code)]
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        ran = (len(open(counter).read())
+               if os.path.exists(counter) else 0)
+        return p, ran
+
+    def ran_count():
+        return len(open(counter).read()) if os.path.exists(counter) else 0
+
+    p, n = go(0)
+    check('cache replay: a fresh PASS runs and is published', n == 1,
+          f'ran {n} times')
+    check('cache replay: and it is a PASS', p.returncode == 0, str(p.returncode))
+    p, n = go(0)
+    check('cache replay: a recorded PASS is REPLAYED, not re-run', n == 1,
+          f'ran {n} times; a replay must not execute the command')
+    check('cache replay: and the replay is announced, not silent',
+          'cached result replayed' in p.stderr, p.stderr[-300:])
+    p, n = go(0, no_cache=True)
+    check('cache replay: --no-cache runs it anyway', n == 2, f'ran {n} times')
+    with open(inp, 'w') as f:
+        f.write('v2')
+    p, n = go(0)
+    check('cache replay: a changed --extra input re-runs', n == 3, f'ran {n}')
+
+    # A different key for the failure phase, and the reason is worth stating:
+    # the key covers the INPUTS, not the command, so re-running the same inputs
+    # with a different exit code replays the recorded one. That is the intended
+    # contract — same inputs, same outcome — and a test that forgets it is
+    # asserting about a key it never changed.
+    with open(inp, 'w') as f:
+        f.write('v3')
+    p, n = go(7)
+    check('cache replay: a fresh FAILURE runs and is published', n == 4,
+          f'ran {n} times')
+    check('cache replay: and it is a failure', p.returncode == 7,
+          str(p.returncode))
+    p, n = go(7)
+    check('cache replay: a recorded FAILURE is RE-RUN, never replayed', n == 5,
+          f'ran {n} times; a replayed failure is a red no fix can clear')
+    check('cache replay: and the re-run says why',
+          're-running it' in p.stderr, p.stderr[-300:])
+    p, n = go(7, rerun=False)
+    check('cache replay: without the flag a failure is replayed (the default)',
+          n == 5, f'ran {n} times')
+    p, n = go(0, input_path=os.path.join(work, 'never-existed'))
+    check('cache replay: an unreadable --extra path warns on stderr',
+          'does not exist' in p.stderr,
+          'a typo in `extra` silently disables caching and says nothing')
+    del ran_count
+
+
+# ── the estate: is every test file run by anything? ────────────────────────
+
+# `test_*.py` files in the repo that NO registered spec names, with why. An
+# empty list would mean this test had nothing to check; the anti-rot assertions
+# below are what keep it honest in the other direction, so an entry cannot
+# outlive the file it excuses or the registration that supersedes it.
+#
+# This IS the inventory from `bugs/UNTESTED.md`, in a form that runs. The
+# measured shape: 50 of 81, and 5 of those 50 are RED today, so the tree carries
+# 25 known-failing assertions that no gate, tally or coverage number reports.
+UNREGISTERED = {
+    # ── RED today: exit non-zero, and no gate, tally or coverage number
+    #    reports any of it. The count is a re-run of every entry, not a
+    #    reading of a bug doc.
+    'test_x86_64_encoders.py': "Two checks on formal/x86_64.py's encoder "
+        'arithmetic, independent of the round-trip above.',
+
+    # ── the encoders, differentially, against the platform assembler ──
+    'test_arm64_emission.py': 'A hand count that the new arm64 instructions '
+        'are emitted at all, which the differential test above cannot tell from '
+        'an instruction emitted where a different one should be.',
+
+    # ── the interpreter, which is the oracle everything else is compared to ──
+    'test_myinterpreter.py': 'Runs a real .mojo file end to end through '
+        'myinterpreter.mojo, which is the reference every compiled-path answer '
+        'is measured against.',
+    'test_myinterpreter_simple.py': 'The same interpreter reached through '
+        'module loading rather than run_mojo_main, which is the path the '
+        'compiled path actually uses.',
+    'test_myinterpreter_validation.py': "The interpreter's output validated "
+        "against Python's OWN tokenizer. The strongest cheap parity check "
+        "available and the only one that is not this project grading itself.",
+    'test_phase2_parser.py': 'The interpreter executes the parser and the ASTs '
+        'are compared, which is the check that a parser change is semantics-'
+        'preserving rather than merely accepted.',
+    'test_phase2_parser_simple.py': 'The minimal form of the above: the '
+        'interpreter can execute parser.mojo at all.',
+
+    # ── the dispatch solver, four phase-ordered files ──
+    'test_dispatch_solver.py': 'DispatchSolver phase A, the table planner. '
+        'Unregistered, so a phase-B or phase-C change can regress it with '
+        'nothing to notice.',
+    'test_dispatch_phase_b.py': 'DispatchSolver phase B: table planning plus C '
+        'code generation.',
+    'test_dispatch_phase_c.py': 'DispatchSolver phase C: GimpleGen integration '
+        'and dispatch table emission into real generated code.',
+    'test_dispatch_promotions.py': 'def->fn and type promotions across a '
+        'transitive closure — a source rewrite, so a wrong promotion is a '
+        'silently wrong program.',
+    'test_dispatch_myinterpreter.py': 'The solver against myinterpreter.mojo '
+        'patterns, which is where its rewrites have to survive real source.',
+
+    # ── closure capture: five files, one family, all real behaviour ──
+    'test_closure_capture_comptime_func_params.py': 'Two documented '
+        'closure-capture bugs, and the file says REAL behavioural tests. A '
+        'capture that binds the wrong cell is a silent wrong answer.',
+    'test_general_mutable_closure_capture.py': 'Mutable (by-reference) closure '
+        'capture; by-reference means a write through a stale word, which is the '
+        'frame-address defect FORMAL.md assigns to [4] on the other backend.',
+    'test_python_source_mut_capture.py': 'Heap-boxed {mut}/nonlocal capture '
+        'from Python source, the path the stdlib corpus is written in.',
+    'test_generators.py': 'Interpreter-side real generator execution. The '
+        'compiled path has a `mojo_unsupported_iter` family of its own, and '
+        'this is the interpreter half nobody runs.',
+    'test_coro_scoreboard.py': 'The A3 before/after scoreboard: a file whose '
+        'output IS the measurement, so there is no assertion to fail and it is '
+        'inert unless something reads it.',
+    'test_coro_bugs.py': 'Per-bug diagnostic for the A3 stack-switch backend. '
+        'Exits 0 while its own output reads CFAIL=1 COMPILE=1 — see UNTESTED.md '
+        '§3: a green exit that reports a failure in its own text.',
+    'test_async_execution.py': 'Interpreter async/await execution, milestone '
+        '3b. The compiled half of async is the `coro` bucket; this is the half '
+        'that decides what the compiled half should agree with.',
+    'test_async_parsing.py': 'Parser-only async/await, async for, async with. '
+        'A parser invariant with no compiler behind it, so nothing else in the '
+        'gate constrains it.',
+    'test_yield_parsing.py': 'Parser-only yield / yield from, milestone 1. Same '
+        'shape: unconstrained by anything that builds.',
+    'test_ownership_check.py': 'Fixture-driven accept/reject for '
+        'ownership_check.py, whose diagnostics gate real emission paths.',
+    'test_dual_cpp_elaboration.py': "REAL behavioural tests for monomorphize.py's "
+        'dual C/C++ output. A silent-wrong-answer shape: a C++ TU emitted where '
+        'C was meant links and computes something else.',
+    'test_mixed_cpp_link.py': 'Toolchain plumbing: a mixed -fgimple C and C++20 '
+        'build, link and run. The proof that the dual output actually links.',
+    'test_import_integration.py': 'Compiling Mojo with imports and linking '
+        'against helper modules, which is the path every multi-file program '
+        'takes.',
+
+    # ── the rest, one reason each ──
+    'test_imports.py': 'That import statements generate extern declarations. '
+        'A missing extern is a link failure attributed to something else.',
+    'test_kwargs_stmt.py': 'kwargs in statement-level calls, a shape the '
+        'parser and the lowering each handle separately.',
+    'test_comptime_bracket_params.py': 'REAL behavioural test for a '
+        'bracket-parametrised comptime call, i.e. the shape `interporacle` and '
+        'the sweep both report and neither pins.',
+    'test_phase3_codegen_simple.py': 'Attempting to execute codegen through the '
+        'interpreter; historical, and kept for the record rather than for its '
+        'assertions.',
+    'test_py314_full.py': "Runs against ~/net/Python-3.14.6, a checkout "
+        'OUTSIDE this repository, so it cannot be registered as-is: a '
+        'registered test that silently skips when the path is absent is a gate '
+        'that measures nothing, which is worse than an unrun file. The fix is '
+        'to take the path as an argument and skip LOUDLY.',
+    'test_refactor_bugs.py': 'Regression tests for the wave-1 entry-point fixes '
+        '(B1/B2, REF.html §3). Named after a refactor, so the bugs it pins are '
+        'the ones someone would forget.',
+    'test_type_system.py': "That the invariant checker catches every bug from "
+        "the session that produced it — i.e. the checker is tested against its "
+        "own author's list of what it should reject.",
+    'test_type_system_integration.py': 'The type system catching violations '
+        'during a real compile, which is the half the fixture list above is not.',
+}
+
+
+def _unregistered_reason_table():
+    """The table above, with the placeholder dropped.
+
+    A `None` value is how a draft entry is written while the list is being
+    built, and this filters it out so an unfinished entry cannot be shipped as
+    a permanent excuse with no reason attached. Anything else non-string is a
+    programming error here rather than a fact about a file, so it raises.
+    """
+    out = {}
+    for path, why in UNREGISTERED.items():
+        if why is None:
+            continue
+        if not isinstance(why, str):
+            raise AssertionError(
+                f'UNREGISTERED[{path!r}] is {type(why).__name__}, not a '
+                f'string. Every entry must say WHY the file is not run.')
+        out[path] = why
+    return out
+
+
+def _test_files_in_repo():
+    """Every `test_*.py` in the repo, repo-relative.
+
+    `build/`, `__pycache__`, `aside/` and `bside/` are excluded: the first two
+    are derived, and the last two are the A/B machinery's copies of repo files
+    (which is why they hold `checked_run.py` and friends but no `test_*.py`).
+    """
+    found = []
+    for dirpath, dirnames, filenames in os.walk(HERE):
+        dirnames[:] = [d for d in dirnames
+                       if d not in ('build', '__pycache__', 'aside', 'bside',
+                                    '.git')
+                       and not d.startswith('.')]
+        for fn in filenames:
+            if fn.startswith('test_') and fn.endswith('.py'):
+                found.append(os.path.relpath(os.path.join(dirpath, fn), HERE))
+    return sorted(set(found))
+
+
+def _registered_test_files():
+    """The `test_*.py` basenames any registered spec's command names."""
+    import re
+    out = set()
+    for spec in suite.REGISTRY.values():
+        for c in (getattr(spec, 'cmd', None) or []):
+            for m in re.findall(r'[\w./-]*test[\w./-]*\.py', str(c)):
+                out.add(os.path.basename(m))
+    return out
+
+
+def test_cached_spec_names_its_own_test():
+    """Every `cache=True` spec hashes the test file it runs.
+
+    A recorded PASS for a spec whose key does not include the test's own source
+    survives an edit to that test: the fix lands, the key does not move, and the
+    old verdict is served. Measured on this tree: all 12 cached specs name their
+    own script, so this is the regression guard for the property, not a fix for
+    a live hole. The live hole is what `extra` does NOT name, and
+    `bugs/UNTESTED.md` records that one.
+    """
+    cached = [n for n, s in suite.REGISTRY.items()
+              if getattr(s, 'cache', False) and not isinstance(s, suite.Fanout)]
+    check('cache key: there are cached specs to check', len(cached) >= 8,
+          f'only {len(cached)}; the checks below would be vacuous')
+    for name in sorted(cached):
+        spec = suite.REGISTRY[name]
+        scripts = [os.path.basename(str(c)) for c in spec.cmd
+                   if str(c).endswith('.py')
+                   and (str(c).startswith('test_') or str(c).endswith('_test.py'))]
+        named = {os.path.basename(str(e)) for e in spec.extra}
+        missing = [s for s in scripts if s not in named]
+        check(f'cache key: cached spec {name} hashes its own test',
+              not missing, f'{missing} not in extra={sorted(named)}')
+
+
+def test_every_test_file_is_registered():
+    """A test file nothing runs is a claim with no evidence behind it.
+
+    The failure this is modelled on is in CLAUDE.md: the `coro` bucket sat in
+    the gate naming `mojo_*` runtime files after they were renamed to `fire_*`,
+    so all 20 of its cases failed to compile and the suite reported 0/20 for
+    two rounds. Nothing was expected, nothing was reported, and the coroutine
+    runtime was untested. A registration is the only thing that makes a test
+    file run at all, and until this check nothing noticed when one did not
+    happen.
+
+    Measured before it existed: 50 of 81, of which 5 are RED. The 50 are
+    declared below with a reason each, because a check that failed 50 times on
+    its first day is a check nobody runs — and the declarations are the
+    inventory from `bugs/UNTESTED.md`, in a form that executes.
+    """
+    excused = _unregistered_reason_table()
+    on_disk = set(_test_files_in_repo())
+    named = _registered_test_files()
+
+    check('the estate: the walk found test files at all', len(on_disk) > 20,
+          f'found {len(on_disk)}; every check below would pass vacuously')
+    check('the estate: some tests are registered, so "registered" means something',
+          len(named) > 10, f'only {len(named)} test files are named by a spec')
+
+    orphans = {f for f in on_disk if os.path.basename(f) not in named}
+    undeclared = sorted(orphans - set(excused))
+    check('the estate: every test file is run by something, or says why not',
+          not undeclared,
+          'not run by any registered spec and not in UNREGISTERED: '
+          + ', '.join(undeclared))
+
+    # The other two directions, which is what stops the list becoming a
+    # permanent excuse. Both are the anti-rot discipline tools/suite.py already
+    # applies to an `expect=` marker, applied here to a 50-entry list.
+    stale = sorted(set(excused) - on_disk)
+    check('the estate: no excuse for a file that no longer exists', not stale,
+          f'delete these from UNREGISTERED: {stale}')
+    resolved = sorted(p for p in excused
+                      if os.path.basename(p) in named)
+    check('the estate: no excuse for a file that is now registered', not resolved,
+          f'registering one makes its excuse wrong; delete these: {resolved}')
+    thin = sorted(p for p, why in excused.items() if len(why) < 40)
+    check('the estate: every excuse is a reason, not a shrug', not thin,
+          f'too short to be a reason: {thin}')
+    print(f'      the estate: {len(on_disk)} test files, {len(named - orphans)} '
+          f'of them run by a registered spec, {len(excused)} declared with a '
+          f'reason, {len(undeclared)} undeclared')
+
+
 def main():
     for fn in (test_cmd_driver, test_reject_pattern, test_mem_driver,
                test_make_driver, test_j_forwarded, test_deps_order_and_skip,
@@ -460,7 +960,11 @@ def main():
                test_artifact_cache, test_selfhost_key_is_complete,
                test_bucket_dedup, test_missing_dep_is_reported,
                test_named_test_brings_its_deps,
-               test_log_has_passes_screen_does_not):
+               test_log_has_passes_screen_does_not,
+               test_checked_run_key_covers_what_it_names,
+               test_checked_run_replays_a_pass_and_reruns_a_failure,
+               test_cached_spec_names_its_own_test,
+               test_every_test_file_is_registered):
         fn()
     print()
     print(f'Results: {PASSES} passed, {len(FAILURES)} failed')
