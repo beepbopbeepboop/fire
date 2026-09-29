@@ -98,6 +98,6 @@ is where a parameter list is already read) and is consumed by both backends'
 answer, two architectures.
 
 **While it is open, the rule for writing a module here is: no default argument
-on anything another image can call.** `os/__init__.mojo` states that at the
-top, and `getenv_or(name, default)` exists as a second function precisely so
+on anything another image can call.** `formal/hostmods/os/__init__.mojo`
+states that at the top, and `getenv_or(name, default)` exists as a second function precisely so
 that the two-argument form has a name instead of a signature that does nothing.

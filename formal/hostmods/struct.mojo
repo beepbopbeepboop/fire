@@ -7,6 +7,12 @@ nothing here needs an object a freestanding image that links libSystem and
 nothing else does not have. That is what makes this file possible, and it is
 why `struct` in HOST_MODELLED was a lie and no longer is.
 
+It lives in `formal/hostmods/` beside this backend's `os` and `sys`, which
+`formal/imports.py` adds to every file's search roots as its last entry. It
+did NOT live at the repository root, where it was first written: the root is a
+search root for four independent resolvers, so a Mojo `struct` there captured
+`import struct` in the compiler's own sources. See `_HOSTMODS_ROOT`.
+
 THE FORMAT SUBSET, MEASURED
 ---------------------------
 Every format-shaped string literal in every `formal/*.py` and

@@ -1100,12 +1100,13 @@ def _classify_terminal(detail: str, source=None, path=None) -> tuple:
     # what another agent editing formal/ will change.
     #
     # …and the name must be a module this backend has NO SOURCE for, which is
-    # a question with an authority rather than a template. `sys.mojo` is a real
-    # module now, so a refusal that quotes `sys` — a module attribute read, a
-    # `mod.fn()` whose module exports no such `fn` — is a refusal about a
-    # construct IN A MODULE THAT EXISTS, and filing it as host-import put 14
-    # real files in the not-answerable bucket for a reason that had stopped
-    # being true. `resolve_module_path` is the build's own resolver, in the
+    # a question with an authority rather than a template. `sys` has a Mojo
+    # source (`formal/hostmods/sys.mojo`), so a refusal that quotes `sys` — a
+    # module attribute read, a `mod.fn()` whose module exports no such `fn` —
+    # is a refusal about a construct IN A MODULE THAT EXISTS, and filing it as
+    # host-import put 14 real files in the not-answerable bucket for a reason
+    # that had stopped being true. `resolve_module_path` is the build's own
+    # resolver, in the
     # build's own order (Mojo source > host module > sibling > stdlib loader),
     # so the sweep does not get to have an opinion about what exists.
     #
@@ -2082,8 +2083,9 @@ def main():
         # more: they were a standing editorial claim that `os` and `sys` were
         # "most of it", which is a statement about the WORK and goes stale the
         # moment one of them is written. `sys` now has a Mojo source
-        # (`sys.mojo`), so it is not in the in-reach set at all, and printing a
-        # name that is no longer there would be worse than printing nothing.
+        # (`formal/hostmods/sys.mojo`), so it is not in the in-reach set at
+        # all, and printing a name that is no longer there would be worse than
+        # printing nothing.
         # What is left is the part that is still true whatever the set holds.
         print("    None of this is close, and none of it is in the rate "
               "above: the point is to size the work, not to improve the "

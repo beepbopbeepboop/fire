@@ -43,6 +43,35 @@ _BUILT: dict = {}
 # legitimate (and bounded) place to look for a module name.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Where this backend's OWN implementations of CPython's modules live: `os/`
+# (with `os/path/` and `os/_syscalls.mojo`), `sys.mojo` and `struct.mojo`.
+#
+# They were at the REPOSITORY ROOT, which is where the first three landed, and
+# that is a search root for FOUR INDEPENDENT resolvers, not just this one:
+# `imports.py`'s `Resolver` (MOJO_PATH puts the repo root on every gimple
+# build's path), `module_loader.py`, `myinterpreter.py`'s
+# `_load_mojo_sibling_module` (it walks up from the importing file and then
+# adds `sys.path`), and the gimple backend's `_module_candidate_paths` (whose
+# last resort is this very directory). So a Mojo `os` at the root captured
+# `import os` in `fire.py`, `module_loader.py` and `gimple_codegen.py`
+# themselves — the compiler's own source — and the compiled path lowered
+# `os.sep` (a `char *` constant) as if it were a module-level name with no
+# storage, which gcc then rejected as `invalid operands to binary + (have
+# 'char *' and 'void *')`. Measured in the integrator's gate, at
+# `bootstrap-stage2-cc` and `selfhost`.
+#
+# Under `formal/` the directory is reachable ONLY from a resolver that
+# deliberately adds it, and this is the one: `_search_roots` below, and
+# nothing else in the tree lists it. `formal_sweep.py`'s default roots walk
+# the repository, so the module sources are still swept — as
+# `formal/hostmods/os/__init__.mojo`, which is a more honest name for what
+# they are than a bare `os/` at the top level.
+#
+# A file INSIDE this directory is compiled by this backend like any other, and
+# the relative imports its own modules use (`from ._syscalls import …`) resolve
+# from the file's own directory, so the move changes no path inside them.
+_HOSTMODS_ROOT = os.path.join(_REPO_ROOT, "formal", "hostmods")
+
 
 # CPython's standard library, SPLIT BY WHAT IMPLEMENTING IT WOULD REQUIRE.
 #
@@ -112,13 +141,14 @@ HOST_MODELLED = frozenset((
     # it is written in and what it still cannot do; the omissions are bug
     # docs, stated at the function that lacks the capability, not here.
     #
-    #   `sys`  — `<repo>/sys.mojo`, checked by `test_formal_sys.py`. What it
-    #     cannot answer is written at the top of the file itself: `argv`,
-    #     `path` and the stream objects are ONE missing capability (an
+    #   `sys`  — `formal/hostmods/sys.mojo`, checked by `test_formal_sys.py`.
+    #     What it cannot answer is written at the top of the file itself:
+    #     `argv`, `path` and the stream objects are ONE missing capability (an
     #     argument vector with no place to put it, and streams), not nine
     #     missing names, so they are filed once, as a bug.
-    #   `os`  — `os/__init__.mojo`, `os/path/__init__.mojo` (CPython's
-    #     posixpath) and `os/_syscalls.mojo` (every libSystem call it makes,
+    #   `os`  — `formal/hostmods/os/__init__.mojo`,
+    #     `formal/hostmods/os/path/__init__.mojo` (CPython's posixpath) and
+    #     `formal/hostmods/os/_syscalls.mojo` (every libSystem call it makes,
     #     once), all three built and RUN by `test_formal_os.py`: 436 path
     #     answers against CPython's own, 75 filesystem operations against the
     #     real filesystem. `listdir` and `walk` need a run-time-length
@@ -126,11 +156,11 @@ HOST_MODELLED = frozenset((
     #     a `char **` walk; both are bug docs rather than approximations.
     "errno", "stat", "platform", "time", "select", "io",
     "pathlib", "glob", "fnmatch", "hashlib", "secrets", "uuid",
-    #   `struct`  — `struct.mojo` at this tree's root, in the subset the
-    #     formal backends can lower, compared BYTE FOR BYTE against CPython's
-    #     own answers by `test_struct_formal.py`. The four measured limits it
-    #     is written around are in that file's own docstring. It also matters
-    #     for the work accounting: an entry here is the claim
+    #   `struct`  — `formal/hostmods/struct.mojo`, in the subset the formal
+    #     backends can lower, compared BYTE FOR BYTE against CPython's own
+    #     answers by `test_struct_formal.py`. The four measured limits it is
+    #     written around are in that file's own docstring. It also matters for
+    #     the work accounting: an entry here is the claim
     #     `formal_sweep.py` sizes its "not answerable" column from, and it
     #     reported seven files as blocked on a module that now exists.
     #
@@ -292,7 +322,13 @@ def _search_roots(relative_to: str, project_root: str) -> list:
     NOT continue past the project root: an unbounded walk would happily
     resolve `import math` to some unrelated ~/math.mojo, which is far worse
     than failing to find it. A file under the stdlib also gets the stdlib
-    root, so stdlib modules resolve each other."""
+    root, so stdlib modules resolve each other.
+
+    Two roots are FIXED rather than walked: the repository root, and
+    `_HOSTMODS_ROOT` — this backend's own `os`/`sys`/`struct`. Both are
+    appended after everything nearer, and the second is listed by NO OTHER
+    resolver in the tree, which is what keeps a Mojo `os` from capturing
+    `import os` in the compiler's own sources."""
     roots = []
     if relative_to:
         here = os.path.dirname(os.path.abspath(relative_to))
@@ -337,6 +373,21 @@ def _search_roots(relative_to: str, project_root: str) -> list:
     # project root was to keep `import math` from binding to an unrelated
     # ~/math.mojo, and a bounded root cannot do that.
     roots.append(_REPO_ROOT)
+    # This backend's own modules — `os`, `os.path`, `sys`, `struct` — last, so
+    # a project's own `os.mojo` beside the file importing it still wins. They
+    # are Mojo source in a search root, so they are found by PASS 1, which is
+    # what keeps the "Mojo source beats the host-module list" rule the rest of
+    # this module is built on: `os` is not in `HOST_MODULES` at all, and
+    # reaching it here is the only reason that is true.
+    #
+    # LAST rather than first is deliberate, and the ordering is the same one
+    # `_REPO_ROOT` is appended under: nearest first, and this is neither the
+    # importing file's directory nor anything above it. It is also the ONLY
+    # root in this list that no other resolver in the tree shares, which is the
+    # property that keeps a Mojo `os` from capturing `import os` in
+    # `fire.py` — see `_HOSTMODS_ROOT`.
+    if os.path.isdir(_HOSTMODS_ROOT):
+        roots.append(_HOSTMODS_ROOT)
     try:
         import module_loader
         stdlib = getattr(module_loader, "STDLIB_PATH", None)

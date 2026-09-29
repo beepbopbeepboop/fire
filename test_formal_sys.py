@@ -2,14 +2,14 @@
 """Tests for the formal backend's `sys` module and the module-call lowering
 it is the first real user of.
 
-`sys.mojo` at the repository root is the Mojo source `formal/imports.py`
+`formal/hostmods/sys.mojo` is the Mojo source `formal/imports.py`
 resolves `import sys` to, so `sys` is no longer in `HOST_MODELLED` and no
 file in this tree is refused for importing it. That is worth nothing on its
 own — a module nothing can call is a rock — so what is asserted here is the
 part that makes it a module:
 
-  1. `import sys` resolves to `<repo>/sys.mojo`, in the resolver's own order,
-     and `sys` is not in `HOST_MODELLED` any more;
+  1. `import sys` resolves to `formal/hostmods/sys.mojo`, in the resolver's own
+     order, and `sys` is not in `HOST_MODELLED` any more;
   2. a program calls it by its REAL Python spelling — `sys.maxsize()`, the
      dotted name `import sys` binds — and gets the right answers, on BOTH
      backends;
@@ -48,7 +48,12 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
-SYS_MODULE = os.path.join(HERE, "sys.mojo")
+# The module source, at the ONE place the formal resolver finds it. Read from
+# `formal/imports.py` rather than spelled out, so this test follows the module
+# if the search root moves — and so a path typed here cannot be a second,
+# quietly-stale copy of the answer the test is about.
+HOSTMODS = os.path.join(HERE, "formal", "hostmods")
+SYS_MODULE = os.path.join(HOSTMODS, "sys.mojo")
 
 sys.path.insert(0, HERE)
 
@@ -211,8 +216,8 @@ def workdir(tmp, name) -> str:
     """A directory of this test's own, for the programs it writes.
 
     Under the temp root and never the repository: `sys.mojo` is found from a
-    program anywhere, because `formal/imports.py`'s `_search_roots` appends the
-    repository root to every file's roots, so a program in a temp directory
+    program anywhere, because `formal/imports.py`'s `_search_roots` appends
+    `formal/hostmods/` to every file's roots, so a program in a temp directory
     resolves `import sys` exactly as one in the tree does — and nothing this
     file writes lands in the checkout.
     """
@@ -266,22 +271,30 @@ def sys_exports(arch="arm64"):
 # ── resolution ─────────────────────────────────────────────────────────────
 
 def test_sys_resolves_to_the_module_source(tmp, _shared):
-    """`import sys` finds `<repo>/sys.mojo`, in the resolver's own order.
+    """`import sys` finds `formal/hostmods/sys.mojo`, in the resolver's own order.
 
     Pass 1 of `resolve_module_path` is Mojo source in a search root, and it
     wins over the host-module list — so this is the assertion that says the
     module is reachable at all, from a file in a SUBDIRECTORY as well as from
-    the root, which is the property that makes the repository root the only
+    the root, which is the property that makes one shared search root the only
     place it could live.
+
+    The location itself is asserted, not just the resolution: a module source
+    back at the repository root resolves from here too, and the whole point of
+    `formal/hostmods/` is that NOTHING ELSE in the tree can see it. See
+    `test_hostmods_are_invisible_to_every_other_resolver` in
+    `test_formal_link_accounting.py` for that half.
     """
     from formal.imports import HOST_MODELLED, resolve_module_path
     check(resolve_module_path("sys", relative_to=os.path.join(HERE, "t1.mojo"))
           == SYS_MODULE,
-          "`import sys` from the repository root did not resolve to sys.mojo")
+          "`import sys` from the repository root did not resolve to "
+          f"{SYS_MODULE}, got "
+          f"{resolve_module_path('sys', relative_to=os.path.join(HERE, 't1.mojo'))!r}")
     nested = os.path.join(HERE, "tools", "ci_line.py")
     check(resolve_module_path("sys", relative_to=nested) == SYS_MODULE,
           "`import sys` from tools/ did not resolve to sys.mojo — the "
-          "repository root is the one root every file in the tree shares")
+          "hostmods root is appended to every file's search roots")
     check("sys" not in HOST_MODELLED,
           "sys is still in HOST_MODELLED: a Mojo source wins over that set, "
           "so the entry no longer describes anything the build does")

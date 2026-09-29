@@ -1,5 +1,17 @@
 """`os` — the operating-system interface, for the formal backend.
 
+This file, `os/path/__init__.mojo` and `os/_syscalls.mojo` live in
+`formal/hostmods/`, which `formal/imports.py` adds to every file's search
+roots as its last entry — so `import os` and `import os.path` reach them from
+any file this backend compiles, and no other resolver in the tree can. They did
+NOT live at the repository root, where they were first written: the root is a
+search root for four independent resolvers (`imports.py`'s `Resolver`,
+`module_loader.py`, the interpreter's sibling-module loader, and the gimple
+backend), so a Mojo `os` there captured `import os` in `fire.py`,
+`module_loader.py` and `gimple_codegen.py` — the compiler's own source — and
+the compiled path lowered `os.sep` as a module-level name with no storage.
+See `formal/imports.py`'s `_HOSTMODS_ROOT`.
+
 What CPython's `os` is, restricted to what a freestanding arm64 image that
 links libSystem and nothing else can actually be asked for. The shape of the
 restriction is the same everywhere in this module and is worth stating once,

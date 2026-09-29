@@ -9,11 +9,14 @@ name `sys`, so `import sys` is no longer the refusal
     imports 'sys', which is a host module (CPython standard library), which
     has no Mojo source for this backend to compile
 
-It sits at the repository root on purpose. `_search_roots` walks from the
-importing file's own directory up to the project root and then appends the
-repository root itself, so the root is the ONE directory every file this
-backend compiles can reach a module from - a file in `tools/` and a file at
-the top level both find it, and nothing else in the tree would do.
+It lives in `formal/hostmods/` — the directory `formal/imports.py` adds to
+every file's search roots as its last entry, so a file in `tools/` and a file
+at the top level both find it, and nothing else in the tree does. NOT at the
+repository root, where the first three of these modules were written: the root
+is a search root for four independent resolvers (`imports.py`'s `Resolver`,
+`module_loader.py`, the interpreter's sibling-module loader, and the gimple
+backend), so a Mojo `sys` there captured `import sys` in the compiler's own
+sources. See `formal/imports.py`'s `_HOSTMODS_ROOT`.
 
 WHAT THIS TARGET CAN ANSWER
 ---------------------------

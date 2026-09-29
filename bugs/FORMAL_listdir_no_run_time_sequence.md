@@ -100,8 +100,9 @@ patch.
    that, not parallel to it.
 
 **What `os` does instead**, so the shape is a decision and not an omission:
-`os` and `os.path` ship no `listdir` and no `walk`, and `os/__init__.mojo` says
-so at the top of its docstring. A caller who writes `os.listdir(p)` gets a
+`os` and `os.path` ship no `listdir` and no `walk`, and
+`formal/hostmods/os/__init__.mojo` says so at the top of its
+docstring. A caller who writes `os.listdir(p)` gets a
 build refusal naming `listdir` — an unresolved name, with the module in hand —
 which is the honest answer. The alternative, a `listdir` that returned a
 fixed-capacity list of whatever fitted, would be a function whose length is a

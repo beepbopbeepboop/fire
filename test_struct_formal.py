@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""test_struct_formal.py -- `struct.mojo` is byte-for-byte CPython's `struct`.
+"""test_struct_formal.py -- `formal/hostmods/struct.mojo` is byte-for-byte
+CPython's `struct`.
 
 The formal backends refused seven files in this repository because they
 `import struct` and `struct` was in `formal/imports.py`'s HOST_MODELLED
-("reachable in principle, not implemented"). `struct.mojo` implements it, and
+("reachable in principle, not implemented"). The module implements it, and
 this file is the evidence that the implementation is RIGHT rather than merely
 present.
 
@@ -42,7 +43,13 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# The module source, at the ONE place the formal resolver finds it. Derived
+# from `formal/imports.py` rather than spelled out here, so a move of the
+# search root cannot leave this file pointing at nothing.
 sys.path.insert(0, HERE)
+import formal.imports as _FI
+HOSTMODS = _FI._HOSTMODS_ROOT
+STRUCT_MODULE = os.path.join(HOSTMODS, "struct.mojo")
 import fire_compiler as F
 FIRE = os.path.join(HERE, "fire.py")
 BUILD_TIMEOUT = 300
@@ -487,7 +494,7 @@ def test_the_module_builds_on_both_backends(_tmpdir=None):
         from formal.imports import build_module_dylib
     finally:
         sys.path.pop(0)
-    src = os.path.join(HERE, "struct.mojo")
+    src = STRUCT_MODULE
 
     # arm64: the whole module, as a dylib, which compiles every public
     # function rather than only the ones a program happens to call.
@@ -587,12 +594,19 @@ def test_unservable_formats_are_refused_not_wrong(tmpdir):
 # ── 5. the module is where the resolver looks, and the corpus imports it ─────
 
 def test_module_resolves_and_is_exported(tmpdir):
-    """`struct` resolves to `struct.mojo` and exports the four entry points.
+    """`struct` resolves to the module source and exports the four entry points.
 
     Without this the byte tests above would pass against a module the
     importer cannot reach, which is the shape of bug the HOST_MODELLED entry
     was: the file existed as far as `import struct` was concerned only if
     something answered it.
+
+    The resolved PATH is compared to the file this suite reads, not to a
+    basename: a `struct.mojo` that had drifted back to the repository root
+    would still answer here — that is exactly what the module used to be — and
+    `test_hostmods_are_invisible_to_every_other_resolver` in
+    `test_formal_link_accounting.py` is what says why that is no longer
+    allowed.
     """
     sys.path.insert(0, HERE)
     try:
@@ -602,13 +616,13 @@ def test_module_resolves_and_is_exported(tmpdir):
     path = I.resolve_module_path("struct", relative_to=os.path.join(
         HERE, "formal", "arm64.py"), project_root=os.path.join(
         HERE, "formal", "arm64.py"))
-    check(path is not None and os.path.basename(path) == "struct.mojo",
-          "`import struct` resolves to struct.mojo for a formal/arm64.py "
-          f"importer; got {path!r}")
+    check(path == STRUCT_MODULE,
+          f"`import struct` resolves to {STRUCT_MODULE} for a "
+          f"formal/arm64.py importer; got {path!r}")
     check("struct" not in I.HOST_MODELLED,
           "`struct` is no longer in HOST_MODELLED — the entry claimed the "
           "module was reachable but unimplemented, and it is implemented")
-    if path:
+    if path and os.path.isfile(path):
         with open(path) as f:
             text = f.read()
         for fn in ("def pack(", "def pack_into(", "def unpack_from(",
