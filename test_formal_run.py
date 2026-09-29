@@ -3339,7 +3339,7 @@ DECLARED_TYPE_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var p = P()\n"
      "    return p.go()\n",
-     "refuse:declares 'in1' nowhere and has no __init__ that assigns it", None),
+     "refuse:declares 'in1' nowhere and has no __init__ at all", None),
     # A field that IS written. `in1: Inner` agrees on a framed struct, so the
     # slot does hold a frame address — but `P.go` ASSIGNS the field, so what is
     # in the slot is a frame belonging to whichever function ran the assignment,

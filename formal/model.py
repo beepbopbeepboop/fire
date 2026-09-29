@@ -6423,20 +6423,28 @@ def annotation_base_name(ann) -> str | None:
 
 
 def struct_field_declared_type(struct_def, name) -> tuple:
-    """`(base_name, annotation)` for a field's declaration, or `(None, why)`.
+    """`(base_name, annotation, why, is_declared)` for a field's declaration.
 
     The ONE reading of a declared type, so a caller that wants to know what a
     field holds and a caller that wants to refuse a field cannot answer
     differently.
 
-    `(None, why)` whenever there is no single declaration to read: the field is
-    not declared here at all (a class that assigns its fields in `__init__`, or
-    one whose storage is named by `__slots__` or by nothing but
-    `self.<name>` reads in a method), or it is declared twice with two different
+    `(None, None, why, False)` when the field is not declared here at all — a
+    class that assigns its fields in `__init__`, or one whose storage is named
+    by `__slots__` or by nothing but `self.<name>` reads in a method — and
+    `(None, None, why, True)` when it is declared TWICE with two different
     annotations.  The second is a real disagreement and not a corner case: a
     class body that says `var p: Pointer` and is then handed an `Int` somewhere
     has two answers, and picking one is the whole class of bug this section is
     arranged to prevent.
+
+    `is_declared` is carried rather than left to the caller to work out, because
+    the two negative answers are different facts and only the first of them has
+    a SECOND evidence source to try: `struct_field_type` falls back to the
+    constructor spelling for a field that is not declared, and must not for one
+    whose two declarations disagree — there is no better of the two to prefer,
+    and an assignment spelling would turn a refusal naming both annotations into
+    one naming neither.
 
     This function reads the DECLARATION and only the declaration; the
     constructor-assignment spelling (`struct_field_assigned_type`) is a second
@@ -6459,17 +6467,19 @@ def struct_field_declared_type(struct_def, name) -> tuple:
                 if spelling not in anns:
                     anns.append(spelling)
     if not anns:
-        return (None, f"{struct_def.name} does not declare {name!r}, so nothing "
-                      f"here says what the slot holds — a field named only by "
-                      f"__slots__ or only by a method's read of self.{name}, "
-                      f"and one only ever handed a value this path cannot type, "
-                      f"are both that shape")
+        return (None, None,
+                f"{struct_def.name} does not declare {name!r}, so nothing here "
+                f"says what the slot holds — a field named only by __slots__ or "
+                f"only by a method's read of self.{name}, and one only ever "
+                f"handed a value this path cannot type, are both that shape",
+                False)
     if len(anns) > 1:
-        return (None, f"{struct_def.name} declares {name!r} more than once and "
-                      f"the declarations disagree — {', '.join(map(repr, anns))} "
-                      f"— so there is no single answer, and one of them would "
-                      f"be a guess")
-    return (annotation_base_name(anns[0]), anns[0])
+        return (None, None,
+                f"{struct_def.name} declares {name!r} more than once and the "
+                f"declarations disagree — {', '.join(map(repr, anns))} — so "
+                f"there is no single answer, and one of them would be a guess",
+                True)
+    return (annotation_base_name(anns[0]), anns[0], None, True)
 
 
 # The second evidence source for a field's type, and the one that unblocks the
@@ -6527,7 +6537,8 @@ def struct_field_assigned_type(struct_def, name, decls: dict) -> tuple:
                  if m.name == "__init__"), None)
     if init is None:
         return (None, None, f"{struct_def.name} declares {name!r} nowhere and "
-                            f"has no __init__ that assigns it")
+                            f"has no __init__ at all, so nothing names its "
+                            f"type")
     receivers = struct_receivers(struct_def)
     names, untyped = [], None
     for node in iter_nodes(getattr(init, "body", None)):
@@ -6558,7 +6569,8 @@ def struct_field_assigned_type(struct_def, name, decls: dict) -> tuple:
     if not names:
         return (None, None, untyped or
                 f"{struct_def.name} declares {name!r} nowhere and its __init__ "
-                f"does not assign it")
+                f"never assigns it — a store in ANOTHER method does run, and a "
+                f"value is not a type")
     if len(names) > 1:
         return (None, None, f"__init__ assigns self.{name} more than one type — "
                             f"{' and '.join(map(repr, names))} — so there is "
@@ -6640,45 +6652,21 @@ def struct_field_type(struct_def, name, decls=None) -> tuple:
     A DECLARATION wins over an assignment, and not by preference: premise (B2)
     says the assignment does not execute, so the declaration is the better
     evidence about the word the slot actually holds.  The two are therefore not
-    a disagreement, and cross-checking them would refuse correct code.
-
-    A declaration that is itself a disagreement (the same field declared twice
-    with two annotations) is NOT overridden by an assignment: there is nothing
-    to override, because no single declaration exists to be the better one, and
-    an assignment spelling would turn a refusal that names both annotations into
-    one that names neither.
+    a disagreement, and cross-checking them would refuse correct code.  A
+    declaration that is ITSELF a disagreement is not overridden either — that
+    is the `is_declared` flag, and the reason for it is on
+    `struct_field_declared_type`.
     """
-    base, why = struct_field_declared_type(struct_def, name)
-    if _has_declaration(struct_def, name):
-        if base is None:                       # declared twice, disagreeing
-            return (None, None, None, why)
-        return (base, why, "declared", None)
+    base, spelling, why, declared = struct_field_declared_type(struct_def, name)
+    if declared:
+        return (base, spelling, "declared" if base else None,
+                None if base else why)
     if decls is None:
         return (None, None, None, why)
     assigned, spelling, why = struct_field_assigned_type(struct_def, name, decls)
     if assigned is None:
         return (None, None, None, why)
     return (assigned, spelling, "assigned", None)
-
-
-def _has_declaration(struct_def, name) -> bool:
-    """True when this struct spells an annotation for `name` anywhere in its body.
-
-    `struct_field_declared_type` returns `(None, why)` for two very different
-    things — no annotation at all, and two annotations that disagree — and
-    `struct_field_type` has to tell them apart before it falls back to the
-    assignment spelling: the first has a second source to try, the second is
-    already a refusal and must not be papered over by one.
-    """
-    for field in struct_fields(struct_def):
-        if struct_field_name(field) != name:
-            continue
-        for spelling in (getattr(field, "type_ann", None),
-                         getattr(field.target, "type_ann", None)
-                         if isinstance(field, F.AssignStmt) else None):
-            if isinstance(spelling, str) and spelling.strip():
-                return True
-    return False
 
 
 def field_type_rows(structs, name, decls=None):
@@ -6791,11 +6779,10 @@ def field_type_disagreement(structs, name, rows) -> str:
     contradicted one.
 
     An agreed row says WHERE its type came from, in the source's own words for
-    each: `declares 'x' as 'Inner'` for a declaration and
-    ``assigns ``self.x = Inner()`` in ``__init__`` `` for the constructor
-    spelling.  Printing "declares" for the second is a reason that is not
-    operating — the class declares nothing, and a reader sent to look for a
-    declaration that does not exist loses the thread.
+    each: "declares 'x' as 'Inner'" for a declaration and "assigns 'x' an Inner
+    in __init__" for the constructor spelling.  Printing "declares" for the
+    second is a reason that is not operating — the class declares nothing, and a
+    reader sent to look for a declaration that does not exist loses the thread.
     """
     parts = []
     for sn, base, ann, why, evidence in rows:
