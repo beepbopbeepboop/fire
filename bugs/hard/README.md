@@ -10,7 +10,7 @@ Every entry carries a `**State: CLOSED | PARTIAL | OPEN.**` banner directly
 under its title, with the residue named. Start there; the banner tells you
 whether re-reading the body is worth your time.
 
-Last updated 2026-09-26.
+Last updated 2026-09-29.
 
 ## OPEN — not fixed, no code change yet
 
@@ -29,7 +29,7 @@ Last updated 2026-09-26.
 | `CODEGEN_bytes_silent_wrong_values.md` | six `bytes`/`memoryview` paths returning plausible wrong values with exit 0. **5 of 6 FIXED 2026-09-26**, plus several found alongside: a bytes fill char that emitted a heap-address byte, empty-bytes predicates, `memoryview.readonly`, `dict.get`/`pop` on a bytes key, a loop-target rebind that was never bytes-specific, and swapped `partition` arms, a non-raising empty separator, `center` padding on the wrong side and a `width` keyword read as the fill. `isprintable`/`isnumeric` were **removed from `bytes`** (CPython raises; only the buggy code dissented) and added to `str`, where they answered a silent `0`. Two enshrined-wrong test expectations were corrected. Residue: `partition` returns a `MojoList *` because **this runtime has no tuple type at all** — not a bytes fix. |
 | `CODEGEN_struct_kwargs_and_inline_unpack.md` | `struct.*` keyword arguments were silently dropped, and mixed int+float `unpack` returned raw IEEE-754 bits. **BOTH FIXED 2026-09-26.** Keywords are *honoured* rather than refused, bounded to the three names CPython actually accepts (measured by brute force over the real module), including its error-message precedence. The doc's mechanism for the unpack half was wrong: it is not about locals — of six consuming spellings exactly one worked, and the literal-index subscript was the survivor. Residue: a read with no compile-time slot index still needs one C type for a heterogeneous value, which is the runtime's missing container tag. |
 | `CODEGEN_generator_lambda_expr_unsupported.md` | **rewritten 2026-09-26: the recorded residue was stale.** Escaping/rebound capturing lambdas are CLOSED — they take a heap env, and the escape analysis now only picks between two correct lowerings. What remains is the **variadic** shape, and it is a call-site SIGSEGV rather than a lost capture: the lifted definition is correct (`int64_t f (MojoList * a)`) but the call site passes loose args positionally as scalars and never packs the list, so the callee dereferences address 4. Three corpus sites. Still excluded: capturing lambdas inside a coroutine body. |
-| `COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` | **corrected 2026-09-26: both of the doc's conclusions were wrong.** The real file is on disk, and rebuilding the audit against it (every earlier reconstruction had dropped the kw-only callable-parameter indirection) shows **4 of the 6 shapes the doc called "WORKS" are still refused**. The real blocker is *invoking a kw-only param as a callee*, the same missing callable-value representation the lambda doc names, from a different direction. Its shape-5 mapping is RETRACTED: that shape is refused outright, so it never witnessed the `value_ctype` bug at all. |
+| `COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` | **the kw-only-callable blocker is FIXED for the same-module case, 2026-09-29.** `walk_tree` and `iter_files_by_suffix` now compile and produce CPython's text; the stack-switch `kwonly params (v0)` gate is a representability question instead of a blanket refusal, and a callable-valued parameter's default is a real function address instead of a NULL pointer (which used to SIGSEGV on **every** path, ordinary `def`s included — that half was not in the doc). Residue: `_walk_tree`/`glob_tree` still refuse because their defaults name an **imported** module's function, undecidable at A3's eligibility time, and that same gap is a live SIGSEGV on the ordinary path (`bugs/CODEGEN_unresolved_imported_callable_default_null_pointer.md`); `iter_files`'s variadic lambda and `process_filenames`' `Exception(...)`-as-a-value are separate and outside this bug, so the file still does not build. |
 
 ## Closed reports are deleted, not kept as monuments
 
@@ -87,15 +87,20 @@ still ~n^1.7), so the doc stays OPEN.
 
 ## Notes for future sessions
 
-- **Three test files run in NO suite bucket** — `test_gimple_runner.py` (120
-  tests), `test_gimple_generator_runner.py` (145) and
-  `test_coro_nested_async_capture.py` (9). No `make check`, no `make gate`
-  runs any of them. This is not theoretical: a correct fix sat **red** in
-  `test_gimple_runner.py` for a full pass because nothing ran it, and the
-  coro file is 0/9 partly because its source list still names pre-rename
-  `mojo_*` runtime files (now `fire_*`). Registering those three is the
-  highest-value structural fix available in this directory — bigger than any
-  single bug listed above it.
+- **One test file runs in NO suite bucket** — `test_coro_nested_async_capture.py`
+  (9 tests). No `make check`, no `make gate` runs it. This is not
+  theoretical: the coro file is 0/9 partly because its source list still
+  names pre-rename `mojo_*` runtime files (now `fire_*`). Registering it
+  is the highest-value structural fix available in this directory — bigger
+  than any single bug listed above it.
+  **CORRECTED 2026-09-29:** this bullet used to name three files, and two
+  of them are wrong. `test_gimple_runner.py` and
+  `test_gimple_generator_runner.py` ARE registered, as `gimplerunner` and
+  `gimplegenerators`, both in `check` and therefore in `gate`
+  (`tools/suite.py`, `GIMPLE_SOURCES` cache-invalidation list included);
+  `make check` runs 172 and 162 tests respectively. Re-measured on the
+  current tree, both green. Treat the rest of this directory's bucket
+  claims the same way — they are notes, not evidence.
 - **Two of the OPEN entries were found by re-testing claims in an existing
   doc rather than by reading code.** The `.format` residual had been
   recorded as "returns a pointer-sized integer ... and a local is correct
