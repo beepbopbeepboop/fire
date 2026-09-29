@@ -63,6 +63,14 @@ _SLOT = 16
 # capped just below the spill/saved-register area.
 _BLOB_BYTES = 16384
 
+# The local a frame-returning function keeps the CALLER'S block address in.
+# A name rather than a dedicated register, so the word goes through the same
+# register-or-spill-slot home every other local has; the leading underscores
+# keep it out of any name the source can spell, which matters because this
+# backend's callee-saved set is only five registers wide and a reserved one
+# would cost a local a register on every function.
+_SRET_LOCAL = "__sret_block"
+
 # Condition-code pairs for the six comparisons, as (unsigned, signed) setcc
 # mnemonics. The literal's type picks the row: `int` is unsigned 64-bit, so
 # `n < 0` on an unannotated parameter is an unsigned comparison — the same
@@ -471,6 +479,16 @@ class X86_64Codegen:
         self._frame_sites: dict = {}
         self._frame_recv_bytes = 0
         self._frame_slots: dict = {}
+        # Blocks for frames this function RECEIVES from a callee that returns
+        # one, and the struct this function itself returns: the two halves of
+        # the same convention, read from the one whole-image table
+        # `formal/build.py`'s fixpoint published.
+        self._ret_frame_sites: dict = {}
+        self._ret_frame_base = 0
+        self._ret_frame_bytes = 0
+        self._returns_frame = None
+        self._image_returns_frame: dict = {}
+        self._entry_name = None
         # `{"h.a.b": slot}` — a NESTED frame read, which is two loads
         # and therefore not something `_frame_slots` can express.
         self._frame_nested_slots: dict = {}
@@ -582,6 +600,7 @@ class X86_64Codegen:
         self.asm.org(base_addr)
 
         first_func_name = functions[0].name
+        self._entry_name = first_func_name if emit_startup else None
         if emit_startup:
             # Save/restore RBP around the call so the kernel's return lands
             # with RAX still holding the entry function's value: that value
@@ -638,6 +657,34 @@ class X86_64Codegen:
         self.asm.label(f.name)
 
         var_names = _collect_var_names(f)
+        # The RETURNED-FRAME convention, set up before the locals so the hidden
+        # word has a home of its own: a function that returns a frame address
+        # takes one extra trailing argument — the address of a block in its
+        # CALLER's scratch — and `return <frame>` becomes "copy the block to
+        # that word, return that word".  The word is an ordinary local so that
+        # it goes through `_load_var`/`_store_var` like every other value on
+        # this path, which is what keeps a spilled home and a register home
+        # from being two different addresses for the same thing.
+        self._image_returns_frame = dict(
+            getattr(f, "_image_returns_frame", None) or {})
+        self._returns_frame = self._image_returns_frame.get(f.name)
+        if self._returns_frame is not None and f.name == self._entry_name:
+            # The ENTRY has no caller to reserve a block, so the convention has
+            # nothing to hand it.  Refused here, where which function is the
+            # entry is already known, and with the SHARED message so arm64 says
+            # the same thing about the same program.
+            raise CodegenError(M.entry_frame_return_refusal(f.name))
+        if self._returns_frame is not None and getattr(
+                f, "_frame_return_problems", None):
+            # The build pass parked a returned-frame refusal for this function
+            # and its entry points raise it after the imports resolve. Reaching
+            # an emitter with one still parked means this function was compiled
+            # outside those entry points, and compiling it would emit a plain
+            # address return on the paths that do not return a frame. The SAME
+            # text either way, because it is the same parked message.
+            raise CodegenError(f._frame_return_problems[0])
+        if self._returns_frame is not None:
+            var_names = list(var_names) + [_SRET_LOCAL]
         n_reg = min(len(var_names), len(CALLEE_SAVED))
         self._var_regs = {name: CALLEE_SAVED[i]
                           for i, name in enumerate(var_names[:n_reg])}
@@ -676,6 +723,16 @@ class X86_64Codegen:
         self._frame_recv_bytes = sum(
             M.struct_frame_block_bytes(st, self._structs)
             for st, _off, _nested in self._frame_sites.values())
+        # Blocks for frames this function RECEIVES from a callee that returns
+        # one.  The same region as the constructor frames and for the same
+        # reason: a returned block has exactly the lifetime a local one has,
+        # so it goes at the bottom of the blob region and the blob cursor
+        # starts above the lot.  The layout is the shared model's, so the two
+        # machines reserve the same bytes at the same offsets.
+        self._ret_frame_sites = M.struct_returned_frame_sites(
+            f, self._structs, self._image_returns_frame.get)
+        self._ret_frame_base = self._frame_recv_bytes
+        self._ret_frame_bytes = sum(v[2] for v in self._ret_frame_sites.values())
         self._frame_slots = dict(getattr(f, "_frame_slots", None) or {})
         # `{"h.a.b": slot}` — a NESTED frame read, two loads rather than one,
         # and a separate table because a `_frame_slots` entry is one load and a
@@ -698,7 +755,8 @@ class X86_64Codegen:
         # is.
         self._return_types = M.function_return_types(
             self._functions.values())
-        self._list_cursor = self._blob_base + self._frame_recv_bytes
+        self._list_cursor = (self._blob_base + self._frame_recv_bytes
+                             + self._ret_frame_bytes)
         self._frame_bytes = _align16(self._top_bytes + _BLOB_BYTES
                                      + _TEMP_SLACK)
 
@@ -760,6 +818,18 @@ class X86_64Codegen:
                 self.asm.emit(encode_mov_r64_r64(Reg.R11, ARG_REGS[i]))
                 self._emit_extend(Reg.R11, ptype_t)
                 self._store_var(pname, Reg.R11)
+        # The RETURNED-FRAME hidden word, in the register the caller passed it
+        # in.  It is moved home and NOT extended: it is an address, and
+        # narrowing it would be a pointer into the low half of a stack.
+        if self._returns_frame is not None:
+            sret_arg = len(params)
+            if sret_arg >= len(ARG_REGS):
+                raise CodegenError(
+                    M.returned_frame_convention_refusal(f.name, sret_arg)
+                    or f"{f.name} needs one hidden word for the caller's block "
+                       f"and there is no argument register left for it")
+            self.asm.emit(encode_mov_r64_r64(Reg.R11, ARG_REGS[sret_arg]))
+            self._store_var(_SRET_LOCAL, Reg.R11)
 
         for stmt in f.body:
             self._emit_stmt(stmt)
@@ -917,6 +987,8 @@ class X86_64Codegen:
         if isinstance(stmt, F.ReturnStmt):
             if stmt.value is None:
                 self._emit_mov_imm(Reg.RAX, 0)
+            elif self._returns_frame is not None:
+                self._emit_frame_return(stmt.value)
             else:
                 self._emit_expr(stmt.value)
             self._flush_pending_finally()
@@ -3538,6 +3610,31 @@ class X86_64Codegen:
                     f"a frame slot has no second layout to offer: the word in "
                     f"the slot is a value, and this path will not read a word "
                     f"as though it were a struct's storage")
+            # A field read off a call that RETURNS A FRAME: `fwd(r).a`,
+            # `r.give().x`.  The base is the block this function reserved for
+            # that call's result, so the field is one load at `base + 8*slot` —
+            # the same access a named holder gets, with the address arriving
+            # from the call rather than from a register.  Checked before the
+            # refusal below, which would otherwise report a field access whose
+            # base this path cannot name, and which is right about every OTHER
+            # non-holder base.
+            if isinstance(expr.obj, F.CallExpr):
+                site = self._ret_frame_sites.get(id(expr.obj))
+                if site is not None:
+                    st = site[0]
+                    slot = M.struct_frame_slot(st, expr.member)
+                    if slot is None:
+                        raise CodegenError(
+                            f"{M.spelled(expr)} reads {expr.member!r} out of a "
+                            f"{st.name} this call returns, and that struct's "
+                            f"{M.struct_field_summary(st)} has no such field: "
+                            f"this path has no way to know which word that is, "
+                            f"and reading the wrong one is a wrong answer "
+                            f"rather than a failure")
+                    self._emit_expr(expr.obj)
+                    self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX,
+                                                      8 * slot))
+                    return
             self._emit_expr(expr.obj)
             # …and a field access whose base is NOT a frame holder is REFUSED,
             # not read as 0.  This is the x86-64 half of
@@ -4748,6 +4845,25 @@ class X86_64Codegen:
             raise CodegenError(
                 f"call {name}(): {len(args)} arguments exceeds the "
                 f"{len(ARG_REGS)} the formal x86-64 ABI passes in registers")
+        # A callee that RETURNS A FRAME takes one hidden trailing word: the
+        # address of the block this function reserved for the result
+        # (`model.struct_returned_frame_sites`, the same prologue-reserved
+        # layout a local constructor gets).  It is pushed and popped exactly
+        # like a source argument, so it is the LAST register loaded and no
+        # earlier argument is disturbed by it, and it is counted in the budget
+        # below because it is an argument.
+        sret_site = self._ret_frame_sites.get(id(e))
+        nargs = len(args) + (1 if sret_site is not None else 0)
+        if nargs > len(ARG_REGS):
+            # A refusal rather than a drop: dropping the hidden word hands the
+            # callee whatever the register held, and the callee copies the
+            # frame there.  The build pass refuses the CALLEE for this (one
+            # function, many call sites); this is the same decision asked
+            # again at the site that would have dropped it.
+            raise CodegenError(
+                M.returned_frame_convention_refusal(name, len(args))
+                or f"calling {name}() needs one hidden word for the caller's "
+                   f"block and there is no argument register left for it")
         # Evaluate left to right onto the stack, then pop in reverse into the
         # argument registers: evaluating argument i+1 clobbers RAX and every
         # caller-saved register, including the ones argument i belongs in.
@@ -4757,7 +4873,11 @@ class X86_64Codegen:
         for arg in args:
             self._emit_expr(arg)
             self._push_slot(Reg.RAX)
-        for i in range(len(args) - 1, -1, -1):
+        if sret_site is not None:
+            self._emit_blob_base(self._blob_base + self._ret_frame_base
+                                 + sret_site[1], Reg.RAX)
+            self._push_slot(Reg.RAX)
+        for i in range(nargs - 1, -1, -1):
             self._pop_slot(Reg.RAX)
             self.asm.emit(encode_mov_r64_r64(ARG_REGS[i], Reg.RAX))
 
@@ -4926,6 +5046,43 @@ class X86_64Codegen:
             self._emit_expr(e.args[0])
             return
         self._emit_fresh_one_word(name, st)
+
+    def _emit_frame_return(self, value) -> None:
+        """`return <frame>` in a function the convention applies to.
+
+        The x86-64 twin of arm64's, and the three steps and the reasons for
+        them are argued there: the source address is whatever the expression
+        yields in RAX (a bare holder name IS its block's address, a call to
+        another frame-returning function leaves the address of the block
+        reserved for ITS result there), the WHOLE block is copied and each
+        placed nested frame is re-pointed at the copy rather than left
+        pointing into the frame being reclaimed, and the destination address is
+        the result.
+
+        The register choice differs and only because the addressing does.  The
+        DESTINATION is not a compile-time offset here — it is the address the
+        CALLER passed in, so it is loaded from its home into R10, while the
+        source address (whatever the expression yielded) goes to R11 and RAX
+        shuttles each word.  Reading the destination from its own frame's
+        layout instead would be the same bug the convention exists to prevent
+        with a different face: the copy would land in the callee's scratch and
+        the caller would read a block nobody wrote.
+        """
+        self._emit_expr(value)
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
+        # AFTER the source, not before: R10 is one of this backend's two
+        # scratch registers (`x86_64.SCRATCH_REGS`) and evaluating the source
+        # clobbers it.
+        self._load_var(_SRET_LOCAL, Reg.R10)
+        nested, block = M.struct_frame_block_layout(self._returns_frame,
+                                                    self._structs)
+        for off in range(0, block, 8):
+            self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.R11, off))
+            self.asm.emit(encode_mov_rm64_r64(Reg.R10, off, Reg.RAX))
+        for _fname, slot, _child, child_off in nested:
+            self.asm.emit(encode_lea_r64_rm64(Reg.RAX, Reg.R10, child_off))
+            self.asm.emit(encode_mov_rm64_r64(Reg.R10, 8 * slot, Reg.RAX))
+        self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R10))
 
     def _emit_frame_constructor(self, e: F.CallExpr, name: str, st) -> None:
         """`S()`, `S(a, b, …)` or `S(x)` — the x86-64 half of the three shapes.
