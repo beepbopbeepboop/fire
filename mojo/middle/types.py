@@ -417,6 +417,69 @@ def _class_attr_ctype(v) -> str | None:
     return None
 
 
+def _struct_format_codes(fmt):
+    """The per-VALUE format codes of a const-foldable struct format string
+    ('4h' -> ['h','h','h','h'], 'x' padding dropped, '10s' -> ['s']), or
+    None if the format isn't statically known. Mirrors the runtime's own
+    format compiler (runtime/fire_runtime.c's mojo_struct_compile) code for
+    code, so a codegen answer and a runtime answer cannot disagree; the
+    runtime is the one that has to be right when they do, which is why its
+    per-slot kinds are the ones recorded on the value
+    (mojo_list_set_kinds) and this table is only ever used to decide
+    statically. Lives here, beside `_struct_ctor_format`, so the
+    struct-format knowledge the low-level middle tier and the backend share
+    has ONE definition."""
+    if not isinstance(fmt, str):
+        return None
+    codes = []
+    i, n = 0, len(fmt)
+    if i < n and fmt[i] in '<>=!@':
+        i += 1
+    while i < n:
+        c = fmt[i]
+        if c in ' \t\n':
+            i += 1
+            continue
+        count = None
+        if c.isdigit():
+            count = 0
+            while i < n and fmt[i].isdigit():
+                count = count * 10 + int(fmt[i]); i += 1
+            if i >= n:
+                return None
+            c = fmt[i]
+        i += 1
+        if c not in 'xbBhHiIlLqQfds?c':
+            return None
+        if c in 'sc':
+            codes.append('s')
+        elif c == 'x':
+            continue
+        else:
+            codes.extend([c] * (1 if count is None else count))
+    return codes
+
+
+def _struct_format_is_mixed(fmt) -> bool:
+    """True when a const-foldable struct format has values of more than one
+    kind, i.e. its unpack result is a heterogeneous container. The
+    condition the whole per-slot-kinds mechanism exists for: a uniform
+    format's answer is the same through any accessor, so a format this
+    rejects costs nothing."""
+    codes = _struct_format_codes(fmt)
+    if not codes:
+        return False
+    kinds = set()
+    for c in codes:
+        if c in 'fd':
+            kinds.add('d')
+        elif c == 's':
+            kinds.add('s')
+        else:
+            kinds.add('i')
+    return len(kinds) > 1
+
+
 def _struct_ctor_format(v) -> str | None:
     """The const-folded format string of a `struct.Struct('<fmt>')`
     initializer, or None for anything else.

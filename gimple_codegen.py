@@ -1809,6 +1809,15 @@ class GimpleGen:
         # an `int64_t` — `print` and f-string/`str()` — so only a value that
         # could be a box pays for finding out. See mojo_repr_boxed.
         self._boxed_vals: set = set()
+        # Function name -> True when some `return` in its body hands back a
+        # value whose per-slot kinds are recorded on the VALUE (a
+        # `struct.unpack` of a format that mixes kinds). Read back at the
+        # call site so a derived list crossing a function boundary is still
+        # lowered as a boxed read. Filled by Pass 2c's whole-program scan,
+        # beside `_return_elem_types`, which is the same shape for the same
+        # reason — see _infer_return_maybe_kinds in
+        # mojo/backend_gimple/module_gen.py.
+        self._return_maybe_kinds: set = set()
         self._nested_elem_types: dict[str, str] = {}
         self._param_struct_types: dict[str, str] = {}
         self._dict_val_types: dict[str, str] = {}

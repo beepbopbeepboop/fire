@@ -5192,6 +5192,18 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         _gf = gen._fn_returns_generator.get(fname_raw)
         if _gf is not None and _gf in gen._generator_api:
             gen._generator_var_api[t] = gen._generator_api[_gf]
+    # A callee that RETURNS a kinds-carrying value: the result is still
+    # described, but the compile-time NAME the per-slot kinds were recorded
+    # against died with the callee's frame. Mark it so a read with no
+    # compile-time index (iteration, a computed subscript) is lowered as a
+    # BOXED read — `f = make_tuple(); f[0]`, `for x in make_tuple():`.
+    # Inferred by the same whole-program scan that fills `_return_elem_types`
+    # (see _infer_return_maybe_kinds in module_gen.py), so it is keyed by
+    # the same bare callee name. A callee NOT in the set keeps the plain
+    # accessor, which is what every other list-returning function has always
+    # emitted.
+    if ret_type == 'MojoList *' and fname_raw in getattr(gen, '_return_maybe_kinds', ()):
+        gen._maybe_kinds_vals.add(t)
     return ret_type, t
 
 

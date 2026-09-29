@@ -3065,6 +3065,39 @@ fn main():
     print(u[1])
 """, "(1, 2.5)\n1\n2.5\n1\n2.5\n(3, 4.5)\n3\n4.5\n(1.5, 2.5)\n1.5\n2.5\n")
 
+    # The same value crossing a FUNCTION boundary. The kinds are recorded on
+    # the value at runtime, so the whole-result repr was already right; the
+    # read with no compile-time index additionally needs to be LOWERED as a
+    # boxed read, and whether it may be is a compile-time question the
+    # per-value marker cannot answer — the name the kinds were recorded
+    # against died with the callee's frame. So the callee is scanned
+    # whole-program before anything is lowered (the same shape as the
+    # existing return-ELEMENT-type inference) and the call site reads the
+    # answer back. A callee that returns a UNIFORM format is in the test on
+    # purpose: it must keep the plain accessor it always had.
+    test_gimple_stdout("gimple_struct_mixed_reads_survive_a_function_boundary", """\
+fn make(buf: DynamicVector):
+    return struct.unpack('<if', buf[0])
+
+fn uniform(buf: DynamicVector):
+    return struct.unpack('<HH', buf[0])
+
+fn main():
+    var u = make([struct.pack('<if', 7, 0.5)])
+    print(u)
+    print(u[0])
+    print(u[1])
+    for x in u:
+        print(x)
+    var i = 1
+    print(u[i])
+    print(list(u))
+    var v = uniform([struct.pack('<HH', 4, 5)])
+    print(v)
+    print(v[0])
+    print(v[1])
+""", "(7, 0.5)\n7\n0.5\n7\n0.5\n0.5\n[7, 0.5]\n(4, 5)\n4\n5\n")
+
     test_gimple_stdout("gimple_struct_uniform_formats_still_uniform", """\
 fn main():
     var d = struct.unpack('<2f', b'\\x00\\x00\\x80?\\x00\\x00\\x00@')

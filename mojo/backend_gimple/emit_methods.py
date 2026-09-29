@@ -542,36 +542,13 @@ def _struct_value_codes(fmt: str | None):
     ('4h' -> ['h','h','h','h'], 'x' padding dropped, '10s' -> ['s']), or
     None if the format isn't statically known. Used to pick the right
     MojoList append (int vs double vs bytes-pointer) per argument and the
-    element type of an unpack result."""
-    if not isinstance(fmt, str):
-        return None
-    codes = []
-    i, n = 0, len(fmt)
-    if i < n and fmt[i] in '<>=!@':
-        i += 1
-    while i < n:
-        c = fmt[i]
-        if c in ' \t\n':
-            i += 1
-            continue
-        count = None
-        if c.isdigit():
-            count = 0
-            while i < n and fmt[i].isdigit():
-                count = count * 10 + int(fmt[i]); i += 1
-            if i >= n:
-                return None
-            c = fmt[i]
-        i += 1
-        if c not in 'xbBhHiIlLqQfds?c':
-            return None
-        if c in 'sc':
-            codes.append('s')
-        elif c == 'x':
-            continue
-        else:
-            codes.extend([c] * (1 if count is None else count))
-    return codes
+    element type of an unpack result.
+
+    A THIN delegate: the format grammar is `_struct_format_codes` in
+    mojo/middle/types.py, shared with `_struct_format_is_mixed` and
+    `_struct_ctor_format` there so the struct-format knowledge the low-level
+    middle tier and this backend both need has one definition."""
+    return gimple_ctypes._struct_format_codes(fmt)
 
 
 def _struct_slot_kinds(codes):

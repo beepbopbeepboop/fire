@@ -204,6 +204,83 @@ def _seed_selfhost_return_elem_types(self):
             self._return_elem_types[_k] = _e
 
 
+def _returns_kinds_valued(node) -> bool:
+    """True when `node` is an expression that produces a value whose
+    per-slot element kinds are recorded on the VALUE itself — a
+    `struct.unpack` of a format that mixes kinds, or a `Struct` handle's
+    `unpack`/`iter_unpack` on such a format. The kinds then survive a
+    `return` even though the compile-time NAME they were recorded against
+    does not, which is the whole reason this question needs answering at
+    the callee (see `_infer_return_maybe_kinds`).
+
+    Only literal formats answer, the same bar `_struct_ctor_format` sets:
+    a computed format is not statically known, and guessing would be the
+    wrong-static-answer failure the whole table exists to avoid."""
+    if not isinstance(node, gimple_ctypes.CallExpr):
+        return False
+    f = node.func
+    # `struct.unpack(fmt, buf)` / `struct.unpack_from(fmt, buf, off)` /
+    # `struct.iter_unpack(fmt, buf)` — fmt is the first argument.
+    if (isinstance(f, gimple_ctypes.MemberExpr)
+            and isinstance(f.obj, gimple_ctypes.IdentExpr)
+            and f.obj.name == 'struct'
+            and f.member in ('unpack', 'unpack_from', 'iter_unpack')
+            and node.args):
+        return gimple_ctypes._struct_format_is_mixed(node.args[0].value)
+    # `H.unpack(buf)` where H is `struct.Struct('mixed-format')`.
+    if (isinstance(f, gimple_ctypes.MemberExpr)
+            and f.member in ('unpack', 'unpack_from', 'iter_unpack')):
+        return gimple_ctypes._struct_format_is_mixed(
+            gimple_ctypes._struct_ctor_format(f.obj))
+    return False
+
+
+def _infer_return_maybe_kinds(gen, body) -> bool:
+    """Does any `return` in this body hand back a kinds-carrying value?
+
+    The cross-function half of the per-slot-kinds mechanism. A
+    `struct.unpack` result records its kinds on the VALUE (runtime side,
+    `mojo_list_set_kinds`), which is what keeps the whole-result repr right
+    through a function boundary — but a read with no compile-time slot index
+    (iteration, a computed subscript) has to be lowered as a BOXED read
+    (mojo_list_get_boxed), and whether it may be is a compile-time
+    decision. Inside one function the marker rides along on the local name
+    (`gen._maybe_kinds_vals`); across a `return` it cannot, so it is
+    inferred here and read back at the call site, the same
+    whole-program-then-lower-the-callee shape Pass 2c already uses for
+    `_return_elem_types`.
+
+    One round of intra-body propagation: a local bound from such a call and
+    then returned by name counts. Two hops (`a = f(); b = a; return b`) do
+    not — recorded rather than approximated, since over-approximating here
+    would only cost a boxed read on a value the runtime then reports as
+    unboxed, while under-approximating costs a wrong answer, and a missing
+    case is a missing case either way."""
+    bound: set = set()
+    for _round in range(2):
+        found = False
+        for nd in _walk_ast(body):
+            if (isinstance(nd, gimple_ctypes.AssignStmt)
+                    and isinstance(nd.target, gimple_ctypes.IdentExpr)):
+                if _returns_kinds_valued(nd.value) or (
+                        isinstance(nd.value, gimple_ctypes.IdentExpr)
+                        and nd.value.name in bound):
+                    bound.add(nd.target.name)
+            elif (isinstance(nd, gimple_ctypes.VarDecl) and nd.name
+                    and _returns_kinds_valued(getattr(nd, 'value', None))):
+                bound.add(nd.name)
+            elif isinstance(nd, gimple_ctypes.ReturnStmt):
+                v = getattr(nd, 'value', None)
+                if _returns_kinds_valued(v):
+                    found = True
+                elif (isinstance(v, gimple_ctypes.IdentExpr)
+                      and v.name in bound):
+                    found = True
+        if found:
+            return True
+    return False
+
+
 def _homogeneous_tuple_ann_elem(self, _ret_ann):
     """`tuple[T, T, ...]` / `Tuple[...]` return annotation whose slots are all
     the SAME resolved C type → that element ctype (else None). Used to seed
@@ -3898,6 +3975,15 @@ def gen_module_impl(self, stmts):
             if _ret_elem is not None and self._return_elem_types.get(s.name) != _ret_elem:
                 self._return_elem_types[s.name] = _ret_elem
                 _c_changed = True
+            # The same whole-program-then-lower-the-callee step, for the
+            # per-slot kinds of a returned value (see _infer_return_maybe_kinds).
+            # Independent of _ret_elem, and NOT part of the fixpoint's
+            # convergence test: the answer is a pure function of the body, so
+            # it cannot oscillate, and gating it on _c_changed would leave
+            # the set permanently empty on the (common) run where no return
+            # ELEMENT type was inferred.
+            if _infer_return_maybe_kinds(self, s.body):
+                self._return_maybe_kinds.add(s.name)
         for s in all_structs_for_methods:
             if isinstance(s, StructDef):
                 s = _as_structdef_node(s)  # boxed loop var -> direct field access on the compiled path
