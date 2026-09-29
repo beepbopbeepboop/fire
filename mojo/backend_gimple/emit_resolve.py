@@ -928,8 +928,9 @@ def _classify_unresolved_export(gen, sym: str, name: str, inline_module: str,
     there) matched nothing, the module was never inlined, and the client's
     `X.ATTR` / `X(...)` bound to the extern-preamble's `weak` "unavailable
     in compiled mode" stub — a wrong value printed into the program's own
-    stdout, exit 0 (bugs/hard/CODEGEN_function_scoped_import_module_not_inlined
-    .md, rows 1-4). A source-text classifier cannot be exhaustive about
+    stdout, exit 0 (the cross-module-import report's rows 1-4; see the
+    2026-09-29 section of bugs/hard/README.md). A source-text classifier
+    cannot be exhaustive about
     spelling, so it has to be the same classifier everywhere.
 
     Text-based, deliberately: this only runs when the module is NOT reachable
@@ -1795,10 +1796,10 @@ def _repr_value(gen, rat: str, rav: str) -> str:
         # called from anywhere, while `repr(obj)` printed
         # `Foo(a=1, b=2)` (or a raw pointer decimal, for a struct the
         # runtime has no field table for). Reproduces with no imports at
-        # all — it is the repr half of
-        # bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md's
-        # rows 2/4, which that doc's `repr(p)` spelling reached through an
-        # import but which is NOT an import bug.
+        # all — it was the repr half of the cross-module-import report's
+        # rows 2/4 (see the 2026-09-29 section of `bugs/hard/README.md`),
+        # which its `repr(p)` spelling reached through an import but which
+        # is NOT an import bug.
         #
         # Deliberately CONSERVATIVE: each condition below is one "we know
         # this is right", and anything unproven falls through to the
@@ -1810,12 +1811,15 @@ def _repr_value(gen, rat: str, rav: str) -> str:
             if gen.func_return_types.get(_rcs) == 'char *':
                 _rcall = gen._call_expr('char *', _rcs, [(rat, rav_local)])
                 # Same null semantics the generated field-dump has: a NULL
-                # object reprs as "None" rather than crashing. `_intern_string`
-                # because a bare `"None"` literal is not a GIMPLE r-value (see
-                # its own docstring).
+                # object reprs as "None" rather than crashing. Interned
+                # through `_intern_string` because a bare `"None"` literal is
+                # not a GIMPLE r-value (see its own docstring), and bound to
+                # a local first rather than nested in the f-string so the
+                # expression uses no quote nesting at all — this file is
+                # compiled by the compiler it implements.
+                _none_slit = gen._intern_string('None')
                 return gen._new_val(
-                    'char *',
-                    f'({rav_local} ? {_rcall} : {gen._intern_string("None")})')
+                    'char *', f'({rav_local} ? {_rcall} : {_none_slit})')
         # Dispatch through the per-struct field-by-field reprs generated
         # in gen_module (see reflect_structs) when the runtime type tag
         # is one this program actually allocates — falls back to the

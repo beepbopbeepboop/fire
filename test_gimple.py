@@ -5778,9 +5778,10 @@ def root_cas_hash_call(parts) -> str:
         real source was _collections_abc.py. FIXED; the report that recorded
         it (bugs/hard/CODEGEN_function_scoped_import_rettype_and_literal_cast_
         mismatches.md) was removed 2026-09-26 after verification. Its live
-        residue is bugs/hard/CODEGEN_function_scoped_import_module_not_inlined
-        .md, a different mechanism (a function-scoped import never inlines its
-        module) that does not own this test."""
+        residue was the cross-module-import report — a different mechanism
+        (a function-scoped import never inlining its module), since itself
+        fixed and deleted; see the 2026-09-29 section of
+        bugs/hard/README.md. Neither report owns this test."""
         global _PASS, _FAIL
         name = "inherited_method_line_directive_names_its_own_module"
         with tempfile.TemporaryDirectory() as wd:

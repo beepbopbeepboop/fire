@@ -56,13 +56,23 @@ def _build_and_run(pkg_files: dict, entry: str, td: str) -> tuple[int | None, st
 
 
 def _cpython_run(td: str, entry: str) -> tuple[int, str]:
-    """CPython's OWN exit code and stdout for the same file, run with `td` as
-    cwd so a sibling import resolves exactly the way the compiled build
-    resolves it. Every case below asserts the compiled program matches THIS,
-    not a hand-written literal — a literal here would just be the bug's
-    current wrong answer frozen into the test."""
+    """CPython's OWN exit code and stdout for the same file. Every case below
+    asserts the compiled program matches THIS, not a hand-written literal — a
+    literal here would just be the bug's current wrong answer frozen into the
+    test.
+
+    `cwd=td` plus `PYTHONPATH=td`, not `cwd=td` alone: running
+    `python3 <td>/p/main.py` puts only `<td>/p` on `sys.path`, so the
+    `pkg/__init__.py`-style layouts the compiled pipeline resolves through
+    the package root would fail under CPython with `ModuleNotFoundError` and
+    the baseline would be empty for exactly the cases that need it. With both
+    set, `from p.sub import tri` means the same thing to the two engines."""
+    env = dict(os.environ)
+    env['PYTHONPATH'] = (td + os.pathsep + env['PYTHONPATH']
+                         if env.get('PYTHONPATH') else td)
     result = subprocess.run([sys.executable, os.path.join(td, entry)],
-                            capture_output=True, text=True, timeout=60, cwd=td)
+                            capture_output=True, text=True, timeout=60,
+                            cwd=td, env=env)
     return result.returncode, result.stdout
 
 
@@ -181,8 +191,9 @@ def test_from_submodule_import_symbol_value_read() -> bool:
 # spellings of the import, because the root cause was that the module was
 # never read on this path at all.
 #
-# Regression tests for bugs/hard/CODEGEN_function_scoped_import_module_not_
-# inlined.md, whose link-mode half was the last one standing.
+# Regression tests for the cross-module-import report's link-mode half,
+# which was the last one standing (report now deleted; see the 2026-09-29
+# section of bugs/hard/README.md).
 
 _INSP_PY = (
     'class Parameter:\n'
@@ -339,6 +350,56 @@ def test_sibling_class_constructor_field_function_scoped() -> bool:
     return ok
 
 
+def test_dotted_sibling_import_qualifier_agrees() -> bool:
+    """`from p.sub import tri` — a DOTTED module name — at MODULE scope, and
+    again from inside a function. The mangled symbol's two halves come from
+    two different code paths and both must spell the module the same way:
+    the DEFINITION's half comes from the inline-compile loop's own module
+    key (the import string, `p.sub` -> `p_sub`), and the CALL SITE's half
+    from the import-registration pass.
+
+    The call site used to disagree. Module scope fell to
+    `_local_sibling_module_exports`' path-derived qualifier — the BASENAME,
+    `sub`, because that is what `module_name_for_path` returns for a nested
+    file — so the call emitted `sub_tri_<suffix>` against a definition
+    emitted as `p_sub_tri_<suffix>`: a hard `implicit declaration of
+    function 'sub_tri_...'; did you mean 'p_sub_tri_...'?` on this path, and
+    a silent `tri: unavailable in compiled mode` / wrong value on the
+    link-mode one. The function-scoped spelling had the same defect for a
+    different reason: it mangled `node.module` WITHOUT the
+    `lstrip('.')` that every other qualifier-computing site does, so a
+    relative `from .sub import tri` inside a function body became
+    `_sub_tri_...` (`'_sub'` is a leading underscore plus the module's own
+    name) against a definition `sub_tri_...` — a hard implicit-declaration
+    error on the single-TU path.
+
+    Both arms of the one condition are asserted, because they are the two
+    spellings of the same statement and each was broken in one of them."""
+    pkg = {
+        'p/__init__.py': '',
+        'p/sub.py': 'def tri(x):\n    return x * 3\n',
+        'p/main.py': (
+            'from p.sub import tri\n'
+            '\n'
+            'def f():\n'
+            '    from p.sub import tri\n'
+            '    return tri(14)\n'
+            '\n'
+            'print(tri(7))\n'
+            'print(f())\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'p/main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'p/main.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '21\n42')
+    if not ok:
+        print(f"  ✗ dotted_sibling_import_qualifier_agrees: rc={rc} "
+              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 CASES = [
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
@@ -347,6 +408,7 @@ CASES = [
     test_sibling_class_attribute_function_scoped,
     test_sibling_class_attribute_module_scoped,
     test_sibling_class_constructor_field_function_scoped,
+    test_dotted_sibling_import_qualifier_agrees,
 ]
 
 

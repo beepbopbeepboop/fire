@@ -1275,8 +1275,8 @@ def gen_module_impl(self, stmts):
     # in a link-inlined sibling compiled with int64_t field defaults, so a
     # client `Class('v', 7)` call site became a real GIMPLE "non-trivial
     # conversion" hard error instead of a correctly-typed constructor call
-    # (bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md,
-    # rows 2/4/6/8).
+    # (the cross-module-import report's rows 2/4/6/8; see the 2026-09-29
+    # section of bugs/hard/README.md).
     if self.do_imports or self.link_imports:
         modules_to_compile = {}  # dict not set: `sorted(<set>)` self-hosted is address order -> nondeterministic module COMPILE order in --dump-full (whole modules emitted vs stubbed run to run; also feeds the OOM per comment below)
         if self.do_imports:
