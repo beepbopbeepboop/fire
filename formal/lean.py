@@ -10,7 +10,9 @@ import time
 # Dependency order: X86 needs ProofLib, and work.lean re-exports it so the
 # generated proof files (which import ProofLib + work + Refine) get the x86-64
 # model without naming a fourth module.
-LIBRARY_MODULES = ("ProofLib", "X86", "work", "Refine")
+# Order is build order: `Contracts` imports `ProofLib` and `Refine`, so it
+# must come after them.
+LIBRARY_MODULES = ("ProofLib", "X86", "work", "Refine", "Contracts")
 VERDICT_EXT = ".leanverdict"
 # Where a library module's own hole census is stored, beside the .olean it was
 # measured from and under the same key — so a cas HIT on the .olean is a hit on

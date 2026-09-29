@@ -1,3 +1,24 @@
+> **STATUS: SUPERSEDED IN PART — read this first.**
+>
+> The reference emitter below is **not landable as written.** The claim in §2
+> that `bv_decide` closes the spec obligation is **false**: `bv_decide` decides
+> `BitVec` goals, and `Arm64State` is a structure, so it abstracts
+> `arm64_reg 0 (S14 (start n))` as an opaque variable and fails. `native_decide`
+> cannot cover it either, because after `intro n` the goal has a free `n`.
+>
+> Three real bugs in the emitter were found and are **fixed** in the stash
+> (`git stash pop`): the state argument needs parentheses (`s.sp` must become
+> `(st0 s).sp`), `S0` must be defined rather than left to `autoImplicit` (an
+> undefined `S0` is a free *variable* of function type, so `hpc0` would be a
+> claim about an arbitrary function), and `_step_rhs` returns `some <state>`
+> while `st_i` is typed `Arm64State`.
+>
+> What survives and is worth keeping: the spec derivation from the export's
+> SOURCE (§6), and the diagnosis of why this needs a symbolic `BitVec 64` machine
+> model. See `bugs/FORMAL_per_export_contracts.md` for the full account,
+> including a methodology error of mine that made an earlier "verified" claim
+> void.
+
 INTERFACE REQUEST  from=[3]  to=[2]  file=formal/arm64_proof_gen.py
 
 STATUS: the Done-when in FORMAL.md §11.2 [3] is **CLOSED**, sorry-free, with
@@ -49,17 +70,19 @@ Per export, from the `dylib_sr_0 … dylib_sr_{m-1}` lemmas you already emit:
       addresses and whose `step` is the composed effect, plus a `BlockCert`
       instance (`arm64_runs code m st = some (step st)` for `st.pc = entry_pc`).
   (b) **`atExit`** — `(step (startState … n)).pc = image.base + image.codeSize`.
-  (c) **`hreg`** — `∀ n, arm64_reg 0 (step (startState … n)) = spec n`, closed
-      by `bv_decide`.
+  (c) **`hreg`** — `∀ n, arm64_reg 0 (step (startState … n)) = spec n`. **NOT
+      closable by `bv_decide`** — see the banner. It needs a symbolic
+      `BitVec 64` machine model, or a normalisation `decide` can follow.
 
-(a) and (b) are mechanical. **(c) is the surprising one: `bv_decide` closes it
-with no help.** The export's value passes through the prologue/epilogue frame,
-so the final `x0` is a `mem_read_u64` of a slot the body itself wrote — but
-every value is a `UInt64`, so the whole memory round trip is bitvector
-computation and `bv_decide` discharges it. Measured: the 15-instruction body of
-`triple` yields `arm64_reg 0 (S15 (triStart n)) = n * 3` for **symbolic** `n`,
-in one tactic. I expected this to need hand-written address arithmetic and it
-did not. Worth knowing before anyone budgets for that work.
+(a) and (b) are mechanical. **(c) is the hard one, and I got it wrong.** The
+export's value does pass through the prologue/epilogue frame — the final `x0` is
+a `mem_read_u64` of a slot the body itself wrote — and I claimed `bv_decide`
+discharged that for free because "every value is a `UInt64`". It does not:
+`bv_decide` decides `BitVec` goals, `Arm64State` is a structure, and it
+abstracts the whole composed effect as an opaque variable. The claim came from a
+concrete-value measurement (`native_decide`, `triple 7 = 21`) read as if it
+settled the symbolic case. It does not, and budgeting for (c) as "one tactic"
+would be budgeting wrong. It needs a symbolic `BitVec 64` machine model.
 
 ## 3. REFERENCE EMITTER
 
@@ -172,7 +195,27 @@ split grows linearly. A `Fin`-indexed induction on the pc discipline would be
 better; I did not need it for a 15-instruction body and did not want to ship an
 untested abstraction.
 
-## 4. ONE THING I CHANGED IN `lib/Contracts.lean` THAT AFFECTS YOU
+## 4. ONE TEST WILL GO RED WHEN YOU LAND THIS, AND IT SHOULD
+
+`test_formal_dylib.py` pins the generated proof's obligation set to **exactly**
+`{_semantics_total, _spec}` per export, and separately pins that `triple`'s
+termination is proved via `total_of_halts`. So the `_spec` `sorry` is currently a
+*deliberately pinned open obligation* — the suite is honest about it, and it is
+the last one; `_semantics_total` you have already closed.
+
+Emitting a proved contract therefore **shrinks** the obligation set, and the
+`obligations == expected` check at `test_formal_dylib.py:405-409` will fail
+until `expected` drops `f"{i}_spec"`. That failure is the correct signal, not a
+regression — the same way the existing `total_of_halts` pin is there to catch a
+slide back to the `sorry` fallback.
+
+Worth naming: the test's `KNOWN_LIB_HOLES` is already the empty set, so the
+dylib proof's only remaining hole is the per-export spec. This request closes
+it. Until then the proof rests on one open obligation per export, and the
+caller's theorem is stated over `(fun n => n)` — so the caller is currently
+discharged against a spec nobody has proved.
+
+## 5. ONE THING I CHANGED IN `lib/Contracts.lean` THAT AFFECTS YOU
 
 `ExportBody.atExit` is stated **for the start state**, not for every state at
 the entry:
@@ -186,7 +229,7 @@ with `x30 := 0` returns to `0`. `startState` is exactly the state that sets
 `x30` to the exit. If your generator had already begun emitting the general
 form, it would emit a false obligation.
 
-## 5. NOT DONE, AND NOT IN SCOPE
+## 6. NOT DONE, AND NOT IN SCOPE
 
 * **The spec still comes from a human.** `fun n => n * 3` is typed into the
   generator, not derived from the export's source AST. `bv_decide` checks it
