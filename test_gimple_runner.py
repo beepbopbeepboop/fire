@@ -3453,6 +3453,60 @@ for x in ['p', 'q']:
     print(x)
 """, "1\n2\np\nq\n")
 
+    # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md "Item 8": a
+    # for-loop over a list PARAMETER read every element through
+    # `mojo_list_get_int` whenever the argument was a list LITERAL, because
+    # the cross-call container element-type contract only ever looked at an
+    # argument that was a bare identifier naming a tracked local. `show(xs)`
+    # was right and `show([1.5, 2.5])` -- the same call with the list written
+    # in place -- printed the floats' raw IEEE-754 bit patterns
+    # (4609434218613702656) and a list of strings printed pointer decimals,
+    # both exit 0. Every expected value below is CPython's, checked with
+    # `python3` on the identical program text.
+    test_gimple_stdout("gimple_for_over_list_param_from_float_literal", """\
+def show(data):
+    for r in data:
+        print(r)
+
+def main():
+    show([1.5, 2.5])
+""", "1.5\n2.5\n")
+
+    # The keyword spelling of the same call: a kwarg names the parameter
+    # directly, so the contract reads it the same way.
+    test_gimple_stdout("gimple_for_over_list_param_from_keyword_literal", """\
+def show(data):
+    for r in data:
+        print(r)
+
+def main():
+    show(data=[1.5, 2.5])
+""", "1.5\n2.5\n")
+
+    # A string list is the case where the int64_t default is most visibly
+    # wrong: a `char *` element read as an int64_t prints its address.
+    test_gimple_stdout("gimple_for_over_list_param_from_str_literal", """\
+def show(data):
+    for r in data:
+        print(r)
+
+def main():
+    show(["a", "b"])
+""", "a\nb\n")
+
+    # A list of LISTS: the inner element ctype has to reach the callee too,
+    # or the outer loop yields a boxed pointer and the inner loop reads
+    # garbage. (The bare-identifier form of this already worked.)
+    test_gimple_stdout("gimple_for_over_nested_list_param_from_literal", """\
+def show(rows):
+    for row in rows:
+        for cell in row:
+            print(cell)
+
+def main():
+    show([[1, 2], [3, 4]])
+""", "1\n2\n3\n4\n")
+
     # bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md: a
     # cross-module constructor call whose only field-type evidence is an
     # unannotated scalar/container LITERAL argument (`Parameter('v', 7)`,
