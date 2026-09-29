@@ -1007,6 +1007,7 @@ def gen_module_impl(self, stmts):
     # the first suffix computation happens during body emission, long after.
     self._local_def_nodes = {s.name: s for s in stmts if isinstance(s, FunctionDef)}
     self._local_def_param_types: dict = {}
+    self._prepare_analysis_funcs(stmts)
 
     def _toplev_bound_names(_tb_body):
         _names = set()

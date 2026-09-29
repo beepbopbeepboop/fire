@@ -1161,6 +1161,126 @@ def main():
     print(total)
 """, "15300000\n", 40)
 
+    # ── Solver widening + small-buffer lists (doc/MEMORY.html sections 3.B, 7).
+    # Non-empty literals are stack-homed and freed per iteration; a local that
+    # is only iterated, passed to callees that provably never keep it, or
+    # declared under the same name in sibling loops is still owned by its loop
+    # body. Bounded RSS pins the free; the printed values pin that nothing was
+    # freed too early (every one of these read the container after its last
+    # mutation and across the small-buffer boundary).
+    test_gimple_bounded_memory("gimple_loop_scoped_nonempty_literals_stack_homed", """\
+def work(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var a = [1, 2, 3, i]
+        var b = {1, 2, i % 3}
+        var d = {"x": i, "y": 2}
+        var s = ["p", "q"]
+        t += len(a) + a[3] + len(b) + d["x"] + d["y"] + len(s) + len(s[0])
+        if i == 2:
+            continue
+        if i == 7:
+            return t * 1000 + len(a)
+    return t
+
+def main():
+    print(work(10))
+    var total = 0
+    for k in range(150000):
+        total += work(5)
+    print(total)
+""", "147004\n11550000\n", 40)
+
+    test_gimple_bounded_memory("gimple_solver_callee_summaries_iteration_sibling_loops", """\
+def total(l: List[Int]) -> Int:
+    var t = 0
+    for x in l:
+        t += x
+    return t
+
+def fill(mut l: List[Int], n: Int):
+    for i in range(n):
+        l.append(i)
+
+def sibling(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var tmp: List[Int] = []
+        tmp.append(i)
+        t += len(tmp)
+    for j in range(n):
+        var tmp: List[Int] = []
+        tmp.append(j)
+        tmp.append(j)
+        t += len(tmp)
+    return t
+
+def main():
+    var acc = 0
+    for i in range(200000):
+        var a: List[Int] = []
+        fill(a, 6)
+        acc += total(a) + sibling(3)
+        var c = 0
+        for y in a:
+            if y > 2:
+                c += y
+        acc += c
+    print(acc)
+""", "7200000\n", 40)
+
+    # A list starts in a 4-slot inline buffer and is copied to the heap when it
+    # outgrows it; insert/pop/reverse/extend/slice and a returned (escaping)
+    # list all cross that boundary. (The `[10, 20]` argument to extend and the
+    # slice result are call-result containers, which still leak by design, so
+    # this one checks values only.)
+    test_gimple_stdout("gimple_list_small_buffer_growth_boundary", """\
+def grow(n: Int) -> Int:
+    var t = 0
+    for r in range(n):
+        var a: List[Int] = []
+        for i in range(r + 1):
+            a.append(i * 3)
+        t += len(a) + a[0] + a[len(a) - 1]
+    return t
+
+def ops() -> Int:
+    var l: List[Int] = []
+    for i in range(3):
+        l.append(i)
+    l.insert(0, 99)
+    l.insert(2, 77)
+    l.append(5)
+    l.append(6)
+    l.append(7)
+    var s = 0
+    for x in l:
+        s += x
+    var p = l.pop()
+    l.reverse()
+    var m = [10, 20]
+    l.extend(m)
+    var c = l[1:4]
+    return s * 1000 + p + len(l) * 7 + len(c) + l[0] + l[len(l) - 1]
+
+def heap_escape(n: Int) -> List[Int]:
+    var r: List[Int] = []
+    for i in range(n):
+        r.append(i + 1)
+    return r
+
+def main():
+    print(grow(9))
+    print(ops())
+    var h = heap_escape(2)
+    var g = heap_escape(6)
+    print(len(h), h[1], len(g), g[5])
+    var acc = 0
+    for k in range(100000):
+        acc += (grow(6) + ops()) % 1000
+    print(acc)
+""", "153\n197099\n2 2 6 6\n16500000\n")
+
     # ── zip() / dict.items() pair shapes ───────────────────────────────
     # zip and dict.items() yield TUPLES. Unmarked, they printed as
     # `[[1, 3], [2, 4]]`; and a pair's first slot is a real value (the 0

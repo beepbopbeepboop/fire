@@ -58,7 +58,7 @@ from ownership_check import _block_terminates
 from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
-    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _compute_owned_free_candidates, _compute_scoped_free_candidates, _scope_decl_name, _empty_ctor_ctype,
+    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _build_analysis_funcs, _compute_owned_free_candidates, _compute_scoped_free_candidates, _scope_decl_name, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
     _pair_key, _prepass_list_elem, _ptr_slot_in_range, _resolve_member_expr_type, _resolve_type, _scan_container_elems,
     _seed_addressed_locals, _type_of
@@ -3711,6 +3711,55 @@ def _owned_push_runtime_fn(ctype) -> str:
     return ''
 
 
+def _owned_stack_push_runtime_fn(ctype) -> str:
+    """The cleanup-stack push for a STACK-homed container of `ctype` (the
+    `_STACK` kinds tear down buffers only, never `free()` the struct); an
+    explicit if-chain for the same self-hosting reason as
+    `_owned_free_runtime_fn`."""
+    if ctype == 'MojoDict *':
+        return 'mojo_cleanup_push_dict_stack'
+    if ctype == 'MojoList *':
+        return 'mojo_cleanup_push_list_stack'
+    if ctype == 'MojoSet *':
+        return 'mojo_cleanup_push_set_stack'
+    return ''
+
+
+def _literal_ctor_ctype(node) -> str | None:
+    """`node` is a container LITERAL (list/dict/set display, any contents) ->
+    its ctype, else None. `dict()`/`list()`/`set()` calls are not literals:
+    with no arguments they are the empty-constructor case, with arguments
+    they take other lowering paths that do not honour a storage request."""
+    if isinstance(node, DictExpr):
+        return 'MojoDict *'
+    if isinstance(node, ListExpr):
+        return 'MojoList *'
+    if isinstance(node, SetExpr):
+        return 'MojoSet *'
+    return None
+
+
+def emit_container_new(gen, t: str, ctype: str) -> None:
+    """Emit the allocation of a container LITERAL into temp `t`: an `_init` of
+    the stack storage `maybe_stack_alloc_owned_ctor` reserved for this exact
+    statement if one is pending for `ctype`, else the usual heap
+    `mojo_*_new()`. The request is consumed here, at literal ENTRY (before the
+    elements are lowered), so a nested literal never takes the outer one's
+    storage."""
+    st = gen._literal_storage
+    if st != '' and gen._literal_storage_ctype == ctype:
+        gen._literal_storage = ''
+        gen._emit(f"  {_OWNED_STACK_KIND[ctype][0]} (&{st});")
+        gen._emit(f"  {t} = &{st};")
+        return
+    if ctype == 'MojoDict *':
+        gen._emit(f"  {t} = mojo_dict_new ();")
+    elif ctype == 'MojoSet *':
+        gen._emit(f"  {t} = mojo_set_new ();")
+    else:
+        gen._emit(f"  {t} = mojo_list_new ();")
+
+
 def maybe_push_owned_local(gen, name: str) -> None:
     """Call once, right after lowering ANY statement whose sole target is
     the plain identifier `name` (a `VarDecl` or a single-target
@@ -3739,12 +3788,28 @@ def maybe_push_owned_local(gen, name: str) -> None:
     pushed = gen._owned_free_pushed
     if name in pushed:
         return
-    push_fn = _owned_push_runtime_fn(gen.var_types.get(name))
+    ctype = gen.var_types.get(name)
+    # A non-empty literal was lowered with a stack-storage request
+    # (`maybe_stack_alloc_owned_ctor`): consumed -> the value lives in that
+    # storage and is torn down with `_destroy`; still pending -> nothing took
+    # it, the value is an ordinary heap allocation and the request is dropped.
+    on_stack = False
+    if gen._literal_storage_ctype != '':
+        on_stack = gen._literal_storage == '' and gen._literal_storage_ctype == ctype
+        gen._literal_storage = ''
+        gen._literal_storage_ctype = ''
+    if on_stack:
+        gen._owned_stack_allocated.add(name)
+        push_fn = _owned_stack_push_runtime_fn(ctype)
+        free_fn = _owned_destroy_runtime_fn(ctype)
+    else:
+        push_fn = _owned_push_runtime_fn(ctype)
+        free_fn = _owned_free_runtime_fn(ctype)
     if push_fn:
         gen._emit(f"  {push_fn} ({name});")
         pushed.add(name)
         if name in gen._scope_armed:
-            _scope_register(gen, name, _owned_free_runtime_fn(gen.var_types.get(name)))
+            _scope_register(gen, name, free_fn)
 
 
 def _emit_owned_local_frees(gen):
@@ -3841,6 +3906,8 @@ def _reset_scope_state(gen) -> None:
     loop depth at the declaration, free function or '' when nothing was
     pushed) in declaration order; `_scope_armed` is the set of names whose
     declaring body is being lowered right now."""
+    gen._literal_storage = ''
+    gen._literal_storage_ctype = ''
     gen._scoped_free_candidates = set()
     gen._scope_armed = set()
     gen._scope_live = []
@@ -4033,6 +4100,23 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
         return False
     ctype = _empty_ctor_ctype(value)
     if ctype is None:
+        # A NON-EMPTY literal (`[1, 2, i]`, `{"a": 1}`, `{1, 2}`) keeps its own
+        # element-type inference and per-element population, so it is not
+        # lowered here; instead this reserves stack storage and posts a
+        # request that the literal's own lowering consumes at entry
+        # (`emit_container_new`), turning its `mojo_*_new()` into an `_init` of
+        # this storage. `maybe_push_owned_local` runs right after the
+        # statement and finishes the job — or, if the request was never
+        # consumed (some other lowering path took the value), falls back to the
+        # ordinary heap candidate. Returns False: the caller lowers normally.
+        lit = _literal_ctor_ctype(value)
+        if lit is None:
+            return False
+        _init_fn, _struct = _OWNED_STACK_KIND[lit]
+        gen.temp_counter += 1
+        gen.decls.append(f"  {_struct} _owned_storage{gen.temp_counter}_{name};")
+        gen._literal_storage = f'_owned_storage{gen.temp_counter}_{name}'
+        gen._literal_storage_ctype = lit
         return False
     init_fn, struct_name = _OWNED_STACK_KIND[ctype]
     gen.temp_counter += 1
@@ -4095,12 +4179,12 @@ def begin_function(gen, fn) -> None:
     just triggered manually instead of automatically at the one
     assignment site automatic propagation can't reach — is correct
     permanently, not a one-off workaround for today's specific bug."""
-    gen._owned_free_candidates = _compute_owned_free_candidates(fn)
+    gen._owned_free_candidates = _compute_owned_free_candidates(fn, gen._analysis_funcs)
     gen._field_elem_types.setdefault('GimpleGen', {})['_owned_free_candidates'] = 'char *'
     gen._owned_free_pushed = set()
     gen._owned_stack_allocated = set()
     _reset_scope_state(gen)
-    gen._scoped_free_candidates = _compute_scoped_free_candidates(fn, gen._owned_free_candidates)
+    gen._scoped_free_candidates = _compute_scoped_free_candidates(fn, gen._owned_free_candidates, gen._analysis_funcs)
 
 
 def reset_no_candidates(gen) -> None:

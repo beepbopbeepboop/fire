@@ -4154,7 +4154,7 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     _inner_ct = _homogeneous_literal_inner_elem(gen, node.elements)
     if _inner_ct:
         gen._nested_elem_types[t] = _inner_ct
-    gen._emit(f"  {t} = mojo_list_new ();")
+    gen._emit_container_new(t, 'MojoList *')
     # Lower elements first so we can see all their types before choosing how
     # to append. A single list-wide suffix mis-types a genuinely heterogeneous
     # collection — e.g. a tuple ('int', 5) would append the int via
@@ -4210,7 +4210,8 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
 
 
 def _lower_dict_literal(gen, node: gimple_ctypes.DictExpr) -> tuple[str, str]:
-    t = gen._new_val('MojoDict *', "mojo_dict_new ()")
+    t = gen._new_temp('MojoDict *')
+    gen._emit_container_new(t, 'MojoDict *')
     # Infer value type from first pair (for subscript / iteration dispatch)
     if node.pairs:
         vt_sample = gen._quick_type(node.pairs[0][1])
@@ -4298,7 +4299,8 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
 
 
 def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:
-    t = gen._new_val('MojoSet *', "mojo_set_new ()")
+    t = gen._new_temp('MojoSet *')
+    gen._emit_container_new(t, 'MojoSet *')
     # Record the element type the same way `_lower_list_literal`/
     # `_lower_tuple_literal` do — this was the ONE container-literal
     # lowering missing it. Without it, a set literal's own elem type

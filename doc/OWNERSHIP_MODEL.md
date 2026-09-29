@@ -290,29 +290,28 @@ destructor dispatch, loop-body-scoped destruction (item 1's own
 follow-up, above — LANDED 2026-09-28, see doc/MEMORY.html §7.1), and
 Phase 4-6 (real calling convention, move-vs-copy, stack allocation).
 
-- [ ] **TODO (queued 2026-09-28, start now that loop-scoped destruction
-  has landed): beef up the solver to stack-home as much as possible.**
-  Today the escape solver (`ownership_destruct.py` for containers,
-  `mojo/middle/solvers.py`'s `EscapeAnalyzer`/`LayoutSolver` for the rest)
-  proves very little, so almost everything falls back to the heap and then
-  to "never freed". Widen what it can prove, each with a measured before/
-  after (doc/MEMORY.html §8 recipe) and the full gate:
-  - stack-home non-empty container literals (`[1, 2, i]`, `{"a": 1}`), not
-    just empty constructors;
-  - stack-home non-escaping struct instances (`_alloc_<S>` `calloc`) and
-    closure environments / boxed mutable locals that no closure outlives;
-  - give the analysis real callee tables (it is called with `{}, {}` today,
-    so every user-function argument disqualifies) so passing a container to a
-    `read` parameter stays a non-escaping use;
-  - add the safe patterns it lacks: `for x in local:` (iteration does not
-    retain), and names assigned once per *scope* rather than once per
-    function (`tmp = []` reused across sibling loops);
-  - string buffers: non-escaping string locals and a fixed stack buffer for
-    transient decimals where the function is not `__GIMPLE`;
-  - drop the top-level-only restriction (struct methods / lifted loop bodies
-    are `__GIMPLE`, where address-taken locals are rejected) or find a
-    GIMPLE-legal way to home storage there.
-  Success = the §5 table in doc/MEMORY.html shrinks toward all-flat.
+- [ ] **Beef up the solver to stack-home as much as possible — IN PROGRESS
+  (2026-09-28).** Landed (each with fixtures in `test_ownership_destruct.py`
+  and a bounded-memory runner test):
+  - [x] `for x in local:` / comprehension clauses over a bare local are
+    non-escaping reads;
+  - [x] the same name declared in sibling loop bodies qualifies in each;
+  - [x] real callee information: `ownership_destruct._summarize_params`
+    proves a parameter non-retaining from the callee's own body (not from the
+    `read` keyword — the compiled path lowers a copy as the same pointer);
+    codegen passes `_build_analysis_funcs(stmts)` (plain, uniquely-named,
+    non-imported free functions only);
+  - [x] non-empty list/dict/set literals are stack-homed
+    (`emit_container_new` consumes a storage request; unconsumed -> heap);
+  - [x] lists have a 4-slot inline buffer: no `malloc` for short lists, stack
+    or heap (doc/MEMORY.html §10).
+  Still open: containers nested inside a literal; temporary containers from
+  expressions consumed once (comprehension/slice/split results, arguments to
+  `extend`); struct instances, closure envs, boxed mutable locals; string
+  buffers; struct-method callee tables; storage homing in `__GIMPLE` bodies;
+  the container-kind registry's cost (~45% of a short list's remaining time);
+  inline slot arrays for dicts/sets. Success = the doc/MEMORY.html §5 table
+  all-flat and §10's end-to-end numbers measured against Rust.
 
 ## Why this matters, not just "more spec compliance"
 

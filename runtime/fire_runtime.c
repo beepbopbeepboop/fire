@@ -659,9 +659,9 @@ int mojo_is_bound_method(void *p) {
  * comment just above (same Phase 6 rationale, same refactor shape). */
 void mojo_list_init(MojoList *l)
 {
-    l->data = NULL;
+    l->data = l->inl;
     l->len  = 0;
-    l->cap  = 0;
+    l->cap  = MOJO_LIST_INLINE;
     if (!_mojo_list_registry) _mojo_list_registry = mojo_set_new();
     mojo_set_add_int(_mojo_list_registry, (int64_t)(intptr_t)l);
 }
@@ -670,7 +670,7 @@ void mojo_list_destroy(MojoList *l)
 {
     if (_mojo_list_registry) mojo_set_discard_int(_mojo_list_registry, (int64_t)(intptr_t)l);
     if (_mojo_tuple_registry) mojo_set_discard_int(_mojo_tuple_registry, (int64_t)(intptr_t)l);
-    free(l->data);
+    if (l->data != l->inl) free(l->data);
 }
 
 MojoList *mojo_list_new(void)
@@ -688,8 +688,16 @@ void mojo_list_free(MojoList *l)
 
 static void _list_grow(MojoList *l)
 {
-    int64_t nc = l->cap == 0 ? 4 : l->cap * 2;
-    l->data = realloc(l->data, (size_t)nc * sizeof(int64_t));
+    int64_t nc = l->cap * 2;
+    if (l->data == l->inl) {
+        /* Leaving the inline buffer: the elements must be COPIED out — the
+         * inline storage is not a malloc block, realloc() on it is UB. */
+        int64_t *nd = malloc((size_t)nc * sizeof(int64_t));
+        memcpy(nd, l->inl, (size_t)l->len * sizeof(int64_t));
+        l->data = nd;
+    } else {
+        l->data = realloc(l->data, (size_t)nc * sizeof(int64_t));
+    }
     l->cap  = nc;
 }
 
@@ -721,7 +729,7 @@ static int64_t _norm_idx(MojoList *l, int64_t i) {
     return i < 0 ? i + l->len : i;
 }
 
-int64_t mojo_list_get_int(MojoList *l, int64_t i)   { if (!l || !l->data) return 0; return l->data[_norm_idx(l, i)]; }
+int64_t mojo_list_get_int(MojoList *l, int64_t i)   { if (!l || l->len == 0) return 0; return l->data[_norm_idx(l, i)]; }
 
 double mojo_list_get_double(MojoList *l, int64_t i)
 {
@@ -830,7 +838,7 @@ void mojo_list_insert_str(MojoList *l, int64_t i, char *v)
 
 char *mojo_list_get_str(MojoList *l, int64_t i)
 {
-    if (!l || !l->data) return "";
+    if (!l || l->len == 0) return "";
     return (char *)(uintptr_t)l->data[_norm_idx(l, i)];
 }
 

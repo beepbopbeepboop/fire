@@ -267,13 +267,17 @@ feature disabled and identical output.
   a stale address can later be misidentified.</li>
 <li><strong>Fixed 256-byte <code>sprintf</code> buffers.</strong> Replace <code>_sprintf_one</code>'s <code>malloc(256)</code> +
   <code>sprintf</code> with a sized <code>snprintf</code> and release it as class C.</li>
-<li><strong>Beef up the solver to stack-home as much as possible (queued 2026-09-28; start once loop-scoped destruction, item 1,
-  is checked in).</strong> Every item above is limited by what the escape solver can prove. Widen it: non-empty container
-  literals, non-escaping struct instances, closure envs and boxed mutable locals; real callee tables (the analysis runs with
-  <code>{}, {}</code> today, so any user-function argument disqualifies a container); the missing safe patterns
-  (<code>for x in local:</code>; a name assigned once per <em>scope</em>, so <code>tmp = []</code> reused across sibling loops
-  qualifies); stack buffers for non-escaping strings and transient decimals; and a GIMPLE-legal way to home storage in
-  <code>__GIMPLE</code> bodies. Tracked in <code>doc/OWNERSHIP_MODEL.md</code>'s TODO list. Success is the §5 table trending to all-flat.</li>
+<li><strong>Beef up the solver to stack-home as much as possible — IN PROGRESS.</strong> Landed 2026-09-28: (a) <code>for x in local:</code>
+  and comprehension clauses over a bare local are non-escaping reads; (b) a name declared in several sibling loop bodies qualifies in each
+  (per-body single declaration; nested, rebound or outside-assigned variants are rejected); (c) real callee information —
+  <code>_summarize_params</code> proves a parameter non-retaining from the callee's own body (never from a <code>read</code> keyword: the
+  compiled path lowers a copy as the same pointer), refusing async/generator/decorated/overloaded/imported-name/recursive callees and
+  bounding depth; (d) non-empty list/dict/set literals are stack-homed via a storage request the literal's own lowering consumes
+  (<code>emit_container_new</code>), falling back to the heap candidate if nothing consumes it; (e) lists carry a 4-slot inline buffer
+  (§10). Still open: containers nested inside a literal (<code>[[1,2],[i]]</code>: the inner lists have no owner); TEMPORARY containers
+  from expressions consumed once (<code>for y in [v for v in a]</code>, <code>l.extend([10, 20])</code>, slice/<code>split</code> results);
+  struct instances, closure envs and boxed mutable locals; string buffers; struct-method callee tables; and a GIMPLE-legal way to home storage in
+  <code>__GIMPLE</code> bodies.</li>
 <li><strong>Dict comprehension keys, <code>__missing__</code> keys.</strong> Route the comprehension's set call through
   <code>_emit_call</code> to opt in; <code>__missing__</code> stays unreleased by contract.</li>
 </ol>
@@ -293,6 +297,29 @@ feature disabled and identical output.
   A memory fix necessarily changes the C, so its evidence is the RSS slope plus unchanged program output.</li>
 <li>Keep a probe for every class in §5; an ownership regression is a slope that reappears.</li>
 </ol>
+
+<h2>10. Speed: containers vs Rust</h2>
+<p>Measured 2026-09-28 on one loop, 5,000,000 iterations of <em>create a list, push 3 values, read <code>len</code> and one element, drop it</em>
+(the runtime linked statically at <code>-O2</code>, so this is the runtime's own cost, not generated-code overhead). Rust: the same
+with <code>Vec&lt;i64&gt;</code> and <code>black_box</code> so the allocation cannot be optimised away, <code>rustc -O</code>.</p>
+<table>
+<tr><th>Configuration</th><th>ns / iteration</th></tr>
+<tr><td>Rust <code>Vec&lt;i64&gt;</code> (one <code>malloc</code>/<code>free</code> per iteration)</td><td>~14</td></tr>
+<tr><td>runtime before: struct + <code>malloc</code>'d data + registry</td><td>~19</td></tr>
+<tr><td>runtime with the 4-slot inline buffer (no <code>malloc</code>), registry on</td><td class="ok">~9.5</td></tr>
+<tr><td>same, registry disabled (scratch copy — not a supported mode)</td><td class="ok">~5.5</td></tr>
+</table>
+<p>So a short stack-homed list is already faster than Rust's, and the container-kind registry is now about 45% of what is left
+(a global hash-set insert on <code>init</code>, a discard on <code>destroy</code>). It exists so the runtime can tell a boxed <code>int64_t</code>
+that is a list from one that is an int or a string; making it cheaper — or unnecessary for a container the solver proves is never
+boxed — is the next lever. <strong>Not yet measured:</strong> the compiled program end to end (it was ~44 ns for the same loop, before
+this change: nine out-of-line runtime calls per iteration through the dylib, none inlinable, and the default <code>-O0</code> build),
+and anything outside this one loop. A claim of "beats Rust" needs those; this section is the micro-benchmark only.</p>
+<p><strong>Small-buffer invariants</strong> (<code>runtime/fire_runtime.h</code>): <code>data</code> is never NULL after init and <code>cap &gt;= MOJO_LIST_INLINE</code>;
+<code>data == inl</code> iff the elements are still inline, and only <code>_list_grow</code> (copy out, never <code>realloc</code>) and
+<code>mojo_list_destroy</code> (never <code>free</code>) distinguish the two; a list must not be copied or moved by value while inline. Dict and set
+slot arrays could get the same treatment, but a dict/set of strings still <code>strdup</code>s every key, so "no malloc" is not reachable for those without
+storing short keys inline (a larger change: keys are handed out as borrowed pointers).</p>
 
 <h2>9. Change log for this document's code</h2>
 <ul>

@@ -163,6 +163,14 @@ class _FuncFacts:
         self.assign_count = {}       # name -> int
         self.all_ctor_assigns = {}   # name -> bool (True until proven False)
         self.disqualified = set()    # names ruled out by rules 3-8
+        # Callee parameter summaries (see `_summarize_params`): memo maps a
+        # callee's name to the '|'-joined names of its non-escaping
+        # parameters (a string, not a set, on purpose — a set read out of a
+        # dict value is the self-hosting trap this module documents
+        # elsewhere); `visiting` is the chain of callees being summarised
+        # right now, so a recursive call is treated as escaping.
+        self.memo = {}
+        self.visiting = []
 
     def note_assign(self, name: str, is_ctor: bool):
         self.assign_count[name] = self.assign_count.get(name, 0) + 1
@@ -200,6 +208,20 @@ class _FuncFacts:
         return out
 
 
+    def ctor_names(self) -> set:
+        """Names every one of whose assignments is a container constructor
+        and that no rule disqualified, whatever the assignment COUNT —
+        the input to the block-scoped analysis, which decides ownership per
+        declaration site instead of per function (so the same name declared
+        in two sibling loop bodies can qualify, `candidates()` requires one).
+        Keys only, for the same self-hosting reason as `candidates()`."""
+        out = set()
+        for name in self.assign_count:
+            if self.all_ctor_assigns.get(name) and name not in self.disqualified:
+                out.add(name)
+        return out
+
+
 def _resolve_callee(func, funcs, methods):
     """Same narrow resolver as ownership_check.py's Phase 2 (bare-name
     free function, or `self.method(...)` against the current struct) —
@@ -213,6 +235,52 @@ def _resolve_callee(func, funcs, methods):
             and func.obj.name == 'self'):
         return methods.get(func.member)
     return None
+
+
+def _summarize_params(callee, funcs, methods, memo: dict, visiting: list) -> str:
+    """'|'-joined names of `callee`'s parameters that PROVABLY do not escape
+    it, by the same escape rules this module applies to a local: analysing
+    the callee's own body with its parameters treated as ordinary names, a
+    parameter that is never returned, stored, aliased, captured, moved or
+    handed to something that might keep it does not outlive the call.
+
+    This replaces trusting a `read` convention keyword. In real Mojo a `read`
+    parameter cannot be stored, but this compiler lowers a copy of a value
+    (`var y = param`) as the SAME pointer, so a callee that copies its
+    `read` parameter into a field would leave the caller's container
+    reachable after the caller frees it. The body analysis has no such gap:
+    an alias (`y = param`) disqualifies `param` exactly as it would a local.
+
+    Conservative by construction: '' (nothing proven) for a callee that is
+    async/a generator (its parameters live in a frame that outlives the
+    call) or decorated (a wrapper may keep them), for a recursive call, and
+    once two callees are already being summarised (bounds the work per call
+    site to a small constant instead of the whole call graph)."""
+    key = callee.name
+    if key in memo:
+        return memo[key]
+    if key in visiting or len(visiting) >= 2:
+        return ''
+    if callee.is_async or callee.is_generator or callee.decorators:
+        memo[key] = ''
+        return ''
+    sub = _FuncFacts()
+    sub.memo = memo
+    sub.visiting = visiting + [key]
+    for stmt in callee.body:
+        _scan_stmt(stmt, sub, funcs, methods)
+    out = ''
+    for pname, _ in callee.params:
+        p = pname.lstrip('*')
+        if p not in sub.disqualified:
+            out = out + p + '|'
+    memo[key] = out
+    return out
+
+
+def _param_is_nonescaping(callee, pname: str, funcs, methods, facts: _FuncFacts) -> bool:
+    summary = _summarize_params(callee, funcs, methods, facts.memo, facts.visiting)
+    return pname in summary.split('|')
 
 
 def _scan_expr(node, facts: _FuncFacts, funcs, methods, in_closure=False):
@@ -271,6 +339,12 @@ def _scan_expr(node, facts: _FuncFacts, funcs, methods, in_closure=False):
 
     if isinstance(node, N.CallExpr):
         callee = None if in_closure else _resolve_callee(node.func, funcs, methods)
+        if (callee is not None and isinstance(node.func, N.IdentExpr)
+                and (node.func.name in facts.assign_count
+                     or node.func.name in facts.disqualified)):
+            # The caller assigns or receives a local of this name (a function
+            # pointer, a parameter): it is not the module-level function.
+            callee = None
         is_whitelisted_builtin = (not in_closure and isinstance(node.func, N.IdentExpr)
                                    and node.func.name in _NONRETAINING_BUILTINS)
         param_names = [p[0] for p in callee.params] if callee else []
@@ -286,7 +360,7 @@ def _scan_expr(node, facts: _FuncFacts, funcs, methods, in_closure=False):
             real_idx = idx + offset
             if not (0 <= real_idx < len(param_names)):
                 return False
-            return callee.param_convs.get(param_names[real_idx]) == 'read'
+            return _param_is_nonescaping(callee, param_names[real_idx], funcs, methods, facts)
 
         for i, a in enumerate(node.args):
             if isinstance(a, N.IdentExpr):
@@ -301,7 +375,7 @@ def _scan_expr(node, facts: _FuncFacts, funcs, methods, in_closure=False):
             if isinstance(v, N.IdentExpr):
                 safe = (not in_closure) and (is_whitelisted_builtin or (
                     callee is not None
-                    and callee.param_convs.get(kw_name) == 'read'))
+                    and _param_is_nonescaping(callee, kw_name, funcs, methods, facts)))
                 if not safe:
                     facts.disqualify(v.name)
             else:
@@ -329,6 +403,19 @@ def _scan_expr(node, facts: _FuncFacts, funcs, methods, in_closure=False):
         # subscripted, since indexing has no dedicated carve-out otherwise.
         _scan_expr(node.index, facts, funcs, methods, in_closure)
         _scan_expr(getattr(node, 'attrs', None), facts, funcs, methods, in_closure)
+        return
+
+    if isinstance(node, N.Generator):
+        # A comprehension clause `for x in <name>`: the comprehension is
+        # lowered inline as a loop over the container, which reads it and
+        # never keeps it past the clause — the same non-retaining read as a
+        # `for` statement over a bare local (see `_scan_stmt`'s ForStmt
+        # case). Inside a closure the usual rule (disqualify) still applies.
+        if isinstance(node.iterable, N.IdentExpr) and not in_closure:
+            pass
+        else:
+            _scan_expr(node.iterable, facts, funcs, methods, in_closure)
+        _scan_expr(node.conditions, facts, funcs, methods, in_closure)
         return
 
     for f in dataclasses.fields(node):
@@ -415,6 +502,21 @@ def _scan_stmt(stmt, facts: _FuncFacts, funcs, methods):
 
     if isinstance(stmt, (N.PassStmt, N.BreakStmt, N.ContinueStmt,
                           N.ImportStmt, N.FromImportStmt)):
+        return
+
+    if isinstance(stmt, N.ForStmt):
+        # `for x in <name>:` READS the container (an index/iterator loop that
+        # is torn down when the loop ends) and never keeps it, so a bare
+        # local iterable is not an escape — exactly like the receiver of
+        # `name[i]` or `name.method()`. Anything else as the iterable
+        # (a call result, an expression) is scanned normally.
+        if not isinstance(stmt.iterable, N.IdentExpr):
+            _scan_expr(stmt.iterable, facts, funcs, methods)
+        for b in stmt.body:
+            _scan_stmt(b, facts, funcs, methods)
+        if stmt.else_body:
+            for b in stmt.else_body:
+                _scan_stmt(b, facts, funcs, methods)
         return
 
     for f in dataclasses.fields(stmt):
@@ -827,16 +929,20 @@ def analyze_scoped_locals(fn, funcs, methods, whole: set) -> set:
     result and is excluded, so each candidate is owned at exactly one level.
 
     A name qualifies iff ALL of:
-      - it is a candidate by the module docstring's rules 1-8 (assigned
-        exactly once, from a container constructor, never escaping);
-      - that one assignment is a DIRECT child statement of a `for`/`while`
-        body with no `else:` (so every path that reaches the end of the
-        body, or any `break`/`continue`/`return` lexically after the
-        declaration, has executed it — no definite-assignment analysis is
-        needed because straight-line order within one block is the proof);
-      - the name occurs NOWHERE outside that declaration and the rest of
-        that body (`_count_name` over the whole function equals the count
-        over `body[idx:]`). This is what makes the free at the end of the
+      - every assignment to it is a container constructor and it never
+        escapes (the module docstring's rules 1, 3-8; rule 2, "assigned
+        once", is replaced by the next two conditions, applied per loop
+        body);
+      - each of its assignments is a DIRECT child statement of a distinct
+        `for`/`while` body with no `else:`, exactly one per body (so every
+        path that reaches the end of the body, or any `break`/`continue`/
+        `return` lexically after the declaration, has executed it — no
+        definite-assignment analysis is needed because straight-line order
+        within one block is the proof). The same name in two sibling loops
+        therefore qualifies in both;
+      - the name occurs NOWHERE outside those declarations and the rest of
+        their bodies (`_count_name` over the whole function equals the sum
+        over each `body[idx:]`). This is what makes the free at the end of the
         body safe for plain-Python source, where a loop-body local stays
         visible after the loop: any later read would be a use-after-free.
     The free itself is emitted per iteration at the end of the body and
@@ -857,18 +963,34 @@ def analyze_scoped_locals(fn, funcs, methods, whole: set) -> set:
     if not have_ctor_decl:
         return out
     facts = _scan_function(fn, funcs, methods)
-    _cands = facts.candidates()
-    for body in bodies:
-        for idx in range(len(body)):
-            st = body[idx]
-            nm = _decl_name(st)
-            if nm == '' or nm not in _cands or nm in whole:
-                continue
-            region = 0
-            for j in range(idx, len(body)):
-                region += _count_name(body[j], nm)
-            if _count_name(fn.body, nm) == region:
-                out.add(nm)
+    _cands = facts.ctor_names()
+    for nm in sorted(_cands):
+        if nm in whole:
+            continue
+        decls = 0     # loop bodies that declare `nm` (each exactly once)
+        region = 0    # occurrences of `nm` from each declaration to its body's end
+        ok = True
+        for body in bodies:
+            first = -1
+            in_body = 0
+            for idx in range(len(body)):
+                if _decl_name(body[idx]) == nm:
+                    in_body += 1
+                    if first < 0:
+                        first = idx
+            if in_body > 1:
+                ok = False   # a rebinding inside one block: the first value would leak
+            if first >= 0:
+                decls += 1
+                for j in range(first, len(body)):
+                    region += _count_name(body[j], nm)
+        # Every assignment must be one of those direct-child declarations, and
+        # the name must occur nowhere else: nested same-name declarations
+        # count twice (inside the outer region and their own), so they fail
+        # the equality below and stay unfreed rather than shadow each other.
+        if ok and decls >= 1 and decls == facts.assign_count.get(nm) \
+                and _count_name(fn.body, nm) == region:
+            out.add(nm)
     return out
 
 
