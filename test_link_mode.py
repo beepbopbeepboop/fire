@@ -55,6 +55,17 @@ def _build_and_run(pkg_files: dict, entry: str, td: str) -> tuple[int | None, st
         os.chdir(cwd)
 
 
+def _cpython_run(td: str, entry: str) -> tuple[int, str]:
+    """CPython's OWN exit code and stdout for the same file, run with `td` as
+    cwd so a sibling import resolves exactly the way the compiled build
+    resolves it. Every case below asserts the compiled program matches THIS,
+    not a hand-written literal — a literal here would just be the bug's
+    current wrong answer frozen into the test."""
+    result = subprocess.run([sys.executable, os.path.join(td, entry)],
+                            capture_output=True, text=True, timeout=60, cwd=td)
+    return result.returncode, result.stdout
+
+
 def test_bare_submodule_import_value_read() -> bool:
     """Regression test for bugs/COMPILE_FAIL_asyncio_futures.md (FIXED,
     commit 94cc04c): a bare `from . import SUBMODULE` marker's own
@@ -160,10 +171,182 @@ def test_from_submodule_import_symbol_value_read() -> bool:
     return ok
 
 
+# ── A LOCAL SIBLING that no dylib can satisfy ───────────────────────────────
+#
+# The three cases above all go through a `pkg/__init__.py` package, which
+# `imports.resolve` can find. These four do not: a bare top-level `.py`
+# sibling, the shape this compiler's OWN sources are written in, and the
+# shape `imports.resolve` returns `(dylib=None, source=None, exports={})`
+# for. Nothing about them is function-scoped-only — each one covers both
+# spellings of the import, because the root cause was that the module was
+# never read on this path at all.
+#
+# Regression tests for bugs/hard/CODEGEN_function_scoped_import_module_not_
+# inlined.md, whose link-mode half was the last one standing.
+
+_INSP_PY = (
+    'class Parameter:\n'
+    '    POSITIONAL_ONLY = 1\n'
+    '    VAR_POSITIONAL = 2\n'
+    '    def __init__(self, name, kind=0):\n'
+    '        self.name = name\n'
+    '        self.kind = kind\n'
+)
+
+
+def test_sibling_function_import_call_is_inlined() -> bool:
+    """A plain top-level function in a dylib-less sibling `.py`, called
+    through a FUNCTION-SCOPED `from SIBLING import f`, must call the real
+    definition. This is the bug's canonical row: the call used to bind to
+    the extern-preamble's `weak` "unavailable in compiled mode" stub, which
+    printed `can_colorize: unavailable in compiled mode` INTO THE PROGRAM'S
+    OWN STDOUT and then returned 0 — so a harness comparing exit codes saw a
+    pass and a harness comparing stdout saw the diagnostic rather than the
+    answer.
+
+    Root cause, not a guess: `_register_link_imports._exports` got
+    `(exports={}, from_reflection=False, source=None)` because
+    `mojo/middle/funcs_shared.py::_parsed_import` could not resolve a bare,
+    non-dotted, local `.py` sibling — `imports.resolve_source` only
+    understands MOJO_PATH-relative dotted names, and
+    `_resolve_test_relative_module` only tries the `.mojo` extension — so
+    every `if source:` fallback short-circuited and nothing was registered.
+    `_parsed_import` now falls back to `_submodule_source_path`, the very
+    resolver `_compile_imported_module` uses for this same name."""
+    pkg = {
+        '_colorize2.py': 'def can_colorize():\n    return True\n',
+        'h1.py': (
+            'def f():\n'
+            '    from _colorize2 import can_colorize\n'
+            '    if can_colorize():\n'
+            '        return 1\n'
+            '    return 0\n'
+            '\n'
+            'print(f())\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'h1.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'h1.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '1')
+    if not ok:
+        print(f"  ✗ sibling_function_import_call_is_inlined: rc={rc} "
+              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
+def test_sibling_class_attribute_function_scoped() -> bool:
+    """A CLASS attribute read (`Parameter.VAR_POSITIONAL`) where the import
+    is function-scoped. Used to print `0`: with the class never inlined, the
+    bare name read as an undeclared identifier (`(int64_t)0`) and the
+    attribute went through the dynamic-getattr chain on a null object.
+    Exit 0, wrong value, no diagnostic — the worst of the three shapes."""
+    pkg = {
+        'insp.py': _INSP_PY,
+        'f7.py': (
+            'def f():\n'
+            '    from insp import Parameter\n'
+            '    return Parameter.VAR_POSITIONAL\n'
+            '\n'
+            'print(f())\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'f7.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'f7.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '2')
+    if not ok:
+        print(f"  ✗ sibling_class_attribute_function_scoped: rc={rc} "
+              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
+def test_sibling_class_attribute_module_scoped() -> bool:
+    """The MODULE-SCOPED spelling of the identical import, for the same
+    `class Parameter:` sibling. This one is what pins the second half of the
+    fix: `_register_link_imports`' source-text classifier decided what to do
+    with an unresolved imported name, and it knew the `struct X:` and `def
+    x(` spellings but not `class X:` — which is a hard keyword to
+    `fire_compiler._parse_struct` and produces the very same StructDef. So a
+    class matched nothing, the module was never inlined, and this shape was
+    broken independently of where the import sat. The classifier is now one
+    function (`_classify_unresolved_export`) rather than the two drifting
+    copies it was, so there is no second spelling list to fall behind."""
+    pkg = {
+        'insp.py': _INSP_PY,
+        'f5.py': (
+            'from insp import Parameter\n'
+            '\n'
+            'def f():\n'
+            '    return Parameter.VAR_POSITIONAL\n'
+            '\n'
+            'print(f())\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'f5.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'f5.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '2')
+    if not ok:
+        print(f"  ✗ sibling_class_attribute_module_scoped: rc={rc} "
+              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
+def test_sibling_class_constructor_field_function_scoped() -> bool:
+    """Constructing the imported class and reading one of its fields, with
+    the import function-scoped. Two bugs had to be fixed for this shape and
+    one test covers both halves, because the first fix's absence showed up
+    here as a hard GIMPLE error rather than a wrong value:
+
+    1. the classifier fix above (without it the module is not inlined and
+       the call binds to the `weak` stub), and
+    2. the link-mode inline loop must run the SAME cross-module
+       constructor-field-hint pre-pass the single-TU path runs. It used to
+       be a second, hand-rolled copy of that loop placed after the shared
+       one, which skipped the pre-passes entirely — so the defining module
+       compiled `self.name = name` with an int64_t default for the
+       unannotated `name` param while the struct field was `char *`, and
+       GCC rejected the store with "non-trivial conversion in 'var_decl'".
+       `gen_module_impl` now has ONE inline-compile loop for both modes.
+
+    `p.name`, not `repr(p)`: a user-defined `__repr__` reached through
+    `repr()` on a locally-constructed struct is a separate, import-
+    independent bug (reproduces with no imports at all) and asserting it
+    here would have made this test assert the wrong thing."""
+    pkg = {
+        'insp.py': _INSP_PY,
+        'f9.py': (
+            'def f():\n'
+            '    from insp import Parameter\n'
+            '    p = Parameter(\'v\', 7)\n'
+            '    return p.name\n'
+            '\n'
+            'print(f())\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'f9.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'f9.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == 'v')
+    if not ok:
+        print(f"  ✗ sibling_class_constructor_field_function_scoped: rc={rc} "
+              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 CASES = [
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
     test_from_submodule_import_symbol_value_read,
+    test_sibling_function_import_call_is_inlined,
+    test_sibling_class_attribute_function_scoped,
+    test_sibling_class_attribute_module_scoped,
+    test_sibling_class_constructor_field_function_scoped,
 ]
 
 
