@@ -156,6 +156,14 @@ HOST_MODELLED = frozenset((
     #     a `char **` walk; both are bug docs rather than approximations.
     "errno", "stat", "platform", "time", "select", "io",
     "pathlib", "glob", "fnmatch", "hashlib", "secrets", "uuid",
+    #   `ast`  — `formal/hostmods/ast.mojo`, the TOKENIZER and a lexical
+    #     validator, not a tree: `parse`, `parse_reason`, `tokenize`,
+    #     `tokenize_from`, `token_bound` and `token_name`, with token kinds,
+    #     positions and counts compared against CPython's own `tokenize` by
+    #     `test_ast_formal.py`. What it cannot do is build a tree, because a
+    #     value on this path is one 64-bit word and a node is not one: the
+    #     subset, the 21 measured ways `parse` differs from CPython's verdict,
+    #     and the f-string collapsing are in `bugs/FORMAL_ast_module_subset.md`.
     #   `struct`  — `formal/hostmods/struct.mojo`, in the subset the formal
     #     backends can lower, compared BYTE FOR BYTE against CPython's own
     #     answers by `test_struct_formal.py`. The four measured limits it is
@@ -172,8 +180,9 @@ HOST_MODELLED = frozenset((
     "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
     "weakref", "pprint", "reprlib", "pickle",
     # A shape over the source language rather than a runtime facility: the
-    # parser, the type lattice, the dataclass transform, the CLI parser.
-    "ast", "typing", "dataclasses", "argparse",
+    # type lattice, the dataclass transform, the CLI parser. (`ast` was here
+    # until `formal/hostmods/ast.mojo` existed and is now written above.)
+    "typing", "dataclasses", "argparse",
     # A SUBSET is reachable, and the subset is the point. `inspect` reads
     # attributes off live values, which this path has (the gimple runtime
     # carries a type tag and `mojo_obj_getattr`); what it cannot do is walk a
