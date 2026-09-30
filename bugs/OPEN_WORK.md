@@ -29,7 +29,9 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 | `FORMAL_x86_64_formal_backend_gaps.md` | the two backend gaps (both now fixed) |
 | `FORMAL_string_value_model.md` | what a string IS on the formal path, `len`/`==`/`+` on it, and the `String`-struct collision behind the 16 "a String receiver" refusals |
 | `FORMAL_arm64_instruction_coverage.md`, `FORMAL_arm64_known_proof_gaps.md`, `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` | arm64 work — not duplicated here |
-| `FORMAL_frame_receiver_handoff.md` | who can take a frame address: the cross-module method hand-off (a binding bug, fixed), `Pointer(to=frame)` (an unjustified refusal, fixed), whether the frame layout and the struct's C layout coincide (measured: they do, for 8-byte fields), and the three refusals that named a cause which was not operating |
+| `FORMAL_frame_receiver_handoff.md` | who can take a frame address: the cross-module method hand-off (a binding bug, fixed), `Pointer(to=frame)` (an unjustified refusal, fixed), `origin_of` (the same mistake again — a compile-time intrinsic with no body, so no dereference for the sentence to describe; fixed), whether the frame layout and the struct's C layout coincide (measured: they do, for 8-byte fields), and the three refusals that named a cause which was not operating |
+| `FORMAL_frame_by_value_ceiling_zero.md` | map rows 7 and 8 of the sweep work map, **measured at a ceiling of 0**: 26 files, both refusals lifted behind a temporary guard, not one reaches `pass`, and 10 of the 26 land in a chain whose end is a documented permanent limit. Carries the per-file landing table, which is the deliverable |
+| `FORMAL_type_argument_read_as_a_container.md` | a subscript's INDEX tuple is a type argument list, not a container store, and four stdlib files are refused for a store that never happens. Not an artefact of the `origin_of` work — `Box[Int, s]` reproduces it with no `origin_of` in it |
 
 ---
 
