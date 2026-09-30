@@ -515,8 +515,14 @@ build/fire: build/system.o build/fire_runtime.o $(CORO_RUNTIME_OBJS)
 # per-file job RESERVES its class out of the machine-wide budget before it
 # starts (tools/ab_run_one.py, `memslot.Slot`): the width `-j20` asks for and
 # the memory the machine can give are now separate numbers, and the second one
-# wins. Make's job server still decides how many are *ready*; the ledger
-# decides how many run.
+# wins — four at a time on a 96 GB budget, not twenty. Make's job server still
+# decides how many are *ready*; the ledger decides how many run.
+#
+# The one place that does NOT apply is `tools/suite.py ab`, whose `ab-aside` /
+# `ab-bside` jobs already reserved `program` for the whole `make` tree and hand
+# it down: a reservation covers its own tree, so the per-file ones are served
+# from it instead of double-claiming, and the tree cap of 55 GB is what bounds
+# that sweep. Nothing in the gate runs it.
 ab.mk: tools/gen_ab_makefile.py tools/ab_filelist.py
 	python3 tools/gen_ab_makefile.py > ab.mk
 

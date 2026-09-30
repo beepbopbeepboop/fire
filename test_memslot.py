@@ -23,7 +23,12 @@ def check(name, ok, detail=""):
 
 
 def env(d):
-    return dict(os.environ, MEMSLOT_DIR=d, MEMSLOT_BUDGET_GB="10")
+    # MEMSLOT_HELD="" is not optional: it is what makes this file hermetic when
+    # it is itself run as a suite job. The suite hands every job it admits the
+    # reservation it holds (MEMSLOT_HELD), so without the clear every wrapper
+    # started below would be "covered" by this test's own reservation, queue
+    # behind itself, and the arithmetic these cases check would never happen.
+    return dict(os.environ, MEMSLOT_DIR=d, MEMSLOT_BUDGET_GB="10", MEMSLOT_HELD="")
 
 
 def start(d, gb, secs, label):
@@ -118,8 +123,10 @@ def main():
     import memslot                                                  # noqa: E402
     old_dir = os.environ.get('MEMSLOT_DIR')
     old_budget = os.environ.get('MEMSLOT_BUDGET_GB')
+    old_held = os.environ.get('MEMSLOT_HELD')
     os.environ['MEMSLOT_DIR'] = tempfile.mkdtemp()
     os.environ['MEMSLOT_BUDGET_GB'] = '10'          # same budget the CLI cases used
+    os.environ['MEMSLOT_HELD'] = ''                 # see env() above
     try:
         # two slots in this one process: the second must wait for the first
         a = memslot.Slot(7, 'slotA').acquire()
@@ -161,11 +168,67 @@ def main():
               any(h.get('job') for h in held), str(held))
         z.release()
     finally:
-        for k, v in (('MEMSLOT_DIR', old_dir), ('MEMSLOT_BUDGET_GB', old_budget)):
+        for k, v in (('MEMSLOT_DIR', old_dir), ('MEMSLOT_BUDGET_GB', old_budget),
+                     ('MEMSLOT_HELD', old_held)):
             if v is None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+    # ── a reservation covers the tree it admitted ─────────────────────────────
+    # Without this, `make mojoc` never finishes: tools/suite.py reserves the
+    # job's class (stage, 96 GB, the whole budget) and the recipe it spawns is
+    # itself `memslot.py --gb 96 -- ...` for the same 96 GB of the same
+    # budget. Two claims on one tree do not fit, so the second queues for a
+    # turn its own parent is holding. Scaled to 6 of 6, the case below took
+    # longer than any timeout before the fix and 0.6s after it.
+    with tempfile.TemporaryDirectory() as d:
+        os.environ['MEMSLOT_DIR'] = d
+        os.environ['MEMSLOT_BUDGET_GB'] = '6'
+        os.environ['MEMSLOT_HELD'] = ''
+        parent = memslot.Slot(6, 'mojoc', budget=6).acquire()
+        try:
+            child_env = dict(os.environ, **memslot.held_env(6))
+            t0 = time.time()
+            r = subprocess.run([sys.executable, MEMSLOT, "--gb", "6", "--label", "mojoc-recipe",
+                                "--", sys.executable, "-c", "print('recipe ran')"],
+                               env=child_env, capture_output=True, text=True, timeout=30)
+            check("a wrapper inside an admitted tree is not made to queue behind it",
+                  r.returncode == 0 and 'recipe ran' in r.stdout,
+                  "rc=%s after %.1fs: %s" % (r.returncode, time.time() - t0, r.stderr.strip()))
+            check("...and the tree is still capped at what it reserved",
+                  '--limit-gb 6' not in r.stdout and 'ceiling 6.0 GB' in r.stdout,
+                  'the ceiling must still be applied: ' + r.stdout.strip()[:120])
+            check("...and the parent's reservation is untouched by it",
+                  memslot.reserved_gb() == 6, '%.1f GB' % memslot.reserved_gb())
+
+            # A request the inherited reservation does NOT cover is a real
+            # mismatch: the tree was admitted for 6 and this asks for 8, which
+            # would let it reach past its own accounting. It has to queue for
+            # the ledger like anyone else. The budget is 12 here so that 8
+            # FITS the machine — what it does not fit is the 6 the tree was
+            # already admitted for, which is the mismatch being tested.
+            os.environ['MEMSLOT_BUDGET_GB'] = '12'
+            over = dict(os.environ, **memslot.held_env(6))
+            q = subprocess.Popen([sys.executable, MEMSLOT, "--gb", "8", "--label", "too-big",
+                                  "--", "sleep", "1"], env=over,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            time.sleep(1.0)
+            check("a wrapper asking for MORE than the tree was admitted queues",
+                  q.poll() is None, 'it ran anyway: the tree can now reach for '
+                  'more than its accounting')
+            q.kill(); q.wait()
+            os.environ['MEMSLOT_BUDGET_GB'] = '6'
+            gone = subprocess.run([sys.executable, MEMSLOT, "--gb", "9", "--label", "over-budget",
+                                   "--", "true"], env=dict(os.environ, **memslot.held_env(6)),
+                                  capture_output=True, text=True, timeout=30)
+            check("...and over the whole budget is refused, not queued (126)",
+                  gone.returncode == 126, 'rc=%s' % gone.returncode)
+        finally:
+            parent.release()
+            check("...and releasing the parent frees the whole tree",
+                  memslot.reserved_gb() == 0, '%.1f GB left' % memslot.reserved_gb())
+            os.environ['MEMSLOT_HELD'] = ''
 
     print("Results: %d passed, %d failed" % (passed, failed))
     return 1 if failed else 0

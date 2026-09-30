@@ -43,6 +43,22 @@ A process may hold SEVERAL reservations at once — the test runner's thread poo
 thread — so a reservation carries an `owner` string and is released by owner. Liveness still keys on
 the pid, because that is the thing that actually dies.
 
+A reservation covers the TREE it admitted, and a process already inside one must not take a second.
+That is not an optimisation, it is the difference between working and deadlocked: `tools/suite.py`
+reserves a job's memclass before spawning it, and the `make mojoc` recipe it spawns is itself
+`memslot.py --gb 96 -- …` for the same 96 GB of the same 96 GB budget. Two reservations for one
+tree do not fit, so the second queues for a turn that can never come and the gate hangs on its
+heaviest step (measured: reproducible in seconds at 1/16 scale, see `test_memslot.py`). So whoever
+takes a reservation publishes it in `MEMSLOT_HELD`, and a request inside that tree that the
+reservation already covers is served from it — no ledger round-trip, and the ceiling still applied.
+A request LARGER than the inherited reservation is a real mismatch (the tree can now reach for more
+than its accounting), so it says so on stderr and takes its own reservation anyway: queueing there
+would hang, and silently running under a bigger ceiling would be worse.
+
+Set `MEMSLOT_HELD=` (empty) in the environment to opt out and take a fresh reservation regardless —
+which is what a TEST of the ledger has to do, or every wrapper it starts would inherit the test's
+own reservation and queue behind itself.
+
 Exit status: the command's own, 125 if memcap killed it for exceeding its reservation, 126 if the
 request can never fit, 2 on usage errors.
 """
@@ -50,6 +66,9 @@ import argparse, fcntl, json, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_BUDGET_GB = 96.0
+
+# The environment variable through which a reservation covers its own tree.
+HELD = 'MEMSLOT_HELD'
 
 
 def ledger_dir():
@@ -60,6 +79,44 @@ def ledger_dir():
 
 def budget_gb(override=None):
     return float(override if override is not None else os.environ.get("MEMSLOT_BUDGET_GB", DEFAULT_BUDGET_GB))
+
+
+def inherited_gb():
+    """The gigabytes an ANCESTOR of this process already reserved, 0.0 for none.
+
+    Read from the environment rather than from the ledger because the ancestor
+    is in a DIFFERENT PROCESS TREE from the one that holds the reservation:
+    `tools/suite.py` admits a job, then the job's recipe runs
+    `memslot.py -- …`, and by the time that wrapper asks, the pids on the
+    holder entries are its grandparent's. The env var is how the reservation
+    reaches down into the tree it covers.
+    """
+    raw = (os.environ.get(HELD) or '').strip()
+    if not raw:
+        return 0.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 0.0
+
+
+def covering(gb, label):
+    """(already_covered, inherited) for a request of `gb` inside this tree.
+
+    The mismatch case is separated out because it is a genuine bug in the
+    caller and the two answers are opposite: covered means run it now from the
+    ancestor's reservation, not covered means the caller is reaching for more
+    memory than the tree was admitted for, and it has to queue (or fail) for it
+    like anyone else.
+    """
+    have = inherited_gb()
+    if have and gb > have + 1e-9:
+        print("memslot: %s wants %.1f GB but this process tree was only "
+              "admitted for %.1f GB (%s); taking a separate reservation, and "
+              "the ceiling it is given is larger than its accounting"
+              % (label, gb, have, HELD), file=sys.stderr, flush=True)
+        return False, have
+    return bool(have), have
 
 
 def _alive(pid):
@@ -181,9 +238,14 @@ class Slot:
     pruned as soon as the job is gone. Without it a killed runner would free
     its reservations while the compilers it started were still running —
     which is the collapse this file exists to prevent.
+
+    A reservation already held by an ANCESTOR of this process covers this one
+    (`covering` above), and in that case `acquire` returns immediately and the
+    release is a no-op. The two that must not both happen are the runner's own
+    admission and the `memslot.py` wrapper in the recipe it admitted.
     """
 
-    __slots__ = ('gb', 'label', 'budget', 'owner', 'ticket', 'waited')
+    __slots__ = ('gb', 'label', 'budget', 'owner', 'ticket', 'waited', 'covered')
 
     def __init__(self, gb, label, budget=None, owner=None):
         self.gb, self.label = float(gb), label
@@ -191,11 +253,13 @@ class Slot:
         self.owner = owner if owner is not None else f"{os.getpid()}:{label}"
         self.ticket = None
         self.waited = 0.0
+        self.covered, _ = covering(self.gb, label)
 
     def acquire(self):
         t0 = time.time()
         try:
-            self.ticket = acquire(self.gb, self.label, self.budget, owner=self.owner)
+            if not self.covered:
+                self.ticket = acquire(self.gb, self.label, self.budget, owner=self.owner)
         finally:
             self.waited = time.time() - t0
         return self
@@ -215,6 +279,18 @@ class Slot:
     def __exit__(self, *exc):
         self.release()
         return False
+
+
+def held_env(gb):
+    """The `MEMSLOT_HELD` value to hand a child, so a reservation covers its tree.
+
+    Every caller that takes a reservation should put this in the environment
+    of the process it starts — that is what stops the tree from taking a
+    second, contradictory reservation, and it is why the variable carries the
+    gigabytes rather than a flag: a nested request is compared against the
+    number it was admitted for, and a mismatch is reported.
+    """
+    return {HELD: f'{float(gb):g}'}
 
 
 def reserved_gb():
@@ -250,18 +326,22 @@ def main(argv):
     if not cmd:
         ap.error("no command given")
     label = a.label or os.path.basename(cmd[0])
-    try:
-        acquire(a.gb, label, budget_gb(a.budget_gb))
-    except ValueError as e:
-        print("memslot: refused: %s" % e, file=sys.stderr)
-        return 126
+    covered, _ = covering(a.gb, label)
+    if not covered:
+        try:
+            acquire(a.gb, label, budget_gb(a.budget_gb))
+        except ValueError as e:
+            print("memslot: refused: %s" % e, file=sys.stderr)
+            return 126
     try:
         proc = subprocess.Popen([sys.executable, os.path.join(HERE, "memcap.py"), "--limit-gb", str(a.gb),
                                  "--label", label, "--"] + cmd)
-        note_job(proc.pid)
+        if not covered:
+            note_job(proc.pid)
         return proc.wait()
     finally:
-        release()
+        if not covered:
+            release()
 
 
 if __name__ == "__main__":

@@ -47,6 +47,14 @@ compile's, and a timeout that counted the wait for memory would kill files for
 a queue they did not cause. For the same reason it is released before the
 artifacts are moved and the meta.json is written, which cost nothing.
 
+One case takes no reservation at all: a sweep run by `tools/suite.py`, whose
+`ab-aside`/`ab-bside` jobs have already reserved `program` for the whole
+`make` tree and hand it down in MEMSLOT_HELD. A reservation covers the tree it
+admitted, so a second one for the same gigabytes would be a second claim on
+them — and `make mojoc`, whose recipe is itself a `memslot.py` wrapper, would
+deadlock on it. See `memslot.covering`. The hand-run `make -j20 aside` has no
+such parent, which is the case this file is for.
+
 A file killed by the ceiling is recorded as such in its meta.json
 (`memory_capped`, with the peak memcap saw) instead of being reported as a
 compiler failure with an empty .ci: "this file needed more memory than one
@@ -148,7 +156,7 @@ def _run_locked(args, basename: str, out_dir: str) -> None:
             return
 
     t0 = time.time()
-    stdout = ''
+    stdout = stderr = ''
     proc = None
     try:
         proc = subprocess.Popen(cmd, cwd=REPO, env=env, stdout=subprocess.PIPE,
@@ -163,6 +171,11 @@ def _run_locked(args, basename: str, out_dir: str) -> None:
         if proc is not None:
             procrun.kill_group(proc)
     finally:
+        # Given back as soon as the compile is over, before the artifacts are
+        # moved and the meta is written, so the sweep's next file starts while
+        # this one is still tidying up. `memcap`'s own process is gone by then
+        # too, which is what makes the release safe: the ceiling that backed
+        # the reservation has already stopped the tree.
         if slot is not None:
             slot.release()
     # memcap reports on stdout, which this harness does not otherwise keep, and
