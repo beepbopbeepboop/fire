@@ -2517,7 +2517,8 @@ class ARM64Codegen:
             else self._frame_candidates.get(root)
         if not cands:
             return None
-        ann = M.frame_slot_declared_annotation(cands, expr.member)
+        ann = M.frame_slot_declared_annotation(cands, expr.member,
+                                                self._structs)
         if ann is None:
             return None
         return self._slot_ann_pair(ann)
@@ -2529,7 +2530,7 @@ class ARM64Codegen:
         only = M.struct_sole_field_name(cands[0])
         if only is None:
             return None
-        ann = M.frame_slot_declared_annotation(cands, only)
+        ann = M.frame_slot_declared_annotation(cands, only, self._structs)
         return self._slot_ann_pair(ann) if ann is not None else None
 
     def _slot_ann_pair(self, ann):

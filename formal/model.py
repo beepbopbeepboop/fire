@@ -2684,7 +2684,7 @@ def struct_field_kind(struct_def, name, int_names=(), string_names=(),
     so the value is unreachable from the declaration in every direction, and
     `frame_slot_value_refusal` is what says so.
     """
-    base, ann = struct_field_declared_type(struct_def, name)
+    base, ann = struct_field_declared_type(struct_def, name, decls)
     if base is None:
         return None
     kind = declared_type_kind(ann, int_names, string_names, decls)
@@ -2696,7 +2696,7 @@ def struct_field_kind(struct_def, name, int_names=(), string_names=(),
     return None
 
 
-def frame_slot_declared_annotation(candidates, name) -> str | None:
+def frame_slot_declared_annotation(candidates, name, decls: dict = None) -> str | None:
     """The one annotation every candidate declares for `name`, or None.
 
     The same agree-or-refuse as `frame_slot_field_kind`, asked for the TEXT
@@ -2710,7 +2710,7 @@ def frame_slot_declared_annotation(candidates, name) -> str | None:
     cands = list(candidates or ())
     if not cands:
         return None
-    rows = field_type_rows(cands, name)
+    rows = field_type_rows(cands, name, decls)
     bases = {base for _sn, base, _ann, _why in rows if base is not None}
     if len(bases) != 1 or any(base is None for _sn, base, _a, _w in rows):
         return None
@@ -2740,7 +2740,7 @@ def frame_slot_field_kind(candidates, name, int_names=(), string_names=(),
     cands = list(candidates or ())
     if not cands:
         return None
-    ann = frame_slot_declared_annotation(cands, name)
+    ann = frame_slot_declared_annotation(cands, name, decls)
     if ann is None:
         return None
     kinds = {struct_field_kind(st, name, int_names, string_names, decls)
@@ -3872,7 +3872,7 @@ def _member_pointee(fn, node, decls, functions):
                       f"pointee — is not available")
     if isinstance(cands, dict):
         cands = [cands]
-    rows = field_type_rows(cands, node.member)
+    rows = field_type_rows(cands, node.member, decls)
     found = set()
     for _sn, base_t, ann, why in rows:
         if base_t is None:
@@ -3900,7 +3900,7 @@ def _member_declared_text(fn, node, decls):
     cands = _member_candidates(fn, node, decls)
     if not cands:
         return None
-    anns = {r[2] for r in field_type_rows(cands, node.member) if r[2]}
+    anns = {r[2] for r in field_type_rows(cands, node.member, decls) if r[2]}
     return anns.pop() if len(anns) == 1 else None
 
 
@@ -8003,21 +8003,32 @@ def annotation_base_name(ann) -> str | None:
     return text
 
 
-def struct_field_declared_type(struct_def, name) -> tuple:
+def struct_field_declared_type(struct_def, name, decls: dict = None) -> tuple:
     """`(base_name, annotation)` for a field's declaration, or `(None, why)`.
 
     The ONE reading of a declared type, so a caller that wants to know what a
     field holds and a caller that wants to refuse a field cannot answer
     differently.
 
-    `(None, why)` whenever there is no single declaration to read: the field is
-    not declared here at all (a class that assigns its fields in `__init__`, or
-    one whose storage is named by `__slots__` or by nothing but
-    `self.<name>` reads in a method), or it is declared twice with two different
-    annotations.  The second is a real disagreement and not a corner case: a
-    class body that says `var p: Pointer` and is then handed an `Int` somewhere
-    has two answers, and picking one is the whole class of bug this section is
-    arranged to prevent.
+    TWO sources, consulted in this order, and the order is the whole of it: an
+    ANNOTATION if the class body spells one, and otherwise what `__init__`
+    ASSIGNS (`struct_init_field_types`).  A class body that spells a type has
+    said what the slot holds and nothing assigned later can talk it out of it;
+    a class body that declares nothing has said nothing at all, and refusing it
+    on that ground is refusing unremarkable Python — `self.scope = Scope()` is a
+    declaration of a nested frame as plainly as `var scope: Scope` is, and the
+    second evidence source is what turns that sentence into a lowering.  The
+    third shape the old `why` named, `__slots__`, needs no source of its own: it
+    declares the field SET with no annotation, and `struct_field_names` has
+    always counted its names, so what it can add to THIS function is nothing.
+
+    `(None, why)` whenever there is no single answer to read: no annotation and
+    no classifiable assignment, an `__init__` that assigns the name two
+    different ways or one the analysis cannot classify, or a declaration spelled
+    twice with two different annotations.  The last is a real disagreement and
+    not a corner case: a class body that says `var p: Pointer` and is then
+    handed an `Int` somewhere has two answers, and picking one is the whole
+    class of bug this section is arranged to prevent.
 
     The `why` is returned rather than discarded because a reader of a refusal has
     to be able to see WHY a name was or was not treated as typed — that is the
@@ -8034,11 +8045,16 @@ def struct_field_declared_type(struct_def, name) -> tuple:
                 if spelling not in anns:
                     anns.append(spelling)
     if not anns:
-        return (None, f"{struct_def.name} does not declare {name!r}, so nothing "
-                      f"here says what the slot holds — a class that assigns "
-                      f"its fields in __init__ and declares none, and a field "
-                      f"named only by __slots__ or only by a method's read of "
-                      f"self.{name}, are both that shape")
+        inferred = struct_init_field_types(struct_def, decls).get(name)
+        if inferred is not None:
+            return inferred
+        return (None, f"{struct_def.name} does not declare {name!r}, and no "
+                      f"assignment in __init__ states what the slot holds "
+                      f"({struct_init_field_type_why(struct_def, name, decls)}), "
+                      f"so nothing here says what it is — a class that assigns "
+                      f"its fields in __init__ with values this path cannot "
+                      f"classify, and a field named only by __slots__ or only by "
+                      f"a method's read of self.{name}, are both that shape")
     if len(anns) > 1:
         return (None, f"{struct_def.name} declares {name!r} more than once and "
                       f"the declarations disagree — {', '.join(map(repr, anns))} "
@@ -8047,7 +8063,7 @@ def struct_field_declared_type(struct_def, name) -> tuple:
     return (annotation_base_name(anns[0]), anns[0])
 
 
-def field_type_rows(structs, name):
+def field_type_rows(structs, name, decls: dict = None):
     """`[(struct_name, base_or_None, annotation_or_None, why)]` per candidate.
 
     The evidence a refusal quotes, computed once and shared: which candidate
@@ -8055,10 +8071,14 @@ def field_type_rows(structs, name):
     from `frame_field_type_candidates` so the diagnostic and the decision read
     the same table rather than two walks of the same candidates that could
     disagree.
+
+    `decls` is passed on to `struct_field_declared_type` and is what the
+    `__init__`-assignment source needs to tell a CONSTRUCTOR from a function
+    call; a caller that has no struct table gets the annotation source alone.
     """
     out = []
     for st in structs:
-        base, ann = struct_field_declared_type(st, name)
+        base, ann = struct_field_declared_type(st, name, decls)
         out.append((st.name, base, ann, None if base is not None else ann))
     return out
 
@@ -8095,7 +8115,7 @@ def frame_field_type_candidates(structs, name, decls: dict):
     places.  `field_type_is_value` below is the accessor for that, so no caller
     has to re-derive the distinction from `rows` and get it subtly wrong.
     """
-    rows, bases, have = field_type_rows(structs, name), set(), 0
+    rows, bases, have = field_type_rows(structs, name, decls), set(), 0
     for _sn, base, _ann, _why in rows:
         if base is not None:
             bases.add(base)
@@ -8129,7 +8149,7 @@ def field_type_is_value(structs, name, decls: dict) -> bool:
         return False
     bases = set()
     for st in structs:
-        base, _ann = struct_field_declared_type(st, name)
+        base, _ann = struct_field_declared_type(st, name, decls)
         if base is None:
             return False
         bases.add(base)
@@ -8199,6 +8219,253 @@ def struct_frame_block_bytes(struct_def, decls: dict,
 # that a cyclic declaration graph produces a refusal rather than a hang; it is
 # checked in `struct_nested_frame_fields` and the refusal names the cycle.
 MAX_NESTED_FRAME_DEPTH = 4
+
+
+# ── `__init__`'s ASSIGNMENTS: a second source for a field's type ─────────
+#
+# `struct_field_declared_type` above reads a field's type out of the class
+# body's ANNOTATION, and it has exactly one source, which left this shape
+# refused by name:
+#
+#     class Tail:
+#         __slots__ = ('limit', '_chunks', '_size')
+#         def __init__(self, limit=4 << 20):
+#             self.limit, self._chunks, self._size = limit, [], 0
+#
+# Nothing here is unusual Python, and nothing here declares a type — but
+# `self._chunks = []` says what the slot holds every bit as plainly as
+# `var _chunks: List[Int]` does, and this path consumed only the annotation.  So
+# the answer it gave was "the declared type is the only thing here that could say
+# so, and it does not", about a class that had said so in the only other way
+# Python has.  `bugs/FORMAL_class_assigns_its_fields_in_init.md`.
+#
+# WHAT THE ASSIGNED VALUE IS EVIDENCE FOR, and what it is not, is the whole of
+# the safety argument, so it is stated before the code:
+#
+#   * `__init__` is evidence about a field's TYPE and never about its VALUE.
+#     Premise (B2) is that `S()` does not run `__init__` on this path, so the
+#     word in a fresh instance's slot is whatever the CONSTRUCTOR stores there —
+#     a class-level default, a zero, or a nested frame address the constructor
+#     itself placed.  Reading the type off the assignment is therefore reading a
+#     fact about the class; reading the VALUE off it would be reading a word
+#     that is not in the image.  Every gate that turns a type into a VALUE
+#     (`struct_field_kind`'s materializable-default test, `declared_type_kind`'s
+#     table) is downstream of this and unchanged, so a class-level default is
+#     still the only thing that can supply one.
+#   * `__init__` and ONLY `__init__`. An assignment in an EXECUTED method is a
+#     real write, which is `struct_fields_written_outside_init`'s business and
+#     stays there: a written field answers `_REASSIGNED` and is refused, and it
+#     must not instead answer "the type is a frame" and place one.
+#   * UNANIMITY OR NOTHING, the same rule `ValueKinds._bind` applies to a local
+#     name and for the same reason: two assignments that classify differently, or
+#     one that classifies and one that cannot, give no answer at all.  Picking
+#     either would make the answer depend on which use site asked.
+#
+# The classifier is deliberately short, because each row is a case where the
+# VALUE settles the question no matter what the program does later, and the
+# omitted ones are all "not provable":
+#
+#   * `S()` where `S` is a bare name — a construction of the struct named `S`.
+#     If `S` is one of THIS UNIT's framed structs the slot holds that struct's
+#     address, which is a nested frame the constructor places; if it is
+#     anything else it is provably not one.  One recogniser, both answers, and
+#     the answer is looked up in `decls` by the caller exactly as an annotation
+#     would be — which is why this is evidence about a NAME and not a decision.
+#   * a container literal — `[]`, `{}`, `()`, `{…}`: a container, and a
+#     container is a frame-allocated blob on this path, never a frame address.
+#   * a literal scalar — a string, an int, a float, a bool, `None`: a word.
+#
+# Everything else is the untyped direction: a name, a member, a ternary, a
+# comprehension, a call with a non-name callee, a subscripted callee
+# (`Pointer[Int](…)` — the base name there is the CONSTRUCTOR's, which is not
+# what the annotation would have said).  Returning None for those is the safe
+# direction twice over: no nested frame is placed, and no frame diagnostic is
+# suppressed.
+
+
+def _init_field_assignments(struct_def) -> dict:
+    """`{field_name: [value_node, …]}` — what `__init__` assigns to each field.
+
+    `__init__` alone, every spelling of `self.<name> = …` it uses, and the
+    UNION of a field's assignments rather than the last one seen: unanimity is
+    decided by `struct_init_field_types`, and it can only be decided over all
+    of them.
+
+    Both assignment spellings matter and only one of them is a `MemberExpr`
+    target of a plain `AssignStmt`: `self.a, self.b = limit, [], 0` parses as an
+    `AssignStmt` whose TARGET is a `TupleExpr` of `MemberExpr`, so a scan
+    looking for `target: MemberExpr` reads a class as assigning nothing at all.
+    `MultiAssignStmt` (`a = b = v`) and a chained `self.a = self.b = v` come out
+    of the same `iter_nodes` walk for the same reason: a chained assignment is a
+    chain of `AssignStmt` nodes in this AST, so reading only the outermost one
+    would miss every target past the first.
+
+    An `AugAssignStmt` contributes the FIELD and no value: `self.n += 1` in
+    `__init__` says the slot is a counter and says nothing about its type.
+    """
+    out: dict = {}
+    for m in struct_methods(struct_def):
+        if m.name != "__init__":
+            continue
+        receivers = struct_receivers(struct_def)
+
+        def record(name, value):
+            out.setdefault(name, []).append(value)
+
+        def target_names(target):
+            """The field names one assignment target binds, or [] if none does.
+
+            A target is a field access only when its base is a receiver NAME, so
+            `self.x`, `(self.x, self.y)` and `self.x, = v` are fields and
+            `p[i]`, `a.b` and a bare local are not — the last of which is what
+            keeps `self.x = y` from claiming a field named `y`.
+            """
+            if isinstance(target, F.MemberExpr):
+                return ([target.member]
+                        if isinstance(target.obj, F.IdentExpr)
+                        and target.obj.name in receivers else [])
+            if isinstance(target, (F.TupleExpr, F.ListExpr)):
+                return [n for el in getattr(target, "elements", None) or []
+                        for n in target_names(el)]
+            return []
+
+        for node in iter_nodes(getattr(m, "body", None)):
+            if isinstance(node, (F.AssignStmt, F.MultiAssignStmt)):
+                targets = [node.target] if isinstance(
+                    node, F.AssignStmt) else list(node.targets or [])
+                for t in targets:
+                    names = target_names(t)
+                    if isinstance(t, (F.TupleExpr, F.ListExpr)):
+                        values = list(getattr(node.value, "elements", None) or [])
+                        if isinstance(node.value, (F.TupleExpr, F.ListExpr)) \
+                                and len(values) == len(names):
+                            # The tuple form pairs them positionally, which is
+                            # what the language guarantees; an arity that does
+                            # not match is a parse this does not understand, so
+                            # it contributes nothing rather than a guess.
+                            for n, v in zip(names, values):
+                                record(n, v)
+                        continue
+                    for n in names:
+                        record(n, node.value)
+    return out
+
+
+# The type NAME an assigned value provably has, for the rows the classifier can
+# settle.  A key that is absent is the untyped direction; the value is what
+# `struct_field_declared_type` hands back as the "annotation", which is why each
+# one is spelled as a bare identifier — a message quoting it reads as a type, and
+# `annotation_base_name` on it returns the same name.
+#
+# `int` and `str` are the Python spellings rather than this project's (`Int`,
+# `String`) on purpose, and the reason is that these rows are only ever consulted
+# for "is this a FRAME of this unit", where "the name is not a struct this unit
+# declares" IS the answer.  Spelling it `Int` instead would make it a lookup
+# that could HIT a struct of this module named `Int`, which is a different claim
+# about the same source text.
+_INIT_ASSIGNED_BASE_NAMES = {
+    F.ListExpr: "list", F.TupleExpr: "tuple", F.SetExpr: "set",
+    F.DictExpr: "dict", F.StringLiteral: "str", F.IntLiteral: "int",
+    F.FloatLiteral: "float", F.BoolLiteral: "bool",
+}
+
+
+def assigned_value_base_name(value, decls: dict = None):
+    """The type NAME an assigned value provably holds, or None.
+
+    The classifier the second evidence source is built on, and its `None` is the
+    answer for anything the source does not settle — see the note above for the
+    cases and for why each omission is the safe direction.
+
+    `decls` is `{name: StructDef}` for the structs THIS MODULE DECLARES, and it
+    is what makes the CONSTRUCTOR row conditional.  `self.x = Inner()` says the
+    slot holds an `Inner`, and if `Inner` is one of this unit's framed structs
+    that is a nested frame the constructor places; `self.x = make()` says the
+    slot holds whatever `make` RETURNS, which is not a type at all and could be
+    an `Inner`, a list, or an int.  Confusing the two is the mistake this
+    parameter exists to prevent, and it is not a small one: a bare `make` read as
+    "a type that is not a struct of this unit" answers the frame question
+    "provably not a frame" about a slot that may well hold one.
+
+    So WITHOUT `decls` the constructor row contributes nothing.  That is the safe
+    direction, and it is the same one the whole rule is arranged around: an
+    absent answer removes a name from the typed set, and a name that is not in the
+    typed set can neither place a frame nor suppress a frame diagnostic.
+    """
+    kind = _INIT_ASSIGNED_BASE_NAMES.get(type(value))
+    if kind is not None:
+        # `type()` rather than `isinstance` because `BoolLiteral` and
+        # `IntLiteral` are separate dataclasses and a subclass that changed its
+        # meaning would silently take the wrong row.
+        return kind
+    if isinstance(value, F.CallExpr) and isinstance(value.func, F.IdentExpr):
+        # A subscripted callee is not reached here (`value.func` is an
+        # `IdentExpr`), so `Pointer[Int]()` and `Int(x)` stay apart.
+        name = value.func.name
+        if decls is None or not name.isidentifier():
+            return None
+        return name if name in decls else None
+    if isinstance(value, F.IdentExpr) and value.name == "None":
+        return "None"
+    return None
+
+
+def struct_init_field_types(struct_def, decls: dict = None) -> dict:
+    """`{field_name: (base, spelling)}` — the type `__init__`'s assignments AGREE on.
+
+    Unanimity or nothing, exactly as `ValueKinds._bind` binds a local name:
+    every assignment of a field has to classify, and they have to classify the
+    same way.  One that does not (`self.x = argv if argv else []`), or one that
+    classifies to nothing (`self.x = make()`, without `decls`), or two that
+    classify differently (`self.x = Scope()` and `self.x = None`) leave the field
+    out of the answer — which is what puts it back on `_NOT_TYPED` and on
+    today's refusal.
+
+    Every field assigned NOTHING at all is left out too, so this is a map of the
+    fields `__init__` says something about rather than a census of them.  The
+    class-level default, the annotation and the field SET are the other three
+    sources and each of them is somebody else's function.
+
+    `decls` is `assigned_value_base_name`'s and its absence is why a
+    constructor-only field is untyped for a caller that cannot supply it.
+    """
+    out = {}
+    for name, values in _init_field_assignments(struct_def).items():
+        bases = {assigned_value_base_name(v, decls) for v in values}
+        if len(bases) != 1:
+            continue
+        base = bases.pop()
+        if base is None:
+            continue
+        out[name] = (base, base)
+    return out
+
+
+def struct_init_field_type_why(struct_def, name, decls: dict = None) -> str:
+    """Why `__init__` said nothing classifiable about `name` — for a refusal.
+
+    The negative half of `struct_init_field_types`, and it exists because a
+    refusal that says "no evidence" sends the reader looking for evidence the
+    tool cannot read.  It says which of the three shapes it is: never assigned,
+    assigned something this classifier cannot reduce to a type, or assigned two
+    different things.
+    """
+    values = _init_field_assignments(struct_def).get(name)
+    if not values:
+        return ("__init__ does not assign it at all, so the only things naming "
+                "it are __slots__ or another method's read of it")
+    bases = [assigned_value_base_name(v, decls) for v in values]
+    named = {b for b in bases if b is not None}
+    if not named:
+        return ("__init__ assigns it values this path cannot reduce to a type "
+                "— a name, a member, a ternary, a comprehension, or a call to "
+                "a function this module does not declare as a type — so there "
+                "is no type to read")
+    if len(named) > 1:
+        return (f"__init__ assigns it {len(bases)} different types "
+                f"({', '.join(sorted(named))}), so there is no single answer")
+    return (f"__init__ assigns it a type this path cannot classify "
+            f"({bases[0]!r}), alongside an assignment it can")
 
 
 def struct_fields_written_outside_init(struct_def) -> set:
@@ -10101,6 +10368,107 @@ def find_method_owner(structs: dict, method_name: str):
     if len(owners) == 1:
         return owners[0]
     return None
+
+
+def structs_declaring_method(structs, method_name) -> list:
+    """The candidate structs that declare a METHOD called `method_name`.
+
+    The question a field read has to ask before it can say "this struct has no
+    such field", and the reason the answer changes what the refusal says: a
+    member access `recv.m` in a VALUE position is not a field access when `m` is
+    one of the receiver's own methods — it is the bound method, and a bound
+    method is not a word, so there is no slot to read it out of and nothing to
+    store it in.  `find_method_owner` answers this over the WHOLE module's dict;
+    this one is over the candidate list the caller already holds, because the
+    diagnostic has to name the struct the RECEIVER is rather than the one that
+    happens to declare the name.
+
+    Every declaring struct is returned rather than one, for the reason
+    `find_method_owner` returns None for two: a name two structs declare is
+    ambiguous, and the caller's business is to say so, not to pick.
+    """
+    return [st for st in (structs or ())
+            if any(m.name == method_name for m in struct_methods(st))]
+
+
+def _slot_rows(candidates, name):
+    """`[(struct_name, slot_or_None), …]` — the disagreement table, for a message.
+
+    `struct_frame_slot_candidates` computes exactly this and returns it inside
+    its second element; this recomputes it for the one caller that is building a
+    message rather than making a decision, and the recomputation cannot disagree
+    because both read the same `struct_frame_slots` list.  It exists so that
+    `member_read_without_a_field` needs only the candidate list.
+    """
+    return [(st.name, struct_frame_slot(st, name)) for st in (candidates or ())]
+
+
+def member_read_without_a_field(chain, holder, name, candidates) -> str:
+    """Why `holder.<name>` has no slot: a message, for the three real shapes.
+
+    `struct_frame_slot_candidates` reports DISAGREEMENT and nothing else, and its
+    one caller printed every disagreement as "this name holds a frame address in
+    more than one shape" — which is false for the two shapes that actually
+    occur most, and both of them say something a reader can act on:
+
+      * ONE candidate, and it does not have the field.  There is nothing to
+        disagree with, so "more than one shape" describes a disagreement that
+        does not exist.  What the reader needs is that the struct simply has no
+        such field — which in Python is an `AttributeError` at run time, and so
+        is usually a program that raises on the first run rather than one that
+        needs an annotation.
+      * The name is a METHOD of the receiver's own struct.  `self.helper` (no
+        parentheses) is not a field read at all: it is a bound method, and this
+        path has no bound-method values.  Reading slot `k` for it would read
+        whichever field happens to be at `k`, and `k` is not even determined —
+        which is why this is a refusal and not a slot lookup.  Measured, on
+        `formal/arm64_codegen.py`'s own `self._untyped_callee`: the previous
+        message told the reader two layouts disagreed when there was one layout
+        and one candidate.
+      * TWO OR MORE candidates, which is the disagreement the original message
+        was written for.  Kept, because there it is true.
+
+    Shared because both backends' frame passes raise from this shape and one
+    message is what keeps the two architectures from drifting on it.
+
+    The FIRST two shapes are refusals of shapes this path has no representation
+    for, and that is the whole of what changed: the class of program that
+    refuses is identical and the sentence about why is no longer a description
+    of a disagreement that did not happen.
+    """
+    owners = structs_declaring_method(candidates, name)
+    if owners:
+        return (
+            f"{chain} names {name!r}, which is a METHOD of "
+            f"{', '.join(st.name for st in owners)} rather than one of its "
+            f"fields: a value-position method reference is a bound method, and "
+            f"a method is not a word — there is no slot to read it out of and "
+            f"nothing to store it in, so this path has no representation for it. "
+            f"Call it (`{holder}.{name}(...)`), which is a receiver and a call "
+            f"and lowers, or write the operation out where it was used"
+        )
+    if len(candidates) == 1:
+        st = candidates[0]
+        return (
+            f"{chain} is a field of {holder}, and {st.name} has no field "
+            f"{name!r}: its {struct_field_summary(st)}. In Python this is an "
+            f"AttributeError at run time, so the program is very likely already "
+            f"raising here — but this path refuses rather than read a word it "
+            f"cannot place, because a frame slot holds one 64-bit word and "
+            f"there is no `k` to read: the name is not in the layout at all"
+        )
+    return (
+        f"{holder}.{name} cannot be placed: this name holds a frame address in "
+        f"more than one shape, and the shapes do not agree on where {name!r} "
+        f"lives — " + "; ".join(
+            f"{sn} puts it at slot {sl}" if sl is not None
+            else f"{sn} has no such field" for sn, sl in _slot_rows(candidates,
+                                                                   name))
+        + ". Which one applies depends on the path taken, and this analysis has "
+          "none, so a slot index computed from either would read the wrong word "
+          "on the other: the program would build, run, and return a number the "
+          "source never wrote"
+    )
 
 
 def method_owner_names(structs: list) -> dict:

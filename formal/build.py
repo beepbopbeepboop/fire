@@ -1936,14 +1936,14 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                                 f"the slot would have to hold a frame address. "
                                 f"The declared type of {outer!r} is the only "
                                 f"thing here that could say so, and it does "
-                                f"not: {M.field_type_disagreement(cands, outer, _type_rows(cands, outer))}"
+                                f"not: {M.field_type_disagreement(cands, outer, _type_rows(cands, outer, structs_by_name))}"
                                 f". Until every binding of the name agrees on "
                                 f"one type there is no frame to place here"
                             )
                         if nested is _REASSIGNED:
                             raise CodegenError(
                                 f"{base}.{outer} is declared as a "
-                                f"{M.annotation_base_name(_field_annotation(cands, outer))}"
+                                f"{M.annotation_base_name(_field_annotation(cands, outer, structs_by_name))}"
                                 f", a struct of this module whose receiver is a "
                                 f"frame of 8-byte slots, so the slot does hold a "
                                 f"frame address — but a method of "
@@ -2023,13 +2023,13 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                         f"the value — which is {node.member!r}() as a call, not "
                         f"a field read. The declared type of {outer_field!r} does "
                         f"not settle it: "
-                        f"{M.field_type_disagreement(cands, outer_field, _type_rows(cands, outer_field))}"
+                        f"{M.field_type_disagreement(cands, outer_field, _type_rows(cands, outer_field, structs_by_name))}"
                     )
                 if nested is _REASSIGNED:
                     raise CodegenError(
                         f"{chain} reads through {base}.{outer_field}, which is "
                         f"declared as a "
-                        f"{M.annotation_base_name(_field_annotation(cands, outer_field))}"
+                        f"{M.annotation_base_name(_field_annotation(cands, outer_field, structs_by_name))}"
                         f" — a struct of this module whose receiver is a frame — "
                         f"but a method of "
                         f"{', '.join(sorted({st.name for st in cands}))} ASSIGNS "
@@ -2060,7 +2060,7 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                         f"read {chain} has no first load: "
                         + ("the candidate layouts disagree — "
                            + M.field_type_disagreement(
-                               cands, outer_field, _type_rows(cands, outer_field))
+                               cands, outer_field, _type_rows(cands, outer_field, structs_by_name))
                            if odis else
                            f"no candidate declares it as a field of a frame")
                     )
@@ -2078,22 +2078,19 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                 # bound from a constructor that is not framed: a plain word.
                 # Not a frame access, so not this pass's business.
                 continue
-            slot, (disagree, rows) = M.struct_frame_slot_candidates(
+            slot, (disagree, _rows) = M.struct_frame_slot_candidates(
                 cands, node.member)
             if disagree:
+                # The message is the model's because it has to pick between
+                # three SHAPES — a method, a field the struct does not have, and
+                # a genuine two-candidate disagreement — and only the model can
+                # ask which, because only it has the struct tables. It used to
+                # be spelled here, and it printed "more than one shape" for
+                # every one of the three; see
+                # `model.member_read_without_a_field`.
                 raise CodegenError(
-                    f"{base}.{node.member} cannot be placed: this name holds a "
-                    f"frame address in more than one shape, and the shapes do "
-                    f"not agree on where {node.member!r} lives — "
-                    + "; ".join(
-                        f"{sn} puts it at slot {sl}" if sl is not None
-                        else f"{sn} has no such field" for sn, sl in rows)
-                    + ". Which one applies depends on the path taken, and this "
-                      "analysis has none, so a slot index computed from either "
-                      "would read the wrong word on the other: the program "
-                      "would build, run, and return a number the source never "
-                      "wrote"
-                )
+                    M.member_read_without_a_field(chain, base, node.member,
+                                                  cands))
             if slot is None:
                 raise CodegenError(
                     f"{base}.{node.member} is a member access on a "
@@ -2379,7 +2376,7 @@ _NOT_TYPED = object()
 _REASSIGNED = object()
 
 
-def _field_annotation(cands, name):
+def _field_annotation(cands, name, decls=None):
     """The declared type of `name` as a candidate spells it, for a message.
 
     The first candidate's answer, and only ever used to NAME a type in a
@@ -2387,15 +2384,18 @@ def _field_annotation(cands, name):
     requires unanimity.  A reader is better served by the spelling one
     candidate used than by no type at all, and the message says "is declared as"
     rather than asserting it is the type.
+
+    `decls` because the `__init__`-assignment source needs it to tell a
+    CONSTRUCTOR from a call to a function, and every caller here has one.
     """
     for st in cands:
-        _base, ann = M.struct_field_declared_type(st, name)
+        _base, ann = M.struct_field_declared_type(st, name, decls)
         if ann is not None:
             return ann
     return None
 
 
-def _type_rows(cands, name):
+def _type_rows(cands, name, decls=None):
     """The declared-type evidence for a field, for a refusal to quote.
 
     A function rather than a call at each use site because the refusal has to
@@ -2403,7 +2403,7 @@ def _type_rows(cands, name):
     would be a second walk of the same candidates that could disagree with the
     first, and a refusal that misreports why it fired is worse than one that
     does not report at all."""
-    return M.field_type_rows(cands, name)
+    return M.field_type_rows(cands, name, decls)
 
 
 def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):

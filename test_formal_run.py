@@ -3449,6 +3449,459 @@ DECLARED_TYPE_REFUSALS = [
      "refuse:is a method call on a value", None),
 ]
 
+# ── a field's TYPE from what `__init__` ASSIGNS it ──────────────────────────
+#
+# The second evidence source for `model.struct_field_declared_type`, and the one
+# that makes a class which assigns its fields in `__init__` and declares none a
+# lowerable program rather than a refusal by name. `bugs/FORMAL_class_assigns_its_
+# fields_in_init.md` is the finding and the measurement; what is here is the
+# evidence that the change is both sound and narrow.
+#
+# FOUR things these cases have to establish, in the order they matter:
+#
+#   1. The nested frame is PLACED and the program computes the source's answer.
+#      `self.inner = Inner()` types the slot exactly as `var inner: Inner` does,
+#      so the constructor places Inner's frame in Outer's own block and the two
+#      objects of `init_assigned_nested_frame_two_objects_no_alias` get two
+#      frames at two addresses. Read through CPython: every answered case below
+#      is also a Python program and the expected exit status is what CPython
+#      returns from `main()`.
+#   2. `__init__` is evidence about the field's TYPE and never about its VALUE.
+#      `init_assigned_class_default_still_governs_the_value` is the case, and it
+#      is the only one here whose answer is NOT CPython's — deliberately, and
+#      because premise (B2) says a zero-argument `S()` does not run `__init__`
+#      on this path, so the class-level default is what the constructor stores.
+#      CPython returns 99 and the image returns 7, and that gap is the premise,
+#      not this change: the case was built on the pre-change tree and returned 7
+#      there too (see the doc). What the case is for is that the `__init__`
+#      assignment now TYPES the field, so a kind is claimed where none was
+#      claimed before — and the value the image computes must still be the one
+#      the CONSTRUCTOR put there.
+#   3. UNANIMITY OR NOTHING, and nothing else. A field assigned two different
+#      classifiable values, or one the classifier cannot reduce to a type, is not
+#      typed, so no frame is placed and the case is refused — with the
+#      disagreement SPELLED, because a refusal that says only "no evidence" sends
+#      the reader looking for evidence the tool cannot read.
+#   4. The narrowing: a field an EXECUTED method assigns is still `_REASSIGNED`,
+#      because `__init__` is excluded from `struct_fields_written_outside_init`
+#      and the lifetime argument that prefers a placed frame does not apply to a
+#      word some running method put there.
+#
+# `method_reference_and_missing_field_*` at the bottom are the other half of this
+# change: the diagnostic `model.member_read_without_a_field` replaced, which used
+# to print "this name holds a frame address in more than one shape" for a single
+# candidate with no disagreement to report.
+INIT_FIELD_TYPE_CASES = [
+    # (1) THE POSITIVE CASE, and the one the sweep's ten files are all the same
+    # instance of. `Interpreter.scope` / `ARM64Codegen.asm` / `Tail._chunks`:
+    # three classes of this repository that assign their fields in `__init__`,
+    # declare none of them, and are refused by name. Nothing here is unusual
+    # Python, and 123 + 5 is what `main()` returns in CPython too.
+    #
+    # The shape that would be silently wrong instead of refused is a shared
+    # nested frame: one block per construction SITE is what keeps `o.inner` from
+    # naming the same address in two objects, so this asserts a real answer
+    # rather than "it linked".
+    ("init_assigned_nested_frame_method_call",
+     "class Inner:\n"
+     "    __slots__ = ('a', 'b', 'c')\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "        self.c = 0\n"
+     "\n"
+     "    def total(self):\n"
+     "        return self.a * 100 + self.b * 10 + self.c\n"
+     "\n"
+     "class Outer:\n"
+     "    __slots__ = ('tag', 'pad', 'inner')\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.tag = 0\n"
+     "        self.pad = 0\n"
+     "        self.inner = Inner()\n"
+     "\n"
+     "    def go(self):\n"
+     "        return self.inner.total() + self.tag\n"
+     "\n"
+     "def main():\n"
+     "    o = Outer()\n"
+     "    o.tag = 5\n"
+     "    o.inner.a = 1\n"
+     "    o.inner.b = 2\n"
+     "    o.inner.c = 3\n"
+     "    return o.go()\n", 128, None),
+    # TWO OBJECTS, EACH HOLDING ITS OWN NESTED FRAME, each read guarded by a
+    # different return code so a regression says WHICH frame moved. This is the
+    # case a "the lowering is the same for every width" argument cannot
+    # establish on its own, and it is the same program as the row above with a
+    # second construction site — which is what makes it a test of the BLOCK
+    # placement and not of the method call.
+    ("init_assigned_nested_frame_two_objects_no_alias",
+     "class Inner:\n"
+     "    __slots__ = ('a', 'b', 'c')\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "        self.c = 0\n"
+     "\n"
+     "    def total(self):\n"
+     "        return self.a * 100 + self.b * 10 + self.c\n"
+     "\n"
+     "class Outer:\n"
+     "    __slots__ = ('tag', 'pad', 'inner')\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.tag = 0\n"
+     "        self.pad = 0\n"
+     "        self.inner = Inner()\n"
+     "\n"
+     "    def go(self):\n"
+     "        return self.inner.total()\n"
+     "\n"
+     "def main():\n"
+     "    o1 = Outer()\n"
+     "    o2 = Outer()\n"
+     "    o1.inner.a = 1\n"
+     "    o1.inner.b = 2\n"
+     "    o1.inner.c = 3\n"
+     "    o2.inner.a = 7\n"
+     "    o2.inner.b = 8\n"
+     "    o2.inner.c = 9\n"
+     "    if o1.inner.total() != 123:\n"
+     "        return 10 + o1.inner.total()\n"
+     "    if o2.inner.total() != 789:\n"
+     "        return 20 + o2.inner.total()\n"
+     "    o2.inner.a = 4\n"
+     "    if o1.inner.total() != 123:\n"
+     "        return 30 + o1.inner.total()\n"
+     "    if o2.inner.total() != 489:\n"
+     "        return 40 + o2.inner.total()\n"
+     "    o1.inner.c = 5\n"
+     "    if o2.inner.total() != 489:\n"
+     "        return 50 + o2.inner.total()\n"
+     "    return 0\n", 0, None),
+    # THE TUPLE FORM is exercised by `init_assigned_scalar_fields_stay_plain`
+    # below rather than here, because it is a property of the STATEMENT
+    # lowering and x86-64 does not lower a `MemberExpr` tuple target at all
+    # (`formal/x86_64_codegen.py`'s `_emit_tuple_assign` takes plain names only,
+    # while arm64 lowers it) — a divergence in the two backends rather than in
+    # anything to do with the evidence source, filed as
+    # `bugs/FORMAL_x86_64_tuple_assignment_member_target.md`.
+    ("init_assigned_scalar_fields_stay_plain",
+     "class Tail:\n"
+     "    __slots__ = ('limit', '_chunks', '_size')\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.limit = 4\n"
+     "        self._chunks = []\n"
+     "        self._size = 0\n"
+     "\n"
+     "    def count(self):\n"
+     "        return self._size\n"
+     "\n"
+     "def main():\n"
+     "    t = Tail()\n"
+     "    t.limit = 4\n"
+     "    t._size = 5\n"
+     "    return t.limit + t.count()\n", 9, None),
+    # (2) THE VALUE IS NOT `__init__`'s. A class-level default is the only thing
+    # this path materialises into a fresh instance's slot, so 7 is what the
+    # image computes and 99 — what `__init__` says — is what premise (B2)
+    # (`FRAME_FIELD_BLOB_PREMISE_B2`) rules out. CPython runs `__init__` and
+    # returns 99.
+    #
+    # This case exists because the change makes the field TYPED: `self.limit =
+    # 99` is an int literal, so `struct_field_kind` now has a kind to claim
+    # where it had none, and the materialisable-default gate in
+    # `struct_field_kind` is what keeps the answer at 7. A regression that let
+    # the `__init__` VALUE through would make this return 99 and every case
+    # below would still pass, so it is here on its own.
+    ("init_assigned_class_default_still_governs_the_value",
+     "class Cfg:\n"
+     "    limit = 7\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.limit = 99\n"
+     "        self.pad = 0\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.limit\n"
+     "\n"
+     "def main():\n"
+     "    c = Cfg()\n"
+     "    return c.get()\n", 7, None),
+    # The same gate, on the OTHER half of `declared_type_kind`'s table: a
+    # class-level STRING default plus `self.s = "hi"` in `__init__` types the
+    # field as a string, and `len()` of a string is a `strlen`. Before the
+    # change this was refused with "the source does not say what this operand
+    # holds" — false about a class whose `__init__` said it. 2 in CPython, where
+    # `__init__` runs and puts the same "hi" there.
+    ("init_assigned_string_field_len_is_answerable",
+     "class Bag:\n"
+     "    s = \"hi\"\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.s = \"hi\"\n"
+     "        self.n = 0\n"
+     "\n"
+     "    def size(self):\n"
+     "        return len(self.s) + self.n\n"
+     "\n"
+     "def main():\n"
+     "    b = Bag()\n"
+     "    return b.size()\n", 2, None),
+]
+
+INIT_FIELD_TYPE_REFUSALS = [
+    # (3) UNANIMITY, and the first of the two. `self.inner = Inner()` on one
+    # branch and `self.inner = None` on the other are both classifiable and they
+    # classify DIFFERENTLY, so there is no single answer and no frame is placed.
+    # The needle is the model's `struct_init_field_type_why` sentence rather than
+    # the refusal's summary, because the summary is about the frame layout and
+    # the reader needs to know WHICH evidence was read and rejected.
+    #
+    # Nothing runs `__init__` on this path, so a reader might reasonably ask
+    # whether the branch matters. It does not, and that is the point: the rule
+    # is flow-INsensitive about `__init__` exactly as `ValueKinds` is about a
+    # local name, because agreeing on "what type is this slot" must not depend
+    # on which use site asked.
+    ("init_assigned_type_must_be_unanimous",
+     "class Inner:\n"
+     "    __slots__ = ('a', 'b', 'c')\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "        self.c = 0\n"
+     "\n"
+     "    def total(self):\n"
+     "        return self.a + self.b + self.c\n"
+     "\n"
+     "class Outer:\n"
+     "    __slots__ = ('tag', 'pad', 'inner')\n"
+     "\n"
+     "    def __init__(self, c):\n"
+     "        self.tag = 0\n"
+     "        self.pad = 0\n"
+     "        if c:\n"
+     "            self.inner = Inner()\n"
+     "        else:\n"
+     "            self.inner = None\n"
+     "\n"
+     "    def go(self):\n"
+     "        return self.inner.total()\n"
+     "\n"
+     "def main():\n"
+     "    o = Outer(1)\n"
+     "    o.inner.a = 4\n"
+     "    return o.go()\n",
+     "refuse:__init__ assigns it 2 different types (Inner, None), so there is no single answer", None),
+    # UNANIMITY, the other direction: one classifiable assignment and one that
+    # is not. `self.inner = make()` is a call whose callee is a NAME, and a name
+    # is not a type — the classifier says so rather than guessing at what
+    # `make` returns, and one unclassifiable assignment takes the whole field
+    # out of the typed set.
+    #
+    # The counter-case a reader will ask for is `self.inner = Inner(1)`: also a
+    # bare constructor call, and ALSO typed, because the arguments say nothing
+    # about which struct is constructed.
+    ("init_assigned_unclassifiable_value_stays_untyped",
+     "class Inner:\n"
+     "    __slots__ = ('a', 'b', 'c')\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "        self.c = 0\n"
+     "\n"
+     "    def total(self):\n"
+     "        return self.a + self.b + self.c\n"
+     "\n"
+     "def make():\n"
+     "    return Inner()\n"
+     "\n"
+     "class Outer:\n"
+     "    __slots__ = ('tag', 'pad', 'inner')\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.tag = 0\n"
+     "        self.pad = 0\n"
+     "        self.inner = make()\n"
+     "\n"
+     "    def go(self):\n"
+     "        return self.inner.total()\n"
+     "\n"
+     "def main():\n"
+     "    o = Outer()\n"
+     "    o.inner.a = 4\n"
+     "    return o.go()\n",
+     "refuse:__init__ assigns it values this path cannot reduce to a type", None),
+    # THE NARROWING, and the case that makes the whole thing safe: the type is
+    # known and it IS a frame, and what is unknown is WHOSE. `Outer.reset`
+    # ASSIGNS `self.inner`, so the word in the slot is a frame belonging to
+    # whichever function ran the assignment rather than the frame this
+    # constructor placed, and those two lifetimes are independent. So the answer
+    # is `_REASSIGNED` and not a nested frame, which is the same fourth answer
+    # `byref_refuse_write_over_a_nested_frame` pins for an ANNOTATED field — the
+    # two must not be able to disagree about which fields are written.
+    ("init_assigned_field_written_by_a_method_stays_reassigned",
+     "class Inner:\n"
+     "    __slots__ = ('a', 'b', 'c')\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "        self.c = 0\n"
+     "\n"
+     "    def total(self):\n"
+     "        return self.a + self.b + self.c\n"
+     "\n"
+     "class Outer:\n"
+     "    __slots__ = ('tag', 'pad', 'inner')\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.tag = 0\n"
+     "        self.pad = 0\n"
+     "        self.inner = Inner()\n"
+     "\n"
+     "    def reset(self):\n"
+     "        self.inner = Inner()\n"
+     "\n"
+     "    def go(self):\n"
+     "        return self.inner.total()\n"
+     "\n"
+     "def main():\n"
+     "    o = Outer()\n"
+     "    o.inner.a = 4\n"
+     "    return o.go()\n",
+     "refuse:ASSIGNS", None),
+    # A CONTAINER field, and the case the `procrun.py` row is really about. The
+    # frame question is answered — `self._chunks = []` says the slot holds a
+    # blob and a blob is never a frame address of this unit — so the frame
+    # diagnostic must NOT fire, and the value-method one must. The needle is the
+    # common part of the two architectures' sentence; the architectures differ
+    # only in which one they name.
+    #
+    # Before the change this source was refused with "the declared type of
+    # '_chunks' is the only thing here that could say so, and it does not" —
+    # a frame-layout diagnostic about a list.
+    ("init_assigned_container_reaches_the_value_method_refusal",
+     "class Tail:\n"
+     "    __slots__ = ('limit', '_chunks', '_size')\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.limit = 4\n"
+     "        self._chunks = []\n"
+     "        self._size = 0\n"
+     "\n"
+     "    def append(self, data):\n"
+     "        self._chunks.append(data)\n"
+     "        return self._size\n"
+     "\n"
+     "def main():\n"
+     "    t = Tail()\n"
+     "    t.append(1)\n"
+     "    return t.limit\n",
+     "refuse:list.append() is not lowered on the formal", None),
+    # `len()` of the nested frame the new evidence placed. The point is which of
+    # the two `len` sentences fires: a frame ADDRESS is its own case in
+    # `len_refusal`, and getting it means the slot was typed as a frame and not
+    # left unclassified. The alternative sentence ("the source does not say what
+    # this operand holds") would be false about a class whose `__init__` says
+    # `self.inner = Inner()`.
+    ("init_assigned_nested_frame_len_is_the_frame_address_refusal",
+     "class Inner:\n"
+     "    __slots__ = ('a', 'b', 'c')\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "        self.c = 0\n"
+     "\n"
+     "class Outer:\n"
+     "    __slots__ = ('tag', 'pad', 'inner')\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.tag = 0\n"
+     "        self.pad = 0\n"
+     "        self.inner = Inner()\n"
+     "\n"
+     "    def go(self):\n"
+     "        return len(self.inner)\n"
+     "\n"
+     "def main():\n"
+     "    o = Outer()\n"
+     "    return o.go()\n",
+     "refuse:len(self.inner) is len() of a FRAME ADDRESS", None),
+    # ── the member-read diagnostic (row 13 of the sweep map) ──
+    #
+    # `self.helper` in a VALUE position is a bound method, not a field read, and
+    # this path has no bound-method values. The refusal it used to produce was
+    # "this name holds a frame address in more than one shape, and the shapes do
+    # not agree on where 'helper' lives" — with ONE candidate and no
+    # disagreement, which is what `formal/arm64_codegen.py`'s own
+    # `self._untyped_callee` reported before this change.
+    #
+    # The case passes the reference as a KEYWORD argument on purpose: that is
+    # the spelling `formal/arm64_codegen.py` uses, and it is the one that keeps
+    # `helper` out of the class's field set, which is why that file was refused
+    # rather than lowered. It is also the shape behind
+    # `bugs/FORMAL_field_set_method_name_and_kwarg_blind_spot.md` — read that
+    # before changing `_self_field_names`.
+    ("method_reference_is_not_a_frame_slot",
+     "class Outer:\n"
+     "    __slots__ = ('limit', 'pad')\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.limit = 4\n"
+     "        self.pad = 0\n"
+     "\n"
+     "    def helper(self):\n"
+     "        return 1\n"
+     "\n"
+     "    def size(self, probe):\n"
+     "        return probe(helper=self.helper)\n"
+     "\n"
+     "def take(helper):\n"
+     "    return helper()\n"
+     "\n"
+     "def main():\n"
+     "    o = Outer()\n"
+     "    return o.size(take)\n",
+     "refuse:which is a METHOD of Outer rather than one of its fields", None),
+    # The same refusal for the OTHER shape row 13 holds: a member read of a name
+    # the receiver's struct simply does not have. There is no disagreement to
+    # report either, and the useful sentence is that the struct has no such
+    # field — which in Python is an `AttributeError`, so the reader learns that
+    # the program is very likely already raising rather than that two layouts
+    # are confused. This is `analyze_benchmarks_types.py`'s `gen.type_checker`
+    # and `test_type_system_integration.py`'s `gen._strict_type_checking`, both
+    # reads of a `GimpleGen` field that class has never had.
+    #
+    # It is a `refuse_without:` case because the wording it replaces was not
+    # merely incomplete but FALSE — the old message claimed two shapes that do
+    # not exist — and a `refuse:` case is satisfied by appending the true
+    # sentence beside the false one.
+    ("missing_field_is_not_reported_as_a_disagreement",
+     "class Cfg:\n"
+     "    __slots__ = ('limit', 'pad')\n"
+     "\n"
+     "    def __init__(self):\n"
+     "        self.limit = 4\n"
+     "        self.pad = 0\n"
+     "\n"
+     "    def get(self):\n"
+     "        return self.limit\n"
+     "\n"
+     "def main():\n"
+     "    c = Cfg()\n"
+     "    return c.get() + c.nosuch\n",
+     "refuse_without:Cfg has no field 'nosuch':in more than one shape", None),
+]
+
 # ── wave 5 (E2): the three CONSTRUCTION shapes ─────────────────────────────
 #
 # `S()`, `S(a, b, …)` and `S(x)` are three lowerings, and until now only the
@@ -6671,6 +7124,7 @@ def main():
                   + BYREF_REFUSALS + WIDE_OFF_CASES
                   + SUBSCRIPT_CASES + DECLARED_TYPE_CASES
                   + DECLARED_TYPE_REFUSALS
+                  + INIT_FIELD_TYPE_CASES + INIT_FIELD_TYPE_REFUSALS
                   + BYREF_HANDOFF_CASES + BYREF_HANDOFF_REFUSALS
                   + CROSS_MODULE_CASES + WAVE5_POSITION_CASES
                   + CONSTRUCTION_CASES + CONSTRUCTION_REFUSALS
