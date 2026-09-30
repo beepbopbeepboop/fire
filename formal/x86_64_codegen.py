@@ -443,16 +443,15 @@ class X86_64Codegen:
         # rule) and by module identity, which is what makes `mod.f(...)` — the
         # spelling `import mod` binds — resolve. The entry carries the declared
         # signature, so a call's result can be classified instead of guessed.
-        # The same two tables, and the same `model.dylib_export_lookup`, as the
-        # arm64 backend: one contract, two emitters.
-        self._dylib_by_name: dict = {}
-        self._dylib_by_module: dict = {}
-        for _lib in (dylib_exports or []):
-            for _entry in (_lib.get("exports") or []):
-                self._dylib_by_name.setdefault(_entry.get("name"), _entry)
-                _owner = self._dylib_by_module.setdefault(
-                    _entry.get("module") or "", {})
-                _owner.setdefault(_entry.get("name"), _entry)
+        # The same three tables, and the same `model.dylib_export_lookup`, as
+        # the arm64 backend: one contract, two emitters. The third is the
+        # names a module publishes by RE-EXPORT rather than by definition, and
+        # all three come from `model.dylib_export_tables` — the one builder,
+        # because the indexing was two copies of the same three questions,
+        # which is two places for them to disagree about which library owns a
+        # name.
+        (self._dylib_by_name, self._dylib_by_module,
+         self._dylib_forwarded) = M.dylib_export_tables(dylib_exports)
         self._comptime_hook = comptime_hook
         self._module_source = module_source
         self.asm = Assembler()
@@ -4623,45 +4622,18 @@ class X86_64Codegen:
     def _extern_symbol(self, name: str) -> str:
         """The boundary symbol an unbound callee `name` is emitted against.
 
-        A BARE name — what `from mod import f` binds — is answered by the flat
-        `{name: symbol}` map, first library on the line winning. A DOTTED name
-        — what `import mod` binds, spelled `mod.f` — is answered ONLY by the
-        export table of the library built for `mod`, so `mod.f` can never bind
-        some other library's `f`; and a dotted name whose module IS linked but
-        which that module does not export is refused here, naming both halves,
-        rather than emitted as a BL against a symbol nothing defines. Same
-        decision and the same words as the arm64 backend's `_extern_symbol`.
-
-        The module is identified by `model.dylib_export_module`, which knows
-        that a manifest keys a package submodule by its ABI prefix
-        (`os.path` → `os_path`) — which is what makes `os.path.join(...)`, the
-        spelling 532 measured call sites in this tree are written with, resolve
-        at all.
+        The DECISION and the words are `model.dylib_extern_symbol`'s, shared
+        with the arm64 emitter: a bare name (`from mod import f`) is answered by
+        the flat map and a dotted one (`import mod`, spelled `mod.f`) only by
+        the library built for that module or by what that module forwards, so
+        `mod.f` can never bind some other library's `f`; and a dotted name whose
+        module IS linked but does not publish it is refused here, naming both
+        halves, rather than emitted as a BL against a symbol nothing defines.
         """
-        if "." not in name:
-            return self._dylib_syms.get(name, name)
-        entry = M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name)
-        if entry is not None:
-            return entry.get("symbol") or name
-        module, _, leaf = name.rpartition(".")
-        table = M.dylib_export_module(self._dylib_by_module, module)
-        if table:
-            have = sorted(table)
-            shown = ", ".join(have[:8]) + (", …" if len(have) > 8 else "")
-            raise CodegenError(
-                f"{name}(): `{module}` is a linked module but it exports no "
-                f"`{leaf}`, so the call has no symbol to bind. What it does "
-                f"export: {shown}. A name `doc/ABI.md`'s export rule excludes "
-                f"(a leading `_`, a generic template, an overload, or a C "
-                f"library symbol such as `exit` or `write`) is not advertised, "
-                f"so a module that defines one cannot be called by that name. "
-                f"The exclusion is measured and settled in "
-                f"bugs/FORMAL_known_limits.md 1.1; a module that needs to "
-                f"publish mutable state rather than functions is a different "
-                f"gap, written down in "
-                f"bugs/FORMAL_module_state_no_storage.md")
-        return self._dylib_syms.get(name, name)
+        return M.dylib_extern_symbol(name, self._dylib_syms,
+                                     self._dylib_by_name,
+                                     self._dylib_by_module,
+                                     self._dylib_forwarded)
 
     def _callee_kind(self, name, stack):
         """What a call to the local function `name` produces, or None."""
@@ -4675,7 +4647,8 @@ class X86_64Codegen:
             # an integer — the pointer's own value.
             return M.dylib_export_return_kind(
                 M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name))
+                                      self._dylib_by_module, name,
+                                      self._dylib_forwarded))
         vk = self._vkinds_for(name, fn, stack)
         ann = getattr(fn, "return_type", None)
         if ann in STRING_TYPE_NAMES:

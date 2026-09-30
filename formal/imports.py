@@ -786,6 +786,23 @@ def _module_identity(module_name: str, parent: str = None) -> str:
     return parent + module_name
 
 
+def _qualified_reexports(reexports: dict, parent: str) -> dict:
+    """`reexported_names`' table with every module spelling made ABSOLUTE.
+
+    `reexported_names` records the module as the source SPELLS it, which for a
+    relative import is `.sub` — a name that means nothing outside the file that
+    wrote it, and this table is published in the manifest, which is read by
+    builds that have never seen this file. Qualifying it here, with the same
+    `_module_identity` the library's own NAME is derived with, is what makes
+    the record say `pkg.sub` where the source said `.sub`, so a reader of the
+    manifest can tell which module actually defines the forwarded name.
+
+    Same function, same parent, so the record and the file name cannot disagree
+    about which module a relative name resolved to."""
+    return {name: (_module_identity(module, parent), kind)
+            for name, (module, kind) in (reexports or {}).items()}
+
+
 def _dylib_lock(out: str):
     """Exclusive, cross-process, released on exit: an flock on a side file.
 
@@ -960,8 +977,10 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
                 [source_path], output=out, prove=False, check=False,
                 module_prefixes={source_path: prefix},
                 link_dylibs=dep_dylibs, arch=arch, fmt="macho",
-                reexports=reexported_names(
-                    stmts, {m: declared_kinds(p) for m, p in depends}))
+                reexports=_qualified_reexports(
+                    reexported_names(
+                        stmts, {m: declared_kinds(p) for m, p in depends}),
+                    module_identity))
         except (FormalBuildError, CodegenError) as e:
             raise ImportBuildError(f"{os.path.basename(source_path)}: {e}")
         # Record the dependencies in the manifest so a program can link them
