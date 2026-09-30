@@ -23,7 +23,12 @@ either did the right thing or produced something that looked fine:
      register kept whatever the caller last put there, and `need_two(1)` read a
      stack address where the callee's own default says 511. A silently wrong
      ARGUMENT, which is the outcome this boundary exists to prevent.
-     (`FORMAL_default_argument_not_applied_across_a_dylib`.)
+     (`FORMAL_default_argument_not_applied_across_a_dylib`.) Four spellings of
+     it are separate cases below — a `from` import, a re-export through a
+     package, and the two arity mismatches — because a callee's DECLARATION is
+     reached through a LOOKUP, and the `integ` merge is what made those lookups
+     one function. A symbol can bind and a signature not be found, and that is
+     the same silently-wrong-argument shape rather than a refusal.
   4. a STRUCT from a `--link-dylib` library. Its methods crossed the boundary
      and its DECLARATION did not, so `b.n = 4` was refused with a repair the
      reader cannot follow. (`FORMAL_link_dylib_imported_struct_field`.)
@@ -531,6 +536,55 @@ def test_a_default_argument_crosses_the_boundary(tmpdir, _):
           f"the default did not arrive: {text!r}")
 
 
+def test_a_re_exported_default_argument_crosses_the_boundary(tmpdir, _):
+    """`pkg.need_two(1) == 511`, through a package that only re-exports.
+
+    The same fact as the case above, reached through the spelling
+    `import pkg` binds rather than `from mod import f` — and it is a case of
+    its own because a re-export is a different LOOKUP. The package's
+    `__init__` is a namespace library with an empty export table by design
+    (`build._namespace_library`), so the name is answered by the submodule's
+    manifest under the name the DEFINING module exports. That table is a
+    different one from the flat `{bare: symbol}` map, and it was not one of the
+    two routes to a callee's DECLARATION until the `integ` merge made
+    `model.callee_declaration` and `model.dylib_extern_symbol` share one lookup
+    (`dylib_callee_export`, which reads `forwarded`).
+
+    So this is the case that would have caught the merge leaving the two
+    functions disagreeing about a forwarded name: a symbol that binds fine and a
+    signature that does not, which is the silently-wrong-argument shape rather
+    than a refusal.
+    """
+    fresh_cas()
+    root = os.path.join(tmpdir, "repkg")
+    write_tree(root, {
+        "repkg/defs.mojo": DEF_LIB,
+        "repkg/__init__.mojo": "from .defs import need_two\n",
+        "consumer.mojo": "import repkg\n\n\n"
+                         "def main(k):\n"
+                         "    printf(\"reexport=%d@@\", repkg.need_two(1))\n"
+                         "    return 0\n",
+    })
+    # The oracle's environment, stated rather than worked around. The formal
+    # resolver understands `from .defs import …` inside a package `__init__`;
+    # `_as_python` renders it as `from defs import …` (the dots are dropped,
+    # because a `.py` next to the module has no relative context to speak of),
+    # so CPython needs the package's OWN directory on the path as well as its
+    # parent. `preamble` is the harness's existing hook for exactly this — the
+    # same one the `--link-dylib` case uses to give CPython an import the
+    # formal side gets from a link line — and it changes nothing about the
+    # program under test.
+    preamble = ("import os as _os\n"
+                "import sys as _sys\n"
+                "_sys.path.insert(0, _os.path.join(_os.path.dirname(__file__),\n"
+                "                                 \"repkg\"))\n")
+    text, rc = agrees_with_cpython(tmpdir, "re-exported default", root,
+                                   "consumer.aout", expect_exit=0,
+                                   preamble=preamble)
+    check("reexport=511@" in text,
+          f"the re-exported callee's default did not arrive: {text!r}")
+
+
 def test_too_many_arguments_across_the_boundary_is_refused(tmpdir, _):
     """`need_one(5, 6)` is a `TypeError`, and it used to build and drop the word.
 
@@ -908,6 +962,8 @@ TESTS = [
      test_a_relative_import_behind_an_alias_resolves_and_runs),
     ("a default argument crosses the boundary",
      test_a_default_argument_crosses_the_boundary),
+    ("a re-exported default argument crosses the boundary",
+     test_a_re_exported_default_argument_crosses_the_boundary),
     ("too many arguments across the boundary is refused",
      test_too_many_arguments_across_the_boundary_is_refused),
     ("too few arguments across the boundary is refused",
