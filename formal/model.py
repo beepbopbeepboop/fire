@@ -561,6 +561,52 @@ def shift_is_logical(signed) -> bool:
     return not signed
 
 
+def shift_signedness(left_type):
+    """The signedness that decides what `>>` shifts IN — from the LEFT
+    operand ALONE, never from a promotion of both operands.
+
+    This is the second half of the shift rule above, and it is a separate
+    decision from the saturation one because it has a different cause.
+
+    Both backends ask `cmp_signed(common_type(ttype(left), ttype(right)))`,
+    and `common_type` is signed-wins (`formal/types.py`). That is the right
+    rule for an ARITHMETIC operator, where the two operands genuinely
+    combine. It is the wrong rule for a shift, because the right operand of a
+    shift is not a value being combined with the left one — it is a COUNT.
+    How many bits to move says nothing about what to move them in, and
+    promoting a count into the decision is how `UInt64 >> Int` came to
+    compute `0xFFFFFFFFFFFFFFFF >> 4` as `0xFFFFFFFFFFFFFFFF` (an arithmetic
+    shift) where the answer is `0x0FFFFFFFFFFFFFFF` (a logical one): the
+    amount was an unannotated `int`, i.e. signed, and signedness won the
+    promotion and then decided the fill.
+
+    Measured, on both backends, over the shapes that differ only in the
+    amount's declared type:
+
+        x: UInt64, n: Int      x >> 4   0xffffffffffffffff   WRONG
+        x: UInt64, n: UInt64   x >> 4   0x0fffffffffffffff  right
+        x: UInt64, n: literal  x >> 4   0x0fffffffffffffff  right
+
+    The literal row is the diagnostic: it is the same shift, and the amount
+    is the same number 4, so the only thing that changed between the wrong
+    row and the right one is whether the count was TYPED. A count that
+    happens to agree with the answer is not a reason to give the right
+    answer.
+
+    So: the left operand decides, and the right one is not consulted. For an
+    unannotated `int` left operand that is signed, which is right — Python's
+    `>>` on a negative value IS arithmetic, and `test_formal_run.py` pins
+    that so a "fix" that made every `>>` logical would fail. For a declared
+    unsigned left operand the value cannot be negative, so a logical shift is
+    not merely correct but the only thing that can be.
+
+    The parameter is the LEFT OPERAND'S TYPE, not a bool: the backends pass
+    `types.cmp_signed(...)` of it, and keeping the decision here means the
+    two cannot pick different notions of "the type of the thing being
+    shifted"."""
+    return left_type
+
+
 def is_generic(fn) -> bool:
     return bool(getattr(fn, "comptime_params", None))
 

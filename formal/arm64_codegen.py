@@ -5539,9 +5539,16 @@ class ARM64Codegen:
         and an amount at or past the word's width SATURATES rather than being
         masked to a shift by zero — `model.shift_saturated_value` is the rule
         and this is only its instruction selection. `**` unrolls a small
-        literal exponent."""
-        signed = cmp_signed(common_type(self._ttype(e.left),
-                                        self._ttype(e.right)))
+        literal exponent.
+
+        The two decisions a shift makes are NOT the same decision, and only
+        one of them promotes both operands: a shift's signedness comes from
+        the thing being SHIFTED (`model.shift_signedness`), because the right
+        operand is a count and a count's signedness says nothing about what to
+        shift in. Division and remainder keep the promotion, where the two
+        operands really do combine."""
+        result_t = common_type(self._ttype(e.left), self._ttype(e.right))
+        signed = cmp_signed(result_t)
         if op in ("/", "//", "%"):
             self._if_counter += 1
             cid = self._if_counter
@@ -5575,8 +5582,14 @@ class ARM64Codegen:
             return
 
         if op in ("<<", ">>"):
-            result_t = common_type(self._ttype(e.left),
-                                   self._ttype(e.right))
+            # The signedness that picks ASRV over LSRV is the LEFT operand's
+            # own, not the promotion's. `result_t` above is still the answer to
+            # "what width is the result", which is a different question and
+            # does involve both operands; only the FILL depends on this one.
+            # Without the split, `UInt64 >> Int` chose signedness from the
+            # unannotated (hence signed) shift AMOUNT and computed
+            # 0xFFFFFFFFFFFFFFFF >> 4 as 0xFFFFFFFFFFFFFFFF.
+            signed = cmp_signed(M.shift_signedness(self._ttype(e.left)))
             imm_r = e.right
             if isinstance(imm_r, F.IntLiteral) and 0 <= imm_r.value <= 63:
                 self._emit_expr(e.left)

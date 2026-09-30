@@ -3882,7 +3882,13 @@ class X86_64Codegen:
         """`<<` `>>`. A literal count in 0..63 uses the immediate form;
         anything else moves the count into CL (the only register form)."""
         result_t = common_type(self._ttype(e.left), self._ttype(e.right))
-        signed = cmp_signed(result_t)
+        # The signedness that picks `sar` over `shr` is the LEFT operand's own,
+        # not the promotion's — a shift's right operand is a COUNT, and how
+        # far to move says nothing about what to move in. `result_t` is still
+        # the answer to "what width is the result", which does involve both
+        # operands. See `model.shift_signedness`; the arm64 emitter asks the
+        # same question the same way.
+        signed = cmp_signed(M.shift_signedness(self._ttype(e.left)))
         lit = self._static_int(e.right)
         if lit is not None and 0 <= lit <= 63:
             self._emit_expr(e.left)
