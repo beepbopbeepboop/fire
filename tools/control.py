@@ -485,6 +485,27 @@ def cmd_unstick(a):
         print("%-32s idle %5.1f min, tree cpu %5.1f%%%s" % (name, idle, busy, "  <- STALLED" if idle >= a.idle_min and busy < 3.0 else ""))
         if idle >= a.idle_min and busy < 3.0 and not a.dry_run:
             print("   restarted as", restart(name, "stalled %.0f min with no CPU (a network error?)" % idle))
+    cmd_unstick_dead(a)
+
+
+NET_ERR = re.compile(r"Cannot connect to API|Unable to connect|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|socket hang up|"
+                     r"network error|Is the computer able to access the url", re.I)
+
+
+def cmd_unstick_dead(a):
+    """Restart workers that DIED of a network error: exited non-zero, said no CONTROL-STATUS, and the tail of the log
+    shows an API connection failure (2026-09-30: 'Error: Cannot connect to API: Unable to connect')."""
+    for name, t in list(load().items()):
+        if state_of(t) != "exited-err" or verdict(t):
+            continue
+        lp = os.path.join(t["worktree"], "work.log")
+        if not os.path.exists(lp):
+            continue
+        tail = re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:])
+        if NET_ERR.search(tail):
+            print("%-32s died of a network error: " % name + tail.strip().splitlines()[-1][:80])
+            if not a.dry_run:
+                print("   restarted as", restart(name, "died of a network error"))
 
 
 def cmd_reap(a):
