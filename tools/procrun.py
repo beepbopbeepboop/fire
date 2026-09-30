@@ -237,7 +237,8 @@ class Run:
         self.rc, self.out, self.timed_out = rc, out, timed_out
 
 
-def spawn(argv, cwd=None, env=None, timeout=None, stream=False, keep_bytes=4 << 20):
+def spawn(argv, cwd=None, env=None, timeout=None, stream=False,
+          keep_bytes=4 << 20, on_start=None):
     """Run argv to completion, capturing its combined output.
 
     stream=True prints each chunk to our stdout as it arrives (and still keeps
@@ -245,15 +246,24 @@ def spawn(argv, cwd=None, env=None, timeout=None, stream=False, keep_bytes=4 << 
     a test that prints without limit cannot grow the runner's own memory.
 
     The child gets its own process group (`start_new_session`), so a timeout
-    can take the whole tree down rather than orphaning a `gcc` child. Returns
-    a `Run`; `rc` is None when `timed_out`.
+    can take the whole tree down rather than orphaning a `gcc` child.
+
+    `on_start(child_pid)` is called with the child's pid as soon as it has
+    been started, i.e. while it is alive. `tools/suite.py` uses it to record
+    the pid on its memory-ledger reservation, so that a reservation survives
+    the death of the process that took it for exactly as long as the job it
+    started is still running.
+
+    Returns a `Run`; `rc` is None when `timed_out`.
     """
     stream = stream or False
     if stream:
-        return _spawn_stream(argv, cwd, env, timeout, keep_bytes)
+        return _spawn_stream(argv, cwd, env, timeout, keep_bytes, on_start)
     with tempfile.TemporaryFile(mode='w+b') as buf:
         p = subprocess.Popen(argv, cwd=cwd, env=env, stdout=buf,
                              stderr=subprocess.STDOUT, start_new_session=True)
+        if on_start:
+            on_start(p.pid)
         try:
             rc = p.wait(timeout=timeout)
             timed_out = False
@@ -265,10 +275,12 @@ def spawn(argv, cwd=None, env=None, timeout=None, stream=False, keep_bytes=4 << 
     return Run(rc, out, timed_out)
 
 
-def _spawn_stream(argv, cwd, env, timeout, keep_bytes):
+def _spawn_stream(argv, cwd, env, timeout, keep_bytes, on_start=None):
     keep = Tail(keep_bytes)
     p = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, start_new_session=True)
+    if on_start:
+        on_start(p.pid)
 
     def pump():
         for chunk in iter(lambda: p.stdout.read(4096), b''):

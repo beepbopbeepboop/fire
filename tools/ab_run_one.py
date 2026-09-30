@@ -20,17 +20,32 @@ each other's output. A per-basename flock (.ab_locks/<basename>.lock)
 serializes only the colliding subset; distinct basenames still run fully
 in parallel via Make's own -j.
 
-The per-file compile is capped. This harness is the "bounded per-file
-alternative, safe to run unattended" the Makefile and `wholeprogram-help`
-point at, and it is bounded by TIMEOUT_S but NOT by memory: `make -j20
-bside` is twenty concurrent native compiles, and the corpus deliberately
-contains this compiler's own sources, where one `--dump` has been measured
-at 15-30 GB (see SELFHOST_TOKENIZE_BLOWUP in tools/suite.py and BLOW.md
-§0's "NOT closed" addendum). The ceiling is the `module` class — the same
-one the three `bootstrap-stage*-dumps` fanouts give the identical per-file
-`--dump` — read from tools/suite.py's MEMCLASS rather than spelled here, so
-`MEMLIMIT_GB` moves it and `MEMLIMIT_GB=0` removes it exactly as it does for
-every job in the suite.
+The per-file compile is capped AND reserved. This harness is the bounded
+per-file alternative the Makefile and `wholeprogram-help` point at, and it is
+bounded by TIMEOUT_S and by memory: `make -j20 bside` is twenty concurrent
+native compiles, and the corpus deliberately contains this compiler's own
+sources, where one `--dump` has been measured at 15-30 GB (see
+SELFHOST_TOKENIZE_BLOWUP in tools/suite.py and BLOW.md §0's "NOT closed"
+addendum). The ceiling is the `module` class — the same one the three
+`bootstrap-stage*-dumps` fanouts give the identical per-file `--dump` — read
+from tools/suite.py's MEMCLASS rather than spelled here, so `MEMLIMIT_GB` moves
+it and `MEMLIMIT_GB=0` removes it exactly as it does for every job in the suite.
+
+A ceiling alone was not enough, and this file is where that showed up hardest:
+a cap bounds ONE process, so twenty of them are twenty times the cap, and on
+2026-09-29 the equivalent fanouts ran about thirty at once at 30-43 GB each
+until the machine collapsed. So each file also RESERVES its class out of the
+one machine-wide budget (`tools/memslot.py`, `memslot.Slot`) before it starts,
+and gives it back when it ends. `make -j20` still says how many files may be
+ready; the ledger says how many may run, and the answer to the second is 4 on a
+96 GB budget. That is also why a hand-run `make -j20 bside` and a running
+`make gate` queue behind each other instead of stacking.
+
+The reservation is taken in-process, around the compile only, rather than by
+wrapping the whole script with `memslot.py ... --`: the timeout is the
+compile's, and a timeout that counted the wait for memory would kill files for
+a queue they did not cause. For the same reason it is released before the
+artifacts are moved and the meta.json is written, which cost nothing.
 
 A file killed by the ceiling is recorded as such in its meta.json
 (`memory_capped`, with the peak memcap saw) instead of being reported as a
@@ -50,6 +65,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+import memslot                                                  # noqa: E402
 import procrun                                                   # noqa: E402
 import suite                                                     # noqa: E402
 
@@ -110,15 +126,45 @@ def _run_locked(args, basename: str, out_dir: str) -> None:
         cmd = [sys.executable, os.path.join(HERE, 'memcap.py'),
                '--limit-gb', str(limit), '--label', label, '--'] + cmd
 
+    # …and the reservation, which is what stops twenty of these being twenty
+    # times the ceiling. Taken only when there is a ceiling to reserve: under
+    # MEMLIMIT_GB=0 there is no number to take, and taking none is the honest
+    # reading of "no memory bound anywhere".
+    slot = None
+    if limit > 0:
+        try:
+            slot = memslot.Slot(limit, label).acquire()
+        except ValueError as exc:
+            # A class larger than the whole machine budget can never be
+            # admitted. Writing that in the meta is better than waiting for a
+            # turn that will never come: the sweep is `make -j20` of these, and
+            # a queue that cannot drain looks exactly like a hang.
+            _write_meta(os.path.join(out_dir, f'{basename}.meta.json'), {
+                'rc': 126, 'elapsed_s': 0.0, 'produced': [],
+                'memcap_gb': limit, 'peak_gb': None, 'memory_capped': False,
+                'reserved_gb': 0, 'waited_for_memory_s': 0,
+                'stderr_tail': f'MEMORY: cannot reserve {limit:g} GB — {exc}'})
+            open(os.path.join(out_dir, f'{basename}.ci'), 'w').close()
+            return
+
     t0 = time.time()
     stdout = ''
+    proc = None
     try:
-        result = subprocess.run(cmd, cwd=REPO, env=env,
-                                 capture_output=True, text=True,
-                                 timeout=TIMEOUT_S, errors='replace')
-        rc, stderr, stdout = result.returncode, result.stderr, result.stdout
+        proc = subprocess.Popen(cmd, cwd=REPO, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True,
+                                errors='replace', start_new_session=True)
+        if slot is not None:
+            slot.note_job(proc.pid)
+        stdout, stderr = proc.communicate(timeout=TIMEOUT_S)
+        rc = proc.returncode
     except subprocess.TimeoutExpired:
         rc, stderr = -1, f'TIMEOUT after {TIMEOUT_S}s'
+        if proc is not None:
+            procrun.kill_group(proc)
+    finally:
+        if slot is not None:
+            slot.release()
     # memcap reports on stdout, which this harness does not otherwise keep, and
     # its two facts are the ones a per-file verdict needs: was this file killed
     # for memory, and how much did it ask for while it ran.
@@ -136,12 +182,16 @@ def _run_locked(args, basename: str, out_dir: str) -> None:
         'elapsed_s': round(time.time() - t0, 2),
         'produced': produced,
         'stderr_tail': stderr[-2000:] if stderr else '',
+        'reserved_gb': limit if slot is not None else 0,
+        'waited_for_memory_s': round(slot.waited, 2) if slot is not None else 0,
     }
     if limit > 0:
         # Always recorded, not only on a kill: a sweep that answers "which
         # files are close to the ceiling" is the only way to tell whether
         # `module` is the right class for this corpus before someone has to
-        # guess again.
+        # guess again. `reserved_gb`/`waited_for_memory_s` answer the same
+        # question for the class as a RESERVATION — how much of it this corpus
+        # actually needs when the machine can give it.
         meta['memcap_gb'] = limit
         meta['peak_gb'] = peak
         meta['memory_capped'] = breached
@@ -152,8 +202,7 @@ def _run_locked(args, basename: str, out_dir: str) -> None:
                                f'ceiling (peak {peak} GB) — not a compile '
                                f'failure' + ('\n' + meta['stderr_tail']
                                              if meta['stderr_tail'] else ''))
-    with open(os.path.join(out_dir, f'{basename}.meta.json'), 'w') as mf:
-        json.dump(meta, mf)
+    _write_meta(os.path.join(out_dir, f'{basename}.meta.json'), meta)
 
     # Always leave a .ci target behind (even empty, on failure/timeout) so
     # Make treats this rule as done and doesn't re-run it on every
@@ -163,6 +212,19 @@ def _run_locked(args, basename: str, out_dir: str) -> None:
     ci_path = os.path.join(out_dir, f'{basename}.ci')
     if not os.path.exists(ci_path):
         open(ci_path, 'w').close()
+
+
+def _write_meta(path, meta):
+    """The meta.json write, from both the refused and the normal exit.
+
+    Temp file + rename, because a sweep running twenty of these in parallel
+    can be interrupted at any moment, and a half-written meta.json is a
+    truncated JSON document that `tools/ab_compare.py` then has to survive.
+    """
+    tmp = f'{path}.tmp{os.getpid()}'
+    with open(tmp, 'w') as mf:
+        json.dump(meta, mf)
+    os.replace(tmp, path)
 
 
 if __name__ == '__main__':

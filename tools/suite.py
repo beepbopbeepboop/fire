@@ -21,14 +21,25 @@ this file is the fix for all three:
    that need a ceiling is a fact about the workloads, not about which recipe
    somebody remembered, so it lives in one table here (`MEMCLASS` plus each
    test's `mem=` field) and `--list` prints it.
-   Two rounds later the same audit found the coverage was still 8 of 73: the
-   `mem` driver capped, `cmd` and `make` did not, so whether a compiler ran
-   under a ceiling was decided by which driver a test happened to pick. Now
-   every job is wrapped, `cmd`/`make` jobs that name no class get
-   `DEFAULT_MEMCLASS`, and a spec that can reach a whole-closure compile must
-   name a class (test_suite.py enforces both). A side effect worth having: the
-   peak is measured for every job, because measuring it is what the wrapper
-   does.
+Two rounds later the same audit found the coverage was still 8 of 73: the
+    `mem` driver capped, `cmd` and `make` did not, so whether a compiler ran
+    under a ceiling was decided by which driver a test happened to pick. Now
+    every job is wrapped, `cmd`/`make` jobs that name no class get
+    `DEFAULT_MEMCLASS`, and a spec that can reach a whole-closure compile must
+    name a class (test_suite.py enforces both). A side effect worth having: the
+    peak is measured for every job, because measuring it is what the wrapper
+    does.
+
+    A ceiling still is not a bound on the machine. On 2026-09-29 the
+    `bootstrap-stage*-dumps` fanouts ran about thirty items at once, each
+    inside its own 24 GB ceiling and each observed between 30 and 43 GB, until
+    the box collapsed — thirty jobs each *allowed* 24 GB is 720 GB of
+    allowance. So the ceiling is also a RESERVATION: every job takes its
+    memclass out of one machine-wide budget (`tools/memslot.py`, strict FIFO)
+    before it is spawned, and gives it back when it exits. That is what makes
+    "18 x 24 GB" mean "four at a time", and it counts the other worktrees and
+    the developer's own terminal as well as this run.
+
 
 2. **Ordering and dependencies were Make's job, and Make could only see
    targets.** `stage1 -> stage2/mojo -> stage2 dumps -> transitive -> stage3
@@ -109,6 +120,7 @@ DEFAULT_LOG = 'build/suite.log'
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 import cas                                                       # noqa: E402
+import memslot                                                   # noqa: E402
 import procrun                                                   # noqa: E402
 
 # ── Paths, mirroring what the Makefile used to spell out ─────────────────────
@@ -232,7 +244,7 @@ def memclass_for(spec) -> str:
     return getattr(spec, 'mem', None) or DEFAULT_MEMCLASS
 
 
-# ── The concurrent-memory budget ──────────────────────────────────────────────
+# ── Admission: memory is ALLOCATED to a job before it starts ─────────────────
 # A per-job ceiling bounds ONE process tree. It says nothing about how many
 # trees may run at once, so on its own it is not a bound on the machine at all:
 # the three `bootstrap-stage*-dumps` fanouts are 47 items each at the `module`
@@ -241,39 +253,34 @@ def memclass_for(spec) -> str:
 # thirty items at once, each observed between 30 and 43 GB, until the machine
 # collapsed and a human killed them by hand. Every individual process was
 # inside its own cap the whole time, which is exactly the point: a per-process
-# ceiling cannot be defeated by width unless the runner bounds the SUM.
+# ceiling cannot be defeated by width unless something bounds the SUM.
 #
-# So the runner spends a memory budget, not just CPU slots. A job may start
-# only if the ceilings of everything already running plus its own fit under
-# MEMBUDGET_GB. That is a statement about concurrency and it composes with the
-# exclusive mechanism rather than replacing it: an exclusive job already gets
-# the machine to itself, and a budget narrower than a job's own class (which
-# only happens if someone sets MEMBUDGET_GB below a class, or raises a class)
-# still runs the job alone rather than stalling the plan forever.
+# So the ceiling is also a RESERVATION, taken out of one machine-wide budget
+# before the job is spawned (`tools/memslot.py`, the ledger in
+# ~/.gmojo/memslot). A 55 GB job takes 55 of the 96 GB budget, so a second one
+# waits instead of running beside it; a 24 GB fanout item runs four at a time
+# rather than eighteen. This composes with `excl` rather than replacing it:
+# `excl` means nothing else IN THIS RUN starts, and the ledger also counts the
+# other worktree's hand-run `make mojoc` and the developer's own terminal.
+# MEMSLOT_BUDGET_GB is the whole-machine number (default 96, memslot's own
+# default: it leaves ~30 GB of a 128 GB box for the OS).
 #
-# 100 GB is the number for a 128 GB machine: the largest two classes that are
-# meant to coexist (`program` 55 + `module` 24 = 79) fit, a 47-item fanout runs
-# 4-wide instead of 18-wide, and a `stage` job (96) still runs with room to
-# spare. Override with MEMBUDGET_GB; 0 means the concurrency bound is off,
-# which with MEMLIMIT_GB=0 means nothing is bounded at all.
-MEMBUDGET_GB_DEFAULT = 100.0
+# An earlier attempt at this lived here as `MEMBUDGET_GB`, a sum-of-ceilings
+# the runner compared before launching. It was never wired to anything, and
+# even wired it would have been the wrong tool: it bounds concurrency inside
+# one runner and knows nothing about the other twenty-nine worktrees, which is
+# where a hand-run `make mojoc` lives. One machine-wide ledger, not a second
+# budget that only one process honours.
+def memslot_budget() -> float:
+    """The machine-wide reservation budget in GB, honouring MEMSLOT_BUDGET_GB.
 
-
-def membudget() -> float:
-    """The concurrent ceiling-sum budget in GB, honouring MEMBUDGET_GB.
-
-    Read from the environment on every call rather than captured at import,
-    because the tests in test_suite.py change it to prove the throttle works
-    and must be able to put it back. A float for the same reason `memlimit`
-    returns one: `MEMBUDGET_GB=0.5` is a real setting and truncating it to an
-    int would turn "half a gigabyte at a time" into "none".
+    Read through `memslot` rather than restated, because the ledger's own
+    default is the one number that has to agree across every worktree, and two
+    spellings of it is one more number to drift. `MEMLIMIT_GB=0` still means
+    "no ceiling anywhere", and with no ceiling there is nothing to reserve, so
+    admission is skipped entirely rather than reserving zero and pretending.
     """
-    raw = os.environ.get('MEMBUDGET_GB', '').strip()
-    if raw:
-        return max(0.0, float(raw))
-    return MEMBUDGET_GB_DEFAULT
-
-
+    return memslot.budget_gb()
 
 # ── Registry ─────────────────────────────────────────────────────────────────
 class Spec:
@@ -712,7 +719,14 @@ SELFHOST_TOKENIZE_BLOWUP = (
 test('mojoc', ['mojoc'], driver='make', mem='stage', excl=True,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
-test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='small',
+# `module`, NOT `small`, and the measurement is why: registered at `small` (8
+# GB) and killed by its own ceiling on 2026-09-29 at a peak of 9.4 GB — a
+# RESOURCE verdict, which is not a verdict on anything, on a test that was
+# already marked expect=. The corpus here is the same A/B one whose per-file
+# `--dump` is documented at ~15-30 GB, so 8 was never going to hold. Under the
+# ledger this matters twice over: the job RESERVES its class, so a class that
+# cannot hold the workload is a job guaranteed to be killed every run.
+test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='module',
      deps=['mojoc'], excl=True, cache=True, extra=['test_ab_native.py'],
      expect=SELFHOST_TOKENIZE_BLOWUP,
      desc='python vs native codegen, byte-for-byte, over the A/B corpus')
@@ -1142,6 +1156,9 @@ def env_state(opts, names) -> "list[tuple[str, str]]":
         ('gcc', gcc),
         ('jobs', str(opts.jobs)),
         ('MEMLIMIT_GB', os.environ.get('MEMLIMIT_GB', '') or '(unset)'),
+        ('MEMSLOT_GB', f'{memslot_budget():g} of one machine-wide budget '
+                       f'(MEMSLOT_BUDGET_GB)'),
+        ('memslot held', f'{memslot.reserved_gb():g} GB already reserved'),
         ('selected', ', '.join(names)),
     ]
 
@@ -1400,11 +1417,14 @@ def run_job(job: Job, opts, log: Log) -> Result:
         log.line(f'  cwd:  {job.cwd}')
     if job.env:
         log.line('  env:  ' + ' '.join(f'{k}={v}' for k, v in job.env.items()))
-    if isinstance(spec, (Spec, Fanout)):
-        cls = memclass_for(spec)
-        log.line(f'  memcap: {cls} class'
-                 + (f' (default)' if not spec.mem else '')
-                 + f', ceiling {memlimit(cls)} GB')
+    # Every spec resolves to a memclass (a fanout is required to name one, a
+    # cmd/make spec inherits DEFAULT_MEMCLASS), so the ceiling and the
+    # reservation below are a property of the workload rather than of whichever
+    # driver happens to launch it.
+    cls = memclass_for(spec)
+    log.line(f'  memcap: {cls} class'
+             + (f' (default)' if not spec.mem else '')
+             + f', ceiling {memlimit(cls)} GB')
 
     # An artifact-cached step: a hit means the binary is already correct, so
     # the step does not run at all. Only whole steps are cached; a fanout's
@@ -1421,6 +1441,33 @@ def run_job(job: Job, opts, log: Log) -> Result:
                        f'the content-addressed store — inputs unchanged)')
             return Result(PASS, cached=True, detail=f'{spec.artifact} from cache')
 
+    # ── Admission ────────────────────────────────────────────────────────────
+    # The job's memclass, taken out of the machine-wide budget, BEFORE anything
+    # of it is spawned. The ceiling (`build_cmd`) and the reservation are the
+    # same number on purpose: the runner never admits more than the budget,
+    # and an admitted job is never allowed to take more than it was given.
+    #
+    # After the artifact-cache check on purpose. A cache hit starts no process
+    # and allocates nothing, so making it queue behind a 40-minute wait for a
+    # 96 GB reservation would make `make gate` slower for no reason at all —
+    # the step it is standing in for is already done.
+    slot = memslot.Slot(memlimit(cls), job.key, budget=memslot_budget())
+    try:
+        slot.acquire()
+    except ValueError as exc:
+        # A job whose class exceeds the whole budget can never be admitted.
+        # That is a configuration fact, not a machine problem and not a wrong
+        # answer, so it is an ERROR naming both numbers — the alternative is a
+        # queue that never drains and a run that hangs instead of reporting.
+        log.line(f'  admission REFUSED: {exc}')
+        return Result(ERROR, detail=f'cannot be admitted: {exc}')
+    wait = slot.waited
+    if wait > 0.5:
+        log.line(f'  admission: waited {wait:.0f}s for {slot.gb:g} GB '
+                 f'(budget {memslot_budget():g} GB)')
+    log.line(f'  admitted:   reserved {slot.gb:g} GB, {memslot_budget() - slot.gb:g} GB '
+             f'left of {memslot_budget():g} GB')
+
     t0 = time.time()
     cwd = os.path.join(REPO, job.cwd) if job.cwd else REPO
     if job.cwd:
@@ -1428,12 +1475,19 @@ def run_job(job: Job, opts, log: Log) -> Result:
         # directory has to exist by the time its first job runs, and the step
         # that wipes it (bootstrap-clean) runs before both.
         os.makedirs(cwd, exist_ok=True)
+    run = None
     try:
+        # `on_start` fires with the child's pid while it is ALIVE, which is the
+        # only moment it is worth recording: the reservation outlives a killed
+        # scheduler exactly as long as the process it started keeps running.
         run = procrun.spawn(cmd, cwd=cwd, env=env,
                             timeout=spec.timeout or opts.timeout,
-                            stream=(opts.jobs == 1 or opts.verbose))
+                            stream=(opts.jobs == 1 or opts.verbose),
+                            on_start=slot.note_job)
     except OSError as exc:
         return Result(ERROR, detail=f'could not launch: {exc}')
+    finally:
+        slot.release()
     secs = time.time() - t0
     breached, peak = _memcap_verdict(run.out)
     log.line(f'  exit: {run.rc}   secs: {secs:.1f}'
@@ -1934,20 +1988,26 @@ def buckets_containing(name):
     return out
 
 
-def print_memcap_prefix(label: str, cls: str) -> int:
-    """The `memcap.py ... --` prefix for one Makefile recipe, as a shell string.
+def print_wrapper_prefix(which: str, label: str, cls: str) -> int:
+    """The `tool ... --` prefix for one Makefile recipe, as a shell string.
 
-    Printed for `$(call memcap,LABEL,CLASS)` so the number comes from
-    MEMCLASS — the same table this runner applies to a job — rather than from
-    a number typed into a recipe, which is how the coverage rotted in the
-    first place: `make mojoc` and `make stage2/mojo` each had their own idea
-    about memory and neither had any.
+    Printed for `$(call memslot,<label>,<class>)` so BOTH numbers come from
+    this file — the memclass ceiling from MEMCLASS, and the reservation the
+    ledger is asked for — rather than from numbers typed into recipes, which is
+    how the coverage rotted in the first place: `make mojoc` and `make
+    stage2/mojo` each had their own idea about memory and neither had any.
+
+    Two wrappers, one spelling of each, and they compose: `memslot` reserves
+    the gigabytes and then runs the job under `memcap` at exactly what it
+    reserved, so a hand-run `make mojoc` both queues behind whatever the gate
+    is doing and cannot exceed the gigabytes it was given.
 
     Empty output is meaningful and is the whole reason this is a function
     rather than a variable: `MEMLIMIT_GB=0` means "no ceiling anywhere", and
     a recipe that expanded to `memcap --limit-gb 0` would kill the first
-    process it sampled. The label is quoted because it is spliced into a
-    shell command line.
+    process it sampled — or to `memslot --gb 0`, which reserves nothing and
+    therefore admits everything, i.e. exactly the collapse. The label is
+    quoted because it is spliced into a shell command line.
     """
     try:
         limit = memlimit(cls)
@@ -1956,15 +2016,24 @@ def print_memcap_prefix(label: str, cls: str) -> int:
         return 2
     if limit <= 0:
         return 0
-    return print(f'{shlex.quote(PY)} {shlex.quote(os.path.join(HERE, "memcap.py"))}'
-                 f' --limit-gb {limit:g} --label {shlex.quote(label)} --')
+    flag, tool = {'memslot': ('--gb', 'memslot.py'),
+                  'memcap': ('--limit-gb', 'memcap.py')}.get(which, (None, None))
+    if flag is None:
+        print(f'suite.py: no wrapper {which!r}; known: memslot, memcap',
+              file=sys.stderr)
+        return 2
+    return print(f'{shlex.quote(PY)} {shlex.quote(os.path.join(HERE, tool))}'
+                 f' {flag} {limit:g} --label {shlex.quote(label)} --')
 
 
 def print_list():
-    print('MEMCLASS (GB ceiling, whole process tree):')
+    print('MEMCLASS (GB ceiling, whole process tree; and what each job '
+          'RESERVES from the machine-wide budget):')
     for name, gb in sorted(MEMCLASS.items(), key=lambda kv: kv[1]):
         print(f'  {name:<8} {gb:>4}')
     print(f'  a cmd/make test with no mem= runs under {DEFAULT_MEMCLASS!r}')
+    print(f'  one machine-wide budget of {memslot_budget():g} GB '
+          f'(MEMSLOT_BUDGET_GB); every job reserves its class before it starts')
     if os.environ.get('MEMLIMIT_GB'):
         print(f'  MEMLIMIT_GB={os.environ["MEMLIMIT_GB"]} overrides all of the above')
     print('\nTESTS:')
@@ -2069,18 +2138,21 @@ def main(argv=None):
                     help='per-job timeout in seconds (default: none)')
     ap.add_argument('--list', action='store_true',
                     help='print the registry and exit')
-    ap.add_argument('--memcap-prefix', nargs=2, metavar=('LABEL', 'CLASS'),
-                    help='print the memcap wrapper prefix for LABEL at CLASS\'s '
-                         'ceiling (empty when MEMLIMIT_GB=0), and exit. This '
-                         'is how the Makefile spells the wrapper once instead '
-                         'of restating the class table.')
+    ap.add_argument('--prefix', nargs=3, metavar=('WRAPPER', 'LABEL', 'CLASS'),
+                    help='print the wrapper prefix for LABEL at CLASS\'s ceiling '
+                         '(empty when MEMLIMIT_GB=0), and exit. WRAPPER is '
+                         'memslot or memcap; this is how the Makefile spells '
+                         'the wrapper once instead of restating the class '
+                         'table: memslot reserves the gigabytes out of the '
+                         'machine-wide budget and runs the job under memcap '
+                         'at exactly what it reserved.')
     ap.add_argument('--dry-run', action='store_true',
                     help='print the plan and its ordering, run nothing')
     opts = ap.parse_args(argv)
     if opts.jobs < 1:
         ap.error('-j must be >= 1')
-    if opts.memcap_prefix:
-        return print_memcap_prefix(*opts.memcap_prefix)
+    if opts.prefix:
+        return print_wrapper_prefix(*opts.prefix)
     if opts.list:
         return print_list()
     names = select(opts.names, opts)
@@ -2101,15 +2173,19 @@ def _run_all(names, opts, log: Log):
     for k, v in env_state(opts, names):
         log.line(f'  {k:<12} {v}')
     log.line(f'  {"memclass":<12} {MEMCLASS}')
+    log.line(f'  {"budget":<12} {memslot_budget():g} GB reserved out of one '
+             f'machine-wide ledger (MEMSLOT_BUDGET_GB); every job takes its '
+             f'class before it starts')
     log.line('')
 
     if not opts.quiet:
         print(f'suite: {len(names)} tests, -j{opts.jobs}, '
               f'{"serial, output streamed" if opts.jobs == 1 else "parallel"}'
-              + (f', MEMLIMIT_GB={override}' if override else ''))
+              + (f', MEMLIMIT_GB={override}' if override else '')
+              + f', {memslot_budget():g} GB memory budget')
         if override in ('0', '0.0'):
-            print('suite: MEMLIMIT_GB=0 — NO memory ceiling on anything. '
-                  'Please watch the machine.')
+            print('suite: MEMLIMIT_GB=0 — NO memory ceiling on anything, and '
+                  'nothing is reserved. Please watch the machine.')
 
     jobs, per_test = plan_for(names, opts)
     for name in names:

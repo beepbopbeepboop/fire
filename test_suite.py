@@ -51,18 +51,24 @@ Run:  python3 test_suite.py         (or `make check-suite`, part of `smoke`)
 """
 
 import ast
+import contextlib
 import io
+import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from contextlib import redirect_stdout
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, 'tools'))
-import suite                                                    # noqa: E402
+import memslot                                                   # noqa: E402
+import suite                                                     # noqa: E402
+
 
 PY = sys.executable
 FAILURES = []
@@ -111,11 +117,54 @@ class Sandbox:
         return False
 
 
-def run(names, jobs=4, log='-', quiet=True, **flags):
+class _SandboxEnv:
+    """Set environment variables for a synthetic run, and put them back.
+
+    A leaked one is worse here than anywhere else in this repo: every job in
+    the suite is now capped AND reserved, so a leaked `MEMLIMIT_GB=0.02`
+    would cap every later test in this file to nothing and a leaked
+    `MEMSLOT_BUDGET_GB` would size every later test's reservation.
+    """
+
+    def __init__(self, **env):
+        self.env, self.saved = env, {}
+
+    def __enter__(self):
+        for k, v in self.env.items():
+            self.saved[k] = os.environ.get(k)
+            os.environ[k] = str(v)
+        return self
+
+    def __exit__(self, *exc):
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        return False
+
+
+# A budget no real memclass can exceed, so admission never blocks and a
+# synthetic run behaves exactly as it did before there was a ledger. The
+# admission tests below pass a small one deliberately.
+NO_WAIT_BUDGET_GB = 100000.0
+
+
+def run(names, jobs=4, log='-', quiet=True, budget=NO_WAIT_BUDGET_GB,
+        ledger=None, **flags):
     """Select, plan, execute, report — the whole main() path, quietly.
 
     `flags` are passed as bare switches (verbose=True -> --verbose), which is
     the only shape argparse accepts for a store_true option.
+
+    Every run gets a PRIVATE ledger directory and a budget no memclass can
+    exhaust. The real ledger is `~/.gmojo/memslot`, shared by every worktree
+    on the machine and sized for real compilers: a synthetic unit test that
+    used it would take 24 GB out of the machine's 96 and queue behind whatever
+    gate happened to be running, which is correct behaviour and useless in a
+    test. `ledger` names a directory to use instead — the admission tests need
+    to hold a reservation in the SAME ledger the run will queue against, so
+    they pass one in rather than letting `run` invent a private one.
     """
     argv = list(names)
     for k, v in flags.items():
@@ -124,8 +173,13 @@ def run(names, jobs=4, log='-', quiet=True, **flags):
     out = io.StringIO()
     if quiet:
         argv.append('-q')
-    with redirect_stdout(out):
-        rc = suite.main(argv + ['-j', str(jobs), '-o', log])
+    with contextlib.ExitStack() as stack:
+        if ledger is None:
+            ledger = stack.enter_context(tempfile.TemporaryDirectory())
+        stack.enter_context(_SandboxEnv(MEMSLOT_DIR=ledger,
+                                        MEMSLOT_BUDGET_GB=budget))
+        with redirect_stdout(out):
+            rc = suite.main(argv + ['-j', str(jobs), '-o', log])
     return rc, out.getvalue()
 
 
@@ -163,15 +217,8 @@ def test_mem_driver():
     small = ok_cmd('print("fine")')
     with Sandbox(hog=dict(cmd=hog, driver='mem', mem='program'),
                  small=dict(cmd=small, driver='mem', mem='program')):
-        old = os.environ.get('MEMLIMIT_GB')
-        os.environ['MEMLIMIT_GB'] = '0.02'      # 20 MB: a bare python is under
-        try:
+        with _tiny_ceiling():
             rc, _ = run(['hog', 'small'], jobs=2, log=log)
-        finally:
-            if old is None:
-                os.environ.pop('MEMLIMIT_GB', None)
-            else:
-                os.environ['MEMLIMIT_GB'] = old
     text = open(log).read() if os.path.exists(log) else ''
     check('mem driver: a breach is RESOURCE, not FAIL',
           'RESOURCE' in text and '\n  FAIL' not in text,
@@ -206,20 +253,10 @@ def _tiny_ceiling():
     the test costs milliseconds — a real workload cannot be used to prove a cap
     fires, because the only honest way to make one breach is to allocate.
     Restores the variable afterwards, which matters now that EVERY job is
-    wrapped: a leaked 0.02 would cap every later test in this file to nothing.
+    wrapped: a leaked 0.02 would cap every later test in this file to nothing
+    (and reserve 0.02 GB of nothing, which is at least harmless).
     """
-    class _Env:
-        def __enter__(self):
-            self.old = os.environ.get('MEMLIMIT_GB')
-            os.environ['MEMLIMIT_GB'] = '0.02'
-
-        def __exit__(self, *exc):
-            if self.old is None:
-                os.environ.pop('MEMLIMIT_GB', None)
-            else:
-                os.environ['MEMLIMIT_GB'] = self.old
-            return False
-    return _Env()
+    return _SandboxEnv(MEMLIMIT_GB=0.02)
 
 
 def test_cmd_and_make_drivers_are_capped():
@@ -509,17 +546,217 @@ def test_every_compiler_job_is_capped():
     # and neither goes through the registry.
     uncovered = [f'{t}: {line[:60]}'
                  for t, line in _makefile_recipe_lines()
-                 if _closure_shapes(line) and '$(call memcap' not in line]
+                 if _closure_shapes(line) and '$(call memslot' not in line]
     check('cap estate: every Makefile recipe that compiles a closure is wrapped',
           not uncovered, '; '.join(uncovered))
     check('cap estate: the Makefile wrapper is the one macro, not a copy',
-          '$(call memcap' in open(os.path.join(HERE, 'Makefile')).read(),
+          '$(call memslot' in open(os.path.join(HERE, 'Makefile')).read(),
           'the Makefile should spell the wrapper once')
 
 
 class _FakeOpts:
     """Enough of an options object for build_cmd, and nothing else."""
     jobs, no_cache, verbose, timeout = 2, False, False, None
+
+
+# ── admission: memory is allocated to a job BEFORE it starts ─────────────────
+# A ceiling bounds one process tree and says nothing about how many may run at
+# once, which is not a bound on the machine: on 2026-09-29 the
+# `bootstrap-stage*-dumps` fanouts ran ~30 items at once, each 30-43 GB, each
+# inside its own ceiling, until the box collapsed. So every job RESERVES its
+# memclass out of one machine-wide budget before it is spawned
+# (`tools/memslot.py`). What follows is the property that matters and the two
+# ways an implementation gets it wrong.
+#
+# Scaled right down — 20 MB reservations, a 60 MB budget — so it runs in
+# seconds and the arithmetic is the one the real numbers use. MEMLIMIT_GB
+# collapses every class to one number, which is exactly what makes "the
+# reservation is the class" checkable: a job's ceiling and the gigabytes it
+# reserves are the same value by construction, and these tests read that value
+# off the ledger rather than off the argv.
+RESERVE_JOB = ('import sys, time;'
+               'sys.path.insert(0, {tools!r});'
+               'import memslot;'
+               'time.sleep(0.5);'
+               'print("RESERVED", memslot.reserved_gb())')
+
+
+def _reserving_cmd():
+    return ok_cmd(RESERVE_JOB.format(tools=os.path.join(HERE, 'tools')))
+
+
+def test_every_job_is_reserved_before_it_starts():
+    """Every kind of job — cmd, mem, make, and each fanout item — reserves
+    before it starts, and the sum of live reservations never exceeds the
+    budget.
+
+    All four shapes, because each has its own way of being missed: `cmd` and
+    `make` are one process each and `make` starts the workload as a
+    grandchild, while a fanout is one SPEC that expands into N jobs — the case
+    that actually collapsed the machine, because `build_cmd` used to skip the
+    whole wrapper for a `Fanout` and eighteen `./mojo --dump` runs at 30-43 GB
+    each went out with no ceiling and no reservation.
+
+    The jobs report the ledger's own number from inside themselves, so what is
+    asserted is the state of the shared budget at the moment the workload was
+    running, not what the runner said it was going to do.
+    """
+    log = os.path.join(HERE, 'build', 'test-suite-reserve.log')
+    mk = os.path.join(HERE, 'build', 'test-suite-reserve.mk')
+    os.makedirs(os.path.dirname(mk), exist_ok=True)
+    with open(mk, 'w') as f:
+        # shlex.quote, not %r: a Make recipe is a SHELL line, and Python's
+        # repr escapes the inner single quotes as \' , which the shell then
+        # reads as a quote of its own and dies on.
+        f.write('hog:\n\t%s -c %s\n' % (shlex.quote(PY),
+                                        shlex.quote(RESERVE_JOB.format(
+                                            tools=os.path.join(HERE, 'tools')))))
+    items = [f'f{i}.mojo' for i in range(6)]
+    with Sandbox(one=dict(cmd=_reserving_cmd()),
+                 one_mem=dict(cmd=_reserving_cmd(), driver='mem', mem='small'),
+                 one_make=dict(cmd=['-f', os.path.relpath(mk, HERE), 'hog'],
+                               driver='make', mem='small'),
+                 many=suite.Fanout(name='many', cmd=_reserving_cmd()[:1] + ['-c',
+                                 RESERVE_JOB.format(tools=os.path.join(HERE, 'tools')),
+                                 '{file}'],
+                                   items=items, mem='small')):
+        # 20 MB per job (MEMLIMIT_GB), 60 MB of budget: at most three at once.
+        with _SandboxEnv(MEMLIMIT_GB=0.02, MEMSLOT_BUDGET_GB=0.06):
+            rc, _ = run(['one', 'one_mem', 'one_make', 'many'], jobs=6,
+                        log=log, budget=0.06, keep_output=True)
+    text = open(log).read() if os.path.exists(log) else ''
+
+    check('admission: every job ran', rc == 0, f'got {rc}')
+    # Anchored, because the runner logs every job's argv too and the argv
+    # contains this same string: a count of `RESERVED` anywhere in the log
+    # would count the code as well as its output.
+    seen = [float(m) for m in re.findall(r'^RESERVED ([\d.]+)$', text, re.M)]
+    check('admission: each of the 9 jobs reported the ledger', len(seen) == 9,
+          f'expected 9 RESERVED lines, saw {len(seen)}')
+    check('admission: the sum of live reservations never exceeds the budget',
+          seen and max(seen) <= 0.06 + 1e-9,
+          f'peak {max(seen) if seen else 0:.3f} GB of a 0.06 GB budget')
+    # Not vacuous: if the ledger said 0 every time, "never exceeds" would be
+    # trivially true of a runner that reserved nothing.
+    check('admission: jobs really did hold memory at the same time',
+          seen and max(seen) >= 0.04,
+          f'peak {max(seen) if seen else 0:.3f} GB — nothing ran concurrently, '
+          f'so this proves nothing about the sum')
+    check('admission: the runner records what it reserved for each job',
+          text.count('admitted:') == 9,
+          f'expected 9 admitted lines, saw {text.count("admitted:")}')
+    # A fanout item is a job like any other: it is what the machine saw.
+    check('admission: fanout items reserve individually',
+          all(f'many:{i}' in text for i in items),
+          'a fanout item with no reservation is the 2026-09-29 failure exactly')
+
+
+def test_the_timeout_clock_starts_after_admission():
+    """A job's timeout must not run while it waits for memory.
+
+    This is the one that decides between two implementations. Wrapping a job
+    in `memslot.py ... --` cannot express a per-job timeout at all, because the
+    wrapper has to start the job to time it — so the queue wait would be inside
+    the timeout, and a `stage` job waiting 40 minutes for a 96 GB reservation
+    on a busy machine would be killed at its timeout having done nothing wrong
+    and having printed nothing. The runner therefore takes the reservation
+    itself and starts the clock after it.
+
+    Measured rather than asserted from the code: the job's own timeout is 2s,
+    the budget is full when it is ready, and it is held there for three times
+    that. If the wait counted, the job would come back TIMEOUT and fail the
+    run; if it does not, it comes back PASS having run for a fraction of a
+    second.
+    """
+    log = os.path.join(HERE, 'build', 'test-suite-admit-wait.log')
+    quick = ok_cmd('import time; time.sleep(0.3); print("ran")')
+    outcome = []
+
+    def queued(ledger, label):
+        """Is `label` sitting in the ledger's queue right now?
+
+        Read the ledger rather than the log because the log cannot answer it:
+        `admission: waited` is written AFTER admission, so a run that is
+        correctly queueing says nothing at all until it is let in.
+        """
+        try:
+            data = json.load(open(os.path.join(ledger, 'ledger.json')))
+        except (OSError, ValueError):
+            return False
+        return any(q.get('label') == label for q in data.get('queue', []))
+
+    ledger = tempfile.mkdtemp()
+    with _SandboxEnv(MEMSLOT_DIR=ledger, MEMSLOT_BUDGET_GB=16), Sandbox(
+            waiter=dict(cmd=quick, mem='small', timeout=2)):
+        # 12 of the 16 GB are already spoken for, so a `small` (8 GB) job has
+        # to wait: 12 + 8 > 16. The holder is this very process, which is also
+        # what running `suite.main` in-process means for a test.
+        holder = memslot.Slot(12, 'test-holder', budget=16).acquire()
+        worker = threading.Thread(
+            target=lambda: outcome.append(
+                run(['waiter'], jobs=1, log=log, budget=16, ledger=ledger,
+                    keep_output=True)))
+        worker.start()
+        deadline = time.time() + 15
+        while time.time() < deadline and not queued(ledger, 'waiter'):
+            time.sleep(0.05)
+        was_waiting = queued(ledger, 'waiter')
+        time.sleep(6.0)                       # three times the job's timeout
+        still_waiting = not outcome
+        holder.release()
+        worker.join(30)
+
+    check('admission: a job with no room left really does wait', was_waiting,
+          'it was admitted immediately: the budget was not actually full')
+    check('admission: the wait is not charged to the job\'s timeout',
+          still_waiting, f'the run finished while the job was still queueing: '
+          f'{outcome}')
+    check('admission: and the job runs, and passes, once there is room',
+          outcome and outcome[0][0] == 0, f'got {outcome[0][0] if outcome else None}')
+    text = open(log).read() if os.path.exists(log) else ''
+    secs = re.search(r'exit: 0\s+secs: ([0-9.]+)', text)
+    check('admission: the recorded duration is the job\'s, not the queue\'s',
+          secs and float(secs.group(1)) < 2,
+          f'the 2s timeout is inside {secs.group(1) if secs else "(no exit line)"}')
+    check('admission: the queue wait is recorded rather than hidden',
+          'admission: waited' in text,
+          'the log should say how long the job waited for memory')
+
+
+def test_a_reservation_the_budget_cannot_fit_is_reported():
+    """A job bigger than the whole machine budget is an ERROR, not a hang.
+
+    `memslot` refuses such a request rather than queueing it forever, which is
+    right — it can never be admitted — but the runner has to notice. A queue
+    that cannot drain looks exactly like a hung test, and the one thing this
+    repo refuses to do is a run that stalls silently.
+    """
+    log = os.path.join(HERE, 'build', 'test-suite-refused.log')
+    ran = os.path.join(HERE, 'build', 'test-suite-refused.ran')
+    if os.path.exists(ran):
+        os.unlink(ran)
+    # The workload's EFFECT, not its text: the runner logs the argv of every
+    # job it plans, refused or not, so grepping the log for the command would
+    # find it there and prove nothing.
+    with Sandbox(toobig=dict(cmd=ok_cmd(f'open({ran!r}, "w").write("x")'),
+                             mem='small')):
+        with _SandboxEnv(MEMLIMIT_GB=0.02, MEMSLOT_BUDGET_GB=0.01):
+            done = []
+            worker = threading.Thread(
+                target=lambda: done.append(run(['toobig'], jobs=1, log=log,
+                                               budget=0.01)))
+            worker.start()
+            worker.join(60)
+    text = open(log).read() if os.path.exists(log) else ''
+    check('admission: an impossible reservation does not hang the run',
+          bool(done), 'the runner never returned')
+    check('admission: it is reported as an ERROR naming both numbers',
+          done and done[0][0] == 1 and 'admission REFUSED' in text
+          and 'exceeds the whole budget' in text,
+          f'rc={done[0][0] if done else None}; log says: '
+          f'{[l for l in text.splitlines() if "REFUS" in l][:1]}')
+    check('admission: the refused job never ran', not os.path.exists(ran),
+          'the workload started without a reservation')
 
 
 def test_j_forwarded():
@@ -1666,7 +1903,19 @@ def main():
                test_checked_run_replays_a_pass_and_reruns_a_failure,
                test_cached_spec_names_its_own_test,
                test_every_test_file_is_registered,
-               test_no_test_preflights_on_an_unbuildable_artifact):
+               test_no_test_preflights_on_an_unbuildable_artifact,
+               # The memory-campaign tests. They were DEFINED and never CALLED
+               # — three functions, 300-odd lines, nothing in this list — which
+               # is the same defect as a test file in no bucket: the coverage
+               # was claimed in a docstring and executed by nobody. A guard
+               # that nothing runs reports green forever, which is the one
+               # thing it must not be able to do.
+               test_cmd_and_make_drivers_are_capped,
+               test_a_timeout_leaves_no_orphan_under_a_cap,
+               test_every_compiler_job_is_capped,
+               test_every_job_is_reserved_before_it_starts,
+               test_the_timeout_clock_starts_after_admission,
+               test_a_reservation_the_budget_cannot_fit_is_reported):
         fn()
     print()
     print(f'Results: {PASSES} passed, {len(FAILURES)} failed')
