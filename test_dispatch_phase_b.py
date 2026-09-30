@@ -204,7 +204,7 @@ def test_dispatch_solver_phase_b():
     # to recognize (gimple_codegen.py, gated to self-hosting compiles only
     # since commit 02b14c5, to avoid misfiring on ordinary
     # `getattr(self, attr)` delegation elsewhere — see
-    # “the self-hosting `getattr(self”).
+    # bugs/hard/CODEGEN_selfhost_getattr_dispatch_heuristic_misfires_on_ordinary_code.md).
     # This test constructs `DispatchSolver` directly rather than going
     # through `GimpleGen.gen_module`'s path-based self-host detection, so it
     # opts into the same behavior explicitly here instead.

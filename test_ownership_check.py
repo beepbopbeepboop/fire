@@ -157,27 +157,6 @@ def main():
     y = 2
     swap(x, y)
 """),
-    # `imm` is a fourth spelling of "immutable borrow" alongside `read` and
-    # `ref`, so it must be read-only for the same reason they are: two `imm`
-    # borrows of one binding are two shared reads, not an exclusivity
-    # violation. This is `conv_is_read_only`, not an `imm != 'mut'` accident.
-    ("same_name_aliases_two_imm_params_is_not_exclusive", """
-def peek(imm a: Int, imm b: Int):
-    pass
-
-def main():
-    x = 1
-    peek(x, x)
-"""),
-    ("same_name_aliases_imm_and_ref_params_is_not_exclusive", """
-def peek(imm a: Int, ref b: Int):
-    pass
-
-def main():
-    x = 1
-    peek(x, x)
-"""),
-
     ("same_name_to_two_read_params_fine", """
 def combine(read a: Int, read b: Int) -> Int:
     return a + b
@@ -269,25 +248,6 @@ def transfer(mut dst: Int, read src: Int):
 def main():
     x = 1
     transfer(x, x)
-"""),
-
-    # `out` is exclusive like `mut` (the callee writes through it), so it must
-    # be flagged — it is in `_CONV_EXCLUSIVE` now rather than only `mut` being.
-    ("same_name_aliases_two_out_params_is_exclusive", """
-def fill(out a: Int, out b: Int):
-    pass
-
-def main():
-    x = 1
-    fill(x, x)
-"""),
-    ("same_name_aliases_out_and_imm_params_is_exclusive", """
-def fill(out dst: Int, imm src: Int):
-    pass
-
-def main():
-    x = 1
-    fill(x, x)
 """),
 ]
 

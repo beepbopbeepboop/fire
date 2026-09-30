@@ -28,49 +28,17 @@ are chosen for the SHAPES rather than the values:
 
 That last point is load-bearing for this module in particular. Writing
 BLAKE2b meant working around FOUR separate defects in the backend, three of
-which produce plausible wrong answers rather than refusals:
-
-  * the immediate `lsl` encoder carried a base opcode with stray bits in `immr`
-    (`0xd3780000` where its own docstring said `0xd3400000`), so a shift
-    AMOUNT was corrupted while `Rn`/`Rd` stayed right — `1 << 12` returned
-    `16`, and only amounts 1-8, whose intended `immr` already had those bits
-    set, came out correct. `test_arm64_encoders.py` now sweeps all three shift
-    encoders over the whole 0..63 range for exactly that reason, and its
-    comment there is where this now lives.
-  * a ninth argument was silently dropped rather than refused: a cross-module
-    call whose arity exceeded the eight the arm64 ABI passes in registers
-    produced a plausible answer from the wrong registers instead of a
-    diagnosis. `test_formal_run.py` asserts the refusal, and
-    `formal/build.py` emits it.
-  * `UInt64 >> Int` shifted ARITHMETICALLY, because the shift AMOUNT's type
-    was promoted into the decision that the VALUE's type should make. Fixed:
-    `formal/model.py`'s `shift_signedness` reads the LEFT operand alone, and
-    `test_formal_run.py` carries the five rows. The bug's doc is deleted with
-    its fix; the one durable thing in it was a fact about the LANGUAGE rather
-    than about this compiler, and it is `FORMAL.md` §4 decision 5 — `>>` on a
-    signed value is arithmetic, so a "make every `>>` logical" fix would have
-    passed that document's own repro and broken Python, and `>>>` is not the
-    way to spell the alternative because it does not parse here and CPython
-    3.14.7 rejects it too.
-  * a shift of 64 or more WRAPPED (the amount was masked to the register width)
-    instead of saturating. The rule is `formal/model.py`'s
-    `shift_saturated_is_zero`, and both backends branch on it.
-
-Each was found by bisecting a digest that was wrong, and each is guarded here
-by the same assertion that found it: the digest must equal CPython's.
+which produce plausible wrong answers rather than refusals (see
+`bugs/FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8.md`,
+`bugs/FORMAL_arm64_ninth_argument_is_silently_dropped.md`,
+`bugs/FORMAL_arm64_right_shift_is_always_arithmetic.md` and
+`bugs/FORMAL_shift_by_64_or_more_wraps_instead_of_saturating.md`). Each one
+was found by bisecting a digest that was wrong, and each is guarded here by
+the same assertion that found it: the digest must equal CPython's.
 
 Building and RUNNING, not building. `test_formal.py` typechecks the generated
 proof and never executes the image; every case here exits with a status this
 file checks.
-
-    --backend=x86_64 runs the WHOLE file on the other codegen, and it is not a
-    repeat of the arm64 run. `hashlib.mojo` used to be refused outright for
-    x86-64 — `b2_g: 7 parameters exceeds the 6 …` and, behind that, an
-    `encode_mov_r64_imm64` that CRASHED on any 64-bit constant with bit 63 set,
-    which is four of BLAKE2b's eight IVs — so there was no x86-64 digest to
-    compare and this file could only ever ask one architecture. Two backends
-    that lower the same module are two lowerings of it, and a digest is exactly
-    the thing where a second lowering can be wrong without failing to build.
 
 Groups: `commoncrypto`, `blake2b`, `raw`, `absent`. With no argument, all.
 """
@@ -88,11 +56,10 @@ FIRE = os.path.join(HERE, "fire.py")
 BUILD_TIMEOUT = 600
 RUN_TIMEOUT = 120
 
-# The record terminator. NOT a newline, and for a reason that does not expire:
-# a separator this suite can read back WITHOUT asking whether the image decoded
-# a literal. `@@` is two bytes a real newline cannot collide with, so every
-# program here emits its records back to back. Same convention, and the same
-# reason, as `test_formal_os.py` and `test_formal_time.py`.
+# The record terminator. NOT a newline: `\n` inside a Mojo string literal is
+# not unescaped on this path — a formal image prints the two characters `\` and
+# `n` — so every program here emits its records back to back. Same convention,
+# and the same reason, as `test_formal_os.py` and `test_formal_time.py`.
 REC = "@@"
 
 TEMP = None
@@ -112,25 +79,13 @@ def mojo_string(s):
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-BACKEND = None      # None = the default (arm64); `--backend` on the command line
-
-
 def build(src, name):
-    """Build `src` through the formal backend, on `BACKEND`.
-
-    The module is compiled for BOTH architectures and every group here is
-    executed on the one this process selected, so the digests are checked
-    against CPython on each rather than on one and assumed for the other.
-    """
     tmp = os.path.join(TEMP, name + ".mojo")
     out = os.path.join(TEMP, name)
     with open(tmp, "w") as f:
         f.write(src)
-    argv = [sys.executable, FIRE, "build", "--formal", "--no-prove"]
-    if BACKEND:
-        argv.append("--backend=%s" % BACKEND)
-    argv += ["-o", out, tmp]
-    r = subprocess.run(argv,
+    r = subprocess.run([sys.executable, FIRE, "build", "--formal", "--no-prove",
+                        "-o", out, tmp],
                        capture_output=True, text=True, timeout=BUILD_TIMEOUT,
                        cwd=HERE)
     check(r.returncode == 0,
@@ -187,7 +142,7 @@ def _chunks(items, n):
     `RecursionError` out of `formal/arm64_codegen.py`, i.e. a crash in the
     compiler's plumbing rather than a claim about the source. Chunking keeps
     each program small enough to compile. Filed as
-    `FORMAL_always_returns_recurses_past_the_stack_on_a_large_function`;
+    `bugs/FORMAL_always_returns_recurses_past_the_stack_on_a_large_function.md`;
     until it is fixed, a test that needs many cases builds many small programs
     rather than one large one.
     """
@@ -403,13 +358,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("groups", nargs="*", help="subset: " + ", ".join(GROUPS))
-    ap.add_argument("--backend", default=None,
-                    help="formal backend to build for (default: arm64)")
     args = ap.parse_args()
-    global BACKEND
-    BACKEND = args.backend
     if platform.machine() not in ("arm64", "aarch64"):
-        print(f"SKIP: this host cannot run the formal images at all, host is "
+        print(f"SKIP: formal output is arm64-only, host is "
               f"{platform.machine()}")
         return 0
     names = args.groups or list(GROUPS)

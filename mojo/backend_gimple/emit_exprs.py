@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 
 from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
@@ -36,16 +35,9 @@ import mlir
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
-import mojo.backend_gimple.emit_infra as ginf
-from mojo.middle.module_shared import builtin_module_constant, bare_global_read_plan
-# `_BOXED_CONTAINER_CTYPES` now lives in `mojo.middle.types` next to
-# `_CONTAINER_KIND_TYPES` (see its own comment for why it left this file) and
-# is imported under its own name: `import *` would drop the leading underscore.
-from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 
 def _lower_strided(gen, node, store: bool):
     """Scalar (SIMD-width-1) lowering of the strided_load/strided_store
@@ -84,8 +76,6 @@ def lower_expr(gen, node) -> tuple[str, str]:
         return gen._lower_BoolLiteral(node)
     elif isinstance(node, gimple_ctypes.EllipsisLiteral):
         return gen._lower_EllipsisLiteral(node)
-    elif isinstance(node, gimple_ctypes.DottedLiteral):
-        return gen._lower_DottedLiteral(node)
     elif isinstance(node, gimple_ctypes.StringLiteral):
         return gen._lower_StringLiteral(node)
     elif isinstance(node, gimple_ctypes.IdentExpr):
@@ -128,74 +118,12 @@ def lower_expr(gen, node) -> tuple[str, str]:
     return 'int', t
 
 
-# The operators whose result is PROVABLY a plain Python integer when every
-# operand is: arithmetic and bitwise only. A comparison is excluded — its
-# result is already a `_Bool`, which `_mark_known_int`'s type test rejects —
-# and `in`, `is`, `and`/`or` and `:=` are excluded because each is dispatched
-# before the arithmetic sites this table guards. `%` appears here BECAUSE its
-# string form is already gone by the arithmetic tail: what reaches it is
-# numeric modulo. `//` is NOT here: it is dispatched even earlier, so it
-# carries its own producer at `_lower_floordiv`. `~` is the UNARY complement
-# only (the sole member with no binary spelling), and `-` serves both
-# spellings.
-_INT_ARITH_OPS = frozenset(('+', '-', '*', '/', '&', '|', '^', '~', '<<', '>>', '%'))
-
-
-def _mark_known_int(gen, operand_vals: list, res_type: str,
-                    res_val: str) -> None:
-    """Record `res_val` in `gen._int_word_vals` when every value in
-    `operand_vals` is already recorded there and `res_type` is a plain
-    integer.
-
-    `_lower_IntLiteral` seeds that set with integer LITERALS, which is enough
-    for `d[3000000000] = 1` and for a local bound from one — but not for the
-    computed keys the same program goes on to write. `d[base + 1]` and
-    `d[-1]` were still SIGSEGVs, because the result of the arithmetic was a
-    fresh temp nothing had ever recorded, so the dict site handed it to
-    `mojo_boxed_is_str` — a RANGE test that calls every positive int64 in
-    [2^31, 2^47) a pointer, so `mojo_dict_set_int_kw(d, 3000000001, 1)`
-    became a `strcmp` of address 3000000001 (at -O0, -O2 and under ASan
-    alike). See bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md.
-
-    The two kinds of producer are here rather than spelled out at each site,
-    and both reduce to the same statement — an integer operation on integers,
-    or a coercion of an integer to an integer, yields an integer — which is
-    what makes the table monotone-safe to extend:
-
-    * **Sound.** The `res_type` test rejects every lowering whose C type could
-      hold a pointer, so a marked value cannot be a string; and a value only
-      enters the set through an operation that cannot reinterpret its
-      operands' bits. The UNSOUND direction — marking a value that IS a
-      pointer — is what `k = "s"` must not do, and that is
-      `_track_pointer_actual_type`'s `discard`, not this function's problem.
-    * **Fail-safe.** A miss is a miss: the value falls back to the runtime's
-      own discriminator, i.e. exactly today's behaviour. A wrongly-narrowed
-      producer costs a missed optimisation, never a crash — which is why this
-      can be added to one operation at a time.
-    """
-    if res_type not in ('int', 'int64_t'):
-        return
-    _iwv = gen._int_word_vals
-    for _v in operand_vals:
-        if _v not in _iwv:
-            return
-    _iwv.add(res_val)
-
-
 def _lower_IntLiteral(gen, node) -> tuple[str, str]:
     value = _signed_int64(_as_intlit_node(node).value)
     if -0x80000000 <= value <= 0x7FFFFFFF:
-        _iv = str(value)
-        # An integer literal is the ONE value whose type needs no inference:
-        # it cannot be a pointer, at any magnitude. Recorded so a consumer
-        # that would otherwise ask the runtime to guess can be told (see
-        # `gen._int_word_vals`), which is what makes `d[3000000000] = 1` a
-        # dict write instead of a `strcmp` of address 3000000000.
-        gen._int_word_vals.add(_iv)
-        return 'int', _iv
+        return 'int', str(value)
     t = gen._new_temp('int64_t')
     gen._emit(f"  {t} = {_signed_int64_c_literal(value)};")
-    gen._int_word_vals.add(t)
     return 'int64_t', t
 
 
@@ -218,27 +146,6 @@ def _lower_EllipsisLiteral(gen, node) -> tuple[str, str]:
     t = gen._new_temp('int')
     gen._emit(f"  {t} = 0;  /* ... */")
     return 'int', t
-
-
-def _lower_DottedLiteral(gen, node) -> tuple[str, str]:
-    """A dot-relative value reference (`.always`, `.uint64`) used as a value.
-
-    The reference is only meaningful against the type the surrounding position
-    supplies — the `inline` decorator's parameter, a DType parameter, the
-    subject of a `__match` — and this backend does not model enums, so there is
-    nothing here to resolve it against. It lowers to a zero placeholder, which
-    is exactly what the SPELLED-OUT form already produces: `_lower_IdentExpr`
-    emits `(int64_t)0` for a class ref used as a value (`DType`, `SIMD` are both
-    in `_BUILTIN_TYPE_NAMES`), so `SIMD[.uint64, 4]` and `SIMD[DType.uint64, 4]`
-    compile to the same thing and neither is silently better than the other.
-
-    int64_t, not int, for the reason `_lower_IdentExpr`'s class-ref branch gives:
-    this value commonly flows into a `(void *)` cast, where a 4-byte int is a
-    real size mismatch on LP64.
-    """
-    t = gen._new_temp('int64_t')
-    gen._emit(f"  {t} = (int64_t)0;  /* .{getattr(node, 'path', '?')} */")
-    return 'int64_t', t
 
 
 def _lower_StringLiteral(gen, node):
@@ -282,26 +189,8 @@ def _lower_StringLiteral(gen, node):
     # Backtick-quoted Mojo identifiers tokenize as STRING — treat as variable reference
     if val.startswith('`') and val.endswith('`') and len(val) > 2:
         return gen._lower_IdentExpr(gimple_ctypes.IdentExpr(name=val))
-    val, is_fstring = gen._decode_str_literal_text(val, gimple_ctypes._str_literal_interp_flag(node))
+    val, is_fstring = gen._decode_str_literal_text(val)
     if not is_fstring:
-        # A RAW literal's escapes are its CHARACTERS, and `_c_escape` passes a
-        # recognised escape through unchanged on the reasoning that the C
-        # compiler will decode it — which is right for `"a\nb"` and wrong for
-        # `r"a\nb"`, where the C compiler decodes a backslash the source asked
-        # to keep. Doubling the backslash FIRST is what makes `_c_escape` see no
-        # escape to pass through: it escapes `\\` as `\\\\`, the C literal
-        # carries one backslash, and the emitted bytes are the four characters
-        # the source wrote. Measured on this tree before this line: `r"p\nq"`
-        # was THREE characters on all three engines where CPython says four;
-        # `fire_compiler.decoded_literal` fixes the interpreter and the formal
-        # backends, and this is what fixes the compiled path.
-        #
-        # `is_raw` is read off the NODE rather than the text because
-        # `_strip_string_prefix_and_quotes` has already stripped the `r` by the
-        # time `val` exists — `fire_compiler.py` records it on the literal for
-        # exactly this reason.
-        if getattr(node, 'is_raw', False):
-            val = val.replace('\\', '\\\\')
         escaped = gimple_ctypes._c_escape(val)
         # GIMPLE: char[] arrays can't be implicitly assigned to char* locals.
         # Register in the module-level string pool (emitted as C global char arrays)
@@ -373,9 +262,9 @@ def _lower_StringLiteral(gen, node):
                 if _conv == 'r':
                     # repr() the ORIGINAL typed value, not the stringified
                     # one — _repr_value(et, ev) expects the raw value.
-                    part_val = gen._repr_value(et, ev, expr_node)
+                    part_val = gen._repr_value(et, ev)
                 else:
-                    part_val = gen._stringify_value(et, ev, expr_node)
+                    part_val = gen._stringify_value(et, ev)
                 if _spec:
                     part_val = gen._apply_fstring_spec(part_val, _spec)
             except Exception as e:
@@ -396,22 +285,7 @@ def _lower_StringLiteral(gen, node):
             # itself a previous cat), so it is freed as soon as the next cat
             # has copied it; the first part may be a literal or a borrowed
             # variable's string and is never freed here.
-            #
-            # The RIGHT operand is freed when the fresh-value chokepoint says
-            # nobody else can name it, which is the same question
-            # `free_left` asks of the left and was not being asked at all. A
-            # container interpolation goes through a repr WALKER
-            # (`_stringify_value`'s / `_repr_value`'s container arms), the
-            # walker `strdup`s its result, `mojo_str_cat` copies out of it —
-            # and nothing released it: 12.8 B per interpolated container,
-            # measured flat over a 4x loop range, for `f"{xs}"`. A part that
-            # is a literal (`_slit_N`), a variable read, or a field is not in
-            # `_fresh_vals` and is untouched, which is the whole reason the
-            # question is asked through the registry rather than by node
-            # shape.
-            acc_val = gen._emit_str_cat(
-                acc_val, part_val, acc_val in gen._fresh_str_tmps,
-                part_val in gen._fresh_vals)
+            acc_val = gen._emit_str_cat(acc_val, part_val, acc_val in gen._fresh_str_tmps, False)
     if acc_val is None:
         # Only reachable for an f-string whose parts are all empty
         # literals (e.g. f"{''}") — emit an empty string, not the old
@@ -423,12 +297,7 @@ def _lower_StringLiteral(gen, node):
 
 def _lower_TstringLiteral(gen, node) -> tuple[str, str]:
     val = node.value
-    # `'1'`, and not a flag read off the node: a `TstringLiteral` is the node
-    # type that exists only for a `t"..."` template literal, so it is
-    # interpolated by construction and carries no field to say so. (Nothing in
-    # this tree builds one — `_parse_primary` folds t-strings into
-    # `StringLiteral`s — so this is the lowering a hand-built node reaches.)
-    val, _ = gen._decode_str_literal_text(val, '1')
+    val, _ = gen._decode_str_literal_text(val)
     parts = gen._parse_fstring_parts(val)
     # Plain unpack loop, NOT `''.join(v for k, v, _s, _c in parts)` — see
     # `_lower_StringLiteral`'s identical fix above for why.
@@ -519,7 +388,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # via a real cross-translation-unit call into the DEFINING module's
     # own synthesized accessor, instead of falling through to the
     # "unknown identifier" zero/NULL placeholder further below (which
-    # a per-module-independent `fire dylib` compile previously always
+    # a per-module-independent `mojo dylib` compile previously always
     # hit for this shape, silently reading zero or a stale/garbage
     # pointer). `name not in self.var_types`: an ordinary same-named
     # LOCAL variable always shadows the imported global, exactly like
@@ -567,10 +436,6 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             gen._funcptr_builtins_needed.add(c_name)
             static_name = f'_funcptr_{c_name}'
             t = gen._new_val('void *', f'{static_name}')
-            # The BARE name, not `c_name`: CPython's repr is the name the
-            # source wrote (`<function step at 0x...>`), and `c_name` is the
-            # mangled C symbol (`step_9f63a2`) or a module qualifier.
-            gen._func_value_names[t] = name
             return 'void *', t
         else:
             # For non-identifier expressions like ((int)0), emit directly
@@ -578,22 +443,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             return 'void *', t
     # C function name used as a value (e.g. tokenize, MojoParser passed to Scope_define).
     # Can't use a function name as rvalue in GIMPLE — use a pre-declared static void*.
-    #
-    # `name in gen._generator_api` is the OTHER half of the membership
-    # test, and it was missing: a generator this compile already lowered
-    # has no entry in `func_return_types` under its OWN name (only its
-    # `<base>_start/_resume/_value/_destroy` do), so a generator read as
-    # a value fell through every branch here to the "unknown identifier"
-    # placeholder at the bottom — a literal `(int64_t)0` — and the
-    # consumer then CALLED it: `consume("/r", leaf)` (passing a module
-    # generator to a function that iterates what it is handed) compiled
-    # and linked, then took SIGSEGV calling address 0. gen_module's
-    # `_funcptr_target` already redirects a generator's bare csym to
-    # `<base>_start` when it emits the static — which is exactly right
-    # here, since calling a generator FUNCTION is what constructs the
-    # generator object without running its body.
-    if ((name in gen.func_return_types or name in gen._generator_api)
-            and name not in gen.var_types
+    if (name in gen.func_return_types and name not in gen.var_types
             and name not in gen.struct_field_types and name not in gen._global_var_types):
         # Use the overload-mangled C symbol so &fn points at the real
         # definition. Membership + subscript, NOT
@@ -605,136 +455,74 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         c_name = gen._func_csym(name)
         if name in gen._c_names:
             c_name = gen._c_names[name]
-        # A VARIADIC function taken as a VALUE. Its real C signature is the
-        # packed form (`MojoList *` for `*args`, `MojoDict *` for
-        # `**kwargs`), which the arity-based `mojo_fnptr_call_N` convention
-        # cannot express: `def f(*a)` reached through `f = f` got loose
-        # scalars and the callee dereferenced the integer 1 — a SIGSEGV.
-        # Materialize the same `MojoVarargFn` a variadic LAMBDA gets (see
-        # `_lower_LambdaExpr` and runtime/fire_runtime.h's "Variadic
-        # callables"), so a direct call by name is untouched and only the
-        # value form changes.
-        _vshape = (getattr(gen, '_variadic_func_shape', None) or {}).get(c_name) \
-            or (getattr(gen, '_variadic_func_shape', None) or {}).get(name)
-        if _vshape is not None:
-            _fnv = gen._new_val('void *', f'(void *){c_name}')
-            _vf = gen._call_expr('MojoVarargFn *', 'mojo_vararg_fn_new',
-                                 [('void *', _fnv), ('void *', '0'),
-                                  ('int64_t', f'({_vshape[0]})'),
-                                  ('int64_t', f'({_vshape[1]})'),
-                                  ('int64_t', '(0)')])
-            return 'void *', gen._new_val('void *', f'(void *){_vf}')
         gen._funcptr_builtins_needed.add(c_name)
         static_name = f'_funcptr_{c_name}'
         t = gen._new_val('void *', f'{static_name}')
-        # What this function RETURNS, so a later call through the value reads
-        # the right one. `mojo_fnptr_call_N` is the homogenized `int64_t`
-        # convention -- right for the box it hands back, wrong for the value
-        # inside -- so without this every bare-function-pointer VALUE printed
-        # the box: `d = {}; d['k'] = add3; print(d['k'](1, 2, 3))` answered 0
-        # for CPython's 6, while the named-local spelling `f = add3; f(...)`
-        # was right only because it consults `func_return_types` directly.
-        # Mirrors the sibling branches: a capturing closure records
-        # `_bound_method_ret_types`, and a lambda records
-        # `_callable_ret_types` in `_lower_LambdaExpr`.
-        gen._callable_ret_types[t] = gen.func_return_types.get(name, 'int64_t')
-        # And the BARE name, so `print(f)` can render `<function f at 0x...>`
-        # where CPython does. `c_name` cannot answer that: it is the mangled C
-        # symbol (`step_9f63a2`) or a module qualifier (`mod_a_thing`), while
-        # CPython's repr is the name the source wrote.
-        gen._func_value_names[t] = name
         return 'void *', t
     # Module-level global variable (persistent type known across functions).
-    # Also catches `global x` declarations inside functions
-    # (_func_declared_globals). The DECISION — which module's
-    # `_<mod>_globals.<name>` field a bare read of `name` loads, and
-    # whether it loads one at all — is `module_shared.bare_global_read_plan`'s,
-    # not this function's: `emit_infra._compr_target_is_shadowed` asks the same
-    # question to decide whether a comprehension target may reuse the C
-    # variable that a bare read of that name would resolve to, and two
-    # derivations of one rule is how they drift apart.
-    (_gwins, _imp_home, _imp_field, _imp_fields, _imp_pending,
-     _global_owner_mod) = bare_global_read_plan(gen, name)
-    if _gwins:
-        # WHICH module's `_<mod>_globals.<name>` field this read must load, in
-        # strict precedence order:
-        #   1. THIS module's own struct, whenever it declares the name (the
-        #      `_owned_here` routing argument above). A later
-        #      `from b import N` followed by a module-level `N = 'a-side'`
-        #      rebinds the name in THIS module's namespace -- Python
-        #      semantics -- so the bare read is this module's field and not
-        #      `b`'s, and no record of an earlier statement outranks a later
-        #      assignment. `_gmi_scan_imported_global_homes` is gated on the
-        #      same fact (`_own_global_var_types`) and is right to leave the
-        #      name alone, but a record that exists anyway must still lose
-        #      here: putting the imported home FIRST printed 'b-side' where
-        #      CPython prints 'a-side'
-        #      (test_gimple_runner.py's
-        #      `own_module_global_beats_the_imported_homonym`).
-        #   2. the module this one imported the name FROM, when it imported it
-        #      and did not redeclare it. The from-import is THIS module's own
-        #      source statement, and the recorded home is a module whose
-        #      struct provably declares the field.
-        #   3. the OWNING module's struct by the shared name-keyed map.
-        #      `_module_global_field_type` is the authoritative test because
-        #      `_module_globals[mod]` is the exact list the typedef, the
-        #      initializer and the accessor were all generated from, which is
-        #      the same reasoning `_lower_MemberExpr`'s `submod.GLOBAL` branch
-        #      already rests on.
-        #
-        # Arm 2 is also the whole difference between compiling and not
-        # compiling for every FROM-IMPORTED global read bare.
-        # `build_stdlib_dylib.py` has
-        # `from module_loader import load_module, STDLIB_PATH,
-        # module_name_for_path` at module level and reads `STDLIB_PATH` bare
-        # inside a function; `build_stdlib_dylib_toplev` declares no such
-        # field (only the module's OWN top-level assignments become fields),
-        # so the read emitted `_build_stdlib_dylib_globals.STDLIB_PATH` --
-        # "'struct _build_stdlib_dylib_toplev' has no member named
-        # 'STDLIB_PATH'". Same for `TEST_PATH` in build_config,
-        # `_BUILTIN_RET_CTYPES` in module_shared/resolve_shared, and the
-        # sibling-alias rewrite's `_BIN_OPS`/`_TYPE_MAP`/`_FIXED_ARRAY_ANN_RE`
-        # (see `_lower_MemberExpr`'s own comment: `gimple_ctypes._BIN_OPS` is
-        # deliberately lowered as a BARE `_BIN_OPS`, in a module that reached
-        # `mojo.middle.types` with `import ... as gimple_ctypes` and so never
-        # ran the from-import declaration site at all).
-        #
-        # Strictly additive: a module that declares the name keeps reading its
-        # own field, and a name nobody declares (owner None) is untouched, so
-        # both cost one dict-free `is None` comparison and nothing else.
-        _read_mod = gen._current_module_ctx or "root"
-        _read_types = gen._module_global_field_type(_read_mod, name)
-        if _read_types is None and _imp_fields is not None:
-            _read_types = _imp_fields
-            _read_mod = _imp_home
-        elif _read_types is None and _imp_pending:
-            # The owner is mid-compile in this closure (see `_imp_pending`),
-            # so its triple does not exist yet. Phase 1.7's own conclusion for
-            # the name IS the owner's conclusion — `_global_to_module` named
-            # this owner for it one gate ago — and `_imp_pending` has already
-            # established that the type is a container, whose field is
-            # declared `int64_t` (the rule two lines below, which is where the
-            # `c_decl_from_owner` of 'int64_t' comes from). So the load and
-            # the type still agree BY CONSTRUCTION rather than by a second
-            # inference: this module's struct has no such member (it never
-            # declared it), so the owner's is the only field there is.
-            _read_types = ('int64_t', gen._global_var_types[name])
-            _read_mod = _imp_home
-        elif _read_types is None:
-            _owner_s = _as_str(_global_owner_mod) if _global_owner_mod is not None else ''
-            if _owner_s and _owner_s != _read_mod:
-                _read_types = gen._module_global_field_type(_owner_s, name)
-                if _read_types is not None:
-                    _read_mod = _owner_s
-        if _read_types is not None:
-            gtype = _read_types[1]
-            c_decl_from_owner = _read_types[0]
-        else:
-            gtype = gen._global_var_types[name]
-            c_decl_from_owner = None
+    # Also catches `global x` declarations inside functions (_func_declared_globals).
+    #
+    # A BARE (unqualified) identifier can only legitimately refer to a
+    # global belonging to THIS module — real Python scoping never lets
+    # a plain name resolve to some OTHER module's global (that needs
+    # `othermodule.name` qualification, handled entirely separately by
+    # MemberExpr lowering). `_global_var_types`/`_global_to_module` are
+    # shared, whole-transitive-tree-scoped dicts (populated once per
+    # name, first writer wins, across every module ever compiled in
+    # the closure — see gen_module's "Phase 1.7 pre-scan" and "Module-
+    # level globals" passes) — deliberately a superset for cross-
+    # module `mod.attr` MEMBER access to work regardless of which
+    # level first discovers a given module. Using that same superset
+    # to decide whether a BARE name is a global at all is wrong: if
+    # some OTHER module (anywhere in the whole closure) happens to
+    # ALSO declare a same-named top-level global, `_global_to_module`
+    # already recorded which module actually owns it — skip this
+    # branch (fall through to the ordinary "unknown identifier"
+    # placeholder below) unless it's OUR OWN module's global. Found
+    # via `fire.py`'s self-host build: a lambda inside gimple_codegen.
+    # py's own `compile_to_gimple_cached` closing over its enclosing
+    # function's `filename` PARAMETER (an ordinary, if imperfectly-
+    # supported, closure capture — see the sibling `mojo_src`/
+    # `do_imports` captures right next to it, which already correctly
+    # fall through to the same placeholder) got misresolved as
+    # `_gimple_codegen_globals.filename` — a field gimple_codegen.py
+    # never declares — because `fire_compiler.py`'s OWN unrelated
+    # top-level `filename = sys.argv[1] if ... else "<stdin>"` (inside
+    # its `if __name__ == "__main__":` block) is also named `filename`
+    # and is reachable via the whole-tree scan. See bugs/CODEGEN_
+    # generator_function_Lib_weakref.md.
+    # Direct attribute access (not `getattr(gen, '_global_to_module', {})`):
+    # the field carries an annotation-seeded `char *` value type, so `.get`
+    # returns a real string here instead of a boxed int64_t that compares
+    # unequal to every module name.
+    _g2m = gen._global_to_module
+    _global_owner_mod = _g2m.get(name) if name in _g2m else None
+    # Explicit `len(...) > 0`, not `X or "root"`: the self-hosted `or` keeps
+    # an empty-but-non-null `char *` rather than falling through to "root",
+    # so `_this_mod` was "" and disagreed with the "root"-keyed owner map —
+    # a bare `global counter` read then fell to the `(int64_t)0` placeholder.
+    _this_mod = gen.module_name if len(gen.module_name) > 0 else "root"
+    # `name in gen._own_global_var_types`: THIS compile's own Phase-1.7 scan
+    # concluded a type for `name` as a module global. Unambiguous "it's ours"
+    # even when the shared, name-keyed `_global_to_module` superset reads
+    # back a boxed/garbage owner under self-compile (`_global_owner_mod ==
+    # _this_mod` then spuriously fails and a bare `global counter` read fell
+    # through to `(int64_t)0`). `_flatten_resolved_conditionals` already
+    # drops an imported module's `if __name__ == '__main__':`-guarded
+    # top-level globals from this scan, so it stays this-module-scoped.
+    _owned_here = name in gen._own_global_var_types
+    # `_as_str(_global_owner_mod)`: the shared `_global_to_module` dict's
+    # VALUE erases to a boxed pointer on the self-hosted compiled path, so
+    # a bare `_global_owner_mod == _this_mod` compared a stale heap address
+    # to a fresh "root" string and always failed — the bare-name global
+    # read then fell to `(int64_t)0` (`import sys` receivers in
+    # t1.mojo/t_argv.mojo/mojo_main.py, stage1-vs-stage2 parity break).
+    if (_global_owner_mod is None or _as_str(_global_owner_mod) == _this_mod or _owned_here) and \
+            (name in gen._func_declared_globals or name not in gen.var_types) and name in gen._global_var_types:
+        gtype = gen._global_var_types[name]
         # Globals are stored at C level as int64_t (boxed pointers) except
         # for char * and simple int globals whose C type matches the Mojo type.
-        if gtype in _BOXED_CONTAINER_CTYPES:
+        if gtype in ('MojoDict *', 'MojoList *', 'MojoSet *'):
             ctype = 'int64_t'
         else:
             ctype = gtype
@@ -768,33 +556,6 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             # [1, 8]]`. Mirrors the _dict_nested_val_types copy just above.
             if name in gen._nested_elem_types:
                 gen._nested_elem_types[t] = gen._nested_elem_types[name]
-        # The CALLABLE side tables, same hop and same reason as the three just
-        # above — see `ginf.carry_callable_ret_types`'s docstring for why a
-        # module-level callable lost what it returns. Reading a global mints a
-        # FRESH temp, and `_lower_fnptr_call_value` keys its lookup on the C
-        # expression it was handed, not on the Mojo name, so without this copy
-        # every module-level callable printed the homogenized `int64_t` box:
-        #     e = lambda: False;  print(e())  ->  0         (False)
-        #     d = {"k": lambda: True}; print(d["k"]())  ->  0  (True)
-        #     f = m.truthy;      print(f())  ->  1         (True)
-        # while the identical spelling inside a `def` was already right — a
-        # local read returns the variable's own C name, which is the whole
-        # difference between the two.
-        ginf.carry_callable_ret_types(gen, name, t)
-        # …and "this global holds a plain integer" (`gen._int_word_vals`), the
-        # same hop and the same reason for the same reason-as-the-three-above:
-        # reading a global mints a FRESH temp, and the dict-key decision is
-        # keyed on the C expression it was handed. So `K = 3000000000` at
-        # module scope was recorded on `K`, the record stopped at the temp,
-        # and `d[K] = 1` on the next line went to `mojo_dict_set_int_kw` —
-        # where the runtime's range-only discriminator calls address
-        # 3000000000 a `char *` and the program SIGSEGVs.
-        # (`_int_word_vals` is per-function by design — temp names repeat
-        # across functions — so a global read from ANOTHER function still has
-        # no record. That is the cross-function inference gap this bug's own
-        # doc puts in `mojo/middle/`'s court, not a miss here.)
-        if name in gen._int_word_vals:
-            gen._int_word_vals.add(t)
         # Resolve the C decl type through the same own-overlay helper the
         # module-globals struct field freeze (gen_module_impl's
         # `_declared_globals` loop) and the assignment-site coercion
@@ -808,80 +569,13 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # dict, then every `aliased_encoding = _aliases.get(...)` receiver
         # load emitted a bare `int64_t t = MojoDict * field;`
         # -Wint-conversion error).
-        # `_imp_fields[0]` FIRST when there is one: for a name this module
-        # imported, this module's own overlay says nothing (and after
-        # `_phase17_set_gtype`'s own-scope split, deliberately nothing) about
-        # the field being loaded, so the owner's own triple is the only
-        # answer that can be right.
         c_decl_type = gen._own_overlay_global_ctype(name)
-        if c_decl_from_owner is not None:
-            # Routed to ANOTHER module's field above (the one this name was
-            # imported from, or the one the shared name-keyed owner map
-            # pointed at), so THAT field's OWN declared type is the answer --
-            # a shared bare-name-keyed dict cannot be, since that is exactly
-            # the table whose "first module to claim this name wins" entry
-            # pointed us here.
-            c_decl_type = c_decl_from_owner
-        elif c_decl_type is None:
+        if c_decl_type is None:
             c_decl_type = gen._global_c_decl_types.get(name, ctype)
-        # Access global from THIS module's own struct — the same routing the
-        # WRITE side already uses, deliberately, at every one of its sites
-        # (`_gen_stmt_AssignStmt`'s `global x`/module-scope branches,
-        # `_write_dest` in emit_infra.py, and cpp_core's own generator-body
-        # module-global read), all of which carry the same explanation:
-        # `_global_to_module` is a SHARED, whole-transitive-tree, name-keyed
-        # "first module to claim this bare name wins" map, so when two
-        # genuinely different modules each declare their own same-named
-        # top-level global it points at whichever was scanned FIRST — not
-        # necessarily the one whose body is being emitted. A BARE (unqualified)
-        # name in real Python can only ever mean THIS module's own global
-        # (the qualification `othermod.name` is a MemberExpr, lowered
-        # separately above), so consulting that map here could only ever
-        # misroute.
-        #
-        # It did, and the read side was the half that was wrong: the gate
-        # above had ALREADY decided the name is ours (owner is None, or
-        # owner is this module, or `_owned_here` — this instance's own
-        # Phase-1.7 scan concluded it), yet the field reference then went
-        # and asked the shared map anyway. So a bare `UNKNOWN` inside
-        # c_analyzer/info.py (whose own `UNKNOWN` is a `_misc.Labeled(...)`
-        # struct, boxed `int64_t`) loaded `_c_common_tables_globals.UNKNOWN`
-        # — c_common/tables.py's unrelated `UNKNOWN = '???'`, a `char *` —
-        # into an `int64_t` local, while the WRITE for the very same name
-        # correctly landed in `_root_globals.UNKNOWN`. Read and write on one
-        # name, two different storage slots, and the read's type disagreed
-        # with the field it read: 4 x "assignment to 'int64_t' from 'char
-        # *' makes integer from pointer without a cast" plus 6 x "non-trivial
-        # conversion in 'component_ref'" (bugs/COMPILE_FAIL_Tools_c-analyzer_
-        # c_analyzer/info.md). With the write already pinned to this module,
-        # making the read agree is what closes the pair.
-        #
-        # `_read_mod`, not `gen._current_module_ctx` unconditionally, and for
-        # the two cases the routing note at the top of this branch names:
-        #
-        # 1. A FROM-IMPORTED global has no field on this module's struct at
-        #    all, so "this module's own struct" is not an answer for it — the
-        #    owner's is. Real Python agrees (`from b import K` binds b's object
-        #    here), and the owner's field triple above is where the read's type
-        #    comes from, so the load and the type cannot disagree. The field
-        #    NAME is `_c_field_name(_imp_field)`, not of `name`: under
-        #    `from b import K as J` the local spelling is `J` and the field is
-        #    still `K`.
-        # 2. A name the shared owner map routes elsewhere (and which this
-        #    module's own scan has no field for) loads the owner's field —
-        #    the same situation, reached through the other table.
-        safe_module = gimple_ctypes._c_field_name(_read_mod)
-        # The field name is `_imp_field`, not `name`, whenever the read routed
-        # to the module this one IMPORTED the name from — `_imp_fields` for the
-        # owner that has registered, `_imp_pending` for the one still being
-        # compiled. Under `from b import K as J` the local spelling is `J` and
-        # the owner's FIELD is still `K`, so the local name is not an answer
-        # for either. `name` remains the answer for every other route, which
-        # is every route that loads THIS module's own struct.
-        _field_name = gimple_ctypes._c_field_name(_imp_field) \
-            if (_imp_fields is not None or _imp_pending) \
-            else gimple_ctypes._c_field_name(name)
-        field_ref = f"_{safe_module}_globals.{_field_name}"
+        # Access global from module struct (use which module the global belongs to)
+        global_module = getattr(gen, '_global_to_module', {}).get(name, gen._current_module_ctx or "root")
+        safe_module = gimple_ctypes._c_field_name(global_module) if global_module else "root"
+        field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(name)}"
         if ctype == 'int64_t' and c_decl_type.endswith(' *'):
             # Global is declared as a pointer type at C level but we box it as int64_t.
             # GIMPLE: must load pointer into matching-type local, then cast via void* → int64_t.
@@ -1028,10 +722,7 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
             gen._emit(f"  {zero} = (int64_t)0;")
             gen._emit(f"  {t} = {ip} == {zero};")
         elif ot == 'int64_t':
-            # `0LL`, not `(int64_t)0`: it becomes a COMPARISON OPERAND below,
-            # and a C-style cast is not a legal gimple operand. See
-            # emit_infra.py's range()-bound note for the full rationale.
-            zero = gen._new_val('int64_t', "0LL")
+            zero = gen._new_val('int64_t', "(int64_t)0")
             gen._emit(f"  {t} = {ov} == {zero};")
         elif ot == '_Bool':
             # GIMPLE: both operands of comparison must have same type
@@ -1113,18 +804,6 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
         actual_ot = 'int64_t'
         actual_ov = ip
     t = gen._new_val(actual_ot, f"{c_op}{actual_ov}")
-    # `-n` / `~n` on a value already known to be an integer is another
-    # integer, which is what makes `d[-1]` and `d[~n]` dict writes instead of
-    # a `strcmp` of an address in [2^31, 2^47) (see `_mark_known_int`, and
-    # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md). The table
-    # has both, and `-` is spelled by both the unary and the binary operator,
-    # so one membership test covers them. Note the operand tested is
-    # `actual_ov`, not `ov`: the pointer-coercion arm above REPLACES it with a
-    # fresh `(int64_t)` cast temp, which is in nobody's set — so a `-<char *>`
-    # (which exists only so the runtime-dispatch for-loop's dead dict branch
-    # compiles) is correctly NOT marked.
-    if c_op in _INT_ARITH_OPS:
-        _mark_known_int(gen, [actual_ov], actual_ot, t)
     return actual_ot, t
 
 
@@ -1160,34 +839,7 @@ def _lower_TernaryExpr(gen, node) -> tuple[str, str]:
     gen._safe_coerce_emit(et, res_type, ev, result)
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_merge)
-    # A ternary over two operands this codegen already KNOWS are integers
-    # produces an integer — the same no-inference argument as every other
-    # producer on `gen._int_word_vals`, one expression wider. Gated on BOTH
-    # branch types being integer-shaped rather than on the joined
-    # `res_type` alone: `_quick_type` estimates without evaluating, so a
-    # branch that really lowers to a pointer can join to `int` and be
-    # truncated to an address, and marking THAT result "a plain integer"
-    # would be the opposite of the answer.
-    if res_type in ('int', 'int64_t') and tt in ('int', 'int64_t') \
-            and et in ('int', 'int64_t') \
-            and tv in gen._int_word_vals and ev in gen._int_word_vals:
-        gen._int_word_vals.add(result)
     return res_type, result
-
-
-# C types with no structure or union behind them, so `.member` on one can
-# only be a dynamic attribute access — never a C field selection. Listed
-# explicitly rather than derived from "does not end in ` *`", because a bare
-# struct value (`Span`, boxed as `int64_t` and separately tracked through
-# `_actual_types`) also does not end in ` *` yet IS a real field read.
-_GIMPLE_SCALAR_CTYPES = frozenset({
-    'char', 'signed char', 'unsigned char',
-    'short', 'unsigned short', 'int', 'unsigned', 'unsigned int',
-    'long', 'unsigned long', 'long long', 'unsigned long long',
-    'int8_t', 'int16_t', 'int32_t', 'int64_t',
-    'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t',
-    'float', 'double', 'long double', '_Bool', 'size_t', 'ssize_t',
-})
 
 
 def _lower_MemberExpr(gen, node) -> tuple[str, str]:
@@ -1304,27 +956,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # Check if obj is a simple identifier (module access)
     if isinstance(node.obj, gimple_ctypes.IdentExpr):
         module_name = node.obj.name
-        # The REAL module this identifier is bound to, for `import X as Y`.
-        # Every module-ATTRIBUTE special case below (`sys.argv`, `os.sep`,
-        # `signal.SIGTERM`, `__mlir_attr.*`, ...) is keyed on the canonical
-        # name, and `import os as _os` binds the local name `_os`, so all of
-        # them missed and the read fell to the generic dynamic-getattr
-        # dispatch -- a bare module marker is obj=NULL there, so `_os.sep`
-        # was a fatal runtime `AttributeError: sep`, silently different from
-        # `os.sep` which this same function handles as a constant.
-        #
-        # A SEPARATE name, not a reassignment of `module_name`: the uses below
-        # split cleanly, and only this half wants the canonical one. The
-        # struct/class/`cls`/`_func_attrs`/`var_types` branches further down
-        # all want the LOCAL binding, which for `import os as _os` is not in
-        # `struct_field_types` at all -- reassigning would make them fire on a
-        # name they cannot know anything about.
-        _canon = module_name
-        _bound = gen.imported_symbols.get(module_name)
-        if _bound:
-            _bm = _bound.get('module')
-            if _bm:
-                _canon = _as_str(_bm)
 
         # `cls.CLASSATTR` inside a classmethod: `cls` is a PARAM (so the
         # bare-type-name `ClassName.ATTR` branch further down is skipped —
@@ -1436,68 +1067,10 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # Lib_test_test_support.md's 2026-08-09 root-cause).
         _bound_mod = gen.imported_symbols.get(module_name, {}).get('module') \
             if module_name in gen.imported_symbols else None
-        # THIS module's own field triple is the authoritative answer for what
-        # `_<mod>_globals.NAME` actually holds — it is the exact
-        # (name, c_type, g_mtype) the struct typedef, the initializer and the
-        # `_<mod>_mojo_global_get_<name>` accessor were all generated from, so
-        # consulting it makes the read agree with the field BY CONSTRUCTION.
-        #
-        # It also replaces the shared `_global_var_types`/`_global_c_decl_types`
-        # lookups this branch used for both halves of the answer, because both
-        # of those are whole-transitive-tree, name-keyed "first module to claim
-        # this bare name wins" tables. `_global_to_module` IS one of them, and
-        # it gates this branch — so with two modules each declaring their own
-        # `MARKER`, only whichever was scanned first could be read through the
-        # `submod.` spelling at all, and its TYPE came from the shared dict
-        # regardless of which field was loaded.
-        #
-        # The shape is Tools/c-analyzer: `c_analyzer/info.py`'s own `UNKNOWN`
-        # (a boxed `_misc.Labeled`) versus `c_common/tables.py`'s unrelated
-        # `UNKNOWN = '???'` (`char *`) — a bare `UNKNOWN` and a qualified
-        # `tables.UNKNOWN` reading the SAME name as two different things
-        # (bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer_info.md). The bare
-        # half of that pair is `_own_overlay_global_ctype`; this is the
-        # qualified half.
-        _field_types = gen._module_global_field_type(_bound_mod, node.member) \
-            if _bound_mod else None
-        if _field_types is not None:
-            c_decl_type, gtype = _field_types
-            ctype = 'int64_t' if gtype in _BOXED_CONTAINER_CTYPES else gtype
-            t = gen._new_temp(ctype)
-            if node.member in gen._actual_types and gen._actual_types[node.member].endswith(' *'):
-                gen._actual_types[t] = gen._actual_types[node.member]
-            else:
-                gen._actual_types[t] = gtype
-            if node.member in gen._dict_val_types:
-                gen._dict_val_types[t] = gen._dict_val_types[node.member]
-            if node.member in gen._elem_types:
-                gen._elem_types[t] = gen._elem_types[node.member]
-            safe_module = gimple_ctypes._c_field_name(_bound_mod) if _bound_mod else "root"
-            field_ref = f"_{safe_module}_globals.{gimple_ctypes._c_field_name(node.member)}"
-            if ctype == 'int64_t' and c_decl_type.endswith(' *'):
-                raw_ptr = gen._new_val(c_decl_type, f'{field_ref}')
-                vp = gen._new_val('void *', f'(void *){raw_ptr}')
-                gen._emit(f'  {t} = (int64_t){vp};')
-            elif ctype.endswith(' *') and c_decl_type == 'int64_t':
-                # A pointer-semantic global (`char *` — e.g. a boxed path
-                # string like gimple_codegen._SELFHOST_DIR) stored in a boxed
-                # `int64_t` field: cast the load back to its real type so a
-                # later string op / `==` on `t` isn't a bare integer compare.
-                gen._emit(f'  {t} = ({ctype}){field_ref};')
-            else:
-                gen._emit(f'  {t} = {field_ref};')
-            return ctype, t
-        # FALLBACK for a module whose globals struct was never registered in
-        # `_module_globals` (an un-inlined stdlib marker like `os`/`sys`, where
-        # no field exists to read and the shape below is equally inapplicable).
-        # Both halves of the answer still come from the shared name-keyed dicts
-        # here — there is no per-module field to consult, so there is nothing
-        # for a homonym to disagree with. Reached only when the branch above
-        # found no field triple for `_bound_mod`.
         if (_bound_mod and node.member in gen._global_var_types
                 and getattr(gen, '_global_to_module', {}).get(node.member) == _bound_mod):
             gtype = gen._global_var_types[node.member]
-            ctype = 'int64_t' if gtype in _BOXED_CONTAINER_CTYPES else gtype
+            ctype = 'int64_t' if gtype in ('MojoDict *', 'MojoList *', 'MojoSet *') else gtype
             t = gen._new_temp(ctype)
             if node.member in gen._actual_types and gen._actual_types[node.member].endswith(' *'):
                 gen._actual_types[t] = gen._actual_types[node.member]
@@ -1531,7 +1104,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
 
         # __mlir_attr.`literal` — a typed MLIR attribute used as a value
         # (integer constants like `0 : index`).  Lower to the constant.
-        if _canon == '__mlir_attr':
+        if module_name == '__mlir_attr':
             kind, val = gimple_ctypes.mlir.parse_attr(node.member)
             if kind in ('int', 'simd'):   # typed int / scalar-simd constant
                 t = gen._new_val('int64_t', f"(int64_t){val}")
@@ -1543,38 +1116,19 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             return 'int', t
 
         # Module attribute access: sys.argv, tokenizer.X, etc.
-        if _canon == 'sys' and node.member == 'argv':
+        if module_name == 'sys' and node.member == 'argv':
             # Return the argv list wired from C main(argc, argv)
             t = gen._new_temp('MojoList *')
             gen._emit(f"  {t} = mojo_get_argv();  /* sys.argv from C */")
             # Track element type so subscript uses mojo_list_get_str
             gen._elem_types[t] = 'char *'
             return 'MojoList *', t
-        if _canon == 'sys' and node.member == 'path':
+        if module_name == 'sys' and node.member == 'path':
             t = gen._new_temp('MojoList *')
             gen._emit(f"  {t} = mojo_list_new ();  /* sys.path stub */")
             gen._elem_types[t] = 'char *'
             return 'MojoList *', t
-        if _canon == 'sys' and node.member == 'platform':
-            # `sys.platform` was reachable only as a comptime CONSTANT, in a
-            # condition: `comptime.eval_const` folds the `sys.platform`
-            # MemberExpr, and that is what makes `if sys.platform == 'win32':
-            # def f(): ...` work at all. Read as a VALUE there was no case for
-            # it, so `print(sys.platform)` fell to the generic dispatch, where a
-            # bare module marker is obj=NULL -- a fatal runtime `AttributeError:
-            # platform`. That is exactly what `./mojoc fire.py --dump-full` ended
-            # with, because `comptime.py`'s own `platform = sys.platform`
-            # fallback is such a read and comptime.py is inside the closure.
-            #
-            # Emitted as the same compile-time constant its own folding uses
-            # (`sys.platform` of the codegen process), so a condition and a
-            # value read cannot disagree, and as a literal rather than a runtime
-            # call, matching how the siblings here already work: `os.sep` and
-            # `signal.SIGTERM` are literals too.
-            t = gen._new_val('char *', gen._intern_string(
-                gimple_ctypes._c_escape(sys.platform)))
-            return 'char *', t
-        if _canon == 'sys' and node.member in ('stdout', 'stderr', 'stdin'):
+        if module_name == 'sys' and node.member in ('stdout', 'stderr', 'stdin'):
             # The three standard stream FILE objects. This runtime has no
             # Python-file-object model, so each is represented as its POSIX
             # file descriptor (0/1/2 — the same identity libc's
@@ -1597,7 +1151,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             return 'int64_t', t
 
         # Special handling for os.path attribute access
-        if _canon == 'os' and node.member == 'path':
+        if module_name == 'os' and node.member == 'path':
             # The actual function call will be handled at the call site
             t = gen._new_temp('int')
             gen._emit(f"  {t} = 0;  /* os.path module marker */")
@@ -1623,19 +1177,15 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # the CallExpr-level rule ever got to match, silently disabling
         # all four existing rewrites. Codegen sees the post-rewrite tree,
         # so this case is unambiguous by construction.
-        if _canon == 'os' and node.member == 'environ':
+        if module_name == 'os' and node.member == 'environ':
             t = gen._new_val('MojoDict *', 'mojo_environ_dict ()')
             gen._dict_val_types[t] = 'char *'
-            return gimple_ctypes._module_attr_ctype(_canon, node.member), t
+            return gimple_ctypes._module_attr_ctype(module_name, node.member), t
 
         # os.sep / os.pathsep / os.curdir / os.pardir / os.linesep —
         # this platform is always POSIX ('/'), so all five are genuine
-        # A compile-time constant a module MARKER exports (`os.linesep`,
-        # `signal.SIGTERM`). `os` and `signal` are never inlined, so there is
-        # no `_module_globals['os']` field to read — the lookup above
-        # legitimately has nothing to say about them and these values are
-        # fixed by os.py's own literals and the OS ABI.
-        #
+        # compile-time constants straight out of os.py's own module body
+        # (sep='/'; pathsep=':'; curdir='.'; pardir='..'; linesep='\n').
         # `sep`/`pathsep` were always handled here; the other three fell
         # through to the generic unresolved-module-attribute paths below
         # — a silent `(int)0` stub where one was reachable, else a fatal
@@ -1643,22 +1193,38 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # from the generic dynamic-dispatch fallback (real:
         # Lib/mailbox.py:32's `linesep = os.linesep.encode('ascii')`,
         # whose global then also mis-typed against the mismatched RHS).
-        #
-        # The table itself is SHARED with the coroutine C++20 emitter's
-        # module-constant read (`builtin_module_constant`), which used to
-        # stub every one of these to 0 — see that table's own comment for
-        # why two copies of one answer were a silent wrong answer rather
-        # than a visible failure.
-        _bm_const = builtin_module_constant(_canon, node.member)
-        if _bm_const is not None:
-            _bm_ctype, _bm_val = _bm_const
+        if module_name == 'os' and node.member in ('sep', 'pathsep',
+                                                   'curdir', 'pardir',
+                                                   'linesep'):
+            val = {'sep': '/', 'pathsep': ':', 'curdir': '.',
+                   'pardir': '..', 'linesep': '\n'}[node.member]
             # _intern_string wants an already-C-escaped literal body —
             # linesep's raw newline must go through _c_escape (the same
             # shared helper every other string-emission site uses) or it
             # splices a literal line break into the .ci string pool.
-            _bm_text = (gen._intern_string(gimple_ctypes._c_escape(_bm_val))
-                        if _bm_ctype == 'char *' else str(_bm_val))
-            return _bm_ctype, gen._new_val(_bm_ctype, _bm_text)
+            t = gen._new_val('char *',
+                             gen._intern_string(gimple_ctypes._c_escape(val)))
+            return 'char *', t
+
+        # signal.SIG* — the portable POSIX signal numbers, genuine
+        # compile-time constants fixed by the OS ABI (identical on every
+        # POSIX system this runtime targets). `signal` binds to a bare
+        # module marker, so these fell through to the dynamic-getattr
+        # fallback — obj=NULL, fatal `AttributeError: SIGTERM` at runtime
+        # (real: Apple/__main__.py's main(): `signal.signal(signal.SIGTERM,
+        # signal_handler)`). Only the eleven numbers that are identical
+        # across all POSIX platforms are listed; BSD/Linux-only members
+        # (SIGUSR1/SIGCHLD/...) deliberately keep the honest AttributeError
+        # rather than risk emitting a wrong number.
+        if module_name == 'signal' and node.member in (
+                'SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGILL', 'SIGABRT',
+                'SIGFPE', 'SIGKILL', 'SIGSEGV', 'SIGPIPE', 'SIGALRM',
+                'SIGTERM'):
+            val = {'SIGHUP': 1, 'SIGINT': 2, 'SIGQUIT': 3, 'SIGILL': 4,
+                   'SIGABRT': 6, 'SIGFPE': 8, 'SIGKILL': 9, 'SIGSEGV': 11,
+                   'SIGPIPE': 13, 'SIGALRM': 14, 'SIGTERM': 15}[node.member]
+            t = gen._new_val('int64_t', str(val))
+            return 'int64_t', t
 
         # Class attribute access: ClassName.ATTR
         # Check if module_name is a known struct/class (not an instance variable)
@@ -1673,7 +1239,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # case used to fall through to a dummy "class attr" stub that
             # always emitted the literal 0 regardless of the alias's real
             # value — e.g. `IfStmt.KIND` printed 0 under --jit/--dump
-            # instead of its declared value under `fire run`.
+            # instead of its declared value under `mojo run`.
             aliases = gen._struct_comptime_aliases.get(module_name)
             if aliases and node.member in aliases:
                 return gen.lower_expr(aliases[node.member])
@@ -1687,19 +1253,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             if _cattrs and node.member in _cattrs:
                 gname = _cattrs[node.member]
                 gtype = gen._global_var_types.get(gname, 'int64_t')
-                _gv = gen._new_val(gtype, f'{gname}')
-                # Carry the attribute's recorded ELEMENT type onto the read
-                # value, so iterating or subscripting it downstream uses
-                # the right accessor. A class-level container is stored as
-                # one `_classattr_<Cls>__<name>` global; without this the
-                # element type recorded against that global (seeded in
-                # module_gen, and by the first `.append()` through
-                # `_lower_list_method`) stayed invisible to every reader.
-                _ge = gen._elem_types.get(gname)
-                if _ge and _ge != 'int64_t':
-                    gen._elem_types[_gv] = _ge
-                    gen._actual_types[_gv] = 'MojoList *'
-                return gtype, _gv
+                return gtype, gen._new_val(gtype, f'{gname}')
             # Not a comptime alias — a genuine class-level access this
             # compiler doesn't yet resolve statically (unimplemented,
             # not merely unreached); stub with a clearly-marked value.
@@ -1764,7 +1318,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # raising a genuine (uncaught) `AttributeError: Token` the
         # instant this assignment executes — not merely an unresolved
         # stub value, an actual fatal exception. See
-        # “COMPILE_FAIL: Tools/cases_generator/parser.py”'s runtime
+        # bugs/COMPILE_FAIL_Tools_cases_generator_parser.md's runtime
         # `AttributeError: Token` gap (parser.py -> parsing.py -> `from
         # plexer import PLexer` -> plexer.py's `Token = lx.Token`).
         # Same "class access unimplemented, stub rather than crash"
@@ -1901,7 +1455,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # object itself, which has no `.parent` — silent wrong
         # runtime behavior (AttributeError) rather than a compile
         # error, since the struct-name fallback further below (Step
-        # 4, “setting/getting an arbitrary attribute on a generically-typed object”)
+        # 4, bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md)
         # already routes unknown MojoBoundMethod fields through
         # runtime dispatch instead of a hard GCC error. See bugs/
         # COMPILE_FAIL_zipfile__path___init__.md.
@@ -2024,8 +1578,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     if ot == 'MojoMemoryView *' and node.member in ('nbytes', 'itemsize', 'format',
                                                      'obj', 'readonly',
                                                      'c_contiguous', 'f_contiguous',
-                                                     'contiguous', 'shape', 'strides',
-                                                     'suboffsets', 'ndim'):
+                                                     'contiguous'):
         mp = gen._ensure_local('MojoMemoryView *', ov)
         if node.member in ('nbytes', 'itemsize'):
             fn = ('mojo_memoryview_nbytes' if node.member == 'nbytes'
@@ -2037,22 +1590,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if node.member == 'obj':
             return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_memoryview_obj',
                                                  [('MojoMemoryView *', mp)])
-        if node.member in ('shape', 'strides', 'suboffsets'):
-            # The tuple-valued descriptors. Neither this member read nor the
-            # call form (_lower_memoryview_method) had a case, so each fell
-            # to the generic unknown-member path and printed its own heap
-            # ADDRESS as a decimal: `mv.shape` printed 4341225952 where
-            # CPython prints `(4,)`. The runtime returns the spelling string,
-            # which is exact for this always-1-D representation.
-            if node.member == 'suboffsets':
-                return 'char *', gen._call_expr(
-                    'char *', 'mojo_memoryview_suboffsets_str', [])
-            return 'char *', gen._call_expr(
-                'char *', 'mojo_memoryview_' + node.member + '_str',
-                [('MojoMemoryView *', mp)])
-        if node.member == 'ndim':
-            return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_ndim',
-                                             [('MojoMemoryView *', mp)])
         if node.member == 'readonly':
             # A real query, not a constant fold: the answer is the
             # MUTABILITY of the object the view was taken over, which the
@@ -2068,27 +1605,13 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                                [('MojoMemoryView *', mp)])
             return '_Bool', gen._new_val('_Bool', f'{t} != 0')
         # A 1-D byte window over contiguous memory is C-contiguous by
-        # construction, so these really are constant — but they are asked of
-        # the runtime rather than folded here, so all three come from ONE
-        # place instead of this being the only site that knows the rule.
-        t = gen._call_expr('int', 'mojo_memoryview_' + node.member,
-                           [('MojoMemoryView *', mp)])
-        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
+        # construction, so these two really are constant.
+        return '_Bool', gen._new_val('_Bool', '1')
 
     # MojoList field name remapping: Mojo List uses _len/_capacity/elems; C MojoList uses len/cap/data
     _sn = gimple_exprtypes._struct_name_of(ot)
     if _sn == 'MojoList':
-        _mojo_to_c = {'_len': 'len', '_capacity': 'cap', '_size': 'len', 'elems': 'data', '_data': 'data', 'cap': 'cap', 'len': 'len', 'data': 'data',
-                        # Mojo `Array`'s public length member is `.length`, and
-                        # it is the same C field as `.len` (std/collections/
-                        # span.mojo's `Span.__init__` reads `array.length`).
-                        # Without the entry the read fell through to a direct
-                        # `array->length` on a `MojoList`, which has no such
-                        # member: "'MojoList' has no member named 'length'".
-                        # Reachable now that `_mojo_type` maps `Array[T, N]` to
-                        # `MojoList *`, which is what makes the static member
-                        # path apply at all.
-                        'length': 'len'}
+        _mojo_to_c = {'_len': 'len', '_capacity': 'cap', '_size': 'len', 'elems': 'data', '_data': 'data', 'cap': 'cap', 'len': 'len', 'data': 'data'}
         if node.member in _mojo_to_c:
             _c_field = _mojo_to_c[node.member]
             _ftype = 'int64_t' if _c_field in ('len', 'cap') else 'int64_t *'
@@ -2247,7 +1770,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     op = '->' if '*' in ot else '.'
     struct_name = gimple_exprtypes._struct_name_of(ot)
     # `obj.__dict__` on a value whose struct type is statically known
-    # (Step 0 of “setting/getting an arbitrary attribute on a generically-typed object”)
+    # (Step 0 of bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md)
     # — a real MojoDict* view of the struct's OWN already-known fields,
     # matching Python's `obj.__dict__` semantics (distinct from the
     # Sub-cases A-C dynamic-storage problem that same doc's later steps
@@ -2394,7 +1917,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # field — falling through to the generic "unknown struct field"
     # handling below used to blindly emit an invalid `{ov}->{member}`
     # access (`'C' has no member named 'b'` from the C compiler; see
-    # CODEGEN_bound_method_as_value_not_resolved). Recognize the
+    # bugs/CODEGEN_bound_method_as_value_not_resolved.md). Recognize the
     # method case first and produce a real bound-method value instead.
     if struct_name in gen.struct_field_types and (
             f"{struct_name}_{node.member}" in gen.func_return_types
@@ -2589,7 +2112,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # the boxed result back to char * here is what makes
             # `print(err.filename)` show the real string instead of raw
             # pointer bits as a number. See `_is_except_as_member_target`
-            # /“setting/getting an arbitrary attribute on a generically-typed object”'s
+            # /bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md's
             # "Residual gap: caught exception objects" section.
             _boxed_ft = 'char *'
         if _boxed_ft is not None and _boxed_ft != 'int64_t':
@@ -2617,7 +2140,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         return 'int64_t', gen._call_expr('int64_t', '_mojo_dispatch_getattr',
                         [('void *', vp), ('char *', f'"{node.member}"')])
     elif struct_name in gimple_ctypes._FIXED_RUNTIME_STRUCT_NAMES:
-        # Step 4 (“setting/getting an arbitrary attribute on a generically-typed object”):
+        # Step 4 (bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md):
         # `ot` resolved to one of THIS codegen's own fixed-layout runtime
         # structs (MojoBoundMethod, ...), and `node.member` isn't one of
         # its real, hardcoded C fields — the generic "Unknown struct
@@ -2629,26 +2152,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # uses instead — real per-object dynamic-attribute storage
         # (mojo_obj_getattr), not a direct field access.
         vp = gen._new_val('void *', f'(void *){ov}')
-        return 'int64_t', gen._call_expr('int64_t', '_mojo_dispatch_getattr',
-                        [('void *', vp), ('char *', f'"{node.member}"')])
-    elif ot in _GIMPLE_SCALAR_CTYPES:
-        # The base is an ordinary SCALAR — `char`, `int64_t`, `_Bool`, ... —
-        # so there is no struct for `.member` to select from and the
-        # "Unknown struct field" fallback below would emit `_t12.data` on a
-        # `char`, which GCC rejects outright ("request for member 'data' in
-        # something not a structure or union"). Same reasoning and the same
-        # remedy as the `_FIXED_RUNTIME_STRUCT_NAMES` branch above, for the
-        # same reason: the direct field access is not merely wrong here, it is
-        # not valid C.
-        #
-        # Reached when the base's element/field type was erased rather than
-        # lost at the call site — `span[0].data` on a `Span` whose element type
-        # the compiler has no record of compiles the subscript to a `char`
-        # (Span's `_data` is a `char *` fat pointer), and the field read then
-        # lands here (test/collections/test_span.mojo's
-        # `assert_equal(span[0].data, 42)`). The tag-dispatched accessor is a
-        # real read of the boxed value rather than a fabricated one.
-        vp = gen._new_val('void *', f'(void *)(int64_t){ov}')
         return 'int64_t', gen._call_expr('int64_t', '_mojo_dispatch_getattr',
                         [('void *', vp), ('char *', f'"{node.member}"')])
     else:
@@ -2773,11 +2276,8 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             obj_type, obj_val = gen.lower_expr(obj_expr)
             eq = gen._isinstance_one_type(obj_type, obj_val, type_name)
             if node.op == 'is not':
-                # `_bool_not`, not `f'!{eq}'`: GIMPLE has no `!` operator, so
-                # the literal spelling is a hard parse error in every
-                # `__GIMPLE`-tagged body ("'!' not valid in GIMPLE before '!'
-                # token"). `eq` is a `_Bool` temp by construction.
-                return '_Bool', gen._bool_not('_Bool', eq)
+                neg = gen._new_val('_Bool', f'!{eq}')
+                return '_Bool', neg
             return '_Bool', eq
 
     if node.op == '//':
@@ -2955,7 +2455,7 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     # method to disambiguate the two intents. Mirrors the identical
     # fix already applied to _lower_subscript's `self.prop[key]` and
     # the MemberExpr chain's `self.prop.attr` (see those comments /
-    # “COMPILE_FAIL: Lib/zipfile/_path/__init__.py”) — this is the
+    # bugs/COMPILE_FAIL_zipfile__path___init__.md) — this is the
     # third and, with `is`/`is not` excluded, final direct-consumer
     # context that had no such handling. Found via Tools/
     # cases_generator/cwriter.py's CWriter.set_position: `gap =
@@ -2971,50 +2471,6 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             rt, rv = gmp._auto_invoke_bound_method_value(gen, rv)
 
     return gen._lower_binary_tail(node.op, node.left, lt, lv, node.right, rt, rv)
-
-
-def _as_dict_operand(gen, t: str, v: str) -> str:
-    """(ctype, value) for the RIGHT operand of a `dict | x`, as a `MojoDict *`.
-
-    `mojo_dict_union` takes two `MojoDict *`. When the right operand's
-    static type is already one, this is `_ensure_local` and nothing else.
-    When it is not, it must become one — but NOT by casting, because a
-    scalar slot may hold either a real dict pointer or an unrelated value,
-    and a cast would hand `mojo_dict_union` whatever bits were there. That
-    is the class of container-kind cast DESIGN.html's R3 flags, and it is a
-    silent wrong answer when the bits happen to look like a dict.
-
-    So the conversion is a RUNTIME TEST, not a compile-time one:
-    `mojo_is_registered_dict` is the runtime's own "is this handle a real
-    dict" predicate (`runtime/fire_runtime.c`, used by `mojo_repr` and the
-    dynamic-dispatch paths for the same reason), and the non-dict case
-    becomes a fresh EMPTY dict — which is exactly Python's answer for
-    `dict | <non-mapping>`: `{}`'s union with a non-mapping contributes
-    nothing.
-
-    Real, and a hard compile error rather than an imprecision:
-    `Lib/collections/__init__.py:1192`'s `UserDict.__ior__`'s
-    `self.data |= other`, where `other` is an unannotated parameter. The
-    static half is a real `MojoDict *` (it is `self.data`, a dict literal
-    from `__init__`), so this branch was reached, and the unannotated
-    parameter was passed straight into the `MojoDict *` slot:
-    "passing argument 2 of 'mojo_dict_union' makes pointer from integer
-    without a cast". Reduced to six lines:
-    `class D: __init__ sets self.data = {}; def merge(self, other): return self.data | other`.
-
-    Bounded on purpose: only the case where the static type is NOT already
-    a pointer-shaped type goes through the test, and only `int`-shaped
-    scalars reach it. A `char *` or `MojoList *` operand is left exactly
-    as it was, so nothing that used to compile changes behaviour — this
-    only supplies the value for a slot that previously had no valid one.
-    """
-    if t == 'MojoDict *':
-        return gen._ensure_local(t, v)
-    _cand = gen._new_val('int64_t', f'(int64_t){_as_str(gen._ensure_local(t, v))}')
-    _isd = gen._call_expr('int', 'mojo_is_registered_dict', [('int64_t', _cand)])
-    _yes = gen._ensure_local('MojoDict *', f'(MojoDict *){_cand}')
-    _no = gen._call_expr('MojoDict *', 'mojo_dict_new', [])
-    return gen._new_val('MojoDict *', f'{_isd} ? {_as_str(_yes)} : {_as_str(_no)}')
 
 
 def _lb_as_set(gen, t: str, v: str) -> str:
@@ -3072,298 +2528,6 @@ def _lower_binary_set_op(gen, _fn: str, _la: str, _lb: str,
     if _e and _e != 'int64_t':
         gen._elem_types[_res] = _e
     return 'MojoSet *', _res
-
-
-# ── `==` / `!=` between containers: Python VALUE equality ───────────────────
-# `a == b` with both operands the same container kind used to fall through
-# `_lower_binary_tail`'s generic numeric tail, which emits the C pointer
-# comparison `_t3 = a == b;` on two `MojoSet *`. That is False for every pair
-# of containers that are equal but not the SAME object -- which is every
-# `while nxt != proven:` / `if cache == proven:` convergence test, since each
-# round builds a fresh one. With no GC the loop never ends and leaks a set per
-# round (the 43 GB two-line compile in
-# “CODEGEN: `==` / `!=` between two containers is POINTER identity”). `is` / `is not` keep
-# pointer identity below, which is what they are for.
-
-# The C type a container operand has, or its `_actual_types` recovery of it,
-# mapped to the runtime predicate that compares that kind. No tuple entry: a
-# tuple lowers to a MojoList with a marker, and the runtime decides that one
-# from the marker (mojo_list_eq), so both spellings land on the list entry.
-_EQ_CTYPE_KIND = {
-    'MojoList *': 'list',
-    'MojoDict *': 'dict',
-    'MojoSet *': 'set',
-}
-
-# `list()` / `set()` / `dict()` / `tuple()` / `frozenset()` spelled as a call
-# rather than a literal -- evidence that an erased int64_t operand really is a
-# container, which is what a container literal on the other side needs.
-_EQ_CTOR_KIND = {
-    'list': 'list',
-    'tuple': 'list',
-    'set': 'set',
-    'frozenset': 'set',
-    'dict': 'dict',
-}
-
-
-def _eq_operand_kind(gen, node, ctype: str, val: str) -> str | None:
-    """'list' / 'dict' / 'set' when this operand statically IS a container of
-    that kind, else None -- meaning "no evidence", which leaves the comparison
-    exactly where it was. Deliberately evidence-based rather than
-    universal: routing EVERY `int == int` through the runtime dispatcher would
-    cost three registry probes on the compiler's own hottest comparison and
-    buy nothing, and a wrong guess here is a wrong ANSWER, not a slow one."""
-    t = _as_str(ctype)
-    if t in _EQ_CTYPE_KIND:
-        return _EQ_CTYPE_KIND[t]
-    at = _as_str(gen._actual_types.get(_as_str(val)))
-    if at in _EQ_CTYPE_KIND:
-        return _EQ_CTYPE_KIND[at]
-    if isinstance(node, gimple_ctypes.DictExpr):
-        return 'dict'
-    if isinstance(node, gimple_ctypes.SetExpr):
-        return 'set'
-    if isinstance(node, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr,
-                         gimple_ctypes.Comprehension)):
-        return 'list'
-    if (isinstance(node, gimple_ctypes.CallExpr)
-            and isinstance(node.func, gimple_ctypes.IdentExpr)):
-        nm = _as_str(node.func.name)
-        # `_locally_binds_name`, not a bare name test: a local named `set` is
-        # not the builtin (same guard _lower_percent uses for its `dict` RHS).
-        if nm in _EQ_CTOR_KIND and not gen._locally_binds_name(nm):
-            return _EQ_CTOR_KIND[nm]
-    # A PARAMETER that every unambiguous literal call site agrees is a
-    # container (`_container_param_kinds`, filled by
-    # `_gmi_apply_call_site_param_evidence`). This is the erased cross-function
-    # case, and the one the documented 43 GB non-terminating compile was: a
-    # fixed point written `while nxt != proven:` inside a function whose
-    # containers arrive as opaque int64_t handles, where nothing else here has
-    # any evidence to offer.
-    if isinstance(node, gimple_ctypes.IdentExpr):
-        _cf = _as_str(getattr(gen, 'current_func_name', '') or '')
-        _k = gen._container_param_kinds.get(_cf)
-        if _k is not None:
-            _pk = _k.get(_as_str(node.name))
-            if _pk is not None:
-                return _as_str(_pk)
-    return None
-
-
-def _eq_elem_code(gen, kind: str, val: str) -> int:
-    """The runtime MOJO_EQ_* code for one operand's elements, or
-    MOJO_EQ_UNKNOWN (0) when the codegen has no element type for it.
-
-    MOJO_EQ_UNKNOWN is also the answer for a list that carries PER-SLOT kinds
-    (`_maybe_kinds_vals`, filled by `_lower_list_literal` for every
-    heterogeneous literal), and those kinds are strictly more precise than the
-    single list-wide ctype `_elem_types` holds: for `[1, "a"]` that ctype is
-    `char *`, and taking it at face value strcmp'd the integer slot against a
-    pointer. Preferring the runtime's own record fixes that, and costs a
-    per-slot kind probe that only a list which HAS one pays anything."""
-    _v = _as_str(val)
-    if kind != 'dict' and _v in getattr(gen, '_maybe_kinds_vals', ()):
-        return 0
-    if kind == 'dict':
-        et = _as_str(gen._dict_val_types.get(_v))
-    else:
-        et = _as_str(gen._elem_types.get(_v))
-    if not et:
-        return 0
-    if et in gimple_ctypes._TYPE_FLOAT:
-        return 2
-    if et in ('char *', 'MojoStr *'):
-        return 3
-    if et == 'MojoBytes *':
-        return 4
-    if et in ('MojoList *', 'MojoDict *', 'MojoSet *'):
-        return 5
-    return 1
-
-
-def _eq_call_args(gen, ctype: str, kind: str, lv: str, lt: str,
-                  rv: str, rt: str, two_codes: bool) -> list:
-    """The arguments of a container `==`: both operands coerced to `ctype`
-    (the kind's own pointer type, or `int64_t` for the erased-handle
-    dispatcher) and the element code to compare them with.
-
-    `two_codes` is the per-kind predicates' shape: ONE PER SIDE, because
-    `[1.0] == [1]` is a legitimate program and one code cannot describe both
-    halves of it. Each side's own code is read by the side it describes, so a
-    disagreement between two `_elem_types` entries is information rather than
-    a contradiction. `mojo_value_eq` takes a single code and applies it to
-    both: the erased operand has no static type by definition, and in the
-    shape that reaches it (`an_erased_handle == ["a", "b"]`) it really does
-    hold the same elements."""
-    _cl = gen._coerce_to_type(_as_str(lt), ctype, _as_str(lv))
-    _cr = gen._coerce_to_type(_as_str(rt), ctype, _as_str(rv))
-    _args = [(ctype, _as_str(_cl)), (ctype, _as_str(_cr))]
-    _ca = _eq_elem_code(gen, kind, lv)
-    if two_codes:
-        _args.append(('int64_t', _as_str(gen._new_val('int64_t', str(int(_ca))))))
-        _cb = _eq_elem_code(gen, kind, rv)
-    else:
-        _cb = _ca
-    _args.append(('int64_t', _as_str(gen._new_val('int64_t', str(int(_cb))))))
-    return _args
-
-
-def _lower_container_eq(gen, op: str, lkind: str | None, lnode, lt: str, lv: str,
-                        rkind: str | None, rnode, rt: str, rv: str) -> tuple[str, str]:
-    """`a == b` / `a != b` / `a < b` / `a <= b` / `a > b` / `a >= b` where at
-    least one operand is statically a container.
-
-    One function for all six, because they are one decision. `==`/`!=` and the
-    four ordering operators differ only in which runtime entry point answers
-    them and in how the answer is folded, and the part that decides anything --
-    which kind each operand is, and hence which predicate can be trusted -- is
-    identical. Splitting them is how `==` got fixed and `<` did not.
-
-    Same kind on both sides (the statically-typed case) calls that kind's own
-    predicate with its own pointer type and per-side element code, so a list
-    of strings compares by CONTENT. Every other pairing -- one operand erased to
-    int64_t, or two different kinds -- goes through `mojo_value_eq` /
-    `mojo_value_cmp`, whose operands are int64_t words because one of them may
-    be a handle whose kind only the registry knows. That case is deliberately
-    NOT folded at compile time to a constant False when the two static kinds
-    differ: `_actual_types` is an inference table and a wrong guess there is a
-    wrong ANSWER, whereas the registry is what the rest of this runtime
-    already treats as the truth.
-
-    A DICT operand is refused for the ordering operators, which is CPython's
-    own answer rather than a limitation of this backend: `{'a':1} < {'b':2}`
-    raises TypeError on 3.14 as well. Two DIFFERENT kinds, and a container
-    against a non-container, are refused for the same reason. A refusal is
-    emitted as the same `mojo_raise_type_error` + never-taken-result shape
-    `_struct_kwarg_rejection` uses, so the surrounding expression still
-    typechecks."""
-    _is_ord = op in _ORD_CMP_OPS
-    if _is_ord and _ord_pair_is_refused(lkind, rkind):
-        return _lower_container_ord_refusal(gen, op, lkind, rkind, lt, rt)
-    if lkind is not None and lkind == rkind:
-        _kind = lkind
-        _ctype = 'MojoList *' if lkind == 'list' else (
-            'MojoDict *' if lkind == 'dict' else 'MojoSet *')
-        if _is_ord:
-            _fn = 'mojo_list_cmp' if lkind == 'list' else 'mojo_set_cmp'
-        else:
-            _fn = 'mojo_list_eq' if lkind == 'list' else (
-                'mojo_dict_eq' if lkind == 'dict' else 'mojo_set_eq')
-        _two = True
-    else:
-        _kind = lkind if lkind is not None else rkind
-        _ctype = 'int64_t'
-        _fn = 'mojo_value_cmp' if _is_ord else 'mojo_value_eq'
-        _two = False
-    _args = _eq_call_args(gen, _ctype, _kind, lv, lt, rv, rt, _two)
-    if not _is_ord:
-        _r = _as_str(gen._call_expr('int', _fn, _args))
-        _t = gen._new_temp('_Bool')
-        _cmp = '!= 0' if op == '==' else '== 0'
-        gen._emit(f"  {_t} = {_r} {_cmp};")
-        return '_Bool', _t
-    # The ordering predicates return a THREE-WAY answer and the operator is one
-    # fold of it — but the operator is ALSO an argument, because a refusal has
-    # to name the operator the source spelled and only this site knows it.
-    # Folding in the runtime rather than emitting four comparison arms at each
-    # of the five call sites is what keeps the four operators from drifting:
-    # `<=` must be `c <= 0`, not `c < 0 || c == 0` re-derived anywhere.
-    _opv = _as_str(gen._new_val('int64_t', str(int(_ORD_CMP_OPS[op]))))
-    _args.append(('int64_t', _opv))
-    _c = _as_str(gen._call_expr('int', _fn, _args))
-    _fc = _as_str(gen._new_temp('int'))
-    gen._emit(f"  {_fc} = mojo_cmp_fold ({_c}, {_opv});")
-    _t = gen._new_temp('_Bool')
-    gen._emit(f"  {_t} = {_fc} != 0;")
-    return '_Bool', _t
-
-
-# The four ORDERING comparisons, and the MOJO_CMP_OP_* code each folds with.
-# The codes are the runtime's (fire_runtime.h), not a second numbering here --
-# a second spelling of the same table is the mistake the `==` family already
-# made once with the MOJO_EQ_* codes, where passing 3 for a bytes element
-# strcmp'd two `MojoBytes *`.
-_ORD_CMP_OPS = {
-    '<': 0,          # MOJO_CMP_OP_LT
-    '<=': 1,         # MOJO_CMP_OP_LE
-    '>': 2,          # MOJO_CMP_OP_GT
-    '>=': 3,         # MOJO_CMP_OP_GE
-}
-
-# Every comparison operator that is answered by a container's VALUE rather than
-# by the C pointer comparison the generic tail emits. `is` / `is not` are NOT in
-# this set: pointer identity is exactly what they mean.
-_CONTAINER_CMP_OPS = ('==', '!=', '<', '<=', '>', '>=')
-
-# The Python type name CPython's TypeError names for each lowering kind, which
-# is not the C one: a tuple is a list at the C level, and its marker is the
-# only thing that tells them apart. `none` is not a lowering KIND -- no
-# operator routes a `None` operand through the container machinery -- it is
-# the type NAME the `_lower_binary_tail` `None`-ordering refusal reports,
-# which is the only place CPython's text names it.
-_ORD_CMP_TYPENAME = {'list': 'list', 'dict': 'dict', 'set': 'set',
-                     'none': 'NoneType'}
-
-
-def _ord_pair_is_refused(lkind: str | None, rkind: str | None) -> bool:
-    """Does this pair of lowering kinds have NO ordering in CPython?
-
-    Two kinds that DIFFER (`list` against `set`, `dict` against anything), a
-    dict on either side, and a container against a NON-container (`None` for
-    that operand's kind, which is what `_eq_operand_kind` returns for a scalar)
-    are all TypeError in CPython — `{'a':1} < {'b':2}` on 3.14 as much as
-    `[1] < 1`. Answering any of them with a comparison would invent a verdict
-    where the language has none.
-
-    NOT refused: two same-kind operands (compared), and — the case worth
-    stating — a list against a tuple. Both lower to `MojoList *`, so this
-    function cannot see them apart; the tuple MARKER decides, in the runtime,
-    where `mojo_list_cmp` raises with the two real type names. Deciding it here
-    from the AST would mean a second source of truth for "is this a tuple",
-    and the marker is the one the rest of the runtime already trusts."""
-    if lkind is None or rkind is None:
-        return True
-    return lkind != rkind or 'dict' in (lkind, rkind)
-
-
-def _lower_container_ord_refusal(gen, op, lkind, rkind, lt, rt) -> tuple[str, str]:
-    """CPython's own answer for an ordering there is none of: a TypeError.
-
-    `mojo_raise_type_error` longjmps, so the assignment after it is never
-    reached and exists only so the expression still typechecks -- the same
-    convention `_struct_kwarg_rejection` documents (`_STRUCT_RAISE_STUB`).
-
-    The type NAMES are best-effort and the comment on `_scalar_typename` says
-    why: the codegen tracks C types, not Python ones, so a `char *` operand is
-    reported as `str` whether it is one. That is the same answer CPython gives
-    for the shapes that reach here (a string literal, a container local), and a
-    slightly wrong type name in an exception message is worth far less than no
-    exception at all."""
-    _lt = _ORD_CMP_TYPENAME.get(lkind) or _scalar_typename(gen, lt)
-    _rt = _ORD_CMP_TYPENAME.get(rkind) or _scalar_typename(gen, rt)
-    _msg = gen._intern_string(gimple_ctypes._c_escape(
-        "'%s' not supported between instances of '%s' and '%s'"
-        % (op, _lt, _rt)))
-    gen._emit_call('void', '', 'mojo_raise_type_error', [('char *', _msg)])
-    _t = gen._new_temp('_Bool')
-    gen._emit(f"  {_t} = 0;")
-    return '_Bool', _t
-
-
-def _scalar_typename(gen, ctype: str) -> str:
-    """The Python type name for a non-container operand's C type, for the
-    TypeError text. Best-effort by construction -- the codegen does not track
-    Python types, only C ones -- so this reports what it knows rather than
-    refusing to answer."""
-    _t = _as_str(ctype)
-    if _t in ('char *', 'MojoStr *'):
-        return 'str'
-    if _t == 'MojoBytes *':
-        return 'bytes'
-    if _t in ('double', 'float'):
-        return 'float'
-    return 'int'
 
 
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
@@ -3547,27 +2711,20 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         # mojo_str_from_int (which appended the decimal BYTE CODE:
         # box.3d/game's ComputerMonitor.print_text turned "Hello, World!"
         # into "72101108111144...").
-        # `_free_sv`: the conversion temp is freed by the cat only when it is a
-        # `mojo_str_from_int` result; a `mojo_char_to_str` result is a shared
-        # immortal string and must never be freed.
         if lt2 == 'char *' and rt2 in ('int', 'int64_t', '_Bool'):
-            _free_sv = True
             if gen._actual_types.get(rv2) == 'char':
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', rv2)])
-                _free_sv = False
             else:
                 nv = gen._to_int64(rt2, rv2)
                 sv = gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
-            return 'char *', gen._emit_str_cat(lv2, sv, gen._is_fresh_operand(left_node, lv2), _free_sv)
+            return 'char *', gen._emit_str_cat(lv2, sv, gen._is_fresh_operand(left_node, lv2), True)
         if rt2 == 'char *' and lt2 in ('int', 'int64_t', '_Bool'):
-            _free_sv = True
             if gen._actual_types.get(lv2) == 'char':
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', lv2)])
-                _free_sv = False
             else:
                 nv = gen._to_int64(lt2, lv2)
                 sv = gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
-            return 'char *', gen._emit_str_cat(sv, rv2, _free_sv, gen._is_fresh_operand(right_node, rv2))
+            return 'char *', gen._emit_str_cat(sv, rv2, True, gen._is_fresh_operand(right_node, rv2))
 
     # char * * int → string repetition (e.g., "  " * 3). Also accepts a
     # _Bool RHS ('s' * (n != 1), Python's common boolean-as-0/1
@@ -3624,23 +2781,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     if op == '*' and lt == 'MojoList *' and rt in ('int', 'int64_t', 'uint64_t'):
         cnt = gen._new_val('int64_t', f"(int64_t){rv}")
         t = gen._call_expr('MojoList *', 'mojo_list_repeat', [('MojoList *', lv), ('int64_t', cnt)])
-        # The repeat copies the source's ELEMENTS, so the result's element
-        # type is the source's — but the result is a FRESH temp, and every
-        # consumer keys element type off the value name. Without this copy
-        # `[0.0] * n` produced an untyped list: a field assigned that
-        # recorded no element type (emit_stmts' self.<f> = <list>
-        # propagation keys on `_elem_types[v]`), so a later
-        # `for g in self.field:` bound `g` as int64_t and read the doubles'
-        # raw IEEE-754 bits as integers — silently wrong, exit 0 (real:
-        # g*g in an accumulator over such a field). It is also what makes
-        # `mojo_list_get_double` vs `mojo_list_get_int` pick correctly on
-        # every later subscript/iteration of the repeated list.
-        if lv in gen._elem_types:
-            gen._elem_types[t] = gen._elem_types[lv]
-        if lv in gen._nested_elem_types:
-            gen._nested_elem_types[t] = gen._nested_elem_types[lv]
-        if lv in gen._dict_val_types:
-            gen._dict_val_types[t] = gen._dict_val_types[lv]
         return 'MojoList *', t
 
     # MojoBytes + MojoBytes → concat ; MojoBytes * int → repeat
@@ -3703,37 +2843,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         gen._emit(f"  {t} = {eq_t} {cmp};")
         return '_Bool', t
 
-    # MojoList == / != (lists AND tuples — same representation, see
-    # _lower_tuple_literal) → mojo_list_eq, by VALUE. This fell through to
-    # the generic pointer comparison below, which is IDENTITY: two
-    # separately-built containers with equal contents compared unequal, and
-    # `(1,2) == (1,2)` was False. The element kind the runtime needs is the
-    # statically known one `_elem_of` already tracks — a slot holds a raw
-    # int64_t with no tag, so a list of strings can only be compared as
-    # strings if the CALL SITE says so.
-    if op in ('==', '!=') and lt == 'MojoList *' and rt == 'MojoList *':
-        # The element kind is the statically known one `_elem_of` tracks, and
-        # it is NOT derivable from the C type alone: a bytes element is a
-        # `MojoBytes *` in the slot, and comparing that as a raw int64_t
-        # compares two heap addresses, so `b'ab'.split(b'b') == [b'a', b'']`
-        # was False for two genuinely equal containers. Hence the explicit
-        # bytes case, matching mojo_list_count_bytes's reasoning.
-        # The element codes come from `_eq_call_args` — the ONE reader of the
-        # runtime's `MOJO_EQ_*` encoding, and the one every other container
-        # `==` goes through. This arm used to derive its own code from
-        # `_elem_of` with a DIFFERENT numbering (0 int, 1 str, 2 double,
-        # 3 bytes), which is not the runtime's: `MOJO_EQ_STR` is 3 and
-        # `MOJO_EQ_BYTES` is 4. Passing 3 for a bytes element therefore
-        # strcmp'd two `MojoBytes *`, and `b'ab'.split(b'b') == [b'a', b'']`
-        # answered False for two equal containers. A second spelling of the
-        # same table is the failure this repo keeps paying for.
-        _args = _eq_call_args(gen, 'MojoList *', 'list', lv, lt, rv, rt, True)
-        eq_t = gen._call_expr('int', 'mojo_list_eq', _args)
-        t = gen._new_temp('_Bool')
-        cmp = '!= 0' if op == '==' else '== 0'
-        gen._emit(f"  {t} = {eq_t} {cmp};")
-        return '_Bool', t
-
     # memoryview == bytes (either operand order) → bytewise compare
     if op in ('==', '!=') and 'MojoMemoryView *' in (lt, rt):
         mv, other = (lv, rv) if lt == 'MojoMemoryView *' else (rv, lv)
@@ -3747,164 +2856,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         cmp = '!= 0' if op == '==' else '== 0'
         gen._emit(f"  {t} = {eq_t} {cmp};")
         return '_Bool', t
-
-    # `None` on either side of an ORDERING comparison is a TypeError in
-    # CPython -- `None < 1`, `None < None`, `"a" < None` -- and the generic
-    # numeric tail below ANSWERED it: `None` lowers to a NULL `char *`, so
-    # `None < 1` was the C comparison `0 < 1` and printed True, `None > 1`
-    # printed False, `None < None` printed False. Seven plausible, stable,
-    # repeatable and completely meaningless verdicts for a program that
-    # CPython refuses on its first line, exit 0, no diagnostic -- a guard
-    # written as a comparison (`if value < 0:` with `value` None on a lookup
-    # miss) silently took one branch or the other.
-    #
-    # Taken BEFORE the container blocks so `None < [1, 2]` names `NoneType`
-    # and `list` rather than falling through to the one-sided-container
-    # refusal, which can only name the C type it happens to see.
-    #
-    # `==` / `!=` are deliberately NOT here and are unchanged: `None == 1` is
-    # a plain False, `None != 1` a plain True and `None == None` a plain
-    # True, all of which the model already answers correctly -- the NULL
-    # simply comparing unequal to 1 and equal to itself. Only the four
-    # operators that have no ordering over `None` at all are taken.
-    if op in _ORD_CMP_OPS and (gen._is_none_literal(left_node)
-                               or gen._is_none_literal(right_node)):
-        # The other side's KIND goes through `_eq_operand_kind`, not
-        # straight to `_scalar_typename`: a container is a pointer at the C
-        # level, so the scalar fallback reports `int` for it and the
-        # TypeError names `int` where CPython names `list`. Asking the same
-        # question the container block below asks is what keeps the two
-        # refusals' texts agreeing about a shape they both handle.
-        _lk_none = ('none' if gen._is_none_literal(left_node)
-                    else _eq_operand_kind(gen, left_node, lt, lv))
-        _rk_none = ('none' if gen._is_none_literal(right_node)
-                    else _eq_operand_kind(gen, right_node, rt, rv))
-        return _lower_container_ord_refusal(gen, op, _lk_none, _rk_none, lt, rt)
-
-    # Container `==` / `!=` and the four ordering operators → Python's VALUE
-    # comparison, not the C pointer comparison the generic tail would emit.
-    # Placed BEFORE the string equality block below because that block claims
-    # any comparison with a string literal on one side: `some_list == "abc"`
-    # reached it and strcmp'd the list's address (a garbage answer, never
-    # False), where the runtime's answer is the honest one. `is` / `is not` are
-    # NOT here — pointer identity is exactly what they mean.
-    #
-    # The ordering operators are here for the same reason `==` is, and they
-    # were missing for the same reason: `a < b` fell through to the generic
-    # numeric tail, which emits `_t = a < b;` on two `MojoList *` — the same
-    # address comparison `==` used to do, so the answer was decided by heap
-    # addresses. For `==` that was a False where Python says True; for `<` it
-    # is a stable, plausible and wrong verdict, exit 0, no diagnostic.
-    if op in _CONTAINER_CMP_OPS:
-        _lk = _eq_operand_kind(gen, left_node, lt, lv)
-        _rk = _eq_operand_kind(gen, right_node, rt, rv)
-        if _lk is not None or _rk is not None:
-            return _lower_container_eq(gen, op, _lk, left_node, lt, lv,
-                                       _rk, right_node, rt, rv)
-
-    # A container against a NON-container on an ordering operator is a TypeError
-    # in CPython (`[1] < 1`, `'a' < [1]`), and the generic tail below would
-    # answer it by comparing a pointer against an integer. Taken here, before
-    # the string block claims the string side, so `'a' < [1]` is the refusal
-    # rather than a strcmp against a list's address.
-    #
-    # `_eq_operand_kind` returns None for a scalar operand, so "exactly one side
-    # is a container" is the signature of this case and it is a refusal for all
-    # four ordering operators -- the same decision `_ord_pair_is_refused` makes
-    # when it is reached through the container block above. This second site
-    # exists only for the ordering operators, because for `==`/`!=` "one side is
-    # a container and the other is not" is a plain False that mojo_value_eq
-    # already answers.
-    if op in _ORD_CMP_OPS:
-        _lk2 = _eq_operand_kind(gen, left_node, lt, lv)
-        _rk2 = _eq_operand_kind(gen, right_node, rt, rv)
-        if (_lk2 is None) != (_rk2 is None):
-            return _lower_container_ord_refusal(gen, op, _lk2, _rk2, lt, rt)
-
-
-    # `x == None` / `x != None` where `x` is a `char *` is a NULL-POINTER test,
-    # not a string comparison, and must be taken BEFORE the string path below.
-    #
-    # `None` is a singleton and the container misses on this path ARE null
-    # pointers: `mojo_dict_get_str` returns NULL for an absent key and
-    # `mojo_dict_get_str` is what `d.get(k)` lowers to. So the answer has to
-    # be True, and the generic path cannot produce it — it sends the `None`
-    # side through `mojo_char_to_str((char)0)`, i.e. it compares the pointer
-    # against the ONE-CHARACTER string NUL, and lets `strcmp` decide. That is
-    # the measured shape of this bug: the natural missing-key guard
-    #
-    #     if d.get("MISSING") == None: ...
-    #
-    # came out FALSE on the compiled path (CPython: True), so the branch a
-    # lookup uses to tell "absent" from "present" was inverted, and exit 0
-    # with no diagnostic. `None == None` and `None == 0` are NOT this case and
-    # still fall through: neither side is a `char *`, so they keep the
-    # existing lowering.
-    if op in ('==', '!=') and (gen._is_none_literal(left_node)
-                              or gen._is_none_literal(right_node)):
-        _none_left = gen._is_none_literal(left_node)
-        _ptr_val = rv if _none_left else lv
-        _ptr_ty = rt if _none_left else lt
-        if _none_left and gen._is_none_literal(right_node):
-            # `None == None` is True: identity, and the singleton is itself.
-            # Taken before the scalar arm below, which would otherwise read
-            # two NULL words of the same width as equal by accident rather
-            # than by the rule -- an accident that breaks the moment one side
-            # is spelled as a NULL-typed local instead of the literal.
-            _t = gen._new_temp('_Bool')
-            # A named local, NOT a conditional expression inside the f-string.
-            # The self-hosted backend compiles an f-string interpolation by
-            # COMPILING it as its own expression, and a nested string literal
-            # inside `{...}` is not something it can parse: the whole-closure
-            # `--dump` emitted the literal text `{1 if op == "}` and the
-            # resulting C did not compile, which is exactly what the `selfhost`
-            # gate step reports (checked_run's "self-host compile/link
-            # regressed").
-            _ans = 1 if op == '==' else 0
-            gen._emit(f'  {_t} = {_ans};')
-            return '_Bool', _t
-        if _ptr_ty == 'char *':
-            # Same shape as the `is`/`is not` pointer-identity case below
-            # (`(int64_t) p == (int64_t) 0`), for the same reason: GIMPLE
-            # compares like with like, and this is the one spelling of
-            # "this pointer is null" already in the file.
-            # `x == None` IS `x == NULL` — the operator carries straight
-            # through, which is the opposite polarity from the `mojo_str_eq`
-            # idiom above (that helper returns 1 for EQUAL, so there `==`
-            # becomes `!= 0`; a pointer comparison here already is the
-            # answer). Getting that backwards inverts every missing-key
-            # guard, which is the shape this branch exists to fix.
-            _p = gen._new_val('int64_t', f'(int64_t){_ptr_val}')
-            _t = gen._new_temp('_Bool')
-            gen._emit(f'  {_t} = {_p} {op} 0;')
-            return '_Bool', _t
-        if _ptr_ty in ('int', 'int64_t', '_Bool', 'double', 'float'):
-            # ...and the same comparison when the other side is NOT a
-            # pointer at all. `None == 0` is False in Python because
-            # `NoneType.__eq__` returns NotImplemented and `int.__eq__(0,
-            # None)` does too, so the answer falls through to identity --
-            # and NULL is not 0's identity. Here `None` had lowered to a
-            # NULL word of the same width and the generic numeric tail
-            # compared `0 == 0`: a stable, repeatable, meaningless True for
-            # `None == 0` and a meaningless False for `None != 0`, both exit
-            # 0. It is the guard shape of the ordering half, on the operator
-            # that has an answer.
-            #
-            # GATED on "this side provably cannot BE None": a scalar C type
-            # the codegen actually resolved, with no pointer identity tracked
-            # for it. A scalar-typed slot that really holds a boxed pointer
-            # (a `d.get(k)` result in an unannotated local) has an
-            # `_actual_types` entry, and that case stays on the NULL-pointer
-            # test above -- which is the one that gets the natural
-            # missing-key guard right.
-            _real = gen._get_actual_type(_ptr_ty, _ptr_val)
-            if not (_as_str(_real).endswith(' *')):
-                _t = gen._new_temp('_Bool')
-                # Named local, not an in-f-string conditional — see the
-                # identical arm above for why.
-                _ans = 1 if op == '!=' else 0
-                gen._emit(f'  {_t} = {_ans};')
-                return '_Bool', _t
 
     # String equality: char*, int64_t-stored-char*, or string literals → strcmp
     rv_is_str_lit = isinstance(right_node, gimple_ctypes.StringLiteral)
@@ -3971,54 +2922,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                 ip = gen._new_val('int64_t', f'(int64_t){_v}')
                 cp = gen._new_val('char *', f'(char *){ip}')
                 return cp
-
-            def _is_undecided_word(typ, var, is_other_str_lit):
-                """True for the int64_t slot whose REPRESENTATION is undecided
-                here: not statically a char, not tracked as holding a pointer,
-                and with no string LITERAL on the other side (a literal already
-                forces the pointer cast above, which is the BUG-2026-048 fix).
-
-                Such a slot holds either a boxed string pointer or a byte code,
-                and the difference decides the comparison completely -- which is
-                why the two are asked at RUN time instead of guessed here."""
-                if typ not in ('int', 'int64_t'):
-                    return False
-                actual = gen._actual_types.get(_as_str(var))
-                if actual == 'char' or (actual and actual.endswith(' *')):
-                    return False
-                return not is_other_str_lit
-
-            lw = _is_undecided_word(lt, lv, rv_is_str_lit)
-            rw = _is_undecided_word(rt, rv, lv_is_str_lit)
-            if lw != rw and (lt == 'char *' or rt == 'char *'):
-                # Exactly one side is an undecided word and the other a string
-                # VALUE (`char *`): `mojo_str_eq_word` answers it from the word
-                # itself. `_to_char_star`'s char-code path used to answer it by
-                # truncating the word to a byte, so a boxed string compared
-                # equal only to whichever 1-character string shares its low
-                # byte -- and `fire_compiler.py`'s `_strip_inline_comment` /
-                # `_split_on_separators` leave a single-quoted string open on
-                # exactly that comparison, so the `;` after ``in_str !='`'``
-                # read as string content and the self-hosted parser refused
-                # the file with `Unexpected SEMICOLON(';')`. The byte-code arm
-                # of the runtime helper is the SAME answer this path used to
-                # give for a real char (and it answers with `mojo_cstr_cmp`'s
-                # own convention, 0 = equal), so nothing that was right here
-                # changes.
-                if lw:
-                    s_side = _to_char_star(rt, rv, True)
-                    eq_t = gen._call_expr(
-                        'int', 'mojo_cstr_cmp_word',
-                        [('char *', s_side), ('int64_t', _as_str(lv))])
-                else:
-                    s_side = _to_char_star(lt, lv, True)
-                    eq_t = gen._call_expr(
-                        'int', 'mojo_cstr_cmp_word',
-                        [('char *', s_side), ('int64_t', _as_str(rv))])
-                t = gen._new_temp('_Bool')
-                cmp = '== 0' if op == '==' else '!= 0'
-                gen._emit(f'  {t} = {eq_t} {cmp};')
-                return '_Bool', t
             ls = _to_char_star(lt, lv, rv_is_str_lit)
             rs = _to_char_star(rt, rv, lv_is_str_lit)
             eq_t = gen._call_expr('int', 'mojo_cstr_cmp', [('char *', ls), ('char *', rs)])
@@ -4233,23 +3136,9 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # MojoDict* reinterprets its slot layout as a MojoSet*'s and is exactly
     # the class of container-kind cast DESIGN.html's R3 flags (confirmed via
     # test_dict.mojo's `orig |= new` where both are Dict[String, Int]).
-    if op == '|' and 'MojoSet *' not in (lt, rt) and (
-            lt == 'MojoDict *' or rt == 'MojoDict *'
-            # ...or BOTH operands are provably dicts by a signal other than
-            # their lowered C type. `lt == 'MojoDict *'` is not reachable for
-            # a module-level global or an unannotated parameter, because both
-            # are stored through the int64_t boxing convention and so lower
-            # to `int64_t` — `a = {'x': 1}; b = {'y': 2}; print(a | b)` then
-            # emitted a raw C `|` between two POINTERS (`_t13 | _t14`) and
-            # printed the result's address. Requiring BOTH is what keeps this
-            # from stealing `int.__or__`: a name is only "provably a dict"
-            # because a table this codegen fills for dicts says so
-            # (`resolve_shared._operand_is_dict`'s own list of signals), and
-            # `{'x': 1} | 3` has no evidence for its right operand.
-            or (gen._operand_is_dict(left_node, lt, lv)
-                and gen._operand_is_dict(right_node, rt, rv))):
-        _lu = _as_dict_operand(gen, lt, lv)
-        _ru = _as_dict_operand(gen, rt, rv)
+    if op == '|' and (lt == 'MojoDict *' or rt == 'MojoDict *') and 'MojoSet *' not in (lt, rt):
+        _lu = gen._ensure_local(lt, lv)
+        _ru = gen._ensure_local(rt, rv)
         t = gen._call_expr(
             'MojoDict *', 'mojo_dict_union',
             [('MojoDict *', _as_str(_lu)), ('MojoDict *', _as_str(_ru))])
@@ -4286,41 +3175,15 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         ba = gen._call_expr('MojoSet *', 'mojo_set_difference', [('MojoSet *', b), ('MojoSet *', a)])
         return 'MojoSet *', gen._call_expr('MojoSet *', 'mojo_set_union',
                                             [('MojoSet *', ab), ('MojoSet *', ba)])
-    # The KNOWN-INTEGER record is not read here any more: the marking moved
-    # DOWN to the arithmetic tail below, where it is one `_mark_known_int` call
-    # against `_INT_ARITH_OPS` rather than a list of operators spelled twice, and
-    # it has to be down there because every early `return` between here and
-    # there produces something that is not an integer (a float, a string, a
-    # container) or is not this expression's value at all.
-    #
-    # What stays HERE is the WIDENING CAST's own producer, which is what makes
-    # the call at the tail able to see this expression's operands at all: the
-    # casts below rebind `lv`/`rv` to fresh temps, so without a record carried
-    # across them the tail would see two unknown operands and mark nothing.
     # Cast operands to result type to satisfy GIMPLE strict type checking
     arith_type = gimple_ctypes.TypeLattice.join(lt, rt)  # common type for arithmetic
     if lt != arith_type and arith_type not in ('_Bool',) and not arith_type.endswith(' *'):
         ct = gen._new_temp(arith_type)
         gen._safe_coerce_emit(lt, arith_type, lv, ct)
-        # Carry the KNOWN-INTEGER record across the widening cast, for the
-        # same reason `_track_pointer_actual_type` carries the pointer one
-        # across an assignment: the cast does not change the value, and
-        # losing the record here is what left `d[base + 1]` crashing. This is
-        # the operand `base + 1` loses — the literal `1` lowers to the
-        # INT64_T temp `_t3 = 1LL` by exactly this block, and the record
-        # names the literal text `1`, so without the carry the arithmetic
-        # tail below sees an unknown operand and marks nothing. Guarded on
-        # the SOURCE type being a plain integer too, because a
-        # `char *`/`MojoList *` operand joined to a scalar is the boxed-
-        # pointer-reinterpretation case that must NOT be marked.
-        if lt in ('int', 'int64_t'):
-            _mark_known_int(gen, [lv], arith_type, ct)
         lv = ct
     if rt != arith_type and arith_type not in ('_Bool',) and not arith_type.endswith(' *'):
         ct = gen._new_temp(arith_type)
         gen._safe_coerce_emit(rt, arith_type, rv, ct)
-        if rt in ('int', 'int64_t'):
-            _mark_known_int(gen, [rv], arith_type, ct)
         rv = ct
     if op in ('==', '!=', '<', '>', '<=', '>=') and lt.endswith(' *') != rt.endswith(' *'):
         ip_l = gen._new_temp('int64_t')
@@ -4373,21 +3236,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         return 'char *', t
     t = gen._new_temp(res_type)
     gen._emit(f"  {t} = {lv} {c_op} {rv};")
-    # `lv {c_op} rv` on two values already PROVEN to be integers is another
-    # integer: the `_int_word_vals` producer this closes is `d[base + 1]` /
-    # `d[i * 2]` / `d[n >> 3]`, whose results were fresh temps nothing had
-    # recorded, so the dict site handed them to the runtime's range-only
-    # `mojo_boxed_is_str` and a key in [2^31, 2^47) became a `strcmp` of an
-    # address (SIGSEGV). Both operands must be known — one known operand
-    # beside a pointer-typed one is a pointer expression, not arithmetic, and
-    # every such shape has already returned above. See `_mark_known_int`.
-    #
-    # The operands tested are `lv`/`rv` AFTER the widening casts above, and
-    # that is why the casts carry their own `_mark_known_int` calls: the record
-    # for `base + 1`'s literal `1` names the literal text, and the cast that
-    # turns it into an `int64_t` temp is what would otherwise lose it.
-    if c_op in _INT_ARITH_OPS:
-        _mark_known_int(gen, [lv, rv], res_type, t)
     return res_type, t
 
 
@@ -4508,7 +3356,7 @@ def _lower_percent(gen, node: gimple_ctypes.BinaryOp):
             gen.lower_expr(e)
         return 'MojoBytes *', lv
     if isinstance(node.left, gimple_ctypes.StringLiteral):
-        fmt_text, is_fstring = gen._decode_str_literal_text(node.left.value, gimple_ctypes._str_literal_interp_flag(node.left))
+        fmt_text, is_fstring = gen._decode_str_literal_text(node.left.value)
         if not is_fstring:
             return gen._lower_percent_format(node, fmt_text)
     return None  # sentinel: caller falls through to generic numeric `%`
@@ -4532,13 +3380,37 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
     rhs_exprs = (list(node.right.elements) if isinstance(node.right, gimple_ctypes.TupleExpr)
                  else [node.right])
 
-    # The SAME parser the `str` spelling uses (`_parse_percent_template`),
-    # which is what removed the second copy: it produces the identical
-    # lit/spec sequence — `%%` collapses to a literal `%` either way, and the
-    # only difference between the two lowerings is what happens to each part
-    # afterwards (`mojo_str_cat` on `char *` vs `mojo_bytes_concat` on
-    # `MojoBytes *`).
-    parts = _parse_percent_template(fmt_bytes)
+    parts = []
+    buf = []
+    i, n = 0, len(fmt_bytes)
+    while i < n:
+        c = fmt_bytes[i]
+        if c != '%':
+            buf.append(c); i += 1
+            continue
+        if i + 1 < n and fmt_bytes[i + 1] == '%':
+            buf.append('%'); i += 2
+            continue
+        if buf:
+            parts.append(('lit', ''.join(buf), '')); buf = []
+        spec_start = i
+        i += 1
+        while i < n and fmt_bytes[i] in '-+0 #.123456789':
+            i += 1
+        conv = fmt_bytes[i] if i < n else 's'
+        if i < n:
+            i += 1
+        parts.append(('spec', fmt_bytes[spec_start:i], conv))
+    if buf:
+        parts.append(('lit', ''.join(buf), ''))
+
+    # Indexed, NOT `sum(1 for p in parts if p[0] == 'spec')` — a genexpr
+    # subscripting a freshly-iterated tuple is the same self-hosted trap
+    # fixed throughout this function; see the loop below's own comment.
+    n_specs = 0
+    for _pi in range(len(parts)):
+        if parts[_pi][0] == 'spec':
+            n_specs += 1
 
     def _lit_bytes(text):
         # Explicit accumulation loop, NOT `''.join(<genexpr>)` — see
@@ -4552,63 +3424,40 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
         sload = gen._new_val('char *', sname)
         return gen._new_val('MojoBytes *', f'mojo_bytes_new_lit ({sload}, {len(text)})')
 
-    if _percent_operands_needed(parts) != len(rhs_exprs):
+    if n_specs != len(rhs_exprs):
         for e in rhs_exprs:
             gen.lower_expr(e)
         return 'MojoBytes *', _lit_bytes(fmt_bytes)
 
-    # A `*`-width/`.*`-precision is still not lowered on the bytes side, and the
-    # reason is a representation one, not an oversight. `MojoBytes` is
-    # `{uint8_t *data; int64_t len;}`, so its value is NOT a C string: a
-    # `%s`-of-bytes has to be spliced by LENGTH (the fast path below), while
-    # every width/precision in this emitter is applied by handing `sprintf` a
-    # `char *`, which stops at the first embedded NUL. Padding to a width is
-    # therefore not expressible here at all — `b'a\x00b'` is three bytes and
-    # `%*s` must see all three. Doing it properly needs a
-    # length-aware pad-and-justify helper on `MojoBytes` in the runtime, which
-    # is a separate piece of work; until then a template carrying a dynamic
-    # width degrades to its literal text here exactly as it always has, which
-    # is wrong-but-obvious rather than wrong-and-plausible. The `str` spelling
-    # above has no such problem and lowers these for real.
-    for _pi in range(len(parts)):
-        if parts[_pi][0] == 'spec' and parts[_pi][3]:
-            for e in rhs_exprs:
-                gen.lower_expr(e)
-            return 'MojoBytes *', _lit_bytes(fmt_bytes)
-
     arg_i = 0
     acc_val = None
-    # Plain 4-way unpack, NOT `part[0]`/`part[1]` — `parts` is a
-    # freshly-built `list[tuple]` (each entry appended via `parts.append((...))`
-    # by the shared parser), and subscripting a value obtained by single-var
-    # for-loop iteration over such a list is the established self-hosted trap
-    # (working `==` but corrupted `len()`/content on the subscripted slot) —
-    # confirmed via `mojoc fire.py --dump-full` producing a different
-    # `mojo_str_cat (<heap address>, ...)` literal every run for
-    # `_lower_percent_format`'s identical-shaped loop
-    # (gimple_gen_exprs.py:~3334), which already carried this exact diagnosis
-    # in its own comment; this sibling (bytes) version had the same shape and
-    # presumably the same live bug, just not yet caught by a byte-identity
-    # check exercising it. All `parts` entries are normalized to 4-tuples
-    # (`'lit'` entries carry dummy conv and dyn slots) so one uniform unpack
-    # shape covers both kinds.
-    for kind, text_or_spec, conv, dyn in parts:
+    # Plain 3-way unpack, NOT `for part in parts: ... part[0]/part[1]` —
+    # `parts` is a freshly-built `list[tuple]` (each entry appended via
+    # `parts.append((...))` just above), and subscripting a value obtained
+    # by single-var for-loop iteration over such a list is the established
+    # self-hosted trap (working `==` but corrupted `len()`/content on the
+    # subscripted slot) — confirmed via `mojoc fire.py --dump-full`
+    # producing a different `mojo_str_cat (<heap address>, ...)` literal
+    # every run for `_lower_percent_format`'s identical-shaped loop
+    # (gimple_gen_exprs.py:~3334), which already carried this exact
+    # diagnosis in its own comment; this sibling (bytes) version had the
+    # same shape and presumably the same live bug, just not yet caught by
+    # a byte-identity check exercising it. All `parts` entries are now
+    # normalized to 3-tuples (`'lit'` entries carry a dummy `''' conv
+    # slot) so one uniform unpack shape covers both kinds.
+    for kind, text_or_spec, conv in parts:
         if kind == 'lit':
             if not text_or_spec:
                 continue
             part_val = _lit_bytes(text_or_spec)
         else:
-            # `dyn` is 0 for every spec that reaches here (the guard above
-            # returned otherwise), so `arg_i` advances by one per spec exactly
-            # as it always did and no operand can be skipped.
             full_spec = text_or_spec
-            _enode = rhs_exprs[arg_i]
-            et, ev = gen.lower_expr(_enode)
+            et, ev = gen.lower_expr(rhs_exprs[arg_i])
             arg_i += 1
             if conv in ('s', 'r') and et == 'MojoBytes *':
                 part_val = ev
             else:
-                cstr = gen._format_percent_spec(full_spec, conv, et, ev, _enode)
+                cstr = gen._format_percent_spec(full_spec, conv, et, ev)
                 part_val = gen._new_val('MojoBytes *', f'mojo_bytes_from_cstr ({cstr})')
         acc_val = part_val if acc_val is None else gen._new_val(
             'MojoBytes *', f'mojo_bytes_concat ({acc_val}, {part_val})')
@@ -4620,129 +3469,19 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
 def _lower_percent_dict(gen, node: gimple_ctypes.BinaryOp):
     """Lower `<template> % <dict>` to the runtime dict-keyed formatter.
 
-    Both operands are lowered normally (side effects preserved), then EACH
-    is coerced to the parameter type its callee declares: the LHS to `char *`,
-    the RHS to `MojoDict *`. A no-op cast for a genuinely-typed operand, and
-    for an int64_t-mistyped one (the pervasive unknown-call-return fallback
-    typing, and what every CONTAINER global reads back as — see
-    `bare_global_read_plan`'s boxed-`int64_t` rule) the cast is still
-    semantically safe because `% dict` on a non-dict RHS is a TypeError in
-    real Python — no VALID program ever reaches this call with a real integer
+    Both operands are lowered normally (side effects preserved), then the
+    LHS is coerced to `char *`: for a genuinely char*-typed template that
+    is a no-op cast, and for an int64_t-mistyped template (the pervasive
+    unknown-call-return fallback typing) the cast is still semantically
+    safe because `% dict` on a non-string LHS is a TypeError in real
+    Python — no VALID program ever reaches this call with a real integer
     in the slot. The alternative (refusing / falling through) keeps
-    emitting invalid GIMPLE `%` on MojoDict*, which cannot link.
-    The RHS cast is through its own temp and not inline in the argument list,
-    because that is the shape the LHS above already uses and the shape
-    GIMPLE has been shown to accept in a call argument (`_compr_list_loop`'s
-    `it_val` notes the same constraint for a different position, an
-    assignment RHS). Emitting the boxed word straight through was a build
-    failure: "passing argument 2 of 'mojo_str_format_dict' makes pointer from
-    integer without a cast", which is what stopped
-    `gimple_dict_repr_kinds_agree_with_cpython` from building at all — the
-    whole program, including the four lines above it that were already right."""
+    emitting invalid GIMPLE `%` on MojoDict*, which cannot link."""
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
     lvs = lv if lt == 'char *' else gen._new_val('char *', f"(char *){lv}")
-    rvs = rv if rt == 'MojoDict *' else gen._new_val(
-        'MojoDict *', f"(MojoDict *){rv}")
-    # `_mojo_repr_dict`, the GENERATED per-TU dict walker, as the third
-    # argument: it is how an UNKEYED spec (`'%s' % d`) renders the mapping,
-    # which CPython defines as `str(d)`. It travels in because this runtime
-    # cannot render a dict — each slot's kind and the recorded `val_repr` are
-    # only in the generated block — which is the same bargain
-    # `MojoDict.val_repr` and `mojo_list_set_elem_repr` make, and the reason
-    # there is still one implementation of "what a dict looks like". A NULL
-    # is tolerated by the callee (it degrades to copying the spec through),
-    # so a caller in a TU with no reflection block is not made worse by this.
-    t = gen._new_val('char *',
-                     f"mojo_str_format_dict ({lvs}, {rvs}, _mojo_repr_dict)")
+    t = gen._new_val('char *', f"mojo_str_format_dict ({lvs}, {rv})")
     return 'char *', t
-
-
-def _parse_percent_template(fmt_text: str):
-    """Split a %-format template into ('lit', text, '', ()) and
-    ('spec', full_spec, conv, dyn) parts, in source order.
-
-    ONE parser for the `str` and `bytes` spellings, which had drifted into
-    two near-identical copies (`_lower_percent_format` /
-    x `lit` entries carry two dummy slots so both kinds
-    unpack with a single uniform `for a, b, c, d in parts:` shape -- the
-    property the self-hosted backend needs, since subscripting a value
-    obtained by iterating a freshly-built list is this codegen's documented
-    corruption trap (see `_lower_percent_format`'s own comment).
-
-    `dyn` is the number of operands the spec consumes BEFORE its value: a `*`
-    width and a `.*` precision each take one (`'%0*.*f' % (8, 2, 1.5)`), in
-    that order. Python has always allowed both and this compiler refused the
-    whole template (see `_lower_percent_format`'s arity check), which is not
-    a rare shape: `Tools/unicode/gencodec.py`'s `hexdigits()` writes
-    `'0x%0*X' % (precision, t)`, and its output was the literal template text.
-
-    `full_spec` keeps the whole spec verbatim — flags, width, precision — so
-    it can be handed to `sprintf` unchanged: C spells a dynamic width with
-    the same `*`, so a `%0*X` needs no rewriting at all, only a wider
-    argument list."""
-    parts = []
-    lit_start = 0
-    esc_buf = ''
-    i, n = 0, len(fmt_text)
-    while i < n:
-        c = fmt_text[i]
-        if c != '%':
-            i += 1
-            continue
-        # hit a '%': flush the pending literal run
-        _run = fmt_text[lit_start:i]
-        if i + 1 < n and fmt_text[i + 1] == '%':
-            # `esc_buf` is a str, concatenated -- not a char list appended to;
-            # a list of single `char`s joined on the self-hosted backend
-            # produced an erased/garbage string that then compiled to
-            # `mojo_str_cat (<decimal address>, ...)` in emitted C, different
-            # every --dump-full run. `%%` (an escaped percent) is the one case
-            # a plain slice can't represent verbatim, so those runs are
-            # accumulated here and flushed as their own 'lit' part.
-            esc_buf = esc_buf + _run + '%'
-            i += 2
-            lit_start = i
-            continue
-        _lit = esc_buf + _run
-        if _lit:
-            parts.append(('lit', _lit, '', 0))
-        esc_buf = ''
-        spec_start = i
-        i += 1
-        # Flags, width, precision, with a `*` in the width or precision
-        # position standing for one operand each.
-        dyn = 0
-        while i < n:
-            _sc = fmt_text[i]
-            if _sc == '*':
-                dyn += 1
-                i += 1
-                continue
-            if _sc in '-+0 #.123456789':
-                i += 1
-                continue
-            break
-        conv = fmt_text[i] if i < n else 's'
-        if i < n:
-            i += 1
-        parts.append(('spec', fmt_text[spec_start:i], conv, dyn))
-        lit_start = i
-    _tail = esc_buf + fmt_text[lit_start:n]
-    if _tail:
-        parts.append(('lit', _tail, '', 0))
-    return parts
-
-
-def _percent_operands_needed(parts) -> int:
-    """How many RHS operands `parts` consumes: one per spec, plus one per
-    `*`-width/`.*`-precision. Indexed, NOT `sum(...)` over a genexpr -- the
-    same self-hosted trap as `_lower_bytes_percent_format`'s own spec count."""
-    needed = 0
-    for _pi in range(len(parts)):
-        if parts[_pi][0] == 'spec':
-            needed += 1 + parts[_pi][3]
-    return needed
 
 
 def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> tuple[str, str]:
@@ -4758,9 +3497,62 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
     rhs_exprs = (list(node.right.elements) if isinstance(node.right, gimple_ctypes.TupleExpr)
                  else [node.right])
 
-    parts = _parse_percent_template(fmt_text)
+    # Parse into ('lit', text) | ('spec', full_spec, conv) parts.
+    # `full_spec` keeps the flags/width/precision text (e.g. '%08.3f')
+    # so sprintf below reproduces them; only the conversion character
+    # needs any Python->C translation.
+    # Build literal runs by SLICING `fmt_text` (`fmt_text[lit_start:i]`),
+    # NOT by `buf.append(c)` + `''.join(buf)` — a list of single `char`s
+    # joined on the self-hosted backend produced an erased/garbage string
+    # that then compiled to `mojo_str_cat (<decimal address>, ...)` in
+    # emitted C (gimple_cpp_core.py:2934's `"..." % (_tid,)`), different
+    # every --dump-full fire.py run. `%%` (an escaped percent) is the one
+    # case a plain slice can't represent verbatim, so those runs are
+    # accumulated in `esc_buf` (a str, concatenated — not a char list)
+    # and flushed as their own 'lit' part.
+    parts = []
+    lit_start = 0
+    esc_buf = ''
+    i, n = 0, len(fmt_text)
+    while i < n:
+        c = fmt_text[i]
+        if c != '%':
+            i += 1
+            continue
+        # hit a '%': flush the pending literal run
+        _run = fmt_text[lit_start:i]
+        if i + 1 < n and fmt_text[i + 1] == '%':
+            esc_buf = esc_buf + _run + '%'
+            i += 2
+            lit_start = i
+            continue
+        _lit = esc_buf + _run
+        if _lit:
+            parts.append(('lit', _lit, ''))
+        esc_buf = ''
+        spec_start = i
+        i += 1
+        # Flags, width, precision. Dynamic width/precision ('%*d') isn't
+        # supported -- rare enough in practice to leave as a follow-up
+        # rather than block the common literal-width case.
+        while i < n and fmt_text[i] in '-+0 #.123456789':
+            i += 1
+        conv = fmt_text[i] if i < n else 's'
+        if i < n:
+            i += 1
+        parts.append(('spec', fmt_text[spec_start:i], conv))
+        lit_start = i
+    _tail = esc_buf + fmt_text[lit_start:n]
+    if _tail:
+        parts.append(('lit', _tail, ''))
 
-    if _percent_operands_needed(parts) != len(rhs_exprs):
+    # Indexed, NOT `sum(1 for p in parts if p[0] == 'spec')` — same
+    # self-hosted trap as the bytes sibling function above.
+    n_specs = 0
+    for _pi in range(len(parts)):
+        if parts[_pi][0] == 'spec':
+            n_specs += 1
+    if n_specs != len(rhs_exprs):
         # Can't safely map operands to specs (mismatched-arity source,
         # or a '%' that wasn't really meant as a format template).
         # Degrade to the literal text -- still evaluated the RHS for any
@@ -4772,20 +3564,20 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
 
     arg_i = 0
     acc_val = None
-    # Plain 4-way unpack, NOT `for part in parts: ... part[1]`/`part[2]` --
+    # Plain 3-way unpack, NOT `for part in parts: ... part[1]`/`part[2]` —
     # `_as_str(part[1])` alone was NOT sufficient: `part` here comes from
     # single-var for-loop iteration over a freshly-built `list[tuple]`,
     # and SUBSCRIPTING that iterated value is itself the self-hosted trap
     # (working `==` but corrupted `len()`/hashing on the subscripted
-    # slot -- the same class of bug as `node.params[i][0]`, confirmed
+    # slot — the same class of bug as `node.params[i][0]`, confirmed
     # while fixing the check-native-dumpfull crash), not something a
     # post-hoc `_as_str()` on the extracted value can repair. Confirmed
     # live: `mojoc fire.py --dump-full` produced a different
     # `mojo_str_cat (<heap address>, ...)` literal every run for this
     # exact loop despite the `_as_str` guards already here. All `parts`
-    # entries are normalized to 4-tuples (`'lit'` entries carry dummy
-    # conv and dyn slots) so one uniform unpack shape covers both kinds.
-    for kind, text_or_spec, conv, dyn in parts:
+    # entries are normalized to 3-tuples (`'lit'` entries carry a dummy
+    # `''` conv slot) so one uniform unpack shape covers both kinds.
+    for kind, text_or_spec, conv in parts:
         if kind == 'lit':
             text = text_or_spec
             if not text:
@@ -4793,30 +3585,14 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
             part_val = gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(text)))
         else:
             full_spec = text_or_spec
-            width_ints = _lower_percent_width_args(gen, rhs_exprs, arg_i, dyn)
-            arg_i += dyn
-            _enode = rhs_exprs[arg_i]
-            et, ev = gen.lower_expr(_enode)
+            et, ev = gen.lower_expr(rhs_exprs[arg_i])
             arg_i += 1
-            part_val = gen._format_percent_spec(full_spec, conv, et, ev, _enode, width_ints)
+            part_val = gen._format_percent_spec(full_spec, conv, et, ev)
         acc_val = part_val if acc_val is None else gen._new_val(
             'char *', f'mojo_str_cat ({acc_val}, {part_val})')
     if acc_val is None:
         acc_val = gen._new_val('char *', gen._intern_string(''))
     return 'char *', acc_val
-
-
-def _lower_percent_width_args(gen, rhs_exprs, arg_i: int, dyn: int) -> list:
-    """Lower the `dyn` `*`-width/`.*`-precision operands at `rhs_exprs[arg_i:]`
-    into plain C `int` temps, in source order, and return them. `dyn` is 0 for
-    every spec without a dynamic width, which is the overwhelming majority —
-    then this is an empty list and the spec lowers exactly as it always did."""
-    out = []
-    for _d in range(dyn):
-        _dn = rhs_exprs[arg_i + _d]
-        _dt, _dv = gen.lower_expr(_dn)
-        out.append(gen._to_c_int_arg(_dt, _dv))
-    return out
 
 
 def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
@@ -4835,18 +3611,6 @@ def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         ti = gen._new_val('int64_t', f"(int64_t){rv}")
         rv = ti
     t = gen._new_val('int64_t', f"__mojo_floordiv ({lv}, {rv})")
-    # `//` on two known integers is another integer, exactly as in the
-    # arithmetic tail — but this lowering is dispatched from `_lower_binary`
-    # BEFORE that tail, so it needs its own producer or `d[6000000000 // 2]`
-    # keeps crashing (SIGSEGV as a `strcmp` of address 1500000000, before this:
-    # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md). The guard
-    # is on `lt`/`rt`, which the two pointer-coercion arms above deliberately
-    # leave UNCHANGED (they rebind only `lv`/`rv`, to fresh `(int64_t)` casts):
-    # a boxed pointer reaches here as a `char *`/`T *` operand whose address
-    # floor-divided is not an integer, and its coercion temp is in nobody's set
-    # anyway, so the pair of tests cannot both pass for one.
-    if lt in ('int', 'int64_t') and rt in ('int', 'int64_t'):
-        _mark_known_int(gen, [lv, rv], 'int64_t', t)
     return 'int64_t', t
 
 
@@ -4873,15 +3637,6 @@ def _lower_pow(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     gen._emit(f"  {t2} = (double) {rv_for_double};")
     t3 = gen._new_val('double', f"pow ({t1}, {t2})")
     t4 = gen._new_val('int', f"(int) {t3}")
-    # Integer `**` produces an integer: the `(int)` cast above makes that
-    # true for every input, so this needs no inference about the operands
-    # at all — the strongest form of the argument the other producers on
-    # `gen._int_word_vals` make. It is worth having because `**` is how a
-    # large key is usually COMPUTED rather than written: `3 ** 20` is
-    # 3486784401, inside the runtime discriminator's pointer window, and
-    # `d[3 ** 20] = 8` was a `strcmp` of address 3486784401 before this
-    # (bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md).
-    gen._int_word_vals.add(t4)
     return 'int', t4
 
 
@@ -5011,21 +3766,7 @@ def _lower_in_impl_values(gen, xt: str, xv: str, right_node, negate: bool) -> tu
         return gen._lower_in_range(xv, right_node.args, negate=negate)
 
     rt, rv = gen.lower_expr(right_node)
-    res = gen._lower_in_dispatch(xt, xv, rt, rv, negate)
-    # `c in ('[', '(', '{')`, `k in {"a", "b"}`, `x in [1, 2]`: the container is
-    # built for this one membership test and no name can ever refer to it, yet
-    # it was never released -- three per character of every tokenizer scan.
-    # Free it once the test has read it. Only a display is treated this way (an
-    # identifier, field or call result names a container somebody else owns);
-    # a tuple literal lowers to a fresh heap list on every path.
-    if isinstance(right_node, gimple_ctypes.TupleExpr) and rt == 'MojoList *':
-        gen._emit(f"  mojo_list_free ({rv});")
-    elif (isinstance(right_node, (gimple_ctypes.ListExpr, gimple_ctypes.SetExpr,
-                                  gimple_ctypes.DictExpr))
-            and rt in ('MojoList *', 'MojoSet *', 'MojoDict *')
-            and rv in gen._fresh_vals):
-        gen._free_fresh_container(rv, rt)
-    return res
+    return gen._lower_in_dispatch(xt, xv, rt, rv, negate)
 
 
 def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) -> tuple[str, str]:
@@ -5435,26 +4176,6 @@ def _lower_mlir_struct(gen, kind: str, index, arg_pairs: list):
 
 def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     elem = gen._infer_list_elem_type(node.elements)
-    # A literal whose every element is a Python bool VALUE is a list of
-    # bools, and the two answers differ in more than the digits: the generic
-    # path both formats a slot as "1"/"0" (mojo_repr_int, not mojo_repr_bool)
-    # AND treats a False (0) slot as the None sentinel, so `[b.flag, c.flag]`
-    # printed `[1, None]`. `[True, False]` was already right because
-    # `_infer_list_elem_type`'s `_quick_type` says `_Bool` for a BoolLiteral;
-    # a bool-annotated struct FIELD has no such type (see
-    # `is_python_bool_expr`), which is why this asks the shared PREDICATE
-    # rather than looking at the joined ctype.
-    #
-    # Only the repr route changes: `list_suffix('_Bool')` is 'int', so the
-    # append suffix, the slot layout and every per-slot reader are exactly
-    # what the integer answer gave. This is the list-side twin of
-    # `mojo_mark_dict_bool_values`, and it is deliberately NOT a change to
-    # `_quick_type`, which is shared with arithmetic: a `_Bool`-typed
-    # `self.count += self.flag` is a GIMPLE operand-type error.
-    if (elem in ('int', 'int64_t') and node.elements
-            and all(gimple_exprtypes.is_python_bool_expr(gen, _el)
-                    for _el in node.elements)):
-        elem = '_Bool'
     suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
     t    = gen._new_temp('MojoList *')
     # See _literal_elements_include_none's docstring: don't tag an
@@ -5462,14 +4183,6 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # spells out a `None` among its elements — _list_repr_fn would
     # otherwise route it through mojo_repr_list_ints (no None-sentinel
     # check), silently misprinting that `None` as `0`.
-    #
-    # An EMPTY literal records `'int64_t'` here, and that is a STORAGE
-    # default, not evidence — `_elem_types` is what the list's own later
-    # consumers read, and `l = []` followed by `l.append(x)` (also through a
-    # module-level global, where nothing else seeds the table) depends on it.
-    # It is the RETURN-side publish that must not treat it as evidence, and
-    # that is `_gen_ReturnStmt`'s own guard; see bugs/
-    # CODEGEN_comprehension_in_a_branch_loses_its_result_elem_type.md.
     if not (elem == 'int64_t' and gen._literal_elements_include_none(node.elements)):
         gen._elem_types[t] = elem
     # Every element is itself a tuple/list literal with a homogeneous,
@@ -5491,21 +4204,15 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # append each element by its OWN type. Numeric-only lists (incl. promoted
     # [1, 2.0]) keep the promoted list-wide suffix, so this never regresses
     # homogeneous lists.
-    # A `*spread` element lowers its OPERAND, not the `UnaryOp` wrapper: the
-    # wrapper is a dereference to `_lower_UnaryOp` (its pass-through whitelist
-    # covers the container types a spread usually operates on and not
-    # `char *`), so `(0, *a)` over a `str` produced the operand's FIRST
-    # CHARACTER — `*a` in C — and extended the tuple with `(MojoList *)'a'`.
-    # Inside a display a `*x` element never means a dereference, and the
-    # display is the only place that knows that.
-    lowered = [(el, *gen.lower_expr(el.operand if _is_star_spread(el) else el))
-               for el in node.elements]
+    lowered = [(el, *gen.lower_expr(el)) for el in node.elements]
 
-    # A `*seq` element EXTENDS rather than appends (see `_is_star_spread`), so
-    # it contributes no scalar suffix: a nested list literal [[...]] is not a
-    # spread — those should append the list pointer.
+    def _is_spread(el, et):
+        # Only treat as spread if it's an explicit spread operator (*seq)
+        # Don't treat nested list literals [[...]] as spreads - those should append the list pointer
+        return isinstance(el, gimple_ctypes.UnaryOp) and el.op == '*'
+
     scalar_sufs = {gimple_ctypes.TypeLattice.list_suffix(et)
-                   for el, et, _ev in lowered if not _is_star_spread(el)}
+                   for el, et, _ev in lowered if not _is_spread(el, et)}
     # A numeric mix is as much a mix as a string/non-string one. `[1, 2.5]`
     # used to append EVERY element through the list-wide 'double' suffix, so
     # the int 1 was stored as 1.0 and the literal printed `[1.0, 2.5]` and
@@ -5518,8 +4225,8 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
 
     for el, et, ev in lowered:
         # Spread element (*seq): extend the list instead of appending
-        if _is_star_spread(el):
-            _emit_star_spread(gen, t, et, ev)
+        if _is_spread(el, et):
+            gen._emit_call('void', '', 'mojo_list_extend', [('MojoList *', t), (et, ev)])
             # Track nested element type if extending with a list that has tracked elements
             # IMPORTANT: Keep _elem_types[t] as 'MojoList *' (what t contains),
             # and set _nested_elem_types[t] to what those lists contain
@@ -5535,17 +4242,6 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
             temp = gen._new_val('char *', f'{ev_cast}')
             ev_cast = temp
         gen._emit(f"  mojo_list_append_{use} ({t}, {ev_cast});")
-        # A callable held in a LIST or TUPLE LITERAL, so a later
-        # `lst[0](...)` / `tup[0](...)` can dispatch. This append loop is the
-        # single chokepoint every literal element passes through, and the
-        # container table is already keyed by the container's lowered name
-        # (`t`), so recording it is one call. A non-callable element is a
-        # no-op inside the helper, so this is not on the hot path. See
-        # `ginf.note_container_callable_ret` — the ONE helper for
-        # "a callable stored in a container, so a later `c[k](...)` can call
-        # it", dict or list or tuple. `gimple_call_through_subscript_callee`
-        # and `gimple_call_through_a_list_subscript_callee` pin it.
-        ginf.note_container_callable_ret(gen, t, ev, et, el)
         # A list whose elements are TUPLES (`[(a, b), (c, d)]`) — record
         # the tuple's own element type so a later `for x, y in lst:`
         # tuple-target loop reads each slot with the right accessor
@@ -5564,25 +4260,12 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # mojo_list_set_kinds) when they are not all the same, so every read of
     # this literal — the whole-result repr, a copy, a slice, iteration, a
     # computed subscript — describes each slot by what it actually holds
-    # instead of by one list-wide ctype. A homogeneous literal normally
-    # records nothing: its single accessor is already exact, and the
-    # side-table probe is the only cost a program that never builds a
-    # heterogeneous list ever pays.
-    #
-    # `None` is the ONE exception, and it is an exception because of what the
-    # runtime's default is, not because this literal is heterogeneous. An
-    # undescribed slot reads as 'i' (mojo_list_slot_kind's fallback), so a
-    # homogeneous `[None]` recorded nothing and was indistinguishable from a
-    # homogeneous `[0]` — which is CPython's `False` for `==` and a TypeError
-    # for `<`. Measured on this tree: `[None] == [0]` answered True, and
-    # `[1] < [None]` answered False where CPython raises. The literal's own
-    # single accessor being "exact" is true of the C TYPE (both are int64_t)
-    # and useless for the value: nothing downstream of the store can recover
-    # which of the two it was. So a literal containing `None` records its
-    # kinds however homogeneous it is; every other homogeneous kind keeps the
-    # old no-side-table behaviour.
-    _kinds = _literal_slot_kinds(gen, lowered)
-    if _kinds and (len(set(_kinds)) > 1 or 'n' in _kinds):
+    # instead of by one list-wide ctype. A homogeneous literal records
+    # nothing: its single accessor is already exact, and the side-table
+    # probe is the only cost a program that never builds a heterogeneous
+    # list ever pays.
+    _kinds = ''.join(_list_literal_slot_kind(gen, el, et) for el, et, _ev in lowered)
+    if _kinds and len(set(_kinds)) > 1:
         gen._emit_call('void', '', 'mojo_list_set_kinds',
                        [('MojoList *', t),
                         ('const char *', gen._intern_string(_kinds))])
@@ -5590,184 +4273,43 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
         # go through the runtime to learn the kind, and this value is one
         # where that is possible — see gen._maybe_kinds_vals.
         gen._maybe_kinds_vals.add(t)
-    # Record how to REPR one element, for the same reason and independently of
-    # the kinds above: a list of a REGISTERED STRUCT has one element ctype, so
-    # no kinds row is recorded, and the runtime walker then reads each slot
-    # through `_mojo_generic_elem_repr`, which finds no type tag on a
-    # struct-allocated value and prints the raw pointer decimal where CPython
-    # prints the object. The element's type is known HERE, where the list is
-    # built; the shim name is `_mojo_elem_repr_<Struct>`, emitted beside that
-    # struct's `_mojo_repr_<Struct>` (module_gen.reflect_structs) and
-    # forward-declared with it.
-    #
-    # Only for a struct this compile REFLECTS (one with at least one field),
-    # because the shim is emitted only for those — naming a shim that does not
-    # exist would be an undefined-function reference at C link time. A
-    # field-less struct has nothing for a field dump to say anyway; its
-    # `__repr__`, if it has one, goes unreached here exactly as it does for
-    # every other container repr.
-    _elem_repr = gimple_exprtypes.struct_elem_repr_shim(gen, elem)
-    if _elem_repr:
-        gen._emit_call('void', '', 'mojo_list_set_elem_repr',
-                       [('MojoList *', t),
-                        ('void *', ginf.elem_repr_operand(gen, _elem_repr))])
     gen._note_fresh_result(t)
     return 'MojoList *', t
 
 
 # The one byte per list-literal element that mojo_list_set_kinds' alphabet
-# uses. `None` is detected from the ELEMENT expression rather than from its
-# lowered type, which is the same int64_t every other integer has; everything
-# else is the shared element-type mapping (TypeLattice.slot_kind_byte), the
-# same one the sorters and the per-slot readers use.
-
-
+# uses, from the element's own lowered C type. `None` is detected from the
+# ELEMENT expression rather than its lowered type, which is the same
+# int64_t every other integer has.
 def _list_literal_slot_kind(gen, el, et) -> str:
     if isinstance(el, (gimple_ctypes.NoneLiteral,)) or (
             isinstance(el, gimple_ctypes.IdentExpr) and el.name == 'None'):
         return 'n'
-    return gimple_ctypes.TypeLattice.slot_kind_byte(et)
-
-
-# `_lower_list_literal`'s spread test and `_lower_tuple_literal`'s identical
-# one, as ONE predicate, asked in the shared middle tier beside the other
-# AST-shape questions (`mojo.middle.types.is_star_spread`) — because a third
-# site needs the same answer and had been re-deriving it: `_infer_list_elem_type`
-# in `mojo/middle/resolve_shared.py`.
-
-
-def _is_star_spread(el) -> bool:
-    return gimple_ctypes.is_star_spread(el)
-
-
-def _emit_star_spread(gen, dest: str, et: str, ev: str) -> None:
-    """`dest.extend(*operand)` — the ONE emission of a `*seq` element of a list
-    or tuple display, shared by both lowerings.
-
-    Two things have to be right here and neither of them is the extend itself:
-
-    * A `char *` operand is a STRING spread, and `mojo_list_extend` is declared
-      to take a `MojoList *` — passing the string straight through read a list
-      header out of a `char *`, which is a SIGSEGV on `(0, *"ab")`.
-      `mojo_str_chars` is the runtime's own answer to "what does iterating this
-      string yield", already used by `mojo_iter_boxed_list` for `list(<a str>)`
-      and built on the same per-byte `mojo_cstr_slice` the codegen's own
-      `for c in s` loop uses, so the spread and the loop cannot disagree. No new
-      runtime entry point, and no second iterator.
-    * The operand is coerced to `MojoList *` rather than passed at its own
-      declared type: an UNANNOTATED parameter holding a list lowers to
-      `int64_t` (the box), and handing that to a `MojoList *` parameter is
-      `passing argument 2 ... makes pointer from integer without a cast` — a
-      hard build failure, measured on this compiler's own `mojo/middle/coro.py`.
-      Same argument and same helper as the `**` spread's operand in
-      `_lower_dict_literal` above.
-
-    The `mojo_str_chars` result goes through a temp rather than being nested
-    inside the `mojo_list_extend` call: a call as another call's argument is
-    not a GIMPLE operand this emitter can rely on.
-    """
-    if et == 'char *':
-        _chars = gen._new_temp('MojoList *')
-        gen._emit_call('MojoList *', _chars, 'mojo_str_chars', [('char *', ev)])
-        ev = _chars
-    else:
-        ev = gen._coerce_to_type(_as_str(et), 'MojoList *', ev)
-    gen._emit_call('void', '', 'mojo_list_extend',
-                   [('MojoList *', dest), ('MojoList *', ev)])
-
-
-def _literal_slot_kinds(gen, lowered) -> str:
-    """The per-slot kind string of a list/tuple LITERAL, in slot order.
-
-    ONE byte per slot is the runtime's invariant (`_KindRow.kinds`: "one byte
-    per slot, or NULL"), so the string may cover only slots whose RUNTIME index
-    this compile can name. A `*spread` element appends an unknown NUMBER of
-    slots (`mojo_list_extend` walks its operand), which makes every index from
-    the first spread onwards runtime-dependent — so the answer stops there and
-    the runtime's own documented fallback ("a slot the string does not cover
-    ... falls back to the int accessor") describes the rest.
-
-Getting this wrong is a SEGFAULT rather than a wrong digit, which
-    is what the `*expr`-in-a-display fix was filed for (its doc is deleted with
-    it): the spread contributed one byte carrying the SPREAD OPERAND's kind
-    (`MojoList *` -> `'l'`, the nested-list slot), so `[0, *a, 9]` recorded
-    `"ili"` — three bytes for a FOUR-slot list, every byte after the first
-    spread describing the wrong slot, and slot 1 (the integer 1 inside `a`)
-    rendered through `mojo_repr_list_kinds`'s `'l'` arm as `(MojoList *)1`.
-    Dropping the spread's own byte is NOT enough and would still crash: the
-    string would be `"il"` and `'l'` would have moved onto `a`'s first element
-    instead of `9`'s. Only stopping at the spread keeps every byte aligned.
-
-    Shared by the list and the tuple lowering, which are the same MojoList and
-    the same record.
-    """
-    out = []
-    for el, et, _ev in lowered:
-        if _is_star_spread(el):
-            break
-        out.append(_list_literal_slot_kind(gen, el, et))
-    return ''.join(out)
-
-
-# `gimple_exprtypes._dict_literal_spread_operand` — the discriminator lives in
-# the middle tier, because `gimple_exprtypes.dict_literal_val_ctype` (the ONE
-# dict-literal value-type rule, which this file's caller also uses) asks the
-# same question of the same key.
+    if et in gimple_ctypes._TYPE_FLOAT:
+        return 'd'
+    if et in ('char *', 'MojoStr *'):
+        return 'p'
+    if et == 'MojoBytes *':
+        return 's'
+    if et in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+        return 'l'
+    return 'i'
 
 
 def _lower_dict_literal(gen, node: gimple_ctypes.DictExpr) -> tuple[str, str]:
     t = gen._new_temp('MojoDict *')
     gen._emit_container_new(t, 'MojoDict *')
-    # Infer value type from the first pair (for subscript / iteration
-    # dispatch). The rule itself is `gimple_exprtypes.dict_literal_val_ctype`
-    # — shared, because the cross-call dict-value contract in
-    # `module_gen.py` stamps the same answer onto a callee PARAMETER from a
-    # literal written at the call site, and two copies of this rule could
-    # type the parameter one way while the literal stores another. Its skip of
-    # a `**spread` pair (which carries no value sample) moved in with it.
-    gen._dict_val_types[t] = gimple_exprtypes.dict_literal_val_ctype(gen, node.pairs)
+    # Infer value type from first pair (for subscript / iteration dispatch)
+    if node.pairs:
+        vt_sample = gen._quick_type(node.pairs[0][1])
+        if vt_sample in gimple_ctypes._FLOAT_TYPES:
+            gen._dict_val_types[t] = 'double'
+        elif vt_sample == 'char *':
+            gen._dict_val_types[t] = 'char *'
+        else:
+            gen._dict_val_types[t] = 'int64_t'
     for key_expr, val_expr in node.pairs:
-        # A `**expr` pair MERGES; it is not a store. Treated as a store it put
-        # the spread's own dict into the KEY slot and the None sentinel into
-        # the value slot, which at run time is `mojo_dict_key_for` refusing a
-        # dict as a key: `TypeError: unhashable type: 'dict'`, an unhandled
-        # exception and a non-zero exit on `{'a': 1, **{'x': 2}}`. The dict
-        # was also silently missing every key it should have contributed.
-        #
-        # Measured consequence beyond a test program: this compiler's own
-        # `mojo/backend_gimple/emit_infra.py::_reset_func` seeds
-        # `gen._dict_val_types` with `**{k: v for k, v in
-        # gen._global_dict_val_types.items() ...}`, so the SELF-HOSTED binary
-        # raised this on every input including an empty file and wrote a
-        # 0-byte `.ci` at exit 0 — `test_selfhost.py`'s
-        # `run_produced_binary` red with no gcc error anywhere.
-        _spread = gimple_exprtypes._dict_literal_spread_operand(key_expr)
-        if _spread is None:
-            _emit_dict_pair_store(gen, t, key_expr, val_expr)
-            continue
-        # `mojo_dict_update` re-inserts each live pair under its own
-        # keykind/kind, which is what keeps a spread's contents addressable by
-        # the same reads a literal store would have made them (the same
-        # helper and the same reason `_lower_comprehension`'s multi-clause
-        # dict arm uses it).
-        #
-        # The operand is coerced through `_coerce_to_type`, NOT only when its
-        # static type is a pointer: an UNANNOTATED parameter holding a dict
-        # lowers to `int64_t` (the box), and passing that straight to a
-        # `MojoDict *` parameter is `passing argument 2 of 'mojo_dict_update'
-        # makes pointer from integer without a cast` — one of those in this
-        # compiler's own `mojo/middle/coro.py`, measured. `_coerce_to_type` is
-        # the sibling `d.update(x)` lowering already uses for exactly this
-        # operand (`emit_methods.py`, the set-vs-dict dispatch above its
-        # `mojo_dict_update`), and a no-op when the types already agree.
-        _st, _sv_raw = gen.lower_expr(_spread)
-        _sv = gen._coerce_to_type(_as_str(_st), 'MojoDict *', _sv_raw)
-        gen._emit_call('void', '', 'mojo_dict_update',
-                       [('MojoDict *', t), ('MojoDict *', _sv)])
-        # A spread contributes the dict's own value type, so a subscript on
-        # the literal reads it with the right accessor.
-        if _sv_raw in gen._dict_val_types:
-            gen._dict_val_types[t] = gen._dict_val_types[_sv_raw]
+        _emit_dict_pair_store(gen, t, key_expr, val_expr)
     gen._note_fresh_result(t)
     return 'MojoDict *', t
 
@@ -5783,50 +4325,21 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
     Single source of truth for key coercion + per-type setter dispatch."""
     kt, kv = gen.lower_expr(key_expr)
     vt, vv = gen.lower_expr(val_expr)
-    # A bytes key is its OWN key domain in the runtime (see `_DictSlot.keykind`).
-    # Decided from the key's lowered type BEFORE the conversion chain below,
-    # because two of those arms re-type `kt` and one of them is this one.
-    _bytes_key = kt == 'MojoBytes *'
-    # Did the key conversion chain below hand out a `_char_to_cstr`
-    # placeholder for `_apply_kw_keys` to resolve? Only the CONTAINER arm
-    # does, so this is what tells the three setter arms whether they must go
-    # through `_emit_call`. Declared here, before the chain, because every
-    # other arm leaves it False — including the two that `continue` out of the
-    # chain early.
-    _kw_key = False
     # Load global string literals into temps before passing to dict functions
-    #
-    # EVERY branch below that produces a `char *` key must re-type `kt` with
-    # it, because `kt` is what the store is EMITTED with. A key whose C
-    # variable is `char *` while the type handed to the store says `int64_t` or
-    # `MojoDict *` used to be harmless — `_emit_call`'s coercion for a
-    # mismatched argument was a `(char *)(void *)(int64_t)` round trip, which is
-    # the identity on a pointer — and is no longer, because that coercion now
-    # routes an untracked word through `mojo_cstr_or_int_str` instead of
-    # reinterpreting it. So a stale `kt` here became
-    # `mojo_dict_set_int(d, mojo_cstr_or_int_str(<char *>), v)`:
-    # "passing argument 1 ... makes integer from pointer without a cast", a
-    # hard GCC error that took the whole self-host closure down. It fired on
-    # `{**lm, **lmaps.get(s.name, {})}` in mojo/middle/coro.py, where the
-    # second `**` packs a `dict.get(...)` — an int64_t — and stringifies it.
-    #
-    # `_lower_dict_compr` gets this right for the same reason
-    # (`kt, kv = gen._char_to_cstr(kt, kv)`), which is the shape to copy.
     if kv.startswith('_slit_'):
         kv_tmp = gen._new_val('char *', f"{kv}")
         kv = kv_tmp
-        kt = 'char *'
     elif kt in ('int', 'int64_t', '_Bool'):
         # Runtime dict keys are always char *; convert non-string keys
         # to strings via mojo_str_from_int (e.g. Int key 0 → "0") instead
         # of C-casting the int to char* which produces NULL for 0.
         kv = gen._new_val('char *', f"mojo_str_from_int({kv})")
-        kt = 'char *'
     elif kt == 'MojoBytes *':
-        # A bytes key must keep the MojoBytes pointer — the generic
-        # non-scalar-key branch below would `_repr_value` it into the char*
-        # str domain, which both loses the bytes type and aliases a str key of
-        # the same characters.
+        # A bytes key is its OWN key domain in the runtime (see
+        # _DictSlot.keykind) and must keep the MojoBytes pointer — the
+        # generic non-scalar-key branch below would `_repr_value` it into
+        # the char* str domain, which both loses the bytes type and aliases
+        # a str key of the same characters.
         if kv.startswith('_slit_'):
             kv = gen._new_val('MojoBytes *', f"{kv}")
     elif kt != 'char *':
@@ -5851,59 +4364,26 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         # strdup()s it — mojo_str_from_int's own heap-allocated
         # buffer is the already-proven-safe, unchanged behavior for
         # by far the most common dict-key type.
-        #
-        # A CONTAINER key is NOT one of those, and rendering it here
-        # with `_repr_value` gave this one site a SECOND spelling of a
-        # content key: `_repr_value` writes the tuple's own TEXT
-        # (`mojo_repr_list_ints` -> "(9, 9)"), while every other
-        # dict-key site in this backend — the subscript get/set, `in`,
-        # `pop`, `setdefault`, a comprehension's key — hands the raw
-        # WORD to `_char_to_cstr(word_ok=True)`, whose `_kw` twin
-        # renders it through the runtime's `mojo_dict_key_for`, a
-        # length-delimited `T1<len><elem>...` form. Two renderings are
-        # two keys, so the literal's entry was unreachable from every
-        # other spelling: `lit = {(9, 9): "L"}; print(lit[(9, 9)])`
-        # printed `None` and `lit[(9, 9)] = "M"` grew the dict to two
-        # entries, where both halves of this file's own
-        # `gimple_tuple_dict_key_is_content_keyed` say one.
-        #
-        # So the container case goes through `_char_to_cstr` too, and
-        # the three setters below go through `_emit_call` when it did —
-        # which is the whole reason the container key is a placeholder
-        # rather than a rendered string: `_apply_kw_keys` is what swaps
-        # in the `_kw` twin, and the runtime has one for each of the
-        # three (`mojo_dict_set_{int,double,str}_kw`). The non-container
-        # arms keep their raw `_emit`, unchanged, because they have no
-        # placeholder to resolve.
-        if kt in ('MojoList *', 'MojoSet *', 'MojoDict *'):
-            kt, kv = gen._char_to_cstr(kt, kv, True, True)
-            _kw_key = True
-        else:
-            kv = gen._repr_value(kt, kv)
-            kt = 'char *'
+        kv = gen._repr_value(kt, kv)
+    _bytes_key = kt == 'MojoBytes *'
     if _bytes_key:
         if vv.startswith('_slit_'):
             vv = gen._new_val('MojoBytes *', f"{vv}")
-    # THE store, for every value kind — including a `char *`, whose setter arm
-    # used to live HERE and at two other sites and at neither of the other two
-    # consistently (see `emit_dict_int_value_store`'s own comment; the fourth
-    # site, an opaque-receiver `d[k] = v`, had none at all and stored a pointer
-    # with `kind == 0`). It picks the setter from the key's domain (`bytes_` or
-    # not), from `is_python_bool_expr` — the one bool predicate every consumer
-    # uses — and from the value's own type, so a bool VALUE lands in a slot of
-    # its own (`mojo_dict_set_bool`, `kind == 3`) and this dict's OTHER values
-    # are untouched. This arm used to emit the whole-dict marker
-    # `mojo_mark_dict_bool_values` instead, which the runtime deleted with that
-    # per-slot replacement, so `{'k': True}` compiled to a call to a function
-    # that does not exist — a hard build failure on an ordinary literal.
-    #
-    # `_kw_key` needs no spelling here: the shared store emits through
-    # `_emit_call`, which is what resolves the `_char_to_cstr` placeholder for
-    # a container key by swapping in the `_kw` twin. That is the reason IT
-    # uses `_emit_call` and not a raw emit, and it is why handing the `char *`
-    # case to it changed no generated text — the raw emit this arm used for a
-    # non-container key and `_emit_call` agree there.
-    gen._emit_dict_int_value_store(t, kt, kv, vt, vv, val_expr)
+    if vt in gimple_ctypes._FLOAT_TYPES:
+        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}double ({t}, {kv}, {vv});")
+    elif vt == 'char *':
+        if vv.startswith('_slit_'):
+            vv_tmp = gen._new_val('char *', f"{vv}")
+            vv = vv_tmp
+        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}str ({t}, {kv}, {vv});")
+    else:
+        # _lower_BoolLiteral returns ctype 'int' (not '_Bool'), same
+        # as any other int — vt alone can't distinguish a real bool
+        # literal from a genuine int, so check the AST node itself.
+        if isinstance(val_expr, gimple_ctypes.BoolLiteral):
+            gen._emit(f"  mojo_mark_dict_bool_values ({t});")
+        vv64 = gen._to_int64(vt, vv)
+        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}int ({t}, {kv}, {vv64});")
 
 
 def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:
@@ -5969,6 +4449,11 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     if _inner_ct:
         gen._nested_elem_types[t] = _inner_ct
     gen._emit(f"  {t} = mojo_list_new ();")
+    # Mark as a tuple (not a plain list) so generic repr() picks `(...)`
+    # over `[...]` — see mojo_mark_as_tuple's doc comment in
+    # runtime/fire_runtime.c; there is otherwise no runtime distinction
+    # between the two, since both lower to the same MojoList.
+    gen._emit(f"  mojo_mark_as_tuple ({t});")
     # Explicit loop, NOT `[(el, *gen.lower_expr(el)) for el in ...]`: the
     # 2-tuple return of `lower_expr` unpacked into a comprehension target
     # boxes `et`/`ev` on the self-hosted path, so `_tuple_slot_types[t]`
@@ -5978,25 +4463,14 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # types feeding a later `for a, b in <list of these tuples>`).
     lowered = []
     for _le in node.elements:
-        # The `*spread` OPERAND, not the UnaryOp wrapper — see
-        # `_lower_list_literal`'s identical line for why, and for what
-        # `(0, *a)` over a `str` used to lower to instead.
-        _lres = gen.lower_expr(_le.operand if _is_star_spread(_le) else _le)
+        _lres = gen.lower_expr(_le)
         lowered.append((_le, _as_str(_lres[0]), _lres[1]))
     scalar_sufs = {gimple_ctypes.TypeLattice.list_suffix(et) for _el, et, _ev in lowered}
     # Any mix of suffixes (not just str-vs-other) needs per-element dispatch —
     # e.g. (Float64, Span*) both look like non-str, but list_suffix maps
     # Float64 -> 'double' and Span* -> 'int' (its generic pointer bucket), so a
     # single list-wide suffix would append-cast the pointer as a double.
-    # Two DISTINCT slot ctypes also need per-slot recording even when both
-    # slots use the same accessor: `(cfg, model)` appends both as plain
-    # ints, so `scalar_sufs` is a single 'int' and `per_element` was False —
-    # yet each slot's real type (`Config *` vs `Model *`) is exactly what
-    # the caller's destructuring needs to read them back as. Keyed on the
-    # CTYPES, not the accessor, which is the same question asked properly.
-    _slot_cts = [_as_str(_slt[1]) for _slt in lowered
-                 if not _is_star_spread(_slt[0])]
-    per_element = len(scalar_sufs) > 1 or len(set(_slot_cts)) > 1
+    per_element = len(scalar_sufs) > 1
     # Record per-slot element types when elements are stored by their own
     # type — a later `for a, b in <list of these tuples>:` needs each
     # slot's real accessor (get_str vs get_int). The joined `elem` is
@@ -6004,7 +4478,8 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     if per_element:
         _slot_ts = []
         for _slt in lowered:
-            if _is_star_spread(_slt[0]):
+            _sl_el = _slt[0]
+            if isinstance(_sl_el, gimple_ctypes.UnaryOp) and _sl_el.op == '*':
                 continue
             _slot_ts.append(_as_str(_slt[1]))
         gen._tuple_slot_types[t] = _slot_ts
@@ -6019,9 +4494,9 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
         # callers unpack 3 ([el, et, ev]), reading garbage for et/ev (the
         # self-hosted compiled list-literal `[1, 2, 3]` emitted `_t3 = ;`
         # with raw-address type names). Mirrors _lower_list_literal's
-        # identical `_is_star_spread` handling.
-        if _is_star_spread(_el):
-            _emit_star_spread(gen, t, et, ev)
+        # identical _is_spread handling.
+        if isinstance(_el, gimple_ctypes.UnaryOp) and _el.op == '*':
+            gen._emit_call('void', '', 'mojo_list_extend', [('MojoList *', t), (et, ev)])
             continue
         use = gimple_ctypes.TypeLattice.list_suffix(et) if per_element else suf
         ev_cast = gen._cast_for_list(et, ev, use)
@@ -6030,82 +4505,6 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
             temp = gen._new_val('char *', f'{ev_cast}')
             ev_cast = temp
         gen._emit(f"  mojo_list_append_{use} ({t}, {ev_cast});")
-        # A callable held in a LIST or TUPLE LITERAL, so a later
-        # `lst[0](...)` / `tup[0](...)` can dispatch. This append loop is the
-        # single chokepoint every literal element passes through, and the
-        # container table is already keyed by the container's lowered name
-        # (`t`), so recording it is one call. A non-callable element is a
-        # no-op inside the helper, so this is not on the hot path. See
-        # `ginf.note_container_callable_ret` — the ONE helper for
-        # "a callable stored in a container, so a later `c[k](...)` can call
-        # it", dict or list or tuple. `gimple_call_through_subscript_callee`
-        # and `gimple_call_through_a_list_subscript_callee` pin it.
-        ginf.note_container_callable_ret(gen, t, ev, et, _el)
-        # A tuple whose elements are themselves LISTS (`([0, 7], [1, 8])`)
-        # needs the same two maps `_lower_list_literal` records for
-        # `[[0, 7], [1, 8]]` — `_nested_elem_types` (what the inner lists
-        # hold) and `_tuple_slot_types` (each inner slot's own ctype) — and
-        # recorded neither, the result was describable only as "a tuple of
-        # lists". `_list_repr_fn` then had no nested entry to pick
-        # `mojo_repr_list_intlists` with, the generic walker recursed through
-        # its None-sentinel heuristic, and the tuple printed as
-        # `((0, 7), (1, 8))` — the inner LISTS in tuple brackets. Same
-        # carry, same reason, on the tuple path; the two lowerings differ
-        # only in the `mojo_mark_as_tuple` at the end.
-        if et == 'MojoList *' and ev in gen._elem_types:
-            gen._nested_elem_types.setdefault(t, gen._elem_types[ev])
-            if ev in gen._tuple_slot_types:
-                gen._tuple_slot_types[t] = gen._tuple_slot_types[ev]
-    # The ELEMENT REPR, exactly as `_lower_list_literal` records it and for
-    # exactly the same reason: a tuple is the same MojoList with a marker, so a
-    # tuple of structs printed `(4347419344,)` where CPython prints `(R<a>,)`.
-    # A tuple that mixes slot ctypes is per_element, and then the joined `elem`
-    # is not the element type at all -- so the shim is looked up per slot and
-    # recorded only when every slot that HAS one agrees, which is the same
-    # unanimity rule the constructor evidence uses. A mixed tuple whose slots
-    # disagree records nothing and keeps the runtime's own per-slot reader.
-    _tshim = ''
-    for _tsl in range(len(lowered)):
-        _tct = _as_str(lowered[_tsl][1])
-        _tsh = gimple_exprtypes.struct_elem_repr_shim(gen, _tct)
-        if not _tsh:
-            continue
-        if _tshim and _tsh != _tshim:
-            _tshim = ''
-            break
-        _tshim = _tsh
-    if _tshim:
-        gen._emit_call('void', '', 'mojo_list_set_elem_repr',
-                       [('MojoList *', t),
-                        ('void *', ginf.elem_repr_operand(gen, _tshim))])
-    # Mark as a tuple AFTER the elements are in, not before. The mark is
-    # what makes this value a tuple rather than a list (see
-    # mojo_mark_as_tuple's doc comment in runtime/fire_runtime.c), and since
-    # 2026-09-29 every mutating MojoList entry point REFUSES a marked list,
-    # so marking first made every tuple literal raise out of its own
-    # construction. The mark is a statement about the FINISHED value, which
-    # is exactly what placing it last says.
-    gen._emit(f"  mojo_mark_as_tuple ({t});")
-    # Record the per-slot kinds on the VALUE (runtime's mojo_list_set_kinds)
-    # when they are not all the same, so every consumer that has to learn what
-    # a slot holds AT RUNTIME can: `_eq_elem_code` returns MOJO_EQ_UNKNOWN for
-    # such a value (the list-wide `_elem_types` entry is a lossy summary of a
-    # heterogeneous literal — for `('a', 1)` it says `char *`) and the
-    # comparison lowerings then ask the value itself.
-    #
-    # This was the missing half of the tuple-literal lowering and it cost a
-    # real answer: with no record, `('a', 1) < ('a', 2)` compared the INTEGER
-    # slot 1 against the string's ADDRESS, which is both a garbage verdict and
-    # a refusal that never fired (`_slot_cmp` saw two MOJO_EQ_STR codes and
-    # strcmp'd them). `_lower_list_literal` has recorded this since it was
-    # needed for the whole-result repr; a tuple is the same MojoList and
-    # needed it for the same reasons plus these.
-    _tkinds = _literal_slot_kinds(gen, lowered)
-    if _tkinds and len(set(_tkinds)) > 1:
-        gen._emit_call('void', '', 'mojo_list_set_kinds',
-                       [('MojoList *', t),
-                        ('const char *', gen._intern_string(_tkinds))])
-        gen._maybe_kinds_vals.add(t)
     return 'MojoList *', t
 
 
@@ -6115,23 +4514,6 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
         # Skip emitting comment to avoid GIMPLE global-passing issues
         gen._emit(f"  {t} = 0;")
         return 'int', t
-
-    # Normalize every `for` clause's target, not just the first's: a chained
-    # comprehension (`[x for a in xs for (b) in a.ys]`) has the same
-    # parenthesised-single-name shape in each of its own clauses.
-    #
-    # A PARENTHESISED SINGLE NAME — `[x for (x) in xs]` — is one binding,
-    # spelled `'(x)'` by the parser, while the 1-tuple `[x for (x,) in xs]` is
-    # `'(x,)'` and DOES unpack (fire_compiler.py's "Unpacking-target
-    # representation"). Peel the redundant parens here, ONCE, so the ~20
-    # `_compr_*_loop` sites below — each of which uses `gen0.target` as a C
-    # IDENTIFIER in a `_declare_var`, a `_cname` or an f-string — see a bare
-    # name for a one-target comprehension. Same reasoning, and the same single
-    # entry point, as `_gen_stmt_ForStmt`'s normalization. Idempotent, so a
-    # re-lowered comprehension lands the same way.
-    for _gen0 in node.generators:
-        if isinstance(_gen0.target, str) and not gimple_ctypes.for_target_is_tuple(_gen0.target):
-            _gen0.target = gimple_ctypes.for_target_single_name(_gen0.target)
 
     gen0 = node.generators[0]
 
@@ -6209,20 +4591,6 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
                 isinstance(gen0.iterable.func, gimple_ctypes.IdentExpr) and
                 gen0.iterable.func.name == 'range')
 
-    # A comprehension whose iterable is a RESUMABLE ITERATOR LOCAL walks the
-    # shared cursor rather than the container from index 0 — see
-    # `_compr_cursor_loop`, which is `_gen_for_iter_cursor`'s comprehension
-    # twin. Declined for a tuple target, so that shape keeps falling through
-    # to the container arms exactly as `_gen_for_iter_cursor`'s call site
-    # declines it for the `for`-statement form.
-    _cur = None
-    if (isinstance(gen0.iterable, gimple_ctypes.IdentExpr)
-            and not gimple_ctypes.for_target_is_tuple(_as_str(gen0.target))):
-        _cur = itc.cursor_for(gen, gen._cname(gen0.iterable.name))
-    if _cur is not None:
-        gen._compr_cursor_loop(node, gen0, res, res_type, _cur)
-        return res_type, res
-
     it_type = ''
     if not is_range:
         # Index the 2-tuple return, not `it_type, it_val = ...`: the
@@ -6264,25 +4632,6 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
                 gen._generator_var_api[it_val] = gen._generator_var_api[_old_it_val]
         it_type = _resolved_type
 
-    # Park the remaining `for` clauses for `_gen_compr_append` to consume from
-    # inside the clause-0 loop body. See its comment there for why the extra
-    # clauses used to vanish and why nesting is the right lowering.
-    # The parked remainder keeps THIS comprehension's own `kind`, so each kind
-    # merges into the outer one with its own runtime call: `mojo_list_extend`
-    # for list/generator (both list-backed -- 'generator' is initialised "as a
-    # list for simplicity", per `_gen_compr_append`), `mojo_set_update` for a
-    # set, `mojo_dict_update` for a dict. The latter two are per-element/per-pair
-    # merges, which is what the set and dict cases need and what a list extend
-    # cannot express -- they were dropped here rather than guessed at, and all
-    # four park the remainder so the per-kind arm in `_gen_compr_append` does
-    # its own merge.
-    if len(node.generators) > 1:
-        gen._compr_pending_inner = gimple_ctypes.Comprehension(
-            kind=node.kind, element=node.element, key=node.key,
-            generators=list(node.generators[1:]))
-    else:
-        gen._compr_pending_inner = None
-
     if is_range:
         gen._compr_range_loop(node, gen0, res, res_type)
     elif it_type == 'MojoList *':
@@ -6300,10 +4649,6 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     else:
         gen._emit(f"  /* TODO: comprehension over {it_type} */")
 
-    # Nothing below may inherit this: the loop body consumed it (above), and
-    # leaving it set would make the NEXT comprehension in the same function
-    # extend with a stale remainder.
-    gen._compr_pending_inner = None
     gen._note_fresh_result(res)
     return res_type, res
 

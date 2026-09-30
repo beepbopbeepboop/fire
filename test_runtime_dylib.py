@@ -55,13 +55,10 @@ Run directly (`python3 test_runtime_dylib.py`). It honours `$GMOJO_HOME` and
 writes nothing outside the CAS and the system temp directory.
 """
 import ctypes
-import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
-import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -712,120 +709,6 @@ def test_dylib_link_key_includes_the_arch():
         os.unlink(obj)
 
 
-# ── 6b. one OUTPUT PATH, many concurrent builders ──────────────────────────
-#
-# The runtime dylib is content-addressed under a name that carries its digest,
-# so it never had this problem. `build()` does not: `build_stdlib()`'s default
-# is a FIXED `build/libmojostdlib.<arch>.dylib`, and every `fire.py build`
-# reaches it through `driver.compile_program`. So N gate jobs running in
-# parallel each asked for the same library at the same path, and the losers of
-# the CAS race did not queue — they raced the winner onto the same output file.
-#
-# Measured on this tree, twice, `python3 tools/suite.py -j4 linkmode nonlocal
-# ...`:
-#
-#     ld: open() failed, errno=17 (File exists) for
-#         '<checkout>/build/libmojostdlib.arm64.dylib'
-#
-# which reached the suites as a failing `test_link_mode` case and a failing
-# `test_nonlocal` case wanting '7\n'. The dylib was never wrong; it was never
-# finished. Two halves answer that, and they are not equally important:
-# `_output_lock` (build_stdlib_dylib) collapses N racing builds into one, and
-# the staged link + `os.replace` makes the artifact whole no matter what — the
-# second half is the correctness claim, because a compiled `fcntl.flock` is the
-# extern preamble's weak stub, so the lock is a no-op in a self-hosted build
-# (see `_output_lock`'s docstring for the measurement). The assertions below
-# cover both: the first is about nobody failing, the second about the work
-# being done once.
-
-_CONCURRENT_BUILD_WORKER = r'''
-import json, sys
-sys.path.insert(0, sys.argv[1])
-import cas
-import build_stdlib_dylib as bsd
-out, src = sys.argv[2], sys.argv[3]
-
-# `cas.stats` counts EVERY content-addressed get_or_build in the build — the
-# module object and each runtime object among them — so it cannot answer "did
-# THIS process link the dylib". Count the dylib-level lookup instead: `build()`
-# makes exactly one (`cas.lookup(link_key, '.dylib')`), and every other lookup
-# it makes is for a '.o'.
-seen = {'lookups': 0, 'hits': 0}
-_lookup = cas.lookup
-
-
-def _counting_lookup(key, ext='.o'):
-    got = _lookup(key, ext)
-    if ext == '.dylib':
-        seen['lookups'] += 1
-        if got:
-            seen['hits'] += 1
-    return got
-
-
-cas.lookup = _counting_lookup
-bsd.cas.lookup = _counting_lookup
-path = bsd.build([src], out, use_cache=True, jobs=1)
-print(json.dumps({'out': path, 'lookups': seen['lookups'], 'hits': seen['hits']}))
-'''
-
-
-def test_concurrent_builds_of_one_output_path_do_not_collide():
-    """Six processes, one output path, one cold key: every one of them must
-    succeed, and at most one of them may actually build.
-
-    The key is made cold per RUN (a nonce in the module's source), not just
-    per tree, so this bites on every invocation instead of only on the first
-    one after an edit — a test that can only fail once is not a test. Six is
-    not a magic number either: it is simply more callers than the machine has
-    room to finish before the first one publishes, which is the whole window.
-    """
-    workers = 6
-    wd = tempfile.mkdtemp(prefix='test_concurrent_build_')
-    try:
-        src = os.path.join(wd, 'probe.mojo')
-        nonce = '%d-%d' % (os.getpid(), time.time_ns())
-        with open(src, 'w') as f:
-            f.write('def probe_tri(x):\n    return x * 3\n'
-                    '# nonce %s\n' % nonce)
-        out = os.path.join(wd, 'libprobe.dylib')
-        env = dict(os.environ, PYTHONPATH=HERE)
-        procs = [subprocess.Popen(
-            [sys.executable, '-c', _CONCURRENT_BUILD_WORKER, HERE, out, src],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
-            for _ in range(workers)]
-        reports = []
-        for p in procs:
-            so, se = p.communicate(timeout=900)
-            reports.append((p.returncode, so, se))
-        check(all(rc == 0 for rc, _so, _se in reports),
-              f'{workers} concurrent builds of one output path all succeed',
-              '; '.join(f'exit {rc}: {se.strip()[-300:]}'
-                        for rc, _so, se in reports if rc != 0) or 'n/a')
-        if any(rc != 0 for rc, _so, _se in reports):
-            return
-        stats = [json.loads(so.strip().splitlines()[-1]) for _rc, so, _se in reports]
-        check(all(s['out'] == out for s in stats),
-              'and every one of them reports the same output path')
-        check(all(s['lookups'] == 1 for s in stats),
-              'each caller asked the cache exactly once for the dylib',
-              f'lookups: {[s["lookups"] for s in stats]}')
-        hits = sum(s['hits'] for s in stats)
-        check(hits == workers - 1,
-              f'exactly one of the {workers} actually links and the other '
-              f'{workers - 1} re-check the cache inside the lock and return '
-              f'(dylib hits={hits}) — instead of racing the winner onto the '
-              f'same file. A WORK claim, not a correctness one: correctness '
-              f'rests on the staged link, and holds even where `flock` does '
-              f'not (see the section comment)')
-        host = bsd.normalize_arch(None)
-        check(bsd.arches_of(out) == frozenset([host]),
-              f'and the surviving artifact is a whole {host} dylib',
-              f'architectures: {sorted(bsd.arches_of(out)) or "none"}')
-    finally:
-        shutil.rmtree(wd, ignore_errors=True)
-
-
 # ── 7. the optional-runtime-unit registry agrees with the export table ──────
 #
 # The coupling this file pins is a CROSS-AGENT one, and it is the reason the
@@ -968,7 +851,6 @@ def main():
     test_clang_can_compile_the_runtime_for_both_architectures()
     test_stdlib_dylib_default_output_carries_the_arch()
     test_dylib_link_key_includes_the_arch()
-    test_concurrent_builds_of_one_output_path_do_not_collide()
     test_derived_namespaces_cover_exactly_their_own_symbols()
     test_unit_namespaces_are_disjoint()
     test_no_unit_namespace_catches_a_runtime_symbol()

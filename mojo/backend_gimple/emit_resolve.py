@@ -47,8 +47,6 @@ import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
-import mojo.backend_gimple.emit_infra as ginf
-import mojo.backend_gimple.emit_exprs as gex
 
 # Re-export shared helpers from mojo.middle.resolve_shared via explicit imports.
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
@@ -57,11 +55,10 @@ from mojo.middle.resolve_shared import *  # noqa: F401,F403
 from mojo.middle.resolve_shared import (
     _as_assignstmt_node, _as_multiassignstmt_node, _as_str, _as_vardecl_node, _calls_in_stmts, _closure_value_locals,
     _collect_calls_in_stmt, _collect_local_container_elems, _collect_return_elems, _decode_str_literal_text, _dtrace, _eval_const,
-    _infer_list_elem_type, _infer_local_var_types, _infer_return_elem_type, _scratch_dict_copy, _is_none_literal, _is_sys_stderr, _lbn_target_names,
-    _lbn_walk, _module_const_int, _operand_is_dict, _parse_fstring_parts, _prepass_callee_key, _quick_type, _record_closure_alias,
+    _infer_list_elem_type, _infer_local_var_types, _infer_return_elem_type, _is_none_literal, _is_sys_stderr, _lbn_target_names,
+    _lbn_walk, _module_const_int, _parse_fstring_parts, _prepass_callee_key, _quick_type, _record_closure_alias,
     _refine_generic_return_type, _sms_key, _str_literal_to_slit, _subst_idents, _type_expr_to_ann
 )
-from mojo.middle.calls_shared import user_dunder_repr_call
 # gimple_gen_coro is reached via `gimple_codegen.gimple_gen_coro` below,
 # not a separate import of its own here -- see gimple_codegen.py's own
 # module-level `import gimple_gen_coro` and its comment on why a
@@ -226,25 +223,6 @@ def _module_candidate_paths(gen, module_name: str) -> list:
                 break
             _anc = _parent
     search_dirs += ['.', '..', script_dir]
-    # A CPython source checkout's `Lib/`, when the IMPORTING FILE is inside one.
-    # Appended LAST on purpose: every directory above it is more specific — the
-    # project's own tree, the CWD, this compiler's installation — so a name both
-    # of those and CPython's `Lib` provide still resolves the way it did before,
-    # and the ONLY thing that changes is a name nothing else provides. That is
-    # the whole gap: `Lib` is a SIBLING of `Tools`, not an ancestor, so the
-    # bounded upward walk above can never reach it from a `Tools/<tool>/x.py`
-    # entry file and `import argparse` used to degrade to a receiver stub with
-    # the source tree sitting right there on disk. Detection itself (and its
-    # memo) lives in `imports.py` because this resolver's own `_find` needs the
-    # same answer — see “The compiler has no way to see CPython's `Lib/` from an entry file outside it”.
-    try:
-        import imports as _imp_cpy
-        _cpython_lib = _imp_cpy.cpython_lib_root(importer_dir) if importer_dir else None
-    except Exception as e:
-        _cpython_lib = None
-        gimple_ctypes._debug_note(f'CPython Lib/ detection failed for {importer_dir!r}', e)
-    if _cpython_lib:
-        search_dirs.append(_cpython_lib)
     mojo_paths = []
     _seen_dirs: list = []
     for d in search_dirs:
@@ -306,7 +284,7 @@ def _module_candidate_paths(gen, module_name: str) -> list:
         # name's LEADING component, also try the dotted path's
         # remaining suffix directly under that dir (treating the dir
         # as already representing that first package level). See
-        # COMPILE_FAIL_tkinter_filedialog.
+        # bugs/COMPILE_FAIL_tkinter_filedialog.md.
         if len(_dotted_parts) > 1:
             _suffix_parts = _dotted_parts[1:]
             _rel_suffix_flat = '/'.join(_suffix_parts)
@@ -381,77 +359,6 @@ def _register_closure_struct_inits(gen, stmts) -> None:
                     gen.func_param_types[_mangled] = _ctypes
 
 
-def publish_a3_generators(gen, meta) -> None:
-    """Publish `gen`'s own A3-lowered (stack-switch) free-function
-    generators into the whole-program `_generator_home_api` — the same
-    cross-module registry `_register_free_generator`
-    (mojo/backend_gimple/module_gen.py) publishes the C++20-coroutine-path
-    ones into.
-
-    Without it, `_cpp_resolve_generator_call_api`'s `<module>.<gen_fn>`
-    shape — the only way a generator body of one module can construct a
-    FOREIGN module's compiled generator handle — could resolve a
-    cpp-lowered generator and never an A3-lowered one, because
-    `mojo/middle/coro.py`'s `register` fills only the per-bare-name
-    `_generator_api`. Both backends deliberately expose the IDENTICAL
-    four-symbol ABI (`<base>_start` -> `MojoGenerator *`, `<base>_resume`
-    -> `_Bool`, `<base>_value`, `<base>_destroy`, with matching
-    `func_return_types`/`func_param_types` entries — coro.py's `register`
-    sets the same keys `_register_free_generator` does), so a handle from
-    either is drivable by one `next()` / for-loop lowering; only the
-    registry entry was missing.
-
-    Real: `c_common/tables.py`'s `read_table` doing
-    `lines = strutil._iter_significant_lines(infile)` then `next(lines)`.
-    `_iter_significant_lines` is A3-eligible while `read_table` is not
-    (kwonly params → "kwonly params (v0)"), so `read_table` compiles
-    through the cpp path and could not resolve the foreign handle,
-    refusing the whole module with `a call to unresolved callee
-    'next(...)'`. See bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
-
-    Must be called at the A3 registration site, not from gen_module: by the
-    time gen_module runs, `mojo/middle/coro.py`'s `lower()` has already
-    REPLACED each generator's FunctionDef with its injected
-    `__mgco_<name>_body`, so the original bare name is gone from
-    `_local_top_level_func_names` and there is nothing left to key on. The
-    `meta` list handed to `register` is the authoritative, per-module record
-    of exactly what this module lowered.
-
-    Qualifier: `module_qualifier(gen.module_name)`, NOT `_func_qualifier`.
-    The A3 backend mangles a free generator's symbols UNQUALIFIED
-    (`__mgco_<name>`, coro.py's own `base = f'__mgco_{fn.name}'`), so there
-    is no per-call-site qualifier to consult — this module's own sanitized
-    name IS the right half of the key, and it is exactly what a reader
-    computing `module_qualifier(imported_symbols[bound_module]['module'])`
-    produces for the same module (`strutil`, `._strutil`, `pkg.strutil` all
-    land on the same spelling). First writer wins, so a cpp-lowered
-    generator's own entry is never displaced."""
-    from mojo.middle.module_shared import module_qualifier
-    if not meta:
-        return
-    qual = module_qualifier(getattr(gen, 'module_name', None) or '')
-    if not qual:
-        return
-    for _m in meta:
-        # A method goes to `_generator_method_api` (keyed by struct), an
-        # async generator drives a different API (`last_yield_was_wd`), and
-        # a nested `@parameter async def` is keyed by its qualified base
-        # with no module-level binding at all — none of the three is a
-        # `<module>.<free generator>` a cpp body can look up.
-        if (_m.get('is_method') or _m.get('nested')
-                or _m.get('is_async') or _m.get('is_async_gen')):
-            continue
-        _name = _m.get('name')
-        if not _name:
-            continue
-        _api = (gen._generator_api or {}).get(_name)
-        if _api is None:
-            continue
-        _key = qual + '::' + _name
-        if _key not in gen._generator_home_api:
-            gen._generator_home_api[_key] = _api
-
-
 def _compile_imported_module(gen, module_name: str) -> tuple:
     """Find and compile an imported .mojo/.py module, extracting type
     information.
@@ -497,43 +404,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             emitted_structs_before = set(gen._emitted_structs)
             inline_defs_before = set(gen._global_inline_defs)
             emitted_allocs_before = set(gen._emitted_allocs)
-            # AND the module-toplevel registration list, which is shared by
-            # reference across every gen level (gimple_codegen.py declares it
-            # "(shared)") and which the ROOT reads at emission time to write
-            # one forward declaration per entry and one call per entry in
-            # `main`. A name registered by an attempt that then raised has no
-            # body anywhere: the exception destroyed the `imported_code` the
-            # body lived in. Left behind, it becomes a declaration with
-            # nothing behind it, and the link fails naming a module the
-            # reader has no reason to connect to the module that actually
-            # failed.
-            #
-            # Measured, on this tree: `mojo/backend_gimple/module_gen.py` has
-            # a local named `_lens` that is a set comprehension in
-            # `_register_free_generator` and a dict in `gen_module_impl`, and
-            # the compiled path froze the name as `MojoSet *`, so the dict
-            # assignment raised "cannot coerce MojoSet * to MojoDict *". That
-            # one module carries four GPU siblings (`device_select`,
-            # `emit_metal`, `metal_ops`, `offload`) in its own inline closure,
-            # so its failure silently deleted all four of their bodies while
-            # leaving all four registered:
-            #
-            #     Undefined symbols for architecture arm64:
-            #       "__mojo_backend_gimple_device_select_toplevel", referenced from: _mojo_main
-            #       "__mojo_backend_gimple_emit_metal_toplevel", ...
-            #       "__mojo_middle_metal_ops_toplevel", ...
-            #       "__mojo_middle_offload_toplevel", ...
-            #
-            # Four modules blamed for one module's bug, which is also how
-            # bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md read
-            # ("57 declarations, 0 bodies", "the blast radius is 57 modules;
-            # the visible symptom is 5") before its own counts came off an
-            # artifact that never finished generating.
-            #
-            # Truncate rather than clear: an OUTER module legitimately
-            # registered its own name before this attempt started, and that
-            # one is not this failed attempt's to retract.
-            sub_toplevels_before = len(gen._sub_toplevels)
             # Same rollback rationale for the builtin-as-value funcptr pair:
             # a module whose gen_module raises mid-compile (e.g. the
             # "cannot compile module: `Counter[...] = ...` subscript store"
@@ -555,55 +425,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             # reference (their referencing text was discarded with it).
             funcptr_needed_before = set(gen._funcptr_builtins_needed)
             funcptr_emitted_before = set(gen._emitted_funcptr_builtins)
-            # Every remaining per-TRANSLATION-UNIT "I already emitted this
-            # definition" registry, for the same reason and with the same
-            # consequence as the two above: the DEFINITION each of these
-            # marks is keyed to lands in the module's OWN `parts`, and this
-            # except handler throws those parts away whole. A mark that
-            # survives its own text leaves every LATER module believing the
-            # definition is already in the unit, so it emits nothing and the
-            # surviving reference sites die on an undeclared name — the
-            # *same* class of failure as `_funcptr_mojo_len` above, in the
-            # four other registries that carry a definition rather than a
-            # type:
-            #
-            #   `_str_pool_declared`        `static char * _slit_N;`
-            #   `_emitted_c_helpers`        `static int64_t _mojo_sizeof_X (void)`
-            #                               `static void * _mojo_fnaddr_f (void)`
-            #   `_regex_progs_defined`      `static const ARRAY[] = {...}`
-            #   `_emitted_list_marshalling` `_mg_pack_*`/`_mg_unpack_*`
-            #   `_emitted_singletons`       `static char * _mojo_type_name (...)`
-            #   `_emitted_unresolved_stub_syms` / `_auto_stubbed`  the
-            #                               `#ifndef`-guarded "unavailable in
-            #                               compiled mode" stub definitions
-            #
-            # Measured on Tools/c-analyzer/c_analyzer/__main__.py before this
-            # fix: 13 distinct `_slit_N` names and `_mojo_elem_repr_*` used
-            # with only their root-preamble definition, thousands of lines
-            # later, because c_parser/info.py, c_parser/parser/_func_body.py,
-            # c_parser/match.py and c_common/scriptutil.py each raise
-            # mid-compile and their marks outlived their text.
-            #
-            # Rolling a mark back can only ever ADD an emission, never
-            # remove one — and every one of these emissions is legal to
-            # repeat (`static char * x;` is a tentative definition, and the
-            # stubs are `#ifndef`-guarded), which is what makes the rollback
-            # unconditionally safe. The registries deliberately NOT listed
-            # here are the ones that hold KNOWLEDGE rather than an emission
-            # mark — `_str_pool` (name identity for a literal must stay
-            # stable across a retry, or the recompiled module would mint a
-            # second `_slit_N` for the same text), `_external_protos`,
-            # `struct_field_types`, `func_param_types`/`func_return_types`,
-            # `_module_globals` — and `_struct_allocs_needed`, whose actual
-            # emission is gated on `_emitted_allocs` (rolled back just above),
-            # so a stale entry there cannot lose a definition.
-            str_pool_declared_before = set(gen._str_pool_declared)
-            emitted_c_helpers_before = set(gen._emitted_c_helpers)
-            regex_progs_defined_before = set(gen._regex_progs_defined)
-            emitted_list_marshalling_before = set(gen._emitted_list_marshalling)
-            emitted_singletons_before = set(gen._emitted_singletons)
-            stub_syms_before = set(gen._emitted_unresolved_stub_syms)
-            auto_stubbed_before = set(gen._auto_stubbed)
             gen._compiling_file_paths.add(_ap_key)
             try:
                 with open(path, 'r') as f:
@@ -663,7 +484,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._emitted_structs = gen._emitted_structs
                 temp_gen._struct_allocs_needed = gen._struct_allocs_needed  # share: reflection dispatch scoping (see gen_module) needs every allocated struct visible, not just the root module's own
                 temp_gen._str_pool = gen._str_pool
-                temp_gen._str_pool_declared = gen._str_pool_declared  # share: one forward declaration per _slit_N in the TU, not one per module (see its own declaration)
                 temp_gen._regex_patterns = gen._regex_patterns  # share: finditer() lowering (see BACKLOG-CODEGEN.md §4f)
                 temp_gen._regex_progs = gen._regex_progs        # share: bubble compiled regex data up to root preamble
                 temp_gen._regex_progs_defined = gen._regex_progs_defined  # share: avoid duplicate emission across recursive paths
@@ -688,19 +508,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._c_kw_struct_renames = gen._c_kw_struct_renames  # share: C-keyword struct-name renames (auto/enum.auto) must agree across modules
                 temp_gen.struct_boxed_fields = gen.struct_boxed_fields
                 temp_gen.struct_bool_fields = gen.struct_bool_fields
-                temp_gen.struct_bool_methods = gen.struct_bool_methods
                 temp_gen._struct_name_owner = gen._struct_name_owner  # share: cross-module same-name collision guard
-                # The module-qualified struct IDENTITY that guard feeds: which
-                # C name each colliding StructDef is emitted under, and which
-                # module owns it. Shared for the same reason — a sibling
-                # module's temp_gen must classify the SAME StructDef node
-                # identically, or the two halves of one class would disagree
-                # about its own name. See GimpleGen._struct_cname_by_id.
-                temp_gen._struct_cname_by_id = gen._struct_cname_by_id
-                temp_gen._struct_cname_of_name = gen._struct_cname_of_name
-                temp_gen._struct_cname_by_home = gen._struct_cname_by_home
-                temp_gen._struct_qualified_cnames = gen._struct_qualified_cnames
-                temp_gen._struct_home_by_id = gen._struct_home_by_id
                 temp_gen._global_var_types = gen._global_var_types
                 temp_gen._global_c_decl_types = gen._global_c_decl_types
                 # share: definition-side free-function signature truth —
@@ -709,31 +517,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # mangled call-site suffix, so both halves of one mangled
                 # symbol always agree (log_match c52cbf-vs-7a6366 family).
                 temp_gen._home_def_param_types = gen._home_def_param_types
-                # share: the RETURN-type twin of the store just shared, for the
-                # same reason and read by the same `_func_csym` mirror — a
-                # call site's emitted symbol carries the module qualifier, so
-                # only the defining unit's own answer for that qualifier can
-                # type that call.
-                temp_gen._home_def_return_types = gen._home_def_return_types
-                # Once per TRANSLATION UNIT, not once per module: a
-                # single-TU closure carries ~160 modules and the GPU
-                # introspection definitions are program-wide. Shared by
-                # reference like the sets around it -- a bool would copy
-                # its value and every module would emit its own copy.
-                temp_gen._mg_introspection_emitted = (
-                    gen._mg_introspection_emitted)
-                # By reference, not by value: these are per-TRANSLATION-UNIT
-                # sets, and assigning a set copies it, which silently restores
-                # the per-module scope that produced duplicate definitions.
                 temp_gen._emitted_ptr_helpers = gen._emitted_ptr_helpers
-                temp_gen._emitted_list_marshalling = (
-                    gen._emitted_list_marshalling)
-                # share by reference: the self-shadowing-temp counter must be
-                # monotonic across the WHOLE closure, or two modules mint the
-                # same `_shadowN_<name>` and -- since every module's decls land
-                # in one translation unit -- the second inherits the first's
-                # declared type. A bare int would not survive this copy.
-                temp_gen._shadow_seq_box = gen._shadow_seq_box
                 # share: a builtin-as-bare-value static (`_funcptr_mojo_make_dict`
                 # etc.) must be declared at most once across the WHOLE transitive
                 # closure, not once per submodule's own throwaway GimpleGen — see
@@ -744,17 +528,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._global_inline_defs = gen._global_inline_defs
                 temp_gen._emitted_allocs = gen._emitted_allocs
                 temp_gen._emitted_singletons = gen._emitted_singletons
-                # share by reference: a `sizeof`/`fnaddr` accessor is a
-                # file-scope `static` and every module's parts land in ONE
-                # translation unit, so a second module needing the same one is
-                # a gcc "redefinition of". Without this each temp_gen started
-                # with an empty dict AND an empty set, so `_c_helper_def`
-                # returned a second definition of a helper the root gen had
-                # already emitted. `_c_helpers_needed`'s own docstring says
-                # why handing back `''` still leaves the definition ahead of
-                # the caller.
-                temp_gen._c_helpers_needed = gen._c_helpers_needed
-                temp_gen._emitted_c_helpers = gen._emitted_c_helpers
                 temp_gen._module_stmts = gen._module_stmts  # share: track all transitive stmts
                 # share: incrementally-maintained flat mirror of
                 # _module_stmts' union (see PERF_nested_module_compile_
@@ -916,7 +689,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # `_link_needs_cxx_box`'s own declaration for the fuller
                 # story, and this method's own cpp-unit-compile call
                 # site below for the concrete case that surfaced this —
-                # “COMPILE_FAIL: Tools/cases_generator/parser.py”).
+                # bugs/COMPILE_FAIL_Tools_cases_generator_parser.md).
                 # `_link_dylibs` shared for the identical reason (a
                 # nested import's own further imports recording a
                 # dylib). Harmless, unread dead data for a do_imports=
@@ -980,7 +753,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(stmts)
                 if _ss_meta:
                     gimple_codegen.gimple_gen_coro.register(temp_gen, _ss_meta)
-                    publish_a3_generators(temp_gen, _ss_meta)
 
                 code = temp_gen.gen_module(stmts)
 
@@ -1098,23 +870,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                     gen._funcptr_builtins_needed.discard(_n)
                 for _e in list(gen._emitted_funcptr_builtins - funcptr_emitted_before):
                     gen._emitted_funcptr_builtins.discard(_e)
-                # The other per-TU "already emitted" registries — see the
-                # snapshot block above for why each of these marks is tied to
-                # text this handler is about to discard.
-                for _d in list(gen._str_pool_declared - str_pool_declared_before):
-                    gen._str_pool_declared.discard(_d)
-                for _h in list(gen._emitted_c_helpers - emitted_c_helpers_before):
-                    gen._emitted_c_helpers.discard(_h)
-                for _p in list(gen._regex_progs_defined - regex_progs_defined_before):
-                    gen._regex_progs_defined.discard(_p)
-                for _m in list(gen._emitted_list_marshalling - emitted_list_marshalling_before):
-                    gen._emitted_list_marshalling.discard(_m)
-                for _s in list(gen._emitted_singletons - emitted_singletons_before):
-                    gen._emitted_singletons.discard(_s)
-                for _y in list(gen._emitted_unresolved_stub_syms - stub_syms_before):
-                    gen._emitted_unresolved_stub_syms.discard(_y)
-                for _b in list(gen._auto_stubbed - auto_stubbed_before):
-                    gen._auto_stubbed.discard(_b)
                 # doc/OWNERSHIP_MODEL.md Phase 3's per-function state
                 # (gimple_gen_infra.py's begin_function/_owned_free_
                 # candidates) is NOT tied to modules_before/etc like the
@@ -1148,25 +903,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
 
     # Module not found (e.g. stdlib module like sys, os)
     return (None, [])
-
-
-def _source_defines_struct(name: str, text: str) -> bool:
-    """Does `text` (a module's source) DEFINE a struct/class called `name`?
-
-    `class X:` and `struct X:` are the same node to this parser —
-    `fire_compiler._parse_struct` accepts `class X:` unconditionally and
-    `_parse_statement` routes it straight there — so both spellings are
-    matched, and both require a `(`-bearing base-class list or a `:` body
-    so that a mere mention (`x = Box`, `def f(b: Box)`) is not mistaken
-    for the definition.
-
-    ONE definition, two callers: `_classify_unresolved_export` below (the
-    `from M import X` spelling) and `_inline_bare_import_struct` (the
-    `import M` + `M.X` spelling). They must agree, exactly as the two
-    duplicated copies of the classifier this function replaced had to be
-    collapsed for the same reason — see that function's own docstring."""
-    _nre = gimple_ctypes.re.escape(name)
-    return bool(gimple_ctypes.re.search(rf'\b(?:struct|class)\s+{_nre}\s*(\(|:)', text))
 
 
 def _classify_unresolved_export(gen, sym: str, name: str, inline_module: str,
@@ -1216,139 +952,15 @@ def _classify_unresolved_export(gen, sym: str, name: str, inline_module: str,
         return True
     # A struct DEFINITION (not a generic one): inline the whole module, which
     # brings the typedef, its `__init__`, its methods and its class
-    # attributes with it. `_source_defines_struct` is shared with the bare
-    # `import M` + `M.X` spelling's caller — see its own docstring.
-    if _source_defines_struct(name, text):
+    # attributes with it. `class` and `struct` are the same node to this
+    # parser — see this function's docstring.
+    if gimple_ctypes.re.search(rf'\b(?:struct|class)\s+{_nre}\s*(\(|:)', text):
         gen._link_inline_modules.add(inline_module)
         return True
     if gimple_ctypes.re.search(rf'\b(?:fn|def)\s+{_nre}\s*\(', text):
         gen._link_inline_modules.add(inline_module)
         return True
     return False
-
-
-def _bare_import_bindings(stmt) -> list:
-    """Flat `[module, local_name, module, local_name, ...]` for every name a
-    bare `import` statement binds — `import M`, `import M as A`,
-    `import a.b` (which binds `a`) and each `extra` clause of the same
-    shape.
-
-    The local-name rule is `gen_module_impl`'s own ImportStmt scan's, copied
-    deliberately: the marker this is used to look up has to be the name the
-    compiler actually BOUND, and a second, subtly different spelling rule
-    would silently never match (the same reason that scan reads `s.module` /
-    `s.alias` directly instead of going through a helper).
-
-    Flat list rather than a list of 2-tuples, and consumed by index: a
-    freshly-built tuple that is then subscripted is a self-host trap
-    documented at length in `mojo/middle/module_shared.py`
-    (`_collect_import_modules_rec`)."""
-    out = []
-    _mod = _as_str(stmt.module)
-    _alias = _as_str(stmt.alias)
-    out.append(_mod)
-    out.append(_alias if _alias else _mod)
-    for _ex in (getattr(stmt, 'extra', None) or []):
-        _exm = _as_str(_ex[0])
-        _exa = _as_str(_ex[1])
-        out.append(_exm)
-        out.append(_exa if _exa else _exm)
-    return out
-
-
-def _module_marker_attribute_reads(stmts) -> dict:
-    """`{identifier: [attribute, ...]}` for every `ident.attr` anywhere in
-    this module — ONE AST walk for the whole module, so a module with N bare
-    imports costs one walk and not N (the walk is the expensive half of
-    `_inline_bare_import_struct`; see
-    bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md)."""
-    out: dict = {}
-    for _n in gimple_exprtypes._walk_ast(stmts):
-        if not isinstance(_n, gimple_ctypes.MemberExpr):
-            continue
-        _obj = _n.obj
-        if not isinstance(_obj, gimple_ctypes.IdentExpr):
-            continue
-        _lst = out.setdefault(_as_str(_obj.name), [])
-        _lst.append(_as_str(_n.member))
-    return out
-
-
-def _inline_bare_import_struct(gen, stmt, marker_reads) -> None:
-    """`import M` + a use of `M.<Class>` — inline M, the way the
-    `from M import <Class>` spelling already does.
-
-    `_register_link_imports` handled ONLY `FromImportStmt`, so a module
-    reached through its own module object was never a candidate for
-    `_link_inline_modules` and never appeared in this translation unit at
-    all. The struct then had no field table here, `_lower_method_call`'s
-    qualified-constructor check (emit_methods.py) had nothing to resolve
-    against, and `M.Class(...)` fell to the generic scalar-receiver stub —
-    `_t = x;  /* int64_t.Parameter() stubbed */`, the module HANDLE echoed
-    back as the constructed object. Two measured consequences on the real
-    `fire.py build` link-mode path, both from programs CPython runs cleanly:
-
-      * `import insp` + `def show(p): return p.label()` +
-        `show(insp.Parameter('v', 7))` printed `0`, exit 0 — a silent wrong
-        value, and the reason the last remaining row of
-        CODEGEN_method_call_on_struct_param_mistyped was still
-        red (the identical program spelled `from insp import Parameter`
-        printed `v` in the SAME build; that doc is deleted as of this fix —
-        see the 2026-09-30 section of bugs/hard/README.md);
-      * `x = insp.Parameter('v', 7); print(x.v)` raised
-        `AttributeError: v`, exit 1, on the module handle.
-
-    The member CLASS no longer matters, because the classifier is the shared
-    one. This used to ask only `_source_defines_struct`, deliberately scoped
-    to a struct "because a FUNCTION reached through a bare marker is a
-    separately tracked bug with its own filed doc" — that doc is
-    the bare-`import` module-qualified-call doc, which is closed by this
-    change, so the exclusion has nothing left to exclude.
-    `_classify_unresolved_export` is the same classifier the `from M import X`
-    spelling uses, it already answers for a plain top-level FUNCTION (inline
-    the module) as well as a struct, and the docstring of the two duplicated
-    copies it replaced is the argument for using it here too: a
-    source-text classifier that is not exhaustive about SPELLING has to be
-    the same classifier everywhere. Without inlining, the member's own
-    definition is not in this translation unit and not behind any dylib on the
-    link line, so the call site the sibling-module branch resolves to a
-    correctly QUALIFIED, overload-suffixed symbol that nothing defines:
-    `ld: symbol(s) not found for architecture arm64: _deep_deep_fn_9f63a2`.
-
-    Still scoped to a LOCAL PROJECT SIBLING, deliberately: a stdlib module
-    has a dylib (or module_loader's source-level export table) behind it, and
-    inlining it here would emit a second definition of symbols the link
-    already binds to that dylib.
-
-    Records into `gen._link_inline_modules` (or the generic/overload tables);
-    returns nothing."""
-    _pairs = _bare_import_bindings(stmt)
-    for _i in range(0, len(_pairs), 2):
-        _mod = _pairs[_i]
-        _local = _pairs[_i + 1]
-        if _local == _mod and '.' in _mod:
-            _local = _mod[:_mod.index('.')]
-        _members = marker_reads.get(_local)
-        if not _members:
-            continue
-        # Existence-only resolution FIRST: `_parsed_import` below parses and
-        # rewrites the module's AST, and a bare `import os` must not pay for
-        # that just to be turned away by the stdlib check on the next line.
-        _path = _submodule_source_path(gen, _mod)
-        if not _path:
-            continue
-        import module_loader as _mlmod_bis
-        if (_path.startswith(_mlmod_bis.STDLIB_PATH)
-                or _path.startswith(_mlmod_bis.TEST_PATH)):
-            continue
-        _res = gen._parsed_import(_mod)
-        if not _res:
-            continue
-        _text = _as_str(_res[1])
-        if not _text:
-            continue
-        for _m in _members:
-            _classify_unresolved_export(gen, _m, _m, _mod, _path, _text)
 
 
 def _register_link_imports(gen, stmts) -> list:
@@ -1422,60 +1034,9 @@ def _register_link_imports(gen, stmts) -> list:
             gimple_ctypes._debug_note(f'load_module({module!r}) failed; treating module as empty', e)
             return {}, False, _sib_path
 
-    # ONE walk of this module's AST for the `ident.attr` reads the bare-import
-    # branch below needs, computed here rather than inside that branch so a
-    # module with several bare imports pays for one walk. Module-level
-    # function call, not a closure over `stmts`: the self-hosted path treats
-    # a nested function's capture of a mutable local unreliably (see
-    # `mojo/middle/module_shared.py::_collect_import_modules`'s docstring).
-    _marker_reads = _module_marker_attribute_reads(stmts)
-
     def scan(stmt_list):
         for stmt in stmt_list:
-            if isinstance(stmt, gimple_ctypes.ImportStmt):
-                # `import M` needs TWO things registered here, and they are
-                # the only two arms of this ladder that ever matched a bare
-                # import — see the unreachable `elif isinstance(stmt,
-                # ImportStmt)` further down, whose whole body used to live
-                # there and which this arm made dead code (two branches
-                # landing in the same `if`/`elif` chain from two different
-                # merges; the earlier one is the arm that runs).
-                #
-                # 1. `import M` + `M.Class` — the OTHER spelling of the
-                #    FromImportStmt branch below, which was the only one
-                #    this scan considered. See `_inline_bare_import_struct`.
-                _inline_bare_import_struct(gen, stmt, _marker_reads)
-                # 2. A plain `import a.b` binds `a` and makes the SUBMODULE
-                #    `a.b` reachable as an attribute, so `a.b.f(...)` is a
-                #    real cross-module call whose symbol link mode has to be
-                #    able to provide. Registering the submodule for inlining
-                #    is what stops that call site binding the extern
-                #    preamble's `weak` "unavailable in compiled mode" stub —
-                #    printing `tri: unavailable in compiled mode` then `0`,
-                #    exit 0, with the diagnostic on the program's own stdout
-                #    (bugs/CODEGEN_import_dotted_name_two_hop_attribute_
-                #    call_exits_1.md's link-mode half; `test_gimple.py`'s
-                #    `dotted_import_two_hop_attribute_call` is its
-                #    regression, both pipelines, against CPython).
-                #
-                #    Only the DOTTED form, and only when nothing else can
-                #    provide the module: a real dylib/reflection entry keeps
-                #    its own path, and `import a` (no dot) names a module the
-                #    normal machinery already handles. `import a.b as q` is
-                #    left alone — the alias names the submodule directly,
-                #    which is the single-hop spelling `_register_sym`
-                #    already resolves.
-                for _im_pair in ([(stmt.module, stmt.alias)]
-                                 + list(getattr(stmt, 'extra', None) or [])):
-                    _im_m = gimple_ctypes._as_str(_im_pair[0])
-                    if '.' not in _im_m or gimple_ctypes._as_str(_im_pair[1]):
-                        continue
-                    _exp2, _refl2, _src2 = _exports(_im_m)
-                    if _exp2:
-                        continue
-                    if _src2 and gen._submodule_source_path(_im_m):
-                        gen._link_inline_modules.add(_im_m)
-            elif isinstance(stmt, gimple_ctypes.FromImportStmt):
+            if isinstance(stmt, gimple_ctypes.FromImportStmt):
                 exports, from_reflection, source = _exports(stmt.module)
                 for _fip11 in (getattr(stmt, 'name_alias_strs', None) or []):
                     name = gimple_ctypes._fi_name(_fip11)
@@ -1552,34 +1113,6 @@ def _register_link_imports(gen, stmts) -> list:
                         if gen._from_import_name_is_submodule(stmt.module, name):
                             gen._link_inline_modules.add(
                                 gimple_ctypes._join_import_member(stmt.module, name))
-                            continue
-                        # A module that only RE-EXPORTS `name` (a package
-                        # `__init__.py` doing `from .sub import tri`) is the
-                        # same dead end for a different reason: there is no
-                        # `def` in its source for the classification below to
-                        # find, and no submodule file of that name, so
-                        # nothing at all was registered — while the call
-                        # site's `extern` (emitted from the call-site
-                        # registration in module_shared.py's
-                        # `_register_sym`, which DOES follow the hop) names
-                        # the DEFINING module's symbol. The program then
-                        # failed to link with
-                        # `Undefined symbols: "_sub_tri_9f63a2"`, where
-                        # before the call-site half was fixed it had bound
-                        # the extern preamble's `weak` "unavailable in
-                        # compiled mode" stub and printed a wrong 0.
-                        #
-                        # Inline the DEFINING module, which is the same
-                        # mechanism the submodule branch just above uses and
-                        # needs no reflection bookkeeping: the inline-compile
-                        # loop emits the real definition into this
-                        # translation unit. The ref is the spelling that
-                        # statement used, which is exactly what that loop
-                        # keys its own compilation by.
-                        _reex_home = gen._find_symbol_home_module(
-                            stmt.module, name, 'fn')
-                        if _reex_home and _reex_home != stmt.module:
-                            gen._link_inline_modules.add(_reex_home)
                             continue
                         # Not a concrete export — classify `name` against the
                         # module's own SOURCE TEXT and record how to make it
@@ -1901,97 +1434,10 @@ def _new_val(gen, ctype: str, rhs: str) -> str:
     return t
 
 
-def _inc_val(gen, base: str) -> str:
-    """`base + 1` as its own int64_t temp — the ONE way to spell a
-    one-step advance in generated GIMPLE.
-
-    A C-style cast is not a legal gimple OPERAND, so the obvious
-    `f'{base} + (int64_t)1'` is a hard gimplification error
-    ("expected expression before '(' token") that takes out the whole
-    translation unit. `1LL` is the tree's existing width-correct int64_t
-    literal idiom (see `_gen_for_range`'s own `step_v`), needs no cast,
-    and IS a legal operand, so the whole expression is valid GIMPLE.
-
-    Every counter/pos/cursor advance in the codegen goes through here
-    rather than each spelling the cast itself: the five sites this
-    replaced (the list-iterator cursor advance in `next(it)` and in
-    `for x in it:`, the regex finditer/findall scan advance, and the
-    enumerate-counter advance) were all still carrying the cast, and
-    Tools/cases_generator/analyzer.py failed to compile on it — the
-    module-level refusal is `cannot compile module` for the whole file
-    because a GIMPLE parse error is not recoverable per-function."""
-    return gen._new_val('int64_t', f'{base} + 1LL')
-
-
-def _call_expr(gen, ret_type: str, fname: str, arg_pairs: list, arg_nodes: list = None) -> str:
-    """Emit a call and return the result temp.
-
-    `arg_nodes` is forwarded to `_emit_call` (see its docstring for what it
-    is and why it is optional)."""
+def _call_expr(gen, ret_type: str, fname: str, arg_pairs: list) -> str:
+    """Emit a call and return the result temp."""
     t = gen._new_temp(ret_type)
-    gen._emit_call(ret_type, t, fname, arg_pairs, arg_nodes)
-    return t
-
-
-def _bool_not(gen, ctype: str, val: str) -> str:
-    """`_Bool` negation of `val` as its own temp, in valid GIMPLE.
-
-    GIMPLE has no `!` operator: a `__GIMPLE`-tagged body's statement must
-    already BE GIMPLE, and the raw parser rejects `_b = !x` outright
-    ("'!' not valid in GIMPLE before '!' token"). The negation is a
-    COMPARISON against zero, and a raw-GIMPLE comparison additionally
-    requires both operands at the SAME C type ("mismatching comparison
-    operand types"), so the zero is materialized at the value's own type and
-    a pointer is widened through `int64_t` first — the same two-step every
-    other pointer/scalar comparison in the tree already uses.
-
-    This is the ONE place that knows that spelling, for the same reason
-    `_inc_val` is the one place that knows the `+ 1LL` idiom: two callers
-    had each hand-written it and each was a `!` (emit_calls.py's
-    `isinstance(x, list)`-and-not-a-tuple test and emit_exprs.py's
-    `x.__class__ is not T`), so the shape could not drift from what raw
-    GIMPLE accepts.
-    """
-    if ctype.endswith(' *') or ctype == 'void *':
-        iv = gen._new_val('int64_t', f'(int64_t){val}')
-        zt = 'int64_t'
-    elif ctype == '_Bool':
-        iv = gen._new_val('int', f'(int){val}')
-        zt = 'int'
-    elif ctype in ('int', 'int64_t'):
-        iv = val
-        zt = ctype
-    else:
-        iv = gen._new_val('int64_t', f'(int64_t){val}')
-        zt = 'int64_t'
-    # `0LL` for the 64-bit zero (a C-style cast is not a legal gimple
-    # OPERAND — see _inc_val), `(int)0` for the int one, which does need the
-    # cast because it is not a literal this emitter writes bare.
-    zero = (gen._new_val('int64_t', '0LL') if zt == 'int64_t'
-            else gen._new_val('int', '(int)0'))
-    t = gen._new_temp('_Bool')
-    gen._emit(f'  {t} = {iv} == {zero};')
-    return t
-
-
-def _bool_and(gen, left: str, right: str) -> str:
-    """`_Bool` conjunction of two `_Bool` temps as its own temp.
-
-    `&&` is not a GIMPLE operator either ("'&&' not valid in GIMPLE"), and
-    neither is a parenthesized sub-expression on the right of `=`, which is
-    what the shape `_b = (_l != 0) && (_r != 0)` reduces to once the parser
-    gives up on the `&&` ("expected expression before '(' token"). Each half
-    must therefore already be a `_Bool` TEMP (built with `_bool_not` or a
-    plain `_new_val('_Bool', 'x != 0')`), and the two combine with `&`.
-
-    Bitwise `&` on two `_Bool`s is `&&` here: raw GIMPLE requires both
-    operands of a bitwise op to be the same integer type, and these are.
-    The short-circuit `&&` would give is only worth having when an operand
-    has a side effect, which is why every caller of this passes two temps
-    that were already computed.
-    """
-    t = gen._new_temp('_Bool')
-    gen._emit(f'  {t} = {left} & {right};')
+    gen._emit_call(ret_type, t, fname, arg_pairs)
     return t
 
 
@@ -2326,28 +1772,10 @@ def _split_expr_format(src: str) -> str:
 
 
 
-def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
+def _repr_value(gen, rat: str, rav: str) -> str:
     """Convert an already-lowered (type, value) pair into a `char *` per
-    Python `repr()` semantics. Shared by the `repr()` builtin, `%r` and an
-    f-string's `!r` conversion.
-
-    `enode` is the operand's AST node when the caller has it, and is the ONLY
-    way a bool is distinguishable from the integer 1/0 it shares a slot with:
-    a bool's C type here is a plain `int` (see `is_python_bool_expr`)."""
-    # `_Bool` FIRST, before every other arm: Python's repr of a bool is
-    # `True`/`False`, and with no arm for it a `_Bool` fell all the way to
-    # the int64_t one and printed `1`/`0` — the right value, the wrong type.
-    # `print()` was already right (`_gen_print`'s `_Bool` arm) and so was
-    # `%s` and `f'{x}'`, which is exactly what let this survive: the obvious
-    # smoke test passes, and the spellings that ship (`repr(x)`, `'%r' % (x,)`,
-    # `f'{x!r}'`, a dict's repr) are the ones that are wrong.
-    # `mojo_repr_bool` takes an `int`, not a `_Bool`, on purpose — this header
-    # is included from the C++20 backend's translation units, where `_Bool`
-    # does not exist — so the cast is the same one the print path makes.
-    if rat == '_Bool' or (enode is not None and rat in ('int', 'int64_t')
-                          and gimple_exprtypes.is_python_bool_expr(gen, enode)):
-        return gen._call_expr('char *', 'mojo_repr_bool',
-                              [('int', gen._new_val('int', f'(int){rav}'))])
+    Python `repr()` semantics. Shared by the `repr()` builtin and `%r`
+    string-formatting."""
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':
@@ -2373,20 +1801,25 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
         # which its `repr(p)` spelling reached through an import but which
         # is NOT an import bug.
         #
-        # The lookup itself is `user_dunder_repr_call` in
-        # mojo/middle/calls_shared.py, SHARED with `_stringify_value` (the
-        # `str()` / `%s` / f-string route) so the two spellings cannot
-        # disagree about which dunder a struct answers. `repr()` passes
-        # `('__repr__',)` only: CPython's own fallback here is `__str__`, and
-        # taking it would silently change the repr of every struct in the
-        # tree that defines `__str__` without `__repr__` — a wide behaviour
-        # change, recorded rather than smuggled in here.
+        # Deliberately CONSERVATIVE: each condition below is one "we know
+        # this is right", and anything unproven falls through to the
+        # pre-existing lowering, so this can only ever replace a wrong
+        # answer with a right one, never introduce a new shape.
         _rsn = rat[:-2].strip() if rat.endswith(' *') else ''
-        if _rsn:
-            _rcall = user_dunder_repr_call(gen, _rsn, rat, rav_local,
-                                           ('__repr__',))
-            if _rcall is not None:
-                return _rcall
+        if _rsn and '__repr__' in (gen._struct_method_names.get(_rsn) or ()):
+            _rcs = gen._struct_method_csym(_rsn, '__repr__', '')
+            if gen.func_return_types.get(_rcs) == 'char *':
+                _rcall = gen._call_expr('char *', _rcs, [(rat, rav_local)])
+                # Same null semantics the generated field-dump has: a NULL
+                # object reprs as "None" rather than crashing. Interned
+                # through `_intern_string` because a bare `"None"` literal is
+                # not a GIMPLE r-value (see its own docstring), and bound to
+                # a local first rather than nested in the f-string so the
+                # expression uses no quote nesting at all — this file is
+                # compiled by the compiler it implements.
+                _none_slit = gen._intern_string('None')
+                return gen._new_val(
+                    'char *', f'({rav_local} ? {_rcall} : {_none_slit})')
         # Dispatch through the per-struct field-by-field reprs generated
         # in gen_module (see reflect_structs) when the runtime type tag
         # is one this program actually allocates — falls back to the
@@ -2437,50 +1870,22 @@ def _intern_string(gen, escaped: str) -> str:
 
 
 
-def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str,
-                         enode=None, width_ints: list | None = None) -> str:
+def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str) -> str:
     """Render one %-spec's operand to `char *`, applying any width or
-    precision in `full_spec` via a real C sprintf (see _sprintf_n)
-    rather than reimplementing printf-style padding by hand.
-
-    `enode` is the operand's AST node when the caller has it. It carries the
-    only thing that distinguishes a bool from an int 0/1 — a bool's lowered C
-    type is a plain `int` — so `'%r' % (b,)` has no other way to print True
-    (see `is_python_bool_expr` and `_repr_value`).
-
-    `width_ints` are the already-lowered C `int` values a `*`-width and/or a
-    `.*`-precision consumed, in that order; empty for every spec without one.
-    They go in FRONT of the value, because that is where C reads them too —
-    `'%0*X' % (4, 255)` is `sprintf (buf, "%0*llX", 4, 255LL)`. The spec text
-    itself needs no rewriting for this: C spells a dynamic width with the same
-    `*`, and the 64-bit length modifier the integer conversions add lands
-    AFTER the width, which is exactly where C's grammar wants it
-    (`%[flags][width][.precision][length]conv`)."""
-    if width_ints is None:
-        width_ints = []
+    precision in `full_spec` via a real C sprintf (see _sprintf_one)
+    rather than reimplementing printf-style padding by hand."""
     if conv == 's':
-        sval = gen._stringify_value(et, ev, enode)
+        sval = gen._stringify_value(et, ev)
         if full_spec == '%s':
             return sval
-        args = list(width_ints)
-        args.append(sval)
-        return gen._sprintf_n(full_spec[:-1] + 's', args)
+        return gen._sprintf_one(full_spec[:-1] + 's', sval)
     if conv == 'r':
-        rval = gen._repr_value(et, ev, enode)
+        rval = gen._repr_value(et, ev)
         if full_spec == '%r':
             return rval
-        args = list(width_ints)
-        args.append(rval)
-        return gen._sprintf_n(full_spec[:-1] + 's', args)
+        return gen._sprintf_one(full_spec[:-1] + 's', rval)
     if conv == 'c':
         nv = gen._to_int64(et, ev)
-        if width_ints:
-            # `%*c`: C takes the code as an `int`, so route it through sprintf
-            # rather than the `mojo_char_to_str` path below (which has no width
-            # to apply and takes a `char`).
-            args = list(width_ints)
-            args.append(nv)
-            return gen._sprintf_n(full_spec[:-1] + 'c', args)
         cv = gen._new_val('char', f'(char){nv}')
         return gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
     if conv in 'diouxX':
@@ -2491,14 +1896,10 @@ def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str,
         # undefined behavior (only 32 bits of the varargs int64_t are
         # consumed on most ABIs). "%5d" -> "%5lld", etc.
         c_spec = full_spec[:-1] + 'll' + conv
-        args = list(width_ints)
-        args.append(nv)
-        return gen._sprintf_n(c_spec, args)
+        return gen._sprintf_one(c_spec, nv)
     if conv in 'fFeEgG':
         dv = ev if et == 'double' else gen._new_val('double', f'(double){ev}')
-        args = list(width_ints)
-        args.append(dv)
-        return gen._sprintf_n(full_spec, args)
+        return gen._sprintf_one(full_spec, dv)
     # Unknown/unsupported conversion (e.g. '%a') -- degrade to str().
     return gen._stringify_value(et, ev)
 
@@ -2604,22 +2005,6 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
     source = gen._imported_generics.get(g)
     if not source:
         return None
-    # An instantiation the in-TU pre-pass ALREADY DEFINED in this translation
-    # unit is lowered as an ordinary local function call, so this must decline
-    # BEFORE it lowers a single argument (see the note below on why returning
-    # None after lowering would double-emit). Deliberately keyed on
-    # `(name, explicit type args)`, so it fires only where `elab_intu` proved
-    # the same instantiation — a bare `generic(<literals>)` call the pre-pass
-    # refused still takes the `.o` route unchanged.
-    _intu_arg = getattr(gen, '_intu_func_args', None) or {}
-    if explicit:
-        _ix = node.func.index
-        _el = _ix.elements if isinstance(_ix, gimple_ctypes.TupleExpr) else [_ix]
-        _hit = _intu_arg.get((g, tuple(gen._type_expr_to_ann(e) for e in _el)))
-        if _hit:
-            return None
-    elif _intu_arg.get((g, ())):
-        return None
     # Lower args once; their C types drive inference (and the emitted call).
     # Append keyword-argument values after the positionals (they fill the
     # trailing params in order — e.g. `_async_execute[T](h, desired_worker_id=-1)`).
@@ -2698,13 +2083,9 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
                 else:
                     new_type_args.append(ta)
             type_args = new_type_args
-            info = el.elaborate_generic_call(module_src, g, type_args,
-                                             arg_count=len(arg_pairs))
+            info = el.elaborate_generic_call(module_src, g, type_args, arg_count=len(arg_pairs))
             if info:
-                gen._refine_generic_return_type(
-                    info, module_src, g, type_args, len(node.args),
-                    materialize=lambda _a: _materialize_return_struct_mentions(
-                        gen, _a, source))
+                gen._refine_generic_return_type(info, module_src, g, type_args, len(node.args))
         else:
             info = el.elaborate_generic_call_inferred(
                 module_src, g, [ct for ct, _ in arg_pairs])
@@ -2727,140 +2108,6 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
 
 
 
-def _register_generic_structs_named(gen, source_path: str | None, names) -> None:
-    """Register, in `_imported_generic_structs`, each of `names` that `source_path`
-    defines as a `struct NAME[...]` template.
-
-    Why this is needed, and why it is narrow. A module that imports the generic
-    FUNCTION `empty` from `std.iter` gets `empty` in `_imported_generics`, but
-    not the generic STRUCT `empty` returns: `_Empty` is named by
-    `empty`'s return annotation, never by the importing module's own
-    `from std.iter import …` line, and registration so far only ever reads
-    those lines. So `_materialize_generic_struct_mentions` — which materializes
-    `Base[Args]` mentions of a RETURN annotation — had nothing to materialize,
-    `_Empty[T]` erased to `int64_t`, and `var it = empty[Int]()` typed the
-    iterator as a boxed integer, leaving `next(it)` with no receiver type (see
-    `mojo/backend_gimple/emit_calls.py::_lower_call`'s refusal).
-
-    Narrow on purpose: only the base names actually MENTIONED in a return
-    annotation this compile is refining are registered, never every generic
-    struct the module happens to define, so this cannot turn a module full of
-    never-called templates into materialization work. Each registration is
-    skipped when the name is already known or is already a real struct in this
-    compile, matching `_register_imported_generic_structs`'s own guards."""
-    if not source_path:
-        return
-    todo = [n for n in names
-            if n and n not in gen._imported_generic_structs
-            and n not in gen.struct_field_types]
-    if not todo:
-        return
-    try:
-        text = open(source_path).read()
-    except OSError:
-        return
-    for n in todo:
-        if gimple_ctypes.re.search(rf'\bstruct\s+{gimple_ctypes.re.escape(n)}\s*[\[:]', text):
-            gen._imported_generic_structs.setdefault(n, source_path)
-
-
-def _materialize_return_struct_mentions(gen, ann: str, source_path: str | None) -> str:
-    """`ann` with every generic-struct instantiation it mentions realized, for a
-    RETURN annotation of a generic defined in `source_path`.
-
-    Identifies the base names first so they can be registered (see
-    `_register_generic_structs_named`), then defers to the shared
-    materializer — so an annotation that names an elaborable struct gets the
-    exact same treatment a FIELD annotation of the same text already gets, and
-    one that names nothing new comes back byte-identical."""
-    if '[' not in ann:
-        return ann
-    bases = [m.group(1) for m in gimple_ctypes.re.finditer(r'\b([A-Za-z_]\w*)\s*\[', ann)]
-    _register_generic_structs_named(gen, source_path, bases)
-    return _materialize_generic_struct_mentions(gen, ann)
-
-
-def _materialize_generic_struct_mentions(gen, ann: str) -> str:
-    """`ann` with every generic-struct INSTANTIATION it mentions (`Base[A]`)
-    replaced by the concrete mangled struct name, materializing each one as a
-    side effect (so its typedef, layout and methods exist in this compile).
-
-    Innermost-first, and each replacement re-scanned, so a nested
-    instantiation is resolved before the one containing it (`Outer[
-    Inner[int64_t]]` → `Inner_int64_t` → `Outer_Inner_int64_t_`). A mention
-    is left exactly as written — no exception, no refusal — when the base is
-    not an elaborable generic struct, when a type argument is not concrete,
-    or when elaboration fails; `_resolve_type` then gets its ordinary
-    `_mojo_type` answer for that mention, which is the correct outcome for
-    every base it declines (List/Dict/Optional/Pointer and friends, which
-    `_mojo_type` does know) and the pre-existing boxed one for anything else.
-    """
-    _out = ann
-    # Bounded by the annotation's own bracket depth: every round that changes
-    # `_out` removes at least one bracket pair, so this cannot spin.
-    for _ in range(8):
-        _hit = None
-        for _m in re.finditer(r'\b([A-Za-z_]\w*)\s*\[', _out):
-            _base = _m.group(1)
-            if _base not in gen._imported_generic_structs:
-                continue
-            _close = gimple_exprtypes._matching_bracket(_out, _m.end() - 1)
-            if _close is None:
-                continue
-            # Innermost wins: a shorter bracket span cannot contain another.
-            if _hit is None or (_close - _m.start()) < (_hit[1] - _hit[0].start()):
-                _hit = (_m, _close)
-        if _hit is None:
-            return _out
-        _m, _close = _hit
-        _base = _m.group(1)
-        _inner = _out[_m.end():_close].strip()
-        _args = [a.strip() for a in gimple_ctypes._split_top_level_commas(_inner)] \
-            if _inner else []
-        if not _args or not all(gimple_exprtypes._is_concrete_type_arg(a)
-                                for a in _args):
-            return _out
-        _mangled = _ensure_generic_struct(gen, _base, _args)
-        if not _mangled:
-            return _out
-        _out = _out[:_m.start()] + _mangled + _out[_close + 1:]
-    return _out
-
-
-def _generic_struct_field_types(gen, info: dict) -> dict:
-    """field -> ctype for a monomorphized generic struct, resolved through THIS
-    compile's own struct registry.
-
-    `info['fields']` is the stateless reduction: `_mojo_type` of each field's
-    Mojo annotation, with no access to `gen.struct_field_types`. That is
-    correct for every scalar and built-in container annotation, and silently
-    WRONG for one shape: a field whose type is another generic struct's
-    instantiation. `_mojo_type` does not know that `Inner_int64_t` is a
-    struct, so it answers `int64_t` and the field is boxed — which is how
-    stdlib's `_PeekableIterator[InnerIterator]`'s `var _inner:
-    Self.InnerIterator` ended up an integer, and how `next(self._inner)` /
-    `next(it)` then had no receiver type to dispatch the iterator protocol
-    through (`bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_
-    unlowered.md`).
-
-    So: materialize the instantiation to its mangled name, then resolve with
-    `gen._resolve_type`, which is the one resolver that consults
-    `struct_field_types`. Every field whose annotation names no elaborable
-    instantiation keeps `_mojo_type`'s answer byte for byte, so this is
-    additive — the only fields that can change are the ones that were wrong.
-    """
-    _out = {f: ct for f, ct in info['fields']}
-    for _fname, _kind, _idx, _ann in (info.get('anns') or []):
-        if _kind != 'field' or _fname not in _out:
-            continue
-        if not isinstance(_ann, str) or '[' not in _ann:
-            continue
-        _resolved = _materialize_generic_struct_mentions(gen, _ann.strip())
-        if _resolved != _ann.strip():
-            _out[_fname] = gen._resolve_type(_resolved)
-    return _out
-
-
 def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
     """Elaborate+register `base_name[type_args]` (idempotent) via
     elaborate.Elaborator.elaborate_generic_struct: materialize the concrete
@@ -2873,20 +2120,6 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
     struct used as a TYPE ARGUMENT to another generic (e.g. `alloc[
     MoveOnly[Int]]`) can also be resolved to a real struct, not just one
     used at a direct `Struct[Args](...)` construction call site."""
-    # An instantiation the in-TU pre-pass ALREADY DEFINED in this translation
-    # unit (`elab_intu`) needs no extern and no CAS object. Emitting either
-    # beside the real definition is exactly `error: conflicting types for
-    # '<name>'` — a definition with this codegen's real parameter types next
-    # to a declaration with the elaborator's erased ones — which is the
-    # regression that made the first in-TU attempt be reverted
-    # (bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
-    # Keyed on `(base, args)` and NOT on "is this name already a struct here":
-    # the second test would also fire for a struct this module defines itself,
-    # which is a different situation with a different (unrelated) answer.
-    _intu = getattr(gen, '_intu_struct_args', None) or {}
-    _known = _intu.get((base_name, tuple(type_args)))
-    if _known:
-        return _known
     source = gen._imported_generic_structs.get(base_name)
     if not source:
         return None
@@ -2906,205 +2139,65 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
         module_src = open(source).read()
         import elaborate
         info = elaborate.Elaborator().elaborate_generic_struct(module_src, base_name, type_args)
-    except Exception as e:
-        # `None` here means "not a generic struct I can elaborate", and the
-        # call site reads it as exactly that: it falls through to the plain
-        # struct-constructor path and lowers `Struct[Args](...)` against the
-        # RAW TEMPLATE, whose type parameters are unbound and so typed
-        # `int64_t`. The obvious fix — raise instead of swallowing — was
-        # measured and it is wrong. Over the stdlib's own `std/` subtree (252
-        # files, 2026-10-02) it takes six currently-compiling files to a hard
-        # failure, among them `List[String]` in std/os/os.mojo and
-        # `Array[Int, 3]` in std/python/_cpython.mojo: the elaborator's bound
-        # check rejects types that genuinely conform. So the fall-through
-        # stays, and what changed is what happens to the RESULT.
-        #
-        # The reason is recorded on the generator, which is what makes the
-        # module that comes out of here UNCACHEABLE
-        # (`build_stdlib_dylib.compile_module_to_c_cached`): one swallowed
-        # failure used to write a wrong module into the content-addressed
-        # store under the current compiler fingerprint, so every later run
-        # replayed the wrong artifact and the failure outlived the condition
-        # that caused it. `test/iter/test_ref_iteration.mojo` is the instance
-        # that reached a gate: with the elaboration unavailable,
-        # `for ref x in list` binds `x` to `int64_t` instead of
-        # `MoveOnlyInt *` and `x.value += 1` becomes gcc's `request for
-        # member 'value' in something not a structure or union`.
-        #
-        # The recorded reason is the whole point of keeping it: the elaborator
-        # raises `ConformanceError` on purpose (a deliberate compile error)
-        # and everything else it raises comes from the nested `gcc -c` over
-        # the monomorphized template, whose stderr
-        # `monomorphize.instantiate` now carries into the exception. Without
-        # that, the failure had to be inferred from a gcc error three stages
-        # downstream.
-        gen._generic_struct_elaboration_failures.append(
-            f"{base_name}[{', '.join(type_args)}] from {source}: "
-            f"{type(e).__name__}: {e}")
+    except Exception:
         gimple_ctypes._debug_note('generic struct elaboration failed')
         info = None
-    return _register_generic_struct(gen, base_name, info)
-
-
-def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
-    """Elaborate Struct[TypeArgs](args) — or bare `Struct(args)`, whose type
-    args the constructor's own annotations supply. Materialize the concrete
-    monomorphized struct (register its layout + typedef, declare its methods,
-    record its object on the link line), then lower the call as a
-    constructor."""
-    if isinstance(node.func, gimple_ctypes.SubscriptExpr):
-        g = node.func.obj.name
-        idx = node.func.index
-        elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
-        type_args = [gen._type_expr_to_ann(e) for e in elems]
-        name = gen._ensure_generic_struct(g, type_args)
-    elif isinstance(node.func, gimple_ctypes.IdentExpr):
-        g = node.func.name
-        if g not in gen._imported_generic_structs:
-            return None
-        source = gen._imported_generic_structs.get(g)
-        try:
-            module_src = open(source).read()
-            import elaborate
-            info = elaborate.Elaborator().elaborate_generic_struct_inferred(
-                module_src, g, [ct for ct, _ in
-                                ([gen.lower_expr(a) for a in node.args]
-                                 + [gen.lower_expr(k) for _, k in
-                                    (getattr(node, 'kwargs', None) or [])])])
-        except Exception:
-            gimple_ctypes._debug_note('inferred generic struct elaboration failed')
-            info = None
-        name = _register_generic_struct(gen, g, info) if info else None
-    else:
+    if not info or not info['fields']:
         return None
-    if not name:
-        return None
-    return gen._lower_struct_constructor(name, node.args, node.kwargs)
 
-
-def _register_generic_struct(gen, base_name, info):
-    """The registration half of `_ensure_generic_struct`, split out so the
-    INFERRED constructor path (`Struct(...)` with no bracket arguments) can
-    reuse it verbatim rather than re-implementing the layout/method/link-line
-    bookkeeping. `_ensure_generic_struct` is now the `Base[Args](...)` spelling
-    of exactly this, plus the template lookup and the concrete-type-argument
-    guard."""
-    if not info:
-        return None
     name = info['name']
     if name not in gen.struct_field_types:
-        # A method's C symbol is what the TU DEFINED, read back with `nm`
-        # (`elaborate._defined_symbols`), and not a name composed here. That
-        # is the whole reason this function consults the object at all: an
-        # overloaded method is suffixed by a hash of its REAL C parameter
-        # types, and this module's view of those is the erased one — so
-        # `_mojo_type('*Ts')` and `_mojo_type('Some[def[T:Writer](mutT)]')`
-        # are both `int64_t` and the two `FormatStruct[T, o].fields` overloads
-        # are INDISTINGUISHABLE here while the TU named them `_fields_6ca16d`
-        # and `_fields_93095a`. Composing a name locally cannot be right; the
-        # object already knows. Measured on the two shapes that disagree:
-        #
-        #   struct MoveOnly[T] (4 distinct method names)
-        #     the real TU: MoveOnly_Int___eq__  __hash__  __init__  write_to
-        #     before this: MoveOnly_Int64_MoveOnly_Int64_*   (the TU's module
-        #                 name was `mangled`, so it prefixed its own name)
-        #
-        #   struct _Empty[T] (`__iter__` overloaded, so suffixed)
-        #     the real TU: _Empty_Int___iter___0120be / _0120be_2 / ___next__
-        #
-        # A method the TU defines under exactly ONE name registers under that
-        # name — which is the name `_struct_method_csym(name, m, '')` composes
-        # for a struct with no module identity, so `func_return_types` lookup
-        # at the call site and the object's definition agree. A method the TU
-        # defines under SEVERAL names registers each of them separately and
-        # registers NO unsuffixed name, because there is none: a caller that
-        # cannot compute a signature hash then finds nothing to dispatch to,
-        # which is the honest state, instead of dispatching to a symbol
-        # nothing defines.
-        #
-        # When `symbols` is unavailable (a re-entrant instantiation contributed
-        # no object, or `nm` was unavailable), fall back to composing the
-        # bare name — the pre-existing behavior, kept so a cycle does not
-        # regress into declining the struct entirely.
-        _syms = set(info.get('symbols') or ())
-        # `nm` on Mach-O prints C symbols with the object format's own leading
-        # underscore (`_Empty_Int___next__` for the C name
-        # `Empty_Int___next__`); ELF prints the bare name. Strip exactly one
-        # leading underscore from any symbol that still matches this struct's
-        # own prefix afterwards, so the key is the C name on both platforms.
-        # Anything that does not still match the prefix after stripping is not
-        # this struct's and is dropped.
-        _prefix = name + '_'
-        _norm: set = set()
-        for _s in _syms:
-            if _s.startswith('_') and _s[1:].startswith(_prefix):
-                _norm.add(_s[1:])
-            elif _s.startswith(_prefix):
-                _norm.add(_s)
-        # An AMBIGUOUS method name still disqualifies the whole struct, and
-        # reading the symbols has not changed that — it has made the reason
-        # sharper. Two overloads of one source name are two C symbols, and
-        # this module's caller composes only the UNSUFFIXED name
-        # (`_struct_method_csym(name, m, '')`), which the object does not
-        # define for an overloaded method; registering the struct anyway would
-        # leave every one of its call sites with no declaration to bind to and
-        # a `func_return_types` entry that resolves to the wrong arity —
-        # measured: registering `FormatStruct[String, MutOrigin]` anyway
-        # produced `error: too many arguments to function
-        # 'FormatStruct_Int64_MutOrigin_params'; expected 2, have 3` at
-        # test/format/test_utils.mojo:159, because `params(*args)`'s erased
-        # parameter list is one slot wide while the call passes two. The
-        # erasure is what makes the overloads look identical and it is the
-        # same erasure that destroys the function `overload_suffix_for` is
-        # computed from, so this cannot be resolved by composing harder — it
-        # needs the CALLER's real argument types, which is the in-TU route
-        # (see bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_
-        # defines.md).
-        _ambiguous: set = set()
-        for mname, _ret, _ps in info['methods']:
-            if len([s for s in _norm
-                    if s == f"{name}_{mname}" or s.startswith(f"{name}_{mname}_")]) > 1:
-                _ambiguous.add(mname)
-        _seen_names: dict = {}
-        for _mn, _r, _p in info['methods']:
-            _seen_names[_mn] = _seen_names.get(_mn, 0) + 1
-        if _ambiguous or any(c > 1 for c in _seen_names.values()):
-            return None
-        _registered: dict = {}
+        # elaborate_generic_struct's method extraction doesn't mangle
+        # overloaded methods by signature — two `__init__`s (or e.g.
+        # LinkedList's `pop()` / `pop(index)`, a common pattern) both come
+        # back named "{name}_{method}", which would need two DIFFERENT
+        # extern declarations for the same C symbol ("conflicting
+        # types"). Rather than register a subset (silently making the
+        # OTHER overload uncallable — confirmed to actively break
+        # LinkedList, which has real callers of both `pop` forms), bail
+        # out of elaborating this struct entirely: the caller
+        # (_lower_call's `if res is not None: return res` pattern) then
+        # falls through to whatever path already handled this struct
+        # correctly before _imported_generic_structs started actually
+        # being populated (this whole mechanism was previously dead code
+        # — see _register_imported_generic_structs).
+        seen_sigs: dict = {}
         for mname, ret, ps in info['methods']:
-            _base = f"{name}_{mname}"
-            _cands = sorted(s for s in _norm
-                            if s == _base or s.startswith(_base + '_'))
-            if not _cands:
-                _cands = [_base] if not _syms else []
-            for _csym in _cands:
-                if _csym in _registered:
-                    continue
-                _registered[_csym] = (ret, ps)
+            sig = (ret, tuple(ps))
+            if mname in seen_sigs and seen_sigs[mname] != sig:
+                return None
+            seen_sigs[mname] = sig
         # Register the layout; the struct-typedef section emits the typedef.
-        # A struct with NO FIELDS registers exactly like any other, with an
-        # empty layout: `struct _Empty[T]` (std/iter) has no fields at all,
-        # and refusing it on that ground alone is what kept
-        # `var it = empty[Int]()` typed as a boxed `int64_t` — the caller got
-        # `None` from here, had no `_Empty_Int` name to resolve, and `next(it)`
-        # had no receiver type to dispatch on. Field-count is not a soundness
-        # property here; the symbol check above is the one that decides
-        # whether the declarations are real.
-        gen.struct_field_types[name] = _generic_struct_field_types(gen, info)
-        for _csym, (_ret, _ps) in _registered.items():
-            gen.func_return_types[_csym] = _ret
-            gen.func_param_types[_csym] = [f"{name} *"] + list(_ps)
-            decl = (f"extern {_ret} {_csym} "
-                    f"({', '.join([name + ' *'] + list(_ps)) or 'void'});")
+        gen.struct_field_types[name] = {f: ct for f, ct in info['fields']}
+        for mname, ret, ps in info['methods']:
+            msym = f"{name}_{mname}"
+            gen.func_return_types[msym] = ret
+            gen.func_param_types[msym] = [f"{name} *"] + ps
+            decl = (f"extern {ret} {msym} "
+                    f"({', '.join([name + ' *'] + ps) or 'void'});")
             if decl not in gen._elaborated_externs:
                 gen._elaborated_externs.append(decl)
     if info['object'] not in gen._link_objects:
         gen._link_objects.append(info['object'])
-    cpp_obj = info.get('cpp_object')
-    if cpp_obj is not None and cpp_obj not in gen._link_objects:
-        gen._link_objects.append(cpp_obj)
+    _cpp_obj = info.get('cpp_object')
+    if _cpp_obj is not None and _cpp_obj not in gen._link_objects:
+        gen._link_objects.append(_cpp_obj)
         gen._link_needs_cxx = True
     return name
+
+
+def _elaborate_generic_struct_call(gen, node: gimple_ctypes.CallExpr):
+    """Elaborate Struct[TypeArgs](args): materialize the concrete monomorphized
+    struct (register its layout + typedef, declare its methods, record its
+    object on the link line), then lower the call as a constructor."""
+    g = node.func.obj.name
+    idx = node.func.index
+    elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
+    type_args = [gen._type_expr_to_ann(e) for e in elems]
+    name = gen._ensure_generic_struct(g, type_args)
+    if not name:
+        return None
+    return gen._lower_struct_constructor(name, node.args, node.kwargs)
 
 
 def _emit_generic_instantiation(gen, info, arg_pairs):
@@ -3214,16 +2307,7 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
     val_var = parts[1] if len(parts) >= 2 and parts[1] else '_enum_val'
 
     elem = gen._elem_of(it_val)
-    # `gi` collects `(source name, saved token)` for every binding this arm
-    # makes, restored together at the loop's end. Both slots are a
-    # comprehension's OWN bindings, so neither may take over the enclosing
-    # function's variable -- or a module constant's -- for that source name;
-    # `gi` is what makes the shadow last exactly as long as the comprehension
-    # (`_compr_list_loop`'s single-target arm gives the reasoning at length,
-    # and the failure it describes was real: a comprehension target named like
-    # a module global rebound that global for the rest of the function).
-    gi = []
-    gi.append((idx_var, ginf._compr_bind_target(gen, _as_str(idx_var), 'int64_t')))
+    gen._declare_var(idx_var, 'int64_t')
     # A nested tuple value slot (`for i, (a, b) in enumerate(pairs)`) is not
     # itself a variable: bind the element into a fresh temp and unpack its
     # own slots from that below, mirroring _gen_for_enumerate's val_is_tuple
@@ -3235,8 +2319,7 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
         val_var = gen._new_temp('int64_t')
         gen.var_types[val_var] = 'int64_t'
     else:
-        gi.append((val_var, ginf._compr_bind_target(gen, _as_str(val_var),
-                                               elem if elem else 'int64_t')))
+        gen._declare_var(val_var, elem if elem else 'int64_t')
     # Emitted references go through _cname: _declare_var renames targets
     # colliding with C reserved identifiers (`index` is a POSIX function →
     # `_var_index`), and emitting the raw Python name wrote an UNDECLARED
@@ -3290,7 +2373,7 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
             _vn = val_names[_vi]
             if _vn == '_':
                 continue
-            gi.append((_vn, ginf._compr_bind_target(gen, _vn, _pair_elem)))
+            gen._declare_var(_vn, _pair_elem)
             _vc = gen._cname(_vn)
             _vt = gen.var_types.get(_vn, _pair_elem)
             if _pair_suf == 'str':
@@ -3315,15 +2398,11 @@ def _compr_enumerate_loop(gen, node, gen0, res, res_type, it_val, start_val):
     gen._emit(f"  {idx64} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
-    # The comprehension is over: every name it bound is the enclosing
-    # function's own binding again (see `ginf._compr_restore_target`).
-    for _gn in gi:
-        ginf._compr_restore_target(gen, _gn[0], _gn[1])
 
 
 def _compr_str_loop(gen, node, gen0, res, res_type, it_val):
     _iv = _as_str(it_val)   # see _compr_list_loop: keep the ptr a char* in the f-string
-    saved_target = ginf._compr_bind_target(gen, _as_str(gen0.target), 'char')
+    gen._declare_var(gen0.target, 'char')
     len64 = gen._new_val('int64_t', f'mojo_str_len ({_iv})')
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
@@ -3342,7 +2421,6 @@ def _compr_str_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  {idx64} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
-    ginf._compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
 def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
@@ -3359,14 +2437,7 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     identical index-loop shape, just over mojo_strlen/_mojo_at_char
     instead of mojo_str_len/mojo_str_char_at."""
     _iv = _as_str(it_val)   # see _compr_list_loop
-    # A comprehension over a str yields 1-char STRINGS, same rule as
-    # _gen_for_cstr (see its comment for why `char` was wrong and what it
-    # broke). This is the path `set(s)` / `sorted(s)` / `list(s)` all take,
-    # since _lower_ctor_from_iterable rewrites them into comprehensions —
-    # so with the target typed `char` they produced a set of character
-    # CODES, and `sorted(set("hello world"))` came back as
-    # [32, 100, 101, ...] instead of [' ', 'd', 'e', ...].
-    saved_target = ginf._compr_bind_target(gen, _as_str(gen0.target), 'char *')
+    gen._declare_var(gen0.target, 'char')
     len64 = gen._new_val('int64_t', f'mojo_strlen ({_iv})')
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
@@ -3376,18 +2447,9 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
-    # `mojo_char_at_str`, for _gen_for_cstr's reason in full: gimple rejects a
-    # `char` argument ("invalid argument to gimple call"), so the slice stood
-    # in for `mojo_char_to_str` and allocated a two-byte buffer per character
-    # of every character comprehension. It reaches the same shared immortal table
-    # through an int64_t INDEX instead. The result is deliberately absent from
-    # the codegen's `_FRESH_STRING_RETURNS`, so no generated path frees it.
-    #
-    # No `_ptr_helpers_needed.add('char')`: the helper is called through the
-    # runtime and never through `_mojo_at_char`, so requesting that one emits a
-    # `static` definition with no call site (master's note beside
-    # `_gen_for_cstr` says the same).
-    gen._emit(f"  {gen._cname(gen0.target)} = mojo_char_at_str ({_iv}, {idx64});")
+    gen._ptr_helpers_needed.add('char')
+    addr = gen._new_val('char *', f"_mojo_at_char ({_iv}, {idx64})")
+    gen._emit(f"  {gen._cname(gen0.target)} = *{addr};")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
@@ -3396,7 +2458,6 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  {idx64} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
-    ginf._compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
 def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
@@ -3423,119 +2484,6 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             gen._emit(f"  if ({cv}) goto {bb_next}; else goto {bb_skip};")
             gen._emit_label(bb_next)
         gen._emit_label(bb_append)
-
-    # A comprehension with MORE THAN ONE `for` clause. Python evaluates it as
-    # nested loops, but every `_compr_*_loop` helper takes a single generator
-    # and `_lower_comprehension` binds only `node.generators[0]`, so the extra
-    # clauses were silently DROPPED -- exit 0, wrong answer.
-    #
-    # Real, measured: `xs = [i + j for i in range(n) for j in range(n)]` with
-    # n=5 returned a 5-element list summing to 10 where Python's 25-element
-    # list sums to 100 (the inner `j` behaved as 0 throughout). That is
-    # `x86-containers`' `nested-comprehension` case, marked expected-failure
-    # with a reason pointing at a bug doc that no longer existed.
-    #
-    # The fix needs no change to the seven loop helpers, because they all
-    # funnel the loop body through THIS function. When `_lower_comprehension`
-    # sees a second clause it parks the remainder here; the clause-0 loop
-    # still runs, and instead of appending one element per iteration this
-    # lowers the remainder (recursively, so any depth works) and extends the
-    # result with it. `for i in A for j in B` is then exactly
-    # `extend([elt for j in B] for each i in A)`.
-    #
-    # The remainder is built WITHOUT conditions of its own because
-    # `_gen_compr_append` already applied `gen0.conditions` above -- a filter
-    # belongs to its own clause, and `node.generators[1:]` still carries its
-    # own per-generator conditions, so `[x for x in a if p for y in b if q]`
-    # filters at the right depth.
-    _inner = getattr(gen, '_compr_pending_inner', None)
-    if _inner is not None and node.kind in ('list', 'generator'):
-        # Clear BEFORE lowering, so the recursive `_lower_comprehension` call
-        # for the remainder installs its own pending inner instead of finding
-        # this one still set and extending with itself forever.
-        gen._compr_pending_inner = None
-        _ir = gen.lower_expr(_inner)
-        _it = _as_str(_ir[0])
-        _iv_raw = _as_str(_ir[1])
-        _iv = _iv_raw
-        if _it.endswith(' *') and _it != 'MojoList *':
-            _iv = gen._new_val('MojoList *', f'(MojoList *){_iv_raw}')
-        gen._emit(f"  mojo_list_extend ({res}, {_iv});")
-        # Carry the inner result's ELEMENT TYPE onto the outer one. The
-        # single-clause path ends with `gen._elem_types[res] = et`, and
-        # returning early here without the equivalent left the outer list's
-        # element type untracked: `len`, indexing and a `for`-loop sum were
-        # all right, but printing the list in place read element 0 through
-        # the wrong accessor, and an int 0 read as a `char *` is NULL --
-        # so `[i + j for i in range(3) for j in range(3)]` printed
-        # `[None, 1, 2, 1, 2, 3, 2, 3, 4]`. Keyed on the pre-cast name,
-        # which is what `lower_expr` registered.
-        if _iv_raw in gen._elem_types:
-            gen._elem_types[res] = gen._elem_types[_iv_raw]
-        if _iv_raw in gen._nested_elem_types:
-            gen._nested_elem_types[res] = gen._nested_elem_types[_iv_raw]
-        # ...and the TUPLE per-slot types, which are a THIRD map and not part
-        # of the other two. Missing this one is what made
-        # `[[i, j] for i in range(2) for j in range(2)]` print
-        # `[(0, None), (0, 1), (1, None), (1, 1)]`: each slot defaulted to the
-        # `char *` accessor, and an int 0 read as a `char *` is NULL, so every
-        # zero-valued slot rendered as `None` while non-zero ones happened to
-        # print. Same keying as the single-clause tuple branch below.
-        if _iv_raw in gen._tuple_slot_types:
-            gen._tuple_slot_types[res] = gen._tuple_slot_types[_iv_raw]
-        return
-
-    if _inner is not None and node.kind == 'set':
-        # A set comprehension with 2+ clauses. Same park-the-remainder shape
-        # as the list branch below, but the merge is a per-ELEMENT ADD, not a
-        # list extend: `mojo_set_update` walks the source's slots and re-adds
-        # each element under its OWN tag (`mojo_set_add_int` / `mojo_set_add_str`),
-        # so the result is deduplicated per element exactly as the single-clause
-        # `mojo_set_add_*` arm is, not concatenated. `for i in A for j in B` is
-        # `update({elt for j in B} for each i in A)`.
-        gen._compr_pending_inner = None
-        _ir = gen.lower_expr(_inner)
-        _it = _as_str(_ir[0]); _iv_raw = _as_str(_ir[1])
-        _iv = _iv_raw
-        if _it.endswith(' *') and _it != 'MojoSet *':
-            _iv = gen._new_val('MojoSet *', f'(MojoSet *){_iv_raw}')
-        gen._emit_call('void', '', 'mojo_set_update',
-                       [('MojoSet *', res), ('MojoSet *', _iv)])
-        # The element type, as the single-clause set arm records it: without it
-        # `sorted({s for s in strs for c in s})` cannot type its result and
-        # yields raw char* decimals (see that arm's comment).
-        if _iv_raw in gen._elem_types:
-            gen._elem_types[res] = gen._elem_types[_iv_raw]
-        return
-
-    if _inner is not None and node.kind == 'dict':
-        # `mojo_dict_update` is the dict sibling of `mojo_set_update`: it
-        # re-inserts each live pair under its own `keykind`/`kind`, so an
-        # integer-keyed pair stays integer-keyed and a string value stays a
-        # string rather than being re-read as an int64_t. The inner
-        # comprehension is a DICT comprehension (same `kind`), so its key/value
-        # expressions are lowered by the same `_char_to_cstr` + typed-set path
-        # the single-clause case uses -- `for i in A for j in B` is
-        # `update({k: v for j in B} for each i in A)`.
-        #
-        # Without this arm `{(i, j): i * j for i in range(2) for j in range(2)}`
-        # printed a TWO-entry dict whose keys were raw heap addresses baked
-        # into the generated C as decimal literals -- the ASLR-dependent class
-        # of wrong output, and the reason this case is worth its own arm rather
-        # than a widened list extend.
-        gen._compr_pending_inner = None
-        _ir = gen.lower_expr(_inner)
-        _it = _as_str(_ir[0]); _iv_raw = _as_str(_ir[1])
-        _iv = _iv_raw
-        if _it.endswith(' *') and _it != 'MojoDict *':
-            _iv = gen._new_val('MojoDict *', f'(MojoDict *){_iv_raw}')
-        gen._emit_call('void', '', 'mojo_dict_update',
-                       [('MojoDict *', res), ('MojoDict *', _iv)])
-        # The dict's VALUE type, keyed as the single-clause dict arm's
-        # consumers key it (`d[k]` / `d.get(k)` read `_dict_val_types`).
-        if _iv_raw in gen._dict_val_types:
-            gen._dict_val_types[res] = gen._dict_val_types[_iv_raw]
-        return
 
     if node.kind == 'list' or node.kind == 'generator':
         # `_lower_comprehension` initializes a 'generator' comprehension
@@ -3569,43 +2517,11 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         gen._emit(f"  mojo_list_append_{suf} ({res}, {ev_cast});")
         # Track element type so downstream for-loops use the right accessor
         gen._elem_types[res] = et
-        # A CALLABLE comprehension element, so `[f for ...][0](...)` can
-        # dispatch. The literal and the `append` paths record through the
-        # same helper, and a comprehension is the third way to build the list
-        # a dispatch table lives in; without this one the answer would depend
-        # on which of the three spellings assembled it. Keyed on the PRE-cast
-        # `ev`, which is the name the callable tables are keyed on.
-        ginf.note_container_callable_ret(gen, res, ev, et, node.element)
-        # A comprehension whose element is a TUPLE or a nested LIST
-        # (`[(5, j) for j in range(3)]`, `[[5, y] for y in ys]`) has to
-        # record BOTH maps the equivalent list LITERAL records at
-        # emit_exprs.py's own "A list whose elements are TUPLES" branch —
-        # `_nested_elem_types` AND `_tuple_slot_types`. Carrying only the
-        # second was this bug, and it is silent and exit 0:
-        # `_list_repr_fn` picks the repr helper from `_nested_elem_types`,
-        # so a comprehension of tuples/lists fell to the generic
-        # `_mojo_repr_list`, whose None-sentinel heuristic renders a raw 0
-        # slot as `None`. Every non-zero slot happened to print, which is
-        # why only the ZEROS exposed it and why the bug looked like "the
-        # later slots lose their type": `[(5, j) for j in range(3)]`
-        # printed `[(5, None), (5, 1), (5, 2)]`.
-        #
-        # The doc's control case (`[[5, y] for y in ys]`, all values
-        # non-zero) is NOT actually correct, it is the same bug with the
-        # zeros absent: `[[5, y] for y in [0, 8]]` printed
-        # `[(5, None), (5, 8)]` — the zero AND the list element rendering
-        # as a tuple. Both are this one missing map.
-        #
-        # `setdefault` (as the literal path also uses) so the first
-        # iteration's answer is the one kept, exactly as the literal path
-        # behaves when a literal mixes shapes.
-        if et == 'MojoList *':
-            if ev in gen._elem_types:
-                # `_elem_types[res]` above stays 'MojoList *' (what res
-                # CONTAINS); `_nested_elem_types` says what those hold.
-                gen._nested_elem_types.setdefault(res, gen._elem_types[ev])
-            if ev in gen._tuple_slot_types:
-                gen._tuple_slot_types[res] = gen._tuple_slot_types[ev]
+        # A comprehension of TUPLES (`[(n, f) for n, f in funcs]`) — carry
+        # the heterogeneous tuple's per-slot types so a later
+        # `for n, f in test_funcs:` reads each slot with the right accessor.
+        if et == 'MojoList *' and ev in gen._tuple_slot_types:
+            gen._tuple_slot_types[res] = gen._tuple_slot_types[ev]
     elif node.kind == 'set':
         # Index the 2-tuple, NOT `et, ev = gen.lower_expr(...)`: the
         # unpack boxes `et` on the self-hosted path, so `et == 'char *'`
@@ -3623,47 +2539,33 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         else:
             ev64 = gen._to_int64(et, ev)
             gen._emit_call('void', '', 'mojo_set_add_int', [('MojoSet *', res), ('int64_t', ev64)])
-        # Record the element type, exactly as the list branch just above
-        # does for its own result. Without it the set is correct but
-        # UNDESCRIBABLE: `sorted(set(text))` reads the set's element type
-        # to type its result (`_lower_builtin_sorted`'s MojoSet branch),
-        # found nothing, and the sorted list came back untyped — so
-        # `sorted(set(s))` yielded raw char* DECIMALS
-        # (4358361792, 4358361408, ...) instead of one-character strings.
-        # The append above already dispatches on `et`, so the information
-        # was available; it just was not written down where the consumer
-        # looks for it.
-        if et and et != 'int64_t':
-            gen._elem_types[res] = et
     elif node.kind == 'dict':
-        # The parser stores a dict comprehension as element=key_expr,
-        # key=val_expr, so the pair handed over is (key, value) — the same
-        # argument order `_emit_dict_pair_store` documents for the dict LITERAL
-        # and the `dict(k=v, ...)` builtin.
-        #
-        # ONE store, because there were THREE lowerings of it and they
-        # disagreed. The comprehension's own coerced the key with
-        # `_char_to_cstr(kt, kv)` — no `transient` / `word_ok`, which is the
-        # flag pair that arms `_char_to_cstr`'s CONTAINER-key branch, the one
-        # that hands the raw word over so `_apply_kw_keys` selects the `_kw`
-        # twin and the runtime's `mojo_dict_key_for` renders the tuple's
-        # CONTENT. Without those flags a `MojoList *` key fell through to a raw
-        # `(char *)value`, so `{k: 1 for k in pairs}` stored its two tuples
-        # under their HEAP ADDRESSES as the key TEXT: different on every run
-        # (ASLR), which makes it worse than a stable wrong answer — and the
-        # repr printed those address bytes, `{'\xef\xac\x99f': 1, ...}`. The
-        # literal spelling `{k: 1 for k in pairs}` reached `_repr_value` and
-        # keyed by content, so the two spellings of one key disagreed. See
-        # bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md, and
-        # CODEGEN_tuple_dict_key_hashed_by_address for the subscript
-        # spelling that was fixed the same way.
-        #
-        # `_emit_dict_pair_store` lowers both operands itself, so the values
-        # this used to lower here are not lowered twice, and its per-kind value
-        # dispatch (float, `None`, bool, struct), `_kw`-twin key handling and
-        # callable-return note are the shared ones rather than this site's
-        # third copy of each.
-        gex._emit_dict_pair_store(gen, res, node.element, node.key)
+        kt, kv = gen.lower_expr(node.element)   # element = key expression in dict compr
+        vt, vv = gen.lower_expr(node.key)        # key field holds the value expression
+        # parser stores dict comprehension as: element=key_expr, key=val_expr
+        # Dict keys are char* in the runtime: coerce the key to a char* local
+        # via _char_to_cstr (handles a non-char* key — e.g. a genuine Int
+        # key, stringified via mojo_str_from_int, or one actually boxed as
+        # int64_t — and loads global string literals into locals first).
+        if kt != 'char *':
+            kt, kv = gen._char_to_cstr(kt, kv)
+        elif kv.startswith('_slit_'):
+            kv_tmp = gen._new_val('char *', f"{kv}")
+            kv = kv_tmp
+        if vt in gimple_ctypes._FLOAT_TYPES:
+            gen._emit(f"  mojo_dict_set_double ({res}, {kv}, {vv});")
+        elif vt == 'char *':
+            if vv.startswith('_slit_'):
+                vv_tmp = gen._new_val('char *', f"{vv}")
+                vv = vv_tmp
+            gen._emit(f"  mojo_dict_set_str ({res}, {kv}, {vv});")
+        else:
+            # See the dict-literal case's identical comment: vt alone
+            # can't distinguish a real bool literal from a genuine int.
+            if isinstance(node.key, gimple_ctypes.BoolLiteral):
+                gen._emit(f"  mojo_mark_dict_bool_values ({res});")
+            vv64 = gen._to_int64(vt, vv)
+            gen._emit(f"  mojo_dict_set_int ({res}, {kv}, {vv64});")
 
 
 

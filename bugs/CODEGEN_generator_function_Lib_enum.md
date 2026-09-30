@@ -596,7 +596,7 @@ widen the coroutine promise/co_yield representation to carry a genuine
 pointer value across the suspend boundary — the SAME kind of "value
 crossing a suspend point isn't just a scalar" scope boundary already
 tracked for tuple yields (now fixed) and for
-`“CODEGEN_generator_function: Lib/ftplib.py”`'s `mlsd` case, just for
+`bugs/CODEGEN_generator_function_Lib_ftplib.md`'s `mlsd` case, just for
 a bare struct-pointer yield instead of a tuple.
 
 Given that landing (1)+(2) alone — without also closing the yield-type

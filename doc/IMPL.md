@@ -527,15 +527,13 @@ The Mojo CLI (`fire.py`) provides upstream-compatible command interface:
 
 **Implementation**: `fire.py` is the CLI, run directly as `python3 fire.py <command>`. It wraps `gimple_codegen.py` to compile Mojo source to C with `__GIMPLE` annotations, then uses system `gcc` (or `gcc-mp-15` on macOS) to link and execute. `make mojoc` builds the same CLI as a self-hosted native binary.
 
-> `build_mojo_cli.py` used to generate a second CLI — a `build/mojo` script
-> beside this one — and nothing imported or ran it: `fire.py` is the entry
-> point. The `mojo`→`fire` rename never reached it, so its output path,
-> docstring and banner all still said `mojo`, and `cas.py` was still hashing it
-> into the self-host fingerprint for the binary that has to be trustworthy
-> across a self-host chain. Deleted, and `cas.selfhost_extra_is_justified` is
-> the check that says so: a hashed input has to exist, and has to be either a
-> declared entry point or reachable from one, so the direction nothing used to
-> look at is no longer invisible.
+> **Stale:** `build_mojo_cli.py` used to generate a separate `build/mojo`
+> script, and this section used to name it as the CLI. Nothing imports or runs
+> that generator any more — `fire.py` is the entry point — and the
+> `mojo`→`fire` rename left its output path, docstring and banner untouched.
+> It is still listed in `cas.py`'s self-host fingerprint, so deleting it is a
+> compiled-path change tracked in
+> `bugs/TOOLS_dead_build_mojo_cli_in_selfhost_fingerprint.md`.
 
 ---
 
@@ -829,7 +827,7 @@ pass, in **`mlir.py`** — table-driven, dialects-as-data.
   `_mojo_at_` helper). The `[name=value]` op params survive parsing via
   `SubscriptExpr.attrs`.
 - **Deferred (explicit, with a reason via `mlir.deferral_reason`)**: GPU
-  (`nvvm.*`/`rocdl.*` — see `METAL.html`), coroutines (`co.*`), atomics, true
+  (`nvvm.*`/`rocdl.*` — see `METAL.md`), coroutines (`co.*`), atomics, true
   vector SIMD, allocation/symbols, and compiler-internal `kgen`/`variant`/struct
   GEP. The codegen emits an honest `/* mlir …: deferred: <reason> */` stub.
 - **Parser**: a bare `__mlir_op` statement is a real side-effecting op (e.g.

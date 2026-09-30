@@ -15,36 +15,10 @@ import mlir
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
-# NO module-level `import gimple_codegen` here. The rule, and this file's two
-# readers of `gimple_codegen._SELFHOST_DIR`, are in the header comment below.
+import gimple_codegen  # constants used by some extracted helpers
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-
-# NO `import gimple_codegen` AT MODULE LEVEL, anywhere in `mojo/middle/*`, and
-# this file's two readers of `gimple_codegen._SELFHOST_DIR` are the reason the
-# rule exists. The edge middle-tier -> `gimple_codegen` -> the gimple backend
-# -> middle-tier IS a cycle, and Python resolves it by letting whichever module
-# the process reached first finish: enter through any of the eight middle-tier
-# modules and `from mojo.middle.infra_infer import _FC_SEP` (or
-# `user_dunder_repr_call`, `_selfhost_parsed_source`, `builtin_module_constant`,
-# `_is_none_literal`, `_annotation_container_elem_type`,
-# `_emit_starred_slot_list`, `_is_selfhost_source_file`) meets a half-built
-# module. Only `test_suite.py`'s declared exemption list kept that from being a
-# red, and every real entry point in `driver.py` reaches `gimple_codegen`
-# first, so nothing else could see it.
-#
-# `import X` binds a module object and survives a half-initialised X (its
-# attribute reads happen later, at call time, by which point X is finished);
-# `from X import NAME` resolves EAGERLY and does not. So the two readers below
-# do their `import gimple_codegen` inside the function — the same placement
-# `module_loader.load_module` and `fire_compiler.compile_with_interpreter`
-# already use for exactly this reason.
-#
-# `test_suite.py`'s "imports: every real entry point imports first" is the
-# measurement, and it is checked in both directions: a new module that closes
-# the cycle fails, and so does an entry left on the exemption list that now
-# imports fine.
 
 def _gmm_callexpr_node(x) -> CallExpr:
     """Same-module `CallExpr`-view identity helper (the `_gmm_as_str`
@@ -55,77 +29,6 @@ def _gmm_callexpr_node(x) -> CallExpr:
     table does not reliably carry a CallExpr case in every compiled module
     (miss sentinel 1 -> `mojo_list_len(1)` SIGSEGV)."""
     return x
-
-def _is_selfhost_source_file(path: str) -> bool:
-    """True when `path` is a source file OF this compiler — a root-level
-    `*.py` beside `fire_compiler.py`, or one inside its own `mojo/` package
-    or `jit/` helper package. The one answer to "is the file being compiled
-    the compiler itself?", for every caller that needs exactly that and not
-    the name of the thing being referenced (`_is_selfhost_sibling_alias`
-    below answers the other, stricter question).
-
-    Deliberately NOT "any `.py` at or under `_SELFHOST_DIR`". A program's
-    location is not something a compiler has any reason to treat specially,
-    so a bare prefix test silently classified as "the compiler's own source"
-    every file that merely happens to sit inside the install directory: a
-    test fixture, a scratch script, a downstream project's subdirectory, a
-    `build/` artifact. Anything gated on it then behaved differently purely
-    because of where the file was written, and in
-    `_lower_method_call`'s generic module-qualified-call branch
-    (`mojo/backend_gimple/emit_methods.py`) that meant a
-    `<marker>.<plain_top_level_fn>(...)` call was refused module-qualifier
-    resolution, fell through to the generic scalar-receiver stub, and
-    answered a literal `0` — a silent wrong value whose only trigger was
-    `$TMPDIR`, which is what made the registered `linkmode` gate step pass or
-    fail depending on the checkout it ran in. `test_link_mode.py`'s
-    `test_bare_submodule_import_call_inside_source_tree` pins it.
-
-    Realpath- and symlink-tolerant like the predicate it replaces: both
-    `abspath` and `realpath` of `_SELFHOST_DIR` are accepted as a base, so
-    a source root reached through a symlink is still recognised. Note the
-    COMPILED binary's own `_SELFHOST_DIR` is its CWD, not the real source
-    dir (see `gimple_codegen._selfhost_load_gimplegen_class`) — that
-    imprecision is unchanged from the prefix test this replaces, and is
-    conservative in the same direction: an unrecognised self-host file
-    simply takes the ordinary resolution path, which is what every
-    self-host compile already did under the compiled binary.
-
-    `.py` only, for the same reason `_is_selfhost_sibling_alias` below
-    requires it: the self-hosting bootstrap is this compiler's own Python,
-    so no `.mojo` file is ever part of it. That matters for a synthetic
-    name — `os.path.abspath('client.mojo')` resolves against the process
-    CWD, which IS this checkout whenever a test runs from the repo root, so
-    without the extension check a bare relative name would read as a
-    compiler source file.
-    """
-    if not path or not path.endswith('.py'):
-        return False
-    # FUNCTION-LOCAL, and that placement is the whole point: see the header
-    # comment's rule. Nothing in `mojo/middle/*` may reach `gimple_codegen` at
-    # module level, because that edge IS the middle-tier import cycle.
-    import gimple_codegen
-    _rp = os.path.realpath(os.path.abspath(path))
-    _sd = gimple_codegen._SELFHOST_DIR
-    _rsd = os.path.realpath(_sd)
-    _dir = os.path.dirname(_rp)
-    # `'/'`, not `os.sep`: `gimple_ctypes.os` is an opaque module marker on
-    # the compiled backend and `.sep` raised `AttributeError: sep`
-    # (mojo/backend_gimple/emit_resolve.py's own note on the same trap).
-    # The `if not _base` guard is for the OTHER half of that hazard —
-    # `_SELFHOST_DIR` is a module-level global that reads back as a boxed
-    # int64_t on the self-hosted path unless `_seed_selfhost_module_globals`
-    # has already corrected its type for this call site, and a boxed `0`
-    # would otherwise be concatenated as if it were a path.
-    for _base in (_sd, _rsd):
-        if not _base:
-            continue
-        if _dir == _base:
-            return True
-        for _sub in ('mojo', 'jit'):
-            _pkg = _base + '/' + _sub
-            if _rp == _pkg or _rp.startswith(_pkg + '/'):
-                return True
-    return False
 
 def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     """True when compiling this compiler's OWN backend source and
@@ -142,10 +45,9 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     if not cf or not cf.endswith('.py'):
         return False
     cur_abs = gimple_ctypes.os.path.abspath(cf)
-    import gimple_codegen          # function-local; see the header comment
     sd = gimple_codegen._SELFHOST_DIR
     # Path-INDEPENDENT sibling signal (`fire_compiler.py` at the tree root),
-    # mirroring `_is_selfhost_source_file` above. The bare
+    # mirroring gimple_module_gen._is_selfhost_source_dir. The bare
     # `_SELFHOST_DIR` equality/prefix check alone is FALSE when the compiler
     # is compiled from a DIFFERENT checkout than the one acting as driver —
     # a downstream GCC frontend vendoring a byte-identical copy at its own
@@ -154,7 +56,7 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     # `mojo.middle.solvers.LayoutSolver.HEAP`) missed this gate in that build and
     # fell through to the "class-as-value not modeled" stub / a
     # `_mojo_dispatch_setattr` on a bogus pointer. Re-derived locally rather
-    # than imported cross-module (see _is_selfhost_source_file's own docstring
+    # than imported cross-module (see _is_selfhost_source_dir's own docstring
     # for the self-hosted resolution gap that forces the duplication).
     _rcur = gimple_ctypes.os.path.realpath(cur_abs)
     _rsd = gimple_ctypes.os.path.realpath(sd)
@@ -166,10 +68,8 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
         # ancestor. This recognizes a SUBDIRECTORY (`mojo/middle`,
         # `mojo/backend_gimple`) reached through a SYMLINKED source root,
         # where `_SELFHOST_DIR` (realpath) and `cur_abs` (symlink path)
-        # never prefix-match. Same defect and same fix as
-        # `_is_selfhost_source_file` above — and unlike that one, which asks
-        # the file-level question and so needs no walk at all, this question
-        # is genuinely about the tree, hence the walk.
+        # never prefix-match. Same defect and same fix as gimple_module_gen.
+        # _is_selfhost_source_dir.
         _rparts = _rcur.split(gimple_ctypes.os.sep)
         for _p in range(len(_rparts), 0, -1):
             _cand = gimple_ctypes.os.sep.join(_rparts[:_p])

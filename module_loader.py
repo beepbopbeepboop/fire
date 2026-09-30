@@ -67,35 +67,13 @@ class _ReflectTable(ctypes.Structure):
                 ('n_syms', ctypes.c_uint32), ('reserved', ctypes.c_uint32),
                 ('syms', ctypes.POINTER(_ReflectSym))]
 
-# The Mojo library checkouts this tree can be built against, most-preferred
-# first. `new-modular` is the current one; `modular` is the older copy and is
-# kept so the tree still resolves when the newer checkout is absent. Each entry
-# is (checkout_dir_name, path_within_checkout) — the two trees spell the stdlib
-# root differently (`Mojo/stdlib` vs `mojo/stdlib`), so the pair has to travel
-# together. MOJO_STDLIB overrides the whole list.
-_STDLIB_CHECKOUTS = (
-    ('new-modular', 'Mojo/stdlib'),
-    ('modular', 'mojo/stdlib'),
-)
-
-
-def _is_stdlib_root(path):
-    """True if `path` is a Mojo stdlib root rather than some same-named dir.
-
-    Both checkouts keep the importable package tree under `stdlib/std`, so that
-    subdirectory is what distinguishes a real root from, say, a build output
-    directory that happens to be called `stdlib`.
-    """
-    return os.path.isdir(os.path.join(path, 'std'))
-
-
 def _find_stdlib_path():
     """Find stdlib path using multiple strategies.
 
     1. Check MOJO_STDLIB environment variable
-    2. Try each known checkout location (see _STDLIB_CHECKOUTS)
+    2. Look relative to this file (project root structure: ../mojo/3rdparty/...)
     3. Search upward from current directory
-    4. Return the first candidate (runtime handles a missing stdlib gracefully)
+    4. Return path (will fail gracefully if not found at runtime)
     """
     # Strategy 1: Environment variable override
     if 'MOJO_STDLIB' in os.environ:
@@ -103,25 +81,24 @@ def _find_stdlib_path():
         if os.path.isdir(path):
             return path
 
-    # Strategy 2: Known checkout locations, most-preferred first
-    for checkout, rel in _STDLIB_CHECKOUTS:
-        abs_path = f'/Users/mrs/net/chatgpt/claude/{checkout}/{rel}'
-        if _is_stdlib_root(abs_path):
-            return abs_path
+    # Strategy 2: Hardcoded path to stdlib
+    abs_path = '/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib'
+    if os.path.isdir(abs_path):
+        return abs_path
 
     # Strategy 3: Search upward from current working directory
     cwd = os.path.abspath(os.getcwd())
     for _ in range(10):  # Search up to 10 levels
-        for checkout, rel in _STDLIB_CHECKOUTS:
-            candidate = os.path.join(cwd, checkout, *rel.split('/'))
-            if _is_stdlib_root(candidate):
-                return candidate
+        # Look for modular/... at current level
+        candidate = os.path.join(cwd, 'modular', 'mojo', 'stdlib')
+        if os.path.isdir(candidate):
+            return candidate
         cwd = os.path.dirname(cwd)
         if cwd == '/':
             break
 
-    # Fallback: return the preferred path (runtime will handle missing stdlib gracefully)
-    return f'/Users/mrs/net/chatgpt/claude/{_STDLIB_CHECKOUTS[0][0]}/{_STDLIB_CHECKOUTS[0][1]}'
+    # Fallback: return the computed path (runtime will handle missing stdlib gracefully)
+    return abs_path
 
 STDLIB_PATH = _find_stdlib_path()
 TEST_PATH = os.path.join(HERE, 'runtime')  # For test modules
@@ -280,7 +257,7 @@ class ModuleLoader:
     # raises "Only stdlib and test imports supported" for anything not under
     # STDLIB_PATH/TEST_PATH). Callers that already resolved an arbitrary
     # local .mojo file's path themselves (e.g. gimple_codegen.py's sibling-
-    # import fallback for `fire dylib`'s per-module standalone compiles,
+    # import fallback for `mojo dylib`'s per-module standalone compiles,
     # which resolves local project modules via imports.resolve_source /
     # _resolve_test_relative_module instead of this class's stdlib-only
     # resolve_module_path) call this directly, keeping the exact same
@@ -770,7 +747,7 @@ class ModuleLoader:
             # in gimple_codegen.py had no way to know the name even existed,
             # let alone that it needs a real cross-translation-unit
             # reference into the DEFINING module's own storage — the
-            # importing module's own compile (each `fire dylib` module is a
+            # importing module's own compile (each `mojo dylib` module is a
             # fully independent translation unit — see driver.compile_dylib)
             # silently fell through to codegen's "unknown identifier"
             # placeholder (0 / NULL), reading zero or segfaulting on a
@@ -814,11 +791,11 @@ class ModuleLoader:
             # fell straight through to codegen's "undeclared -> 0"
             # placeholder — with or without reflect.py's own same-file-only
             # struct-global gap (a SEPARATE mechanism entirely: this
-            # `load_module_from_path` scan is what `fire dylib`'s per-module-
+            # `load_module_from_path` scan is what `mojo dylib`'s per-module-
             # independent compile actually consults via
             # `_local_sibling_module_exports` / `_emit_imported_global_
             # accessors`, not reflect.py's `collect_exports`/
-            # `_register_link_imports`, which is `fire build`'s link-mode-
+            # `_register_link_imports`, which is `mojo build`'s link-mode-
             # only path). The `(?:=\s*(?P<rhs>.+?))?` group is now optional;
             # a bare `var NAME: Type` (or untyped `var NAME`, though Mojo
             # requires an annotation or initializer) still exports an entry.

@@ -502,73 +502,7 @@ frees, the honest reading is that **total bytes ever allocated** is what is
 being measured, and that total is ~4 GB in CPython's terms, amplified by
 allocation granularity and the 14x instruction gap.
 
-## Status (2026-10-01 — BOTH cheap wins in "What this means for the fix" are
-## DONE; the remaining lever is per-module AST lifetime, still untried)
-
-This document's own last section listed two confirmed-cheap wins and said both
-were "still undone". Both have since landed, in `33f4b72d`, and the sentence
-was stale. Verified in the source rather than taken on trust:
-
-1. **The three seed passes no longer parse the file list three times.**
-   `_selfhost_module_scalar_globals`, `_selfhost_struct_dict_field_val_types`
-   and `_selfhost_homogeneous_tuple_ret_funcs` each read
-   `module_shared._selfhost_parsed_modules(sd)` (`module_shared.py` lines 187,
-   235, 305), which is one list built over the shared per-FILE cache
-   `funcs_shared._selfhost_parsed_source(path)`, keyed `path + '@' + mtime`.
-   The per-FILE key is the load-bearing part and is documented on
-   `_selfhost_parsed_modules`: the three passes cover different file lists, so
-   a whole-list key could never be shared between them, and editing one file
-   would have re-parsed all 43.
-2. **`_set_grow`'s replay probes each key once.** The replay is
-   `_set_replay_entry` (`runtime/fire_runtime.c`), which calls
-   `_set_slot_int` / `_set_slot_str_tag` a single time and stamps `seq`
-   directly. Its own docstring records the three silent bugs found while
-   fixing it — bytes entries DROPPED by the rehash (`{b'a',...,b'e'}` had
-   `len()` 1), every string strdup'd and then freed, and the recursive
-   `_set_grow` the old `next_seq` save/restore was papering over.
-
-`BLOW.md` §4 said the same two things were "still undone"; that line is
-corrected in the same commit, since it is the line a next session reads first.
-
-**What this does NOT do.** Neither win is the fix; both are repeated-work, not
-growth, which is exactly how the document described them. §2's measurement
-(58.6 GB / 1.24 T instructions / ~45 s for `./mojoc --dump-full
-fire_compiler.py`, with 11.4 GB live across 130,462,322 blocks in 953
-mappings at t=12 s) predates both, so it is a BASELINE to re-measure against,
-not a current figure — the shared parse alone should be ~1/3 the instructions
-and ~1/3 the retained AST nodes for that seed work. **No re-measurement was
-taken**: the run needs `./mojoc`, i.e. a whole-closure compile at ~30-58 GB,
-which is outside what this session was allowed to run.
-
-### The one remaining lever, and how to start it
-
-**Per-module AST lifetime** (a `module_gen.py`-shaped edit): release a
-module's AST after its `.ci` is emitted instead of retaining it for the whole
-closure. That is where the ~670M retained small objects live — §2 ruled out
-fragmentation (1%), a fixed arena (953 mappings, linear growth), quadratic
-output assembly (`mojo_str_join` is a correct two-pass), one hot loop (a 5 s
-`sample` is flat), and the tokenizer as the volume source (14.8 MB of source
-against 58.6 GB).
-
-Start by answering one question: **which structure holds the ASTs of a module
-after that module's code is emitted?** `_SELFHOST_PARSE_CACHE`
-(`funcs_shared.py`) holds a rewritten statement list per file for the life of
-the process, and `gen._all_closures` / `_selfhost_extracted_fn_index` hold
-node references into them. The cache is the obvious first candidate because it
-is a plain dict with a documented per-file key, but note the constraint that
-makes it non-trivial: three different passes read it at three different points
-in the pipeline, so a bounded "release once every reader has passed" scheme is
-needed rather than a clear. If the cache turns out to be the whole story, the
-honest cheap experiment is a process that parses, emits, and drops, per module,
-with the per-file cache scoped to one module at a time.
-
-Correctness first: §5's rule is that a wrong answer can cost 1584x the memory
-of a right one and will look like a structural property of the system. So
-establish that `--dump-full` output is unchanged before believing any memory
-number, and `cmp` the artifacts — a lifetime change must be behaviour-
-preserving to the byte.
-
-## What this means for the fix (the original section, kept)
+### What this means for the fix
 
 The next step is **no longer localisation** — that is done above. It is to
 find which retained structures dominate the 670M objects, and the cheapest

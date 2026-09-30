@@ -4,158 +4,331 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status 2026-10-04 — the refusal names the callee and still will not answer; `read_table` is the module-level blocker
+## Status (re-verified 2026-08-26 — checked against this session's new loop-as-expression codegen; UNAFFECTED)
 
-Re-measured on this tree (`python3 fire.py build -o .tmp/out .tmp/ca/c_common/tables.py`,
-sources from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`, arm64, ~8 s). The file still
-does not build and the module-level refusal is `read_table`:
+This session implemented real loop-as-expression codegen for `list(x)`/
+`set(x)`/comprehension-as-value inside a compiled generator/coroutine
+body (see `bugs/CODEGEN_generator_function_Lib_codecs.md`'s entry of the
+same date for the implementation writeup). `read_table`'s own blocker is
+`for row in _get_reader(lines, delimiter=sep or '\t'):` — a for-loop
+whose iterable is a call through a callable PARAMETER (`_get_reader`
+defaults to `csv.reader`), not a `list()`/`set()`/comprehension shape —
+so no change was expected.
 
-    Error building: cannot compile module: function(s) read_table (generator function(s),
-      contain a `yield`/`yield from`)
+A/B'd via `git stash` (isolated `compile_to_gimple_with_cpp(do_imports=
+False)`, strict mode): byte-identical refusal before/after —
+`read_table: a call to unresolved callee 'next(...)'`. (Note: this
+differs in WORDING from this doc's own 2026-08-26 entry above, which
+records `"unsupported for-loop iterable type: CallExpr"` as the current
+blocker — that's a pre-existing methodology difference between a plain
+`do_imports=False` strict repro (what this verification and this doc's
+`fix/rest-remainder9`-era entries used) and whatever exact invocation
+produced today's `fix/rest-remainder18` entry; both are confirmed
+UNCHANGED by this session's own before/after A/B on this exact
+methodology, so this file is unaffected by this session's fix either
+way. Not investigated further — out of scope for this pass.) Confirmed
+unaffected; doc stays open.
 
-`MOJO_DEBUG=1` still prints the three refusal shapes this file contributes, all unchanged
-and all naming their callee:
+## Status (re-verified 2026-08-26)
 
-    read_table: a `for` over a call through the callable-valued local/parameter
-      '_get_reader(...)' is not supported in a compiled generator/coroutine body
-    chain:      every `yield` must carry a value, and all values must agree on one
-                scalar type (int64_t/double/_Bool)
+Fresh repro against this session's tree (`fix/rest-remainder18`)
+reproduces the identical single blocker, byte-for-byte: `read_table:
+unsupported for-loop iterable type: CallExpr` (`for row in
+_get_reader(lines, delimiter=sep or '\t'):`, where `_get_reader` is a
+callable PARAMETER defaulting to `csv.reader`). Same family as
+`bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_datafiles.md`'s
+`read_decls` blocker (a for-loop iterable resolved through a callable
+value rather than a statically-known generator/function) — confirmed
+genuinely still the same structural gap (no callable-parameter-value
+tracking into for-loop iteration in the coroutine-body emitter), plus
+the still-undiagnosed `fix_row = _normalize_fix_read(fix)` nested-
+function-factory-as-value shape right behind it. Not attempted — large
+feature-sized work. No code change; doc re-verified only.
 
-**Nothing in this entry's three sub-problems has moved**, and the entry's own correction
-still stands: `_get_reader` is NOT declared with either callable ctype, so step 1 is two
-steps (bind the default's type, then carry a signature).
+Re-verified again 2026-08-26, wtOpencode_canalyzer2 (fresh-cut worktree):
+with imports resolved, identical single refusal verbatim
+(`read_table: unsupported for-loop iterable type: CallExpr`); without
+imports the same function refuses one step earlier on unresolved
+`next(...)` (the foreign strutil generator handle can't resolve) —
+consistent with the entry below, no change in either direction.
 
-One measurement that IS new and that a next session should not have to make: **this file's
-closure reaches `c_common/fsutil.py`, and `MOJO_DEBUG=1` prints fsutil's own shapes while
-building `tables.py`** — `_walk_tree` and `glob_tree` refused on the same
-callable-valued-parameter `for`, plus `iter_files`' variadic lambda, plus a fourth,
-`iter_many`, refused on `a call to unresolved callee 'onempty(...)'`. So the three-file
-grouping in the entry below ("one fix, three files") is really four, and
-`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`'s own status says its blocker list
-has shrunk from four to three — `process_filenames`' `Exception(...)` is no longer among
-them, so `onempty(...)` is the same shape reached from another module and both should be
-counted once.
+## Status (updated 2026-08-25 — `next()` on a foreign generator FIXED (commit c4c88fa, verified end-to-end); read_table now reaches the NEXT unsupported shape: `for row in _get_reader(...)`)
 
-## Status 2026-10-02 — the suggested first slice is DONE: the refusal names the callable
+The doc's tracked blocker — `read_table`'s
+`lines = strutil._iter_significant_lines(infile)` +
+`next(lines).strip()` inside a compiled coroutine body — is now genuinely
+fixed in shared compiler source (commit `c4c88fa` on this branch), and the
+fix was verified END-TO-END (build exits 0 AND runtime output correct) on
+stand-in repros that isolate this exact shape:
 
-The slice the entry below asks for ("make the refusal NAME the
-callable-local case ... so the three files' shared blocker is legible")
-landed in commit `ad7ffd96`. The refusal is now:
+- same-module generator driven by `next()` inside a generator body,
+  with `try/except StopIteration`;
+- foreign sibling module (`import m` / `from m import gen` /
+  package-relative `from . import m`) whose generator is consumed via
+  `next()`; runtime values round-trip as real strings and exhaustion
+  raises/catches StopIteration correctly.
+
+What it took (all landed in shared source):
+
+1. **Relative imports never resolved on the compiled path at all.**
+   Root-caused during this session: `from . import strutil` produced
+   literal candidate filenames like `<dir>/..strutil.py` (the parser keeps
+   leading dots; find_imports concatenated another dot), so strutil was
+   NEVER part of tables.py's whole-program build — the doc's "foreign"
+   framing was stronger than assumed. `_module_candidate_paths` now
+   normalizes leading-dot names with the interpreter's own dots/level rule,
+   and the new `_join_import_member` keeps the binding site's and the
+   defining temp_gen's module strings byte-identical (including the
+   synthesized per-name candidates).
+2. **Generator-handle locals + `next()`** in gimple_cpp_core's coroutine
+   emitter: assignments from compiled-generator constructions declare
+   `MojoGenerator *` locals and emit `{base}_start(...)`; `next(g)` lowers
+   to `{base}_resume/_value` with Milestone D's pending-exception
+   disambiguation and a tagged StopIteration `_MojoCppExc` throw (so
+   `except StopIteration:` works via the existing try/except machinery);
+   chained `.strip()` etc. type correctly.
+3. **Cross-module linkage**: root `.cpp` preambles emit extern "C"
+   declarations for every referenced generator drive API; foreign siblings'
+   units already compiled+linked as their own objects
+   (`_compile_link_inline_cpp_unit`).
+4. **Value typing**: cross-module list-element contracts
+   (`_xmod_gen_elem_hints`, incl. one-level forwarding through local
+   wrappers) give foreign string generators a real `char *` promise instead
+   of a boxed int64_t. Supporting fixes that this surfaced: char*
+   truthiness for `not`/`if`/`while` (an empty string is falsy — raw `!ptr`
+   made `if not line.strip(): continue` silently never fire),
+   `str.partition(...)[0]`, collection-literal call arguments, and a silent
+   `object()` placeholder (the old weak stub printed "unavailable" once per
+   process from any `X = object()` module init).
+
+**This file still does not build**, blocked by the NEXT, precisely-
+diagnosed shape one line further down `read_table`:
 
 ```
-read_table: a `for` over a call through the callable-valued
-            local/parameter '_get_reader(...)' is not supported in a
-            compiled generator/coroutine body: what that call RETURNS is
-            not knowable here (it depends on which callable the caller
-            passes), and a `for` target needs the returned ITERATOR's
-            element type. It needs the callable's signature discovered
-            from its call sites first.
+Unsupported shape(s): read_table: unsupported for-loop iterable type:
+CallExpr.
 ```
 
-Verified on all three files the entry below groups as sharing this
-blocker, each of which now names its own callee:
+i.e. `for row in _get_reader(lines, delimiter=sep or '\t'):` — iterating a
+CALLABLE PARAMETER whose default is `csv.reader`. That needs: callable-param
+values holding builtin/module functions (`_open=open`,
+`_get_reader=csv.reader` are parameter DEFAULTS carrying non-representable
+values), invoking such a value, AND driving its result as an iterator — plus
+whatever csv.reader itself would have to do in this scalar model. Also still
+ahead in the same body: `fix_row = _normalize_fix_read(fix)` (a factory
+returning a NESTED function) invoked as `fix_row(row)`. These are separate,
+feature-sized capability gaps in the coroutine emitter, not regressions;
+not attempted this round.
 
-| file | callee named |
-|---|---|
-| `c_common/tables.py` | `read_table` → `_get_reader(...)` |
-| `c_analyzer/__init__.py` | `check_all` → `check(...)` |
-| `c_common/fsutil.py` | `_walk_tree` → `_walk(...)`, `glob_tree` → `_glob(...)` |
+## Status (re-verified 2026-08-25 — down to ONE blocker: `next()` on a cross-module generator handle)
 
-Regressions `cpp_for_over_callable_param_names_the_callee` and
-`cpp_for_over_callable_param_leaves_resolved_callees_alone` in
-`test_gimple_generator_runner.py` — the second is the negative half, so
-the gate cannot be quietly too wide.
-
-**The blocker itself is untouched, and the three sub-problems the entry
-below lists are still all three.** One correction to that entry's
-reasoning, measured: `_get_reader` is NOT declared with one of the two
-callable ctypes. Its parameter inference gives up on a default-valued
-parameter and leaves it at the `int64_t` default (measured by dumping this
-unit's `declared` at the `for`), which is why the refusal's gate is "the
-callee is a bare name this unit has DECLARED" rather than "the callee is
-declared as a callable" — the precise predicate misses every real
-instance of this shape. That is worth knowing before item 1 is started:
-the parameter is not yet recognised as a callable AT ALL, so step 1 is
-two steps (bind the default's type, then carry a signature), not one.
-
-## Status 2026-09-30 — one real blocker removed; a DIFFERENT, harder one is next
-
-Re-verified against the current tree (`python3 fire.py build`, sources copied
-from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/` into `.tmp/ca/`). The
-sole remaining refusal:
+Re-ran fresh against `fix/rest-remainder9`. Real progress since 2026-08-23:
+`parse_table` and `_fix_write_default` no longer appear in the refusal at
+all — both now compile past the generator-eligibility pre-pass cleanly.
+Only ONE ineligible generator remains:
 
 ```
-Unsupported shape(s): read_table: unsupported for-loop iterable type: CallExpr.
+Error building: cannot compile module: function(s) read_table (generator
+function(s), contain a `yield`/`yield from`) ...
+Unsupported shape(s): read_table: a call to unresolved callee 'next(...)'
+is not supported in a compiled generator/coroutine body (...).
 ```
 
-**This is progress, not the same blocker.** Until this session the sole
-refusal was
+Root-caused: `read_table`'s `lines = strutil._iter_significant_lines(infile)`
+binds a generator object obtained from a FOREIGN module (`c_common/
+strutil.py`, imported), then later does `actualheader = next(lines).strip()`.
+The coroutine-body emitter's `next(x)` support (gimple_cpp_core.py, ~line
+1736) only handles the case where `x` is a same-module STRUCT implementing
+`__next__` (real object-based iterator protocol) — it has no notion of a
+generator-typed local holding a coroutine handle at all, whether from this
+module or another. The nearby `yield from <call>` delegation machinery
+(`gen._generator_api`/`{base}_start/_resume/_value/_destroy`) is the
+closest existing analogue, but it only tracks SAME-MODULE generators the
+current compile has itself already translated via the C++20-coroutine
+path — `strutil._iter_significant_lines` is both foreign-module (no
+cross-module coroutine-handle linking exists yet) and manually driven via
+bare `next()` rather than a `for`/`yield from` consumption shape this
+emitter already understands. Making `next()` work on an arbitrary
+generator-typed local would need a new `_generator_var_api`-style
+tracking mechanism (mirroring `_async_var_api`/`_taskgroup_var_api`'s
+existing "value -> api" side-tables) PLUS cross-module coroutine-handle
+resolution for the `strutil` case specifically — a materially new codegen
+capability, not a local fix. Left untouched, per this round's guidance
+against large speculative feature work. Doc kept open; every one of the
+smaller, narrower gaps this doc previously tracked (tuple-yield, keyword-
+parameter escaping, `?:` type coercion, bare-module-reference lowering,
+bound-method-as-value) has now either been fixed or become moot as
+`parse_table`/`_fix_write_default` cleared the eligibility gate — `next()`
+on a foreign generator is now the sole, and genuinely structural, blocker.
+
+## Status (updated 2026-08-23 — real progress: coroutine units now EMIT C++ and reach g++; 13 new, precisely-diagnosed C++ errors remain)
+
+Re-ran against current master tip (`626f3f0`). For the first time this
+file's generators get past the eligibility pre-pass entirely —
+`parse_table`, `read_table`, and `_fix_write_default` all emit real
+coroutine `.cpp` units (confirming the tuple-yield support AND the
+2026-08-13 keyword-parameter escaping fix below both hold: no
+"expected ',' or '...' before 'default'" anywhere) — and the build now
+fails at the g++ stage with 13 errors that are ALL new, unrelated to
+either old blocker:
 
 ```
-read_table: a call to unresolved callee 'next(...)' is not supported in a
-compiled generator/coroutine body
+tables_gen.cpp: In function '_mojogen__fix_write_default_Task
+_mojogen__fix_write_default_impl(MojoList*, int64_t)':
+179:32: error: operands to '?:' have different types 'int64_t' and 'char*'
+tables_gen.cpp: In function '_mojogen_read_table_Task ...':
+258:13: error: 'strutil' was not declared in this scope; did you mean 'strtol'?
+265:24: error: 'next' was not declared in this scope
+273:28: error: invalid conversion from 'const char*' to 'int64_t'
+282:41: error: invalid conversion from 'MojoBoundMethod*' to 'int64_t'
+283:32: error: '_get_reader' cannot be used as a function
+284:31: error: 'fix_row' cannot be used as a function
+tables_gen.cpp: In function '_mojogen_parse_table_Task ...':
+359:10: error: declaration of 'auto line' has no initializer
+359:19: error: multiple declarations in range-based 'for' loop
+359:32: error: 'strutil' was not declared in this scope
+361/382: error: 'filename' was not declared in this scope
 ```
 
-— `read_table` doing `lines = strutil._iter_significant_lines(infile)` then
-`next(lines)`, where `read_table` is NOT A3-eligible (kwonly params →
-`coro.py`'s `_eligible` returns "kwonly params (v0)") and so compiles through
-the cpp C++20-coroutine path, while `strutil._iter_significant_lines` IS
-A3-lowered. That combination did not work at all, because the A3 backend
-filed its lowered generators only in the per-bare-name `_generator_api` and
-never in the whole-program `_generator_home_api` that
-`_cpp_resolve_generator_call_api` searches — so the cpp emitter could not
-build a handle for a foreign A3 generator even though both backends expose
-the identical `{base}_start/_resume/_value/_destroy` ABI.
+Mechanisms (all in the separately-maintained coroutine-body emitter,
+`_cpp_expr`/`_cpp_for_stmt` in gimple_cpp_core.py):
+1. `for line, filename in _get_reader(...)` inside `parse_table` — a
+   TUPLE-target for-loop over a non-`enumerate` iterable emits malformed
+   `for (auto line, filename : ...)` C++ ("multiple declarations in
+   range-based 'for' loop", cascading "'filename' was not declared").
+   The coroutine drive-loop's tuple-unpack exists but only for an
+   already-translated GENERATOR callee; `_get_reader` isn't one here.
+   Same gap family `c_parser/datafiles.py`'s doc lists.
+2. Bare module references in the body (`strutil.split(...)` etc.) have
+   no lowering → `'strutil' was not declared`; same for the `next()`
+   builtin (used against a generator-object local).
+3. `_get_reader(...)`/`fix_row(...)` as nested-function calls resolve to
+   undeclared symbols; a bound method stored/passed as a value converts
+   `MojoBoundMethod*`→`int64_t`.
+4. `_fix_write_default`'s ternary over a param default mixes
+   int64_t and char* (`default=None` vs string defaults).
 
-Fixed in commit `93eacde6`: `publish_a3_generators`
-(`mojo/backend_gimple/emit_resolve.py`) + the `for x in <generator handle>:`
-case in `_cpp_for_stmt`. Regression tests
-`foreign_a3_generator_handle_next` / `..._for_loop` in
-`test_gimple_generator_runner.py` (both verified failing before the change;
-the `for` one failed with a silent wrong answer).
+Notably, the 2026-08-09 note's latent `ColumnSpec._parse` `cls(*values)`
+spread-call finding is no longer observable either way — the ordinary
+path now handles spread call arguments (the parser wraps them in a
+UnaryOp node; see this repo's CLAUDE.md), and `_parse` compiles past
+that line. Doc kept open; every remaining mechanism above is
+feature-sized work on shared coroutine-codegen machinery. Not attempted.
 
-### The blocker now in front of this file, and why it is hard
+## Status (updated 2026-08-10 — tuple-valued yield now FIXED; a NEW, precisely-diagnosed, unrelated blocker found)
 
-`read_table` (c_common/tables.py:115):
+Implemented real tuple-valued-`yield` support this session (see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes`). Confirmed via an isolated compile: `parse_table`'s `yield
+row, filename` (line 183) is no longer refused.
 
-```python
-for row in _get_reader(lines, delimiter=sep or '\t'):
-    yield tuple(fix_row(row))
+**This file still does not build**, blocked by a DIFFERENT, precisely-
+diagnosed, pre-existing gap — not in the tuple-yield boxing itself
+(confirmed clean), but in the coroutine's own C++ FUNCTION SIGNATURE:
+`parse_table(entries, sep='\t', header=None, rawsep=False,
+default=None, strict=True)` has a parameter literally named `default`
+— a C++ reserved keyword. The coroutine-body codegen's parameter-list
+emission (`cpp_sig`, `_gen_cpp_generator_unit`) doesn't escape C++-
+keyword parameter names the way struct FIELD names already are
+(`_CPP_KEYWORD_FIELDS`) — g++ then fails to parse the function
+signature at all ("expected ',' or '...' before 'default'"), which
+cascades into "not declared in this scope" errors for every OTHER name
+in the function body (including this session's own correctly-generated
+tuple-boxing code, which is innocent — it's simply unreachable once the
+enclosing function's signature itself fails to parse). Confirmed by line
+number: the very first error is at the `_mojogen_parse_table_impl`
+function-signature line itself, and every subsequent error in that
+function is a direct syntactic consequence of that one parse failure.
+
+A real fix would extend the SAME keyword-escaping mechanism
+`_CPP_KEYWORD_FIELDS`/`_cpp_expr`'s IdentExpr case already applies to
+struct field names, to coroutine PARAMETER names too — not attempted
+here (a distinct, well-scoped `_gen_cpp_generator_unit` gap, unrelated
+to the promise/ABI value-representation work this session's fix
+targets). Doc kept open (not deleted) — tuple-yield is no longer this
+file's blocker, but the file genuinely still doesn't build.
+
+## Status (re-verified 2026-08-09)
+
+Re-ran against current master (`python3 fire.py build .../c_common/
+tables.py`). The previously-documented `ColumnSpec._parse`
+`cls(*values)` spread-call-against-opaque-callee GCC error ("type
+mismatch in binary expression" at line 289) no longer surfaces — but
+NOT because that bug was fixed. `gen_module`'s generator-eligibility
+pre-pass (which now honestly refuses `parse_table`, see below) runs,
+and raises, entirely in Python BEFORE any C is ever handed to GCC —
+that raise necessarily happens earlier in the pipeline than a GCC-
+level type-mismatch ever could. The only way the old doc's GCC error
+could have been reached at all is if, at capture time, the generator-
+eligibility check didn't yet reject `parse_table`'s tuple-valued yield
+(i.e. an earlier, more permissive version of the coroutine-lowering
+pre-pass let it through, presumably emitting silently-wrong C, which
+then went on to hit the unrelated `cls(*values)` bug during GCC
+compilation). The eligibility check has since been hardened to
+honestly refuse tuple-valued yields up front instead of silently
+mis-lowering them. So: the `cls(*values)` opaque-callee spread-call
+bug is UNVERIFIED here, not confirmed fixed — it's simply unreachable
+now, masked by an earlier (and more correct) refusal. Left as a
+separate, latent finding; not re-investigated since it can't be
+reached from this file's current top-level compile.
+
+Current failure is the same already-tracked "coroutine codegen has
+much weaker yield/type coverage than the ordinary function path" gap
+independently confirmed this session for `c_analyzer/__init__.py`,
+`c_analyzer/__main__.py`, `c_analyzer/info.py`, and
+`c_common/scriptutil.py`:
+
+```
+Error building: cannot compile module: function(s) parse_table
+(generator function(s), contain a `yield`/`yield from`) — this codegen
+compiles every function into a single straight-line C function and has
+no suspend/resume state-machine transform for generators, ...
 ```
 
-`_get_reader` is a DEFAULT-VALUED CALLEDABLE PARAMETER (`_get_reader=csv.reader`
-in the signature at :88). Its return value's shape — a `csv.reader` object —
-is not knowable at compile time: it depends on the caller's override, and
-this scalar body model has no representation for a dynamically-produced
-iterator (it needs the loop-variable types, which come from the iterator's
-element type). This is the same family as the `check_all` blocker in
-`bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___init__.md` and the
-`unsupported for-loop iterable type: CallExpr` family in
-`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` — i.e. three of
-my files now share ONE remaining blocker, which is the right grouping for a
-follow-up.
+With `MOJO_DEBUG=1`:
 
-### Next step
+```
+generator 'parse_table' not eligible for C++ coroutine path, falling
+back to honest refusal: parse_table: every `yield` must carry a value,
+and all values must agree on one scalar type (int64_t/double/_Bool)
+```
 
-`for <target> in <call to a callable-value local>:` where the callee is a
-declared callable local (`_CPP_CALLABLE_CTYPE`) and the loop target is a
-tuple. Three things are needed together, and none is a one-liner:
+`parse_table` (line 153) does `yield row, filename` (line 183) — a
+2-tuple-valued yield. The coroutine promise machinery only supports a
+single scalar (`int64_t`/`double`/`_Bool`) yield-value type, exactly
+the documented "tuple-valued yields aren't representable at all" gap.
+Not attempted here — deliberately deferred, already-tracked compiled-
+generator/async-codegen project scope, not a narrow fix.
 
-1. A way to give the loop variable a real type. `_cpp_for_stmt`'s
-   list-iterable branch already types the target from the element type it
-   derives; a callable-local call has no such derivation, so either the
-   callee's declared return type must be tracked into the body model (it is
-   NOT in `_cpp_declared`) or the shape must be refused more precisely than
-   today's flat "unsupported for-loop iterable type: CallExpr", which does
-   not even name which call it could not type.
-2. Element access. `csv.reader` yields rows; the ordinary path has per-slot
-   accessors for a `MojoList *` but nothing that produces one from an
-   unknown iterator.
-3. A decision about `fix_row(row)` (`_normalize_fix_read`'s result) in the
-   same body — likely fine once 1 and 2 exist, but not yet checked.
+(The old GCC-warning-log excerpt previously shown here was from the
+stale pre-hardening repro described above and has been removed —
+current repro fails before GCC is ever invoked.)
 
-Suggested first slice, independent of the above: make the refusal NAME the
-callable-local case (`for ... in <call through a callable local>`) so the
-three files' shared blocker is legible in `Unsupported shape(s)` rather than
-looking like one undifferentiated CallExpr gap.
+## Status (updated 2026-08-13 — coroutine keyword-parameter-name blocker FIXED)
 
+Fixed: `gimple_codegen.py`'s coroutine (.cpp) parameter emission
+(`_gen_cpp_generator_unit`/`_gen_cpp_async_unit`) now escapes a
+parameter name that's a reserved C/C++ keyword (e.g. `default`) to
+`_kw_<name>`, consistently across the emitted signature, the
+`_start`-to-`impl` call-forwarding text, and every body reference
+(`_cpp_expr`'s IdentExpr fallback, `_cpp_stmt`'s AssignStmt target) —
+mirrors the escaping already applied to struct FIELD names
+(`_CPP_KEYWORD_FIELDS`) and to the ordinary (non-coroutine) GIMPLE
+path's own parameter names (`_C_KEYWORDS`/`_declare_var`), just ported
+to this separate coroutine emitter. Threaded through a new scoped-state
+map, `self._cpp_kw_param_renames` (mirrors `_cpp_mut_capture_names`'s
+identical reset-per-unit convention).
+
+Confirmed fixed: `parse_table`'s g++ signature-parse failure
+("expected ',' or '...' before 'default'") is gone — re-running
+`python3 fire.py build .../c_common/tables.py` no longer produces that
+error or any of its cascaded "not declared in this scope" follow-on
+errors.
+
+**This file still does not build** — as anticipated by the
+2026-08-09 status below, the build now reaches (and reproduces) the
+separate, already-documented `ColumnSpec._parse`'s `cls(*values)`
+opaque-callee spread-call gap ("type mismatch in binary expression" at
+line 289), previously only a latent, unverified finding masked by the
+earlier (now-fixed) coroutine-signature failure. Not attempted here —
+out of scope for this narrow keyword-escaping fix.

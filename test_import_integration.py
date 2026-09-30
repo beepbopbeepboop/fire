@@ -106,7 +106,7 @@ def compile_and_link(main_src: str, helper_srcs: dict) -> str:
 
 def test_multi_name_import_interpreter():
     """`import a, b, c` must bind *every* name into scope, not just the
-    first (INTERP_multi_name_import_only_binds_first). Regression
+    first (bugs/INTERP_multi_name_import_only_binds_first.md). Regression
     test for myinterpreter.py's execute_ImportStmt: previously only
     node.module/node.alias were bound, and every entry in node.extra (the
     comma-separated targets past the first) was silently dropped, so using

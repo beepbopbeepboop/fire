@@ -10,22 +10,10 @@ module-level constants are byte-identical to their originals.
 """
 from __future__ import annotations
 import re
-from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _FLOAT_TYPES
+from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG
 import dataclasses
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _signed_int64
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _signed_int64
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
-# Whether a node's CLASS is a dataclass, cached beside the field names for
-# the same reason and on the same key. `dataclasses.is_dataclass` is a pure
-# function of its argument's type, so the per-class answer is static for the
-# life of the process exactly as the field-name tuple is — but it was being
-# re-asked on EVERY node visit, which at the 160-module struct chain this
-# file's walk utility is profiled on meant 4,207,567 calls costing 1.42s of a
-# 23.3s profiled run (6.1%) to re-derive an answer the very next line's
-# `_WALK_FIELD_NAMES_CACHE.get(type(node))` had already been keyed on.
-# `None` means "not a dataclass"; a tuple means "a dataclass, and these are
-# its field names". A class that is not a dataclass has no entry to compute,
-# so it is stored as `None` and never re-tested.
-_WALK_DATACLASS_CACHE: dict[type, bool] = {}
 _WALK_AST_MAX_DEPTH = 900
 
 def _walk_ast_into(node, out, _depth=0):
@@ -69,20 +57,15 @@ def _walk_ast_into(node, out, _depth=0):
     # never pre-registered and emitted `(uint64_t *)0` (repro:
     # std/test/memory/uninit_check/test_uninit_check_float64_poison). A
     # genuine int/str/float is never a dataclass, so this ordering is safe.
-    _nc = type(node)
-    _is_dc = _WALK_DATACLASS_CACHE.get(_nc)
-    if _is_dc is None:
-        _is_dc = dataclasses.is_dataclass(node)
-        _WALK_DATACLASS_CACHE[_nc] = _is_dc
-    if _is_dc:
-        fnames = _WALK_FIELD_NAMES_CACHE.get(_nc)
+    if dataclasses.is_dataclass(node):
+        fnames = _WALK_FIELD_NAMES_CACHE.get(type(node))
         if fnames is None:
             _raw = dataclasses.fields(node)
             _names = []
             for _f in _raw:
                 _names.append(_f.name if hasattr(_f, 'type') else _f)
             fnames = tuple(_names)
-            _WALK_FIELD_NAMES_CACHE[_nc] = fnames
+            _WALK_FIELD_NAMES_CACHE[type(node)] = fnames
         for fname in fnames:
             _child = getattr(node, fname, None)
             if _child is node:
@@ -440,281 +423,6 @@ def _local_literal_ctype(value) -> str | None:
         return '_Bool'
     return None
 
-def _receiver_ctypes(gen, node) -> list:
-    """Every C type this backend has RECORDED for the receiver expression
-    `node`, most authoritative first. For a bare name these are the four
-    places a name's type can live, and they genuinely disagree in coverage:
-
-    - `_quick_type` reads `var_types`, which covers a local and a parameter
-      but NOT a module-level GLOBAL (`b = Box(True, 5)` at module scope has no
-      `var_types` entry, so `_quick_type` answers the `int64_t` default);
-    - `_global_var_types` is where a module-level name's own declaration is
-      recorded;
-    - `_param_struct_types` is where a parameter's struct identity is kept when
-      the C signature had to ABI-box it to a scalar and `_quick_type` can only
-      see the box;
-    - `_actual_types` is where a value's real type is recorded after it was
-      stored into an `int64_t` slot.
-
-    An EMPTY list is the honest answer for an expression none of them describes,
-    and every caller treats it as "cannot tell" rather than guessing — which is
-    why the answer here is a LIST and not a single winner: a field lookup
-    keyed on the struct name can accept any of them, and a wrong winner would
-    silently answer about the wrong struct."""
-    if isinstance(node, IdentExpr):
-        out = []
-        try:
-            out.append(gen._quick_type(node))
-        except Exception:
-            pass
-        _gvt = getattr(gen, '_global_var_types', None) or {}
-        if node.name in _gvt:
-            out.append(_gvt[node.name])
-        _pst = getattr(gen, '_param_struct_types', None) or {}
-        if node.name in _pst:
-            out.append(f'{_as_str(_pst[node.name])} *')
-        _at = getattr(gen, '_actual_types', None) or {}
-        if node.name in _at:
-            out.append(_at[node.name])
-        return out
-    try:
-        return [gen._quick_type(node)]
-    except Exception:
-        return []
-
-
-def record_bool_params(gen, node) -> None:
-    """Record which of the function being lowered has a `bool`-annotated
-    PARAMETER, keyed by `gen.current_func_name`.
-
-    Called from the two sites in `emit_funcs.py` that set `current_func_name`
-    with the `FunctionDef` in hand — the free-function path (`node.name`) and
-    the struct-method path (`<Struct>_<method><overload>`) — because those are
-    the only places where the annotation text and the emitted function name are
-    both available. `_signature_ctypes` was the alternative chokepoint, but it
-    is only reached for a varargs signature on the body-lowering path (the
-    unconditional `func_param_types[...] = _signature_ctypes(...)` writes are
-    in later pre-passes and in prototype emission), so it would have missed
-    every ordinary signature.
-
-    The key is `current_func_name` verbatim rather than a name derived here,
-    so the reader cannot disagree with the writer about what a method's key is.
-
-    `*args` / `**kwargs` are skipped: they are packed into a `MojoList *` /
-    `MojoDict *` and have no per-element annotation to honour, so claiming
-    them would be a claim about nothing.
-    """
-    _tbl = getattr(gen, '_bool_param_names', None)
-    if _tbl is None:
-        _tbl = {}
-        gen._bool_param_names = _tbl
-    _key = _as_str(getattr(gen, 'current_func_name', '') or '')
-    if not _key:
-        return
-    _names = _tbl.get(_key)
-    if _names is None:
-        _names = set()
-        _tbl[_key] = _names
-    # Indexed, and never `isinstance(_p, list)`: a param element is a
-    # (name, annotation) TUPLE under CPython, so a list test is False for
-    # every one of them and the whole table stays empty. Self-hosted, the
-    # documented shape is a 2-slot list, which is why the codebase indexes.
-    _params = getattr(node, 'params', None) or []
-    for _pi in range(len(_params)):
-        _p = _params[_pi]
-        _pn = _as_str(_p[0])
-        if not _pn or _pn.startswith('*'):
-            continue
-        if _p[1] is not None and _as_str(_p[1]).strip() == 'bool':
-            _names.add(_pn)
-
-
-def bool_param_in_scope(gen, name: str) -> bool:
-    """Is `name` a `bool`-annotated parameter of the function being lowered?
-    See `record_bool_params` for how the table is written.
-
-    The trailing-digit strip is the one wrinkle: an OVERLOADED method's
-    `current_func_name` carries its overload id (`Box_report2`) while the
-    annotation is per-declaration, and `Box_report` is the key that names it.
-    Stripping the digit run recovers that key; without it an overloaded
-    method's bool parameters simply fall back to today's answer, which is the
-    safe direction.
-    """
-    _tbl = getattr(gen, '_bool_param_names', None)
-    if not _tbl or not name:
-        return False
-    _cf = _as_str(getattr(gen, 'current_func_name', '') or '')
-    _names = _tbl.get(_cf)
-    if _names is not None and name in _names:
-        return True
-    _base = _cf
-    while _base and _base[-1].isdigit():
-        _base = _base[:-1]
-    if _base != _cf:
-        _names = _tbl.get(_base)
-        if _names is not None and name in _names:
-            return True
-    return False
-
-
-def is_python_bool_expr(gen, node) -> bool:
-    """Does this AST expression hold a Python `bool` VALUE, as distinct from a
-    plain int?
-
-    A bool's C type is a plain `int` in this backend — `BoolLiteral` lowers to
-    `int`, and `any`/`all`/`isinstance` return a C `int` on purpose — so every
-    consumer that has to CHOOSE between the int formatting and the bool one
-    (`1`/`0` vs `True`/`False`) has to look at the expression instead, and a
-    bare NAME has nothing left to look at: `b = True` gives `b` an `int`
-    lowered type. Those names are recorded in `gen._bool_valued` by
-    `_record_bool_valued` (emit_stmts.py) for exactly this purpose.
-
-    A FIELD read is the other shape with nothing left to look at, and for the
-    same reason: `_TYPE_MAP` maps `'bool'` to `'int'` (deliberately — see
-    `struct_bool_fields`' own docstring), so a `flag: bool` field's lowered
-    type is an ordinary integer and `gen._quick_type` cannot tell it from an
-    `int` field. `gen.struct_bool_fields` already records which fields carry a
-    `bool` annotation (module_gen.py populates it where the annotation is still
-    readable — the struct-field scan for a class-body declaration, and
-    `_gmi_collect_self_assigns` for the `self.flag = flag` shape that carries
-    the annotation on the `__init__` PARAMETER — and the reflection repr
-    consults it) so this is the SAME evidence the struct's own
-    `_mojo_repr_<Sn>` uses, read here instead of re-derived. Without this arm
-    every spelling of a bool field printed `1`/`0` — `print(b.flag)`,
-    `repr(b.flag)`, `f'{b.flag}'`, `'%r' % (b.flag,)`, `{'k': b.flag}` and
-    `[b.flag]` — while the same value compared (`b.flag == True`) was right,
-    because the comparison produces its own `_Bool`.
-
-    A `bool`-annotated PARAMETER is the third shape, and the hardest of the
-    three to key. `'bool'` resolves to `'int'` and `'int'` to `'int64_t'`, so
-    a bool param IS distinguishable from an int param in `func_param_types` —
-    but NOT from a small integer LITERAL's own lowering, which is also a plain
-    C `int` (see `_local_literal_ctype`'s docstring). Keying off `'int'` would
-    be a guess that turns `x = 5; print(x)` into `True`. So the annotation is
-    captured where it is still readable — `record_bool_params`, called from
-    the two places that set `gen.current_func_name` with the `FunctionDef` in
-    hand — and read back per function by `bool_param_in_scope`.
-
-    One predicate, so `print`, a dict store and a list literal cannot disagree
-    about the same value — which they did: `print(b)` formatted as True/False
-    while `{'k': b}` stored a value the dict repr then rendered as `1`.
-
-    Best-effort by contract: a node nothing can type simply answers False,
-    which is the pre-existing behaviour of every caller."""
-    if isinstance(node, BoolLiteral):
-        return True
-    if isinstance(node, IdentExpr) and node.name in getattr(gen, '_bool_valued', ()):
-        return True
-    if isinstance(node, IdentExpr) and bool_param_in_scope(gen, _as_str(node.name)):
-        return True
-    if isinstance(node, MemberExpr):
-        return _is_python_bool_field(gen, node)
-    if isinstance(node, CallExpr):
-        return _is_python_bool_method(gen, node)
-    try:
-        return gen._quick_type(node) == '_Bool'
-    except Exception:
-        return False
-
-
-def _is_python_bool_field(gen, node) -> bool:
-    """Is this `x.f` / `self.f` a struct field whose ANNOTATION says `bool`?
-
-    The fourth source `is_python_bool_expr` consults, and the one that
-    cannot be a ctype test. `_TYPE_MAP` maps `'bool'` to `'int'`, so
-    `_resolve_type('bool')` returns `'int'` and a `bool`-annotated field
-    occupies an ordinary integer slot: the field read lowers to `int`, the
-    struct declares `int flag`, and every `_Bool` arm downstream has
-    nothing to fire on. The bool-ness is destroyed before any chokepoint
-    could look at it, which is why `struct_bool_fields` exists — the
-    annotation is recorded while the StructDef is still readable (the
-    struct's own generated `__repr__` has consulted that table all along,
-    so `print(b)` said `flag=True` while `print(b.flag)` said `1`).
-
-    Resolving the RECEIVER's struct is the whole job, and there are two
-    spellings: `self.f` inside the struct's own method, where the current
-    struct is the answer, and `b.f` everywhere else, where the receiver is an
-    ordinary expression whose type has to be ASKED FOR -- through
-    `_receiver_ctypes`, which is the one place that knows a name's type can
-    live in four tables that genuinely disagree in coverage. Calling
-    `gen._quick_type` here instead answered `int64_t` for a module-scope
-    `b = Box(True, 5)`, because `_quick_type` reads `var_types`, which has no
-    entry for a module-level GLOBAL: every spelling of `b.flag` printed
-    `1`/`0` at module scope while the same field inside a function printed
-    `True`/`False`. `_receiver_ctypes` answers with a LIST of every type the
-    backend has RECORDED for the name, so a spelling it cannot type at all
-    (a call result, a subscript) matches nothing and this answers False --
-    the pre-existing behaviour of every caller of the shared predicate.
-    """
-    _member = getattr(node, 'member', None)
-    if not _member:
-        return False
-    _bf = getattr(gen, 'struct_bool_fields', None)
-    if not _bf:
-        return False
-    _recv = getattr(node, 'obj', None)
-    if isinstance(_recv, IdentExpr) and _recv.name == 'self':
-        _sn = getattr(gen, '_current_struct_name', None)
-        if _sn and _member in (_bf.get(_sn) or ()):
-            return True
-    for _rt in _receiver_ctypes(gen, _recv):
-        if not _rt or not _rt.endswith(' *'):
-            continue
-        _rsn = _struct_name_of(_rt)
-        if _rsn and _member in (_bf.get(_rsn) or ()):
-            return True
-    return False
-
-
-def _is_python_bool_method(gen, node) -> bool:
-    """Is this `x.m(...)` a method of a struct that RETURNS a `bool` field?
-
-    The fifth source `is_python_bool_expr` consults, and the shape most real
-    code uses: `def get(self): return self.flag`. The method's C return type
-    is inferred from its body, the body is a read of an `int` field, so the
-    inference lands on `int64_t` exactly as the direct read does — and
-    `print(b.get())` printed `1` where CPython prints `True`.
-
-    Note that `b.get() == True` was ALREADY right, because the comparison
-    produces a `_Bool`; a test that only checked the equality would pass
-    while every printing spelling was wrong, which is the same trap
-    `CODEGEN_repr_of_a_bool_prints_1.md` documents for print vs repr.
-
-    `struct_bool_methods` records only methods whose EVERY `return` hands
-    back a bool field (see module_gen.py's second per-method loop), so a
-    method that merely reads one is not claimed. The receiver is resolved
-    through `_receiver_ctypes` for the same reason the field case is — a
-    LIST, so `b.get()` at module scope and the identical call inside a
-    `def` cannot disagree. As with the field case, the answer is
-    deliberately NOT a `_Bool` return type: that would make `b.get() + 1` a
-    GIMPLE operand-type error, which is the reason the real fix (this
-    document's option A, `_TYPE_MAP['bool'] = '_Bool'`) needs the full gate
-    and its own session.
-    """
-    _f = getattr(node, 'func', None)
-    if not isinstance(_f, MemberExpr):
-        return False
-    _bm = getattr(gen, 'struct_bool_methods', None)
-    if not _bm:
-        return False
-    for _rt in _receiver_ctypes(gen, _f.obj):
-        if not _rt or not _rt.endswith(' *'):
-            continue
-        if _as_str_node(_f.member) in (_bm.get(_struct_name_of(_rt)) or ()):
-            return True
-    return False
-
-
-def _as_str_node(v) -> str:
-    """`v` as text, for an AST field read that may be boxed.
-
-    The self-hosted backend boxes a struct field read to `int64_t`, so a
-    bare comparison would compare an address; every other consumer in this
-    file goes through `fire_compiler._as_str` for the same reason."""
-    from fire_compiler import _as_str
-    return _as_str(v)
-
-
 def _receiver_key(e) -> str | None:
     """Stable string identity for a "receiver" sub-expression whose STORED
     per-name type info (`dict_val_types`, below) was recorded under that
@@ -745,7 +453,7 @@ def _is_known_struct_ptr_ctype(ctype, known_structs) -> bool:
     re-deriving a second notion of "is this really a struct pointer"."""
     return known_structs is not None and isinstance(ctype, str) and ctype.endswith(' *') and (ctype[:-2] in known_structs)
 
-def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, self_struct_ctype: str | None=None, module_global_types: dict | None=None) -> str | None:
+def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, self_struct_ctype: str | None=None) -> str | None:
     """Best-effort scalar C++ type of a narrow-generator-body expression —
     used both to pick each first-assigned local's declared type and to infer
     a generator's single yielded-value type. Deliberately conservative:
@@ -780,23 +488,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
     like every other compiled struct-method call site already resolves it)
     is one. Reuses this codegen's ALREADY-established per-struct dict-value-
     type/method-return-type registries rather than inventing new tracking —
-    see CODEGEN_generator_function_Lib_enum.md's 2026-08-20 update.
-
-    `module_global_types` (optional, default None — every existing caller
-    that doesn't pass it keeps this function's original behaviour) is a
-    `"<module marker>.<name>" -> ctype` map of module-level constants this
-    compile can read by name (`os.linesep`, `fsutil.USE_CWD`). A MemberExpr
-    rooted at one of those names is the value of a real field of that
-    module's globals struct, so it has a real type; without the map it fell
-    through to `return None` and every local bound to one took this
-    function's `int64_t` default — a string constant became an `int64_t`
-    local, which then disagreed with its sibling string locals and turned a
-    generator that yields strings everywhere into the mixed-kind refusal
-    (scriptutil.py's `iter_marks`: `div = os.linesep` beside
-    `end = f'{mark}{os.linesep}'`, bugs/COMPILE_FAIL_Tools_c-analyzer_c_
-    common_scriptutil.md). The map is the coroutine-body half of the
-    ordinary GIMPLE path's `submod.GLOBAL` read, which resolves the same
-    field's own `(c_type, mojo_type)` triple."""
+    see CODEGEN_generator_function_Lib_enum.md's 2026-08-20 update."""
     if isinstance(e, IntLiteral):
         return 'int64_t'
     if isinstance(e, FloatLiteral):
@@ -805,9 +497,6 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
         return '_Bool'
     if isinstance(e, StringLiteral):
         return 'char *'
-    if isinstance(e, MemberExpr) and module_global_types is not None \
-            and isinstance(e.obj, IdentExpr):
-        return module_global_types.get(f"{e.obj.name}.{e.member}")
     if isinstance(e, MemberExpr) and isinstance(e.obj, IdentExpr) and (e.obj.name == 'self'):
         if self_fields is None:
             return None
@@ -826,19 +515,19 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return known[e.name]
         return 'int64_t'
     if isinstance(e, UnaryOp):
-        return _infer_simple_expr_ctype(e.operand, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types, module_global_types=module_global_types)
+        return _infer_simple_expr_ctype(e.operand, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
     if isinstance(e, TernaryExpr):
-        ct = _infer_simple_expr_ctype(e.condition, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types, module_global_types=module_global_types)
-        tt = _infer_simple_expr_ctype(e.then_val, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types, module_global_types=module_global_types)
-        et = _infer_simple_expr_ctype(e.else_val, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types, module_global_types=module_global_types)
+        ct = _infer_simple_expr_ctype(e.condition, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
+        tt = _infer_simple_expr_ctype(e.then_val, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
+        et = _infer_simple_expr_ctype(e.else_val, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
         if tt is not None:
             return tt
         if et is not None:
             return et
         return 'int64_t'
     if isinstance(e, BinaryOp):
-        lt = _infer_simple_expr_ctype(e.left, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types, module_global_types=module_global_types)
-        rt = _infer_simple_expr_ctype(e.right, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types, module_global_types=module_global_types)
+        lt = _infer_simple_expr_ctype(e.left, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
+        rt = _infer_simple_expr_ctype(e.right, known, self_fields, async_api, closure_api, fn_return_types=fn_return_types)
         if lt is None or rt is None:
             return None
         if 'char *' in (lt, rt):
@@ -864,7 +553,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             if isinstance(_next_arg, IdentExpr) and _next_arg.name == 'self':
                 recv_ctype = self_struct_ctype
             else:
-                recv_ctype = _infer_simple_expr_ctype(_next_arg, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, fn_return_types, self_struct_ctype=self_struct_ctype, module_global_types=module_global_types)
+                recv_ctype = _infer_simple_expr_ctype(_next_arg, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, fn_return_types, self_struct_ctype=self_struct_ctype)
             if _is_known_struct_ptr_ctype(recv_ctype, known_structs):
                 rt = method_return_types.get(f'{recv_ctype[:-2]}___next__')
                 if rt in ('int64_t', 'double', '_Bool', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
@@ -913,7 +602,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
                 if _is_known_struct_ptr_ctype(vt, known_structs):
                     return vt
         if method_return_types is not None and (not getattr(e, 'kwargs', None)) and (e.func.member != 'get'):
-            recv_ctype = _infer_simple_expr_ctype(e.func.obj, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, module_global_types=module_global_types)
+            recv_ctype = _infer_simple_expr_ctype(e.func.obj, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types)
             if _is_known_struct_ptr_ctype(recv_ctype, known_structs):
                 rt = method_return_types.get(f'{recv_ctype[:-2]}_{e.func.member}')
                 if rt in ('int64_t', 'double', '_Bool', 'char *'):
@@ -1173,7 +862,7 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None,
             slots = merged
     return (found, slots)
 
-def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, module_global_types: dict | None=None) -> str | None:
+def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None) -> str | None:
     """The single scalar C++ type every `yield <value>` / `yield from
     <call>` in fn's own body must agree on (mixed types, a bare `yield` with
     no value, or a `yield from` that doesn't resolve to a known compiled
@@ -1205,12 +894,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
     case already consults) let a `yield from self.<field>`/`yield from
     <local list>` site resolve its REAL element type instead of always
     defaulting to char* — see `_yield_from_delegate_ctype`'s matching
-    case. Real: Lib/tarfile.py's `TarFile.__iter__`. `module_global_types`
-    (`"<module marker>.<name>" -> ctype`, threaded straight through to
-    `_infer_simple_expr_ctype` below exactly as `known_structs` and friends
-    are) lets a `yield <module constant>` site resolve that constant's real
-    type instead of reporting the kind as unresolved — see
-    `_infer_simple_expr_ctype`'s own `module_global_types` entry."""
+    case. Real: Lib/tarfile.py's `TarFile.__iter__`."""
     ctype = None
     for n in _walk_own_body(fn.body):
         if isinstance(n, YieldExpr):
@@ -1225,7 +909,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
             elif isinstance(n.value, (ListExpr, DictExpr, SetExpr)):
                 return None
             else:
-                t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, fn_return_types, self_struct_ctype=self_struct_ctype, module_global_types=module_global_types)
+                t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, fn_return_types, self_struct_ctype=self_struct_ctype)
                 if t is None:
                     t = 'int64_t'
             if ctype is None:
@@ -1288,7 +972,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                 continue
             if n.value is None:
                 continue
-            t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, fn_return_types, module_global_types=module_global_types)
+            t = _infer_simple_expr_ctype(n.value, known, self_fields, async_api, closure_api, known_structs, dict_val_types, method_return_types, fn_return_types)
             if t is None:
                 return None
             if ctype is None:
@@ -1297,138 +981,12 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                 return None
     return ctype
 
-def _dict_literal_spread_operand(key_expr):
-    """The mapping a `**expr` pair spreads, or None if this pair is not one.
-
-    PEP 448 mapping unpacking is spelled by the parser as a PAIR whose KEY is
-    a `UnaryOp(op='**', operand=<mapping>)` and whose VALUE is the `NoneType`
-    sentinel — `fire_compiler.py`'s `_parse_dict_entry`, and
-    `myinterpreter.py`'s `eval_DictLiteral` (whose docstring states the
-    convention) is the reference reading of it. `value is None` is the
-    discriminator, not the key's type, because a `{**d}` pair and a real
-    `{k: v}` pair both have an expression in the key slot.
-
-    Lives here rather than in the backend module that first needed it because
-    two of them ask: the dict literal's STORE asks for the operand (it calls
-    `mojo_dict_update` with it) and `dict_literal_val_ctype` asks only whether
-    the pair is one (a spread pair carries no value sample).
-    """
-    if isinstance(key_expr, UnaryOp) and key_expr.op == '**':
-        return key_expr.operand
-    return None
-
-
-def dict_literal_val_ctype(gen, pairs) -> str:
-    """The dict VALUE ctype a `{k: v, ...}` LITERAL stores under, by the
-    first-pair sample rule the dict-literal lowering has always used.
-
-    ONE definition of that rule, because two callers need it and they must
-    not drift: `_lower_dict_literal` (which stamps the answer onto the temp
-    it allocates) and `module_gen.py`'s cross-call dict-value contract
-    (which stamps the same answer onto a CALLEE's unannotated parameter, from
-    a literal written at the call site instead — `f({"x": "1"})`). With two
-    copies, a call site's contract and the literal's own lowering could
-    disagree about the very dict they describe, and the parameter would be
-    typed one way while the argument is stored another.
-
-    Deliberately still a single SAMPLE rather than a join over every pair:
-    this dict representation has one `int64_t` slot plus a per-slot `kind`
-    tag, so a heterogeneous `{'x': 1, 'y': 's'}` has no single value type to
-    record anyway, and widening it to a join would be a decision about that
-    representation rather than about type inference.
-
-    The FIRST pair that CARRIES A VALUE, not `pairs[0]`: a `**spread` pair's
-    value slot is the NoneType sentinel (see
-    `_dict_literal_spread_operand`), so `{'a': 1, **d}`'s leading pair is not a
-    value sample and `_quick_type(None)` says nothing about the dict. Sampling
-    it recorded `int64_t` for a dict whose real values are strings.
-    """
-    for _pair in (pairs or ()):
-        if _dict_literal_spread_operand(_pair[0]) is not None:
-            continue
-        _vt = gen._quick_type(_pair[1])
-        if _vt in _FLOAT_TYPES:
-            return 'double'
-        if _vt == 'char *':
-            return 'char *'
-        # A STRUCT value is nameable, and naming it is what the container half
-        # of the repr machinery needs: the store (`emit_dict_int_value_store`)
-        # already records the struct's repr shim on the dict and hands it to
-        # every list the dict goes on to build (`mojo_dict_values`,
-        # `mojo_dict_items`), but a reader chooses a WALKER from this table,
-        # and `int64_t` picks `mojo_repr_list_ints` — so the struct's own
-        # `__repr__` was asked for at the store and then not consulted, and
-        # the value printed as its own pointer decimal.
-        #
-        # Measured on the shape that isolates it, because the dict's OWN repr
-        # was already right in both halves and only the derived list differed:
-        #
-        #     p = P("a"); d = {}; d['k'] = p; print(d.values())   # [R<a>]
-        #     e = {"k": p};                          print(e.values())  # pointer
-        #
-        # `dict_literal_val_ctype` is the only difference: the subscript store
-        # records the value type itself, and the literal's sample could not
-        # name a struct at all. Restricted to a REGISTERED struct (the same
-        # `struct_field_types` test `struct_elem_repr_shim` makes, and for the
-        # same reason: a ctype that merely ends in ` *` is a container or a
-        # runtime type whose accessor rules are a separate question), so no
-        # scalar, `char *`, bytes or container answer changes.
-        if _vt.endswith(' *') and gen.struct_field_types.get(_vt[:-2].strip()):
-            return _vt
-        return 'int64_t'
-    return 'int64_t'
-
-
 def _struct_name_of(ctype: str) -> str:
     """Extract the bare struct name from a C type like 'const Foo *' → 'Foo'."""
     s = ctype
     if s.startswith('const '):
         s = s[6:]
     return s.replace(' *', '').strip()
-
-def struct_elem_repr_shim(gen, ctype: str) -> str:
-    """`_mojo_elem_repr_<Struct>` for a CONTAINER-ELEMENT ctype, else ''.
-
-    The one decision behind `mojo_list_set_elem_repr` (a list or tuple) and
-    `mojo_dict_set_val_repr` (a dict, via its `kind == 5` slots), and the one
-    place that RECORDS that a shim is wanted — because the name it returns is
-    written into the generated C at the store, so the reflection preamble has
-    no choice but to emit that symbol. Asking twice (once per container, with
-    the same ctype) is what makes the two drift, and one of the two copies
-    going stale is how `struct_field_types[struct]` being non-empty stopped
-    being the same question as "a shim exists": the emitter's `reflect_structs`
-    is narrower (it also requires the struct to be emitted and allocated here),
-    so the store named `_mojo_elem_repr_TrieNode` in a module that never emits
-    it and the self-host closure failed to LINK with
-    `'_mojo_elem_repr_TrieNode' undeclared` (ast_rewriter.py). The request is
-    therefore recorded in `gen._elem_repr_needed`, and `_emit_reflection_dispatch`
-    emits a shim for every struct in it — so the two cannot disagree.
-
-    A unit compiled with `emit_struct_defs=False` emits no reflection preamble
-    at all, so it must not name a shim either: that is why the answer is ''
-    there, checked BEFORE anything is recorded.
-
-    Returns the shim's NAME, which the caller hands to the runtime as a
-    function pointer; the runtime calls it with the slot's word. Empty string
-    for every other value type (int, str, bytes, a nested list, a dict), where
-    the runtime's own per-slot reader is already right — that is what makes
-    this a strict improvement and not a new dispatch to get wrong.
-
-    Lives here, in the middle tier, rather than in the backend module that
-    first needed it: the two containers ask the same question about the same
-    ctype, and a copy per container is how the two drifted before.
-    """
-    if not getattr(gen, 'emit_struct_defs', False):
-        return ''
-    if not ctype or not ctype.endswith(' *'):
-        return ''
-    sn = ctype[:-2].strip()
-    if not sn or not _struct_name_of(ctype):
-        return ''
-    if not gen.struct_field_types.get(sn):
-        return ''
-    gen._elem_repr_needed.add(sn)
-    return f'_mojo_elem_repr_{sn}'
 
 def _struct_type_id(name: str) -> int:
     """Deterministic runtime type tag for a struct name — a pure function of
@@ -1582,31 +1140,3 @@ def _used_idents_deep(node) -> set[str]:
             for s in hbody:
                 base |= _used_idents_deep(s)
     return base
-
-def expr_provably_str(e) -> bool:
-    """Recursive, pure. Is `e` an expression whose Python runtime value is
-    provably a `str`?
-
-    Sound transitive closure over the two string-producing binary operators:
-    `%`-format yields str whenever the FORMAT (LHS) is a str literal, and `+`
-    yields str whenever EITHER operand is a str (`str.__add__` rejects a
-    non-str operand, so a literal str on either side proves both sides are
-    str — which is what disambiguates this from list/tuple concatenation).
-
-    Lives here, in the shared middle layer, rather than in the GIMPLE module
-    pass that first needed it, because it is asked from two of them: the
-    cross-call "this untyped slot may hold a string" evidence collector, and
-    `_lower_LambdaExpr`, which runs at EMISSION time and so cannot reach
-    anything the module pass computed. A predicate this load-bearing — every
-    answer widens a parameter's evidence — must have exactly one
-    implementation, or the two callers can disagree about whether a `char *`
-    was observed and the disagreement is invisible."""
-    if isinstance(e, (StringLiteral, TstringLiteral)):
-        return True
-    if isinstance(e, BinaryOp):
-        if e.op == '%':
-            return expr_provably_str(e.left)
-        if e.op == '+':
-            return (expr_provably_str(e.left)
-                    or expr_provably_str(e.right))
-    return False

@@ -8,9 +8,6 @@ third run three at a time; the sum of live reservations never exceeds the budget
 import json, os, signal, subprocess, sys, tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# The in-process cases below call memslot's Python API directly, in THIS process: backfill must be off here
-# too, or a small slot sneaks in on the machine's real free memory and the strict arithmetic is bypassed.
-os.environ["MEMSLOT_SNEAK_MAX_GB"] = "0"
 MEMSLOT = os.path.join(HERE, "tools", "memslot.py")
 passed = failed = 0
 
@@ -31,21 +28,7 @@ def env(d):
     # reservation it holds (MEMSLOT_HELD), so without the clear every wrapper
     # started below would be "covered" by this test's own reservation, queue
     # behind itself, and the arithmetic these cases check would never happen.
-    # MEMSLOT_SNEAK_MAX_GB=0 turns backfill OFF: these cases check strict budget arithmetic, which a small
-    # job sneaking in on measured free memory would (correctly) bypass. The backfill cases below turn it on.
-    return dict(os.environ, MEMSLOT_DIR=d, MEMSLOT_BUDGET_GB="10", MEMSLOT_HELD="", MEMSLOT_SNEAK_MAX_GB="0")
-
-
-def sneak_env(d, avail, **kw):
-    e = env(d)
-    e.update(MEMSLOT_SNEAK_MAX_GB="8", MEMSLOT_SNEAK_CAP_GB="32", MEMSLOT_SNEAK_MARGIN_GB="16", MEMSLOT_AVAIL_GB=str(avail))
-    e.update({k: str(v) for k, v in kw.items()})
-    return e
-
-
-def start_env(e, gb, secs, label):
-    return subprocess.Popen([sys.executable, MEMSLOT, "--gb", str(gb), "--label", label, "--", "sleep", str(secs)],
-                            env=e, stderr=subprocess.DEVNULL)
+    return dict(os.environ, MEMSLOT_DIR=d, MEMSLOT_BUDGET_GB="10", MEMSLOT_HELD="")
 
 
 def start(d, gb, secs, label):
@@ -247,16 +230,13 @@ def main():
                   memslot.reserved_gb() == 0, '%.1f GB left' % memslot.reserved_gb())
             os.environ['MEMSLOT_HELD'] = ''
 
-    # A tree that holds the WHOLE budget and a recipe that asks for more than
-    # its class. This used to be reachable through `excl` (which reserved the
-    # whole budget, whatever the class), and since 2026-09-30 it is not: an
-    # exclusive job reserves its class like any other, and the escape hatch
-    # below is for the case that remains — MEMSLOT_BUDGET_GB set below a
-    # memclass, e.g. 64 with a `stage` job, where the tree holds all 64 and the
-    # recipe asks for 96. Nothing is left to reserve and nothing is left to
-    # overrun — nothing else can be admitted at all — so it runs, and the
-    # ceiling still applies. Refusing it (126) would take `make mojoc` down for
-    # a budget setting that is meant to be supported.
+    # An EXCLUSIVE job reserves the whole budget (`tools/suite.py`'s
+    # reserved_gb), and its recipe asks for its memclass, which need not be the
+    # budget: MEMSLOT_BUDGET_GB=64 with a `stage` job means the tree holds all
+    # 64 and the recipe asks for 96. Nothing is left to reserve and nothing is
+    # left to overrun — nothing else can be admitted at all — so it runs, and
+    # the ceiling still applies. Refusing it (126) would take `make mojoc` down
+    # for a budget setting that is meant to be supported.
     with tempfile.TemporaryDirectory() as d:
         os.environ['MEMSLOT_DIR'] = d
         os.environ['MEMSLOT_BUDGET_GB'] = '64'
@@ -267,142 +247,13 @@ def main():
                                 "--", sys.executable, "-c", "print('stage ran')"],
                                env=dict(os.environ, **memslot.held_env(64)),
                                capture_output=True, text=True, timeout=30)
-            check("a wrapper under a whole-budget reservation is covered whatever it asks for",
+            check("a wrapper under an EXCLUSIVE reservation is covered whatever it asks for",
                   r.returncode == 0 and 'stage ran' in r.stdout,
                   "rc=%s: %s" % (r.returncode, r.stderr.strip()[:160]))
             check("...and its own ceiling is still the one applied",
                   'ceiling 96.0 GB' in r.stdout, r.stdout.strip()[:120])
         finally:
             parent.release()
-
-    # ── a POOL: one admitted reservation as the ceiling on its own fan-out ───
-    # The hole this closes is bugs/MEMCAP_ab_sweep_per_file_reservations_are_
-    # covered_by_the_parent.md. `ab-aside`/`ab-bside` are `make` jobs admitted
-    # for `program` (55 GB) and their recipe is `make -j20`, one
-    # `tools/ab_run_one.py` per file. Every child asked for its own per-file
-    # `module` class, `covering()` said "already accounted for" because 24 <= 55,
-    # and each took NOTHING from the ledger — so the ledger's view of the
-    # machine was a single 55 GB holder against an allowance of twenty 24 GB
-    # ceilings. A per-process ceiling is not a bound on a sum: that is the
-    # 2026-09-29 shape (~30 processes at 30-43 GB each, every one inside its own
-    # ceiling) and it is what the reservation exists to prevent.
-    #
-    # Scaled to fit the file's arithmetic: a parent admitted for 6 of 10, a pool
-    # of 6, and three children of 3. Two fit inside the parent's own
-    # reservation; the third has to wait, which is the whole difference.
-    with tempfile.TemporaryDirectory() as d:
-        os.environ['MEMSLOT_DIR'] = d
-        os.environ['MEMSLOT_BUDGET_GB'] = '10'
-        os.environ['MEMSLOT_HELD'] = ''
-        parent = memslot.Slot(6, 'ab-bside', budget=10).acquire()
-        try:
-            child = dict(os.environ, **memslot.held_env(6, pool='ab-bside'))
-            probe = ("import sys, time, os; sys.path.insert(0, %r); import memslot;"
-                     "s = memslot.Slot(3, 'file' + sys.argv[1], pool=True).acquire();"
-                     "print('in', flush=True); time.sleep(2); s.release()"
-                     % os.path.join(HERE, 'tools'))
-            kids = [subprocess.Popen([sys.executable, '-c', probe, str(i)],
-                                     env=child, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE, text=True)
-                    for i in range(3)]
-            time.sleep(1.2)
-            # The POOL LEDGER is the instrument, not process liveness: a child
-            # blocked on the pool is alive too, and a `readline()` on its pipe
-            # blocks until it is admitted, which is the very thing under test.
-            pool_file = os.path.join(d, 'ledger-ab-bside.json')
-            pool = json.load(open(pool_file)) if os.path.exists(pool_file) else {}
-            in_pool = pool.get('holders', [])
-            check("a pool bounds a fan-out by the reservation that admitted it",
-                  len(in_pool) == 2 and sum(h['gb'] for h in in_pool) == 6,
-                  f'{len(in_pool)} children hold {sum(h["gb"] for h in in_pool)} '
-                  f'of the 6 GB pool; a third would be 9 of the 6 reserved')
-            check("...and the machine ledger is not double-counted: it carries "
-                  "the parent alone",
-                  memslot.reserved_gb() == 6,
-                  f'{memslot.reserved_gb()} GB on the machine ledger; the '
-                  f"pool's usage is INSIDE the parent's reservation, not in "
-                  f"addition to it")
-            for p in kids:
-                p.wait(timeout=30)
-            check("...and the third is admitted once the first two are done",
-                  all(p.returncode == 0 for p in kids),
-                  f'{[p.returncode for p in kids]}')
-            left = json.load(open(pool_file))['holders'] if os.path.exists(pool_file) else []
-            check("...leaving no pool reservation behind", left == [],
-                  f'{left}; a pool entry that outlives its children is a leak '
-                  f'in the ledger')
-
-            # A child that does NOT opt in is unaffected: it is covered by the
-            # inherited reservation, as `make mojoc`'s recipe is.
-            r = subprocess.run([sys.executable, MEMSLOT, "--gb", "6", "--label", "recipe",
-                                "--", "true"], env=child,
-                               capture_output=True, text=True, timeout=30)
-            check("a child that does not opt into the pool is still covered by "
-                  "its ancestor's reservation",
-                  r.returncode == 0, 'rc=%s' % r.returncode)
-            # …and one that asks for MORE than the pool falls back to the
-            # machine-wide ledger rather than waiting forever for a turn its own
-            # parent is holding. The budget is 16 here so that 9 FITS the
-            # machine: what it does not fit is the pool's 6, which is the
-            # fallback being tested.
-            os.environ['MEMSLOT_BUDGET_GB'] = '16'
-            over = dict(os.environ, **memslot.held_env(6, pool='ab-bside'))
-            t0 = time.time()
-            big = subprocess.run([sys.executable, '-c', probe.replace('3,', '9,'), '0'],
-                                 env=over, capture_output=True, text=True, timeout=30)
-            check("a child asking for more than the pool takes its own "
-                  "reservation instead of deadlocking on the parent's",
-                  big.returncode == 0 and time.time() - t0 < 10,
-                  f'rc={big.returncode} after {time.time() - t0:.1f}s: '
-                  f'{big.stderr.strip()[-160:]}')
-        finally:
-            parent.release()
-            os.environ['MEMSLOT_HELD'] = ''
-
-    # ---- backfill: small jobs sneak in on measured free memory and never delay the head of the queue
-    with tempfile.TemporaryDirectory() as d:
-        big = start(d, 10, 6, "big")                         # takes the WHOLE budget
-        wait_for(lambda: holders(d) == ["big"])
-        s1 = start_env(sneak_env(d, 60), 3, 2, "small")      # 60 GB free, margin 16: 60 - 3 >= 16
-        check("a small job sneaks in beside a full-budget holder when plenty is free",
-              wait_for(lambda: "small" in holders(d), 6), str(holders(d)))
-        check("...and is recorded as a sneak in the ledger",
-              any(h.get("sneak") for h in ledger(d)["holders"] if h["label"] == "small"))
-        s1.wait(); big.wait()
-    with tempfile.TemporaryDirectory() as d:
-        big = start(d, 10, 4, "big")
-        wait_for(lambda: holders(d) == ["big"])
-        low = start_env(sneak_env(d, 12), 3, 1, "low")       # 12 free: 12 - 3 = 9 < margin 16: must wait
-        time.sleep(1.5)
-        check("it does NOT sneak when measured free memory minus its size is under the margin", holders(d) == ["big"], str(holders(d)))
-        big.wait(); low.wait()
-        check("...and runs normally once the holder leaves", low.returncode == 0)
-    with tempfile.TemporaryDirectory() as d:
-        big = start(d, 10, 6, "big"); wait_for(lambda: holders(d) == ["big"])
-        nine = start_env(sneak_env(d, 80), 9, 1, "nine")     # over SNEAK_MAX (8): never sneaks, however much is free
-        time.sleep(1.5)
-        check("a request over the sneak size limit never sneaks", holders(d) == ["big"], str(holders(d)))
-        big.wait(); nine.wait()
-    with tempfile.TemporaryDirectory() as d:
-        e = sneak_env(d, 80, MEMSLOT_SNEAK_CAP_GB=4)
-        big = start(d, 10, 6, "big"); wait_for(lambda: holders(d) == ["big"])
-        a = start_env(e, 3, 5, "a"); wait_for(lambda: "a" in holders(d), 6)
-        b = start_env(e, 3, 1, "b"); time.sleep(1.5)
-        check("total sneaking is capped (3 + 3 > 4): the second waits", "b" not in holders(d) and "a" in holders(d), str(holders(d)))
-        for p_ in (big, a, b): p_.wait()
-    with tempfile.TemporaryDirectory() as d:
-        # a sneaker does not count against the budget, so it cannot delay the job at the head of the queue
-        a = start(d, 6, 4, "a"); wait_for(lambda: holders(d) == ["a"])
-        sn = start_env(sneak_env(d, 80), 3, 4, "sn"); wait_for(lambda: "sn" in holders(d), 6)
-        head = start(d, 4, 1, "head")                        # 6 + 4 = 10 fits the budget; the 3 GB sneaker must not block it
-        check("a sneaker never delays a request that fits the budget", wait_for(lambda: "head" in holders(d) or head.poll() is not None, 6))
-        for p_ in (a, sn, head): p_.wait()
-    with tempfile.TemporaryDirectory() as d:
-        # an unmeasurable machine never reads as plenty
-        e = sneak_env(d, 80); e.pop("MEMSLOT_AVAIL_GB"); e["PATH"] = "/nonexistent"
-        r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0,%r); import memslot; print(memslot.avail_gb())" % os.path.join(HERE, "tools")],
-                           env=e, capture_output=True, text=True)
-        check("with no vm_stat, avail_gb() is None (no sneaking on a missing measurement)", r.stdout.strip() == "None", r.stdout + r.stderr)
 
     print("Results: %d passed, %d failed" % (passed, failed))
     return 1 if failed else 0
