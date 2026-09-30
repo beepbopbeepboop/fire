@@ -36,11 +36,29 @@ either did the right thing or produced something that looked fine:
 All five were bugs, and all five are fixed — by this branch, and by the
 `tools/formal_sweep.py` change case 2 needs. Their `bugs/*.md` docs are
 DELETED rather than left behind with a Status section, so the slugs above are
-history, not links: find them in this branch's commits. Two docs this branch
-filed rather than fixed are the only things left OPEN in this area, and both
-start `FORMAL_` in `bugs/`: one about a relative import's ABI prefix not being
-a function of the module's source, and one about a field-access refusal that
-names a declaration the reader does not have.
+history, not links: find them in this branch's commits. Three docs this branch
+filed rather than fixed are what is left OPEN in this area, and all three start
+`FORMAL_` in `bugs/`:
+
+  * `FORMAL_relative_import_at_the_root_has_no_qualified_identity` — a relative
+    import's ABI prefix is not a function of the module's source, so the same
+    file can get two different libraries in two processes. Benign, measured,
+    and the one that says which of the three relative-import cases above is
+    allowed to change and which is not.
+  * `FORMAL_field_access_refusal_names_the_wrong_module` — a refusal that
+    explains itself wrongly when a `--link-dylib` library's source is gone.
+    Case 4's `is still refused` is the shape of it, and this suite pins the
+    refusal rather than the wording.
+  * `FORMAL_hostmod_defaults_left_required_after_the_cross_dylib_fix` — the fix
+    for (3) made defaults across a boundary work, and four hostmods still spell
+    theirs REQUIRED as a workaround. The signatures and the four tests to
+    extend with them are written out there; nothing in THIS file changes if
+    they land, which is why it is a doc and not a case.
+
+A fourth doc this branch filed, `TOOLS_the_test_estate_check_has_been_red_since_
+eight_formal_suites_landed`, is not about this area: it is about the registry
+that would have to run this file, and it is why the `UNREGISTERED` entry in
+`test_suite.py` names the one-line spec that belongs to this suite.
 
 Every case below BUILDS the arm64 image, EXECUTES it, and compares its output
 and exit status with CPython running the SAME program. A refusal is asserted
