@@ -2033,6 +2033,19 @@ UNREGISTERED = {
     'test_x86_64_encoders.py': "Two checks on formal/x86_64.py's encoder "
         'arithmetic, independent of the round-trip above.',
 
+    # ── the formal backend's per-construct suites, run by hand ──
+    #
+    # Each of these BUILDS AND EXECUTES images on both architectures and
+    # compares against CPython, so a gate that ran them would be minutes per
+    # job; they are named in the bug docs for the construct they cover and are
+    # run directly.  Eleven sibling files are still missing from this table,
+    # which is why the estate check is red on master — see
+    # `bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md`, and
+    # `construct:estate-registration` owns them.
+    'test_formal_returned_frame.py': 'Builds and runs the returned-frame '
+        'images on both architectures against CPython; '
+        'bugs/FORMAL_returned_frame_caller_owned_block.md.',
+
     # ── the encoders, differentially, against the platform assembler ──
     'test_arm64_emission.py': 'A hand count that the new arm64 instructions '
         'are emitted at all, which the differential test above cannot tell from '
