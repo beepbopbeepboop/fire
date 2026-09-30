@@ -1198,43 +1198,12 @@ class ARM64Codegen:
     def _module_global(self, name: str):
         """The `__DATA` slot that holds `name` in the function being EMITTED.
 
-        CPython's rule for a bare name inside a function, which is the rule
-        being implemented:
+        The decision and the words are `model.module_slot_for`'s, shared with
+        the x86-64 emitter: two spellings of CPython's scoping rule in two
+        backends is two places for one language implementation to disagree about
+        where a word lives."""
+        return M.module_slot_for(name, self._fn_local_names)
 
-          * bound in THIS function, with no `global` → a local, full stop;
-          * declared `global` here → the module's storage;
-          * neither → a free variable, so it resolves in module scope and reads
-            the module's storage.
-
-        The middle case is the one that has to get both ends right, and keying
-        on either end alone gets one of them wrong:
-
-            G = 5
-
-            def bump_local():
-                G = G + 1        # NO `global` — a LOCAL; module stays 5
-
-            def read_only():
-                return G         # no assignment anywhere — the MODULE's 5
-
-            def set_it():
-                global G
-                G = 100
-
-        Gating on "does the name have a slot" sends `bump_local`'s read and
-        write to `__DATA`, and the module's 5 becomes 6 — measured on arm64 and
-        x86_64 alike, with the interpreter disagreeing. Gating on "did this
-        function declare it `global`" sends `read_only`'s read to a dead
-        register, and the build refuses with "has no home".
-
-        So the gate is the local set, which answers both ends at once:
-        `_collect_var_names` is already the shared allocation order and already
-        excludes names declared `global`, so a name in it is local and a name
-        outside it is not. One list, one rule, and the register allocation and
-        the load/store path cannot disagree about it."""
-        if name in self._fn_local_names:
-            return None
-        return M.module_slot(name)
 
     def _store_var(self, name: str, src: int) -> None:
         """local `name` = src. Register homes MOV; spill slots STR via X17.

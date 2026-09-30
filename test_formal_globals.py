@@ -107,12 +107,8 @@ CASES = [
     # mode, and nothing else in the suite would catch it.
     #
     # `bump_local` never READS `G`, which is deliberate and is the limit of what
-    # is asserted. `G = G + 1` with no `global` is a different question — the
-    # right-hand `G` resolves in module scope and the assignment then binds a
-    # local — and the formal backend resolves both against one home rather than
-    # two. That is a real gap, tracked as
-    # bugs/FORMAL_local_shadows_module_global.md; writing the case here would
-    # either enshrine the wrong answer or leave a red test in the tree.
+    # is asserted. `G = G + 1` with no `global` is a different question, and the
+    # row below answers it.
     #
     # `set_it` exists so the name does have a slot at all: with no `global`
     # write anywhere in the module, `G` is a read-only module constant and this
@@ -329,6 +325,53 @@ REFUSALS = [
      "    print(s)\n"
      "    return 0\n",
      "no initializer"),
+
+    # A local that SHADOWS a module global, read before the local is stored. The
+    # refusal is the point of the row, and the reason is a fact about CPython
+    # that is easy to get backwards:
+    #
+    #     G = 5
+    #     def bump():
+    #         G = G + 1
+    #
+    # Python decides a name's scope at COMPILE time, from the whole function
+    # body — `G` is assigned here, so `G` is local throughout `bump` — and the
+    # right-hand read therefore raises `UnboundLocalError`. It does NOT read the
+    # module's 5. Verified:
+    #
+    #     $ python3 -c 'G = 5
+    #     > def bump():
+    #     >     G = G + 1
+    #     > bump()'
+    #     UnboundLocalError: cannot access local variable 'G' where it is not
+    #     associated with a value
+    #
+    # So the two homes are not a missed feature here; there is no answer to
+    # compute, and a backend that resolved the read against the module slot
+    # would print 6 for a program CPython refuses. `model.read_before_store`
+    # refuses it, and this row pins that it still does on BOTH architectures —
+    # the shape specific to this construct, because the read name is a real
+    # module global here and so the alternative was a live `__DATA` load rather
+    # than a dead register. The general read-before-store rule is pinned by
+    # `test_formal_run.py`'s three refusal rows, none of which has a
+    # module-level binding for the name it reads.
+    #
+    # The Mojo interpreter disagrees with CPython here (`fire.py run` prints 6),
+    # which is worth knowing and is NOT what this row asserts: the test
+    # contract for the images is CPython's semantics, and a program CPython
+    # raises on has no reference answer to be lowered to.
+    ("local_shadow_of_global_read_before_store_refused",
+     "G = 5\n"
+     "\n"
+     "def bump():\n"
+     "    G = G + 1\n"
+     "    return G\n"
+     "\n"
+     "def main(n):\n"
+     "    v: Int = bump()\n"
+     "    print(v)\n"
+     "    return 0\n",
+     "before anything in this function stores it"),
 ]
 
 

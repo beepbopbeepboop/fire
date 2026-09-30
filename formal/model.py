@@ -11110,6 +11110,75 @@ def global_names_bound_in(fn) -> set:
     return {n for n in functions_writing_globals([fn])} or set()
 
 
+def module_slot_for(name: str, local_names):
+    """The `__DATA` slot a bare `name` reads or writes in ONE function, or None.
+
+    The scoping decision, in one place because both backends have to make it and
+    a rule written twice is a rule that will be written two ways. `local_names`
+    is the emitting function's local set — `_collect_var_names` is the shared
+    allocation order, so the register allocator and this cannot disagree.
+
+    CPython's rule for a bare name inside a function:
+
+      * bound in THIS function, with no `global` → a local, full stop;
+      * declared `global` here → the module's storage;
+      * neither → a free variable, so it resolves in module scope and reads the
+        module's storage.
+
+    The middle case is the one that has to get both ends right, and keying on
+    either end alone gets one of them wrong:
+
+        G = 5
+
+        def bump_local():
+            G = G + 1        # NO `global` — a LOCAL; the module stays 5
+
+        def read_only():
+            return G         # no assignment anywhere — the MODULE's 5
+
+        def set_it():
+            global G
+            G = 100
+
+    Gating on "does the name have a slot" sends `bump_local`'s read and write to
+    `__DATA`, and the module's 5 becomes 6. Gating on "did this function declare
+    it `global`" sends `read_only`'s read to a dead register, and the build
+    refuses with "has no home". So the gate is the local set, and `local_names`
+    already excludes the declared globals, which answers both ends at once.
+
+    THE THIRD CASE IS NOT A GAP, and it is the one a reader is most likely to
+    try to "fix" by making the read module-scoped:
+
+        G = 5
+        def bump():
+            G = G + 1        # the right-hand G is a LOCAL read
+
+    Python decides a name's scope at COMPILE time from the whole body, so `G` is
+    local throughout `bump` and the right-hand read raises `UnboundLocalError` —
+    it does NOT read the module's 5. Verified against CPython:
+
+        $ python3 -c 'G = 5
+        > def bump():
+        >     G = G + 1
+        > bump()'
+        UnboundLocalError: cannot access local variable 'G' where it is not
+        associated with a value
+
+    So this function returning a slot for that read — had nothing refused the
+    program first — would compute a 6 CPython never produces. `read_before_store`
+    is what refuses it, and it is the general rule rather than a special case
+    here; `test_formal_globals.py` pins that it fires for this shape on both
+    architectures, because the read name is a real module global and the
+    alternative was a live `__DATA` load rather than a dead register.
+
+    (The Mojo interpreter disagrees here — `fire.py run` prints 6. The images'
+    contract is CPython's semantics, and a program CPython raises on has no
+    reference answer to be lowered to.)"""
+    if name in local_names:
+        return None
+    return module_slot(name)
+
+
 def collect_global_slots(stmts: list, functions: list) -> dict:
     """`{name: GlobalSlot}` for every module-level name that needs STORAGE.
 
