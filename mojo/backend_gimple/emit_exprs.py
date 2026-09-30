@@ -2692,20 +2692,27 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         # mojo_str_from_int (which appended the decimal BYTE CODE:
         # box.3d/game's ComputerMonitor.print_text turned "Hello, World!"
         # into "72101108111144...").
+        # `_free_sv`: the conversion temp is freed by the cat only when it is a
+        # `mojo_str_from_int` result; a `mojo_char_to_str` result is a shared
+        # immortal string and must never be freed.
         if lt2 == 'char *' and rt2 in ('int', 'int64_t', '_Bool'):
+            _free_sv = True
             if gen._actual_types.get(rv2) == 'char':
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', rv2)])
+                _free_sv = False
             else:
                 nv = gen._to_int64(rt2, rv2)
                 sv = gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
-            return 'char *', gen._emit_str_cat(lv2, sv, gen._is_fresh_operand(left_node, lv2), True)
+            return 'char *', gen._emit_str_cat(lv2, sv, gen._is_fresh_operand(left_node, lv2), _free_sv)
         if rt2 == 'char *' and lt2 in ('int', 'int64_t', '_Bool'):
+            _free_sv = True
             if gen._actual_types.get(lv2) == 'char':
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', lv2)])
+                _free_sv = False
             else:
                 nv = gen._to_int64(lt2, lv2)
                 sv = gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
-            return 'char *', gen._emit_str_cat(sv, rv2, True, gen._is_fresh_operand(right_node, rv2))
+            return 'char *', gen._emit_str_cat(sv, rv2, _free_sv, gen._is_fresh_operand(right_node, rv2))
 
     # char * * int → string repetition (e.g., "  " * 3). Also accepts a
     # _Bool RHS ('s' * (n != 1), Python's common boolean-as-0/1
@@ -3747,7 +3754,21 @@ def _lower_in_impl_values(gen, xt: str, xv: str, right_node, negate: bool) -> tu
         return gen._lower_in_range(xv, right_node.args, negate=negate)
 
     rt, rv = gen.lower_expr(right_node)
-    return gen._lower_in_dispatch(xt, xv, rt, rv, negate)
+    res = gen._lower_in_dispatch(xt, xv, rt, rv, negate)
+    # `c in ('[', '(', '{')`, `k in {"a", "b"}`, `x in [1, 2]`: the container is
+    # built for this one membership test and no name can ever refer to it, yet
+    # it was never released -- three per character of every tokenizer scan.
+    # Free it once the test has read it. Only a display is treated this way (an
+    # identifier, field or call result names a container somebody else owns);
+    # a tuple literal lowers to a fresh heap list on every path.
+    if isinstance(right_node, gimple_ctypes.TupleExpr) and rt == 'MojoList *':
+        gen._emit(f"  mojo_list_free ({rv});")
+    elif (isinstance(right_node, (gimple_ctypes.ListExpr, gimple_ctypes.SetExpr,
+                                  gimple_ctypes.DictExpr))
+            and rt in ('MojoList *', 'MojoSet *', 'MojoDict *')
+            and rv in gen._fresh_vals):
+        gen._free_fresh_container(rv, rt)
+    return res
 
 
 def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) -> tuple[str, str]:

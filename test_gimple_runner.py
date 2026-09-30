@@ -1593,6 +1593,67 @@ def main():
     print(total)
 """, "36\n208\n51600000\n", 40)
 
+    # The shape of this compiler's own tokenizer: a scan over a string, one
+    # character at a time, asking `c in ('(', '[', '{')` and `c == "x"`. Every
+    # step used to malloc a one-character string (mojo_char_to_str) plus a fresh
+    # list for each tuple literal, and free neither: ~150 bytes per character,
+    # i.e. gigabytes for the self-hosted compiler over its own source
+    # (bugs/PERF_selfhost_memory_leak_hunt.md). The characters are now shared
+    # immortal strings and a display used only as the right side of `in` is freed
+    # after the test. 16M characters here; the leak, if back, is gigabytes.
+    test_gimple_bounded_memory("gimple_char_scan_allocates_nothing_per_character", """\
+def scan(s: String) -> Int:
+    var depth = 0
+    var seen = 0
+    var i = 0
+    while i < len(s):
+        var c = s[i]
+        if c in ('(', '[', '{'):
+            depth += 1
+        elif c in (')', ']', '}'):
+            depth -= 1
+        if c == "x":
+            seen += 1
+        i += 1
+    return depth * 1000 + seen
+
+def main():
+    var line = "(x[x{}x]) " * 8
+    var total = 0
+    for r in range(200000):
+        total += scan(line)
+    print(total)
+""", "4800000\n", 60)
+
+    # Rebuilding a string from its characters must still be right now that the
+    # character strings are shared and never freed: `out + ch` frees its own
+    # conversion temp only for a number, never for a character (a free of a
+    # shared character string would corrupt the heap; the runner scribbles freed
+    # memory, so a wrong free changes the output or crashes).
+    test_gimple_bounded_memory("gimple_char_concat_never_frees_shared_character", """\
+def rebuild(text: String) -> String:
+    var out = String("")
+    for i in range(len(text)):
+        var ch = text[i]
+        out = out + ch
+    return out
+
+def main():
+    var t = String("(x[x{}x]) tokens")
+    var hits = 0
+    for r in range(100000):
+        var u = rebuild(t)
+        if u == t:
+            hits += 1
+    print(hits)
+    print(rebuild(t))
+    var seen = ""
+    for c in "abcabc":
+        if c in ["a", "c"]:
+            seen = seen + c
+    print(seen)
+""", "100000\n(x[x{}x]) tokens\nacac\n", 60)
+
     test_gimple_stdout("gimple_string_local_aliased_by_strip_or_str_is_not_freed", """\
 def work(n: Int, kept: List[String]) -> Int:
     var t = 0

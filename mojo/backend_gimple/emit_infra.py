@@ -959,8 +959,11 @@ _FRESH_CONTAINER_RETURNS = frozenset([
 # string_strip, mojo_str_rstrip, mojo_str_lstrip_chars, mojo_str_expandtabs,
 # _str_pad, mojo_str_join (returns "" for an empty list), mojo_repr_float
 # ("nan"/"inf"). mojo_repr_int is absent too (its comment says it reuses a buffer).
+# mojo_char_to_str is absent on purpose: it returns one of 256 shared IMMORTAL
+# one-character strings (a malloc per character of every string scan was the
+# bulk of the self-hosted tokenizer's memory), so a free() of it would crash.
 _FRESH_STRING_RETURNS = frozenset([
-    'mojo_str_cat', 'mojo_str_from_int', 'mojo_char_to_str', 'mojo_cstr_slice',
+    'mojo_str_cat', 'mojo_str_from_int', 'mojo_cstr_slice',
     'mojo_cstr_repeat', 'mojo_cstr_reverse', 'mojo_repr_str',
     'mojo_hex', 'mojo_oct', 'mojo_bin',
     # The str methods: each returns a copy the caller owns, never its receiver
