@@ -9,9 +9,8 @@ refusal itself is the behaviour this backend wants.
 
 A struct library built with `fire.py dylib --formal`, its manifest's
 `source` then pointed at a file that no longer exists (the case a
-dylib shipped without its sources produces, and the one
-`bugs/FORMAL_link_dylib_imported_struct_field.md` §"A narrower, honest
-interim" asks about), and a program with NO import statement:
+dylib shipped without its sources produces), and a program with NO
+import statement:
 
 ```console
 $ python3 -c "…set manifest['source'] = '/nonexistent/heaplib.mojo'…"
@@ -80,5 +79,11 @@ With the source present, the whole shape works and is verified:
 `b.n = 4`, `b.tag = 7`, `len(b)` (the `__len__` rewrite across the
 boundary), `b.add(3)` and a second struct's `w.sum()` on
 `--link-dylib heaplib.dylib` with no import statement all build, run, and
-match CPython. That is `bugs/FORMAL_link_dylib_imported_struct_field.md`,
-fixed in the same commit that filed this.
+match CPython. That is `FORMAL_link_dylib_imported_struct_field`, fixed in
+the same commit that filed this (`1ec5c620`, whose doc is deleted, as a
+fixed bug's is) by `_imported_structs` widening to the libraries the program
+was HANDED — which is the deleted doc's "one field list per exported struct
+in the dylib manifest, or the importing build given the module's source path"
+step, and which leaves its "A narrower, honest interim" paragraph open. That
+paragraph and §"The exact next step"'s "narrower alternative" below are the
+same sentence about the same message, so there is one repair here, not two.
