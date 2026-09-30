@@ -123,15 +123,33 @@ class: it is listed under `FAILED:` tagged `[TIMEOUT]`, and it is not one a
 nothing, so letting a marker absorb it would be a way to not run a test and
 call the run green.
 
-Memory: every job that runs a `mojoc` binary, or a whole-closure compile
-standing in for one, is capped by `tools/memcap.py` at the ceiling its
-`memclass` names (`small` 8 GB, `module` 24, `program` 55, `stage` 96 — see
-the `MEMCLASS` table in `tools/suite.py` for which is which and the
-measurements behind them). `program` and `stage` are the ones known to pass
-10 GB, and they are exclusive: the runner gives them the machine to
-themselves and starts nothing else until they are done, so a 55 GB job is
-safe to leave running unattended. `MEMLIMIT_GB=96` raises every ceiling;
-`MEMLIMIT_GB=0` removes them all and says so loudly.
+Memory: two mechanisms, and the second is the one that bounds the machine.
+
+A **ceiling** is per process tree: every job that runs a `mojoc` binary, or a
+whole-closure compile standing in for one, is capped by `tools/memcap.py` at
+the ceiling its `memclass` names (`small` 8 GB, `module` 24, `program` 55,
+`stage` 96 — see the `MEMCLASS` table in `tools/suite.py` for which is which
+and the measurements behind them). `program` and `stage` are the ones known to
+pass 10 GB. `MEMLIMIT_GB=96` raises every ceiling; `MEMLIMIT_GB=0` removes
+them all and says so loudly.
+
+A **reservation** is per machine, and it is not optional. A ceiling bounds one
+tree and says nothing about how many may run at once, which is not a bound at
+all: on 2026-09-29 about thirty compiler processes at 30-43 GB each, every one
+of them inside its own ceiling, collapsed the box. So every job takes its
+memclass out of ONE machine-wide budget (`tools/memslot.py`, strict FIFO,
+`~/.gmojo/memslot`, `MEMSLOT_BUDGET_GB`, default 96) *before* it is spawned,
+and gives it back when it exits — so "18 x 24 GB" means four at a time, and
+the count includes the other worktrees and your own terminal. An `excl` job
+reserves the WHOLE budget, so exclusivity now means the machine rather than
+one run. A reservation covers the tree it admitted, which is why the
+`$(call memslot,…)` recipe in the Makefile does not deadlock against the
+runner's own admission of that recipe (`MEMSLOT_HELD`, and
+`memslot.covering`).
+
+A job's TIMEOUT starts after admission, never during the queue wait: a `stage`
+job can wait a long time for 96 GB on a busy machine, and a timeout that
+counted the queue would kill jobs that had done nothing wrong.
 
 Cached results, and what is deliberately **not** cached. Three caches, with
 different jobs:

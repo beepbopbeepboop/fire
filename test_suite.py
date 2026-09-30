@@ -232,6 +232,9 @@ def test_mem_driver():
     check('mem driver: a breach is RESOURCE, not FAIL',
           'RESOURCE' in text and '\n  FAIL' not in text,
           'expected a RESOURCE verdict in the log')
+    check('mem driver: ...and it is memcap\'s own exit code, 125',
+          'exit: 125' in text,
+          f'expected a 125 for the hog, saw {text.count("exit: 125")}')
     check('mem driver: the in-budget job passed', 'RESOURCE-CAPPED' in text or
           'resource-capped' in text, 'expected the hog to be the only casualty')
     check('mem driver: the ceiling is recorded in the log',
