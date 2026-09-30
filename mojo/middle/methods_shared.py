@@ -97,7 +97,6 @@ def _is_selfhost_source_file(path: str) -> bool:
                 return True
     return False
 
-
 def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     """True when compiling this compiler's OWN backend source and
     `module_name` is a local alias for one of its sibling implementation
