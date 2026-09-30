@@ -1,16 +1,19 @@
 # HARD BUG: `struct` keyword arguments are silently dropped, and the inline mixed int+float unpack still returns raw bits
 
-**State: FULLY FIXED 2026-09-29 — this doc is kept open for one more pass
-over the evidence, not because a named residue is left.** Both headline
-items were already closed; the residue under item 2 (reads with no
-compile-time slot index, copies of a mixed result, and a class attribute's
-`Struct` handle) is now fixed too, in two parts — see "Residue" below for
-what landed and what each measurement was before. The one thing still
-missing is a different bug this work uncovered, filed separately and named
-in the last section: a function that returns a `MojoList *` it built in a
-LOCAL is typed `int64_t` by return-type inference, so the caller print()s
-the pointer's address and iterating it SEGFAULTS — pre-existing, and
-independent of `struct`.
+**State: CLOSED 2026-09-29. No live residue in this doc.** Both headline
+items were closed 2026-09-26; the residue recorded under item 2 on
+2026-09-27 (reads with no compile-time slot index, copies of a mixed
+result, and a class attribute's `Struct` handle) is fixed too, and the
+"Residue" section below says exactly what landed and what each measurement
+was before. **This doc is kept, not deleted, for two reasons and no more:**
+ten live cross-references point at it (a `git rm` would orphan every one —
+the exact rot this directory's README catalogues), and one recorded
+divergence of the new mechanism belongs here rather than nowhere. The one
+genuinely open bug this work uncovered is a DIFFERENT one, filed at
+`bugs/CODEGEN_list_return_via_local_types_the_return_int64_t.md`: a
+function that returns a `MojoList *` it built in a LOCAL is typed `int64_t`
+by return-type inference, so the caller print()s the pointer's address and
+iterating it SEGFAULTS — pre-existing, and independent of `struct`.
 
 Found 2026-09-26 by re-testing the claims in the now-removed
 `CODEGEN_struct_module.md`. That doc was correctly closed for the mechanisms
@@ -265,16 +268,27 @@ does before its own branches, so a call result boxed into
 re-open, which is why the task's "file one if there isn't one" does not
 apply — there is nothing left to file.
 
-## A claim in the removed doc that did NOT reproduce
+## A claim in the removed doc that did NOT reproduce — AND IS NOW STALE ITSELF
 
 It claimed no interpreter `struct` module exists, so a comptime-evaluated
 `struct.Struct(...)` default still `NameError`s. Both shapes were reported as
-working through `fire.py run` in the doc that replaced it. In THIS checkout
-`fire.py run` on any `struct.*` call raises
-`NameError: name 'struct' is not defined` — there is no interpreter `struct`
-support at all, so the compiled path is strictly ahead of it and there is no
-interpreter/compiled parity to hold. Reported, not fixed: the interpreter is
-not where this doc's work belongs.
+working through `fire.py run` in the doc that replaced it. On 2026-09-26 the
+interpreter really did have no `struct` at all (`fire.py run` on any
+`struct.*` call raised `NameError: name 'struct' is not defined`), which is
+what this section said.
+
+**Re-measured 2026-09-29, that is no longer true, in either spelling:**
+
+    fire.py run, 'import struct; print(struct.unpack("<if", struct.pack("<if", 1, 1.0)))'
+      -> (1, 1.0)          (CPython agrees)
+    fire.py run, 'from struct import unpack, pack; print(unpack("<if", pack("<if", 1, 1.0)))'
+      -> (1, 1.0)          (CPython agrees)
+
+So the interpreter grew a `struct` module in the meantime, and there is now
+real interpreter/compiled parity to hold rather than the compiled path being
+"strictly ahead". Recorded because this section is the kind of claim that
+goes stale silently: it was written as a measurement, and it stopped being
+one.
 
 ## Where
 
