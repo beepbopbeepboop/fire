@@ -1461,5 +1461,128 @@ def run_saxpy_on_gpu(msl: str, fname: str):
 
 
 
+class TestNoGpuFlag(unittest.TestCase):
+    """`--no-gpu` turns off INFERENCE, not the device path.
+
+    The distinction is the whole contract, and both halves are tested
+    because either alone would be a plausible-looking implementation: a flag
+    that suppressed every kernel would satisfy "no auto-offload" while
+    silently demoting code the user explicitly marked, and a flag that
+    changed nothing would satisfy "marked code still works" while leaving no
+    way to keep a loop on the host.
+    """
+
+    MARKED = ('@gpu\n'
+              'def vec_add(in0: UnsafePointer[Float32, MutAnyOrigin],\n'
+              '            output: UnsafePointer[Float32, MutAnyOrigin], len: Int):\n'
+              '    tid = global_idx.x\n'
+              '    if tid >= len:\n'
+              '        return\n'
+              '    output[tid] = in0[tid]\n')
+
+    def test_inference_is_off_without_the_flag_on_the_gen(self):
+        mod = parse(SAXPY)
+        on = gctypes.GimpleGen(None, auto_gpu=True)
+        on.module_name = 'x'
+        with_on = on.gen_module(list(mod))
+        off = gctypes.GimpleGen(None, auto_gpu=False)
+        off.module_name = 'x'
+        with_off = off.gen_module(list(mod))
+        self.assertIn('_mg_offload_saxpy', with_on)
+        self.assertNotIn('_mg_offload_saxpy', with_off)
+        # And the rest of the module is untouched: this is a targeted
+        # suppression, not a different codegen.
+        self.assertIn('saxpy', with_off)
+
+    def test_a_marked_kernel_survives_no_gpu(self):
+        for auto in (True, False):
+            gen = gctypes.GimpleGen(None, auto_gpu=auto)
+            gen.module_name = 'm'
+            out = gen.gen_module(list(parse(self.MARKED)))
+            self.assertIn('kernel void vec_add', out, f'auto_gpu={auto}')
+            self.assertIn('_mg_launch_vec_add', out, f'auto_gpu={auto}')
+
+    def test_a_registrar_reached_kernel_survives_no_gpu(self):
+        # Reached through `compile_function[...]` rather than marked. Same
+        # contract: the user asked for the device path explicitly.
+        src = ('def k(out: UnsafePointer[Float32, MutAnyOrigin], len: Int):\n'
+               '    out[global_idx.x] = 1.0\n'
+               '\n'
+               'def main():\n'
+               '    ctx = DeviceContext()\n'
+               '    ctx.compile_function[k](4, 1, 1)\n')
+        gen = gctypes.GimpleGen(None, auto_gpu=False)
+        gen.module_name = 'm'
+        out = gen.gen_module(list(parse(src)))
+        self.assertIn('kernel void k', out)
+
+    def test_the_cache_key_separates_the_two(self):
+        """A content-addressed cache that ignored the flag would serve a GPU
+        build to a `--no-gpu` request -- the silent-wrong-output class the
+        cache exists to prevent."""
+        import cas
+        src = SAXPY
+        self.assertNotEqual(cas.compile_key(src, False, 'm', auto_gpu=True),
+                            cas.compile_key(src, False, 'm', auto_gpu=False))
+        # ...and the default is the GPU one, so an unkeyed caller is unchanged.
+        self.assertEqual(cas.compile_key(src, False, 'm'),
+                         cas.compile_key(src, False, 'm', auto_gpu=True))
+
+    def test_the_cli_flag_is_recognised_and_stripped(self):
+        import fire
+        self.assertEqual(fire._extract_gpu_flags(['--no-gpu', 'a.py']),
+                         (False, ['a.py']))
+        self.assertEqual(fire._extract_gpu_flags(['a.py']), (True, ['a.py']))
+        # It must come out of argv, or the executed program sees it as its
+        # own argument (`input_file = sys.argv[1]`, program argv = argv[2:]).
+        self.assertEqual(fire._extract_gpu_flags(['x.mojo', '--no-gpu'])[1],
+                         ['x.mojo'])
+
+
+@unittest.skipUnless(sys.platform == 'darwin', 'Metal is macOS-only')
+class TestNoGpuOnRealGpu(unittest.TestCase):
+    """`--no-gpu` must not stop marked code from running on the device."""
+
+    PROG = ('@gpu\n'
+            'def vec_add(in0: UnsafePointer[Float32, MutAnyOrigin],\n'
+            '            in1: UnsafePointer[Float32, MutAnyOrigin],\n'
+            '            output: UnsafePointer[Float32, MutAnyOrigin], len: Int):\n'
+            '    tid = global_idx.x\n'
+            '    if tid >= len:\n'
+            '        return\n'
+            '    output[tid] = in0[tid] + in1[tid]\n'
+            '\n'
+            'def main():\n'
+            '    a = [0.0, 1.0, 2.0, 3.0]\n'
+            '    b = [2.0, 2.0, 2.0, 2.0]\n'
+            '    o = [-999.0, -999.0, -999.0, -999.0]\n'
+            '    vec_add(a, b, o, 4)\n'
+            '    for v in o:\n'
+            '        print(v)\n'
+            '    print("d", _mojo_gpu_dispatch_count())\n'
+            '    print("f", _mojo_gpu_failure_count())\n')
+
+    def _run(self, extra):
+        with tempfile.TemporaryDirectory() as wd:
+            path = os.path.join(wd, 'm.mojo')
+            with open(path, 'w') as f:
+                f.write(self.PROG)
+            r = subprocess.run(
+                [sys.executable, os.path.join(HERE, 'fire.py')] + extra +
+                ['--jit', path],
+                capture_output=True, text=True, timeout=900, cwd=HERE)
+            return r.stdout.strip().splitlines(), r.stderr
+
+    def test_marked_kernel_still_dispatches_with_no_gpu(self):
+        out, err = self._run(['--no-gpu'])
+        if not out:
+            self.skipTest(f'no JIT build here: {err[-400:]}')
+        self.assertEqual(out[:4], ['2.0', '3.0', '4.0', '5.0'],
+                         f'--no-gpu changed a marked kernel\n{out}\n{err[-600:]}')
+        self.assertIn('d 1', out, f'no dispatch happened\n{out}')
+        self.assertIn('f 0', out, f'a dispatch failed\n{out}')
+
+
+
 if __name__ == '__main__':
     unittest.main()

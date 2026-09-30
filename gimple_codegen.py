@@ -712,7 +712,8 @@ class GimpleGen:
 
     def __init__(self, do_imports: bool = False, emit_str_pool: bool = True, emit_struct_defs: bool = True,
                  emit_entry_points: bool = True, module_name: str = "", link_imports: bool = False,
-                 no_mangle=(), relaxed_imports: bool = False):
+                 no_mangle=(), relaxed_imports: bool = False,
+                 auto_gpu: bool = True):
         # Function names that must NOT be overload-mangled in this TU — e.g. a
         # generic instantiation's own symbol, which is already uniquely named by
         # its type args and is referenced by that exact name from call sites.
@@ -1440,6 +1441,16 @@ class GimpleGen:
         self.emit_entry_points = emit_entry_points  # False for imported modules; suppress main/_gimple_main
         self.module_name = module_name  # used to name _{module_name}_toplevel
         self.relaxed_imports = relaxed_imports  # when True, skip unsupported generator/async fns instead of failing
+        # auto_gpu: when False, do NOT synthesise a device kernel for a
+        # recognised parallel loop nest (`--no-gpu`). A function that already
+        # carries `@gpu`/`@kernel`, or that is reached through
+        # `compile_function[...]`/`enqueue_function[...]`, is STILL a device
+        # function: the flag turns off INFERENCE, not the device path. That
+        # distinction is the whole contract -- `offload.synthesise_module`
+        # already skips explicitly-marked functions, so the two mechanisms do
+        # not overlap and there is no way to be surprised by a marked kernel
+        # silently demoted to the host.
+        self.auto_gpu = auto_gpu
         self.func_return_types: dict[str, str] = {}
         self.struct_field_types: dict[str, dict[str, str]] = {}
         # Names of user structs that subclass the builtin `dict` (directly
@@ -4736,7 +4747,7 @@ def _relocate_module_instance_defs(code: str) -> str:
 
 
 def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = "",
-                  link_mode: bool = False):
+                  link_mode: bool = False, auto_gpu: bool = True):
     """Shared driver behind every public compile_* entry point.
 
     One place owns the per-compile setup so the wrappers cannot drift apart
@@ -4778,7 +4789,8 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # plain `__mgco_<g>_body` the ordinary codegen lowers; ineligible ones
     # fall through to the gimple_cpp_* C++20-coroutine path unchanged.
     stmts, _coro_meta = gimple_gen_coro.lower(stmts)
-    gen = GimpleGen(do_imports=do_imports, link_imports=link_mode)
+    gen = GimpleGen(do_imports=do_imports, link_imports=link_mode,
+                    auto_gpu=auto_gpu)
     gimple_gen_coro.register_abi_externs(gen)
     if _coro_meta or gimple_gen_coro._NATIVE_FUTURE_CLASSES:
         gimple_gen_coro.register(gen, _coro_meta)
@@ -5010,7 +5022,8 @@ def _dep_sources_digest(mojo_src: str, filename: str) -> str:
     return cas._hash(*(f'{p}\0{texts[p]}' for p in sorted(texts)))
 
 
-def compile_to_gimple_cached(mojo_src: str, do_imports: bool = False, filename: str = "") -> str:
+def compile_to_gimple_cached(mojo_src: str, do_imports: bool = False, filename: str = "",
+                            auto_gpu: bool = True) -> str:
     """Like compile_to_gimple but CAS-cached (plus an in-process L1).
 
     The full tokenize -> parse -> AST-rewrite -> gen_module pipeline is
@@ -5027,23 +5040,28 @@ def compile_to_gimple_cached(mojo_src: str, do_imports: bool = False, filename: 
     correct, just slower."""
     import cas
     key = cas.compile_key(mojo_src, do_imports, filename,
-                          deps_digest=_dep_sources_digest(mojo_src, filename))
+                          deps_digest=_dep_sources_digest(mojo_src, filename),
+                          auto_gpu=auto_gpu)
     return cas.get_or_build_text(
         key, '.ci',
-        lambda: compile_to_gimple(mojo_src, do_imports, filename),
+        lambda: compile_to_gimple(mojo_src, do_imports, filename, auto_gpu),
         _compile_cache)
 
 
-def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "") -> str:
+def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "",
+                      auto_gpu: bool = True) -> str:
     """Parse Mojo source and return a C string with __GIMPLE annotations.
 
     If do_imports=True, recursively compile imported modules and inline their code.
     If do_imports=False, imports are recorded as metadata only.
     If filename is provided, emit #line directives with the filename.
 
-    (Kept at this exact 3-arg signature: the self-hosting bootstrap emits a
-    matching forward declaration for it. Link mode is a separate entry point —
-    compile_to_gimple_linked — to avoid changing this ABI.)
+    (The first three parameters are the self-hosting ABI: the bootstrap emits a
+    matching 3-arg forward declaration, and a 4th POSITIONAL argument would
+    break that. `auto_gpu` is therefore keyword-with-default, so every existing
+    3-arg call — including the one the compiled path emits — is unchanged.
+    Link mode is a separate entry point, compile_to_gimple_linked, to avoid
+    changing that ABI at all.)
     """
     # One call here = one independent output artifact (this project's own
     # transitive-closure dumps included - the whole multi-file closure is one
@@ -5052,13 +5070,15 @@ def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "
     # process (e.g. compile_stdlib.py compiling many independent modules),
     # while still deduping correctly *within* one call across every nested
     # GimpleGen instance recursive import-inlining creates.
-    result, _gen = _run_pipeline(mojo_src, do_imports=do_imports, filename=filename)
+    result, _gen = _run_pipeline(mojo_src, do_imports=do_imports, filename=filename,
+                                 auto_gpu=auto_gpu)
     return result
 
 
 def compile_to_gimple_with_cpp(mojo_src: str, do_imports: bool = False,
                                 filename: str = "",
-                                link_objects_out: list = None) -> tuple[str, str]:
+                                link_objects_out: list = None,
+                                auto_gpu: bool = True) -> tuple[str, str]:
     """Like compile_to_gimple, but ALSO returns the companion .cpp text
     (Milestone B's C++20-coroutine translation of this module's supported
     generator function(s), '' if there are none). A separate entry point
@@ -5083,7 +5103,8 @@ def compile_to_gimple_with_cpp(mojo_src: str, do_imports: bool = False,
     generators still gets those definitions onto the link line. Every path
     is a C++-compiled object, so a consumer must treat their presence like
     a non-empty companion .cpp for final-link-driver selection."""
-    c_code, gen = _run_pipeline(mojo_src, do_imports=do_imports, filename=filename)
+    c_code, gen = _run_pipeline(mojo_src, do_imports=do_imports, filename=filename,
+                                auto_gpu=auto_gpu)
     if link_objects_out is not None:
         link_objects_out.extend(dict.fromkeys(gen._link_objects))
     return c_code, gen.generated_cpp

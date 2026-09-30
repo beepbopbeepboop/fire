@@ -1128,7 +1128,13 @@ def gen_module_impl(self, stmts):
     # The synthesised functions are added AFTER the classifier has run and
     # then the classification is refreshed, because a synthesised function is
     # not in `stmts` when classify_functions sees it.
-    _synth_names = _gmi_offload.synthesise_module(stmts)
+    #
+    # `--no-gpu` (`self.auto_gpu` False) skips the synthesis entirely. It
+    # does NOT change `_device_kinds`: a marked or registrar-reached function
+    # is still DEVICE, because that was an explicit request and the flag is
+    # about inference.
+    _synth_names = (_gmi_offload.synthesise_module(stmts)
+                    if getattr(self, 'auto_gpu', True) else [])
     if _synth_names:
         stmts = list(stmts) + list(_synth_names)
         _device_kinds = _gmi_device_select.classify_functions(stmts)
