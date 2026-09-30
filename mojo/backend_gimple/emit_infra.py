@@ -3962,16 +3962,18 @@ def _dedup_variadic_externs(parts: list) -> str:
 
     def _record_output_parse(out: str, out_parts: list,
                              exact_concrete, variadic_by_out_part: list) -> None:
-        """Publish         `_DEDUP_EXTERN_PARTS_CACHE[out]`.  `out` is `'\n'.join(out_parts)`,
-        so the parse of `out` is the concatenation of the parses of
-        `out_parts` — whose entries the caller has just read — exactly when
-        no join boundary merges two name-carrying fragments, which is what
+        """Publish `_DEDUP_EXTERN_PARTS_CACHE[out]` for the text JUST
+        returned, with the parse its parts' own entries imply.
+
+        `out` is `'\n'.join(out_parts)`, so the parse of `out` is the
+        concatenation of the parses of `out_parts` — whose entries the caller
+        has just read — exactly when no run of parts merges into one
+        `;`-delimited fragment that changes what it names, which is what
         `_boundaries_preserve_parse` decides by direct comparison.
 
         The condition is checked rather than assumed, and when it fails
         nothing is published (the parent level then parses the text itself,
         exactly as it did before this existed).
-
 
         `exact_concrete` is the caller's already-computed set when it is
         provably the exact name set of `out` (nothing was dropped) — passed

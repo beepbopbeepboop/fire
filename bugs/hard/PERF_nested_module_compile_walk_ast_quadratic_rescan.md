@@ -93,26 +93,36 @@ declarations actually exist), cumulative corpus per level unchanged:
 **What is left, precisely.** The corpus is still handed to the function at every
 level and is still O(cumulative) — that is inherent to the output, not a
 rescan: the parent's text genuinely CONTAINS every descendant's text, so
-producing it costs one `'\n'.join` per level (a memcpy of bytes the caller
-requires as one str). What is gone is the per-byte Python-level re-reading of
-it. Two residual per-level costs remain, both O(#parts) or O(corpus) with tiny
-constants and neither able to change output: one dict lookup per part (plus
-`concrete.add` per extern name, ~159 adds total at n=80 vs 3,240 before) and the
-`'\n'.join`. Turning the first into O(delta) needs the shared running
-`concrete` set this doc already rejected twice as a superset; it stays rejected.
+producing it costs one `'\n'.join` per level (one memcpy of bytes the caller
+requires as a single str). What is gone is the per-byte Python-level
+re-reading of it. Two residual per-level costs remain, and neither can change
+output: the `'\n'.join`, and one dict lookup per part plus one `concrete.add`
+per name in that part's entry. The second is *cheaper* than it was — a derived
+entry is the child's already-deduplicated name SET, where a fresh parse is a
+LIST, so a part declared once per module in the closure now costs one `add`
+per level instead of one per declaration. Measured as the count of names folded
+across the 80 levels of the n=80 chain: 3,240 before, 158 after. It is still
+O(the corpus's extern names) per level, and making THAT O(delta) needs the
+shared running `concrete` set this doc already rejected twice as a superset; it
+stays rejected.
 
 **Equivalence evidence.** Generated C BYTE-IDENTICAL on two large succeeding
 real cases — `std/io/io.mojo` (28,318,118 bytes, md5
 `248e44fd29f532280b5d212726dfc9a8`) and `std/format/tstring.mojo` (8,021,416
-bytes, md5 `f7ac69d1b240328ac7181f134ee34b9d`) — and on the chain at
-n=20/40/80. Differential harness (old body verbatim, private memo, vs new):
-exhaustive over all 8,400 pairs and triples, and 175,692 4- and 5-tuples, of a
-20-piece adversarial set built from empty/whitespace/`;`-only parts and
-unterminated extern fragments in both arities; 4,000 randomized corpora; a
-multi-level simulation (each level's parts contain the previous level's output)
-over 300 seeds with EVERY published entry compared against an independent
-parse of that text; real generated C split into random chunks at 7 chunkings;
-and repeat-call stability (a warm cache must not change a second answer).
+bytes, md5 `f7ac69d1b240328ac7181f134ee34b9d`) — and on the synthetic chain at
+every size measured, each `cmp`-clean from a fixed module directory so the
+`#line` directives are stable too: n=20 263,458 bytes md5
+`be03542847a1bd17e3e869d795374e52`, n=40 525,278 bytes md5
+`d18d3d1ef28569d712a4ad18fa1e9bed`, n=80 1,120,918 bytes md5
+`83feabd12315910be3af32c660f27e81`. Differential harness (old body verbatim,
+private memo, vs new): exhaustive over all 8,400 pairs and triples, and
+175,692 4- and 5-tuples, of a 20-piece adversarial set built from
+empty/whitespace/`;`-only parts and unterminated extern fragments in both
+arities; 4,000 randomized corpora; a multi-level simulation (each level's parts
+contain the previous level's output) over 300 seeds with EVERY published entry
+compared against an independent parse of that text; real generated C split into
+random chunks at 7 chunkings; and repeat-call stability (a warm cache must not
+change a second answer).
 
 **Gate** (2026-09-30, worker pass, NOT the full gate — see the controller note
 in this entry's "Not run"): `python3 test_gimple.py` 333 passed / 0 failed,
