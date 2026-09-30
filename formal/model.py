@@ -9088,21 +9088,28 @@ def collect_module_symbols(stmts: list) -> dict:
             # only when both fold. `site` stays `rebound` so a read that
             # somehow has no folded value is refused rather than guessed.
             table[name] = GlobalSymbol(
-                name, _folded_node(folded, value), "rebound", None,
+                name, folded_literal_node(folded, value), "rebound", None,
                 getattr(stmt, "line", 0) or 0)
             continue
-        table[name] = GlobalSymbol(name, _folded_node(folded, value),
+        table[name] = GlobalSymbol(name, folded_literal_node(folded, value),
                                    "assigned", None,
                                    getattr(stmt, "line", 0) or 0)
     return table
 
 
-def _folded_node(folded, template):
+def folded_literal_node(folded, template):
     """An AST literal node carrying `folded`, keeping the ORIGINAL's spelling.
 
     Same line/col as the value it replaces, so a diagnostic raised at a read
     site after the substitution still points at the read, not at the
-    module-level line the value came from."""
+    module-level line the value came from.
+
+    Public because TWO places build a literal from a folded value and they must
+    build the SAME literal: this module, for a module-level constant, and
+    `formal/build.py:_fold_target_queries`, for a target query rewritten in a
+    function body. A `BoolLiteral` in one and an `IntLiteral` of 0/1 in the
+    other would be two answers to one question, and the difference is invisible
+    until a `comptime if` takes the wrong branch."""
     line = getattr(template, "line", 0) or 0
     col = getattr(template, "col", 0) or 0
     if isinstance(folded, str):

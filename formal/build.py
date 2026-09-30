@@ -858,14 +858,25 @@ def compile_formal(source_path: str, output: str = None,
     # `<Struct>_<method>` and the rewrite needs to know which struct owns the
     # name. Resolving this after would leave `c.get()` unrecognised in a file
     # that imported the struct, which is the only way such a call occurs.
+    # The target this image is FOR, published BEFORE anything that can build a
+    # module — `_imported_structs` below compiles each imported module into a
+    # dylib, and each of those publishes the target of ITS OWN build (a dylib is
+    # always Mach-O, `formal/imports.py`). Publishing first and again after
+    # would work, but a value that is only correct because of the order is a
+    # value that will be wrong the day someone reorders these two lines; so this
+    # one comes first and the dylib's publish is the one that has to be undone.
+    #
+    # The pipeline is where a `#kgen.param.expr<…>` target query is answered:
+    # `arch` and `fmt` are the two facts the linker is about to act on, and a
+    # query like "what is the current target's arch" has exactly one correct
+    # answer for them. They are the same pair the dylib cache is keyed on, so
+    # the two front ends cannot describe one target two ways.
+    M.publish_target(M.target_for(arch, fmt))
     imported_structs = _imported_structs(source_path, stmts, arch)
-    # The target this image is FOR, published before the function pipeline runs
-    # because the pipeline is where a `#kgen.param.expr<…>` target query is
-    # answered: `arch` and `fmt` are the two facts the linker is about to act
-    # on, and a query like "what is the current target's arch" has exactly one
-    # correct answer for them. `arch` and `fmt` are the same pair the dylib
-    # cache is keyed on (formal/imports.py), so the two front ends cannot
-    # describe one target two ways.
+    # …and again, because the dylib builds above republished it as the dylib's
+    # own Mach-O target. This is the one place the two genuinely differ (an
+    # `--fmt=elf` build on a Mac asks for an ELF image and a Mach-O dylib), and
+    # the executable's functions are the ones the linker is about to act on.
     M.publish_target(M.target_for(arch, fmt))
     try:
         functions, structs, symbols = _prepare_functions(
@@ -3117,7 +3128,7 @@ def _fold_target_queries_in(node, count: list):
                 # to disagree and refused a construct the build answers.
                 folded = M.fold_target_template(child)
                 if folded is not None:
-                    folded = M._folded_node(folded, child)
+                    folded = M.folded_literal_node(folded, child)
                     count[0] += 1
                     changed = True
                 if isinstance(node, list):
@@ -3139,7 +3150,7 @@ def _fold_target_queries_in(node, count: list):
     folded = M.fold_target_template(node)
     if folded is not None:
         count[0] += 1
-        return M._folded_node(folded, node)
+        return M.folded_literal_node(folded, node)
     for name in getattr(node, "__dataclass_fields__", {}):
         child = getattr(node, name)
         if isinstance(child, (list, tuple)):
