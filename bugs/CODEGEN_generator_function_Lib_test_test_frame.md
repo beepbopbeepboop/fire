@@ -248,11 +248,11 @@ refused wholesale, distinct from every other gap found in this cluster.
 
 Also present (transitively, via `test.support`, not this file's own
 code): the `start_threads` print()-scalar-argument gap already noted in
-`“CODEGEN_generator_function: Lib/test/test_faulthandler.py”`.
+`bugs/CODEGEN_generator_function_Lib_test_test_faulthandler.md`.
 
 Single instance of the new BinaryOp-statement gap so far; not folded
 into a hard-bug doc. If confirmed recurring, write
-`CODEGEN_generator_bare_expr_statement_unsupported`.
+`bugs/hard/CODEGEN_generator_bare_expr_statement_unsupported.md`.
 
 ## Build error
 

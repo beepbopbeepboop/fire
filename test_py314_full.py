@@ -8,39 +8,20 @@ Differences from test_py_stdlib.py / runner.py:
     running it through fire.py build. Test-suite fixtures that are
     *intentionally* invalid Python (e.g. Lib/test/badsyntax_*.py) are
     skipped and logged separately rather than filed as mojo bugs.
-  - Dedups against the report directory already on disk: if any category file
-    already exists for a given relative path, no new report is written.
+  - Dedups against bugs/ already on disk: if any category file already
+    exists for a given relative path, no new bug report is written.
   - Caches every fire.py build outcome in py314_build_cache.json (keyed by
     compiler+toolchain fingerprint + file content, via py314_cache.py/cas.py)
     so re-running against an unchanged compiler is near-instant instead of
     repeating ~15 minutes of subprocess builds for files whose answer hasn't
     changed.
-
-**It writes its reports to a directory you name, and that directory is a TEMP
-one unless you ask otherwise.** It used to write `bugs/<CATEGORY>_<path>.md`
-into this repository, which made it a process rather than a test: measured on
-2026-10-01, 300 seconds of it produced **25 new files in `bugs/`** and a
-`grammar_snippet_gen.cpp` at the repo root, and the failure mode is not who ran
-it. `tools/suite.py` launches jobs in parallel from a common checkout, so two
-runs racing on the same category file, or one killed half-way leaving a
-truncated doc that the dedup then treats as complete, are both quiet.
-`bugs/UNTESTED.md` §4.1 records the finding.
-
-So: `--root` names the tree to scan (a missing one is a loud non-zero exit, not
-a silent zero-file pass), `--out` names where reports go and defaults to a
-fresh temp directory printed at the end, and `--write-to-bugs` restores the old
-destination for the deliberate, manual, human-in-the-loop run. The
-investigation is unchanged; only the write target moved, and the summary says
-where it went.
 """
 
-import argparse
 import ast
 import concurrent.futures
 import json
 import os
 import sys
-import tempfile
 import threading
 import time
 
@@ -48,37 +29,15 @@ import py314_cache
 from py314_harness import run_build
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO_BUGS = os.path.join(HERE, "bugs")
-DEFAULT_ROOT = os.path.expanduser("~/net/Python-3.14.6")
+BUGS_DIR = os.path.join(HERE, "bugs")
+ROOT = os.path.expanduser("~/net/Python-3.14.6")
 
 EXCLUDE_DIR_NAMES = {".git", "__pycache__", "venv", ".venv"}
 
 CATEGORIES = ["PASS", "LEX_FAIL", "PARSE_FAIL", "COMPILE_FAIL", "TIMEOUT", "ERROR"]
 
-# Set by main() from --out/--write-to-bugs, and read by the two writers. A
-# module global because the report writers are called from worker threads and a
-# path threaded through eight call signatures to say "and do not write into the
-# repository" is a worse shape than one assignment.
-OUT_DIR = None
+os.makedirs(BUGS_DIR, exist_ok=True)
 write_lock = threading.Lock()
-
-
-def parse_args(argv):
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--root", default=DEFAULT_ROOT,
-                    help=f"tree of .py files to scan (default {DEFAULT_ROOT})")
-    ap.add_argument("--out", default=None,
-                    help="directory to write reports into; a fresh temp "
-                         "directory if not given. The path is printed at the "
-                         "end, so a run cannot write anywhere silently")
-    ap.add_argument("--write-to-bugs", action="store_true",
-                    help="write into this repository's bugs/ -- the ORIGINAL "
-                         "behaviour, for a deliberate manual run. Off by "
-                         "default because a test that writes into a shared "
-                         "tree is a process, not a test (bugs/UNTESTED.md 4.1)")
-    ap.add_argument("max_files", nargs="?", default=None,
-                    help="stop after N files")
-    return ap.parse_args(argv)
 
 
 def find_py_files(root):
@@ -99,11 +58,11 @@ def safe_name_for(filepath):
     return rel.replace(os.sep, "_")[:-len(".py")]
 
 
-def existing_report(safe_name):
+def existing_bug_category(safe_name):
     for cat in CATEGORIES:
         if cat == "PASS":
             continue
-        if os.path.exists(os.path.join(OUT_DIR, f"{cat}_{safe_name}.md")):
+        if os.path.exists(os.path.join(BUGS_DIR, f"{cat}_{safe_name}.md")):
             return cat
     return None
 
@@ -130,7 +89,7 @@ def check_valid_python(filepath):
 def write_bug_report(filepath, safe_name, cat, stderr, rc, elapsed):
     rel = os.path.relpath(filepath, ROOT)
     stderr_lines = [l for l in stderr.splitlines() if "_mojo_reflect.c" not in l]
-    bugfile = os.path.join(OUT_DIR, f"{cat}_{safe_name}.md")
+    bugfile = os.path.join(BUGS_DIR, f"{cat}_{safe_name}.md")
     with write_lock:
         if os.path.exists(bugfile):
             return False
@@ -155,7 +114,7 @@ def process_one(filepath):
     if not valid:
         return {"file": filepath, "status": "INVALID_SOURCE", "reason": reason}
 
-    already = existing_report(safe_name)
+    already = existing_bug_category(safe_name)
     cat, stderr, stdout, rc, elapsed, cache_hit = run_build(filepath)
 
     filed = False
@@ -172,30 +131,11 @@ def process_one(filepath):
     }
 
 
-def main(argv=None):
-    global OUT_DIR, ROOT
-    args = parse_args(sys.argv[1:] if argv is None else argv)
-    ROOT = os.path.abspath(os.path.expanduser(args.root))
-    max_files = int(args.max_files) if args.max_files and args.max_files.isdigit() else None
+def main():
+    max_files = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else None
     workers = int(os.environ.get("WORKERS", "8"))
 
-    # A missing tree is a loud non-zero exit, never a zero-file pass. A
-    # registered test that skips silently when a path is absent is a gate that
-    # measures nothing, which is worse than an unrun file.
-    if not os.path.isdir(ROOT):
-        print(f"test_py314_full: no such tree: {ROOT}\n"
-              f"  pass --root <dir> to point at one "
-              f"(default {DEFAULT_ROOT})", file=sys.stderr)
-        return 2
-
-    if args.write_to_bugs:
-        OUT_DIR = REPO_BUGS
-    elif args.out:
-        OUT_DIR = os.path.abspath(os.path.expanduser(args.out))
-    else:
-        OUT_DIR = tempfile.mkdtemp(prefix="py314_full_")
-    os.makedirs(OUT_DIR, exist_ok=True)
-    print(f"Scanning {ROOT} ... reports go to {OUT_DIR}", flush=True)
+    print(f"Scanning {ROOT} ...", flush=True)
     files = find_py_files(ROOT)
     if max_files:
         files = files[:max_files]
@@ -255,7 +195,7 @@ def main(argv=None):
         "new_bugs_filed": new_bugs,
         "cache_hits": cache_hits,
     }
-    with open(os.path.join(OUT_DIR, "PY314_FULL_SCAN_SUMMARY.json"), "w") as f:
+    with open(os.path.join(BUGS_DIR, "PY314_FULL_SCAN_SUMMARY.json"), "w") as f:
         json.dump(summary, f, indent=2)
 
     print("\n" + "=" * 60)
@@ -273,13 +213,8 @@ def main(argv=None):
     print(f"\nCache hits: {cache_hits}/{len(files) - len(invalid)} "
           f"({os.path.basename(py314_cache.CACHE_PATH)})")
     print(f"Total time: {total_time:.0f}s")
-    print(f"Reports and summary written to {OUT_DIR}")
-    if OUT_DIR != REPO_BUGS and new_bugs:
-        print(f"  {len(new_bugs)} report(s) written. To put them where the "
-              f"queue lives, review them and copy, or re-run with "
-              f"--write-to-bugs.")
-    return 0
+    print(f"Summary written to {os.path.join(BUGS_DIR, 'PY314_FULL_SCAN_SUMMARY.json')}")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

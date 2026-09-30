@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import shutil
+import sysconfig
 import platform
 import threading
 
@@ -28,8 +29,7 @@ os.environ['PATH'] = '/opt/homebrew/bin:/Users/mrs/bin:/opt/local/bin:/opt/local
 
 # Platform detection for cross-platform build support
 _IS_DARWIN = platform.system() == 'Darwin'
-from build_config import (find_gcc, find_gxx, optional_unit_cc,
-                          optional_unit_cc_flags, optional_unit_compile_failed,
+from build_config import (find_gcc, find_gxx, optional_unit_compile_failed,
                           optional_unit_libs, optional_unit_source,
                           referenced_optional_runtime_units)
 _GCC_BIN = find_gcc()
@@ -84,16 +84,6 @@ def _usage_text() -> str:
   {tool} --formal [-n <int>] <file.mojo>
                                     Same, then run it (bare form = build and run)
   {tool} --no-prove <file> [...]     Formal backend only: skip proof generation/checking
-  {tool} --check-contracts <file>    Formal backend only: lower every @requires/@ensures
-                                    into a run-time check; on `build` it also emits
-                                    the f_contract theorems into the proof. A contract
-                                    found FALSE stops the build. Without the flag a
-                                    false contract is still REPORTED, with the input
-                                    that breaks it. On `dylib` the theorem half does
-                                    not apply -- that path's contract is derived from
-                                    the machine (lib/Contracts.lean), not from a
-                                    source model -- so the run-time check and the
-                                    reported verdicts are what you get.
   {tool} --backend=arm64 ...         Select the arm64 formal backend (no gimple) [same as --formal]
   {tool} --backend=gimple ...        Select the gimple backend (default)
   {tool} dylib <file.mojo> [...]     Compile library module(s) to a standalone .dylib/.so
@@ -119,15 +109,7 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
   -g -g0 -g1 -g2 -g3               Debug info level (build default -g3)
 
 Backend selector (may appear anywhere; selects the codegen path):
-  --backend=gimple|arm64           gimple = default C/GIMPLE path; arm64 = formal arm64 + Mach-O (no gimple, no driver)
-
-GPU:
-  --no-gpu                         Do not auto-offload. A recognised parallel
-                                   loop nest gets no synthesised device
-                                   kernel. Code MARKED @gpu/@kernel, or reached
-                                   through compile_function[...], is still
-                                   compiled for the GPU -- this turns off
-                                   inference, not the device path."""
+  --backend=gimple|arm64           gimple = default C/GIMPLE path; arm64 = formal arm64 + Mach-O (no gimple, no driver)"""
 
 
 def _extract_codegen_flags(args: list):
@@ -196,67 +178,18 @@ def _backend_was_explicit(argv: list) -> bool:
     return any(a == "--backend" or a.startswith("--backend=") for a in argv)
 
 
-def _extract_gpu_flags(args: list):
-    """Pull `--no-gpu` out of an argument list.
-
-    Returns (auto_gpu, remaining_args).
-
-    WHAT IT TURNS OFF, precisely: the INFERENCE that synthesises a device
-    kernel for a recognised parallel loop nest
-    (`mojo/middle/offload.py`, increment 3 of doc/GPU_OFFLOAD_PLAN.html). A
-    function that already carries `@gpu`/`@kernel`, or that is reached through
-    `compile_function[...]`/`enqueue_function[...]`, is STILL a device
-    function under `--no-gpu`. That is the contract: the flag turns off
-    guessing, not the device path, and the two mechanisms cannot overlap
-    because `offload.synthesise_module` already skips explicitly-marked
-    functions.
-
-    Why it needs to exist at all: auto-offload fires on ordinary Python with
-    no marker, so without an opt-out a user who wants their loop on the host
-    has no way to say so -- and "it ran slower and I cannot tell why" is not
-    an acceptable answer to a compiler that moved their code.
-    """
-    auto_gpu = True
-    remaining = []
-    for a in args:
-        if a == '--no-gpu':
-            auto_gpu = False
-        else:
-            remaining.append(a)
-    return auto_gpu, remaining
-
-
 def _extract_formal_flags(args: list):
-    """`--formal`, `--no-prove`, `--check-contracts`, `--opt`, and the rest.
-
-    `--check-contracts` asks for the host contracts' assumption TEXT rather
-    than their count; `--opt` turns on `formal/peephole.py`, the verified
-    peephole pass. Both are off by default and both defaults are deliberate.
-    For `--opt` the reason is that every rewrite the pass performs is licensed
-    by a theorem in `lib/Peephole.lean` saying the machine model is unchanged,
-    but a proved rewrite is only as good as the pass's ability to decide the
-    rewrite's side conditions, and the flag is how the corpus and the
-    differential fuzzer are run both ways so the OUTPUT can be compared.
-    `bugs/FORMAL_peephole_rules_without_proofs.md` has what is enabled and what
-    is not.
-    """
     formal = False
     prove = True
-    check_contracts = False
-    opt = False
     remaining = []
     for a in args:
         if a == '--formal':
             formal = True
         elif a in ('--no-prove', '--no-proof'):
             prove = False
-        elif a == '--check-contracts':
-            check_contracts = True
-        elif a == '--opt':
-            opt = True
         else:
             remaining.append(a)
-    return formal, prove, check_contracts, opt, remaining
+    return formal, prove, remaining
 
 
 def _pop_flag_value(argv: list, flag: str):
@@ -282,7 +215,7 @@ def _first_input_index(argv: list) -> int:
 
 
 def _pop_test_input(argv: list):
-    """Pop the formal backend's `-n <int>` (the entry function's ARGUMENTS).
+    """Pop the formal backend's `-n <int>` (entry function's X0 argument).
 
     Only from the CLI's own portion of the command line: `-n` is consumed when
     it appears before the input file, and left alone when it appears after it,
@@ -290,17 +223,6 @@ def _pop_test_input(argv: list):
     `fire --formal prog.mojo -n 5` still hands -n to prog (everything after the
     input file is the program's argv). A bare `-n` with no value, or a
     non-integer one, is a usage error.
-
-    **One value per parameter, and the comma is the separator.**  `-n 5` is
-    what this has always meant and is unchanged -- the whole of every program in
-    `formal/examples`, whose entry points take one argument.  `-n 5,7` supplies
-    two, which is what a `def main(n: Int, m: Int)` needs: the startup stub
-    materializes one word per value into the argument registers in order
-    (`formal/model.py::entry_arg_values` pads a short list with the `0` those
-    registers already hold), and the proof's concrete run test is stated against
-    the same list.  Before this, a two-parameter entry point could only be given
-    its first argument from the command line, and the second register held
-    `argv` -- the model said `0` and the binary said a pointer.
     """
     argv = sys.argv
     first_file = _first_input_index(argv)
@@ -313,18 +235,10 @@ def _pop_test_input(argv: list):
     raw = argv[i + 1]
     del argv[i:i + 2]
     try:
-        vals = [int(part) for part in raw.split(',')]
+        return int(raw)
     except ValueError:
-        print(f"{_tool_name()}: -n expects an integer or a comma-separated "
-              f"list of them, got {raw!r}", file=sys.stderr)
+        print(f"{_tool_name()}: -n expects an integer, got {raw!r}", file=sys.stderr)
         sys.exit(2)
-    if len(vals) == 1:
-        return vals[0]
-    if not vals:
-        print(f"{_tool_name()}: -n expects at least one integer, got {raw!r}",
-              file=sys.stderr)
-        sys.exit(2)
-    return vals
 
 
 def _sorry_note(result) -> str:
@@ -353,52 +267,8 @@ def _sorry_note(result) -> str:
             f"it is not a proof]")
 
 
-def _trust_note(result) -> str:
-    """The ADMITTED HOST CONTRACTS this build rests on, or "" when it rests on none.
-
-    The `sorry` count above says HOW MUCH is admitted; this says WHAT, which is
-    the part a reader cannot reconstruct.  `proof_sorries` is a number whose
-    meaning depends on the file, and the file is not printed: a build reporting
-    "3 declarations ADMITTED a sorry" could be three CFG leaves in this file's
-    own control flow or three `@admitted` contracts about a second process, and
-    those are not remotely the same claim.  So the names and their assumptions go
-    on the line.
-
-    Printed on its OWN line, after `Built:`, rather than appended to `Proof:`,
-    and that is not cosmetic.  `Proof:` is about the generated Lean file, and it
-    is printed only when proofs ran; the sweep builds with `--no-prove` and its
-    files still rest on these contracts, so a note attached to `Proof:` would
-    vanish for exactly the files whose classification depends on it.  It is also
-    why this reads `result["admitted"]`, which `formal/build.py` fills
-    unconditionally, rather than something computed here.
-
-    A contract whose summary carries an `error` — the closure walk failed, which
-    `formal/build.py`'s `_admitted_summary` catches rather than let a build
-    succeed with a note it could not write — is printed as the error it is.  The
-    alternative is an empty list, which reads as "this build trusts nothing
-    about the host", and that is precisely the claim that would be false.
-    """
-    admitted = result.get("admitted") or []
-    if not admitted:
-        return ""
-    lines = []
-    for c in admitted:
-        if c.get("error"):
-            lines.append(f"  {c.get('name')} — COULD NOT BE READ: {c['error']}")
-        elif c.get("assumes"):
-            lines.append(f"  {c['name']} — assumes of the host: {c['assumes']}")
-        else:
-            lines.append(f"  {c['name']} — (no assumption text; see "
-                         f"{c.get('source')}:{c.get('line')})")
-    head = (f"trust: {len(admitted)} admitted host contract(s) — a claim of "
-            f"trust, not a proof:")
-    return "\n".join([head] + lines)
-
-
 def _formal_executable(input_file: str, output, test_input: int, prove: bool,
-                       run_it: bool, link_dylibs=None, arch: str = "arm64",
-                       check_contracts: bool = False,
-                       opt: bool = False) -> int:
+                       run_it: bool, link_dylibs=None, arch: str = "arm64") -> int:
     """The one formal executable path: `fire build --formal` and bare
     `fire --formal <file>` both land here, and nothing else builds one.
 
@@ -414,13 +284,7 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
                                     test_input=test_input,
                                     prove=prove, check=prove,
                                     arch=arch,
-                                    check_contracts=check_contracts,
-                                    link_dylibs=list(link_dylibs or []),
-                                    opt=opt)
-        if result.get("peephole"):
-            fired = ", ".join(f"{k}×{v}" for k, v
-                              in sorted(result["peephole"].items()))
-            print(f"peephole: {fired}")
+                                    link_dylibs=list(link_dylibs or []))
     except _fb.FormalBuildError as e:
         print(f"build: {e}", file=sys.stderr)
         return 1
@@ -430,12 +294,6 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
         traceback.print_exc(file=sys.stderr)
         return 1
     print(f"Built: {result['path']}  [{result.get('backend', arch)}]")
-    trust = _trust_note(result)
-    if trust:
-        print(trust)
-    contracts = _contract_note(result, check_contracts)
-    if contracts:
-        print(contracts)
     if result.get("proof_path"):
         cached = " (verified from cache)" if result.get("proof_cached") else ""
         print(f"Proof: {result['proof_path']}{cached}{_sorry_note(result)}")
@@ -448,55 +306,6 @@ def _formal_executable(input_file: str, output, test_input: int, prove: bool,
         print(f"build: cannot run {result['path']}: {e}", file=sys.stderr)
         return 1
     return completed.returncode
-
-
-def _contract_note(result: dict, checked: bool) -> str:
-    """What this build's SOURCE-LANGUAGE CONTRACTS said, as one printed block.
-
-    Printed ALWAYS, including when the build did not check them, and that is
-    the point.  A contract in the source is a claim about the program; a build
-    that silently ignored it would be indistinguishable from a build of a file
-    that promised nothing, and this project has measured what that costs four
-    times over (a `sorry` over a false statement, a `Total` that was false for
-    every dylib, a `fun n => n` spec that typechecked for a function computing
-    `n * 3`).
-
-    A REFUTED verdict reaches this function in the default build (it is a
-    failure only under `--check-contracts`, where `_search_contracts` raises
-    first), so a REFUTED line here is a promise this build found FALSE and
-    named the input for. UNKNOWN is printed for the same reason and with the
-    same weight: an undecided contract is not a passing one.
-    """
-    entries = list(result.get("contracts") or [])
-    if not entries:
-        return ""
-    lines = []
-    for e in entries:
-        head = f"contract {e['name']}: {e['status'].upper()}"
-        extra = ""
-        if "counterexample_inputs" in e:
-            extra = f" at {e['counterexample_inputs']}"
-        lines.append(f"  {head}{extra} — {e['why']}")
-    # The mode line is DERIVED from the entries, not from the flag alone.  A
-    # flag says what was asked for and the entries say what was done, and on
-    # the library path the two differ -- `dylib --formal --check-contracts`
-    # checks at run time and emits no theorem -- so a line derived from the flag
-    # would claim "and in the proof" for a path that wrote none.
-    partial = any(e.get("status") == "not-applicable" for e in entries)
-    if not checked:
-        mode = ("NOT checked in the image; pass --check-contracts for that, "
-                "which also makes a REFUTED one fail the build. The search "
-                "below runs either way, so a false promise is reported on "
-                "every build")
-    elif partial:
-        mode = ("checked in the image; a REFUTED one fails the build. The "
-                "theorem half does not apply on this path -- the row below "
-                "says why")
-    else:
-        mode = ("checked in the image and in the proof; a REFUTED one fails "
-                "the build")
-    return (f"contracts: {len(entries)} declared ({mode}):\n"
-            + "\n".join(lines))
 
 
 def _formal_run_argv(path: str, arch: str) -> list:
@@ -542,58 +351,8 @@ def _load_formal_build():
 
 def _parse_arm64_module(src: str, filename: str) -> list:
     """Parse source with fire_compiler for the arm64 backend path."""
-    from fire_compiler import py_tokenize_named, Parser
-    return Parser(py_tokenize_named(src, filename)).with_filename(filename).parse_module()
-
-
-def _main_entry_args(main_def):
-    """The arguments `fire.py run` passes when it invokes `main` itself: one
-    `0` per parameter that has NO default, and nothing for the rest.
-
-    The compiled path's C `main()` wrapper does the same thing for the same
-    reason — it renames `def main(...)` to `_gimple_main` and calls
-    `_gimple_main(0, 0, ...)` (`mojo/backend_gimple/emit_funcs.py`, "Generate C
-    wrapper for main"), because a bare `main()` call cannot satisfy a signature
-    that declares parameters. This is the interpreter half of that convention,
-    and it was MISSING: `fire.py` invoked `main()` with no arguments at all, so
-    a program declaring the extremely common `def main(n):` had `n` bound to
-    nothing. That was invisible while `myinterpreter.py`'s `_invoke` bound an
-    unsupplied parameter to `None` — which it did until `MojoFunction._invoke`
-    made it the arity error CPython already raised, so the gap surfaced as
-    eight red cases in `test_nonlocal.py` the moment that landed. Every one of
-    them was a `def main(n):` whose body never reads `n`, so the programs are
-    correct and the entry point was the thing that had to change.
-    `test_runtime_diff.py`'s `main_takes_a_parameter` is the case that reads
-    `n`, because the eight could not tell a `0` from a `None`.
-
-    Two deliberate differences from the compiled wrapper, both of them cases
-    where the interpreter can be right and the wrapper cannot:
-
-      * a parameter WITH a default keeps it here (`def main(args=None)` sees
-        `None`, which is what the source says), while the wrapper passes `0`
-        for every parameter unconditionally because it has no way to spell a
-        default expression in a C call site;
-      * `*args` / `**kwargs` catch-alls take no positional at all, which the
-        wrapper's `len(param_strs)` would get wrong for the same reason.
-
-    `0` is the value because it is what the compiled path passes and because
-    this repository's `def main(n):` convention reads `n` as an argument count
-    — a program that wants the real count reads `sys.argv`, which both paths
-    give it.
-    """
-    from fire_compiler import IntLiteral
-    from myinterpreter import Interpreter
-    defaults = getattr(main_def, 'param_defaults', None) or {}
-    out = []
-    for param in Interpreter._extract_param_names(main_def):
-        # `_extract_param_names` keeps the stars (`*rest`, `**kw`); neither
-        # takes a positional, and a bare `*` separator is not a name at all.
-        if param.startswith('*'):
-            continue
-        if param in defaults:
-            continue
-        out.append(IntLiteral(value=0))
-    return out
+    from fire_compiler import py_tokenize, Parser
+    return Parser(py_tokenize(src)).with_filename(filename).parse_module()
 
 
 def _calls_main(stmts, IfStmt, ExprStmt, CallExpr, IdentExpr):
@@ -667,10 +426,7 @@ def interpret_and_execute(src_code, filename=None, argv=None):
             has_main_def = any(isinstance(s, FunctionDef) and s.name == 'main' for s in stmts)
             already_called = _calls_main(stmts, IfStmt, ExprStmt, CallExpr, IdentExpr)
             if has_main_def and not already_called:
-                main_def = next(s for s in stmts
-                                if isinstance(s, FunctionDef) and s.name == 'main')
-                interpreter.eval_expr(CallExpr(func=IdentExpr(name='main'),
-                                               args=_main_entry_args(main_def)))
+                interpreter.eval_expr(CallExpr(func=IdentExpr(name='main')))
         except SystemExit as e:
             # A worker thread swallows SystemExit silently instead of ending
             # the process — a Mojo script's exit() builtin (mapped to
@@ -820,15 +576,14 @@ def run_repl():
             print()
             break
 
-def jit_compile_and_execute(input_file: str, src: str, opt_flag=None, debug_flag=None,
-                            program_args=None, auto_gpu=True):
+def jit_compile_and_execute(input_file: str, src: str, opt_flag=None, debug_flag=None, program_args=None):
     """JIT compile and execute Mojo source code for ARM64.
     
     Returns True on success, False on failure.
     """
     try:
         from jit.arm64 import ARM64JIT
-        jit = ARM64JIT(opt_flag=opt_flag, debug_flag=debug_flag, auto_gpu=auto_gpu)
+        jit = ARM64JIT(opt_flag=opt_flag, debug_flag=debug_flag)
         return bool(jit.compile_and_execute(src, filename=input_file, program_args=program_args))
     except Exception as e:
         print(f"JIT error: {e}", file=sys.stderr)
@@ -855,56 +610,11 @@ def link_executable(objs, exe_file, extra_ldflags=None, cxx=False):
 
 def build_executable(input_file: str, src: str, output: str = None,
                      opt_flag: str = None, debug_flag: str = None,
-                     quiet: bool = False,
-                     auto_gpu: bool = True) -> bool:
-    """Compile Mojo source to executable using GIMPLE codegen.
-
-    **Every intermediate goes in a scratch directory this call OWNS, beside the
-    artifact and removed on both returns.** That is a change: the five
-    intermediates (the generated `.ci`, the module `.o`, the runtime `.o`, the
-    generator `.cpp` and its `.o`, plus the coro/async/optional-unit objects)
-    used to be named after the input file's basename in the PROCESS's working
-    directory, and only a caller who passed `work_dir` got them anywhere else.
-    `fire.py build` did not, so building one file left up to five files in
-    wherever the user happened to be standing — measured, `python3
-    test_py314_full.py` from the repository root leaves
-    `grammar_snippet_gen.cpp` there, and two such files were committed before
-    `.gitignore` covered the pattern.
-
-    The collision half is the one that was a wrong ANSWER rather than litter:
-    two builds of two modules that share a basename (`a/gen.py` and
-    `b/gen.py`) both wrote `gen.ci`, `gen.o` and `gen_gen.cpp` into one shared
-    directory with no lock, and `tools/suite.py` runs jobs `-j18` from a common
-    checkout. The directory is derived from `output` — the path the caller asked
-    for — so two builds with two outputs cannot meet, and it is DETERMINISTIC
-    rather than a `mkdtemp`, so a given input and output still compile the same
-    bytes (the `.ci` path reaches the binary through `-g3`'s debug info, and a
-    random directory there would make every build of the same program a
-    different binary).
-
-    With no `output` the executable is the input's basename in the CWD, so the
-    scratch is `./.<stem>.build` and is still removed: the litter is gone
-    whether or not `-o` was passed.
-
-    `work_dir` is GONE rather than kept as an override, because a parameter with
-    one meaning in three call sites and a second meaning in the fourth is how the
-    fourth got this wrong — and its two callers (`jit/arm64.py`,
-    `test_module_cache.py`) both passed a `TemporaryDirectory`, which is exactly
-    what the default now is.
-    """
-    stem = os.path.splitext(os.path.basename(input_file))[0] or 'main'
-    # Resolved BEFORE the scratch directory: with no `output` the executable IS
-    # the stem, in the CWD, and the scratch goes beside it.
-    exe_file = output if output else stem
-    scratch = os.path.join(os.path.dirname(os.path.abspath(exe_file)),
-                           f".{stem}.build")
-    try:
-        os.makedirs(scratch, exist_ok=True)
-    except OSError as e:
-        print(f"Error building: cannot create the build directory "
-              f"{scratch}: {e}", file=sys.stderr)
-        return False
-    basename = os.path.join(scratch, stem)
+                     work_dir: str = None, quiet: bool = False) -> bool:
+    """Compile Mojo source to executable using GIMPLE codegen."""
+    basename = os.path.splitext(os.path.basename(input_file))[0] or 'main'
+    if work_dir is not None:
+        basename = os.path.join(work_dir, basename)
     # Default to a debuggable unoptimized build; -O*/-g* on the command line override.
     # -ftrivial-auto-var-init=zero: matches Makefile's stage2/mojo build (see
     # its own comment there for the full story) — the generated .ci reads
@@ -944,10 +654,9 @@ def build_executable(input_file: str, src: str, output: str = None,
         if gimple_codegen.module_may_have_supported_generator(src, filename=input_file):
             c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
                 src, do_imports=True, filename=input_file,
-                link_objects_out=sibling_cpp_objs, auto_gpu=auto_gpu)
+                link_objects_out=sibling_cpp_objs)
         else:
-            c_code = gimple_codegen.compile_to_gimple_cached(
-                src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
+            c_code = gimple_codegen.compile_to_gimple_cached(src, do_imports=True, filename=input_file)
         ci_file = f"{basename}.ci"
         with open(ci_file, "w") as f:
             f.write(c_code)
@@ -1067,9 +776,8 @@ def build_executable(input_file: str, src: str, output: str = None,
                     return False
                 extra_objs.append(_co)
 
-        # Link executable with CPython runtime. `exe_file` was resolved at the
-        # top, before the scratch directory: with no `output` it is the stem in
-        # the CWD, NOT `basename`, which now lives in the scratch directory.
+        # Link executable with CPython runtime
+        exe_file = output if output else basename
         # Get Python library path
         try:
             configdir = subprocess.run(
@@ -1110,8 +818,7 @@ def build_executable(input_file: str, src: str, output: str = None,
             py_ldflags += ['-Wl,-z,stacksize=536870912']
 
         # Optional runtime units (build_config's registry -- see
-        # build_config.py's own header, where the bug is described).
-        # runtime/ holds
+        # bugs/CODEGEN_optional_runtime_units_not_linked.md). runtime/ holds
         # six C units and only fire_runtime.c was in a build path, while the
         # headers of the other four are `#include`d into EVERY generated TU
         # (module_gen.py's preamble) and all their signatures sit in
@@ -1125,13 +832,7 @@ def build_executable(input_file: str, src: str, output: str = None,
         for _unit in referenced_optional_runtime_units(c_code, runtime_dir):
             _u_src = optional_unit_source(_unit, runtime_dir)
             _u_o = f"{basename}_{_unit}_rt.o"
-            # Per-unit compiler and flags, not the build-wide gcc: the Metal
-            # unit is Objective-C (the generated .ci is gimple C, so this is
-            # the only place Metal can be reached) and needs clang + ARC. The
-            # ordinary C units take the default path unchanged.
-            _u_cc = optional_unit_cc(_unit) or _GCC_BIN
-            _u_c = [_u_cc] + cg_flags + optional_unit_cc_flags(_unit) + [
-                "-I", runtime_dir] + py_cflags + [
+            _u_c = [_GCC_BIN] + cg_flags + ["-I", runtime_dir] + py_cflags + [
                 "-c", "-o", _u_o, _u_src]
             _r = subprocess.run(_u_c, capture_output=True, text=True)
             if _r.returncode != 0:
@@ -1158,16 +859,6 @@ def build_executable(input_file: str, src: str, output: str = None,
         traceback.print_exc(file=sys.stderr)
         return False
 
-    finally:
-        # Every `return False` above lands here too, which is the point: a
-        # failed build that kept its scratch would be the same litter this
-        # function just stopped doing, and a sweep's failures are most of its
-        # builds. `ignore_errors` because a scratch we cannot delete must not
-        # turn a successful build into a failed one — the caller has its answer
-        # either way, and the directory is named `.`+stem+`.build` so what is
-        # left is visible and attributable.
-        shutil.rmtree(scratch, ignore_errors=True)
-
 def main():
     # Pull -O*/-g* codegen flags and --backend out of argv first so they
     # may appear anywhere. backend selects the codegen path: 'gimple'
@@ -1175,12 +866,7 @@ def main():
     opt_flag, debug_flag, rest = _extract_codegen_flags(sys.argv[1:])
     backend_explicit = _backend_was_explicit(sys.argv[1:])
     backend, rest = _extract_backend(rest)
-    formal, prove, check_contracts, opt, rest = _extract_formal_flags(rest)
-    # --no-gpu: turn off auto-offload of recognised parallel loop nests. Marked
-    # @gpu/@kernel code is unaffected. Extracted here, alongside the other
-    # flags, so it is stripped from argv before `program_args = sys.argv[2:]`
-    # and never reaches the executed program as an argument of its own.
-    auto_gpu, rest = _extract_gpu_flags(rest)
+    formal, prove, rest = _extract_formal_flags(rest)
     if formal and not backend_explicit:
         # --formal alone means the arm64 formal backend, but an explicit
         # --backend wins: `build --formal --backend=x86_64` is how the x86-64
@@ -1293,85 +979,16 @@ def main():
             print(f"{_tool_name()} dylib: at least one .mojo file is required",
                   file=sys.stderr)
             sys.exit(1)
-        # `--backend` is a GLOBAL flag, extracted above, and this command never
-        # read it: `compile_formal_dylib` defaults to `arch="arm64"` and the
-        # proof generator is arm64-only, so `dylib --formal --backend=x86_64`
-        # built an ARM64 image and printed `Built:` -- measured 2026-10-03 on
-        # `def triple(n): return n * 3`, both files `Mach-O 64-bit dynamically
-        # linked shared library arm64`.  That is the silent-wrong-answer shape,
-        # and it is worse on this command than elsewhere because the whole
-        # subject is a PER-EXPORT contract: a reader measuring the x86-64
-        # boundary (bugs/FORMAL_dylib_export_loops_and_frame_bounds.md §OPUS-6)
-        # would get an arm64 answer and conclude "the same argument applies",
-        # which is precisely the hypothesis the document says must not be
-        # assumed.  So refuse it, and name what is missing.
-        #
-        # The `--formal` in the condition is what makes the sentence below TRUE.
-        # This guard used to fire on the `--backend` value alone, so it also fired
-        # for `dylib --no-prove --backend=x86_64` — and its own diagnostic ends
-        # "For a x86_64 library without a contract, drop --formal: `dylib
-        # --no-prove` is that", which is the command already running. Measured on
-        # `master` at `77b24183`:
-        #
-        #   $ fire.py dylib --no-prove --backend=x86_64 -o zz.dylib m.mojo
-        #   fire dylib --formal: x86_64 has no per-export contract ... drop
-        #   --formal: `dylib --no-prove` is that.                      [exit 2]
-        #
-        # and the second guard took `--no-prove --backend=arm64` too, so there
-        # was NO command line that produced an x86-64 formal library at all, only
-        # the python call behind one (`formal.build.compile_formal_dylib`). A
-        # consumer of a dylib is exactly who cannot use that.
-        if formal and backend not in ('gimple', 'arm64'):
-            print(f"{_tool_name()} dylib --formal: {backend} has no per-export "
-                  f"contract, so there is nothing --formal could prove. Two "
-                  f"separate things, and keeping them apart is the point: the "
-                  f"IMAGE for {backend} builds (arch is honoured by the code "
-                  f"generator), while the CONTRACT is arm64-only -- its "
-                  f"emitter is formal/arm64_proof_gen.py "
-                  f"(generate_dylib_proof) and `DylibExport` in "
-                  f"lib/ProofLib.lean is stated over the arm64 machine "
-                  f"(arm64_go_exit, arm64_step, arm64_runs). So this is a "
-                  f"missing GENERATOR, not a missing request. For a "
-                  f"{backend} library without a contract, drop --formal: "
-                  f"`dylib --no-prove` is that. For the x86-64 PROGRAM path, "
-                  f"which does have a generator "
-                  f"(formal/x86_64_proof_gen.py), use "
-                  f"`build --formal --backend=x86_64`.",
-                  file=sys.stderr)
-            sys.exit(2)
-        # A `--backend` on this command names a FORMAL library's architecture,
-        # and there is nothing else it could mean: without `--formal` this
-        # command is the gimple/C path, which compiles through gcc for the
-        # HOST's architecture and has no `--backend` at all. So the refusal that
-        # used to sit here -- "`--backend=arm64` without `--formal` is refused,
-        # because 'the gimple path for arm64' is right by coincidence on an arm64
-        # host and silently wrong on any other" -- was refusing the one reading
-        # of the flag that was left, and it fired for `--backend=x86_64` too, so
-        # no command line produced an x86-64 formal library at all. Measured on
-        # `master` at `77b24183`, both exits 2 with a message contradicting the
-        # flag that was passed:
-        #
-        #   $ fire.py dylib --no-prove --backend=x86_64 -o zz.dylib m.mojo
-        #   fire dylib --formal: x86_64 has no per-export contract ... For a
-        #   x86_64 library without a contract, drop --formal: `dylib
-        #   --no-prove` is that.                                    <-- the command
-        #
-        # The branch above is what that sentence promises, and it now delivers.
-        dylib_arch = 'arm64' if backend == 'gimple' else backend
-        if formal or backend != 'gimple':
+        if formal:
             _fb = _load_formal_build()
             try:
                 result = _fb.compile_formal_dylib(
-                    dylib_inputs, output=dylib_output, arch=dylib_arch,
-                    prove=prove, check=prove,
-                    check_contracts=check_contracts)
+                    dylib_inputs, output=dylib_output,
+                    prove=prove, check=prove)
             except Exception as e:
                 print(f"formal dylib: {e}", file=sys.stderr)
                 sys.exit(1)
             print(f"Built: {result['path']}")
-            contracts = _contract_note(result, check_contracts)
-            if contracts:
-                print(contracts)
             if result.get("proof_path"):
                 cached = " (verified from cache)" if result.get("proof_cached") else ""
                 print(f"Proof: {result['proof_path']}{cached}{_sorry_note(result)}")
@@ -1439,8 +1056,7 @@ def main():
 
     # If JIT requested, compile and execute
     if jit:
-        ok = jit_compile_and_execute(input_file, src, opt_flag, debug_flag,
-                                     program_args, auto_gpu=auto_gpu)
+        ok = jit_compile_and_execute(input_file, src, opt_flag, debug_flag, program_args)
         sys.exit(0 if ok else 1)
 
     # If build requested, compile to executable. backend='arm64' routes through
@@ -1452,19 +1068,16 @@ def main():
                 input_file, build_output,
                 10 if formal_test_input is None else formal_test_input,
                 prove, run_it=False, link_dylibs=build_link_dylibs,
-                arch=backend, check_contracts=check_contracts, opt=opt))
-
+                arch=backend))
         try:
             import driver
-            rc = driver.compile_program(
-                input_file, src, output=build_output, run=False,
-                opt_flag=opt_flag, debug_flag=debug_flag, auto_gpu=auto_gpu)
+            rc = driver.compile_program(input_file, src, output=build_output,
+                                        run=False, opt_flag=opt_flag, debug_flag=debug_flag)
         except Exception:
             rc = None
         if rc is None:
             success = build_executable(input_file, src, output=build_output,
-                                       opt_flag=opt_flag, debug_flag=debug_flag,
-                                       auto_gpu=auto_gpu)
+                                       opt_flag=opt_flag, debug_flag=debug_flag)
             rc = 0 if success else 1
         sys.exit(rc)
 
@@ -1490,8 +1103,7 @@ def main():
             return
         try:
             import gimple_codegen
-            c_code = gimple_codegen.compile_to_gimple(
-                src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
+            c_code = gimple_codegen.compile_to_gimple(src, do_imports=True, filename=input_file)
             with open(f"{basename}.ci", "w") as f:
                 f.write(c_code)
             print(f"✓ Generated {basename}.ci (transitive closure)", file=sys.stderr)
@@ -1568,9 +1180,7 @@ def main():
             # arm64 backend: skip gimple .ci entirely (no gimple_codegen import).
             if backend != 'arm64':
                 try:
-                    c_code = gimple_codegen.compile_to_gimple(
-                        src, do_imports=False, filename=input_file,
-                        auto_gpu=auto_gpu)
+                    c_code = gimple_codegen.compile_to_gimple(src, do_imports=False, filename=input_file)
                 except Exception as e:
                     print(f"compile_to_gimple failed: {e}", file=sys.stderr)
                     import traceback; traceback.print_exc(file=sys.stderr)
@@ -1624,14 +1234,12 @@ def main():
             sys.exit(_formal_executable(
                 input_file, None,
                 10 if formal_test_input is None else formal_test_input,
-                prove, run_it=True, arch=backend,
-                check_contracts=check_contracts, opt=opt))
+                prove, run_it=True, arch=backend))
         try:
             import driver
-            rc = driver.compile_program(
-                input_file, src, run=True, opt_flag=opt_flag,
-                debug_flag=debug_flag, program_args=program_args,
-                auto_gpu=auto_gpu)
+            rc = driver.compile_program(input_file, src, run=True,
+                                        opt_flag=opt_flag, debug_flag=debug_flag,
+                                        program_args=program_args)
         except Exception as e:
             print(f"driver error, interpreting instead: {e}", file=sys.stderr)
             rc = None

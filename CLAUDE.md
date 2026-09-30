@@ -127,17 +127,11 @@ Memory: two mechanisms, and the second is the one that bounds the machine.
 
 A **ceiling** is per process tree: every job that runs a `mojoc` binary, or a
 whole-closure compile standing in for one, is capped by `tools/memcap.py` at
-the ceiling its `memclass` names (`tiny` 4 GB, `small` 8, `module` 24,
-`program` 55, `stage` 96 — see the `MEMCLASS` table in `tools/suite.py` for
-which is which). **Each class is assigned from the job's MEASURED peak**
-(`MEASURED_PEAK_GB`, read off a real run's log by the same wrapper that does
-the killing), never from the shape of the workload it resembles, and a class
-over 4 GB carries a one-line `memwhy` pointing at
-`bugs/PERF_memory_over_4gb_is_a_bug.md` — over 4 GB is a debt, not a fact.
-`python3 tools/suite.py --list` prints peak, class, ceiling and ratio per job,
-plus the over-provisioned (>8x) and unmeasured lists. `MEMLIMIT_GB=96` raises
-every ceiling and is also the answer to a class that no longer fits;
-`MEMLIMIT_GB=0` removes them all and says so loudly.
+the ceiling its `memclass` names (`small` 8 GB, `module` 24, `program` 55,
+`stage` 96 — see the `MEMCLASS` table in `tools/suite.py` for which is which
+and the measurements behind them). `program` and `stage` are the ones known to
+pass 10 GB. `MEMLIMIT_GB=96` raises every ceiling; `MEMLIMIT_GB=0` removes
+them all and says so loudly.
 
 A **reservation** is per machine, and it is not optional. A ceiling bounds one
 tree and says nothing about how many may run at once, which is not a bound at
@@ -145,18 +139,13 @@ all: on 2026-09-29 about thirty compiler processes at 30-43 GB each, every one
 of them inside its own ceiling, collapsed the box. So every job takes its
 memclass out of ONE machine-wide budget (`tools/memslot.py`, strict FIFO,
 `~/.gmojo/memslot`, `MEMSLOT_BUDGET_GB`, default 96) *before* it is spawned,
-and gives it back when it exits — so "18 x 4 GB" means 24 at a time, and
-the count includes the other worktrees and your own terminal. That is also why
-the classes are measured: a class is a claim on the machine, so one that is 20x
-the job's peak is not a margin, it is twenty other jobs that cannot run. An
-`excl` job reserves its class like any other and is additionally alone in ITS
-run — `excl` is about jobs racing on a shared artifact, not about memory, and
-a class over half the budget already means alone on the machine by arithmetic.
-A reservation covers the tree it admitted, which is why the
+and gives it back when it exits — so "18 x 24 GB" means four at a time, and
+the count includes the other worktrees and your own terminal. An `excl` job
+reserves the WHOLE budget, so exclusivity now means the machine rather than
+one run. A reservation covers the tree it admitted, which is why the
 `$(call memslot,…)` recipe in the Makefile does not deadlock against the
 runner's own admission of that recipe (`MEMSLOT_HELD`, and
-`memslot.covering`) — and why a recipe's class may never exceed the class of
-the job that runs it, which `test_suite.py` checks.
+`memslot.covering`).
 
 A job's TIMEOUT starts after admission, never during the queue wait: a `stage`
 job can wait a long time for 96 GB on a busy machine, and a timeout that
@@ -304,10 +293,7 @@ checkouts.
 A test registered with `expect='<why>'` in `tools/suite.py` is a known
 failure. It reports as `EXPECTED` with its reason on screen, in the tally,
 and in `--list`, and it does not fail the run. The reason string is
-mandatory — a marker without one is a silenced test. **What running it costs
-decides whether `expect=` is the right marker at all: a known failure too
-expensive to run gets `disabled=<bug doc>` instead, which is the subject of
-the next section.**
+mandatory — a marker without one is a silenced test.
 
 The anti-rot half is the point: an `expect`-marked test that **passes** is
 reported as a **FAILURE** ("marked expect=… but it PASSES — drop the
@@ -334,146 +320,22 @@ mark it with a reason and a bug-doc link.
   compiled path ignored decorators too, so the diff was clean). A new
   interpreter-oracle bug belongs there, not in `test_runtime_diff.py`.
 
-Current `EXPECTED` entries, and the one `DISABLED` entry. **`python3
-tools/suite.py --list` is the census**, not this table — and since 2026-10-01 it
-is the only census that can be: every registered test is now in a bucket unless
-it declares `dep=True` (one does, `prooflib`), which `test_suite.py` checks in
-both directions. So the `[]` column the eleven ungated `expect=` jobs used to
-print cannot be produced again by accident, which is what the two bugs about
-gated-but-never-run registrations were about; both of their docs are deleted
-with their fixes.
+Current `EXPECTED` entries, all one root cause — the self-hosted binary
+segfaults on any input, including a two-line program (`./mojoc --dump-full`
+exits 139), so these three are red together and are fixed together:
 
-A marker that states a count is CHECKED against the run, for the same reason:
-`expect=` forgives `FAIL`/`ERROR` wholesale, so a new failure inside an
-already-marked test used to be absorbed silently and the tally still said
-EXPECTED. The count is read out of the marker's own leading prose ("3 of 14:",
-"36 failing:") and out of the harness's summary line, and a disagreement is a
-FAILURE — the same signal as a marker whose test starts passing, because both
-mean the marker no longer describes the test. A marker that describes a
-whole-job condition rather than a set of cases states no count, and one that
-states a count but whose run prints none is reported as UNCHECKED rather than
-agreed with; which markers are in which class is `--list`'s to say, not a list
-restated here.
+| test | subject |
+|---|---|
+| `ab-native` | python vs native codegen over the A/B corpus |
+| `native-dumpfull` | the native `--dump-full` artifact vs the reference |
+| `bootstrap-stage2-dumps` | the compiled binary dumping every source |
 
-`formal-toplevel` was the fourth formal host-module row this table used to
-carry and, like `formal-struct` before it, lost its `expect=` on 2026-10-02:
-both failures each named were rewrites of an assertion that could no longer see
-the case it was watching, and the cases are now build-and-RUN comparisons
-against CPython. The remaining `expect=` jobs besides the two heavyweight steps
-and the formal host-module rows are the compiled-path async/await cluster, all
-cheap (0.0-0.2 GB, 1.2-11.6 s each) and all in `coroutine` and `x86`, each
-measured one at a time before being named, with the measurement at its
-registration — plus, since 2026-10-04, `bootstrap-stage2-dumps`, which is the
-one count a FANOUT states (40 of its 46 items exit non-zero) and is therefore
-checked against the per-item verdicts rather than against a summary line; see
-`observed_fanout_failures` in `tools/suite.py`. `bugs/CODEGEN_ab_native_fails.md` §4 carries the full inventory
-and the reasoning for `expect=` rather than `disabled=` on each.
+Tracked in `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`. They
+flip themselves to FAIL the moment the binary stops crashing, which is the
+intended way for them to be retired.
 
-| test | marker | subject | cost it charges every gate |
-|---|---|---|---|
-| `ab-native` | `disabled=bugs/CODEGEN_ab_native_fails.md` | python vs native codegen over the A/B corpus | **nothing** — registered, not run |
-| `native-dumpfull` | `expect=` (`SELFHOST_TOKENIZE_BLOWUP`) | the native `--dump-full` artifact vs the reference | 31.3 GB, `program` (55 GB) |
-| `bootstrap-verify` | `expect=` (`SELFHOST_STAGE2_EMPTY_DUMP`) | the three stage trees, byte for byte | 0.6 s, default class; its cost is all in `bootstrap-stage3-transitive` |
-| `bootstrap-validate` | `expect=` (`SELFHOST_STAGE2_EMPTY_DUMP`) | the same comparison in the Mojo driver's vocabulary | 0.6 s, default class |
-| `bootstrap-stage2-dumps` | `expect=`, count checked (40 of 46) | the compiled binary's per-file `--dump` | 4 s, `tiny`; `bootstrap` |
-| the async/coroutine ones | `expect=`, count checked | compiled-path async/await, coroutine and closure capture | 1.4-15.4 s each, `tiny`; `coroutine` |
-
-`formal-toplevel` and `formal-module-attr` were in this table and are not any
-more: both markers were dropped on this tree, so `--list` reports neither and a
-row claiming otherwise is the failure `test_suite.py`'s
-`a stated test status must match the registry` exists to catch. It is a census
-(`python3 tools/suite.py --list`), not this file.
-
-**A declared red and an unrun red are different failures**, and the second is
-worse: a marker on a test no gate runs can never be observed going green, so it
-cannot rot out. That is why the ungated ones above were a coverage hole
-(the `expect=` markers themselves, and the ungated
-tests that are not marked at all) and not merely a cost question, why they went into
-`coroutine` rather than staying out of every bucket, and why "register it" is
-never the same act as "run it". Every one of them is in a bucket (2026-10-01),
-measured one at a time before being named, and `test_suite.py`'s `the buckets:`
-checks are what keeps it that way — a registration that is in no bucket fails
-the self-test unless it declares `dep=True`, which is `prooflib` and nothing
-else.
-
-The `native-dumpfull` `expect=` is the old "the binary segfaults on any input"
-claim, which was **measured false on 2026-09-27 and corrected rather than left
-to rot**: `./mojoc --dump-full` on a two-line program is now exit 0 / 12.1 MB
-/ 94.6 M instructions. What is left there is the self-hosting bootstrap
-pre-pass's cost (~15-30 GB / ~15-25 s per call, localised in
-`bugs/CODEGEN_bootstrap_resource_blowup.md` and BLOW.md §0).
-
-**A marker on this class has moved twice, and both moves are the anti-rot
-discipline rather than bookkeeping** — read this before adding one back.
-`bootstrap-stage2-dumps` carried `SELFHOST_SEGV` ("segfaults on any input"),
-which was measured false on 2026-09-27; it was replaced with
-`SELFHOST_STAGE2_STALL`, on the reasoning that a marker saying "segfault" would
-hide the real class. That marker then went **stale** and the runner reported it
-as a failure, because the class it named (`mojo_unsupported_iter`) is gone — and
-the class underneath it is not: `--dump` on the compiled binary writes a correct
-`.pyi`, an **empty** `.ci` and no `.tok`/`.ast`, and exits 0. That fanout
-**cannot see it**, because `reject=` is a regex over a child's output and a
-child that writes nothing prints nothing, so it passes. The marker therefore
-lives on `bootstrap-verify`/`bootstrap-validate`, which compare the stage trees
-and do see it (87 stage1-vs-stage2 diffs, 0 stage2-vs-stage3 — the binary is a
-fixed point of itself, computing something other than the reference). **So a
-passing `bootstrap-stage2-dumps` is not evidence that the self-hosted binary
-dumps correctly**; it is evidence that the row does not look at what it
-produced. Divergences themselves:
-`bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`; the empty-dump class,
-with its reproduction and its per-artifact shape:
-`bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md`.
-
-**The gate is otherwise clean, and deliberately no file here says how many.**
-Every `expect=` and `disabled=` registration in the registry is accounted for
-above and there is no undeclared red — that is a statement about the REGISTRY,
-not about a run. A tally, by contrast, is a claim about a *run*, and a run is
-not a property of the tree: it goes stale underneath a change made in none of
-the files that state it. This sentence has been the third file to be caught
-that way (it read "`check` 11/11, `coro` 20/20, `stdlib` 2/2" when the bucket
-held 21 names, then again when it held 22, then again when it held 36), which
-is the argument for removing the number rather than for refreshing it. The
-current figures are the last line of `build/suite.log`; a bucket's SIZE is
-`make check-plan` / `python3 tools/suite.py --dry-run <bucket>`, which reads
-the registry and is therefore a fact about the tree rather than about a run.
-A doc that states a test's STATUS is checked against the registry by
-`test_suite.py`, and `tools/dangling_doc_refs.py` walks the citations —
-ratcheted per file, so a citation of a doc deleted by its own fix cannot be
-added back. A doc that states a tally is not checked, because there is nothing
-to check it against until somebody runs the gate.
-
-## Known failures: `expect=` or `disabled=`, decided by cost
-
-Two markers for the same state of knowledge — *this test is red and we know
-why* — and the only thing that decides between them is what running it costs.
-
-1. **A known failure that is CHEAP runs, with `expect='<why>'`.** Its anti-rot
-   is the whole reason it is worth running: an expected-fail that starts
-   passing is reported as a FAILURE. A cheap test can afford to keep that
-   check alive every gate.
-2. **A known failure that is EXPENSIVE must not be run: `disabled='bugs/<doc>.md'`.**
-   Registered, never run — no process, no memcap, no reservation, no wall time
-   — reported as its own `DISABLED` status with the doc, counted in the tally,
-   listed on screen and in `--list` and `--dry-run`, and it reserves **0** from
-   the memslot ledger whatever class it carries. **The threshold is the
-   3-4 GB memory standard in `bugs/PERF_memory_over_4gb_is_a_bug.md`**, applied
-   to time as well: a class over that line is a debt, so a job carrying one is
-   too expensive to spend on a known answer; so is one that takes more than a
-   few minutes. Measured, not guessed — `ab-native` was `expect=` while using
-   20.5 GB and holding 55 of the machine's 96 GB, exclusive, every gate.
-3. **Never spend an exclusive, machine-sized reservation on a job whose outcome
-   is already known.** `excl` and a `program` class are for jobs that must
-   finish; on a job that cannot pass yet, they are the machine paying twice.
-
-**The bug doc IS the switch, and that is what makes this safe.** The rule
-below says a fully fixed bug's doc is DELETED, so the doc's disappearance is
-exactly the event "the bug is fixed": `tools/suite.py` refuses to load the
-registry while a disabled test's doc is gone, naming the test and saying to turn
-it back on. A doc that never existed (a typo) fails the same way with its own
-message, and a job carrying both markers is refused outright. So a fix cannot
-land without re-enabling its test, and a disabled test cannot stay off
-forever. Checked in `test_suite.py` (`the disabled markers in the registry are
-honest`) and enforced at import.
+**The gate is otherwise clean**: `check` 11/11, `coro` 20/20, `stdlib` 2/2,
+`mojoc` builds, `bootstrap` green through `stage2-cc`.
 
 ## Bug docs
 
@@ -489,17 +351,3 @@ fixed with the remainder written down, or not fixed at all. Those are the
 cases where a Status section carrying the evidence and the exact next step
 is worth more than the absence of a file. `bugs/hard/` is for the ones that
 need their own careful pass; `bugs/OPEN_WORK.md` is the triage index.
-
-**Deleting a doc has a second half, and it is the half that gets skipped.**
-Every file that cited it now cites nothing. Run
-
-    python3 tools/dangling_doc_refs.py --ratchet
-
-in the same commit, and fix what it names: rewrite the citation to name the
-BUG (its symptom, or the commit that fixed it), or delete the sentence if the
-path was all it said. `--ratchet` fails only when a file GAINS a citation,
-against the per-file ceilings in `tools/dangling_refs_baseline.py`, and it is
-a registered gate job (`doc-refs`, in `check`) — so the corpus of dangling
-citations can only shrink from here, and it grew from 309 to 480 while nothing
-was watching it. To bank a sweep, `--write-baseline` regenerates the ceilings
-and prints what moved.

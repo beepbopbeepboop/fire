@@ -13,15 +13,12 @@ links libSystem and nothing else can be asked for. The restrictions are
 stated once, here, because three of them are properties of the VALUE MODEL
 rather than of this module, and every function below is shaped by them.
 
-  * BOTH BACKENDS TODAY, for the reason `formal/hostmods/os/__init__.mojo` gives
-    at length: a module dylib that calls into the C library builds and RUNS
-    under `--backend=x86_64` too, and the claim this replaces was false. Every
-    function here needs the C library, so what the x86-64 backend has to get
-    right is the symbol each call binds — and for `localtime`/`strftime`, whose
-    answer is a `struct tm` this target fills in, that is the same
-    dual-spelling table `formal/model.py`'s `target_libc_symbol` is. A host
-    with no x86-64 support at all still skips the x86-64 half of
-    `test_formal_time.py`.
+  * ARM64 ONLY TODAY, for the reason `formal/hostmods/os/__init__.mojo` gives
+    at length: a module dylib that calls into the C library produces an image
+    the loader refuses under `--backend=x86_64`
+    (`bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md`).
+    Every function here needs the C library, so all of them are arm64-only
+    until that is fixed, and `test_formal_time.py` skips a non-arm64 host.
 
   * A FLOAT IS NOT A FLOAT. `formal/arm64_codegen.py`'s `FloatLiteral` arm
     says it: *"formal is int-only; truncate toward zero (matches C cast)"*,
@@ -29,44 +26,19 @@ rather than of this module, and every function below is shaped by them.
     `time.time()` cannot return CPython's float: there is no fractional value
     in the model, and `0.5` in a source file is the integer 0. What CAN cross
     is the IEEE-754 BIT PATTERN of a double, and `printf("%.6f", bits)` prints
-    it exactly on BOTH architectures — measured, and pinned in
-    `test_formal_time.py`, whose `--backend` flag is what makes the x86-64 half
-    of that claim a thing the suite can run at all (there was no way to ask it
-    before, which is how an arm64-only measurement came to be written down as a
-    property of both). On x86-64 that needs the floating conversion placed in
-    `XMM0` rather than read out of the integer register the word is in;
-    `formal/model.py`'s `printf_argument_classes` is the reader and
-    `formal/x86_64.py`'s `encode_movq_xmm_rm64` is the move. What is still
-    absent, and for a different reason, is every function whose CPython answer
-    is a float VALUE rather than a double rendered by a variadic call: a
-    non-variadic `double` parameter says what it wants in a prototype, and a
-    freestanding image has no header to read it from. So
+    it exactly — measured, and pinned in `test_formal_time.py` — so
     `time_seconds_bits()` below returns that pattern and the module's own
     docstrings say what to do with it. Every function whose CPython answer is
     a float therefore has BOTH a `_bits` form (faithful, this target's
     representation) and an integer `_ns` form (the same clock, in nanoseconds,
     which is the unit a program can actually do arithmetic on here).
 
-  * NO STRUCT CROSSES, and the reason is measured rather than assumed.
-    `localtime`, `gmtime`, `mktime`, `strftime` and `get_clock_info` all answer
-    with a `struct tm` or a named tuple, and a struct is a frame blob (see
-    `os/_syscalls.mojo`'s note on `stat`), so they are absent rather than
-    answered with a plausible number — and each one is named in
-    `bugs/FORMAL_time_struct_shaped_answers.md`.
-
-    What that doc has since MEASURED is worth stating here, because it is what a
-    reader has to check before deciding what the fix is: **reading** a C
-    library's struct field-wise WORKS on this path — a `Pointer[UInt8]` pointee
-    plus `(p + k).value()` gives every byte, four little-endian loads per `int`
-    field — and what is missing is the other half, **writing** through a pointee,
-    which is refused outright ("assignment target must be a plain name"). That is
-    the whole blocker for `localtime`/`gmtime`, whose argument is a
-    `const time_t *` this module cannot fill, and for `mktime`/`strftime`, whose
-    argument is 36 bytes it cannot fill. Passing an integer where the pointer
-    belongs instead passes a null `time_t *` and the image segfaults inside
-    libc, so the honest answer here is the refusal. The capability is filed as
-    `bugs/FORMAL_a_module_cannot_store_through_a_pointer_with_a_declared_pointee.md`
-    and the measurement is `test_formal_time.py`'s `structroute` group.
+  * NO STRUCT CROSSES. `localtime`, `gmtime`, `mktime`, `strftime` and
+    `get_clock_info` all answer with a `struct tm` or a named tuple, and a
+    struct is a frame blob (see `os/_syscalls.mojo`'s note on `stat`), so
+    there is no representation for them. They are absent, each named in
+    `bugs/FORMAL_time_struct_shaped_answers.md` with the measurement, rather
+    than answered with a plausible number.
 
   * NO EXCEPTIONS. `time.sleep` on a negative argument raises `ValueError` in
     CPython; here it returns having slept zero seconds, and says so. There is
@@ -80,13 +52,19 @@ rather than of this module, and every function below is shaped by them.
     function and `time.CLOCK_REALTIME` is spelled `CLOCK_REALTIME()`. This is
     the same rule `os` follows for `os.sep`, and the same reason.
 
-  * NO FUNCTION HERE HAS A DEFAULT ARGUMENT. A call into another image does
-    not materialize the callee's defaults: the caller has no signature to read
-    them from, so the argument register is whatever the caller last left in it.
-    Measured: `need_two(1)` returns 511 in one image and 1867609072 across a
-    dylib (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`). So
-    the parameters CPython gives defaults are REQUIRED here, and the one place
-    a default is genuinely wanted is a SECOND function of its own.
+  * NO FUNCTION HERE HAS A DEFAULT ARGUMENT. A call into another image USED not
+    to materialize the callee's defaults — the caller had no signature to read
+    them from, so the argument register was whatever the caller last left in it,
+    measured as `need_two(1)` returning 511 in one image and 1867609072 across a
+    dylib. `formal/imports.py`'s `external_declarations` now hands the emitter
+    the callee's own declaration, so that measurement no longer reproduces
+    (`FORMAL_default_argument_not_applied_across_a_dylib`, fixed; its doc is
+    deleted, as a fixed bug's is). The parameters CPython gives defaults are
+    still REQUIRED here — a choice rather than a limit, and the step that
+    restores them is written down in
+    `bugs/FORMAL_hostmod_defaults_left_required_after_the_cross_dylib_fix.md`
+    because it wants a sweep behind it. The one place a default is genuinely
+    wanted is a SECOND function of its own.
 
 WHAT IS HERE, AND WHY IT IS THE RIGHT SUBSET
 --------------------------------------------

@@ -94,47 +94,6 @@ typedef struct MojoGenerator {
     int       done;
 } MojoGenerator;
 
-/* ---- the TAGGED box: one word per element, and its kind beside it --------
-   A `yield` whose tuple has a slot that is ITSELF a tuple of heterogeneous
-   inner shape boxes that inner tuple as
-
-       [ tag0, word0, tag1, word1, ... ]        (2*K int64 slots)
-
-   carried in a MojoList and handed around as the single int64_t every box on
-   this seam is. The ACCESSORS are here, next to the tag values, because a
-   caller that cannot see the tags cannot read a tag back: `mojo_tagged_tag_dyn`
-   answers one of the constants below and nothing else states what they mean.
-   Definitions are in fire_coro_gen.c.
-
-   Declared here rather than left to the definitions, and that is a fix rather
-   than a formality: these six names carry the runtime's `mojo_` prefix and were
-   EXPORTED by the runtime dylib while no header declared them, so
-   `formal/model.py`'s `gimple_runtime_callable` refused every call to them for
-   want of a signature — five word-shaped entry points that were already written,
-   already compiled into the library and already linkable, refused for a reason
-   that is about the DECLARATION and not about the target.  `mojo_tagged_double`
-   and `mojo_double_bits` are declared here too and are still correctly refused:
-   they cross the boundary as a `double`, which is one machine word but not one
-   value on the formal path (`_WORD_SCALARS`). */
-enum { MOJO_TAG_INT = 0, MOJO_TAG_STR = 1, MOJO_TAG_DOUBLE = 2,
-       MOJO_TAG_LIST = 3, MOJO_TAG_NONE = 4 };
-
-/* `box` is the tagged box as an int64_t, `p` the 0-based element index. The
-   typed accessors answer 0 (or NULL) unless the tag at `p` is their own, which
-   is what makes one unpack correct regardless of which yield site produced the
-   value; the `_dyn` pair reads the raw word and the raw tag. An out-of-range `p`
-   reads as tag MOJO_TAG_NONE and word 0 rather than trapping. */
-int64_t  mojo_tagged_int(int64_t box, int64_t p);
-int64_t  mojo_tagged_word_dyn(int64_t box, int64_t p);
-int64_t  mojo_tagged_tag_dyn(int64_t box, int64_t p);
-char    *mojo_tagged_str(int64_t box, int64_t p);
-int64_t  mojo_tagged_list(int64_t box, int64_t p);
-double   mojo_tagged_double(int64_t box, int64_t p);
-
-/* The IEEE-754 bits of a double as a word, and nothing else — the float rule
-   above is why a formal image cannot use either half of this pair. */
-int64_t  mojo_double_bits(double d);
-
 #ifdef __cplusplus
 }
 #endif

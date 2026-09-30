@@ -4,267 +4,307 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/scriptutil.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status 2026-10-04 — unchanged: ONE blocker, `_iter_filenames` on `process(...)`, and the closure's `next(...)` floor is still what stops the rest
+## Status (re-verified 2026-08-26, post print()/flush= fix e49a9fb)
 
-Re-measured on this tree (`python3 fire.py build -o .tmp/out .tmp/ca/c_common/scriptutil.py`,
-sources from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`, arm64, ~8 s). The complete
-module-level refusal list is still one name:
-
-    Error building: cannot compile module: function(s) _iter_filenames (generator
-      function(s), contain a `yield`/`yield from`)
-
-and `MOJO_DEBUG=1` still names the shape the 2026-10-02 entry recorded:
-
-    _iter_filenames: a call to unresolved callee 'process(...)' is not supported in a
-      compiled generator/coroutine body
-
-So items 1 and 2 of that entry stay landed (`iter_marks` compiles; the module-member VALUE
-read is `_cpp_module_global_field` plus the `builtin_module_constant` table) and item 3 —
-the callable-value-local signature discovery — is untouched, with its three sub-problems
-still all three. Nothing here regressed and nothing moved.
-
-**Both new measurements are about the floor rather than this file.** First, this closure
-cannot be built until `c_common/iterutil.py` compiles, and its blocker is `next(...)` on
-`next(IdentExpr)` — `peek_and_iter` doing `items = iter(items)` then `next(items)`, i.e. a
-REBOUND list-iterator local, which is the shape
-`bug:CODEGEN_next_on_bound_list_iter_cursor_off_by_one` is about and which this compiler
-already supports in its direct form. That is the cheapest thing in the whole c-analyzer
-family and three of these six files now name it. Second, `c_parser/preprocessor/__init__.py`
-— which this closure reaches — used to contribute ~17 gcc errors and now contributes seven,
-because the 1-slot tuple target over a generator (`for patterns, in _resolve_file_values(...)`)
-is fixed; the detail and the four still-undeclared names are in
-`bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md`'s 2026-10-04 status.
-
-## Status 2026-10-02 — items 1 and 2 are FIXED; `iter_marks` compiles. ONE blocker left, and it is item 3
-
-Fresh `python3 fire.py build -o .tmp/out/ca/scriptutil
-.tmp/ca/c-analyzer/c_common/scriptutil.py` on `ad7ffd96` (sources copied
-from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`), arm64, ~2 s. The
-complete refusal list:
+Re-ran fresh against this session's tree (`fix/rest-remainder18`) AFTER
+landing this session's `end=`/`flush=` print()-in-coroutine-body fix
+(commit `e49a9fb`, `gimple_cpp_core.py`). Real, verified progress: the
+refusal set is now down from 5 functions to 3 —
+**`track_progress_compact` and `track_progress_flat` no longer appear
+in the refusal list at all**, both now compiling past the
+generator-eligibility gate:
 
 ```
-_iter_filenames: a call to unresolved callee 'process(...)' is not supported in a
-                 compiled generator/coroutine body (not a builtin this emitter
-                 supports, a known module-level/imported function, a same-module
-                 struct constructor, or a declared callable-value local)
+Error building: cannot compile module: function(s) _iter_filenames,
+filter_filenames, main_for_filenames (generator function(s), contain a
+`yield`/`yield from`) ...
+Unsupported shape(s): _iter_filenames: a call to unresolved callee
+'Exception(...)' is not supported in a compiled generator/coroutine body
+(...); filter_filenames: `for ... in _iter_filenames(...)` does not
+consume a generator this compile has itself already translated via the
+C++20-coroutine path (...); main_for_filenames: `for ... in
+_iter_filenames(...)` does not consume a generator this compile has
+itself already translated via the C++20-coroutine path (...).
 ```
 
-**`iter_marks` is gone from the list** — it compiles and runs. So are items
-1 and 2 of the entries below, which this entry records as landed rather
-than re-asserts:
+`track_progress_flat`'s blocker was exactly `print(fmt.format(item),
+flush=True)` — now handled directly by the fix. `track_progress_compact`
+also cleared: its own `print(last, end='', flush=True)` was evidently
+the reason it surfaced in the refusal set too (the 2026-08-25 pm entry's
+"`**mark_kwargs` spread forwarded to a known GENERATOR callee" framing
+for this function is superseded — with print() no longer refusing
+first, `iter_marks(groups=groups, **mark_kwargs)` plus `next(marks)`
+now compile through cleanly as well, so that framing was either stale
+or masked by the print() refusal firing first at the time it was
+written).
 
-* **Item 1 (the module-member VALUE read).** `div = os.linesep` beside
-  `end = f'{mark}{os.linesep}'` disagreed on the yield slot because the
-  read had no type. Fixed in two commits, `12106a4b` and `c260fdc1`:
-  `_cpp_module_global_field` reads the constant off the module's OWN
-  `_module_globals` field triple (or, for a marker that is never inlined,
-  off the new shared `builtin_module_constant` table — `os` and `signal`
-  have no field row to read, and the ordinary GIMPLE path's two literal
-  dicts for them are now that one table);
-  `_cpp_expr_static_ctype` answers the same question for a CONDITION; and
-  `_infer_simple_expr_ctype`/`_generator_yield_ctype` take a new
-  `module_global_types` hint, seeded per generator unit in all three cpp
-  unit emitters. `div` is now a `char *` local and the yields agree.
-  Regressions `cpp_coroutine_body_reads_foreign_module_constant`,
-  `cpp_coroutine_body_compares_foreign_module_constant` and
-  `cpp_coroutine_body_reads_marker_module_constant` in
-  `test_gimple_generator_runner.py`, all compiled-vs-CPython.
-* **Item 2 (`Exception(...)` as a value).** `onempty =
-  Exception('no filenames provided')` is now an emission site plus the
-  matching local type (`_cpp_exc_ctor_value`), commit `7374f254`; the
-  local still HOLDS the message, which is this model's one exception
-  representation and what the ordinary path already produced for the same
-  source. Regression `cpp_coroutine_exception_ctor_as_value`.
+**File still does not build** — the remaining 3-function refusal set is
+unrelated to print()/flush and squarely the same already-tracked,
+genuinely structural families documented elsewhere in this campaign:
+`_iter_filenames`'s `Exception(...)` builtin-instance construction as a
+value inside a coroutine body (no lowering for constructing a builtin
+exception object as a value, distinct from `raise`), and
+`filter_filenames`/`main_for_filenames`'s moot-ordering consumption of
+the never-eligible `_iter_filenames`. Not attempted — large,
+speculative feature work (would need a real value representation for a
+constructed-but-not-yet-raised exception object). No further code
+change this pass beyond the print()/flush= fix already committed; doc
+updated to reflect real, partial, verified progress.
 
-### The one that is left, and why it is a different kind of work
+Re-verified again 2026-08-26, wtOpencode_canalyzer2 (fresh-cut worktree):
+identical 3-function refusal set verbatim via isolated
+compile_to_gimple_with_cpp(do_imports=False). Also re-checked the
+`Exception(...)`-as-value shape for tractability: the constructed value
+flows into `raise onempty` (same function) AND
+`iterutil.iter_many(items, onempty)` (a FOREIGN-module generator consumed
+with a tuple target behind it) — even a message-string representation
+for the exception object would immediately hit the foreign-generator
+consumption + module-member shapes, all feature-sized in the same
+coroutine emitter. Still no single tractable fix flips the file.
 
-`_iter_filenames`'s `process(filenames, relroot=relroot)` — `process` is an
-unannotated PARAMETER of `_iter_filenames`, so the callee is a value, not a
-function. This is the item the entry below calls "a separate capability
-(callable-value-local signature discovery), not a tweak", and nothing in
-this round changed that assessment.
+## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
 
-Three things are needed together, and none is a one-liner:
+Fresh repro: the SAME five-function refusal set with the SAME
+per-function reasons as this doc's 2026-08-25 entry above —
+`_iter_filenames` (unresolved `Exception(...)` instance construction as
+a value; `iterutil.*`/`fsutil.USE_CWD` module-member shapes behind it),
+`filter_filenames`/`main_for_filenames` (moot-ordering consumption of
+the never-eligible `_iter_filenames`), `track_progress_compact`
+(`**mark_kwargs` spread forwarded to a known GENERATOR callee),
+`track_progress_flat` (unresolved `print(...)` in a generator body).
+Checked against this round's newly-landed shared fixes (opaque-handle
+write mirror, cpp string escaping, WithStmt generator driving): none
+touch any of these five shapes. All remain within tracked
+coroutine-codegen gap families (builtin-exception values, module-member
+calls, kwargs-forward-to-generator, print-in-generator, dynamic-callee
+consumption); no single tractable fix flips the file. No code change;
+doc re-verified. Still open.
 
-1. The callee's real signature. This model has exactly two callable-value
-   ctypes (`_CPP_CALLABLE_CTYPE`, zero-arg, and
-   `_CPP_CALLABLE_CTYPE_1ARG`), and this call passes two arguments, so
-   there is no representation to call it through yet. What is missing is
-   the discovery itself: `_cpp_declared` carries no return type for a
-   callable-valued parameter, and the ordinary path's
-   `_PLAIN_CALLSITE_PARAM_KINDS` (`mojo/middle/coro.py`) answers a
-   different question — a value KIND for a yield slot, not a C signature.
-2. The returned ITERATOR's element type, for the same reason the
-   `for`-over-a-callable refusal is (see
-   `bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` — the same
-   blocker one function over, where the refusal now NAMES
-   `_get_reader(...)` instead of reporting an undifferentiated
-   `CallExpr`).
-3. Whatever `process` is expected to return in each of the four shapes
-   `_iter_filenames` then distinguishes (`isinstance(peeked, str)` /
-   `len(peeked) == 4`), which needs element access as well.
+## Status (updated 2026-08-25, branch fix/opencode-pkgutil — shared consumption-ordering fix landed; per-function reasons refined; refusal set unchanged)
 
-Also still open in this file, unchanged by this round and untouched by it:
-`iter_files`' lambda-with-`*a/**k` refusal and `_iter_filenames`' five
-further shapes after this one (`yield from
-fsutil.process_filenames(...)`, `iterutil.peek_and_iter`,
-`iterutil.iter_many`, a lambda inside a tuple yield, `yield from items` on
-a non-generator local). Note `iterutil` itself does not compile — its
-`next(...)` on a plain identifier has no lowering — and this file's whole
-closure depends on it.
+The shared "generator-consumption ordering" machinery (this doc's
+2026-08-23 note's `filter_filenames`/`main_for_filenames` refusals) is
+now FIXED in shared source (commit `9ea2749` on fix/opencode-pkgutil):
+the generator retry loop runs to a fixed point instead of a hard-coded
+3 passes, coroutine-body consumption paths pad omitted trailing args
+from the consumed generator's registered defaults, a silent direct-call
+default-mispad (`prod(3)` vs `def prod(n, step=10)` ran with step=0)
+is fixed, and refusal reasons are latest-wins so stale "defined LATER"
+text no longer masks real blockers. Forward consumption of an ELIGIBLE
+later-defined generator now works at any depth, verified end-to-end
+(new tests; gates 253/253, 76/76, selfhost clean, stdlib dylib 0 skips).
 
-## Status 2026-10-01 — THREE blockers are now TWO; `track_progress_compact` has cleared, and `iter_marks`' real cause is narrower than recorded below
+Re-ran this file post-fix: same five-function refusal SET, but two
+reasons are now more precise (latest-wins reports each function's real
+final blocker, not pass 1's):
 
-Fresh `python3 fire.py build .tmp/ca/c_common/scriptutil.py` (sources copied
-from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`) on `6b9b6b18`, arm64.
-The complete refusal list:
+- `_iter_filenames`: NOW refuses on `onempty = Exception('no filenames
+  provided')` — constructing a builtin-exception INSTANCE as a value in
+  a generator body has no lowering (unresolved callee `Exception(...)`)
+  — and only THEN hits the already-documented items (`iterutil.*`
+  module-member calls, `fsutil.USE_CWD`, tuple-target consumption of
+  `iterutil.iter_many(...)`). The 2026-08-10 lambda gap itself is gone
+  (zero/single-param lambda support landed since).
+- `filter_filenames` / `main_for_filenames`: still refuse consuming
+  `_iter_filenames(...)`, but this is now MOOT-ordering: an eligible
+  later-defined callee resolves automatically post-fix, and
+  `_iter_filenames` is never eligible for its own reasons above. These
+  two unblock only when `_iter_filenames` does.
+- `track_progress_compact`: unchanged (`**mark_kwargs` spread forwarded
+  to a known GENERATOR callee — separate documented gap).
+- `track_progress_flat`: newly visible (was masked behind siblings'
+  earlier refusals): its body calls `print(...)` inside the generator
+  body — print is not among the coroutine-body emitter's supported
+  callees.
 
-```
-_iter_filenames: a call to unresolved callee 'Exception(...)' is not
-                 supported in a compiled generator/coroutine body
-iter_marks:     every `yield` must carry a value, and all values must
-                 agree on one scalar type (int64_t/double/_Bool)
-```
+All shapes remain within tracked coroutine-codegen project scope; doc
+kept open.
 
-**`track_progress_compact` is gone from the list.** The entry below recorded
-it as blocked by `a *`-/`**`-unpack call argument in a generator body`
-(`iter_marks(groups=groups, **mark_kwargs)`, scriptutil.py:580). That shape
-now lowers. Nothing in this branch touched it — the change is a later
-lander's — but the doc's claim about it was accurate when written and is now
-stale, and the file has one fewer blocker than it says.
+## Status (updated 2026-08-23 — BOTH 2026-08-10 blockers confirmed gone; new refusal chain documented)
 
-### `iter_marks`' cause, measured: it is NOT the `**`-unpack
+Re-ran against current master tip (`626f3f0`). Both blockers the
+2026-08-10 update below listed are confirmed no longer reached:
+`main_for_filenames` is not refused for its tuple-valued yield (the
+tuple-yield support holds), and `_iter_filenames`'s `check =
+(lambda: True)` is not refused either (zero-arg lambda support landed
+2026-08-20 per the fsutil doc's update; `_iter_filenames` produces no
+refusal at all in this run's MOJO_DEBUG output).
 
-The entry below argues at length that `iter_marks` fails because its
-`yield` types disagree, and that the disagreement comes from `os.linesep`
-being read into a generator body (`div = os.linesep` inferring `int64_t`
-against `end = f'{mark}{os.linesep}'` inferring `char *`). That is still the
-immediate mechanism, but it is worth stating what the refusal list now
-shows: with `track_progress_compact`'s `**mark_kwargs` forwarding lowered,
-`iter_marks` is the *only* remaining `iter_marks`-family blocker, so the
-`**`-unpack and the mixed-yields were never the same problem.
-
-Measuring `_cpp_expr` on the live tree confirms the module-member VALUE read
-is still the diagnosed stub:
-
-```
-[gimple_codegen] stubbed operation: generator-body module-member value read os.linesep
-```
-
-i.e. where it does NOT trip the yield-type check it produces `''` where
-CPython produces `'\n'` — a wrong answer with a diagnostic rather than an
-error. That is the honest statement of what is left, and it is the entry
-below's step 1, unchanged.
-
-### Next step (unchanged in substance; re-verified 2026-10-01)
-
-1. **Module-attribute value reads in a generator body** (`os.linesep`,
-   `fsutil.USE_CWD`, …). Still the highest-value item, still worth doing
-   first, still the difference between an honest refusal and a wrong
-   program. The bound module object is an opaque `int64_t` in this body
-   model, so the fix needs the constant's real C symbol — and since
-   `6b9b6b18` there IS a per-module globals-struct lookup to read it from:
-   `_module_global_field_type(module, name)` in `gimple_codegen.py`, which
-   resolves a name against `_module_globals[mod]`'s `(name, c_type,
-   g_mtype)` triples (the same list the struct typedef, the initializer and
-   the `_<mod>_mojo_global_get_<name>` accessors are generated from).
-   `_cpp_expr_static_ctype` needs the matching row so the yield types agree
-   afterwards. **This is a smaller job than the entry below assumed** — the
-   per-module lookup it needed did not exist then and does now.
-2. **`Exception(...)` as a value.** Unchanged; still the `_iter_filenames`
-   blocker. `_cpp_raise_stmt` already builds the `_MojoCppExc{tag, msg, obj}`
-   payload for `raise ExcName(...)` and for a bare `raise ExcName`; what's
-   missing is the ASSIGNMENT form.
-3. **`**`-forwarding into a compiled generator.** **REDUCED**: the one real
-   call site in this file (`iter_marks(groups=groups, **mark_kwargs)`) now
-   lowers, and `c_analyzer/__init__.py`'s `iter_decls(filenames, **kwargs)`
-   is the remaining one. If it is still refused, re-measure before working —
-   it may have cleared with the same change.
-
-## Status 2026-09-30 — three blockers, unchanged in count; two of them are now the shared blockers other files also hit
-
-Re-verified against the current tree (`python3 fire.py build`, sources copied
-from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/` into `.tmp/ca/`):
+The build now aborts on a DIFFERENT generator, with a new precise
+refusal:
 
 ```
-Unsupported shape(s):
-  _iter_filenames: a call to unresolved callee 'Exception(...)' is not supported
-    in a compiled generator/coroutine body
-  iter_marks: iter_marks: every `yield` must carry a value, and all values must
-    agree on one scalar type (int64_t/double/_Bool)
-  track_progress_compact: a `*`/`**`-unpack call argument is not supported in a
-    compiled generator/coroutine body
+[gimple_codegen] generator 'track_progress_compact' not eligible for
+C++ coroutine path, falling back to honest refusal: a `*`/`**`-unpack
+call argument is not supported in a compiled generator/coroutine body
+Error building: cannot compile module: function(s)
+track_progress_compact ...
 ```
 
-Nothing this session moved these three, and it is worth being precise about
-why the `**`-unpack one did NOT clear here the way it cleared in
-`c_analyzer/__init__.py`: that file's `iter_decls` stopped refusing because
-its import closure stopped failing to PARSE (`c_parser/preprocessor`'s bare
-`for patterns, in ...:` target — commit `b67c170e`). `scriptutil`'s own three
-shapes are independent of that and still need real work. In particular
-`_cpp_try_kwargs_forward_call` is UNCHANGED and still refuses exactly what its
-docstring says it refuses — including this file's
-`iter_marks(groups=groups, **mark_kwargs)`, named in that docstring as a
-deliberate non-case.
+Root cause: `track_progress_compact`'s body does `marks =
+iter_marks(groups=groups, **mark_kwargs)` — a literal keyword PLUS a
+`**kwargs` spread forwarded to a statically-known GENERATOR callee.
+The existing narrow kwargs-forwarding helper (`_cpp_try_kwargs_forward_call`,
+gimple_cpp_core.py) deliberately excludes generator callees (compiled
+generators have no directly-callable C symbol, only the
+`_start`/`_resume`/`_value` API), and there is today NO
+generator-object-value representation in a coroutine body at all
+(no way to hold `marks`, and `next(marks)` two lines later has no
+lowering either), so this shape is refused honestly rather than
+mis-lowered.
 
-Two of the three are shared with other files in this family, which is the
-grouping a follow-up should use:
+Also visible in MOJO_DEBUG (retried on later passes but not the final
+aborting name): `filter_filenames` and `main_for_filenames` refuse
+consuming `_iter_filenames(...)` — "does not consume a generator this
+compile has itself already translated ... or it's defined LATER in this
+module" — the same source-ordering constraint that binds all
+cross-generator consumption here. All shapes remain within the tracked
+coroutine-codegen project scope; not attempted this session.
 
-| blocker | site | also in |
-|---|---|---|
-| `Exception(...)` in a generator body | `onempty = Exception('no filenames provided')` (:560) — a call to an exception CLASS as a constructor, then `raise onempty` | `c_common/fsutil.py`'s `process_filenames` (the `hard-fsutil` claim) |
-| `**`-unpack call argument in a generator body | `iter_marks(groups=groups, **mark_kwargs)` (:580) | `c_analyzer/__init__.py`'s `iter_analysis_results` doing `iter_decls(filenames, **kwargs)` |
-| mixed yield types | `iter_marks` (:595) — see below | `c_analyzer/__main__.py`'s `render` |
+## Status (updated 2026-08-10 — `main_for_filenames`'s tuple-valued yield now FIXED; `_iter_filenames` remains refused for an unrelated, non-tuple reason)
 
-### The `iter_marks` refusal is a SILENT-WRONG upstream of itself
+Implemented real tuple-valued-`yield` support this session (see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes`). Re-verified: `main_for_filenames` is no longer in the
+refusal list — it now compiles past the eligibility gate. Only
+`_iter_filenames` remains refused, and NOT for a tuple-arity/shape
+reason:
 
-`_generator_yield_ctype` refuses because the yields disagree — and they
-disagree because `os.linesep` is read into a generator body:
+```python
+def _iter_filenames(filenames, process, relroot):
+    ...
+    check = (lambda: True)
+    for filename, ismany in iterutil.iter_many(items, onempty):
+        relfile = fsutil.format_filename(filename, relroot, fixroot=False)
+        yield filename, relfile, check, ismany
+```
+
+The 4-tuple yield's THIRD element, `check`, is bound to a `lambda: True`
+closure. `_cpp_expr` (the coroutine-body expression lowering) has no
+case for `LambdaExpr` at all — attempting to box it would need a real
+value representation for a closure, which this narrow scalar/pointer
+coroutine-body model doesn't have. Confirmed via `MOJO_DEBUG=1`: the
+refusal is now the honest, precise `unsupported expression in generator
+body: LambdaExpr` (raised by `_cpp_expr`'s own existing exhaustive
+fallback, not anything new added this session) — not a tuple-arity/type
+mismatch. Unrelated to and unaffected by this fix. Doc kept open (not
+deleted) — 1 of 2 generators fixed, but the file still doesn't build.
+
+## Status (re-verified 2026-08-09)
+
+Re-ran against current master (`python3 fire.py build .../c_common/
+scriptutil.py`); still an honest up-front refusal, not a GCC error, now
+naming both generator functions in the file:
 
 ```
-[gimple_codegen] stubbed operation: generator-body module-member value read os.linesep
-iter_marks: every `yield` must carry a value, and all values must agree on one
-scalar type
+Error building: cannot compile module: function(s) _iter_filenames,
+main_for_filenames (generator function(s), contain a `yield`/`yield
+from`) — this codegen compiles every function into a single
+straight-line C function and has no suspend/resume state-machine
+transform for generators, nor an event loop / suspend-resume codegen
+for async functions, yet, so these cannot be represented as compiled C
+without emitting silently wrong or broken code; falling back to
+interpreting this module from source instead
 ```
 
-`div = os.linesep` (scriptutil.py:601) infers as `int64_t` because
-`_infer_simple_expr_ctype` has no row for a module-member value, while
-`end = f'{mark}{os.linesep}'` infers `char *` — hence the disagreement. The
-cpp emitter's own answer to a module-member VALUE read is a diagnosed stub of
-`0` (`cpp_core.py`, "generator-body module-member value read"), so where this
-does NOT trip the yield-type check it produces `''` where CPython produces
-`'\n'`: a wrong answer with a diagnostic rather than an error.
+With `MOJO_DEBUG=1`, the two functions fail the C++20-coroutine
+eligibility pre-check for two DIFFERENT reasons, both manifestations of
+the same already-tracked "coroutine codegen has much weaker type
+inference/expression coverage than the ordinary function path" gap
+(the same root cause independently confirmed this session for the
+sibling files `c_analyzer/__init__.py`, `c_analyzer/__main__.py`,
+`c_analyzer/info.py`):
 
-That makes the module-attribute VALUE read the actual bug, not the yield
-check, and it is worth fixing first: it is the difference between an honest
-refusal and a wrong program.
+```
+generator 'main_for_filenames' not eligible for C++ coroutine path,
+falling back to honest refusal: main_for_filenames: every `yield` must
+carry a value, and all values must agree on one scalar type
+(int64_t/double/_Bool)
 
-### Next step
+generator '_iter_filenames' not eligible for C++ coroutine path,
+falling back to honest refusal: unsupported expression in generator
+body: LambdaExpr
+```
 
-1. **Module-attribute value reads in a generator body** (`os.linesep`,
-   `fsutil.USE_CWD`, …). The bound module object is an opaque `int64_t` in
-   this body model, so a value read needs the constant's real C symbol — the
-   module-globals structs already exist and are already emitted per module
-   (`__parser__regexes_globals` etc.), so `os.linesep` is a field read on a
-   struct this emitter knows how to name. `_cpp_expr_static_ctype` needs the
-   matching row so the yield types agree afterwards.
-2. **`Exception(...)` as a value.** `_cpp_raise_stmt` already builds the exact
-   `_MojoCppExc{tag, msg, obj}` payload for `raise ExcName(...)` and for a
-   bare `raise ExcName`; what's missing is the ASSIGNMENT form
-   (`e = ValueError(msg); raise e`). Representing it as the same
-   (tag, msg) pair — a per-generator local-name → tag map beside
-   `_cpp_reraise_stack` — keeps one exception representation rather than the
-   two the emitter would otherwise have.
-3. **`**`-forwarding into a compiled generator.** Both real call sites
-   (`iter_marks(groups=groups, **mark_kwargs)`, `iter_decls(filenames,
-   **kwargs)`) forward into something that is NOT an ordinary local free
-   function — a generator, and a callable-valued parameter respectively — so
-   `_cpp_try_kwargs_forward_call`'s narrow shape cannot be widened to cover
-   them without first knowing the callee's real parameter names and defaults.
-   That is a separate capability (callable-value-local signature discovery),
-   not a tweak.
-4. Only then: `_iter_filenames`'s remaining blockers after (2) — `yield from
-   fsutil.process_filenames(...)`, `iterutil.peek_and_iter`,
-   `iterutil.iter_many`, a lambda inside a tuple yield, and `yield from items`
-   on a non-generator local. Five more shapes after one.
+- `main_for_filenames` (line 542) does `yield filename, relfile` — a
+  2-tuple-valued yield. The coroutine promise machinery
+  (`_gen_cpp_generator_unit`) only supports a single scalar
+  (`int64_t`/`double`/`_Bool`) yield-value type across the whole
+  function, exactly the "tuple-valued yields aren't representable at
+  all" gap.
+- `_iter_filenames` (line 555) assigns `check = (lambda: True)` inside
+  the generator body. The compiled generator/coroutine body is lowered
+  by a SEPARATE, narrower expression dispatcher (`_cpp_expr`,
+  `gimple_codegen.py` ~line 23198) than the ordinary function path's
+  general expression lowering (`_lower_LambdaExpr`, ~line 14905, which
+  DOES support lambda-lifting) — `_cpp_expr` has no `LambdaExpr` case
+  at all and falls through to the generic "unsupported expression in
+  generator body" raise (~line 23851). Same underlying "coroutine path
+  has much less expression/type coverage than the ordinary path"
+  structural gap, different specific symptom (unsupported expression
+  kind rather than unsupported yield-value shape).
 
+Both are the same deliberately-deferred, already-tracked compiled-
+generator/async-codegen project (see `bugs/CODEGEN_generator_function_
+Lib_*.md`) — not attempted here, out of scope for a narrow fix (would
+require either extending the coroutine promise to carry a tuple/struct
+value type, or teaching the generator-body expression dispatcher to
+lift lambdas, both real feature work on shared coroutine-codegen
+machinery, not a one-spot stub).
+
+```
+Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py: In function 'configure_logger_7a6366':
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:86:11: warning: variable '_t33' set but not used [-Wunused-but-set-variable]
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:85:11: warning: variable '_t32' set but not used [-Wunused-but-set-variable]
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:83:11: warning: variable '_t30' set but not used [-Wunused-but-set-variable]
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:82:11: warning: variable '_t29' set but not used [-Wunused-but-set-variable]
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:78:11: warning: variable '_t25' set but not used [-Wunused-but-set-variable]
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:72:11: warning: variable '_t20' set but not used [-Wunused-but-set-variable]
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:63:11: warning: variable '_t11' set but not used [-Wunused-but-set-variable]
+   63 |         print(*args, **kwargs)
+      |           ^~~~
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:62:11: warning: variable '_t10' set but not used [-Wunused-but-set-variable]
+   62 |             return
+      |           ^ ~~
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py: In function '_alloc_hide_emit_errors_restore_env':
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:44:1: warning: label 'bb_2' defined but not used [-Wunused-label]
+   44 |     Rather than printing a message describing the error, we show nothing.
+      | ^   
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py: In function 'hide_emit_errors_restore':
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:58:1: warning: label 'bb_2' defined but not used [-Wunused-label]
+   58 |         self.verbosity = verbosity
+      | ^   
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:56:10: warning: variable '_t5' set but not used [-Wunused-but-set-variable]
+   56 | class Printer:
+      |          ^~~
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:55:11: warning: variable '_t4' set but not used [-Wunused-but-set-variable]
+   55 | 
+      |           ^  
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:54:10: warning: variable '_t3' set but not used [-Wunused-but-set-variable]
+   54 | 
+      |          ^  
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:53:11: warning: variable '_t2' set but not used [-Wunused-but-set-variable]
+   53 |     return restore
+      |           ^~~
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:52:11: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
+   52 |         logging.raiseExceptions = orig
+      |           ^~~
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py: In function 'hide_emit_errors':
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:57:10: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
+   57 |     def __init__(self, verbosity=VERBOSITY):
+      |          ^~~
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py: In function 'logging_Printer___init__':
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:60:1: warning: label 'bb_2' defined but not used [-Wunused-label]
+   60 |     def info(self, *args, **kwargs):
+      | ^   
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:58:11: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
+   58 |         self.verbosity = verbosity
+      |           ^~~
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py: In function 'logging_Printer_info':
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/logging.py:65:1: warning: label 'bb_4' defined but not used [-Wunused-label]
+... (1070 more lines)
+```
+
+Exit code: 1
+Elapsed: 14.62s

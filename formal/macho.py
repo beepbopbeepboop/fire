@@ -151,7 +151,6 @@ def build_macho(
     external_syms: list[str] | None = None,
     arch: str = "arm64",
     dylibs: list | None = None,
-    globals_image=None,
 ) -> bytes:
     """Build a Mach-O-64 executable for `arch` from scratch.
 
@@ -159,13 +158,6 @@ def build_macho(
     offset comes from formal.macho_linker's layout constants (see
     executable_entry_offset), not from a literal here, so `code` must have been
     compiled for the matching base address.
-
-    `globals_image` is a `formal.model.GlobalDataImage` or None; non-None adds
-    the writable `__DATA` segment the module-global slots live in. It is passed
-    through to both builders rather than handled here because the segment's
-    presence changes `sizeofcmds` and therefore the entry offset, which each
-    builder derives for itself — routing it through one place would put the
-    decision here and the arithmetic in two places that must agree.
     """
     if external_syms is None:
         external_syms = []
@@ -176,8 +168,7 @@ def build_macho(
         # vmaddrs (see compute_macho_got_addrs + asm.resolve_extern).
         from formal.macho_linker import build_macho_executable_extern
         return build_macho_executable_extern(code, external_syms, arch,
-                                             dylibs=dylibs,
-                                             globals_image=globals_image)
+                                             dylibs=dylibs)
 
     from formal.macho_linker import build_macho_executable
 
@@ -185,7 +176,7 @@ def build_macho(
     # command list plus the slack post-hoc codesigning needs) — the caller only
     # has to have emitted `code` for that same offset, which it learns from
     # NOEXTERN_ENTRYOFF / EXTERN_ENTRYOFF before compiling.
-    return build_macho_executable(code, arch, globals_image=globals_image)
+    return build_macho_executable(code, arch)
 
 
 def compute_macho_got_addrs(code_size: int, external_syms: list[str],

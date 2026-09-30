@@ -83,7 +83,7 @@ def _cpp_struct_ptr_local(gen, name: str) -> str | None:
     (e.g. 'ArgResolver *'), return the bare struct name; else None.
     Used to pick `->` vs `.` for a non-self member access/method call,
     and to find the struct a method call on `name` belongs to — see
-    CODEGEN_generator_struct_typed_param_refused."""
+    bugs/hard/CODEGEN_generator_struct_typed_param_refused.md."""
     if gen._cpp_declared is None:
         return None
     ct = gen._cpp_declared.get(name)
@@ -395,16 +395,13 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # Increment D guard: a nested async GENERATOR that captures enclosing
     # locals in a shape the A3 capture-box threading cannot reach (driven
     # from a further-nested `async def` sibling's `async for`/await loop).
-    # The A3 side records these in `_UNTHREADABLE_NESTED_ASYNC_GENS`, on
-    # BOTH backends (mojo/middle/coro.py's `_scan_unthreadable_nested_async_
-    # gens`, which runs whether or not the stack-switch lowering does) --
-    # it used to be populated only by that lowering, so this guard never
-    # fired here and the shape it exists to refuse produced a generated-C++
-    # error instead. This emitter has no capture model at all, so
+    # The A3 side records these in `_UNTHREADABLE_NESTED_ASYNC_GENS` during
+    # `_hoist_nested_async`; this emitter has no capture model at all, so
     # emitting one produced a body referencing the captured name in a scope
     # where it does not exist -- a hard "'acc' was not declared in this
     # scope" from the generated .cpp, which blames generated code rather
-    # than the program. Refuse honestly instead.
+    # than the program. Refuse honestly instead. See
+    # bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md (item 3).
     if (getattr(fn, 'name', None) in gimple_gen_coro._UNTHREADABLE_NESTED_ASYNC_GENS
             or (struct_name and f'{struct_name}_{fn.name}'
                 in gimple_gen_coro._UNTHREADABLE_NESTED_ASYNC_GENS)):
@@ -426,7 +423,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # own `_eligible` refuses them; this is the same refusal for the C++
     # backend, so neither can silently miscompile what the other rejects. The
     # message is built by the same helper so the two cannot drift. See
-    # CODEGEN_coro_yield_kind_unresolved_callsite.
+    # bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md.
     _bad = gimple_gen_coro._ambiguous_yielded_params(fn, struct_name)
     if _bad:
         raise gimple_exprtypes._UnsupportedGeneratorShape(
@@ -773,13 +770,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_pending_return_store = (_ret_base, _ret_ct)
     gen._cpp_last_has_return_value = _has_return_value
     gen._cpp_list_local_elem_types = {}
-    # `<module marker>.<name>` -> ctype for the module-level constants this
-    # unit's body can read as values (see `gcc_._cpp_module_global_ctypes`).
-    # Seeded HERE, before the body-emission loop below, because that loop is
-    # what types each local bound to such a read (`div = os.linesep`) — and
-    # `_generator_yield_ctype`, which runs after it, reads those same
-    # `declared` entries.
-    gen._cpp_module_global_ctypes = gcc_._cpp_module_global_ctypes(gen)
     gcc_._cpp_reset_unit_state(gen)
     # Seed param list-ELEMENT types into the coroutine-body emitter's local
     # elem registry BEFORE body emission: a MojoList*-typed param whose
@@ -864,8 +854,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             include_returns=False,
             generator_method_api=gen._generator_method_api,
             self_struct_name=struct_name,
-            self_struct_ctype=(f"{struct_name} *" if struct_name else None),
-            module_global_types=getattr(gen, '_cpp_module_global_ctypes', None))
+            self_struct_ctype=(f"{struct_name} *" if struct_name else None))
         # Tuple-valued yield (`yield a, b, ...`): _generator_yield_ctype
         # (just above) only decided the OVERALL promise value type
         # ('MojoList *' for a tuple yield, same as any plain list-
@@ -895,7 +884,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_declared = None
         gen._cpp_func_scope_decls = None
         gen._cpp_list_local_elem_types = {}
-        gen._cpp_module_global_ctypes = None
         gen._cpp_nested_helper_syms = {}
         gen._cpp_gen_self_name = None
         gen._cpp_gen_self_base = None
@@ -905,9 +893,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     if value_ctype is None:
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"{fn.name}: every `yield` must carry a value, and all "
-            "values must agree on one scalar type (int64_t/double/_Bool) "
-            "— they disagree, or one of them's value kind could not be "
-            "resolved at all")
+            "values must agree on one scalar type (int64_t/double/_Bool)")
     if (value_ctype.endswith(' *') and value_ctype not in ('MojoList *', 'MojoDict *', 'MojoSet *')
             and value_ctype[:-2] in gen.struct_field_types):
         gen._cpp_value_struct_names.add(value_ctype[:-2])
@@ -1111,24 +1097,19 @@ _HELPER_FREE_BUILTINS = frozenset({
 def _hbn_add_target(bound: set, t) -> None:
     """Hoisted out of `_helper_bound_names` (was a recursive nested
     closure) — the lifted-closure-env determinism fix. `bound` (set)
-    threaded and annotated.
-
-    Bound NAMES, not slots, so this is `for_target_names` (the shared leaf
-    walk) with the `*` stripped — the same shape
-    `mojo/middle/boundnames.py::_lbn_target_names` needs, and the same
-    reason: the previous private copy did a bare `s[1:-1].split(',')`, which
-    tore a nested target into paren-carrying fragments and — because it
-    recursed on the paren branch only — could not tell `'(a)'` from a
-    1-tuple `'(a,)'`."""
+    threaded and annotated."""
     if isinstance(t, str):
-        for name in gimple_ctypes.for_target_names(t):
-            if name:
-                bound.add(name.lstrip('*').strip())
-        return
-    if isinstance(t, gimple_ctypes.IdentExpr):
+        s = t.strip()
+        if s.startswith('(') and s.endswith(')'):
+            for part in s[1:-1].split(','):
+                part = part.strip().lstrip('*').strip()
+                if part:
+                    bound.add(part)
+        elif s:
+            bound.add(s.lstrip('*').strip())
+    elif isinstance(t, gimple_ctypes.IdentExpr):
         bound.add(t.name)
-        return
-    if isinstance(t, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+    elif isinstance(t, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
         for e in t.elements:
             _hbn_add_target(bound, e)
 
@@ -1365,7 +1346,6 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         sv_self_struct = gen._cpp_gen_self_struct
         sv_self_fields = gen._cpp_gen_self_fields
         sv_list_elem = gen._cpp_list_local_elem_types
-        sv_mod_globals = getattr(gen, '_cpp_module_global_ctypes', None)
         sv_kw = dict(gen._cpp_kw_param_renames or {})
         gen._cpp_declared = hdeclared
         gen._cpp_emit_kind = 'helper'
@@ -1373,11 +1353,6 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_gen_self_struct = struct_name
         gen._cpp_gen_self_fields = self_fields
         gen._cpp_list_local_elem_types = {}
-        # Rebuilt against the HELPER's own `hdeclared`, for the same reason
-        # the helper swaps `declared`: a helper parameter can shadow a module
-        # marker, and that local must not be resolved through a globals
-        # mirror.
-        gen._cpp_module_global_ctypes = gcc_._cpp_module_global_ctypes(gen)
         gen._cpp_kw_param_renames = dict(kw_renames)
         try:
             hbody = []
@@ -1394,7 +1369,6 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
             gen._cpp_gen_self_struct = sv_self_struct
             gen._cpp_gen_self_fields = sv_self_fields
             gen._cpp_list_local_elem_types = sv_list_elem
-            gen._cpp_module_global_ctypes = sv_mod_globals
             gen._cpp_kw_param_renames = sv_kw
         csym = f"{base}_h_{gimple_ctypes._safe_name(d.name)}"
         cpp_ret = ('void' if ret_ct == 'void'
@@ -1781,11 +1755,6 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
     gen._cpp_declared = declared
     func_decls: list[str] = []
     gen._cpp_func_scope_decls = []
-    # The async unit's twin of the generator unit's own map, seeded before
-    # body emission for the same reason (a local bound to a module constant
-    # read gets that constant's real type) — see the generator unit's own
-    # seeding site and `gcc_._cpp_module_global_ctypes`.
-    gen._cpp_module_global_ctypes = gcc_._cpp_module_global_ctypes(gen)
     try:
         body_lines: list[str] = []
         for s in fn.body:
@@ -1833,8 +1802,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
             fn, declared, generator_api=None, self_fields=None,
             async_api=gen._async_api, closure_api=_closure_api_scoped,
             known_structs=frozenset(gen.struct_field_types.keys()),
-            method_return_types=gen.func_return_types,
-            module_global_types=getattr(gen, '_cpp_module_global_ctypes', None))
+            method_return_types=gen.func_return_types)
         # Step I: an async function whose body NEVER reaches an
         # ordinary `return <expr>` at all (real Mojo's own idiom for an
         # always-raising helper, e.g. `async def failing_async() raises
@@ -1862,7 +1830,6 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         gen._cpp_declared = None
         gen._cpp_func_scope_decls = None
         gen._cpp_list_local_elem_types = {}
-        gen._cpp_module_global_ctypes = None
         gen._cpp_mut_capture_names = frozenset()
     if value_ctype is None:
         # A genuinely void-returning async function (declared `-> None`
@@ -2781,11 +2748,12 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
     """Increment D guard, for the same reason as
     `_gen_cpp_generator_unit`'s: a nested async GENERATOR that captures
     enclosing locals in a shape the A3 capture-box threading cannot reach.
-    Recorded by the A3 side, on BOTH backends, into
+    Recorded by `_hoist_nested_async` into
     `_UNTHREADABLE_NESTED_ASYNC_GENS`. Without this the emitted coroutine
     body referenced the captured name in a scope where it does not exist —
     a hard "'acc' was not declared in this scope" from the generated .cpp,
-    blaming generated code rather than the program.
+    blaming generated code rather than the program. See
+    bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md (item 3).
     """
     if getattr(fn, 'name', None) in gimple_gen_coro._UNTHREADABLE_NESTED_ASYNC_GENS:
         raise gimple_exprtypes._UnsupportedGeneratorShape(
@@ -2915,11 +2883,6 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
         fn, declared, None, gen._async_api,
         generator_api=gen._generator_api)
     gen._cpp_pending_tuple_slots = list(_pre_slots) if (_pre_ok and _pre_slots) else None
-    # Same per-unit module-constant map as the other two unit emitters
-    # (see _gen_cpp_generator_unit's seeding site), so an async GENERATOR
-    # body reads `<module marker>.<name>` the same way a plain generator's
-    # does.
-    gen._cpp_module_global_ctypes = gcc_._cpp_module_global_ctypes(gen)
     try:
         body_lines: list[str] = []
         for s in fn.body:
@@ -2934,8 +2897,7 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
             fn, declared, generator_api=gen._generator_api,
             self_fields=None, async_api=gen._async_api,
             known_structs=frozenset(gen.struct_field_types.keys()),
-            method_return_types=gen.func_return_types,
-            module_global_types=getattr(gen, '_cpp_module_global_ctypes', None))
+            method_return_types=gen.func_return_types)
         # See _gen_cpp_generator_unit's identical companion call for
         # the full rationale — same tuple-yield slot-type resolution,
         # reused verbatim for the async-generator (`async for`) case.
@@ -2949,7 +2911,6 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
         gen._cpp_emit_kind = 'generator'
         gen._cpp_gen_self_struct = None
         gen._cpp_gen_self_fields = None
-        gen._cpp_module_global_ctypes = None
     if value_ctype is None:
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"{fn.name}: every `yield <value>` must carry a scalar "

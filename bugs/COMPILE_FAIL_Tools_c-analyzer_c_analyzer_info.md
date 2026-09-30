@@ -4,233 +4,288 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status 2026-10-04 — unchanged for THIS file, and its closure has moved: the preprocessor's 17 gcc errors are 7
+## Status (updated 2026-08-26, wtOpencode_canalyzer2 — one of two blockers FIXED
+## in shared source; the four c_parser/info.py errors are gone; remaining
+## errors are the previously-masked generator-body type-inference family)
 
-Re-measured on this tree (`python3 fire.py build -o .tmp/out .tmp/ca/c_analyzer/info.py`,
-sources from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`, arm64, ~8 s).
+Fresh bounded build reproduced a REDUCED failure set vs the entries
+below: only ONE error remained — `_toplevel`'s `UNKNOWN =
+_misc.Labeled('UNKNOWN')` emitting `(char *)` coercion into the
+root-globals struct's `int64_t UNKNOWN` field (the four c_parser/info.py
+`:179/:247` `_fix_filename` pointer-from-integer errors from the
+2026-08-25 signature-race analysis no longer reproduce).
 
-**This file's own ten gcc errors remain fixed** — no `c_analyzer/info.py:NNN` line appears
-in the output at all, which is the entry below's own conclusion and it still holds. The
-imported-module floor is the same two `next(...)` shapes it recorded, `.iterutil` and
-`c_parser.info`, plus the two `_ind` errors in `c_parser/parser/_common.py` that
-`bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md` owns.
+Root-caused and FIXED this session (commit `4b24623`, shared source):
+a cross-module same-bare-name GLOBAL homonym. `c_common/tables.py`
+declares its own string global `UNKNOWN = '???'`; both modules compile
+into one whole-program unit sharing `_global_c_decl_types`. Empirically
+(instrumented): root's globals-struct fields freeze from a CLEAN cdecl
+(`int64_t UNKNOWN`), then the imported modules' compiles land tables'
+`char *` into the SHARED cdecl dict, then root's body emission consults
+`_global_dst_ctype` — whose pointer-shaped-cdecl exception (added for
+the compiler's own dispatch tables) let the FOREIGN `char *` beat root's
+own scalar Phase-1.7 conclusion → RHS coerced to `char *` against an
+`int64_t` field. Fix: new `GimpleGen._own_overlay_global_ctype()` is now
+the single type resolution used by BOTH the assignment sites
+(`_global_dst_ctype`) and gen_module_impl's field-decl loop — container-
+pointer cdecls (`MojoDict *`/`MojoList *`/`MojoSet *`, the dispatch-
+table/boxing family) still outrank scalar own-freezes; every other
+foreign non-container pointer cdecl no longer beats this module's own
+scalar conclusion; the two sides can therefore never disagree regardless
+of cross-module compile ordering.
 
-What HAS moved is the third module this closure reaches, `c_parser/preprocessor/__init__.py`,
-and it is worth recording here because the previous entries did not list it as failing:
-it used to contribute ~17 gcc errors, and seven remain:
+Full mandatory gate after the change: `test_gimple.py` 256/256,
+`test_module_cache.py` 76/76, `make check-selfhost` clean, from-scratch
+stdlib dylib rebuild EXIT=0 with **0 skip lines** (baseline held).
 
-    :59:10  too many arguments to function 'source_good_file_2dbb98'; expected 0, have 2
-    :69:8   assignment to 'int64_t' from 'MojoList *'
-    :123:10 'incldirs' undeclared        :125:10 'includes' undeclared
-    :127:10 'macros' undeclared          :129:10 'samefiles' undeclared
-    :191:10 implicit declaration of 'c_common_fsutil_match_glob_2dbb98'; did you mean
-            'c_common_fsutil_match_glob_c2eb2a'?
-
-The six `expected ')' before ',' token` errors and the `'i'`/`'v'` undeclared pair that
-used to sit at :115/:117 and :171-:204 are GONE: they were a `for i, in _resolve_file_
-values(...)` / `[i for i, in _resolve_file_values(...)]` 1-slot tuple target reaching the
-generator consumer, which declared the target's own spelling `(i,)` as a C variable. Fixed
-on this tree (`_single_loop_target_name`), pinned by
-`test_gimple_generator_runner.py`'s `gen_one_slot_tuple_target_binds_one_name`.
-
-The four undeclared names at :123-129 are the SAME statement's other half: they are the
-comprehension's RESULT locals (`includes = [i for i, in _resolve_file_values(...)]`), read
-back three statements later inside `preprocess(**kwargs)`. So the fix above bound the
-target but the comprehension's own result local is still not declared, which is a separate
-defect in `_compr_generator_loop`/`_gen_compr_append` and the natural next step for anyone
-picking this file up — it is a NAME that was never declared, not a wrong type.
-
-## Status 2026-10-01 — this file's OWN ten errors are GONE (10 → 0). Three UNRELATED imported-module blockers remain, and the doc's "foreign-claim" caveat turned out to be wrong about one thing
-
-`python3 fire.py build .tmp/ca/c_analyzer/info.py` (sources copied from
-`/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/`) on the pre-fix tree
-(`1d5a25ed`) versus this branch:
+The fix exposed (rather than left masked) the NEXT blocker — exactly the
+generator-body type-inference family this doc's 2026-08-23 entry already
+documented, now reached again:
 
 ```
-before:  10 error: lines, ALL ten of the single UNKNOWN family
-after:    3 error: lines, NONE of them the UNKNOWN family
+info_gen.cpp:138: request for member 'render' in 'self->Analyzed::item',
+                  which is of non-class type 'int64_t'
+info_gen.cpp:146: void value not ignored as it ought to be
+info_gen.cpp:236: invalid conversion from 'int64_t' to 'char*'
 ```
 
-Before, verbatim and complete:
+`Analyzed.render`/`_render_extra` are generators; `self.item = item`
+(unannotated init param → int64_t default) makes `.render(fmt)` a
+member call on int64_t, etc. The `self.item` half is squarely the
+HIGH-RISK unannotated-init-param-type family
+(bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md)
+this session is instructed NOT to attempt; the rest is the same
+coroutine-path inference-parity gap tracked below. Doc stays open on
+that family.
+
+## Status (re-verified 2026-08-26)
+
+Fresh repro against this session's tree (`fix/rest-remainder18`)
+reproduces the identical five errors byte-for-byte (`c_parser/info.py`
+:179:45/:179:50/:247:45/:247:50 `_fix_filename` pointer-from-integer, plus
+`c_analyzer/info.py:18:25` `int64_t`-from-`char*`). Confirmed still the
+same caller/callee signature-race (stale placeholder param types raced
+against later body-usage inference) documented in the 2026-08-25 entry
+below. A general fix requires a forward-declaration-only type-resolution
+prepass across the whole two-pass compilation model — correctly assessed
+as out of scope for a narrow per-doc pass; not attempted. No code change;
+doc re-verified only.
+
+## Status (re-verified 2026-08-25 pm, branch fix/opencode-group1)
+
+Fresh repro: same failure family as the 2026-08-25 entry below — the
+build fails in the ordinary compiled-C stage on transitively-imported
+`c_parser/info.py` (`:179:45/:179:50/:247:45/:247:50 passing argument
+1/2 of 'c_parser_info__fix_filename_5c8044' makes pointer from integer`,
+plus `c_analyzer/info.py:18:25 assignment to 'int64_t' from 'char *'`)
+— i.e. the stale-placeholder-signature-vs-inference race documented
+there, now with two ADDITIONAL call sites (:247) showing the same
+`_fix_filename` coercion mismatch. Re-examined this round per the
+doc's own analysis: the general fix is a forward-declaration-only
+prepass resolving every free function's real parameter types before
+any caller compiles — a materially larger change to the shared two-pass
+model than this round's scope, and the `cls`-parameter variant at :825
+is the same family. No code change; doc re-verified with the new call
+sites recorded. Still open.
+
+## Status (re-verified 2026-08-25)
+
+Re-ran fresh against `fix/rest-remainder9`. The specific errors quoted by
+the 2026-08-23 entry (`info_gen.cpp` coroutine-path errors) no longer
+occur — this file no longer routes through the C++20-coroutine generator
+path at all for its current blocker. Fresh repro instead fails during the
+ordinary compiled-C build, pulling in a SIBLING file this module imports
+(`Tools/c-analyzer/c_parser/info.py`, not `c_analyzer/info.py` itself):
 
 ```
-info.py:184:7: error: assignment to 'int64_t' from 'char *' makes integer from pointer without a cast
-info.py:80:8:  error: (same)
-info.py:79:8:  error: (same)
-info.py:93:8:  error: (same)
-info.py:111:1: error: non-trivial conversion in 'component_ref'   x4
-info.py:223:1: error: non-trivial conversion in 'component_ref'   x2
+c_parser/info.py:179:45: error: passing argument 1 of
+  'c_parser_info__fix_filename_5c8044' makes pointer from integer without
+  a cast
+c_parser/info.py:179:50: error: passing argument 2 of
+  'c_parser_info__fix_filename_5c8044' makes pointer from integer without
+  a cast
+c_parser/info.py:825:1: error: non-trivial conversion in 'parm_decl'
+c_analyzer/info.py:18:25: error: assignment to 'int64_t' from 'char *'
+  makes integer from pointer without a cast
 ```
 
-After, verbatim and complete:
+Root-caused the FIRST of these two independent bugs precisely (found via
+targeted debug instrumentation of `_lower_named_call`'s kwargs-padding
+loop, gimple_gen_calls.py): `c_parser/info.py`'s `FileInfo.fix_filename`
+calls `_fix_filename(self.filename, relroot, **kwargs)`, forwarding a
+`**kwargs` SPREAD (not literal kwargs) to a callee, `_fix_filename(filename,
+relroot, *, formatted=True, **kwargs)`, that has a keyword-only parameter
+(`formatted`) BETWEEN the last fixed positional and its own trailing
+`**kwargs` slot. The forwarded dict landed in `arg_pairs` as the LAST
+lowered argument (`_lower_UnaryOp`'s `**` spread pass-through), but the
+missing-argument padding loop treated it as filling the NEXT missing
+positional slot (silently binding the real forwarded dict to `formatted`
+instead of `kwargs`) and then fabricated a brand-new EMPTY dict for the
+real `**kwargs` slot — losing every forwarded override and shifting the
+whole argument tail by one. FIXED in `gimple_gen_calls.py`'s
+`_lower_named_call` (~line 2469): when a `**`-spread call's forwarded
+dict already sits in `arg_pairs` at a position strictly before its real
+`_func_kwargs_slot` index (i.e. there's a real keyword-only param with a
+default in between), the dict is now popped aside and re-inserted at its
+correct slot once the loop reaches it, instead of a fresh empty dict.
+Verified via targeted debug output that this fix engages correctly on
+this exact repro (`_fwd_kw_pair` now correctly re-lands at index 3).
+
+This fix did NOT, however, make the file build clean — it exposed
+(rather than caused) a SEPARATE, deeper, genuinely structural bug it sits
+in front of: `_fix_filename`'s `func_param_types` entry, as seen by THIS
+particular caller, is still `[int64_t, int64_t, int64_t, MojoDict *]` — a
+PLACEHOLDER signature registered before `_fix_filename`'s own body-usage
+type inference (which later concludes `char *, char *, _Bool, MojoDict *`
+from its `fix(filename, relroot=relroot, **kwargs)` forwarding into
+`fsutil.format_filename`/`fsutil.fix_filename`) has run. Because
+`FileInfo.fix_filename` is compiled and its call site's C args committed
+BEFORE `_fix_filename`'s real signature is finalized, the caller coerces
+its arguments down to the STALE int64_t placeholder types, while the
+callee's own `-fgimple` definition (compiled later, using the resolved
+`char *` types) ends up with a different, incompatible real C signature —
+exactly the class of two-pass "sentinel gets overwritten... every OTHER
+call site compiled afterwards sees the concrete signature" hazard this
+codegen's own comments already document elsewhere (see
+`_emit_call`/`_pack_vararg_trailing_params`'s docstrings), but here it's
+the SIGNATURE ITSELF racing its own inference, not just the varargs-
+packing sentinel. Fixing this class of ordering bug in general (e.g. a
+forward-declaration-only prepass that always resolves every free
+function's real parameter types before any CALLER is compiled) is a
+materially larger, riskier change to the shared two-pass compilation
+model than this round's per-doc scope — not attempted further. The
+second independent blocker (`_parse_data`/`_format_data` classmethods'
+`cls` parameter inferred as `struct KIND *` in one spot vs `int64_t` in
+another — likely the same class of caller/callee signature-race, for a
+`cls` param rather than an ordinary one) was also root-caused to the same
+family but not fixed, for the same reason. Neither is the coroutine-path
+generator/async gap the earlier updates below focused on — doc's
+blocker has moved twice now; kept open with today's precise findings.
+Quality gate after the `_lower_named_call` fix: `test_gimple.py` 253/253,
+`test_module_cache.py` 76/76 (see the top-level session report for
+`make check-selfhost`/stdlib-dylib results, run once for the whole
+day's change set).
+
+## Status (re-verified 2026-08-23)
+
+Re-ran against current master tip (`626f3f0`): still fails, still in the
+generated `info_gen.cpp`, with the SAME error shapes the 2026-08-09
+root-cause below identified (unannotated generator-body params
+`item`/`fmt` falling back to naive types):
 
 ```
-info_gen.cpp:140:27: error: request for member 'render' in 'self->Analyzed::item',
-                              which is of non-class type 'int64_t'
-info_gen.cpp:156:30: error: invalid types 'int64_t[int]' for array subscript
-info_gen.cpp:157:24: error: invalid types 'int64_t[int]' for array subscript
+info_gen.cpp:138:27: error: request for member 'render' in
+    'self->Analyzed::item', which is of non-class type 'int64_t'
+info_gen.cpp:134:14 / 158:19 / 161:19: error: ISO C++ forbids comparison
+    between pointer and integer   (fmt == "raw" / "summary" / "full")
+info_gen.cpp:159:48: error: invalid conversion from 'int64_t' to 'char*'
+info_gen.cpp:146:35: error: void value not ignored as it ought to be
 ```
 
-### What was actually wrong — THREE defects, one per layer, not one
+Byte-for-byte the same mechanism (coroutine-path type inference lacks
+the ordinary path's param/field inference; same tracked generator/async
+codegen project, tasks #95-135). Structural; unchanged; no code change —
+doc re-verified only.
 
-The doc's mechanism section was right that the family is one name
-(`UNKNOWN`), and right that both `c_analyzer/info.py`'s boxed
-`_misc.Labeled(...)` and `c_common/tables.py`'s `UNKNOWN = '???'` are
-involved. Its diagnosis was incomplete: it named only the ROUTING defect
-(a bare name resolving through the shared `_global_to_module`), which is
-one of three, and the one that had already been fixed before this branch
-started.
+## Status (updated 2026-08-09)
 
-1. **Routing, bare `UNKNOWN`.** `_lower_IdentExpr` decided the name was
-   ours and then asked the shared, whole-transitive-tree, name-keyed
-   `_global_to_module` anyway — a "first module to claim this bare name
-   wins" table, so it answered `c_common.tables`. Read and write landed
-   on two different slots. The WRITE side already used
-   `gen._current_module_ctx` at every site; this is the read half.
+Re-verified against current master (fast-forwarded to `bf1ead2`, after
+several sibling `Tools/c-analyzer/` bugs got fixed this session): still
+fails, same shape and (for the errors quoted in the 2026-08-06 note)
+byte-identical text — errors are all in the generated C++ file
+(`info_gen.cpp`), confirming this module still routes through the
+separate C++20-coroutine generator lowering path (`info.py`'s `render`
+method does `yield repr(self)` / `yield from rendered`, etc.).
 
-2. **Type, bare `UNKNOWN`.** `_own_overlay_global_ctype`'s rule 2 narrows
-   "a foreign homonym's pointer cdecl must not re-type this module's own
-   SCALAR conclusion". Its exact mirror for a CONTAINER own-conclusion was
-   missing, and is not reachable by narrowing: a container conclusion
-   (`MojoList *`) falls *past* rule 2 (own is not a scalar) into rule 3,
-   which deferred to ANY shared cdecl. `tables.py`'s `'char *'` therefore
-   re-typed `info.py`'s own boxed container, and `_global_dst_ctype` (the
-   assignment sites) coerced the RHS to `char *` against an already-frozen
-   `int64_t` field. New rule 4 boxes a non-dispatch container conclusion
-   to `int64_t` whenever the shared cdecl is not itself a container
-   pointer.
+Root-caused precisely this time (the 2026-08-06 note hadn't traced past
+the gcc error text): `Analyzed.__init__`'s `item`/`typedecl` parameters
+and the `render(self, fmt='line', ...)` method's `fmt` parameter are
+both unannotated. The ORDINARY (non-coroutine) function-lowering path
+infers such parameters' real C types from call-site/body usage; the
+C++20-coroutine generator-body lowering (`_gen_cpp_generator_unit` and
+its statement-emission helpers) is a separate, independently-maintained
+type-inference pass that does not do this — it falls back to the naive
+`int64_t` default for both `self.item` (a struct-typed field, assigned
+from the `item` constructor param) and `fmt` (a string, compared against
+string literals `'raw'`/`'summary'`/`'full'` in `render`'s body). This
+produces exactly the observed errors:
+- `self->item.render(fmt)` — `.render` looked up on `int64_t` because
+  `item`'s field type was never resolved to the real `Analyzed`/
+  `TypeDeclaration`-shaped struct pointer.
+- `(fmt == "raw")` / `(fmt == "summary")` / `(fmt == "full")` — `fmt`
+  compared against a C string literal while typed `int64_t`: "ISO C++
+  forbids comparison between pointer and integer".
+- `throw _MojoCppExc{ (int64_t)108472663, fmt, (void *)fmt }` — the
+  exception-message slot expects `char*` but receives `fmt` typed as
+  `int64_t`.
+- `Analyzed__render_extra(self, fmt)` used in a value context while its
+  inferred return type is `void` — likely the same self/param
+  mistyping cascading into `_render_extra`'s own inferred signature.
 
-3. **Type, qualified `tables.UNKNOWN`.** `_lower_MemberExpr`'s
-   `submod.GLOBAL` branch resolved the FIELD module-correctly but took
-   both halves of the TYPE from the shared name-keyed dicts — and
-   `_global_to_module`, itself such a dict, GATED the branch, so only
-   whichever module was scanned first was reachable through the qualified
-   spelling at all. New `_module_global_field_type` reads the owning
-   module's own `_module_globals` `(name, c_type, g_mtype)` triple, which
-   is exactly what the struct typedef, the initializer and the
-   `_<mod>_mojo_global_get_<name>` accessor were generated from, so the
-   read agrees with the field by construction rather than by a second
-   independently-drifting inference.
-
-Regression test `same_bare_name_global_reads_own_module_slot` in
-`test_gimple_runner.py` — a package with a string `MARKER` in `tables.py`
-and a list `MARKER` in `main.py`, printing BOTH `MARKER` and
-`tables.MARKER` side by side and comparing against CPython on the same
-files. Verified failing on the pre-fix tree (gcc `-Wint-conversion`) and
-passing after. Its fixture is the smallest case that reaches all three
-defects at once, which is why it asserts on the built binary's stdout and
-not merely on a successful compile.
-
-**One correction to the doc's own reasoning, recorded because it changes
-what a follow-up should do:** the doc says these ten errors "belong to
-another worker's claim" and that `bugs/hard/CODEGEN_same_bare_name_struct_
-collision_across_modules.md` "correctly predicts the symptom". The
-prediction was right; the ownership was not load-bearing. No other worker
-holds this area now, and the defect was three ordinary layering bugs in
-one name, fixable without touching the struct-collision machinery.
-
-### What still blocks this file — three UNRELATED shapes, none of them `UNKNOWN`
-
-Same three imported modules the previous entry listed, still failing first:
+This is the same "untyped/misresolved generator-body member-access"
+category the 2026-08-06 note already pointed at, now traced to its
+actual mechanism: the coroutine-body lowering pass needs its own
+parameter/field type-inference pass brought up to parity with the
+ordinary function-lowering path's (a real, nontrivial feature — not a
+missing single case), and touches the same separately-maintained
+generator/async codegen subsystem the tracked project (tasks #95-135)
+already covers. Structural; not attempted here, per CLAUDE.md's
+guidance against forcing narrow fixes onto shared/incomplete inference
+machinery. No code change — doc corrected with the precise mechanism.
 
 ```
-# ERROR: compiling imported module 'c_parser.info'  -> next(...) on next(CallExpr) has no lowering
-# ERROR: compiling imported module '._func_body'     -> cannot coerce MojoDict * to MojoList *  value='_t513' dest='data'
-# ERROR: compiling imported module 'c_parser.match'  -> cannot coerce MojoSet * to MojoList *   value='_t6' dest='expected'
+Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use (set to 2)
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py: In function '_mojo_dispatch_getattr':
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py:67:11: warning: unused variable '_tag' [-Wunused-variable]
+   67 |             return resolved, None
+      |           ^ ~~
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py: In function '_mojo_dispatch_setattr':
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py:72:11: warning: unused variable '_tag' [-Wunused-variable]
+   72 |         if extra:
+      |           ^~~~
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py: In function '_mojo_dispatch_fields':
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py:77:11: warning: unused variable '_tag' [-Wunused-variable]
+   77 |         elif typedeps in (None, UNKNOWN):
+      |           ^~~~
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py: In function '_mojo_dispatch_repr':
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py:92:11: warning: unused variable '_tag' [-Wunused-variable]
+   92 |         elif item.kind is KIND.STRUCT or item.kind is KIND.UNION:
+      |           ^~~~
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py: In function '_mojo_generic_elem_repr':
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py:101:13: warning: unused variable '_tag' [-Wunused-variable]
+  101 |         elif typedecl and not isinstance(typedecl, TypeDeclaration):
+      |             ^~~~
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py: In function 'SystemType___init__':
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py:227:1: warning: label 'bb_2' defined but not used [-Wunused-label]
+  227 | 
+      | ^   
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py:225:11: warning: variable '_t1' set but not used [-Wunused-but-set-variable]
+  225 |         self.item.fix_filename(relroot, **kwargs)
+      |           ^~~
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py: In function 'Analyzed_is_target':
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py:38:1: warning: label 'bb_4' defined but not used [-Wunused-label]
+   38 |     def from_raw(cls, raw, **extra):
+      | ^   
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py:36:1: warning: label 'bb_5' defined but not used [-Wunused-label]
+   36 | 
+      | ^   
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py:47:1: warning: label 'bb_3' defined but not used [-Wunused-label]
+   47 |             return cls(raw, **extra)
+      | ^   
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py:38:1: warning: label 'bb_2' defined but not used [-Wunused-label]
+   38 |     def from_raw(cls, raw, **extra):
+      | ^   
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py:36:9: warning: variable '_t8' set but not used [-Wunused-but-set-variable]
+   36 | 
+      |         ^  
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py:35:9: warning: variable '_t7' set but not used [-Wunused-but-set-variable]
+   35 |             return False
+      |         ^  
+/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/info.py:34:11: warning: variable '_t6' set but not used [-Wunused-but-set-variable]
+   34 |         else:
+      |           ^~~
+... (2301 more lines)
 ```
 
-Two notes that are new since the previous entry:
-
-* `c_parser.info`'s refusal CHANGED. It used to be `cannot materialize a
-  generator as a list: no known generator API for 'rendered'`; it is now
-  an honest `next(<CallExpr>)` refusal, which is the same
-  `_func_body`/`match` shape as a link-time hazard turned into a
-  compile-time one. Neither is this file's own error, and both are
-  tracked in `bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md`.
-* A FOURTH module now appears that the previous entry did not list:
-  `.iterutil` (`next(...)` on `next(IdentExpr)`). It is in the same
-  closure and is the same refusal class.
-
-So: this file's own gcc errors are fixed; its remaining floor is three
-(soon four) imported-module shapes, all in other docs.
-
-## Status 2026-09-30 — this file's own gcc errors are ONE root cause, and it belongs to another worker's claim
-
-Re-verified against the current tree (`python3 fire.py build`, sources copied
-from `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/` into `.tmp/ca/`). Ten
-gcc errors, all one family, all from the SAME module-level global name:
-
-```
-info.py:79:8:  error: assignment to 'int64_t' from 'char *' makes integer from pointer without a cast
-info.py:81:8:  error: (same)
-info.py:93:8:  error: (same)
-info.py:185:7: error: (same)
-info.py:111:1: error: non-trivial conversion in 'component_ref'   x4
-info.py:223:1: error: non-trivial conversion in 'component_ref'   x2
-```
-
-with gcc naming the offending expression:
-
-```
-int64_t
-char *
-_t6 = _c_common_tables_globals.UNKNOWN;
-```
-
-### The mechanism
-
-`c_analyzer/info.py` defines its OWN `UNKNOWN`:
-
-```python
-IGNORED = _misc.Labeled('IGNORED')     # a struct-typed module global
-UNKNOWN = _misc.Labeled('UNKNOWN')
-```
-
-`c_common/tables.py` also defines `UNKNOWN = '???'` — a `char *`. A bare
-reference to `UNKNOWN` inside `c_analyzer/info.py` (`typedecl in (UNKNOWN,
-IGNORED)`, `return UNKNOWN, extra`, `typedecl = UNKNOWN`, …) is emitted
-against **`c_common.tables`'** globals struct. So:
-
-* the wrong module's slot is read, and
-* the local is typed `int64_t` while the slot it reads is `char *`.
-
-Two modules sharing one bare name, each reference resolving through whichever
-slot won — that is
-`CODEGEN_same_bare_name_struct_collision_across_modules`, which
-is **claimed by another worker** (`hard-same-name-struct`). Per the parallel-work
-rules I did not edit it. It also correctly predicts the symptom: the loser's
-access resolves against the winner's slot.
-
-### Next step (for whoever holds that claim, or after it lands)
-
-1. The bare-name resolution must be module-scoped for module GLOBALS the way
-   it already is for functions (`_func_qualifier`) and structs
-   (`_imported_struct_home`). `c_analyzer/info.py` references its own
-   `UNKNOWN` — it is in `self._module_globals` / `_local_top_level_func_names`
-   territory already, so the fix is that the global slot lookup consult the
-   same tier order instead of one shared bare-name slot.
-2. Verify against BOTH names at once: `IGNORED` exists only in
-   `c_analyzer/info.py`, `UNKNOWN` in both `c_analyzer/info.py` and
-   `c_common/tables.py`, and `c_parser/info.py` has its own pair again — three
-   modules, two names, so a fix that resolves the winner differently per
-   module is testable.
-3. A CPython-comparison regression must print, compiled, the value of
-   `c_analyzer.info.UNKNOWN` next to `c_common.tables.UNKNOWN` and show them
-   DIFFERENT (`Labeled('UNKNOWN')` vs `'???'`). A test that only prints one of
-   them cannot catch this.
-
-### Meanwhile, this file cannot build even with that fixed
-
-Three imported modules fail in this closure, unchanged:
-
-```
-# ERROR: compiling imported module 'c_parser.info'      -> cannot materialize a generator as a list: no known generator API for 'rendered'
-# ERROR: compiling imported module 'c_parser/parser/_func_body.py' -> cannot coerce MojoDict * to MojoList * ... value='_t513' dest='data'
-# ERROR: compiling imported module 'c_parser.match'      -> cannot coerce MojoSet * to MojoList * ... value='_t6' dest='expected'
-```
-
-(`c_parser/preprocessor` was the fourth and is fixed — commit `b67c170e`.)
-All three are documented in
-`bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md`'s "Next
-step", which is the more actionable list: this file's own ten errors are one
-foreign-claim bug, but its imported-module floor is three unclaimed ones.
+Exit code: 1
+Elapsed: 13.82s

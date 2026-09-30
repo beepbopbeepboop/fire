@@ -324,10 +324,11 @@ int64_t __mojo_tuple_box_8(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e
  * matching that name's own C type, so each per-branch unpack is correct
  * regardless of which yield site produced the value -- the reason plain
  * box-without-tags would silently miscompile. */
-/* The tag values live in fire_coro.h now, beside the accessors that hand one
-   back, so a caller reading `mojo_tagged_tag_dyn`'s answer has the vocabulary
-   in the same declaration.  They were #defined here, which meant the only place
-   that said what a tag means was a .c file nothing includes. */
+#define MOJO_TAG_INT    0
+#define MOJO_TAG_STR    1
+#define MOJO_TAG_DOUBLE 2
+#define MOJO_TAG_LIST   3
+#define MOJO_TAG_NONE   4
 
 extern void   *mojo_list_new(void);
 extern void    mojo_list_append_int(void *, int64_t);
@@ -653,24 +654,6 @@ __mojo_async_await_sock_recv(int64_t coro, int64_t fd)
     if (n == 1) return (int64_t)c;
     if (n == 0) return (int64_t)-1;
     return (int64_t)-2;
-}
-
-/* `asyncio.iscoroutine(x)` / `asyncio.isawaitable(x)` — the same question
- * `__mojo_async_run_gen` asks before it drives anything, as a predicate of its
- * own so the source can ask it too. The check is the registry lookup, not the
- * cast: a value that is not a live handle is 0, which is CPython's own answer
- * for `iscoroutine`, and there is no reinterpreting of an arbitrary int64_t
- * into a `MojoGen *` to get there (nothing is read out of it).
- *
- * This is what makes `if asyncio.iscoroutine(result): asyncio.run(result)` --
- * the idiom `Android/android.py` writes -- mean what it says. Before it, the
- * predicate had no lowering at all and answered `False` for a value that
- * really was a coroutine, so the guard the source wrote evaluated backwards:
- * silent, exit 0, no diagnostic. */
-_Bool
-__mojo_async_iscoroutine(int64_t genHandle)
-{
-    return mgen_reg_has(genHandle) ? 1 : 0;
 }
 
 /* `asyncio.run(f())`'s bridge: genHandle is the MojoGenerator f() already

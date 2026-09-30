@@ -19,15 +19,6 @@ with a loop or a `bl` still gets one named `sorry` over `Total`. That
 statement is true (or at least not known to be false), which is more than
 could be said for what it replaced.
 
-**The emitter's own condition has four clauses, not two**, and the gap matters
-because two of them are silent. `_gen_universal_e2e_cfg` returns `None` — so
-the caller emits the named `sorry` — unless the walk is **not recursive**, is
-**acyclic** (every branch target after the branch), has **no `bl` block**, and
-is given a `fuel` at or above the instruction count. So "acyclic and has no
-calls" is two of four: a self-recursive export that is otherwise acyclic in its
-CFG, and an export offered less fuel than it has instructions, both fall back
-to the `sorry` without either condition being visible from this sentence.
-
 How: the generator's existing CFG walk (`_gen_universal_e2e_cfg`, halt-only
 mode) now proves `{ident}_halts`:
 
@@ -225,9 +216,8 @@ forward in a scratch tree, not committed:
 > **See also [2]'s §5.7**, which measures the same walk breakage from the
 > other side. Its problem statement is **resolved by `e0af987`**, which landed
 > the arithmetic-form fuel this section calls for. Two accounts of one bug; fold
-> them when convenient. §4.1's remaining fuel obligation is `OPUS-4` below and in
-> `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md`; §3's `hreg` landed with
-> `lib/Contracts.lean`, which compiles clean with 0 holes.
+> them when convenient. The full consolidated state of both is
+> `bugs/FORMAL_contract_work_handoff.md`.
 
 #### 4.1a RESOLVED as a diagnosis: the `sorry` is on a false statement, and that is now CHECKED
 
@@ -320,14 +310,10 @@ A three-export dylib, built through the ordinary path
 
 So the scheme is not partial in a diffuse way: on a plain arithmetic export it
 is total, and the two exclusions in `_gen_universal_e2e_cfg` are exactly the
-two that bite. `fuel < _TOTAL` never fires in practice — and this is the one
-sentence in this file that was stale for longer than it looks, because it said
-"`exportFuel` is 100000" when `exportFuel` has been
-`200000 + (image.codeSize / 4) * n` since §4.1's arithmetic-form fix landed.
-It is not a constraint worth thinking about at either size. **The binding
-constraints are `bl` and the back edge, one per §4.2 and §4.1.** (The third
-exclusion, `recursive`, is not exercised by this table and is not claimed to be
-subsumed by the other two; see §1.)
+two that bite. `fuel < _TOTAL` never fires in practice — `exportFuel` is
+100000 and no export approaches that instruction count — so it is not a
+constraint worth thinking about. **The binding constraints are `bl` and the back
+edge, one per §4.2 and §4.1.**
 
 This matters for sequencing: §4.1 and §4.2 are not two independent items of
 equal size. §4.1 (loops) is a *definitional* question — no amount of walking
@@ -373,22 +359,17 @@ and §2 of that request contains the finding that matters most for budgeting:
 prologue/epilogue memory round trip is bitvector computation. Nobody should
 budget address arithmetic for that.
 
-**The blocker that was here is gone.** The emitter emits `import Contracts`;
-`formal/lean.py`'s `LIBRARY_MODULES` was
+**What blocks it is one line in a file I do not own.** The emitter emits
+`import Contracts`; `formal/lean.py`'s `LIBRARY_MODULES` is still
 `("ProofLib", "X86", "work", "Refine")`, so `lib/Contracts.lean` — tracked in
 git since `c967b5d` — was never built by the project, and nothing importing it
-could be checked. `LIBRARY_MODULES` now includes `Contracts` and
-`lib/Contracts.olean` builds. It was escalated rather than edited here because
-`formal/lean.py` was integrator-owned (FORMAL.md §11.3), in
-`IR-2-to-integrator-lib-registration-and-total-shape.md`; it was one line, it
-was mechanical, and it was blocking two agents.
-
-So §5.3 and §5.5 are unblocked by registration, and what is left in them is the
-emitter's own work. **Note the boundary this exposes**, because it is the same
-one §5.3 keeps running into: registering the module makes the proof *checkable*;
-it does not make the emitter *correct*. `lib/Contracts.lean` importing cleanly
-and `dylib_export_0_triple_spec` being discharged are independent facts, and
-only the second one is worth anything.
+could be checked. **That is now fixed**: `formal/lean.py`'s `LIBRARY_MODULES`
+has been extended to include `Contracts`, and `lib/Contracts.olean` builds.
+So this blocker is gone and §5.3/§5.5 are unblocked; the remaining work is in
+the emitter, not in registration. `formal/lean.py` is integrator-owned (FORMAL.md §11.3), so this
+is escalated in `IR-2-to-integrator-lib-registration-and-total-shape.md` rather
+than edited. It is now the blocker for **two** agents, which is the argument for
+doing it: it is one line, it is mechanical, and it is unblocking.
 
 One detail from that request that changes an emitted obligation, recorded here
 so it is not lost: `ExportBody.atExit` is stated **for the start state**, not
@@ -454,18 +435,6 @@ described here. But the file still fails, for a *different* reason one level
 down, and it is not a budget problem. See **§5.7**, which supersedes the
 "try `+decide`, then suspect the memory round trip" advice this paragraph used
 to give — that guess was wrong, and the real cause is the `fuel_lean` change.
-
-**AND FINALLY, 2026-10-03: this thread is closed, and the unfold was a
-symptom.** The emitter also composed each step into itself (`st_i` substituted
-`st{i-1}` while `S_{i+1}` feeds it the running state), so every step ran once
-per earlier step again — `triple` multiplied by 3 five times, `n * 243` against
-a machine computing `n * 3` — and it wrapped the whole composed state in the
-runner's own `if pc = pc then .. else ..`, one per step, which is what
-`bv_decide` cannot be configured out of normalising. Fixed in
-`formal/arm64_proof_gen.py`; `formal-dylib` is green and the generated proof
-checks in 9 s. `FORMAL.md` §12 and
-`bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1 have the numbers and
-what is still open (`OPUS-4`, `OPUS-5`, `OPUS-6`).
 
 ### 5.7 MEASURED: the `fuel_lean` change broke the walk — RESOLVED by `e0af987`
 
