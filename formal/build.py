@@ -211,7 +211,6 @@ def _refuse_unlowerable_module_body(body: list) -> None:
             raise CodegenError(why)
 
 
-
 class FormalClosureCtx:
     """TypeCtx for shared closure discovery on the formal arm64 path.
 
