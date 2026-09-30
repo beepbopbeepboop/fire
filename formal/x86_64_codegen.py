@@ -444,12 +444,12 @@ class X86_64Codegen:
         # spelling `import mod` binds — resolve. The entry carries the declared
         # signature, so a call's result can be classified instead of guessed.
         # The same three tables, and the same `model.dylib_export_lookup`, as
-        # the arm64 backend: one contract, two emitters.
-        # …and by module identity AGAIN for the names a module publishes by
-        # RE-EXPORT rather than by definition. All three tables come from
-        # `model.dylib_export_tables`, the same builder the arm64 backend uses:
-        # the indexing was two copies of the same three questions, which is two
-        # places for them to disagree about which library owns a name.
+        # the arm64 backend: one contract, two emitters. The third is the
+        # names a module publishes by RE-EXPORT rather than by definition, and
+        # all three come from `model.dylib_export_tables` — the one builder,
+        # because the indexing was two copies of the same three questions,
+        # which is two places for them to disagree about which library owns a
+        # name.
         (self._dylib_by_name, self._dylib_by_module,
          self._dylib_forwarded) = M.dylib_export_tables(dylib_exports)
         self._comptime_hook = comptime_hook
