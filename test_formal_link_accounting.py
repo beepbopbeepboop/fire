@@ -234,6 +234,7 @@ def written_modules():
 # without a module behind it fails too.
 IMPLEMENTED_HOST_MODULE_TESTS = {
     "argparse": "test_formal_argparse.py",
+    "ast": "test_ast_formal.py",
     "os": "test_formal_os.py",
     "struct": "test_struct_formal.py",
     "sys": "test_formal_sys.py",

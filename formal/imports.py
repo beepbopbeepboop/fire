@@ -156,6 +156,14 @@ HOST_MODELLED = frozenset((
     #     a `char **` walk; both are bug docs rather than approximations.
     "errno", "stat", "platform", "select", "io",
     "pathlib", "glob", "fnmatch", "secrets", "uuid",
+    #   `ast`  — `formal/hostmods/ast.mojo`, the TOKENIZER and a lexical
+    #     validator, not a tree: `parse`, `parse_reason`, `tokenize`,
+    #     `tokenize_from`, `token_bound` and `token_name`, with token kinds,
+    #     positions and counts compared against CPython's own `tokenize` by
+    #     `test_ast_formal.py`. What it cannot do is build a tree, because a
+    #     value on this path is one 64-bit word and a node is not one: the
+    #     subset, the 21 measured ways `parse` differs from CPython's verdict,
+    #     and the f-string collapsing are in `bugs/FORMAL_ast_module_subset.md`.
     #   `struct`  — `formal/hostmods/struct.mojo`, in the subset the formal
     #     backends can lower, compared BYTE FOR BYTE against CPython's own
     #     answers by `test_struct_formal.py`. The four measured limits it is
@@ -196,8 +204,9 @@ HOST_MODELLED = frozenset((
     "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
     "weakref", "pprint", "reprlib", "pickle",
     # A shape over the source language rather than a runtime facility: the
-    # parser, the type lattice, the dataclass transform.
-    "ast", "typing", "dataclasses",
+    # type lattice, the dataclass transform. (`ast` and `argparse` were here
+    # until their host modules existed and are now written above.)
+    "typing", "dataclasses",
     #   `argparse`  — `formal/hostmods/argparse.mojo`, in the subset the formal
     #     backends can lower, checked case for case against CPython's own
     #     `argparse` by `test_formal_argparse.py`: the same values, the same

@@ -891,7 +891,6 @@ decision rather than a patch.
 | the only gate on the constructor half | `formal/model.py` `_constructed_struct_name` |
 | the four-way answer, and the emitter that acts on it | `formal/build.py` `_typed_nested_frame`, `model.struct_nested_frame_fields` |
 | the spelling the diagnostics share | `formal/model.py` `member_chain_text` / `expr_spelling` — which is where `formal/build.py`'s two private copies went |
-||||||| a0c0969
 
 ---
 
