@@ -536,6 +536,10 @@ class ARM64Codegen:
         self._while_counter = 0
         self._assert_counter = 0
         self._tup_counter = 0
+        # Per-image counter for the lazy module-global initializer's skip
+        # label; unique per function because the assembler's labels are.
+        self._gi_counter = 0
+        self._fn_local_names: set = set()
         self._strings = []   # list[(label, bytes)]
         self._str_counter = 0
         self._var_regs = {}
@@ -698,10 +702,6 @@ class ARM64Codegen:
         first_func_name = functions[0].name
         if emit_startup:
             self.asm.emit(encode_stp_sp_pre(29, 30))
-            # The module-global initializer runs BEFORE the entry function, so a
-            # slot an entry function reads is already correct. See
-            # `_emit_global_init` for why this is CODE and not a relocation.
-            self._emit_global_init()
             test_val = self.test_input
             if test_val <= 0xffff:
                 self.asm.emit(encode_movz_xn_imm(0, test_val))
@@ -757,6 +757,11 @@ class ARM64Codegen:
         # parameter annotation, a `var p: Pointer[T]`, the bindings of a name —
         # and `_current_function` is a string, so it cannot answer any of those.
         self._cur_fn = f
+        # This function's LOCAL names, which is what decides whether a bare
+        # name is served from `__DATA` or from a register — see
+        # `_module_global`. Built from the same shared allocation order the
+        # registers come from, so the two cannot disagree.
+        self._fn_local_names = set(_collect_var_names(f))
         self.asm.label(f.name)
 
         var_names = _allocation_order(f)
@@ -867,6 +872,16 @@ class ARM64Codegen:
         self.asm.emit(encode_mov_zr_xn(29, 31))  # MOV X29, SP
         for i in range(self._npairs):
             self.asm.emit(encode_stp_sp_pre(19 + 2 * i, 20 + 2 * i))
+        # The module-global initializer, LAZILY: a function that touches a
+        # global checks a flag and fills the slots if they are not filled yet.
+        # Placed here — after the frame is established and the callee-saved
+        # registers are saved, before anything can read a slot — because the
+        # prologue above is what makes X16/X17 available to it. See
+        # `_emit_global_init` for why this is CODE and not a relocation, and
+        # `model.initialization_is_lazy` for why it is not in the startup stub.
+        if M.function_touches_globals(f):
+            self._gi_counter += 1
+            self._emit_global_init(skip_label=f"__gi_done_{self._gi_counter}")
         self.asm.emit(encode_mov_zr_xn(19, 0))   # MOV X19, X0 (argument 0)
         # AAPCS delivers argument i in Xi on entry, and Xi is caller-saved —
         # so arguments 1..7 have to be moved into the callee-saved register
@@ -969,7 +984,7 @@ class ARM64Codegen:
         if slot is not None:
             self._emit_frame_load(name, slot, dst)
             return
-        gslot = M.module_slot(name)
+        gslot = self._module_global(name)
         if gslot is not None:
             self._emit_global_load(gslot, dst)
             return
@@ -1007,15 +1022,15 @@ class ARM64Codegen:
             return
         raise CodegenError(self._no_home(name))
 
-    def _emit_global_init(self) -> None:
-        """Fill every address-valued module-global slot, before `main` runs.
+    def _emit_global_init(self, skip_label: str = None) -> None:
+        """Fill every address-valued module-global slot, and set the flag.
 
         WHY CODE AND NOT A RELOCATION. The obvious mechanism is a relocation —
         dyld's classic `REBASE` opcode stream for Mach-O, `R_X86_64_RELATIVE` for
         ELF — and it is what the file-format documentation describes. It does not
         work on the target this backend actually runs on: measured on macOS 26,
-        a well-formed `LC_DYLD_INFO_ONLY` rebase stream naming `__DATA` ordinal 3
-        is parsed (a malformed one aborts at launch with "missing
+        a well-formed `LC_DYLD_INFO_ONLY` rebase stream naming `__DATA` is parsed
+        (a malformed one aborts at launch with "missing
         REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB") and then SILENTLY NOT
         APPLIED — the slot still held the link-time address, and the first read
         through it was a segfault. A silent no-op relocation is the worst
@@ -1024,23 +1039,50 @@ class ARM64Codegen:
 
         So the addresses are computed by the same instructions that already work
         here: ADRP/ADD is how a string literal's address reaches a register, and
-        it is PC-relative, so it is correct under whatever slide dyld chose. The
-        cost is a handful of instructions per address-valued slot at startup; the
-        benefit is that the mechanism is the one already proven against a real
-        dyld on this exact target rather than one taken from a specification.
+        it is PC-relative, so it is correct under whatever slide dyld chose.
 
-        X16 and X17, because the startup stub has saved the frame and holds
-        nothing else live — the same two registers `_emit_global_store` uses for
-        an address and a parked value."""
+        `skip_label`, when given, is where control goes once the flag says the
+        globals are already filled — the caller's lazy-init check branches there
+        and the body of every function that touches a global ends up with one
+        branch that is never taken after the first call.
+
+        X16 and X17: the address being stored and the address of the slot. Both
+        are the intra-procedure scratch registers, and neither holds anything
+        across these instructions."""
         table = M.module_slots()
         base = self._globals_base
         if not table or base is None:
+            if skip_label:
+                self.asm.emit_label_rel(skip_label, here_offset=-4)
             return
         image = M.build_data_image(table, base)
+        if skip_label:
+            # CBNZ over the whole body — the flag is CLEAR (zero) until the
+            # last store below, so the first call falls through and runs it and
+            # every later call branches past it.
+            self._adrp_add_abs(17, base + image.init_flag_offset)
+            self.asm.emit(encode_ldr_xt_xn_imm(16, 17, 0))
+            # Recorded AFTER the instruction is emitted, biased back over it —
+            # the idiom every branch on this path uses, because the assembler
+            # computes the position from the current length.
+            self.asm.emit(encode_cbnz_xn(0, 16))
+            self.asm.emit_label_rel(skip_label, here_offset=-4)
         for at, target in image.fixups:
             self._adrp_add_abs(16, base + target)
             self._adrp_add_abs(17, base + at)
             self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
+        if skip_label:
+            # Set the flag LAST, after every store, so a slot is never observed
+            # filled while another still holds its link-time address.
+            self._adrp_add_abs(16, base + image.init_flag_offset)
+            self._adrp_add_abs(17, base + image.init_flag_offset)
+            self.asm.emit(encode_movz_xn_imm(16, 1))
+            self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
+            # `label`, not `emit_label_rel`: this DEFINES where the check above
+            # branches to. Recording a relocation here would be a second branch
+            # to a label nothing ever defines, which the assembler reports as
+            # "Undefined label" at resolve time.
+            self.asm.label(skip_label)
 
     def _global_slot_address(self, slot) -> None:
         """X17 = the address of a module-global's `__DATA` slot.
@@ -1127,6 +1169,47 @@ class ARM64Codegen:
         self._load_var(holder, 17)
         self.asm.emit(encode_str_xt_xn_imm(src, 17, 8 * slot))
 
+    def _module_global(self, name: str):
+        """The `__DATA` slot that holds `name` in the function being EMITTED.
+
+        CPython's rule for a bare name inside a function, which is the rule
+        being implemented:
+
+          * bound in THIS function, with no `global` → a local, full stop;
+          * declared `global` here → the module's storage;
+          * neither → a free variable, so it resolves in module scope and reads
+            the module's storage.
+
+        The middle case is the one that has to get both ends right, and keying
+        on either end alone gets one of them wrong:
+
+            G = 5
+
+            def bump_local():
+                G = G + 1        # NO `global` — a LOCAL; module stays 5
+
+            def read_only():
+                return G         # no assignment anywhere — the MODULE's 5
+
+            def set_it():
+                global G
+                G = 100
+
+        Gating on "does the name have a slot" sends `bump_local`'s read and
+        write to `__DATA`, and the module's 5 becomes 6 — measured on arm64 and
+        x86_64 alike, with the interpreter disagreeing. Gating on "did this
+        function declare it `global`" sends `read_only`'s read to a dead
+        register, and the build refuses with "has no home".
+
+        So the gate is the local set, which answers both ends at once:
+        `_collect_var_names` is already the shared allocation order and already
+        excludes names declared `global`, so a name in it is local and a name
+        outside it is not. One list, one rule, and the register allocation and
+        the load/store path cannot disagree about it."""
+        if name in self._fn_local_names:
+            return None
+        return M.module_slot(name)
+
     def _store_var(self, name: str, src: int) -> None:
         """local `name` = src. Register homes MOV; spill slots STR via X17.
 
@@ -1140,7 +1223,7 @@ class ARM64Codegen:
         if slot is not None:
             self._emit_frame_store(name, slot, src)
             return
-        gslot = M.module_slot(name)
+        gslot = self._module_global(name)
         if gslot is not None:
             self._emit_global_store(gslot, src)
             return

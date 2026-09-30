@@ -957,7 +957,7 @@ def compile_formal(source_path: str, output: str = None,
     # that imported the struct, which is the only way such a call occurs.
     imported_structs = _imported_structs(source_path, stmts, arch)
     try:
-        functions, structs, symbols = _prepare_functions(
+        functions, structs, symbols, slots = _prepare_functions(
             stmts, synthetic=True, extra_structs=imported_structs)
     except CodegenError as e:
         # A clean compile error. The function pipeline runs before codegen
@@ -1028,6 +1028,7 @@ def compile_formal(source_path: str, output: str = None,
     from formal.imports import imported_modules
     try:
         M.publish_module_symbols(symbols)
+        M.publish_global_slots(slots)
         check_frame_field_blob_premises(structs)
         check_frame_subscript_escapes(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
@@ -1148,7 +1149,8 @@ def _formal_module_functions(source_path: str,
     # (which finds nothing in binary_heap either, so it is refused a moment
     # later, by the check that can actually say why). Reporting the accurate
     # reason matters: "no top-level functions" reads like a codegen gap.
-    functions, structs, symbols = _prepare_functions(stmts, synthetic=False)
+    functions, structs, symbols, slots = _prepare_functions(
+        stmts, synthetic=False)
     # The other of the two call sites of `check_frame_field_blob_premises`, and
     # for the same reason: this is the dylib path, it has no import resolution
     # of its own to be preempted by, and the check has to apply to a dylib
@@ -1173,6 +1175,7 @@ def _formal_module_functions(source_path: str,
         # globals over the published one, and the dylib path builds imported
         # modules before it gets here.
         M.publish_module_symbols(symbols)
+        M.publish_global_slots(slots)
         check_frame_field_blob_premises(structs)
         check_frame_subscript_escapes(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
@@ -1189,7 +1192,7 @@ def _formal_module_functions(source_path: str,
         raise FormalBuildError(str(e))
     module = re.sub(r"[^A-Za-z0-9_]", "_",
                     os.path.splitext(os.path.basename(source_path))[0])
-    return module, functions, source, structs
+    return module, functions, source, structs, slots
 
 
 def _struct_methods(stmts: list) -> list:
@@ -3652,7 +3655,8 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # Published for the reason `_MODULE_SYMBOLS` is: the consumers are a
     # per-function walk inside each backend and the linker, and none of them has
     # the module statements in hand.
-    M.publish_global_slots(M.collect_global_slots(stmts, functions))
+    slots = M.collect_global_slots(stmts, functions)
+    M.publish_global_slots(slots)
     # A module-level NAME whose value the build can FOLD is substituted at
     # every read, so `G = 5` read from a function is the 5 and not whatever
     # the register allocator left behind.  LAST of the rewrites, for the reason
@@ -3666,7 +3670,11 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # a lifted lambda or a flattened closure is a function with its own locals
     # and its own receivers.
     _frame_receivers(functions, structs_by_name)
-    return functions, structs, symbols
+    # The slot table is RETURNED as well as published, for the reason
+    # `symbols` is: building an import compiles the imported module through this
+    # same function, and that nested call publishes ITS globals over ours, so
+    # the caller re-publishes its own before anything reads the table.
+    return functions, structs, symbols, slots
 
 
 def _method_owners(stmts: list, extra_structs: list = None) -> dict:
@@ -4997,10 +5005,38 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     ordered = []
     seen: dict = {}
     structs_by_file: dict = {}
+    # The library's merged module-global slot table, published before the
+    # codegen runs because every slot access is an absolute address computed
+    # against it. Built by hand here rather than by re-running
+    # `collect_global_slots`, because a library is compiled from SEVERAL
+    # sources and each one's table numbers its own slots from zero.
+    library_slots: dict = {}
+    library_slot_owners: dict = {}
     for source_path in source_paths:
-        module, functions, module_source, file_structs = \
+        module, functions, module_source, file_structs, file_slots = \
             _formal_module_functions(source_path, link_dylibs)
         structs_by_file[source_path] = file_structs
+        for name, slot in (file_slots or {}).items():
+            owner = library_slot_owners.get(name)
+            if owner is not None:
+                # Two files of ONE library both declaring the same module-level
+                # name is a genuine collision, not something to resolve: a slot
+                # is placed by its BARE name, so one `COUNT` in two files would
+                # silently share a word. (In Mojo they are `a.COUNT` and
+                # `b.COUNT`; this backend carries no module identity at a use
+                # site, which is the same limit
+                # `FORMAL_module_attribute_access_refused` records for
+                # module-attribute CALLS.) Refused by name, naming BOTH files,
+                # rather than one of them silently winning by ordering.
+                raise FormalBuildError(
+                    f"{source_path}: module-level name {name!r} is also "
+                    f"declared in {owner}, and this library compiles both files "
+                    f"into one image, so the two would share a single word. A "
+                    f"module global is placed by its bare name on this path, so "
+                    f"two files of one library cannot both declare it")
+            library_slots[name] = M.GlobalSlot(name, len(library_slots),
+                                               slot.init, slot.site)
+            library_slot_owners[name] = source_path
         for fn in functions:
             # A repeated name is an OVERLOAD, not a collision — and Mojo
             # overloads are ordinary (`def tile[...]` appears three times in
@@ -5090,13 +5126,20 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         return _namespace_library(output, install_name, arch, reexports,
                                   dylib_syms, dep_install, linked)
 
+    # The library's merged slot table is PUBLISHED before the codegen runs,
+    # because a slot access is an absolute address the codegen computes against
+    # it, and the image the linker is handed at the end has to be built from the
+    # same table. The per-file tables each numbered their slots from zero, so
+    # this merge is what makes the library's slots distinct.
+    M.publish_global_slots(library_slots)
+    has_globals = bool(library_slots)
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                             dylib_exports=dylib_exports)
     try:
         code, info = codegen.compile(
             ordered,
-            base_addr=TEXT_BASE + dylib_code_offset(install_name, False,
-                                                    dep_install),
+            base_addr=TEXT_BASE + dylib_code_offset(
+                install_name, False, dep_install, has_globals),
             emit_startup=False)
         external_syms = info.get("external_syms") or []
         if external_syms:
@@ -5105,7 +5148,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             # segment and libSystem are discovered by the first pass.
             codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                                     dylib_exports=dylib_exports)
-            code_file = dylib_code_offset(install_name, True, dep_install)
+            code_file = dylib_code_offset(install_name, True, dep_install,
+                                          has_globals)
             code, info = codegen.compile(ordered,
                                          base_addr=TEXT_BASE + code_file,
                                          emit_startup=False)
@@ -5142,9 +5186,10 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     binary = build_macho_dylib(
         code,
         TEXT_BASE + dylib_code_offset(install_name, bool(external_syms),
-                                      dep_install),
+                                      dep_install, has_globals),
         exports, install_name, arch=arch, external_syms=external_syms,
-        deps=dep_install, dep_syms=dep_syms)
+        deps=dep_install, dep_syms=dep_syms,
+        globals_image=globals_image("macho") if has_globals else None)
     with open(output, "wb") as f:
         f.write(binary)
     os.chmod(output, 0o755)

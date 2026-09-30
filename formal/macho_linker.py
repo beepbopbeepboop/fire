@@ -92,9 +92,22 @@ GOT_SEGMENT_INDEX = 2      # segment ordinal of __DATA_CONST (0=__PAGEZERO, 1=__
 LIBSYSTEM_PATH = b"/usr/lib/libSystem.B.dylib\0"
 
 PAGEZERO_SIZE = 0x100000000
+# __TEXT's mapped address for every image this module emits.
+#
+# Exactly 4 GB, i.e. the first address ABOVE the range __PAGEZERO reserves, and
+# that is a hard requirement rather than a convention: __PAGEZERO claims all of
+# [0, 4 GB) with nothing mapped, and the kernel will not map any other segment
+# into it for an executable. Measured: moving __TEXT down to 3 GB — leaving a
+# full gigabyte of headroom, apparently the obvious way to keep an x86-64 image
+# clear of the 4 GB boundary — produced a binary that AMFI rejected outright and
+# the kernel SIGKILLed before its first instruction, with nothing on stderr.
+#
+# Everything else in an image (the GOT, the stubs, __DATA_CONST and __LINKEDIT)
+# is placed relative to this constant, so the whole image moves with it and no
+# call site has to know which architecture it is building for.
 TEXT_BASE = 0x100000000
-DATA_BASE = 0x100004000
-LINKEDIT_BASE = 0x100008000
+DATA_BASE = TEXT_BASE + 0x4000
+LINKEDIT_BASE = TEXT_BASE + 0x8000
 PAGE_SIZE = 0x4000
 
 def _dylinker_cmd() -> bytes:
@@ -140,6 +153,12 @@ DATA_SIZEOFCMDS = 72 + 80
 # each depend on the other. Placing it at a fixed address a few MB past the text
 # breaks the cycle: the codegen reads this constant before it emits anything,
 # the linker writes the segment here, and neither needs the other's output.
+#
+# ABOVE the text, because a Mach-O's segments must ascend in virtual address and
+# nothing can go below __TEXT — __PAGEZERO covers all of [0, 4 GB) and the kernel
+# will not map a segment into it. See the note on `TEXT_BASE` for the
+# measurements behind that, which is that a `__DATA` above 4 GB killed every
+# x86-64 image under Rosetta while the same source ran fine on arm64.
 #
 # The distance is chosen for ADRP's ±4 GB page range, not for tidiness: a page
 # delta is (target - pc) >> 12, so anything within 4 GB works and this is three
@@ -557,29 +576,43 @@ def _globals_blob(globals_image) -> bytes:
 
 
 def _check_globals_do_not_overlap_text(text_size: int, has_globals: bool) -> None:
-    """Refuse an image whose `__TEXT` would run into the fixed `__DATA`.
+    """Refuse a Mach-O image whose `__DATA` would collide with its `__TEXT`.
 
-    `GLOBALS_VM` is a constant, so "does the text reach it" is a real question
-    rather than an arithmetic impossibility — and the failure if it ever came to
-    pass would be two load commands describing overlapping mappings, which dyld
-    resolves by refusing to launch the image, with nothing in the output naming
-    the segment that collided.
+    `GLOBALS_VM` is ABOVE `TEXT_BASE`, and both facts about that are forced:
 
-    Measured threshold, not a guess: `GLOBALS_VM` is 4 MB past `TEXT_BASE`, and
-    the largest formal image measured on this tree (`fire.py` itself, ~1.5 MB of
-    arm64 code with its whole stdlib dylib set) is an order of magnitude below
-    it. So this raises on a program no repository source produces, and the
-    alternative — deriving __DATA from __TEXT's size — reintroduces the
-    circular dependency between the code and the address every slot access is
-    computed against, which is the harder bug to find."""
+      * ABOVE, because a Mach-O's segments must ASCEND in virtual address — dyld
+        refuses an image otherwise ("segment '__DATA' vm address out of order",
+        measured) — and nothing can go BELOW `__TEXT` either, since
+        __PAGEZERO covers all of [0, 4 GB) and the kernel will not map a segment
+        into it. Above the text is the only ascending arrangement.
+      * FIXED, because __TEXT's size is a function of the CODE and every access
+        to a slot is an address the codegen must compute BEFORE the image
+        exists. Deriving one from the other makes each depend on the other;
+        there is no ordering of the two passes that resolves it, because the
+        number of instructions emitted does not depend on the addresses in them.
+
+    So the price is a ceiling on how large an image with module globals can be,
+    and this is where that price is collected rather than discovered at launch.
+    A program whose __TEXT would reach `GLOBALS_VM` gets two load commands
+    describing overlapping mappings; dyld resolves that by refusing the image,
+    with nothing in the output naming the segment that collided — so the check
+    says which segment and by how much instead.
+
+    The margin is not a guess: the largest formal image measured on this tree
+    (`fire.py` plus its whole stdlib dylib set) is an order of magnitude inside
+    it, and this raises only on a program the repository does not contain."""
     if not has_globals:
         return
-    if text_size > GLOBALS_VM - TEXT_BASE:
+    room = GLOBALS_VM - TEXT_BASE
+    if text_size > room:
         raise ValueError(
-            f"__TEXT is {text_size} bytes, which reaches the fixed __DATA at "
-            f"{GLOBALS_VM:#x} ({GLOBALS_VM - TEXT_BASE} bytes past the text "
-            f"base); the two mappings would overlap and dyld would refuse the "
-            f"image without naming the segment that collided")
+            f"__TEXT is {text_size} bytes but the fixed module-global __DATA "
+            f"is mapped at {GLOBALS_VM:#x}, only {room} bytes past the text "
+            f"base {TEXT_BASE:#x}. A __TEXT that reached it would give two "
+            f"load commands describing overlapping mappings, and dyld refuses "
+            f"such an image at launch without naming the segment that "
+            f"collided. A program with module-global state has to fit under "
+            f"that ceiling; one without it has no limit.")
 
 
 def _stub_bytes(got_vm: int, stub_vm: int, arch: str = "arm64") -> bytes:

@@ -8727,27 +8727,70 @@ class GlobalSlot:
 
 
 class GlobalDataImage:
-    """The whole `__DATA` content for one unit, plus where its fixups go.
+    """The whole data image for one unit, plus where its fixups go.
 
-    `blob` is the bytes, laid out slot-first and then the container blobs the
-    slots point at, and `fixups` is `[(offset_into_blob, target_offset)]` — for
-    each address-valued slot word, the offset WITHIN `blob` of the thing it
+    `blob` is the bytes, laid out slot-first, then the container blobs and string
+    bytes the address-valued slots point at, and `fixups` is `[(offset, target)]`
+    — for each address-valued slot word, the offset WITHIN `blob` of the thing it
     points at. Both are expressed as OFFSETS rather than addresses precisely
     because the linker knows the segment's base address and the backend does not
     need it: one number, added to a base each side already has, instead of two
-    independently-computed absolutes that can disagree."""
+    independently-computed absolutes that can disagree.
 
-    __slots__ = ("blob", "fixups")
+    `init_flag_offset` is the word that says "this unit's globals have been
+    filled in", and it is PART of the image rather than a module-level name: it is
+    the backend's own bookkeeping, it has no source spelling a program could
+    collide with, and it has to exist in a dylib as much as in an executable.
+    See `initialization_is_lazy` for why the filling is deferred at all."""
 
-    def __init__(self, blob: bytes, fixups: list):
+    __slots__ = ("blob", "fixups", "init_flag_offset")
+
+    def __init__(self, blob: bytes, fixups: list, init_flag_offset: int = 0):
         self.blob = blob
         self.fixups = fixups
+        self.init_flag_offset = init_flag_offset
 
     def __len__(self):
         return len(self.blob)
 
     def __bool__(self):
         return bool(self.blob)
+
+
+# WHY THE INITIALIZER IS LAZY, and why it is not the startup stub.
+#
+# The obvious place to fill an address-valued slot is the executable's startup
+# stub, which runs before `main` and is free to emit as much setup as it likes.
+# That works — it is the first thing this did, and it is verified — but it does
+# not work for a DYLIB, and a dylib is half of where module state lives: a
+# module compiled into a library has `emit_startup=False` precisely because a
+# library has no entry point, so a stub that runs once per process does not
+# exist for it to run in. Two answers (a stub in one container kind, a refusal in
+# the other) is the shape this codebase treats as a bug, so there is ONE:
+# a function that touches a global checks a flag word and runs the initializer if
+# the flag is clear.
+#
+# It is correct for the reason the rest of this backend's model is correct: a
+# formal program is single-threaded (coroutines lower as plain functions, see
+# `arm64_codegen.compile`), so "check the flag, then fill" cannot interleave.
+# And it costs one load and one branch in each function that reads a global,
+# which is the same order as the access itself.
+
+
+def function_touches_globals(fn) -> bool:
+    """True when `fn` reads or writes any module global.
+
+    Asked per function, and the answer decides whether the lazy-init prologue is
+    emitted at all: a function that cannot observe a global cannot need its
+    value filled in, and paying a branch there would be a cost on every call for
+    nothing."""
+    table = module_slots()
+    if not table:
+        return False
+    for node in iter_nodes(getattr(fn, "body", None) or []):
+        if isinstance(node, F.IdentExpr) and node.name in table:
+            return True
+    return False
 
 
 def functions_writing_globals(functions) -> dict:
@@ -9036,10 +9079,14 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
     if not table:
         return GlobalDataImage(b"", [])
     count = max(s.index for s in table.values()) + 1
-    blob = bytearray(count * GLOBAL_SLOT_BYTES)
+    # The initializer flag occupies the word immediately after the slots, so it
+    # is at a fixed offset from the slot table and both backends and the linker
+    # can name it without another table.
+    flag_offset = count * GLOBAL_SLOT_BYTES
+    blob = bytearray(flag_offset + GLOBAL_SLOT_BYTES)
     fixups = []
-    # The trailing area starts after every slot, so a slot's address never
-    # depends on how many trailing items there are.
+    # The trailing area starts after the flag, so a slot's address never depends
+    # on how many trailing items there are.
     tail = bytearray()
     for slot in sorted(table.values(), key=lambda s: s.index):
         kind = slot.init[0]
@@ -9050,7 +9097,7 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
         elif kind in ("blob", "str"):
             while len(tail) % GLOBAL_SLOT_BYTES:
                 tail.append(0)
-            offset = count * GLOBAL_SLOT_BYTES + len(tail)
+            offset = flag_offset + GLOBAL_SLOT_BYTES + len(tail)
             if kind == "blob":
                 for w in slot.init[1]:
                     tail.extend(int(w).to_bytes(GLOBAL_SLOT_BYTES, "little",
@@ -9062,7 +9109,8 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
             fixups.append((at, offset))
         # `("unknown", …)` writes eight zero bytes, and the read is refused by
         # name before anything can observe the zero.
-    return GlobalDataImage(bytes(blob) + bytes(tail), fixups)
+    # The flag starts CLEAR: zero means "not yet filled in".
+    return GlobalDataImage(bytes(blob) + bytes(tail), fixups, flag_offset)
 
 
 # Published for the same reason `_MODULE_SYMBOLS` is: the consumers are a
