@@ -230,13 +230,16 @@ def main():
                   memslot.reserved_gb() == 0, '%.1f GB left' % memslot.reserved_gb())
             os.environ['MEMSLOT_HELD'] = ''
 
-    # An EXCLUSIVE job reserves the whole budget (`tools/suite.py`'s
-    # reserved_gb), and its recipe asks for its memclass, which need not be the
-    # budget: MEMSLOT_BUDGET_GB=64 with a `stage` job means the tree holds all
-    # 64 and the recipe asks for 96. Nothing is left to reserve and nothing is
-    # left to overrun — nothing else can be admitted at all — so it runs, and
-    # the ceiling still applies. Refusing it (126) would take `make mojoc` down
-    # for a budget setting that is meant to be supported.
+    # A tree that holds the WHOLE budget and a recipe that asks for more than
+    # its class. This used to be reachable through `excl` (which reserved the
+    # whole budget, whatever the class), and since 2026-09-30 it is not: an
+    # exclusive job reserves its class like any other, and the escape hatch
+    # below is for the case that remains — MEMSLOT_BUDGET_GB set below a
+    # memclass, e.g. 64 with a `stage` job, where the tree holds all 64 and the
+    # recipe asks for 96. Nothing is left to reserve and nothing is left to
+    # overrun — nothing else can be admitted at all — so it runs, and the
+    # ceiling still applies. Refusing it (126) would take `make mojoc` down for
+    # a budget setting that is meant to be supported.
     with tempfile.TemporaryDirectory() as d:
         os.environ['MEMSLOT_DIR'] = d
         os.environ['MEMSLOT_BUDGET_GB'] = '64'
@@ -247,7 +250,7 @@ def main():
                                 "--", sys.executable, "-c", "print('stage ran')"],
                                env=dict(os.environ, **memslot.held_env(64)),
                                capture_output=True, text=True, timeout=30)
-            check("a wrapper under an EXCLUSIVE reservation is covered whatever it asks for",
+            check("a wrapper under a whole-budget reservation is covered whatever it asks for",
                   r.returncode == 0 and 'stage ran' in r.stdout,
                   "rc=%s: %s" % (r.returncode, r.stderr.strip()[:160]))
             check("...and its own ceiling is still the one applied",
