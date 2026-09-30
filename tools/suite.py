@@ -1584,9 +1584,9 @@ test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
 # is the defect CLAUDE.md tells `coro` about: the coro runtime was renamed
 # `mojo_*` -> `fire_*` and 20 cases failed to compile for two rounds while
 # nothing noticed, because the estate check that should have noticed was itself
-# in no bucket. These eight are the same failure in a quieter form — 68% of the
-# tree's test files, every one of them a claim about the formal backend, and
-# every claim unbacked.
+# in no bucket. These eight are the same failure in a quieter form — eight
+# claims about the formal backend, every one of them unbacked, and every one of
+# them building and RUNNING images that nothing was executing.
 #
 # `mem='tiny'` on all eight, from MEASURED_PEAK_GB rather than from the shape
 # of the workload. That shape is "builds a compiler and links it", which the
