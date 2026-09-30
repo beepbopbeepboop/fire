@@ -8604,7 +8604,47 @@ def module_body(stmts: list, symbols: dict = None) -> list:
         if kind in _MODULE_BODY_BINDINGS and _is_folded_constant(stmt):
             continue
         out.append(stmt)
-    return out
+    # A folded constant the body REBINDS is not a constant, and exempting its
+    # store is how a correct program gets a wrong answer.
+    #
+    # `total = 0` at file level folds, so the store is normally left out and
+    # the literal is substituted at each read. But if the body then writes the
+    # name — `for i in range(5): total = total + i` — the substitution does
+    # NOT fire inside the body (the body binds the name, which is what
+    # `_substitute_module_constants` checks), so the read at the top of the
+    # loop has no store to read: the allocator gave the name a register and
+    # nothing ever wrote it, and the program printed 10 on the same source
+    # where CPython says 10. Measured, both backends, and the identical
+    # program inside a `def` is right — the difference is exactly the missing
+    # store.
+    #
+    # The condition is asked with the register allocator's OWN walk
+    # (`bound_names_in_order`), not a second one: the exemption has to agree
+    # with the pass that decides which names have a register, or "is this name
+    # in the body" has two answers and the wrong one is the one that decides
+    # whether a store is emitted.
+    rebound = set()
+    if out:
+        from mojo.middle.boundnames import bound_names_in_order
+        try:
+            rebound = {n for n in bound_names_in_order(out, [])
+                       if isinstance(n, str)}
+        except Exception:
+            rebound = set()
+    if not rebound:
+        return out
+    kept = {id(s) for s in out}
+    final = []
+    for stmt in stmts or []:
+        folded = (type(stmt).__name__ in _MODULE_BODY_BINDINGS
+                  and _is_folded_constant(stmt))
+        if folded and _module_binding_name(stmt) in rebound:
+            final.append(stmt)          # the store the body needs
+        elif folded:
+            continue                    # substituted at each read; no store
+        elif id(stmt) in kept:
+            final.append(stmt)
+    return final
 
 
 def module_body_refusal(stmt):
