@@ -173,10 +173,16 @@ MULTI_INDEX_DATA = "data-multi-index"
 # The MLIR spelling forms, which take a bracketed TEMPLATE rather than an
 # index: the elements are backtick-quoted literal fragments interleaved with
 # compile-time sub-expressions, and the whole thing denotes a dialect
-# attribute. `__mlir_op` is absent on purpose — it is a real side-effecting
-# op, lowered as a call (see fire_compiler's statement parser), and its
+# attribute. `__mlir_op` is absent on purpose and is NOT a gap left by that:
+# it is a real side-effecting op, lowered as a call (see fire_compiler's
+# statement parser), so calling it a template would misdescribe it, and its
 # bracket list is MLIR op attributes with `attrs` set, which is a different
-# (already separately refused) node.
+# node again. It is refused by the OTHER rule — `mlir_dialect_refusal`, asked
+# for any `__mlir_*` name no template rule covers, which is why the two
+# refusals are different sentences rather than one: the template reader can
+# quote the fragments the reader has to look for, and the dialect reader
+# cannot. Both are arch-free and both are asked through the one reader each
+# backend uses.
 MLIR_TEMPLATE_NAMES = frozenset((
     "__mlir_attr",
     "__mlir_deferred_attr",

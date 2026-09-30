@@ -414,40 +414,65 @@ file count**, so the cost statement stands; what changed is that the reason is
 narrower than the section claimed, and a reader who took "permanent" as covering
 the whole family would not have looked for the query case at all.
 
-## 2.2 `__mlir_op` still builds and segfaults
+## 2.2 `__mlir_op` — CLOSED 2026-09-30: refused, on both architectures, and pinned
 
-`__mlir_op` is deliberately *absent* from `MLIR_TEMPLATE_NAMES`, on the stated
-ground that "it is a real side-effecting op, lowered as a call". The call it
-lowers to is a symbol nothing defines:
+**This section said "`__mlir_op` still builds and segfaults". That is no longer
+true, and it stopped being true before the sentence was written to record it.**
+It is kept, with the measurement, because a reader deciding what to do about
+inline assembly needs the reason the refusal is the RIGHT one rather than a
+gap someone left.
 
-```mojo
-def main():
-    var n = 3
-    var a = __mlir_op.`pop.inline_asm`[n]
-    print("a = %llu\n", a)
+The measurement above was taken in wave 5. What the construct does now:
+
 ```
+$ fire.py build --formal --no-prove --backend=arm64 -o m2 m2.mojo
+build: main: __mlir_op is an MLIR dialect construct. This path has no MLIR: it
+lowers a Mojo program to a Mach-O image whose only value is a 64-bit word, and
+an MLIR attribute, type or operation has no representation in one … Write the
+value the construct denotes at the use site
+# identical text, byte for byte, for --backend=x86_64
 ```
-$ fire.py build --formal --no-prove --backend=arm64 -o m2 m2.mojo && ./m2
-Built: m2.aout
-Segmentation fault: 11                                    # exit 139
-$ fire.py build --formal --no-prove --backend=x86_64 -o m2x m2.mojo && ./m2x
-Built: m2x.aout
-Segmentation fault: 11                                    # exit 139
-```
+
+Re-measured 2026-09-30 on this tree for three spellings of the same operation —
+`__mlir_op.`pop.inline_asm`[n]`, the keyword-argument form
+`__mlir_op.`pop.inline_asm`[_type=None, assembly="nop", constraints="", …](p)`
+that `std/sys/_assembly.mojo` writes, and the `return`-ed form inside that
+file's `inlined_assembly` — on BOTH architectures. All six builds refuse; none
+of them links an image, so there is no exit 139 left to produce. Pinned by
+`a_bare_dialect_operation_is_refused_rather_than_built` in
+`test_formal_mlir_precedence.py`, which asserts the refusal on both backends and
+therefore goes red if the limit is ever closed.
+
+**Why the refusal is right, and why the suggested repair was not the one taken.**
+The paragraph below proposed adding `__mlir_op` to `MLIR_TEMPLATE_NAMES`. That
+was the wrong lever, and `model.mlir_dialect_refusal` is why: `__mlir_op` is an
+OPERATION BUILDER, not an attribute or type template, so putting it in a set
+whose four entries are all templates would misdescribe it, and it is spelled
+with a dotted template and a bracket in every real use — two node shapes the
+`MLIR_TEMPLATE_NAMES` test does not key on. What landed instead is the rule that
+is actually true of it and of `__mlir_attr` alike: a name with the `__mlir_`
+prefix that no template rule covers has no representation in a 64-bit word, and
+is refused by name. The refusal is arch-free text in `formal/model.py`, asked
+through the one reader both backends use, so the two architectures cannot come to
+name different limits for one construct.
 
 `std/sys/_assembly.mojo` — the module that heads 17 of family 1's 30 files — is
-built out of exactly this construct. **Verdict: a gap, not a false refusal, and
-it is the largest remaining hole in this document**: a construct that builds,
-links, and dies at the first instruction. **What it should be:** refused with
-the same MLIR-template wording, and the honest reason is the one its own comment
-contradicts: the bracketed list is MLIR op attributes, which is a different
-node, and the `pop.inline_asm` body is `__mlir_attr` again, so there is no call
-to lower either. **Cost: minutes**, now that `is_mlir_template` exists and
-`mlir_template_refusal` is one call — it needs `__mlir_op` added to the name
-set and its "deliberately absent" comment deleted. Not done in wave 5: it was
-not in that wave's brief, and adding a fifth name to a set whose other four
-entries are each pinned by a `refuse:` case deserves its own case rather than a
-drive-by.
+built out of exactly this construct, so it is refused, and the seventeen files
+behind it are refused on it. **That is the correct end state for them, not a
+gap.** The module's entire purpose is inline assembly, there is no MLIR in a
+freestanding image for an MLIR operation to become, and nothing about the
+`_get_kgen_string` import it also fails on can change that: the body is fatal
+whether or not the import resolves. See `FORMAL_target_query_evaluator.md`
+Blocker 2 for the cycle that is behind that import, and
+`FORMAL_imported_generic_reported_as_a_module_level_name.md` for the
+diagnostic it produces (which the pre-emption now shadows for this file, so the
+output quoted in that doc no longer reproduces — the defect it describes is
+unchanged).
+
+What DID have to change for the message to be the right one is
+`FORMAL_mlir_refusal_preemption.md`: `NoneType` at `_assembly.mojo:94` used to
+pre-empt `__mlir_op` at line 95, so this module was reported as a missing local
+rather than as the construct it is written in.
 
 ---
 
@@ -1071,7 +1096,16 @@ them:
 | reported instead of the true limit | docs |
 |---|---|
 | `'NoneType' has no home` — a bare TYPE name in a `comptime` type comparison, refused with an enumeration of where a *value* lives (52 stdlib files, up from 35) | `FORMAL_type_name_as_a_value.md` |
-| any unplaced name earlier in the body — the construct-refusal pre-pass is implemented for the bracketed/dotted MLIR spellings and not for the bare `__mlir_op` dialect name, so line order decides the message for 18 of 36 files | `FORMAL_mlir_refusal_preemption.md` |
+| any unplaced name earlier in the body — the construct-refusal pre-pass is implemented for the bracketed/dotted MLIR spellings and not for the bare `__mlir_op` dialect name, so line order decides the message for 18 of 36 files | `FORMAL_mlir_refusal_preemption.md` — **the pre-emption has landed** (2026-09-30); what is left there is 16 files decided by the order of two FUNCTIONS |
+
+**Both rows above are stale for `std/sys/_assembly.mojo` itself, and that is the
+point of the second one landing.** Re-measured 2026-09-30 on this tree, the
+module's own body reports the construct it is written in —
+`inlined_assembly: __mlir_op is an MLIR dialect construct` — so the 17 files
+behind it are refused on the MLIR operation rather than on a missing local or a
+type name read as a value. The quotes above are what the file reported when this
+addendum was written, and they are kept because they are the measurement that
+made the pre-emption worth landing; they are not what the build says now.
 
 **The one measured gain**, over all 664 stdlib files through the exact function
 that changed: 305 files were refused as an imported module-level name, 269 are

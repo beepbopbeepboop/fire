@@ -1137,8 +1137,17 @@ CASES = [
     # arm64, 0 on x86-64, for the same source; a module-level
     # `comptime X = __mlir_type[…]` is never walked at all, which is why
     # std/builtin/type_aliases.mojo is a false PASS in the sweep baseline;
-    # `__mlir_op.`…`[n]` builds and segfaults; and `String()` (zero operands)
-    # is refused as if it were a two-operand conversion.
+    # and `String()` (zero operands) is refused as if it were a two-operand
+    # conversion.
+    #
+    # A fifth entry was here until 2026-09-30 — `__mlir_op.`…`[n]` "builds and
+    # segfaults" — and it was TRUE when written (bugs/FORMAL_known_limits.md
+    # §2.2 measured exit 139 on both architectures) and stopped being true
+    # before this note was corrected. It is now refused by
+    # `model.mlir_dialect_refusal` on both, and is pinned where the refusal
+    # itself is what is under test:
+    # `a_bare_dialect_operation_is_refused_rather_than_built` in
+    # test_formal_mlir_precedence.py.
 
     # An MLIR attribute template is not a subscript. The elements are
     # backtick-quoted literal fragments interleaved with compile-time
