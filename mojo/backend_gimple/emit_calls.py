@@ -1543,7 +1543,10 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `repr(ast)` on a parsed AST list.
     if fname_raw == 'repr' and node.args:
         rat, rav = gen.lower_expr(node.args[0])
-        return 'char *', gen._repr_value(rat, rav)
+        # The operand NODE as well as its lowered type: a bool's C type here
+        # is a plain `int`, so `repr(b)` for a `b = True` printed `1` unless
+        # the node is consulted too (see is_python_bool_expr).
+        return 'char *', gen._repr_value(rat, rav, node.args[0])
 
     # bytes(...): construct a MojoBytes value.
     #   bytes()            -> empty
@@ -1657,11 +1660,16 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (fname_raw == 'str' and len(node.args) == 1
             and not gen._locally_binds_name('str')):
         et, ev = gen.lower_expr(node.args[0])
-        # A bare True/False literal lowers with ctype 'int' (not '_Bool' —
-        # _lower_BoolLiteral does this deliberately; other sites depend on
-        # it), so str(True) would take the int path → "1". Recover the
-        # bool intent from the AST so it stringifies as "True"/"False".
-        if isinstance(node.args[0], gimple_ctypes.BoolLiteral):
+        # A bool lowers with ctype 'int' (not '_Bool' — _lower_BoolLiteral
+        # does this deliberately; other sites depend on it), so str(True)
+        # would take the int path → "1". Recover the bool intent from the
+        # AST, which is the only place it survives: the node itself for a
+        # literal, and `gen._bool_valued` for a name bound to one. The
+        # recognition is `is_python_bool_expr` — one predicate with the print
+        # dispatch, `repr()` and the dict store — so `str(b)`, `print(b)`,
+        # `repr(b)` and `{'k': b}` cannot disagree about the same value.
+        # (They did: at module scope all but `repr` said `1`.)
+        if gimple_exprtypes.is_python_bool_expr(gen, node.args[0]):
             et = '_Bool'
         return 'char *', gen._stringify_value(et, ev)
 

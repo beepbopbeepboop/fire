@@ -3735,6 +3735,48 @@ print(f())
 print([True, False])
 """, "[True, False]\n")
 
+    # repr() of a bool printed `1`/`0` — the right VALUE, the wrong type.
+    # print() was already right (`_gen_print`'s `_Bool` arm calls
+    # mojo_repr_bool) and so were `%s` and `f'{x}'`, which is exactly what let
+    # this survive: the obvious smoke test passes and the spellings that ship
+    # are the wrong ones. `_repr_value` had no `_Bool` arm at all, so a
+    # `_Bool` fell through to the int64_t one — the ordering trap being that
+    # the new arm has to come before the `endswith(' *')` test.
+    #
+    # `%d` and `%i` are in the same test deliberately: they are RIGHT (Python
+    # formats a bool as an int there), and a fix that made them print
+    # True/False would pass every other assertion in this file.
+    test_gimple_stdout("gimple_repr_of_a_bool_is_true_false", """\
+x = 1 == 1
+print(repr(x))
+print(repr(x == 2))
+print('%r' % (x,))
+print(f'{x!r}')
+print('%d' % (x,))
+print('%i' % (x == 2,))
+print('%s' % (x,))
+print(f'{x}')
+print(str(x))
+""", "True\nFalse\nTrue\nTrue\n1\n0\nTrue\nTrue\nTrue\n")
+
+    # A bool stored as a dict VALUE is a plain `int` slot by the time it is
+    # stored, so the dict is MARKED (mojo_mark_dict_bool_values) and
+    # mojo_is_bool_dict picks the bool formatter for its whole repr. The mark
+    # used to require a literal RHS, so every other bool expression — a name
+    # holding a bool, a comparison — printed `{'k': 1}` while print() on the
+    # same value said True. `{'k': 1}` (a genuine int) is in the same test so
+    # the mark cannot turn into a blanket "this dict holds 0/1".
+    test_gimple_stdout("gimple_dict_of_bool_values", """\
+b = True
+print({'k': b})
+print({'k': 1 == 1})
+print({'k': 1 == 2})
+print({'k': 1})
+d = {}
+d['a'] = b
+print(d)
+""", "{'k': True}\n{'k': True}\n{'k': False}\n{'k': 1}\n{'a': True}\n")
+
     # §4.2b: print({1, 2}) printed the set's own ADDRESS -- print had no
     # MojoSet * dispatch branch at all (len()/iteration on the same value
     # were already correct).

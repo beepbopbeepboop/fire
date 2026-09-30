@@ -1339,8 +1339,13 @@ def _gen_stmt_AssignStmt(gen, node):
             else:
                 # Mark so generic repr() prints True/False instead of 1/0
                 # for this dict's values — see mojo_mark_dict_bool_values's
-                # doc comment in runtime/fire_runtime.c.
-                if isinstance(node.value, gimple_ctypes.BoolLiteral):
+                # doc comment in runtime/fire_runtime.c. A literal RHS was
+                # the only shape recognised, so `d['a'] = b` for a `b = True`
+                # and `d['a'] = 1 == 1` both printed `{'a': 1}` while
+                # `print(b)` and `repr(b)` were already right; the one shared
+                # predicate is `is_python_bool_expr`, which the dict LITERAL
+                # store and the print dispatch use too.
+                if gimple_exprtypes.is_python_bool_expr(gen, node.value):
                     gen._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
                 # Pass actual vtype so _emit_call can coerce pointers to int64_t
                 gen._emit_call('void', '', 'mojo_dict_set_int',
@@ -1395,7 +1400,7 @@ def _gen_stmt_AssignStmt(gen, node):
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it, idx_v, True, True)
-                    if isinstance(node.value, gimple_ctypes.BoolLiteral):
+                    if gimple_exprtypes.is_python_bool_expr(gen, node.value):
                         gen._emit(f"  mojo_mark_dict_bool_values ({dp});")
                     # Pass actual vtype so _emit_call can coerce pointers to int64_t
                     gen._emit_call('void', '', 'mojo_dict_set_int',
@@ -2619,7 +2624,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 gen._emit(f"  mojo_list_set_{suf} ({obj_v}, {idx64}, {ev_cast});")
             elif ot == 'MojoDict *':
                 _, key_tmp = gen._char_to_cstr(it2, idx_v, True, True)
-                if isinstance(node.value, gimple_ctypes.BoolLiteral):
+                if gimple_exprtypes.is_python_bool_expr(gen, node.value):
                     gen._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
                 gen._emit_call('void', '', 'mojo_dict_set_int',
                                 [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
@@ -2647,7 +2652,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     gen._emit(f"  {ip} = (int64_t){obj_v};")
                     dp = gen._coerce_to_type('int64_t', 'MojoDict *', ip)
                     _, key_tmp2 = gen._char_to_cstr(it2, idx_v, True, True)
-                    if isinstance(node.value, gimple_ctypes.BoolLiteral):
+                    if gimple_exprtypes.is_python_bool_expr(gen, node.value):
                         gen._emit(f"  mojo_mark_dict_bool_values ({dp});")
                     gen._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])

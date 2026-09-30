@@ -2606,13 +2606,25 @@ def _list_repr_call(gen, key: str, lst: str | None = None) -> tuple[str, list]:
     return fn, args
 
 
-def _stringify_value(gen, et: str, ev: str) -> str:
+def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
     """Convert an already-lowered (type, value) pair into a `char *` per
-    Python `str()` semantics. Shared by f-string interpolation and `%`
-    string-formatting's `%s` conversion — both need "stringify this typed
-    value" and previously only f-strings had it inline."""
+    Python `str()` semantics. Shared by f-string interpolation, `%`
+    string-formatting's `%s` conversion and the `str()` builtin — all three
+    need "stringify this typed value" and previously only f-strings had it
+    inline.
+
+    `enode` is the operand's AST node when the caller has it, and is the only
+    way to tell a bool from the int 0/1 it shares a slot with: a bool's
+    lowered C type is a plain `int` here, so `'%s' % (b,)`, `f'{b}'` and
+    `str(b)` all printed `1` for a `b = True` at module scope while the same
+    value inside a `def` (where the name's inferred type IS `_Bool`) printed
+    `True`. See `is_python_bool_expr`."""
     if et == 'char *':
         return ev
+    if enode is not None and et in ('int', 'int64_t') \
+            and gimple_exprtypes.is_python_bool_expr(gen, enode):
+        return gen._call_expr('char *', 'mojo_bool_to_str',
+                              [('int', gen._new_val('int', f'(int){ev}'))])
     # A boxed char* (a string pointer stored in an int64_t var, e.g. a
     # tuple-loop var read via get_str and boxed) — stringify as the string
     # it points to, not its decimal address. Without this, f-strings /
@@ -3547,11 +3559,12 @@ def _gen_print(gen, args: list, kwargs: list = None):
         _stat = arg_static[i] if i < len(arg_static) else ''
         # A name recorded as holding a bool (`b = True`): its own static type
         # is the `int` that BoolLiteral lowers to, so the check above cannot
-        # see it. Only `print` consults this set.
+        # see it. Only `print` consults this set — through the one shared
+        # predicate, which a dict store now uses too, so the two cannot
+        # disagree about the same value (they did: `print(b)` said True while
+        # `{'k': b}` printed `{'k': 1}`).
         if _stat != '_Bool' and args and i < len(args):
-            _an = args[i]
-            if (isinstance(_an, gimple_ctypes.IdentExpr)
-                    and _an.name in getattr(gen, '_bool_valued', ())):
+            if gimple_exprtypes.is_python_bool_expr(gen, args[i]):
                 _stat = '_Bool'
         if atype == 'char *':
             gen._emit(f'  {print_fn} ({aval});')

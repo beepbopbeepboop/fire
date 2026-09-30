@@ -4101,8 +4101,8 @@ class GimpleGen:
         return ginf._list_repr_fn(self, rav)
     def _list_repr_call(self, key: str, lst: str | None = None) -> tuple[str, list]:
         return ginf._list_repr_call(self, key, lst)
-    def _stringify_value(self, et: str, ev: str) -> str:
-        return ginf._stringify_value(self, et, ev)
+    def _stringify_value(self, et: str, ev: str, enode=None) -> str:
+        return ginf._stringify_value(self, et, ev, enode)
     def _apply_fstring_spec(self, part_val: str, spec: str) -> str:
         return ginf._apply_fstring_spec(self, part_val, spec)
     def _subst_in_value(self, v, mapping: dict):
@@ -4209,8 +4209,8 @@ class GimpleGen:
         return grsl._split_expr_format(src)
     def _parse_fstring_parts(self, inner: str) -> list[tuple[str, str, str, str]]:
         return grsl._parse_fstring_parts(self, inner)
-    def _repr_value(self, rat: str, rav: str) -> str:
-        return grsl._repr_value(self, rat, rav)
+    def _repr_value(self, rat: str, rav: str, enode=None) -> str:
+        return grsl._repr_value(self, rat, rav, enode)
     def _decode_str_literal_text(self, val: str) -> tuple[str, str]:
         return grsl._decode_str_literal_text(self, val)
     def _stub_result(self, ctype: str, value: str, note: str) -> tuple[str, str]:
@@ -4221,8 +4221,9 @@ class GimpleGen:
         return grsl._str_literal_to_slit(self, str_literal)
     def _subst_idents(self, expr, mapping: dict):
         return grsl._subst_idents(self, expr, mapping)
-    def _format_percent_spec(self, full_spec: str, conv: str, et: str, ev: str) -> str:
-        return grsl._format_percent_spec(self, full_spec, conv, et, ev)
+    def _format_percent_spec(self, full_spec: str, conv: str, et: str, ev: str,
+                             enode=None) -> str:
+        return grsl._format_percent_spec(self, full_spec, conv, et, ev, enode)
     def _cast_for_list(self, elem_type: str, val: str, suf: str) -> str:
         return grsl._cast_for_list(self, elem_type, val, suf)
     def _type_expr_to_ann(self, node) -> str:

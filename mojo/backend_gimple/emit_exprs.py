@@ -262,9 +262,9 @@ def _lower_StringLiteral(gen, node):
                 if _conv == 'r':
                     # repr() the ORIGINAL typed value, not the stringified
                     # one — _repr_value(et, ev) expects the raw value.
-                    part_val = gen._repr_value(et, ev)
+                    part_val = gen._repr_value(et, ev, expr_node)
                 else:
-                    part_val = gen._stringify_value(et, ev)
+                    part_val = gen._stringify_value(et, ev, expr_node)
                 if _spec:
                     part_val = gen._apply_fstring_spec(part_val, _spec)
             except Exception as e:
@@ -3452,12 +3452,13 @@ def _lower_bytes_percent_format(gen, node, fmt_latin1: str) -> tuple[str, str]:
             part_val = _lit_bytes(text_or_spec)
         else:
             full_spec = text_or_spec
-            et, ev = gen.lower_expr(rhs_exprs[arg_i])
+            _enode = rhs_exprs[arg_i]
+            et, ev = gen.lower_expr(_enode)
             arg_i += 1
             if conv in ('s', 'r') and et == 'MojoBytes *':
                 part_val = ev
             else:
-                cstr = gen._format_percent_spec(full_spec, conv, et, ev)
+                cstr = gen._format_percent_spec(full_spec, conv, et, ev, _enode)
                 part_val = gen._new_val('MojoBytes *', f'mojo_bytes_from_cstr ({cstr})')
         acc_val = part_val if acc_val is None else gen._new_val(
             'MojoBytes *', f'mojo_bytes_concat ({acc_val}, {part_val})')
@@ -3585,9 +3586,10 @@ def _lower_percent_format(gen, node: gimple_ctypes.BinaryOp, fmt_text: str) -> t
             part_val = gen._new_val('char *', gen._intern_string(gimple_ctypes._c_escape(text)))
         else:
             full_spec = text_or_spec
-            et, ev = gen.lower_expr(rhs_exprs[arg_i])
+            _enode = rhs_exprs[arg_i]
+            et, ev = gen.lower_expr(_enode)
             arg_i += 1
-            part_val = gen._format_percent_spec(full_spec, conv, et, ev)
+            part_val = gen._format_percent_spec(full_spec, conv, et, ev, _enode)
         acc_val = part_val if acc_val is None else gen._new_val(
             'char *', f'mojo_str_cat ({acc_val}, {part_val})')
     if acc_val is None:
@@ -4370,10 +4372,17 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
             vv = vv_tmp
         gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}str ({t}, {kv}, {vv});")
     else:
-        # _lower_BoolLiteral returns ctype 'int' (not '_Bool'), same
-        # as any other int — vt alone can't distinguish a real bool
-        # literal from a genuine int, so check the AST node itself.
-        if isinstance(val_expr, gimple_ctypes.BoolLiteral):
+        # A bool stored as a dict value is indistinguishable from a genuine
+        # 0/1 int once it is a slot (vt is a plain `int` for a bool in this
+        # backend — `_lower_BoolLiteral` returns `int`, and any/all/isinstance
+        # return a C int on purpose), so the dict is MARKED and
+        # mojo_is_bool_dict picks the bool formatter for its whole repr. That
+        # mark used to require a literal RHS, which missed every other bool
+        # expression: `b = True; d = {'k': b}` and `d = {'k': 1 == 1}` both
+        # printed `{'k': 1}` while `print(b)` and `print(repr(b))` were
+        # already right. `is_python_bool_expr` is the one predicate, shared
+        # with the print dispatch.
+        if gimple_exprtypes.is_python_bool_expr(gen, val_expr):
             gen._emit(f"  mojo_mark_dict_bool_values ({t});")
         vv64 = gen._to_int64(vt, vv)
         gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}int ({t}, {kv}, {vv64});")
