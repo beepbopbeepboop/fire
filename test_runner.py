@@ -11,7 +11,6 @@ import sys
 import subprocess
 import tempfile
 from build_config import find_gcc
-from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -41,9 +40,7 @@ def compile_mojo_to_executable(mojo_src: str) -> str:
              os.path.join(runtime_dir, 'fire_runtime.c')],
             capture_output=True,
             text=True,
-            # A `gcc` over one module: the COMPILE budget, not a literal. See
-            # exec_budget.py for the measurement behind the number.
-            timeout=COMPILE_TIMEOUT_S
+            timeout=30
         )
         if result.returncode != 0:
             raise RuntimeError(f"gcc compilation failed: {result.stderr}")
@@ -55,19 +52,12 @@ def compile_mojo_to_executable(mojo_src: str) -> str:
             pass
 
 
-# Was 60 s, itself raised from 10 s: at -j18 `int_is_64bit` failed the whole
-# gate with "timed out after 10 seconds" while passing 17/17 standalone. See
-# exec_budget.py for the measurement and for why the value is now shared rather
-# than spelled per file.
-EXE_TIMEOUT_S = RUN_TIMEOUT_S
-
-
 def run_executable(exe_path: str) -> int:
     """Execute the program and return its exit code."""
     result = subprocess.run(
         [exe_path],
         capture_output=True,
-        timeout=EXE_TIMEOUT_S
+        timeout=10
     )
     return result.returncode
 
@@ -77,7 +67,7 @@ def run_executable_capture(exe_path: str) -> tuple:
     result = subprocess.run(
         [exe_path],
         capture_output=True,
-        timeout=EXE_TIMEOUT_S
+        timeout=10
     )
     return result.returncode, result.stdout.decode('utf-8', errors='replace')
 

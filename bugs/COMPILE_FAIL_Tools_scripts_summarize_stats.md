@@ -130,7 +130,7 @@ bodies for `iter_optimization_tables`/`iter_specialization_tables`/
   "opcode");` declared `int64_t`; `names = names &= 0;`);
 - `Section___init__`'s extern signature types its list parameter `int64_t`,
   while call sites pass brace-init lists of `Table *` (the cpp-path sibling of
-  `“the constructor-call-site field-typing pass understood only scalars”`);
+  `bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`);
 - a bare `continue;` emitted outside any loop (`iter_specialization_tables`),
   `yield_value(int64_t)` receiving `Section *`, `'OpcodeStats' does not name a
   type` (declaration ordering), and `_mojogen_iter_parts_impl` reading closure

@@ -4,106 +4,6 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/unicode/gencodec.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (2026-10-02 — item 2, the `0x%0*X` entry lines, is FIXED; two runtime items and one filed defect remain)
-
-The 2026-10-01 entry below recorded the entry lines as `literally
-    (): (0x%0*X, 0x%0*X),` and diagnosed item 2 as "`%`-formatting of
-runtime-boxed values has no lowering". That diagnosis was half right and the
-half that was wrong is the one that mattered: `%`-formatting of runtime
-values HAS a lowering (`_format_percent_spec` renders any operand through
-`sprintf`), and what had no lowering was the `*`. `_parse_percent_template`'s
-width/precision scan accepted only the literal characters `-+0 #.123456789`, so
-`gencodec.py:130`'s
-
-```python
-return '0x%0*X' % (precision, t)
-```
-
-parsed as ONE spec whose conversion character was `*`. The operand count
-(2) then never matched the spec count (1), and the arity check's documented
-degrade returned the TEMPLATE TEXT — hence `0x%0*X` in the output.
-
-Fixed (branch `work/bugs4-7`): the scan accepts a `*` in the width or
-precision position, each standing for one operand consumed BEFORE the value;
-`_sprintf_n` (which `_sprintf_one` now delegates to, so there is one
-sprintf path) emits the extra arguments; and `_to_c_int_arg` narrows each one
-to a plain C `int`, because C reads a `*` width out of the varargs as an
-`int` and this codebase's integers are `int64_t` everywhere. The spec TEXT
-needs no rewriting — C spells a dynamic width with the same `*`, and the `ll`
-the integer conversions add lands after the width, which is where C's grammar
-wants it. So `'0x%0*X' % (2|4|6, 255)` is `0xFF` / `0x00FF` / `0x0000FF`,
-byte-identical to CPython, and `gencodec.py:132`'s `', '.join([...])` over it
-now produces real comma-separated hex. Regressions
-`gimple_percent_format_star_width_and_precision` and
-`gimple_bytes_percent_format_shares_the_parser` in `test_gimple_runner.py`,
-both compiled-vs-CPython across every conversion (`d x o X s r c f`).
-
-Two things the fix deliberately did NOT do, both stated in the code rather
-than left to be found:
-
-* The `bytes` spelling still degrades a dynamic-width template to its literal
-  text. `MojoBytes` is `{uint8_t *data; int64_t len;}` — not a C string — so a
-  width cannot be applied through `sprintf` there without truncating at an
-  embedded NUL. Doing it properly needs a length-aware pad-and-justify helper
-  on `MojoBytes` in the runtime; a separate piece of work.
-* It CONSOLIDATED the second copy of the template parser. `str` and `bytes`
-  `%`-formatting had two near-identical parsers that agreed only by accident;
-  there is now one `_parse_percent_template` and one operand accounting
-  (`_percent_operands_needed`). Emitted C for every template WITHOUT a `*` is
-  byte-identical before and after, `bytes` included — verified by `cmp`ing the
-  generated `.ci` for `'%s=%r %d %05.2f %x %o %c %%' % ('k','v',7,1.5,255,8,65)`
-  plus a `b'%s-%d' % ('bb', 3)` sibling.
-
-Item 1 (the pointer digits) remains root-caused and filed as
-`CODEGEN_string_arg_type_lost_across_forwarding_hop.md`; items 3 and 4
-(`codecs.make_encoding_map` unmodelled, `marshal.dump` unimplemented) are
-untouched and remain real features rather than gaps. So the doc stays open,
-now on three items instead of four.
-
-## Status (2026-10-01 — BUILD IS exit 0; all four remaining items are RUNTIME content divergences, and item 1 is now root-caused to a filed, three-function defect)
-
-`python3 fire.py build -o .tmp/out/gencodec/gencodec
-/Users/mrs/net/Python-3.14.6/Tools/unicode/gencodec.py` under
-`tools/memslot.py --gb 8`: **exit 0, zero `error:` lines**, an 80 KB
-executable. (The `-o` target's parent directory must exist — `-o
-.tmp/out/gencodec` alone fails at LINK with `ld: open() failed` — which
-is not a compiler bug.)
-
-So this doc's original COMPILE_FAIL premise is long gone; what is left is
-what the 2026-08-25 entry below called "the compile itself and the whole
-convertdir control flow are correct". Measured side-by-side against real
-CPython 3.14.7 on the same one-file directory (`run/readme.md` plus a
-subdirectory), all four of that entry's items reproduce unchanged:
-
-| | CPython | compiled |
-|---|---|---|
-| `converting …` line | `converting readme.md to readme.py and readme.mapping` | identical |
-| header | `""" Python Character Mapping Codec readme generated from 'run/readme.md' with gencodec.py.` | `… Codec readme generated from '4385725232' …` |
-| entry lines | `    97: 0x0020,` etc. | literally `    (): (0x%0*X, 0x%0*X),` |
-| `readme.mapping` | 577 bytes | **0 bytes** |
-
-**Item 1 (the pointer digits) is ROOT-CAUSED and filed as
-`CODEGEN_string_arg_type_lost_across_forwarding_hop.md`** — reduced from
-this file's `convertdir` → `pymap` → `codegen` chain to three functions,
-and the mechanism is not the call-site-argument-shape visibility the
-2026-08-25 entry guessed but an ORDERING fact: the free-function scalar
-observation loop runs before any function's parameters are refined, so a
-parameter passed straight through a forwarding hop is recorded as
-no-evidence and never re-examined. Not fixed here — the fix is a bounded
-fixpoint on shared cross-call type machinery, and `_arg_scalar_type`'s
-own docstring records the `ntpath.split` regression that a single
-un-fixpointed flip causes.
-
-Items 2-4 are unchanged and un-attempted: `%`-formatting of runtime-boxed
-values has no lowering (`_lower_percent_format` handles statically-string
-operands only), `codecs.make_encoding_map` is unmodelled so
-`decoding_table` never gets built, and `marshal.dump` has no runtime
-implementation at all (real CPython's binary marshal format is a
-standalone feature).
-
-Doc kept open on three runtime-content items, one of them now with a
-filed root cause and a named next step.
-
 ## Status (re-verified 2026-08-26, wtOpencode_ctypesutil2): build exit 0; runtime content gaps byte-identical to the 2026-08-26 diagnosis
 
 Fresh end-to-end rebuild (exit 0, ~75s) + run against current tree past
@@ -465,7 +365,7 @@ assumed:**
    ~21253-21254 — at least four `inner.split(',')`/`var[1:-1].split(',')`
    sites doing this same un-paren-aware tuple-target parsing for different
    loop/comprehension shapes). This project has documented history (see
-   `“setting/getting an arbitrary attribute on a generically-typed object”`'s "fourth call
+   `bugs/hard/CODEGEN_dynamic_attribute_on_generic_object.md`'s "fourth call
    site found during verification") of a fix scoped to only one or two of
    several near-identical duplicated sites compiling clean for the obvious
    repro while silently missing the same shape elsewhere. A real fix needs

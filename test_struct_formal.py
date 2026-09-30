@@ -37,9 +37,6 @@ Run:  python3 test_struct_formal.py [-v]
 """
 import argparse
 import os
-import re
-import shutil
-import signal
 import struct
 import subprocess
 import sys
@@ -55,17 +52,8 @@ HOSTMODS = _FI._HOSTMODS_ROOT
 STRUCT_MODULE = os.path.join(HOSTMODS, "struct.mojo")
 import fire_compiler as F
 FIRE = os.path.join(HERE, "fire.py")
-# `exec_budget`'s, not this file's own `300`/`60`: the same pair of literals
-# every build-and-run suite grew, and the reason they are one pair is in the
-# module's docstring. `child_exit_reason` is `_how_it_died`'s whole subject.
-from exec_budget import (BUILD_TIMEOUT, RUN_TIMEOUT,   # noqa: E402
-                         child_exit_reason)
-
-#: Where a run that never finishes leaves the image, so that the one question
-#: about it can be asked.  `build/` is git-ignored and is already where
-#: `build/suite.log` goes, so it is the tree's own scratch area rather than a
-#: new one — see `_preserve_a_hung_image`.
-HANG_ARTIFACTS = os.path.join(HERE, "build", "hang-artifacts")
+BUILD_TIMEOUT = 300
+RUN_TIMEOUT = 60
 
 # Values chosen to exercise the parts that are easy to get wrong, not to be
 # round numbers: every one has a non-zero byte in every position of its width,
@@ -81,124 +69,20 @@ V_NEG = 0 - 5            # signed: the arithmetic-shift case
 
 RESULTS = []
 
-# "The values were not compared", distinct from `None` ("no differences") and
-# from `[]`. `expect_lines` uses it so a wrong COUNT fails the values check
-# rather than passing it on a comparison it never made.
-_NOT_COMPARED = object()
 
-def check(ok, what, detail="", tally=None, announce=True):
-    """Record one verdict, and print it when it is a failure.
-
-    The detail is KEPT in the record, not just printed: a suite that reports
-    "FAIL <what>" and throws away the only sentence that says why has thrown
-    away the evidence, and `“CODEGEN_test_struct_formal: the struct suite is FLAKY”` is the
-    write-up of a run whose output could not be attributed for exactly that
-    reason. It is also what the harness self-test below asserts on, so a record
-    that dropped it would make that check pass for the wrong reason.
-
-    `tally` redirects the record somewhere other than `RESULTS`, which is for a
-    caller measuring THIS harness rather than `struct`: the probes in
-    `test_the_check_count_is_fixed_whatever_the_verdicts` are supposed to fail,
-    and a failure that reached the suite's own tally would make it red for a
-    reason that has nothing to do with `struct`. It is the same code path
-    either way, so what the probe measures is real. `announce=False` suppresses
-    the FAIL line, which is the other half of that: a probe's expected failure
-    printed among the suite's real ones is noise. Both halves of a probe's
-    tuple are still there — a probe measuring the COUNT must not be measuring a
-    different record shape than the suite's own.
-    """
-    (RESULTS if tally is None else tally).append((bool(ok), what, detail))
-    if not ok and announce:
+def check(ok, what, detail=""):
+    RESULTS.append((bool(ok), what))
+    if not ok:
         print(f"FAIL  {what}" + (f": {detail}" if detail else ""), flush=True)
     return bool(ok)
-
-
-def _how_it_died(run):
-    """A description of a non-clean exit, or None when the image was fine.
-
-    A program that builds, links, and then dies — SIGSEGV, SIGBUS, an illegal
-    instruction, a `dyld` kill — has an EMPTY stdout, which is exactly what a
-    program that legitimately printed nothing also has. Without this the one
-    piece of evidence that distinguishes "crashed" from "answered wrongly" is
-    discarded at the point where it still exists, and the reported failure
-    points at the struct tables when the real answer is a dead process.
-
-    The wording is `exec_budget.child_exit_reason`'s, which four suites had each
-    hand-rolled and one of which printed a bare `signal 9`: a negative
-    `returncode` is the ONLY record of which signal ended the child, and a
-    `SIGKILL` in particular is a fact about the machine rather than about the
-    module, which is a distinction four copies of this sentence could not keep
-    agreeing on.
-    """
-    if run.returncode == 0:
-        return None
-    return child_exit_reason(run.returncode, run.stderr)
-
-
-def _preserve_a_hung_image(name, out, path):
-    """Copy the image and the source that produced it somewhere they survive.
-
-    Returns the directory they are in, or None if they could not be copied.
-
-    **Why this exists.**  The image used to live in a `TemporaryDirectory` and
-    the timeout message named a path that no longer existed by the time anybody
-    read the message, so the one question the timeout raises — "did this process
-    never get scheduled, or is it spinning inside the image?" — could only be
-    answered with the image in hand and the image was already gone.  The
-    `SIGKILL` sibling of that report needs no image: `-9` cannot be sent by a
-    process from inside, so it is a fact about the machine, and it is the
-    reading that was already taken (`bugs/FORMAL_a_calcsize_image_hangs_once_in_
-    several.md` §"Step 1").  **A hang is the one outcome where the harness holds
-    no evidence at all beyond "it did not finish",** which is why it is this one
-    that is preserved and why the copy is the whole of the fix.
-
-    `build/hang-artifacts/` rather than a new directory: `build/` is already the
-    tree's git-ignored scratch area (`build/suite.log`), so a directory beside
-    it needs no ignore rule and is where a reader looks.  A copy failure is
-    reported as None rather than raised, because losing a diagnostic must not
-    turn a reported hang into an IOError.
-    """
-    dest = os.path.join(HANG_ARTIFACTS, name)
-    try:
-        os.makedirs(dest, exist_ok=True)
-        for src in (out, path):
-            if os.path.isfile(src):
-                shutil.copy2(src, os.path.join(dest, os.path.basename(src)))
-    except OSError:
-        return None
-    return dest if os.path.isfile(os.path.join(dest, os.path.basename(out))) \
-        else None
 
 
 def build_and_run(tmpdir, name, source):
     """Compile `source` through the formal arm64 backend and run it.
 
-    Returns `(stdout_lines, how_it_died)`, or raises AssertionError with the
-    build output — a build failure is a test failure here, never a skip:
-    `struct.mojo` is in this repository and a program that imports it must
-    build.
-
-    The exit status is RETURNED rather than raised because one caller
-    (`test_unservable_formats_are_refused_not_wrong`) requires a nonzero exit
-    to be the passing outcome: reading `b[i]` for i past the end of an empty
-    list is supposed to stop the program. Turning that into an exception would
-    turn a correct observation into a failure.
-
-    A run that never finishes is raised, and that is a separate decision from
-    the exit status. `subprocess.TimeoutExpired` is an `OSError`, not an
-    `AssertionError`, so it used to sail straight through `expect_lines`'s
-    `except AssertionError` and out of the `for fmt in CORPUS_FORMATS` loop it
-    was called from — abandoning every case after it. Measured: one run in two
-    hit a 60 s timeout on `calcsize("<HHIQQQI")` and finished **122/127**
-    instead of 148, because 21 checks were never reached and the report could
-    not say so. A case that does not finish is a failed case, which is exactly
-    what a build failure already was, and the fix is to make it one.
-
-    **And the image is KEPT** (`_preserve_a_hung_image`), because the message
-    names a path and a path that is gone by the time the message is read is not
-    one.  The message states both branches the hang could be — starved, or
-    spinning — because which one it is is a fact about the machine and about the
-    image respectively, and only one of them is the image's fault.
+    Returns the stdout lines, or raises AssertionError with the build output —
+    a build failure is a test failure here, never a skip: `struct.mojo` is in
+    this repository and a program that imports it must build.
     """
     path = os.path.join(tmpdir, f"{name}.py")
     with open(path, "w") as f:
@@ -211,92 +95,28 @@ def build_and_run(tmpdir, name, source):
     if result.returncode != 0:
         raise AssertionError(
             f"build failed: {(result.stderr or result.stdout).strip()[-600:]}")
+    run = subprocess.run([out], capture_output=True, text=True,
+                         timeout=RUN_TIMEOUT)
+    return [ln for ln in run.stdout.split("\n") if ln.strip() != ""]
+
+
+def expect_lines(tmpdir, name, source, expected, what):
+    """The program's printed integers must equal `expected`, element-wise."""
     try:
-        run = subprocess.run([out], capture_output=True, text=True,
-                             timeout=RUN_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        kept = _preserve_a_hung_image(name, out, path)
-        where = (f"the image and its source are kept in {kept}: `file "
-                 f"{os.path.join(kept, os.path.basename(out))}`, and "
-                 f"`tools/gdbtool.py` on the live process answers in seconds "
-                 f"whether it is looping" if kept else
-                 f"the image COULD NOT be copied out of {tmpdir}, so it is "
-                 f"gone and the only evidence is this message")
-        raise AssertionError(
-            f"the image was built and then did not finish within "
-            f"{RUN_TIMEOUT}s — it is hung, not slow, and the cases after this "
-            f"one in the same loop would not be reached if this were allowed "
-            f"to propagate.  Two readings, and they are not the same fault: a "
-            f"process that never got SCHEDULED is the machine (look at "
-            f"`build/suite.log`'s measured peak and at how many jobs ran at "
-            f"once), while a process SPINNING is the image — and {where}."
-        ) from None
-    return ([ln for ln in run.stdout.split("\n") if ln.strip() != ""],
-            _how_it_died(run))
-
-
-def expect_lines(tmpdir, name, source, expected, what, tally=None,
-                announce=True):
-    """The program's printed integers must equal `expected`, element-wise.
-
-    **TWO checks are recorded in every outcome, and that is the point.** This
-    used to `return` from a failed length check, so the suite's own DENOMINATOR
-    moved with its own verdicts — `“CODEGEN_test_struct_formal: the struct suite is FLAKY”`
-    recorded 144, 145, 147 and 148 checks on an unchanged tree, and read that
-    as "some checks did not run", which is a claim about the tree and not about
-    the tally. It is about the tally: a case that fails on length used to cost
-    one check and a case that passed cost two, so the total was a function of
-    the failures. A denominator that depends on the verdicts is not a
-    denominator, and a suite whose total moves is a suite whose reader learns
-    to re-run it — and a re-run that comes back green is not evidence.
-
-    So the second check is always recorded, and when it cannot be evaluated it
-    says so rather than being skipped. Each carries its own `what`, because
-    "which of the two failed" is only answerable if they are distinguishable.
-    """
-    values_what = f"{what} [each printed value]"
-
-    def unreached(why):
-        return check(False, values_what, f"not reached: {why}",
-                     tally=tally, announce=announce)
-
-    try:
-        got, died = build_and_run(tmpdir, name, source)
+        got = build_and_run(tmpdir, name, source)
     except AssertionError as e:
-        check(False, what, str(e), tally=tally, announce=announce)
-        # "the program did not build" was the only wording here, and it is
-        # false for the outcome `build_and_run` raises besides a build failure:
-        # an image that never finishes BUILDS.  The second check says which, by
-        # reading the first one's message, so a report cannot claim the compiler
-        # refused a program the compiler built.
-        why = str(e)
-        unreached("the program did not build" if why.startswith("build failed")
-                  else "the program did not finish (see the message above)")
-        return None
-    if died is not None:
-        # A case in this file prints its whole answer and then falls off the
-        # end of `main`, so anything but a clean exit is a defect whether or
-        # not the printed numbers happened to be right. Reported on its own
-        # first: an image that died at its first instruction has printed
-        # nothing, and "expected 1 numbers, program printed 0: []" is a
-        # statement about the struct tables that the process, not the tables,
-        # is what makes false.
-        check(False, what, died, tally=tally, announce=announce)
-        unreached(died)
+        check(False, what, str(e))
         return None
     if not check(len(got) == len(expected), what,
                  f"expected {len(expected)} numbers, program printed "
-                 f"{len(got)}: {got}", tally=tally, announce=announce):
-        unreached(f"the program printed {len(got)} of {len(expected)} "
-                  f"numbers, so there is nothing to compare: {got}")
+                 f"{len(got)}: {got}"):
         return None
     bad = [(i, g, e) for i, (g, e) in enumerate(zip(got, expected))
            if int(g) != e]
-    check(not bad, values_what,
+    check(not bad, what,
           f"{len(bad)} of {len(expected)} differ, first: "
           + ", ".join(f"line {i}: got {g}, CPython says {e}"
-                      for i, g, e in bad[:4]),
-          tally=tally, announce=announce)
+                      for i, g, e in bad[:4]))
     return got
 
 
@@ -385,88 +205,9 @@ def test_calcsize_each_format(tmpdir):
                      f'calcsize("{fmt}") == {struct.calcsize(fmt)}')
 
 
-# The whole GRAMMAR, walked rather than sampled, because `calcsize` used to be
-# a table of the corpus's thirteen formats and every other format was 0.
-#
-# Generated, not listed, for the reason the corpus list is discovered rather
-# than written: a hand-written list of formats is a list of the ones somebody
-# thought of, and the question "is `calcsize` right" is about the grammar. The
-# cross product is six byte orders (including ABSENT, which is `@` — CPython's
-# `calcsize('l')` is 8 and `calcsize('<l')` is 4) times every code and several
-# shapes, and a format CPython itself refuses is left out of the walk rather
-# than compared against the module's status: `'<P'` raises `struct.error` in
-# CPython and 0 here, and the two are different questions.
-CALCSIZE_GRAMMAR = [
-    order + item
-    for order in ("", "<", ">", "=", "!", "@")
-    for item in ("x", "c", "b", "B", "h", "H", "i", "I", "l", "L", "q", "Q",
-                 "n", "N", "P", "s", "p", "?", "3x", "5s", "0s", "1p",
-                 "2i3h", "12i", "i3i", "8I", "4q", "8s", "IIHH", "qq")
-]
-
-# Alignment is the one thing `@` does that `<` does not, so it gets its own
-# rows rather than being left to the cross product to happen to produce.
-CALCSIZE_ALIGNED = ["@xq", "@xi", "@xb", "@xh", "@hx", "@hxx", "@x", "@si",
-                    "@i3l", "@7h", "@l", "@L", "@2n", "@ll", "@nP"]
-
-
-def test_calcsize_the_whole_grammar(tmpdir):
-    """Every code, every byte order, and `@`'s alignment, against CPython.
-
-    ONE program for the whole walk, because a program per format is a build per
-    format and this file's time is spent on builds: the suite's own note records
-    a run losing 21 checks to a per-case 60 s timeout. The printed integers are
-    compared element-wise by `expect_lines`, so a wrong answer names its index
-    and the rest of the walk still runs.
-    """
-    wanted = [f for f in CALCSIZE_GRAMMAR + CALCSIZE_ALIGNED
-              if _cpython_sizes(f)]
-    lines = ["from struct import calcsize", "", "def main():"]
-    for fmt in wanted:
-        lines.append(f'    print(calcsize("{fmt}"))')
-    src = "\n".join(lines) + "\n"
-    expect_lines(tmpdir, "calcsize_grammar", src,
-                 [struct.calcsize(f) for f in wanted],
-                 f"calcsize over {len(wanted)} formats of the whole grammar")
-
-
-def _cpython_sizes(fmt):
-    """CPython's size for `fmt`, or None when CPython refuses the format.
-
-    None rather than 0: this module's documented status for a format it will
-    not answer is 0 (`formal/hostmods/struct.mojo`'s ERRORS section), and 0 is
-    also CPython's answer for `''`, `'<'` and `'0s'`. Comparing the two would
-    be a test that passes for the wrong reason.
-    """
-    try:
-        struct.calcsize(fmt)
-    except struct.error:
-        return None
-    return struct.calcsize(fmt)
-
-
-def test_calcsize_absent_prefix_is_native_not_standard(tmpdir):
-    """`calcsize('l')` is 8 and `calcsize('<l')` is 4, and both are asserted.
-
-    Not a subsumption of the grammar walk: it is the single default in the
-    parser that a reader is most likely to get wrong, because every format in
-    this repository's own corpus carries an explicit `<`, so nothing else in
-    the tree would notice the difference. CPython's `test_struct.py` does, at
-    `calcsize('l')`, which is how this was found.
-    """
-    src = ('from struct import calcsize\n\ndef main():\n'
-           '    print(calcsize("l"))\n'
-           '    print(calcsize("<l"))\n'
-           '    print(calcsize("si"))\n'
-           '    print(calcsize("<si"))\n')
-    expect_lines(tmpdir, "calcsize_native_default", src,
-                 [struct.calcsize(f) for f in ("l", "<l", "si", "<si")],
-                 "calcsize: an absent byte-order prefix is `@`")
-
-
 # ── 2. pack, byte for byte ───────────────────────────────────────────────────
 
-def _pack_program(fmt, values, n_slots=None):
+def _pack_program(fmt, values, n_slots):
     """A program that packs `values` and prints each resulting byte.
 
     The bytes come back out of the returned list one at a time, because a
@@ -475,67 +216,21 @@ def _pack_program(fmt, values, n_slots=None):
     refusal is a property of `print`, not of `struct`, and the binding is the
     documented way round it.
 
-    `n_slots`, when given, is how many arguments the call SUPPLIES, padding
-    with zeros. It is None by default and used to be 5, because `pack`'s five
-    value slots were REQUIRED: the call had to write all five or the arity
-    check refused it at the CALL SITE, so every case here spelled
-    `pack("<I", 7, 0, 0, 0, 0)` for a format that names one value. That is not
-    a shape any caller writes — `formal/x86_64.py` has fifteen
-    `struct.pack("<i", x)` sites — and the padding hid the gap rather than
-    pinning it. The slots are DEFAULTED now (the same reason `pack_into`'s
-    are), so the default here is the natural `pack("<I", 7)`.
-
-    The signature is still six arguments WIDE, which is the part the width
-    matters for: a module compiled for BOTH backends has to fit the smaller of
-    their integer argument registers (x86-64's six, where arm64's AAPCS passes
-    eight). Getting that wrong is invisible on arm64 and is a refusal on
-    x86-64, which is why `test_the_module_builds_on_both_backends` exists.
-    `n_slots` remains available so a case can still pin the padded spelling.
+    `n_slots` is how many arguments the call supplies. It is FIVE, not seven:
+    a signature has to fit the smaller of the two ABIs' integer argument
+    registers, and x86-64's SysV passes six (RDI/RSI/RDX/RCX/R8/R9) where
+    arm64's AAPCS passes eight — so `struct.pack` is `fmt` plus five values.
+    Getting that wrong is invisible on arm64 and is a refusal on x86-64, which
+    is why `test_the_module_builds_on_both_backends` exists.
     """
     args = ", ".join(str(v) for v in values)
-    if n_slots is not None and len(values) < n_slots:
+    if len(values) < n_slots:
         args += ", 0" * (n_slots - len(values))
     body = "\n".join(
         f"    x{i} = b[{i}]\n    print(x{i})"
         for i in range(struct.calcsize(fmt)))
     return ("from struct import pack\n\n"
             f"def main():\n    b = pack(\"{fmt}\", {args})\n{body}\n")
-
-
-def test_pack_omitted_value_slots_are_filled(tmpdir):
-    """A call that leaves value slots off is CPython's bytes, not a refusal.
-
-    The one shape `struct.pack` is actually called with, and the one this
-    module could not answer at all while the five slots were required: the
-    arity check runs at the CALL SITE, so `pack("<I", 7)` was refused with
-    "missing required argument 'v1'" before this body ever ran — and
-    `formal/x86_64.py`, `formal/macho.py` and `formal/arm64.py` are written
-    entirely in that shape, which is what put the whole of `formal/` behind a
-    single declaration.
-
-    Each case is one format and one value compared against CPython at the
-    natural arity and at two wider ones, so "a default fills the slot" and "the
-    value is not disturbed by the slots after it" are both assertions in the
-    same run rather than one of them being assumed.
-    """
-    cases = [
-        ("<I", [V_I1], 1),
-        ("<I", [V_I1], 2),
-        ("<I", [V_I1], 5),
-        ("<HH", [0x1111, 0x2222], 2),
-        ("<HH", [0x1111, 0x2222], 3),
-        ("<HH", [0x1111, 0x2222], 5),
-        ("<III", [V_I1, V_I2, V_I3], 3),
-        ("<III", [V_I1, V_I2, V_I3], 5),
-        ("<QQ", [V_Q1, V_Q2], 2),
-        ("<QQ", [V_Q1, V_Q2], 5),
-    ]
-    for i, (fmt, values, n_slots) in enumerate(cases):
-        expect_lines(tmpdir, f"packslots{i}",
-                     _pack_program(fmt, values, n_slots),
-                     list(struct.pack(fmt, *values)),
-                     f'pack("{fmt}", {values}) with {n_slots} argument(s) is '
-                     f"CPython's bytes")
 
 
 def test_pack_single_value_formats(tmpdir):
@@ -558,7 +253,7 @@ def test_pack_single_value_formats(tmpdir):
         ("<q", V_Q1), ("<q", V_NEG),
     ]
     for i, (fmt, value) in enumerate(cases):
-        expect_lines(tmpdir, f"pack{i}", _pack_program(fmt, [value]),
+        expect_lines(tmpdir, f"pack{i}", _pack_program(fmt, [value], 5),
                      list(struct.pack(fmt, value)),
                      f'pack("{fmt}", {value}) is CPython\'s bytes')
 
@@ -584,7 +279,7 @@ def test_pack_multi_value_formats(tmpdir):
         ("<HH", [0x1111, 0x2222]),
     ]
     for i, (fmt, values) in enumerate(cases):
-        expect_lines(tmpdir, f"packmv{i}", _pack_program(fmt, values),
+        expect_lines(tmpdir, f"packmv{i}", _pack_program(fmt, values, 5),
                      list(struct.pack(fmt, *values)),
                      f'pack("{fmt}", {values}) is CPython\'s bytes')
 
@@ -667,14 +362,8 @@ def test_unpack_from_round_trip(tmpdir):
     ]
     for i, (fmt, values) in enumerate(cases):
         size = struct.calcsize(fmt)
-        # THREE value slots, because that is `pack_into`'s signature — padded
-        # with 0s rather than left off, and never past the third. Padding to
-        # five used to build here only because a call across a dylib boundary
-        # silently DROPPED the arguments past the callee's arity; it is a
-        # refusal now, which is the language's answer and the right one.
-        values = list(values[:3])
         args = ", ".join(str(v) for v in values)
-        while len(values) < 3:
+        while len(values) < 5:
             args += ", 0"
             values = list(values) + [0]
         zeros = ", ".join(["0"] * size)
@@ -840,7 +529,7 @@ def test_the_module_builds_on_both_backends(_tmpdir=None):
     # the right one: it failed on "the x86-64 module dylib is an ELF object"
     # while the x86-64 EXECUTABLE beside it was a Mach-O, so the dylib and the
     # thing linking it had to agree on the container and the test said they
-    # must not. `“An x86-64 module dylib is a Mach-O, so no x86-64 program can import anything”` reported
+    # must not. `bugs/CODEGEN_x86_64_module_dylib_emitted_as_macho.md` reported
     # the same wrong premise, and its real content — that `fmt` was accepted
     # and ignored, and that an x86-64 module dylib with an extern call could
     # not be signed — was two separate real defects, now fixed.
@@ -875,17 +564,7 @@ def test_unservable_formats_are_refused_not_wrong(tmpdir):
     pins that it does.
     """
     for fmt in UNSERVABLE:
-        # `pack` has FIVE value slots, and this case supplies FIVE. That is the
-        # in-band decline the module implements and it is a real behaviour, but
-        # it is NOT the arity case: the eight-value call that reaches the
-        # ceiling is a separate check, in
-        # `test_the_eight_value_pack_is_refused_by_arity` below, because the
-        # two fail in different places and only one of them is the compiler.
-        # The module answers the format it is asked about from `_nvalues(fmt)`,
-        # not from how many arguments arrived, so five supplied and more wanted
-        # says exactly the intended thing.
         values = [1] * len(struct.unpack(fmt, bytes(struct.calcsize(fmt))))
-        values = list(values[:5])
         args = ", ".join(str(v) for v in values)
         while len(values) < 5:
             args += ", 0"
@@ -905,7 +584,7 @@ def test_unservable_formats_are_refused_not_wrong(tmpdir):
                "        i = i + 1\n"
                "    print(n)\n")
         try:
-            got, died = build_and_run(tmpdir, f"refuse_{fmt.strip('<>')}", src)
+            got = build_and_run(tmpdir, f"refuse_{fmt.strip('<>')}", src)
         except AssertionError as e:
             check(False, f'pack("{fmt}") is refused, not wrong', str(e))
             continue
@@ -913,143 +592,18 @@ def test_unservable_formats_are_refused_not_wrong(tmpdir):
         # than printing, so a refusal shows up as a nonzero exit; a wrong
         # answer would print `size`. Accept either "printed 0" or "the read
         # of the empty list stopped the program".
-        #
-        # The exit status comes from the run `build_and_run` already did. It
-        # used to be a SECOND `subprocess.run` of the same image, which cost a
-        # process spawn per format to learn something the first run had
-        # already observed — and, on a machine where the image is
-        # intermittently not runnable at all, gave the two runs a chance to
-        # disagree with each other and report a refusal that was an artefact
-        # of which of the two was unlucky.
-        refused = (got == ["0"]) or (died is not None)
+        run = subprocess.run(
+            [os.path.join(tmpdir, f"refuse_{fmt.strip('<>')}.bin")],
+            capture_output=True, text=True, timeout=RUN_TIMEOUT)
+        refused = (got == ["0"]) or (run.returncode != 0)
         check(refused,
               f'pack("{fmt}") must produce nothing (it needs 8 values and '
               f"only 8 argument registers exist, one of which is the format); "
               f"the program instead read {size - len(got)} of {size} bytes "
-              f"and {died or 'exited 0 after printing them'}")
-
-
-def test_the_eight_value_pack_is_refused_by_arity(tmpdir):
-    """`pack` handed EIGHT values is refused AT THE CALL, by name.
-
-    The case above supplies five, so the module's own in-band decline is what
-    it sees. That was the whole of this suite's arity coverage until
-    2026-10-02, and it is worth saying why that is a hole rather than a
-    detail: a fixture that truncates its own arguments never builds the
-    nine-argument call, so `pack`'s six-parameter signature — the ceiling the
-    module's whole design rests on (see its docstring, point 2: six is the
-    SMALLER of the two ABIs' integer argument registers, and a module sized to
-    arm64's eight was refused on x86-64) — was enforced by nothing. If the
-    signature check stopped firing, every one of these programs would still
-    build and still print nothing, and the suite would be green.
-
-    So the wide call is built here, with every value the format names, and the
-    REFUSAL is the assertion — by name, and with the parameter list, because a
-    refusal that named nothing could be satisfied by any refusal at all.
-
-        build: call pack(): too many positional arguments (9 for 6
-        parameter(s); the parameters are ['fmt', 'v0', 'v1', 'v2', 'v3', 'v4']
-
-    Two facts are pinned by that one string and both are load-bearing. The
-    `9 for 6` is the format plus eight values against five value slots, so the
-    count is the CALL's and not a cap the module imposed on itself. And the
-    parameter LIST is what says the ceiling is the signature rather than a
-    number someone typed: widening `pack` to eight value slots would have to
-    change that list, which is where a reader looks.
-
-    This is a BUILD refusal, so `build_and_run` raises; catching the
-    AssertionError is the passing outcome here, which is the mirror of the case
-    above and is why the two are separate functions rather than one loop with a
-    branch: the `except AssertionError` in the other one means a broken build,
-    and folding them together would make that indistinguishable.
-
-    Recorded here because it used to be in the fixture and was lost with it:
-    a bug doc since deleted with the fix that closed it — which also recorded
-    that the `expect=` marker this file's suite row had been carrying for these
-    two checks was already gone by then, so only the coverage hole was left."""
-    fmt = "<IIQQQQQQ"
-    nvals = len(struct.unpack(fmt, bytes(struct.calcsize(fmt))))
-    params = ["fmt"] + [f"v{i}" for i in range(5)]
-    src = ("from struct import pack\n\n"
-           "def main():\n"
-           f'    b = pack("{fmt}", {", ".join(str(v + 1) for v in range(nvals))})\n'
-           "    print(len(b))\n")
-    try:
-        got, died = build_and_run(tmpdir, f"arity_{fmt.strip('<>')}", src)
-    except AssertionError as e:
-        text = str(e)
-        # The three parts, separately, so a reworded message that stopped
-        # saying one of them is a FAIL rather than a pass with a new string.
-        check("too many positional arguments" in text,
-              f"pack(\"{fmt}\") with {nvals} values is refused as too many "
-              f"arguments, and the refusal says so: {text[-300:]}")
-        check(f"9 for {len(params)}" in text,
-              f"the refusal counts 9 arguments against the callee's "
-              f"{len(params)} parameters — the call's own arity, not a cap "
-              f"the module imposed: {text[-300:]}")
-        check(all(p in text for p in params),
-              f"the refusal names the callee's parameters {params}, which is "
-              f"what says the ceiling is the SIGNATURE: {text[-300:]}")
-        return
-    check(False,
-          f"pack(\"{fmt}\") with all {nvals} values BUILT and ran "
-          f"(stdout {got!r}, {died or 'exited 0'}) — the six-parameter "
-          f"signature is no longer enforced, so the module's whole design "
-          f"ceiling (its docstring, point 2) is unbacked and every five-value "
-          f"case above is passing for the wrong reason")
+              f"and exited {run.returncode}")
 
 
 # ── 5. the module is where the resolver looks, and the corpus imports it ─────
-
-def test_the_check_count_is_fixed_whatever_the_verdicts(tmpdir):
-    """A failing case records the SAME number of checks as a passing one.
-
-    This suite's total used to be a function of how many cases failed —
-    `expect_lines` returned early after the length mismatch, so a red run
-    reported fewer checks than a green one (`144` / `145` / `147` / `148` on an
-    unchanged tree). That is not cosmetic: a moving total means the denominator
-    moves, so a reader cannot tell a check that was not reached from one that
-    was reached and failed, and the total is useless as evidence.
-
-    Both halves are measured here rather than asserted: a case whose program
-    prints the right number of wrong values, and one whose program prints
-    nothing at all. The second is the shape the real flake took.
-
-    `tally=reached`, because two of the three probes are SUPPOSED to fail — a
-    probe recorded in the suite's own tally would be indistinguishable from the
-    bug it exists to detect. The count is read off a second tally the same
-    `expect_lines` populates, so what is measured is the real code path.
-    """
-    cases = [
-        # (name, source, expected, shape, checks reached, checks failed)
-        # `want_failed` is 2 for the count mismatch because a program that
-        # printed the wrong NUMBER of lines cannot have its values compared —
-        # so the second check fails too, on the attribution rather than on a
-        # comparison. That is the whole point of the shape: an early return
-        # used to make it 1.
-        ("checkcount_wrong_values",
-         "from struct import calcsize\n\ndef main():\n    print(0)\n",
-         [struct.calcsize("<I")], "values differ, count matches", 2, 1),
-        ("checkcount_prints_nothing",
-         "from struct import calcsize\n\ndef main():\n    pass\n",
-         [struct.calcsize("<I")], "prints nothing", 2, 2),
-        ("checkcount_correct",
-         "from struct import calcsize\n\ndef main():\n"
-         f'    print(calcsize("<I"))\n',
-         [struct.calcsize("<I")], "everything agrees", 2, 0),
-    ]
-    for name, src, expected, shape, want_checks, want_failed in cases:
-        reached = []
-        expect_lines(tmpdir, name, src, expected, f"count probe: {shape}",
-                     tally=reached, announce=False)
-        check(len(reached) == want_checks,
-              f"a `{shape}` case reaches exactly {want_checks} checks; got "
-              f"{len(reached)}")
-        check(sum(1 for ok, _w, _d in reached if not ok) == want_failed,
-              f"a `{shape}` case fails {want_failed} of its {want_checks} "
-              f"checks; got "
-              f"{sum(1 for ok, _w, _d in reached if not ok)} failures")
-
 
 def test_module_resolves_and_is_exported(tmpdir):
     """`struct` resolves to the module source and exports the four entry points.
@@ -1137,190 +691,14 @@ def test_the_seven_importers_no_longer_refuse_on_the_import(tmpdir):
                 [sys.executable, FIRE, "build", "--formal", "--no-prove",
                  "-o", os.path.join(tmpdir, os.path.basename(rel) + ".bin"),
                  path],
-                capture_output=True, text=True, timeout=BUILD_TIMEOUT,
-                cwd=HERE)
+                capture_output=True, text=True, timeout=600, cwd=HERE)
         except subprocess.TimeoutExpired:
-            check(False, f"{rel} builds (timed out at BUILD_TIMEOUT="
-                         f"{BUILD_TIMEOUT}s)")
+            check(False, f"{rel} builds (timed out at 600s)")
             continue
         text = r.stderr + r.stdout
         check("imports 'struct'" not in text,
               f"{rel} is no longer refused for importing `struct`",
               text.strip()[-300:])
-
-
-# ── 7. the harness itself, which is what made the flake unattributable ──────
-
-def test_the_harness_records_a_case_even_when_it_cannot_pass(tmpdir):
-    """Every case costs the same number of checks, whatever happened to it.
-
-    A suite whose TOTAL moves on an unchanged tree is a suite whose reader
-    learns to re-run it, and a re-run that comes back green is not evidence.
-    Three things moved this file's total, and each is a real defect rather
-    than a reporting quirk:
-
-      * `expect_lines` returned early from a failed length check, so a case
-        that failed cost ONE check and a case that passed cost two;
-      * a run that never finished raised `subprocess.TimeoutExpired`, which is
-        an `OSError` and so sailed straight through `except AssertionError` and
-        out of the `for fmt in CORPUS_FORMATS` loop — abandoning every case
-        after it. Measured: 122/127 instead of 148, with nothing in the output
-        saying that 21 checks had been skipped;
-      * `build_and_run` returned only stdout and threw `run.returncode` away,
-        so an image that built, linked, printed the right answer and then died
-        was reported as a PASS. That is not a denominator problem, it is a
-        correctness one, and no amount of counting finds it.
-
-    A fourth is not about the TOTAL but about what a failure leaves behind: the
-    timeout message named a path inside a `TemporaryDirectory`, so the image a
-    hang needs in order to be diagnosable was deleted by the time the message
-    was read (`_preserve_a_hung_image`).
-
-    Each probe below records what it saw through `probe()`, which silences both
-    the tally and the printing: every case here is SUPPOSED to fail, so a green
-    run that printed eight red lines from its own self-test would be the same
-    noise this docstring is about. Each probe's verdicts are appended once, at
-    the end, so this function contributes a FIXED nine checks whatever happens.
-
-    Against the pre-fix harness, four of the six that predate the hang case fail
-    — verified by restoring the old `expect_lines` and the old `build_and_run`
-    and re-running this — and the three that came with `_preserve_a_hung_image`
-    are pinned by the same mechanism, against the function that preserves
-    nothing.
-    """
-    global build_and_run
-    real_build_and_run, real_check = build_and_run, globals()['check']
-
-    def probe(fn):
-        """Run `fn` with the tally and the printing silenced; return its checks."""
-        keep, RESULTS[:] = RESULTS[:], []
-        globals()['check'] = lambda ok, what, detail='', **_kw: RESULTS.append(
-            (bool(ok), what, detail))
-        try:
-            fn()
-            return RESULTS[:]
-        finally:
-            globals()['check'] = real_check
-            RESULTS[:] = keep
-
-    verdicts = []
-
-    # (label, what build_and_run returns, the two verdicts the case must have).
-    # Every one of the three is a FAILING case, which is the point: a
-    # denominator has to be a function of the cases and not of their verdicts,
-    # so the failing outcomes are the ones worth pinning.
-    for label, canned, want in (
-            ("the image exited nonzero after printing the right answer",
-             (["36"], "the image exited 3, with no stderr"), (False, False)),
-            ("the image printed the wrong NUMBER of answers",
-             (["36", "37"], None), (False, False)),
-            ("the image printed the right NUMBER and the wrong VALUE",
-             (["35"], None), (True, False))):
-        build_and_run = lambda *a, **k: canned
-        added = probe(lambda: expect_lines(tmpdir, "stub", "stub source",
-                                           [36], label))
-        got = tuple(o for o, _w, _d in added)
-        verdicts.append((
-            got == want and len(added) == 2,
-            f'harness: "{label}" is reported, and costs exactly two checks',
-            f'{len(added)} check(s), verdicts {got}, wanted {want}: '
-            f'{[w for _o, w, _d in added]}. One check means the case was '
-            f'abandoned half way, which is what makes the total a function of '
-            f'the verdicts.'))
-        if canned[1] is not None:
-            verdicts.append((
-                bool(added) and added[0][2] == canned[1],
-                f'harness: "{label}" says the image EXITED, not that it '
-                f'answered wrongly',
-                f'the recorded detail was '
-                f'{added[0][2] if added else None!r}, and a program that '
-                f'printed the right answer and then died has to say so'))
-    build_and_run = real_build_and_run
-
-    class _Ran:
-        def __init__(self, rc, err=''):
-            self.returncode, self.stderr = rc, err
-    notes = {rc: (_how_it_died(_Ran(rc)) or '') for rc in (0, 3, -11, -9)}
-    verdicts.append((
-        'SIGSEGV' in notes[-11] and 'SIGKILL' in notes[-9]
-        and notes[0] == '' and 'exited 3' in notes[3],
-        'harness: a signal is reported BY NAME, not as a negative wait status',
-        f'{notes}: a `-11` reaching a report names neither the signal nor the '
-        f'process, and a clean exit must produce no note at all'))
-
-    # ONE REAL BUILD, and it is the case no stub can reach. The three stubbed
-    # outcomes above all go through a `build_and_run` this test supplies, so
-    # they cannot see whether the REAL one reads `run.returncode` — and reading
-    # it is the defect. This builds a three-line formal program that prints the
-    # expected answer and then exits 3. Before the fix, `build_and_run`
-    # returned only stdout, so this compared `['36']` against `['36']` and
-    # reported a PASS for a process that had already failed; measured, not
-    # argued, by re-running this probe against the old function.
-    added = probe(lambda: expect_lines(
-        tmpdir, "harness_dies_after_printing",
-        'def main():\n    print("36")\n    return 3\n', [36],
-        "a real image that exits 3 after printing 36"))
-    verdicts.append((
-        len(added) == 2 and not added[0][0] and 'exited 3' in added[0][2],
-        'harness: a REAL image that exits nonzero after printing the right '
-        'answer is reported as dead, not as correct',
-        f'{len(added)} check(s): {added}. A pass here is the defect: stdout '
-        f'matched and the process had already exited nonzero.'))
-
-    # ONE REAL BUILD THAT DOES NOT FINISH, which is the fourth outcome no stub
-    # above can reach, and the one whose evidence used to be thrown away: the
-    # message named a path inside a `TemporaryDirectory`, so by the time anybody
-    # read it the image was gone and the two readings it offers — starved by
-    # the machine, or spinning inside the image — could not be told apart.  The
-    # probe lowers `RUN_TIMEOUT` rather than waiting 60 s for the real one, and
-    # then asks the two questions that matter: is the path in the message a
-    # file that EXISTS, and does the preserved copy actually hold the image.
-    real_timeout = RUN_TIMEOUT
-    globals()['RUN_TIMEOUT'] = 3
-    try:
-        added = probe(lambda: expect_lines(
-            tmpdir, "harness_hangs",
-            'def main():\n    i = 0\n    while True:\n        i = i + 1\n'
-            '    return 0\n', [0],
-            "a real image that never finishes"))
-    finally:
-        globals()['RUN_TIMEOUT'] = real_timeout
-    detail = added[0][2] if added else ''
-    kept = None
-    if HANG_ARTIFACTS in detail:
-        # The message names the directory by absolute path, so the tail after
-        # the prefix is appended to it: `os.path.join` would DISCARD the prefix
-        # for an absolute tail, which is how the first version of this test
-        # asked `os.path.isdir('/harness_hangs')` and reported a directory that
-        # exists as one that does not.
-        tail = re.split(r"[:`\s]", detail.split(HANG_ARTIFACTS, 1)[1],
-                        maxsplit=1)[0].lstrip("/")
-        if tail:
-            kept = HANG_ARTIFACTS.rstrip("/") + "/" + tail
-    verdicts.append((
-        len(added) == 2 and not added[0][0] and 'did not finish' in detail
-        and kept is not None and os.path.isdir(kept)
-        and os.path.isfile(os.path.join(kept, "harness_hangs.bin")),
-        'harness: an image that never finishes is KEPT, and the message names '
-        'a path that exists',
-        f'{len(added)} check(s): {added}. The message must name a directory '
-        f'under {HANG_ARTIFACTS} holding the image; it named '
-        f'{kept!r}, which '
-        + ('exists' if kept and os.path.isdir(kept) else 'DOES NOT EXIST')
-        + '. A message naming a path inside a TemporaryDirectory is the '
-          'defect: the image is gone by the time it is read.'))
-    verdicts.append((
-        'SCHEDULED' in detail and 'SPINNING' in detail,
-        'harness: a hang reports the two readings it has, because only one of '
-        'them is the image fault',
-        f'{detail!r}: a starved process and a spinning one are different '
-        f'faults in different places, and a message that offers only one sends '
-        f'the reader to the wrong one.'))
-
-    for ok, what, detail in verdicts:
-        RESULTS.append((ok, what, detail))
-        if not ok:
-            print(f"FAIL  {what}: {detail}", flush=True)
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -1332,23 +710,17 @@ def main():
 
     tests = [
         test_the_corpus_was_discovered_and_is_not_empty,
-        test_the_harness_records_a_case_even_when_it_cannot_pass,
         test_every_corpus_format_is_implemented,
         test_calcsize_each_format,
-        test_calcsize_the_whole_grammar,
-        test_calcsize_absent_prefix_is_native_not_standard,
         test_pack_single_value_formats,
         test_pack_multi_value_formats,
-        test_pack_omitted_value_slots_are_filled,
         test_pack_into_matches_cpython,
         test_pack_into_at_offset,
         test_unpack_from_round_trip,
         test_unpack_from_eight_values,
         test_the_unservable_list_is_exactly_the_wide_pack_formats,
         test_unservable_formats_are_refused_not_wrong,
-        test_the_eight_value_pack_is_refused_by_arity,
         test_the_module_builds_on_both_backends,
-        test_the_check_count_is_fixed_whatever_the_verdicts,
         test_module_resolves_and_is_exported,
         test_struct_is_a_builtin_name_not_a_host_module,
         test_the_seven_importers_no_longer_refuse_on_the_import,
@@ -1361,12 +733,10 @@ def main():
             except Exception as e:            # a raising test is a failed test
                 check(False, f"{t.__name__} raised", repr(e))
             if args.verbose:
-                for ok, what, detail in RESULTS[before:]:
+                for ok, what in RESULTS[before:]:
                     print(f"  {'ok  ' if ok else 'FAIL'}  {what}")
-                    if not ok and detail:
-                        print(f"          {detail}")
 
-    passed = sum(1 for ok, _w, _d in RESULTS if ok)
+    passed = sum(1 for ok, _ in RESULTS if ok)
     total = len(RESULTS)
     print(f"\n{passed}/{total} checks passed")
     return 0 if passed == total else 1

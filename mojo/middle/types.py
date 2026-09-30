@@ -9,20 +9,13 @@ gimple_codegen re-imports them so unqualified internal references and
 external `from gimple_codegen import X` keep working unchanged.
 """
 from __future__ import annotations
-
-# `_RUNTIME_FUNCS` (runtime function name -> C return type) is defined ONCE,
-# in gimple_codegen.py, and re-exported here: this file previously held
-# a second, STALE copy that had drifted (it was missing eight entries,
-# so a new runtime function added to the real table was invisible to
-# anything reading this one). gimple_codegen is the module the rest of
-# the compiler imports the name from, so it stays the definition and
-# this is a re-export rather than the reverse.
 import hashlib
 import os
 import re
 import sys
+import zlib
 import dataclasses
-from fire_compiler import split_top_level_commas, target_slots, for_target_is_tuple, for_target_names, for_target_single_name, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
@@ -94,25 +87,6 @@ def _param_names_stripped(params: list) -> list:
     for pn, _pt in params or []:
         out.append(pn.lstrip('*'))
     return out
-
-def is_star_spread(node) -> bool:
-    """True for a `*expr` element of a list/tuple/set display.
-
-    The one discriminator for "this element EXTENDS the container instead of
-    being APPENDED to it", shared by every site that has to know: the list and
-    tuple lowerings in `mojo/backend_gimple/emit_exprs.py` (which emit the
-    extend), and `_infer_list_elem_type` in `mojo/middle/resolve_shared.py`
-    (which must not let a spread's operand type into the literal's element-type
-    join — see that function's own note).
-
-    `op == '*'` and not `op in ('*', '**')`: `**x` inside a list or tuple
-    display is not a spread in Python, and this codegen does not extend for
-    one, so a `**` element really does occupy exactly one slot and its kind
-    byte belongs in the kinds string. Spelling the test as `'*'` only is what
-    keeps those two facts the same fact at all four sites.
-    """
-    return isinstance(node, UnaryOp) and node.op == '*'
-
 
 class TypeLattice:
     """Numeric type promotion lattice for Mojo → C lowering.
@@ -266,38 +240,6 @@ class TypeLattice:
         return 'int'
 
     @classmethod
-    def slot_kind_byte(cls, elem: str) -> str:
-        """The one byte per list slot of `mojo_list_set_kinds`' alphabet that
-        an element of C type `elem` holds — see that function's docstring in
-        runtime/fire_runtime.c for the alphabet and the MOJO_KIND_* names.
-
-        A MojoList slot is a raw int64_t, so every consumer that has to know
-        what a slot HOLDS (the repr, the per-slot readers, the sorters) needs
-        this one mapping rather than its own; the runtime's own default for an
-        undescribed slot is 'i', so an unrecognised element type maps there too
-        instead of inventing a letter.
-
-        `None` is NOT decided here — it is indistinguishable from 0 once
-        lowered, so a caller that can still see the expression (a list
-        literal) detects it there, as _list_literal_slot_kind does."""
-        if elem in _TYPE_FLOAT:
-            return 'd'
-        if elem in ('char *', 'MojoStr *'):
-            return 'p'
-        if elem == 'MojoBytes *':
-            return 's'
-        if elem in ('MojoList *', 'MojoDict *', 'MojoSet *'):
-            return 'l'
-        return 'i'
-
-    # The MOJO_KIND_* constant each alphabet byte is named by in
-    # runtime/fire_runtime.h, so generated C says `MOJO_KIND_STR` rather than a
-    # bare `'p'`. The header is the one definition of the letters; this is the
-    # one definition of their names.
-    SLOT_KIND_CONST = {'i': 'INT', 'd': 'DOUBLE', 's': 'BYTES',
-                       'p': 'STR', 'l': 'LIST', 'n': 'NONE'}
-
-    @classmethod
     def printf_fmt(cls, ctype: str) -> str:
         if ctype in ('double', 'float', '__fp16'):
             return '%g'
@@ -313,69 +255,8 @@ class TypeLattice:
             return '%u'
         return '%d'
 _TYPE_MAP: dict[str | None, str] = {'Int': 'int64_t', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt': 'uint64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Float16': '__fp16', 'Float32': 'float', 'Float64': 'double', 'float': 'double', 'Bool': '_Bool', 'bool': 'int', 'String': 'char *', 'str': 'char *', 'List': 'MojoList *', 'list': 'MojoList *', 'Dict': 'MojoDict *', 'dict': 'MojoDict *', 'Set': 'MojoSet *', 'set': 'MojoSet *', 'Str': 'MojoStr *', 'bytes': 'MojoBytes *', 'bytearray': 'MojoBytes *', 'memoryview': 'MojoMemoryView *', 'None': 'void', 'object': 'int64_t'}
-# Python builtin name -> the C type it evaluates to. ONE table, because
-# two consumers need it and they were two lists: `_quick_type` (which
-# types the enclosing function's PROTOTYPE and every local) and
-# `_gmi_collect_self_assigns` (which types `self.<field> = <builtin>(...)`).
-# The second list was missing every builtin here that is not a literal
-# ctor — `sorted`, `reversed`, `map`, `filter`, `range`, `tuple`,
-# `enumerate`, `zip` — so `self.itos = sorted(set(text))` declared the
-# field `int64_t`, the MojoList* was boxed on the store, and every later
-# read of `self.itos` went through the dynamic tagged path with no element
-# type: `for i, c in enumerate(self.itos)` bound `c` as int64_t and passed
-# those raw pointer bits to `stoi[c] = i`, which gimple rejects outright
-# ("invalid argument to gimple call" — mojo_dict_set_int takes char *).
-_BUILTIN_RET_CTYPES = {
-    'set': 'MojoSet *', 'dict': 'MojoDict *', 'list': 'MojoList *',
-    # sorted()/reversed() both materialise a MojoList*
-    # (see _lower_builtin_sorted / _lower_builtin_reversed).
-    'sorted': 'MojoList *', 'reversed': 'MojoList *',
-    # enumerate() in VALUE position builds a list of (index, value)
-    # pair-lists; as a `for` target it is an iterator instead, but that
-    # path dispatches on the call's own shape, not on this type.
-    'enumerate': 'MojoList *',
-    # zip() chains mojo_zip, which walks MojoLists and returns a new one
-    # of pair-lists.
-    'zip': 'MojoList *',
-    # mojo_range/mojo_range3 return a MojoList*.
-    'range': 'MojoList *',
-    # tuple(x) lowers to the same MojoList as list(x).
-    'tuple': 'MojoList *',
-    # map(f, xs) / filter(f, xs) build their result in the CODEGEN
-    # (_build_per_element_list), not in the runtime: mojo_map/mojo_filter
-    # are identity stubs because a char* function pointer cannot call back
-    # into a GIMPLE-compiled body. Both really do produce a MojoList of
-    # results / kept elements.
-    'map': 'MojoList *', 'filter': 'MojoList *',
-    # Bytes/bytearray materialize a MojoBytes*, not a container.
-    'bytes': 'MojoBytes *', 'bytearray': 'MojoBytes *',
-    # Naming the runtime constructors too, so a `self.x = mojo_list_new()`
-    # -shaped call is answered from the same place.
-    'mojo_list_new': 'MojoList *', 'mojo_dict_new': 'MojoDict *',
-    'mojo_set_new': 'MojoSet *',
-    # The Mojo spellings of the container types.
-    'DynamicVector': 'MojoList *', 'Dict': 'MojoDict *', 'Set': 'MojoSet *',
-    'frozenset': 'MojoSet *',
-}
-
 _SCALAR_INT_TYPES = frozenset({'int', 'char', '_Bool', 'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'})
-# The floating counterparts, next to _SCALAR_INT_TYPES and for the same
-# reason: a builtin that has to branch on "is this argument numeric, and
-# if so which" (abs, min, max) should not each re-spell the two sets.
-# `float` is a real C float here and `double` is this compiler's default
-# for a Python float, so both are in it.
-_SCALAR_FLOAT_TYPES = frozenset({'float', 'double', '__fp16'})
 _CONTAINER_KIND_TYPES = frozenset({'MojoDict *', 'MojoList *', 'MojoSet *', 'MojoBytes *'})
-# The Mojo container types a module-level global is DECLARED with. Every one of
-# them is stored in the `_<mod>_globals` struct as a boxed `int64_t`, which is
-# the rule the bare-name global read, its `submod.GLOBAL` sibling and the
-# comprehension-target shadow predicate all share. It lives HERE rather than in
-# the backend's `emit_exprs.py` because those three are not all in that one
-# file any more: the read's decision was extracted to
-# `mojo/middle/module_shared.py::bare_global_read_plan` (so the comprehension
-# lowering could ask the SAME question instead of re-deriving a weaker one), and
-# a second copy of the list there would be exactly the drift this replaces.
-_BOXED_CONTAINER_CTYPES = ('MojoDict *', 'MojoList *', 'MojoSet *')
 _EMPTY_CONTAINER_CTOR = {'MojoDict *': 'mojo_dict_new ()', 'MojoList *': 'mojo_list_new ()', 'MojoSet *': 'mojo_set_new ()'}
 
 def _seedable_local_ctype(t) -> bool:
@@ -429,26 +310,6 @@ def container_kind(ctype: str) -> str | None:
         return None
     return {'MojoDict *': 'dict', 'MojoList *': 'list', 'MojoSet *': 'set', 'MojoBytes *': 'bytes'}[ctype]
 
-def _is_empty_container_literal(node) -> bool:
-    """True when `node` is a SYNTACTICALLY EMPTY container literal — `[]`,
-    `()`, `{}`, `set()` — which carries no evidence of what it would hold.
-
-    The same shape `reify_empty_container_literal` recognises, and for the
-    same reason it needs its own test rather than reusing that one: an empty
-    literal still has a STORAGE element type (`_infer_list_elem_type([])` is
-    `'int64_t'`, so a local can be declared), it is just not a statement about
-    the values. The consumer that needs the distinction is
-    `_gen_ReturnStmt`'s publish of `_return_elem_types`, where treating that
-    storage default as evidence routed a str-valued result through
-    `mojo_repr_list_ints` and printed its slots as pointer decimals — see
-    “A comprehension inside an `if` body loses its RESULT list's element type”.
-    """
-    if isinstance(node, (DictExpr, ListExpr, SetExpr, TupleExpr)):
-        return not (getattr(node, 'elements', None)
-                    or getattr(node, 'pairs', None))
-    return False
-
-
 def reify_empty_container_literal(gen, value_type: str, declared_type: str, value_node) -> str | None:
     """If `value_node` is a syntactically-EMPTY container literal (`{}`,
     `[]`, `set()`, `()`) whose default lowering (`value_type`) doesn't
@@ -471,6 +332,7 @@ def reify_empty_container_literal(gen, value_type: str, declared_type: str, valu
     if getattr(value_node, 'elements', None) or getattr(value_node, 'pairs', None):
         return None
     return gen._new_val(declared_type, _EMPTY_CONTAINER_CTOR[declared_type])
+_RUNTIME_FUNCS: dict[str, str] = {'mojo_exc_pop': 'void', 'mojo_raise': 'void', 'mojo_exc_msg_set': 'void', 'mojo_exc_msg_get': 'char *', 'mojo_list_new': 'MojoList *', 'mojo_list_len': 'int64_t', 'mojo_list_get_int': 'int64_t', 'mojo_list_get_double': 'double', 'mojo_list_get_str': 'char *', 'mojo_list_contains_int': 'int', 'mojo_list_contains_double': 'int', 'mojo_list_contains_str': 'int', 'mojo_list_contains_bytes': 'int', 'mojo_list_set_int': 'void', 'mojo_list_set_double': 'void', 'mojo_list_set_str': 'void', 'mojo_list_slice': 'MojoList *', 'mojo_list_concat': 'MojoList *', 'mojo_dict_new': 'MojoDict *', 'mojo_dict_get_int': 'int64_t', 'mojo_dict_get_double': 'double', 'mojo_dict_get_str': 'char *', 'mojo_dict_setdefault_int': 'int64_t', 'mojo_dict_setdefault_str': 'char *', 'mojo_dict_contains': 'int', 'mojo_dict_set_bytes_int': 'void', 'mojo_dict_set_bytes_str': 'void', 'mojo_dict_set_bytes_double': 'void', 'mojo_dict_get_bytes_int': 'int64_t', 'mojo_dict_get_bytes_str': 'char *', 'mojo_dict_get_bytes_double': 'double', 'mojo_dict_contains_bytes': 'int', 'mojo_dict_setdefault_bytes_int': 'int64_t', 'mojo_dict_pop_bytes_int': 'int64_t', 'mojo_dict_pop_bytes_str': 'char *', 'mojo_dict_pop_bytes_double': 'double', 'mojo_dict_len': 'int64_t', 'mojo_dict_iter_new': 'MojoDictIter *', 'mojo_dict_iter_next': 'int', 'mojo_dict_iter_key': 'char *', 'mojo_dict_iter_val_int': 'int64_t', 'mojo_dict_iter_val_double': 'double', 'mojo_dict_iter_val_str': 'char *', 'mojo_dict_iter_free': 'void', 'mojo_set_new': 'MojoSet *', 'mojo_set_contains_int': 'int', 'mojo_set_contains_str': 'int', 'mojo_set_add_bytes': 'void', 'mojo_set_contains_bytes': 'int', 'mojo_set_val_bytes': 'MojoBytes *', 'mojo_set_iter_pos': 'int64_t', 'mojo_set_len': 'int64_t', 'mojo_set_iter_new': 'MojoSetIter *', 'mojo_set_iter_next': 'int', 'mojo_set_iter_val_int': 'int64_t', 'mojo_set_iter_val_str': 'char *', 'mojo_set_iter_free': 'void', 'mojo_str_new': 'MojoStr *', 'mojo_str_concat': 'MojoStr *', 'mojo_str_len': 'int64_t', 'mojo_str_data': 'char *', 'mojo_str_char_at': 'char', 'mojo_str_eq': 'int', 'mojo_str_contains': 'int', 'mojo_str_slice': 'MojoStr *', 'mojo_cstr_slice': 'char *', 'mojo_cstr_region_eq': 'int', 'mojo_str_from_char': 'MojoStr *', 'mojo_str_repeat': 'MojoStr *', 'mojo_str_to_int': 'int64_t', 'mojo_str_to_float': 'double', 'mojo_bytes_new_lit': 'MojoBytes *', 'mojo_bytes_empty': 'MojoBytes *', 'mojo_bytes_zeros': 'MojoBytes *', 'mojo_bytes_from_list': 'MojoBytes *', 'mojo_bytes_from_str': 'MojoBytes *', 'mojo_bytes_from_cstr': 'MojoBytes *', 'mojo_bytes_len': 'int64_t', 'mojo_bytes_get': 'int64_t', 'mojo_bytes_eq': 'int', 'mojo_bytes_truthy': 'int', 'mojo_bytes_repr': 'char *', 'mojo_bytes_concat': 'MojoBytes *', 'mojo_bytes_repeat': 'MojoBytes *', 'mojo_bytes_slice': 'MojoBytes *', 'mojo_bytes_contains': 'int', 'mojo_bytes_find': 'int64_t', 'mojo_bytes_rfind': 'int64_t', 'mojo_bytes_find_from': 'int64_t', 'mojo_bytes_rfind_from': 'int64_t', 'mojo_bytes_index_int': 'int64_t', 'mojo_bytes_rindex_int': 'int64_t', 'mojo_bytes_count_int': 'int64_t', 'mojo_bytes_count': 'int64_t', 'mojo_bytes_count_from': 'int64_t', 'mojo_bytes_startswith': 'int', 'mojo_bytes_endswith': 'int', 'mojo_bytes_decode': 'char *', 'mojo_bytes_hex': 'char *', 'mojo_bytes_removeprefix': 'MojoBytes *', 'mojo_bytes_removesuffix': 'MojoBytes *', 'mojo_bytes_title': 'MojoBytes *', 'mojo_bytes_capitalize': 'MojoBytes *', 'mojo_bytes_swapcase': 'MojoBytes *', 'mojo_bytes_ljust': 'MojoBytes *', 'mojo_bytes_rjust': 'MojoBytes *', 'mojo_bytes_center': 'MojoBytes *', 'mojo_bytes_zfill': 'MojoBytes *', 'mojo_bytes_fill_byte': 'int', 'mojo_bytes_partition': 'MojoList *', 'mojo_bytes_rpartition': 'MojoList *', 'mojo_bytes_fromhex': 'MojoBytes *', 'mojo_bytes_cstr_key': 'char *', 'mojo_bytes_maketrans': 'MojoBytes *', 'mojo_bytes_translate': 'MojoBytes *', 'mojo_bytes_is': 'int', 'mojo_bytes_replace': 'MojoBytes *', 'mojo_bytes_replace_n': 'MojoBytes *', 'mojo_bytes_strip': 'MojoBytes *', 'mojo_bytes_upper': 'MojoBytes *', 'mojo_bytes_lower': 'MojoBytes *', 'mojo_bytes_split': 'MojoList *', 'mojo_bytes_rsplit': 'MojoList *', 'mojo_bytes_split_max': 'MojoList *', 'mojo_bytes_splitlines': 'MojoList *', 'mojo_bytes_splitlines_keep': 'MojoList *', 'mojo_bytes_join': 'MojoBytes *', 'mojo_bytes_copy': 'MojoBytes *', 'mojo_bytearray_new': 'MojoBytes *', 'mojo_bytearray_copy': 'MojoBytes *', 'mojo_bytearray_mark': 'MojoBytes *', 'mojo_bytearray_pop': 'int64_t', 'mojo_bytearray_insert': 'void', 'mojo_bytearray_remove': 'void', 'mojo_memoryview_new': 'MojoMemoryView *', 'mojo_memoryview_from_bytes': 'MojoMemoryView *', 'mojo_memoryview_len': 'int64_t', 'mojo_memoryview_get': 'int64_t', 'mojo_memoryview_slice': 'MojoMemoryView *', 'mojo_memoryview_tobytes': 'MojoBytes *', 'mojo_memoryview_eq': 'int', 'mojo_memoryview_hex': 'char *', 'mojo_memoryview_cast': 'MojoMemoryView *', 'mojo_memoryview_repr': 'char *', 'mojo_memoryview_nbytes': 'int64_t', 'mojo_memoryview_itemsize': 'int64_t', 'mojo_memoryview_format': 'char *', 'mojo_memoryview_obj': 'MojoBytes *', 'mojo_memoryview_readonly': 'int', 'mojo_struct_compile': 'MojoStructFmt *', 'mojo_struct_new': 'MojoStructFmt *', 'mojo_struct_calcsize': 'int64_t', 'mojo_struct_size': 'int64_t', 'mojo_struct_format': 'char *', 'mojo_struct_pack_list': 'MojoBytes *', 'mojo_struct_pack_h': 'MojoBytes *', 'mojo_struct_unpack': 'MojoList *', 'mojo_struct_unpack_from': 'MojoList *', 'mojo_struct_unpack_h': 'MojoList *', 'mojo_struct_unpack_from_h': 'MojoList *', 'input': 'char *', 'string_lower': 'char *', 'string_strip': 'char *', 'string_upper': 'char *', 'compile_to_gimple': 'char *', 'py_tokenize': 'MojoList *', 'Parser': 'Parser *', 'Interpreter': 'Interpreter *'}
 _FLOAT_TYPES = {'double', 'float', '__fp16'}
 # The `struct` module's module-level function surface, mapped to the C type
 # each call's VALUE has. This is the SINGLE source of that answer, consulted by
@@ -504,338 +366,6 @@ _STRUCT_MODULE_FN_RETVALS = {
     'iter_unpack': 'MojoList *',
     'pack_into': 'int',
 }
-def _struct_value_codes(fmt: str | None):
-    """The per-VALUE format codes of a const-foldable struct format string
-    ('4h' -> ['h','h','h','h'], 'x' padding dropped, '10s' -> ['s']), or
-    None if the format isn't statically known. Used to pick the right
-    MojoList append (int vs double vs bytes-pointer) per argument and the
-    element type of an unpack result.
-
-    THE single implementation of the struct-format grammar. Mirrors the
-    runtime's own format compiler (runtime/fire_runtime.c's
-    mojo_struct_compile) code for code, so a codegen answer and a runtime
-    answer cannot disagree; the runtime is the one that has to be right when
-    they do, which is why its per-slot kinds are the ones recorded on the
-    value (mojo_list_set_kinds) and this table is only ever used to decide
-    statically.
-
-    WHY THE BODY LIVES HERE AND NOT IN A DELEGATE. Merging integ (which
-    introduced `_struct_format_codes` as the canonical name) with metal
-    (which had relocated these three helpers into this module) briefly left
-    TWO copies of the parser. Collapsing the duplicate by making THIS name a
-    tail-call delegate to `_struct_format_codes` compiles standalone but
-    breaks the whole-closure `mojoc`/`selfhost` build with
-
-        resolve_shared.py:98: error: assignment to 'int64_t' from 'MojoList *'
-        makes integer from pointer without a cast [-Wint-conversion]
-
-    on `codes = _struct_value_codes(gen._try_const_fold_str(fmt_node))`.
-    The self-hosted return-type inference reads a list LITERAL (`codes = []`
-    below) as direct evidence that the result is a `MojoList *`; a function
-    whose only `return` is a call to another function gives it nothing local
-    to read, the local falls back to the int64_t default, and the assignment
-    then mismatches. So the inference needs the `codes = []` to be in the
-    function whose own return type is being decided -- which is why the
-    duplicate was collapsed in THIS direction rather than the other.
-    `_struct_format_codes` below delegates here, keeping both spellings
-    working for their existing callers (`types.py` internally, and
-    `emit_methods.py`'s shim).
-    """
-    if not isinstance(fmt, str):
-        return None
-    codes = []
-    i, n = 0, len(fmt)
-    if i < n and fmt[i] in '<>=!@':
-        i += 1
-    while i < n:
-        c = fmt[i]
-        if c in ' \t\n':
-            i += 1
-            continue
-        count = None
-        if c.isdigit():
-            count = 0
-            while i < n and fmt[i].isdigit():
-                count = count * 10 + int(fmt[i]); i += 1
-            if i >= n:
-                return None
-            c = fmt[i]
-        i += 1
-        if c not in 'xbBhHiIlLqQfds?c':
-            return None
-        if c in 'sc':
-            codes.append('s')
-        elif c == 'x':
-            continue
-        else:
-            codes.extend([c] * (1 if count is None else count))
-    return codes
-
-
-def _struct_slot_kinds(codes):
-    """Per-slot element kind for an unpack format: one of 'int'/'double'/
-    'bytes' per value, in wire order.
-
-    A `MojoList` holds ONE element ctype, which is why a format mixing ints
-    and floats used to degrade wholesale to int64 slots — the float came
-    back as its raw IEEE bits (`struct.unpack('<if', ...)` giving
-    `1 4607182418800017408`). But the format string is a compile-time
-    constant here, so each slot's real kind is statically known and only
-    the CONTAINER is untyped. Recording the per-slot kinds lets every
-    statically-indexed read of the result pick the right accessor for that
-    slot: the subscript (emit_calls.py's MojoList branch), the `a, b = t`
-    destructuring target (loops_shared._tuple_elem_value), and the
-    whole-result repr (`_list_repr_fn` -> `mojo_repr_list_kinds`). It is a
-    property of the VALUE, not of whether it was bound to a local; a read
-    with no compile-time slot index (iteration, a computed subscript) still
-    has no single right C type. That residue was closed in the RUNTIME, by
-    moving the per-slot kinds onto the live `MojoList` (a side table keyed on
-    its address) and boxing a read with no compile-time index — see
-    `mojo_list_set_kinds` / `mojo_list_get_boxed` / `mojo_repr_boxed` in
-    runtime/fire_runtime.c and `_lower_LambdaExpr`'s env-field block in
-    emit_calls.py for the consumers.
-    """
-    out = []
-    for c in codes or ():
-        if c in 'fd':
-            out.append('double')
-        elif c == 's' or c == 'c':
-            out.append('bytes')
-        else:
-            out.append('int')
-    return out
-
-
-def _struct_elem_ctype(codes):
-    """Uniform MojoList element ctype for an unpack tuple, or 'int64_t'
-    when the codes are mixed / unknown (the common integer-format case is
-    exact; a genuinely mixed int+float format degrades to int64 slots).
-
-    That degradation is now confined to reads with no compile-time slot
-    index: `_struct_slot_kinds` carries the real per-slot kinds, and the
-    subscript, the `a, b = t` destructuring target and the whole-result repr
-    all consult it. See `_struct_slot_kinds` / `_struct_attr_format` in
-    mojo/backend_gimple/emit_methods.py, which are where those consumers are
-    written."""
-    if not codes:
-        return 'int64_t'
-    kinds = set()
-    for c in codes:
-        if c in 'fd':
-            kinds.add('double')
-        elif c == 's':
-            kinds.add('bytes')
-        else:
-            kinds.add('int')
-    if kinds == {'double'}:
-        return 'double'
-    if kinds == {'bytes'}:
-        return 'MojoBytes *'
-    return 'int64_t'
-
-
-# Python `math` name -> the C type that function returns in C, for the
-# libm functions whose Python and C signatures are identical. The C symbol
-# is the same name, so this table is ALSO the identity map that tells the
-# backend which real symbol to call — gimple_codegen builds its
-# BUILTIN_VALUE_MAP entries from these keys rather than restating the
-# names, so "which C function" and "what does it return" cannot drift.
-#
-# `math` is not a resolvable module in this project
-# (module_loader's `can_resolve_module_path('math')` is False), so these
-# had no lowering at all: the name fell through `_safe_name` to a
-# `mojo_<name>` stub that nothing defines, which linked only against the
-# auto-stub (answering 0) and failed to link in a whole-closure build.
-#
-# Only functions that are genuinely 1:1 belong here. Deliberately ABSENT,
-# each for a concrete reason:
-#   - `round`    Python rounds half-to-EVEN and returns int for one arg;
-#                C `round` rounds half-away-from-zero and returns double.
-#   - `trunc`    kept (C trunc IS Python's math.trunc), but note `int()`
-#                is the floor-based one — different function, different name.
-#   - `degrees`/`radians`/`gcd`/`factorial`/`fsum`/`isqrt`/`dist`/`comb`/
-#     `perm`/`prod`   no same-named C function; mapping them would be a lie.
-#   - `frexp`/`modf`   return `double *` through an out-parameter, which
-#                this single-type table cannot express.
-#   - `pow` with integer arguments and `hypot` with >2 args are fine as
-#     double (C promotes), so both stay.
-_LIBM_FN_RETVALS = {
-    'sqrt': 'double', 'exp': 'double', 'log': 'double', 'log2': 'double',
-    'log10': 'double', 'sin': 'double', 'cos': 'double', 'tan': 'double',
-    'asin': 'double', 'acos': 'double', 'atan': 'double', 'atan2': 'double',
-    'sinh': 'double', 'cosh': 'double', 'tanh': 'double',
-    'asinh': 'double', 'acosh': 'double', 'atanh': 'double',
-    'pow': 'double', 'fabs': 'double', 'floor': 'double', 'ceil': 'double',
-    'trunc': 'double', 'fmod': 'double', 'expm1': 'double', 'log1p': 'double',
-    'cbrt': 'double', 'hypot': 'double', 'copysign': 'double',
-    'erf': 'double', 'erfc': 'double', 'lgamma': 'double', 'tgamma': 'double',
-    'ldexp': 'double', 'remainder': 'double', 'nextafter': 'double',
-    'fma': 'double',
-    # C returns int; Python returns bool, and _Bool would be the closer
-    # match, but `int` is what the surrounding scalar conventions use for
-    # a truth value and converts to either without a cast.
-    'isnan': 'int', 'isinf': 'int', 'isfinite': 'int',
-}
-
-# The dispatch-table and type-table MODULE GLOBALS, with the C DECLARATION
-# TYPE each one really has. ONE mapping, because four sites need this same fact
-# and each used to carry its own hand-written copy -- and the copies drifted the
-# moment the globals moved from `gimple_codegen.py` into `mojo/middle/types.py`
-# under the module split, which is how "struct _mojo_middle_types_toplev has no
-# member named '_TYPE_MAP'" happened.
-#
-# THE TYPE IS PART OF THE KEY'S ANSWER, and a bare "a dispatch table is a
-# `MojoDict *`" is wrong for eleven of the twenty-four: ten are sets
-# (`_CMP_OPS` is declared `_CMP_OPS: set` in `generated_dispatch.py`; the rest
-# are `frozenset`s or `{...}` set literals) and two are plain strings and two
-# are not containers at all. That mis-typing is not cosmetic. Each answer is
-# written into the SHARED, bare-name-keyed `_global_c_decl_types`, and
-# `_own_overlay_global_ctype`'s rule 1 ("a container cdecl beats a scalar
-# own-conclusion") then lets it beat the OWNING module's own correct
-# conclusion -- so module_loader's `_C_KEYWORDS = frozenset({...})` found
-# `_global_c_decl_types['_C_KEYWORDS'] == 'MojoDict *'` and refused to coerce:
-#
-#     # ERROR: compiling imported module 'module_loader': cannot coerce
-#     #   MojoSet * to MojoDict * (incompatible container kinds)
-#
-# for four modules of the self-host closure, `selfhost`/`mojoc` red.
-#
-# Read the global's own DEFINITION before adding a name -- a `{...}` literal
-# with no `key: value` pairs is a SET, not a dict. `'int64_t'` is the BOX: the
-# value is right and there is no typed accessor, which is the convention
-# `_gscan_declare_global`'s own non-dispatch arms use for exactly that case
-# (`_FIXED_ARRAY_ANN_RE` is a compiled regex; its pattern source lives in
-# `_regex_patterns` and `.finditer()` is lowered from that string, so the
-# object itself is never read at run time).
-#
-# `dispatch_table_global_ctype` below is the ONLY way out of this table, so
-# membership ("is this one of ours?") and the type ("what C type is it?")
-# cannot come apart the way a name-list-plus-a-parallel-type-list pair does.
-_DISPATCH_TABLE_GLOBAL_CTYPES = {
-    # ── dicts ──
-    '_STMT_DISPATCH': 'MojoDict *',
-    '_EXPR_DISPATCH': 'MojoDict *',
-    '_BIN_OPS': 'MojoDict *',
-    '_TYPE_MAP': 'MojoDict *',
-    '_SIGNED': 'MojoDict *',
-    '_UNSIGNED': 'MojoDict *',
-    '_FLOAT': 'MojoDict *',
-    '_LIBM_FN_RETVALS': 'MojoDict *',
-    '_SELFHOST_EXTRA_FIELD_CACHE': 'MojoDict *',
-    # ── `frozenset`s and `{...}` set literals ──
-    '_CMP_OPS': 'MojoSet *',
-    '_C_KEYWORDS': 'MojoSet *',
-    '_C_RESERVED_FUNCS': 'MojoSet *',
-    '_FORCE_RENAME_RESERVED': 'MojoSet *',
-    '_CPP_KEYWORD_FIELDS': 'MojoSet *',
-    '_C_PARAM_EXTRA_KEYWORDS': 'MojoSet *',
-    '_PSEUDO_DUNDER_ATTRS': 'MojoSet *',
-    '_LIST_RETURNING_METHODS': 'MojoSet *',
-    '_STR_RETURNING_METHODS': 'MojoSet *',
-    '_SCALAR_INT_TYPES': 'MojoSet *',
-    '_SCALAR_FLOAT_TYPES': 'MojoSet *',
-    # ── plain strings ──
-    '_CPP_CALLABLE_CTYPE': 'char *',
-    '_CPP_CALLABLE_CTYPE_1ARG': 'char *',
-    '_UNKNOWN_FIELD_CTYPE': 'char *',
-    # ── no typed accessor: the box ──
-    '_FIXED_ARRAY_ANN_RE': 'int64_t',
-}
-
-
-# ---------------------------------------------------------------------------
-# Modules whose CALLS this compiler answers from the SOURCE TEXT, at compile
-# time, so the runtime value of a call on the module MARKER is never observed.
-# ---------------------------------------------------------------------------
-
-# `re` is the one today: `_gmi_phase17`'s `X = re.compile("...")` scan records
-# the PATTERN against `X` (`gen._regex_patterns`), and `.finditer()` /
-# `.findall()` on `X` are then lowered against that recorded pattern with
-# `mojo_regex_*` — the value stored in `X` is a token and is never read.
-#
-# This table exists because that fact is load-bearing somewhere ELSE, and the
-# somewhere else used to get it wrong. `import re` binds a module MARKER: an
-# `int64_t` global initialised to 0 (`_root_globals.re = 0`), because
-# `module_loader.can_resolve_module_path('re')` is false — that predicate asks
-# whether there is MOJO SOURCE for a module under `TEST_PATH` or `std*`, and
-# the real Python stdlib is neither. So `re.compile(...)` is genuinely stubbed
-# to the marker, i.e. to 0, in the generated C — and that is CORRECT, because
-# nothing reads it.
-#
-# `_uncompiled_module_marker`'s raise (see
-# bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md) therefore
-# has to exclude these modules: it answers “is this a marker for a module this
-# compile never compiled”, which is true for `re` and irrelevant, because the
-# compile-time recogniser already holds the answer. Raising there turned
-# `for m in re.compile(r'[a-z]+').finditer(src)` into
-# `NotImplementedError: re.compile: module 're' is not compiled into this
-# binary` — on master that program prints its matches, so this is a regression
-# caught by `test_silent_noop_iter.py::finditer_still_lowered`.
-#
-# ONE table, read by the recogniser that fills `_regex_patterns` AND by the
-# predicate that decides not to raise, so “which modules are compile-time
-# handled” has one answer. A second module only enters by being implemented
-# here and in the recogniser together — which is the point.
-_COMPILE_TIME_CALL_MODULES = frozenset({'re'})
-
-
-def compile_time_call_module(module: str) -> bool:
-    """Does this compiler answer `module.<name>(...)` from the SOURCE TEXT?
-
-    True for `re` today — see `_COMPILE_TIME_CALL_MODULES`. A module in this
-    set binds a 0 marker and every call on it is answered by a lowering that
-    read the call's own arguments, so neither the marker's value nor the call's
-    return value is observable. See that set's comment for the two readers
-    that must agree and the regression that comes of it when they do not."""
-    return module in _COMPILE_TIME_CALL_MODULES
-
-
-def regex_prog_for(gen, pattern: str) -> dict:
-    """Compile `pattern` into `gen`'s emitted regex-program tables, reusing the
-    one already built for that exact pattern text.
-
-    THE one place a compile-time-known pattern becomes program tables, because
-    three lowerings need it (`finditer`/`findall` in emit_loops, and every
-    `P.<method>(...)` arm in emit_methods) and each of them open-coding the
-    "already compiled? reuse : compile" step is how they came to disagree about
-    WHICH tables a given pattern gets — two programs for one pattern text means
-    two `static const ARRAY[]` declarations of the same shape, and the second
-    one's name is a fresh `re<N>` the first lowering never heard of.
-
-    It lives HERE, not in `emit_loops`, because that module imports
-    `emit_methods` and the reverse import would be a cycle; this module is
-    imported by both (as `gimple_ctypes`) and already owns the regex-compile
-    dependency. `emit_loops._regex_prog_for` is a thin delegate to it.
-    """
-    if pattern not in gen._regex_progs:
-        prog_id = f"re{len(gen._regex_progs)}"
-        gen._regex_progs[pattern] = regex_compile.compile_pattern(pattern, prog_id)
-    return gen._regex_progs[pattern]
-
-
-def dispatch_table_global_ctype(name) -> str | None:
-    """The C declaration type for the compiler-internal table global `name`,
-    or None when it is not one of ours.
-
-    ONE accessor for the whole table, rather than the table plus a names list:
-    a `name -> ctype` mapping and a parallel `names` list can disagree, and
-    that disagreement has been a build break twice (see
-    `_DISPATCH_TABLE_GLOBAL_CTYPES`'s own comment) -- `selfhost` red with
-    "cannot coerce MojoSet * to MojoDict *". `... is not None` is therefore
-    also the ONE membership test, which is the other half of what a name list
-    was for.
-
-    A FUNCTION, and not a bare read of the dict at each call site: these sites
-    are in other modules (`mojo/backend_gimple/module_gen.py`,
-    `mojo/middle/module_shared.py`, `gimple_codegen.py`), and a cross-module
-    call is the one shape that does not depend on how the self-hosted compiled
-    path represents another module's globals. A module-level `dict.get` and a
-    module-level `in` over a dict literal both happen to work there today; a
-    cross-module ATTRIBUTE read of one does not, and a `tuple(<dict>)` /
-    `set(<tuple>)` derived view of the table does not either, so neither this
-    function nor its callers may be "simplified" into either."""
-    return _DISPATCH_TABLE_GLOBAL_CTYPES.get(name)
-
 _SCALAR_CTORS = {'Float32': 'float', 'Float64': 'double', 'Float16': '__fp16', 'BFloat16': '__fp16', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Int': 'int64_t', 'UInt': 'uint64_t', 'Bool': '_Bool'}
 _STR_WRAPPER_CTORS = frozenset({'StringSlice', 'StaticString'})
 
@@ -843,16 +373,20 @@ def _split_top_level_commas(s: str) -> list[str]:
     """Split `s` on commas that are not nested inside ([{ }]). Used to pull
     just the element-type segment out of a multi-arg bracket annotation like
     `UnsafePointer[X, SomeOrigin]` without splitting inside a nested `X` that
-    itself contains a bracketed, comma-bearing type arg (e.g. `Tuple[Int, Int]`).
-
-    This is fire_compiler.split_top_level_commas under the name this module's
-    ~25 callers already use, and it is an ALIAS rather than a second copy: the
-    same bracket-aware split serves a bracket annotation AND an
-    unpacking-target string, and a trailing-comma 1-tuple target is only
-    expressible if every reader drops the empty slot it leaves (see
-    fire_compiler.py's "Unpacking-target representation" section). Two copies
-    would be free to disagree about exactly that."""
-    return split_top_level_commas(s)
+    itself contains a bracketed, comma-bearing type arg (e.g. `Tuple[Int, Int]`)."""
+    parts, depth, buf = ([], 0, [])
+    for c in s:
+        if c in '([{':
+            depth += 1
+        elif c in ')]}':
+            depth = max(0, depth - 1)
+        if c == ',' and depth == 0:
+            parts.append(''.join(buf))
+            buf = []
+        else:
+            buf.append(c)
+    parts.append(''.join(buf))
+    return parts
 
 def _class_attr_ctype(v) -> str | None:
     """C pointer type for a container-valued class-body attribute initializer
@@ -886,38 +420,44 @@ def _class_attr_ctype(v) -> str | None:
 def _struct_format_codes(fmt):
     """The per-VALUE format codes of a const-foldable struct format string
     ('4h' -> ['h','h','h','h'], 'x' padding dropped, '10s' -> ['s']), or
-    None if the format isn't statically known.
-
-    A THIN DELEGATE to `_struct_value_codes` beside it, which holds the one
-    implementation of the grammar. This is the spelling
-    `mojo/backend_gimple/emit_methods.py`'s shim uses; kept so the merge with
-    integ need not touch its call sites, and so the grammar cannot come to
-    exist in two places. See `_struct_value_codes` for why the implementation
-    sits there rather than here."""
-    return _struct_value_codes(fmt)
-
-def _struct_literal_format(a) -> str | None:
-    """The format string a `struct.*` call's format ARGUMENT node literally
-    carries, or None for anything that is not a plain non-bytes string
-    literal.
-
-    The one place the "is this format statically known" bar is defined, for
-    both callers: `struct.unpack(fmt, buf)`'s first argument and
-    `struct.Struct(fmt)`'s single argument are the same question with the
-    same answer, so they must not each grow their own reading of what a
-    literal node looks like — that is how `_returns_kinds_valued` came to
-    reach for `.value` on whatever node it was handed and crash with
-    `AttributeError: 'IdentExpr' object has no attribute 'value'` on
-    `struct.unpack(fmt, buf)` where `fmt` is a variable (zipfile,
-    shutil, tempfile, importlib/resources/*).
-
-    A bytes literal is None on purpose: `struct.unpack(b'<if', buf)` takes
-    its format as bytes, and none of the callers' callers want to reason
-    about that spelling here."""
-    if isinstance(a, StringLiteral):
-        val = a.value
-        return val if isinstance(val, str) and not a.is_bytes else None
-    return None
+    None if the format isn't statically known. Mirrors the runtime's own
+    format compiler (runtime/fire_runtime.c's mojo_struct_compile) code for
+    code, so a codegen answer and a runtime answer cannot disagree; the
+    runtime is the one that has to be right when they do, which is why its
+    per-slot kinds are the ones recorded on the value
+    (mojo_list_set_kinds) and this table is only ever used to decide
+    statically. Lives here, beside `_struct_ctor_format`, so the
+    struct-format knowledge the low-level middle tier and the backend share
+    has ONE definition."""
+    if not isinstance(fmt, str):
+        return None
+    codes = []
+    i, n = 0, len(fmt)
+    if i < n and fmt[i] in '<>=!@':
+        i += 1
+    while i < n:
+        c = fmt[i]
+        if c in ' \t\n':
+            i += 1
+            continue
+        count = None
+        if c.isdigit():
+            count = 0
+            while i < n and fmt[i].isdigit():
+                count = count * 10 + int(fmt[i]); i += 1
+            if i >= n:
+                return None
+            c = fmt[i]
+        i += 1
+        if c not in 'xbBhHiIlLqQfds?c':
+            return None
+        if c in 'sc':
+            codes.append('s')
+        elif c == 'x':
+            continue
+        else:
+            codes.extend([c] * (1 if count is None else count))
+    return codes
 
 
 def _struct_format_is_mixed(fmt) -> bool:
@@ -965,7 +505,11 @@ def _struct_ctor_format(v) -> str | None:
         return None
     if len(v.args) != 1 or getattr(v, 'kwargs', None):
         return None
-    return _struct_literal_format(v.args[0])
+    a = v.args[0]
+    if isinstance(a, StringLiteral):
+        val = a.value
+        return val if isinstance(val, str) and not a.is_bytes else None
+    return None
 _FIXED_ARRAY_ANN_RE = re.compile('^\\[\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*;\\s*([A-Za-z_0-9]+)\\s*\\]$')
 
 
@@ -1003,7 +547,7 @@ def _mojo_type(ann: str | type | None) -> str:
         return 'int64_t'
     if isinstance(ann, str) and ann.endswith('()') and ('[' not in ann):
         base = ann[:-2].strip()
-        if base in ('list', 'List', 'DynamicVector', 'Array'):
+        if base in ('list', 'List', 'DynamicVector'):
             return 'MojoList *'
         if base in ('dict', 'Dict'):
             return 'MojoDict *'
@@ -1019,20 +563,7 @@ def _mojo_type(ann: str | type | None) -> str:
         if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
             elem = _mojo_type(_split_top_level_commas(inner)[0].strip())
             return f'{elem} *'
-        if base in ('List', 'list', 'InlineArray', 'Array'):
-            # `Array[T, N]` — Mojo's fixed-size array — is a LIST at this
-            # representation level, exactly like `List[T]`: one `MojoList *`
-            # with an element type, no separate fixed-size struct. It was
-            # missing here, so the annotation erased to `int64_t` and every
-            # use lost its static container type. The visible damage was a
-            # `for x in xs:` over an `Array[Int, N]`, where an untyped
-            # iterable emits the runtime dict-or-list dispatch and the DICT
-            # arm declares the loop variable `char *` (it is a key); the
-            # later `var val = <a double>` in the same function then assigned
-            # a double to that `char *` — "cannot convert to a pointer type"
-            # in the stdlib's test_math.mojo. Also in
-            # `_IMPORTED_STRUCT_SKIP_BASENAMES`, i.e. already agreed not to
-            # be an ordinary imported struct.
+        if base in ('List', 'list', 'InlineArray'):
             return 'MojoList *'
         if base in ('Dict', 'dict'):
             return 'MojoDict *'
@@ -1317,13 +848,7 @@ def _safe_field(name: str) -> str:
     if name in _C_KEYWORDS or name in _C_PARAM_EXTRA_KEYWORDS or name in _C_MACRO_NAMES or (name in _CPP_KEYWORD_FIELDS):
         return f'_kw_{name}'
     return name
-_C_RESERVED_FUNCS = frozenset({'exit', 'abort', 'write', 'read', 'close', 'malloc', 'calloc', 'realloc', 'free', 'printf', 'fprintf', 'snprintf', 'sprintf', 'dprintf', 'puts', 'putchar', 'memcpy', 'memmove', 'memset', 'memcmp', 'memchr', 'strlen', 'strcmp', 'strncmp', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strchr', 'strrchr', 'strstr', 'strtok', 'strerror', 'atoi', 'atol', 'atoll', 'atof', 'strtol', 'strtoll', 'strtod', 'strtof', 'setvbuf', 'setbuf', 'remainderf', 'remainderl', 'posix_spawn', 'posix_spawnp', 'index', 'rindex', 'cos', 'cosf', 'sin', 'sinf', 'tan', 'tanf', 'acos', 'acosf', 'asin', 'asinf', 'atan', 'atanf', 'atan2', 'atan2f', 'ceil', 'ceilf', 'floor', 'floorf', 'round', 'roundf', 'trunc', 'truncf', 'sqrt', 'sqrtf', 'cbrt', 'cbrtf', 'pow', 'powf', 'exp', 'expf', 'exp2', 'exp2f', 'log', 'logf', 'log2', 'log2f', 'log10', 'log10f', 'fabs', 'fabsf', 'fmod', 'fmodf', 'erf', 'erff', 'erfc', 'erfcf', 'tgamma', 'lgamma', 'ldexp', 'ldexpf', 'frexp', 'frexpf', 'modf', 'modff', 'sinh', 'sinhf', 'cosh', 'coshf', 'tanh', 'tanhf', 'asinh', 'acosh', 'atanh', 'asinhf', 'acoshf', 'atanhf', 'nextafter', 'nextafterf', 'copysign', 'copysignf', 'nan', 'nanf', 'hypot', 'hypotf', 'fma', 'fmaf', 'remainder', 'expm1', 'expm1f', 'log1p', 'log1pf', 'scalb', 'scalbf', 'scalbn', 'scalbnf', 'logb', 'logbf', 'j0', 'j1', 'y0', 'y1', 'getenv', 'setenv', 'unsetenv', 'putenv', 'realpath', 'open', 'fopen', 'fclose', 'fread', 'fwrite', 'fseek', 'ftell', 'rewind', 'fflush', 'getline', 'getdelim', 'fgets', 'fputs', 'feof', 'ferror', 'clearerr', 'vprintf', 'vfprintf', 'vsnprintf', 'vsprintf', 'fdopen', 'popen', 'pclose', 'remove', 'rename', 'rand', 'srand', 'random', 'srandom', 'getuid', 'getgid', 'getpid', 'getppid', 'waitpid', 'fork', 'execv', 'symlink', 'readlink', 'link', 'mkdir', 'chmod', 'chown', 'unlink', 'rmdir', 'ioctl', 'fcntl', 'dup', 'dup2', 'pipe', 'dlopen', 'dlsym', 'dlclose', 'dlerror', 'access', 'stat', 'lstat', 'fstat', 'qsort', 'bsearch', 'abs', 'labs', 'llabs', 'fabsf', 'fmodf', 'sqrtf', 'powf', 'ceilf', 'floorf', 'roundf', 'truncf', 'isfinite', 'isinf', 'isnan', 'isnormal', 'signbit', 'fpclassify', 'isalpha', 'isdigit', 'isalnum', 'isspace', 'isupper', 'islower', 'toupper', 'tolower', 'strdup', 'strndup', 'strtok_r', # `clock_gettime` is deliberately NOT here: it takes a `struct timespec*`,
-# and a struct is a frame blob that cannot cross the Mojo/C boundary --
-# the same reason formal/hostmods/time.mojo omits localtime/gmtime/mktime.
-# Its stdlib caller declares a mismatched signature, which a real
-# prototype in scope turns into `conflicting types for 'clock_gettime'`.
-'time', 'clock', 'difftime', 'clock_gettime_nsec_np',
-    'mach_absolute_time', 'mktime', 'strftime', 'gmtime', 'localtime', 'signal', 'raise', '_end'})
+_C_RESERVED_FUNCS = frozenset({'exit', 'abort', 'write', 'read', 'close', 'malloc', 'calloc', 'realloc', 'free', 'printf', 'fprintf', 'snprintf', 'sprintf', 'dprintf', 'puts', 'putchar', 'memcpy', 'memmove', 'memset', 'memcmp', 'memchr', 'strlen', 'strcmp', 'strncmp', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strchr', 'strrchr', 'strstr', 'strtok', 'strerror', 'atoi', 'atol', 'atoll', 'atof', 'strtol', 'strtoll', 'strtod', 'strtof', 'setvbuf', 'setbuf', 'remainderf', 'remainderl', 'posix_spawn', 'posix_spawnp', 'index', 'rindex', 'cos', 'cosf', 'sin', 'sinf', 'tan', 'tanf', 'acos', 'acosf', 'asin', 'asinf', 'atan', 'atanf', 'atan2', 'atan2f', 'ceil', 'ceilf', 'floor', 'floorf', 'round', 'roundf', 'trunc', 'truncf', 'sqrt', 'sqrtf', 'cbrt', 'cbrtf', 'pow', 'powf', 'exp', 'expf', 'exp2', 'exp2f', 'log', 'logf', 'log2', 'log2f', 'log10', 'log10f', 'fabs', 'fabsf', 'fmod', 'fmodf', 'erf', 'erff', 'erfc', 'erfcf', 'tgamma', 'lgamma', 'ldexp', 'ldexpf', 'frexp', 'frexpf', 'modf', 'modff', 'sinh', 'sinhf', 'cosh', 'coshf', 'tanh', 'tanhf', 'asinh', 'acosh', 'atanh', 'asinhf', 'acoshf', 'atanhf', 'nextafter', 'nextafterf', 'copysign', 'copysignf', 'nan', 'nanf', 'hypot', 'hypotf', 'fma', 'fmaf', 'remainder', 'expm1', 'expm1f', 'log1p', 'log1pf', 'scalb', 'scalbf', 'scalbn', 'scalbnf', 'logb', 'logbf', 'j0', 'j1', 'y0', 'y1', 'getenv', 'setenv', 'unsetenv', 'putenv', 'realpath', 'open', 'fopen', 'fclose', 'fread', 'fwrite', 'fseek', 'ftell', 'rewind', 'fflush', 'getline', 'getdelim', 'fgets', 'fputs', 'feof', 'ferror', 'clearerr', 'vprintf', 'vfprintf', 'vsnprintf', 'vsprintf', 'fdopen', 'popen', 'pclose', 'remove', 'rename', 'rand', 'srand', 'random', 'srandom', 'getuid', 'getgid', 'getpid', 'getppid', 'waitpid', 'fork', 'execv', 'symlink', 'readlink', 'link', 'mkdir', 'chmod', 'chown', 'unlink', 'rmdir', 'ioctl', 'fcntl', 'dup', 'dup2', 'pipe', 'dlopen', 'dlsym', 'dlclose', 'dlerror', 'access', 'stat', 'lstat', 'fstat', 'qsort', 'bsearch', 'abs', 'labs', 'llabs', 'fabsf', 'fmodf', 'sqrtf', 'powf', 'ceilf', 'floorf', 'roundf', 'truncf', 'isfinite', 'isinf', 'isnan', 'isnormal', 'signbit', 'fpclassify', 'isalpha', 'isdigit', 'isalnum', 'isspace', 'isupper', 'islower', 'toupper', 'tolower', 'strdup', 'strndup', 'strtok_r', 'time', 'clock', 'difftime', 'mktime', 'strftime', 'gmtime', 'localtime', 'signal', 'raise', '_end'})
 _FORCE_RENAME_RESERVED = frozenset({'index', 'rindex', 'getenv', 'atol', 'frexp', 'abort'})
 _IDENT_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'
 
@@ -1414,44 +939,6 @@ def _c_field_name(name: str) -> str:
     if safe in _C_KEYWORDS:
         return f'_{safe}'
     return safe
-
-def _env_field_ctype(ci, vname: str) -> str:
-    """The C type of closure `ci`'s ENV FIELD for `vname`.
-
-    A capture the closure (or, for a shared sibling env, any member of the
-    group) can REASSIGN is stored BY REFERENCE: `ClosureInfo.mut_names`
-    holds its name, and the field is a POINTER to the owner's heap box, not
-    the value. So the field's C type is the capture's declared type with one
-    `*` on top — `count = 0` captured by a sibling that does `count += 1`
-    is `int64_t * count`, not `int64_t count`.
-
-    Every site that DECLARES a field or STORES into one has to agree on
-    that, which is why the answer lives here rather than being spelled out
-    at each of them: a struct emitted with one spelling and filled with
-    another is a hard `-Wint-conversion` pair at every store, and the
-    store is a different file from the typedef.
-
-    Real, in `mojo/middle/offload.py`'s `rewrite_fused_loop`: `fusable`
-    and `walk` are siblings that call each other, so `discover_closures`
-    gives them ONE shared env whose `count` field is the by-reference
-    `int64_t *`, and `_lower_outer_closure_call` — the sibling-to-sibling
-    env copy — was loading `_env->count` into a temp typed from
-    `ci.captures` (`int64_t`). The struct was right and the code was
-    wrong, which gcc reports as a bare pointer/integer mismatch at
-    `fused = fusable(st)`, thousands of lines from either half.
-    """
-    for _cap in (getattr(ci, 'captures', None) or []):
-        if _as_str(_cap[0]) == vname:
-            _ct = _as_str(_cap[1])
-            if vname in (getattr(ci, 'mut_names', None) or ()):
-                return f'{_ct} *'
-            return _ct
-    # Not a declared capture: the only question left is whether the name is
-    # a by-reference one the capture list never spelled out.
-    if vname in (getattr(ci, 'mut_names', None) or ()):
-        return 'int64_t *'
-    return 'int64_t'
-
 _CPP_OPAQUE_PTR_STRUCTS = frozenset({'MojoList', 'MojoDict', 'MojoSet', 'MojoStr', 'MojoStrIter', 'MojoListIter', 'MojoDictIter', 'MojoSetIter', 'MojoGenerator', 'MojoAsync', 'MojoBoundMethod', 'PyObject', 'MojoCompletedProcess', 'MojoFileHandle'})
 _FIXED_RUNTIME_STRUCT_NAMES = frozenset({'MojoBoundMethod', 'MojoGenerator', 'MojoAsync'})
 
@@ -1619,25 +1106,29 @@ def _c_escape(s: str) -> str:
         i += 1
     return ''.join(out)
 
-def _str_literal_interp_flag(lit) -> str:
-    """`'1'` when `lit` is an interpolated (f/t) `StringLiteral`, `''` when it is
-    not — the string shape `resolve_shared._decode_str_literal_text` returns its
-    second slot in, and the same shape because that function's callers have to
-    hand the two back to the same tuple-unpacking helpers.
-
-    The answer is the AST's own `is_interpolated` field, never a sniff of
-    `lit.value`: an ordinary literal's value is its BODY and a body can start
-    with `f"` all by itself (`s = 'f"n"'`), which is how
-    `f"n"`/`t'x'`/`r"x"` were each read as a prefix token. The parser decides
-    from the source token and the node carries the decision, so every reader
-    asks the node.
-
-    `''` for anything that is not a `StringLiteral` and for a node the
-    self-hosted path hands over without the field, which is the same
-    `getattr(..., False)` convention `is_bytes` is read with."""
-    if getattr(lit, 'is_interpolated', False):
-        return '1'
-    return ''
+def _str_literal_value_is_fstring(val: str) -> bool:
+    """Does a raw StringLiteral.value (as the parser leaves it -- an
+    f/t-string keeps its prefix+quotes, unlike a plain string, whose
+    quotes the parser already strips at tokenize time -- see
+    GimpleGen._decode_str_literal_text's own comment) look like an f- or
+    t-string? Pure prefix-sniffing, factored out as its own free
+    function (rather than inlined at its one call site) so any FUTURE
+    caller that only needs the yes/no answer (not the fully decoded
+    text GimpleGen._decode_str_literal_text also strips out) has
+    somewhere to reuse it instead of re-deriving the same prefix-walk.
+    Deliberately mirrors (but, for now, does not share code with)
+    _decode_str_literal_text's identical prefix-walk -- that method is
+    a hot, widely-used (4 call sites) instance method deep in the
+    f-string/`%`-formatting lowering path; refactoring it to delegate
+    here is out of scope for this fix (unrelated risk, see this
+    codebase's "one careful step at a time" convention for exactly this
+    kind of prescan/global-inference change)."""
+    prefix = ''
+    rest = val
+    while rest and rest[0] in 'fFrRbBuUtT':
+        prefix += rest[0]
+        rest = rest[1:]
+    return bool(rest) and rest[0] in ('"', "'") and any((c in 'fFtT' for c in prefix))
 
 def _extract_init_expr(stmt_value) -> str:
     """Generate C initialization code for a module-level assignment RHS."""
@@ -1667,7 +1158,7 @@ def _extract_init_expr(stmt_value) -> str:
             return 'mojo_set_new()'
         return '0'
     elif isinstance(stmt_value, StringLiteral):
-        if _str_literal_interp_flag(stmt_value) == '1':
+        if _str_literal_value_is_fstring(stmt_value.value):
             return '0'
         return f'"{_c_escape(stmt_value.value)}"'
     elif isinstance(stmt_value, (CallExpr, IdentExpr)):
@@ -1685,9 +1176,9 @@ def _module_toplevel_name(module_name: str) -> str:
 
 def _module_init_name(module_name: str) -> str:
     """Public, documented C symbol name for a *library* module's module-scope
-    initializer (DYLIB_module_scope_never_executes, box.3d/game repo).
+    initializer (bugs/DYLIB_module_scope_never_executes.md, box.3d/game repo).
 
-    A `fire dylib` build (emit_entry_points=False) never emits any `main()` —
+    A `mojo dylib` build (emit_entry_points=False) never emits any `main()` —
     there is nothing in the produced .dylib's ABI that calls the module's own
     `_<module>_toplevel()` (see `_module_toplevel_name`), so every module-scope
     `var x = f()` / bare statement silently never ran. Two independent fixes
@@ -1708,51 +1199,12 @@ def _module_init_name(module_name: str) -> str:
     return f'{safe}_init'
 
 def _used_idents_node(node) -> set[str]:
-    """All IdentExpr names referenced in node; does NOT cross FunctionDef or
-    LambdaExpr boundaries.
-
-    Two rules, and the second one is what this function's structure exists to
-    enforce:
-
-    1. A name bound inside the subtree is not free. The explicit branches below
-       handle the shapes that need that said out loud (Comprehension subtracts
-       its generator targets, AssignStmt counts its target as a use, IfStmt
-       walks elifs and else), because a generic field walk cannot tell a
-       binding from a reference.
-    2. A node type with no explicit branch is walked GENERICALLY over its
-       dataclass fields, never silently reported as using nothing.
-
-    Rule 2 was added 2026-09-30 because the function used to end in a bare
-    `return set()`, which made an unhandled node type an UNDER-approximation:
-    the free names inside it vanished, and `discover_closures` feeds this set
-    straight into a closure's capture list (`used - inner_declared`), so a
-    `comptime if`, a `comptime for`, a `match`, an `await` or a `yield` nested
-    in a nested `def` with no explicit `[capture ...]` list produced a closure
-    that did not capture what its body reads. 39 of the 67 AST dataclass node
-    types had no branch. An over-approximation costs a slightly larger env and
-    is absorbed by the existing `inner_declared` subtraction; an
-    under-approximation is a wrong capture and a wrong read. Deliberately the
-    same direction as ForStmt, which also does not subtract its loop variable.
-
-    The generic walk must still not cross into a nested function or lambda, so
-    those two return early above and are never reached by the fallback.
-    """
+    """All IdentExpr names referenced in node; does NOT cross FunctionDef boundaries."""
     if node is None:
         return set()
-    if isinstance(node, (list, tuple, set, frozenset)):
-        rl: set = set()
-        for item in node:
-            rl |= _used_idents_node(item)
-        return rl
     if isinstance(node, IdentExpr):
         return {node.name}
     if isinstance(node, FunctionDef):
-        return set()
-    if isinstance(node, LambdaExpr):
-        # A closure boundary, for the same reason FunctionDef is one: the
-        # nested callable's own capture analysis is a separate pass, and
-        # counting its body's names here would make the ENCLOSING function
-        # capture variables only the lambda needs.
         return set()
     if isinstance(node, BinaryOp):
         return _used_idents_node(node.left) | _used_idents_node(node.right)
@@ -1845,25 +1297,6 @@ def _used_idents_node(node) -> set[str]:
             for s in node.else_body:
                 r5 |= _used_idents_node(s)
         return r5
-    if isinstance(node, MatchStmt):
-        rm = _used_idents_node(node.subject)
-        for case in node.cases:
-            rm |= _used_idents_node(case)
-        return rm
-    if isinstance(node, MatchCase):
-        # The guard and the body are free uses. The patterns contribute their
-        # EVALUATED parts and then give back their bindings, which is what makes
-        # `case mod.CONST` keep `mod` (a real read) while `case Int(v)` gives
-        # back both `Int` and `v`. Getting this the other way round is what the
-        # generic fallback would have done: a bare `case Int(v)` contributes
-        # `Int` (a type name) and `v` (a fresh binding) as if the enclosing
-        # function read both, and `discover_closures` would try to CAPTURE them.
-        rc = _used_idents_node(node.patterns)
-        if node.guard is not None:
-            rc |= _used_idents_node(node.guard)
-        for s in node.body:
-            rc |= _used_idents_node(s)
-        return rc - _match_pattern_bound(node.patterns)
     if isinstance(node, WhileStmt):
         r6 = _used_idents_node(node.condition)
         for s in node.body:
@@ -1895,83 +1328,7 @@ def _used_idents_node(node) -> set[str]:
         for s in node.body:
             r9 |= _used_idents_node(s)
         return r9
-    return _used_idents_generic(node)
-
-
-def _match_pattern_bound(patterns) -> set[str]:
-    """The names a `case`'s patterns BIND, which are therefore not free uses.
-
-    Follows `match` semantics rather than guessing: a bare name in a pattern is
-    an irrefutable CAPTURE, not a comparison. So `case _`, `case other`,
-    `case Int(v)`, `case [x, y, *rest]`, `case {"k": z}` and `case a as b` all
-    bind every IdentExpr they contain, and none of those is a use of an
-    enclosing name. A pattern that does compare against an existing name spells
-    it as a dotted value pattern -- `case mod.CONST` -- and that is the one
-    shape whose base must be KEPT, because `mod` really is read from the
-    enclosing scope. It arrives as a MemberExpr, whose `member` is a plain str
-    (the bound name, so nothing to add) and whose `obj` is the use, so
-    MemberExpr is deliberately not descended into.
-
-    Without this, every `match` in the new-modular syntax leaked its type names
-    and its bindings into the enclosing function's free-name set.
-    """
-    bound: set = set()
-
-    def go(p) -> None:
-        if p is None or isinstance(p, (str, bytes, int, float, bool)):
-            return
-        if isinstance(p, (list, tuple)):
-            for item in p:
-                go(item)
-            return
-        if isinstance(p, IdentExpr):
-            bound.add(p.name)
-            return
-        if isinstance(p, MemberExpr):
-            return          # value pattern: obj is a use, member is the binding
-        if dataclasses.is_dataclass(p):
-            for f in dataclasses.fields(p):
-                go(getattr(p, f.name, None))
-
-    for pat in (patterns or ()):
-        go(pat)
-    return bound
-
-
-def _used_idents_generic(node) -> set[str]:
-    """Rule 2: walk an unhandled node's dataclass fields for IdentExpr names.
-
-    Split out from `_used_idents_node` so the recursion is obviously total: this
-    is the only exit from that function that does not depend on the node's type
-    matching one of the branches above.
-
-    Every child goes back through `_used_idents_node`, never through itself.
-    That is the whole trick, and getting it wrong is silent: recursing into
-    `_used_idents_generic` instead walks an `IdentExpr` as a dataclass, finds
-    its `name` is a str, and returns NOTHING for it — so the generic path
-    reported zero free names and looked like a clean, plausible result. Strings,
-    ints, bools and None are not nodes and contribute nothing here, which is what
-    makes a blind field walk safe: a `VarDecl.name` or an annotation spelled as a
-    str cannot invent a use.
-
-    Because children re-enter `_used_idents_node`, a handled grandchild still
-    gets its specialised treatment (a `MatchStmt`'s case bodies reach ExprStmt
-    and AssignStmt that way), and an unhandled great-grandchild falls back here
-    again. Every step descends the tree, so this terminates.
-    """
-    if node is None or isinstance(node, (str, bytes, int, float, bool)):
-        return set()
-    if isinstance(node, (list, tuple, set, frozenset)):
-        r: set = set()
-        for item in node:
-            r |= _used_idents_node(item)
-        return r
-    if not dataclasses.is_dataclass(node) or isinstance(node, (FunctionDef, LambdaExpr)):
-        return set()
-    out: set = set()
-    for f in dataclasses.fields(node):
-        out |= _used_idents_node(getattr(node, f.name, None))
-    return out
+    return set()
 
 def _compute_exc_descendants(all_struct_defs):
     """For each struct name, the set of all struct names that transitively
@@ -2001,17 +1358,17 @@ def _compute_exc_descendants(all_struct_defs):
 def _unpack_target_leaf_names(target: str) -> list:
     """Flatten a tuple-unpack target string (`'(a, b)'`,
     `'(a, (b, (c, d)))'`, ... — the exact text _parse_unpack_target
-    preserves) into its LEAF variable names.
-
-    `fire_compiler.for_target_names` under the name this module's callers
-    already use, and an alias rather than a second walk: this is a
-    representation fire_compiler.py OWNS (see its "Unpacking-target
-    representation" section), and a second recursion over the same text is
-    exactly where the `(a,)` / `(a)` confusion came from — this copy stripped
-    the outer parens and recursed unconditionally, so it read a
-    parenthesised single NAME as a one-slot group and a 1-tuple as the same
-    thing. It is also what knows about the trailing comma."""
-    return for_target_names(target)
+    preserves) into its LEAF variable names. Bracket-aware at every
+    level: a naive `.split(',')` tore nested slots into paren-carrying
+    fragments that then leaked into declared-name sets (or worse, into
+    emitted C declarations verbatim)."""
+    t = target.strip()
+    if t.startswith('(') and t.endswith(')'):
+        names = []
+        for part in _split_top_level_commas(t[1:-1]):
+            names.extend(_unpack_target_leaf_names(part))
+        return names
+    return [t] if t else []
 
 def _declared_vars_body(stmts) -> set[str]:
     """Variables declared in a statement list (does not cross FunctionDef boundaries)."""
@@ -2022,16 +1379,10 @@ def _declared_vars_body(stmts) -> set[str]:
         elif isinstance(node, ForStmt):
             tgt = node.target
             name = tgt if isinstance(tgt, str) else getattr(tgt, 'name', '')
-            # Every target shape through the ONE leaf-name reader, with no
-            # "is it parenthesised?" test of its own. That test is what this
-            # used to do, and it is the reason a 1-tuple `'(a,)'` and a
-            # parenthesised name `'(a)'` were indistinguishable here: both
-            # took the paren branch and both produced the same one-element
-            # set, which happened to be right for NAMES and is why the
-            # distinction had to be pushed down to `for_target_is_tuple`
-            # rather than fixed here.
-            if isinstance(name, str) and name:
+            if isinstance(name, str) and name.startswith('(') and name.endswith(')'):
                 result.update(_unpack_target_leaf_names(name))
+            elif name:
+                result.add(name)
             result |= _declared_vars_body(node.body)
         elif isinstance(node, IfStmt):
             result |= _declared_vars_body(node.then_body)

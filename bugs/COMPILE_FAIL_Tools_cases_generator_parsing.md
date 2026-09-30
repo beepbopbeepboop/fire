@@ -1,87 +1,5 @@
 # COMPILE_FAIL: Tools/cases_generator/parsing.py
 
-## Status (2026-09-30, branch work/compile-fail-stdlib-misc — THIS DOC'S CENTRAL CLAIM IS NOW FALSE: the 12 own-file errors are GONE and the file BUILDS. But it is SILENTLY WRONG, which is worse, and the cause is `lexer.py`'s `globals()`, not `parsing.py`)
-
-Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Tools/cases_generator/parsing.py`:
-
-```
-Built: /Users/mrs/net/chatgpt/claude/work-95/.tmp/out/parsing     (exit 0, 12 s)
-```
-
-**Zero `error:` lines.** None of the twelve polymorphic
-`yield from self.<field>.tokens()` dispatch errors that every entry below
-records reproduces — `_struct_method_csym` evidently resolves those now (or
-the shape is refused at a level above gcc without failing the build). The
-doc's whole "12 own-file `parsing_gen.cpp` errors" premise is stale, and
-it has been for long enough that every entry below should be read as
-history rather than as a current description.
-
-### What replaces it is NOT a fix
-
-Run both, same arguments (none):
-
-```
-$ python3 /Users/mrs/net/Python-3.14.6/Tools/cases_generator/parsing.py ; echo rc=$?
-rc=0                                   # no output at all
-$ .tmp/out/parsing ; echo rc=$?
-globals: unavailable in compiled moderc=0
-```
-
-CPython prints nothing and exits 0. The compiled binary exits 0 and prints
-a codegen diagnostic **into its own stdout**. That is the
-silent-wrong-output class: a program's observable output now contains a
-compiler message.
-
-Root-caused from the generated closure `.ci` — the weak stub is
-
-```c
-__attribute__((weak)) int64_t globals (...) {
-    mojo_print ((char *)"globals: unavailable in compiled mode"); return (int64_t)0; }
-```
-
-and it has exactly two call sites, both in `_lexer_toplevel`, from
-`Tools/cases_generator/lexer.py:76,78`:
-
-```python
-operators = {op: pattern for op, pattern in globals().items() if op == op.upper()}
-for op in operators:
-    globals()[op] = op
-```
-
-So `lexer.py`'s `globals()` — the module-dictionary builtin — lowers to
-the generic unresolved-name weak stub, returns 0, prints into stdout, and
-`operators` / `opmap` become garbage. `parsing.py` itself is innocent: it
-merely imports `lexer`.
-
-This is the same "a weak stub prints into the program's stdout and
-returns a wrong value" failure `test_link_mode.py` and
-`test_comptime_parity.py` already guard against for other names, and it
-belongs to the `construct:compiled-silent-wrong-values` family, which is
-another worker's claim. Filed for the record in this doc rather than as a
-new doc, because the doc that claims this file does not compile is the one
-that has to record that it now compiles and misbehaves.
-
-### What a fix needs
-
-`globals()` (and `locals()` / `vars()`) is not an unresolved external: it
-is a builtin with a well-defined compiled meaning in this codegen — the
-module's own globals struct, which already exists per module
-(`_lexer_globals`, `_root_globals`, …). So the fix is to lower
-`globals()` to that struct's address rather than to fall through to the
-unresolved-name stub, and to make sure a weak stub can never print into a
-program's stdout (that half is a separate, general improvement worth its
-own doc).
-
-Until then this file is a **false green**: exit 0 with wrong output is
-harder to notice than the loud refusal it used to produce, and nothing in
-`make check` builds this file. If a sweep over `Tools/` starts reporting
-"built, exit 0" for these `cases_generator` files, it should be
-cross-checked against CPython's output, not trusted.
-
-Doc kept open — but the reason has completely changed, and the entry
-below about "12 own-file errors" should no longer be used as the current
-state.
-
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/parsing.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
@@ -153,7 +71,7 @@ statically-base-typed field/variable holding a subclass instance — that is
 precisely what this file's blocker needs (`self.body.tokens()` where
 `self.body`'s declared type is `Stmt` but its runtime type varies). Still
 squarely the excluded polymorphic-dispatch hard-doc cluster
-(`CODEGEN_generator_recursive_yield_from_no_arg_forwarding`/
+(`bugs/hard/CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md`/
 `CODEGEN_generator_classmethod_first_param_must_be_self.md`). Not
 attempted — real vtable/type-tag dispatch in the coroutine codegen path is
 a genuine feature project, not a narrow fix. No code change.
@@ -203,7 +121,7 @@ etc., plus `int64_t`→`char*`/`Stmt*` conversions), though the specific
 line numbers in `parsing_gen.cpp` shifted slightly (179/184/189/192/254/
 259/320/325/386/397/461/470 vs the previous 159/164/.../366/367). No
 regression, no fix — same deliberately-excluded polymorphic-dispatch gap
-(`CODEGEN_generator_recursive_yield_from_no_arg_forwarding`/
+(`bugs/hard/CODEGEN_generator_recursive_yield_from_no_arg_forwarding.md`/
 `CODEGEN_generator_classmethod_first_param_must_be_self.md` cluster). Not
 attempted, per this round's guidance against speculative changes to this
 shared, regression-prone machinery.
@@ -323,9 +241,9 @@ not this file's own code:
 /Users/mrs/net/Python-3.14.6/Tools/cases_generator/cwriter.py:20:1: error: type mismatch in binary expression
 ```
 
-Same root cause as `“COMPILE_FAIL: Tools/cases_generator/cwriter.py”`
+Same root cause as `bugs/COMPILE_FAIL_Tools_cases_generator_cwriter.md`
 (comprehension-assigned struct field defaulting to `int` — see
-`“the constructor-call-site field-typing pass understood only scalars”`).
+`bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`).
 Nothing specific to `parsing.py` itself was found. Not fixed here.
 
 ```

@@ -40,40 +40,23 @@ simplifications" below):
      another binding believe it shares ownership.
   6. `x` never appears as a call ARGUMENT (positional or keyword) unless
      the call is PROVABLY non-retaining:
-- a small whitelisted builtin known not to store its argument
-       beyond the call (`len`, `print`, `str`, `repr`, `bool`, `hash`,
-       `id` — read the value, never keep it), or
-     - a call this module can resolve (same narrow resolver as Phase 2:
-       a bare-name free function, or `self.method(...)`) whose matching
-       parameter is PROVABLY non-escaping, decided from the CALLEE'S OWN
-       BODY by `_summarize_params` — not from a `read` convention keyword.
-       In real Mojo a `read` parameter cannot be stored, but this compiler
-       lowers a copy (`var y = param`) as the SAME pointer, so a callee that
-       copied its `read` parameter into a field would leave the caller's
-       container aliased (see `_summarize_params`'s docstring for the real
-       crash that motivated this). An unresolved call, or a resolved one whose
-       matching parameter may escape, downgrades `x` — being used only via ITS
-       OWN methods (`x.append(...)`, `x["k"] = v`) is fine and does NOT count as
-       a call-argument use, since `x` there is the method's receiver (`.obj`),
-       not one of `args`/`kwargs`.
+       - a small whitelisted builtin known not to store its argument
+         beyond the call (`len`, `print`, `str`, `repr`, `bool`, `hash`,
+         `id` — read the value, never keep it), or
+       - a call this module can resolve (same narrow resolver as Phase 2:
+         a bare-name free function, or `self.method(...)`) whose matching
+         parameter's convention is canonically `read` — a `read`
+         parameter is BY DEFINITION a borrow the callee cannot store past
+         the call's own lifetime, which is exactly the guarantee needed
+         here. An unresolved call, or a resolved one where the matching
+         parameter is `mut`/`owned`/unannotated, downgrades `x` — being
+         used only via ITS OWN methods (`x.append(...)`, `x["k"] = v`) is
+         fine and does NOT count as a call-argument use, since `x` there
+         is the method's receiver (`.obj`), not one of `args`/`kwargs`.
   7. `x` never appears inside a nested `def`/`LambdaExpr` in the same
      function (a possible closure capture) — conservative exclusion,
      since this module (like ownership_check.py's Phase 1) does not
      analyze closures.
-     Deliberately still blanket, even though the parser now records an
-     explicit capture list (`FunctionDef.captures` /
-     `has_capture_list`) that would in principle say exactly which names
-     a nested scope can capture. `_nested_capture_names` already computes
-     that set and `analyze_returns_fresh` uses it, so the information
-     exists — but this rule rests on the module's core soundness default
-     ("a bare IdentExpr reached through generic recursion always
-     disqualifies that name... if a future change needs a new safe
-     pattern, it must be added as its own branch here, never by weakening
-     the default"), and rule 7 has no such branch. Narrowing it would buy
-     recall on a rare shape (a nested def rebinding a name that is also
-     an enclosing container candidate) at the cost of the one failure
-     mode this analysis is built to have none of: a wrong free. Left
-     alone deliberately, not overlooked.
   8. `x` is never the target of `del`.
 
 Known simplifications (by design, matching ownership_check.py's own
@@ -189,42 +172,6 @@ def _is_constructor_expr(node):
     return False
 
 
-def _is_fresh_string_expr(node) -> bool:
-    """True iff `node` is an EXPRESSION whose value is a brand-new heap
-    allocation the receiver/caller can never name — so a callee that returns it
-    hands its caller sole ownership, exactly as `analyze_returns_fresh` already
-    concludes for a container display.
-
-    Every form here was read in the lowering, not inferred from a type:
-      - `a + b` — `mojo_str_cat` always copies (doc/MEMORY.html §4.2), and on
-        a list the same spelling is `mojo_list_concat`, a fresh list. Either
-        way the result is not an alias of an operand. A non-container `+` (two
-        ints) is an `int64_t`, which the declaration gate never frees, so
-        accepting it is inert rather than wrong.
-      - an f-string — its accumulator is built by `_emit_str_cat` and is fresh
-        by the same argument.
-      - `s[a:b]` — `mojo_cstr_slice` is on the runtime's fresh-string list and
-        `mojo_list_slice` on its fresh-container one.
-
-    Deliberately NOT accepted, each because it can return its own argument and a
-    `free()` of that is a crash: `str(s)`/`String(s)` (the identity for a
-    string — emit_calls.py's `fname_raw == 'str'` branch returns `ev`
-    unchanged), a bare string method call (the receiver rules in
-    `receiver_results_consumed` decide those, per call site, and the receiver
-    may not even be a string), and any other call (whether it is fresh is
-    exactly the question being asked)."""
-    # `N.is_fstring_literal(node)` as well as the (never-constructed, see its
-    # own definition) `TstringLiteral`: an f-string is a plain `StringLiteral`
-    # whose value keeps its `f` prefix and quotes, so without this an
-    # interpolated string read as a CONSTANT here and the name that holds it
-    # was never credited with owning anything.
-    if isinstance(node, (N.TstringLiteral, N.SliceExpr)) or N.is_fstring_literal(node):
-        return True
-    if isinstance(node, N.BinaryOp) and node.op == '+':
-        return True
-    return _is_string_percent_expr(node)
-
-
 def _is_maybe_fresh_expr(node) -> bool:
     """A right-hand side that MAY build a brand-new container the assigned name
     would solely own: a call (a runtime function such as `.split()`/`.keys()`,
@@ -235,34 +182,11 @@ def _is_maybe_fresh_expr(node) -> bool:
     really is, keeps ownership only when it can prove the value fresh at the
     declaration (emit_infra.maybe_push_owned_local); otherwise the name is
     dropped from the candidates right there."""
-    if isinstance(node, (N.CallExpr, N.SliceExpr, N.Comprehension,
-                         N.TstringLiteral)) or N.is_fstring_literal(node):
+    if isinstance(node, (N.CallExpr, N.SliceExpr, N.Comprehension, N.TstringLiteral)):
         return True
     if isinstance(node, N.BinaryOp) and node.op == '+':
         return True
-    return _is_string_percent_expr(node)
-
-
-def _is_string_percent_expr(node) -> bool:
-    """`'%s' % xs` -- the one `%` that builds a fresh STRING.
-
-    `%` is two operations in Python and the AST does not say which: string
-    interpolation when the left operand is a string, numeric modulo otherwise
-    (`5 % 2`). Only the first allocates, and only the first may be freed, so
-    the left operand has to be a string LITERAL to answer it from the AST
-    alone -- which is what the codegen's own `_lower_percent` does too (it
-    returns None, and the caller falls through to integer modulo, for every
-    shape it cannot prove).
-
-    Without this arm `s = '%s' % xs` was not credited with owning its value,
-    so a container on the right leaked its repr buffer once per iteration:
-    measured 12.8 B/iteration, flat over a 4x range. `%d` of a container is
-    impossible, so the container case is `%s`/`%r` and both are covered by
-    the same left-operand test.
-    """
-    if not isinstance(node, N.BinaryOp) or node.op != '%':
-        return False
-    return isinstance(node.left, N.StringLiteral)
+    return False
 
 
 class _FuncFacts:
@@ -459,30 +383,6 @@ def _param_is_nonescaping(callee, pname: str, funcs, methods, facts: _FuncFacts)
     return pname in summary.split('|')
 
 
-def _call_arg_is_safe(idx: int, in_closure: bool, is_whitelisted_builtin: bool, callee,
-                      param_names: list, offset: int, funcs, methods,
-                      facts: _FuncFacts) -> bool:
-    """Is the `idx`th positional argument of a call safe to pass a bare local to?
-
-    A module-level function taking everything it reads as a parameter, not a
-    closure nested in `_scan_expr` (which is what this used to be). Self-hosted,
-    the nested form's captured-variable environment was laid out in a different
-    order where it was built than where it was read, so `len(param_names)` read
-    the `is_whitelisted_builtin` slot (`True`, i.e. 1) as a list and
-    `mojoc --dump-full fire.py` died in `mojo_list_len(0x1)` while analysing the
-    compiler's own sources."""
-    if in_closure:
-        return False
-    if is_whitelisted_builtin:
-        return True
-    if callee is None:
-        return False
-    real_idx = idx + offset
-    if not (0 <= real_idx < len(param_names)):
-        return False
-    return _param_is_nonescaping(callee, param_names[real_idx], funcs, methods, facts)
-
-
 def _scan_expr(node, facts: _FuncFacts, funcs, methods, in_closure=False):
     """Visits every expression node reachable from `node`. THE CORE
     SOUNDNESS RULE (fixed 2026-09-15 after a real, reproducible self-host
@@ -557,17 +457,8 @@ def _scan_expr(node, facts: _FuncFacts, funcs, methods, in_closure=False):
             if _sn != '':
                 struct_recv = _rn
                 _m = facts.structs.get(_sn, {}).get(node.func.member)
-                # Explicit nested tests, NOT `_m is not None and _m.params and
-                # ...`: self-hosted, a bool operand followed by a list operand in
-                # one `and` chain feeds the BOOL's raw value (1) into the later
-                # `mojo_list_len` truthiness check -- `mojo_list_len(0x1)`, the
-                # SIGSEGV that ended `mojoc --dump-full fire.py` here (the same
-                # class as emit_infra._reset_func's `params or ()`, e7fc3ec).
-                _callee_ok = False
-                if _m is not None:
-                    if len(_m.params) > 0:
-                        _callee_ok = _param_is_nonescaping(_m, _m.params[0][0], funcs, methods, facts)
-                if _callee_ok:
+                if (_m is not None and _m.params
+                        and _param_is_nonescaping(_m, _m.params[0][0], funcs, methods, facts)):
                     callee = _m
                 else:
                     facts.disqualify(_rn)
@@ -576,10 +467,21 @@ def _scan_expr(node, facts: _FuncFacts, funcs, methods, in_closure=False):
         param_names = [p[0] for p in callee.params] if callee else []
         offset = 1 if (callee and isinstance(node.func, N.MemberExpr)) else 0
 
+        def _arg_is_safe(idx):
+            if in_closure:
+                return False
+            if is_whitelisted_builtin:
+                return True
+            if callee is None:
+                return False
+            real_idx = idx + offset
+            if not (0 <= real_idx < len(param_names)):
+                return False
+            return _param_is_nonescaping(callee, param_names[real_idx], funcs, methods, facts)
+
         for i, a in enumerate(node.args):
             if isinstance(a, N.IdentExpr):
-                if not _call_arg_is_safe(i, in_closure, is_whitelisted_builtin, callee,
-                                         param_names, offset, funcs, methods, facts):
+                if not _arg_is_safe(i):
                     facts.disqualify(a.name)
                 # else: a bare identifier has no further substructure to
                 # scan, and it's already been proven safe — do NOT also
@@ -738,8 +640,7 @@ def _scan_stmt(stmt, facts: _FuncFacts, funcs, methods):
                 # even if y itself was otherwise a clean single-assignment
                 # constructor, x now holds the same pointer.
                 facts.disqualify(value.name)
-            facts.note_assign(name, is_ctor,
-                               _is_constructor_expr(value) or _is_fresh_string_expr(value))
+            facts.note_assign(name, is_ctor, _is_constructor_expr(value))
             _scan_expr(value, facts, funcs, methods)
         else:
             # Non-identifier target (subscript/member): its RHS is now
@@ -1335,51 +1236,6 @@ def _has_nested_scope(node) -> bool:
     return False
 
 
-# Every name a nested scope under `node` could capture, and whether that set is
-# COMPLETE. `(True, names)` means every nested `def` wrote an explicit capture
-# list naming specific names, so `names` is the exact capture set and a name
-# outside it provably is not captured. `(False, names)` means at least one
-# nested scope is UNKNOWN — no capture list at all (so captures are inferred
-# from its body), a `{mut}`/`{var}` bare-convention entry (which by definition
-# captures whatever the body references), or a `lambda` (whose capture list is
-# not parsed into names). Callers must keep their conservative behaviour then.
-def _nested_capture_names(node) -> tuple:
-    complete = True
-    names: set = set()
-    if isinstance(node, (list, tuple)):
-        for item in node:
-            c, n = _nested_capture_names(item)
-            complete = complete and c
-            names |= n
-        return complete, names
-    if not _is_node(node):
-        return True, names
-    if isinstance(node, N.LambdaExpr):
-        # A lambda's `captures` field is the raw `{ref}` / `{imm key}` TEXT
-        # (LambdaExpr's own docstring), not a name list, so there is nothing to
-        # extract and the set stays unknown.
-        return False, names
-    if isinstance(node, N.FunctionDef):
-        if not getattr(node, 'has_capture_list', False):
-            return False, names        # captures inferred from the body
-        for entry in (getattr(node, 'captures', None) or []):
-            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
-                return False, names
-            cap_name = entry[0]
-            if cap_name is None:
-                return False, names    # `{mut}` — captures whatever is referenced
-            names.add(_as_str(cap_name))
-        # Do NOT descend into the nested body: its own nested scopes are
-        # separate closures with their own capture sets, already visited when
-        # the walk reached them from the enclosing statement lists.
-        return complete, names
-    for f in dataclasses.fields(node):
-        c, n = _nested_capture_names(getattr(node, f.name))
-        complete = complete and c
-        names |= n
-    return complete, names
-
-
 def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
     """True iff EVERY call to `fn` provably returns a brand-new container that
     nothing else references, so the caller may own it (and free it).
@@ -1388,13 +1244,8 @@ def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
     of the result would be a crash or a use-after-free:
       - `fn` is a plain function (not async/a generator/decorated: a
         coroutine/generator returns a frame object, a decorator may wrap or
-        cache the result) whose nested `def`/`lambda` scopes do NOT capture
-        anything it returns. Refined from "contains any nested scope at all":
-        a nested `def` with an explicit capture list naming specific names
-        cannot capture a returned name outside that list, and `{}` captures
-        nothing, so either may be ignored — but a nested scope with no list, a
-        bare `{mut}`/`{var}`, or any `lambda` leaves the set unknown and the
-        refusal stands;
+        cache the result) with no nested `def`/`lambda` (a closure could keep
+        the returned container);
       - EVERY path returns a value: the body ends in a terminator and no
         `return` is bare. A path that falls off the end or returns None hands
         the caller a NULL pointer, and freeing that crashes;
@@ -1409,7 +1260,7 @@ def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
     """
     if fn.is_async or fn.is_generator or fn.decorators:
         return False
-    if not fn.body or not _block_terminates(fn.body):
+    if not fn.body or _has_nested_scope(fn.body) or not _block_terminates(fn.body):
         return False
     rets = []
     _collect_returns(fn.body, rets)
@@ -1428,7 +1279,7 @@ def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
         v = r.value
         if v is None:
             return False
-        if _is_constructor_expr(v) or _is_fresh_string_expr(v):
+        if _is_constructor_expr(v):
             continue
         nm = _moved_name(v)
         if nm == '':
@@ -1445,31 +1296,6 @@ def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
         for nm in names:
             if nm not in _da:
                 return False
-    # The closure veto, applied to the NAMES this function actually returns
-    # rather than to the mere existence of a nested scope.
-    #
-    # It used to be an unconditional `or _has_nested_scope(fn.body)`, which
-    # refused the whole question for any function containing a `def` or
-    # `lambda` anywhere — including one whose closures provably capture
-    # nothing from this scope, and including the very common shape of a helper
-    # that defines a callback and then returns a container the callback never
-    # sees. Each refusal costs the CALLER a free it could have owned
-    # (doc/MEMORY.html §3.B, "user functions proven to return fresh
-    # containers"), so the veto was buying safety with a real leak.
-    #
-    # Now: if every nested scope wrote an explicit capture list naming specific
-    # names, the capture set is known and a returned name outside it cannot be
-    # captured. If any nested scope is unknown — no list (captures inferred from
-    # its body), a bare `{mut}`/`{var}` (captures whatever it references), or a
-    # `lambda` — the old veto stands in full. `{}` counts as KNOWN and captures
-    # nothing, which is what it asserts; `has_capture_list` is what tells the
-    # two apart, since both leave `captures == []`.
-    _caps_complete, _captured = _nested_capture_names(fn.body)
-    if _caps_complete:
-        if names & _captured:
-            return False
-    elif _has_nested_scope(fn.body):
-        return False
     return True
 
 
@@ -1620,242 +1446,6 @@ def _name_uses_consumed(node, name: str, consumed: bool = False) -> bool:
         if not _name_uses_consumed(getattr(node, f.name), name, False):
             return False
     return True
-
-
-def list_elements_owned(fn_body, name: str) -> bool:
-    """True iff a list local `name` that owns its own string ELEMENTS
-    (`mojo_str_split`/`mojo_str_splitlines`, whose every element is a fresh
-    allocation made by the function that built the list) may be torn down with
-    the element strings included, without leaving a dangling pointer anywhere.
-
-    The list is the only owner of the allocations, but the PROGRAM can still
-    hand an element pointer out, and then the list is no longer the owner of
-    that element's lifetime: `kept.append(parts[0])` stores a pointer the free
-    then invalidates, and the read comes back as the pointer's bits. So this
-    asks a strictly narrower question than the container analyses do — may any
-    ELEMENT of `name` be named at all? — and the answer is deliberately the
-    smallest one that is still useful:
-
-      - the declaration's own target (`var name = ...`, `name = ...`) is not a
-        use;
-      - `len(name)`, `repr/str/print/bool/hash/id(name)` read the list's
-        length or its contents and hand nothing back;
-      - `name` as a statement of its own, and as an operand of `==`/`!=`/`<`/
-        `>`/`<=`/`>=` (which compare, and build no new list);
-      - `not name` and a condition.
-
-    Everything else is rejected, which is the fail-closed direction: a missed
-    free leaks a few bytes, a wrong one is a use-after-free. So `parts[0]`,
-    `for p in parts:`, `list(parts)`, `parts[:]`, `parts + other`, `sorted
-    (parts)`, `kept.extend(parts)` and every method call on `parts` all keep
-    the plain `mojo_list_free` and the pre-existing leak. That is the same
-    trade doc/MEMORY.html section 7 records for nested list literals ("Left
-    leaking on purpose") and for a dict/set's `key_views_consumed` above; this
-    is the LIST-element counterpart, and the leak it does close — the
-    ~48 B/iteration of `String("a b c").split(" ")` measured over 100k and
-    400k iterations in CODEGEN_call_result_container_never_freed — is
-    the `len()`-and-drop shape, which is the common one."""
-    return _list_str_uses_ok(fn_body, name)
-
-
-# Read-only builtins that read a container without handing any of its contents
-# back. `str` is here (unlike `_NONRETAINING_BUILTINS`, where it is not): for a
-# LIST `str(x)` is `repr(x)`, which builds a new string from the contents; the
-# string-identity case that excluded it there is a different question.
-_LIST_READ_BUILTINS = frozenset(['len', 'repr', 'str', 'print', 'bool',
-                                 'hash', 'id'])
-# Comparison operators only. `+`/`*` are absent on purpose: `parts + other`
-# builds a list that SHARES the element pointers.
-_LIST_SAFE_CMP = frozenset(['==', '!=', '<', '>', '<=', '>='])
-
-
-def _list_str_uses_ok(node, name: str, seen: bool = False) -> bool:
-    """`seen` is True when this subtree has already been accepted by a
-    recognised read-only parent (the argument of `len(name)`, an operand of a
-    comparison), so a bare `name` inside it is a use that is fine rather than
-    one that hands an element out."""
-    if isinstance(node, (list, tuple)):
-        for item in node:
-            if not _list_str_uses_ok(item, name, False):
-                return False
-        return True
-    if not _is_node(node):
-        return True
-    # The binding itself: the target is not a use of the value.
-    if isinstance(node, N.VarDecl) and _as_str(node.name) == name:
-        return _list_str_uses_ok(node.value, name, False)
-    if (isinstance(node, (N.AssignStmt, N.AugAssignStmt))
-            and isinstance(node.target, N.IdentExpr)
-            and _as_str(node.target.name) == name):
-        return _list_str_uses_ok(node.value, name, False)
-    if isinstance(node, N.CallExpr) and isinstance(node.func, N.IdentExpr) \
-            and _as_str(node.func.name) in _LIST_READ_BUILTINS:
-        for a in node.args:
-            if not _list_str_uses_ok(a, name, True):
-                return False
-        for kw in (node.kwargs or []):
-            if not _list_str_uses_ok(kw[1], name, True):
-                return False
-        return True
-    if isinstance(node, N.ExprStmt):
-        return _list_str_uses_ok(node.value, name, True)
-    if isinstance(node, N.BinaryOp) and node.op in _LIST_SAFE_CMP:
-        return (_list_str_uses_ok(node.left, name, True)
-                and _list_str_uses_ok(node.right, name, False))
-    if isinstance(node, N.CompareChain):
-        for o in node.operands:
-            if not _list_str_uses_ok(o, name, True):
-                return False
-        for op in (node.ops or []):
-            if op not in _LIST_SAFE_CMP:
-                return False
-        return True
-    if isinstance(node, N.UnaryOp) and node.op == 'not':
-        return _list_str_uses_ok(node.operand, name, True)
-    if isinstance(node, (N.IfStmt, N.WhileStmt, N.TernaryExpr)):
-        for f in dataclasses.fields(node):
-            v = getattr(node, f.name)
-            if not _list_str_uses_ok(v, name, f.name == 'condition'):
-                return False
-        return True
-    if isinstance(node, N.IdentExpr):
-        return seen or _as_str(node.name) != name
-    for f in dataclasses.fields(node):
-        v = getattr(node, f.name)
-        if v is None:
-            continue
-        if not _list_str_uses_ok(v, name, False):
-            return False
-    return True
-
-
-def lambda_value_owned(fn_body, name: str) -> bool:
-    """True iff the callable local `name` may be freed at scope exit TOGETHER
-    with the environment it captured, i.e. nothing can name it except the call
-    it is written for.
-
-    A capturing lambda's value is a `MojoBoundMethod` wrapping a `malloc`'d
-    environment: two allocations and a `_reg_bound_method` entry per creation,
-    ~74 B/iteration measured over 100k and 400k iterations
-    (bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md). That object dies
-    with the scope that made it only if the scope is its last holder, and
-    "holder" here is narrow: the ONLY acceptable mention of `name` after its
-    binding is as the CALLEE of a call (`f(x)`). Everything else can keep the
-    pointer past the free —
-      `g = f`, `return f`, `kept.append(f)`, `f` in a list/tuple display,
-      `f` captured by another `lambda`/`def`, `f.attr`, `f[0]`, or a call
-      through a container it was put into — and is rejected.
-
-    The binding itself must be a `lambda` expression and there must be exactly
-    one: a second assignment is a second value with an independent lifetime,
-    and a non-lambda RHS is some other callable whose allocation the free does
-    not know the shape of (a bare function pointer, or a bound method whose
-    `self` is somebody's receiver — that one is `mojo_bound_method_free`, not
-    this, see runtime/fire_runtime.c).
-
-    Deliberately separate from the container candidate analysis rather than
-    folded into it: a function containing a `lambda` is excluded from that one
-    outright (`_is_free_eligible_function`), because inside a closure the
-    receiver rules that make `d[k]`/`d.x`/`d[a:b]`/`for x in d` safe are not
-    safe, and lifting that exclusion is a separate piece of work. This rule
-    asks nothing about containers, so it holds on a body the container analysis
-    refuses to look at."""
-    return _lambda_uses_ok(fn_body, name)
-
-
-def nested_def_env_owned(fn_body, name: str) -> bool:
-    """True iff the environment `_alloc_<name>_env()` allocated for a nested
-    `def name` may be freed when the enclosing function returns.
-
-    The same rule `lambda_value_owned` applies to a capturing lambda's value,
-    and for the same reason: the environment dies with the scope that made it
-    only if that scope is its last holder, and "holder" is narrow — the ONLY
-    acceptable mention of `name` is as the CALLEE of a call. `return inner(1)
-    + inner(2)` (one env, two calls, the shape
-    bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md's OPEN 1 measured
-    at +16 B/iteration) qualifies; `g = inner`, `kept.append(inner)`,
-    `return inner`, `inner.attr` and a mention inside any nested
-    `lambda`/`def` (whose own environment can outlive this scope) do not.
-
-    What is DIFFERENT from a capturing lambda, and why this is its own name
-    rather than a second rule:
-
-    * a capturing lambda's value is a `MojoBoundMethod *` PLUS the env, one
-      allocation unit freed by `mojo_closure_free` (which also drops the
-      `_reg_bound_method` entry — freeing the object without it makes
-      `mojo_is_bound_method` report whatever the allocator hands back next);
-    * a nested `def` produces NO bound method at all. Its call sites are
-      DIRECT (`helper_inner (_env_inner, 1)`), the env var is
-      function-scoped, and the value is a plain `malloc` block — so the
-      teardown is a bare `free` and the unwind entry is `MOJO_CLEANUP_PTR` /
-      `mojo_cleanup_push_ptr` ("a plain malloc/calloc block: a struct
-      instance"). `mojo_closure_free` would be WRONG here: it would treat a
-      `helper_inner_env *` as a `MojoBoundMethod` and free two words of it.
-
-    So it is the same question with a different teardown, which is exactly
-    what `lambda_value_owned`'s own docstring means by "This rule asks
-    nothing about containers, so it holds on a body the container analysis
-    refuses to look at" — this one asks nothing about a callable VALUE,
-    because there is none.
-    """
-    return _lambda_uses_ok(fn_body, name)
-
-
-def _lambda_uses_ok(node, name: str, as_callee: bool = False) -> bool:
-    if isinstance(node, (list, tuple)):
-        for item in node:
-            if not _lambda_uses_ok(item, name, False):
-                return False
-        return True
-    if not _is_node(node):
-        return True
-    if isinstance(node, N.VarDecl) and _as_str(node.name) == name:
-        return isinstance(node.value, N.LambdaExpr)
-    if (isinstance(node, (N.AssignStmt, N.AugAssignStmt))
-            and isinstance(node.target, N.IdentExpr)
-            and _as_str(node.target.name) == name):
-        return False        # a rebinding: a second value, independently owned
-    if isinstance(node, N.CallExpr):
-        if not _lambda_uses_ok(node.func, name, True):
-            return False
-        for a in node.args:
-            if not _lambda_uses_ok(a, name, False):
-                return False
-        for kw in (node.kwargs or []):
-            if not _lambda_uses_ok(kw[1], name, False):
-                return False
-        return True
-    if isinstance(node, N.IdentExpr):
-        return as_callee or _as_str(node.name) != name
-    if isinstance(node, (N.FunctionDef, N.LambdaExpr)):
-        # A nested scope that MENTIONS `name` captures it into its environment,
-        # and that environment can outlive this scope — the exact hazard this
-        # rule exists to prevent. Reject on the mention, whatever shape it has
-        # inside (a call position included).
-        return not _mentions_name(node, name)
-    for f in dataclasses.fields(node):
-        v = getattr(node, f.name)
-        if v is None:
-            continue
-        if not _lambda_uses_ok(v, name, False):
-            return False
-    return True
-
-
-def _mentions_name(node, name: str) -> bool:
-    if isinstance(node, (list, tuple)):
-        for item in node:
-            if _mentions_name(item, name):
-                return True
-        return False
-    if not _is_node(node):
-        return False
-    if isinstance(node, N.IdentExpr):
-        return _as_str(node.name) == name
-    for f in dataclasses.fields(node):
-        if _mentions_name(getattr(node, f.name), name):
-            return True
-    return False
 
 
 def _key_view_source(it, name: str) -> str:

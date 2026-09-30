@@ -40,8 +40,7 @@ exists for.
 
 WHAT IS DELIBERATELY NOT HERE.  A frame address in a `__len__` RETURN, in a
 container, or through a subscript: those are refused by name and are a different
-family (`formal/build.py`'s `_check_frame_escapes` and the three refusals it
-raises).
+family (`_check_frame_escapes`, `bugs/FORMAL_frame_receiver_handoff.md`).
 """
 import argparse
 import os
@@ -173,7 +172,7 @@ DIFF_CASES = [
     # "the frame belongs to the function that made it and this one did not, so it
     # must be gone", the read would be of reclaimed stack and the answer would be
     # whatever those bytes hold now.  This is the use-after-free guard, and it is
-    # the case `test_formal_returned_frame.py` argues for in general
+    # the case `bugs/FORMAL_frame_receiver_handoff.md` §8 argues for in general
     # terms and nobody had measured for this construct.
     ("len_frame_creator_one_frame_deeper",
      "struct Counter:\n"
@@ -507,7 +506,7 @@ def run_cpython(source, tmpdir):
     """The oracle: the same program under CPython, whose exit status and stdout
     the formal image has to match.
 
-    Not `fire.py run` and not the interpreter in this repository.  The point of a
+    Not `mojo run` and not the interpreter in this repository.  The point of a
     differential case is that the two answers come from two independent
     implementations of the language, and `myinterpreter.py` is not one of them —
     it shares the AST, so a mistake in the AST cannot be caught by comparing

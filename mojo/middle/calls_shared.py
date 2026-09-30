@@ -15,18 +15,7 @@ import mlir
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
-# NO module-level `import gimple_codegen` here: nothing in this file reads
-# anything from it. The edge middle-tier -> `gimple_codegen` (which imports the
-# whole `mojo/backend_gimple/*` tier at its own top level, gimple_codegen.py:738)
-# -> that tier reading THIS module back at ITS top level is an import CYCLE, and
-# only `test_suite.py`'s declared exemption list was hiding it — a process
-# entering through a middle module met a half-built module and an ImportError
-# about a name in it, a long way from the edge that closed the loop. A middle
-# module that does need something from `gimple_codegen` imports it at its USE
-# SITE, the shape `mojo/backend_gimple/module_gen.py:6727` already uses for
-# `mojo/middle/infra_infer.py`. The rule in full, and why a function-local
-# `import X` survives where `from X import NAME` cannot, is in
-# `mojo/middle/methods_shared.py`'s header comment.
+import gimple_codegen  # constants used by some extracted helpers
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -55,266 +44,12 @@ def _isinstance_type_name(ta):
         return ta.member
     return None
 
-def _callable_value_symbol(gen, node, cxx: bool = False):
-    """`(ctype, rvalue)` for `node` used as a CALLABLE VALUE — a reference
-    to a function this compile knows the address of — or None when `node`
-    is not such a reference.
-
-    This is the one place that decides what "the function `f`" means as a
-    bare C value, because two callers need exactly that answer and used to
-    each answer `0` instead: `_default_expr_to_pair` (a parameter whose
-    default IS a function — `def consume(root, *, walk=leaf)`) and
-    `_lower_IdentExpr`'s own "C function name used as a value" arm. Both
-    missing answers are the same crash: the padded/loaded value is a NULL
-    function pointer that the body then CALLS, so `def apply_it(x, *,
-    f=leaf): return f(x)` invoked as `apply_it("q")` compiled, linked,
-    and died with SIGSEGV on `mojo_fnptr_call_1(NULL, ...)` — exit 139,
-    no diagnostic, and the doc that recorded the *generator* instance of
-    this shape (`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`)
-    never saw it, because it is reachable from an ordinary `def` too.
-
-    Two spellings, matching the two the corpus actually uses:
-      * a bare name — this module's own `def`, or any transitively
-        inlined imported module's (`from os import walk` / `import os as
-        o; o.walk`). Membership is `func_return_types` (ordinary defs) OR
-        `_generator_api` (a generator this compile already lowered to its
-        `<base>_start` entry point).
-      * `module.attr` — the same, for a name reached through an `import
-        ... as m` / `from pkg import submod` alias.
-
-    A name shadowed by a local, a module-level global, or a struct/class
-    name is NOT a function reference (Python scoping decides that first),
-    so those return None and the caller keeps its own behaviour.
-
-    `cxx` selects the textual form only. Under `-fgimple` a bare function
-    name is not a legal rvalue, so the value goes through the pre-declared
-    `static void * _funcptr_<sym>` this codegen already uses for every
-    other "function as a value" site (registered in
-    `_funcptr_builtins_needed`; gen_module's own `_funcptr_target`
-    redirects a generator's bare csym to `<base>_start` at emission time —
-    see its docstring for why, which is the same reason `_funcptr_` is the
-    right vehicle here). In the C++20-coroutine body there is no such
-    restriction, so the address is spelled directly — against the
-    REDIRECTED symbol, because `_funcptr_`'s statics live in the .c
-    translation unit and are not visible from the separately-compiled .cpp.
-    """
-    _fname = None
-    if isinstance(node, gimple_ctypes.IdentExpr):
-        _fname = _as_str(node.name)
-    elif (isinstance(node, gimple_ctypes.MemberExpr)
-            and isinstance(node.obj, gimple_ctypes.IdentExpr)
-            and _as_str(node.obj.name) in getattr(gen, 'imported_symbols', ())):
-        _fname = _as_str(node.member)
-    if not _fname:
-        return None
-    # A local shadows a module-level name, a global shadows a function of
-    # the same name, and a struct/class name is a type, not a callable —
-    # all three are decided by Python scoping before "is it a function?"
-    # ever matters.
-    if _fname in getattr(gen, 'var_types', ()) or \
-            _fname in getattr(gen, '_global_var_types', ()) or \
-            _fname in getattr(gen, 'struct_field_types', ()):
-        return None
-    _gen_api = getattr(gen, '_generator_api', None) or {}
-    _is_gen = _fname in _gen_api
-    if not _is_gen and _fname not in getattr(gen, 'func_return_types', ()):
-        return None
-    _c_name = gen._func_csym(_fname)
-    if _fname in gen._c_names:
-        _c_name = gen._c_names[_fname]
-    _c_name = _as_str(_c_name)
-    if cxx:
-        # gen_module's `_funcptr_target` rule, reused rather than
-        # restated: a supported compiled generator has NO ordinary C
-        # definition under its bare csym (only `<base>_start/_resume/
-        # _value/_destroy`), so the address that means "call this to get
-        # the generator object" is `<base>_start`.
-        _target = _c_name
-        if _is_gen:
-            _target = f"{_gen_api[_fname]['base']}_start"
-        return ('void *', f'(void *){_target}')
-    gen._funcptr_builtins_needed.add(_c_name)
-    return ('void *', f'_funcptr_{_c_name}')
-
-
-def _callable_default_generator(gen, default_node):
-    """The generator's registration api when `default_node` names a
-    compiled generator of THIS compile, else None.
-
-    This is what makes a higher-order parameter's RESULT type knowable:
-    `def walk_tree(root, *, walk=_walk_tree)` hands the body a callable
-    whose only in-source value is a generator this compile already
-    turned into a `MojoGenerator *` with a registered api (`base`,
-    `value_ctype`, `tuple_slot_ctypes`), so `for f in walk(root)` has a
-    real, static answer for how to drive and how to read the loop target
-    — exactly the answer `_gen_for_generator_iter` uses for a DIRECT
-    generator call. Returns None (and the consumer then keeps refusing /
-    zero-iterating, unchanged) for every other default: an ordinary
-    function, an unresolvable reference, a lambda, a local.
-
-    The residual this trades away is stated at its one consumer
-    (`_lower_fnptr_call`); it is the same residual `fn_returns_generator`
-    already carries for a first-class generator value, and it is strictly
-    smaller, because a default only names ONE callable while a returned
-    value can come from any of several.
-    """
-    if not isinstance(default_node, gimple_ctypes.IdentExpr):
-        return None
-    _fname = _as_str(default_node.name)
-    _api = (getattr(gen, '_generator_api', None) or {}).get(_fname)
-    return _api
-
-
-def _callable_param_ret_types(gen, fn_node) -> dict:
-    """`{param name: the return C type of the function that parameter's
-    declared DEFAULT names}` — the ordinary-function twin of
-    `_callable_param_generator_apis`, for the same reason and with the same
-    shape.
-
-    Without it a higher-order parameter's call result is the homogenized
-    `int64_t` box `mojo_fnptr_call_N` hands back, which is right for the box
-    and wrong for the value inside:
-
-        def upper(s):
-            return s.upper()
-        def apply_to(items, _f=upper):
-            r = _f(items)
-            print(r)               # CPython AB; compiled 4337064208
-            print(len(r))           # CPython 2;   compiled 0
-
-    `r` is a `char *` and every consumer that needs to know that — `len`, a
-    `for` loop, `print` — has nothing to dispatch on, so the program iterates
-    nothing and exits 0. See
-    bugs/CODEGEN_callable_param_called_in_ordinary_generator_returns_garbage.md.
-
-    Deliberately NARROW, and the narrowing is the doc's own: a bare-name
-    default only, so the answer is the DEFINING function's own inferred
-    `func_return_types` entry and nothing is guessed. A `lambda` default, a
-    bound-method default, an imported default and a `None` default are all
-    unanswered — `func_return_types` has no entry for a lambda's materialised
-    value until one is materialised, and the other three are the padding-site
-    question CODEGEN_unresolved_imported_callable_default_null_pointer
-    is about. A param absent from the answer is exactly today's behaviour.
-
-    `void` is excluded: `mojo_fnptr_call_N`'s result for a void callee is not
-    a value, and recording `'void'` would make the caller cast garbage.
-    """
-    _out = {}
-    _dflts = getattr(fn_node, 'param_defaults', None) or {}
-    for _pn, _pann in (getattr(fn_node, 'params', None) or []):
-        _pn = _as_str(_pn)
-        if _pn.startswith('*'):
-            continue
-        _d = _dflts.get(_pn)
-        if not isinstance(_d, gimple_ctypes.IdentExpr):
-            continue
-        _rt = gen.func_return_types.get(_as_str(_d.name))
-        if _rt and _rt != 'void':
-            _out[_pn] = _rt
-    return _out
-
-
-def _callable_param_generator_apis(gen, fn_node) -> dict:
-    """`{param name: generator api}` for the parameters of `fn_node` whose
-    declared default names a compiled generator of this compile. See
-    `_callable_default_generator`; the keys are this FUNCTION's parameter
-    names, so the result is per-function state and is reset in
-    `_reset_func` alongside every other per-function map.
-    """
-    _out = {}
-    _dflts = getattr(fn_node, 'param_defaults', None) or {}
-    for _pn, _pann in (getattr(fn_node, 'params', None) or []):
-        _pn = _as_str(_pn)
-        if _pn.startswith('*'):
-            continue
-        _api = _callable_default_generator(gen, _dflts.get(_pn))
-        if _api is not None:
-            _out[_pn] = _api
-    return _out
-
-
-def _is_pointer_ctype(param_ctype) -> bool:
-    """Is `param_ctype` a C pointer, i.e. does a null for it have to be a
-    null POINTER rather than an integer 0?
-
-    The padding sites use this to type a "no value" default against the
-    callee's own declared parameter type — see
-    `_default_expr_to_pair`'s `param_ctype` argument for why the difference
-    is load-bearing rather than cosmetic."""
-    if not param_ctype:
-        return False
-    _t = param_ctype if isinstance(param_ctype, str) else str(param_ctype)
-    return _t.endswith('*')
-
-
-def _null_default_pair(param_ctype, int_ctype: str = 'int') -> tuple:
-    """The "no value" pair for a padding site: a typed NULL when the callee's
-    declared parameter type is a POINTER, else the integer zero.
-
-    `_default_expr_to_pair`'s `param_ctype` argument, applied at each of the
-    places that answer "this default has no value". The distinction is not
-    cosmetic: an integer 0 handed to a `char *` parameter is coerced by
-    `_emit_call` through `mojo_cstr_or_int_str`, which renders it as the
-    string `"0"` — a true, non-null pointer — so a callee testing `if value`
-    sees a value where Python passes None. See that function's docstring for
-    the self-hosted parser failure it caused."""
-    if _is_pointer_ctype(param_ctype):
-        return (_as_cstr(param_ctype), '0')
-    return (int_ctype, '0')
-
-
-def _as_cstr(param_ctype):
-    """`param_ctype` as text. On the self-hosted path a `(ctype, value)` tuple
-    read out of a list re-boxes both slots to int64_t, so a ctype that
-    reached here from `chosen['param_ctypes']` can be an integer (the erased
-    text) rather than a str; `str()` keeps the comparison in
-    `_is_pointer_ctype` meaningful instead of raising."""
-    return param_ctype if isinstance(param_ctype, str) else str(param_ctype)
-
-
-def _default_expr_to_pair(gen, _dflt, cxx: bool = False,
-                          param_ctype=None) -> tuple:
+def _default_expr_to_pair(gen, _dflt) -> tuple:
     """Convert a default-arg expression AST node to a (ctype, rvalue) pair,
     for padding a call site that omitted the argument. Mirrors the struct
-    ctor default handling in _build_call_args_for_candidate.
-
-    `cxx` = the caller is lowering into the C++20-coroutine body, which
-    spells a callable value as a direct address rather than through the
-    .c-side `_funcptr_` statics; see `_callable_value_symbol`.
-
-    `param_ctype` = the callee's DECLARED C type for the slot being padded,
-    when the padding site knows it. It changes exactly one thing, and that one
-    thing was a silent miscompile of the whole self-hosted compiler: a
-    `None`/`False`/unrepresentable default is "no value", and passed to a
-    POINTER parameter the integer 0 is not a null pointer — it is a
-    `char *` parameter, so `_emit_call`'s coercion runs it through
-    `mojo_cstr_or_int_str(0)` and hands the callee the one-character string
-    `"0"`, which is TRUE. `Parser._expect(self, kind, value: str = None)`
-    is the shape: `self._expect("LPAREN")` in the compiled binary delivered
-    `value == "0"`, so `if value and t.value != value:` fired on every
-    single-argument call and the parser refused every file with
-    "Expected '0' got ')'" — a class of failure with no message anyone would
-    connect to a defaulted parameter. `_expand_sole_spread_into_fixed_slots`
-    already typed its `char *` padding as `(char *)0` for exactly this reason;
-    this argument is that fix, applied to every padding site.
-
-    A default that is a FUNCTION (`def walk_tree(root, *, walk=_walk_tree)`,
-    `Tools/c-analyzer/c_common/fsutil.py`'s whole higher-order-parameter
-    idiom) used to fall off the end of this function and become `('int',
-    '0')` — a NULL function pointer that the callee then CALLS, so every
-    such call site compiled clean, linked, and took SIGSEGV at run time.
-    `_callable_value_symbol` now answers it with the real address. A
-    function reference this compile cannot resolve stays `('int', '0')`:
-    that is the pre-existing documented convention for an unrepresentable
-    default (and `None`/`False` legitimately lower to the same 0), so it
-    is deliberately not made louder here — what changed is that every
-    RESOLVABLE callable default stopped being indistinguishable from it.
-    """
+    ctor default handling in _build_call_args_for_candidate."""
     if _dflt is None:
-        return _null_default_pair(param_ctype)
-    _cv = _callable_value_symbol(gen, _dflt, cxx=cxx)
-    if _cv is not None:
-        return _cv
+        return ('int', '0')
     if isinstance(_dflt, gimple_ctypes.BoolLiteral):
         return ('_Bool', '1' if _dflt.value else '0')
     if isinstance(_dflt, gimple_ctypes.StringLiteral):
@@ -337,42 +72,12 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False,
     if isinstance(_dflt, gimple_ctypes.IntLiteral):
         return ('int', str(_dflt.value))
     if isinstance(_dflt, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr, gimple_ctypes.SetExpr, gimple_ctypes.DictExpr)):
-        return _null_default_pair(param_ctype, int_ctype='int64_t')
+        return ('int64_t', '0')
     if isinstance(_dflt, gimple_ctypes.IdentExpr) and _dflt.name in ('True',):
         return ('int', '1')
     if isinstance(_dflt, gimple_ctypes.IdentExpr) and _dflt.name in ('False', 'None'):
-        return _null_default_pair(param_ctype)
-    # A `module.attr` default (`def probe(x, *, g=os.walk)`) is a reference to
-    # something this compile cannot resolve: whether `os.walk` was translated
-    # into this translation unit at all is a property of the whole import
-    # closure, not of the expression. The `('int', '0')` fallthrough below
-    # therefore delivered address 0, and a callee that CALLS the parameter
-    # called through it — `mojo_fnptr_call_1((void *)0, x)` — a SIGSEGV with
-    # exit 139 and no output. Padding 0 is the one answer that is always
-    # available and always wrong.
-    #
-    # So: a stub address, armed with the name. Calling it RAISES a catchable
-    # NotImplementedError naming the callable, rather than printing a line and
-    # returning 0 — a 0 handed back from `g(x)` is indistinguishable from a
-    # real 0 the function could have returned, so every number derived from it
-    # was wrong with exit 0 (`probe('/r')` printed `0` where CPython prints a
-    # generator object). The raise is inside the stub, so a program that never
-    # CALLS the parameter is still completely unaffected, and a program that
-    # does can catch it and say so. Same decision, and the same reason, as
-    # `mojo_module_not_compiled`: a name that resolved to nothing here.
-    #
-    # Scoped to MemberExpr on purpose. A bare `IdentExpr` default
-    # (`g=some_helper`) is NOT routed here: a module-level constant lowers to
-    # an int64 and is indistinguishable at this point from a function, and 0
-    # is already the right answer for a constant this compile could not see.
-    if (isinstance(_dflt, gimple_ctypes.MemberExpr)
-            and isinstance(_dflt.obj, gimple_ctypes.IdentExpr)):
-        _nm = f'{_dflt.obj.name}.{_dflt.member}'
-        _slit = gen._new_val('char *',
-                             gen._intern_string(gimple_ctypes._c_escape(_nm)))
-        gen._emit(f'  mojo_set_unavailable_callable_name ({_slit});')
-        return ('void *', gen._new_val('void *', 'mojo_unavailable_callable_ptr ()'))
-    return _null_default_pair(param_ctype)
+        return ('int', '0')
+    return ('int', '0')
 
 def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) -> dict | None:
     """Pick the candidate overload matching a call site's argument count/
@@ -537,25 +242,6 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
         gen._dict_val_types[d] = _val_ty
     return d
 
-def _param_ctype_at(chosen: dict, index: int):
-    """`chosen`'s declared C type for parameter `index`, or None when the
-    candidate registration does not carry one (a list/tuple element read on
-    the self-hosted path, a candidate built without `param_ctypes`).
-
-    The padding sites hand this to `_default_expr_to_pair` so a "no value"
-    default for a POINTER parameter becomes a typed NULL instead of the
-    integer 0 that `_emit_call` would coerce into the string `"0"`."""
-    try:
-        _cts = chosen.get('param_ctypes') or []
-    except AttributeError:
-        return None
-    if not isinstance(_cts, (list, tuple)):
-        return None
-    if 0 <= index < len(_cts):
-        return _cts[index]
-    return None
-
-
 def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list | None,
                                    defaults: dict | None = None) -> list:
     """Build the C arg-value list (self excluded) for a resolved struct
@@ -593,8 +279,7 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
                 out.append(gen.lower_expr(kw.pop(_pname)))
                 continue
             _dflt = (defaults or {}).get(_pname) if _pname else None
-            _pct = _param_ctype_at(chosen, _i)
-            out.append(gen._default_expr_to_pair(_dflt, param_ctype=_pct))
+            out.append(gen._default_expr_to_pair(_dflt))
         out.append(gen._lower_varargs_pack(args[pre_n:]))
         # Post-star params are necessarily keyword-only (Python/Mojo
         # syntax). A `**kwargs` slot among them is a real MojoDict*
@@ -602,19 +287,10 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
         # pre-star binding above and by other named post-star params
         # into it (mirrors the non-varargs branch below), instead of
         # always leaving it null.
-        for _pi, pname in enumerate(param_names[pre_n:]):
+        for pname in param_names[pre_n:]:
             if pname.startswith('**'):
                 continue
-            if pname in kw:
-                out.append(gen.lower_expr(kw.pop(pname)))
-            else:
-                # A keyword-only parameter left unbound is padded against its
-                # own DECLARED type — see `_default_expr_to_pair`'s
-                # `param_ctype`: for a pointer parameter, integer 0 would be
-                # coerced into the string "0" rather than a null pointer.
-                _pct2 = _param_ctype_at(chosen, pre_n + _pi)
-                out.append(('int', '0') if not _is_pointer_ctype(_pct2)
-                           else (_as_cstr(_pct2), '0'))
+            out.append(gen.lower_expr(kw.pop(pname)) if pname in kw else ('int', '0'))
         if any(pn.startswith('**') for pn in param_names[pre_n:]):
             out.append(('MojoDict *', gen._pack_kwargs_dict(
                 {_kn: gen.lower_expr(_kv) for _kn, _kv in kw.items()})))
@@ -641,10 +317,8 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
         # default.md). No-default params still fall back to 0 here via
         # _default_expr_to_pair(None).
         while len(out) <= idx:
-            _fill = len(out)
             out.append(gen._default_expr_to_pair(
-                (defaults or {}).get(chosen['param_names'][_fill]),
-                param_ctype=_param_ctype_at(chosen, _fill)))
+                (defaults or {}).get(chosen['param_names'][len(out)])))
         out[idx] = gen.lower_expr(kw[pname])
     if _kw_idx >= 0:
         _named = set(chosen['param_names'])
@@ -653,10 +327,8 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
             if _kn not in _named:
                 _rest[_kn] = gen.lower_expr(kw[_kn])
         while len(out) <= _kw_idx:
-            _fill2 = len(out)
             out.append(gen._default_expr_to_pair(
-                (defaults or {}).get(chosen['param_names'][_fill2]),
-                param_ctype=_param_ctype_at(chosen, _fill2)))
+                (defaults or {}).get(chosen['param_names'][len(out)])))
         out[_kw_idx] = ('MojoDict *', gen._pack_kwargs_dict(_rest))
     # Pad up to max_arity, but never past the real parameter count — for a
     # `*args` overload max_arity is `float('inf')` (which the varargs
@@ -668,50 +340,7 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
     _pn_count = len(chosen['param_names'])
     _max_ar = chosen['max_arity']
     while len(out) < _pn_count and len(out) < _max_ar:
-        _tail = len(out)
-        _dflt = (defaults or {}).get(chosen['param_names'][_tail])
-        out.append(gen._default_expr_to_pair(
-            _dflt, param_ctype=_param_ctype_at(chosen, _tail)))
+        _dflt = (defaults or {}).get(chosen['param_names'][len(out)])
+        out.append(gen._default_expr_to_pair(_dflt))
     return out
 
-def user_dunder_repr_call(gen, struct_name: str, ctype: str, cval: str, prefer):
-    """`char *` expression calling a struct RECEIVER'S OWN `__repr__` /
-    `__str__`, or None when it defines neither (or the one it defines is not
-    registered as returning `char *`).
-
-    THE shared dunder lookup for both spellings that have one, so they
-    cannot disagree about which dunder wins: `_repr_value` (`repr(x)`, `%r`)
-    passes `('__repr__',)` and `_stringify_value` (`str(x)`, `%s`, and every
-    f-string interpolation) passes `('__str__', '__repr__')` — CPython's own
-    order for `str`, which prefers `__str__` and falls back to `__repr__`
-    before the default object repr.
-
-    `cval` is materialized as a local of `ctype` first, because the emitted
-    NULL check needs it twice.
-
-    Returns None rather than a fallback expression: the caller then keeps its
-    OWN pre-existing lowering for the no-dunder case (the generated field
-    dump, `mojo_repr_obj`), which is what makes this a strict improvement —
-    it can only replace a wrong answer with a right one.
-
-    Deliberately conservative, exactly as `_repr_value`'s own copy of this
-    logic was: every condition is one "we know this is right" — a struct
-    this compile registered, a method it actually emitted, a return type it
-    actually registered as `char *` — and anything unproven falls through.
-    """
-    _have = gen._struct_method_names.get(struct_name) or ()
-    _local = gen._ensure_local(ctype, cval)
-    for _dunder in prefer:
-        if _dunder not in _have:
-            continue
-        _csym = gen._struct_method_csym(struct_name, _dunder, '')
-        if gen.func_return_types.get(_csym) != 'char *':
-            continue
-        _call = gen._call_expr('char *', _csym, [(ctype, _local)])
-        # Same null semantics the generated field-dump has: a NULL object
-        # reprs as "None" rather than crashing. Interned through
-        # `_intern_string` because a bare `"None"` literal is not a GIMPLE
-        # r-value (see its own docstring).
-        _none = gen._intern_string('None')
-        return gen._new_val('char *', f'({_local} ? {_call} : {_none})')
-    return None

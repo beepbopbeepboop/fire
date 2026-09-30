@@ -1,26 +1,5 @@
 # Mojo Self-Hosting Bootstrap - Current Status
 
-> **ARCHIVED, 2026-10-01. This document describes a bootstrap pipeline that no
-> longer exists, and its "✅ COMPLETE" claims are about THAT pipeline, not about
-> this compiler.** It is kept as a dated record, with its file names left as
-> they were written, because a `sed`-ed rename would produce a document that
-> *reads* as current while describing a pipeline with no Makefile rule — and
-> that failure mode is worse than an obviously stale one, because it stops
-> being obvious.
->
-> What it describes: `make transpile` running `apex py2mojo` to write a Mojo
-> compiler into `mojo/*.mojo`, compiled from there by a `build/mojo` binary
-> into `stage1/mojo` and `stage2/mojo`. None of that exists: there is no
-> `transpile:` rule in the Makefile, no `mojo/mojo_main.mojo`, no
-> `mojo_compiler.mojo`, and `build/mojo` is written by `build_mojo_cli.py`,
-> which nothing runs (see the note in `doc/IMPL.md`).
->
-> What the bootstrap is now: `make bootstrap`, which is `tools/suite.py
-> bootstrap` — `fire.py --dump-full fire.py` → `fire.ci` → `gcc -fgimple` →
-> `stage2/mojo`, verified stage1-vs-stage2-vs-stage3 by `bootstrap-verify`.
-> The CLI is `fire.py` (run) or the compiled `mojoc`/`stage*/mojo`. See
-> `make check-list` for the steps and `tools/suite.py` for what each one runs.
-
 ## Overview
 
 The bootstrap infrastructure is now **fully functional** with all three phases working. The interpreter-based approach allows us to execute the complete Mojo compiler pipeline (tokenize → parse → codegen) without requiring the final compiler to be complete.

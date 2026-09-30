@@ -1,87 +1,5 @@
 # COMPILE_FAIL: Lib/importlib/metadata/__init__.py
 
-## Status (2026-10-01 — STILL a RESOURCE failure, now measured twice and with the ceiling raised; explicitly NOT a verdict either way)
-
-The 2026-09-30 entry below refused to call its single 8 GB run a verdict,
-because `memslot` killed it before it finished. Re-run on this tree at
-**both** ceilings, it is killed again, and neither run says anything about
-whether the file compiles:
-
-```
-tools/memslot.py --gb 8  -- ... fire.py build ... importlib/metadata/__init__.py
-  → memcap: BREACH  8.9 GB >  8.0 GB ceiling (111%)   peak observed before the kill: 8.9 GB
-  → exit 125, 0 `error:` lines
-
-tools/memslot.py --gb 20 -- ... fire.py build ... importlib/metadata/__init__.py
-  → memcap: BREACH 20.7 GB > 20.0 GB ceiling (103%)   peak observed before the kill: 20.7 GB
-  → exit 125, 0 `error:` lines
-```
-
-Two things this measurement DOES establish, both of them new:
-
-- **The runaway is still here and is still growing past 20 GB**, so the
-  `ctypes/util.py` entry's "that one is gone" does not generalise — it was
-  that closure, not this one. `bugs/CODEGEN_bootstrap_resource_blowup.md` /
-  `bugs/PERF_memory_over_4gb_is_a_bug.md` remain the right places; this is
-  the same shape, not a new finding.
-- **23 sibling modules are compiled (as soft fallbacks) before the kill**,
-  and the last diagnostic is `glob.py` refusing on
-  ``next(...) on next(IdentExpr) has no lowering`` — the `next()` refusal
-  just filed as the `itertools.filterfalse`-has-no-lowering gap, which
-  is a real blocker for `importlib/resources/readers.py`'s closure too. So
-  there is a *known, filed, narrow* blocker in this closure as well as the
-  memory one, and the memory one is reached first.
-
-**Not established:** whether this file compiles. Getting a verdict needs a
-ceiling above ~21 GB or a memory-fixed tree; this is the integrator's
-call, not a light worker's. The 2026-09-03 entry's specific claim — that
-`_convert_egg_info_reqs_to_simple_reqs`'s nested helpers cannot have their
-parameters typed because `sections`' element type is not threaded into
-them — is still the right hypothesis to check first and is unchanged by
-anything on this branch.
-
-Doc kept open. **Explicitly not a re-verification, and not a verdict.**
-
-## Status (2026-09-30, branch work/compile-fail-stdlib-misc — NOT REPRODUCED and NOT CLEARED: killed for memory before any verdict)
-
-The one attempt this session was **not a verdict in either direction**, and
-recording it as one would be the worst thing this doc could do:
-
-```
-python3 tools/memslot.py --gb 8 --label metadata -- \
-  python3 fire.py build -o .tmp/out/metadata \
-  /Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/__init__.py
-memcap: BREACH 9.3 GB > 8.0 GB ceiling (115%), 1 procs -- killing metadata
-real 367s
-```
-
-A RESOURCE failure: the process was killed for memory before it finished,
-so whether this file now compiles is unknown. Before the kill it had
-emitted 17 module-level soft fallbacks for OTHER modules and **zero** for
-`importlib/metadata/__init__.py` itself — but "zero before the kill" is
-not a result, it is the absence of one.
-
-This is the same whole-program RAM growth the 2026-08-24/26 entries
-describe for `ctypes/util.py`, except that `ctypes/util.py` — a bigger
-closure — now completes in 1.7 GB on this tree (see that doc's 2026-09-30
-entry). So the growth is specific to something in THIS closure, and
-`bugs/CODEGEN_bootstrap_resource_blowup.md` /
-`bugs/PERF_memory_over_4gb_is_a_bug.md` are the right places for it.
-
-**Next step for whoever picks this up**: re-run with the ceiling raised
-(`MEMLIMIT_GB=96` for the suite runner, or `--gb 24` for a direct
-`memslot.py` call) so the build is allowed to finish, then read the
-verdict. The 2026-09-03 entry's specific claim — that
-`_convert_egg_info_reqs_to_simple_reqs`'s nested helpers `url_req_space`
-/ `quoted_marker` / `make_condition` cannot have their parameters typed
-because `sections`' element type is not threaded into them — is still the
-right hypothesis to check first, and is unchanged by anything this branch
-did (both fixes this branch landed are in the closure's OTHER modules:
-`zipfile`, `shutil`, `tempfile`, `json/decoder`, `email/_parseaddr`,
-`importlib/resources/*`).
-
-Doc kept open. **Explicitly not a re-verification.**
-
 ## Status (2026-09-03 — nested non-capturing sync-helper coroutine codegen LANDED; this file still refused)
 
 Implemented real compilation of nested NON-capturing sync `def`s
@@ -201,7 +119,7 @@ neither a narrow whitelist add. Not attempted; no code change.
 
 This session implemented real loop-as-expression codegen for `list(x)`/
 `set(x)`/comprehension-as-value inside a compiled generator/coroutine
-body (see `“CODEGEN_generator_function: Lib/codecs.py”`'s entry of the
+body (see `bugs/CODEGEN_generator_function_Lib_codecs.md`'s entry of the
 same date for the implementation writeup). This file's own two refusals
 are `_convert_egg_info_reqs_to_simple_reqs` (nested-`def`-as-callee,
 `url_req_space(...)`) and `Sectioned.read` (`map(...)`, categorically
@@ -533,7 +451,7 @@ returned value/type. This generically fixes `self.prop[key]` for any
 0-arg property/method (inherited or not) followed by a subscript,
 without touching `_signature_ctypes`/call-argument-packing machinery at
 all (a deliberately different, narrower code path from the held-back
-`CODEGEN_args_kwargs_signature_assumed_forwarding_only`
+`bugs/hard/CODEGEN_args_kwargs_signature_assumed_forwarding_only.md`
 task #142 — NOT the same fix, NOT touching the same function).
 
 Verification: both `Distribution.name`/`Distribution.version`'s
