@@ -119,6 +119,34 @@ Re-sweeping the 26 with the fix in place:
 So the fix buys 7 truthful diagnoses and 4 of the 7 immediately walk into the
 next false one, which is the single most reusable thing left in these two rows.
 
+## The fix's verdict footprint is exactly those 7 files
+
+Worth stating, because a rewrite in `formal/` is a wide change to make on trust.
+59 stdlib files call `origin_of`, and the question is how many of the other 52
+could have had it as their reported refusal. Answer: none of them could have,
+and the reason is structural rather than lucky — the only place this construct
+could ever be a file's terminal cause is the value-only sentence in
+`_check_frame_escapes`'s argument loop, and on the 2026-09-30 sweep log
+`origin_of` appears **7 times in 628 files' verdicts, and all 7 are that
+sentence**:
+
+```
+$ grep -c origin_of .tmp/sweep_20260930.log        # lines, i.e. files
+7
+$ grep origin_of .tmp/sweep_20260930.log | grep -vc "lowered as an operation on a VALUE"
+0
+```
+
+7 files and 21 textual occurrences of the name, every one of them in that one
+sentence.
+
+The other 52 were already refused earlier — by a host import, a dependency, or a
+refusal the walk reaches before the argument loop — and none of those moves. So
+the change cannot move a file outside these 7, and a full re-sweep after it
+should find exactly the 7 verdicts the table above lists, with 0 reaching
+`pass`. (That re-sweep is a large run and was not done here; it belongs to the
+gate.)
+
 ## The neighbouring gap: a subscript's argument list is not a container
 
 Filed as `bugs/FORMAL_type_argument_read_as_a_container.md`. One paragraph,
