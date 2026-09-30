@@ -239,6 +239,7 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     "sys": "test_formal_sys.py",
     "time": "test_formal_time.py",
     "hashlib": "test_formal_hashlib.py",
+    "re": "test_re_formal.py",
 }
 
 
@@ -308,15 +309,20 @@ def test_host_tiers():
     # them "not fixable" was false. A name that has been WRITTEN is not in
     # this list because it is implemented rather than unreachable; see
     # `written_modules()` above for the derived account.
-    for m in ('math', 'json', 're'):
+    for m in ('math', 'json'):
         check(I.host_module_tier(m) == 'modelled',
               f'{m} is modelled (reachable in principle, not implemented)')
-    # `time` is NOT in that list and the omission is the point: it is one of
-    # the four names this check originally asserted, and it stopped being
-    # 'modelled' when `formal/hostmods/time.mojo` was written. A name reaches
-    # this list by being written and leaves it by being named, so adding one
-    # here is a separate edit from adding the module — and the account above
-    # fails if only one of the two is done.
+    # `time` and `re` are NOT in that list and their omissions are the point:
+    # they are two of the four names this check originally asserted, and each
+    # stopped being 'modelled' when its source was written
+    # (`formal/hostmods/time.mojo`, `formal/hostmods/re.mojo`). A name
+    # reaches this list by being written and leaves it by being named, so
+    # adding one here is a separate edit from adding the module — and the
+    # account above fails if only one of the two is done. Neither gets a
+    # bespoke "in neither tier" assertion here: that is exactly what the loop
+    # over `IMPLEMENTED_HOST_MODULE_TESTS` above already says about every
+    # written name, and a second copy of it would be the duplicate the pair
+    # above exists to prevent.
     for m in ('subprocess', 'ctypes', 'asyncio', 'threading', 'socket',
               'tempfile', 'shutil', 'concurrent.futures', 'zlib', 'traceback'):
         check(I.host_module_tier(m) == 'unreachable',

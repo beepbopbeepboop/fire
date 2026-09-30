@@ -187,10 +187,25 @@ HOST_MODELLED = frozenset((
     #     cross a dylib boundary — so each digest is one function, and the
     #     seven absent names (SHA-3, SHAKE, blake2s) are named with the
     #     measurements in `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md`.
+    #   `re`  — `formal/hostmods/re.mojo`, a backtracking regex engine in the
+    #     subset `regex_compile.py` says it exists for plus `\b`, `^`/`$`
+    #     under MULTILINE, DOTALL and `(?P<name>…)` — the four things the
+    #     thirteen sweep files and `fire_compiler.py` actually spell — checked
+    #     span for span against CPython's own `re` by `test_re_formal.py`
+    #     (112 patterns, every integer compared). It matters for the same
+    #     reason `struct` does: thirteen files of the arm64 sweep stopped on
+    #     this one import. What it cannot answer is written at the top of the
+    #     file, and the three absences are refusals rather than wrong answers
+    #     — lookaround and backreferences return `STATUS_UNSUPPORTED`, a
+    #     pattern bigger than the module compiles returns `STATUS_LIMIT`, and
+    #     the compiled-pattern and match OBJECTS are functions taking a
+    #     caller-allocated span list, because an object is more than one
+    #     64-bit word and a compiled pattern has nowhere to live between
+    #     calls.
     #
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
-    "json", "re", "math", "random", "decimal", "fractions",
+    "json", "math", "random", "decimal", "fractions",
     "numbers", "array", "operator", "functools", "itertools", "collections",
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
     "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
