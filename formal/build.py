@@ -1928,6 +1928,7 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                             # No single declared type, so the slot's contents
                             # are unknown — which is what the old message said,
                             # and now it also says WHICH candidate disagreed.
+                            trows = _type_rows(cands, outer, structs_by_name)
                             raise CodegenError(
                                 f"{chain}() hands the word in the slot "
                                 f"{base}.{outer} to "
@@ -1936,14 +1937,16 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                                 f"the slot would have to hold a frame address. "
                                 f"The declared type of {outer!r} is the only "
                                 f"thing here that could say so, and it does "
-                                f"not: {M.field_type_disagreement(cands, outer, _type_rows(cands, outer, structs_by_name))}"
+                                f"not: {M.field_type_disagreement(cands, outer, trows)}"
                                 f". Until every binding of the name agrees on "
                                 f"one type there is no frame to place here"
                             )
                         if nested is _REASSIGNED:
+                            ann = _field_annotation(cands, outer,
+                                                    structs_by_name)
                             raise CodegenError(
                                 f"{base}.{outer} is declared as a "
-                                f"{M.annotation_base_name(_field_annotation(cands, outer, structs_by_name))}"
+                                f"{M.annotation_base_name(ann)}"
                                 f", a struct of this module whose receiver is a "
                                 f"frame of 8-byte slots, so the slot does hold a "
                                 f"frame address — but a method of "
@@ -2009,6 +2012,7 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                 nested = _typed_nested_frame(
                     base, outer_field, cands, structs_by_name, None)
                 if nested is _NOT_TYPED:
+                    vrows = _type_rows(cands, outer_field, structs_by_name)
                     raise CodegenError(
                         f"{chain} reads a field of a field through the receiver "
                         f"{base}: a frame slot holds one 64-bit word, and the word "
@@ -2023,13 +2027,14 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                         f"the value — which is {node.member!r}() as a call, not "
                         f"a field read. The declared type of {outer_field!r} does "
                         f"not settle it: "
-                        f"{M.field_type_disagreement(cands, outer_field, _type_rows(cands, outer_field, structs_by_name))}"
+                        f"{M.field_type_disagreement(cands, outer_field, vrows)}"
                     )
                 if nested is _REASSIGNED:
+                    vann = _field_annotation(cands, outer_field, structs_by_name)
                     raise CodegenError(
                         f"{chain} reads through {base}.{outer_field}, which is "
                         f"declared as a "
-                        f"{M.annotation_base_name(_field_annotation(cands, outer_field, structs_by_name))}"
+                        f"{M.annotation_base_name(vann)}"
                         f" — a struct of this module whose receiver is a frame — "
                         f"but a method of "
                         f"{', '.join(sorted({st.name for st in cands}))} ASSIGNS "
@@ -2055,12 +2060,13 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                 outer_slot, (odis, orows) = M.struct_frame_slot_candidates(
                     cands, outer_field)
                 if odis or outer_slot is None:
+                    trows = _type_rows(cands, outer_field, structs_by_name)
                     raise CodegenError(
                         f"{base}.{outer_field} cannot be placed, so the nested "
                         f"read {chain} has no first load: "
                         + ("the candidate layouts disagree — "
-                           + M.field_type_disagreement(
-                               cands, outer_field, _type_rows(cands, outer_field, structs_by_name))
+                           + M.field_type_disagreement(cands, outer_field,
+                                                       trows)
                            if odis else
                            f"no candidate declares it as a field of a frame")
                     )
