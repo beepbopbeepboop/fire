@@ -8,6 +8,10 @@ whose whole value is that its kill is aimed correctly:
   * `tools/suite.py` needs to kill a runaway job's whole tree on a timeout,
     and to read what the job printed.
   * `tools/memcap.py` needs to measure a tree's RSS and kill it at a ceiling.
+  * `tools/ab_run_one.py` and `tools/suite.py` need to read that ceiling run's
+    verdict — the peak it saw, and whether it was the ceiling that stopped it —
+    so a per-file A/B job and a whole suite test report a memory kill the same
+    way. `memcap_verdict` is that reader.
 
 Duplicating the process-table walk and the kill order in both would be exactly
 the failure this file prevents. There was a real instance of it: an earlier
@@ -37,6 +41,7 @@ that gets ignored is the same as no TERM at all.
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -139,13 +144,25 @@ def kill_tree(root, table=None):
 
 
 def kill_group(proc: subprocess.Popen):
-    """SIGKILL a Popen's entire process group, then reap it.
+    """SIGKILL a Popen's whole process TREE, then its group, then reap it.
 
-    Used on the timeout path, where the child may have spawned anything at
-    all and there is no reason to walk `ps` for a process we already have a
-    handle to: `start_new_session=True` put the whole subtree in one group we
-    can signal as a unit.
+    The walk comes FIRST, and it is not belt-and-braces: it is the only part
+    that reaches a nested wrapper's children. `tools/memcap.py` starts the
+    command it supervises with `start_new_session=True` (so it can signal the
+    subtree as a unit), which puts that subtree in a process group of its own
+    — so a group kill aimed at the wrapper's group stops AT the wrapper. Since
+    every capped job is `memcap <workload>`, a timeout that only killed the
+    group would SIGKILL memcap and leave the real workload running,
+    unmonitored, still allocating: exactly the runaway the ceiling exists to
+    prevent, re-created by the mechanism meant to stop it. Walking `ps` while
+    the parent is still alive is what makes the ppid chain available at all,
+    and `kill_tree` already kills children before parents, so the memory is
+    released before the process holding it dies.
+
+    The group kill stays, for the pid that arrives between the walk and the
+    reap, and as the path that works when `ps` is unavailable.
     """
+    kill_tree(proc.pid)
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
@@ -157,6 +174,35 @@ def kill_group(proc: subprocess.Popen):
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         pass
+
+
+# ── Reading a memcap run's verdict ──────────────────────────────────────────
+# One parser, two callers: `tools/suite.py` needs the peak of every job it
+# runs (which is how a job's measured peak gets into the log and the run's
+# summary) and needs to tell "the child exited 125" from "memcap killed it";
+# `tools/ab_run_one.py` needs the same two facts per A/B file, to record a
+# memory kill in its meta.json rather than reporting it as a compiler failure.
+# Both are the same two lines of memcap's output, so they are parsed here
+# rather than twice.
+_MEMCAP_PEAK = re.compile(r'peak (?:observed before the kill: )?([\d.]+) GB')
+_MEMCAP_BREACH = 'memcap: BREACH'
+
+
+def memcap_verdict(text):
+    """`(breached, peak_gb)` from a memcap-wrapped run's output.
+
+    `breached` is read from memcap's own words rather than from exit code 125,
+    because exit 125 is only memcap's while the wrapper is the one that
+    started the child: a workload that exits 125 by itself is a workload that
+    failed, and calling that a memory cap is how a real failure gets filed
+    under a machine problem. A run whose output carries no memcap lines at all
+    (a `checked_run` cache hit, which never starts the child) is not a breach.
+
+    `peak_gb` is None when memcap printed nothing measurable.
+    """
+    text = text or ''
+    found = _MEMCAP_PEAK.findall(text)
+    return (_MEMCAP_BREACH in text, float(found[-1]) if found else None)
 
 
 # ── A bounded capture buffer ─────────────────────────────────────────────────

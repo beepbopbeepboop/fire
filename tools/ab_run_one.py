@@ -19,6 +19,24 @@ which file is being compiled — so two files sharing a basename (56 distinct
 each other's output. A per-basename flock (.ab_locks/<basename>.lock)
 serializes only the colliding subset; distinct basenames still run fully
 in parallel via Make's own -j.
+
+The per-file compile is capped. This harness is the "bounded per-file
+alternative, safe to run unattended" the Makefile and `wholeprogram-help`
+point at, and it is bounded by TIMEOUT_S but NOT by memory: `make -j20
+bside` is twenty concurrent native compiles, and the corpus deliberately
+contains this compiler's own sources, where one `--dump` has been measured
+at 15-30 GB (see SELFHOST_TOKENIZE_BLOWUP in tools/suite.py and BLOW.md
+§0's "NOT closed" addendum). The ceiling is the `module` class — the same
+one the three `bootstrap-stage*-dumps` fanouts give the identical per-file
+`--dump` — read from tools/suite.py's MEMCLASS rather than spelled here, so
+`MEMLIMIT_GB` moves it and `MEMLIMIT_GB=0` removes it exactly as it does for
+every job in the suite.
+
+A file killed by the ceiling is recorded as such in its meta.json
+(`memory_capped`, with the peak memcap saw) instead of being reported as a
+compiler failure with an empty .ci: "this file needed more memory than one
+file is allowed" and "this file does not compile" are different findings, and
+the sweep's output is the only place either can surface.
 """
 import argparse
 import fcntl
@@ -29,9 +47,18 @@ import subprocess
 import sys
 import time
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+import procrun                                                   # noqa: E402
+import suite                                                     # noqa: E402
+
 LOCK_DIR = os.path.join(REPO, '.ab_locks')
 TIMEOUT_S = 120
+# The class one file's compile runs under. A `module` is one source file's
+# worth of the closure, which is what a single `--dump` of a single file is,
+# and it is what the suite gives the per-file bootstrap fanouts.
+MEMCLASS = 'module'
 
 
 def main() -> int:
@@ -74,14 +101,28 @@ def _run_locked(args, basename: str, out_dir: str) -> None:
         env['MOJO_HOME'] = REPO
         cmd = [os.path.join(REPO, 'mojoc'), args.src, '--dump']
 
+    # The ceiling, spelled the one way. ABSOLUTE paths on both, because the
+    # compile runs with cwd=REPO while this script may have been invoked from
+    # anywhere, and `memcap.py` has to be found before the workload starts.
+    limit = suite.memlimit(MEMCLASS)
+    label = f'ab-{args.side}:{os.path.relpath(args.src, REPO)}'
+    if limit > 0:
+        cmd = [sys.executable, os.path.join(HERE, 'memcap.py'),
+               '--limit-gb', str(limit), '--label', label, '--'] + cmd
+
     t0 = time.time()
+    stdout = ''
     try:
         result = subprocess.run(cmd, cwd=REPO, env=env,
                                  capture_output=True, text=True,
                                  timeout=TIMEOUT_S, errors='replace')
-        rc, stderr = result.returncode, result.stderr
+        rc, stderr, stdout = result.returncode, result.stderr, result.stdout
     except subprocess.TimeoutExpired:
         rc, stderr = -1, f'TIMEOUT after {TIMEOUT_S}s'
+    # memcap reports on stdout, which this harness does not otherwise keep, and
+    # its two facts are the ones a per-file verdict needs: was this file killed
+    # for memory, and how much did it ask for while it ran.
+    breached, peak = procrun.memcap_verdict(stdout)
 
     produced = []
     for ext in ('tok', 'ast', 'ci', 'pyi'):
@@ -96,6 +137,21 @@ def _run_locked(args, basename: str, out_dir: str) -> None:
         'produced': produced,
         'stderr_tail': stderr[-2000:] if stderr else '',
     }
+    if limit > 0:
+        # Always recorded, not only on a kill: a sweep that answers "which
+        # files are close to the ceiling" is the only way to tell whether
+        # `module` is the right class for this corpus before someone has to
+        # guess again.
+        meta['memcap_gb'] = limit
+        meta['peak_gb'] = peak
+        meta['memory_capped'] = breached
+    if breached:
+        # Readable in `ab_compare.py`'s failure listing, and not confusable with
+        # a compiler error: this file was killed before it said anything.
+        meta['stderr_tail'] = (f'MEMORY: killed at the {limit:g} GB per-file '
+                               f'ceiling (peak {peak} GB) — not a compile '
+                               f'failure' + ('\n' + meta['stderr_tail']
+                                             if meta['stderr_tail'] else ''))
     with open(os.path.join(out_dir, f'{basename}.meta.json'), 'w') as mf:
         json.dump(meta, mf)
 

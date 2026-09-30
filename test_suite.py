@@ -54,7 +54,10 @@ import ast
 import io
 import os
 import re
+import signal
+import subprocess
 import sys
+import time
 from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -190,6 +193,333 @@ def test_make_driver():
                          driver='make')):
         rc, _ = run(['mk'])
         check('make driver: runs make with the target', rc == 0, f'got {rc}')
+
+
+# ── memory ceilings: every driver, and the trees behind them ────────────────
+HOG = ('import time; x = bytearray(96 * 1024 * 1024); time.sleep(8)')
+
+
+def _tiny_ceiling():
+    """Run `body` with MEMLIMIT_GB set to a ceiling a bare python exceeds.
+
+    20 MB: less than the interpreter's own RSS, so the breach is immediate and
+    the test costs milliseconds — a real workload cannot be used to prove a cap
+    fires, because the only honest way to make one breach is to allocate.
+    Restores the variable afterwards, which matters now that EVERY job is
+    wrapped: a leaked 0.02 would cap every later test in this file to nothing.
+    """
+    class _Env:
+        def __enter__(self):
+            self.old = os.environ.get('MEMLIMIT_GB')
+            os.environ['MEMLIMIT_GB'] = '0.02'
+
+        def __exit__(self, *exc):
+            if self.old is None:
+                os.environ.pop('MEMLIMIT_GB', None)
+            else:
+                os.environ['MEMLIMIT_GB'] = self.old
+            return False
+    return _Env()
+
+
+def test_cmd_and_make_drivers_are_capped():
+    """The `cmd` and `make` drivers must kill a runaway and say RESOURCE.
+
+    This is the whole point of the coverage change, and it is the check that
+    would have caught the gap: the `mem` driver capped its jobs and the other
+    two did not, so `selfhost` — which reaches the 55 GB self-compile from
+    inside a test file — ran with nothing between it and the machine, and 8 of
+    the 73 registered jobs were the only ones anyone had thought about.
+
+    Each driver gets its own synthetic job, because the two wrap the workload
+    differently: `cmd` hands memcap the command directly, while `make` hands it
+    a `make` server whose recipe starts the workload as a GRANDCHILD. The
+    second is the one that matters and the one a `mem`-only test never tried.
+    """
+    log = os.path.join(HERE, 'build', 'test-suite-cap.log')
+    mk = os.path.join(HERE, 'build', 'test-suite-hog.mk')
+    os.makedirs(os.path.dirname(mk), exist_ok=True)
+    with open(mk, 'w') as f:
+        f.write('hog:\n\t%s -c %r\n' % (PY, HOG))
+    with Sandbox(capcmd=dict(cmd=ok_cmd(HOG)),
+                 capmake=dict(cmd=['-f', os.path.relpath(mk, HERE), 'hog'],
+                              driver='make')):
+        with _tiny_ceiling():
+            rc, _ = run(['capcmd', 'capmake'], jobs=2, log=log)
+    text = open(log).read() if os.path.exists(log) else ''
+
+    check('cap: a cmd job that breaches is RESOURCE, not FAIL',
+          text.count('RESOURCE') >= 2 and '\n  FAIL' not in text,
+          'expected a RESOURCE verdict for each driver')
+    check('cap: the make driver caps the tree, not just make itself',
+          'make' in text and '--limit-gb 0.02' in text,
+          'expected the make job to run under memcap too')
+    check('cap: a breach is memcap\'s exit code, 125',
+          text.count('exit: 125') >= 2,
+          f'expected exit 125 twice, saw {text.count("exit: 125")}')
+    check('cap: a capped job reports its measured peak',
+          'peak: 0.0 GB' in text or 'peak:' in text,
+          'the peak line is how a job records what it asked for')
+    check('cap: RESOURCE still does not fail the run', rc == 0, f'got {rc}')
+
+
+def test_a_timeout_leaves_no_orphan_under_a_cap():
+    """A timeout must take the whole capped tree down, not just the wrapper.
+
+    `procrun.spawn` kills a job's process GROUP on a timeout, and that was
+    enough when the child was the workload. It stopped being enough the moment
+    every job became `memcap <workload>`: memcap starts its command with
+    `start_new_session=True` (so it can signal the subtree as a unit), which
+    puts the workload in a process group of its own — so the group kill reached
+    memcap and stopped there, leaving the real compile running, unmonitored,
+    still allocating. That is the runaway the ceiling exists to prevent,
+    re-created by the mechanism meant to stop it, and it is invisible: the
+    runner reports TIMEOUT and the machine quietly fills up behind it.
+
+    So the test asserts on the process table rather than on a verdict: the job
+    spawns a grandchild that would outlive the run by minutes, and neither it
+    nor its parent may be there afterwards. It also has to be a grandchild —
+    killing the direct child is what the old code did and what this test must
+    not accept.
+    """
+    pidfile = os.path.join(HERE, 'build', 'test-suite-orphan.pid')
+    if os.path.exists(pidfile):
+        os.unlink(pidfile)
+    log = os.path.join(HERE, 'build', 'test-suite-timeout-tree.log')
+    body = (f'import os, subprocess, sys, time;'
+            f'p = subprocess.Popen([sys.executable, "-c", "import time;'
+            f' time.sleep(300)"]);'
+            f'open({pidfile!r}, "w").write(f"{{os.getpid()}} {{p.pid}}");'
+            f'time.sleep(300)')
+    with Sandbox(hang=dict(cmd=[PY, '-c', body], timeout=2)):
+        rc, _ = run(['hang'], jobs=1, log=log)
+
+    deadline = time.time() + 3
+    while not os.path.exists(pidfile) and time.time() < deadline:
+        time.sleep(0.05)
+    check('timeout tree: the grandchild was started at all',
+          os.path.exists(pidfile),
+          'no pid file: the test cannot tell an orphan from a job that never ran')
+    if not os.path.exists(pidfile):
+        return
+    pids = [int(p) for p in open(pidfile).read().split()]
+
+    def alive(pid):
+        return subprocess.run(['ps', '-p', str(pid)], capture_output=True,
+                              text=True).returncode == 0
+
+    deadline = time.time() + 3
+    while any(alive(p) for p in pids) and time.time() < deadline:
+        time.sleep(0.1)
+    survivors = [p for p in pids if alive(p)]
+    check('timeout tree: the runaway grandchild did not survive the kill',
+          not survivors,
+          f'pid(s) {survivors} still running: the timeout killed the wrapper '
+          f'and left the workload behind')
+    check('timeout tree: and the job is reported as TIMEOUT',
+          'TIMEOUT' in (open(log).read() if os.path.exists(log) else ''),
+          'expected a TIMEOUT verdict in the log')
+    check('timeout tree: a timeout is still a failure', rc == 1, f'got {rc}')
+    for pid in survivors:                     # never leave a stray behind
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+
+# ── the memory-ceiling estate: is anything that can run away, capped? ────────
+# The vocabulary below is what a WHOLE-CLOSURE compile looks like, not which
+# compiler is installed: a build of the compiler's own main source, a
+# `--dump-full` of it, a `gcc -fgimple` over the .ci it writes, or the
+# compiled binary itself. It is deliberately not "a mention of mojoc" — a
+# detector that flagged every test that talks about the compiler would be
+# flagged-stuff, and a check that fires on 40 jobs is a check nobody reads.
+#
+# The failure being modelled is measured, not hypothetical. `tools/suite.py`
+# capped 8 of its 73 registered jobs, because the cap was a property of the
+# DRIVER (`mem`) rather than of the workload: `selfhost` — which calls
+# `fire.build_executable(fire.py)` and so reaches the 55 GB self-compile — was
+# `driver='cmd'`, and ran with nothing between it and the machine. `make mojoc`,
+# `make stage2/mojo`, `make fire.ci` and `make build/system.o` had the same
+# shape, and the A/B sweep had no ceiling anywhere in its chain. All of that
+# is now closed; this is what stops the next registration from reopening it.
+CLOSURE_CMD_SHAPES = (
+    ('the whole-closure build', re.compile(r'fire\.py\s+build')),
+    ('the whole-closure dump', re.compile(r'--dump-full')),
+    ('a gcc over the closure', re.compile(r'-fgimple')),
+    ('a compiled compiler binary',
+     re.compile(r'(?:^|[\s\'"/])(?:\./)?(?:mojoc|mojo|stage\d+/mojo)(?:[\s\'"/]|$)')),
+    ('a whole-stdlib sweep',
+     re.compile(r'compile_stdlib|build_stdlib_dylib')),
+)
+
+
+def _closure_shapes(text):
+    return [why for why, rx in CLOSURE_CMD_SHAPES if rx.search(text)]
+
+
+def _closure_shapes_in_code(path):
+    """The shapes that appear in a test file as CODE rather than as prose.
+
+    One level deep, and by AST rather than by grep, because a test file
+    discusses the compiler constantly: `test_gimple.py` and twenty others
+    mention `-fgimple` and `mojoc` in strings and docstrings while compiling
+    snippet-sized programs. What is unambiguous is a CALL — `build_executable`
+    is the closure build's entry point, and `--dump-full` as an argument to a
+    call is a real invocation. Grepping for either would flag half the estate;
+    parsing for them flags the three that actually reach the workload.
+    """
+    try:
+        tree = ast.parse(open(path, errors='replace').read())
+    except (SyntaxError, OSError):
+        return []
+    hits = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = (func.attr if isinstance(func, ast.Attribute)
+                else getattr(func, 'id', ''))
+        if name == 'build_executable':
+            hits.add('calls build_executable')
+        for arg in list(node.args) + [k.value for k in node.keywords]:
+            if isinstance(arg, ast.Constant) and arg.value == '--dump-full':
+                hits.add('runs --dump-full')
+    return sorted(hits)
+
+
+def _makefile_recipe_lines():
+    """`(target, line)` for every logical line of a Makefile recipe.
+
+    Continuations joined, because the `stage2/mojo` recipe is one command
+    spread over six lines and the wrapper is on the first of them: a checker
+    that read one line at a time would see a bare `gcc ... -fgimple` with no
+    ceiling and report a false positive on a recipe that has one.
+    """
+    target, buf = None, []
+    with open(os.path.join(HERE, 'Makefile')) as f:
+        lines = f.read().splitlines()
+    for line in lines:
+        if not line.startswith('\t'):
+            if buf:
+                yield target, ' '.join(buf)
+                buf = []
+            m = re.match(r'^([A-Za-z0-9_][\w./$-]*):(?!=)', line)
+            target = m.group(1) if m else target
+            continue
+        buf.append(line.strip().rstrip('\\').strip())
+    if buf:
+        yield target, ' '.join(buf)
+
+
+def test_every_compiler_job_is_capped():
+    """No registered job that can reach a whole-closure compile may be uncapped.
+
+    Three rules, each closing a different way the answer used to be "no":
+
+    1. EVERY job resolves to a positive ceiling. `cmd` and `make` jobs that
+       name no class get `DEFAULT_MEMCLASS`, so a new registration is capped
+       by existing — checked here against the built argv, so the thing being
+       asserted is that a process is wrapped, not that a table has a row.
+    2. Every `driver='make'` spec names a class. A make target's command line
+       is not in the registry, so no pattern can check what it runs;
+       `ab-clean` is `rm -rf` and `bside` is 779 real compiles, and they are
+       the same line of the registry.
+    3. A job whose command line — or whose test file, one level in, as code —
+       compiles the whole closure names its class rather than inheriting the
+       default. The default is right for a snippet and wrong by 30x for the
+       closure, and nothing in the registry can tell the reader which it got.
+    """
+    specs = suite.REGISTRY
+    check('cap estate: the registry is big enough for this to mean something',
+          len(specs) > 60, f'only {len(specs)} specs')
+    check('cap estate: there is a default class to inherit',
+          suite.DEFAULT_MEMCLASS in suite.MEMCLASS,
+          f'DEFAULT_MEMCLASS={suite.DEFAULT_MEMCLASS!r} is not a class')
+
+    # (1) the argv, which is the thing that decides whether a process is
+    # wrapped. Skipped under MEMLIMIT_GB=0, which is the documented way to
+    # turn every ceiling off and would otherwise fail the run it is
+    # deliberately disabling.
+    if os.environ.get('MEMLIMIT_GB', '').strip() in ('', '0', '0.0'):
+        opts = _FakeOpts()
+        unwrapped = []
+        for name, spec in sorted(specs.items()):
+            cmd = suite.build_cmd(suite.Job(spec, cmd=['true']), opts)
+            if not any(os.path.basename(str(a)) == 'memcap.py' for a in cmd):
+                unwrapped.append(name)
+        check('cap estate: every registered job is wrapped in memcap',
+              not unwrapped, f'unwrapped: {unwrapped}')
+    else:
+        print('      cap estate: MEMLIMIT_GB is set, so the argv check is '
+              'skipped (it asserts the wrapping that the override disables)')
+
+    # (2) a make target is opaque, so its number has to be written down.
+    nameless_makes = sorted(
+        name for name, spec in specs.items()
+        if getattr(spec, 'driver', None) == 'make' and not spec.mem)
+    check('cap estate: every make-driven test names its memclass',
+          not nameless_makes, f'inheriting the default: {nameless_makes}')
+
+    # (3) a closure compile, named.
+    silent, flagged = [], 0
+    for name, spec in sorted(specs.items()):
+        cmd = ' '.join(str(c) for c in (spec.cmd or []))
+        hits = _closure_shapes(cmd)
+        if not hits:
+            for c in (spec.cmd or []):
+                if str(c).endswith('.py') and os.path.exists(c):
+                    hits = _closure_shapes_in_code(c)
+                    if hits:
+                        hits = [f'{os.path.basename(str(c))} {h}' for h in hits]
+                    break
+        if not hits:
+            continue
+        flagged += 1
+        if not spec.mem:
+            silent.append(f'{name} ({", ".join(hits)})')
+    check('cap estate: a test that reaches a whole-closure compile names its '
+          'memclass', not silent, '; '.join(silent))
+    check('cap estate: the detector still finds those jobs', flagged >= 5,
+          f'only {flagged} flagged; a detector that sees nothing proves '
+          f'nothing')
+
+    # The detector's own tests, load-bearing for the same reason the
+    # build-artifact check's are: a guard that cannot see the shape it was
+    # written for reports green forever.
+    check('cap estate: the detector sees a closure build',
+          _closure_shapes('python3 fire.py build fire.py -o mojoc') != [],
+          'it stopped recognising `fire.py build`')
+    check('cap estate: the detector sees a closure dump',
+          _closure_shapes('mojoc --dump-full ../fire.py') != [],
+          'it stopped recognising --dump-full')
+    check('cap estate: the detector sees a stage binary',
+          _closure_shapes("['stage2/mojo']") != [],
+          'it stopped recognising a stage binary')
+    check('cap estate: the detector sees a gcc over the closure',
+          _closure_shapes('gcc-15 -O0 -fgimple -o stage2/mojo') != [],
+          'it stopped recognising -fgimple')
+    check('cap estate: and does not flag an ordinary test',
+          not _closure_shapes('python3 test_gimple.py'),
+          'a plain test is not a closure compile')
+
+    # And the Makefile, because the runner's registry is only half the estate:
+    # `make mojoc` and `make stage2/mojo` are how a developer gets the binary,
+    # and neither goes through the registry.
+    uncovered = [f'{t}: {line[:60]}'
+                 for t, line in _makefile_recipe_lines()
+                 if _closure_shapes(line) and '$(call memcap' not in line]
+    check('cap estate: every Makefile recipe that compiles a closure is wrapped',
+          not uncovered, '; '.join(uncovered))
+    check('cap estate: the Makefile wrapper is the one macro, not a copy',
+          '$(call memcap' in open(os.path.join(HERE, 'Makefile')).read(),
+          'the Makefile should spell the wrapper once')
+
+
+class _FakeOpts:
+    """Enough of an options object for build_cmd, and nothing else."""
+    jobs, no_cache, verbose, timeout = 2, False, False, None
 
 
 def test_j_forwarded():

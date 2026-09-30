@@ -70,6 +70,9 @@ GCC_MP15     = /opt/local/bin/gcc-mp-15
 BOOTSTRAP_CC = $(shell command -v gcc-15 >/dev/null 2>&1 && echo gcc-15 || (test -x $(GCC_MP15) && echo $(GCC_MP15)) || echo gcc)
 BOOTSTRAP_OPT ?= -O0
 MOJO_OPT ?= -O2 -g0
+# The `python3` that builds everything here. Overridable so the memcap wrapper
+# below cannot end up in a different interpreter than the recipe it wraps.
+PYTHON   ?= python3
 
 # 512MB main-thread stack (default 8MB). The self-hosted compiler's regex
 # engine and generic AST walkers are deeply CPS-recursive — a re.sub/findall
@@ -111,6 +114,31 @@ export SDKROOT
 ifneq ($(strip $(MEMLIMIT_GB)),)
 export MEMLIMIT_GB
 endif
+
+# ── Memory ceilings for the build rules ─────────────────────────────────────
+# `make mojoc` and `make stage2/mojo` are the two recipes in this file that
+# start a whole-closure self-compile: the same workload as
+# bootstrap-stage1-transitive, which has been measured at 55.8 GB healthy and
+# 192 GB when it ran away, plus a `gcc -fgimple` over the resulting 40 MB
+# translation unit. Both used to run with no ceiling at all, which is worse in
+# a Makefile than it is in the test runner: `make mojoc` is the command a
+# developer types by hand when they want the binary, and a runaway there is
+# stopped by a human watching the machine.
+#
+# So the wrapper is spelled ONCE, here, and every recipe that starts a
+# compiler uses it. $(call memcap,<label>,<class>) expands to the whole
+# `memcap.py --limit-gb <GB> --label <label> --` prefix, or to NOTHING when
+# MEMLIMIT_GB=0 — the run-wide "no ceiling" switch has to remove the wrapper,
+# not pass it a zero, because `memcap --limit-gb 0` would kill the first
+# process it sampled.
+#
+# The number comes from tools/suite.py's MEMCLASS table via one `$(shell)`
+# call, so a hand-run `make mojoc` and the runner's own `mojoc` step cannot
+# disagree about what this workload is allowed, and `--memcap-prefix` is the
+# one place that knows how to spell the answer.
+MEMCAP   = $(PYTHON) $(CURDIR)/tools/memcap.py
+memcap   = $(shell $(PYTHON) $(CURDIR)/tools/suite.py --memcap-prefix $(1) $(2))
+
 # `make -jN` → J=N, where the make in use records a count (GNU Make 4.x).
 MAKE_JOBS := $(patsubst -j%,%,$(filter -j%,$(MAKEFLAGS)))
 J         ?= $(strip $(MAKE_JOBS))
@@ -148,6 +176,12 @@ wholeprogram-help:
 	@echo ""
 	@echo "      make check MEMLIMIT_GB=96              # raise every ceiling"
 	@echo "      make gate  MEMLIMIT_GB=0               # no cap; watch it"
+	@echo ""
+	@echo "EVERY job the runner launches is capped, and so is every build"
+	@echo "recipe here that compiles a whole closure — 'make mojoc', 'make"
+	@echo "stage2/mojo', 'make fire.ci', 'make build/system.o' — through the"
+	@echo "one $(call memcap) macro, so the answer does not depend on which"
+	@echo "recipe someone remembered to wrap."
 	@echo ""
 	@echo "The program/stage classes are also EXCLUSIVE: the runner starts"
 	@echo "nothing else while one runs, so a 55 GB job is safe to leave"
@@ -309,9 +343,18 @@ dump-all-stage3:
 # coroutine runtime, which `fire.py build`'s link (driver.py) pulls in when
 # the compiler's own source contains a generator/async function and which was
 # missing here for the same reason: editing it did not rebuild `mojoc`.
+#
+# `stage` (96 GB) is the class: this recipe is the whole-closure self-compile
+# (healthy peak 55.8 GB, measured) AND the `gcc -O2 -fgimple` over the
+# resulting 40 MB translation unit, and a build's peak is the larger of those
+# two phases rather than their sum. It is the workload `stage` is documented
+# on, read from the same table tools/suite.py applies, so this recipe and the
+# runner's `mojoc` step cannot drift apart. The whole build's peak has never
+# actually been recorded — nothing capped it until now — so this number is the
+# class, not a measurement; see bugs/BUILD_mojoc_ceiling_unmeasured.md.
 mojoc: $(SELFHOST_INPUTS) $(CORO_RUNTIME_SRC)
 	@echo "=== Building mojoc from $(MOJO_MAIN) ($(MOJO_OPT)) ==="
-	python3 fire.py build fire.py $(MOJO_OPT) -o mojoc
+	@$(call memcap,mojoc,stage) $(PYTHON) fire.py build fire.py $(MOJO_OPT) -o mojoc
 	@echo "✓ mojoc ready"
 
 # stage1/fire.ci is written by the runner's stage1 steps (a whole-closure
@@ -333,10 +376,17 @@ stage1/fire.ci:
 # `mojo_str_cat` (strlen on a garbage pointer). Zero-init makes the read
 # well-defined (NULL), which the codegen's own `_ptr_slot_in_range` guard
 # already treats as "no known type" and falls back on safely.
+#
+# The gcc -fgimple over the 40 MB closure is the single most memory-hungry step
+# in the chain, and this recipe — the way a developer gets `stage2/mojo` by
+# hand — ran it with no ceiling. `stage` (96 GB) is the class documented for
+# exactly this shape, read from tools/suite.py's MEMCLASS so it cannot drift
+# from the runner's `bootstrap-stage2-cc` step, which names the same class.
+# `MEMLIMIT_GB=96` raises it, `MEMLIMIT_GB=0` removes the wrapper.
 stage2/mojo: stage1/fire.ci $(RUNTIME_SRC) $(RUNTIME_HDR) $(CORO_RUNTIME_SRC)
 	@mkdir -p stage2
 	@echo "=== Compiling stage2/mojo from stage1/fire.ci ==="
-	$(BOOTSTRAP_CC) $(BOOTSTRAP_OPT) -fgimple -ftrivial-auto-var-init=zero -I runtime \
+	$(call memcap,stage2/mojo,stage) $(BOOTSTRAP_CC) $(BOOTSTRAP_OPT) -fgimple -ftrivial-auto-var-init=zero -I runtime \
 	    $(BIG_STACK_LDFLAGS) \
 	    -o stage2/mojo \
 	    -x c stage1/fire.ci \
@@ -352,15 +402,22 @@ stage2/mojo: stage1/fire.ci $(RUNTIME_SRC) $(RUNTIME_HDR) $(CORO_RUNTIME_SRC)
 # those can change without mojo.py itself changing, and a stale fire.ci built
 # before such a change silently gets reused otherwise (confirmed: caused a
 # bare-vs-qualified symbol mismatch after an unrelated codegen.py edit).
+#
+# `fire.ci` and `build/system.o` are the other two whole-closure compiles in
+# this file — the `--dump-full` that `mojoc`/`stage2/mojo` also start, and the
+# `gcc -fgimple` over the 40 MB it writes — and both ran uncapped, so the rule
+# applied here is the one that does not rot: every recipe in this file whose
+# workload is a whole-closure compile goes through `$(call memcap,...)`, and
+# test_suite.py fails the build if a new one does not.
 .PHONY: FORCE
 FORCE:
 
 fire.ci: $(MOJO_MAIN) FORCE
-	PYTHONPATH=. python3 fire.py --dump-full $(MOJO_MAIN) 2>/dev/null
+	$(call memcap,fire.ci,program) env PYTHONPATH=. $(PYTHON) fire.py --dump-full $(MOJO_MAIN) 2>/dev/null
 
 build/system.o: fire.ci
 	@mkdir -p build
-	$(BOOTSTRAP_CC) -fgimple -I runtime -c -o $@ -x c fire.ci
+	$(call memcap,build/system.o,stage) $(BOOTSTRAP_CC) -fgimple -I runtime -c -o $@ -x c fire.ci
 
 build/fire_runtime.o: $(RUNTIME_SRC) $(RUNTIME_HDR)
 	$(BOOTSTRAP_CC) -I runtime -c -o $@ $(RUNTIME_SRC)
