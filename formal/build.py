@@ -3713,6 +3713,35 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 why = M.mlir_dialect_refusal(name)
                 raise CodegenError(f"{fn.name}: {why}" if fn.name else why)
             sym = M.module_symbol(name)
+            # A TYPE read as a value is the same kind of misdirection as the
+            # MLIR dialect above, and it is asked in the same place for the same
+            # ordering reason: `unresolved_name_refusal` enumerates where a NAME
+            # lives — a register, a spill slot, a receiver field's frame, a folded
+            # module constant — and a type is in none of those because a type is
+            # not a value, so that sentence is false about the file and sends
+            # the reader to the register allocator for a fact about the
+            # language. The census behind this is in
+            # bugs/FORMAL_type_name_as_a_value.md.
+            #
+            # Asked AFTER the module-symbol question, not before, and the
+            # ordering is not a compromise — it is what the measurement forced.
+            # Asking it first moved two stdlib files off the module message:
+            # `bench_set.mojo` (`Set`) and `list_strategy.mojo` (`List`), both
+            # `from std.collections import …`. Their message is not a symptom,
+            # it is MORE specific, and it carries a backtick-quoted module name
+            # that `tools/formal_sweep.py` reads to file the verdict as
+            # `not-answerable/unresolved-import` — so pre-empting it with a
+            # message that has no module name in it silently reclassifies those
+            # two files in the sweep's own accounting. So for a name that is
+            # BOTH, both facts are said.
+            if sym is not None and M.is_type_name(name):
+                # The construct first, then the module fact, indented so the
+                # two read as two sentences rather than one run-on — and with
+                # the module message's own `fn:` prefix suppressed, since this
+                # half already carries it.
+                raise CodegenError(
+                    M.type_as_value_fact(name, fn.name) + "  "
+                    + M.module_global_refusal(name, sym, ""))
             if sym is not None:
                 # A module-level name, refused for the reason a module-level
                 # name is refused: it has no storage with a lifetime longer
@@ -3721,6 +3750,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # repairs.
                 raise CodegenError(M.module_global_refusal(name, sym,
                                                           fn.name))
+            if M.is_type_name(name):
+                raise CodegenError(M.type_as_value_refusal(name, fn.name))
             raise CodegenError(M.unresolved_name_refusal(
                 name, fn.name, _why_unplaced(node, fn, frame_slots)))
         _refuse_variadic_reads(functions, fn, shape)

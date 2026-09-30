@@ -6265,6 +6265,56 @@ WAVE7_G2_CASES = [
      "    var a = [" + ", ".join(["1"] * 20000) + "]\n"
      "    return len(a)\n",
      "refuse:does not fit in the frame: it needs", None),
+    # ── a TYPE read where a value is required ──
+    #
+    # `t == NoneType` with `t` a `comptime` type parameter was refused as
+    # "'NoneType' has no home: the register allocator collected no home for it …
+    # This path places a name in a register or a spill slot allocated for THIS
+    # function, a receiver field's frame, or a module-level constant the build
+    # folded". That sentence is false about the file: a type is in none of those
+    # four places because a type is not a value, and the reader was sent to the
+    # register allocator for a fact about the language. The refusal itself is
+    # right and stays — every one of these files is refused either way, so this
+    # is a message-accuracy change and not a coverage one (measured: 32 of 664
+    # stdlib files move off the false diagnosis, and the sweep's own class
+    # counts are byte-identical before and after).
+    ("refuse_a_type_compared_with_a_comptime_parameter",
+     "def pick[t: DType](v: Int32) -> Int32:\n"
+     "    if t == NoneType:\n"
+     "        return 0\n"
+     "    return v\n"
+     "\n"
+     "def main(n: Int32) -> Int32:\n"
+     "    return pick[Int32](7)\n",
+     "refuse:is a TYPE, and a type is not a value", None),
+    # A bare type name in a value position, with no comparison — the other
+    # shape the same message covers, and the one a `from typing import List`
+    # file reaches.
+    ("refuse_a_bare_type_name_as_a_value",
+     "def main(n: Int) -> Int:\n"
+     "    x = NoneType\n"
+     "    return 0\n",
+     "refuse:is a TYPE, and a type is not a value", None),
+    # GUARD (passes before and after, and it is the case that would catch the
+    # over-correction): a type used as a CALLEE is a construction, which this
+    # path lowers — `Int32(5)` is ordinary representable code. The new rule is
+    # asked about a bare READ, and a callee is not a read (the same exclusion
+    # `check_module_symbols` already makes for MLIR roots), so this must keep
+    # building. A rule written as "any appearance of a type name" breaks it.
+    ("type_as_a_callee_is_still_a_construction",
+     "def main(n: Int32) -> Int32:\n"
+     "    var x = Int32(5)\n"
+     "    return x + 1\n",
+     6, None),
+    # GUARD (passes before and after): a genuinely unplaced VALUE keeps the
+    # storage enumeration, because for a value that enumeration is the right
+    # story. 41 of the 664 stdlib files are in exactly this position and they
+    # are correct as they are; a rule that swallowed them into the type message
+    # would be the over-correction in the other direction.
+    ("refuse_an_unplaced_value_keeps_the_storage_story",
+     "def main(n: Int) -> Int:\n"
+     "    return rebind\n",
+     "refuse:has no home: the module-level symbol table is empty", None),
 
     # ── (4) the C-library hand-off sets, audited by PROTOTYPE ──
     # `open(const char *, int, ...)` takes a path and a flag word; it does not

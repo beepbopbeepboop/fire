@@ -9532,6 +9532,95 @@ def name_resolves_without_a_local(name: str) -> bool:
     return name in _UNRESOLVED_NAME_ALLOWED
 
 
+def is_type_name(name: str) -> bool:
+    """True when `name` spells a TYPE on this path — not a value.
+
+    The union of the four tables that already know type names, and the union is
+    the point: each answers a different question, so a name in only one of them
+    is still a type.
+
+      * `POINTEE_WIDTHS` — types with a known width, and the only table
+        `NoneType` is in;
+      * `INT_TYPE_CTORS` / `IDENTITY_TYPE_CTORS` — what a bare call `T(x)`
+        means, read through `type_constructor_kind`;
+      * `UNREPRESENTABLE_TYPE_CTORS` — real types this path cannot build a
+        value of (`DType`, `Optional`, `SIMD`, …), which is a statement about
+        the VALUE and not about whether the name is a type;
+      * `Self`, which is a type and appears in no table.
+
+    A struct this unit compiles is deliberately NOT here: `check_module_symbols`
+    already places those names, and its own docstring says why — "a struct is
+    not a value and has no register" — which is the same fact stated for the
+    case that reaches it.
+
+    Read this only to decide which WORD a refusal uses. It must never be used to
+    answer "can this name be read", because the answer to that is always no, and
+    `name_resolves_without_a_local` is the list of the ones that can."""
+    if name == "Self":
+        return True
+    if name in POINTEE_WIDTHS or name in UNREPRESENTABLE_TYPE_CTORS:
+        return True
+    return type_constructor_kind(name) is not None
+
+
+def type_as_value_refusal(name: str, fn_name: str) -> str:
+    """A TYPE read where a value is required.
+
+    `unresolved_name_refusal` enumerates the four places a NAME can live on this
+    path — a register, a spill slot, a receiver field's frame, a folded
+    module-level constant. That enumeration is right for a value and it is
+    wrong here in a way worth naming: a type is in none of the four because a
+    type is not a value and never was. The reader is sent to the register
+    allocator for a fact about the language.
+
+    The measured cost of that: `check_module_symbols` over the 664 stdlib
+    `.mojo` files reported 93 files as "'<name>' has no home", and 52 of those
+    names are types — `NoneType`, `DType`, `Int`, `Self`, `String`, `Byte`,
+    `UInt8`, `UInt64`. The other 41 are unchanged and correct: they name values
+    (`debug_assert`, `rebind`, `__is_run_in_comptime_interpreter`, …) that
+    really are read where there is no storage, and for those the storage
+    enumeration is the right story. `std/sys/_assembly.mojo:94`'s
+    `comptime if result_type == NoneType:` is one of the 52.
+
+    A COMPARISON of two types is the common shape, and it is the one this
+    message is really about: `t == NoneType` with `t` a `comptime` type
+    parameter compares two types, which needs a type to BE a value — a tag per
+    type, interned, and the SAME on both sides of a dylib boundary, so it
+    cannot be a per-unit small integer. That is reflection-table work and it
+    belongs to whoever owns the type table; this message says so rather than
+    implying the reader could fix it by naming a variable differently.
+
+    What a caller CAN do is branch on something the one-word model can
+    distinguish, and the message says that too, because a refusal with no
+    repair is the other half of a useless diagnostic.
+    """
+    return type_as_value_fact(name, fn_name)
+
+
+def type_as_value_fact(name: str, fn_name: str = "") -> str:
+    """The type-is-not-a-value SENTENCE, on its own.
+
+    Split from `type_as_value_refusal` because a name can be a type AND have a
+    more specific story — a module symbol imported from another module, whose
+    message `tools/formal_sweep.py` parses — and in that case the two facts are
+    both true and both worth saying. `fn_name` is optional here because this
+    half is also appended to a message that already carries it."""
+    who = f"{fn_name}: " if fn_name else ""
+    return (f"{who}{name!r} is a TYPE, and a type is not a value on this path: "
+            f"a value here is one 64-bit word, and a type is not one thing a "
+            f"word can hold. So there is no register, spill slot, frame field "
+            f"or folded constant this could live in — the question those four "
+            f"places answer is the wrong question for a type. Comparing a "
+            f"`comptime` type parameter against a type name (`t == {name}`), "
+            f"testing one with `is`, or passing one as an argument all need "
+            f"types to be values: an interned tag per type, identical on both "
+            f"sides of a dylib boundary, which is reflection-table work this "
+            f"path does not have. Branch on something the word model can tell "
+            f"apart — a flag or an extra parameter the caller passes, a "
+            f"separate function per case, or a property of the value itself "
+            f"rather than of its type.")
+
+
 def comptime_fold_refusal(name: str) -> str:
     """The refusal for a `comptime NAME = …` whose value is not a constant.
 
