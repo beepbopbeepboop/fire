@@ -1,6 +1,118 @@
 # CODEGEN_dynamic_attribute_string_reads_as_pointer: a dynamically-set attribute's string value reads back as a raw int64 pointer in the compiled path
 
-## Status (2026-09-26, first entry — bug ISOLATED and REPRODUCED, NOT fixed; it is the leading suspect for `make bootstrap`'s 44-file `#line` divergence, but that link is NOT yet proven)
+## Status (2026-09-30 — the string-attribute half is FIXED, and it is a memory-level bug, not a display one; the three residuals below are separate and still open)
+
+Re-measured at `86d862fc` before acting, against CPython on the same text
+(single-TU `gimple_codegen.compile_to_gimple` + `gcc -fgimple` +
+`runtime/fire_runtime.c`). The doc's 6-line repro reproduced exactly:
+`9759608` / `9759608` where CPython printed `hello` twice, exit 0.
+
+**The doc's mechanism is wrong, and the real one is worse.** It attributes
+the wrong value to `mojo_obj_getattr` returning a boxed `int64_t` that
+nothing re-types. Read out of the generated C, what actually happens is
+that the attribute is never dynamic at all. `C` declares no field `x`, so
+`_scan_body_for_local_field_access`
+(`mojo/backend_gimple/module_gen.py`) MINTS a phantom field for it — its
+documented job, for a member a known struct does not declare — and the
+mint was unconditionally `int`, the "nothing is known about this member"
+answer that is right for a read-only phantom. A member that is *assigned*
+is not read-only, and the write went through that field:
+
+```c
+typedef struct C { int64_t __mojo_type_id; int x; } C;
+...
+_t2 = _slit_10000;              /* "hello"   */
+_t4 = (void *)_t2;
+_t5 = (int64_t)_t4;
+_t3 = (int)_t5;                 /* the string POINTER, truncated to 32 bits */
+o->x = _t3;                     /* stored into a 4-byte int field          */
+```
+
+So the value was **truncated to 32 bits on the way in**, and the read
+printed those bits as a decimal. `mojo_obj_getattr` and the per-object
+dynamic-attribute dict are not on this path at all for the plain `o.x`
+spelling. The consequence is worse than a silent wrong value: `len(o.x)`
+dereferenced the truncated value and **segfaulted**, and `o.big =
+1099511627776` (an ordinary integer) is truncated the same way, to `0`.
+
+**Fixed**: the minted field's type is now taken from the value actually
+assigned to that member (`_scan_stmt_member_assigns` feeds the mint; the
+answer is `_quick_type`'s, the same estimator the rest of codegen uses).
+Deliberately restricted to POINTER-shaped and floating answers — those are
+the ones a 4-byte `int` slot is provably wrong for — so a member assigned
+an ordinary integer keeps exactly the declaration it always had, and a
+read-only phantom still mints `int`. The doc's repro now prints `hello`
+twice, and a wider program that reads the same attribute through `print`,
+`len`, an f-string, `str()`, `%s`, `==` and `getattr` gets all of them
+right; regression test
+`gimple_dynamic_attribute_string_keeps_its_type` in
+`test_gimple_runner.py`.
+
+`getattr(o, "x", "")` needed a second, separate fix to join them, and it is
+worth naming because the reason it was broken is not the one it looks like.
+The value was already there — the generated `_mojo_getattr_C` reads the real
+field (`strcmp(attr, "x") == 0 ? obj->x : ...`) — and the call site simply
+never cast the boxed result back, because that cast is gated on
+`_is_selfhost_file` (see the A5 comment above: a bare `_known_field_type`
+by NAME is unsound for an arbitrary receiver, and `Lib/tempfile.py`'s
+`getattr(file, 'buffer', file)` was the real regression that gate exists
+for). The sound evidence is the RECEIVER's own declared field, which is
+exactly what `_lower_MemberExpr`'s `o.x` read already uses, so
+`_lower_builtin_getattr`'s literal-name branch now takes the field's C type
+from the receiver's static struct when that struct really has the field —
+making the two spellings agree by construction instead of one of them being
+right by accident. The name-keyed gate is left exactly as it was.
+
+MEASUREMENT NOTE, because it cost time and will cost it again: the two
+spellings behaved DIFFERENTLY depending on whether `compile_to_gimple` was
+given a `filename`, because `_is_selfhost_file` is
+`os.path.abspath(_current_filename).startswith(_SELFHOST_DIR)` and
+`_SELFHOST_DIR` is the directory `gimple_codegen.py` was loaded from — so
+ANY file under the repo root counts as "self-hosted source", and any file
+outside it does not. `test_gimple_runner.py` calls `compile_to_gimple(src)`
+with NO filename, so a probe that passes one is exercising a different
+build than the suite runs. Run the suite's own harness when the question is
+what the suite will see. So the doc's proposed `mojo_dynattr_get_as(v,
+want)` helper is not needed for this case, and would have been the wrong
+layer: it would have re-typed a value that a 4-byte field had already
+destroyed.
+
+**Still open, and each is a different mechanism — recorded so none of them
+is re-derived from this one:**
+
+1. **A large integer assigned to a phantom field is still truncated**
+   (`o.big = 1099511627776` reads back `0`). The restriction above is
+   what leaves it: `_quick_type` answers `int64_t` both for a genuine
+   integer literal and as its no-evidence default, so "the value is a
+   wide integer" and "nothing is known" are indistinguishable there.
+   Distinguishing them means classifying the value AST node directly
+   rather than through the estimator, and then EVERY phantom field that
+   is assigned an integer changes width — a layout change across the
+   whole tree for a case that currently corrupts silently. Not attempted
+   here.
+2. **A 3-argument `getattr` whose key is absent still does not return the
+   supplied default** (`getattr(o, "nope", "dflt")` printed a pointer
+   decimal). Pre-existing and unchanged by either fix above; it is the miss
+   path (`_mojo_getattr_missed` / `_mojo_getattr_nothrow`), not the value
+   path. Worth its own look: the ternary that selects the default exists in
+   the emitted C, so the flag is not being SET by a miss for this object.
+3. **The dynamic-attribute dict path itself is still untyped** for a
+   receiver whose static type is genuinely unknown (an `int64_t`-boxed
+   object, not a known struct). This is where the doc's original analysis
+   does apply, and the honest reading of it is that it needs a
+   *data-dependent* type: the read's static type would have to depend on a
+   runtime tag, which means a union-typed read and a consumer that
+   branches on it. A name-keyed "this attribute held a string somewhere"
+   table would be unsound (the same name on two objects can hold two
+   types) and is the shape the existing narrow special case
+   (`_except_attr_str_fields`, for caught-exception objects) already has.
+   Recorded, not attempted.
+
+The "Relationship to `make bootstrap`" section below is untouched by this:
+the 44-file `#line` divergence is a self-host-wide phenomenon and this
+change is a field type in one class, not a filename.
+
+## Earlier status (2026-09-26, first entry — bug ISOLATED and REPRODUCED, NOT fixed; it is the leading suspect for `make bootstrap`'s 44-file `#line` divergence, but that link is NOT yet proven)
 
 Found while triaging `make bootstrap` on `f6837c8` (see "Relationship to
 `make bootstrap`" below). Reproduced in a self-contained 6-line program, so
