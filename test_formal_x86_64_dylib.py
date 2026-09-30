@@ -232,6 +232,67 @@ def test_the_dylib_container_is_what_the_caller_asked_for(tmpdir, shared):
           "fmt='macho' did not produce a 64-bit Mach-O container")
 
 
+def test_an_elf_image_with_a_module_import_is_refused(tmpdir, shared):
+    """`fmt="elf"` plus an import is refused, not emitted as a broken image.
+
+    This was the worst shape the container gap took. `formal/imports.py` builds
+    module libraries with `build_macho_dylib`, so on an ELF build they are Mach-O
+    — and `formal/elf.py`'s `build_elf` carries ONE `lib_name`
+    (`libc.so.6`) and writes exactly one `DT_NEEDED`, with no `.dynamic` entry
+    for anything else. The libraries were built, audited (so their symbols
+    counted as `provided` and `_audit_bound_symbols` passed) and then put
+    nowhere.
+
+    Measured before the fix, on this exact program:
+
+        external_syms    ['ANY_add1_9f63a2', 'printf']
+        DT_NEEDED count  1        (libc.so.6)
+        .dynstr          ANY_add1_9f63a2, printf, libc.so.6
+
+    so the image built, passed the audit that exists to catch exactly this,
+    and would die at load on a symbol its own source imports. The audit passes
+    because the library's manifest says the symbol is provided — which is true,
+    and irrelevant, since no ELF loader will ever open that Mach-O.
+
+    An ELF image with NO import still builds; that is the assertion that the
+    refusal is about the import and not about the format.
+    """
+    from formal.build import compile_formal, FormalBuildError
+    lib = os.path.join(tmpdir, "elfmod.mojo")
+    with open(lib, "w") as f:
+        f.write("def add1(x):\n  return x + 1\n")
+    prog = os.path.join(tmpdir, "elfimp.mojo")
+    with open(prog, "w") as f:
+        f.write("import elfmod\n\ndef main():\n  return elfmod.add1(41)\n")
+
+    try:
+        compile_formal(prog, output=os.path.join(tmpdir, "elfimp.elf"),
+                       arch="x86_64", fmt="elf", prove=False, check=False)
+    except FormalBuildError as e:
+        msg = str(e)
+        check("elf" in msg,
+              f"the refusal does not name the format: {msg!r}")
+        check("mach-o" in msg.lower(),
+              f"the refusal does not say the module libraries are Mach-O, so "
+              f"a reader cannot tell which half is missing: {msg!r}")
+    else:
+        raise TestFailure(
+            "an ELF image importing a module was emitted: the module's "
+            "library is a Mach-O that no ELF loader will open, so the image "
+            "carries the symbol with nothing providing it")
+
+    # The format itself is fine — it is the module link line it cannot carry.
+    lone = os.path.join(tmpdir, "elfsolo.mojo")
+    with open(lone, "w") as f:
+        f.write("def main():\n  printf(\"%d\", 42)\n  return 0\n")
+    result = compile_formal(lone, output=os.path.join(tmpdir, "elfsolo.elf"),
+                            arch="x86_64", fmt="elf", prove=False, check=False)
+    check(result["backend"] == "x86_64/elf",
+          f"an import-free ELF build reported backend "
+          f"{result['backend']!r}; the refusal above must be about the module "
+          f"link line and not about elf as a container")
+
+
 def test_every_byte_of_the_dylib_is_claimed(tmpdir, shared):
     """The image is exactly as long as its last segment claims.
 
@@ -362,6 +423,8 @@ TESTS = [
      test_x86_64_dylib_passes_strict_validation),
     ("the dylib container is what the caller asked for",
      test_the_dylib_container_is_what_the_caller_asked_for),
+    ("an ELF image with a module import is refused",
+     test_an_elf_image_with_a_module_import_is_refused),
     ("every byte of the x86-64 dylib is claimed by a segment",
      test_every_byte_of_the_dylib_is_claimed),
     ("a program importing an extern module matches CPython",

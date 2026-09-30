@@ -1059,6 +1059,37 @@ def compile_formal(source_path: str, output: str = None,
         # launch with "Symbol not found" for a function the source plainly
         # imports.
         raise FormalBuildError(str(e))
+    if fmt != "macho" and import_dylibs:
+        # An ELF image with a module dependency, refused rather than emitted.
+        #
+        # `formal/imports.py` builds module libraries with
+        # `build_macho_dylib`, so `import_dylibs` here is a list of Mach-O
+        # shared objects — and `formal/elf.py`'s `build_elf` carries ONE
+        # `lib_name` (`libc.so.6`) and writes exactly one `DT_NEEDED`, with no
+        # `.dynamic` entry for anything else. The libraries are therefore built,
+        # audited (their symbols are `provided`, so `_audit_bound_symbols`
+        # passes) and then put NOWHERE: the image's `.dynstr` carries
+        # `ANY_add1_9f63a2` while the only `DT_NEEDED` is libc.
+        #
+        # That is the worst shape this can take, because the audit is what
+        # makes it look right. The image builds, the audit passes, and the
+        # program dies at load with an unresolved symbol for a function its
+        # own source imports. This is the ELF half of the container gap named
+        # in bugs/CODEGEN_x86_64_module_dylib_emitted_as_macho.md: `arch`
+        # selects the code generator and is honoured, but there is no ELF
+        # shared-object emitter, so a program that imports a module has no
+        # target-shaped library to link.
+        from formal.elf import DEFAULT_LIBC
+        raise FormalBuildError(
+            f"{os.path.basename(source_path)} imports {len(import_dylibs)} "
+            f"module(s) and cannot be built for {fmt!r}: module libraries are "
+            f"Mach-O on this path (formal/macho_linker.py's build_macho_dylib "
+            f"is the only emitter) and {fmt} has no shared-object form here — "
+            f"formal/elf.py writes one DT_NEEDED ({DEFAULT_LIBC!r}) and no "
+            f".dynamic entry for anything else, so the image would carry the "
+            f"module's symbols in .dynstr with nothing providing them. The "
+            f"code generator does honour arch; the container is the missing "
+            f"half. Build for macho, or lower the module into this image.")
     # HERE and not inside `_prepare_functions`, which ran before the imports
     # resolved: a file that imports a host module is out of reach whatever its
     # codegen says, and this check fires on a third of the repository, so
