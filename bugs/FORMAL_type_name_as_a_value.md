@@ -159,20 +159,22 @@ here is budgeting one that cannot be reached.
 * **read-before-store** — `func_attribute.mojo:156` reads the `Attribute` enum
   value `self` was bound to and nothing in that function stores. A flow question
   in a file that is refused one question at a time.
-* **`argparse`** — a host-module-shaped import whose module is refused for a
-  string comparison it cannot classify. `bugs/FORMAL_method_param_field_access.md`
-  and the map's §3 own both of these.
+* **`argparse`** — where `tools/detrace_diff.py` already was, and still is; §3.1.
 
-So: **four files, four different next questions, none of them this construct.**
-The honest reading of the count is the same one `bugs/FORMAL_sweep_work_map_2026-09-30.md`
-§3.1 reached for the `L[T]()` half of the same row: the row's "41 files" was one
-false diagnostic, a dylib export rule, a bare-type-name rule and premise B2 —
-and this document is the bare-type-name rule, which is the smallest of the four.
+So: of the four reachable files, the three that moved share ONE next question
+(the bracketed callee in `random.mojo`, which they reach through the same import
+chain) and the fourth has another (a read-before-store). **None of them is this
+construct.** The honest reading of the count is the same one
+`bugs/FORMAL_sweep_work_map_2026-09-30.md` §3.1 reached for the `L[T]()` half of
+the same row: the row's "41 files" was one false diagnostic, a dylib export rule,
+a bare-type-name rule and premise B2 — and this document is the bare-type-name
+rule, which is the smallest of the four.
 
 ## 4. What the other two branches touching this construct should know
 
-Recorded so a merge is a decision rather than a surprise. Nothing here depends on
-either of them; both directions were checked by building every case above.
+Recorded so a merge is a decision rather than a surprise. Every case in this
+document was built on this tree alone, with neither branch present; what these two
+notes are for is the merge, and each says which way it cuts.
 
 * **`work/formal-sweep-next`'s `L[T]()` half** (`model.subscript_callee_names`,
   `empty_blob_constructor`) is the other spelling of row 2 and is orthogonal: it
