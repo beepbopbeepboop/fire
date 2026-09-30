@@ -102,6 +102,14 @@ def main():
         for name in cands:
             if name not in I.pick_candidates(quiet=True):
                 continue                                  # superseded or integrated under us
+            if I.infra_only(C.load()[name]["branch"]):       # test infrastructure/docs only: the fast lane, no project gate
+                log("%s touches only test infrastructure: fast lane (no project gate)" % name)
+                rc, out = run_integrate("--only", name, "--fast")
+                tail = [l for l in out.splitlines() if l.startswith(("GREEN", "RED", "NOT test", "CONFLICT", "merged", "fast lane"))]
+                log("%s: rc=%d %s" % (name, rc, " | ".join(tail)[:300]))
+                if "another integrator" in out:
+                    log("integrator busy; retry next interval"); break
+                continue
             head = head_sha(name)
             if screen.get(name, {}).get("head") != head:
                 log("screening %s alone (quick tier)" % name)
