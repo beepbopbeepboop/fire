@@ -663,7 +663,20 @@ static struct {
     _KindRow *rows;
     uint64_t  cap;    /* power of two, 0 until first add */
     uint64_t  used;
+    int       shift;  /* 64 - log2(cap), as in _PtrReg */
 } _reg_kinds;
+
+/* Home slot for `addr`. The one-multiply hash and the high-bit shift are
+ * `_PtrReg`'s (_pr_home) for the same reason: a BARE `addr & mask` — which
+ * is what this table used — gives every pair of heap MojoLists the same home
+ * slot, because `sizeof(MojoList)` is 56 and malloc hands out 64-byte
+ * blocks, so consecutive allocations are 64 apart and congruent mod any
+ * power-of-two table size. Every live kinds row therefore sat in one probe
+ * cluster, which is both a linear-time probe and — the bug this fixes — a
+ * table whose DELETION could strand its neighbours (see _kinds_forget). */
+static inline uint64_t _kinds_home(uint64_t addr) {
+    return ((addr >> 3) * 0x9E3779B97F4A7C15ULL) >> _reg_kinds.shift;
+}
 
 static void _kinds_grow(void)
 {
@@ -672,10 +685,12 @@ static void _kinds_grow(void)
     uint64_t ocap = _reg_kinds.cap;
     _reg_kinds.rows = (_KindRow *)calloc((size_t)ncap, sizeof(_KindRow));
     _reg_kinds.cap  = ncap;
+    _reg_kinds.shift = 64;
+    for (uint64_t c = ncap; c > 1; c >>= 1) _reg_kinds.shift--;
     _reg_kinds.used = 0;
     for (uint64_t i = 0; i < ocap; i++) {
         if (!old[i].addr) continue;
-        uint64_t j = old[i].addr & (ncap - 1);
+        uint64_t j = _kinds_home(old[i].addr);
         while (_reg_kinds.rows[j].addr) j = (j + 1) & (ncap - 1);
         _reg_kinds.rows[j] = old[i];
         _reg_kinds.used++;
@@ -688,7 +703,7 @@ static _KindRow *_kinds_row(uint64_t addr)
 {
     if (!_reg_kinds.cap || !addr) return NULL;
     uint64_t mask = _reg_kinds.cap - 1;
-    uint64_t i = addr & mask;
+    uint64_t i = _kinds_home(addr);
     for (;;) {
         if (!_reg_kinds.rows[i].addr) return NULL;
         if (_reg_kinds.rows[i].addr == addr) return &_reg_kinds.rows[i];
@@ -707,7 +722,7 @@ static _KindRow *_kinds_row_for_write(uint64_t addr, int *fresh)
         *fresh = 1;
     }
     uint64_t mask = _reg_kinds.cap - 1;
-    uint64_t i = addr & mask;
+    uint64_t i = _kinds_home(addr);
     while (_reg_kinds.rows[i].addr) {
         if (_reg_kinds.rows[i].addr == addr) return &_reg_kinds.rows[i];
         i = (i + 1) & mask;
@@ -760,12 +775,36 @@ void mojo_list_inherit_kinds(MojoList *dst, MojoList *src)
 
 static void _kinds_forget(uint64_t addr)
 {
-    _KindRow *r = _kinds_row(addr);
-    if (!r) return;
-    free(r->boxes);
-    r->addr = 0;
-    r->kinds = NULL;
-    r->boxes = NULL;
+    if (!_reg_kinds.used) return;
+    uint64_t mask = _reg_kinds.cap - 1;
+    uint64_t i = _kinds_home(addr);
+    while (_reg_kinds.rows[i].addr != addr) {
+        if (!_reg_kinds.rows[i].addr) return;    /* not registered */
+        i = (i + 1) & mask;
+    }
+    free(_reg_kinds.rows[i].boxes);
+    /* Backward-shift deletion, the same algorithm (and the same reason) as
+     * _pr_del: clearing the slot outright would leave a hole that every
+     * LATER member of this probe cluster can no longer be found through, so
+     * one list's free would silently strip the element kinds off every other
+     * live list whose home slot it shared — and a heterogeneous list read
+     * with no kinds reads a double's IEEE-754 bit pattern as an int64_t,
+     * which the repr path then hands to strlen. Real, measured, and the
+     * shape of the dangling-registry bug this table was written without. */
+    uint64_t j = i;
+    for (;;) {
+        j = (j + 1) & mask;
+        if (!_reg_kinds.rows[j].addr) break;
+        uint64_t k = _kinds_home(_reg_kinds.rows[j].addr);
+        int in_range = (i <= j) ? (i < k && k <= j) : (i < k || k <= j);
+        if (!in_range) {
+            _reg_kinds.rows[i] = _reg_kinds.rows[j];
+            i = j;
+        }
+    }
+    _reg_kinds.rows[i].addr = 0;
+    _reg_kinds.rows[i].kinds = NULL;
+    _reg_kinds.rows[i].boxes = NULL;
     _reg_kinds.used--;
 }
 

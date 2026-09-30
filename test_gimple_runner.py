@@ -3134,6 +3134,46 @@ fn main():
     print(v[1])
 """, "(7, 0.5)\n7\n0.5\n7\n0.5\n0.5\n[7, 0.5]\n(4, 5)\n4\n5\n")
 
+    # The per-slot kinds travel with the VALUE, keyed by the live list's
+    # address in a runtime side table — and that table's DELETE was clearing
+    # the slot outright instead of closing the probe gap, so freeing one list
+    # stripped the kinds off every other live list that shared its probe
+    # cluster. Heap MojoLists are 64 bytes apart (sizeof is 56, malloc's
+    # size class rounds up), so a bare `addr & mask` home function put EVERY
+    # kinds row in one cluster and the collision was the norm, not a
+    # coincidence: `pick()` below frees its first local on return, and the
+    # list it RETURNS is allocated 64 bytes later, so its repr came back
+    # through the no-kinds fallback — which reads each slot with
+    # mojo_list_get_int and hands a double's IEEE-754 bit pattern to
+    # strlen. It segfaulted. Both halves are pinned here: the printed repr
+    # and element reads (which go through mojo_list_get_boxed, so they need
+    # the row), and the survival of a second, longer-lived list in the same
+    # function (the direct-collision shape, without a callee boundary).
+    test_gimple_stdout("gimple_kinds_survive_a_sibling_list_being_freed", """\
+fn mixed(x: Float64, s: String) -> List:
+    return [x, 1, s]
+
+fn drop_one() -> List:
+    var first = mixed(1.5, "aa")
+    var kept = mixed(9.5, "zz")
+    return kept
+
+fn main():
+    var b = drop_one()
+    print(b)
+    print(b[0], b[1], b[2])
+    var i = 0
+    print(b[i])
+    var j = 2
+    print(b[j])
+    var a = mixed(2.5, "yy")
+    var c = mixed(3.5, "xx")
+    print(a, c)
+    print(a[0], c[0])
+    var k = 1
+    print(a[k], c[k])
+""", "[9.5, 1, 'zz']\n9.5 1 zz\n9.5\nzz\n[2.5, 1, 'yy'] [3.5, 1, 'xx']\n2.5 3.5\n1 1\n")
+
     test_gimple_stdout("gimple_struct_uniform_formats_still_uniform", """\
 fn main():
     var d = struct.unpack('<2f', b'\\x00\\x00\\x80?\\x00\\x00\\x00@')
