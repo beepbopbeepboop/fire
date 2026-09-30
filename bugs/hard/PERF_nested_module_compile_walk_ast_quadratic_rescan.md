@@ -124,16 +124,23 @@ compared against an independent parse of that text; real generated C split into
 random chunks at 7 chunkings; and repeat-call stability (a warm cache must not
 change a second answer).
 
-**Gate** (2026-09-30, worker pass, NOT the full gate — see the controller note
-in this entry's "Not run"): `python3 test_gimple.py` 333 passed / 0 failed,
-including the new `dedup_variadic_externs_cache_is_a_faithful_parse`;
-`python3 test_module_cache.py` 83 passed / 0 failed. `make gate`,
-`compile_stdlib.py` and `build_stdlib_dylib.py` were deliberately NOT run
-(light-worker rule) and are owed by the integrator, since this touches a file
-inside the compiled closure: `stdlib-dylib`'s `skip <module>:` count and
-`stdlib-syntax`'s unexpected-failure count must be compared against baseline,
-and the three `stage*` self-host steps are the ones that can only see the
-self-hosted binary's own lowering of the new code.
+**Gate** (2026-09-30, worker pass only): `python3 test_gimple.py` 333 passed /
+0 failed, including the new `dedup_variadic_externs_cache_is_a_faithful_parse`;
+`python3 test_module_cache.py` 83 passed / 0 failed;
+`test_silent_noop_iter.py` 16 passed / 0 failed (the change adds a `for` loop
+over a local list inside a nested helper, so the loop-lowering suite is the one
+that would notice if it were not lowered).
+
+**NOT RUN, and owed by the integrator** — this pass was a light worker and
+deliberately did not run `make gate`, `compile_stdlib.py` or
+`build_stdlib_dylib.py`. The change adds code to a file INSIDE the compiled
+closure, so the checks that can only see the self-hosted binary's own lowering
+of it are exactly the ones still owed: `mojoc` builds, the three `stage*`
+self-host steps, `stdlib-dylib`'s `skip <module>:` count vs baseline (must not
+increase), `stdlib-syntax`'s unexpected-failure count vs baseline (must not
+increase), `ab-native` and `native-dumpfull` (expected red for a documented
+pre-existing reason — `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`
+— and must not get redder).
 
 
 ## Status (2026-09-26, Phase 7 — `_dedup_variadic_externs`: one pass + per-part memo; the residual is now provably the corpus, not the rescan)
