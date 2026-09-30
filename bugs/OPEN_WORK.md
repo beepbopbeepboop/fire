@@ -23,6 +23,8 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 | `CODEGEN_noshim_dumpfull_preexisting_divergence.md` | native-vs-reference `.ci` divergence |
 | `CODEGEN_nested_comprehension.md` | the `gimple`-path part, which is FIXED: a 2+ clause comprehension silently dropped every clause after the first (see the commit that lands `_compr_pending_inner`). Read it for the dropped-clause mechanism; the OPEN remainder is `FORMAL_nested_comprehension_nondeterministic_exit.md` |
 | `FORMAL_nested_comprehension_nondeterministic_exit.md` | the OPEN remainder of the case above: the same shape in the SEPARATE proof-oriented backend, which exits 58 or SIGSEGV at random and is not reachable from a `mojo/backend_gimple/` fix |
+| `TEST_expect_marked_tests_in_no_bucket_never_run.md` | 11 of the 16 `expect`-marked tests have NO bucket, so no gate runs them and their anti-rot "marked expect= but it PASSES" check can never fire — ~69 failing cases, mostly the compiled-path async/await cluster |
+| `CODEGEN_set_dict_comprehension_multi_clause_dropped.md` | the list/generator half of the multi-clause comprehension fix is in; `set` and `dict` still drop every clause after the first (silent, exit 0) |
 | `CODEGEN_range_comprehension_tuple_slot_type_lost.md` | a comprehension over `range()` whose element is a tuple/list drops the per-slot element types, so a 0 in a non-first slot reads as NULL and prints `None` — silent, exit 0, and pre-existing (reproduces on a single clause) |
 | `FORMAL_x86_64_formal_backend_gaps.md` | the two backend gaps (both now fixed) |
 | `FORMAL_string_value_model.md` | what a string IS on the formal path, `len`/`==`/`+` on it, and the `String`-struct collision behind the 16 "a String receiver" refusals |
