@@ -1127,9 +1127,15 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
         for i in range(n):
             f = stub_file + i * ssize
             got_vm = got_base_vm + i * 8
-            file[f : f + ssize] = _stub_bytes(got_vm, stub_base_vm + i * ssize)
+            file[f : f + ssize] = _stub_bytes(got_vm, stub_base_vm + i * ssize,
+                                               arch)
     file[linkedit_file : linkedit_file + len(trie)] = trie
     file[linkedit_file + len(trie) : linkedit_file + linkedit_len] = bind
+    _assert_no_unclaimed_bytes(
+        file,
+        [(0, text_size)]
+        + ([(data_file, data_size)] if n else [])
+        + [(linkedit_file, linkedit_len)])
     return bytes(file)
 
 
