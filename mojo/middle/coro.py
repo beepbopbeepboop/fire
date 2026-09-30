@@ -2057,7 +2057,12 @@ def _compute_no_wd_forward(stmts: list) -> None:
     # `mojo_set_contains_str`: "an `add_int` / `contains_str` mismatch is a
     # codegen element-type inference gap and has to be fixed there"). A dict
     # keeps one value word per entry, so its int and str views agree by
-    # construction and every key spelling lands in the one domain.
+    # construction and every key spelling lands in the one domain. All four
+    # tables are LOCAL for a reason of their own: a container handed across a
+    # call boundary reaches codegen as a boxed `int64_t`, and `x in <boxed
+    # dict>` goes through `mojo_in_dispatch_int`, which has no dict branch at
+    # all (bugs/CODEGEN_in_dispatch_int_has_no_dict_branch.md) -- so every
+    # membership test in this function is deliberately a typed-local one.
     preds: dict = {}
     seeds: list = []
     for name in fns:
