@@ -656,17 +656,17 @@ def main(n):
         "reisdir-tmp": str(int(os.path.isdir("/tmp"))),
         "reisdir-root": str(int(os.path.isdir("/"))),
         "reisfile-tmp": str(int(os.path.isfile("/tmp"))),
-        # THE `isfile` DEVIATION, pinned rather than asserted away.
-        # `os.path.isfile` is `S_ISREG(st_mode)`, and this module's is
-        # `exists(p) and not isdir(p)` — the largest fact it can establish,
-        # because `stat` reports through an out-parameter struct whose bytes
-        # this path cannot read (bugs/FORMAL_stat_out_parameter_is_unreadable.md).
-        # The two agree on a regular file, on a directory, on a symbolic link to
-        # either, and on a path that does not exist. They DISAGREE on a device
-        # node, a FIFO and a socket, and `/dev/null` is the one of those on
-        # every machine, so it is the case in this file: CPython says 0, this
-        # says 1, and the difference is the point of the line.
-        "reisfile-devnull": "1",
+        # `/dev/null` was where the `isfile` DEVIATION used to be pinned: this
+        # module's `isfile` was `exists(p) and not isdir(p)`, which is
+        # CPython's answer for a regular file, a directory, a link to either
+        # and a path that is not there, and 1 where CPython says 0 for a
+        # device node, a FIFO or a socket. It is `S_ISREG(st_mode)` read out of
+        # the buffer `stat` fills now
+        # (bugs/FORMAL_stat_out_parameter_is_unreadable.md), so this line is
+        # CPython's own answer and a disagreement is a failure rather than a
+        # documented exception. The `stat` group below is where the other two
+        # of those three shapes are checked.
+        "reisfile-devnull": str(int(os.path.isfile(os.devnull))),
         "resize-devnull-ok": "1",
         "resize-missing": "-1",
     }

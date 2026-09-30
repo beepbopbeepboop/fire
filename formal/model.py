@@ -1751,7 +1751,54 @@ def string_operand_is_string(kind) -> bool:
     return kind == STR_KIND
 
 
-def string_comparison_lowering(op: str, left_kind, right_kind):
+def _is_zero_literal(e) -> bool:
+    """True for the integer literal `0` and for `0 - 0`, and nothing else.
+
+    NOT a string `"0"`: `s == "0"` asks whether a string is the
+    one-character string, and that is a content comparison. `s == 0` asks
+    whether a pointer is NULL, which on this target is a different question
+    with a different answer, and the line between them is drawn by
+    `string_is_null_test`.
+    """
+    if isinstance(e, F.IntLiteral):
+        return e.value == 0
+    if isinstance(e, F.UnaryOp) and e.op == "-":
+        return isinstance(e.operand, F.IntLiteral) and e.operand.value == 0
+    return False
+
+
+def string_is_null_test(left, right) -> bool:
+    """True for `p == 0` / `p != 0` where the other side is not also a zero.
+
+    A POINTER'S NULL TEST, and the reason a function that can return NULL
+    cannot be annotated `-> str` on this path without breaking its own caller.
+    A string is a bare `char *`, a NULL string is 0, and "is it there" is
+    written `x == 0` — which is what every function in
+    `formal/hostmods/os` does with `getenv`, `realpath`, `strchr` and `getcwd`.
+    With the annotation in place `x` is classified a string, one side of `==`
+    is a string, and the comparison this would otherwise choose is
+    `strcmp(x, "0") == 0` — a CONTENT comparison that dereferences the very
+    NULL the test was written to detect.
+
+    The decision lives beside `string_comparison_lowering` because the two
+    answers are chosen from the same pair of operands, and a third caller
+    asking the question separately is how two architectures come to disagree
+    about whether a program works.
+
+    Python has no such spelling — `s == 0` is False for every string there — so
+    this is a RECORDED DIVERGENCE and not an approximation of an answer. What it
+    is instead is the one reading that makes a pointer test mean what the
+    pointer's own convention says, and the alternative is that every
+    NULL-returning function on this path stays unannotated forever, which
+    reopens `bugs/FORMAL_string_equality_of_two_unclassified_words.md` for every
+    caller of one.
+    """
+    return ((_is_zero_literal(left) and not _is_zero_literal(right))
+            or (_is_zero_literal(right) and not _is_zero_literal(left)))
+
+
+def string_comparison_lowering(op: str, left_kind, right_kind,
+                               left=None, right=None):
     """How `a {op} b` lowers when either side is a string: content, identity,
     or None when it is not a string comparison.
 
@@ -1784,6 +1831,16 @@ def string_comparison_lowering(op: str, left_kind, right_kind):
             or string_operand_is_string(right_kind)):
         return None
     if op in ("==", "!="):
+        # The NULL test, asked BEFORE the content compare and only of a pair
+        # whose SYNTAX the caller has in hand. `left`/`right` are optional
+        # because a caller with no nodes cannot ask, and a caller with no nodes
+        # is not deciding about `p == 0` — see `string_is_null_test` for why the
+        # question exists and what it costs to get wrong. Every comparison site
+        # in both backends passes them, so one architecture cannot be answering
+        # `p == 0` and the other `strcmp(p, "0")`.
+        if left is not None and right is not None \
+                and string_is_null_test(left, right):
+            return None
         return STRING_COMPARE_CONTENT
     if op in STRING_IDENTITY_OPS:
         return STRING_COMPARE_IDENTITY
@@ -1976,8 +2033,82 @@ def _string_operand_refusal(op: str, spelled_op, left_kind,
         "string_concat_refusal for the `+` half of this table")
 
 
+def string_compare_number_refusal(op: str, left_kind, right_kind,
+                                  left, right, spelled_op=None) -> str | None:
+    """Why `a {op} b` cannot be a string comparison when ONE side is a number.
+
+    THE OTHER HALF of `string_comparison_lowering`'s precondition, and it was
+    live the moment `p[i]` on a declared pointer became a byte read. That
+    lowering is `strcmp(a, b) == 0`, whose precondition is that BOTH operands
+    are addresses, and it decided that by asking whether AT LEAST ONE side is a
+    string — which is the right question for `a == "x"` and the wrong one for
+    `p[0] == "."`.
+
+    `p[0]` is a byte, a byte is an integer on this path, and `strcmp` was handed
+    the byte's VALUE as an address. Measured, on this tree, arm64:
+
+        def is_dot(name: Pointer[UInt8]):
+            if name[0] != ".":
+                return 0
+            ...
+
+    SIGSEGV, with no output at all — the number 46 is not a mapping. Before the
+    pointer subscript landed the same line took the blob path, so this is a new
+    way for the same spelling to be a crash, and a crash is the outcome the
+    byte read was supposed to replace.
+
+    It is refused rather than worked around, and the message gives both
+    readings because both are right answers to different questions: the byte's
+    value (`p[0] == 46`, with the byte code written as a number, which is the
+    same rule `os/path`'s `SLASH` and `DOT` constants are there for), or the
+    string's content (`str_at(s, 0, ".")`, or `s.startswith(".")`).
+
+    NOT the same arm as the null test, and both are asked from the same pair of
+    operands: `p == 0` is "is it there", which IS a word compare and is what
+    every function in `os` means by it; `p[0] == "."` is a number against a
+    string, which is nothing.
+    """
+    if (spelled_op or op) not in ("==", "!="):
+        return None
+    if left is None or right is None:
+        return None
+    if string_is_null_test(left, right):
+        return None
+    if not (string_operand_is_string(left_kind)
+            or string_operand_is_string(right_kind)):
+        return None
+    # EXACTLY ONE side classified. `None` counts as "not a string" on purpose:
+    # `p[0]` on a `Pointer[UInt8]` is definitively a byte and `ValueKinds`
+    # reports None for it, because a subscript's element kind is not something
+    # the whole-function scan derives. Requiring INT_KIND would have missed the
+    # measured case exactly, and it would have missed a `char *` from an
+    # unannotated callee too — which is a crash by the same route.
+    if (string_operand_is_string(left_kind)
+            == string_operand_is_string(right_kind)):
+        return None
+    # The STRING side is `txt` and the other is `num`, whichever side it is on.
+    num, txt = ((right, left) if string_operand_is_string(left_kind)
+                else (left, right))
+    return (
+        f"`{spelled(left)} {spelled_op or op} {spelled(right)}` compares a "
+        f"NUMBER with a string, and the string comparison this would lower to "
+        f"is `strcmp`, which DEREFERENCES both operands — so it would be handed "
+        f"the value of `{spelled(num)}` as an address. Measured on this tree: "
+        f"`p[0] != \".\"` on a `Pointer[UInt8]` segfaults with no output, "
+        f"because a byte is a number here and the number is not a mapping. "
+        f"Python has no such comparison at all: it is False for every pair. "
+        f"Ask one of the two questions instead — the byte's value, "
+        f"`{spelled(num)} == 46` with the byte written as a number (the same "
+        f"rule `os.path`'s `SLASH` and `DOT` constants exist for, since a "
+        f"character argument to a C library call is an `int` there), or the "
+        f"string's content, `str_at({spelled(txt)}, 0, \".\")` or "
+        f"`{spelled(txt)}.startswith(\".\")`")
+
+
 def string_binary_refusal(op: str, left_kind, right_kind,
-                          spelled_op: str | None = None) -> str | None:
+                          spelled_op: str | None = None,
+                          left=None, right=None, fn=None,
+                          untyped_callee=None) -> str | None:
     """The ONE place a binary operator with a string operand is decided not to
     be lowered, so both backends ask the same question in the same order.
 
@@ -1989,10 +2120,172 @@ def string_binary_refusal(op: str, left_kind, right_kind,
     by x86-64 for the augmented forms, so `s += t` printed `[]` on arm64 and
     segfaulted on x86-64 — the same non-answer as `s = s + t`, which both
     backends refused, from the same line of source.
+
+    `left`/`right` are the operand NODES, `fn` the function being emitted and
+    `untyped_callee` the backend's "is this a Mojo callee with no declared
+    return type".
+    Only `string_compare_word_refusal` below uses them — the other two arms ask
+    about kinds and have no use for the syntax — and they are all OPTIONAL so
+    that a caller which has none of them still gets the first two arms. Both
+    backends pass all four at every comparison site, so the third arm cannot be
+    reached from one site and missed from another: that is the failure this
+    function exists to prevent, applied to itself.
     """
+    if (left is not None and right is not None and fn is not None
+            and untyped_callee is not None):
+        word = string_compare_word_refusal(
+            op, left_kind, right_kind, left, right, fn, untyped_callee)
+        if word is not None:
+            return word
     return (string_concat_refusal(spelled_op or op, left_kind, right_kind)
             or string_arithmetic_refusal(op, left_kind, right_kind,
-                                         spelled_op))
+                                         spelled_op)
+            or string_compare_number_refusal(op, left_kind, right_kind,
+                                             left, right, spelled_op))
+
+
+def _word_from_an_unannotated_call(fn, operand, untyped_callee) -> bool:
+    """True when `operand` is a word whose only provenance is an UNTYPED call.
+
+    The three shapes, and each one is measured:
+
+      * a call result directly — `mk("abc") == other`;
+      * a NAME bound from a call in this very function — which is what the
+        measured case is, and the reason this function exists rather than an
+        `isinstance(operand, F.CallExpr)` test: `c = mk("abc"); d = mk("abc");
+        c == d` puts two `IdentExpr` at the `==`, and a syntactic test would
+        see two unremarkable names;
+      * an ALIAS of such a name — `e = c` — which `_name_bindings` walks, so it
+        comes out of the same two cases rather than a third rule.
+
+    A name whose binding CARRIES AN ANNOTATION is not in this set at all, which
+    is the fourth shape and the one that keeps the refusal off correct code:
+    `var buf: Pointer[UInt8] = fill(p)` binds a name with a declared type from a
+    call that declares nothing, and `buf == 0` is a NULL test on a declared
+    pointer.
+
+    `untyped_callee(name)` is the backend's answer to "is this a MOJO function
+    that does not say what it returns", and the question is asked in the
+    backend rather than derived from the kind because `ValueKinds` cannot
+    answer it: an unannotated call's result and an `-> int` call's result are
+    both `INT_KIND` here, because a word is an integer. The third case matters
+    as much as the second — an UNBOUND EXTERN is not this at all.
+    `memcmp(a, b, n) == 0` is a comparison of a C library function's return
+    value against zero and is correct in every `os` function on this path;
+    `getenv(name) == 0` is a NULL check. So the test asks about Mojo callees
+    only, and the backend answers it from the parser's `return_type` for a
+    function of this image and from the dylib manifest's signature for one in
+    another — where an unannotated function's signature return is `void` (see
+    `reflect._c_signature`), which is how the two are told apart there.
+    """
+    if isinstance(operand, F.CallExpr):
+        callee = _flat_callee(operand)
+        return callee is not None and untyped_callee(callee)
+    if isinstance(operand, F.IdentExpr) and fn is not None:
+        from_call = False
+        for ann, rhs in _name_bindings(fn, operand.name):
+            if ann:
+                # A DECLARED type, so the name is not an untyped word whatever
+                # it was bound from. `var buf: Pointer[UInt8] = fill(p)` is the
+                # case that needs this: `fill` says nothing about its return,
+                # the local says `Pointer[UInt8]`, and `buf == 0` is a NULL
+                # test on a declared pointer rather than a comparison of two
+                # words of unknown provenance.
+                return False
+            if isinstance(rhs, F.CallExpr):
+                callee = _flat_callee(rhs)
+                if callee is not None and untyped_callee(callee):
+                    from_call = True
+        return from_call
+    return False
+
+
+def string_compare_word_refusal(op: str, left_kind, right_kind, left, right,
+                                fn, untyped_callee) -> str | None:
+    """Why `a {op} b` must not be lowered as a comparison of two NUMBERS, or None.
+
+    `bugs/FORMAL_string_equality_of_two_unclassified_words.md`, and the worst
+    shape a backend bug can have: a correct program taking the wrong branch,
+    silently, on both architectures. `string_comparison_lowering` returns None
+    when neither side is a string, and the caller's fallback for None is the
+    ordinary integer comparison of two words — so two `char *` into two
+    `malloc`'d buffers holding the same four bytes compared UNEQUAL:
+
+        def mk(t):
+            var p: Pointer[UInt8] = malloc(64)
+            snprintf(p, 64, "%s", t)
+            return p
+
+        c = mk("abc"); d = mk("abc")
+        c == d                        # FALSE; the answer is TRUE
+        strncmp(c, d, strlen(d) + 1)  # 0 — the comparison this is documented
+                                      # to lower to, agreeing they are equal
+
+    Three rows localise it exactly. Two interned LITERALS compare equal, so a
+    pointer compare would pass. A literal on ONE side makes it a string
+    comparison, so `call-lit` is right. And the content compare the code
+    documents itself as making says the two are equal. So the content compare
+    is not mis-LOWERED — it is never REACHED, because a value that came out of
+    a call is classified `INT_KIND` and a word is an integer on this path.
+
+    WHEN IT FIRES, and the narrowness is the design. `==`/`!=` only; neither
+    side classified as a string (so this never competes with the content
+    compare, which is the right answer); and at least one side a word whose
+    only provenance is a call to a MOJO FUNCTION THAT DOES NOT SAY WHAT IT
+    RETURNS. Three things that leaves alone, each for a measured reason:
+
+      * an ANNOTATED callee — so `count() == other_count()` for two `-> int`
+        functions is untouched, and once `formal/hostmods/os` carries its
+        `-> str` / `-> int` annotations (the OTHER half of that bug doc, and
+        thirty-odd one-word edits) this stops firing for a path library
+        altogether;
+      * an UNBOUND EXTERN — `memcmp(a, b, n) == 0` and `getenv(name) == 0` are
+        comparisons of a C library function's return value, and they are
+        correct on every one of them;
+      * two unannotated PARAMETERS — `p == q` on two words from a caller is a
+        comparison of two integers far more often than of two strings, and
+        refusing it would put a diagnostic in front of correct code;
+      * an INTEGER LITERAL on either side — see the comment at the test. The
+        measured defect has no literal in it.
+
+    The cost of the narrowness, stated rather than hidden: a function that
+    returns a string, says nothing about it, and is called through a name that
+    is never bound to a local — `f() == g()` where the result is compared
+    directly against another call — is refused, and one compared against a
+    PARAMETER is not. The message says exactly what to do about it.
+    """
+    if op not in ("==", "!="):
+        return None
+    if string_operand_is_string(left_kind) or string_operand_is_string(right_kind):
+        return None
+    # A LITERAL on either side is a number, and a comparison against one is a
+    # numeric comparison in every case the corpus has. That is not a guess: it
+    # is what the two regressions this refusal caused were.
+    # `struct Counter: count: Int` with `def get(self): return self.count` and
+    # `if c.get() != 37:` has no return annotation to be missing, and a
+    # diagnostic in front of it is a diagnostic in front of correct code. The
+    # measured defect has NO literal — it is `c == d`, two computed words.
+    if isinstance(left, F.IntLiteral) or isinstance(right, F.IntLiteral):
+        return None
+    if not (_word_from_an_unannotated_call(fn, left, untyped_callee)
+            or _word_from_an_unannotated_call(fn, right, untyped_callee)):
+        return None
+    return (
+        f"`{spelled(left)} {op} {spelled(right)}` compares two values this path "
+        f"can only call numbers, and at least one of them arrived from a call "
+        f"that does not say what it returns. A string on this path is a bare "
+        f"`char *` to a `malloc`'d buffer, and two such buffers holding the "
+        f"same four bytes are at DIFFERENT addresses, so the comparison this "
+        f"lowers to says they are unequal. Measured, on both backends: "
+        f"`c = mk(\"abc\")` and `d = mk(\"abc\")` gave `c == d` FALSE while "
+        f"`strncmp(c, d, strlen(d) + 1)` returned 0. A correct program takes "
+        f"the wrong branch and nothing downstream can tell. The missing thing "
+        f"is the CALLEE's return type: annotate it `-> str` or `-> int`, which "
+        f"is what puts the answer in the dylib manifest's signature and lets "
+        f"this call site classify the result. Until then ask the question with "
+        f"the comparison itself — `strncmp(a, b, strlen(b) + 1) == 0` or "
+        f"`memcmp(a, b, n) == 0` — which is a real content test and needs no "
+        f"kind to be recovered")
 
 
 def string_unary_refusal(op: str, kind, spelled_operand: str) -> str | None:
@@ -2692,6 +2985,21 @@ def spelled(expr) -> str:
     if isinstance(expr, F.CallExpr):
         callee = _flat_callee(expr)
         return f"{callee}(...)" if callee else f"{type(expr).__name__}(...)"
+    if isinstance(expr, F.IntLiteral):
+        # The literal's VALUE, which is its spelling. Same reason as the
+        # subscript arm below: a message that quotes `IntLiteral` instead of
+        # `46` names the node's type rather than the thing the reader is
+        # looking at.
+        return str(expr.value)
+    if isinstance(expr, F.SubscriptExpr):
+        # `p[0]`, not `SubscriptExpr`. A subscript is the one non-name shape
+        # whose spelling is both short and exact, and it is the shape a byte
+        # read arrives as — so the diagnostic that explains `p[0] != "."` was
+        # quoting `SubscriptExpr != '.'`, which names neither the expression
+        # nor the byte.
+        if isinstance(expr.index, F.SliceExpr):
+            return f"{spelled(expr.obj)}[...]"
+        return f"{spelled(expr.obj)}[{spelled(expr.index)}]"
     return type(expr).__name__
 
 
@@ -3712,8 +4020,20 @@ def _offset_scale(fn, expr, width, seen=()):
 
 
 def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
-                         structs_by_name: dict = None):
+                         structs_by_name: dict = None, index_scaled: bool = False):
     """`("load", width, signed)` | ("frame", struct) | None — with a refusal.
+
+    `index_scaled=True` says the CALLER scales the index it supplies, so
+    `_offset_scale` must judge the base address alone. It is the flag for a
+    SUBSCRIPT (`subscript_base_lowering` below) and it exists because the two
+    callers ask different questions about the same arithmetic: `p.value()` reads
+    at whatever address `p` already holds, so a `p + k` in that address has to
+    have been scaled by whoever wrote it, while `p[i]` reads at `p + i*width` and
+    the multiply is this path's own — asking `_offset_scale` to account for the
+    index would refuse every `q[0]` on a `Pointer[Int32]` for the sake of an
+    offset the emitter adds itself. Measured: without the flag,
+    `var q: Pointer[Int32] = malloc(16); q[0]` is refused with "the address is
+    the result of a call", which is true of `q` and irrelevant to `q[0]`.
 
     THE pointer value model's decision, and the one function both backends call
     in place of `DEREFERENCE_METHODS` for a receiver that is a pointer.  A
@@ -3748,9 +4068,10 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
         return (None, f"the pointee is {inner}, and {POINTEES_REFUSED[inner]}")
     if inner in POINTEE_WIDTHS:
         width, signed = POINTEE_WIDTHS[inner]
-        scaled, scale_why = _offset_scale(fn, expr, width)
-        if not scaled:
-            return (None, scale_why)
+        if not index_scaled:
+            scaled, scale_why = _offset_scale(fn, expr, width)
+            if not scaled:
+                return (None, scale_why)
         return (("load", width, signed), why)
     if inner in ("SIMD", "Scalar"):
         args = pointee_args(_rhs_declared_text(fn, expr, decls, functions) or "")
@@ -4054,6 +4375,86 @@ def receiver_declared_is_pointer(fn, expr, decls: dict) -> bool | None:
     if base is None:
         return None
     return base in POINTER_TYPE_CTORS
+
+
+def subscript_base_lowering(fn, obj, decls: dict, functions: dict = None,
+                            structs_by_name: dict = None):
+    """`(shape, width, signed, why)` — `(None, None, None, why)` to refuse.
+
+    WHAT `obj[i]` READS, for a base that is not a string and not a dict key —
+    the single decision `formal/arm64_codegen.py:_emit_subscript_addr` and its
+    x86-64 twin used to each get wrong in the same way.
+
+    Two spellings of one question, and only one of them was routed. `p.value()`
+    asked `dereference_lowering` and got a load at the pointee's width, which is
+    right; `p[i]` asked nothing and fell through to the BLOB walk, whose first
+    word of the base is a COUNT. For a `Pointer[UInt8]` that count is the byte
+    at offset 0, the bounds check then passes or fails on it, and the element
+    address is `base + 8 + 8*count`:
+
+        byteat("ab")   -1879048144   0x9002_2E68 — "ab" plus whatever follows
+                                         it in __TEXT, read as a little-endian
+                                         word. `0x68` is `h`; the answer is 97.
+        malloc(64)     exit 1, no output — the count is 0, the check fails, and
+                                         the Darwin exit(1) has no message.
+
+    Both are a silent wrong answer, and one spelling of them is silent in a way
+    nothing downstream can detect. See
+    bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md.
+
+    The three shapes, and the same arity for all of them so the caller reads one
+    unpack:
+
+      * `("load", width, signed, why)` — the base is a pointer whose pointee this
+        module established a width for. The caller emits `base + i*width` and a
+        load of `width` bytes, which is the same instruction pair
+        `_emit_dereference` emits for `p.value()` — the SAME width rule, from
+        the SAME reader, so the two spellings cannot disagree about what a
+        `Pointer[UInt8]` holds.
+      * `("blob", 8, False, None)` — nothing here says the base is a pointer, so the
+        container reading stands, and a container element is a word. This is the
+        answer for a list/tuple/dict base and for the many bases whose kind no
+        declaration in this image establishes.
+      * `(None, None, None, why)` — the base is DECLARED a pointer and the
+        pointee is not established, or it is established but has no width. A
+        bounds check against whatever word is at offset 0 of an address is never
+        the answer, so this is a diagnostic rather than a number.
+
+    What is deliberately NOT refused: a base whose kind nothing establishes. The
+    blob reading is a guess there, and it is a guess the corpus depends on — an
+    unannotated parameter is a word, and a word is an integer on this path, so
+    "refuse every unestablished base" would refuse every `p[i]` where `p` came
+    from a caller. Measured over the 395 `.mojo` files of the sweep corpus that
+    is ~2 200 sites whose base is a word, most of them `List`/`Fence`/SIMD
+    type-parameter subscripts that are refused further down the same path
+    anyway. The remaining wrong-number case — a base that IS an address and
+    says nothing — is recorded, with the number, in that bug doc.
+    """
+    how, why = dereference_lowering(fn, obj, decls, functions, structs_by_name,
+                                    index_scaled=True)
+    if how is not None:
+        _shape, width, signed = how
+        if _shape != "load":
+            return (None, None, None,
+                    f"the base is a pointer to a STRUCT, and a struct's value "
+                    f"on this path is the address of its frame, so `{spelled(obj)}"
+                    f"[i]` would need to know the field at offset i*8 — a layout "
+                    f"no declaration in this image states. {_sentence(why)}")
+        return ("load", width, signed, why)
+    if receiver_declared_is_pointer(fn, obj, decls) is True:
+        return (None, None, None,
+                f"`{spelled(obj)}[i]` reads through a POINTER, and the width of "
+                f"the read is the pointee's — {_sentence(why)} Refused rather "
+                f"than read as a container: a container base is "
+                f"`[count][element]…`, so the count would come from offset 0 of "
+                f"the address itself, the bounds check would be against whatever "
+                f"byte is there, and the element address would be `base + 8 + "
+                f"8*count`. Measured, on a pointer to a string: -1879048144, "
+                f"which is the first four characters of the string read as a "
+                f"little-endian word, and 97 is the byte. Declaring the pointee "
+                f"— `var p: Pointer[UInt8]`, or a parameter annotated "
+                f"`Pointer[Int32]` — is what makes it answerable")
+    return ("blob", 8, False, None)
 
 
 def dereference_refusal(method: str, why: str, is_pointer_receiver) -> str:
@@ -5856,14 +6257,27 @@ def _param_list(fn):
 #     `mod.f(...)` spells the same function with a qualifier this path had no
 #     table for — so the only Python spelling of a module call that worked was
 #     the one that renames what it calls.
+#   * AND THE RE-EXPORTED SPELLING, which is the same table with one more
+#     source of names. A package `__init__` that is nothing but `from .sub
+#     import f` publishes `f` as part of its API and has an EMPTY export trie
+#     on purpose (a re-export is not a new definition, so an entry for it in
+#     this image's trie would be an address lookup into a file with no code —
+#     `build._namespace_library`). So the names a package publishes are its
+#     FORWARDINGS, and the dotted table did not have them: `pkg.f(...)` found
+#     nothing, was not refused (there was no table to report), and reached the
+#     link audit as a dangling symbol — the same function, reachable only
+#     through the spelling that renames it. The manifest already recorded the
+#     forwarding (`reexports`, with the symbol the defining module really
+#     exports); nothing was reading it for this.
 #
 # Keyed by MODULE IDENTITY, not by bare name, and that is the whole safety
 # argument for the dotted table: `mod.f` can only ever reach an export of the
-# library built for `mod`, so two modules that both define `helper` cannot
-# cross-bind, and a bare `f()` cannot reach either of them through the dotted
-# table. (The flat bare-name map is a different, older, coarser answer and
-# stays where it is; `bugs/FORMAL_known_limits.md` §1.1 is why a `_CLIB_SYMS`
-# name is not advertised there at all.)
+# library built for `mod` — or a name that module explicitly forwards — so two
+# modules that both define `helper` cannot cross-bind, and a bare `f()` cannot
+# reach either of them through the dotted table. (The flat bare-name map is a
+# different, older, coarser answer and stays where it is;
+# `bugs/FORMAL_known_limits.md` §1.1 is why a `_CLIB_SYMS` name is not
+# advertised there at all.)
 
 
 def signature_return_type(signature: str) -> str:
@@ -5927,10 +6341,12 @@ def abi_module_name(dotted: str) -> str:
 def dylib_export_module(by_module: dict, qualifier: str) -> dict:
     """The export table of the module a dotted qualifier names, or `{}`.
 
-    Asked twice of every dotted callee — once for the export it names, and
-    once to tell "this module does not export that" apart from "that is not a
-    module at all", which are different answers with different consequences —
-    so both spellings are resolved here rather than at the two call sites.
+    Asked of every dotted callee — for the export it names, and to tell "this
+    module does not export that" apart from "that is not a module at all",
+    which are different answers with different consequences — so both spellings
+    are resolved here rather than at the call sites. It reads whatever table it
+    is handed, so the same resolution answers for a module's own exports and
+    for what it forwards (`dylib_export_tables`).
     """
     if not qualifier:
         return {}
@@ -5940,7 +6356,85 @@ def dylib_export_module(by_module: dict, qualifier: str) -> dict:
     return by_module.get(abi_module_name(qualifier)) or {}
 
 
-def dylib_export_lookup(by_name: dict, by_module: dict, callee: str):
+def dylib_export_tables(dylib_exports: list):
+    """`(by_name, by_module, forwarded)` — the three tables a callee is
+    resolved through, built once so the two backends cannot disagree.
+
+    `dylib_exports` is the linked libraries' manifest export lists in LINK
+    ORDER (what `formal/build.py` hands both emitters), and the three tables
+    are the three questions a callee spelling can ask:
+
+      * `by_name` — `{bare name: entry}`, first library on the line winning, so
+        a BARE callee (`from mod import f`) resolves to exactly the entry
+        `dylib_syms` resolved it to. Built with `setdefault` in link order for
+        that reason, and it is the same iteration `dylib_syms` comes from.
+      * `by_module` — `{module identity: {bare name: entry}}`, which is what
+        makes a DOTTED callee (`import mod`, spelled `mod.f`) resolvable
+        without ever consulting a bare name. This is the table that carries the
+        safety argument: `mod.f` can only ever reach an export of the library
+        built for `mod`.
+      * `forwarded` — `{module identity: {bare name: entry}}` again, but for
+        the names a module's API is made of by RE-EXPORT rather than by
+        definition: a package `__init__` that is nothing but `from .sub import
+        f` has a real, public, importable API, and it deliberately has an EMPTY
+        export trie (`build._namespace_library` — a re-export is not a new
+        definition, so an entry for it in this image's trie would be an address
+        lookup into a file with no code). Its manifest records the forwarding
+        under `reexports`, and this is where a dotted call to that name is
+        answered.
+
+    Every library contributes a `by_module` slot even when it has no exports,
+    because "this module is linked and exports nothing" is a distinct fact from
+    "that qualifier is not a module at all", and only the first of the two is
+    reportable: the second is a value's method (`xs.append`), which is a
+    different construct entirely.
+
+    A forwarded entry carries the symbol the DEFINING module really exports
+    (taken verbatim from that module's own manifest when the package's library
+    was built), so the call binds the definition rather than the forwarding —
+    which is the same symbol the BARE spelling binds, so `from pkg import f`
+    and `pkg.f` cannot disagree about where `f` lives. Its declared signature
+    is borrowed from `by_name` when the symbols agree, which is what keeps a
+    `char *` result classified as a string for a re-exported function exactly
+    as it is for a defined one. A name with no match in `by_name` keeps an
+    empty signature, which is the honest "the build does not know" — never a
+    guess at one that would change how a result is printed."""
+    by_name: dict = {}
+    by_module: dict = {}
+    forwarded: dict = {}
+    libs = list(dylib_exports or [])
+    for lib in libs:
+        for entry in (lib.get("exports") or []):
+            by_name.setdefault(entry.get("name"), entry)
+    for lib in libs:
+        module = lib.get("module") or ""
+        if module:
+            by_module.setdefault(module, {})
+        for entry in (lib.get("exports") or []):
+            by_module.setdefault(entry.get("module") or "",
+                                 {}).setdefault(entry.get("name"), entry)
+        for name, fwd in (lib.get("reexports") or {}).items():
+            if fwd.get("kind") == "type" or not fwd.get("symbol"):
+                # A TYPE has no function symbol to forward: it crosses as a
+                # layout in the reflection table and reaches the importer as a
+                # `StructDef` (`imported_struct_defs`), so there is nothing
+                # here for a CALL to bind and nothing to put in this table.
+                continue
+            known = by_name.get(name)
+            entry = {"name": name, "symbol": fwd.get("symbol"),
+                     "module": fwd.get("module") or module,
+                     "signature": (known.get("signature") or "")
+                     if known and known.get("symbol") == fwd.get("symbol")
+                     else "",
+                     "arity": known.get("arity") if known else None,
+                     "forwarded_by": module}
+            if module:
+                forwarded.setdefault(module, {}).setdefault(name, entry)
+    return by_name, by_module, forwarded
+
+
+def dylib_export_lookup(by_name: dict, by_module: dict, callee: str,
+                        forwarded: dict = None):
     """The manifest export a callee name reaches, or None.
 
     `by_name` is the flat `{bare name: entry}` table in LINK ORDER with
@@ -5950,13 +6444,174 @@ def dylib_export_lookup(by_name: dict, by_module: dict, callee: str):
     a DOTTED callee, whose qualifier names the module that has to own the
     export. The qualifier is resolved by `dylib_export_module`, so a package
     submodule (`os.path.join`) is found under the prefix its manifest uses.
-    """
+
+    `forwarded` is the same shape for the names a module publishes by
+    RE-EXPORT, and it is consulted only after the module's OWN table, because
+    a name the module defines itself is its definition and anything else is a
+    forwarding of somebody else's."""
     if not callee:
         return None
     if "." in callee:
         module, _, leaf = callee.rpartition(".")
-        return dylib_export_module(by_module, module).get(leaf)
+        entry = dylib_export_module(by_module, module).get(leaf)
+        if entry is not None or not forwarded:
+            return entry
+        return dylib_export_module(forwarded, module).get(leaf)
     return by_name.get(callee)
+
+
+def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
+                        forwarded: dict = None) -> str:
+    """The boundary symbol an unbound callee `name` is emitted against.
+
+    THE ONE implementation, shared by both backends' `_extern_symbol`, which
+    were two copies of the same decision and therefore two places for them to
+    disagree about what a dotted name binds.
+
+    Two spellings, and the second is why this is a function rather than a
+    `dict.get`:
+
+      * a BARE name — what `from mod import f` binds — is answered by the
+        flat `{name: symbol}` map, first library on the line winning, which is
+        `load_dylib_manifests`'s own precedence and stays it;
+      * a DOTTED name — what `import mod` binds, spelled `mod.f` — is
+        answered ONLY by the export table of the library built for `mod`, or by
+        what that module forwards (`dylib_export_tables`' `forwarded`). Falling
+        back to the flat map for a dotted name would let `mod.f` bind some
+        other library's `f`, which is the silently-wrong binding the whole
+        module-identity mechanism exists to prevent.
+
+    A dotted name whose module is linked but which that module does not publish
+    — by definition or by re-export — is REFUSED, naming both halves and
+    listing what the module does publish. It used to fall through to the bare
+    name, which produced a BL against a symbol nothing defines and an image
+    that died in dyld — the failure this whole mechanism was built to make a
+    build-time error instead. It is also what a namespace library's empty trie
+    used to produce: a package whose whole API is re-exported had no table to
+    consult, so `pkg.f` found nothing, was not refused (there was nothing to
+    report), and reached the link audit as a dangling symbol.
+
+    The module is identified by `dylib_export_module`, which knows that a
+    manifest keys a package submodule by its ABI prefix (`os.path` → `os_path`)
+    — which is what makes `os.path.join(...)`, the spelling 532 measured call
+    sites in this tree are written with, resolve at all."""
+    if "." not in name:
+        return (syms or {}).get(name, name)
+    entry = dylib_export_lookup(by_name, by_module, name, forwarded)
+    if entry is not None:
+        return entry.get("symbol") or name
+    module, _, leaf = name.rpartition(".")
+    have = set(dylib_export_module(by_module, module))
+    have |= set(dylib_export_module(forwarded, module) if forwarded else ())
+    if have or _module_is_linked(by_module, forwarded, module):
+        shown = ", ".join(sorted(have)[:8]) + (", …" if len(have) > 8 else "")
+        if not shown:
+            shown = ("nothing — every name this module publishes is "
+                     "re-exported, and none of the modules it re-exports "
+                     "from publishes that one")
+        raise CodegenError(
+            f"{name}(): `{module}` is a linked module but it exports no "
+            f"`{leaf}`, so the call has no symbol to bind. What it does "
+            f"export: {shown}. A name `doc/ABI.md`'s export rule excludes (a "
+            f"leading `_`, a generic template, an overload, or a C library "
+            f"symbol such as `exit` or `write`) is not advertised, so a module "
+            f"that defines one cannot be called by that name. The exclusion is "
+            f"measured and settled in bugs/FORMAL_known_limits.md 1.1; a module "
+            f"that needs to publish mutable state rather than functions is a "
+            f"different gap, written down in "
+            f"bugs/FORMAL_module_state_no_storage.md")
+    return (syms or {}).get(name, name)
+
+
+def _module_is_linked(by_module: dict, forwarded: dict, module: str) -> bool:
+    """Whether `module` names a library on this link line at all.
+
+    "Linked and publishes nothing" and "not a module" are different facts, and
+    only the first of them is a refusal that can say what the module does
+    export: the second is a value's method (`xs.append`), which is a different
+    construct with its own answer. `dylib_export_module` cannot tell them apart
+    — it answers `{}` for both — so this asks the tables' keys directly, in
+    both the dotted and the ABI spelling, which is the same two spellings that
+    function resolves."""
+    if not module:
+        return False
+    for tables in (by_module or {}, forwarded or {}):
+        if module in tables or abi_module_name(module) in tables:
+            return True
+    return False
+
+
+# ── A module's CONSTANTS, read across a dylib boundary ───────────────────
+#
+# A dylib cannot export a VARIABLE: there is nowhere for one to live, because
+# every value a formal program can name lives in a function's own stack scratch
+# (`bugs/FORMAL_module_state_no_storage.md`). But a module-level name the build
+# FOLDED to a literal needs no storage, for the reason the in-unit substitution
+# already relies on: the module-level sequence is its only writer, and a
+# function that writes the name writes a LOCAL of the same name, which shadows
+# it. There is therefore exactly one value of that name in the whole program,
+# and it is a literal both sides can hold.
+#
+# So the importer does not need an address for it — it needs the VALUE, and the
+# build that compiled the module is the only place that value was ever
+# computed. That is what the manifest's `constants` records, and it is why
+# `sys.argv` (a list) and `os.sep` (a string literal) come out differently:
+# the first has no literal to record and stays refused, the second has one and
+# lowers.
+
+
+def dylib_module_constants(dylib_exports: list) -> dict:
+    """`{module identity: {name: value}}` for every linked library.
+
+    Keyed by the same ABI identity the export tables use, so the consumer
+    resolves a qualifier with `dylib_export_module` and gets the same two
+    spellings (`os.path` and `os_path`) the symbol tables answer. A name two
+    libraries both publish as a constant takes the FIRST on the link line,
+    which is `load_dylib_manifests`'s precedence for a bare name and the only
+    one available here: a dotted read says which module it means, and a bare
+    read does not."""
+    out: dict = {}
+    for lib in (dylib_exports or []):
+        module = lib.get("module") or ""
+        constants = lib.get("constants") or {}
+        if not module or not constants:
+            continue
+        for name, value in constants.items():
+            if isinstance(value, bool) or not isinstance(value, (int, str)):
+                # Only what `fold_literal_expr` can produce crosses here, and
+                # anything else in a manifest is a producer this path does not
+                # understand. Refusing to invent a value for it is the honest
+                # answer; the read then falls through to the ordinary
+                # module-global refusal, which says so.
+                continue
+            out.setdefault(module, {}).setdefault(name, value)
+    return out
+
+
+def imported_constant(tables: dict, qualifier: str, name: str):
+    """The value a linked module publishes as a constant under `name`, or None.
+
+    None is a refusal and never a zero: a name no module publishes as a
+    literal is a real global or a name that does not exist, and those are two
+    different mistakes with two different repairs."""
+    table = dylib_export_module(tables, qualifier)
+    return table.get(name) if table else None
+
+
+def constant_literal_node(value, line: int = 0, col: int = 0):
+    """An AST literal node carrying a constant that crossed a dylib boundary.
+
+    At the READ site's line and column, not the module-level line the value was
+    written on: a diagnostic raised after the substitution points at the read,
+    which is the line the reader wrote. `_folded_node` is the same rule for the
+    in-unit case and is deliberately not reused here — it takes a template node
+    to copy the position from, and a value that arrived through a manifest has
+    no node behind it.
+    """
+    if isinstance(value, str):
+        return F.StringLiteral(value=value, line=line or 0, col=col or 0,
+                               is_bytes=False)
+    return F.IntLiteral(value=value, line=line or 0, col=col or 0, raw="")
 
 
 def _target_names(target):
@@ -10086,6 +10741,43 @@ def comptime_fold_refusal(name: str) -> str:
         f"`var` and read it at run time")
 
 
+def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
+    """The diagnostic for a CALL to a name the defining module does not export.
+
+    Distinct from `module_global_refusal` because the two are different facts,
+    and the generic one is FALSE about this one. `f[x](...)` roots at a name,
+    `check_module_symbols` sees a bare `IdentExpr` that is not a local, and the
+    imported case answered "a module-level name is not exported as a word —
+    there is no storage for it" about what is a call: a call needs a SYMBOL, and
+    the question is whether the library has one, not whether a value has a home.
+    A reader sent by the old wording to look for storage finds a `_`-prefixed
+    generic with no storage question at all.
+
+    What it says instead is the reason the export set excludes the name, which
+    is `reflect.collect_exports_src`'s rule and is the same rule the dylib
+    build's own `no_public_api_reason` reports by: a leading `_`, a generic
+    template (each instantiation is its own symbol, and this path has no
+    monomorphization — `bugs/FORMAL_known_limits.md` §1.2), an overload (no one
+    symbol denotes it) or a C library name. `_get_kgen_string` in
+    `std/sys/_assembly.mojo` is the first two at once, and it is the terminal
+    construct for nineteen swept files."""
+    who = f"{fn_name}: " if fn_name else ""
+    mod = getattr(sym, "module", None)
+    return (f"{who}`{name}` is called, and it is imported from `{mod}`, so the "
+            f"call has to bind a symbol `{mod}` exports. That module does not "
+            f"export it, and the reason is `doc/ABI.md`'s export rule rather "
+            f"than anything about this call: a name with a leading `_` is "
+            f"private, a generic template is not one symbol but one per "
+            f"instantiation (`_get_kgen_string[asm]()` is the measured case — "
+            f"both at once), an overload has no single symbol, and a C library "
+            f"name like `exit` or `write` is provided by libSystem. The "
+            f"exclusion is measured and settled in "
+            f"bugs/FORMAL_known_limits.md §1.1, and the generic case in §1.2. "
+            f"Write the operation in this module, or call a public function "
+            f"that does it — which is the same program with a definition this "
+            f"image can bind")
+
+
 def module_global_refusal(name: str, sym, fn_name: str) -> str:
     """The one-line diagnostic for a module-level name this path cannot read.
 
@@ -10117,14 +10809,34 @@ def module_global_refusal(name: str, sym, fn_name: str) -> str:
         # lower. The sweep's own comment says the house style — "a codegen
         # diagnostic quotes nothing of this shape (`self.<field>` is in
         # backticks)" — and this is the case that makes it load-bearing.
-        return (f"{who}{name!r} is imported from `{mod}`, so it is a "
+        #
+        # What a dylib DOES publish, because the sentence has to be true as
+        # well as discouraging and the previous one named a repair that does
+        # not lower: its FUNCTIONS, as symbols, and its module-level names the
+        # build FOLDED TO A LITERAL, as values — a literal needs no storage to
+        # cross the boundary (there is exactly one value of a folded
+        # module-level name in a whole program), so the importer materializes
+        # the same one in its own image. A name that reached this refusal is
+        # therefore not one of those: it is a real variable, a list, an object,
+        # or a function used as a value. Saying so is what makes the remaining
+        # sentence a repair rather than a deflection.
+        return (f"{who}{name!r} is imported from `{mod}`, and it is a "
                 f"module-level name of another module. This path compiles an "
-                f"import into a dylib, and a module-level name is not exported "
-                f"as a word — there is no storage for it here: every value a "
-                f"formal program can name lives in a function's own stack "
-                f"scratch, which is reclaimed when the function returns. "
-                f"Give it a function (a `{mod}.fn()` call lowers) or write the "
-                f"value at the use site")
+                f"import into a dylib, and a dylib publishes FUNCTIONS and "
+                f"folded CONSTANTS — a name whose value the build knows "
+                f"(`{mod}.K = 1`, `{mod}.S = \"x\"`, a `comptime` constant) "
+                f"lowers, and a call `{mod}.fn(...)` lowers. What it cannot "
+                f"publish is a VARIABLE: there is no storage for one here, "
+                f"because every value a formal program can name lives in a "
+                f"function's own stack scratch, which is reclaimed when the "
+                f"function returns — and a list, a stream object or a function "
+                f"used as a value is one of those, not a constant. So this "
+                f"name's value is a real global with nowhere to live, which is "
+                f"a property of the value model rather than of this call: "
+                f"`{mod}.fn(...)` where `{mod}` publishes that function as a "
+                f"function is the same program with a representation. "
+                f"bugs/FORMAL_module_state_no_storage.md records the design "
+                f"and what would have to be true to close it")
     if site == "declared":
         return (f"{who}{name!r} is declared at module level with no value "
                 f"(`{name}: T`), so nothing ever writes it and no value "
