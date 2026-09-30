@@ -38,6 +38,7 @@ import mojo.backend_gimple.device_select as dsel
 import mojo.backend_gimple.device_glue as dglue
 import mojo.backend_gimple.emit_metal as eml
 import mojo.middle.metal_ops as mops
+import mojo.middle.offload as ofl
 
 
 def parse(src: str):
@@ -1063,6 +1064,400 @@ class TestAirIntrinsicsRunOnGpu(unittest.TestCase):
                          'a float-routed intrinsic computed the right answer, '
                          'so this harness cannot see that class of bug:\n'
                          f'{out}')
+
+
+
+# ---------------------------------------------------------------------------
+# Increment 3: auto-offload. A recognised parallel loop nest is synthesised
+# into a `@gpu` function and flows through seams 1/2/3 unchanged.
+# ---------------------------------------------------------------------------
+
+SAXPY = '''
+def saxpy(a: Float32, x: List[Float32], y: List[Float32],
+          out: List[Float32], n: Int):
+    for i in range(n):
+        out[i] = a * x[i] + y[i]
+'''
+
+
+def _fn(src: str, name: str = None):
+    mod = parse(src)
+    for s in mod:
+        if getattr(s, 'name', None) and (name is None or str(s.name) == name):
+            return s
+    raise AssertionError('no such function')
+
+
+class TestOffloadRecognition(unittest.TestCase):
+    """What is accepted, and -- mostly -- what is refused.
+
+    The refusals are the point. Increment 3 moves a loop onto a GPU without
+    being asked, so every loop it declines must be declined for a reason that
+    would otherwise produce a plausible wrong answer at exit 0.
+    """
+
+    def test_a_parallel_map_is_recognised(self):
+        info = ofl.recognise(_fn(SAXPY))
+        self.assertIsNotNone(info)
+        self.assertEqual(info.index, 'i')
+        self.assertEqual(info.param, 'n')
+        self.assertEqual(info.writes, 'out')
+        self.assertEqual(info.reads, ['x', 'y'])
+        # `a` is a bare identifier in the body, so it is a kernel parameter
+        # too. Missing it emits it as an undeclared global -- the build error
+        # that found this.
+        self.assertEqual(info.scalars, ['a'])
+
+    def test_a_scalar_coefficient_is_carried(self):
+        info = ofl.recognise(_fn(
+            'def f(k: Int, x: List[Float32], out: List[Float32], n: Int):\n'
+            '    for i in range(n):\n'
+            '        out[i] = x[i] * k\n'))
+        self.assertEqual(info.scalars, ['k'])
+
+    def test_a_reduction_is_refused(self):
+        # `t = t + x[i]` is not a parallel map. Accepting it and summing
+        # per-thread would give a wrong answer, not an error.
+        f = _fn('def f(x: List[Float32], out: List[Float32], n: Int):\n'
+                '    t = 0.0\n'
+                '    for i in range(n):\n'
+                '        t = t + x[i]\n'
+                '    out[0] = t\n')
+        self.assertIsNone(ofl.recognise(f))
+        self.assertIn('reduction', ofl.explain(f))
+
+    def test_a_strided_write_is_refused(self):
+        f = _fn('def f(x: List[Float32], out: List[Float32], n: Int):\n'
+                '    for i in range(n):\n'
+                '        out[i * 2] = x[i]\n')
+        self.assertIsNone(ofl.recognise(f))
+        self.assertIn('not indexed by the loop variable', ofl.explain(f))
+
+    def test_a_conditional_store_is_refused(self):
+        f = _fn('def f(x: List[Float32], out: List[Float32], n: Int):\n'
+                '    for i in range(n):\n'
+                '        if x[i] < 0.0:\n'
+                '            continue\n'
+                '        out[i] = x[i]\n')
+        self.assertIsNone(ofl.recognise(f))
+        self.assertIn('not a single assignment', ofl.explain(f))
+
+    def test_a_nested_loop_is_refused(self):
+        f = _fn('def f(x: List[Float32], out: List[Float32], n: Int):\n'
+                '    for i in range(n):\n'
+                '        for j in range(n):\n'
+                '            out[i] = x[j]\n')
+        self.assertIsNone(ofl.recognise(f))
+
+    def test_an_aliasing_write_is_refused(self):
+        f = _fn('def f(x: List[Float32], out: List[Float32], n: Int):\n'
+                '    for i in range(n):\n'
+                '        x[i] = x[i] + 1.0\n'
+                '        out[i] = x[i]\n')
+        self.assertIsNone(ofl.recognise(f))
+
+    def test_range_with_two_bounds_is_refused(self):
+        f = _fn('def f(x: List[Float32], out: List[Float32], n: Int):\n'
+                '    for i in range(0, n):\n'
+                '        out[i] = x[i]\n')
+        self.assertIsNone(ofl.recognise(f))
+        self.assertIn('range', ofl.explain(f))
+
+    def test_iterating_a_list_rather_than_a_range_is_refused(self):
+        f = _fn('def f(x: List[Float32], out: List[Float32], xs: List[Int]):\n'
+                '    for i in xs:\n'
+                '        out[i] = x[i]\n')
+        self.assertIsNone(ofl.recognise(f))
+
+    def test_a_call_in_the_body_is_refused(self):
+        f = _fn('def f(x: List[Float32], out: List[Float32], n: Int):\n'
+                '    for i in range(n):\n'
+                '        out[i] = helper(x[i])\n')
+        self.assertIsNone(ofl.recognise(f))
+        self.assertIn('CallExpr', ofl.explain(f))
+
+    def test_other_host_work_in_the_function_is_refused(self):
+        f = _fn('def f(x: List[Float32], out: List[Float32], n: Int):\n'
+                '    z = 1.0\n'
+                '    for i in range(n):\n'
+                '        out[i] = x[i]\n')
+        self.assertIsNone(ofl.recognise(f))
+        self.assertIn('assignment', ofl.explain(f))
+
+    def test_a_trailing_return_is_allowed(self):
+        f = _fn('def f(x: List[Float32], out: List[Float32], n: Int):\n'
+                '    for i in range(n):\n'
+                '        out[i] = x[i]\n'
+                '    return out\n')
+        self.assertIsNotNone(ofl.recognise(f))
+
+
+class TestOffloadSynthesis(unittest.TestCase):
+    """The synthesised function, and the seams it has to survive."""
+
+    def setUp(self):
+        self.fn = _fn(SAXPY)
+        self.k = ofl.synthesise(self.fn, ofl.recognise(self.fn))
+
+    def test_it_is_marked_gpu_so_the_existing_seams_take_it(self):
+        # This is the whole design: no new code path, just a FunctionDef that
+        # seam 1 already classifies as DEVICE.
+        self.assertEqual(self.k.decorators, ['gpu'])
+        self.assertEqual(dsel.classify_functions([self.k]),
+                         {self.k.name: dsel.DEVICE})
+
+    def test_the_name_cannot_collide_with_a_user_function(self):
+        self.assertTrue(str(self.k.name).startswith(ofl.SYNTH_PREFIX))
+        self.assertNotEqual(str(self.k.name), 'saxpy')
+
+    def test_the_length_parameter_comes_first(self):
+        # device_glue takes the FIRST Int parameter as the copy-back element
+        # count. With `a: Int` present, any other order lets a coefficient
+        # steal that role and the host copies back the wrong number of
+        # elements.
+        types, count_idx = dglue.launch_arg_types(self.k.params)
+        self.assertEqual(self.k.params[count_idx][0], ofl._LENGTH_PARAM)
+        self.assertEqual(count_idx, 0)
+
+    def test_containers_are_device_pointers_not_lists(self):
+        # `List[Float32]` resolves to `MojoList *`, which emit_metal refuses
+        # by name; the device signature has to be the pointer spelling.
+        for name, ann in self.k.params:
+            if name in ('x', 'y', 'out'):
+                self.assertTrue(ann.startswith('UnsafePointer['), ann)
+
+    def test_it_lowers_to_msl_with_a_real_bounds_guard(self):
+        msl = eml.emit_kernel(self.k)
+        self.assertIn('kernel void _mg_offload_saxpy', msl)
+        self.assertIn('i = __gid;', msl)
+        # The guard is what stops an over-dispatched grid reading past the end.
+        self.assertIn('if ((i >= _mg_len))', msl)
+        self.assertIn('out[i] = ((a * x[i]) + y[i]);', msl)
+
+    def test_buffer_indices_count_buffers_not_parameters(self):
+        """A latent emitter bug that this parameter order exposed.
+
+        runtime/fire_metal.m binds buffers at 0..n_bufs-1 and only then the
+        scalars, so a scalar before a buffer must not advance the buffer
+        index. Every hand-written kernel in this tree declares all its
+        buffers first, so `len(parts)` happened to equal the buffer count
+        and the bug could not fire -- until a synthesised kernel put its
+        length scalar first. Before the fix this kernel bound `out` at
+        [[buffer(4)]] while the runtime bound it at 2, and the GPU wrote
+        nothing: 1024 of 1024 elements left at their sentinel, exit 0.
+        """
+        msl = eml.emit_kernel(self.k)
+        self.assertIn('x [[buffer(0)]]', msl)
+        self.assertIn('y [[buffer(1)]]', msl)
+        self.assertIn('out [[buffer(2)]]', msl)
+        self.assertNotIn('out [[buffer(4)]]', msl)
+
+    def test_an_unannotated_container_is_refused(self):
+        f = _fn('def f(x, out, n):\n'
+                '    for i in range(n):\n'
+                '        out[i] = x[i]\n')
+        info = ofl.recognise(f)
+        self.assertIsNotNone(info, 'the loop itself is still a parallel map')
+        with self.assertRaises(ofl.SynthesisRefused) as cm:
+            ofl.synthesise(f, info)
+        self.assertIn('no type annotation', str(cm.exception))
+
+    def test_a_string_container_is_refused(self):
+        # `x: List[String]` is not read in the body here, so the recogniser
+        # has nothing to refuse on and the loop is a perfectly good parallel
+        # map -- `out[i] = 1.0` touches only the Float32 list. The string
+        # container is caught where it belongs: a String element is not a
+        # scalar or a subscript, so any body that actually READS one is
+        # refused.
+        f = _fn('def f(x: List[String], out: List[Float32], n: Int):\n'
+                '    for i in range(n):\n'
+                '        out[i] = 1.0\n')
+        info = ofl.recognise(f)
+        self.assertIsNotNone(info)
+        self.assertEqual(info.reads, [], 'x is not read, so it is not a kernel arg')
+
+        # A body that DOES read the string element is RECOGNISED -- the
+        # recogniser is a shape test and does not track element types -- and
+        # then refused by the SYNTHESISER, which is the layer that resolves
+        # annotations. The layering is the point: refusing on shape would
+        # mean refusing every subscript read, including the numeric ones that
+        # are the whole purpose.
+        g = _fn('def f(x: List[String], out: List[Float32], n: Int):\n'
+                '    for i in range(n):\n'
+                '        out[i] = x[i]\n')
+        ginfo = ofl.recognise(g)
+        self.assertIsNotNone(ginfo)
+        self.assertEqual(ginfo.reads, ['x'])
+        with self.assertRaises(ofl.SynthesisRefused) as cm:
+            ofl.synthesise(g, ginfo)
+        self.assertIn('String', str(cm.exception))
+
+
+class TestOffloadEndToEnd(unittest.TestCase):
+    """The synthesised kernel has to survive the real codegen, not just the
+    emitter in isolation."""
+
+    def test_the_kernel_and_its_launch_wrapper_reach_the_generated_c(self):
+        mod = parse(SAXPY + '\ndef main():\n    print(1)\n')
+        synth = ofl.synthesise_module(mod)
+        self.assertEqual([str(f.name) for f in synth], ['_mg_offload_saxpy'])
+        gen = gctypes.GimpleGen(None)
+        gen.module_name = 'e2e'
+        out = gen.gen_module(list(mod) + list(synth))
+        # The MSL sidecar, and the host wrapper that marshals for it.
+        self.assertIn('_mg_offload_saxpy', out)
+        self.assertIn('_mg_launch__mg_offload_saxpy', out)
+        # The MSL is embedded as an ESCAPED C string, so the buffer
+        # attributes appear split across adjacent string literals. Assert on
+        # the wrapper's buffer table instead, which is unescaped and is the
+        # half the HOST actually uses.
+        self.assertIn('void *_mg_bufs[] = {x, y, out};', out)
+        self.assertIn('_mg_sc0 = (int32_t)_mg_len;', out)
+        # And on the escaped kernel signature, joined back up.
+        self.assertNotIn('out [[buffer(4)]]', out)
+        self.assertIn('buffer(2', out)
+
+    def test_an_explicitly_marked_function_is_not_re_synthesised(self):
+        mod = parse('@gpu\ndef k(out: List[Float32], n: Int):\n'
+                    '    for i in range(n):\n'
+                    '        out[i] = 1.0\n')
+        self.assertEqual(ofl.synthesise_module(mod), [])
+
+
+@unittest.skipUnless(sys.platform == 'darwin', 'Metal is macOS-only')
+class TestSynthesisedKernelRunsOnGpu(unittest.TestCase):
+    """Increment 3's behavioural claim: a loop nobody marked computes the
+    right answer on the real GPU."""
+
+    def test_a_recognised_loop_computes_saxpy_exactly(self):
+        msl = eml.emit_kernel(
+            ofl.synthesise(_fn(SAXPY), ofl.recognise(_fn(SAXPY))))
+        status, out = run_saxpy_on_gpu(msl, '_mg_offload_saxpy')
+        if status == 'no_device':
+            self.skipTest('no Metal device on this machine')
+        self.assertEqual(status, 'ok', f'status={status}\n{out}\n--- msl ---\n{msl}')
+
+    def test_misbound_buffers_are_caught_by_this_harness(self):
+        """The test earns its keep only if it fails on the bug it guards."""
+        msl = eml.emit_kernel(
+            ofl.synthesise(_fn(SAXPY), ofl.recognise(_fn(SAXPY))))
+        self.assertIn('out [[buffer(2)]]', msl)
+        broken = (msl.replace('y [[buffer(1)]]', 'y [[buffer(2)]]')
+                     .replace('out [[buffer(2)]]', 'out [[buffer(4)]]'))
+        self.assertNotEqual(broken, msl, 'mutation did not apply')
+        status, out = run_saxpy_on_gpu(broken, '_mg_offload_saxpy')
+        if status == 'no_device':
+            self.skipTest('no Metal device on this machine')
+        self.assertEqual(status, 'mismatch',
+                         'a misbound buffer computed the right answer, so '
+                         f'this harness cannot see that class of bug:\n{out}')
+
+
+#: saXPY's own harness. `_HARNESS_INT` checks a device's view of its THREAD
+#: INDEX; this one checks a computed VALUE, and it is the only test that can
+#: tell a synthesised kernel that works from one that never ran.
+#:
+#: The buffer binding order is the runtime's, not the MSL's: fire_metal.m
+#: binds buffers at 0..n_bufs-1 and only then the scalars. An earlier
+#: version of this harness bound by parameter position and reported a
+#: perfect-looking failure that was really a harness bug.
+_HARNESS_SAXPY = r'''
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+
+static const char *kMsl = @MSL@;
+static const char *kFname = "@FNAME@";
+
+int main(void) {
+    @autoreleasepool {
+        id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+        if (!dev) { printf("NO_DEVICE\n"); return 2; }
+        NSError *err = nil;
+        MTLCompileOptions *co = [[MTLCompileOptions alloc] init];
+        co.languageVersion = MTLLanguageVersion3_2;
+        id<MTLLibrary> lib = [dev newLibraryWithSource:[NSString stringWithUTF8String:kMsl]
+                                               options:co error:&err];
+        if (!lib) { printf("MSL_FAIL: %s\n", err.description.UTF8String); return 3; }
+        id<MTLFunction> fn = [lib newFunctionWithName:@(kFname)];
+        if (!fn) { printf("NO_FN\n"); return 3; }
+        id<MTLComputePipelineState> ps =
+            [dev newComputePipelineStateWithFunction:fn error:&err];
+        if (!ps) { printf("NO_PIPE: %s\n", err.description.UTF8String); return 3; }
+
+        const int N = 1024;
+        float a = 2.5f;
+        float *x = malloc(N * sizeof(float));
+        float *y = malloc(N * sizeof(float));
+        float *out = malloc(N * sizeof(float));
+        for (int i = 0; i < N; i++) {
+            x[i] = (float)i; y[i] = (float)(N - i); out[i] = -1.0f;
+        }
+        id<MTLBuffer> bx = [dev newBufferWithBytes:x length:N*sizeof(float)
+                            options:MTLResourceStorageModeShared];
+        id<MTLBuffer> by = [dev newBufferWithBytes:y length:N*sizeof(float)
+                            options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bo = [dev newBufferWithBytes:out length:N*sizeof(float)
+                            options:MTLResourceStorageModeShared];
+        id<MTLCommandQueue> q = [dev newCommandQueue];
+        id<MTLCommandBuffer> cb = [q commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        [e setComputePipelineState:ps];
+        [e setBuffer:bx offset:0 atIndex:0];
+        [e setBuffer:by offset:0 atIndex:1];
+        [e setBuffer:bo offset:0 atIndex:2];
+        [e setBytes:&N length:sizeof(int) atIndex:3];
+        [e setBytes:&a length:sizeof(float) atIndex:4];
+        NSUInteger w = ps.threadExecutionWidth, tmax = ps.maxTotalThreadsPerThreadgroup;
+        if (w == 0) w = 1;
+        if (tmax < w) tmax = w;
+        [e dispatchThreadgroups:MTLSizeMake((N + tmax/w - 1)/(tmax/w), 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(w, 1, 1)];
+        [e endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        memcpy(out, [bo contents], N * sizeof(float));
+        double maxdiff = 0.0; int bad = 0;
+        for (int i = 0; i < N; i++) {
+            double want = (double)a * (double)x[i] + (double)y[i];
+            double d = fabs((double)out[i] - want);
+            if (d > maxdiff) maxdiff = d;
+            if (d > 0) bad++;
+        }
+        printf("SAXPY N=%d MAXDIFF %.3e BAD %d\n", N, maxdiff, bad);
+        return bad == 0 ? 0 : 1;
+    }
+}
+'''
+
+
+def run_saxpy_on_gpu(msl: str, fname: str):
+    """Dispatch `msl` as a saXPY kernel and compare against the CPU value."""
+    if sys.platform != 'darwin':
+        return 'no_device', ''
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, 'h.m')
+        exe = os.path.join(td, 'h')
+        body = (_HARNESS_SAXPY.replace('@MSL@', _c_string_literal(msl))
+                               .replace('@FNAME@', fname))
+        with open(src, 'w') as f:
+            f.write(body)
+        cc = subprocess.run(['clang', '-fobjc-arc', '-O1', '-framework',
+                             'Foundation', '-framework', 'Metal', '-o', exe, src],
+                            capture_output=True, text=True)
+        if cc.returncode != 0:
+            return 'compile_fail', cc.stderr[:400]
+        run = subprocess.run([exe], capture_output=True, text=True, timeout=300)
+        out = run.stdout
+        if 'NO_DEVICE' in out:
+            return 'no_device', out
+        if 'MSL_FAIL' in out or 'NO_FN' in out or 'NO_PIPE' in out:
+            return 'compile_fail', out
+        if run.returncode != 0 or 'BAD 0' not in out:
+            return 'mismatch', out
+        return 'ok', out
 
 
 

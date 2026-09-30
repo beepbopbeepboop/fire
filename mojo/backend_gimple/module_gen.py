@@ -44,6 +44,7 @@ import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
 from mojo.middle.closures import discover_closures
 import mojo.backend_gimple.device_select as _gmi_device_select
+import mojo.middle.offload as _gmi_offload
 import mojo.backend_gimple.device_glue as _gmi_device_glue
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
@@ -1115,6 +1116,23 @@ def gen_module_impl(self, stmts):
     # do about a function it has already started, which is why this is a
     # pre-pass and not a check inside gen_func.
     _device_kinds = _gmi_device_select.classify_functions(stmts)
+
+    # Increment 3 (doc/GPU_OFFLOAD_PLAN.html): synthesise a device function
+    # for a recognised parallel loop nest, so ordinary Python offloads with
+    # no marker. The synthesised FunctionDef is appended to `stmts` and
+    # carries `@gpu`, which is what makes it flow through seam 1's
+    # classifier, seam 2's MSL emitter and seam 3's host wrappers with no
+    # change to any of them -- increment 3 adds a recogniser and a
+    # synthesiser, not a second code path.
+    #
+    # The synthesised functions are added AFTER the classifier has run and
+    # then the classification is refreshed, because a synthesised function is
+    # not in `stmts` when classify_functions sees it.
+    _synth_names = _gmi_offload.synthesise_module(stmts)
+    if _synth_names:
+        stmts = list(stmts) + list(_synth_names)
+        _device_kinds = _gmi_device_select.classify_functions(stmts)
+
     _device_parts: list[str] = []
     _device_names = sorted(n for n, k in _device_kinds.items()
                            if k == _gmi_device_select.DEVICE)

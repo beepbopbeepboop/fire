@@ -214,6 +214,7 @@ class MetalEmitter:
 
     def _signature(self) -> str:
         parts = []
+        n_bufs = 0
         for pname, _ptype in self.params:
             pname = _as_str(pname)
             # Kernel arguments are scalars or device/constant pointers by
@@ -226,7 +227,25 @@ class MetalEmitter:
             if msl_t.endswith('*'):
                 # A buffer argument: the address space is part of the type
                 # and the index binds it.
-                _bidx = len(parts)
+                #
+                # The index counts BUFFERS, not parameters. runtime/fire_metal.m
+                # binds `bufs[0..n_bufs)` at `setBuffer:atIndex:bi` and only
+                # then the scalars, so a scalar sitting before a buffer must
+                # not advance the buffer index.
+                #
+                # This was latent until a synthesised kernel put its length
+                # scalar FIRST (mojo/middle/offload.py needs the length to be
+                # the first Int parameter, because device_glue takes the
+                # first Int as the copy-back element count). Every hand-written
+                # kernel in this tree happens to declare all its buffers
+                # before all its scalars, so `len(parts)` and the buffer
+                # count were the same number and the bug could not fire.
+                # Measured before the fix: a two-buffer kernel with a leading
+                # scalar bound `out` at [[buffer(4)]] while the runtime bound
+                # it at 2, and the kernel wrote nothing -- 1024 of 1024
+                # elements left at their sentinel, exit 0.
+                _bidx = n_bufs
+                n_bufs += 1
                 parts.append(f'{msl_t} {pname} [[buffer({_bidx})]]')
             else:
                 # A SCALAR kernel argument is passed BY REFERENCE into the
