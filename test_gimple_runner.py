@@ -171,6 +171,53 @@ def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
                 pass
 
 
+def test_gimple_diagnostic(name: str, mojo_src: str, expected_stderr: str,
+                           expected_stdout: str = None, expected_return: int = 0):
+    """Assert the compiled program prints `expected_stderr` on stderr and,
+    optionally, exactly `expected_stdout` with exit `expected_return`.
+
+    The shape of a LOUD-BUT-CONTINUING refusal — the compiled path's
+    established alternative to a signal or to a silent wrong value, the same
+    one `mojo_unsupported_iter` and the `_unsupported_generator_names` weak
+    stubs use (see those comments for why abort() is worse: no Mojo-level
+    try/except can catch SIGABRT, so it takes down the whole process). It
+    needs its own helper because `test_gimple_runtime_error` asserts a
+    NON-ZERO exit, which is the opposite convention: there the program fails
+    as CPython would, here it says what it cannot do and carries on with the
+    behaviour the gap already produced. Asserting only the stderr substring
+    would be weak, so the stdout and exit code are pinned too where the test
+    has an opinion."""
+    global _PASS, _FAIL, _TIMEOUT
+    exe_path = None
+    try:
+        exe_path = compile_mojo_to_gimple_exe(mojo_src)
+        result = subprocess.run([exe_path], capture_output=True, timeout=10)
+        err = result.stderr.decode('utf-8', errors='replace')
+        out = result.stdout.decode('utf-8', errors='replace')
+        if (expected_stderr in err and result.returncode == expected_return
+                and (expected_stdout is None or out == expected_stdout)):
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected {expected_stderr!r} on stderr with "
+                  f"exit {expected_return}"
+                  + (f' and stdout {expected_stdout!r}' if expected_stdout is not None else '')
+                  + f', got exit {result.returncode} err={err[-300:]!r} out={out[-200:]!r}')
+            _FAIL += 1
+    except subprocess.TimeoutExpired as e:
+        print(f"TIMEOUT {name}: {e}")
+        _TIMEOUT += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+    finally:
+        if exe_path:
+            try:
+                os.unlink(exe_path)
+            except:
+                pass
+
+
 def test_gimple_bounded_memory(name: str, mojo_src: str, expected_stdout: str, limit_mb: int):
     """The program prints exactly `expected_stdout` AND its peak RSS stays
     under `limit_mb`. A leak in a loop shows up as RSS proportional to the
@@ -875,6 +922,46 @@ main()
     # stderr text because the compiled binary's exit code alone cannot tell a
     # TypeError from an unrelated failure (and the signal it replaced was
     # exit 0 with a wrong list).
+    # A callable-valued parameter default naming an IMPORTED module's function
+    # (`def probe(x, *, g=os.walk)`) was padded with 0, so `g` arrived as
+    # address 0 and the callee called through a null pointer: SIGSEGV, exit
+    # 139, no output. Whether `os.walk` was compiled into this translation
+    # unit at all is a property of the whole import closure, not of the
+    # expression, so "0" is the one answer that is always available and
+    # always wrong.
+    #
+    # The honest answer follows `mojo_unsupported_iter`: say so, loudly, and
+    # carry on. `n > 0` printing False is what the null pointer WOULD have
+    # printed had it survived — the loop's own "unsupported iterable"
+    # diagnostic says the body runs zero times, which is pre-existing
+    # behaviour, not something this change introduced.
+    test_gimple_diagnostic("gimple_imported_callable_default_is_diagnosed", """\
+def probe(x, *, g=os.walk):
+    return g(x)
+
+def main():
+    r = probe(".")
+    n = 0
+    for a, b, c in r:
+        n = n + 1
+    print(n > 0)
+main()
+""", "mojo_unavailable_callable: 'os.walk'", "False\n")
+
+    # The same default in a callee that NEVER CALLS the parameter must be
+    # completely unaffected: the diagnostic lives inside the stub, so it fires
+    # on a call, not on a padding. Without this the fix would trade a crash
+    # for a spurious message in every program that merely mentions a callable
+    # default.
+    test_gimple_stdout("gimple_uncalled_imported_callable_default_is_silent", """\
+def probe(x, *, g=os.walk):
+    return x
+
+def main():
+    print(probe("hello"))
+main()
+""", "hello\n")
+
     test_gimple_runtime_error("gimple_list_sort_mixed_types_is_a_typeerror", """\
 def main():
     l = [1, 'a', 2.5]

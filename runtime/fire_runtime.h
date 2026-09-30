@@ -1097,6 +1097,16 @@ double  mojo_min_double(void *args);
 double mojo_sum_double(void *args);
 /* Python bool repr: "True"/"False", not 1/0. */
 char *mojo_repr_bool(int b);
+
+/* A callable-valued parameter default naming an IMPORTED module's function
+ * (`def probe(x, *, g=os.walk)`) — see the block comment on
+ * mojo_unavailable_callable in fire_runtime.c for why padding it with 0 was a
+ * SIGSEGV and why ONE no-parameter function is the right stub for every
+ * arity. `mojo_set_unavailable_callable_name` arms the name the diagnostic
+ * prints; the codegen emits it immediately before the call it belongs to. */
+void    mojo_set_unavailable_callable_name(const char *name);
+int64_t mojo_unavailable_callable(void);
+void   *mojo_unavailable_callable_ptr(void);
 /* An int64_t used as a C string: itself when it is a boxed char*, else its
    decimal string (see mojo_cstr_or_int_str's comment in the .c). */
 char *mojo_cstr_or_int_str(int64_t v);

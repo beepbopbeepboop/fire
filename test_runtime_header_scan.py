@@ -178,7 +178,14 @@ def test_every_declaration_is_seen():
     # int64_t the homogenized `mojo_fnptr_call_N` helpers return for a
     # callable value all use it, so a consumer recovering a double from a
     # word cannot get the direction wrong.
-    for header, want in (('fire_runtime.h', 476),
+    # 476 -> 479 (2026-09-30): `mojo_set_unavailable_callable_name` /
+    # `mojo_unavailable_callable` / `mojo_unavailable_callable_ptr`, the honest
+    # answer for a callable-valued parameter default naming an imported
+    # module's function — padding it with 0 made the callee call through a
+    # null pointer (SIGSEGV, exit 139). One no-parameter stub covers every
+    # arity, since a callee that declares no parameters does not read the
+    # arguments the caller passes; see the block comment in fire_runtime.c.
+    for header, want in (('fire_runtime.h', 479),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

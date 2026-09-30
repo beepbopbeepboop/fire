@@ -77,6 +77,34 @@ def _default_expr_to_pair(gen, _dflt) -> tuple:
         return ('int', '1')
     if isinstance(_dflt, gimple_ctypes.IdentExpr) and _dflt.name in ('False', 'None'):
         return ('int', '0')
+    # A `module.attr` default (`def probe(x, *, g=os.walk)`) is a reference to
+    # something this compile cannot resolve: whether `os.walk` was translated
+    # into this translation unit at all is a property of the whole import
+    # closure, not of the expression. The `('int', '0')` fallthrough below
+    # therefore delivered address 0, and a callee that CALLS the parameter
+    # called through it — `mojo_fnptr_call_1((void *)0, x)` — a SIGSEGV with
+    # exit 139 and no output. Padding 0 is the one answer that is always
+    # available and always wrong.
+    #
+    # So: a stub address, armed with the name. The diagnostic is inside the
+    # stub, so a callee that never calls the parameter is COMPLETELY
+    # unaffected — no message, no behaviour change — and one that does gets a
+    # greppable line and a 0 instead of a signal. That is the same
+    # loud-but-continuing shape as `mojo_unsupported_iter`, and for the same
+    # reason: continuing with the previous behaviour beats taking the process
+    # down.
+    #
+    # Scoped to MemberExpr on purpose. A bare `IdentExpr` default
+    # (`g=some_helper`) is NOT routed here: a module-level constant lowers to
+    # an int64 and is indistinguishable at this point from a function, and 0
+    # is already the right answer for a constant this compile could not see.
+    if (isinstance(_dflt, gimple_ctypes.MemberExpr)
+            and isinstance(_dflt.obj, gimple_ctypes.IdentExpr)):
+        _nm = f'{_dflt.obj.name}.{_dflt.member}'
+        _slit = gen._new_val('char *',
+                             gen._intern_string(gimple_ctypes._c_escape(_nm)))
+        gen._emit(f'  mojo_set_unavailable_callable_name ({_slit});')
+        return ('void *', gen._new_val('void *', 'mojo_unavailable_callable_ptr ()'))
     return ('int', '0')
 
 def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) -> dict | None:

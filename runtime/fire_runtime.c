@@ -6345,6 +6345,58 @@ int64_t mojo_obj_getattr(void *obj, char *attr) {
  * worse regression than the silent-empty-loop it replaces. So: print
  * loudly (visible, greppable), but let execution continue with the same
  * zero-iterations behavior as before. */
+/* A CALLABLE-VALUED parameter default naming an IMPORTED module's function
+   (`def probe(x, *, g=os.walk): return g(x)`). `_callable_value_symbol`
+   answers "what C symbol does a function used as a value mean" for a BARE
+   NAME this compile lowered; it cannot answer for a `module.attr` reference,
+   because whether `os.walk` was compiled into this translation unit at all is
+   a property of the whole import closure, not of the expression. The old
+   answer was the `('int', '0')` fallback in `_default_expr_to_pair`, so `g`
+   arrived as address 0 and `mojo_fnptr_call_1((void *)0, ...)` called through
+   a null pointer: SIGSEGV, exit 139, no output.
+
+   This is that case's honest answer, and it follows
+   `mojo_unsupported_iter`'s convention exactly: print loudly, and let
+   execution continue with the same behaviour the null pointer would have
+   produced had it survived — so a program that never CALLS the parameter is
+   completely unaffected, and one that does gets a greppable diagnostic
+   instead of a signal.
+
+   ONE function, not a family per arity, because the call reaches it through
+   `mojo_fnptr_call_N`'s `int64_t (*)(int64_t...)` cast: a callee that
+   declares no parameters simply does not read the arguments the caller
+   passes, on every ABI this runtime targets. So `int64_t
+   mojo_unavailable_callable(void)` is a correct target for arities 0 through
+   4 alike, and returns a real 0 for the boxed result.
+
+   The name is armed by the call site immediately before the call, which is
+   why it is a separate setter rather than an argument: a `void (*)(void)`
+   target cannot be passed one, and the alternative — one weak stub per
+   referenced name — is the machinery the existing
+   `_unsupported_generator_names` weak stubs already provide, which this is
+   deliberately not duplicating. */
+static const char *_unavailable_callable_name = "?";
+static int _unavailable_callable_reported = 0;
+
+void mojo_set_unavailable_callable_name(const char *name) {
+    _unavailable_callable_name = name ? name : "?";
+    _unavailable_callable_reported = 0;
+}
+
+int64_t mojo_unavailable_callable(void) {
+    if (!_unavailable_callable_reported) {
+        _unavailable_callable_reported = 1;
+        fprintf(stderr, "mojo_unavailable_callable: '%s' is a callable that is "
+                         "not available in compiled mode (it names an imported "
+                         "module's function, which this translation unit may "
+                         "not contain); calling it returns 0\n",
+                _unavailable_callable_name);
+    }
+    return 0;
+}
+
+void *mojo_unavailable_callable_ptr(void) { return (void *)mojo_unavailable_callable; }
+
 void mojo_unsupported_iter(const char *type_name) {
     fprintf(stderr, "mojo_unsupported_iter: 'for' loop over unsupported iterable "
                      "type %s (codegen has no lowering for this container/iterator "
