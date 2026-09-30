@@ -7940,24 +7940,6 @@ def struct_construction_plan(struct_def, call, decls: dict,
     if kwargs:
         return (None, construction_keyword_refusal(
             name, [k for k, _v in kwargs]))
-    if not args:
-        # The existing shape.  Deliberately NOT re-decided here: `S()`'s
-        # refusal for a non-literal default belongs to
-        # `struct_frame_representable` / `struct_default_word` and has its own
-        # message, and a second copy of the decision is a second thing to keep
-        # in step with the first.
-        #
-        # It is ALSO where premise (B2) still lives, and the two are the same
-        # decision: a declared `__init__` is only inlined where the call has
-        # ARGUMENTS to bind to it, so `S()` on a struct whose `__init__` takes
-        # none still brings every field up at its class-level default and does
-        # not run the body.  That is a real, and now the only, way this path
-        # disagrees with the language about a constructor, and it is written
-        # down rather than fixed here because the fix is a behaviour change
-        # with a sweep-sized blast radius and no test would be able to tell a
-        # correct one from a lucky one; see
-        # `bugs/FORMAL_zero_arg_init_not_inlined.md`.
-        return ((CONSTRUCTION_DEFAULT,), None)
     # A DECLARED `__init__` outranks everything below, and it has to: with one,
     # `S(a, b)` is a call to it, so every message underneath — the arity one
     # included — is describing a construct the source does not contain.
@@ -7971,7 +7953,35 @@ def struct_construction_plan(struct_def, call, decls: dict,
     # blanket refusal is the two facts the inline genuinely needs and cannot
     # supply — an arity that selects exactly one overload, and a body that is
     # only those stores.
+    #
+    # READ BEFORE the zero-argument case, and that ordering is the whole of
+    # premise (B2)'s removal.  `S()` used to return `CONSTRUCTION_DEFAULT`
+    # before this lookup, so a declared `__init__` was inlined only where the
+    # call had ARGUMENTS to bind to it — and `S()` on a struct whose
+    # constructor takes none came up at its class-level defaults with the body
+    # never run.  Measured: `struct Z(a=8, b=9)`, `var z = Z()` then `z.a`,
+    # returned 0 where CPython returns 8, on BOTH architectures, with nothing
+    # refused and nothing printed.
+    #
+    # "THE COUNT SELECTS NOTHING" was the stated reason for the early return
+    # and it is answered here rather than avoided: `init_overload_for_arity` is
+    # the same function that selects an overload for every other count, it
+    # admits a count of 0 exactly when some declared overload takes no required
+    # parameter, and it answers `ambiguous` — a refusal — when two of them
+    # would.  So `S()` is decided by the same rule as `S(1)` and neither of the
+    # two holes the early return was avoiding is open.  A `__init__` that
+    # REQUIRES a parameter is the other half and is now what the language
+    # says: `Bag4()` against `def __init__(out self, n, m)` is a `TypeError`,
+    # and it is refused as one, naming the declared overloads.
     shapes = struct_init_shapes(struct_def)
+    if not args and not shapes:
+        # The existing shape, for a struct that declares no constructor at all:
+        # every field at its own default, and every placed nested frame brought
+        # up.  Deliberately NOT re-decided here: `S()`'s refusal for a
+        # non-literal default belongs to `struct_frame_representable` /
+        # `struct_default_word` and has its own message, and a second copy of
+        # the decision is a second thing to keep in step with the first.
+        return ((CONSTRUCTION_DEFAULT,), None)
     if shapes:
         shape, why = init_overload_for_arity(shapes, len(args))
         if why is not None:
@@ -8190,10 +8200,11 @@ def _frame_source_structs(arg, candidates: dict):
 #        (B1) — a non-literal class-level DEFAULT — is already refused, by
 #        `struct_frame_representable`, and is deliberately NOT re-decided
 #        below; see `frame_field_premise`.
-#   (B2) `S()` does not run `__init__`.  Every slot's value is the class-level
-#        DEFAULT, not what the constructor of the language would assign, so the
-#        `self.items = List[Self.T]()` in every container-shaped `__init__` in
-#        the corpus never executes.
+#   (B2) `S()` does not run `__init__` on a struct whose constructor takes NO
+#        REQUIRED PARAMETER, and that is now a refusal rather than a silent
+#        zero.  A struct that declares NO constructor at all is premise-free:
+#        there is no body to run.  Every slot's value for a refused `S()` is
+#        still nothing, because nothing runs.
 #
 # The two have quite different standing and the check below says so:
 #
@@ -8201,14 +8212,21 @@ def _frame_source_structs(arg, candidates: dict):
 #     runs, so `self.items = List[Self.T]()` inside it puts a blob in a slot
 #     today, and the refusal is the point.  This is the one the value-method
 #     work must keep true.
-#   * (B2) is an ENABLING PREMISE, asserted by the emitter (`_emit_struct_
-#     constructor` emits no call and refuses `S(x)`) and reported by name.  It
-#     is not something this check can prove, and a check that appeared to
-#     prove it would be the worst kind of check.
+#   * (B2) is an ENABLING PREMISE for the `CONSTRUCTION_DEFAULT` shape, which is
+#     what a struct that DECLARES no constructor lowers to.  It is reported by
+#     name so a reader is told which premise a refusal rests on.  It is not
+#     something this check can prove, and a check that appeared to prove it
+#     would be the worst kind of check.  A struct that DOES declare a
+#     constructor is not under (B2) at all — `S()` goes down the same
+#     `CONSTRUCTION_INIT` path as `S(args)`, and the confinement argument in
+#     the next paragraph is what keeps that safe.
 #
-# `S(args)` is the FOURTH door and it is neither premise: a construction with
-# arguments DOES run the constructor, because a constructor does not have to be
-# called to be run — `init_body_stores` inlines the body's stores at the site.
+# `S(args)` — and now `S()` on a struct whose `__init__` takes no required
+# parameter — is the FOURTH door and it is neither premise: such a construction
+# DOES run the constructor, because a constructor does not have to be called to
+# be run — `init_body_stores` inlines the body's stores at the site, and the
+# argument COUNT (zero included) is what `init_overload_for_arity` reads to pick
+# the overload, exactly as it does for every other count.
 # That cannot put an unreclaimable word in a slot, and the reason is the
 # confinement argument above rather than (B2): the inlined body runs in the
 # CONSTRUCTING function, whose scratch holds the block it writes into and
@@ -8227,13 +8245,17 @@ def _frame_source_structs(arg, candidates: dict):
 # sees one word per slot either way.
 FRAME_FIELD_BLOB_PREMISE_B1 = \
     "no executed method writes a container into a field"
-# (B2) is now a statement about the ZERO-ARGUMENT construction only, and the
-# wording says so, because "S() does not run __init__" read as a claim about
-# every construction and stopped being one when `S(args)` began inlining the
-# body.  What the text is FOR is telling a reader which of the two premises a
-# refusal rests on, and a reader who is told the wrong one is sent to look for
-# a violation of a rule that is not what stopped the build.
-FRAME_FIELD_BLOB_PREMISE_B2 = "a zero-argument S() does not run __init__"
+# (B2) is now a statement about a construction of a struct that DECLARES NO
+# CONSTRUCTOR, and the wording says so, because "S() does not run __init__"
+# read as a claim about every construction and stopped being one twice over:
+# when `S(args)` began inlining the body, and then when `S()` on a struct whose
+# `__init__` takes no required parameter began inlining it too.  A struct with
+# no constructor has no body to run, so its fields are the class-level defaults
+# and the word "run" is not the question.  What the text is FOR is telling a
+# reader which of the two premises a refusal rests on, and a reader who is told
+# the wrong one is sent to look for a violation of a rule that is not what
+# stopped the build.
+FRAME_FIELD_BLOB_PREMISE_B2 = "a struct that declares no __init__ has no body to run"
 
 
 def _is_container_value(value, containers: set) -> str:

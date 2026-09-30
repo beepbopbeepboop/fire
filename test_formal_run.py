@@ -4091,16 +4091,22 @@ CONSTRUCTION_CASES = [
      "    if last_v != 9:\n"
      "        return 50 + last_v\n"
      "    return 7\n", 7, None),
-    # GUARD, and the one that says the change did not OVERREACH: `S()` on a
-    # struct that declares an `__init__` still brings every field up at its
-    # class-level default and does NOT run the body, because there are no
-    # arguments for the argument count to select an overload with.  A lowering
-    # that ran the constructor here would have to pick a zero-required overload
-    # by something other than the count, and 8 + 9 is what a reader would be
-    # entitled to expect if it did.  The sibling refusal
-    # `constr_zero_arg_still_ignores_a_declared_init` pins the same fact from
-    # the other side (a constructor that takes arguments).
-    ("constr_init_a_zero_argument_construction_still_ignores_the_body",
+    # THE LANGUAGE'S ANSWER, and the test that was missing while this was
+    # pinned the other way: `S()` on a struct whose `__init__` takes no
+    # REQUIRED parameter RUNS the constructor, so `Z()` is `a == 8, b == 9`.
+    #
+    # This used to assert the opposite (both fields zero), and pinning a
+    # known-wrong answer is how it stayed wrong: nothing else in the corpus
+    # distinguishes a correct zero-argument lowering from the zeros, so a green
+    # suite said nothing either way.  `init_overload_for_arity` is what makes
+    # it decidable rather than a guess — it admits a count of 0 exactly when
+    # some declared overload takes no required parameter, and answers
+    # `ambiguous` (a refusal) when two of them would, so `S()` is selected by
+    # exactly the rule every other count is.  The exit status is 1 because
+    # `main` returns 1 when both fields carry the defaults, and 0 otherwise, so
+    # the zeros and CPython's answer are different exit codes and this test
+    # cannot pass for either by accident.
+    ("constr_a_zero_argument_construction_runs_a_zero_required_init",
      "struct Z:\n"
      "    var a: Int\n"
      "    var b: Int\n"
@@ -4116,8 +4122,28 @@ CONSTRUCTION_CASES = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    var z = Z()\n"
-     "    if z.get(0) != 0 or z.get(1) != 0:\n"
-     "        return 20 + z.get(0)\n"
+     "    if z.get(0) == 8 and z.get(1) == 9:\n"
+     "        return 1\n"
+     "    return 0\n", 1, None),
+    # …and the GUARD that says the change did not OVERREACH: a struct that
+    # declares NO constructor is still brought up at its class-level defaults,
+    # because there is no body to run.  Same shape as the case above with the
+    # `__init__` removed, so it is the only thing separating "zero-argument
+    # constructions run a constructor" from "every construction runs one".
+    ("constr_a_zero_argument_construction_of_a_constructor_less_struct",
+     "struct P9:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def get(self, i: Int) -> Int:\n"
+     "        if i == 0:\n"
+     "            return self.a\n"
+     "        return self.b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P9()\n"
+     "    if p.get(0) != 0 or p.get(1) != 0:\n"
+     "        return 20 + p.get(0)\n"
      "    return 7\n", 7, None),
 ]
 
@@ -4348,16 +4374,15 @@ CONSTRUCTION_REFUSALS = [
      "    return x.g\n",
      "refuse:as field 'f' is refused on this path: 'f' is declared as a In3",
      None),
-    # The guard on the other side of the same line: a ZERO-argument `S()` on a
-    # struct that declares `__init__` is NOT one of the refusals above. There
-    # are no arguments for the count to select an overload with, so it stays
-    # premise (B2) — every field comes up at its class-level default — and that
-    # is the shape nearly every container in the corpus is written in. If this
-    # case ever starts refusing, the init branch has leaked above the `not args`
-    # early return. `constr_init_a_zero_argument_construction_still_ignores_the_body`
-    # in `CASES` is the same fact with all-defaulted parameters, where a
-    # lowering that DID run the body would have produced 8 and 9.
-    ("constr_zero_arg_still_ignores_a_declared_init",
+    # The other side of the same line, and the one the change made a REFUSAL:
+    # a zero-argument `S()` on a struct whose `__init__` REQUIRES a parameter.
+    # `Bag4()` is a `TypeError` in the language — the constructor needs `n` and
+    # `m` — and it used to build, run and return 7 by bringing both fields up
+    # at zero.  A silently wrong value is the outcome this backend treats as
+    # worst available, and the count is not ambiguous here: `init_overload_
+    # for_arity` says no declared overload takes 0 and the message spells the
+    # overloads it does declare, so the fix is on the caller's side.
+    ("constr_refuse_a_zero_arg_construction_when_init_requires_parameters",
      "struct Bag4:\n"
      "    var n: Int\n"
      "    var m: Int\n"
@@ -4371,9 +4396,8 @@ CONSTRUCTION_REFUSALS = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    var b = Bag4()\n"
-     "    if b.get() != 0:\n"
-     "        return 20 + b.get()\n"
-     "    return 7\n", 7, None),
+     "    return b.get()\n",
+     "refuse:none of them takes that count", None),
     # ── ARITY: too few, too many, and a zero-field struct ──
     # Too FEW. `S(1)` on a two-field `S` is not a one-field construction, it is
     # a two-field construction missing an argument, and the message has to say
@@ -5906,6 +5930,16 @@ WAVE7_G2_CASES = [
     # most worth its own sentence, because offset 0 of a frame is the struct's
     # FIRST FIELD and `len` over it returns a plausible number meaning nothing.
     # Pre-change this was filed under "the source does not say".
+    # `Outer.__init__` stores a WORD and leaves `inner` alone.  It used to store
+    # `self.inner = Inner()` — a construction of a FRAMED struct in a
+    # constructor's right-hand side — and `Outer()` never ran that body (premise
+    # (B2) as it was then worded), so the store was dead code that happened to
+    # compile.  `S()` on a struct whose `__init__` takes no required parameter
+    # RUNS the body now, and a nested frame construction in it is refused by name
+    # — the message here says the same thing, which is why the program is
+    # written the recommended way instead: `inner` is a PLACED nested frame, so
+    # `Outer()` brings it up without the constructor mentioning it, and `go`
+    # reaches exactly the `len()` of a frame address this case is about.
     ("len_frame_slot_is_a_frame_address",
      "struct Inner:\n"
      "    var a: Int\n"
@@ -5917,7 +5951,6 @@ WAVE7_G2_CASES = [
      "    var inner: Inner\n"
      "    var n: Int\n"
      "    def __init__(out self):\n"
-     "        self.inner = Inner()\n"
      "        self.n = 5\n"
      "    def go(self) -> Int:\n"
      "        return len(self.inner)\n"
