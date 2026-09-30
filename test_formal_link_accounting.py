@@ -240,6 +240,7 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     "time": "test_formal_time.py",
     "hashlib": "test_formal_hashlib.py",
     "json": "test_formal_json.py",
+    "pathlib": "test_formal_pathlib.py",
 }
 
 

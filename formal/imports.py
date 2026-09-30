@@ -155,7 +155,15 @@ HOST_MODELLED = frozenset((
     #     sequence, which a list on this path cannot be, and `environ` needs
     #     a `char **` walk; both are bug docs rather than approximations.
     "errno", "stat", "platform", "select", "io",
-    "pathlib", "glob", "fnmatch", "secrets", "uuid",
+    #   `pathlib`  — `formal/hostmods/pathlib.mojo`, in the pure half only,
+    #     checked read for read against CPython's own `PurePosixPath` by
+    #     `test_formal_pathlib.py`: `as_posix`, `name`, `stem`, `suffix`,
+    #     `parent`, the three pure rewritings, `relative_to`, `match` and
+    #     `is_reserved`, over a corpus of awkward corners. It is the part
+    #     pathlib has and `os.path` has no name for, and the names `os.path`
+    #     already answers are NOT answered again there — see the module's own
+    #     docstring, which names each one.
+    "glob", "fnmatch", "secrets", "uuid",
     #   `struct`  — `formal/hostmods/struct.mojo`, in the subset the formal
     #     backends can lower, compared BYTE FOR BYTE against CPython's own
     #     answers by `test_struct_formal.py`. The four measured limits it is
