@@ -446,6 +446,106 @@ def _c_string_literal(text: str) -> str:
     return '"' + esc + '"'
 
 
+#: The same shape as `_HARNESS` for a kernel that returns INT and whose
+#: reference is the DISPATCH GEOMETRY rather than an arithmetic combination of
+#: two input buffers. `_HARNESS` hardwires `vec_add`: three float buffers and
+#: `ref[i] = a[i] + b[i]`, so an index-intrinsic kernel run through it
+#: reports `mismatch` for reasons that have nothing to do with the kernel.
+#:
+#: The reference here is deliberately a check on the DEVICE's own view of
+#: its position: the kernel stores `lid + nthreads + (lid % 32)`, all three
+#: read through `llvm.air.*` intrinsics, and the host recomputes that from
+#: the width and threadgroup size it dispatched with. If an intrinsic read
+#: the wrong value, or were routed through a float, this is what catches it.
+_HARNESS_INT = r'''
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+static const char *kMsl = @MSL@;
+static const char *kFname = "@FNAME@";
+
+int main(void) {
+    @autoreleasepool {
+        id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+        if (!dev) { printf("NO_DEVICE\n"); return 2; }
+        NSError *err = nil;
+        MTLCompileOptions *co = [[MTLCompileOptions alloc] init];
+        co.languageVersion = MTLLanguageVersion3_2;
+        id<MTLLibrary> lib = [dev newLibraryWithSource:[NSString stringWithUTF8String:kMsl]
+                                               options:co error:&err];
+        if (!lib) { printf("MSL_FAIL: %s\n", err.description.UTF8String); return 3; }
+        id<MTLFunction> fn = [lib newFunctionWithName:@(kFname)];
+        if (!fn) { printf("NO_FN\n"); return 3; }
+        id<MTLComputePipelineState> ps =
+            [dev newComputePipelineStateWithFunction:fn error:&err];
+        if (!ps) { printf("NO_PIPE: %s\n", err.description.UTF8String); return 3; }
+
+        const int N = 256;
+        int *outbuf = malloc(N * sizeof(int));
+        for (int i = 0; i < N; i++) outbuf[i] = -999;
+        id<MTLBuffer> bo = [dev newBufferWithBytes:outbuf length:N*sizeof(int)
+                            options:MTLResourceStorageModeShared];
+        id<MTLCommandQueue> q = [dev newCommandQueue];
+        id<MTLCommandBuffer> cb = [q commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        [e setComputePipelineState:ps];
+        [e setBuffer:bo offset:0 atIndex:0];
+        [e setBytes:&N length:sizeof(int) atIndex:1];
+        NSUInteger w = ps.threadExecutionWidth, tmax = ps.maxTotalThreadsPerThreadgroup;
+        NSUInteger tg = tmax / w;
+        [e dispatchThreadgroups:MTLSizeMake((N + tg - 1) / tg, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(w, 1, 1)];
+        [e endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        memcpy(outbuf, [bo contents], N * sizeof(int));
+
+        int w2 = (int)w;
+        int bad = 0;
+        for (int i = 0; i < N; i++) {
+            int lane = i % w2;
+            int want = ((lane * 16777217) + w2 + (lane % 32)) & 0x7fffffff;
+            if (outbuf[i] != want) {
+                if (bad < 6) printf("  i=%d got=%d want=%d (w=%d)\n",
+                                    i, outbuf[i], want, w2);
+                bad++;
+            }
+        }
+        printf("W=%d MISMATCH %d of %d\n", w2, bad, N);
+        return bad == 0 ? 0 : 1;
+    }
+}
+'''
+
+
+def run_int_kernel_on_gpu(msl: str, fname: str, n: int = 256):
+    """`run_on_gpu` for an int kernel. Same contract, `_HARNESS_INT`."""
+    if sys.platform != 'darwin':
+        return 'no_device', ''
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, 'h.m')
+        exe = os.path.join(td, 'h')
+        body = (_HARNESS_INT.replace('@MSL@', _c_string_literal(msl))
+                              .replace('@FNAME@', fname))
+        with open(src, 'w') as f:
+            f.write(body)
+        cc = subprocess.run(['clang', '-fobjc-arc', '-O1', '-framework',
+                             'Foundation', '-framework', 'Metal', '-o', exe, src],
+                            capture_output=True, text=True)
+        if cc.returncode != 0:
+            return 'compile_fail', cc.stderr[:400]
+        run = subprocess.run([exe], capture_output=True, text=True, timeout=300)
+        out = run.stdout
+        if 'NO_DEVICE' in out:
+            return 'no_device', out
+        if 'MSL_FAIL' in out or 'NO_FN' in out or 'NO_PIPE' in out:
+            return 'compile_fail', out
+        if run.returncode != 0 or 'MISMATCH 0 of' not in out:
+            return 'mismatch', out
+        return 'ok', out
+
 def run_on_gpu(msl: str, fname: str, n: int = 4096):
     """Compile `msl` with Apple's real compiler, dispatch, compare to a CPU
     reference. Returns (status, stdout). status: 'ok' | 'no_device' |
@@ -787,6 +887,183 @@ def main():
                              f'wrong answer on the GPU\n{r.stdout}\n{r.stderr[-800:]}')
             self.assertIn('d 1', out, f'no dispatch happened\n{r.stdout}')
             self.assertIn('f 0', out, f'a dispatch failed\n{r.stdout}')
+
+
+# ---------------------------------------------------------------------------
+# Increment 2: the stdlib reaches the GPU ONLY through
+# `llvm_intrinsic["llvm.air....", ReturnType, ...]()`, so that subscript-call
+# shape is what makes real stdlib GPU code lowerable at all.
+# ---------------------------------------------------------------------------
+
+AIR_INTRINSIC_CALL = '''
+def air_indices(out: UnsafePointer[Int32, MutAnyOrigin], len: Int):
+    tid = global_idx.x
+    if tid >= len:
+        return
+    a = llvm_intrinsic["llvm.air.thread_position_in_threadgroup.x", Int32, has_side_effect=False]()
+    b = llvm_intrinsic["llvm.air.threads_per_threadgroup.x", Int32, has_side_effect=False]()
+    c = llvm_intrinsic["llvm.air.thread_index_in_simdgroup", Int32, has_side_effect=False]()
+    out[tid] = ((a * 16777217) + b + c)
+'''
+
+
+def _air_fn(src: str = AIR_INTRINSIC_CALL):
+    mod = parse(src)
+    return [s for s in mod if getattr(s, 'name', None)
+            and str(s.name) == 'air_indices'][0]
+
+
+class TestLlvmAirTables(unittest.TestCase):
+    """The table half: pure, so no device and no emitter."""
+
+    def test_index_families_resolve_to_generated_parameters(self):
+        # These resolve to the index PARAMETERS, not to a call. MSL's
+        # builtin-function spellings do not resolve at any language version
+        # on this toolchain -- see metal_ops.INDEX_PARAM_NAMES, which records
+        # that as probed rather than assumed.
+        self.assertEqual(mops.llvm_air('llvm.air.thread_position_in_threadgroup.x'),
+                         '__lid')
+        self.assertEqual(mops.llvm_air('llvm.air.thread_position_in_threadgroup.z'),
+                         '__lid')
+        self.assertEqual(mops.llvm_air('llvm.air.threads_per_threadgroup.x'),
+                         '__nthreads')
+        self.assertEqual(mops.llvm_air('llvm.air.threadgroup_position_in_grid.y'),
+                         '__tgid')
+
+    def test_simdgroup_index_matches_the_existing_lane_id_definition(self):
+        # One definition of "the lane": if this ever stops agreeing with
+        # INDEX_PARAM_NAMES['lane_id'], the two would disagree silently.
+        self.assertEqual(mops.llvm_air(mops.LLVM_AIR_SIMDGROUP_INDEX),
+                         mops.INDEX_PARAM_NAMES['lane_id'])
+
+    def test_math_intrinsics_map_to_the_metal_namespace(self):
+        self.assertEqual(mops.llvm_air('llvm.air.sqrt'), 'metal::sqrt')
+        self.assertEqual(mops.llvm_air('llvm.air.rsqrt'), 'metal::rsqrt')
+
+    def test_what_is_absent_refuses_rather_than_guessing(self):
+        # Every one of these is a real llvm.air name the stdlib can reach.
+        # None has a 1:1 MSL form, so each must return None -> the emitter
+        # raises naming the intrinsic. A table entry here would be a guess
+        # about semantics, and a guess that computes a plausible wrong answer
+        # is worse than a refusal.
+        for name in (
+                'llvm.air.simdgroup_matrix_8x8_multiply_accumulate',
+                'llvm.air.simdgroup_matrix_16x16x16_multiply_accumulate',
+                'llvm.air.simdgroup_matrix_16x16x16_widening_multiply_accumulate',
+                'llvm.air.simd_shuffle',
+                'llvm.air.simd_ballot.i32',
+                'llvm.air.threads_per_grid.x',   # no such kernel attribute
+                'llvm.air.thread_position_in_threadgroup.q',  # not x/y/z
+        ):
+            self.assertIsNone(mops.llvm_air(name), name)
+
+    def test_declared_return_type_is_honoured(self):
+        # The emitter DEFAULTS an unknown expression to float, so reading the
+        # stdlib's declared return type is what keeps an Int32 index
+        # intrinsic from being declared float.
+        self.assertEqual(mops.llvm_air_ret_type('Int32'), 'int')
+        self.assertEqual(mops.llvm_air_ret_type('Float16'), 'half')
+        self.assertEqual(mops.llvm_air_ret_type('Bool'), 'bool')
+        # A vector spelling has no single right width here; None keeps the
+        # existing default rather than inventing one.
+        self.assertIsNone(mops.llvm_air_ret_type('SIMD[DType.float32, 4]'))
+
+
+class TestLlvmAirLowering(unittest.TestCase):
+    """The emitter half: MSL text, no device needed."""
+
+    def test_intrinsic_call_becomes_its_msl_form(self):
+        msl = eml.emit_kernel(_air_fn())
+        self.assertIn('a = __lid;', msl)
+        self.assertIn('b = __nthreads;', msl)
+        self.assertIn('c = (__lid % 32u);', msl)
+        # The subscript-call shape is what needed lowering at all; before
+        # this, `_call` refused any non-IdentExpr callee outright.
+        self.assertNotIn('llvm_intrinsic', msl)
+
+    def test_intrinsic_results_are_declared_int_not_float(self):
+        msl = eml.emit_kernel(_air_fn())
+        self.assertIn('int a;', msl)
+        self.assertIn('int b;', msl)
+        self.assertIn('int c;', msl)
+        self.assertNotIn('float a;', msl)
+
+    def test_a_vendor_intrinsic_is_refused_by_name(self):
+        # llvm.nvvm.* / rocdl.* are reached only from is_nvidia_gpu() /
+        # is_amd_gpu() branches and have no 1:1 MSL equivalent. Refusing with
+        # the name in the message is the useful part.
+        src = '''
+def air_indices(out: UnsafePointer[Int32, MutAnyOrigin], len: Int):
+    out[0] = llvm_intrinsic["llvm.nvvm.mbarrier.arrive.shared", Int32]()
+'''
+        with self.assertRaises(eml.MetalUnsupported) as cm:
+            eml.emit_kernel(_air_fn(src))
+        self.assertIn('llvm.nvvm.mbarrier.arrive.shared', str(cm.exception))
+
+    def test_an_unimplemented_air_intrinsic_is_refused_by_name(self):
+        src = '''
+def air_indices(out: UnsafePointer[Int32, MutAnyOrigin], len: Int):
+    out[0] = llvm_intrinsic["llvm.air.simd_shuffle", Int32]()
+'''
+        with self.assertRaises(eml.MetalUnsupported) as cm:
+            eml.emit_kernel(_air_fn(src))
+        self.assertIn('simd_shuffle', str(cm.exception))
+
+    def test_a_non_literal_intrinsic_name_is_refused(self):
+        # The stdlib writes `"llvm.air..." + dim` where dim is a StaticString
+        # parameter, so this shape is reachable. Resolving it to a default
+        # name would be inventing a kernel.
+        #
+        # The name here is a FUNCTION PARAMETER rather than an undefined
+        # global, so this reaches the intrinsic path and is refused there --
+        # the "no globals" refusal that a bare undefined name would hit
+        # first is a different error and is not what is under test.
+        src = '''
+def air_indices(out: UnsafePointer[Int32, MutAnyOrigin], len: Int, nm: String):
+    out[0] = llvm_intrinsic[nm, Int32]()
+'''
+        with self.assertRaises(eml.MetalUnsupported) as cm:
+            eml.emit_kernel(_air_fn(src))
+        self.assertIn('not a string literal', str(cm.exception))
+
+
+@unittest.skipUnless(sys.platform == 'darwin', 'Metal is macOS-only')
+class TestAirIntrinsicsRunOnGpu(unittest.TestCase):
+    """Increment 2's behavioural claim: an `llvm.air.*` index intrinsic
+    reads the DEVICE's own thread position, and reaches an int buffer without
+    being routed through a float."""
+
+    def test_air_index_intrinsics_read_the_device_thread_position(self):
+        msl = eml.emit_kernel(_air_fn())
+        status, out = run_int_kernel_on_gpu(msl, 'air_indices')
+        if status == 'no_device':
+            self.skipTest('no Metal device on this machine')
+        self.assertEqual(status, 'ok', f'status={status}\n{out}\n--- msl ---\n{msl}')
+
+    def test_a_float_routed_intrinsic_is_caught_by_this_harness(self):
+        """The test is worth keeping only if it FAILS on the bug it guards.
+
+        `_type_of` defaults an unrecognised expression to `float`, so before
+        the return-type table the three `Int32` intrinsics were declared
+        `float` and every result was routed through a float. Small values
+        survive that -- `lid` is 0..31, so a naive check passes. The kernel
+        above multiplies by 16777217 (2^24+1) for exactly that reason, and
+        this asserts the mutated kernel is caught rather than assuming it.
+        """
+        msl = eml.emit_kernel(_air_fn())
+        self.assertIn('int a;', msl)
+        broken = msl.replace('int a;', 'float a;') \
+                     .replace('int b;', 'float b;') \
+                     .replace('int c;', 'float c;')
+        self.assertNotEqual(broken, msl, 'mutation did not apply')
+        status, out = run_int_kernel_on_gpu(broken, 'air_indices')
+        if status == 'no_device':
+            self.skipTest('no Metal device on this machine')
+        self.assertEqual(status, 'mismatch',
+                         'a float-routed intrinsic computed the right answer, '
+                         'so this harness cannot see that class of bug:\n'
+                         f'{out}')
+
 
 
 if __name__ == '__main__':
