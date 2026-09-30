@@ -6389,39 +6389,35 @@ def frame_len_candidates_disagree(spelled: str, struct_names, rows) -> str:
           "same `__len__`")
 
 
-def frame_len_refusal(spelled: str, struct_names, declares: bool) -> str:
-    """Why `len(<frame address>)` cannot be lowered, for a frame the rewrite
-    could not take.
+def frame_len_refusal(spelled: str, struct_names) -> str:
+    """Why `len(<frame address>)` cannot be lowered, for a frame whose struct
+    declares no `__len__`.
 
     One message for both backends, and it says what the ANSWER to the question
     is rather than restating the rule, because the rule ("a frame has no
-    header") is true and is not what is stopping this program:
+    header") is true and is not what is stopping this program: the answer in
+    Mojo is the struct's own `__len__`, and a struct that declares none is a
+    type with no length operator — which is what `len` on a list-free struct
+    means in every language that has one.  So the message says that, and then
+    names the two things the source can do about it, of which the second is the
+    one this backend can lower.
 
-    * `declares` is False — the struct(s) in hand declare no `__len__`, so there
-      is no function to call and the length genuinely is not in the frame.  The
-      next step is then the source's: read the field you mean, or give the
-      struct a `__len__` (which is a method of its own struct, and so is
-      lowered).
-    * `declares` is True — the struct DOES declare one and `len(x)` is
-      `x.__len__()`, but this call site is a shape the build pass does not
-      rewrite.  Saying "read the field instead" there would send the reader to
-      change a program that is already correct, which is the defect
-      `bugs/FORMAL_frame_receiver_handoff.md` §4 is about; the honest sentence
-      names the `__len__` that is there and the shape the rewrite does not
-      cover.
+    There is deliberately no "and the struct DOES declare one" arm.  Every shape
+    where that is true is a shape the rewrite takes, or a shape whose REAL fault
+    is something else:
+
+      * `len(h)` with one argument — rewritten to `Struct___len__(h)`;
+      * `len(h, x)` or `len(h, k=v)` — the ARITY is what is wrong, and the
+        emitter has its own message for it ("len() takes exactly one argument
+        on this path").  An arm that claimed the operand "is not a bare name"
+        there would be false in its first clause — the operand IS the bare name
+        `h` — and it is reachable, measured: `return len(b, b)` on a `Bag`
+        frame hits it.  A refusal whose stated reason is entirely false is the
+    worst outcome on this path (`bugs/FORMAL_frame_receiver_handoff.md` §4), so
+    the arm is not there to be right about a case that should have a different
+        message.
     """
     who = ", ".join(struct_names) if struct_names else "this struct"
-    if declares:
-        return (
-            f"len({spelled}) is len() of a FRAME ADDRESS whose struct declares "
-            f"a `__len__`, so the answer is {spelled}.__len__() — a method of "
-            f"the receiver's own struct, which is the one hand-off a frame "
-            f"address makes. The build pass rewrites that spelling for a bare "
-            f"name holding a {who} frame, and this operand is not a bare name: a "
-            f"nested frame (`{spelled}.field`) and a value this path has not "
-            f"settled reach the emitter as a frame address with no `__len__` "
-            f"call behind it. Assign it to a name and take the length of the "
-            f"name")
     return (
         f"len({spelled}) is len() of a FRAME ADDRESS — the address of a block "
         f"of 8-byte slots that is one struct's fields in declaration order. "

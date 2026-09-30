@@ -829,6 +829,20 @@ function that happens to be spelled like a method, and the language gives it no
 to be handed to, so it is refused for the same reason a struct with no `__len__`
 at all is, and the refusal says "declares no `__len__`", which is true.
 
+**One dead arm, found by writing the message and then going looking for who
+reaches it.** `frame_len_refusal` first took a `declares` flag so it could also
+cover "the struct DOES declare a `__len__` and this call site is not a shape the
+rewrite takes". There is such a shape — `return len(b, b)`, a wrong-arity `len`
+whose operand is a `Bag` frame — and the arm was reachable, and it was **false
+in its first clause**: it said "this operand is not a bare name", and the
+operand IS the bare name `b`. The real fault is the arity, which the emitter
+has its own message for. So the flag and the arm are gone, the hand-off branch
+is gated on the rewrite's own condition (one positional argument, no keywords),
+and `len(b, b)` falls through to the pre-existing value-only message. A refusal
+whose stated reason is entirely false is the worst outcome on this path — §4 of
+this file is three examples of it — and the shape is now a labelled case in
+`test_formal_frame_len.py` so a future arm cannot be written for it silently.
+
 ## 15. The message, which is the half worth keeping
 
 The refusal that remains — a frame address whose struct declares no `__len__` —
@@ -893,11 +907,11 @@ three-line reproducer and the one set to add the subscript base to.
 | the refusal when the candidates disagree | `formal/model.py` `frame_len_candidates_disagree` |
 | the bare-name rewrite, and the hand-off check that must stop seeing it | `formal/build.py` `_rewrite_len_on_frame_receivers`, `_check_frame_escapes` |
 | the nested rewrite | `formal/build.py` `_rewrite_len_on_nested_frames` |
-| the cases | `test_formal_frame_len.py` — 9 differential cases, each compared against CPython running the same program, both architectures built and executed |
+| the cases | `test_formal_frame_len.py` — 10 differential cases, each compared against CPython running the same program, both architectures built and executed |
 
-The nine cases are differential rather than a hand-written expected value, which
-is the discipline `test_interp_oracle.py` set for the other engine: eight of them
-fail on the pre-change tree and one is labelled a GUARD because it is correct
-before and after. The three refusals additionally require CPython to raise
+The cases are differential rather than a hand-written expected value, which is
+the discipline `test_interp_oracle.py` set for the other engine: eight of them
+fail on the pre-change tree and two are labelled GUARDs because they are correct
+before and after. The four refusals additionally require CPython to raise
 `TypeError` on the same program, so what is pinned is that the decision is
 RIGHT, not merely that this compiler makes it.

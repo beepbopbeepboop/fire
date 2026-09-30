@@ -457,6 +457,40 @@ REFUSALS = [
      "\n"
      "len(Q())\n",
      "declares no `__len__`"),
+
+    # THE ARITY, and this case exists to hold a DEAD BRANCH out.  There is a
+    # shape where a frame address reaches the hand-off check and its struct DOES
+    # declare a `__len__`: `len(b, b)`.  The rewrite is keyed on the one-
+    # argument spelling, so this reaches the check — and a refusal written for it
+    # that says "this operand is not a bare name" would be false in its first
+    # clause, because the operand IS the bare name `b`.  The fault here is the
+    # arity, and the needle pins that the program is left on the PRE-EXISTING
+    # value-only message rather than on a new one written for a case that should
+    # have a different diagnostic.  (The emitter's own "len() takes exactly one
+    # argument" would be better still, but reaching it means the frame
+    # hand-off must stop firing on a wrong-arity call, which is a separate
+    # ordering question and not this case's.)
+    #
+    # It failed on the pre-change tree too — with the same words — so it is a
+    # GUARD against a regression, not a demonstration.
+    ("guard_a_wrong_arity_len_is_not_the_frame_refusal",
+     "struct Bag:\n"
+     "    var n: Int\n"
+     "    var tag: Int\n"
+     "    def __len__(self) -> Int:\n"
+     "        return self.n\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    var b = Bag()\n"
+     "    b.n = 2\n"
+     "    b.tag = 0\n"
+     "    return len(b, b)\n",
+     "class Bag:\n"
+     "    def __len__(self):\n"
+     "        return self.n\n"
+     "\n"
+     "len(Bag(), Bag())\n",
+     "is lowered as an operation on a VALUE"),
 ]
 
 

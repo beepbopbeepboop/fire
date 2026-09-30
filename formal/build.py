@@ -2731,7 +2731,8 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                                 "has not read"))
                     continue
                 if callee == "len" and isinstance(a, F.IdentExpr) \
-                        and a.name in holders:
+                        and a.name in holders \
+                        and len(node.args or []) == 1 and not (node.kwargs or []):
                     # `len` first, and before `_callee_wants_a_value`, because
                     # it is the one value-only callee whose argument is exactly
                     # what it wants.
@@ -2754,12 +2755,21 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                     # a reader who follows its advice ("give it a field,
                     # `len(self.n)`") is sent to change a program that is
                     # already correct whenever the struct HAS a `__len__`.
+                    #
+                    # THE ARITY IS NOT THIS BRANCH'S BUSINESS, and the condition
+                    # above says so: it is the rewrite's own condition, one
+                    # positional argument and no keywords.  `len(h, x)` is a
+                    # shape the rewrite does not take, and the fault there is
+                    # the ARITY, which the emitter has its own message for.
+                    # Claiming the operand is not a bare frame name would be
+                    # false in its first clause — it is the bare name `h` — and
+                    # measured, `return len(b, b)` on a `Bag` frame reaches it.
+                    # Falling through leaves those programs on
+                    # `frame_receiver_escape_refusal`, which is what refused
+                    # them before this branch existed.
                     _refuse_holder_use(
                         fn, a, holders, by_name, "",
-                        M.frame_len_refusal(
-                            _expr_spelling(a), _names(a),
-                            any(M.dunder_len_method(st) is not None
-                                for st in (by_name.get(a.name) or ()))))
+                        M.frame_len_refusal(_expr_spelling(a), _names(a)))
                     continue
                 # 1. A value-taking callee, in ANY position.  This is the
                 #    check that was unreachable, because the old loop only
