@@ -65,6 +65,26 @@ Three things, in the order they would have to be answered:
    the `declared`/`comptime` site vocabulary, with a new message for "bound to
    a type" — not as a one-line skip.
 
+   **Re-measured 2026-09-30, with the skip applied as an experiment and then
+   reverted** (`refuse_module_level_mlir_templates` not raising for a type
+   template; nothing else changed), so that the recommendation above rests on
+   what the three files then SAY and not only on their class:
+
+   | file | before | with the type binding recorded as no-value |
+   |---|---|---|
+   | `std/sys/info.mojo` | `the module-level comptime binding '_TargetType' is initialized from an MLIR type template` | `_current_target: __mlir_attr.`#kgen.param.expr<current_target> : !kgen.target` asks for the current TARGET itself, which is not a value on this path` |
+   | `std/builtin/coroutine.mojo` | `… binding 'AnyCoroutine' is initialized from an MLIR type template` | `_suspend_async: __mlir_op is an MLIR dialect construct` — **its own body** |
+   | `std/builtin/variadics.mojo` | `… binding '_IntToXGeneratorType' is initialized from an MLIR type template` | `Self.reduce[False, Self._AnySatisfiesReducer[…]] is a subscript whose index is a tuple` — **worse**: that bracket is a generic's explicit-parameter list, not a subscript, which is the shape `FORMAL_env_family_next_terminal.md` §2 files |
+
+   So: two files get a deeper and more useful limit, one gets a message that is
+   about a shape the source did not use, and **nothing builds** — `info.mojo`'s
+   next refusal is `current_target` as a VALUE, which is as permanent as
+   `target_has_feature` (a target is a description, not a 64-bit word), so item 2
+   below is not the only thing between this module and a build; there are two
+   permanent refusals in it. That is the measurement behind "not done
+   deliberately": the change costs a new site kind, a new refusal message and
+   four rewritten pins, and buys a mixed diagnostic in three files and no image.
+
 2. **`target_has_feature`** (`_has_feature`, line 87) — refused on purpose. A CPU
    feature is a property of a CPU and the build names the architecture it emits
    and never a CPU. It IS a rule, and the two rules that could be derived
@@ -73,6 +93,22 @@ Three things, in the order they would have to be answered:
    alone keeps `info.mojo` from building**, because `compile_module` lowers
    every function in the file. Closing it needs a per-CPU input (a `-mcpu=`-shaped
    flag on `compile_formal`, and a table) — a real feature, not a fix.
+
+   **Not the only permanent refusal in the file.** `compile_module` lowers every
+   function, and `_current_target()`'s own body —
+
+   ```mojo
+   def _current_target() -> _TargetType:
+       return __mlir_attr.`#kgen.param.expr<current_target> : !kgen.target`
+   ```
+
+   — asks for the target as a VALUE, which this path refuses ("a target is a
+   description, not a 64-bit word"). Its FIELDS answer; the target does not. So
+   a worker planning a per-CPU input should know that answering
+   `target_has_feature` is necessary and not sufficient: `info.mojo` reads the
+   target itself, and the module-level binding that TYPES it is refused too.
+   Measured, not inferred — see the table in item 1, where that is the message
+   `info.mojo` reports once the binding is out of the way.
 
 3. **`default parameter values` — CLOSED, and it was never a blocker.**
    `def _triple_attr[target: _TargetType = _current_target()]()` and 8 more in
