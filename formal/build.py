@@ -891,6 +891,21 @@ def compile_formal(source_path: str, output: str = None,
     except SyntaxError as e:
         raise FormalBuildError(f"parse error: {e}")
 
+    # The target this image is FOR, published BEFORE anything that can build a
+    # module — `_imported_structs` below compiles each imported module into a
+    # dylib, and each of those publishes the target of ITS OWN build (a dylib is
+    # always Mach-O, `formal/imports.py`). Publishing again after would work, but
+    # a value that is only correct because of the order of two lines is a value
+    # that will be wrong the day someone reorders them; so this one goes first
+    # and the dylib's publish is the one that has to be undone.
+    #
+    # The pipeline is where a `#kgen.param.expr<…>` target query is answered:
+    # `arch` and `fmt` are the two facts the linker is about to act on, and a
+    # query like "what is the current target's arch" has exactly one correct
+    # answer for them. They are the same pair the dylib cache is keyed on, so
+    # the two front ends cannot describe one target two ways.
+    M.publish_target(M.target_for(arch, fmt))
+
     # Structural acceptance: only FunctionDefs matter for codegen; imports /
     # module-level statements are fine (filtered here + in the codegen).
     # The modules this file imports contribute their struct declarations
@@ -899,6 +914,12 @@ def compile_formal(source_path: str, output: str = None,
     # name. Resolving this after would leave `c.get()` unrecognised in a file
     # that imported the struct, which is the only way such a call occurs.
     imported_structs = _imported_structs(source_path, stmts, arch)
+    # …and the target again, because the dylib builds above republished it as
+    # the dylib's own Mach-O target. This is the one place the two genuinely
+    # differ (an `--fmt=elf` build on a Mac asks for an ELF image and a Mach-O
+    # dylib), and the executable's functions are the ones the linker is about to
+    # act on.
+    M.publish_target(M.target_for(arch, fmt))
     try:
         functions, structs, symbols = _prepare_functions(
             stmts, synthetic=True, extra_structs=imported_structs)
@@ -1073,8 +1094,9 @@ def compile_formal(source_path: str, output: str = None,
     return result
 
 
-def _formal_module_functions(source_path: str,
-                             link_dylibs: list = None) -> tuple[str, list]:
+def _formal_module_functions(source_path: str, link_dylibs: list = None,
+                             arch: str = "arm64",
+                             fmt: str = None) -> tuple[str, list]:
     try:
         with open(source_path) as f:
             source = f.read()
@@ -1092,6 +1114,13 @@ def _formal_module_functions(source_path: str,
     # (which finds nothing in binary_heap either, so it is refused a moment
     # later, by the check that can actually say why). Reporting the accurate
     # reason matters: "no top-level functions" reads like a codegen gap.
+    # The dylib is an image for the same target as the executable that will
+    # link it, and it is the executable's own `arch`/`fmt` that decides it
+    # (formal/imports.py keys its build cache on them for exactly that reason).
+    # Published HERE because it is the first thing in the dylib pipeline that
+    # knows the pair, and `_prepare_functions` is what every reader below
+    # consults.
+    M.publish_target(M.target_for(arch, fmt or default_format(arch)))
     functions, structs, symbols = _prepare_functions(stmts, synthetic=False)
     # The other of the two call sites of `check_frame_field_blob_premises`, and
     # for the same reason: this is the dylib path, it has no import resolution
@@ -3308,6 +3337,110 @@ def _rewrite_child(child, sites: dict, stores: set):
     return child
 
 
+def _fold_target_queries(functions: list) -> int:
+    """Replace every `#kgen.param.expr<…>` target query in a body with its value.
+
+    Returns the number of sites folded.
+
+    A source-to-source rewrite in the SHARED pipeline rather than a case in
+    either backend's expression walk, and the reason is the same one
+    `_substitute_module_constants` and `_rewrite_class_constants` give: a
+    question the BUILD answers is a question that must not be answered twice.
+    If this lived in the emitters then arm64 and x86-64 would each carry their
+    own copy of the answer to "what is the current target's arch", and the two
+    would be free to disagree about it — the failure mode this module's whole
+    design exists to prevent. Replacing the query with the literal it denotes
+    also means everything downstream — the comptime folder, the name check, both
+    instruction selectors — sees an ordinary `StringLiteral` and needs to know
+    nothing about MLIR at all.
+
+    PRE-ORDER, and it does NOT descend into a query it folded (that subtree is
+    gone with it) nor into one it did not. The second half is the part that is
+    not an optimisation: `std/_plugin/selector.mojo` nests a
+    `target_get_field` inside an `eq` that also needs a plugin table this build
+    has no value for, and replacing the inner node would leave the outer one
+    holding a hole no evaluator can read — turning a refusal that names the
+    missing plugin into one that names an argument. Refusing a whole template
+    is the honest answer, so the walk leaves it whole."""
+    done = 0
+    for fn in functions:
+        body = getattr(fn, "body", None)
+        if not isinstance(body, list):
+            continue
+        count = [0]
+        _fold_target_queries_in(body, count)
+        done += count[0]
+    return done
+
+
+def _fold_target_queries_in(node, count: list):
+    """The walk, in place. Returns a replacement node for `node`, or None.
+
+    `count` is a one-element list because a list element has to be replaced
+    through its parent while a single-attribute child has to be replaced
+    through `setattr`, and one walk serves both — so the number of sites folded
+    comes back through a box rather than as a return value that only one of the
+    two shapes could carry."""
+    if isinstance(node, (list, tuple)):
+        # A tuple as well as a list, and not as a generality: a call's KEYWORD
+        # arguments are a list of `(name, value)` pairs (`CallExpr.kwargs`),
+        # which is where `std/builtin/type_aliases.mojo` keeps its templates —
+        # `Origin[0, _mlir_origin=__mlir_attr[…]]()`. Descent that stops at
+        # lists walks straight past them and leaves the query in the tree, so
+        # the backend then refuses a construct the build can answer, and the
+        # read of a `comptime` bound from it materializes a register.
+        #
+        # A tuple cannot be assigned into, so a tuple with a replaced element
+        # comes back as a LIST and the list slot it was read from takes it. A
+        # tuple with nothing replaced returns None, which is what keeps the
+        # common case — every keyword argument in the corpus that is not a
+        # template — from rewriting the list it lives in.
+        out = []
+        changed = isinstance(node, tuple)
+        for i, child in enumerate(node):
+            if M.is_mlir_template(child):
+                # A template this pass could not answer keeps its shape, WHOLE:
+                # see the function's note on `selector.mojo`. The test is
+                # `model.template_is_answered`, the SAME one the module-level
+                # refusal asks, because these two walks over the same tree used
+                # to disagree and refused a construct the build answers.
+                folded = M.fold_target_template(child)
+                if folded is not None:
+                    folded = M.folded_literal_node(folded, child)
+                    count[0] += 1
+                    changed = True
+                if isinstance(node, list):
+                    node[i] = folded if folded is not None else child
+                else:
+                    out.append(folded if folded is not None else child)
+                continue
+            repl = _fold_target_queries_in(child, count)
+            if repl is not None:
+                changed = True
+            if isinstance(node, list):
+                if repl is not None:
+                    node[i] = repl
+            else:
+                out.append(child if repl is None else repl)
+        return out if (changed and isinstance(node, tuple)) else None
+    if node is None or isinstance(node, (str, int, float, bool)):
+        return None
+    folded = M.fold_target_template(node)
+    if folded is not None:
+        count[0] += 1
+        return M.folded_literal_node(folded, node)
+    for name in getattr(node, "__dataclass_fields__", {}):
+        child = getattr(node, name)
+        if isinstance(child, (list, tuple)):
+            _fold_target_queries_in(child, count)
+        elif child is not None and not isinstance(child, (str, int, float,
+                                                          bool)):
+            repl = _fold_target_queries_in(child, count)
+            if repl is not None:
+                setattr(node, name, repl)
+    return None
+
+
 def check_module_symbols(functions: list, structs_by_name: dict = None,
                          imported_module_names=None) -> None:
     """Refuse every name a function reads that no table in the compiler places.
@@ -3478,6 +3611,15 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         bracketed = {}
         for sub in M.iter_nodes(fn.body):
             if not isinstance(sub, (F.SubscriptExpr, F.MemberExpr)):
+                continue
+            if M.template_is_answered(sub):
+                # Answered at build time, so nothing is left to refuse about it
+                # and the tree below it is not a use of anything. The rewrite
+                # (`_fold_target_queries`) has normally already replaced these
+                # with literals before this check runs, so reaching here means
+                # the rewrite did not cover this position — which is why the
+                # condition is the shared `template_is_answered` rather than a
+                # second opinion written beside it.
                 continue
             root_ident = sub.obj
             while isinstance(root_ident, (F.MemberExpr, F.SubscriptExpr)):
@@ -3841,6 +3983,15 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # to be visible to the substitution or the module constant would replace
     # the function's OWN name.
     _substitute_module_constants(functions)
+    # …and a target query IN a body, which the constant substitution cannot
+    # reach: `__mlir_attr[...]` is an expression, not a name, and a function
+    # that asks the build what it is compiling for has to get the answer
+    # materialized as the literal it is.  Same list, same position, same
+    # reason.  Independently of order with the substitution above: a
+    # module-level `comptime ARCH = <query>` was already folded to a literal by
+    # `collect_module_symbols`, and this pass only sees the query where the
+    # SOURCE wrote one.
+    _fold_target_queries(functions)
     # LAST, on the FINAL function list: which local names hold a frame
     # address is a property of the code that survives every rewrite above, and
     # a lifted lambda or a flattened closure is a function with its own locals
@@ -5197,7 +5348,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     structs_by_file: dict = {}
     for source_path in source_paths:
         module, functions, module_source, file_structs = \
-            _formal_module_functions(source_path, link_dylibs)
+            _formal_module_functions(source_path, link_dylibs, arch=arch,
+                                    fmt="macho")
         structs_by_file[source_path] = file_structs
         for fn in functions:
             # A repeated name is an OVERLOAD, not a collision — and Mojo
