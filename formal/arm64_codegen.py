@@ -3114,6 +3114,19 @@ class ARM64Codegen:
         contract for) and the second emitted a store through a computed
         address. Both now say no."""
         self._refuse_frame_container_operand("a subscript", e.obj)
+        if M.is_external_call_template(e):
+            # The ONE place an `external_call[...]` is a subscript that is not
+            # the callee of a call, and `M.multi_index_refusal_for` above (and
+            # in `build.py`) cannot see that, because `M.iter_nodes` has no
+            # parent.  `_emit_call` intercepts the template BEFORE any address
+            # is computed, so reaching here means the source used it as a
+            # VALUE — and there is no such value: the bracket names a symbol and
+            # a return type, and the word it would produce is the C function's,
+            # which only a call can ask for.  Refused here rather than falling
+            # through to the dict/frame address paths, which would answer with
+            # an address into a frame that nobody asked for.
+            raise CodegenError(M.external_call_value_refusal(
+                M.external_call_spelling(e)))
         if e.attrs is not None:
             raise CodegenError(
                 "type-parameter subscript [...] is not supported on the "
@@ -5124,21 +5137,54 @@ class ARM64Codegen:
             raise CodegenError(str(exc))
 
     def _emit_call(self, e: F.CallExpr) -> None:
-        name = _callee_symbol(e.func)
+        # `external_call["sym", RetType](args…)` — a direct call to the C symbol
+        # the bracket names, with `RetType` marshalling the result.
+        #
+        # Intercepted at the TOP, before `_callee_symbol`, and that is the whole
+        # point: `_callee_symbol` reads the bracket as a generic's comptime
+        # specialization and answers `external_call`, so without this the call
+        # became `BL external_call` — a symbol no library defines, on an image
+        # that would have died in dyld.
+        #
+        # The `is_extern_call` flag is the other half, and it is what makes
+        # `std/os/env.mojo` lowerable at all: the bracket names a C SYMBOL, and
+        # that module defines Mojo functions called `getenv`, `setenv` and
+        # `unsetenv` over the same three C symbols.  A name is looked up in
+        # `self._functions` before the extern path is taken, so a bare name
+        # would have branched to the module's OWN `getenv` — which takes an
+        # `Int` and returns an `Int`, so the call "succeeded" and the program
+        # then read an Int where it had asked for a `char *` and segfaulted
+        # dereferencing it.  A C function and a Mojo function occupy different
+        # namespaces in the language (the real compiler mangles the Mojo one to
+        # `__mlir_fn.env.getenv`), so on this path the C symbol must go to the
+        # extern machinery even when this image declares that name — and the
+        # BUILTIN interception below must be skipped for the same reason, since
+        # `external_call["printf", Int32](fmt, n)` is a call to `printf` with
+        # the format the source wrote, not `print`.
+        ext_return = None
+        is_extern_call = M.is_external_call_template(e.func)
+        if is_extern_call:
+            symbol, ext_return, why = M.external_call_spec(e.func)
+            if why is not None:
+                raise CodegenError(M.external_call_refusal(
+                    M.external_call_spelling(e.func), why))
+            name = symbol
+        else:
+            name = _callee_symbol(e.func)
         if name is None:
             raise CodegenError(
                 f"unsupported call target on the formal arm64 path "
                 f"(got {type(e.func).__name__})")
-        if name == "range":
+        if not is_extern_call and name == "range":
             self._emit_range_list(list(e.args))
             return
-        if name == "len":
+        if not is_extern_call and name == "len":
             self._emit_len(e)
             return
-        if name == "print":
+        if not is_extern_call and name == "print":
             self._emit_print(e)
             return
-        if M.builtin_function(name) == "file_open":
+        if not is_extern_call and M.builtin_function(name) == "file_open":
             self._emit_open(e)
             return
         # A DEREFERENCE.  Intercepted HERE rather than left to the value-method
@@ -5186,7 +5232,7 @@ class ARM64Codegen:
         # files here declare and an identity conversion, and preferring the
         # declaration would change a program's MEANING rather than its
         # verdict.
-        if name not in self._functions:
+        if not is_extern_call and name not in self._functions:
             nargs = len(e.args) + len(e.kwargs or [])
             if not M.type_constructor_prefers_local_struct(
                     name, self._structs, nargs):
@@ -5194,10 +5240,10 @@ class ARM64Codegen:
                 if tkind is not None:
                     self._emit_type_constructor(e, name, tkind)
                     return
-        if name in self._structs:
+        if not is_extern_call and name in self._structs:
             self._emit_struct_constructor(e, name, self._structs[name])
             return
-        is_extern = name not in self._functions
+        is_extern = is_extern_call or name not in self._functions
         # The gimple backend's C runtime is not an external dependency of THIS
         # target but a library of a different one, and it is spelled in the
         # source as bare `mojo_*` names (`mojo_sqlite3_open`, `mojo_list_len`,
@@ -5328,6 +5374,30 @@ class ARM64Codegen:
         else:
             self.asm.emit(encode_bl(0))
             self.asm.emit_label_rel(name, here_offset=-4)
+        if ext_return is not None:
+            self._emit_extern_return(ext_return)
+
+    def _emit_extern_return(self, kind) -> None:
+        """Put the return register into the shape the DECLARED return type says.
+
+        The ABI puts the low `bits` of a narrow integer return in X0 and leaves
+        the rest unspecified, and a W-register write zero-extends on AArch64, so
+        the value that actually arrives is zero-extended.  `Int32` and `c_int`
+        are signed and the source means the sign-extended value:
+        `zero_extend(0xFFFFFFFF)` is 4294967295, not -1.  So this is the
+        conversion, not tidying, and `model.py`'s section on the construct is
+        where the reasoning and the measurement live.
+
+        A pointer (`getenv` declares `_CPointer[UInt8, …]`), a 64-bit integer
+        and a string are already the whole register, so they need no
+        instruction, and `NoneType` returns nothing at all.  The width
+        normalization itself is `_emit_extend` — the same one an `Int32(x)`
+        conversion uses, so there is one implementation of "make this word
+        this width" per architecture rather than two."""
+        if kind == M.EXTERN_RETURN_VOID or kind == M.EXTERN_RETURN_WORD:
+            return
+        width, signed = kind
+        self._emit_extend(0, 0, IntType(width, signed))
 
 
     # ── Comprehension / slice / div-shift / compare-chain ──────────

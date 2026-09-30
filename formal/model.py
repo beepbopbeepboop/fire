@@ -127,31 +127,43 @@ def key_compare_is_structural(needle) -> bool:
 # two-dimensional subscript, and the corpus says so unambiguously: across the
 # 294 stdlib files and every source in this repository there is not one
 # instance whose base is a value. Every one names a generic — `SIMD[dtype,
-# width]`, `size_of[type, target]`, `external_call["sym", RetType]`,
-# `UnsafePointer[NoneType, MutAnyOrigin]` — or is an `__mlir_attr[...]`
-# template. Those are COMPILE-TIME EXPLICIT-PARAMETER LISTS: they select an
-# instantiation and hand it a type or a comptime value, and no runtime word
-# corresponds to any of them.
+# width]`, `size_of[type, target]`, `UnsafePointer[NoneType, MutAnyOrigin]` —
+# is an `external_call["sym", RetType]`, or is an `__mlir_attr[...]` template.
 #
-# So the four readings this construct could have are settled by the source
-# that uses it, and none of them is "index a flat buffer at i*stride + j":
-#   * a comptime parameter list — what every corpus instance is. Lowering it
-#     means resolving the parameter binding, which needs the callee's type
+# The `external_call` is called out because it was the expensive mistake here,
+# and the shape is why: its bracket is the SAME AST node as a generic's, so
+# lumping it in with them looked free and cost a 55-file family several waves
+# of re-derivation (bugs/FORMAL_known_limits.md §6.2.1). A shared shape is not
+# a shared meaning. What the bracket holds is what decides it, and for
+# `external_call` it holds a C SYMBOL and a declared return type — see that
+# section below, which is not a comptime parameter list and does not need a
+# monomorphizer, because the callee is a symbol that already exists rather than
+# a template this compiler must emit.
+#
+# So the readings this construct could have are settled by the source that uses
+# it, and none of them is "index a flat buffer at i*stride + j":
+#   * a comptime parameter list — what nearly every corpus instance is. Lowering
+#     it means resolving the parameter binding, which needs the callee's type
 #     table; there is none here, and guessing a value (e.g. claiming
 #     `size_of[DType.int]` is 8) would be a fabricated answer.
 #   * an MLIR attribute template — what `__mlir_attr[...]` is. Not a value at
 #     all on this path.
-#   * a dict keyed by tuples — real, and the ONE case lowered, by the
+#   * an `external_call[...]` template application — LOWERED, to a direct call
+#     to the C symbol the bracket names. Not a refusal and not a kind; it is
+#     asked about in `multi_index_refusal_for` above, which is why this list
+#     does not have a row for it.
+#   * a dict keyed by tuples — real, and the one case lowered here, by the
 #     element-wise key comparison above. It requires a KNOWN DICT base, which
 #     only the backend knows; `multi_index_kind` takes that as an argument.
 #   * a 2-D index into a flat buffer — needs a row stride. The source never
 #     states one, so any stride would be invented.
 #
-# Therefore every non-dict case is refused, and `multi_index_refusal` says
-# which of the above it is so the diagnostic names the construct rather than
-# the symptom. The text is deliberately ARCH-FREE: arm64 and x86-64 return the
-# same string, so the two architectures cannot drift on what a subscript means
-# (see test_formal_run.py's `refuse:` cases, which assert they do not).
+# Therefore every non-dict, non-external_call case is refused, and
+# `multi_index_refusal` says which of the above it is so the diagnostic names
+# the construct rather than the symptom. The text is deliberately ARCH-FREE:
+# arm64 and x86-64 return the same string, so the two architectures cannot
+# drift on what a subscript means (see test_formal_run.py's `refuse:` cases,
+# which assert they do not).
 
 MULTI_INDEX_MLIR_TEMPLATE = "mlir-template"
 MULTI_INDEX_COMPTIME_PARAMS = "comptime-parameters"
@@ -337,7 +349,14 @@ def multi_index_kind(e, base_is_dict: bool = False,
     `generic_callee` is the FunctionDef the base names, when the backend has
     one in hand and it is a generic; that is what separates a comptime
     parameter list from a value subscript, and it is a fact the backend can
-    check rather than a guess from the spelling."""
+    check rather than a guess from the spelling.
+
+    A LOWERED `external_call["sym", RetType]` never reaches this function: it
+    is answered in `multi_index_refusal_for` above, which returns None for the
+    well-formed template and carries the specific sentence for a malformed
+    one. This table's kinds are the three ways a multi-element bracket can
+    mean something, and `external_call` is a fourth that is not a kind at
+    all — it has an answer, not a diagnosis."""
     if base_is_dict:
         return None                       # the one lowered case; not a refusal
     if is_mlir_template(e):
@@ -438,26 +457,355 @@ def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None):
     tuple-index refusal, which is still true of it.
 
     Called from the address computation, not from the read: that is the one
-    place a read, a store and an augmented assignment all pass through, and
-    the read-only check this replaces left `a[i, j] = v` unrefused.
+    place a read, a store and an augmented assignment all pass through, and the
+    read-only check this replaces left `a[i, j] = v` unrefused.
 
     Callable UNCONDITIONALLY — the multi-element gate moved inside — because the
     MLIR answer does not depend on the arity (`is_mlir_template` keys on the
     base), and a caller that still guarded the call with `is_multi_index` would
     keep the single-element spelling `__mlir_type[x]` fabricated. A non-MLIR
     single index is not this function's business and returns None, exactly as
-    before."""
+    before.
+
+    `external_call["sym", RetType]` is asked HERE and not in `multi_index_kind`
+    because it is the one multi-element construct whose answer is not a kind but
+    a specific sentence: a well-formed one is LOWERED (it becomes a direct call
+    to the C symbol, with the declared return type marshalling the result), and
+    a malformed one is refused by `external_call_refusal` with the reason that
+    shape is malformed. Routing it through the kind table would have made a
+    refused template read as a two-dimensional index, which is the
+    misdiagnosis §6.2 of bugs/FORMAL_known_limits.md is about.
+
+    The module's OWN `external_call` declaration wins over the language's
+    template, which is why `callee_defs` is consulted first: a module that
+    declares `def external_call[a, b](…)` has said what the name means in that
+    module, and its explicit-parameter list is then the same comptime-params
+    case as any other generic."""
     why = mlir_template_refusal(e)
     if why is not None:
         return why
     if not is_multi_index(getattr(e, "index", None)):
         return None
+    callee_defs = callee_defs or {}
+    if (callee_defs.get(_base_name(e.obj)) is None
+            and is_external_call_template(e)):
+        _symbol, _kind, xc_why = external_call_spec(e)
+        if xc_why is None:
+            return None
+        return external_call_refusal(external_call_spelling(e), xc_why)
     kind = multi_index_kind(e, base_is_dict=base_is_dict,
-                            generic_callee=(
-                                (callee_defs or {}).get(_base_name(e.obj))))
+                            generic_callee=callee_defs.get(_base_name(e.obj)))
     if kind is None:
         return None
     return multi_index_refusal(kind, multi_index_spelling(e))
+
+
+# ── `external_call["sym", RetType](args…)` ─────────────────────────────────
+#
+# The construct behind the largest single family in the sweep residue (55 stdlib
+# files, one terminal module: `std/os/env.mojo`), and the one multi-element
+# subscript in the whole corpus that is NOT a generic's explicit-parameter list.
+# The tuple-index refusal above is true of the SHAPE and wrong about the
+# MECHANISM, which §6.2 of bugs/FORMAL_known_limits.md is the audit of: the base
+# is a function-like template, the first bracket element is the SYMBOL to call
+# and the second is the declared return type. Neither is a coordinate, and
+# `external_call` is not a dict.
+#
+# So it is lowered, and what it lowers to is the extern call both backends
+# already emit — the arguments into the ABI's argument registers, a branch to
+# the C symbol — plus the ONE thing an extern call has no way to know and this
+# construct states outright: the declared return type.
+#
+# It is a marshalling instruction here, not documentation.  Both ABIs put the
+# low `bits` of a narrow integer return in the return register and say nothing
+# about the rest, and on both of these ISAs a narrow register WRITE zero-
+# extends, so what actually arrives is the low `bits` ZERO-extended.  The
+# declared type is usually SIGNED — `Int32` and `c_int` cover every
+# `status`-shaped call in the corpus — and the source means the SIGN-extended
+# value: `zero_extend(0xFFFFFFFF)` is 4294967295 and `sign_extend(0xFFFFFFFF)`
+# is -1.  So without the extension a program can read a plausible positive
+# number where the source says a negative one.  The reference lowering
+# (`mojo/backend_gimple/emit_exprs.py::_lower_external_call`) gets this for
+# free by emitting `extern int32_t setenv();` and letting C's typed assignment
+# do the conversion; a machine-code backend has to be told, and the source
+# already said.
+#
+# MEASURED, so the claim is not stronger than it is: every libSystem symbol
+# reachable from this corpus (`strcmp`, `atoi`, `memcmp`, `strcasecmp`) already
+# hands back a sign-extended 64-bit word on this host, so the extension is a
+# no-op instruction for all of them TODAY.  It is kept anyway, and the reason is
+# the one sentence above: a value model may not take its correctness from one
+# libc's internal choice about a register the ABI leaves unspecified, and the
+# answer to match is the reference lowering's.
+
+# The one name the template is spelled. A frozenset of one, so a caller reads
+# it as "the base name that means this" rather than as a private string; see
+# `multi_index_kind` for why a module that DECLARES its own `external_call`
+# generic still means that generic instead (the callee table is consulted
+# first, and it is the module's own declaration that is the stronger fact).
+EXTERNAL_CALL_NAMES = frozenset({"external_call"})
+
+# What a declared return type says about the return register.
+#   "void" — the callee returns nothing; the register is meaningless and the
+#            source discards it.  Also the answer for the one-element bracket
+#            `external_call["sym"]`, because that is what the reference lowering
+#            emits for it (`ret_ct = 'void'` when the bracket has no second
+#            element), and matching the compiler that does have the C type
+#            system matters more than being stricter than it.
+#   "word" — the whole 64-bit register IS the answer.  Every pointer, and every
+#            64-bit integer, on both targets: pointers are addresses and the
+#            integer types are the word this path's values already are.
+#   ("int", (bits, signed)) — the low `bits` of the register are the answer
+#            and the backend sign/zero-extends to it.  `Int32` (env.mojo's
+#            `setenv`), `c_int` (its `unsetenv`), `UInt8` (a C `_Bool`).
+EXTERN_RETURN_VOID = "void"
+EXTERN_RETURN_WORD = "word"
+
+# `(bits, signed)` for the declared integer return types a C function has.
+#
+# Deliberately NOT `POINTEE_WIDTHS`, which is a different question with a
+# deceptively similar answer: that table says how many bytes a LOAD of a
+# pointee of this type reads, and it is C-flavoured, so its `Int` is four bytes
+# (C's `int`) where a DECLARED `Int` is Mojo's `Int64`. Reading a declared
+# return type through it would truncate a 64-bit return to 32 on the strength of
+# a table written about something else. Two tables, two questions, both named
+# for what they answer.
+EXTERN_RETURN_INTS = {
+    # Mojo's own integer types. `Int`/`UInt` are 64-bit HERE, which is the one
+    # entry the two tables disagree about and the reason they are separate.
+    "Int": (64, True), "int": (64, True),
+    "Int8": (8, True), "Int16": (16, True),
+    "Int32": (32, True), "Int64": (64, True),
+    "UInt": (64, False),
+    "UInt8": (8, False), "UInt16": (16, False),
+    "UInt32": (32, False), "UInt64": (64, False),
+    # A C `_Bool`/`bool` is one byte, and a program that reads it as a word
+    # wants it zero-extended — an uninitialised top half would make every
+    # comparison of it a coin flip, which is the whole hazard this section is
+    # about.
+    "Bool": (8, False),
+    # The C aliases `std/ffi/__init__.mojo` declares. Read HERE BY NAME,
+    # because a declared return type reaches this as a type EXPRESSION in the
+    # AST: `c_int` is an `IdentExpr` naming a module-level `comptime` binding,
+    # and this path does not resolve a module-level comptime binding to its
+    # target (that is the `std/sys/info.mojo` capability, and a separate one).
+    # The widths are the ones `std/ffi` itself states — `comptime c_int =
+    # Int32`, `c_ssize_t = Int`, `c_size_t = UInt`, `c_pid_t = Int` — so this
+    # table and the source cannot drift into disagreeing about what a C `int`
+    # is. `c_float`/`c_double` are deliberately absent: this path has no float
+    # kind (`POINTEES_REFUSED` says why, for the same reason), and a `double`
+    # return read as a word would be a number nobody wrote.
+    "c_char": (8, True), "c_uchar": (8, False),
+    "c_short": (16, True), "c_ushort": (16, False),
+    "c_int": (32, True), "c_uint": (32, False),
+    "c_long": (64, True), "c_ulong": (64, False),
+    "c_long_long": (64, True), "c_ulong_long": (64, False),
+    "c_ssize_t": (64, True), "c_size_t": (64, False),
+    "c_pid_t": (64, True),
+}
+
+
+def external_call_return_kind(text):
+    """How the declared return type marshals the return register, or None.
+
+    `text` is a declared type rendered by `type_expr_text` — the same string
+    shape a `VarDecl.type_ann` arrives in, which is why that one function
+    renders the AST node into it rather than this module growing a second
+    spelling.
+
+    None means "this path cannot say", and the caller must refuse: a return
+    type this module has never heard of is a value whose width was never
+    established, and a call whose result is an unestablished number is the
+    silent-wrong-answer shape the whole value model is built to refuse.  Every
+    refusal below is a real thing a declared return can be and none of them
+    is answerable by widening the register:
+
+      * a pointer — `Pointer`, `UnsafePointer`, `_CPointer[UInt8, …]`,
+        `_CString`, `FILE_ptr` — is an address, so `"word"`, and it needs no
+        pointee: the return VALUE is the address the C function handed back,
+        and `env.mojo`'s `if not ptr:` reads exactly that.
+      * a string type is a bare `char *` here (`STRING_TYPE_CTORS`), so also
+        `"word"` — `getenv` declares a `_CPointer[UInt8, …]` and the source
+        then builds a `String` from it.
+      * `NoneType` is `void`: the C prototype has no return, so there is
+        nothing in the register to extend (`KGEN_CompilerRT_GetArgV` and the
+        rest of the runtime's void entry points).
+    """
+    if not text:
+        return None
+    base = annotation_base_name(text)
+    if base is None:
+        return None
+    if base == "NoneType":
+        return EXTERN_RETURN_VOID
+    if base in POINTER_TYPE_CTORS or base in STRING_TYPE_CTORS:
+        return EXTERN_RETURN_WORD
+    # A name this path does not know is refused, NOT passed through as a word:
+    # a `SIMD[dtype, 4]` or a `Scalar[dtype]` return is n words, and dropping
+    # n-1 of them is the "returns a value nobody asked for" outcome the
+    # tuple-index refusal above exists to avoid.
+    info = EXTERN_RETURN_INTS.get(base)
+    if info is not None:
+        return info
+    return None
+
+
+def is_external_call_template(e) -> bool:
+    """True when `e` is `external_call[...]` — the template, whatever it is
+    applied to.
+
+    The BASE NAME alone, so `external_call["sym"]`, `external_call["sym", T]`
+    and `external_call["sym", T, P, Q]` are all recognised and a malformed one
+    is refused by `external_call_spec` with a message about the template rather
+    than falling through to the tuple-index text, which would name a data
+    subscript that is not there.
+    """
+    return (isinstance(e, F.SubscriptExpr)
+            and _base_name(e.obj) in EXTERNAL_CALL_NAMES)
+
+
+def external_call_spec(e):
+    """`(symbol, return_kind, why)` for an `external_call[...]` template, or
+    None when `e` is not that construct at all.
+
+    `None` is "not this construct" and every caller asks `is_external_call_
+    template` first, so the two cannot disagree about what this function
+    claims. When `e` IS the construct the answer is always a 3-tuple:
+    `symbol` is the C symbol to branch to, `return_kind` is what
+    `external_call_return_kind` says, and `why` is None or the CLAUSE saying
+    which part is not lowerable.
+
+    `why` is a clause and not a whole sentence because `external_call_refusal`
+    prefixes the construct's spelling, and there is one place that decides how
+    a source construct is written in a diagnostic (`multi_index_spelling`) — a
+    second spelling here would be two answers to "what did the file say" and
+    they would drift the first time a new shape needed a different rendering.
+
+    The refusals here are about the TEMPLATE, never about the data index:
+      * the first element is not a string literal.  `external_call[name,
+        T](…)` with a name bound by a `comptime` parameter does occur in the
+        stdlib (`std/sys/info.mojo`), and a symbol that is not a literal is not
+        knowable at the point the call is lowered — the branch's target would
+        have to come from a register, which is how an image gets a call to
+        wherever that register happened to point.
+      * a bare `external_call` with no bracket at all, which is a name nobody
+        declared, and belongs to the name-placement rules rather than here.
+      * more than two elements: the third is a PARAMETER type list the C
+        prototype already states, and this path has no parameter types to
+        marshal with, so taking the first two and ignoring the rest would be a
+        call that does not say what the source says.
+    """
+    if not is_external_call_template(e):
+        return None
+    if getattr(e, "attrs", None):
+        return (None, None,
+                "applies the external_call template with keyword attributes. "
+                "The template's bracket is the symbol and the declared return "
+                "type, and nothing else; there is no keyword form of it to "
+                "honour here, and ignoring the attributes would call a symbol "
+                "the source did not spell")
+    items = list(e.index.elements) if isinstance(e.index, F.TupleExpr) else [e.index]
+    if len(items) > 2:
+        return (None, None,
+                f"applies the external_call template with {len(items)} "
+                f"arguments. The template takes the symbol and the declared "
+                f"return type; a third element would be a C parameter type "
+                f"list, which this path has no way to marshal with — the C "
+                f"prototype on the link line states it, and taking the first "
+                f"two and dropping the rest would build a call that is not the "
+                f"one the source wrote")
+    if len(items) < 2:
+        # No declared return type is the reference lowering's `void`
+        # (`ret_ct = 'void'` when `len(elems) < 2`), so it is answered the
+        # same way here rather than refused: the C prototype decides what the
+        # register means, and refusing a form the compiler that does have C
+        # types accepts would make the two disagree about the language.  The
+        # symbol is still read, so a well-formed one-element bracket is a call.
+        head = items[0]
+        if not isinstance(head, F.StringLiteral) \
+                or not isinstance(getattr(head, "value", None), str):
+            return (None, None, _non_literal_symbol_why(head))
+        return (head.value, EXTERN_RETURN_VOID, None)
+    head = items[0]
+    if not isinstance(head, F.StringLiteral) \
+            or not isinstance(getattr(head, "value", None), str):
+        return (None, None, _non_literal_symbol_why(head))
+    symbol = head.value
+    text = type_expr_text(items[1])
+    if text is None:
+        return (None, None,
+                f"declares its return type as {_spell(items[1])}, which is not "
+                f"a type this path can read. The declared return type is what "
+                f"says how wide the value coming back in the return register "
+                f"is, so a type the build cannot name leaves the width "
+                f"unestablished — and a call whose result is an unestablished "
+                f"number is a plausible wrong answer rather than a failure")
+    kind = external_call_return_kind(text)
+    if kind is None:
+        return (None, None,
+                f"declares its return type as {text}, and this path has no "
+                f"value of that kind to put in the return register. A formal "
+                f"value is one 64-bit word, so the width of what comes back "
+                f"has to be established by the declaration: an integer type "
+                f"extends the register to its own width, a pointer is the "
+                f"whole of it, and anything else would have to drop or invent "
+                f"bits. Declare one of those, or keep the value on the other "
+                f"side of the boundary")
+    return (symbol, kind, None)
+
+
+def _non_literal_symbol_why(head) -> str:
+    """The clause for an `external_call` bracket whose first element is not a
+    string literal. Its own function so the one-element and the two-element
+    bracket cannot drift into refusing the same thing differently."""
+    return (f"names the symbol to call with {_spell(head)}, which is not a "
+            f"string literal. A branch has to be emitted against a symbol the "
+            f"build can read, and a name bound by a `comptime` parameter is "
+            f"not one at the point this call is lowered — the call would go to "
+            f"wherever that name's value happened to point. Spell the symbol "
+            f"as a literal, or call through a function pointer the module "
+            f"declares")
+
+
+def external_call_spelling(e) -> str:
+    """`e` as a diagnostic should write it: `external_call["sym", Int32]`.
+
+    One reader for the two shapes the bracket can have — a bracketed comma list
+    is a tuple index, anything else a single index — so every refusal, on every
+    call site and both architectures, writes the same construct the same way.
+    """
+    if is_multi_index(getattr(e, "index", None)):
+        return multi_index_spelling(e)
+    return f"external_call[{_spell(e.index)}]"
+
+
+def external_call_refusal(spelled: str, why: str) -> str:
+    """The refusal for an `external_call[...]` that is the right construct and
+    the wrong shape. Arch-free, from this module like every other one, because
+    the two architectures have to refuse the same construct for the same
+    reason — the failure this path has already produced once, where arm64 said
+    no and x86-64 emitted a `call` to a symbol the source never named.
+    """
+    return (f"{spelled} {why}")
+
+
+def external_call_value_refusal(spelled: str) -> str:
+    """The refusal for an `external_call[...]` read as a VALUE.
+
+    Separate from `external_call_refusal` because it is a different mistake: the
+    template is perfectly well formed and the source is using it as something
+    it is not.  `multi_index_refusal_for` cannot catch this one — it sees a
+    SubscriptExpr with no parent — so each backend asks at the point the
+    address would be computed, which is the last moment the shape is still
+    visible.
+    """
+    return (
+        f"{spelled} is applied as a value. The bracket names a C symbol and a "
+        f"declared return type; it is not a container, and the value the call "
+        f"produces is the C function's, which only a CALL can ask for — there "
+        f"is nothing here to read, and an address into a frame that the source "
+        f"never mentioned would be a number with no meaning. Call it"
+    )
 
 
 # ── Calling convention ────────────────────────────────────────────────────
