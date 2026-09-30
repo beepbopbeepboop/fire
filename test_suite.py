@@ -2106,6 +2106,13 @@ UNREGISTERED = {
         'takes.',
 
     # ── the rest, one reason each ──
+    'test_container_equality.py': 'Container ==/!= on the compiled path, each '
+        'case a whole program run BOTH ways and required to agree with CPython '
+        'on stdout and exit status. Not registered because the work that added '
+        'it was told not to touch tools/suite.py; it needs a `check`-bucket '
+        'entry beside `gimple`/`gimplerunner` (a `cmd` step, memclass small: '
+        '24 programs, ~25 s, peak 0.1 GB) and `extra` naming this file so '
+        'checked_run.py\'s content-addressed cache invalidates when it changes.',
     'test_imports.py': 'That import statements generate extern declarations. '
         'A missing extern is a link failure attributed to something else.',
     'test_kwargs_stmt.py': 'kwargs in statement-level calls, a shape the '
