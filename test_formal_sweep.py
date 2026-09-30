@@ -336,6 +336,23 @@ class TestDyldProbe(unittest.TestCase):
             raise AssertionError(
                 f"expected the bind audit's refusal, got: "
                 f"{cls.bogus_refusal[-400:]}")
+        # A RELATIVE import, which is the shape whose symbols begin with an
+        # underscore: `abi_module_name('._helper')` is `__helper`, so every
+        # export of the imported module is `__helper_<name>_<hash>` and every
+        # bind name the image records starts with `_`. The probe used to
+        # `lstrip("_")` the name before handing it to dlsym, which turned
+        # `__helper_twice_…` into `helper_twice_…` and reported a load failure
+        # for an image that loads — measured on both `formal/hostmods/os`
+        # hosts, both of which build, link and run. See
+        # bugs/FORMAL_relative_submodule_abi_prefix_off_by_one.md.
+        os.makedirs(os.path.join(d, "relpkg"), exist_ok=True)
+        with open(os.path.join(d, "relpkg", "_helper.mojo"), "w") as f:
+            f.write("fn twice(a: Int) -> Int:\n    return a + a\n")
+        with open(os.path.join(d, "relpkg", "__init__.mojo"), "w") as f:
+            f.write("from ._helper import twice\n\n"
+                    "fn main() -> Int:\n"
+                    "    var x: Int = twice(21)\n    return x\n")
+        cls.relative_img = cls._fire("relpkg/__init__.mojo", "arm64")
         # The image the post-build probe still has to be able to catch, built
         # the way a dylib-path build produces one: one external bind, and a
         # dylib that IS on the link line and loadable but does not define the
@@ -419,6 +436,23 @@ class TestDyldProbe(unittest.TestCase):
         rc, err = self._runs(self.resolvable_img, "ok")
         self.assertEqual(err, "", f"dyld refused a resolvable image: {err}")
         self.assertEqual(rc, 5, "main() returns add(2, 3)")
+
+    def test_a_relative_imports_underscored_symbol_resolves_and_the_image_runs(self):
+        # The `lstrip("_")` regression, end to end and settled by dyld.
+        #
+        # A relative import's ABI prefix begins with an underscore, so this
+        # image's bind names do too — that is the precondition, asserted rather
+        # than assumed, because if it stops holding the test would pass for the
+        # wrong reason and stop covering anything.
+        names = [name for _ordinal, name in S._binds(self.relative_img)]
+        self.assertTrue(names, "precondition: the image binds something")
+        self.assertTrue(all(n.startswith("_") for n in names),
+                        f"precondition: every bind name is underscore-prefixed, "
+                        f"got {names}")
+        self.assertEqual(S._unresolved_imports(self.relative_img), [])
+        rc, err = self._runs(self.relative_img, "rel")
+        self.assertEqual(err, "", f"dyld refused a resolvable image: {err}")
+        self.assertEqual(rc, 42, "main() returns twice(21)")
 
     def test_an_image_nothing_defines_is_reported_and_dyld_agrees(self):
         # The true positive, and the check that the probe is not simply
