@@ -4241,13 +4241,25 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # Reverse the two lines and the same file gets the useful message, which
         # is not a property a diagnostic should have.
         #
-        # The pre-emption is deliberate and unconditional, and the judgement it
-        # encodes is this: a file containing an MLIR dialect construct cannot be
-        # lowered for ONE reason, and nothing else in it changes that, so the
-        # reason is what the reader needs first. A missing local may be a typo
-        # in the file — but the file will not build either way, and naming the
-        # deeper limit first is the same choice `_refuse_unlowerable_module_body`
-        # makes when it runs ahead of the ordinary codegen.
+        # The pre-emption is deliberate, and the judgement it encodes is this:
+        # a FUNCTION containing an MLIR dialect construct cannot be lowered for
+        # ONE reason, and nothing else in it changes that, so the reason is what
+        # the reader needs first. A missing local may be a typo in the file —
+        # but the file will not build either way, and naming the deeper limit
+        # first is the same choice `_refuse_unlowerable_module_body` makes when
+        # it runs ahead of the ordinary codegen.
+        #
+        # Per FUNCTION and not per file, which is the boundary that costs
+        # something: a construct in a LATER function than the refusal an earlier
+        # one earns still loses to it. Measured, and the other way round is
+        # worse — `std/memory/stack_allocation.mojo`'s
+        # "stack_allocation[count, Scalar[…], alignment, address_space] is a
+        # compile-time explicit-parameter list on a generic, not a subscript" is
+        # true and specific, and a per-file pre-emption would replace sentences
+        # like it with the coarser dialect text. Sixteen stdlib files are still
+        # decided by the order of two functions; the measurement, and the
+        # narrower rule that would convert three of them without demoting any,
+        # are in bugs/FORMAL_mlir_refusal_preemption.md.
         #
         # It is asked in SOURCE ORDER among the MLIR constructs themselves, and a
         # bare `__mlir_op` does not outrank an `__mlir_attr[…]` that appears
@@ -4259,21 +4271,21 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # identifier it roots, so by the time the identifier is here its entry is
         # already recorded.
         bracketed = {}
-        answered_roots = set()
+        exempt_roots = set()
         first_mlir = None
         for sub in M.iter_nodes(fn.body):
             if isinstance(sub, F.IdentExpr):
-                # `answered_roots` is the OTHER half of the rule the arm below
+                # `exempt_roots` is the OTHER half of the rule the arm below
                 # states, and skipping it here would be reading one node two
-                # ways inside one loop: an identifier that roots a template the
-                # build ANSWERED is not a use of anything, so it is not an MLIR
-                # dialect construct either. `_fold_target_queries` has normally
+                # ways inside one loop: an identifier that roots a sub-expression
+                # that is not a use of anything is not an MLIR dialect construct
+                # either. `_fold_target_queries` has normally
                 # replaced those templates with literals before this runs, so the
                 # set is empty in practice — and it is written down rather than
                 # left to that, because the failure it prevents is a REFUSAL of
                 # a construct this build answers, which is the worse of the two
                 # mistakes available here.
-                if first_mlir is None and id(sub) not in answered_roots \
+                if first_mlir is None and id(sub) not in exempt_roots \
                         and sub.name.startswith(M.MLIR_DIALECT_PREFIX):
                     first_mlir = bracketed.get(id(sub)) \
                         or M.mlir_dialect_refusal(sub.name)
@@ -4301,7 +4313,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 #
                 # The root is recorded because the IdentExpr arm above asks
                 # about it, and it is reached first in source order.
-                answered_roots.add(id(root_ident))
+                exempt_roots.add(id(root_ident))
                 continue
             why = M.mlir_template_refusal(sub)
             if why is None and isinstance(sub, F.SubscriptExpr):
