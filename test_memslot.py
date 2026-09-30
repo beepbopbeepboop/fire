@@ -8,6 +8,9 @@ third run three at a time; the sum of live reservations never exceeds the budget
 import json, os, signal, subprocess, sys, tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# The in-process cases below call memslot's Python API directly, in THIS process: backfill must be off here
+# too, or a small slot sneaks in on the machine's real free memory and the strict arithmetic is bypassed.
+os.environ["MEMSLOT_SNEAK_MAX_GB"] = "0"
 MEMSLOT = os.path.join(HERE, "tools", "memslot.py")
 passed = failed = 0
 
@@ -28,7 +31,21 @@ def env(d):
     # reservation it holds (MEMSLOT_HELD), so without the clear every wrapper
     # started below would be "covered" by this test's own reservation, queue
     # behind itself, and the arithmetic these cases check would never happen.
-    return dict(os.environ, MEMSLOT_DIR=d, MEMSLOT_BUDGET_GB="10", MEMSLOT_HELD="")
+    # MEMSLOT_SNEAK_MAX_GB=0 turns backfill OFF: these cases check strict budget arithmetic, which a small
+    # job sneaking in on measured free memory would (correctly) bypass. The backfill cases below turn it on.
+    return dict(os.environ, MEMSLOT_DIR=d, MEMSLOT_BUDGET_GB="10", MEMSLOT_HELD="", MEMSLOT_SNEAK_MAX_GB="0")
+
+
+def sneak_env(d, avail, **kw):
+    e = env(d)
+    e.update(MEMSLOT_SNEAK_MAX_GB="8", MEMSLOT_SNEAK_CAP_GB="32", MEMSLOT_SNEAK_MARGIN_GB="16", MEMSLOT_AVAIL_GB=str(avail))
+    e.update({k: str(v) for k, v in kw.items()})
+    return e
+
+
+def start_env(e, gb, secs, label):
+    return subprocess.Popen([sys.executable, MEMSLOT, "--gb", str(gb), "--label", label, "--", "sleep", str(secs)],
+                            env=e, stderr=subprocess.DEVNULL)
 
 
 def start(d, gb, secs, label):
@@ -254,6 +271,51 @@ def main():
                   'ceiling 96.0 GB' in r.stdout, r.stdout.strip()[:120])
         finally:
             parent.release()
+
+    # ---- backfill: small jobs sneak in on measured free memory and never delay the head of the queue
+    with tempfile.TemporaryDirectory() as d:
+        big = start(d, 10, 6, "big")                         # takes the WHOLE budget
+        wait_for(lambda: holders(d) == ["big"])
+        s1 = start_env(sneak_env(d, 60), 3, 2, "small")      # 60 GB free, margin 16: 60 - 3 >= 16
+        check("a small job sneaks in beside a full-budget holder when plenty is free",
+              wait_for(lambda: "small" in holders(d), 6), str(holders(d)))
+        check("...and is recorded as a sneak in the ledger",
+              any(h.get("sneak") for h in ledger(d)["holders"] if h["label"] == "small"))
+        s1.wait(); big.wait()
+    with tempfile.TemporaryDirectory() as d:
+        big = start(d, 10, 4, "big")
+        wait_for(lambda: holders(d) == ["big"])
+        low = start_env(sneak_env(d, 12), 3, 1, "low")       # 12 free: 12 - 3 = 9 < margin 16: must wait
+        time.sleep(1.5)
+        check("it does NOT sneak when measured free memory minus its size is under the margin", holders(d) == ["big"], str(holders(d)))
+        big.wait(); low.wait()
+        check("...and runs normally once the holder leaves", low.returncode == 0)
+    with tempfile.TemporaryDirectory() as d:
+        big = start(d, 10, 6, "big"); wait_for(lambda: holders(d) == ["big"])
+        nine = start_env(sneak_env(d, 80), 9, 1, "nine")     # over SNEAK_MAX (8): never sneaks, however much is free
+        time.sleep(1.5)
+        check("a request over the sneak size limit never sneaks", holders(d) == ["big"], str(holders(d)))
+        big.wait(); nine.wait()
+    with tempfile.TemporaryDirectory() as d:
+        e = sneak_env(d, 80, MEMSLOT_SNEAK_CAP_GB=4)
+        big = start(d, 10, 6, "big"); wait_for(lambda: holders(d) == ["big"])
+        a = start_env(e, 3, 5, "a"); wait_for(lambda: "a" in holders(d), 6)
+        b = start_env(e, 3, 1, "b"); time.sleep(1.5)
+        check("total sneaking is capped (3 + 3 > 4): the second waits", "b" not in holders(d) and "a" in holders(d), str(holders(d)))
+        for p_ in (big, a, b): p_.wait()
+    with tempfile.TemporaryDirectory() as d:
+        # a sneaker does not count against the budget, so it cannot delay the job at the head of the queue
+        a = start(d, 6, 4, "a"); wait_for(lambda: holders(d) == ["a"])
+        sn = start_env(sneak_env(d, 80), 3, 4, "sn"); wait_for(lambda: "sn" in holders(d), 6)
+        head = start(d, 4, 1, "head")                        # 6 + 4 = 10 fits the budget; the 3 GB sneaker must not block it
+        check("a sneaker never delays a request that fits the budget", wait_for(lambda: "head" in holders(d) or head.poll() is not None, 6))
+        for p_ in (a, sn, head): p_.wait()
+    with tempfile.TemporaryDirectory() as d:
+        # an unmeasurable machine never reads as plenty
+        e = sneak_env(d, 80); e.pop("MEMSLOT_AVAIL_GB"); e["PATH"] = "/nonexistent"
+        r = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0,%r); import memslot; print(memslot.avail_gb())" % os.path.join(HERE, "tools")],
+                           env=e, capture_output=True, text=True)
+        check("with no vm_stat, avail_gb() is None (no sneaking on a missing measurement)", r.stdout.strip() == "None", r.stdout + r.stderr)
 
     print("Results: %d passed, %d failed" % (passed, failed))
     return 1 if failed else 0
