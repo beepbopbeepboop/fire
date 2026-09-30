@@ -76,15 +76,15 @@ def cpython_run(tmpdir, name, source):
     return r.stdout, r.returncode
 
 
-def formal_run(tmpdir, name, source):
-    """Build `source` for arm64 and EXECUTE it. (stdout, exit status)."""
+def formal_run(tmpdir, name, source, arch="arm64"):
+    """Build `source` for `arch` and EXECUTE it. (stdout, exit status)."""
     path = os.path.join(tmpdir, name + ".py")
     with open(path, "w") as f:
         f.write(source)
-    out = os.path.join(tmpdir, name + ".bin")
+    out = os.path.join(tmpdir, name + f".{arch}.bin")
     b = subprocess.run(
         [sys.executable, FIRE, "build", "--formal", "--no-prove",
-         "-o", out, path],
+         f"--backend={arch}", "-o", out, path],
         capture_output=True, text=True, timeout=BUILD_TIMEOUT, cwd=HERE)
     if b.returncode != 0:
         raise BuildRefused((b.stderr or b.stdout).strip())
@@ -754,6 +754,41 @@ def run_corpus_case(tmpdir, only=None):
               verdict[-300:])
 
 
+# ── 4. the two architectures AGREE ──────────────────────────────────────────
+#
+# The transform is arch-free — it lives in the shared front end, and both
+# backends go through `formal/build.py`'s one pipeline — so a two-backend
+# divergence here would be a divergence in a transform both of them read, which
+# is the shape this project has measured more than once (a real 2026-08-13→09-13
+# case produced a 1.4M-line diff from correct while every other check stayed
+# green). A field-wise `==` is exactly where that would show: the chain is
+# lowered by each backend's own compare, and the two have to agree about what a
+# field read produces.
+#
+# So this builds and EXECUTES the same program on both, and asserts all three
+# answers — arm64, x86-64, CPython — are one answer. Measured before this case
+# existed: arm64 `1 0`, x86-64 `1 0`, CPython `1 0`.
+
+def run_arch_parity_case(tmpdir, only=None):
+    name = "both_architectures_agree_with_cpython_on_the_field_wise_compare"
+    if only and name not in only:
+        return
+    try:
+        arm, arm_rc = formal_run(tmpdir, name + "_arm", EQUALITY, "arm64")
+        x86, x86_rc = formal_run(tmpdir, name + "_x86", EQUALITY, "x86_64")
+    except BuildRefused as e:
+        check(False, name, f"refused: {str(e)[-400:]}")
+        return
+    want, want_rc = cpython_run(tmpdir, name, EQUALITY)
+    check(arm == x86,
+          f"{name}: arm64 and x86_64 disagree on stdout",
+          f"arm64 {arm!r} vs x86_64 {x86!r}")
+    check(arm == want and arm_rc == want_rc == x86_rc,
+          f"{name}: the image and CPython disagree",
+          f"arm64 {arm!r}/{arm_rc} x86_64 {x86!r}/{x86_rc} "
+          f"CPython {want!r}/{want_rc}")
+
+
 def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("cases", nargs="*")
@@ -766,6 +801,7 @@ def main(argv):
         run_refuse_cases(tmpdir, only)
         run_guard_case(tmpdir, only)
         run_corpus_case(tmpdir, only)
+        run_arch_parity_case(tmpdir, only)
 
     passed = sum(1 for ok, _ in RESULTS if ok)
     failed = len(RESULTS) - passed
