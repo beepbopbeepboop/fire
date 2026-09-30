@@ -639,9 +639,11 @@ BUILTIN_PROGRAMS = {
     # `sorted(key=lambda *a: ...)` / `map(lambda *a: ...)` are deliberately
     # NOT here: the COMPILED path handles them (test_gimple_runner.py's
     # `gimple_variadic_lambda_works_through_every_holder` covers both), but
-    # handing a variadic lambda to a builtin crashes the INTERPRETER, so this
-    # harness could not compare anything. Tracked in
-    # bugs/CODEGEN_interpreter_variadic_lambda_as_builtin_callback.md.
+    # the INTERPRETER crashes on a user-defined function passed as a builtin
+    # callback at all — `sorted(key=lambda a: -a)` and `sorted(key=k)` for a
+    # plain `def k(a)` fail the same way — so this harness could not compare
+    # anything. Tracked in
+    # bugs/CODEGEN_interpreter_user_function_as_builtin_callback_crashes.md.
     "variadic_lambda_packs_its_arguments": textwrap.dedent("""\
         def add(a, b):
             return a + b
