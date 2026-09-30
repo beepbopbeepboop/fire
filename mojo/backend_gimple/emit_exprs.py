@@ -4384,6 +4384,7 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         # with the print dispatch.
         if gimple_exprtypes.is_python_bool_expr(gen, val_expr):
             gen._emit(f"  mojo_mark_dict_bool_values ({t});")
+        gen._note_dict_callable_ret(t, vv)
         vv64 = gen._to_int64(vt, vv)
         gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}int ({t}, {kv}, {vv64});")
 

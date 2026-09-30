@@ -1089,11 +1089,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # ONLY a CallExpr callee (a genuine chained call) and a
         # LambdaExpr callee (an immediately-invoked lambda — a real
         # runtime callable value) are value-lowered here. A
-        # SubscriptExpr callee is a GENERIC TYPE/constructor expression
-        # (`Scalar[x.dtype](...)` — a comptime bracket argument, not a
-        # runtime value), whose eager value-lowering would miscompile
-        # (found via math.mojo's `Scalar[x.dtype](...)`); those keep the
-        # old stub.
+        # SubscriptExpr callee is handled further down, after the generic
+        # bracket-argument case it shares a node type with.
         if isinstance(node.func, (gimple_ctypes.CallExpr, gimple_ctypes.LambdaExpr)):
             _callee_t, _callee_v = gen.lower_expr(node.func)
             if _callee_t == 'MojoBoundMethod *':
@@ -1121,6 +1118,15 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # loop then correctly takes the "no iterator protocol" path
         # and drops the loop body (still functionally a stub, but one
         # that compiles) rather than colliding types.
+        #
+        # BEFORE the runtime-subscript value-lowering below, deliberately:
+        # this is the ONE SubscriptExpr callee that is a comptime bracket
+        # argument rather than a runtime value read, and
+        # `_static_generic_return_ctype` is what tells the two apart — it
+        # answers only for a base NAME this compile recorded as an IMPORTED
+        # GENERIC (`Scalar`, `from_numpy_array`, ...). The other order
+        # would reintroduce the math.mojo `Scalar[x.dtype](...)` miscompile
+        # the comment above records.
         if isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr):
             _static_ct = gen._static_generic_return_ctype(node.func.obj.name)
             if _static_ct is not None:
@@ -1129,6 +1135,50 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 gimple_ctypes._debug_note('un-elaboratable generic call statically-typed stub',
                             (node.func.obj.name, _static_ct))
                 return _static_ct, t
+        # The OTHER SubscriptExpr callee: a RUNTIME subscript read of a
+        # callable held as a first-class value — `d['k'](2, 3)`, a name-keyed
+        # dispatch table. This was lumped in with the generic case above and
+        # stubbed to 0, a SILENT wrong answer with exit 0 for a shape common
+        # enough that anything relying on it is already broken.
+        #
+        # What is left of the discriminator is a POSITIVE test, and it has to
+        # be one: this container is one a callable was actually recorded
+        # being stored into (see `note_dict_callable_ret`). A negative test
+        # ("the base looks like a container") is not enough, and finding that
+        # out cost a real regression — `re`'s own `_RE.finditer(src)` reaches
+        # this branch with a TUPLE index and a base whose actual type is a
+        # plain `int64_t`, and value-lowering it emitted the finditer result
+        # into the wrong place in the generator's C++, which then failed at
+        # RUNTIME with `dyld: symbol not found in flat namespace
+        # '_std_memory___init___is_trivially_copyable'`. A speculatively
+        # lowered callee is the real hazard, independent of the test: lowering
+        # has side effects (it emits statements and allocates temps), so
+        # probing with `gen.lower_expr` and then discarding the result emits
+        # the same code twice. Hence the base is read from the type TABLES by
+        # name and never lowered on this path.
+        #
+        # A base that is not a plain Name (`a[i]['k']()`, `self.d['k']()`)
+        # keeps the old stub: there is nothing cheap and side-effect-free to
+        # read its type from, and guessing is what this bug was.
+        if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
+                and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+                and node.func.obj.name in gen._dict_callable_ret):
+            _callee_t, _callee_v = gen.lower_expr(node.func)
+            if _callee_t == 'MojoBoundMethod *':
+                return gen._lower_bound_method_call_value(_callee_v, node)
+            if _callee_t == 'void *' or _callee_t in ('int', 'int64_t', '_Bool'):
+                # A dict's own value type is a single slot, so what the
+                # callables stored in it were recorded as is a SET — usable
+                # only when it is UNANIMOUS, which is the same
+                # "unanimity or nothing" rule every other inference in this
+                # file follows. A dict holding callables of different return
+                # types then keeps the int64_t answer, i.e. exactly the
+                # behaviour before this existed.
+                _seen = gen._dict_callable_ret.get(node.func.obj.name)
+                _vt = 'int64_t'
+                if _seen is not None and len(_seen) == 1:
+                    _vt = next(iter(_seen))
+                return gen._lower_fnptr_call_value(_callee_t, _callee_v, node, _vt)
         gimple_ctypes._debug_note('indirect call stubbed', type(node.func).__name__)
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')
@@ -3911,6 +3961,19 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     saved_decls          = gen.decls
     saved_body           = gen.body_lines
     saved_var_types      = dict(gen.var_types)
+    # The callable-value knowledge the ENCLOSING function has built up, for
+    # the same reason and with the same shape as the state saved just below:
+    # `_gen_lifted_closure` calls `_reset_func` to generate the lambda's own
+    # body, and `_reset_func` clears these maps because their keys are temp
+    # names that recycle across functions. So lifting a lambda erased the
+    # enclosing function's record of what it had already stored —
+    # `d['k'] = lambda: False; d['j'] = lambda: 1; print(d['j']())` then saw
+    # an EMPTY set and the wrong answer for both. Restored below with the
+    # rest of it.
+    saved_callable_rets  = gen._callable_ret_types
+    saved_dict_callable  = gen._dict_callable_ret
+    gen._callable_ret_types = {}
+    gen._dict_callable_ret = {}
     saved_func_name      = gen.current_func_name
     saved_ret_type       = gen.func_ret_type
     saved_bb             = gen.bb_counter
@@ -4017,6 +4080,8 @@ def _lower_LambdaExpr(gen, node) -> tuple:
 
     gen.decls                   = saved_decls
     gen.body_lines              = saved_body
+    gen._callable_ret_types     = saved_callable_rets
+    gen._dict_callable_ret      = saved_dict_callable
     gen.var_types               = saved_var_types
     gen.current_func_name       = saved_func_name
     gen.func_ret_type           = saved_ret_type

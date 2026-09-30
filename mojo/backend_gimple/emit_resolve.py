@@ -2588,6 +2588,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             # can't distinguish a real bool literal from a genuine int.
             if gimple_exprtypes.is_python_bool_expr(gen, node.key):
                 gen._emit(f"  mojo_mark_dict_bool_values ({res});")
+            gen._note_dict_callable_ret(res, vv)
             vv64 = gen._to_int64(vt, vv)
             gen._emit(f"  mojo_dict_set_int ({res}, {kv}, {vv64});")
 

@@ -395,6 +395,18 @@ def _reset_func(gen, body: list = None, params: list = None,
     # Reset per function for the same reason _bound_method_ret_types is: temp
     # names (_tN) recycle across functions.
     gen._callable_ret_types: dict[str, str] = {}
+    # A DICT's lowered value -> the SET of callable return types stored into
+    # it. A dict is the one container whose value type is a single slot, so a
+    # per-key table does not exist; a set of what was stored is enough,
+    # because the consumer (a `d[k](...)` call site) only uses the answer
+    # when it is UNANIMOUS. A dict holding callables of different return
+    # types then keeps the old int64_t answer, which is the pre-existing
+    # behaviour — never a new wrong one. Without any of this, `d['k'] =
+    # lambda: False; print(d['k']())` printed `0`: the callable's return type
+    # was lost at the store, exactly as it was at the call before
+    # `_callable_ret_types` existed.
+    # Reset per function for the same reason as the maps above.
+    gen._dict_callable_ret: dict[str, set] = {}
     # Builtin-container method bound as a first-class VALUE (`append =
     # l.append`, the classic accumulator-aliasing idiom) — key: the C
     # name of the temp/var holding the boxed value; value: (receiver
@@ -3441,6 +3453,22 @@ def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
     gen._emit(f"  mojo_set_iter_free ({iter_t});")
+
+
+def note_dict_callable_ret(gen, dict_val: str, value_text: str) -> None:
+    """A callable stored into a dict keeps its return type for a later
+    `d[k](...)` call, which is the one place a dict subscript can be a
+    CALLEE. Called from every dict store of an int64 slot; a non-callable
+    value has no entry in `_callable_ret_types` and is a no-op, which is
+    what keeps this off the hot path."""
+    _rt = gen._callable_ret_types.get(value_text)
+    if not _rt:
+        return
+    _set = gen._dict_callable_ret.get(dict_val)
+    if _set is None:
+        _set = set()
+        gen._dict_callable_ret[dict_val] = _set
+    _set.add(_rt)
 
 
 def _gen_print(gen, args: list, kwargs: list = None):

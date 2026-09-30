@@ -465,6 +465,12 @@ def _gen_stmt_VarDecl(gen, node):
         # assignment and `f()` prints `0` for a `lambda: False`.
         if v in gen._callable_ret_types:
             gen._callable_ret_types[node.name] = gen._callable_ret_types[v]
+        # Same for the dict's own record of what was stored in it: a dict
+        # LITERAL is materialized into a temp and only then bound to the
+        # variable, so `d = {"k": lambda: False}; print(d["k"]())` looked the
+        # temp up and found nothing.
+        if v in gen._dict_callable_ret:
+            gen._dict_callable_ret[node.name] = gen._dict_callable_ret[v]
         # `append = l.append` (a builtin-container method bound as a
         # value, see _lower_builtin_method_value): carry the recorded
         # (receiver, method) binding from the RHS temp onto the variable,
@@ -1068,6 +1074,8 @@ def _gen_stmt_AssignStmt(gen, node):
         # call site keys on the variable's name.
         if v in gen._callable_ret_types:
             gen._callable_ret_types[tname] = gen._callable_ret_types[v]
+        if v in gen._dict_callable_ret:
+            gen._dict_callable_ret[tname] = gen._dict_callable_ret[v]
         # `append = l.append` (a builtin-container method bound as a
         # value, see _lower_builtin_method_value): carry the recorded
         # (receiver, method) binding from the RHS temp onto the variable,
@@ -1361,6 +1369,7 @@ def _gen_stmt_AssignStmt(gen, node):
                 # store and the print dispatch use too.
                 if gimple_exprtypes.is_python_bool_expr(gen, node.value):
                     gen._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
+                gen._note_dict_callable_ret(obj_v, v)
                 # Pass actual vtype so _emit_call can coerce pointers to int64_t
                 gen._emit_call('void', '', 'mojo_dict_set_int',
                                 [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
@@ -1416,6 +1425,7 @@ def _gen_stmt_AssignStmt(gen, node):
                     _, key_tmp2 = gen._char_to_cstr(it, idx_v, True, True)
                     if gimple_exprtypes.is_python_bool_expr(gen, node.value):
                         gen._emit(f"  mojo_mark_dict_bool_values ({dp});")
+                    gen._note_dict_callable_ret(dp, v)
                     # Pass actual vtype so _emit_call can coerce pointers to int64_t
                     gen._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
@@ -1429,6 +1439,7 @@ def _gen_stmt_AssignStmt(gen, node):
                                     [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
                                      ('char *', v)])
                 else:
+                    gen._note_dict_callable_ret(_dsw_dp, v)
                     gen._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', _dsw_dp), ('char *', _dsw_kv),
                                      (vtype, v)])
@@ -2640,6 +2651,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 _, key_tmp = gen._char_to_cstr(it2, idx_v, True, True)
                 if gimple_exprtypes.is_python_bool_expr(gen, node.value):
                     gen._emit(f"  mojo_mark_dict_bool_values ({obj_v});")
+                gen._note_dict_callable_ret(obj_v, v)
                 gen._emit_call('void', '', 'mojo_dict_set_int',
                                 [('MojoDict *', obj_v), ('char *', key_tmp), (vtype, v)])
             elif ot in ('int', 'int64_t'):
@@ -2668,6 +2680,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     _, key_tmp2 = gen._char_to_cstr(it2, idx_v, True, True)
                     if gimple_exprtypes.is_python_bool_expr(gen, node.value):
                         gen._emit(f"  mojo_mark_dict_bool_values ({dp});")
+                    gen._note_dict_callable_ret(dp, v)
                     gen._emit_call('void', '', 'mojo_dict_set_int',
                                     [('MojoDict *', dp), ('char *', key_tmp2), (vtype, v)])
             elif ot.endswith(' *') and gimple_exprtypes._struct_name_of(ot) not in gen.struct_field_types:

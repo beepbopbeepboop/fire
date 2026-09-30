@@ -761,6 +761,29 @@ main()
     # An ordinary `def` returning the same value is in the same test because
     # it was already right — it is what proves the loss is in the callable
     # VALUE path and not in the return-type inference.
+    # `d['k'](2, 3)` — a callable value held in a dict subscript, a
+    # name-keyed dispatch table — was stubbed to 0, exit 0, silently wrong.
+    # It was lumped in with the ONE other SubscriptExpr callee that is not a
+    # runtime value read (`Scalar[x.dtype](...)`, a comptime bracket
+    # argument), which `_static_generic_return_ctype` tells apart and which
+    # still keeps the stub.
+    #
+    # The `f = d['k']` line is in the same test because the doc records it as
+    # ALREADY working (`print(f(2, 3))` printed 5) — so it is the control
+    # that proves the loss is in the subscript-callee dispatch and not in the
+    # value representation.
+    test_gimple_stdout("gimple_call_through_subscript_callee", """\
+def main():
+    d = {}
+    d['k'] = lambda a, b: a + b
+    print(d['k'](2, 3))
+    f = d['k']
+    print(f(4, 5))
+    e = {"j": lambda: "hi"}
+    print(e["j"]())
+main()
+""", "5\n9\nhi\n")
+
     test_gimple_stdout("gimple_callable_value_keeps_its_return_type", """\
 def plain():
     return False
