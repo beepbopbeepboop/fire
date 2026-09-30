@@ -62,13 +62,63 @@ own reservation and queue behind itself.
 Exit status: the command's own, 125 if memcap killed it for exceeding its reservation, 126 if the
 request can never fit, 2 on usage errors.
 """
-import argparse, fcntl, json, os, subprocess, sys, time
+import argparse, re, fcntl, json, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_BUDGET_GB = 96.0
 
 # The environment variable through which a reservation covers its own tree.
 HELD = 'MEMSLOT_HELD'
+
+# BACKFILL ("sneaking in"). A reservation is a worst-case promise: a 96 GB holder may really use 4. Most
+# jobs in this repo are small and quick (under ~6 GB, seconds to minutes), and making them queue behind a
+# big reservation while tens of GB are plainly free wastes the machine (2026-09-30: four 8 GB test runs
+# waited minutes behind a 3.7 GB job that had reserved 96). So a SMALL request is admitted at once when the
+# machine's MEASURED free memory covers it with a margin. It still runs under its own ceiling (memcap at
+# the gigabytes it asked for), it is recorded in the ledger (`status` shows it) but does NOT count toward
+# the budget the head of the queue is waiting on, so backfill can never delay a big job.
+SNEAK_MAX_GB = 8.0          # only requests up to this size may sneak (env MEMSLOT_SNEAK_MAX_GB; 0 disables)
+SNEAK_CAP_GB = 32.0         # total sneaking at once (env MEMSLOT_SNEAK_CAP_GB)
+SNEAK_MARGIN_GB = 16.0      # measured-free memory that must remain AFTER the sneaker (env MEMSLOT_SNEAK_MARGIN_GB)
+
+
+def _envf(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def avail_gb():
+    """Memory the OS can hand out right now, in GB: free + speculative + inactive + purgeable pages.
+
+    `vm_stat` (macOS). None when it cannot be read, which means NO sneaking: a missing measurement must
+    never read as plenty. MEMSLOT_AVAIL_GB overrides it, for tests."""
+    fake = os.environ.get("MEMSLOT_AVAIL_GB")
+    if fake:
+        return float(fake)
+    try:
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=10).stdout
+        page = int(re.search(r"page size of (\d+) bytes", out).group(1))
+        pages = 0
+        for key in ("Pages free", "Pages speculative", "Pages inactive", "Pages purgeable"):
+            m = re.search(r"^%s:\s+(\d+)" % key, out, re.M)
+            pages += int(m.group(1)) if m else 0
+        return pages * page / 1024 ** 3
+    except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
+        return None
+
+
+def may_sneak(L, gb):
+    """True if a request of `gb` may be admitted as backfill right now (call under the ledger lock)."""
+    if gb > _envf("MEMSLOT_SNEAK_MAX_GB", SNEAK_MAX_GB):
+        return False
+    avail = avail_gb()
+    if avail is None:
+        return False
+    sneaking = sum(h["gb"] for h in L.data["holders"] if h.get("sneak"))
+    return (sneaking + gb <= _envf("MEMSLOT_SNEAK_CAP_GB", SNEAK_CAP_GB) + 1e-9
+            and avail - gb >= _envf("MEMSLOT_SNEAK_MARGIN_GB", SNEAK_MARGIN_GB))
 
 
 def ledger_dir():
@@ -181,7 +231,9 @@ class Ledger:
         self.lock.close()
 
     def used(self):
-        return sum(h["gb"] for h in self.data["holders"])
+        """Gigabytes reserved against the budget. Backfill (`sneak`) holders are not counted: they must never
+        delay the job at the head of the queue."""
+        return sum(h["gb"] for h in self.data["holders"] if not h.get("sneak"))
 
 
 def acquire(gb, label, budget, poll=0.5, announce=True, owner=""):
@@ -206,6 +258,11 @@ def acquire(gb, label, budget, poll=0.5, announce=True, owner=""):
             if head and head["ticket"] == ticket and L.used() + gb <= budget + 1e-9:
                 L.data["queue"] = [q for q in L.data["queue"] if q["ticket"] != ticket]
                 L.data["holders"].append({"pid": os.getpid(), "owner": owner, "job": 0,
+                                          "gb": gb, "label": label, "t": time.time()})
+                return ticket
+            if may_sneak(L, gb):            # small, and the machine has plenty free RIGHT NOW: backfill
+                L.data["queue"] = [q for q in L.data["queue"] if q["ticket"] != ticket]
+                L.data["holders"].append({"pid": os.getpid(), "owner": owner, "job": 0, "sneak": True,
                                           "gb": gb, "label": label, "t": time.time()})
                 return ticket
             used, ahead = L.used(), sum(1 for q in L.data["queue"] if q["ticket"] < ticket)
@@ -320,8 +377,8 @@ def status():
         b = budget_gb()
         print("budget %.1f GB, reserved %.1f GB, free %.1f GB" % (b, L.used(), b - L.used()))
         for h in L.data["holders"]:
-            print("  HOLD %6.1f GB  pid %-6d job %-6s %s (%.0fs)" % (
-                h["gb"], h["pid"], h.get("job") or "-", h["label"], time.time() - h["t"]))
+            print("  %s %6.1f GB  pid %-6d job %-6s %s (%.0fs)" % (
+                "SNEAK" if h.get("sneak") else "HOLD ", h["gb"], h["pid"], h.get("job") or "-", h["label"], time.time() - h["t"]))
             if h.get("owner"):
                 print("        owner %s" % h["owner"])
         for q in sorted(L.data["queue"], key=lambda q: q["ticket"]):
