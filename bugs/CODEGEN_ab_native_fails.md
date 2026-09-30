@@ -45,8 +45,8 @@ message, and a job carrying both `expect=` and `disabled=` is refused outright.
 The anti-rot is therefore mechanical rather than a matter of remembering: a
 fix cannot land without re-enabling the test, and this test cannot stay off
 forever. **When the divergence below is fixed, delete this file in the same
-commit** — that is the whole re-enabling procedure, and step 4 below is only
-for the case where you want to run it *before* it passes.
+commit** — that is the whole re-enabling procedure; §3 is only for the case
+where you want to run it *before* it passes.
 
 What did **not** change: `deps=['mojoc']` is still a dep, so the `native`
 bucket still builds the native compiler (3.7 GB measured, `small`) — that
@@ -59,11 +59,15 @@ The recorded evidence, and its limits, stated plainly because the difference
 matters for what to do next:
 
 - **It is a byte-parity divergence, not a crash and not a memory verdict.**
-  `mojo_boxed_is_str`'s 31-bit-tag-range bug — the segfault on any input
-  including a two-line program — was fixed in `e7fc3ece` (2026-09-27), and
-  `./mojoc --dump-full` on a two-line program is now exit 0 / 12.1 MB / 94.6 M
-  instructions. The marker that used to say "segfaults on any input" was
-  measured false and corrected; what is left is the dump comparison.
+  `./mojoc --dump-full` on a two-line program used to exit 139, and that
+  segfault was fixed in `e7fc3ece` (2026-09-27) — `mojo_boxed_is_str` had been
+  made to alias `_mojo_tagged_addr_ok` wholesale, so a misaligned `.rodata`
+  literal stopped classifying as a string and the compiler fell into formatting
+  addresses as decimal strings; the fix splits out `_mojo_ptr_shaped`
+  (BLOW.md §1). Re-measured on that tree: the two-line program is exit 0 /
+  12.1 MB / 94.6 M instructions. The marker that used to say "segfaults on any
+  input" was measured false and corrected; what is left is the dump
+  comparison.
 - **It used to pass.** `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`
   records `check-ab-native` at **30 passed / 0 failed** on 2026-09-21, after
   nine rounds of self-hosted-only fixes. The `expect=` marker first appeared
@@ -145,7 +149,7 @@ investigation. Read it with the threshold from CLAUDE.md: over ~4 GB (the
 | job | measured peak | reserved | in a bucket? | wall time | recommendation |
 |---|---|---|---|---|---|
 | `native-dumpfull` | **31.3 GB** (largest job in the registry that completes) | `program` 55 GB | `gate`, `native` | ~126 s (BLOW.md §0, 2026-09-27) | **disable it too**, pointing at `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`. Same reasoning as `ab-native` and a worse ratio: 31.3 GB and 55 GB reserved for a known red. It is the one job whose run is also how the blowup's numbers get re-measured, so pair the disable with a standing instruction to re-run it by hand (`make check-native-dumpfull` / `python3 tools/suite.py native-dumpfull`) when that work moves — or, better, land the blowup fix first and decide again. |
-| `bootstrap-stage2-dumps` | 0.5 GB **per item**, 47 items | `tiny` 4 GB each (24 at a time under the ledger) | `gate`, `bootstrap` | not recorded; a fanout, so bounded by the slowest item | **leave it as `expect=`.** 4 GB per item is at the floor class, and the fanout is 47 cheap jobs rather than one expensive one — under the 4 GB line, so by the stated threshold it belongs to the cheap side. Note what it costs in *time*: it is on the critical path of the whole `bootstrap` chain, and 47 recorded FAILs would buy nothing. If disabling it, the 5 dependents (`bootstrap-stage2-transitive` … `bootstrap-verify`) would then have to be disabled too, since a disabled dep no longer skips its dependents. |
+| `bootstrap-stage2-dumps` | 0.5 GB **per item**, 47 items | `tiny` 4 GB each (24 at a time under the ledger) | `gate`, `bootstrap` | not recorded; a fanout, so bounded by the slowest item | **leave it as `expect=`.** 4 GB per item is at the floor class, and the fanout is 47 cheap jobs rather than one expensive one — under the 4 GB line, so by the stated threshold it belongs to the cheap side. Note what it costs in *time*: it is on the critical path of the whole `bootstrap` chain, and 47 recorded FAILs would buy nothing. If disabling it, note what a disabled dep does to its dependents: since DISABLED satisfies a dep, the 5 jobs downstream of it (`bootstrap-stage2-transitive`, `bootstrap-stage3-dumps`, `bootstrap-stage3-transitive`, `bootstrap-verify`, `bootstrap-validate`) would each have to be disabled as well, or `verify` would compare a fresh stage1 against a stage2 that was never dumped. |
 | `x86-containers` | unmeasured | `small` 8 GB | **no bucket** | not recorded | none needed — leave it. It runs in nothing today. |
 | `mutable-async-capture` | unmeasured | `small` 8 GB | **no bucket** | not recorded | none needed — leave it. |
 | `transitive-closure-capture` | unmeasured | `small` 8 GB | **no bucket** | not recorded | none needed — leave it. |
