@@ -1106,6 +1106,7 @@ def compile_formal(source_path: str, output: str = None,
         check_frame_subscript_escapes(functions)
         check_frame_holder_rebinds(functions)
         check_construction_mismatches(functions)
+        check_shadowed_global_reads(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
         check_module_symbols(
             functions, {st.name: st for st in structs},
@@ -1264,6 +1265,7 @@ def _formal_module_functions(source_path: str,
         check_frame_subscript_escapes(functions)
         check_frame_holder_rebinds(functions)
         check_construction_mismatches(functions)
+        check_shadowed_global_reads(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
         # The third of the three, and HERE for the reason the other two are:
         # a name the build cannot place is a codegen finding about THIS file,
@@ -1606,13 +1608,30 @@ def _expr_spelling(node) -> str:
     reader to the AST to find the call, which is the opposite of what a
     diagnostic quoting a call site is for.  A shape with no short spelling is
     named by its type, which is at least a true statement and is obviously a
-    placeholder to anyone who reads it."""
+    placeholder to anyone who reads it.
+
+    The OPERATOR arms came later than the rest and the reason is a message that
+    read `G is read in bump() at BinaryOp` — a true statement, a placeholder,
+    and useless, because the reader's question is which read.  Every refusal that
+    quotes a value goes through this one function, so the fix belongs here rather
+    than in each caller."""
     if isinstance(node, F.IdentExpr):
         return node.name
     if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr):
         return f"{node.func.name}({', '.join(_expr_spelling(a) for a in (node.args or []))})"
     if isinstance(node, F.MemberExpr):
         return _member_chain(node)
+    if isinstance(node, F.BinaryOp):
+        return (f"{_expr_spelling(node.left)} {node.op} "
+                f"{_expr_spelling(node.right)}")
+    if isinstance(node, F.UnaryOp):
+        return f"{node.op}{_expr_spelling(node.operand)}"
+    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return (f"{'(' if isinstance(node, F.TupleExpr) else ''}"
+                f"{', '.join(_expr_spelling(e) for e in node.elements)}"
+                f"{')' if isinstance(node, F.TupleExpr) else ''}")
+    if isinstance(node, F.SubscriptExpr):
+        return f"{_expr_spelling(node.obj)}[{_expr_spelling(node.index)}]"
     for attr in ("value", "name"):
         v = getattr(node, attr, None)
         if isinstance(v, (str, int, float, bool)):
@@ -3967,6 +3986,171 @@ def _rewrite_child(child, sites: dict, stores: set):
     return child
 
 
+def _bound_before_first_statement(stmts) -> set:
+    """Names a function's body binds NOT by an assignment: a `global`
+    declaration, a loop target, a `with … as` alias, a comprehension variable.
+
+    Every one of these is a name that is either not a local at all
+    (`global`) or is local and ALREADY BOUND before the first statement's value
+    is evaluated.  A read of one of them is legal, and a check that flagged it
+    would be refusing correct code — which is the failure mode
+    `bugs/FORMAL_a_frame_holder_rebound_from_a_word.md` records for the receiver
+    exclusion, and the reason this is a named helper rather than a condition
+    repeated at each use."""
+    out = set()
+    for node in M.iter_nodes(stmts):
+        if isinstance(node, (F.AssignStmt, F.VarDecl, F.AugAssignStmt)):
+            continue
+        if isinstance(node, F.GlobalStmt):
+            for n in (getattr(node, "names", None) or ()):
+                out.add(n.name if hasattr(n, "name") else n)
+            continue
+        target = getattr(node, "target", None)
+        if isinstance(target, F.IdentExpr):
+            out.add(target.name)
+        elif isinstance(target, (F.TupleExpr, F.ListExpr)):
+            for e in target.elements:
+                if isinstance(e, F.IdentExpr):
+                    out.add(e.name)
+        if isinstance(node, F.WithStmt):
+            for item in (getattr(node, "items", None) or ()):
+                alias = getattr(item, "alias", None)
+                if isinstance(alias, F.IdentExpr):
+                    out.add(alias.name)
+    return out
+
+
+def _assign_target_names(node) -> list:
+    """The plain names one assignment statement binds, or [] for any other shape."""
+    if isinstance(node, F.AssignStmt):
+        if isinstance(node.target, F.IdentExpr):
+            return [node.target.name]
+        if isinstance(node.target, (F.TupleExpr, F.ListExpr)):
+            return [e.name for e in node.target.elements
+                    if isinstance(e, F.IdentExpr)]
+        return []
+    if isinstance(node, F.VarDecl):
+        return [node.name]
+    if isinstance(node, F.AugAssignStmt) and isinstance(node.target,
+                                                        F.IdentExpr):
+        # An augmented assignment READS before it writes, so a name reached only
+        # this way is a read-before-assign of exactly the same kind — and CPython
+        # raises on it too.
+        return [node.target.name]
+    return []
+
+
+def _declared_global_names(stmts) -> set:
+    """The names a function's body declares `global`."""
+    out = set()
+    for node in M.iter_nodes(stmts):
+        if not isinstance(node, F.GlobalStmt):
+            continue
+        for n in (getattr(node, "names", None) or ()):
+            out.add(n.name if hasattr(n, "name") else n)
+    return out
+
+
+def _collect_shadowed_global_reads(functions) -> None:
+    """PARK the two ways a function and a module-level binding of the same name
+    come to disagree: reading a local it has not assigned, and writing a global
+    it has declared.
+
+    1. `G = 5` at module level, then `def bump(): G = G + 1; return G`.  The
+       right-hand `G` does not resolve in module scope — a name assigned anywhere
+       in a function body is local to that body from its first line — so CPython
+       raises `UnboundLocalError` and the program has no number.  This path reads
+       the name's local home, which has no value, and answers whatever the
+       register allocator left there: measured, 11 on x86-64 and 78152773 on
+       arm64, from identical source, with the module's `G` correctly left at 5.
+    2. `def bump(): global G; G = G + 1; return G`.  This one the language
+       allows and the value model has nowhere for: there is no `__DATA` slot to
+       redirect the write into, so the emitters treat `global` as a no-op and the
+       assignment lands in a local.  Measured, CPython 6 and 6; this path 10601485
+       and 5 on arm64, 11 and 5 on x86-64.
+
+    **The read half is scoped to the module-global case, and the measurement is
+    why.**  The language's rule is general — reading any local before its first
+    assignment raises — and enforcing the general form was measured at **233
+    sites in 57 files of this repository** and **8 in 5 stdlib files** (a
+    syntactic scan with a call's callee, a `global` declaration and every
+    loop/with/comprehension target already excluded), which is a coverage cost of
+    a different order from the one site this fixes.  With the name ALSO bound at
+    module level the collision is unambiguous — the source is visibly asking
+    about the module's binding, and the alternative reading is the one CPython
+    rejects — and the same scan finds **0 sites in 319 repository files and 0 in
+    294 stdlib files**.  The general remainder is written down in
+    `bugs/FORMAL_a_local_read_before_its_first_assignment.md`.
+
+    Parked rather than raised, for the reason the other five late frame checks
+    are: `_prepare_functions` runs before `_resolve_imports`, so a refusal from
+    inside it preempts the import diagnosis.
+    """
+    globals_ = set(M.module_symbols())
+    if not globals_:
+        return
+    for fn in functions:
+        stmts = list(getattr(fn, "body", None) or ())
+        if not stmts:
+            continue
+        declared_globals = _declared_global_names(stmts) & globals_
+        prebound = _bound_before_first_statement(stmts)
+        prebound |= set(M.function_param_shape(fn).names or ())
+        assigned = set()
+        for node in M.iter_nodes(stmts):
+            assigned |= set(_assign_target_names(node))
+        if declared_globals & assigned:
+            fn._mutated_module_global = sorted(declared_globals & assigned)[0]
+            return
+        candidates = (assigned & globals_) - prebound - declared_globals
+        if not candidates:
+            continue
+        bound = set(prebound)
+        for node in M.iter_nodes(stmts):
+            names = _assign_target_names(node)
+            if not names:
+                continue
+            value = getattr(node, "value", None)
+            if value is None:
+                continue
+            # A tuple target's value is evaluated before ANY store, so a read of
+            # a tuple target's own name there is legal; a plain `x = x + 1` is
+            # not, and is the finding.
+            own = (set() if isinstance(getattr(node, "target", None),
+                                       F.IdentExpr)
+                   else set(names))
+            callee_names = {n.func.name for n in M.iter_nodes(value)
+                            if isinstance(n, F.CallExpr)
+                            and isinstance(n.func, F.IdentExpr)}
+            for n in M.iter_nodes(value):
+                if not isinstance(n, F.IdentExpr):
+                    continue
+                if n.name not in candidates or n.name in bound:
+                    continue
+                if n.name in own or n.name in callee_names:
+                    continue
+                fn._shadowed_global_reads = [(n.name, _expr_spelling(value))]
+                break
+            if getattr(fn, "_shadowed_global_reads", None):
+                break
+            bound |= set(names)
+
+
+def check_shadowed_global_reads(functions) -> None:
+    """Raise the read-before-assign and mutated-global findings
+    `_collect_shadowed_global_reads` parked.  The sixth late check, at the entry
+    points, for the reason the other five are."""
+    for fn in functions:
+        mutated = getattr(fn, "_mutated_module_global", None)
+        if mutated is not None:
+            raise CodegenError(M.mutated_module_global_refusal(
+                mutated, fn.name))
+        for name, value_spelling in (
+                getattr(fn, "_shadowed_global_reads", ()) or ()):
+            raise CodegenError(M.shadowed_module_global_read_refusal(
+                fn.name, name, value_spelling))
+
+
 def _materialize_entry_dunder_name(functions: list) -> int:
     """Replace a read of `__name__` in the MODULE BODY with `"__main__"`.
 
@@ -4547,6 +4731,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # to be visible to the substitution or the module constant would replace
     # the function's OWN name.
     _substitute_module_constants(functions)
+    _collect_shadowed_global_reads(functions)
     _materialize_entry_dunder_name(functions)
     # LAST, on the FINAL function list: which local names hold a frame
     # address is a property of the code that survives every rewrite above, and

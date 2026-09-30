@@ -343,7 +343,7 @@ FIXED_CASES = [
 # through a method's own `self` — which is a `self.x` store and not a rebinding
 # of `self`, and is the shape a too-eager check would break first.
 HOLDER_ASSIGN_CASES = [
-    ("holder_may_be_construction_copy_and_self_write",
+("holder_may_be_construction_copy_and_self_write",
      "class R:\n"
      "    def __init__(self, v):\n"
      "        self.a = v\n"
@@ -370,6 +370,33 @@ HOLDER_ASSIGN_CASES = [
      "    printf(\"a=%d b=%d c=%d\", pick(r, n), t.get(), r.total())\n"
      "    return 0\n",
      "a=9 b=3 c=3"),
+]
+
+# ── what a module-level binding may be used for, which is what the two
+#    read/assign refusals below are about ──
+#
+# Both refusals are about a function and a module-level name COLLIDING, and a
+# check that fired on the collision rather than on the shape would refuse the
+# case CPython is happy with: a local that shadows a module global without
+# writing it.  That is the one the path already gets right — a folded module
+# constant is SUBSTITUTED at every read, and a local that shadows it never
+# reaches the module's storage — so it is pinned here, together with the
+# shadow-free read beside it.
+MODULE_GLOBAL_CASES = [
+    ("a_local_may_shadow_a_module_global_and_the_module_keeps_its_value",
+     "G = 5\n"
+     "\n"
+     "def shadow():\n"
+     "    G = 99\n"
+     "    return G\n"
+     "\n"
+     "def rd():\n"
+     "    return G\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"s=%d r=%d g=%d\", shadow(), rd(), G)\n"
+     "    return 0\n",
+     "s=99 r=5 g=5"),
 ]
 
 # (name, source, needle the refusal must contain)
@@ -476,7 +503,7 @@ REFUSALS = [
     # three-slot frame HOLDER — and the field store landed in read-only `__TEXT`.
     # Measured before the fix on both architectures: SIGBUS, exit 138, from a
     # green build, on the stdlib's own three-field `String` verbatim.
-    ("a_name_that_is_both_a_struct_and_a_conversion_is_refused",
+        ("a_name_that_is_both_a_struct_and_a_conversion_is_refused",
      "struct String:\n"
      "    var _ptr_or_data: Pointer[UInt8]\n"
      "    var _len_or_data: Int\n"
@@ -488,6 +515,47 @@ REFUSALS = [
      "    a._len_or_data = 5\n"
      "    return a.size()\n",
      "a = String(...) binds a to a value this path holds as TEXT"),
+    # A LOCAL READ BEFORE IT HAS BEEN ASSIGNED, where the name is also a
+    # module-level binding.  The right-hand `G` does NOT resolve in module
+    # scope: a name assigned anywhere in a function body is local to that body
+    # from its first line, so CPython raises UnboundLocalError and the program
+    # has no number.  What this path did was read the local's register, which
+    # holds whatever the allocator left there — 11 on x86-64 and 78152773 on
+    # arm64 from identical source.  The refusal is also where the filing's
+    # proposed fix is corrected: making the gate order-dependent would answer 6,
+    # which is a number CPython never produces.
+    ("a_local_read_before_its_first_assignment_is_refused",
+     "G = 5\n"
+     "\n"
+     "def bump():\n"
+     "    G = G + 1\n"
+     "    return G\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"local=%d global=%d\", bump(), G)\n"
+     "    return 0\n",
+     "G is read in bump() at `G + 1`"),
+    # THE SAME NAME, WRITTEN through a `global` declaration — which the language
+    # allows and the value model has nowhere for.  There is no `__DATA` slot to
+    # redirect the write into, so the emitters treat the declaration as a no-op
+    # and the assignment lands in a local while the module's name still folds to
+    # the value it was bound with.  Measured: CPython 6 and 6; this path
+    # 10601485 and 5 on arm64, 11 and 5 on x86-64.
+    ("a_module_global_a_function_declares_global_and_assigns_is_refused",
+     "G = 5\n"
+     "\n"
+     "def bump():\n"
+     "    global G\n"
+     "    G = G + 1\n"
+     "    return G\n"
+     "\n"
+     "def rd():\n"
+     "    return G\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"bump=%d read=%d\", bump(), rd())\n"
+     "    return 0\n",
+     "G is declared `global` in bump() and assigned there"),
 ]
 
 
@@ -601,6 +669,7 @@ def main():
     everything = ([(c, False) for c in CASES]
                   + [(c, False) for c in TUPLE_STORE_CASES]
                   + [(c, False) for c in HOLDER_ASSIGN_CASES]
+                  + [(c, False) for c in MODULE_GLOBAL_CASES]
                   + [(c, "fixed") for c in FIXED_CASES]
                   + [(c, True) for c in REFUSALS])
     selected = [c for c in everything if not args.cases or c[0][0] in args.cases]

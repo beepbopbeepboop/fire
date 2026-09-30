@@ -6722,6 +6722,129 @@ def frame_len_refusal(spelled: str, struct_names) -> str:
         f"method of the receiver's own struct is a call this backend makes")
 
 
+def mutated_module_global_refusal(name: str, fn_name: str) -> str:
+    """Why a function cannot WRITE a module global it declares `global`.
+
+    The design decision this path already made and this message reports is in
+    the comment above `GlobalSymbol`: a module-level name is either FOLDED — its
+    value is literal-only, substituted at every read, and needs no storage
+    because nothing ever stores it — or it is a real mutable-or-computed global
+    with nowhere to live, because a formal value lives in a function's own stack
+    scratch and that scratch is reclaimed when the function returns.  There is no
+    `__DATA` slot to redirect a write into, and the emitters say so where the
+    declaration is handled: `formal/arm64_codegen.py`'s `GlobalStmt` branch is
+    "the declaration is a no-op and the following AssignStmt still targets the
+    local", with the same words in x86-64's.
+
+    So `global G; G = G + 1` writes a LOCAL, and the module's `G` keeps the value
+    it was folded with — and the two architectures disagree about the local while
+    both are wrong.  Measured, on
+
+    ```
+    G = 5
+    def bump():
+        global G
+        G = G + 1
+        return G
+    def read():
+        return G
+    ```
+
+    CPython answers 6 and 6.  This path answers **10601485 and 5** on arm64 and
+    **11 and 5** on x86-64: the write landed in a register, the read of the
+    module's name still folds to the 5 it was bound with, and the two
+    architectures cannot agree on the first number because it was never
+    computed.  A program that prints two numbers and gets four wrong ones, two of
+    them architecture-dependent, is the shape this backend's refusals exist for.
+
+    Declaring `global` is not the mistake — it is the only correct spelling for
+    what the source means, and the analysis is what has nowhere to put it.  So
+    the message says what the path can do instead: fold the value at module level
+    and read it, or move the computation into a function and pass the result in.
+    """
+    return (
+        f"{name} is declared `global` in {fn_name}() and assigned there, so the "
+        f"program means to WRITE the module's {name} — and this path has no "
+        f"storage for that. A formal value lives in a function's own stack "
+        f"scratch and that scratch is reclaimed when the function returns, so "
+        f"there is no location a write to a module-level name could outlive; a "
+        f"module-level name whose value the build can FOLD is substituted at "
+        f"every read and needs no storage precisely because nothing ever stores "
+        f"it, and this assignment is that store. The declaration is not the "
+        f"mistake — it is the only correct spelling for what the source means, "
+        f"and the analysis is what has nowhere to put it. Measured: CPython "
+        f"answers 6 and 6 for a `global {name}` increment read twice, and this "
+        f"path answers 10601485 and 5 on arm64 and 11 and 5 on x86-64 — the "
+        f"write landed in a register, the module's {name} still folds to the "
+        f"value it was bound with, and the two architectures cannot agree on "
+        f"the first number because it was never computed. Make the module-level "
+        f"binding a literal (or literal-only arithmetic on literals) and read "
+        f"it, or move the computation into a function and pass the result in")
+
+
+def shadowed_module_global_read_refusal(fn_name: str, name: str,
+                                       value_spelling: str) -> str:
+    """Why a function cannot read a module global it also assigns.
+
+    **The premise this corrects is worth stating, because the obvious reading of
+    the program is wrong.**  For
+
+    ```
+    G = 5
+    def bump():
+        G = G + 1
+        return G
+    ```
+
+    the right-hand `G` does NOT resolve in module scope.  A name assigned
+    anywhere in a function body is LOCAL to that body from the first line — that
+    is Python's rule, it is decided when the function is compiled, and it is why
+    CPython raises here:
+
+    ```
+    UnboundLocalError: cannot access local variable 'G' where it is not
+    associated with a value
+    ```
+
+    (measured, CPython 3.14, the same text).  So there is no number this program
+    has, and the only honest answer is that it does not lower.  What this path
+    does instead is read the name's LOCAL home, which has never been initialised,
+    and answer whatever the register allocator left there: measured on this tree,
+    `main` printed the local as **11** on x86-64 and as **78152773** on arm64,
+    with the module's `G` correctly left at 5 in both.  Two architectures, two
+    numbers, neither of them written by the source — and the difference between
+    them is register allocation, which is the signature of a value that was never
+    computed.
+
+    The read is left unsubstituted because `_substitute_module_constants` treats
+    the name as a local of this function, which it is; that is correct, and it is
+    also why the read has no value to give.
+
+    The repair named is the one the language offers, and it is not "make the gate
+    order-dependent": a name that is local throughout cannot be made to read from
+    the module before its first assignment, because there is no such reading.
+    `global G` says the module's `G` IS the local, which is a different program
+    and the right one to write when that is what is meant.
+    """
+    return (
+        f"{name} is read in {fn_name}() at `{value_spelling}`, before anything in "
+        f"that function has assigned it — and {name} IS a local of {fn_name}() "
+        f"from its first line, because the function assigns it, and it is also a "
+        f"module-level binding of this module. That is the collision: the read "
+        f"has no home. The language's own answer is UnboundLocalError (measured, "
+        f"CPython: \"cannot access local variable '{name}' where it is not "
+        f"associated with a value\"), because a name assigned anywhere in a "
+        f"function body is local to that body throughout — it does NOT resolve "
+        f"in module scope until after the assignment, and there is no ordering "
+        f"that makes this read valid. What this path did instead is read the "
+        f"local's register, which holds whatever the allocator left there: "
+        f"measured, {fn_name}() returned 11 on x86-64 and 78152773 on arm64, two "
+        f"numbers and neither of them written by the source. Either declare "
+        f"`global {name}`, which makes the module's binding the local and is a "
+        f"different program, or read the module-level name from a function that "
+        f"does not also assign it")
+
+
 def holder_rebound_from_a_word_refusal(fn_name: str, name: str,
                                        value_spelling: str,
                                        frame_spelling: str,

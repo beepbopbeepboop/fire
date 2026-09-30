@@ -6435,6 +6435,39 @@ EQ_DISPATCH_CASES = [
      "    r = 5\n"
      "    return r.a\n",
      "refuse:r is assigned 5 in main()", None),
+    # A LOCAL READ BEFORE IT HAS BEEN ASSIGNED, on a name that is also a
+    # module-level binding.  The right-hand `G` does NOT resolve in module scope:
+    # a name assigned anywhere in a function body is local to that body from its
+    # first line, so CPython raises UnboundLocalError and the program has no
+    # number.  What this path did was read the local's uninitialised register —
+    # 78152773 on arm64 and 11 on x86-64 from identical source.  It is also where
+    # bugs/FORMAL_local_shadows_module_global's proposed fix is corrected:
+    # making the gate order-dependent would answer 6, a number CPython never
+    # produces.
+    ("a_local_read_before_its_assignment_is_refused",
+     "G = 5\n"
+     "def bump():\n"
+     "    G = G + 1\n"
+     "    return G\n"
+     "def main(n):\n"
+     "    return bump()\n",
+     "refuse:G is read in bump() at `G + 1`", None),
+    # The sibling the filing did not mention: the same name WRITTEN through a
+    # `global` declaration, which the language allows and the value model has
+    # nowhere for.  There is no storage a write could outlive a frame in, so both
+    # emitters treat the declaration as a no-op — CPython answers 6 and 6 where
+    # this path answered 10601485 and 5 on arm64 and 11 and 5 on x86-64.
+    ("a_mutated_module_global_is_refused",
+     "G = 5\n"
+     "def bump():\n"
+     "    global G\n"
+     "    G = G + 1\n"
+     "    return G\n"
+     "def rd():\n"
+     "    return G\n"
+     "def main(n):\n"
+     "    return bump() + rd()\n",
+     "refuse:G is declared `global` in bump() and assigned there", None),
 ]
 
 
