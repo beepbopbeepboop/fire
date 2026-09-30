@@ -124,7 +124,54 @@ LITERALS = [
     # "unterminated string literal" here, not "triple-quoted" — the exact
     # distinction that made the old behaviour look like a near-miss.
     ("term_five_run",       Q3 + "\\" + '"' * 5,            None),
+
+    # ── CHARACTERS `str.splitlines()` CALLS LINE BREAKS AND THE LANGUAGE DOES
+    # NOT ──
+    #
+    # The tokenizer used `src.splitlines()`, and that also breaks on vertical
+    # tab, form feed, the four C1 information separators, NEL, LINE SEPARATOR
+    # and PARAGRAPH SEPARATOR. CPython's tokenizer breaks on none of them, so
+    # each of these used to be cut in half: the literal produced NO STRING token
+    # at all, and the diagnostic that followed named a line with no problem on
+    # it. `ours` is the byte-exact content, so for these the value is a
+    # one-character hole in a three-character string.
+    ("vtab_in_a_literal",        '"a\vb"',  "a\vb"),
+    ("formfeed_in_a_literal",    '"a\fb"',  "a\fb"),
+    ("c1_fs_in_a_literal",       '"a\x1cb"', "a\x1cb"),
+    ("c1_gs_in_a_literal",       '"a\x1db"', "a\x1db"),
+    ("c1_rs_in_a_literal",       '"a\x1eb"', "a\x1eb"),
+    ("nel_in_a_literal",         '"a\x85b"', "a\x85b"),
+    ("line_separator_in_a_lit",  '"a\u2028b"', "a\u2028b"),
+    ("para_separator_in_a_lit",  '"a\u2029b"', "a\u2029b"),
+    ("vtab_in_a_single_quoted",  "'a\vb'",  "a\vb"),
+    # The control row in the other direction: a C0 control character
+    # `splitlines()` does NOT break on, so it worked by accident. It is here so
+    # that a fix which narrowed the set the wrong way — to "any control
+    # character" — goes red here instead of passing by coincidence.
+    ("control_char_that_is_not_a_break", '"a\x1fb"', "a\x1fb"),
+    # ── and the three that ARE line breaks, in a single-quoted literal ──
+    #
+    # A single-quoted literal may not cross a line break, so CPython refuses
+    # each of these and so must this. `\r` is the row that used to be ACCEPTED
+    # with its literal silently destroyed: `_scan_string_end` only knew about
+    # `\n`, while the line split knew about `\r` — one function disagreeing with
+    # the other about the same question, which is the shape this whole area has.
+    ("lf_in_a_single_quoted",       "'a\nb'",   None),
+    ("cr_in_a_single_quoted",       "'a\rb'",   None),
+    ("crlf_in_a_single_quoted",     "'a\r\nb'", None),
+    ("cr_in_a_double_quoted",       '"a\rb"',   None),
+    # ── a TAB, which is whitespace to the tokenizer and CONTENT to a literal ──
+    #
+    # The per-line pass used `line.expandtabs(_INDENT_SIZE)` on the whole line,
+    # which is for the INDENT and nothing else — `indent` is computed from the
+    # leading run alone. In code a tab is whitespace either way, so expanding the
+    # body changed no token; inside a literal it rewrote the value, and
+    # `print("x<TAB>y")` printed `x y` here and `x<TAB>y` in CPython.
+    ("tab_in_a_literal",     '"a\tb"',  "a\tb"),
+    ("tab_in_a_single_quoted", "'a\tb'", "a\tb"),
+    ("tab_in_a_triple",      '"""a\tb"""', "a\tb"),
 ]
+
 
 # Programs that must keep their shape: a literal followed by more source. The
 # reported failure was never "this one literal parsed wrong", it was "the rest
@@ -170,6 +217,35 @@ PROGRAMS = {
         '    var a = ' + Q3 + "\\" + Q3 + '\n'
         '    print(a)\n'
         '    print(1)\n', None),
+    # A line-break character `str.splitlines()` invented, inside a COMMENT and
+    # after a quote. The split put `b"` on a line of its own, `_strip_inline_
+    # comment` had already run on the half above it, and the tail became a bare
+    # NAME statement — a SECOND top-level statement out of a one-statement
+    # program, which then raised NameError on `b` and reported it against the
+    # def below. The count is the whole assertion: the program ran, and ran
+    # against a statement the source does not contain.
+    "control_char_in_a_comment_is_not_a_line": (
+        '# a\vb"\n'
+        'def main():\n'
+        '    return 7\n', ("top", 1)),
+    # And the same character inside a real literal, where the split destroyed the
+    # STRING token outright: the program was refused with a diagnostic naming a
+    # line two below the one with the problem.
+    "control_char_in_a_literal_keeps_the_program": (
+        'def main():\n'
+        '    var a = "x\vy"\n'
+        '    return 7\n', ("main", 2)),
+    # The guard in the other direction for the tab: a tab is still an INDENT.
+    # `_indent_expanded` expands the leading run only, and a tab at the start of
+    # a line lands on a column boundary, so the nesting must be unchanged — a
+    # fix that stopped expanding tabs altogether would leave the inner `return`
+    # at the outer level and this count would be 2.
+    "tab_indentation_is_still_an_indent": (
+        "def main():\n"
+        "\tx = 1\n"
+        "\tif x == 1:\n"
+        "\t\treturn 7\n"
+        "\treturn 0\n", ("main", 3)),
 }
 
 # A backslash-newline pair inside a literal is a LINE CONTINUATION, and
@@ -288,12 +364,12 @@ def check_continuation(name, text, ours_expected, cpython_expected, verbose):
 
 
 def check_code_continuation_is_unchanged(verbose):
-    """The guard in the other direction: OUTSIDE a string the pair is still a
+    r"""The guard in the other direction: OUTSIDE a string the pair is still a
     line continuation, and the space the join has always put there is what keeps
     `1 +` and `2` two tokens. A fix that dropped the space unconditionally would
-    glue them into one NAME, and would break every `\` continuation in the 392
-    `.mojo` files on this tree — the pair is common there, just never inside a
-    literal."""
+    glue them into one NAME, and would break every backslash continuation in the
+    392 `.mojo` files on this tree — the pair is common there, just never inside
+    a literal."""
     src = ("def main():\n"
            "    a = 1 + \\\n"
            "        2\n"
@@ -499,11 +575,44 @@ def run_end_to_end(verbose):
                  '    print(c)\n'
                  '    print(len(a) + len(b) + len(c))\n'
                  '    return 0\n')
+    # The fourth oracle-able program: characters that `str.splitlines()` calls
+    # line breaks and the language does not, inside literals. CPython's value is
+    # three characters and so is this path's (byte-exact), so the two agree and
+    # CPython is the oracle — which is the point: the row is here because before
+    # the fix this path had NO STRING token for any of them and the program did
+    # not build at all.
+    # All three characters are single-byte, deliberately: `len` on this path
+    # counts BYTES (a string is a `char *`), so a multi-byte character here
+    # would make the length row a test of that instead of of this.
+    not_breaks = ('def main():\n'
+                  '    a = "x\vy"\n'
+                  '    b = "p\fy"\n'
+                  '    c = "m\x1cy"\n'
+                  '    print(len(a) + len(b) + len(c))\n'
+                  '    print(a)\n'
+                  '    print(b)\n'
+                  '    print(c)\n'
+                  '    return 0\n')
+    # A TAB inside a literal, which the per-line pass used to expand on its way
+    # to computing an indent. `od -c` on the image's stdout is the only way to
+    # see this one: a space and a tab both look like nothing in a diff, so the
+    # length row is the one that actually catches it, and both are asserted.
+    literal_tab = ('def main():\n'
+                   '    a = "x\ty"\n'
+                   '    b = "p\tq"\n'
+                   '    print(len(a) + len(b))\n'
+                   '    print(a)\n'
+                   '    print(b)\n'
+                   '    return 0\n')
     cases = [
         # (name, mojo text, python text or None, expected stdout, expected exit)
         ("agree", agree, agree + "main()\n", 'p"q\nx\ny\nsay "hi"\n14\n', 0),
         ("byte_exact", byte_exact, None, 'a\\"b\np\\nq\n4\n4\n', 0),
         ("continued", continued, continued + "main()\n", 'abcd\nxy\nm\n7\n', 0),
+        ("not_line_breaks", not_breaks, not_breaks + "main()\n",
+         '9\nx\vy\np\fy\nm\x1cy\n', 0),
+        ("literal_tab", literal_tab, literal_tab + "main()\n",
+         '6\nx\ty\np\tq\n', 0),
     ]
     failures = []
     with tempfile.TemporaryDirectory() as tmp:
