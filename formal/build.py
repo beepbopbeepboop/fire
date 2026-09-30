@@ -3727,8 +3727,22 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
         return node
     if isinstance(node, (F.AssignStmt, F.AugAssignStmt, F.VarDecl)):
         # The target is a store: leave it, and walk the value side only.
-        _apply_module_constant_sites(
-            getattr(node, "value", None), sites, stores)
+        #
+        # …through `_rewrite_child`, which RETURNS a replacement, and not
+        # through this function, which rewrites in place. That is the whole
+        # difference and it was a live bug: a bare `IdentExpr` has no child
+        # slots to rewrite (its fields are `name`, `line` and `col`, all
+        # scalars), so handing one to the in-place walk walked straight
+        # through it and left the name in place. Every other position reached
+        # the replacement — a list element is matched in the list branch, and
+        # every other single child goes through `_rewrite_child` — so the
+        # substitution silently covered `return G`, `print(G)` and `G + 1` and
+        # missed `x = G`, `x: Int = G` and `h.a = G`. The consequence is the
+        # `has no home` refusal, on both architectures, for a construct the
+        # build answers: `G = 7` then `h.v = G` inside a function was refused
+        # rather than reading the 7.
+        node.value = _rewrite_child(getattr(node, "value", None), sites,
+                                    stores)
         return
     for name in getattr(node, "__dataclass_fields__", {}):
         setattr(node, name,

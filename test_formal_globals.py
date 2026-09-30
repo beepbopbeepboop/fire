@@ -162,6 +162,49 @@ CASES = [
      "    print(b)\n"
      "    return 0\n", "3\n11\n"),
 
+    # ── where the substitution is READ from ──
+    #
+    # Every case above reads a module-level name in a position the substitution
+    # already covered — as a return value, as an argument, on the right of a
+    # binop. These two read it from the one position it did NOT cover, and the
+    # gap was live on master: `_apply_module_constant_sites` rewrote in place,
+    # so a bare `IdentExpr` — which has no child slots, its fields being `name`,
+    # `line` and `col` — was walked straight through and left alone. Every
+    # other position reached the replacement through a list element or through
+    # `_rewrite_child`, which is why the substitution looked complete and was
+    # not: `G = 7` then `x = G` inside a function was refused with
+    # "'G' has no home" on BOTH architectures, for a construct the build
+    # answers. Fixed in `formal/build.py` (the AssignStmt/VarDecl/AugAssign
+    # value side goes through `_rewrite_child`, which returns a replacement).
+    #
+    # `read_global_as_an_assignment_value` is the plain shape;
+    # `read_global_into_a_field_store` is the one that matters, because a
+    # `MemberExpr` store target is the shape this backend uses for every struct
+    # field write, so the uncovered position was reached by ordinary code
+    # rather than by an assignment to a bare local.
+    ("read_global_as_an_assignment_value",
+     "G = 7\n"
+     "\n"
+     "def main(n):\n"
+     "    x = G\n"
+     "    y: Int = G\n"
+     "    print(x)\n"
+     "    print(y)\n"
+     "    return 0\n", "7\n7\n"),
+
+    ("read_global_into_a_field_store",
+     "struct Wrap:\n"
+     "    v: Int\n"
+     "\n"
+     "G = 7\n"
+     "\n"
+     "def main(n):\n"
+     "    w = Wrap()\n"
+     "    w.v = G\n"
+     "    x: Int = w.v\n"
+     "    print(x)\n"
+     "    return 0\n", "7\n"),
+
     # ── containers ──
     # A module-level list is an address-valued slot: the slot holds a POINTER to
     # the blob, so it is the case that exercises the initializer at all — an
