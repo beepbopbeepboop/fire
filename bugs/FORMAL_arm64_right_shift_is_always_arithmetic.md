@@ -1,159 +1,144 @@
-# FORMAL_arm64_right_shift_is_always_arithmetic: there is no logical shift, so every bit-manipulating algorithm is wrong
+# FORMAL_arm64_right_shift_is_always_arithmetic: the repro was measuring the right answer
 
-**Status: OPEN. Found while writing `hashlib` (2026-09-29, the
-`module:hashlib` claim); the fix is in `formal/arm64_codegen.py`, which that
-claim does not own, so it is filed rather than applied. Until it lands,
-`formal/hostmods/hashlib.mojo` masks after every right shift — see "What the
-hashlib module does about it".**
+**Status: the underlying construct gap is FIXED and the document's diagnosis
+is CORRECTED. What this file is kept for is the second half, because the
+first half is the expensive mistake: a bug report whose repro asserts a
+WRONG expectation, and whose "fix" would have broken working code.**
 
-This is a **wrong answer, not a refusal**, and it is the one with the widest
-blast radius of the three arm64 defects found while writing that module: it
-silently breaks **every algorithm that does bit manipulation**, which is
-SHA-1, SHA-2, BLAKE2, CRC, base64, AES and anything else that shifts a word
-right expecting zeros in.
+Fixed 2026-09-30 (`construct:arm64-silent-wrong-answers`). Kept rather than
+deleted because its two "next step" options are still the record of how this
+was decided, and because the repro below is still the fastest way to convince
+a reader that the arithmetically-signed answer is the CORRECT one — which is
+the opposite of what this document used to say.
 
 ---
 
-## What I ran
+## The correction, which is the point
 
-```
-$ cat > .tmp/neg.mojo
+The document's repro, re-run against the current tree:
+
+```mojo
 def shr(x: int, n: int) -> int:
     return x >> n
 def main() -> int:
     printf("shr1=0x%016lx@@", shr(0 - 5, 1) & 0xFFFFFFFFFFFFFFFF)
     printf("shr4=0x%016lx@@", shr(0 - 5, 4) & 0xFFFFFFFFFFFFFFFF)
     return 0
-$ python3 fire.py build --formal --no-prove -o .tmp/neg .tmp/neg.mojo
-$ ./.tmp/neg
+```
+
+```
 shr1=0xfffffffffffffffd
 shr4=0xffffffffffffffff
 ```
 
-## What I saw
+and CPython, on the same two expressions:
 
-`(-5) >> 4` should be `0x0fffffffffffffff` (a logical shift: the top four bits
-become zero). It is `0xffffffffffffffff` — the top four bits became **ones**,
-because the shift sign-extends.
-
-| expression | got | want |
-|---|---|---|
-| `(-5) >> 1` | `0xfffffffffffffffd` | `0x7ffffffffffffffd` |
-| `(-5) >> 4` | `0xffffffffffffffff` | `0x0fffffffffffffff` |
-| `(-2**63) >> 1` | `0xc000000000000000` | `0x4000000000000000` |
-
-Every case is right for a POSITIVE operand and wrong for a negative one, which
-is why this can hide: `1 >> 4` is `0`, and testing a shift on a small positive
-number says nothing.
-
-The immediate form behaves the same way — `x >> 32` on
-`0x0123456789ABCDEF` is correct because that value's bit 63 is clear.
-
-## Why
-
-Both backends choose between the two right-shift instructions by asking
-whether the operand is signed, and nothing in the SOURCE can answer that
-question:
-
-`formal/arm64_codegen.py:5462` (the shared entry, used by both the immediate
-and the register form):
-
-```python
-        signed = cmp_signed(common_type(self._ttype(e.left),
-                                        self._ttype(e.right)))
+```
+>>> hex((-5) >> 1 & (2**64-1))    0xfffffffffffffffd
+>>> hex((-5) >> 4 & (2**64-1))    0xffffffffffffffff
 ```
 
-and then, in the register form:
+**Identical.** The document's "what I expect" column said
+`(-5) >> 1` should be `0x7ffffffffffffffd` and `(-5) >> 4` should be
+`0x0fffffffffffffff` — i.e. a LOGICAL shift. But `>>` on a negative `int` is
+ARITHMETIC in Python: it rounds toward negative infinity, so `-5 >> 1` is
+`-3` and `-5 >> 4` is `-1`. The "want" column was computed as though the
+value were unsigned, and the backend was right.
 
-```python
-            elif signed:
-                self.asm.emit(encode_asrv_xd_xn_xm(0, 0, 1))
-            else:
-                self.asm.emit(encode_lsrv_xd_xn_xm(0, 0, 1))
+This is worth stating loudly because the document's own later text already
+half-knew it — it said "a test that only pins the negative case would invite
+exactly that wrong fix" and "`>>` on a negative `int` is arithmetic and `>>>`
+is logical" — while its headline, its repro and its fix direction all assumed
+the opposite. A "fix" that made every `>>` logical would have passed the
+document's own repro and broken Python.
+
+## What the real defect was, and it was real
+
+The construct gap underneath was genuine, and it is fixed. It is just not
+the one the document measured. `UInt64 >> Int` computed
+
+```
+0xFFFFFFFFFFFFFFFF >> 4  as  0xFFFFFFFFFFFFFFFF     (arithmetic — wrong)
+CPython:                                        0x0FFFFFFFFFFFFFFF
 ```
 
-So `ASRV` and `LSRV` both exist and both are implemented; the emitter picks
-per-value from the type, and `Int` is signed, so **every** `Int >> Int` is
-`ASRV`. There is no spelling that asks for the other one, so a program that
-wants zeros shifted in has no way to say so.
+The cause: both backends asked
+`cmp_signed(common_type(ttype(left), ttype(right)))`, and `common_type` is
+signed-wins (`formal/types.py`). That is the right rule for `/` and `%`,
+where the operands genuinely combine. It is the wrong rule for a shift,
+because the right operand is a COUNT, and how far to move says nothing about
+what to move in. An unannotated — hence signed — shift amount won the
+promotion and then decided the fill.
 
-This is the same shape as the two other arm64 defects found alongside it, and
-the three together are worth reading as a group:
+The rows that isolate it, all the same shift and the same amount `4`:
 
-| doc | what | symptom |
-|---|---|---|
-| `FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8.md` | `<<` immediate, one wrong constant | `1 << 12` is `16` |
-| `FORMAL_arm64_ninth_argument_is_silently_dropped.md` | callee `break`s at 8 params | the 9th argument reads `0` |
-| this one | `>>` is always arithmetic | `(-5) >> 4` fills with ones |
+| source | before | after | CPython |
+|---|---|---|---|
+| `x: UInt64, n: Int` | `0xffffffffffffffff` | `0x0fffffffffffffff` | `0x0fffffffffffffff` |
+| `x: UInt64, n: UInt64` | `0x0fffffffffffffff` | unchanged | `0x0fffffffffffffff` |
+| `x: UInt64, n: literal 4` | `0x0fffffffffffffff` | unchanged | `0x0fffffffffffffff` |
 
-In all three the code contains the right instruction and takes a wrong path to
-it, and in all three the answer is plausible rather than absent.
+The literal row is the diagnostic, and it is why this hid: the amount is the
+same number 4 in all three, so the only thing that differs is whether the
+COUNT was typed. A count that happens to agree with the answer is not a
+reason to give the right answer, and a bit-manipulating algorithm that shifts
+by a literal looked correct throughout.
 
-## What I expect
+Fixed as `formal/model.py`'s `shift_signedness` — the left operand alone —
+read by both emitters. The result WIDTH still comes from `common_type` of
+both operands, because that is a different question and does involve both.
+Pinned by `test_formal_run.py`'s `ushift_u64_by_typed_int_amount`,
+`..._typed_u64_amount`, `..._literal_amount`, `..._variable_amount`, and
+`signed_shift_by_unsigned_amount_stays_arithmetic` — the last of which is
+there so that "the amount never decides the fill" cannot be satisfied by
+refusing to decide at all.
 
-A logical right shift, spelled somehow. The three candidate answers, in the
-order I would try them:
+## The two "next step" options, and what happened to each
 
-1. **A builtin or a type distinction.** `>>>` is Python's logical shift and
-   the parser may already have a spelling for it — worth checking before
-   inventing one, because if `>>>` parses and lowers through `_emit_div_shift_pow`
-   then the fix is a few lines and the spelling is already the one a Python
-   programmer would reach for.
-2. **Decide by a declared unsigned type.** `cmp_signed` already does the right
-   thing for a `UInt`; the question is whether `UInt >> UInt` is expressible
-   and lowers. If it is, the documented spelling is "declare the word
-   unsigned", and this file's job is to say so.
-3. **A new operator or a module-level flag.** Least good, and only if 1 and 2
-   both fail.
+The document offered three and ranked them. All three are now settled, and
+two of them were wrong for reasons worth keeping.
 
-## The exact next step
+**1. "Check whether `>>>` parses, and route it to LSRV."** It does not parse,
+and neither does the interpreter — `fire_compiler.py`'s `_PREC` has `<<` and
+`>>` and no `>>>`, so `x >>> n` is `Unexpected OP('>')` on every path that
+goes through this tree's parser.
 
-1. **Check whether `>>>` parses.** `fire_compiler.py`'s operator table is one
-   grep. If `>>>` is already a token, route it to `LSRV`/`LSRL` in
-   `_emit_div_shift_pow` and refuse it on a signed-only path rather than
-   guessing; the refusal is the important half, because an operator that
-   silently means the other thing is worse than one that does not exist.
+More decisively: **CPython 3.14.7 on this machine rejects `>>>` too.**
 
-2. **Otherwise, expose the choice the emitter already makes.** `cmp_signed` is
-   the whole decision, so a source-level unsigned word type reaches both
-   branches already. Check `formal/model.py` for a `UInt` spelling that a
-   subscript or an annotation can produce, and check that `>>` between two of
-   them takes the `LSRV` path — that path is written and, as far as the
-   measurements here go, untested.
-
-3. **A test for it**, in `test_formal_run.py`: `(0 - 5) >> 4` and
-   `0x8000000000000000 >> 1`, asserted against the logical answer. A
-   POSITIVE operand must be in the same test, precisely so the test fails if
-   someone "fixes" this by making all shifts logical — that would be correct
-   for `(-5) >> 4` and wrong for Python, where `>>` on a negative `int` is
-   arithmetic and `>>>` is logical. **The two must stay distinguishable**, and
-   a test that only pins the negative case would invite exactly that wrong
-   fix.
-
-**Checked and NOT the same bug**, so nobody re-derives it: this is not the
-`<<` immediate defect (different instruction, different direction, different
-arithmetic boundary), and not the ninth-argument defect (which loses an
-argument before any shift happens). It IS however the reason a rotation cannot
-be written the obvious way, and it is the second of the two blockers that
-stopped BLAKE2b in `formal/hostmods/hashlib.mojo`.
-
-## What the hashlib module does about it, in the meantime
-
-`rotr64` masks after the shift:
-
-```mojo
-    # `x >> n` is an ARITHMETIC shift on this path (see the bug doc), so the
-    # top n bits come back as ones; masking to n bits of headroom turns it
-    # into the logical shift BLAKE2b specifies.
-    return ((x >> n) & ((1 << (64 - n)) - 1)) | (x << (64 - n))
+```
+$ printf 'x = -5\nn = 4\nprint(x >>> n)\n' > /tmp/t.py && python3 /tmp/t.py
+  File "/tmp/t.py", line 3
+    print(x >>> n)
+              ^
+SyntaxError: invalid syntax
 ```
 
-which is the logical shift spelled in the operations that do work. The inner
-`1 << (64 - n)` is a VARIABLE shift, so it is `LSLV` and is correct (measured);
-the arithmetic shift is then masked away. The cost is two extra ALU
-instructions per rotation, which is the right trade on a backend whose job is
-to be trustworthy rather than fast.
+Checked through `ast.parse`, through `exec`, and through `eval` of a
+string built at run time (`op = ">>" + ">"`), so it is the grammar and not
+the shell. `>>` is accepted on the same lines. This is surprising enough to
+be worth stating as a measured fact rather than an assumption, because it
+inverts the conclusion: adding `>>>` to `_PREC` would make this compiler
+accept a program its own oracle rejects. **Do not add it on the strength of a
+Python-2-era memory of the operator.**
 
-`test_formal_hashlib.py` would fail immediately if this were removed, because
-the digest would stop matching CPython — which is the point of checking a
-digest against an oracle rather than against itself.
+**2. "Expose the choice the emitter already makes — `cmp_signed` does the
+right thing for a `UInt`; check whether `UInt >> UInt` is expressible."** This
+is what was implemented, and it is the whole fix. `UInt >> UInt` was already
+expressible and already lowered through `LSRV`; the defect was that the
+AMOUNT's type could overrule the VALUE's.
+
+**3. "A new operator or a module-level flag."** Not needed, and the operator
+half is unavailable per (1).
+
+## What is left of the original ask
+
+Nothing construct-wise. A program that wants zeros shifted in says so with an
+unsigned type, and that is now honoured regardless of how the amount is
+spelled. There is deliberately no spelling for a logical shift of a SIGNED
+value, for the reason in (1).
+
+## Checked and NOT the same bugs
+
+- Not `FORMAL_shift_by_64_or_more_wraps_instead_of_saturating.md` (fixed in the same session): that is how FAR a shift goes, this is what comes in. `x >> 64` saturating to 0 is unrelated to `x >> 4` on an unsigned value.
+- Not the immediate-`<<` encoder defect (`FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8.md`, also fixed, also in the same session): a different instruction and a different direction.
+- Not `FORMAL_negative_shift_amount_masks_instead_of_raising.md`, which is a new finding from the same session: an amount that is out of range in the other direction, affecting `<<` and `>>` alike.

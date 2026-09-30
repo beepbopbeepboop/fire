@@ -1449,13 +1449,16 @@ class X86_64Codegen:
             self.asm.emit(_ALU_RR[op](Reg.R11, Reg.RAX))   # R11 = old op rhs
             self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R11))
         elif op in ("<<", ">>"):
-            # Variable shift: the count has to be in CL, and the value being
-            # shifted in RAX.
+            # The count has to be in CL and the value in RAX, which is what
+            # `_emit_shift_reg` takes. The signedness is the NAME's own, not
+            # the promotion's — `model.shift_signedness`, the same rule
+            # `_emit_shift` uses for the binary form, so `y >>= n` and
+            # `y = y >> n` cannot disagree about whether the result is
+            # signed.
             self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.RAX))
             self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R11))
-            self.asm.emit(encode_shift_r64_cl(
-                _SHIFT_CL[op] if cmp_signed(ttype) else _SHIFT_IMM[op],
-                Reg.RAX))
+            self._emit_shift_reg(op, cmp_signed(
+                M.shift_signedness(self._ttype(F.IdentExpr(name)))))
         else:
             raise CodegenError(
                 f"unsupported augmented operator {stmt.op!r} on the formal "
@@ -3928,7 +3931,13 @@ class X86_64Codegen:
         """`<<` `>>`. A literal count in 0..63 uses the immediate form;
         anything else moves the count into CL (the only register form)."""
         result_t = common_type(self._ttype(e.left), self._ttype(e.right))
-        signed = cmp_signed(result_t)
+        # The signedness that picks `sar` over `shr` is the LEFT operand's own,
+        # not the promotion's — a shift's right operand is a COUNT, and how
+        # far to move says nothing about what to move in. `result_t` is still
+        # the answer to "what width is the result", which does involve both
+        # operands. See `model.shift_signedness`; the arm64 emitter asks the
+        # same question the same way.
+        signed = cmp_signed(M.shift_signedness(self._ttype(e.left)))
         lit = self._static_int(e.right)
         if lit is not None and 0 <= lit <= 63:
             self._emit_expr(e.left)
@@ -3936,14 +3945,86 @@ class X86_64Codegen:
                 _SHIFT_CL[op] if signed else _SHIFT_IMM[op], Reg.RAX, lit))
             self._emit_trunc(result_t)
             return
+        # A literal amount at or past the word's width, decided HERE with no
+        # branch. The immediate form's range check above is what routes it
+        # here, and the hardware would mask it back to a shift by zero —
+        # `3 >> 64` was `3` on this backend exactly as on arm64, because both
+        # were written to the same wrong rule (the rule itself is
+        # `model.shift_saturated_is_zero`; the arithmetic `>>` case is not 0,
+        # which is why only the SIGN is left to a run-time fact).
+        if lit is not None and M.shift_saturates(lit):
+            self._emit_expr(e.left)
+            self._emit_saturated(op, signed)
+            self._emit_trunc(result_t)
+            return
+        # The register form: put the value in RAX and the amount in RCX, which
+        # is what `_emit_shift_reg` takes, and let it carry the saturation
+        # rule. The binary form and the `<<=`/`>>=` form both come through
+        # here, because they are one operator and a second copy of the rule
+        # is how `y <<= 64` kept the hardware's masking while `y = y << 64`
+        # did not.
         self._emit_expr(e.left)
         self._push_slot(Reg.RAX)
         self._emit_expr(e.right)
         self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.RAX))
         self._pop_slot(Reg.RAX)
+        self._emit_shift_reg(op, signed)
+        self._emit_trunc(result_t)
+
+    def _emit_shift_reg(self, op: str, signed: bool) -> None:
+        """Variable shift RAX = RAX <op> RCX, SATURATING.
+
+        THE ONE register-form shift emitter on this backend; RAX holds the
+        value and RCX the amount on entry, and RAX is the result on exit.
+
+        The amount is compared against 64 and a saturating branch taken
+        BEFORE the shift, because the three x86 shift forms do not agree
+        about an out-of-range count and agreeing with none of them is not a
+        rule: `SHR`/`SAR` saturate at 63 (so `x >> 64` would be `x >> 63`,
+        which is 1 for a negative operand where Python says 0), while `SHL`
+        masks the count to 6 bits (so `x << 64` is `x`). One comparison
+        covers all three, and the saturated value is the same one arm64
+        computes — `model.shift_saturated_is_zero` is the rule and this is
+        only its instruction selection.
+
+        The compare is SIGNED, matching arm64's and for the same reason: an
+        amount of 64 or more saturates, and a NEGATIVE one (which CPython
+        rejects with ValueError, and which this path has always handed to
+        the hardware) keeps the masking it had. Unsigned, a negative amount
+        would take the saturating branch and answer 0 — a third wrong answer
+        rather than the one that is there now. See
+        bugs/FORMAL_negative_shift_amount_masks_instead_of_raising.md.
+        """
+        self._if_counter += 1
+        sid = self._if_counter
+        fn = self.func_name
+        sat_label = f"{fn}_sh{sid}_sat"
+        end_label = f"{fn}_sh{sid}_end"
+        self.asm.emit(encode_cmp_r64_imm32(Reg.RCX, M.SHIFT_WIDTH))
+        self._record_cond_branch()
+        self._emit_jcc(COND_GE, sat_label)
         self.asm.emit(encode_shift_r64_cl(
             _SHIFT_CL[op] if signed else _SHIFT_IMM[op], Reg.RAX))
-        self._emit_trunc(result_t)
+        self._emit_jmp(end_label)
+        self.asm.label(sat_label)
+        self._emit_saturated(op, signed)
+        self.asm.label(end_label)
+
+    def _emit_saturated(self, op: str, signed: bool) -> None:
+        """Materialise the answer a SATURATING shift gives, in RAX.
+
+        The decision is `model.shift_saturated_is_zero` — shared with arm64,
+        so the two architectures cannot answer it differently — and this is
+        only its instruction selection. Two cases, and the second is the one
+        a `return 0` saturation gets wrong: `sar rax, 63` is exactly "the
+        sign-extended word", 0 for a non-negative operand and -1 for a
+        negative one, which is what Python's arithmetic `>>` gives at any
+        amount at or past 64. `RAX` holds the value on entry, so the sign is
+        read from it rather than recomputed."""
+        if M.shift_saturated_is_zero(op, signed):
+            self._emit_mov_imm(Reg.RAX, 0)
+        else:
+            self.asm.emit(encode_shift_r64_imm8(">>signed", Reg.RAX, 63))
 
     def _emit_pow(self, e: F.BinaryOp) -> None:
         """`**`.

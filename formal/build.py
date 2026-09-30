@@ -3801,6 +3801,9 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
     empty) the dotted spelling is refused exactly as before, so a caller that
     has not resolved its imports still gets the old answer."""
     struct_names = set(structs_by_name or {})
+    # A read-before-store hit per function, raised after the loop: see the
+    # ordering note where they are raised.
+    unstored: list = []
     for fn in functions:
         shape = M.function_param_shape(fn)
         placed = {n for n, _t in shape.fixed}
@@ -3986,6 +3989,75 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             raise CodegenError(M.unresolved_name_refusal(
                 name, fn.name, _why_unplaced(node, fn, frame_slots)))
         _refuse_variadic_reads(functions, fn, shape)
+        unstored.append(_unstored_read(fn, placed, frame_slots))
+    # Raised LAST, and that ordering is the design rather than an accident of
+    # where the call landed. A read-before-store is a SYMPTOM — the name has a
+    # home and the program reads it before filling it — and this module
+    # already has refusals that name the CAUSE, which are the ones a reader
+    # can act on. Two real cases, both measured on the stdlib, where raising
+    # this one first replaced a better message with a worse one:
+    #
+    #   std/algorithm/backend/tile.mojo:77  a `comptime for` over the
+    #     `*args` of the enclosing function, which is the variadic-ABI
+    #     refusal's exact case and was replaced by "'tile_size_list' is read
+    #     at line 77 before anything in this function stores it".
+    #   std/math/polynomial.mojo:86  a `comptime` binding that does not
+    #     fold, whose own refusal says what to do about it ("make the
+    #     initializer a literal … or bind it with an ordinary `var`"), and
+    #     which was replaced by a message about a name that is a PARAMETER
+    #     of the generic.
+    #
+    # So: same rule the rest of this function already follows for the MLIR
+    # and multi-index refusals — the diagnostic that NAMES THE CONSTRUCT is
+    # asked first, so the better-worded message wins rather than being
+    # pre-empted by a symptom of it. A caller that gets this refusal has
+    # therefore been told about everything that could be said more precisely.
+    for hit in unstored:
+        if hit is not None:
+            name, line, fn_name = hit
+            raise CodegenError(M.read_before_store_refusal(name, fn_name,
+                                                           line))
+
+
+def _unstored_read(fn, placed: set, frame_slots: dict):
+    """`(name, line)` for a name this function reads before anything in it
+    stores, or None.
+
+    The second question about a name's storage, asked beside the first one
+    (`check_module_symbols`) and deliberately not folded into it. The first
+    asks "does this name have a HOME"; this one asks "does it have a VALUE at
+    this read", and a name can answer yes and still be wrong: the allocator
+    gives a register to every name the function assigns somewhere, so a name
+    read before its first store has a perfectly good home holding whatever
+    the CALLER left in it. The value is then not merely incorrect but
+    BUILD-DEPENDENT — the same source gave -157679357 on one arm64 build and
+    -157679350 on another, and 240046802 on x86-64 — which is what makes it a
+    finding rather than a cosmetic issue.
+
+    `placed` is passed rather than recomputed, and it is the SAME set the
+    walk above consults, for the reason the docstring there gives about not
+    folding the two questions together: that set answers "has a home", and a
+    check that made it answer "has a value" would be false about files that
+    are fine. Names outside it — no home at all — stay that other check's
+    refusal, which names the better problem.
+
+    `frame_slots` names are excluded for the same reason they are excluded
+    there: a frame slot is placed by a CONSTRUCTOR, and whether the
+    constructor has run is not a question a name walk can answer.
+
+    Returns rather than raises, because of where it is called from — see the
+    ordering note at the call site.
+    """
+    params = {p[0] if isinstance(p, (tuple, list)) and p else p
+              for p in (getattr(fn, "params", None) or [])}
+    # Only names this function ITSELF binds can be unstored: a parameter is
+    # stored by the caller, and everything else in `placed` is stored by
+    # something this walk does not see.
+    own = placed - params - set(frame_slots)
+    if not own:
+        return None
+    hit = M.read_before_store(fn, params, own)
+    return None if hit is None else (hit[0], hit[1], fn.name)
 
 
 def _callee_defs(functions: list) -> dict:
