@@ -1971,12 +1971,6 @@ def _forward_tagged(cvar: str, val_expr) -> N.ExprStmt:
 # the generator for real or refuse it, instead of guessing.
 _NO_WD_FORWARD: set = set()
 
-# Same keying as `_NO_WD_FORWARD`, but every `async def` in the module,
-# eligible or not, plus the bare-name/method-name ambiguity set used to
-# decide whether an awaited bare name resolves unambiguously.
-_ASYNC_FN_DEFS: dict = {}
-_AMBIGUOUS_ASYNC_NAMES: set = set()
-
 
 def _await_needs_channel(fn: N.FunctionDef, proven_clean: set) -> bool:
     """True iff `fn` can put a wait-descriptor on its own yield channel.
@@ -2001,7 +1995,7 @@ def _await_needs_channel(fn: N.FunctionDef, proven_clean: set) -> bool:
 
 
 def _compute_no_wd_forward(stmts: list) -> None:
-    """Fill `_NO_WD_FORWARD` / `_ASYNC_FN_DEFS` for one `lower()` call.
+    """Fill `_NO_WD_FORWARD` for one `lower()` call.
 
     Greatest fixed point: start by assuming EVERY async function is
     channel-free, then relax until the answer stops shrinking. Starting
@@ -2012,7 +2006,7 @@ def _compute_no_wd_forward(stmts: list) -> None:
     is not an `async def` of this module, or one that is also a struct
     method's name, so its `__mgco_*_start` base is ambiguous) resolves to
     "parks", so a hole here is a refusal upstream, never a miscompile."""
-    global _ASYNC_FN_DEFS, _AMBIGUOUS_ASYNC_NAMES, _NO_WD_FORWARD
+    global _NO_WD_FORWARD
     fns: dict = {}
     ambiguous: set = set()
     for s in stmts:
@@ -2036,13 +2030,12 @@ def _compute_no_wd_forward(stmts: list) -> None:
                     fns[f'{_cm_as_str(s.name)}_{_cm_as_str(inner.name)}'] = inner
     proven = set(fns)
     while True:
+        resolvable = proven.difference(ambiguous)
         nxt = {name for name, fn in fns.items()
-               if not _await_needs_channel(fn, proven - ambiguous)}
+               if not _await_needs_channel(fn, resolvable)}
         if nxt == proven:
             break
         proven = nxt
-    _ASYNC_FN_DEFS = fns
-    _AMBIGUOUS_ASYNC_NAMES = ambiguous
     _NO_WD_FORWARD = proven
 
 
