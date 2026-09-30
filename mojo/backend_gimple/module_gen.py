@@ -63,6 +63,134 @@ from mojo.middle.module_shared import (
 )
 
 
+def _gmi_literal_ctype(node):
+    """The ctype of an UNAMBIGUOUS container/string literal, else None.
+
+    "Unambiguous" is the whole point. A string literal is never a list and a
+    list literal is never a string, so either one is ground truth about what
+    the callee's parameter really is. Anything whose ctype depends on context
+    (an identifier, an arithmetic expression, a call result) returns None
+    rather than guessing.
+    """
+    if isinstance(node, (gimple_ctypes.StringLiteral,
+                        gimple_ctypes.TstringLiteral)):
+        return 'char *'
+    # `fire_compiler` also exports `ListLiteral`/`SetLiteral`/... but those are
+    # ALIASES of the `*Expr` classes, not subclasses, so naming them in an
+    # isinstance tuple raises `AttributeError` against `mojo.middle.types` --
+    # which is what `gimple_ctypes` re-exports here. Only the `*Expr` spellings
+    # are real attributes.
+    if isinstance(node, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
+        return 'MojoList *'
+    if isinstance(node, gimple_ctypes.SetExpr):
+        return 'MojoSet *'
+    if isinstance(node, gimple_ctypes.DictExpr):
+        return 'MojoDict *'
+    return None
+
+
+def _gmi_iter_calls(stmts, _seen=None):
+    """Every CallExpr in the tree, via a generic walk over node attributes."""
+    if _seen is None:
+        _seen = set()
+    for st in (stmts or []):
+        stack = [st]
+        while stack:
+            node = stack.pop()
+            if node is None or id(node) in _seen:
+                continue
+            _seen.add(id(node))
+            if isinstance(node, gimple_ctypes.CallExpr):
+                yield node
+            for attr in ('body', 'args', 'value', 'func', 'iterable',
+                         'obj', 'left', 'right', 'operand', 'target', 'elt',
+                         'key', 'results', 'statements', 'expr'):
+                sub = getattr(node, attr, None)
+                if sub is None:
+                    continue
+                if isinstance(sub, (list, tuple)):
+                    stack.extend(sub)
+                else:
+                    stack.append(sub)
+
+
+def _gmi_apply_call_site_param_evidence(gen, stmts):
+    """Ground an unannotated parameter in what its CALLERS actually pass.
+
+    `_infer_param_types` infers a parameter's type from how the body USES it,
+    and for an iterable-consuming builtin that inference has to collapse
+    "iterable" onto one concrete container. That is lossy: `str` is iterable
+    too, so `reversed(seq)` says "container" and cannot say WHICH.
+
+    Real regression this fixes, introduced with the
+    `_ITERABLE_CONSUMING_BUILTINS` signal: `def rev(seq): for c in
+    reversed(seq): ...` called as `rev("abc")` inferred `seq` as
+    `MojoList *`, so the call passed a `char *` into `mojo_list_copy()` and
+    the process SEGFAULTED (exit -11) on ordinary Python. The parent commit
+    inferred `char *` here and worked.
+
+    The call site is the only input that can settle it, and nothing consulted
+    it. This pass records the ctype of *unambiguous literal* arguments and,
+    when a parameter's use-derived type contradicts every call site, believes
+    the callers.
+
+    Deliberately narrow, because this runs on every module:
+      - free-function calls only (`IdentExpr` callee), so there is no
+        `self`-offset ambiguity in positional alignment;
+      - only when the call's arity equals the declared param count, so
+        positional alignment cannot silently shift;
+      - only to resolve str-vs-container, and only when the call sites are
+        UNANIMOUS. One ambiguous or absent call site leaves the inference
+        exactly as it was.
+    A wrong override here would silently re-type a parameter, so anything
+    less than unanimous evidence declines to act.
+    """
+    ipt = gen._inferred_param_types
+    if not ipt:
+        return
+    names = getattr(gen, '_func_param_names', {})
+    # (func, param) -> {ctype, ...} for unambiguous literal arguments only
+    evidence: dict = {}
+    for call in _gmi_iter_calls(stmts):
+        if not isinstance(call.func, gimple_ctypes.IdentExpr):
+            continue
+        fname = _as_str(call.func.name)
+        params = names.get(fname)
+        if not params:
+            continue
+        args = call.args or []
+        if len(args) != len(params):
+            # Arity mismatch means positional alignment (an optional or
+            # defaulted param, a *args call) is not trustworthy here.
+            continue
+        for pname, arg in zip(params, args):
+            ctype = _gmi_literal_ctype(arg)
+            if ctype is not None:
+                evidence.setdefault((fname, pname), set()).add(ctype)
+
+    containers = ('MojoList *', 'MojoSet *', 'MojoDict *')
+    for (fname, pname), ctypes in evidence.items():
+        if len(ctypes) != 1:
+            continue  # not unanimous
+        # `list(ctypes)[0]`, NOT `next(iter(ctypes))`: this function is part
+        # of the self-host closure, and `next` is not one of the runtime
+        # symbols the compiled path links (caught by `selfhost` as an
+        # undefined-symbol link failure -- `_next`, referenced from
+        # `_gmi_apply_call_site_param_evidence`). The set is known to hold
+        # exactly one element here, so a literal subscript is both equivalent
+        # and linkable.
+        call_type = list(ctypes)[0]
+        cur = ipt.get(fname, {}).get(pname)
+        if cur == call_type:
+            continue
+        if not ((cur in containers and call_type == 'char *')
+                or (cur == 'char *' and call_type in containers)):
+            # The two agree, or the disagreement is not the str/list
+            # ambiguity this pass exists to settle. Leave it alone.
+            continue
+        ipt.setdefault(fname, {})[pname] = call_type
+
+
 def _is_selfhost_source_dir(_dir: str) -> bool:
     """Is `_dir` a directory holding a genuine checkout of this compiler's
     own source (not necessarily THIS checkout)? Every real call site that
@@ -905,6 +1033,11 @@ def gen_module_impl(self, stmts):
     # feeds two emissions at different times: the prototypes in the
     # preamble, and the wrapper definitions in the tail sidecar.
     self._device_kernels = {n: True for n in _device_names}
+    # Which of those a HUMAN marked, and which merely matched by inference --
+    # see the DEVICE branch's own note. A function that falls back to the host
+    # is recorded here so the reason is visible instead of silent.
+    _device_explicit = _gmi_device_select.explicitly_marked_functions(stmts)
+    _device_fallbacks: list = []
     self._device_launch_args = {}
     self._device_launch_count: dict = {}
     _device_kernels_meta: dict = {}
@@ -917,7 +1050,24 @@ def gen_module_impl(self, stmts):
             # call site: an un-marshallable kernel is a build error either
             # way, and failing before anything is emitted gives a file and
             # line instead of a stack through the call-site lowering.
-            _gmi_device_glue.element_count_index(_nm, _ci)
+            try:
+                _gmi_device_glue.element_count_index(_nm, _ci)
+            except _gmi_device_glue.LaunchError as _le:
+                # No length parameter means the host has no way to size the
+                # copy-back, so this kernel cannot be dispatched -- a real
+                # limitation, and for an EXPLICIT `@gpu` a build error is the
+                # right answer (the check exists so a silently-empty
+                # copy-back cannot pass for a result).
+                #
+                # For an INFERRED stdlib kernel it is not: nobody asked for
+                # the device path, and raising here made the module
+                # uncompilable. Same rule as the emitter's own
+                # MetalUnsupported branch -- explicit is honoured, inference
+                # falls back to the host with the reason recorded.
+                if _nm in _device_explicit:
+                    raise
+                _device_fallbacks.append(f'{_nm}: {_le}')
+                continue
             self._device_launch_args[_nm] = _tys
             # A kernel's buffer parameters are `T *`, and a list argument at
             # a call site is a MojoList -- so the kernel's own element types
@@ -4127,6 +4277,10 @@ def gen_module_impl(self, stmts):
     for s in all_functions:
         if isinstance(s, FunctionDef):
             self._inferred_param_types[s.name] = self._infer_param_types(s)
+    # Ground those use-derived parameter types in what callers pass, where the
+    # two disagree and a call site is unambiguous. See
+    # `_gmi_apply_call_site_param_evidence`.
+    _gmi_apply_call_site_param_evidence(self, stmts)
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             s = _as_structdef_node(s)
@@ -6746,18 +6900,38 @@ def gen_module_impl(self, stmts):
             # NOT emitted as C, because a C definition of a kernel would be
             # dead code that still has to typecheck.
             if _device_kinds.get(_as_str(stmt.name)) == _gmi_device_select.DEVICE:
+                _msl = None
                 try:
                     _msl = _gmi_emit_metal.emit_kernel(stmt, kernel=True)
                 except _gmi_emit_metal.MetalUnsupported as _me:
-                    # A kernel that cannot be lowered honestly is a build
-                    # error, not a silently-stubbed C function: the whole
-                    # point of the path is that the GPU runs the code the
-                    # user wrote, and a stub would be a lie with exit 0.
-                    raise RuntimeError(
-                        f'GPU kernel {_as_str(stmt.name)!r} did not lower to '
-                        f'MSL: {_me}') from _me
-                _device_parts.append(_msl)
-                continue
+                    if _as_str(stmt.name) in _device_explicit:
+                        # EXPLICIT `@gpu` that will not lower is a build
+                        # error, not a silently-stubbed C function: the user
+                        # asked for the GPU, the whole point of the path is
+                        # that the GPU runs the code they wrote, and quietly
+                        # running it on the CPU is a lie with exit 0.
+                        raise RuntimeError(
+                            f'GPU kernel {_as_str(stmt.name)!r} did not lower '
+                            f'to MSL: {_me}') from _me
+                    # INFERRED (a stdlib kernel reached through
+                    # `compile_function[...]`) that will not lower is
+                    # different in kind: nobody asked for the device path for
+                    # this function, and erroring here made the module
+                    # uncompilable. Measured: 10 stdlib/test files died on it
+                    # -- std/gpu's `abort_kernel`/`_read_back_kernel`, the
+                    # test/asyncrt and test/algorithm/gpu device-pointer
+                    # kernels -- so `stdlib-syntax` was 91 unexpected and the
+                    # whole stdlib could not be built. Falling back to the
+                    # host costs nothing that was asked for: the function
+                    # compiles and runs as ordinary C, and the GPU path simply
+                    # does not engage for it until the emitter covers it
+                    # (`doc/GPU_OFFLOAD_PLAN.md` increment 2).
+                    _device_fallbacks.append(
+                        f'{_as_str(stmt.name)}: {_me}')
+                    _device_kinds[_as_str(stmt.name)] = _gmi_device_select.HOST
+                if _msl is not None:
+                    _device_parts.append(_msl)
+                    continue
             _nested_pushed = []
             _prefix = f"{stmt.name}::"
             for _qn, _info in self._nested_async_api.items():

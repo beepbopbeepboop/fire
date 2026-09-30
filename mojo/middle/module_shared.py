@@ -845,6 +845,27 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
                         _ctor = _gmi_as_str(getattr(cfn.obj.func, 'name', ''))
                         if _ctor in self.struct_field_types:
                             ft = _ctor + ' *'
+                        else:
+                            # The `else` this branch was missing. Without it
+                            # `ft` kept whatever the previous iteration left
+                            # in it, and on the FIRST field that reached here
+                            # it was never assigned at all -- so
+                            # `found[fn] = ft` three lines below raised
+                            # `UnboundLocalError: cannot access local
+                            # variable 'ft'`, which aborted the whole module.
+                            #
+                            # Measured: 5 stdlib files died on it
+                            # (std/collections/{list,_swisstable}.mojo,
+                            # std/memory/{arc_pointer,owned_pointer}.mojo,
+                            # std/python/_cpython.mojo) plus every module that
+                            # imports them.
+                            #
+                            # `_UNKNOWN_FIELD_CTYPE` is the right default and
+                            # not merely a safe one: it is exactly what the
+                            # sibling branches above and below use for "the
+                            # pre-pass cannot see through this", and it never
+                            # asserts a pointer type the code has not earned.
+                            ft = _UNKNOWN_FIELD_CTYPE
                     elif (isinstance(cfn, MemberExpr)
                           and cfn.member in _STR_RETURNING_METHODS):
                         ft = 'char *'

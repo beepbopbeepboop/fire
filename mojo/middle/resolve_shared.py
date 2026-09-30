@@ -136,6 +136,30 @@ def _quick_type(gen, node) -> str:
         if _ci is not None:
             return 'MojoBoundMethod *' if _ci.env_struct else 'void *'
         return 'int64_t'
+    if (isinstance(node, gimple_ctypes.SubscriptExpr)
+            and isinstance(node.obj, gimple_ctypes.IdentExpr)):
+        # A dict SUBSCRIPT: `cache[key]`. Without this case `_quick_type` fell
+        # through to the int64_t box for every one of them, which matters
+        # because `_collect_return_types` types each `return` expression with
+        # `_quick_type` -- so a function returning `d[k]` inferred a scalar
+        # even when `d`'s value type was known.
+        #
+        # Measured on the self-host closure: `funcs_shared._parsed_import`
+        # ends in `return cache[module]`, where every `cache[module]` is a
+        # 3-tuple. Its one-line delegate `GimpleGen._parsed_import` has no
+        # return annotation, so the delegate was typed `int64_t` and gcc
+        # rejected the closure with "invalid conversion in gimple call"
+        # (int64_t vs `struct MojoList *`).
+        #
+        # `gen._dict_val_types` is the value-type table, populated for the
+        # body under inference by `_infer_return_type_with_locals`'s overlay
+        # (the same save/overlay/restore it already does for `var_types`).
+        # A LIST subscript is deliberately not handled: `lst[i]`'s element
+        # type is a different table with different evidence, and guessing
+        # would launder a container through a scalar slot.
+        _dvt = (getattr(gen, '_dict_val_types', None) or {}).get(node.obj.name)
+        if _dvt:
+            return _as_str(_dvt)
     if isinstance(node, gimple_ctypes.BinaryOp):
         # 'in'/'not in' are missing from _CMP_OPS (generated_dispatch.py) —
         # real, pre-existing gap: falling through to
@@ -699,6 +723,29 @@ def _infer_list_elem_type(gen, elements: list) -> str:
     types = []
     for _e in elements:
         types.append(gen._quick_type(_e))
+    _joined = gimple_ctypes.TypeLattice.join_all(types) if types else 'int64_t'
+    # A HETEROGENEOUS literal is not a string list. `TypeLattice.join`
+    # short-circuits to `char *` whenever either side is `char *`, which is
+    # right for an arithmetic result and wrong for STORAGE: the joined type
+    # then selects `mojo_list_append_str` for EVERY element, so a struct
+    # pointer is appended as a string.
+    #
+    # Measured on the self-host closure: `ast_rewriter.py`'s
+    # `args=[bindings['key'], value, IntLiteral(value=1)]` has a `char *`
+    # first element and two struct pointers, joined to `char *`, and the
+    # `ExprStmt *` was passed where `const char *` is declared -- a hard
+    # `-Wincompatible-pointer-types` error.
+    #
+    # The correct storage type is the SCALAR box, not `void *`: a struct
+    # element is stored boxed (an int64_t plus a type tag --
+    # `struct_boxed_fields`), which is exactly what joining the two struct
+    # pointers already yields. So the fix is only to stop `char *` from
+    # winning when it is not the common type. `void *` was tried here and is
+    # wrong: appending a scalar element to a `void *` slot needs a cast the
+    # list builder does not emit, which is its own `-Wint-conversion` error.
+    if _joined == 'char *' and any(
+            _t and _t.endswith(' *') and _t != 'char *' for _t in types):
+        return 'int64_t'
     return gimple_ctypes.TypeLattice.join_all(types) if types else 'int64_t'
 
 def _prepass_callee_key(gen, node) -> str | None:

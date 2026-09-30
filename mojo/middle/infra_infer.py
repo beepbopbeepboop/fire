@@ -1530,6 +1530,80 @@ def _container_literal_locals(body: list) -> dict:
     walk(body)
     return out
 
+def _dict_value_locals(gen, body: list) -> dict:
+    """`{dict name: ctype}` for every dict in `body` that is STORE-INTO with
+    a value of a known type, so a later `return <that dict>[k]` can be typed.
+
+    The companion to `_container_literal_locals`, for the subscript case: a
+    container literal bound to a NAME is found by the former, but a
+    `d[k] = v` store gives the type of `d`'s VALUES, and
+    `return d[k]` reads one.
+
+    `gen._dict_val_types` already carries this information, but it is EMPTY by
+    the time return inference runs: `resolve_shared.py`'s pre-pass does
+    `gen._dict_val_types = {}` while rebuilding `var_types`. So the scan is
+    redone here for the body under inference and overlaid in the same
+    save/restore window `_container_literal_locals` already uses.
+
+    A container literal store is mapped through `_CONTAINER_LITERAL_CTYPES`
+    (a tuple is a real `MojoList`), because `_quick_type` has no body context
+    and answers the int64_t box for all four -- which is why a dict populated
+    with tuples recorded nothing at all.
+
+    First-store-wins, matching the declaration-time first-binding rule, and
+    only values whose type is a real pointer or a known scalar are recorded:
+    an unknown store must not pin the dict to the box and suppress a later,
+    better-evidenced one.
+    """
+    out: dict = {}
+
+    def note(n):
+        if not isinstance(n, gimple_ctypes.AssignStmt):
+            return
+        t = n.target
+        if not (isinstance(t, gimple_ctypes.SubscriptExpr)
+                and isinstance(t.obj, gimple_ctypes.IdentExpr)):
+            return
+        name = _as_str(t.obj.name)
+        if name in out:
+            return                       # first store wins
+        vt = gen._quick_type(n.value)
+        if vt == 'int64_t':
+            lit = _CONTAINER_LITERAL_CTYPES.get(type(n.value).__name__)
+            if lit is not None:
+                vt = lit
+        if vt and (vt in ('char *', 'double', 'MojoDict *', 'MojoList *',
+                          'MojoSet *', 'MojoBytes *')
+                   or vt.endswith(' *')):
+            out[name] = vt
+
+    def walk(stmts):
+        for n in (stmts or []):
+            note(n)
+            if isinstance(n, gimple_ctypes.FunctionDef):
+                continue
+            if isinstance(n, gimple_ctypes.IfStmt):
+                walk(n.then_body)
+                if isinstance(getattr(n, 'else_body', None), list):
+                    walk(n.else_body)
+            elif isinstance(n, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
+                walk(n.body)
+                if getattr(n, 'else_body', None):
+                    walk(n.else_body)
+            elif isinstance(n, gimple_ctypes.WithStmt):
+                walk(n.body)
+            elif isinstance(n, gimple_ctypes.TryStmt):
+                walk(n.body)
+                for h in (getattr(n, 'handlers', None) or []):
+                    walk(getattr(h, 'body', None))
+                if n.else_body:
+                    walk(n.else_body)
+                if getattr(n, 'finally_body', None):
+                    walk(n.finally_body)
+    walk(body)
+    return out
+
+
 def _infer_return_type_with_locals(gen, body: list) -> str:
     """`_infer_return_type`, but with the body's own container-literal
     locals visible to it.
@@ -1552,7 +1626,8 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     The overlay is temporary and additive: a name already in `var_types`
     keeps the type an earlier pass decided for it."""
     _locals = _container_literal_locals(body)
-    if not _locals:
+    _dict_vals = _dict_value_locals(gen, body)
+    if not _locals and not _dict_vals:
         return _infer_return_type_core(gen, body)
     _saved = gen.var_types
     _merged = dict(_saved)
@@ -1560,10 +1635,20 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
         if _n not in _merged:
             _merged[_n] = _t
     gen.var_types = _merged
+    # Same window, second table: `_quick_type`'s SubscriptExpr case reads
+    # `_dict_val_types` to type a `return d[k]`. Additive, and a name already
+    # in the table keeps the type an earlier pass decided for it.
+    _saved_dv = getattr(gen, '_dict_val_types', None)
+    _merged_dv = dict(_saved_dv or {})
+    for _n, _t in _dict_vals.items():
+        if _n not in _merged_dv:
+            _merged_dv[_n] = _t
+    gen._dict_val_types = _merged_dv
     try:
         return _infer_return_type_core(gen, body)
     finally:
         gen.var_types = _saved
+        gen._dict_val_types = _saved_dv
 
 
 def _infer_return_type(gen, body: list) -> str:

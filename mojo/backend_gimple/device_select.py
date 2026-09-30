@@ -158,8 +158,7 @@ def classify_functions(stmts: list) -> dict[str, str]:
     registered = _registered_kernels(stmts)
 
     def _classify_one(fdef) -> str:
-        decs = {_as_str(d) for d in (getattr(fdef, 'decorators', None) or [])}
-        if decs & KERNEL_DECORATORS:
+        if _decorator_names(fdef) & KERNEL_DECORATORS:
             return DEVICE
         if _as_str(fdef.name) in registered:
             return DEVICE
@@ -173,6 +172,71 @@ def classify_functions(stmts: list) -> dict[str, str]:
             for m in (getattr(s, 'methods', None) or []):
                 if isinstance(m, FunctionDef):
                     out[f'{_as_str(s.name)}_{_as_str(m.name)}'] = _classify_one(m)
+    return out
+
+
+def _explicit_marker(fdef) -> bool:
+    """True when a human marked this function `@gpu`/`@kernel`."""
+    return bool(_decorator_names(fdef) & KERNEL_DECORATORS)
+
+
+def _decorator_names(fdef) -> set:
+    """The NAMES a function's decorators carry, as a set of strings.
+
+    A decorator is NOT always a bare name. `@gpu` and `@kernel` are, but
+    `@functools.lru_cache(maxsize=1)` is a CALL, and its
+    `FunctionDef.decorators` entry is a CallExpr node -- which is
+    unhashable, so the obvious `{_as_str(d) for d in decorators}` dies
+    with `TypeError: cannot use 'CallExpr' as a set element`.
+
+    That is not hypothetical: `version.py` carries
+    `@functools.lru_cache(maxsize=1)` on `version()`, and it is inside
+    the self-host closure, so the whole closure failed to compile with
+    that TypeError and the link then failed on an undefined
+    `_version_version`. Any module with a parameterized decorator hit it.
+
+    So: take a string entry as itself, an `IdentExpr`/`MemberExpr` as its
+    attribute name, and a call as its callee's name (`lru_cache` from
+    `functools.lru_cache(...)`). A parameterized `@gpu(...)` is then
+    still recognised, which the bare-string form silently was not.
+    """
+    names: set = set()
+    for d in (getattr(fdef, 'decorators', None) or []):
+        if isinstance(d, str):
+            names.add(d)
+            continue
+        if isinstance(d, (IdentExpr, MemberExpr)):
+            _n = getattr(d, 'name', None) or getattr(d, 'member', None)
+            if _n:
+                names.add(_as_str(_n))
+            continue
+        if isinstance(d, CallExpr):
+            _f = getattr(d, 'func', None)
+            if isinstance(_f, IdentExpr) and getattr(_f, 'name', None):
+                names.add(_as_str(_f.name))
+            elif isinstance(_f, MemberExpr) and getattr(_f, 'member', None):
+                names.add(_as_str(_f.member))
+    return names
+
+
+def explicitly_marked_functions(stmts: list) -> set:
+    """The names a HUMAN marked `@gpu`/`@kernel`, free functions and methods.
+
+    Distinct from `classify_functions`, which also selects by INFERENCE -- a
+    function reached through `compile_function[...]` / `enqueue_function[...]`
+    is a kernel even though nothing marks it. The caller needs the
+    difference because the two deserve different behaviour when the MSL
+    emitter cannot lower them (see `module_gen`'s DEVICE branch).
+    """
+    out: set = set()
+    for s in stmts or []:
+        if isinstance(s, FunctionDef):
+            if _explicit_marker(s):
+                out.add(_as_str(s.name))
+        elif isinstance(s, StructDef):
+            for m in (getattr(s, 'methods', None) or []):
+                if isinstance(m, FunctionDef) and _explicit_marker(m):
+                    out.add(f'{_as_str(s.name)}_{_as_str(m.name)}')
     return out
 
 
