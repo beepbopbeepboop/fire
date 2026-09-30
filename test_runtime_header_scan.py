@@ -172,7 +172,13 @@ def test_every_declaration_is_seen():
     # whose index is not a compile-time constant (`mojo_list_get_boxed`,
     # `mojo_is_boxed`, `mojo_box_double`, `mojo_box_int`, `mojo_repr_boxed`) —
     # see bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
-    for header, want in (('fire_runtime.h', 474),
+    # 474 -> 476 (2026-09-30): `mojo_double_from_bits` / `mojo_double_to_bits`,
+    # the one definition of the "a double travels as its IEEE-754 bits in an
+    # int64_t" conversion in each direction — a MojoList slot, a box and the
+    # int64_t the homogenized `mojo_fnptr_call_N` helpers return for a
+    # callable value all use it, so a consumer recovering a double from a
+    # word cannot get the direction wrong.
+    for header, want in (('fire_runtime.h', 476),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

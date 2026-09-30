@@ -1735,6 +1735,9 @@ class GimpleGen:
         self._param_generator_api: dict = {}
         self._all_async_fn_names: set = set()
         self._bound_method_ret_types: dict = {}
+        # Any callable VALUE -> that callee's real return type; see
+        # emit_infra._reset_func's `_callable_ret_types` entry.
+        self._callable_ret_types: dict = {}
         self._module_int_consts_cache: dict = {}
         self._seen_generator_base_names: dict = {}
         self._cpp_module_fn_asts: dict = {}

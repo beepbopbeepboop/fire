@@ -748,6 +748,39 @@ def main():
 main()
 """, "5\n")
 
+    # A callable VALUE's real return type used to be lost at the call,
+    # because `mojo_fnptr_call_N` is the homogenized `int64_t` convention —
+    # the RIGHT thing for the box it hands back, but the CALLEE is the one
+    # that knows the type. So `lambda: False` printed `0` (the bug doc's
+    # symptom), `lambda: "hi"` printed its own pointer decimal, and
+    # `lambda: 1.5` printed `2.1393696074e-314`: a `double` cannot even ride
+    # the `int64_t` return, which reads a general-purpose register the value
+    # is not in, so the fix for THAT one is a `double`-returning twin of the
+    # helper family rather than a reinterpretation.
+    #
+    # An ordinary `def` returning the same value is in the same test because
+    # it was already right — it is what proves the loss is in the callable
+    # VALUE path and not in the return-type inference.
+    test_gimple_stdout("gimple_callable_value_keeps_its_return_type", """\
+def plain():
+    return False
+
+def main():
+    a = lambda: True
+    print(a())
+    b = lambda: False
+    print(b())
+    c = lambda x: x > 1
+    print(c(5))
+    print(c(0))
+    d = lambda: 1.5
+    print(d())
+    e = lambda: "hi"
+    print(e())
+    print(plain())
+main()
+""", "True\nFalse\nTrue\nFalse\n1.5\nhi\nFalse\n")
+
     test_gimple_stdout("gimple_list_sort_method_in_place", """\
 def main():
     l = [3, 1, 2]

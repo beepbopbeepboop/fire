@@ -134,6 +134,36 @@ static inline int64_t mojo_fnptr_call_4(void *fp, int64_t a, int64_t b, int64_t 
     return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
 }
 
+/* The `double`-returning twin of each helper above. A callee whose real
+ * return type is `double` cannot be called through an `int64_t (*)(...)`
+ * cast and have the value survive: it comes back in an SSE register, not
+ * the general-purpose one the `int64_t` return reads, so the bits are
+ * whatever the ABI happened to leave there (measured: `d = lambda: 1.5;
+ * print(d())` printed 2.1393696074e-314). These are the same helpers with
+ * the real return type, so the call is well-typed and the value arrives.
+ * The codegen picks them only when it knows the callee returns a double —
+ * see `_lower_fnptr_call_value`. */
+static inline double mojo_fnptr_call_d0(void *fp) {
+    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_0((MojoBoundMethod *)fp);
+    return ((double (*)(void))fp)();
+}
+static inline double mojo_fnptr_call_d1(void *fp, int64_t a) {
+    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_1((MojoBoundMethod *)fp, a);
+    return ((double (*)(int64_t))fp)(a);
+}
+static inline double mojo_fnptr_call_d2(void *fp, int64_t a, int64_t b) {
+    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_2((MojoBoundMethod *)fp, a, b);
+    return ((double (*)(int64_t, int64_t))fp)(a, b);
+}
+static inline double mojo_fnptr_call_d3(void *fp, int64_t a, int64_t b, int64_t c) {
+    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_3((MojoBoundMethod *)fp, a, b, c);
+    return ((double (*)(int64_t, int64_t, int64_t))fp)(a, b, c);
+}
+static inline double mojo_fnptr_call_d4(void *fp, int64_t a, int64_t b, int64_t c, int64_t d) {
+    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_4((MojoBoundMethod *)fp, a, b, c, d);
+    return ((double (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
+}
+
 /* Dynamic dispatch through a value that may be EITHER a MojoBoundMethod*
  * or a plain function pointer — the callee identity isn't known
  * statically (a local branch-joined from `lambda`/free-function and a
@@ -345,6 +375,14 @@ void    mojo_list_append_str(MojoList *l, const char *v);
 
 int64_t mojo_list_get_int(MojoList *l, int64_t i);
 double  mojo_list_get_double(MojoList *l, int64_t i);
+
+/* A double travels as its IEEE-754 BITS inside an int64_t — a list slot, a
+ * box, or the int64_t the homogenized `mojo_fnptr_call_N` helpers return for
+ * a callable value. The one definition of the conversion in each direction.
+ * `mojo_double_from_bits` must not be written as a C cast: `(double)bits` is
+ * the bits' NUMERIC value, not the double they encode. */
+double  mojo_double_from_bits(int64_t bits);
+int64_t mojo_double_to_bits(double v);
 
 int64_t mojo_list_len(MojoList *l);
 

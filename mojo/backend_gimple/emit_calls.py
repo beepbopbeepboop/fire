@@ -4100,6 +4100,18 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         gen._funcptr_builtins_needed.add(lifted_name)
         static_name = f'_funcptr_{lifted_name}'
         t = gen._new_val('void *', static_name)
+        # The VALUE's real return type, so a later call through it does not
+        # lose it. `mojo_fnptr_call_N` is the homogenized `int64_t`
+        # convention — that IS the right thing for the box it hands back —
+        # but the CALLEE is the one that knows the type, and a `_Bool`, a
+        # `double` or a `char *` returned that way came back widened:
+        # `e = lambda: False; print(e())` printed `0` and
+        # `e = lambda: "hi"; print(e())` printed the pointer decimal. The
+        # lifted function's own declared return type is right here
+        # (`ret_type` is re-read from `func_return_types` just above for
+        # exactly this reason), so record it against the value and let
+        # `_lower_fnptr_call_value` narrow the result through.
+        gen._callable_ret_types[t] = ret_type
         return 'void *', t
 
     # A closing lambda's value: a heap env holding the captured values,
@@ -4131,7 +4143,12 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     _fnv = gen._new_val('void *', f'(void *){lifted_name}')
     _bm = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
                          [('void *', _fnv), ('void *', gen._new_val('void *', _envp))])
-    return 'void *', gen._new_val('void *', f'(void *){_bm}')
+    _bmv = gen._new_val('void *', f'(void *){_bm}')
+    # Same reason as the non-capturing case just above: a call through this
+    # value goes through the homogenized `int64_t` helper, so the return
+    # type has to travel with the value or it is lost.
+    gen._callable_ret_types[_bmv] = ret_type
+    return 'void *', _bmv
 
 
 def _lower_async_closure_construct(gen, key: tuple, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -4257,7 +4274,15 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
     (`fp_raw`, of C type `fp_type`), the value-based twin of
     _lower_fnptr_call (shared so an arbitrary callable VALUE — e.g. the
     result of a chained `factory()(5)` call expression — dispatches
-    through the same mojo_fnptr_call_N runtime helpers)."""
+    through the same mojo_fnptr_call_N runtime helpers).
+
+    `ret_type` is the callee's declared C return type when the call site
+    knows it. When it does not, `_callable_ret_types` is the second source:
+    a callable VALUE carries its own return type from where it was
+    materialized (see `_lower_LambdaExpr`), because the `int64_t` the
+    homogenized helper hands back is a BOX, not the value's real type — so
+    without it a `lambda: False` prints `0` and a `lambda: "hi"` prints its
+    own pointer decimal. `_narrow_callable_result` is that one conversion."""
     arg_pairs = [gen.lower_expr(a) for a in node.args]
     n = len(arg_pairs)
     # Cast to void * so the runtime helper receives a stable pointer type.
@@ -4279,15 +4304,33 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
             widened.append(av)
         else:
             widened.append(gen._new_val('int64_t', f'(int64_t){av}'))
-    # Emit the runtime-helper call; helpers exist for 0..4 args.
-    helper = f'mojo_fnptr_call_{min(n, 4)}'
     call_args = ', '.join([fp_void] + widened[:4])
-    raw_t = gen._new_val('int64_t', f'{helper} ({call_args})')
+    # The callee's real return type: what the caller knew, else what the
+    # callable VALUE carries from where it was materialized. Both must be
+    # settled BEFORE the helper is chosen — the helper's own return type is
+    # the whole point for a `double`.
+    if ret_type == 'int64_t':
+        ret_type = gen._callable_ret_types.get(fp_raw, ret_type)
+    if ret_type == 'void':
+        # `void` still has to be CALLED, so it goes through the int64_t
+        # helper and discards the result.
+        gen._emit(f"  mojo_fnptr_call_{min(n, 4)} ({call_args});")
+        return 'int', gen._new_val('int', '0')
+    # A `double`-returning callee cannot be called through the `int64_t`
+    # helper at all — the value comes back in an SSE register the `int64_t`
+    # return does not read, so what the caller got was whatever the ABI
+    # happened to leave in the general-purpose one (measured:
+    # `d = lambda: 1.5; print(d())` printed 2.1393696074e-314). This is the
+    # `double` twin of the helper family, not a reinterpretation of its
+    # result; a reinterpretation cannot work because the bits are not there
+    # to reinterpret.
+    if ret_type == 'double':
+        t = gen._call_expr('double', f'mojo_fnptr_call_d{min(n, 4)}',
+                           [('void *', fp_void)] + [('int64_t', w) for w in widened[:4]])
+        return 'double', t
+    raw_t = gen._new_val('int64_t', f'mojo_fnptr_call_{min(n, 4)} ({call_args})')
     if ret_type in ('int64_t', 'int'):
         return ret_type, raw_t
-    if ret_type == 'void':
-        gen._emit(f'  {helper} ({call_args});')
-        return 'int', gen._new_val('int', '0')
     # Narrow back to declared return type.
     t = gen._new_val(ret_type, f'({ret_type}){raw_t}')
     return ret_type, t

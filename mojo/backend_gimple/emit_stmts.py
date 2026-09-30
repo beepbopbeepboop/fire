@@ -457,6 +457,14 @@ def _gen_stmt_VarDecl(gen, node):
         # a few lines below this method).
         if actual_dst == 'MojoBoundMethod *' and v in gen._bound_method_ret_types:
             gen._bound_method_ret_types[node.name] = gen._bound_method_ret_types[v]
+        # Any callable VALUE assigned to a variable (`f = lambda: False`):
+        # carry its real return type onto the variable too, for the same
+        # reason and by the same mechanism as the two propagations above —
+        # the call site keys on the VARIABLE's name, not the RHS temp the
+        # value was materialized into. Without this the type is lost at the
+        # assignment and `f()` prints `0` for a `lambda: False`.
+        if v in gen._callable_ret_types:
+            gen._callable_ret_types[node.name] = gen._callable_ret_types[v]
         # `append = l.append` (a builtin-container method bound as a
         # value, see _lower_builtin_method_value): carry the recorded
         # (receiver, method) binding from the RHS temp onto the variable,
@@ -1054,6 +1062,12 @@ def _gen_stmt_AssignStmt(gen, node):
             gen._bm_tainted_locals.add(tname)
             if v in gen._bound_method_ret_types:
                 gen._bound_method_ret_types[tname] = gen._bound_method_ret_types[v]
+        # Any callable VALUE assigned to a variable — the AssignStmt path's
+        # identical propagation a few hundred lines above, same reason:
+        # `f = lambda: False` materializes the value into a temp, and the
+        # call site keys on the variable's name.
+        if v in gen._callable_ret_types:
+            gen._callable_ret_types[tname] = gen._callable_ret_types[v]
         # `append = l.append` (a builtin-container method bound as a
         # value, see _lower_builtin_method_value): carry the recorded
         # (receiver, method) binding from the RHS temp onto the variable,

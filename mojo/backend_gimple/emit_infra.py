@@ -383,6 +383,18 @@ def _reset_func(gen, body: list = None, params: list = None,
     # Reset per function for the same reason _actual_types is: temp
     # names (_tN) recycle across functions. See _lower_bound_method_value.
     gen._bound_method_ret_types: dict[str, str] = {}
+    # Any callable VALUE (a lambda's `_funcptr_X` static, a bound-method
+    # handle, a struct method taken as a value) -> that callee's real return
+    # type. The `mojo_fnptr_call_N` / `mojo_maybe_bound_call_N` helpers are
+    # the homogenized `int64_t` convention — the RIGHT thing for the box they
+    # hand back — but the CALLEE is the one that knows the type, so a `_Bool`,
+    # a `double` or a `char *` came back widened: `e = lambda: False;
+    # print(e())` printed `0` and `e = lambda: "hi"; print(e())` printed its
+    # own pointer decimal. Recorded where the value is materialized (see
+    # `_lower_LambdaExpr`) and read by `_lower_fnptr_call_value`.
+    # Reset per function for the same reason _bound_method_ret_types is: temp
+    # names (_tN) recycle across functions.
+    gen._callable_ret_types: dict[str, str] = {}
     # Builtin-container method bound as a first-class VALUE (`append =
     # l.append`, the classic accumulator-aliasing idiom) — key: the C
     # name of the temp/var holding the boxed value; value: (receiver

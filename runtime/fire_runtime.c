@@ -840,6 +840,26 @@ int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
     return (int64_t)(uintptr_t)r->boxes[i];
 }
 
+/* A double travels as its IEEE-754 BITS inside an int64_t — in a list slot
+   (mojo_list_get_double), in a box (mojo_box_double below), and in the
+   int64_t the homogenized `mojo_fnptr_call_N` helpers return for a callable
+   value. This is the ONE definition of that conversion in each direction, so
+   a consumer recovering a double from a word cannot get the direction wrong.
+   `mojo_double_from_bits` must MEMCPY, never a C cast: `(double)bits` is the
+   bits' NUMERIC value — 4611686018427387904.0 for the bit pattern of the
+   literal 1.5 — which is exactly the wrong answer this exists to prevent. */
+double mojo_double_from_bits(int64_t bits) {
+    double v;
+    memcpy(&v, &bits, sizeof(v));
+    return v;
+}
+
+int64_t mojo_double_to_bits(double v) {
+    int64_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    return bits;
+}
+
 /* The box read as a double. A value that is NOT a box comes back as its own
  * numeric value, not 0: the codegen marks a whole READ SITE as possibly
  * boxed (the runtime decides per slot), so a call here must be correct for
@@ -848,9 +868,7 @@ int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
 double mojo_box_double(int64_t v)
 {
     if (!mojo_is_boxed(v)) return (double)v;
-    double d;
-    __builtin_memcpy(&d, &((MojoBox *)(intptr_t)v)->bits, 8);
-    return d;
+    return mojo_double_from_bits(((MojoBox *)(intptr_t)v)->bits);
 }
 
 /* The box read as an integer: Python's own conversion (truncation toward
@@ -1102,10 +1120,9 @@ int64_t mojo_list_get_int(MojoList *l, int64_t i)   { if (!l || l->len == 0) ret
 
 double mojo_list_get_double(MojoList *l, int64_t i)
 {
-    double v;
-    memcpy(&v, &l->data[_norm_idx(l, i)], sizeof(v));
-    return v;
+    return mojo_double_from_bits(l->data[_norm_idx(l, i)]);
 }
+
 
 int64_t mojo_list_len(MojoList *l) { return l ? l->len : 0; }
 
