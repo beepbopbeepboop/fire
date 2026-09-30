@@ -96,19 +96,24 @@ def main():
         cands = sorted(I.pick_candidates(quiet=True), key=C.priority_key)
         if not cands:
             log("nothing new to integrate")
-        # In PRIORITY order, one branch at a time: screen it alone through the quick tier; if it passes, LAND it
-        # (full gate) before looking at the next, so the most important branch is never kept waiting behind the
-        # screening of less important ones. A branch that fails its screen is skipped here and handed to a fixer below.
+        # FAST LANE FIRST: test-infrastructure-only branches need no project gate (owner's policy) and cost minutes,
+        # so every one of them is handled before any gate work, whatever its priority.
         for name in cands:
-            if name not in I.pick_candidates(quiet=True):
-                continue                                  # superseded or integrated under us
-            if I.infra_only(C.load()[name]["branch"]):       # test infrastructure/docs only: the fast lane, no project gate
+            if name in I.pick_candidates(quiet=True) and I.infra_only(C.load()[name]["branch"]):
                 log("%s touches only test infrastructure: fast lane (no project gate)" % name)
                 rc, out = run_integrate("--only", name, "--fast")
                 tail = [l for l in out.splitlines() if l.startswith(("GREEN", "RED", "NOT test", "CONFLICT", "merged", "fast lane"))]
                 log("%s: rc=%d %s" % (name, rc, " | ".join(tail)[:300]))
                 if "another integrator" in out:
                     log("integrator busy; retry next interval"); break
+        cands = sorted(I.pick_candidates(quiet=True), key=C.priority_key)
+        # In PRIORITY order, one branch at a time: screen it alone through the quick tier; if it passes, LAND it
+        # (full gate) before looking at the next, so the most important branch is never kept waiting behind the
+        # screening of less important ones. A branch that fails its screen is skipped here and handed to a fixer below.
+        for name in cands:
+            if name not in I.pick_candidates(quiet=True):
+                continue                                  # superseded or integrated under us
+            if I.infra_only(C.load()[name]["branch"]):       # handled by the fast-lane pre-pass above
                 continue
             head = head_sha(name)
             if screen.get(name, {}).get("head") != head:

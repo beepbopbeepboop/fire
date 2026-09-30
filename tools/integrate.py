@@ -54,7 +54,7 @@ CONTROLLER_FILES = ("tools/control.py", "tools/control_prompt.md", "tools/gatewa
 # inherently safe). A branch whose EVERY changed file is listed here lands through the fast lane.
 INFRA_FILES = ("tools/suite.py", "tools/memslot.py", "tools/memcap.py", "tools/procrun.py", "tools/ab_run_one.py",
                "tools/gatewatch.py", "tools/control.py", "tools/control_prompt.md", "tools/integrate.py",
-               "tools/autointegrate.py", "CLAUDE.md", "CONTROL.html")
+               "tools/autointegrate.py", "CLAUDE.md", "CONTROL.html", "checked_run.py")
 INFRA_PREFIXES = ("bugs/", "doc/")
 
 
