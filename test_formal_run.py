@@ -392,9 +392,19 @@ CASES = [
     # `char *`), so the constructor materializes the literal's own address. The
     # comparison is what proves the pointer is the RIGHT pointer and not merely
     # some word: it has to be the bytes `hi`.
+    # `-> str` ON `get` IS LOAD-BEARING, and it was not before. `c.get() ==
+    # "hi"` used to reach the content compare because the RIGHT side is a
+    # string and `string_comparison_lowering` answers for either side being one
+    # — and it was RIGHT by accident, because the field's default happens to be
+    # an interned `char *`. `model.string_compare_number_refusal` now refuses a
+    # comparison where exactly one side is classified a string, because
+    # `strcmp` dereferences both and the unclassified side is not known to be an
+    # address; a method that does not say what it returns is exactly that case.
+    # The annotation is the fix the refusal names, and it is also what the
+    # program should have said all along.
     ("struct_default_word_string", "struct Name:\n"
                                   "    text = \"hi\"\n\n"
-                                  "    def get(self):\n"
+                                  "    def get(self) -> str:\n"
                                   "        return self.text\n\n"
                                   "def main(n):\n"
                                   "    c = Name()\n"

@@ -464,6 +464,14 @@ class X86_64Codegen:
         # arm64's `_emit_function`.
         self._cur_fn = None
         self._if_counter = 0
+        # The element width the subscript being emitted reads and writes at, in
+        # bytes.  `_emit_subscript_addr` sets it on every path — a container
+        # element is 8, a string byte is 1, a declared pointee is its own — and
+        # the load and the store read it, so the address computation and the
+        # instruction that uses it cannot disagree.  Same rule and same reason as
+        # the arm64 backend's `_sub_width`, and the decision is
+        # `model.subscript_base_lowering` so the two cannot drift.
+        self._sub_width = 8
         self._while_counter = 0
         self._var_regs = {}
         self._var_spills = {}
@@ -2793,12 +2801,20 @@ class X86_64Codegen:
 
     def _is_string_subscript(self, obj) -> bool:
         """True when `obj` is known to hold a string (char*) address, so a
-        subscript is a byte load rather than a list index."""
+        subscript is a byte load rather than a list index.
+
+        The same one-authority rule as the arm64 backend's, and for the same
+        reason: the flow-sensitive `_string_vars` map only ever sees a BINDING
+        statement, so a `String`-annotated PARAMETER was missing from it while
+        the whole-function `ValueKinds` — which `_expr_str_kind` falls back to —
+        knows. The same name was then a `char *` to `len` and a list blob to
+        this predicate, and the blob path bounds-checks against the first eight
+        CHARACTERS of the string. See
+        bugs/CODEGEN_string_parameter_subscript_reads_count_field.md.
+        """
         if isinstance(obj, F.StringLiteral):
             return True
-        if isinstance(obj, F.IdentExpr):
-            return obj.name in self._string_vars
-        return False
+        return self._expr_str_kind(obj) == M.STR_KIND
 
     def _refuse_frame_container_operand(self, op: str, obj) -> None:
         """Raise if `obj` is a BARE NAME holding a frame address.
@@ -2842,6 +2858,7 @@ class X86_64Codegen:
         confidently wrong. `model.multi_index_refusal_for` is the shared text,
         so the two cannot drift again."""
         self._refuse_frame_container_operand("a subscript", e.obj)
+        self._sub_width = 8
         if e.attrs is not None:
             raise CodegenError(
                 "type-parameter subscript [...] is not supported on the "
@@ -2879,6 +2896,30 @@ class X86_64Codegen:
             # addr = base + index. RAX still holds the INDEX here and R11
             # the base, so this is a plain add — copying the base into RAX
             # first would compute base+base.
+            self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
+            self._sub_width = 1
+            return
+        shape, width, signed, sub_why = M.subscript_base_lowering(
+            self._cur_fn, e.obj, self._structs, self._functions, self._structs)
+        if shape is None:
+            raise CodegenError(sub_why)
+        if shape == "load":
+            # A POINTER subscript is `base + index*width`, with NO count header
+            # and no bounds check — the same question `p.value()` asks, routed
+            # through the same reader, and the reason the two spellings of it
+            # now agree.  Before the route existed this fell through to the blob
+            # walk, whose first word of the base is a COUNT, so `p[0]` read the
+            # byte at offset 0 as the element count and loaded
+            # `base + 8 + 8*count`.  See
+            # bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md.
+            self._sub_width = width
+            if width != 1:
+                # The scale is emitted rather than assumed: `base + i` is right
+                # for a one-byte element and is the SECOND element for any
+                # other width, the same trap `model._offset_scale` refuses on
+                # the dereference path.
+                self.asm.emit(encode_imul_r64_r64_imm(Reg.RAX, Reg.RAX,
+                                                           width))
             self.asm.emit(encode_add_r64_r64(Reg.RAX, Reg.R11))
             return
         self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.R11))
@@ -2932,11 +2973,15 @@ class X86_64Codegen:
                                    e.index.step)
             return
         self._emit_subscript_addr(e)
-        # The address is in RAX; a string's element is a BYTE at it, so the
-        # load has to happen before the zero-extension — MOVZX of the address
-        # itself would yield the low byte of a pointer.
+        # The address is in RAX; the element has to be LOADED before any
+        # extension — MOVZX of the address itself would yield the low byte of a
+        # pointer.
         self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))
-        if self._is_string_subscript(e.obj):
+        if self._sub_width == 1:
+            # Unsigned: a `UInt8` element is a byte, and a formal value is one
+            # 64-bit word holding an integer, so `200` has to read back as 200.
+            # The signed form is the same two-instruction pair with a different
+            # mnemonic, chosen from the pointee the model established.
             self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
 
     def _blob_est(self, e) -> int:
@@ -3643,7 +3688,9 @@ class X86_64Codegen:
         # `model.string_binary_refusal`, which is the one table both backends
         # ask and which holds the measurements.
         reason = M.string_binary_refusal(
-            op, self._expr_str_kind(e.left), self._expr_str_kind(e.right))
+            op, self._expr_str_kind(e.left), self._expr_str_kind(e.right),
+            left=e.left, right=e.right, fn=self._cur_fn,
+            untyped_callee=self._untyped_callee)
         if reason is not None:
             raise CodegenError(reason)
         if op in _CMP_CONDS:
@@ -3738,8 +3785,8 @@ class X86_64Codegen:
         answer, which is the same trap `_emit_str_affix` documents.
         """
         if M.string_comparison_lowering(
-                op, self._expr_str_kind(l), self._expr_str_kind(r)) \
-                != M.STRING_COMPARE_CONTENT:
+                op, self._expr_str_kind(l), self._expr_str_kind(r),
+                l, r) != M.STRING_COMPARE_CONTENT:
             return False
         # push l, then r  =>  [rsp] = r, [rsp+16] = l. The same two-slot shape
         # `_emit_str_affix` uses, and for the same reason: an expression leaves
@@ -4076,8 +4123,18 @@ class X86_64Codegen:
         self._push_slot(Reg.RAX)                   # value
         self._emit_subscript_addr(target)          # RAX = address
         self._pop_slot(Reg.R11)                    # R11 = value
-        if self._is_string_subscript(target.obj):
-            self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R11))
+        if self._sub_width == 1:
+            # A BYTE store, and this used to be a full 64-bit store into a
+            # one-byte element: both branches of the old `if` were the same
+            # instruction, so `p[0] = 65` on a `Pointer[UInt8]` overwrote the
+            # seven bytes after it. It was unreachable over a POINTER (the
+            # subscript took the blob path and exited 1 first) and reachable
+            # over a `char *` in a string literal, which is a read-only
+            # __TEXT page, so nothing noticed. Widening `_sub_width` to the
+            # pointee made it reachable over a `malloc`'d buffer, where the
+            # overwrite is a silent corruption rather than a fault, so the two
+            # branches have to differ.
+            self.asm.emit(encode_mov_rm8_r8(Reg.RAX, 0, Reg.R11))
         else:
             self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R11))
 
@@ -4634,6 +4691,40 @@ class X86_64Codegen:
                                      self._dylib_by_name,
                                      self._dylib_by_module,
                                      self._dylib_forwarded)
+
+    def _untyped_callee(self, name) -> bool:
+        """Is `name` a MOJO function that does not say what it returns?
+
+        The question `string_compare_word_refusal` needs and `ValueKinds` cannot
+        answer: an unannotated call's result and an `-> int` call's result are
+        both `INT_KIND` on this path, because a word is an integer, and the two
+        are not the same thing — one of them may be a `char *`, and `f() == g()`
+        on two of those compares two addresses.
+
+        Two sources, because there are two kinds of Mojo callee, and the third
+        kind is the one that must NOT be in this set:
+
+          * a function of THIS image — the parser recorded its `return_type`,
+            and `None` is the answer when the source has no `->`;
+          * an export of a LINKED MODULE — its manifest signature carries the
+            return type, and `reflect._c_signature` spells an unannotated
+            function's as `void`, so `void` here is the same fact as `None`
+            above. `dylib_export_return_kind` reads the `char *` case out of
+            the same string, which is how a cross-image `-> str` classifies;
+          * and an UNBOUND EXTERN is NOT in this set at all. `memcmp(a, b, n)
+            == 0` is in every `os` function on this path and is correct on
+            every one of them; `getenv(name) == 0` is a NULL check. A C
+            library function has no Mojo return annotation to be missing.
+        """
+        fn = self._functions.get(name)
+        if fn is not None:
+            return getattr(fn, "return_type", None) is None
+        entry = M.dylib_export_lookup(self._dylib_by_name,
+                                      self._dylib_by_module, name)
+        if entry is None:
+            return False
+        return M.signature_return_type(
+            entry.get("signature") or "").strip() == "void"
 
     def _callee_kind(self, name, stack):
         """What a call to the local function `name` produces, or None."""
