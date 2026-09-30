@@ -691,8 +691,21 @@ test('preflight', [PY, '-c',
 # and synthetic commands: no toolchain, milliseconds, so it can be the first
 # thing anyone runs when the runner is what changed.
 test('suite-self-test', [PY, 'test_suite.py'], cache=True,
-     extra=['test_suite.py', 'tools/suite.py', 'tools/procrun.py'],
+     extra=['test_suite.py', 'tools/suite.py', 'tools/procrun.py',
+            'tools/memslot.py'],
      desc='the runner: drivers, deps, exclusivity, fanout, tally, log split')
+# The ledger every job above reserves out of, tested on its own. In `smoke`
+# rather than nowhere, which is where it was for a commit: `test_memslot.py`
+# arrived untracked, was committed, and still had no spec and no bucket, so
+# the estate check that exists to catch exactly that reported it — correctly.
+# And it earns one. A bug in the ledger is not a failing test, it is a HUNG
+# GATE: two reservations for one process tree deadlock (measured, see
+# `covering` in tools/memslot.py), and every job in every bucket goes through
+# it. Cheap — its own private ledger, a 10 GB budget of made-up gigabytes, and
+# nothing compiled.
+test('memslot', [PY, 'test_memslot.py'], cache=True,
+     extra=['test_memslot.py', 'tools/memslot.py', 'tools/memcap.py'],
+     desc='the machine-wide memory ledger: FIFO, budgets, crash, tree coverage')
 test('coro', [PY, 'test_coro_runtime.py'], cache=True,
      extra=['test_coro_runtime.py'] + CORO_RUNTIME,
      desc='A3 stack-switch coroutine runtime, every backend at -O0 and -O2')
@@ -941,11 +954,21 @@ test('bootstrap-validate', [PY, 'bootstrap-validate.mojo'],
 # makes a repeat run a stat rather than a hash), so a suite-level artifact
 # cache would be a third cache in front of two that already work — and
 # would go stale in a new way when the cas is shared between checkouts.
+# `mem='module'`, and it is the one place the default is knowingly wrong.
+# Every other unnamed job in the registry is a python check over
+# snippet-sized programs, which is what `small` describes; this one hands the
+# job to LEAN, whose 27 MB .olean is a real typechecker's real memory and is
+# the only external tool in the everyday registry that this repo has no
+# measurement for at all. A RESOURCE verdict here is not forgiven by anything
+# (`expect` forgives FAIL and ERROR), and `prooflib` is a `deps` of the whole
+# proofs bucket, so a ceiling that fired would SKIP sixteen proof runs and
+# report a passing gate. `module` is the "we do not know, and it is not
+# snippet-sized" answer; the peak table in the run log is what replaces it.
 test('prooflib', [PY, '-c',
                   'import os, formal.lean as L; '
                   'L.ensure_library(L.find_lean(), '
                   'os.path.join(L._default_root(), "lib"))'],
-     timeout=2400,
+     mem='module', timeout=2400,
      desc='build lib/*.olean once — 27MB, ~80s, and 16-way duplicated '
           'without this step')
 
@@ -1097,7 +1120,7 @@ BUCKETS = {
                'formal-x86-endtoend', 'formal-x86-model'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model'],
     'coroutine': ['coro', 'coro-nested-capture'],
-    'smoke': ['preflight', 'suite-self-test'],
+    'smoke': ['preflight', 'suite-self-test', 'memslot'],
     'ab': ['ab-clean', 'ab-aside', 'ab-bside', 'ab-compare'],
 }
 

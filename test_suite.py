@@ -157,19 +157,26 @@ def run(names, jobs=4, log='-', quiet=True, budget=NO_WAIT_BUDGET_GB,
     `flags` are passed as bare switches (verbose=True -> --verbose), which is
     the only shape argparse accepts for a store_true option.
 
-    Every run gets a PRIVATE ledger directory and a budget no memclass can
-    exhaust. The real ledger is `~/.gmojo/memslot`, shared by every worktree
-    on the machine and sized for real compilers: a synthetic unit test that
-    used it would take 24 GB out of the machine's 96 and queue behind whatever
-    gate happened to be running, which is correct behaviour and useless in a
-    test. `ledger` names a directory to use instead — the admission tests need
-    to hold a reservation in the SAME ledger the run will queue against, so
-    they pass one in rather than letting `run` invent a private one.
+    Every run gets a PRIVATE ledger directory, a budget no memclass can
+    exhaust, and no inherited reservation. The real ledger is
+    `~/.gmojo/memslot`, shared by every worktree on the machine and sized for
+    real compilers: a synthetic unit test that used it would take 24 GB out of
+    the machine's 96 and queue behind whatever gate happened to be running,
+    which is correct behaviour and useless in a test. `ledger` names a
+    directory to use instead — the admission tests need to hold a reservation
+    in the SAME ledger the run will queue against, so they pass one in rather
+    than letting `run` invent a private one.
+
+    MEMSLOT_HELD='' is not optional either, and it is the one that bites when
+    this file is itself run as a suite job: the runner hands every job it
+    admits the reservation it holds, so without the clear each synthetic job
+    would be "covered" by suite-self-test's own reservation, take none, and
+    the admission checks below would pass on a runner that reserved nothing.
     """
     argv = list(names)
     for k, v in flags.items():
-        if v:
-            argv.append(f'--{k.replace("_", "-")}')
+        argv.append(('--' + k.replace('_', '-')) if v is True
+                    else f'--{k.replace("_", "-")}={v}')
     out = io.StringIO()
     if quiet:
         argv.append('-q')
@@ -177,10 +184,12 @@ def run(names, jobs=4, log='-', quiet=True, budget=NO_WAIT_BUDGET_GB,
         if ledger is None:
             ledger = stack.enter_context(tempfile.TemporaryDirectory())
         stack.enter_context(_SandboxEnv(MEMSLOT_DIR=ledger,
-                                        MEMSLOT_BUDGET_GB=budget))
+                                        MEMSLOT_BUDGET_GB=budget,
+                                        MEMSLOT_HELD=''))
         with redirect_stdout(out):
             rc = suite.main(argv + ['-j', str(jobs), '-o', log])
     return rc, out.getvalue()
+
 
 
 # ── drivers ──────────────────────────────────────────────────────────────────
@@ -300,6 +309,104 @@ def test_cmd_and_make_drivers_are_capped():
     check('cap: RESOURCE still does not fail the run', rc == 0, f'got {rc}')
 
 
+def test_a_fanout_item_is_capped_and_reserved_like_any_other_job():
+    """A fanout is ONE spec that becomes N jobs, and the N is what ran.
+
+    This is the shape that collapsed the machine on 2026-09-29, so it is the
+    one the `cmd`/`make` cases above cannot stand in for. `build_cmd` used to
+    guard its whole wrapping block with `isinstance(spec, Spec)`, so a fanout's
+    `mem=` was validated at registration, printed by `--list`, and then applied
+    to nothing at all: the three `bootstrap-stage*-dumps` fanouts, 45 items
+    each of them a real `--dump` of one real source file, ran with a bare argv
+    and nothing between them and the machine. A cap that is documented in
+    three places and applied in none is worse than an absent one, because it
+    reads as coverage.
+
+    Both halves are checked on the same synthetic fanout: the item's argv
+    carries memcap's ceiling, and the item takes its own reservation out of
+    the ledger — the second is the half a fanout could skip while still
+    looking wrapped, since `mem=module` on the spec and a wrapper on the item
+    are different code paths.
+    """
+    log = os.path.join(HERE, 'build', 'test-suite-fanout-cap.log')
+    items = [f'synthetic{i}.mojo' for i in range(3)]
+    fan = suite.Fanout(name='fan', cmd=ok_cmd(HOG), items=items, mem='small')
+    with Sandbox(fan=fan):
+        with _tiny_ceiling():
+            rc, _ = run(['fan'], jobs=3, log=log)
+    text = open(log).read() if os.path.exists(log) else ''
+
+    check('cap: every fanout ITEM is wrapped, not just the spec',
+          text.count('--limit-gb 0.02') >= len(items),
+          f'expected {len(items)} wrapped items, saw '
+          f'{text.count("--limit-gb 0.02")} memcap argv lines')
+    check('cap: a fanout item that breaches is RESOURCE and exits 125',
+          text.count('exit: 125') >= 1 and 'RESOURCE' in text,
+          f'expected a 125 per item, saw {text.count("exit: 125")}')
+    check('cap: ...and every item was tried, not just the first',
+          all(f'fan:{i}' in text for i in items),
+          'a fanout that stopped after one item is a fanout of one')
+    check('cap: a capped fanout still does not fail the run', rc == 0, f'got {rc}')
+
+
+def test_a_registered_fanout_item_is_wrapped_in_the_built_argv():
+    """The check above proves the runner wraps fanout items; this proves the
+    REGISTRY's fanouts reach that code path at all.
+
+    A separate test because they fail differently. The one above can only see
+    a fanout it registers itself, so a change that gave `Fanout` some new
+    shape — one `build_cmd` no longer recognises, say — would leave it passing
+    while every real fanout in the tree quietly ran bare. The three
+    `bootstrap-stage*-dumps` fanouts are the real subjects: 45 items each, and
+    the 2026-09-29 collapse.
+    """
+    opts = _FakeOpts()
+    unwrapped, items = [], 0
+    for name, spec in sorted(suite.REGISTRY.items()):
+        if not isinstance(spec, suite.Fanout):
+            continue
+        fan_items = spec.items() if callable(spec.items) else spec.items
+        for item in fan_items:
+            items += 1
+            job = suite.Job(spec, label=item,
+                            cmd=[a.replace('{file}', item) for a in spec.cmd])
+            argv = suite.build_cmd(job, opts)
+            if not any(os.path.basename(str(a)) == 'memcap.py' for a in argv):
+                unwrapped.append(f'{name}:{item}')
+    check('cap estate: every item of every registered fanout is wrapped',
+          not unwrapped, f'{len(unwrapped)} unwrapped, first: {unwrapped[:3]}')
+    check('cap estate: ...and the registry really does have fanout items',
+          items >= 100, f'only {items} items: a guard that sees none proves '
+          f'nothing')
+
+
+def test_an_exclusive_job_takes_the_whole_machine_budget():
+    """`excl` has always meant "the machine to itself" — in this run.
+
+    The ledger is what carries that to the rest of the machine: the other
+    worktrees' hand-run `make mojoc` and the developer's own terminal were
+    never in the runner's exclusive set, and a reservation for a job's CLASS
+    rather than the whole budget would leave room beside a 55 GB exclusive job
+    for exactly those. So an exclusive job reserves the budget itself, and
+    this checks the number the runner actually takes rather than the flag it
+    sets.
+    """
+    with _SandboxEnv(MEMSLOT_BUDGET_GB=64):
+        plain = suite.Job(suite.REGISTRY['gimple'])
+        excl = suite.Job(suite.REGISTRY['mojoc'])
+        check('admission: an exclusive job reserves the WHOLE budget',
+              suite.reserved_gb(excl, suite.REGISTRY['mojoc']) == 64,
+              f'{suite.reserved_gb(excl, suite.REGISTRY["mojoc"])} of 64 GB')
+        check('admission: ...and an ordinary one reserves its class',
+              suite.reserved_gb(plain, suite.REGISTRY['gimple'])
+              == suite.memlimit(suite.memclass_for(suite.REGISTRY['gimple'])),
+              'the class is the promise the ceiling has to keep')
+    with _SandboxEnv(MEMLIMIT_GB=0):
+        check('admission: no ceiling means no reservation, not a zero one',
+              suite.reserved_gb(plain, suite.REGISTRY['gimple']) == 0,
+              'MEMLIMIT_GB=0 is the run-wide "no memory bound anywhere" switch')
+
+
 def test_a_timeout_leaves_no_orphan_under_a_cap():
     """A timeout must take the whole capped tree down, not just the wrapper.
 
@@ -403,9 +510,19 @@ def _closure_shapes_in_code(path):
     discusses the compiler constantly: `test_gimple.py` and twenty others
     mention `-fgimple` and `mojoc` in strings and docstrings while compiling
     snippet-sized programs. What is unambiguous is a CALL — `build_executable`
-    is the closure build's entry point, and `--dump-full` as an argument to a
-    call is a real invocation. Grepping for either would flag half the estate;
-    parsing for them flags the three that actually reach the workload.
+    is the closure build's entry point, and `--dump-full` handed to a PROCESS
+    LAUNCHER is a real invocation. Grepping for either would flag half the
+    estate; parsing for them flags the few that actually reach the workload.
+
+    "Handed to a process launcher" is a narrowing, and it is there because of a
+    real false positive rather than out of caution: this file's own detector
+    self-tests pass `'mojoc --dump-full ../fire.py'` to `_closure_shapes`, so
+    the string IS a constant argument to a call, and the un-narrowed rule
+    flagged `test_suite.py` as a test that runs a whole-closure dump. It does
+    not: it starts no compiler at all, and a guard that names the guard is a
+    guard nobody can act on. The narrowing keeps the self-tests below honest —
+    a detector that cannot see a real invocation is reported here, not in a
+    bug doc.
     """
     try:
         tree = ast.parse(open(path, errors='replace').read())
@@ -420,10 +537,38 @@ def _closure_shapes_in_code(path):
                 else getattr(func, 'id', ''))
         if name == 'build_executable':
             hits.add('calls build_executable')
-        for arg in list(node.args) + [k.value for k in node.keywords]:
-            if isinstance(arg, ast.Constant) and arg.value == '--dump-full':
-                hits.add('runs --dump-full')
+        if name in PROCESS_LAUNCHERS:
+            for arg in _argv_constants(node):
+                if arg == '--dump-full':
+                    hits.add('runs --dump-full')
     return sorted(hits)
+
+
+def _argv_constants(call):
+    """Every string constant reachable from a call's arguments, lists included.
+
+    The list matters more than it looks: `subprocess.run([sys.executable,
+    'fire.py', '--dump-full', 'main.py'])` is how every real invocation in this
+    repo is spelled, and a scan of the call's direct arguments only would find
+    the one spelling nobody writes.
+    """
+    out = []
+    for arg in list(call.args) + [k.value for k in call.keywords]:
+        for node in ast.walk(arg):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                out.append(node.value)
+    return out
+
+
+
+# The calls that hand a string to a new process. `subprocess.run` and friends
+# are named by their attribute, so `subprocess.run` and a `from subprocess
+# import run` both land here; anything that is not one of these is a function
+# that was handed the text, which is what a detector's own fixture is.
+PROCESS_LAUNCHERS = frozenset((
+    'run', 'Popen', 'call', 'check_call', 'check_output', 'getoutput',
+    'getstatusoutput', 'system', 'popen', 'spawn', 'spawnl', 'spawnv', 'execv',
+))
 
 
 def _makefile_recipe_lines():
@@ -540,6 +685,30 @@ def test_every_compiler_job_is_capped():
     check('cap estate: and does not flag an ordinary test',
           not _closure_shapes('python3 test_gimple.py'),
           'a plain test is not a closure compile')
+
+    # …and the narrowed CODE detector, whose narrowing is itself a way of
+    # being wrong: a guard that cannot see a real invocation reports green
+    # forever. Written to a temp file because the rule is about the AST, and
+    # the two cases straddle it — one hands `--dump-full` to a process, the
+    # other hands the same string to a function, which is what THIS file does
+    # with its own fixtures.
+    src = os.path.join(HERE, 'build', 'closure-detector-probe.py')
+    os.makedirs(os.path.dirname(src), exist_ok=True)
+    with open(src, 'w') as f:
+        f.write('import subprocess\n'
+                'def fixture(patterns):\n'
+                '    return patterns\n'
+                'subprocess.run(["mojoc", "--dump-full", "fire.py"])\n'
+                'fixture(["mojoc --dump-full fire.py"])\n'
+                'def doc():\n'
+                '    """`fire.py --dump-full` in a docstring is prose."""\n')
+    check('cap estate: the code detector sees a real --dump-full invocation',
+          'runs --dump-full' in _closure_shapes_in_code(src),
+          'it stopped recognising an invocation')
+    check('cap estate: ...and not a string handed to a function',
+          len(_closure_shapes_in_code(src)) == 1,
+          'it flagged a fixture as an invocation: %s'
+          % _closure_shapes_in_code(src))
 
     # And the Makefile, because the runner's registry is only half the estate:
     # `make mojoc` and `make stage2/mojo` are how a developer gets the binary,
@@ -1915,7 +2084,10 @@ def main():
                test_every_compiler_job_is_capped,
                test_every_job_is_reserved_before_it_starts,
                test_the_timeout_clock_starts_after_admission,
-               test_a_reservation_the_budget_cannot_fit_is_reported):
+               test_a_reservation_the_budget_cannot_fit_is_reported,
+               test_a_fanout_item_is_capped_and_reserved_like_any_other_job,
+               test_a_registered_fanout_item_is_wrapped_in_the_built_argv,
+               test_an_exclusive_job_takes_the_whole_machine_budget):
         fn()
     print()
     print(f'Results: {PASSES} passed, {len(FAILURES)} failed')
