@@ -293,6 +293,56 @@ def test_an_elf_image_with_a_module_import_is_refused(tmpdir, shared):
           f"link line and not about elf as a container")
 
 
+def test_the_link_line_containers_must_agree(tmpdir, shared):
+    """A library in the wrong container is refused, and the matching one is not.
+
+    `_audit_bound_symbols` cannot see this: it reads each library's manifest,
+    finds the symbol among its exports, and counts it as provided — true, and
+    irrelevant, because the library is a container the loader will not open.
+    So the question "does something on this link line DECLARE this name" has to
+    be followed by "will the loader open that file", and the second one is
+    asked here.
+
+    Checked both ways, because a check that only fires is a check that cannot
+    be told apart from a broken one: a mismatch must be caught, and the same
+    link line against a matching image must not be.
+    """
+    from formal.build import (load_dylib_manifests, FormalBuildError,
+                              _audit_link_line_containers, _container_family)
+    lib = shared["extern_dylib"]
+    linked = load_dylib_manifests([lib])
+    check(bool(linked) and linked[0].get("path"),
+          "the manifest did not yield a linkable path, so the container "
+          "audit has nothing to read — the libraries would be uncheckable")
+
+    check(_container_family(lib) == "macho",
+          f"the x86-64 module dylib is {_container_family(lib)}, expected "
+          f"macho on this host")
+
+    # Matching container: no error. A library against a macho image.
+    try:
+        _audit_link_line_containers(linked, "macho", "image")
+    except FormalBuildError as e:
+        raise TestFailure(
+            f"a Mach-O library on a Mach-O link line was refused: {e}")
+
+    # Mismatched: named, and about the container rather than a symbol.
+    try:
+        _audit_link_line_containers(linked, "elf", "image")
+    except FormalBuildError as e:
+        msg = str(e)
+        check("elf" in msg and "macho" in msg,
+              f"the refusal does not name both containers, so it does not "
+              f"say which is wrong: {msg!r}")
+        check(os.path.basename(lib) in msg,
+              f"the refusal does not name the offending library: {msg!r}")
+    else:
+        raise TestFailure(
+            "an ELF image with a Mach-O library on its link line was "
+            "accepted: the symbol is declared by a file no ELF loader will "
+            "open, so it is unresolvable at load")
+
+
 def test_every_byte_of_the_dylib_is_claimed(tmpdir, shared):
     """The image is exactly as long as its last segment claims.
 
@@ -425,6 +475,8 @@ TESTS = [
      test_the_dylib_container_is_what_the_caller_asked_for),
     ("an ELF image with a module import is refused",
      test_an_elf_image_with_a_module_import_is_refused),
+    ("the link line containers must agree",
+     test_the_link_line_containers_must_agree),
     ("every byte of the x86-64 dylib is claimed by a segment",
      test_every_byte_of_the_dylib_is_claimed),
     ("a program importing an extern module matches CPython",

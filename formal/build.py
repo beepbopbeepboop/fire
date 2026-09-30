@@ -728,6 +728,65 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
         f"unknown arch {arch!r} (expected one of {', '.join(ARCHES)})")
 
 
+def _container_family(path: str) -> str:
+    """Which executable CONTAINER `path` is: "macho", "elf", or "unknown".
+
+    Four bytes of magic, which is the same test `file(1)` makes and the only
+    thing a loader gets to look at before deciding it can open the image at
+    all. Read from the file rather than from the build that produced it,
+    because the whole point of asking is not to trust the build.
+    """
+    try:
+        with open(path, "rb") as f:
+            magic = f.read(4)
+    except OSError:
+        return "unknown"
+    if magic == b"\xcf\xfa\xed\xfe":
+        return "macho"
+    if magic == b"\x7fELF":
+        return "elf"
+    return "unknown"
+
+
+def _audit_link_line_containers(linked, fmt: str, where: str) -> None:
+    """Every library on this link line must be in the image's OWN container.
+
+    The gap this closes is the one that let an ELF image import a module for
+    as long as it did, and it is the check `_audit_bound_symbols` structurally
+    cannot be. That one asks "does something on this link line DECLARE this
+    name?", reads each library's manifest, and finds it there — which was true,
+    and irrelevant, because the library was a Mach-O and the image an ELF, so
+    no ELF loader would ever open it. The symbol was declared by a file the
+    loader refuses to read.
+
+    Both halves of a mismatch are worth saying: the image cannot open the
+    library, AND the library cannot be opened by the loader that would be
+    running. The name that is wrong is the container, not the symbol, so this
+    names the container.
+
+    It is deliberately cheap and unconditional rather than ELF-only. A Mach-O
+    image with an ELF library is the same defect with the two formats swapped,
+    and nothing about the host decides which way it goes: `fmt` is chosen by
+    the caller, so a caller can ask for one container while the libraries on
+    the line are in the other.
+    """
+    want = "macho" if fmt == "macho" else "elf"
+    for d in linked or []:
+        path = d.get("path")
+        if not path:
+            continue
+        got = _container_family(path)
+        if got != want:
+            article = "an" if want == "elf" else "a"
+            raise FormalBuildError(
+                f"the {where} is {want} but {os.path.basename(path)} is "
+                f"{got}: {article} {want} loader cannot open {article} {got} "
+                f"library, so every symbol it exports is unresolvable at "
+                f"load. The library's container is what has to match, not the "
+                f"symbol names — rebuild the dependency for {fmt!r}. This "
+                f"path emits {want} module libraries only.")
+
+
 def _audit_bound_symbols(external_syms, dylib_syms, where: str,
                           dylib_exports=None) -> list:
     """Every extern must be accounted for: a C library, or a linked dependency.
@@ -822,7 +881,11 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     # the two are built from one iteration rather than from two
     # re-implementations of "first library on the line wins".
     dylib_exports = [{"exports": list(d.get("exports") or [])}
-                     for d in dylibs]
+                    for d in dylibs]
+    # BEFORE any codegen pass: a library the loader cannot open makes every
+    # symbol it exports unresolvable, so there is nothing worth compiling and
+    # the diagnostic is better before the image exists.
+    _audit_link_line_containers(dylibs, fmt, "image")
     if fmt == "elf":
         from formal.elf import (DEFAULT_BASE, DEFAULT_LIBC, build_elf,
                                  compute_got_addrs)
@@ -4254,6 +4317,7 @@ def load_dylib_manifests(dylib_paths: list) -> list:
             amap.setdefault(e["name"], e["symbol"])
         out.append({
             "install_name": payload.get("load_path") or payload["dylib"],
+            "path": dylib,
             "map": amap,
             "exports": exports,
         })
@@ -5452,6 +5516,10 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     runtime_lib, _covered = _runtime_library_for(ordered, arch, fmt)
     if runtime_lib is not None:
         linked = linked + [runtime_lib]
+    # Same reason and same check as the image path: a sibling library in the
+    # wrong container is on this library's `deps` list and will be written into
+    # its load commands, so the loader is told to open a file it cannot open.
+    _audit_link_line_containers(linked, fmt, "library")
     dylib_syms = {}
     for d in linked:
         for bare, mangled in (d.get("map") or {}).items():
