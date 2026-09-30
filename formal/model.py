@@ -2640,7 +2640,7 @@ def declared_type_kind(ann, int_names=(), string_names=(), decls=None):
     if base in int_names:
         return INT_KIND
     if decls is not None:
-        inner = decls.get(base)
+        inner = structs_declared(base, decls)
         if inner is not None and struct_is_framed(inner):
             return FRAME_KIND
     if base in BLOB_TYPE_CTORS:
@@ -3767,7 +3767,7 @@ def _name_declared_struct(fn, name, decls):
     if len(anns) != 1:
         return None
     base = annotation_base_name(anns.pop())
-    return decls.get(base) if base else None
+    return structs_declared(base, decls) if base else None
 
 
 def _member_candidates(fn, node, decls):
@@ -8123,7 +8123,7 @@ def frame_field_type_candidates(structs, name, decls: dict):
     if not rows or have != len(rows) or len(bases) > 1:
         return (None, (True, rows))
     base = bases.pop()
-    st = decls.get(base)
+    st = structs_declared(base, decls)
     if st is None or not struct_is_framed(st):
         return (None, (False, rows))
     return (st, (False, rows))
@@ -8156,7 +8156,7 @@ def field_type_is_value(structs, name, decls: dict) -> bool:
     if len(bases) > 1:
         return False
     only = bases.pop()
-    inner = decls.get(only)
+    inner = structs_declared(only, decls)
     return inner is None or not struct_is_framed(inner)
 
 
@@ -8357,17 +8357,54 @@ def _init_field_assignments(struct_def) -> dict:
 # one is spelled as a bare identifier — a message quoting it reads as a type, and
 # `annotation_base_name` on it returns the same name.
 #
-# `int` and `str` are the Python spellings rather than this project's (`Int`,
-# `String`) on purpose, and the reason is that these rows are only ever consulted
-# for "is this a FRAME of this unit", where "the name is not a struct this unit
-# declares" IS the answer.  Spelling it `Int` instead would make it a lookup
-# that could HIT a struct of this module named `Int`, which is a different claim
-# about the same source text.
+# `int` and `str` are the PYTHON spellings, not this project's (`Int`,
+# `String`), and that is deliberate in both directions.  These names are only
+# ever consumed to answer "is this a FRAME of this unit", where "the name is not
+# a struct this unit declares" IS the answer — so the spelling must be one that
+# CANNOT name a struct of this unit, which is what
+# `init_literal_type_names_are_not_structs` below enforces.  Spelling it `Int`
+# instead would make it a lookup that could HIT a struct of this module named
+# `Int`, which is a different claim about the same source text.
 _INIT_ASSIGNED_BASE_NAMES = {
     F.ListExpr: "list", F.TupleExpr: "tuple", F.SetExpr: "set",
     F.DictExpr: "dict", F.StringLiteral: "str", F.IntLiteral: "int",
     F.FloatLiteral: "float", F.BoolLiteral: "bool",
 }
+
+
+# The names `_INIT_ASSIGNED_BASE_NAMES` spells a LITERAL with, and the reason
+# they are looked up in `structs_declared` rather than in the struct table.
+#
+# `self.x = []` says the slot holds a list, and a list on this path is a
+# frame-allocated blob, never a frame address — so the answer for a literal is
+# decided without consulting a struct table at all.  It has to be, because the
+# spelling is a PYTHON builtin name and a module is free to declare a struct
+# called `list`: without this guard, a `struct list` anywhere in the unit would
+# turn every `self.x = []` in it into "a nested frame", and the constructor would
+# place a frame in a slot that holds a blob.  That is the silently-wrong
+# direction, and the guard is the whole of it.
+#
+# The Mojo spellings (`List`, `Int`, `String`, …) are deliberately NOT here:
+# they are ordinary type names that a struct of this unit may well be called,
+# and `decls.get("List")` answering is then CORRECT.  Measured over this
+# repository and `../modular/mojo/stdlib/std` (714 structs): zero structs named
+# after any name in this set, so this is a guard and not a compatibility shim.
+_INIT_LITERAL_TYPE_NAMES = frozenset(_INIT_ASSIGNED_BASE_NAMES.values())
+
+
+def structs_declared(base, decls: dict):
+    """`decls`'s StructDef for a type name, or None — refusing a builtin name.
+
+    The ONE lookup every "is this a frame of this unit" question makes, and the
+    reason it is a function rather than `decls.get` at each site: a type name
+    that is a Python builtin cannot be a struct of this unit on this path, so
+    the lookup must return None for it even if a module declared something by
+    that name.  `init_literal_type_names_are_not_structs` says why, and
+    `assigned_value_base_name` is the only producer of such a name.
+    """
+    if not isinstance(base, str) or base in _INIT_LITERAL_TYPE_NAMES:
+        return None
+    return (decls or {}).get(base)
 
 
 def assigned_value_base_name(value, decls: dict = None):
@@ -8404,7 +8441,7 @@ def assigned_value_base_name(value, decls: dict = None):
         name = value.func.name
         if decls is None or not name.isidentifier():
             return None
-        return name if name in decls else None
+        return name if structs_declared(name, decls) is not None else None
     if isinstance(value, F.IdentExpr) and value.name == "None":
         return "None"
     return None
