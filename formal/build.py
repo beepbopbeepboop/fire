@@ -93,21 +93,122 @@ def parse_module(source: str, filename: str = "<input>") -> list:
     return stmts
 
 
-def _synthetic_main() -> F.FunctionDef:
-    """Trivial `def main(): return 0` for sources with no top-level FunctionDef.
+# The name the module body is compiled under: `model.MODULE_BODY_NAME`, which
+# is where it lives because both backends' entry selection recognises it. Bound
+# here only so the construction below reads as one idea.
+MODULE_BODY_NAME = M.MODULE_BODY_NAME
 
-    A module that is only imports / constants / classes / module-level
-    statements is a valid formal input (build.py's _extract_functions
-    documents that surface as accepted-and-ignored); it just has nothing to
-    lower. Emitting a real entry keeps the Mach-O startup path intact and
-    matches the arm64 codegen contract that functions[0] is what the
-    startup stub BLs — without inventing lowers for the ignored toplevel."""
+
+def _module_body_function(body: list, declares: list = None) -> F.FunctionDef:
+    """`def __module_body__(): <body>` — the module's top level as a function.
+
+    The whole of the fix for `bugs/FORMAL_toplevel_statements_dropped.md`. A
+    file whose body is
+
+        import sys
+        sys.exit(3)
+
+    used to build, link, pass the bind audit and do nothing: `_extract_functions`
+    picked out `FunctionDef`s, found none, and `_synthetic_main` supplied
+    `return 0`. The image was exit 0 where the source says 3, and the coverage
+    sweep counted the file a pass.
+
+    Wrapping the body in a function is the whole lowering, and it is the RIGHT
+    one rather than a convenient one, because everything the backends already
+    know how to lower is a function body. Method-call rewriting, frame
+    receivers, spill allocation, the blob arena, the module-constant
+    substitution, the unresolved-name check, both architectures' expression
+    walk: all of it runs over function bodies, and the module's top level is
+    exactly that once it is named. There is no second implementation to keep in
+    step with the first, and a construct the backends refuse inside a function
+    is refused here by the SAME code with the SAME message — which is what
+    makes "a top-level statement is not lowerable" a fact about the construct
+    instead of a fact about where it was written.
+
+    The name is not `main`, and must not be: a module that declares its own
+    `def main` has that function called by the body (or not), and the startup
+    stub branches to `functions[0]`, which is this one. Making the body
+    `main` would both collide with the source's own `main` and silently
+    displace it.
+
+    `return 0` at the end, matching `_synthetic_main`'s contract and CPython's
+    (a script that runs off the end exits 0) — and deliberately NOT the value
+    of the last statement, because CPython's is 0 and the last statement's
+    value is what a REPL would print, not what a process exits with.
+
+    `declares` is the module's own FunctionDefs, and is checked for one of
+    this name. `__module_body__` is a legal Python identifier, so a file CAN
+    define it, and both backends key their function tables by name
+    (`self._functions[f.name] = f`) — two functions of one name means the
+    second silently replaces the first, and which one wins would depend on
+    emission order. Refusing by name is the only answer that is not a
+    coin toss, and the reader can rename their function in one edit.
+    """
+    if any(getattr(f, "name", None) == MODULE_BODY_NAME
+           for f in (declares or [])):
+        raise CodegenError(
+            f"this module defines a function named `{MODULE_BODY_NAME}`, "
+            f"which is the name this path compiles a module's top-level "
+            f"statements under. Both backends key their function tables by "
+            f"name, so two functions of one name means one silently replaces "
+            f"the other depending on emission order. Rename it")
+    fn = F.FunctionDef(name=MODULE_BODY_NAME,
+                       params=[],
+                       return_type=None,
+                       body=list(body) + [F.ReturnStmt(
+                           value=F.IntLiteral(value=0, line=0, col=0, raw=""))],
+                       line=getattr(body[0], "line", 0) if body else 0,
+                       col=0)
+    return fn
+
+
+def _synthetic_main() -> F.FunctionDef:
+    """Trivial `def main(): return 0` for a module with nothing to run.
+
+    The module has no top-level statements (so `model.module_body` is empty)
+    and no top-level `FunctionDef` (so `_extract_functions` finds none): a
+    module that is only imports / constants / classes. Emitting a real entry
+    keeps the Mach-O startup path intact and matches the arm64 codegen contract
+    that functions[0] is what the startup stub BLs."""
     stmts = parse_module("def main():\n    return 0\n", filename="<synthetic-main>")
     for s in stmts:
         if isinstance(s, F.FunctionDef) and s.name == "main":
             return s
     raise FormalBuildError("synthetic main failed to parse")
 
+
+def _first_body_where(body: list) -> str:
+    """"line N: " for the first statement of a module body, or "".
+
+    A diagnostic that can point at a line should, and the line is the only
+    thing that distinguishes `sep = "/"` at the top of a file from the same
+    store three hundred lines down. Empty when the body carries no line
+    numbers, because a message reading "line : " is worse than one that does
+    not mention a line at all."""
+    line = getattr(body[0], "line", 0) if body else 0
+    return f"line {line}: " if line else ""
+
+
+def _refuse_unlowerable_module_body(body: list) -> None:
+    """Raise `CodegenError` on a top-level statement with no function-level meaning.
+
+    Asked on the module body BEFORE it is wrapped, because inside the synthetic
+    function these statements are no longer the constructs they are: a
+    file-level `return` would return from `__module_body__`, a `global` would
+    name a scope that does not exist, and a `yield` would make the ENTRY a
+    generator that nothing iterates. Each of those would build and run and
+    compute something other than what the file says, which is the failure mode
+    this whole backend's refusals exist to prevent.
+
+    Every other shape is not refused here: it is wrapped, and the ordinary
+    function-body pipeline then lowers it or refuses it with its own message
+    naming the construct. Refusing a second, larger set here would report
+    things as top-level problems that are really ordinary codegen gaps, and
+    the sweep's whole point is that a refusal names the construct."""
+    for stmt in body:
+        why = M.module_body_refusal(stmt)
+        if why is not None:
+            raise CodegenError(why)
 
 
 class FormalClosureCtx:
@@ -542,24 +643,54 @@ def _lift_lambdas(functions) -> list:
     return functions + lifted
 
 
-def _extract_functions(stmts: list, synthetic: bool = True) -> list:
-    """Extract top-level FunctionDefs from a full module statement list.
+def _extract_functions(stmts: list, synthetic: bool = True,
+                       symbols: dict = None, body: list = None) -> list:
+    """The function list the codegen compiles, entry first.
 
-    Imports, module-level assignments, structs, control flow, etc. are
-    accepted and ignored here — the arm64 codegen only lowers FunctionDefs
-    (ARM64Codegen.compile filters them). This lets Mojo's Python-superset
-    surface (import os, from math import sqrt, x = 1, if __name__ == ...)
-    parse and compile structurally without a hard toplevel gate.
-    A module with zero top-level FunctionDefs still builds: _synthetic_main
-    provides the entry the startup stub requires.
-    Returns the FunctionDef list with `main` first when present (the
-    startup stub BLs functions[0])."""
+    Three kinds of top-level statement reach this function and each has its own
+    answer, which is the whole of what a module's top level means to this
+    backend:
+
+      * a `FunctionDef` is compiled, and `main` is put first because the startup
+        stub branches to `functions[0]`;
+      * an `import` is not a function and is not body — it names a module the
+        linker resolves (`_resolve_imports`), and a nested one inside an `if` or
+        a `try` is a body statement like any other;
+      * everything else that has an EFFECT is the module BODY, and it is
+        compiled as one function (`_module_body_function`) placed FIRST, so it
+        runs before `main` and the startup stub enters it.
+
+    That third bullet is the fix for `bugs/FORMAL_toplevel_statements_dropped.md`
+    and it is a change of class, not of wording: a file whose whole body is
+    `sys.exit(3)` used to build, run, and exit 0, and the sweep called it a
+    pass. `model.module_body` decides which statements those are, by kind, once,
+    for both backends and both front ends.
+
+    `symbols` is `collect_module_symbols(stmts)`'s table — passed in rather
+    than rebuilt because `_prepare_functions` has already built AND published
+    it, and the foldable-constant exemption is a lookup in it. `body` is that
+    same table's `model.module_body(stmts, symbols)` answer, passed for the
+    same reason: asking it twice would be a second analysis of the same
+    statements that could disagree with the first, and a caller that had
+    already refused the body (the dylib path) must be refused the same body.
+
+    A module with neither a FunctionDef nor a body statement still builds:
+    `_synthetic_main` provides the entry the startup stub requires.
+    """
     functions = [s for s in stmts if isinstance(s, F.FunctionDef)]
-    if not functions and synthetic:
+    if body is None:
+        body = M.module_body(stmts, symbols)
+    entry = ([_module_body_function(body, functions)]
+             if body else [])
+    if not functions and not entry and synthetic:
         functions = [_synthetic_main()]
+    # The body first, then `main`, then the rest. The body is the module's own
+    # code and CPython runs it before anything calls `main`; `main` next
+    # because the startup stub's contract is `functions[0]`, which the body
+    # now is, and a declared `main` is an ordinary function the body may call.
     main = [f for f in functions if f.name == "main"]
     rest = [f for f in functions if f.name != "main"]
-    return main + rest
+    return entry + main + rest
 
 
 def _make_codegen(arch: str, fmt: str, test_input: int,
@@ -1091,7 +1222,18 @@ def _formal_module_functions(source_path: str,
     # (which finds nothing in binary_heap either, so it is refused a moment
     # later, by the check that can actually say why). Reporting the accurate
     # reason matters: "no top-level functions" reads like a codegen gap.
-    functions, structs, symbols = _prepare_functions(stmts, synthetic=False)
+    #
+    # `as_dylib=True` because a LIBRARY has no entry point. A module whose API
+    # is its top-level statements — `sep = "/"` — compiles here to a dylib that
+    # exports nothing, has no code to run the store, and is then refused by
+    # `no_public_api_reason` for the wrong reason ("no public functions"), which
+    # sends the reader looking for a missing `def` when the file has exactly
+    # what it meant to write. The body is refused by name here instead, which is
+    # the same message the executable path gives and the same answer the reader
+    # needs: a module-level store needs storage, and this path has none
+    # (`bugs/FORMAL_module_state_no_storage.md`).
+    functions, structs, symbols = _prepare_functions(stmts, synthetic=False,
+                                                    as_dylib=True)
     # The other of the two call sites of `check_frame_field_blob_premises`, and
     # for the same reason: this is the dylib path, it has no import resolution
     # of its own to be preempted by, and the check has to apply to a dylib
@@ -3305,6 +3447,52 @@ def _rewrite_child(child, sites: dict, stores: set):
     return child
 
 
+def _materialize_entry_dunder_name(functions: list) -> int:
+    """Replace a read of `__name__` in the MODULE BODY with `"__main__"`.
+
+    Only in the module body, and the restriction is the whole correctness
+    argument. `__name__` is a Python-level value, not a local, and the module
+    body is the only place on this path where one specific value of it is
+    knowable: the body IS the program's entry, and the entry program's
+    `__name__` is `"__main__"` — that is what CPython says for `python3
+    file.mojo`, and it is the same answer on both architectures because it is
+    a fact about what the file is rather than about the machine. It is also
+    what makes the `if __name__ == "__main__":` guard work, which is 143 of
+    the 210 files in this tree and the stdlib that have a top-level statement:
+    without it every one of them would be refused on a name, and the refusal
+    would be about a construct that has an exact answer.
+
+    In a FUNCTION it stays unplaced and is still refused by
+    `check_module_symbols`, which is right: a function's `__name__` is the
+    name of whatever MODULE it was defined in, and a function lifted out of an
+    imported module has no answer this path can give. Materializing it there
+    too would answer a question the source does not ask with a value that is
+    right only for this file — the same class of lie as a `PLATFORM` constant
+    in `bugs/FORMAL_module_state_no_storage.md`.
+
+    Uses the module-constant substitution's OWN rewriter rather than a second
+    one, because the two have the same subtlety: a store target and a call's
+    callee are not reads, and a rewrite that replaced either would turn a
+    store into a dropped one and a call into a call to a string.
+
+    Returns the number of functions touched, for the test to pin.
+    """
+    sites = {"__name__": F.StringLiteral(value="__main__", line=0, col=0,
+                                         is_bytes=False)}
+    done = 0
+    for fn in functions:
+        if getattr(fn, "name", None) != M.MODULE_BODY_NAME:
+            continue
+        stores = _assigned_names(fn.body)
+        if "__name__" in stores:
+            # The body assigns it, so it is an ordinary local here and the
+            # substitution must not overwrite the source's own value.
+            continue
+        _apply_module_constant_sites(fn.body, sites, stores)
+        done += 1
+    return done
+
+
 def check_module_symbols(functions: list, structs_by_name: dict = None,
                          imported_module_names=None) -> None:
     """Refuse every name a function reads that no table in the compiler places.
@@ -3657,8 +3845,19 @@ def _apply_constant_sites(node, sites: dict):
 
 
 def _prepare_functions(stmts: list, synthetic: bool = True,
-                       extra_structs: list = None) -> tuple:
+                       extra_structs: list = None,
+                       as_dylib: bool = False) -> tuple:
     """Turn a parsed module into the function list the codegen compiles.
+
+    `as_dylib` says this unit is being compiled as a LIBRARY rather than as a
+    program, and it is the one thing that differs between the two: a dylib has
+    no entry point, so nothing would ever call the module body, and a module
+    whose whole content is its top-level statements would compile to a library
+    that computes nothing at load time and exports nothing — the same silent
+    no-op, one level down, and the reason the dylib path must not pretend the
+    body is code. The refusal is raised by the caller (after imports resolve,
+    so a file with a bad import still reports the import), and is the same
+    message the executable path would give for a body it cannot lower.
 
     ONE pipeline for both entry points. It was two, and they had drifted:
     the executable path skipped method lifting and call rewriting entirely,
@@ -3696,7 +3895,56 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # and their globals are not one table.
     symbols = M.collect_module_symbols(stmts)
     M.publish_module_symbols(symbols)
-    functions = _extract_functions(stmts, synthetic=synthetic)
+    # A top-level statement whose MEANING changes when the body is wrapped in a
+    # function — a file-level `return`, `global`, `break`, a `yield`/`await` —
+    # is refused HERE, before the wrapping, and NOT by the function pipeline it
+    # is about to join. Inside `__module_body__` each of those is a different
+    # construct: a `return` returns from the entry, a `global` names a scope
+    # that does not exist, a `yield` makes the entry a generator nothing
+    # iterates. Lowered rather than refused, each builds, runs, and computes
+    # something other than what the file says.
+    #
+    # Only `module_body_refusal`'s shapes are refused here; everything else is
+    # wrapped and then answered by the ordinary codegen, so a construct the
+    # backends cannot lower is still reported as a construct rather than as a
+    # top-level-statement problem.
+    body = M.module_body(stmts, symbols)
+    if as_dylib:
+        # …and on the DYLIB path the WHOLE body is refused, not just the
+        # file-level-only shapes, because a library has no entry point for any
+        # of it. Emitting `__module_body__` into a dylib would produce a
+        # function nothing calls, exported or not: the module's top-level code
+        # would be compiled, dead, and the file would build and link and do
+        # nothing at load time — the same silent no-op one level down, which is
+        # worse than the executable case because a caller linking the library
+        # has no way to see that the store never ran.
+        #
+        # Said HERE, before `no_public_api_reason` gets its turn, because that
+        # check reports "this module has no public functions" for a module
+        # whose content IS its top level, which sends the reader looking for a
+        # missing `def` in a file that has exactly what it meant to write.
+        if body:
+            kinds = sorted({type(s).__name__ for s in body})
+            raise CodegenError(
+                f"{_first_body_where(body)}this module's API is its "
+                f"top-level statements ({', '.join(kinds[:4])}"
+                f"{' …' if len(kinds) > 4 else ''}), and a library has no "
+                f"entry point to run them. This path compiles an import into "
+                f"a dylib, and the code that would run a module's top level "
+                f"is not called at load time, so it would compile to a "
+                f"function nothing ever runs — the file would build, link, "
+                f"and do nothing, which is the same silent no-op an "
+                f"executable had. A module-level name has no storage either: "
+                f"every value a formal program can name lives in a function's "
+                f"own stack scratch, reclaimed when the function returns "
+                f"(bugs/FORMAL_module_state_no_storage.md). Give the module a "
+                f"function and call it — `def sep(): return \"/\"` instead of "
+                f"`sep = \"/\"` — which is the same program with a "
+                f"representation.")
+    else:
+        _refuse_unlowerable_module_body(body)
+    functions = _extract_functions(stmts, synthetic=synthetic, symbols=symbols,
+                                   body=body)
     owners = _method_owners(stmts, extra_structs)
     # This file's own declarations win over an imported one of the same name:
     # a local definition shadows the import, and the local is what this file's
@@ -3779,6 +4027,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # to be visible to the substitution or the module constant would replace
     # the function's OWN name.
     _substitute_module_constants(functions)
+    _materialize_entry_dunder_name(functions)
     # LAST, on the FINAL function list: which local names hold a frame
     # address is a property of the code that survives every rewrite above, and
     # a lifted lambda or a flattened closure is a function with its own locals

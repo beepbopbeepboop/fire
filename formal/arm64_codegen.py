@@ -667,9 +667,7 @@ class ARM64Codegen:
         for st in (structs or []):
             self._structs[st.name] = st
         if emit_startup:
-            main = [f for f in functions if f.name == "main"]
-            rest = [f for f in functions if f.name != "main"]
-            functions = (main + rest) if main else functions
+            functions = M.entry_function(functions)
         for f in functions:
             # async def and generators lower as ordinary functions: formal
             # has no event loop / iterator protocol, so `await` is identity

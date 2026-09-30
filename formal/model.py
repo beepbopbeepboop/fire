@@ -9096,6 +9096,258 @@ def collect_module_symbols(stmts: list) -> dict:
     return table
 
 
+# ── The module BODY: the top-level statements that are not declarations ──
+#
+# Everything above decides what a module-level NAME means. This decides which
+# top-level STATEMENTS have to run, and it is the answer to the question the
+# whole `formal` entry-point path turns on: `_extract_functions` in
+# `formal/build.py` picks `FunctionDef`s out of the module statement list and
+# lowers nothing else, so before this existed a file whose body was
+#
+#     import sys
+#     sys.exit(3)
+#
+# built, linked, passed the bind audit and computed NOTHING — exit 0 where the
+# source says 3 — and the coverage sweep counted it a pass. That is the
+# worst outcome this project has (a false pass), and it was silent because
+# nothing asked.
+#
+# So the module body is classified here, ONCE, in the model both backends and
+# both front ends share, and the classification is by KIND rather than by
+# inspection:
+#
+#   * a DECLARATION — `def`, `struct`, `trait`, `import`, `from … import`,
+#     and a module-level `comptime` binding (a compile-time binding, not a
+#     runtime store) — is not body. Each has its own lowering or its own
+#     refusal already.
+#   * a module DOCSTRING — a bare string `ExprStmt` — is not body. Python
+#     stores it in `__doc__` and runs nothing; `model._UNRESOLVED_NAME_ALLOWED`
+#     already answers a read of `__doc__` from a Python-level value, so there
+#     is nothing to execute and nothing to lose.
+#   * `pass` at file level is not body: it is the statement that does nothing.
+#   * a module-level BINDING whose value FOLDS to a literal, bound once, is not
+#     body either — and this is the exemption `collect_module_symbols` already
+#     computes, read as a lookup rather than as a second analysis. The
+#     substitution (`build.py:_substitute_module_constants`) puts the literal
+#     at every read site inside the unit, which is exactly what executing the
+#     store would have achieved for a name nothing else can see. Anything ELSE
+#     at file level — a call, an `if`, a `for`, a binding of a value the folder
+#     cannot fold — IS body, because its effect is not observable anywhere else
+#     and dropping it is a wrong answer rather than a harmless one.
+#
+# A `ComptimeVarStmt` is a DECLARATION here, deliberately and against the
+# measurement: 539 of the module-level statements in this repository and the
+# stdlib are `comptime X = …` bindings, and `refuse_module_level_mlir_templates`
+# / `collect_module_symbols` already own every one of them. Counting them as
+# body would put 88 stdlib modules into "this module has a body" for a
+# construct that has no runtime store at all, which is the same category of
+# error as calling a comment a statement.
+_MODULE_BODY_DECLARATIONS = ("ImportStmt", "FromImportStmt", "FunctionDef",
+                             "StructDef", "TraitDef", "ComptimeVarStmt")
+
+# The binding forms. A `VarDecl` with no value (`x: Int`) is a DECLARATION of a
+# name with no store, which `collect_module_symbols` already records as
+# `declared`; it is listed here so it is classified as body and then refused by
+# the ordinary name rules rather than being quietly skipped.
+_MODULE_BODY_BINDINGS = ("AssignStmt", "VarDecl", "AugAssignStmt",
+                         "MultiAssignStmt")
+
+# The name the module body is compiled under. Lives HERE, beside the rule that
+# decides which statements are body, because the two backends' entry selection
+# (`entry_function`) has to recognise it and build.py has to create it: three
+# places agreeing on one spelling by convention is three places that can
+# disagree.
+#
+# A dunder-adjacent spelling, and the reason is load-bearing: it must not
+# collide with a name the source can write (a module is free to define
+# `def module_body()`, and then the emitter's `self._functions` table would
+# keep only the last of the two), and `doc/ABI.md`'s export rule excludes a
+# leading `_`, so a function of this name can never be published as a module's
+# API either. It is NOT `main` and must not be: a module that declares its own
+# `def main` has that called by its body or not at all, and the startup stub
+# branches to `functions[0]`, which is this one.
+MODULE_BODY_NAME = "__module_body__"
+
+
+def entry_function(functions: list):
+    """The function the startup stub branches to, and the order to emit in.
+
+    One rule, asked by both backends, because the two used to each spell it out
+    (`main` first, else the list as given) and a rule written twice is a rule
+    that will be written two ways. The rule:
+
+      1. the MODULE BODY first, when the module has one. The module's own
+         top-level statements are the program's own code and run before
+         anything else — that is what CPython does, and it is the whole of
+         `bugs/FORMAL_toplevel_statements_dropped.md`;
+      2. then a declared `main`, which is an ordinary function the body may
+         call and which used to be the entry;
+      3. then everything else, in source order.
+
+    A body-less module therefore behaves exactly as it did before this rule
+    existed, which is why every file in the formal suites is unaffected: they
+    are all `def f(): …` with nothing at file level.
+
+    Returns the ordered list; `functions[0]` is the entry. `emit_startup=False`
+    callers (the dylib path) do not reorder, because a library has no entry and
+    the order is then only the emission order."""
+    body = [f for f in functions if getattr(f, "name", None) == MODULE_BODY_NAME]
+    if not body:
+        body = [f for f in functions if getattr(f, "name", None) == "main"]
+    else:
+        # A module body AND a declared `main`: the body is still first, and
+        # `main` second. The body calls `main` if the source says so.
+        body = body + [f for f in functions
+                       if getattr(f, "name", None) == "main"]
+    # By IDENTITY, not by `not in`: `F.FunctionDef` is a dataclass, so `in`
+    # compares by VALUE, and two functions that happen to be spelled the same
+    # way — `def f(): return 0` twice, which Mojo overloads and this tree
+    # does contain — would make the second one compare equal to the first and
+    # be dropped from `rest`. That is a silently missing function, which is
+    # the failure this whole module exists to remove.
+    taken = {id(f) for f in body}
+    rest = [f for f in functions if id(f) not in taken]
+    return body + rest if body else functions
+
+
+def module_body(stmts: list, symbols: dict = None) -> list:
+    """The top-level statements of `stmts` that HAVE TO RUN, in source order.
+
+    The counterpart of `_extract_functions`, and the answer to what it drops.
+    Empty for a module that is only declarations and foldable constants — the
+    overwhelming majority of this repository, and every file the existing
+    formal suites build — so a caller that lowers this into a function changes
+    nothing for them.
+
+    `symbols` is `collect_module_symbols(stmts)`'s table, which the caller
+    already has (and publishes) on every path that asks this question, so the
+    foldable-constant exemption is a LOOKUP in a table already built rather than
+    a second fold of the same expressions."""
+
+    def _is_folded_constant(stmt) -> bool:
+        name = _module_binding_name(stmt)
+        if name is None:
+            return False
+        sym = (symbols or {}).get(name)
+        if sym is None or sym.literal is None:
+            return False
+        # `site == "assigned"` is the table's own word for "bound once at
+        # module level to a value that folds", which is the only case where the
+        # store itself has no effect the substitution would miss. A name bound
+        # twice, or by an augmented assignment, is body: the ORDER of the
+        # stores is the program, and `site` is `rebound` for exactly that.
+        return sym.site == "assigned" and sym.line == (getattr(stmt, "line", 0)
+                                                       or 0)
+
+    out = []
+    for stmt in stmts or []:
+        kind = type(stmt).__name__
+        if kind in _MODULE_BODY_DECLARATIONS:
+            continue
+        if kind == "ExprStmt" and isinstance(getattr(stmt, "value", None),
+                                             F.StringLiteral):
+            continue                    # the module docstring
+        if kind == "PassStmt":
+            continue                    # the statement that does nothing
+        if kind in _MODULE_BODY_BINDINGS and _is_folded_constant(stmt):
+            continue
+        out.append(stmt)
+    # A folded constant the body REBINDS is not a constant, and exempting its
+    # store is how a correct program gets a wrong answer.
+    #
+    # `total = 0` at file level folds, so the store is normally left out and
+    # the literal is substituted at each read. But if the body then writes the
+    # name — `for i in range(5): total = total + i` — the substitution does
+    # NOT fire inside the body (the body binds the name, which is what
+    # `_substitute_module_constants` checks), so the read at the top of the
+    # loop has no store to read: the allocator gave the name a register and
+    # nothing ever wrote it, and the program printed 10 on the same source
+    # where CPython says 10. Measured, both backends, and the identical
+    # program inside a `def` is right — the difference is exactly the missing
+    # store.
+    #
+    # The condition is asked with the register allocator's OWN walk
+    # (`bound_names_in_order`), not a second one: the exemption has to agree
+    # with the pass that decides which names have a register, or "is this name
+    # in the body" has two answers and the wrong one is the one that decides
+    # whether a store is emitted.
+    rebound = set()
+    if out:
+        from mojo.middle.boundnames import bound_names_in_order
+        try:
+            rebound = {n for n in bound_names_in_order(out, [])
+                       if isinstance(n, str)}
+        except Exception:
+            rebound = set()
+    if not rebound:
+        return out
+    kept = {id(s) for s in out}
+    final = []
+    for stmt in stmts or []:
+        folded = (type(stmt).__name__ in _MODULE_BODY_BINDINGS
+                  and _is_folded_constant(stmt))
+        if folded and _module_binding_name(stmt) in rebound:
+            final.append(stmt)          # the store the body needs
+        elif folded:
+            continue                    # substituted at each read; no store
+        elif id(stmt) in kept:
+            final.append(stmt)
+    return final
+
+
+def module_body_refusal(stmt):
+    """Why a top-level statement cannot be lowered as the module body, or None.
+
+    The entry point runs the body as a function, so a statement that means
+    something only at file level — a bare `return`, a `global`/`nonlocal` that
+    names a scope which does not exist, a `yield`/`await` that would make the
+    module a generator or a coroutine — has no meaning inside one, and the
+    wrapper function must refuse it BEFORE it is wrapped.
+
+    None for everything else, and that is most things: an ordinary statement
+    wrapped in a function is an ordinary statement, and the backends already
+    lower it or already refuse it, by name, from inside a function body. This
+    function is asked only about the handful of shapes whose MEANING changes
+    with the wrapping, because a refusal that says "unsupported statement" and
+    not WHICH sends the reader to the file rather than to the line."""
+    kind = type(stmt).__name__
+    line = getattr(stmt, "line", 0) or 0
+    where = f"line {line}: " if line else ""
+    if kind == "ReturnStmt":
+        return (f"{where}a `return` at file level returns from nothing: this "
+                f"path runs a module's top-level statements as the body of a "
+                f"synthetic function, so a `return` here would return from "
+                f"that function rather than from a function the source wrote. "
+                f"Move it inside a `def`")
+    if kind in ("GlobalStmt", "NonlocalStmt"):
+        return (f"{where}a `{kind[:-4].lower()}` declaration at file level "
+                f"names a scope that does not exist — the module's own "
+                f"top-level statements are not a scope a `global` can refer "
+                f"to, and the synthetic function they run in has a real local "
+                f"frame instead. Move it inside a `def`")
+    if kind in ("BreakStmt", "ContinueStmt"):
+        return (f"{where}a `{kind[:-5].lower()}` at file level has no loop to "
+                f"be in: the module's top-level statements run straight "
+                f"through. Move it inside a `def`")
+    for node in iter_nodes(stmt):
+        nk = type(node).__name__
+        if nk in ("YieldExpr", "YieldFromExpr"):
+            return (f"{where}a `yield` at file level makes the MODULE a "
+                    f"generator, and there is nothing on this path that "
+                    f"iterates a module: the top-level statements are lowered "
+                    f"as one function's body, so the `yield` would leave its "
+                    f"value in a register the program never reads. Put the "
+                    f"`yield` in a `def` and call that")
+        if nk == "AwaitExpr":
+            return (f"{where}an `await` at file level makes the MODULE a "
+                    f"coroutine, and this path has no event loop to await on: "
+                    f"the top-level statements are lowered as one function's "
+                    f"body, where `await` is the identity, so the program "
+                    f"would run the awaitable and throw the result away. Put "
+                    f"the `await` in an `async def`")
+    return None
+
+
 def _folded_node(folded, template):
     """An AST literal node carrying `folded`, keeping the ORIGINAL's spelling.
 
