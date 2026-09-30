@@ -6424,19 +6424,31 @@ def struct_frame_slot_candidates(structs, name):
 # `Int` here exactly as it does in the source, and that is ordinary value
 # lowering.
 DUNDER_LEN = "__len__"
+# The COMPARISON dunders, which are the second spelling of the same idea: an
+# operator is a method of the receiver's own struct, called by name, and the
+# spelling in the source is `a == b` rather than `a.__eq__(b)`.
+DUNDER_EQ = "__eq__"
+DUNDER_NE = "__ne__"
 
 
-def dunder_len_method(struct_def):
-    """This struct's `__len__`, or None when it declares none it could be reached by.
+def dunder_receiver_method(struct_def, name: str):
+    """This struct's method called `name`, or None when none could be reached.
 
     A method declared with NO parameters has no receiver, by the same rule
     `struct_receivers` applies to a field read and
     `formal/build.py`'s `_receiverless_methods` applies to a call: there is
-    nothing for a frame address to be handed to, so it cannot answer `len(x)`.
-    A `@staticmethod` is excluded for the same reason and by the same helper.
+    nothing for a frame address to be handed to, so it cannot answer `len(x)`
+    or `a == b`.  A `@staticmethod` is excluded for the same reason and by the
+    same helper.
+
+    ONE function for the whole family rather than one per dunder, because the
+    predicate is about the DECLARATION's shape and not about which operator the
+    method answers: three copies of `name != X or staticmethod or no params` is
+    three places for the rule to change, and a `__eq__` that quietly accepted a
+    parameterless declaration would be called with a receiver it cannot name.
     """
     for m in struct_methods(struct_def):
-        if m.name != DUNDER_LEN:
+        if m.name != name:
             continue
         if "staticmethod" in _decorator_names(m):
             continue
@@ -6444,6 +6456,16 @@ def dunder_len_method(struct_def):
             continue
         return m
     return None
+
+
+def dunder_len_method(struct_def):
+    """This struct's `__len__`, or None when it declares none it could be reached by.
+
+    The `__len__` spelling of `dunder_receiver_method`, kept as its own name
+    because every existing caller reads better saying `dunder_len_method` than
+    saying `dunder_receiver_method(st, DUNDER_LEN)`, and because it is the one
+    of the family that existed before the family did."""
+    return dunder_receiver_method(struct_def, DUNDER_LEN)
 
 
 def struct_dunder_len_candidates(structs):
@@ -6487,6 +6509,96 @@ def struct_dunder_len_candidates(structs):
     if owners and (len(owners) > 1 or have != len(rows)):
         return (None, (True, rows))
     return ((owners.pop() if owners else None), (False, rows))
+
+
+# `a == b` is `type(a).__eq__(a, b)`, and `a != b` is `type(a).__ne__(a, b)` —
+# with the language's own fallback, so the two are ONE question with two
+# spellings rather than two questions.  The dunder each operator reaches, in the
+# order it is tried: `!=` looks for `__ne__` and, finding none, for the negation
+# of `__eq__`, which is what `object` does and therefore what a struct that
+# declares only `__eq__` inherits.
+EQ_DISPATCH_DUNDERS = {"==": ((DUNDER_EQ, False),),
+                       "!=": ((DUNDER_NE, False), (DUNDER_EQ, True))}
+
+
+def struct_dunder_dispatch_candidates(left_structs, right_structs, op: str):
+    """`(owner, dunder, negate, disagreeing)` — the struct whose dunder answers
+    `a op b`.
+
+    The `struct_dunder_len_candidates` contract over a fact with one extra
+    dimension, and the same answer for the same reason: WHICH struct, decided by
+    AGREE-OR-REFUSE over every struct either name could hold.  The two candidate
+    lists go in as ONE list, deduplicated by struct name, because the question is
+    a property of the pair of names rather than of either alone: a call whose
+    receiver might be `S` and might be `T` is not an `S.__eq__` with a fallback
+    to `T`, it is one call or the other depending on the path taken, and this
+    analysis has no path sensitivity.
+
+    `dunder` is the name the answer was found under and the caller MUST call
+    that one, not the operator's own: `!=` reaches `HasNe___ne__` when the struct
+    declares a `__ne__` and `HasNe___eq__` under a `not` when it does not, and a
+    caller that spelled the call from `op` would call `__eq__` for both — which
+    is the wrong method for the first, and answers `a == b` for the second.
+    `negate` says the operator is `!=` reached through the `__eq__` fallback, so
+    the caller wraps the call in the language's `not`, which is the whole of that
+    fallback.
+
+    `owner is None` with no disagreement is the answer "this type has no
+    comparison operator", and it is NOT a refusal: it is what makes CPython's
+    INHERITED identity `__eq__` correct, and it is the same reason the frame
+    length rewrite leaves a struct that declares no `__len__` alone.  On this
+    path a frame's own address compare is already that identity, so leaving the
+    operator alone is not a gap — it is the right answer for a struct with no
+    dunder, and the case that would break it is a dunder on a DIFFERENT struct
+    than the one the addresses are, which is what the disagreement arm is for.
+    """
+    structs, seen = [], set()
+    for st in list(left_structs or []) + list(right_structs or []):
+        if st.name not in seen:
+            seen.add(st.name)
+            structs.append(st)
+    for dunder, negate in EQ_DISPATCH_DUNDERS.get(op, ()):
+        rows, owners, have = [], set(), 0
+        for st in structs:
+            found = dunder_receiver_method(st, dunder)
+            rows.append((st.name, found is not None))
+            if found is not None:
+                owners.add(st.name)
+                have += 1
+        if not owners:
+            continue
+        if len(owners) > 1 or have != len(rows):
+            return (None, dunder, negate, (True, rows))
+        return (owners.pop(), dunder, negate, (False, rows))
+    return (None, None, False, (False, [(st.name, False) for st in structs]))
+
+
+def eq_dispatch_candidates_disagree(spelled: str, struct_names, rows) -> str:
+    """Why `a == b` has no single dunder to call, when the candidates disagree.
+
+    The agree-or-refuse refusal for the comparison half, and a different message
+    from `frame_len_candidates_disagree` because the answer is a different shape:
+    there is nothing to READ that is missing here, there is a CALL that would be
+    one of two, and the two are the two answers the program would give on the two
+    paths.  `rows` is `[(struct_name, declares_it), …]` from
+    `struct_dunder_dispatch_candidates` and the refusal names every row, for
+    the reason its sibling gives: "they disagree" without saying which is which
+    sends the reader to look at the wrong declaration.
+    """
+    who = ", ".join(struct_names) if struct_names else "this struct"
+    return (
+        f"{spelled} compares two FRAME ADDRESSES, so the answer is the frame's "
+        f"own struct's `__eq__` — which means WHICH struct is the whole of the "
+        f"question, and {who} does not settle it: "
+        + "; ".join(f"{sn} declares one"
+                    if has else f"{sn} declares none"
+                    for sn, has in rows)
+        + ". Each name holds a different frame on each path that binds it, and "
+          "this analysis has no path sensitivity to say which one is live at "
+          "this comparison, so the call this would lower to is one of two and "
+          "the program would build, run, and answer with whichever struct's "
+          "`__eq__` the other path would have called. Give each name one "
+          "binding, or give every candidate the same `__eq__`")
 
 
 def frame_len_candidates_disagree(spelled: str, struct_names, rows) -> str:

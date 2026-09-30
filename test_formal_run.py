@@ -6340,6 +6340,86 @@ WAVE7_G2_CASES = [
      "    return h.at(1) + h.size()\n", 88, None),
 ]
 
+# `a == b` on two FRAME ADDRESSES, which used to be a flag-setting compare of
+# two words and therefore an answer about ADDRESSES: CPython's INHERITED
+# `__eq__`, correct for a struct that declares none and a silent bypass of the
+# one that does.  Three rows because the question has three answers and a fix
+# that gets two of them right is the same defect again.
+#
+# The full case set for this construct, including the CPython-oracle comparison
+# and the two refusals, is `test_formal_eq_dispatch.py`.  These three are here
+# because this file is the registered suite job and a construct nothing in it
+# exercises is a construct nothing in it can regress.
+EQ_DISPATCH_CASES = [
+    # The reproducer: `__eq__` that ignores its argument, reached through the
+    # operator and through the explicit spelling in the same printf, because the
+    # two are the same question asked twice and CPython makes them equal.
+    # Pre-change on BOTH backends: `eq=0 direct=1`.
+    ("eq_operator_reaches_a_declared_eq",
+     "class Plain:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    def __init__(self, p, q):\n"
+     "        self.x = p\n"
+     "        self.y = q\n"
+     "    def __eq__(self, other):\n"
+     "        return True\n"
+     "def main(n):\n"
+     "    var a = Plain(1, 2)\n"
+     "    var b = Plain(3, 4)\n"
+     "    printf(\"eq=%d direct=%d\\n\", 1 if a == b else 0,\n"
+     "           1 if a.__eq__(b) else 0)\n"
+     "    return 0\n", 0, "eq=1 direct=1"),
+    # The GUARD, and the direction the fix must not move: no declared dunder, so
+    # CPython's inherited IDENTITY comparison stands, which on this path is the
+    # address compare that was always there.  `a == a` is 1, `a == b` is 0 for
+    # two live objects, and `a == c` is 0 for two objects holding equal field
+    # values.  A rewrite that fired on every comparison rather than on a
+    # declared dunder would get the last two wrong.
+    ("eq_no_declared_dunder_stays_identity",
+     "class Bare:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    def __init__(self, p, q):\n"
+     "        self.x = p\n"
+     "        self.y = q\n"
+     "def main(n):\n"
+     "    var a = Bare(1, 2)\n"
+     "    var b = Bare(3, 4)\n"
+     "    var c = Bare(1, 2)\n"
+     "    printf(\"same=%d diff=%d cross=%d\\n\", 1 if a == a else 0,\n"
+     "           1 if a == b else 0, 1 if a == c else 0)\n"
+     "    return 0\n", 0, "same=1 diff=0 cross=0"),
+    # AGREE-OR-REFUSE.  `v` holds an `A` or a `B` depending on the branch, and
+    # only `B` declares a dunder, so which call the comparison lowers to depends
+    # on the path and this analysis has no path sensitivity.  Pre-change this
+    # BUILT and compared two addresses.
+    ("eq_two_candidate_structs_are_refused",
+     "class A:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    def __init__(self, p, q):\n"
+     "        self.x = p\n"
+     "        self.y = q\n"
+     "class B:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    z: int\n"
+     "    def __init__(self, p, q, r):\n"
+     "        self.x = p\n"
+     "        self.y = q\n"
+     "        self.z = r\n"
+     "    def __eq__(self, other):\n"
+     "        return True\n"
+     "def main(n):\n"
+     "    var v = A(1, 2)\n"
+     "    if n:\n"
+     "        v = B(1, 2, 3)\n"
+     "    printf(\"r=%d\\n\", 1 if v == v else 0)\n"
+     "    return 0\n",
+     "refuse:compares two FRAME ADDRESSES", None),
+]
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
@@ -6361,6 +6441,7 @@ def main():
                   + POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
                   + WAVE6_TRUTHY_CASES
                   + WAVE6_NAME_CASES + WAVE7_G2_CASES
+                  + EQ_DISPATCH_CASES
                   + [X86_ONLY_1SLOT_BUG_CASE])
     selected = [c for c in everything if not args.cases or c[0] in args.cases]
     known = {c[0] for c in everything}

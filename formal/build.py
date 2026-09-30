@@ -1663,6 +1663,14 @@ def _call_receivers(fn):
     return out
 
 
+# How many times the holder fixpoint below is allowed to saturate-and-rewrite.
+# The pair converges in two on anything measured (the second round exists for
+# the `__eq__` second-parameter edge and for a `len` reached through a rewritten
+# call); the bound is a backstop that raises rather than the alternative, which is
+# a hang in the compiler on a program whose rewrite is not monotone.
+_HOLDER_FIXPOINT_ROUNDS = 4
+
+
 def _frame_receivers(functions: list, structs_by_name: dict) -> None:
     """Annotate every function with its frame-pointer receivers and field slots.
 
@@ -1751,70 +1759,85 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
         for name, sts in _constructor_bindings(fn, framed).items():
             holders[fn.name].add(name)
             hstruct[fn.name].setdefault(name, []).extend(sts)
-    changed = True
-    while changed:
-        changed = False
-        for fn in functions:
-            hs = holders[fn.name]
-            for node in M.iter_nodes(fn.body):
-                target = value = None
-                if isinstance(node, F.VarDecl):
-                    target, value = node.name, node.value
-                elif isinstance(node, F.AssignStmt) \
-                        and isinstance(node.target, F.IdentExpr):
-                    target, value = node.target.name, node.value
-                if target and isinstance(value, F.IdentExpr) \
-                        and value.name in hs and target not in hs:
-                    # a copy: the same frame under a second name
-                    hs.add(target)
-                    hstruct[fn.name][target] = list(hstruct[fn.name][value.name])
-                    changed = True
-                if not isinstance(node, F.CallExpr) \
-                        or not isinstance(node.func, F.IdentExpr):
-                    continue
-                # EVERY argument position, not just the first, and a keyword
-                # resolved BY NAME — the position a keyword lands in is the
-                # parameter list's business, and reading it off the
-                # concatenated `args + kwargs` list would follow a frame
-                # address into the wrong parameter.
-                #
-                # The lifetime reasoning this needs, and it is the whole
-                # reason it is safe: a frame belongs to the function that
-                # created it, and an address only ever travels DOWN an active
-                # call chain, so the creator of a holder that arrived as an
-                # argument is an ancestor of the callee and its frame is live
-                # for every instant of the callee's activation. The callee may
-                # therefore read and write through it — which is the same
-                # licence a method receiver has, and the same one the
-                # cross-module hand-off relies on. What it may NOT do is let
-                # the word leave, because then it outlives the call and the
-                # creator may be gone: `return y`, a container, a field, a
-                # subscript and a module-level name are all refused by name in
-                # `_check_frame_escapes`.
-                #
-                # `r[1] == 0` is kept: a field read is a VALUE and not an
-                # address, so only a bare name hands the frame over.
-                #
-                # `plist` is the callee's OWN parameter list, and the edge is
-                # only taken for a position that list has: a callee this image
-                # does not have has no parameter to make a holder, and that is
-                # the opaque case `_check_frame_escapes` says so about.
-                plist = params_of.get(node.func.name)
-                if not plist:
-                    continue
-                for pos, pname, _kw in _frame_argument_slots(node, plist):
-                    if pos >= len(plist):
+    for _round in range(_HOLDER_FIXPOINT_ROUNDS):
+        grew = False
+        changed = True
+        while changed:
+            changed = False
+            for fn in functions:
+                hs = holders[fn.name]
+                for node in M.iter_nodes(fn.body):
+                    target = value = None
+                    if isinstance(node, F.VarDecl):
+                        target, value = node.name, node.value
+                    elif isinstance(node, F.AssignStmt) \
+                            and isinstance(node.target, F.IdentExpr):
+                        target, value = node.target.name, node.value
+                    if target and isinstance(value, F.IdentExpr) \
+                            and value.name in hs and target not in hs:
+                        # a copy: the same frame under a second name
+                        hs.add(target)
+                        hstruct[fn.name][target] = list(
+                            hstruct[fn.name][value.name])
+                        changed = grew = True
+                    if not isinstance(node, F.CallExpr) \
+                            or not isinstance(node.func, F.IdentExpr):
                         continue
-                    r = _root_ident(pname)
-                    if not (r and r[0] in hs and r[1] == 0):
+                    # EVERY argument position, not just the first, and a keyword
+                    # resolved BY NAME — the position a keyword lands in is the
+                    # parameter list's business, and reading it off the
+                    # concatenated `args + kwargs` list would follow a frame
+                    # address into the wrong parameter.
+                    #
+                    # The lifetime reasoning this needs, and it is the whole
+                    # reason it is safe: a frame belongs to the function that
+                    # created it, and an address only ever travels DOWN an active
+                    # call chain, so the creator of a holder that arrived as an
+                    # argument is an ancestor of the callee and its frame is live
+                    # for every instant of the callee's activation. The callee may
+                    # therefore read and write through it — which is the same
+                    # licence a method receiver has, and the same one the
+                    # cross-module hand-off relies on. What it may NOT do is let
+                    # the word leave, because then it outlives the call and the
+                    # creator may be gone: `return y`, a container, a field, a
+                    # subscript and a module-level name are all refused by name in
+                    # `_check_frame_escapes`.
+                    #
+                    # `r[1] == 0` is kept: a field read is a VALUE and not an
+                    # address, so only a bare name hands the frame over.
+                    #
+                    # `plist` is the callee's OWN parameter list, and the edge is
+                    # only taken for a position that list has: a callee this image
+                    # does not have has no parameter to make a holder, and that is
+                    # the opaque case `_check_frame_escapes` says so about.
+                    plist = params_of.get(node.func.name)
+                    if not plist:
                         continue
-                    callee = plist[pos]
-                    if not callee or callee in holders.get(node.func.name, ()):
-                        continue
-                    holders[node.func.name].add(callee)
-                    hstruct[node.func.name][callee] = \
-                        list(hstruct[fn.name][r[0]])
-                    changed = True
+                    for pos, pname, _kw in _frame_argument_slots(node, plist):
+                        if pos >= len(plist):
+                            continue
+                        r = _root_ident(pname)
+                        if not (r and r[0] in hs and r[1] == 0):
+                            continue
+                        callee = plist[pos]
+                        if not callee or callee in holders.get(
+                                node.func.name, ()):
+                            continue
+                        holders[node.func.name].add(callee)
+                        hstruct[node.func.name][callee] = \
+                            list(hstruct[fn.name][r[0]])
+                        changed = grew = True
+        moved = (_rewrite_len_on_frame_receivers(functions, holders, hstruct)
+                 + _rewrite_eq_on_frame_receivers(functions, holders, hstruct))
+        if not (grew or moved):
+            break
+    else:
+        raise CodegenError(
+            f"the holder analysis did not settle in {_HOLDER_FIXPOINT_ROUNDS} "
+            f"rounds: an operator rewrite is still introducing frames at each "
+            f"one, which means the rewrite is not monotone and the fixpoint it "
+            f"feeds has no fixed point. That is a compiler bug, not a program "
+            f"error")
     # AFTER the fixpoint and BEFORE the per-function loop below, and both of
     # those positions are load-bearing rather than tidy:
     #
@@ -1829,14 +1852,23 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
     #     the frame as its first argument — which is the shape the by-reference
     #     design exists for, and needs nothing new to be right about.
     #
-    # No second fixpoint run is needed afterwards, and that is a fact rather
-    # than an omission: the rewrite introduces exactly one edge, `Struct___len__`
-    # reached with a frame in argument 0, and `Struct___len__`'s first parameter
-    # is already a holder because it is a method of a framed struct
-    # (`struct_receivers` above).  If that ever stopped being true,
-    # `_check_holder_agreements` at the end of this function is what would say
-    # so, by name, at the call site.
-    _rewrite_len_on_frame_receivers(functions, holders, hstruct)
+    # …and the fixpoint and the two rewrites above it are ONE fixpoint rather
+    # than three passes, because the rewrites feed it.  `len` introduces one
+    # edge, `Struct___len__` with a frame in argument 0, whose parameter is
+    # already a holder, so for `len` a second saturation was never needed and
+    # none happened.  `a == b` introduces an edge at argument 0 AND at argument
+    # 1: `S___eq__(a, b)` hands `b` to the method's SECOND parameter, and that
+    # parameter is a holder only because the fixpoint has seen the call.  The
+    # `__eq__` that reads the field it is given — `self.x == other.x`, which is
+    # what an equality method is for — was refused by name ("`other.x` is a
+    # field access through `other`, and this path has no way to say what
+    # `other` holds") until the round after the one that made the call.  Both
+    # rewrites are idempotent and only ever add, so the pair converges, and
+    # `_HOLDER_FIXPOINT_ROUNDS` is the bound that says so out loud rather than
+    # leaving a non-monotone rewrite to hang.  If that bound is ever reached,
+    # `_check_holder_agreements` at the end of this function is what would
+    # otherwise have said the parameter is not a holder, by name, at the call
+    # site.
     for fn in functions:
         hs = holders[fn.name]
         if not hs:
@@ -2187,7 +2219,7 @@ def _rewrite_nested_method_calls(fn, nested_fields) -> None:
         node.args = [obj] + list(node.args)
 
 
-def _rewrite_len_on_frame_receivers(functions, holders, hstruct) -> None:
+def _rewrite_len_on_frame_receivers(functions, holders, hstruct) -> int:
     """`len(h)` → `Struct___len__(h)`, for every `h` that holds a frame.
 
     The `len` half of the by-reference hand-off, and the reason it is a REWRITE
@@ -2225,6 +2257,7 @@ def _rewrite_len_on_frame_receivers(functions, holders, hstruct) -> None:
     the blob-count lowering that has always worked; rewriting it would call a
     struct's `__len__` on a word that is a value.
     """
+    moved = 0
     for fn in functions:
         hs = holders.get(fn.name) or ()
         by_name = hstruct.get(fn.name) or {}
@@ -2263,6 +2296,193 @@ def _rewrite_len_on_frame_receivers(functions, holders, hstruct) -> None:
                 (node, M.method_function_name(owner, M.DUNDER_LEN)))
         for node, callee in pending:
             node.func = F.IdentExpr(name=callee)
+        moved += len(pending)
+    return moved
+
+
+def _replace_nodes(root, replacements: dict) -> None:
+    """Swap each child of `root` that `replacements` names, in place.
+
+    A pass that has to turn one NODE into a differently-shaped node — a
+    `BinaryOp` into a `CallExpr` — cannot do it by mutating the node it found,
+    because the fields it would have to write do not exist on the shape it is
+    replacing.  It has to reach the parent, which is why this exists and why
+    `M.iter_nodes` is not enough: that walk yields a node and then recurses into
+    it, so a rewrite applied during the walk is a walk that mutates what it is
+    walking.  Collect first, replace second, exactly as
+    `_rewrite_len_on_frame_receivers` does.
+
+    Keyed by `id()` because the nodes are dataclasses with no `__eq__` of their
+    own — `id` is the identity the walk has, and every key here comes from a node
+    the walk is currently holding, so no node can be collected and freed between
+    being found and being replaced.
+    """
+    if isinstance(root, (list, tuple)):
+        for i, child in enumerate(root):
+            new = replacements.get(id(child))
+            if new is not None:
+                root[i] = new
+            else:
+                _replace_nodes(child, replacements)
+        return
+    if not hasattr(root, "__dataclass_fields__"):
+        return
+    for name in root.__dataclass_fields__:
+        child = getattr(root, name)
+        new = replacements.get(id(child))
+        if new is not None:
+            setattr(root, name, new)
+        elif isinstance(child, (list, tuple)):
+            _replace_nodes(child, replacements)
+        elif hasattr(child, "__dataclass_fields__"):
+            _replace_nodes(child, replacements)
+
+
+def _eq_dispatch_call(node, op: str, left, right, cands_l, cands_r, by_name,
+                      hs) -> object:
+    """The call that answers `left op right`, or None to leave the operator be.
+
+    The decision is `model.struct_dunder_dispatch_candidates` and nothing here
+    decides it again; this reads its answer out of the table, refuses the
+    disagreement by name, and builds the call the ordinary call path then
+    handles.  `None` is the answer for every shape this pass deliberately does
+    not touch, and each is a shape where the pre-existing lowering is either
+    CORRECT or already refused by something closer to the mistake:
+
+      * an operand that is not a BARE NAME — `f(h) == h`, `h.x == h`.  The
+        holder table is keyed by name, and a name is the only thing here that can
+        say what a word holds; guessing past it is the bug this file exists to
+        stop;
+      * a name with no candidates, which is a plain word, so its `==` is the
+        word compare that has always run;
+      * no candidate declaring the dunder, which is CPython's INHERITED
+        identity `__eq__` — and a frame's address compare already IS that, so
+        leaving it alone is the right answer and not a gap.
+    """
+    if not isinstance(left, F.IdentExpr) or not isinstance(right, F.IdentExpr):
+        return None
+    if left.name not in hs or right.name not in hs:
+        return None
+    cands = list(by_name.get(left.name) or ()) + list(by_name.get(right.name)
+                                                  or ())
+    if not cands:
+        return None
+    owner, dunder, negate, (disagree, rows) = \
+        M.struct_dunder_dispatch_candidates(cands_l, cands_r, op)
+    if disagree:
+        raise CodegenError(M.eq_dispatch_candidates_disagree(
+            f"{left.name} {op} {right.name}",
+            sorted({st.name for st in cands}), rows))
+    if owner is None:
+        return None
+    call = F.CallExpr(
+        func=F.IdentExpr(name=M.method_function_name(owner, dunder)),
+        args=[left, right])
+    if not negate:
+        return call
+    return F.UnaryOp(op="not", operand=call)
+
+
+def _rewrite_eq_on_frame_receivers(functions, holders, hstruct) -> int:
+    """`a == b` → `Struct___eq__(a, b)`, for two names that hold the same frame.
+
+    The COMPARISON half of what `_rewrite_len_on_frame_receivers` does for
+    `len`, and it is here for exactly the reason that function's call site gives:
+    the operator carries no type, so nothing can decide WHOSE `__eq__` it is until
+    the holder analysis has run, and rewriting it before then would replace a
+    word compare with a call to a method the type may not have.
+
+    Why it was a WRONG ANSWER and not a refusal: `a == b` on two frame
+    addresses is a flag-setting compare of two words, and the words are
+    ADDRESSES, so the operator answers "are these the same object" — which is
+    CPython's INHERITED `__eq__` and is correct for a struct that declares none.
+    A struct that DOES declare one is the case the language sends to the method
+    and the lowering bypassed: measured, a class whose `__eq__` returns
+    unconditionally True gave `eq=0 direct=1`, where CPython gives
+    `eq=1 direct=1` — the method was found, called and ignored by the operator,
+    and a program that took the wrong branch said nothing about it.
+
+    BOTH operands must be names this analysis believes hold a frame of the SAME
+    single struct, and that is the whole of the safety argument, so it is worth
+    spelling out rather than leaving to the code:
+
+      * both being holders is what makes the rewritten call SAFE.  The callee is
+        the struct's own method, its first parameter is that struct's receiver,
+        and a receiver is a frame address by definition — so the call is the
+        shape the by-reference design exists for and `_check_frame_escapes`
+        follows it into a parameter it recognises.  Rewriting `h == 5` instead
+        would hand a word that may not be a frame to a method that dereferences
+        it, and `h`'s own name can be rebound to a word elsewhere in the same
+        function (`bugs/FORMAL_holder_rebound_from_a_word.md`), so "may not be"
+        is a measured fact about this pass, not a hypothetical;
+      * the SAME struct is what makes it CORRECT.  Python resolves
+        `a == b` through `type(a)`, and the two agreeing means there is no
+        reflected-operand question to answer — which this path could not answer,
+        since `NotImplemented` has no representation;
+      * a disagreement is REFUSED rather than resolved, for the reason
+        `struct_frame_slot_candidates` gives: the call would be one of two and
+        the program would build, run and answer with the other one.
+
+    The chain spelling (`a == b == c`) is one `F.CompareChain` and lowers here
+    as the `and` of its pairwise comparisons, which is what the language says a
+    chain is.  Only when EVERY operand is a bare name: the rewrite re-reads the
+    middle operands, and a name read twice is the same load twice, while an
+    operand with a call in it would be called twice where the language calls it
+    once.  A chain with a call in it is left alone — see the remainder named in
+    `bugs/FORMAL_eq_does_not_dispatch_to_a_user_dunder.md`.
+
+    Returns how many operators it rewrote, which is what lets the caller run
+    this and the holder fixpoint as ONE fixpoint: a round that neither grew a
+    holder nor moved an operator has nothing left to do, and a round that DID
+    move one may have introduced a call the next round's fixpoint has to follow.
+    """
+    moved = 0
+    for fn in functions:
+        hs = holders.get(fn.name) or ()
+        by_name = hstruct.get(fn.name) or {}
+        if not hs:
+            continue
+        pending = []
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if isinstance(node, F.BinaryOp) and node.op in ("==", "!=") \
+                    and isinstance(node.left, F.IdentExpr) \
+                    and isinstance(node.right, F.IdentExpr):
+                call = _eq_dispatch_call(
+                    node, node.op, node.left, node.right,
+                    by_name.get(node.left.name) or (),
+                    by_name.get(node.right.name) or (), by_name, hs)
+                if call is not None:
+                    pending.append((id(node), call))
+                continue
+            if not isinstance(node, F.CompareChain) or len(node.ops) < 2:
+                continue
+            if any(op not in ("==", "!=") for op in node.ops):
+                continue
+            if not all(isinstance(o, F.IdentExpr) for o in node.operands):
+                continue
+            links, lowered = [], True
+            for i, op in enumerate(node.ops):
+                left, right = node.operands[i], node.operands[i + 1]
+                call = _eq_dispatch_call(
+                    node, op, left, right, by_name.get(left.name) or (),
+                    by_name.get(right.name) or (), by_name, hs)
+                if call is None:
+                    lowered = False
+                    break
+                links.append(call)
+            if not lowered:
+                continue
+            # `and`, folded left, so the leftmost comparison is evaluated first
+            # and a false one short-circuits the rest — the chain's own rule,
+            # reached by the same short-circuit `and` every other one uses.
+            whole = links[0]
+            for link in links[1:]:
+                whole = F.BinaryOp(op="and", left=whole, right=link)
+            pending.append((id(node), whole))
+        for node_id, call in pending:
+            _replace_nodes(fn.body, {node_id: call})
+        moved += len(pending)
+    return moved
 
 
 def _rewrite_len_on_nested_frames(fn, by_name, structs_by_name) -> None:
