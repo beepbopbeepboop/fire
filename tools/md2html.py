@@ -55,6 +55,9 @@ CSS = """\
            vertical-align: top; }
   th { background: #eee; }
   li { margin: .3em 0; }
+  blockquote { background: #f7f7f7; border-left: 4px solid #b9b9b9;
+               margin: 1em 0; padding: .6em 1em; color: #444; }
+  blockquote p { margin: 0; }
   li > p { margin: .3em 0; }
   .banner { background: #fffbe6; border-left: 4px solid #d4a017;
             padding: .6em 1em; margin: 0 0 2em 0; font-size: 92%; color: #555; }
@@ -99,6 +102,7 @@ def _inline(text: str) -> str:
 
 _FENCE_RE = re.compile(r'^```\s*(\S*)\s*$')
 _HEADING_RE = re.compile(r'^(#{1,6})\s+(.*?)\s*#*\s*$')
+_BQ_RE = re.compile(r'^\s*>\s?(.*)$')
 _UL_RE = re.compile(r'^(\s*)[-*]\s+(.*)$')
 _OL_RE = re.compile(r'^(\s*)(\d+)\.\s+(.*)$')
 _TABLE_SEP_RE = re.compile(r'^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$')
@@ -259,6 +263,37 @@ def convert(md: str, src_name: str) -> str:
             out.append(_render_table(rows))
             continue
 
+        if _BQ_RE.match(line):
+            # Seed with the line already in hand. An earlier version stepped
+            # `i` past it and started collecting at the NEXT line, which
+            # silently dropped the opening line of every blockquote -- the
+            # text was gone and the remaining lines still rendered, so the
+            # page looked fine.
+            body: list[str] = [_BQ_RE.match(line).group(1)]
+            i += 1
+            while i < len(lines):
+                m = _BQ_RE.match(lines[i])
+                if m:
+                    body.append(m.group(1))
+                    i += 1
+                    continue
+                # Lazy continuation: a plain indented-free line right after a
+                # quoted one is still part of the quote. Without this, a
+                # blockquote that wraps to the next source line is cut in
+                # half and the tail becomes an ordinary paragraph.
+                if (lines[i].strip() and not lines[i][:1].isspace()
+                        and not _HEADING_RE.match(lines[i])
+                        and not _FENCE_RE.match(lines[i])
+                        and not _UL_RE.match(lines[i])
+                        and not _OL_RE.match(lines[i])):
+                    body.append(lines[i].strip())
+                    i += 1
+                    continue
+                break
+            out.append('<blockquote><p>' + _inline(' '.join(body))
+                       + '</p></blockquote>')
+            continue
+
         if _UL_RE.match(line) or _OL_RE.match(line):
             html_block, i = _render_list(lines, i)
             out.append(html_block)
@@ -268,6 +303,7 @@ def convert(md: str, src_name: str) -> str:
         while i < len(lines) and lines[i].strip():
             nxt = lines[i]
             if (_HEADING_RE.match(nxt) or _FENCE_RE.match(nxt)
+                    or _BQ_RE.match(nxt)
                     or _UL_RE.match(nxt) or _OL_RE.match(nxt)
                     or (_is_table_row(nxt) and i + 1 < len(lines)
                         and _TABLE_SEP_RE.match(lines[i + 1]))):

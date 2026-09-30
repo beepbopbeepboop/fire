@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Metal GPU Offload on macOS (Future Work)</title>
+<style>
+  body { max-width: 56em; margin: 0 auto; padding: 2em;
+         font-family: system-ui, sans-serif; line-height: 1.6; color: #1a1a1a; }
+  h1 { border-bottom: 2px solid #222; padding-bottom: .3em; }
+  h2 { margin-top: 2.5em; border-bottom: 1px solid #ccc; padding-bottom: .2em; }
+  h3 { margin-top: 1.8em; }
+  h1, h2, h3, h4 { line-height: 1.25; }
+  code, pre { font-family: "SF Mono", "Fira Code", monospace; font-size: 92%; }
+  code { background: #f0f0f0; padding: .1em .3em; border-radius: 3px; }
+  pre { background: #f5f5f5; padding: .8em 1em; border-radius: 4px;
+        overflow-x: auto; line-height: 1.45; }
+  pre code { background: none; padding: 0; font-size: 100%; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid #ccc; padding: .4em .7em; text-align: left;
+           vertical-align: top; }
+  th { background: #eee; }
+  li { margin: .3em 0; }
+  blockquote { background: #f7f7f7; border-left: 4px solid #b9b9b9;
+               margin: 1em 0; padding: .6em 1em; color: #444; }
+  blockquote p { margin: 0; }
+  li > p { margin: .3em 0; }
+  .banner { background: #fffbe6; border-left: 4px solid #d4a017;
+            padding: .6em 1em; margin: 0 0 2em 0; font-size: 92%; color: #555; }
+  .banner code { background: #f5edd0; }
+  em { color: #444; }
+</style>
+</head>
+<body>
+
+<p class="banner">Generated from <code>METAL.md</code> by <code>tools/md2html.py</code>. Edit the Markdown, not this file; rerun <code>python3 tools/md2html.py METAL.md</code>.</p>
+
+<h1>Metal GPU Offload on macOS (Future Work)</h1>
+<blockquote><p>Status: <strong>design note / parking lot.</strong> Not implemented. Captured now so we don't lose the plan; we build it down the road once the CPU path (stdlib → MLIR → GIMPLE → C) is solid.</p></blockquote>
+<h2>The idea in one line</h2>
+<p>On a Mac we already have a full GPU toolchain in the box: identify the Mojo kernels we want to offload, lower their inner bodies to <strong>Metal Shading Language (MSL)</strong> / <strong>LLVM Metal IR</strong>, run them through <strong>Apple's IR→binary compiler</strong> to get a real <code>.metallib</code> for this machine, and call that from the C we already emit. Result: actual GPU offload on macOS with no external runtime.</p>
+<h2>Why this is tractable here</h2>
+<p>Apple ships every layer we need:</p>
+<ul>
+<li><p><strong>Metal Shading Language (MSL)</strong> — a C++14-based kernel language. Our GPU kernels can be emitted as MSL the same way we emit GIMPLE C for the host.</p></li>
+<li><p><strong>LLVM-based Metal IR (AIR)</strong> — Metal compiles through an LLVM IR dialect ("Apple IR" / AIR). Since we already live in LLVM/MLIR land conceptually, we can route kernel bodies into this IR instead of (or alongside) MSL text.</p></li>
+<li><p><strong><code>metal</code> / <code>metallib</code> compilers</strong> — Apple's offline toolchain turns MSL/AIR into a <code>.metallib</code> <em>binary glob</em> targeted at the host GPU. That's the "IR → binary for your machine" piece the user noted.</p></li>
+<li><p><strong>Metal runtime (C API via <code>Metal/Metal.h</code>)</strong> — load the <code>.metallib</code>, build a pipeline state, bind buffers, dispatch the grid, read results back. All callable from the C we generate, so the host side is just normal extern calls.</p></li>
+</ul>
+<h2>Pipeline (host + device split)</h2>
+<pre><code>   Mojo source
+       │
+       ▼
+  identify kernels   ──►  inner kernel bodies            host glue stays on CPU
+  (offload targets)        │                              │
+                           ▼                              ▼
+                  "metalize": lower to            GIMPLE C  (already done)
+                  MSL / LLVM Metal IR                 │
+                           │                          │  external_call into the
+                           ▼                          │  Metal host wrapper
+                   xcrun metal / metallib             │
+                           │                          ▼
+                           ▼                  load .metallib, set buffers,
+                     foo.metallib  ◄──────────  dispatch, copy back
+                  (binary for THIS Mac's GPU)</code></pre>
+<ol>
+<li><p><strong>Kernel identification.</strong> Mark/detect the functions to offload (e.g. a <code>@gpu</code>/kernel attribute, or analysis of <code>for</code>-over-grid patterns). Everything else stays on the CPU path we already have.</p></li>
+<li><p><strong>Metalize the inner stuff.</strong> Lower the kernel body to MSL (text) or to LLVM Metal IR (AIR). This reuses the same lowering discipline as <code>mlir.py</code> / <code>gimple_codegen.py</code> — just a different backend target for the device region.</p></li>
+<li><p><strong>Router across into LLVM land → binary.</strong> Hand the MSL/AIR to Apple's offline compiler (<code>xcrun -sdk macosx metal …</code> → <code>.air</code> → <code>xcrun metallib …</code> → <code>.metallib</code>). Out comes a real binary for this machine's GPU.</p></li>
+<li><p><strong>Call it from C.</strong> Emit a small host wrapper (Objective-C/C using <code>Metal/Metal.h</code>) that loads the <code>.metallib</code>, creates the compute pipeline, marshals arguments into <code>MTLBuffer</code>s, dispatches, and copies results back. The generated GIMPLE C reaches it through the same <code>external_call</code> mechanism we just built — so from the program's perspective, the kernel is "just a call." Voilà: offload on a Mac.</p></li>
+</ol>
+<h2>What we already have that feeds this</h2>
+<ul>
+<li><p><strong><code>external_call</code> lowering</strong> — the host→device handoff is just calls into the Metal host wrapper; no new calling machinery needed.</p></li>
+<li><p><strong><code>mlir.py</code> (table-driven)</strong> — the discipline for replaying MLIR ops as a concrete backend is exactly what a "lower kernel body to MSL/AIR" pass needs; the device target is another table of op → emission rules.</p></li>
+<li><p><strong>Two-target codegen shape</strong> — host code already goes Mojo → C; device code becomes Mojo → MSL/AIR as a parallel lowering, split at the kernel boundary.</p></li>
+</ul>
+<h2>Open questions (for when we pick this up)</h2>
+<ul>
+<li>Kernel marking: explicit attribute vs. inferred from grid/<code>for</code> patterns.</li>
+<li><p>Emit <strong>MSL text</strong> (simpler, lean on <code>xcrun metal</code>) vs. <strong>AIR/LLVM IR</strong> directly (tighter, but needs the AIR dialect details).</p></li>
+<li><p>Argument marshaling/ABI: how Mojo buffers/<code>Span</code>s map to <code>MTLBuffer</code> bindings and threadgroup sizing.</p></li>
+<li><p>Host wrapper language: Objective-C (<code>Metal/Metal.h</code>) vs. the C++ <code>metal-cpp</code> headers; pick whichever links cleanly from our emitted C.</p></li>
+<li><p>Build wiring: invoking <code>xcrun metal</code>/<code>metallib</code> from the build and embedding or shipping the resulting <code>.metallib</code>.</p></li>
+</ul>
+<h2>Upstream alignment</h2>
+<p>The real stdlib already carries Apple-GPU paths (<code>is_apple_gpu()</code>, <code>_metal_print_write</code>, the <code>print</code> Metal branch in <code>std/io/io.mojo</code>). When the CPU walk-into-stdlib is mature, those branches are the natural seams to light up the Metal target rather than inventing our own kernel surface.</p>
+
+</body>
+</html>

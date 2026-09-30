@@ -350,7 +350,8 @@ test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True,
           'on the GPU against a CPU reference')
 test('md2html', [PY, 'test_md2html.py'], cache=True,
      extra=['tools/md2html.py', 'test_md2html.py',
-            'doc/GPU_OFFLOAD_PLAN.md', 'doc/GPU_OFFLOAD_PLAN.html'],
+            'doc/GPU_OFFLOAD_PLAN.md', 'doc/GPU_OFFLOAD_PLAN.html',
+            'doc/METAL.md', 'doc/METAL.html'],
      desc='the docs\' HTML generator keeps every word of its Markdown, and '
           'the committed HTML is not stale')
 test('linkmode', [PY, 'test_link_mode.py'], cache=True,

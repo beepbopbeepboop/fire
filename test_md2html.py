@@ -22,8 +22,13 @@ sys.path.insert(0, os.path.join(HERE, 'tools'))
 
 import md2html as M  # noqa: E402
 
-PLAN = os.path.join(HERE, 'doc', 'GPU_OFFLOAD_PLAN.md')
-PLAN_HTML = os.path.join(HERE, 'doc', 'GPU_OFFLOAD_PLAN.html')
+# Every document this generator is responsible for. A doc listed here is
+# held to the same three checks: every source line survives, the committed
+# HTML is current, and the ASCII diagram inside METAL.md is byte-intact.
+DOCS = (
+    ('doc/GPU_OFFLOAD_PLAN.md', 'doc/GPU_OFFLOAD_PLAN.html'),
+    ('doc/METAL.md', 'doc/METAL.html'),
+)
 
 VOID = {'meta', 'br', 'hr', 'img', 'link', 'input'}
 
@@ -138,6 +143,33 @@ class TestContentSurvival(unittest.TestCase):
         self.assertNotIn('<not a tag>', out)
         self.assertEqual(out.count('<pre>'), 1)
 
+    def test_blockquote_keeps_its_first_line(self):
+        """A blockquote must not lose the line that opens it.
+
+        The collector stepped past the opening line before it started
+        collecting, so the first line of every blockquote vanished and the
+        remaining lines still rendered -- the page looked complete. This is
+        the third instance of the same shape in this renderer, which is why
+        it is worth a test each time: "the thing that is missing is the thing
+        nobody looks for".
+        """
+        src = ('> Status: **design note / parking lot.** Not implemented.\n'
+               "> don't lose the plan.\n")
+        out = M.convert(src, 't.md')
+        self.assertIn('<blockquote>', out)
+        self.assertIn('Status:', out)
+        self.assertIn('design note / parking lot', out)
+        self.assertIn("don't lose the plan", out)
+        self.assertEqual(out.count('<blockquote>'), 1)
+
+    def test_blockquote_ends_at_a_blank_line(self):
+        src = ('> quoted line\n'
+               '\n'
+               'ordinary paragraph\n')
+        out = M.convert(src, 't.md')
+        self.assertIn('<blockquote><p>quoted line</p></blockquote>', out)
+        self.assertIn('<p>ordinary paragraph</p>', out)
+
     def test_a_code_span_may_cross_a_source_line_break(self):
         """Real prose does this, and it must not split the code span.
 
@@ -165,30 +197,42 @@ class TestRealDocument(unittest.TestCase):
     """
 
     def setUp(self):
-        if not os.path.exists(PLAN):
-            self.skipTest('plan markdown not present')
-        with open(PLAN, encoding='utf-8') as f:
+        self.md_path, self.html_path = DOCS[0]
+        with open(self.md_path, encoding='utf-8') as f:
             self.md = f.read()
-        with open(PLAN_HTML, encoding='utf-8') as f:
+        with open(self.html_path, encoding='utf-8') as f:
             self.html = f.read()
 
     def test_every_source_line_survives_into_the_html(self):
-        text = visible_text(self.html)
+        for md_rel, html_rel in DOCS:
+            with self.subTest(doc=md_rel):
+                self._check_content(md_rel, html_rel)
+
+    def _check_content(self, md_rel: str, html_rel: str) -> None:
+        with open(os.path.join(HERE, md_rel), encoding='utf-8') as f:
+            md = f.read()
+        with open(os.path.join(HERE, html_rel), encoding='utf-8') as f:
+            htm = f.read()
+        text = visible_text(htm)
         missing = []
-        for raw in self.md.split('\n'):
+        in_fence = False
+        for raw in md.split('\n'):
             s = raw.strip()
-            if not s or s.startswith(('```', '|---', '---')):
+            if s.startswith('```'):
+                in_fence = not in_fence
+                continue
+            if in_fence or not s or s.startswith(('---', '|---')):
                 continue
             if s.startswith('|'):
                 probes = [c for c in (c.strip() for c in s.strip('|').split('|'))
                           if len(c) > 8]
             else:
-                probes = [re.sub(r'^\s*(?:[-*]|\d+\.)\s+', '',
-                                 re.sub(r'^#{1,6}\s+', '', s))]
+                s = re.sub(r'^>\s?', '', re.sub(r'^#{1,6}\s+', '', s))
+                probes = [re.sub(r'^\s*(?:[-*]|\d+\.)\s+', '', s)]
             for probe in probes:
-                # A code span that crosses a line break cannot be probed
+                # A code span crossing a source line break cannot be probed
                 # per-line -- the renderer correctly joins it, so the source
-                # fragment does not appear anywhere. Skip those.
+                # fragment appears nowhere. Skip those.
                 if probe.count('`') % 2:
                     continue
                 q = _plain(probe)
@@ -196,13 +240,33 @@ class TestRealDocument(unittest.TestCase):
                     continue
                 if q[:50] not in text:
                     missing.append(q[:60])
-        self.assertEqual(missing, [], f'content lost from the HTML: {missing}')
+        self.assertEqual(missing, [], f'content lost in {html_rel}: {missing}')
 
-    def test_committed_html_is_up_to_date_with_the_markdown(self):
-        self.assertEqual(
-            M.convert(self.md, os.path.basename(PLAN)), self.html,
-            'doc/GPU_OFFLOAD_PLAN.html is stale -- regenerate with '
-            '`python3 tools/md2html.py doc/GPU_OFFLOAD_PLAN.md`')
+    def test_committed_html_is_current_for_every_doc(self):
+        for md_rel, html_rel in DOCS:
+            with self.subTest(doc=md_rel):
+                with open(os.path.join(HERE, md_rel), encoding='utf-8') as f:
+                    md = f.read()
+                with open(os.path.join(HERE, html_rel), encoding='utf-8') as f:
+                    cur = f.read()
+                self.assertEqual(
+                    M.convert(md, os.path.basename(md_rel)), cur,
+                    f'{html_rel} is stale -- regenerate with '
+                    f'`python3 tools/md2html.py {md_rel}`')
+
+    def test_metals_ascii_diagram_is_intact(self):
+        """The pipeline diagram is the one thing in these docs that only
+        works if it is reproduced exactly. It lives in a fence, so it is
+        skipped by the line-survival check; if the fence ever stopped being
+        recognised, the diagram would reflow into a paragraph and nothing else
+        in the file would notice."""
+        with open(os.path.join(HERE, 'doc/METAL.html'), encoding='utf-8') as f:
+            htm = f.read()
+        seg = htm[htm.find('<pre>'):htm.find('</pre>')]
+        for probe in ('Mojo source', 'identify kernels', 'xcrun metal / metallib',
+                      'foo.metallib', "binary for THIS Mac's GPU",
+                      'GIMPLE C  (already done)'):
+            self.assertIn(probe, seg, f'diagram lost {probe!r}')
 
     def test_check_mode_reports_a_stale_file(self):
         tmp = os.path.join(HERE, 'build', '_md2html_stale.md')
