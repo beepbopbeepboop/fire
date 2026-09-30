@@ -1,4 +1,4 @@
-# FORMAL_hostmod_defaults_left_required_after_the_cross_dylib_fix: the backend applies a callee's defaults across a dylib now, and five hostmods still spell theirs out
+# FORMAL_hostmod_defaults_left_required_after_the_cross_dylib_fix: the backend applies a callee's defaults across a dylib now, and four hostmods still spell theirs out
 
 **Area:** CODEGEN/FORMAL (Mach-O): the module documentation and signatures in
 `formal/hostmods/`, and `formal/imports.py`'s `external_declarations` — the
@@ -51,14 +51,15 @@ not changed there, and that is the deliberate part.
 
 Adding a default to a hostmod signature is additive and cannot change an
 existing call site's answer — every call site in the corpus passes the argument
-— but it changes the PUBLIC SURFACE of five stdlib modules, and the only thing
-that would confirm the surface still behaves is a formal sweep: ~45 files,
-two architectures, and the `formal-sweep-truth` / `formal-link-accounting`
-census. A worker told to run the narrowest thing that shows its change works
-cannot run that, and a change verified only by "the comment now says so" is
-exactly the kind of belief this repo's docs keep warning against. So the text
-is fixed and the code is not, and this doc is the difference between those two
-states.
+— but it changes the PUBLIC SURFACE of four stdlib modules (five hostmod files
+across the whole claim, counting `struct.mojo`, whose `pack_into` is already
+done and is the precedent), and the only thing that would confirm the surface
+still behaves is a formal sweep: ~45 files, two architectures, and the
+`formal-sweep-truth` / `formal-link-accounting` census. A worker told to run the
+narrowest thing that shows its change works cannot run that, and a change
+verified only by "the comment now says so" is exactly the kind of belief this
+repo's docs keep warning against. So the text is fixed and the code is not, and
+this doc is the difference between those two states.
 
 ## The exact next step
 

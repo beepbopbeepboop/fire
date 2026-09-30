@@ -48,7 +48,7 @@ import mojo.backend_gimple.emit_infra as ginf
 from mojo.middle.funcs_shared import *  # noqa: F401,F403
 from mojo.middle.funcs_shared import (
     _SELFHOST_EXTRA_FIELD_CACHE, _as_dict, _as_funcdef_node, _as_str, _as_structdef_node, _find_generic_source,
-    _find_imported_struct, _from_import_name_is_submodule, _imported_field_ctype, _local_sibling_module_exports, _note_vararg_trailing_param_types, _pair_key,
+    _find_imported_struct, _find_symbol_home_module, _from_import_name_is_submodule, _resolved_export_entry, _imported_field_ctype, _local_sibling_module_exports, _note_struct_import_alias, _note_vararg_trailing_param_types, _pair_key,
     _param_ctype, _parsed_import, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
     _ris_collect, _scan_from_imports_flat, _selfhost_extracted_fn_index, _selfhost_gen_self_param_ctype, _sgfs_resolve_ann, _signature_ctypes,
     _struct_method_overload_ids, _struct_method_qualifier
@@ -225,13 +225,32 @@ def _gen_stmt_FromImportStmt(gen, node):
     # right module (the pre-scan in gen_func/_gen_struct_method/
     # _gen_lifted_closure already did the same, so even pre-passes agree).
     if not getattr(node, 'wildcard', False) and gen._import_scope_stack:
-        _scope_qual = gen._resolve_import_module_qualifier(node.module)
-        if _scope_qual:
-            _scope = gen._import_scope_stack[-1]
-            for _fip1 in (getattr(node, 'name_alias_strs', None) or []):
-                name = gimple_ctypes._fi_name(_fip1)
-                alias = gimple_ctypes._fi_alias(_fip1)
-                _scope[alias if alias else name] = _scope_qual
+        for _fip1 in (getattr(node, 'name_alias_strs', None) or []):
+            name = gimple_ctypes._fi_name(_fip1)
+            alias = gimple_ctypes._fi_alias(_fip1)
+            # Qualify by the module that DEFINES the name, not the one this
+            # statement names. A module that only RE-EXPORTS the name (a
+            # package `__init__.py`) is not the module it was compiled
+            # under, and this frame is the FIRST tier `_func_qualifier`
+            # consults for the name — so writing the re-exporting module's
+            # qualifier here wins over the correct value
+            # `_note_own_func_home` records further down, and every call
+            # site inside this body then emitted `p_tri_<suffix>` against a
+            # definition emitted as `sub_tri_<suffix>` ("implicit
+            # declaration of function 'p_tri_...'; did you mean
+            # 'sub_tri_...'?") with no other diagnostic to explain it.
+            # When the defining module cannot be resolved to a path, fall
+            # back to the canonical dot-stripped spelling rather than to
+            # the re-exporting module.
+            _sc_home = gen._find_symbol_home_module(node.module, name, 'fn')
+            if _sc_home and _sc_home != node.module:
+                _scope_qual = (gen._resolve_import_module_qualifier(_sc_home)
+                               or _sc_home.lstrip('.').replace('.', '_')
+                               .replace('-', '_'))
+            else:
+                _scope_qual = gen._resolve_import_module_qualifier(node.module)
+            if _scope_qual:
+                gen._import_scope_stack[-1][alias if alias else name] = _scope_qual
     for _fip2 in (getattr(node, 'name_alias_strs', None) or []):
         name = gimple_ctypes._fi_name(_fip2)
         alias = gimple_ctypes._fi_alias(_fip2)
@@ -377,6 +396,46 @@ def _gen_stmt_FromImportStmt(gen, node):
             except Exception:
                 _fi_exports = None
         _fi_info = (_fi_exports or {}).get(name)
+        # A function-body `from REEXPORTER import name` where REEXPORTER
+        # only re-exports it (the package-`__init__.py` layout) hit the same
+        # dead end the module-scope `_register_sym` did, and the same fix
+        # applies: resolve the DEFINING module through the re-export hops
+        # and take ITS export entry. `_fi_info` was empty here (the
+        # re-exporting module's text scan finds no `def`), so the whole
+        # `'signature'` branch below was skipped and the call site emitted a
+        # reference to a symbol nothing declares:
+        #
+        #   implicit declaration of function 'p_tri_9f63a2';
+        #     did you mean 'sub_tri_9f63a2'?
+        #
+        # Gate `not _fi_info` so the ordinary case does no extra work, and
+        # `_find_symbol_home_module`'s own memo/cycle-guard so a re-export
+        # loop cannot hang here.
+        _fi_eff_mod = node.module
+        if not _fi_info and not getattr(node, 'wildcard', False):
+            _fi_home = gen._find_symbol_home_module(node.module, name, 'fn')
+            if _fi_home and _fi_home != node.module:
+                # ABSOLUTIZED ref for opening the file, as-spelled ref for
+                # the C symbol prefix — see the module-scope twin in
+                # `_register_sym` and `_find_symbol_home_module`'s own
+                # docstring for why both spellings are first-class.
+                _fi_home_abs = gen._find_symbol_home_module(
+                    node.module, name, 'fn', want_abs=True) or _fi_home
+                try:
+                    _fi_hexp, _fi_hqual = gen._local_sibling_module_exports(_fi_home_abs)
+                except Exception:
+                    _fi_hexp = None
+                    _fi_hqual = None
+                _fi_hinfo = _fi_hexp.get(name) if _fi_hexp else None
+                if _fi_hinfo:
+                    _fi_eff_mod = _fi_home
+                    # The DEFINING module's parsed signature, not the text
+                    # scan's — same reason as the module-scope twin in
+                    # `_register_sym`, and see `_resolved_export_entry`.
+                    _fi_info = _resolved_export_entry(gen, _fi_home, name,
+                                                     _fi_hinfo)
+                    if _fi_hqual:
+                        _fi_qual = _fi_hqual
         if isinstance(_fi_info, dict) and _fi_info.get('signature'):
             if not (isinstance(gen.imported_symbols.get(symbol_name), dict)
                     and 'signature' in gen.imported_symbols[symbol_name]):
@@ -386,7 +445,13 @@ def _gen_stmt_FromImportStmt(gen, node):
                     _fi_sig = _re_fi.sub(r'\b' + _re_fi.escape(name) + r'\b',
                                          symbol_name, _fi_sig, count=1)
                 gen.imported_symbols[symbol_name] = {
-                    'module': node.module,
+                    # `_fi_eff_mod`, not `node.module`: when the name only
+                    # REACHES this module through a re-export, every reader
+                    # of this entry ("which module defines this symbol") has
+                    # to be told about the defining one, and the call site's
+                    # own qualifier below is derived from the same value —
+                    # the two halves of a mangled name must name one binding.
+                    'module': _fi_eff_mod,
                     'original_name': name,
                     'c_return_type': _fi_info.get('c_return_type', 'int64_t'),
                     'return_type': _fi_info.get('return_type'),
@@ -427,7 +492,13 @@ def _gen_stmt_FromImportStmt(gen, node):
                 # that one must spell the qualifier that way.
                 if (getattr(gen, 'do_imports', False)
                         or node.module in getattr(gen, '_link_inline_modules', ())):
-                    _fi_home = (node.module.lstrip('.').replace('.', '_')
+                    # `_fi_eff_mod` — the DEFINING module — for the reason
+                    # its own docstring gives: a re-exporting `p/__init__.py`
+                    # is not the module `tri` was compiled under, so
+                    # qualifying by it emitted `p_tri_<suffix>` against a
+                    # definition emitted as `sub_tri_<suffix>`. Identical to
+                    # `node.module` when nothing was re-exported.
+                    _fi_home = (_fi_eff_mod.lstrip('.').replace('.', '_')
                                 .replace('-', '_'))
                 else:
                     _fi_home = _fi_qual
@@ -454,7 +525,7 @@ def _gen_stmt_FromImportStmt(gen, node):
                 # back to c_parameters when the AST isn't resolvable.
                 _fi_pts = None
                 try:
-                    for _fs in (gen._parsed_import(node.module)[2] or []):
+                    for _fs in (gen._parsed_import(_fi_eff_mod)[2] or []):
                         if isinstance(_fs, gimple_ctypes.FunctionDef) and _fs.name == name:
                             _fi_pts = gen._signature_ctypes(_fs.params, _fs)
                             break
@@ -473,7 +544,7 @@ def _gen_stmt_FromImportStmt(gen, node):
             # before its own BUG-2026-020 fix.
             try:
                 _fi_fn = None
-                for _fs in (gen._parsed_import(node.module)[2] or []):
+                for _fs in (gen._parsed_import(_fi_eff_mod)[2] or []):
                     if isinstance(_fs, gimple_ctypes.FunctionDef) and _fs.name == name:
                         _fi_fn = _fs
                         break
@@ -530,6 +601,16 @@ def _gen_stmt_FromImportStmt(gen, node):
                     gen._note_own_func_home(
                         name, _rx_home.replace('.', '_').replace('-', '_'))
                 continue
+        # A function-scoped `from M import Class as Alias` is the same shape
+        # the module-scope path records (see `_register_sym` in
+        # mojo/middle/module_shared.py) and had the same hole: the export
+        # table has no class exports, so the alias reached neither the
+        # `'signature'` branch above nor anything the constructor dispatch
+        # consults, and `Alias(...)` inside the function built the generic
+        # opaque-constructor fallback. Same shared writer, so the two
+        # scopes cannot disagree about what the alias names.
+        if not getattr(node, 'wildcard', False):
+            gen._note_struct_import_alias(node.module, symbol_name, name)
         # Use known signature if available. Default to 'int64_t' (NOT
         # 'int') for unknown symbols — this must match the fallback
         # return type every other unknown-callee path in this file
@@ -1784,12 +1865,31 @@ def _collect_body_import_bindings(gen, node_list: list, scope: dict) -> None:
     _gen_struct_method) and populated by its own call to this method."""
     for stmt in node_list:
         if isinstance(stmt, gimple_ctypes.FromImportStmt) and not getattr(stmt, 'wildcard', False):
-            q = gen._resolve_import_module_qualifier(stmt.module)
-            if not q:
-                continue
             for _fip3 in (getattr(stmt, 'name_alias_strs', None) or []):
                 nm = gimple_ctypes._fi_name(_fip3)
                 alias = gimple_ctypes._fi_alias(_fip3)
+                # Same defining-module resolution as `_gen_stmt_FromImportStmt`'s
+                # own scope write, and it has to be the SAME answer: this
+                # pre-scan fills the frame BEFORE the body is lowered, and
+                # the body pass writes the same frame again, so whichever
+                # ran first with the wrong module string would leave every
+                # call site in the body qualified by the re-exporting
+                # module ("implicit declaration of function 'p_tri_...';
+                # did you mean 'sub_tri_...'?") with no diagnostic pointing
+                # at the import at all.
+                _cb_mod = stmt.module
+                _cb_home = gen._find_symbol_home_module(stmt.module, nm, 'fn')
+                if _cb_home and _cb_home != stmt.module:
+                    _cb_mod = _cb_home
+                q = gen._resolve_import_module_qualifier(_cb_mod)
+                if not q and _cb_mod != stmt.module:
+                    # Unresolvable to a path: the canonical dot-stripped
+                    # spelling of the DEFINING module, never the
+                    # re-exporting one (which is what produced the
+                    # mismatch).
+                    q = _cb_mod.lstrip('.').replace('.', '_').replace('-', '_')
+                if not q:
+                    continue
                 scope[alias if alias else nm] = q
         elif isinstance(stmt, gimple_ctypes.IfStmt):
             gen._collect_body_import_bindings(stmt.then_body, scope)
@@ -3225,36 +3325,18 @@ def _find_struct_home_module(gen, module: str, name: str, depth: int = 0) -> str
     target -- relative spellings are absolutized against the importing
     module via `_abs_module`, mirroring `_find_generic_source`). None
     if no reachable module defines the struct (an honest "not found",
-    never a guess). Memoized per (module, name); the memo doubles as
-    the cycle guard for re-export loops."""
-    if depth > 5 or not module:
-        return None
-    key = (module, name)
-    if key in gen._struct_home_cache:
-        return gen._struct_home_cache[key]
-    # Mark in-progress BEFORE recursing so an import cycle terminates
-    # (a re-export loop A->B->A must not recurse forever).
-    gen._struct_home_cache[key] = None
-    if gen._find_imported_struct(module, name) is not None:
-        gen._struct_home_cache[key] = module
-        return module
-    _path, _src, stmts = gen._parsed_import(module)
-    if not stmts:
-        return None
-    for st in stmts:
-        if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
-            continue
-        for _fip6 in (getattr(st, 'name_alias_strs', None) or []):
-            nm = gimple_ctypes._fi_name(_fip6)
-            alias = gimple_ctypes._fi_alias(_fip6)
-            if (alias or nm) != name:
-                continue
-            sub = gen._abs_module(st.module, module) if st.module.startswith('.') else st.module
-            r = gen._find_struct_home_module(sub, name, depth + 1)
-            if r:
-                gen._struct_home_cache[key] = r
-                return r
-    return None
+    never a guess). Memoized per (kind, module, name) in
+    `gen._struct_home_cache`; the memo doubles as the cycle guard for
+    re-export loops.
+
+    The walk itself is `_find_symbol_home_module`
+    (mojo/middle/funcs_shared.py), which the FREE-FUNCTION import
+    qualifier needs too: "which module really defines this symbol" is one
+    question, and the answer differs only in which kind of top-level
+    definition counts. Two implementations of the same re-export walk
+    would be two places for a cycle guard to be missing.
+    """
+    return _find_symbol_home_module(gen, module, name, 'struct', depth)
 
 
 

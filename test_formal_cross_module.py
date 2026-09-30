@@ -60,6 +60,18 @@ eight_formal_suites_landed`, is not about this area: it is about the registry
 that would have to run this file, and it is why the `UNREGISTERED` entry in
 `test_suite.py` names the one-line spec that belongs to this suite.
 
+**A FIFTH doc was deleted by the merge that brought `integ` in, and its content
+is two cases in this file rather than a hole.** `integ` filed
+`FORMAL_cross_module_call_arity_is_never_checked` — a call across a dylib
+boundary dropped extra arguments and read uninitialized registers for missing
+ones, and the two architectures printed two different wrong numbers. The fix
+for it is the argument binder this branch landed for case 3, reading the
+callee's own declaration, and the two cases named
+`too many arguments across the boundary is refused` and
+`too few arguments across the boundary is refused` are where it is pinned. The
+doc is gone rather than left with a Status section, so its slug is history:
+find it in `4ab42cdb` (filed) and in the merge commit that closed it.
+
 Every case below BUILDS the arm64 image, EXECUTES it, and compares its output
 and exit status with CPython running the SAME program. A refusal is asserted
 only where CPython also refuses, with the words it refuses in; the two

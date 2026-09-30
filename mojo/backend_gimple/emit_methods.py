@@ -2021,6 +2021,62 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 t = gen._call_expr('char *', 'int64_t_realpath', [(arg_type, arg_val)])
                 return 'char *', t
 
+    # `import a.b` binds `a`, so `a.b.f(...)` is a TWO-hop attribute call
+    # and its receiver is the SUBMODULE `a.b`, not the binding `a`. Python's
+    # own `os.path.join` / `xml.etree.ElementTree.parse` are this shape, so
+    # it cannot be left to the generic dynamic getattr: the module
+    # `<module>.function(args)` dispatch below only matches when
+    # `func.obj` is a plain IdentExpr, so `a` lowered as an undeclared
+    # identifier to a literal `0` and the program died at RUNTIME with
+    # `Unhandled exception: AttributeError: b`, exit 1 and NO stdout —
+    # it built and linked cleanly first, and nothing in the output said
+    # which import was wrong (bugs/CODEGEN_import_dotted_name_two_hop_
+    # attribute_call_exits_1.md).
+    #
+    # Normalised by rewriting the receiver to `IdentExpr('a.b')` and
+    # re-entering, rather than by a second copy of the module-call
+    # machinery below: the submodule marker `a.b` is itself already
+    # registered in `_module_alias_names` (the plain-`import` registration
+    # records both the head and the full dotted name, precisely so a
+    # dotted target is reachable), so the ordinary single-hop dispatch
+    # handles it with its own guards — real-submodule source check,
+    # plain-top-level-def check, self-host exclusion, `_lower_call`'s
+    # forward-declaration and keyword bookkeeping.
+    if (isinstance(func.obj, gimple_ctypes.MemberExpr)
+            and isinstance(func.obj.obj, gimple_ctypes.IdentExpr)
+            and not getattr(node, 'kwargs', None)):
+        _th_base = func.obj.obj.name
+        _th_dotted = _th_base + '.' + func.obj.member
+        if (_th_base in getattr(gen, '_module_alias_names', ())
+                and _th_dotted != _th_base
+                and gen._submodule_source_path(_th_dotted)):
+            # Register the dotted target as a module marker too. The
+            # plain-`import` pre-pass only records the BOUND name (`p`),
+            # because that is all Python binds; the full dotted target is
+            # registered later still, by the module-globals pass, which runs
+            # AFTER the toplevel body is lowered — so at the moment this
+            # call site is emitted the submodule marker the single-hop
+            # dispatch below requires does not exist yet, and the call fell
+            # through to the scalar-receiver stub (`int64_t.tri() stubbed`,
+            # printing 0). Same dict, same shape the later pass writes, and
+            # first-writer-wins because it only fills a name that is absent.
+            if _th_dotted not in gen._module_alias_names:
+                if _th_dotted not in gen.imported_symbols:
+                    gen.imported_symbols[_th_dotted] = {
+                        'module': _th_dotted, 'return_type': 'unknown',
+                    }
+                gen._module_alias_names.add(_th_dotted)
+            _th_node = gimple_ctypes.CallExpr(
+                func=gimple_ctypes.MemberExpr(
+                    obj=gimple_ctypes.IdentExpr(
+                        name=_th_dotted, line=getattr(func.obj, 'line', 0)),
+                    member=func.member,
+                    line=getattr(func, 'line', 0), col=getattr(func, 'col', 0)),
+                args=list(node.args),
+                kwargs=[],
+                line=getattr(node, 'line', 0), col=getattr(node, 'col', 0))
+            return _lower_method_call(gen, _th_node)
+
     # Handle module method calls: module_name.function(args)
     if isinstance(func.obj, gimple_ctypes.IdentExpr):
         module_name = func.obj.name

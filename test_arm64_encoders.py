@@ -128,6 +128,31 @@ def cases():
         c.append((f"tst x{xn}, x{xm}", A.encode_tst_xn_xm(xn, xm)))
         c.append((f"cmn x{xn}, x{xm}", A.encode_cmn_xn_xm(xn, xm)))
         c.append((f"subs x2, x{xn}, x{xm}", A.encode_subs_xd_xn_xm(2, xn, xm)))
+    # ── the three immediate SHIFT encoders, every amount 0..63 ────────────
+    #
+    # Every one of these three is a UBFM/SBFM alias, so all three share a base
+    # opcode and a pair of fields; a base that carries stray bits in `immr`
+    # corrupts the shift AMOUNT while leaving `Rn`/`Rd` correct, which is why
+    # the one broken encoder here was correct for a run of amounts and wrong
+    # for every other one (bugs/FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8.md:
+    # `1 << 12` returned `16`, and only amounts 1-8 — the ones whose intended
+    # `immr` already had the stray bits set — were right). Sweeping the whole
+    # 0..63 range per instruction is what distinguishes that from a working
+    # encoder: no single amount picks it out, and a hand-picked amount picks
+    # out one of the eight that were already fine.
+    #
+    # Registered as a separate list so the sweep is one loop rather than three,
+    # and so a new shift encoder is added here rather than left untested — this
+    # file had no `lsl` case at all while `lsl` was the broken one.
+    for enc, mn in ((A.encode_lsl_xd_xn_imm, "lsl"),
+                    (A.encode_asr_xd_xn_imm, "asr"),
+                    (A.encode_lsr_xd_xn_imm, "lsr")):
+        for sh in range(64):
+            c.append((f"{mn} x0, x0, #{sh}", enc(0, 0, sh)))
+        # A non-zero Rd/Rn pair, so a field landing in the wrong bit position
+        # cannot be masked by the all-zero operand the sweep above uses.
+        for (xd, xn, sh) in ((5, 7, 12), (30, 31, 63), (1, 2, 33)):
+            c.append((f"{mn} x{xd}, x{xn}, #{sh}", enc(xd, xn, sh)))
     return c
 
 

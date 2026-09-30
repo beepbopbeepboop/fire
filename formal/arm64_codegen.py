@@ -48,6 +48,17 @@ CodegenError = M.CodegenError
 
 _CALLEE_SAVED = [19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
 
+# How many arguments AAPCS passes in registers: X0..X7. Named once and used by
+# BOTH ends of the convention (the callee's prologue and `_emit_call`), because
+# the two are one fact and a program that is refused at one end and silently
+# truncated at the other is the bug this constant exists to prevent.
+#
+# The x86-64 backend has its own (`ARG_REGS`, six of them) for the same reason:
+# the limit is the platform's, not the language's, and it belongs in the
+# backend. What is NOT the backend's is what to do past the limit, and both
+# refuse.
+_ABI_ARG_REGS = 8
+
 
 def _for_target_tree(target: str):
     """Parse a for/comprehension target string into a leaf name or nested list.
@@ -604,21 +615,20 @@ class ARM64Codegen:
         # becomes a BL against a symbol nothing defines.
         self._dylib_syms: dict = dict(dylib_syms or {})
         # The same libraries' MANIFEST export entries, in the same order
-        # `_dylib_syms` was built in, indexed two ways: flat by bare name (so a
-        # bare callee resolves to the entry `_dylib_syms` resolved it to, by
-        # construction rather than by a second copy of the same precedence
-        # rule) and by module identity, which is what makes `mod.f(...)` — the
-        # spelling `import mod` binds — resolve. The entry carries the declared
+        # `_dylib_syms` was built in, indexed the way `model.dylib_export_tables`
+        # indexes them: flat by bare name (so a bare callee resolves to the
+        # entry `_dylib_syms` resolved it to, by construction rather than by a
+        # second copy of the same precedence rule), by module identity (which is
+        # what makes `mod.f(...)` — the spelling `import mod` binds — resolve),
+        # and by module identity again for the names a module publishes by
+        # RE-EXPORT rather than by definition. The entry carries the declared
         # signature, so a call's result can be classified instead of guessed.
+        # One builder, both backends: the tables were two copies of the same
+        # indexing, which is two places for them to disagree about which
+        # library owns a name.
         # See `model.dylib_export_lookup`.
-        self._dylib_by_name: dict = {}
-        self._dylib_by_module: dict = {}
-        for lib in (dylib_exports or []):
-            for entry in (lib.get("exports") or []):
-                self._dylib_by_name.setdefault(entry.get("name"), entry)
-                owner = self._dylib_by_module.setdefault(
-                    entry.get("module") or "", {})
-                owner.setdefault(entry.get("name"), entry)
+        (self._dylib_by_name, self._dylib_by_module,
+         self._dylib_forwarded) = M.dylib_export_tables(dylib_exports)
         # `{local name: (module as spelled, defining name)}` — what
         # `from m import f as g` binds. The flat map above is keyed by the
         # DEFINING name and a call site spells the LOCAL one, so without this
@@ -627,7 +637,7 @@ class ARM64Codegen:
         # resolved against the MODULE's export table, never the flat one: the
         # alias says where the name came from, and a name that happens to
         # collide with another library's export must still bind the module it
-        # was imported from. See `model.dylib_aliased_export`.
+        # was imported from. See `model.dylib_callee_export`.
         self._import_aliases: dict = dict(import_aliases or {})
         # `{export symbol: FunctionDef}` — the callee's OWN declaration, read
         # from the source each linked library was compiled from
@@ -653,6 +663,14 @@ class ARM64Codegen:
         self._comptime_list_asts: dict = {}
         # Unique-label counter for subscript bounds-check exit paths.
         self._sub_counter = 0
+        # The element width the subscript being emitted reads at, in bytes.
+        # `_emit_subscript_addr` sets it on every path (a container element and
+        # a dict value are 8, a string byte is 1, a declared pointee is its
+        # own) and the caller that emits the load or the store reads it, so
+        # the address computation and the instruction that uses it cannot
+        # disagree. Defaulted here because a stale value from a previous
+        # subscript in the same function would silently pick a width.
+        self._sub_width = 8
         # {function name: model.ValueKinds}, for the whole module. `_functions`
         # is fixed for a compile, so a callee's answer is the same at every
         # call site and there is no reason to re-derive it per function.
@@ -879,9 +897,20 @@ class ARM64Codegen:
         # parameters first (the call site passes them ahead of the runtime
         # ones), then its runtime parameters.
         incoming = M.incoming_args(f)
+        if len(incoming) > _ABI_ARG_REGS:
+            # The other end of the same refusal. `_emit_call` catches a call
+            # SITE with too many arguments, but a function can also be REACHED
+            # without one — a dylib export, a reflection-resolved call, an
+            # entry point the driver calls directly — and this used to answer
+            # that by `break`ing out of the loop, which leaves every parameter
+            # past the eighth with its home slot never written. The first read
+            # of such a name then loaded whatever the slot held, so the value
+            # was not merely wrong but BUILD-DEPENDENT. Refusing here means
+            # the arity is rejected whichever way the function is entered.
+            raise CodegenError(
+                f"{f.name}: {len(incoming)} parameters exceeds the "
+                f"{_ABI_ARG_REGS} the formal arm64 ABI passes in registers")
         for i, (pname, ptype) in enumerate(incoming):
-            if i >= 8:
-                break            # AAPCS has no register for argument 8+
             if i == 0:
                 # Already in X19 by the unconditional save above, which also
                 # keeps the no-parameter case (unknown-name reads fall back to
@@ -894,11 +923,10 @@ class ARM64Codegen:
                     # home is a spill slot: write the incoming argument there
                     # now, or its first read in the body would load whatever
                     # the slot happened to hold. Same addressing as
-                    # `_store_var`'s spill path. NOT reachable today — the
-                    # caller only ever passes 8 arguments (AAPCS X0-X7, see
-                    # `_emit_call`), so at most 8 parameters exist to be
-                    # spilled — but it is written rather than left as a
-                    # silent-wrong-value trap for whoever raises that limit.
+                    # `_store_var`'s spill path. Reachable for arguments 0..7
+                    # of a function with more than ten parameters — the
+                    # arity check above bounds how MANY arguments there are,
+                    # not how many names want a register.
                     if pname in self._var_spills:
                         self.asm.emit(encode_mov_zr_xn(17, i))
                         _emit_sub_imm(self.asm, 17, 17,
@@ -1246,8 +1274,14 @@ class ARM64Codegen:
                 self.asm.emit(encode_stp_sp_pre(0, 2))
                 self._emit_expr_to(stmt.value, "X1")
                 self.asm.emit(encode_ldp_sp_post(0, 2))
+                # The LEFT operand is the name being shifted, so its own type
+                # decides the fill and the shift AMOUNT's type is not
+                # consulted — `model.shift_signedness`, the same rule
+                # `_emit_div_shift_pow` uses for the binary form. A `y <<= n`
+                # and a `y = y << n` are the same operator and must not
+                # disagree about whether the result is signed.
                 self._emit_shift_reg(op, signed=cmp_signed(
-                    self._ttype(F.IdentExpr(name))))
+                    M.shift_signedness(self._ttype(F.IdentExpr(name)))))
                 self._emit_trunc(common_type(
                     self._ttype(F.IdentExpr(name)), self._ttype(stmt.value)))
                 self._store_var(name, 0)
@@ -2532,86 +2566,72 @@ class ARM64Codegen:
         return (ann, M.declared_type_kind(ann, TYPE_NAMES, STRING_TYPE_NAMES,
                                           self._structs))
 
-    def _aliased_export(self, name: str):
-        """The manifest export a bare callee reaches THROUGH an import alias."""
-        return M.dylib_aliased_export(self._dylib_by_name,
-                                      self._dylib_by_module, name,
-                                      self._import_aliases)
+    def _callee_export(self, name: str):
+        """The manifest export this emitter's tables say `name` reaches.
+
+        A THIN CALL into `M.dylib_callee_export`, the one lookup of "which
+        library publishes this callee, under whichever spelling the call site
+        used" — the same one `_extern_symbol` and `_callee_decl` read, so the
+        symbol a call binds, the kind its result has and the signature it is
+        bound against are three uses of one answer. This used to be a per-emitter
+        `_aliased_export` beside a bare `dylib_export_lookup`, in both
+        backends, which is four places for them to disagree about an aliased
+        callee."""
+        return M.dylib_callee_export(self._dylib_by_name, self._dylib_by_module,
+                                     name, self._dylib_forwarded,
+                                     self._import_aliases)
 
     def _extern_symbol(self, name: str) -> str:
         """The boundary symbol an unbound callee `name` is emitted against.
 
-        Three spellings, and the second and third are why this is a function
-        rather than a `dict.get`:
-
-          * a BARE name — what `from mod import f` binds — is answered by the
-            flat `{name: symbol}` map, first library on the line winning, which
-            is `load_dylib_manifests`'s own precedence and stays it;
-          * a bare name that is an IMPORT ALIAS — what `from mod import f as g`
-            binds — is answered by the export table of the module the alias
-            came from, never by the flat map. The flat map is keyed by the
-            DEFINING name, so `g` misses it, and the fallback used to bind `g`
-            itself: an image that builds, fails the link audit, and says so.
-            See `_aliased_export`;
-          * a DOTTED name — what `import mod` binds, spelled `mod.f` — is
-            answered ONLY by the export table of the library built for `mod`.
-            Falling back to the flat map for a dotted name would let
-            `mod.f` bind some other library's `f`, which is the silently-wrong
-            binding the whole module-identity mechanism exists to prevent.
-
-        A dotted name whose module is linked but which that module does not
-        export is REFUSED, naming both halves. It used to fall through to the
-        bare name, which produced a BL against a symbol nothing defines and an
-        image that died in dyld — the failure this whole mechanism was built to
-        make a build-time error instead.
-
-        The module is identified by `model.dylib_export_module`, which knows
-        that a manifest keys a package submodule by its ABI prefix
-        (`os.path` → `os_path`) — which is what makes `os.path.join(...)`, the
-        spelling 532 measured call sites in this tree are written with, resolve
-        at all, and which is why the same call answers an alias whose module was
-        spelled RELATIVELY (`._syscalls` is filed as `__syscalls`). The x86-64
-        emitter asks the same question the same way.
+        The DECISION and the words are `model.dylib_extern_symbol`'s, shared
+        with the x86-64 emitter: THREE spellings — a bare name from the flat map,
+        a bare name bound by `from m import f as g` from the module it was
+        imported from, and a dotted name from the library built for that module
+        or from what that module forwards — and a name whose module IS linked
+        but does not publish it refused by name here rather than emitted as a BL
+        against a symbol nothing defines. This used to be a second copy of that
+        rule, in two backends, which is two places for one language
+        implementation to disagree about what a module call binds.
         """
-        if "." not in name:
-            entry = self._aliased_export(name)
-            if entry is not None:
-                return entry.get("symbol") or name
-            if M.is_import_alias(name, self._import_aliases):
-                # An ALIAS whose module does not export the name it stands for.
-                # Falling back to the flat map would bind `g` itself, and the
-                # bind audit would report an unbound symbol with no idea why.
-                # A plain `from m import f` is NOT this case and keeps the
-                # audit's own message, which is the one that was always right
-                # for it.
-                raise CodegenError(M.dylib_aliased_export_refusal(
-                    name, self._import_aliases, self._dylib_by_module))
-            return self._dylib_syms.get(name, name)
-        entry = M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name)
-        if entry is not None:
-            return entry.get("symbol") or name
-        module, _, leaf = name.rpartition(".")
-        table = M.dylib_export_module(self._dylib_by_module, module)
-        if table:
-            have = sorted(table)
-            shown = ", ".join(have[:8]) + (", …" if len(have) > 8 else "")
-            raise CodegenError(
-                f"{name}(): `{module}` is a linked module but it exports no "
-                f"`{leaf}`, so the call has no symbol to bind. What it does "
-                f"export: {shown}. A name `doc/ABI.md`'s export rule excludes "
-                f"(a leading `_`, a generic template, an overload, or a C "
-                f"library symbol such as `exit` or `write`) is not advertised, "
-                f"so a module that defines one cannot be called by that name. "
-                f"The exclusion is measured and settled in "
-                f"bugs/FORMAL_known_limits.md 1.1; a module that needs to "
-                f"publish mutable state rather than functions is a different "
-                f"gap, written down in "
-                f"bugs/FORMAL_module_state_no_storage.md")
-        aliased = self._aliased_export(name)
-        if aliased is not None:
-            return aliased.get("symbol") or name
-        return self._dylib_syms.get(name, name)
+        return M.dylib_extern_symbol(name, self._dylib_syms,
+                                     self._dylib_by_name,
+                                     self._dylib_by_module,
+                                     self._dylib_forwarded,
+                                     self._import_aliases)
+
+    def _untyped_callee(self, name) -> bool:
+        """Is `name` a MOJO function that does not say what it returns?
+
+        The question `string_compare_word_refusal` needs and `ValueKinds` cannot
+        answer: an unannotated call's result and an `-> int` call's result are
+        both `INT_KIND` on this path, because a word is an integer, and the two
+        are not the same thing — one of them may be a `char *`, and `f() == g()`
+        on two of those compares two addresses.
+
+        Two sources, because there are two kinds of Mojo callee, and the third
+        kind is the one that must NOT be in this set:
+
+          * a function of THIS image — the parser recorded its `return_type`,
+            and `None` is the answer when the source has no `->`;
+          * an export of a LINKED MODULE — its manifest signature carries the
+            return type, and `reflect._c_signature` spells an unannotated
+            function's as `void`, so `void` here is the same fact as `None`
+            above. `dylib_export_return_kind` reads the `char *` case out of
+            the same string, which is how a cross-image `-> str` classifies;
+          * and an UNBOUND EXTERN is NOT in this set at all. `memcmp(a, b, n)
+            == 0` is in every `os` function on this path and is correct on
+            every one of them; `getenv(name) == 0` is a NULL check. A C
+            library function has no Mojo return annotation to be missing.
+        """
+        fn = self._functions.get(name)
+        if fn is not None:
+            return getattr(fn, "return_type", None) is None
+        entry = self._callee_export(name)
+        if entry is None:
+            return False
+        return M.signature_return_type(
+            entry.get("signature") or "").strip() == "void"
 
     def _callee_kind(self, name, stack):
         """What a call to the local function `name` produces, or None."""
@@ -2624,10 +2644,7 @@ class ARM64Codegen:
             # was unclassified, and `print(mod.name())` formatted a `char *` as
             # an integer — the pointer's own value, so the program printed
             # 4335747904 where it meant to print `darwin`.
-            return M.dylib_export_return_kind(
-                M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name)
-                or self._aliased_export(name))
+            return M.dylib_export_return_kind(self._callee_export(name))
         vk = self._vkinds_for(name, fn, stack)
         ann = getattr(fn, "return_type", None)
         if ann in STRING_TYPE_NAMES:
@@ -2754,15 +2771,31 @@ class ARM64Codegen:
         return False
 
     def _is_string_subscript(self, obj) -> bool:
-        """True when `obj` is known to hold a char* (byte index path)."""
+        """True when `obj` is known to hold a char* (byte index path).
+
+        One question, asked through the one authority that answers it:
+        `_expr_str_kind`, so the flow-sensitive `_string_vars` map still wins
+        where the two disagree and this cannot contradict the three call sites
+        (`len`, `print`, a string method receiver) that were already right.
+
+        The FALLBACK is the whole of a fixed silent wrong answer. A parameter is
+        bound by the signature, so `_note_binding` never sees it and it was not
+        in `_string_vars` — while the whole-function `ValueKinds` IS seeded from
+        the parameter's annotation. Asking only the flow-sensitive set therefore
+        gave one name two answers on this path: a `char *` to `len`/`print`, a
+        LIST BLOB to this one. Falling through to the blob path is what made it
+        silent AND wrong-shaped rather than a crash — a blob is
+        `[count:i64][elem0]…`, so `s[0]` read the first eight CHARACTERS of the
+        string as the element count and loaded `base + 8 + 8*count`, which for
+        `"AB"` walks off the string and returns a text-section address. Measured
+        before the fallback: `f(s: String): return s[0]` on `f("AB")` printed
+        -8070450326089498624, where 65 is the answer. That was
+        `CODEGEN_string_parameter_subscript_reads_count_field`, fixed, doc
+        deleted.
+        """
         if isinstance(obj, F.StringLiteral):
             return True
-        if isinstance(obj, F.IdentExpr):
-            return obj.name in self._string_vars
-        if isinstance(obj, F.MemberExpr):
-            key = _member_slot_key(obj)
-            return key is not None and key in self._string_vars
-        return False
+        return self._expr_str_kind(obj) == M.STR_KIND
 
     def _emit_subscript(self, e: F.SubscriptExpr) -> None:
         """`obj[index]` → element/byte value in X0.
@@ -2770,7 +2803,8 @@ class ARM64Codegen:
         List/tuple blobs: `[count:i64][e0…]`, unsigned bounds-checked
         (negative indices wrap like Python, then bounds-check); OOB →
         Darwin exit(1). String pointers (literal or tracked var): raw
-        byte load, no header.
+        byte load, no header. A declared POINTER: a load of the pointee's
+        width, which `_emit_subscript_addr` recorded in `_sub_width`.
 
         Every refusal lives in `_emit_subscript_addr`, which this calls: a
         read, a store and an augmented assignment all go through it, and a
@@ -2782,10 +2816,23 @@ class ARM64Codegen:
             self._emit_slice_parts(e.obj, sl.start, sl.stop, sl.step)
             return
         self._emit_subscript_addr(e)
-        if self._is_string_subscript(e.obj):
-            self.asm.emit(encode_ldrb_wd_wn(0, 0, 0))
+        self._emit_subscript_load(0, 0)
+
+    def _emit_subscript_load(self, reg: int, base: int) -> None:
+        """Load one element through X{base} into X{reg}, at `_sub_width`.
+
+        ONE place, because the read, the store's own read-modify and the
+        augmented assignment each used to spell this choice separately and the
+        pointer route made a third width possible. A one-byte element is
+        zero-extended by `LDRB`, which is what a `UInt8` read is; anything
+        wider is the full 64-bit load, and the sub-word widths the pointee
+        table can return (2 and 4) are the same two instructions
+        `_emit_dereference` uses for them.
+        """
+        if self._sub_width == 1:
+            self.asm.emit(encode_ldrb_wd_wn(reg, base, 0))
         else:
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
+            self.asm.emit(encode_ldr_xt_xn_imm(reg, base, 0))
 
     def _emit_dict(self, expr: F.DictExpr) -> None:
         """Stack-allocate a dict pair-blob: [count_pairs][k0][v0][k1][v1]…
@@ -3019,6 +3066,12 @@ class ARM64Codegen:
         contract for) and the second emitted a store through a computed
         address. Both now say no."""
         self._refuse_frame_container_operand("a subscript", e.obj)
+        # The element width this subscript reads at, for the caller that emits
+        # the load. A container element and a dict value are a word, a string
+        # byte and a declared pointee are whatever the pointee is, and the
+        # default here is the word because it is the answer for the two that
+        # reach their own branch and set it before returning.
+        self._sub_width = 8
         if e.attrs is not None:
             raise CodegenError(
                 "type-parameter subscript [...] is not supported on the "
@@ -3045,6 +3098,7 @@ class ARM64Codegen:
                 M.spelled(e.index))
             if ireason is not None:
                 raise CodegenError(ireason)
+            self._sub_width = 1
             self._emit_expr(e.obj)
             self.asm.emit(encode_stp_sp_pre(0, 2))
             self._emit_expr_to(e.index, "X1")
@@ -3053,6 +3107,38 @@ class ARM64Codegen:
             self.asm.emit(encode_mov_zr_xn(2, 0))
             self.asm.emit(encode_ldp_sp_post(0, 31))
             self.asm.emit(encode_mov_zr_xn(0, 2))
+            return
+        shape, width, _signed, sub_why = M.subscript_base_lowering(
+            self._cur_fn, e.obj, self._structs, self._functions, self._structs)
+        if shape is None:
+            raise CodegenError(sub_why)
+        if shape == "load":
+            # A POINTER subscript is `base + index*width` and a load of `width`
+            # bytes — `p[i]` and `p.value()` are the same question, and this is
+            # the half of the pair that used to fall through to the blob walk
+            # and read the element COUNT out of the pointer itself. Measured
+            # before the route existed: `p[0]` on a `Pointer[UInt8]` holding
+            # "ab" returned -1879048144 (0x9002_2E68 = "ab" plus the next two
+            # bytes of __TEXT) and the same spelling on a `malloc`'d buffer
+            # exited 1 with no message, because the count there is 0. That was
+            # `FORMAL_subscript_of_a_pointer_reads_a_blob_count` (fixed, doc
+            # deleted); the decision is `model.subscript_base_lowering`.
+            self._sub_width = width
+            self._emit_expr(e.obj)                    # X0 = the address
+            self.asm.emit(encode_stp_sp_pre(0, 2))    # save it
+            self._emit_expr_to(e.index, "X1")         # X1 = index
+            self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))   # X9 = base
+            if width != 1:
+                # The scale is emitted, not assumed: `base + i` is right for a
+                # one-byte element and is the SECOND element for any other
+                # width, which is the same trap `_offset_scale` refuses rather
+                # than guesses on the dereference path.
+                self.asm.emit(encode_movz_xd_imm(2, width))
+                self.asm.emit(encode_mul_xd_xn_xm(1, 1, 2))
+            self.asm.emit(encode_add_xd_xn_xm(9, 9, 1))  # X9 = &elem
+            self.asm.emit(encode_mov_zr_xn(0, 9))
+            self.asm.emit(encode_ldp_sp_post(0, 31))  # restore SP (clobbers X0)
+            self.asm.emit(encode_mov_zr_xn(0, 9))
             return
         obj_ok = type(e.obj) in (F.IdentExpr, F.CallExpr, F.ListExpr,
                                  F.TupleExpr, F.MemberExpr, F.SubscriptExpr)
@@ -3131,7 +3217,7 @@ class ARM64Codegen:
         # nothing is emitted between the load and the store. The value is at
         # [sp+16]: the addr pair pushed just above took [sp+0] and [sp+8].
         self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 16))  # X5 = value
-        if self._is_string_subscript(target.obj):
+        if self._sub_width == 1:
             self.asm.emit(encode_strb_wd_wn(5, 9, 0))
         else:
             self.asm.emit(encode_str_xt_xn_imm(5, 9, 0))
@@ -3155,25 +3241,24 @@ class ARM64Codegen:
                 f"unsupported augmented operator {stmt.op!r} "
                 f"(formal arm64 path supports + - * & | ^ << >>)")
         target = stmt.target
-        is_str = self._is_string_subscript(target.obj)
         self._emit_subscript_addr(target)
         self.asm.emit(encode_stp_sp_pre(0, 31))   # push addr (X0, XZR)
         self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))  # X9 = addr
-        if is_str:
-            self.asm.emit(encode_ldrb_wd_wn(0, 9, 0))
-        else:
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 9, 0))  # X0 = old
+        self._emit_subscript_load(0, 9)           # X0 = old, at the element's width
         self.asm.emit(encode_stp_sp_pre(0, 31))   # push old (stack: old, addr)
         self._emit_expr_to(stmt.value, "X1")      # X1 = value
         self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))  # X0 = old (re-load)
         if want_shift:
+            # As above: the thing being shifted decides the fill, and for a
+            # subscript target that is the ELEMENT, which is what `target`
+            # types as.
             self._emit_shift_reg(op, signed=cmp_signed(
-                self._ttype(target)))
+                M.shift_signedness(self._ttype(target))))
         else:
             self.asm.emit(ops[op](0, 0, 1))       # X0 = old op value
         # addr is at [SP+16] after the two pushes.
         self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 16))
-        if is_str:
+        if self._sub_width == 1:
             self.asm.emit(encode_strb_wd_wn(0, 9, 0))
         else:
             self.asm.emit(encode_str_xt_xn_imm(0, 9, 0))
@@ -4070,7 +4155,9 @@ class ARM64Codegen:
         # `model.string_binary_refusal`, which is the one table both backends
         # ask and which holds the measurements.
         reason = M.string_binary_refusal(
-            op, self._expr_str_kind(e.left), self._expr_str_kind(e.right))
+            op, self._expr_str_kind(e.left), self._expr_str_kind(e.right),
+            left=e.left, right=e.right, fn=self._cur_fn,
+            untyped_callee=self._untyped_callee)
         if reason is not None:
             raise CodegenError(reason)
         # Comparisons
@@ -4174,8 +4261,8 @@ class ARM64Codegen:
         caller-saved register, so both operands have to survive the call.
         """
         if M.string_comparison_lowering(
-                "==", self._expr_str_kind(l), self._expr_str_kind(r)) \
-                != M.STRING_COMPARE_CONTENT:
+                "==", self._expr_str_kind(l), self._expr_str_kind(r),
+                l, r) != M.STRING_COMPARE_CONTENT:
             return False
         # [sp+0] l, [sp+8] r, [sp+16] len(r). The same scratch area and the
         # same store-then-reload discipline `_emit_str_affix` uses for
@@ -4327,7 +4414,8 @@ class ARM64Codegen:
         # deciding either.
         reason = M.string_binary_refusal(
             cond.op, self._expr_str_kind(cond.left),
-            self._expr_str_kind(cond.right))
+            self._expr_str_kind(cond.right), left=cond.left, right=cond.right,
+            fn=self._cur_fn, untyped_callee=self._untyped_callee)
         if reason is not None:
             raise CodegenError(reason)
         # A string `==`/`!=` is a `strcmp`, and the strcmp form leaves the flags
@@ -4592,7 +4680,7 @@ class ARM64Codegen:
         return M.callee_declaration(self._functions, self._dylib_by_name,
                                     self._dylib_by_module,
                                     self._import_aliases, self._extern_decls,
-                                    name)
+                                    name, self._dylib_forwarded)
 
     def _bind_call_args(self, name: str, e: F.CallExpr) -> list:
         """`e`'s arguments in positional form, for a known callee.
@@ -5150,7 +5238,7 @@ class ARM64Codegen:
         # (`model.gimple_runtime_callable`): a call is answerable when every
         # type crossing the boundary is one 64-bit word — which is what a value
         # IS here — AND the symbol is on the link line, which `_dylib_syms` is
-        # (and `_aliased_export` is for a name bound by `from m import f as g`).
+        # (and `_callee_export` is for a name bound by `from m import f as g`).
         # Note the two are independent and both are needed. A `MojoList *`
         # argument is a box no link line can answer, so it is refused EVEN IF a
         # dylib provides the symbol; and `mojo_print`, whose every type is a
@@ -5159,7 +5247,7 @@ class ARM64Codegen:
         # second from it.
         if is_extern and not M.gimple_runtime_callable(
                 name, name in self._dylib_syms
-                or self._aliased_export(name) is not None):
+                or self._callee_export(name) is not None):
             raise CodegenError(M.gimple_runtime_refusal(name))
         if is_extern and self._callee_decl(name) is None:
             # Unknown signature: AAPCS has no place for Python kwargs on a
@@ -5219,14 +5307,22 @@ class ARM64Codegen:
         # (they don't produce call arguments).
         for se in side_effects:
             self._emit_expr(se)
-        # AAPCS: only X0..X7 are argument registers. Args past 8 are
-        # evaluated for side effects then dropped (same compile-only
-        # fidelity as unknown-signature kwargs / dynamic *unpack).
-        if len(args) > 8:
-            extra = args[8:]
-            args = args[:8]
-            for x in extra:
-                self._emit_expr(x)
+        # AAPCS passes the first eight arguments in X0..X7. A ninth has no
+        # register, and this path has no stack-argument convention to fall
+        # back on, so the call is REFUSED here rather than truncated: the
+        # alternative — evaluate the extra arguments for their side effects,
+        # drop them, and branch — built an image that ran and read the ninth
+        # parameter as ZERO, which is a perfectly good answer to a great many
+        # questions (measured: `nine(1,...,9)` returned 1 where the source
+        # says 90001). A wrong value is strictly worse than a refusal here,
+        # because nothing downstream can tell a dropped argument from a
+        # caller who passed zero. Same shape, same words, as the x86-64
+        # check in `_emit_call` there — the two differ in their limit (8 vs
+        # 6) because the ABIs do, not in what they do about it.
+        if len(args) > _ABI_ARG_REGS:
+            raise CodegenError(
+                f"call {name}(): {len(args)} arguments exceeds the "
+                f"{_ABI_ARG_REGS} the formal arm64 ABI passes in registers")
 
         # AAPCS: pass up to 8 integer args in X0..X7. Evaluate left-to-right,
         # spilling each result so nested evaluations (which clobber X0/X1/X2)
@@ -5596,10 +5692,20 @@ class ARM64Codegen:
 
         Division is UDIV/SDIV (trunc toward zero; `//` matches `/` on the
         unsigned default). Remainder is DIV then MSUB (n - (n/d)*d). Shifts
-        use LSLV/LSRV/ASRV (immediate form when the RHS is a small literal).
-        `**` unrolls a small literal exponent."""
-        signed = cmp_signed(common_type(self._ttype(e.left),
-                                        self._ttype(e.right)))
+        use LSLV/LSRV/ASRV (immediate form when the RHS is a small literal),
+        and an amount at or past the word's width SATURATES rather than being
+        masked to a shift by zero — `model.shift_saturated_is_zero` is the rule
+        and this is only its instruction selection. `**` unrolls a small
+        literal exponent.
+
+        The two decisions a shift makes are NOT the same decision, and only
+        one of them promotes both operands: a shift's signedness comes from
+        the thing being SHIFTED (`model.shift_signedness`), because the right
+        operand is a count and a count's signedness says nothing about what to
+        shift in. Division and remainder keep the promotion, where the two
+        operands really do combine."""
+        result_t = common_type(self._ttype(e.left), self._ttype(e.right))
+        signed = cmp_signed(result_t)
         if op in ("/", "//", "%"):
             self._if_counter += 1
             cid = self._if_counter
@@ -5633,6 +5739,14 @@ class ARM64Codegen:
             return
 
         if op in ("<<", ">>"):
+            # The signedness that picks ASRV over LSRV is the LEFT operand's
+            # own, not the promotion's. `result_t` above is still the answer to
+            # "what width is the result", which is a different question and
+            # does involve both operands; only the FILL depends on this one.
+            # Without the split, `UInt64 >> Int` chose signedness from the
+            # unannotated (hence signed) shift AMOUNT and computed
+            # 0xFFFFFFFFFFFFFFFF >> 4 as 0xFFFFFFFFFFFFFFFF.
+            signed = cmp_signed(M.shift_signedness(self._ttype(e.left)))
             imm_r = e.right
             if isinstance(imm_r, F.IntLiteral) and 0 <= imm_r.value <= 63:
                 self._emit_expr(e.left)
@@ -5642,21 +5756,34 @@ class ARM64Codegen:
                     self.asm.emit(encode_asr_xd_xn_imm(0, 0, imm_r.value))
                 else:
                     self.asm.emit(encode_lsr_xd_xn_imm(0, 0, imm_r.value))
-                self._emit_trunc(common_type(self._ttype(e.left),
-                                             self._ttype(e.right)))
+                self._emit_trunc(result_t)
                 return
+            # A literal amount at or past the word's width is decided HERE,
+            # with no branch: the value cannot be shifted that far, and the
+            # immediate form's range check above is what sends it to the
+            # register form, where the hardware would mask the amount back to
+            # a shift by zero. `3 >> 64` was `3` and `3 << 64` was `3`. The
+            # saturation rule (and why the arithmetic `>>` case is not simply
+            # 0) is `model.shift_saturated_is_zero`; only the SIGN is a runtime
+            # fact here, so the operand is still evaluated and `ASR #63`
+            # replicates it.
+            lit = self._static_int(imm_r)
+            if lit is not None and M.shift_saturates(lit):
+                self._emit_saturated(op, signed)
+                self._emit_trunc(result_t)
+                return
+            # The register form: `_emit_shift_reg` is the ONE emitter for it
+            # and carries the saturation rule, so this only has to put the
+            # value in X0 and the amount in X1 and step aside. That is the
+            # whole consolidation — a second copy of the rule here is what
+            # let the `<<=` spelling keep the hardware's masking while the
+            # `<<` spelling did not.
             self._emit_expr(e.left)
             self.asm.emit(encode_stp_sp_pre(0, 2))
             self._emit_expr_to(e.right, "X1")
             self.asm.emit(encode_ldp_sp_post(0, 2))
-            if op == "<<":
-                self.asm.emit(encode_lslv_xd_xn_xm(0, 0, 1))
-            elif signed:
-                self.asm.emit(encode_asrv_xd_xn_xm(0, 0, 1))
-            else:
-                self.asm.emit(encode_lsrv_xd_xn_xm(0, 0, 1))
-            self._emit_trunc(common_type(self._ttype(e.left),
-                                         self._ttype(e.right)))
+            self._emit_shift_reg(op, signed)
+            self._emit_trunc(result_t)
             return
 
         if op == "**":
@@ -6147,13 +6274,72 @@ class ARM64Codegen:
                 pos += 16
 
     def _emit_shift_reg(self, op: str, signed: bool) -> None:
-        """Variable shift X0 = X0 <op> X1 (LSLV/LSRV/ASRV)."""
+        """Variable shift X0 = X0 <op> X1 (LSLV/LSRV/ASRV), SATURATING.
+
+        X0 holds the value and X1 the amount on entry; both are live and
+        X0 is the result on exit.
+
+        THE ONE register-form shift emitter on this backend. It was not,
+        and being the second one is how the same defect reached the source
+        twice: `_emit_div_shift_pow` had its own copy, and a program that
+        spelled the shift `x <<= n` went through THIS one and got the
+        hardware's modulo-64 masking, so `y <<= 64` left `y` unchanged
+        while `y = y << 64` zeroed it. Both spellings are the same operator
+        and the rule is one rule (`model.shift_saturated_is_zero`), so the
+        rule lives here and both callers come to it.
+
+        The amount is compared against 64 and a saturating branch taken
+        BEFORE the shift instruction runs, so the masking is never the
+        answer. The sign for the arithmetic case is X0's own, read before
+        X0 is overwritten.
+
+        The compare is SIGNED, which is what keeps this fix to the case it
+        fixes: an amount of 64 or more (signed, so 64..2^63-1) saturates,
+        and a NEGATIVE amount is below 64 and keeps the masking it has
+        always had. That is not an endorsement — CPython raises ValueError
+        for a negative amount, and this path answers with the masked shift
+        — it is a separate question left alone rather than changed under
+        cover of a fix about the saturation boundary. See
+        bugs/FORMAL_negative_shift_amount_masks_instead_of_raising.md, which
+        is also why the compare must not be made unsigned: unsigned, a
+        negative amount would take the saturating branch and answer 0, a
+        THIRD wrong answer rather than this one.
+        """
+        self._if_counter += 1
+        sid = self._if_counter
+        fn = self.func_name
+        sat_label = f"{fn}_sh{sid}_sat"
+        end_label = f"{fn}_sh{sid}_end"
+        self.asm.emit(encode_cmp_xn_imm(1, 64))
+        self.asm.emit(encode_b_cond("ge", 8))
+        self.asm.emit_label_rel(sat_label, here_offset=-4)
         if op == "<<":
             self.asm.emit(encode_lslv_xd_xn_xm(0, 0, 1))
         elif signed:
             self.asm.emit(encode_asrv_xd_xn_xm(0, 0, 1))
         else:
             self.asm.emit(encode_lsrv_xd_xn_xm(0, 0, 1))
+        self.asm.emit(encode_b(0))
+        self.asm.emit_label_rel(end_label, here_offset=-4)
+        self.asm.label(sat_label)
+        self._emit_saturated(op, signed)
+        self.asm.label(end_label)
+
+    def _emit_saturated(self, op: str, signed: bool) -> None:
+        """Materialise the answer a SATURATING shift gives, in X0.
+
+        The decision is `model.shift_saturated_is_zero` and this is only its
+        instruction selection, so that a second backend cannot answer the
+        same question differently. Two cases, and the second is the one a
+        `return 0` saturation gets wrong: `ASR X0, X0, #63` is exactly "the
+        sign-extended word", which is 0 for a non-negative operand and -1 for
+        a negative one — which is what Python's arithmetic `>>` gives at any
+        amount at or past 64. `X0` holds the value being shifted on entry, so
+        the sign is read from it rather than recomputed."""
+        if M.shift_saturated_is_zero(op, signed):
+            self.asm.emit(encode_movz_xd_imm(0, 0))
+        else:
+            self.asm.emit(encode_asr_xd_xn_imm(0, 0, 63))
 
     def _check_comptime_target(self, name: str, what: str) -> None:
         """Refuse a store to a name that is currently a `comptime` binding.

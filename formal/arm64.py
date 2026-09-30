@@ -584,7 +584,7 @@ def encode_lsl_xd_xn_imm(xd: int, xn: int, shift: int) -> bytes:
     assert 0 <= xd <= 30 and 0 <= xn <= 31 and 0 <= shift <= 63
     immr = (-shift) & 63
     imms = 63 - shift
-    insn = 0xd3780000 | (immr << 16) | (imms << 10) | (xn << 5) | xd
+    insn = 0xd3400000 | (immr << 16) | (imms << 10) | (xn << 5) | xd
     return struct.pack('<I', insn)
 
 

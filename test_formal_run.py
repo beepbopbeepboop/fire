@@ -392,9 +392,19 @@ CASES = [
     # `char *`), so the constructor materializes the literal's own address. The
     # comparison is what proves the pointer is the RIGHT pointer and not merely
     # some word: it has to be the bytes `hi`.
+    # `-> str` ON `get` IS LOAD-BEARING, and it was not before. `c.get() ==
+    # "hi"` used to reach the content compare because the RIGHT side is a
+    # string and `string_comparison_lowering` answers for either side being one
+    # — and it was RIGHT by accident, because the field's default happens to be
+    # an interned `char *`. `model.string_compare_number_refusal` now refuses a
+    # comparison where exactly one side is classified a string, because
+    # `strcmp` dereferences both and the unclassified side is not known to be an
+    # address; a method that does not say what it returns is exactly that case.
+    # The annotation is the fix the refusal names, and it is also what the
+    # program should have said all along.
     ("struct_default_word_string", "struct Name:\n"
                                   "    text = \"hi\"\n\n"
-                                  "    def get(self):\n"
+                                  "    def get(self) -> str:\n"
                                   "        return self.text\n\n"
                                   "def main(n):\n"
                                   "    c = Name()\n"
@@ -6374,6 +6384,312 @@ WAVE7_G2_CASES = [
 ]
 
 
+# ── SILENT WRONG ANSWERS in the arm64 lowering ─────────────────────────────
+#
+# Every case in this group builds an image, EXECUTES it, and compares with
+# CPython running the same program. That is the whole point of putting them
+# here rather than in `test_armal_encoders.py` or a model test: each of the
+# five defects below produced an image that was a perfectly good Mach-O file,
+# encoded a real instruction, and computed a number the source never wrote.
+# A test that checked the encoding or the model would have been green
+# throughout.
+#
+# THE SHAPE OF EACH GROUP. Where a defect has a wrong answer and a right one
+# that a plausible-looking "fix" would swap, BOTH are pinned, and the comment
+# says which is which. A test that pins only the newly-fixed case invites the
+# over-correction: making every `>>` logical, or making every shift saturate
+# to 0 regardless of sign, are each correct for one row here and wrong for
+# another.
+SHIFT_CASES = [
+    # ── `<<` by an IMMEDIATE amount (the UBFM encoder) ───────────────────
+    #
+    # `encode_lsl_xd_xn_imm` used base `0xd3780000` while its own docstring
+    # said `0xd3400000`; the difference sits inside `immr`'s field, and the
+    # code ORs the real `immr` into the same field, so the emitted shift
+    # amount was `immr_intended | 0x38`. The amounts where that OR is
+    # harmless are EXACTLY 1..8 — so `1 << 8` was right and `1 << 12` was
+    # 16. The amounts below are spread across the broken range deliberately,
+    # and `lsl_imm_amount_8` is here to say that the surviving amounts are
+    # still right: a fix that shifted the whole range would pass the others.
+    #
+    # Every value is asserted through STDOUT rather than through the exit
+    # status, because a process exit status is 8 bits and `1 << 12` is
+    # 4096. The exit code carries "it ran", which is its own assertion.
+    ("lsl_imm_amount_8",
+     "def f(x):\n    return x << 8\n"
+     "def main(n):\n    printf(\"%ld\", f(1))\n    return 0\n", 0, "256"),
+    ("lsl_imm_amount_9",
+     "def f(x):\n    return x << 9\n"
+     "def main(n):\n    printf(\"%ld\", f(1))\n    return 0\n", 0, "512"),
+    ("lsl_imm_amount_12",
+     "def f(x):\n    return x << 12\n"
+     "def main(n):\n    printf(\"%ld\", f(1))\n    return 0\n", 0, "4096"),
+    ("lsl_imm_amount_20",
+     "def f(x):\n    return x << 20\n"
+     "def main(n):\n    printf(\"%ld\", f(1))\n    return 0\n", 0, "1048576"),
+    # 63 is the largest amount that is not a saturation, and it is the row
+    # that pins the high end of the immediate range. Printed as hex because
+    # `1 << 63` is negative when read as a signed decimal.
+    ("lsl_imm_amount_63",
+     "def f(x):\n    return x << 63\n"
+     "def main(n):\n    printf(\"%lx\", f(1))\n    return 0\n",
+     0, "8000000000000000"),
+    # The VARIABLE form was always right (LSLV, a different instruction with
+    # its own encoding), and it is here so the immediate fix cannot have been
+    # made by changing the shared shift path.
+    ("lsl_variable_amount_12",
+     "def f(x, n):\n    return x << n\n"
+     "def main(k):\n    printf(\"%ld\", f(1, 12))\n    return 0\n", 0, "4096"),
+    # ── a shift amount at or past the word's width SATURATES ─────────────
+    #
+    # The hardware takes the amount modulo 64, so `3 >> 64` was `3` and
+    # `3 << 64` was `3`, on BOTH backends — they were written to the same
+    # wrong rule. CPython saturates.
+    ("shr_amount_64_is_zero",
+     "def f(x, n):\n    return x >> n\n"
+     "def main(k):\n    printf(\"%ld\", f(3, 64))\n    return 0\n", 0, "0"),
+    ("shr_amount_65_is_zero",
+     "def f(x, n):\n    return x >> n\n"
+     "def main(k):\n    printf(\"%ld\", f(3, 65))\n    return 0\n", 0, "0"),
+    ("shl_amount_64_is_zero",
+     "def f(x, n):\n    return x << n\n"
+     "def main(k):\n    printf(\"%ld\", f(3, 64))\n    return 0\n", 0, "0"),
+    # 63 is the largest amount that must STILL SHIFT, and it is here
+    # precisely so that a fix which saturates at 63 by accident rather than
+    # by rule is distinguishable from one that does it on purpose. The
+    # immediate form cannot express 63 as an exit status, so the value is
+    # printed and the exit code carries the assertion.
+    ("shl_amount_63_still_shifts",
+     "def f(x, n):\n    return x << n\n"
+     "def main(k):\n    printf(\"%lx\", f(1, 63))\n    return 0\n", 0,
+     "8000000000000000"),
+    # ── the SATURATED value is not 0 for an arithmetic right shift ───────
+    #
+    # Python's `>>` on a negative value is an ARITHMETIC shift: it rounds
+    # toward negative infinity, so the sign bit keeps being replicated no
+    # matter how far the shift goes. `-5 >> 4` is -1, not -2, and `-5 >> 64`
+    # is -1 rather than 0. A saturation that returned 0 for every amount at
+    # or past 64 would be right for `<<` and for every non-negative `>>`, and
+    # wrong for exactly the negative operands a bit-manipulating algorithm
+    # produces by subtracting.
+    ("shr_negative_amount_64_is_minus_one",
+     "def f(x, n):\n    return x >> n\n"
+     "def main(k):\n    printf(\"%ld\", f(0 - 5, 64))\n    return 0\n", 0, "-1"),
+    # 128, not a rounder number, and the choice is the point: it is the
+    # second amount whose low six bits are ZERO, so it is the second amount
+    # the hardware turns into a shift by none. (100 would not discriminate —
+    # 100 & 63 is 36, and `-5 >> 36` is already -1, so the old code passed
+    # this row by coincidence.)
+    ("shr_negative_amount_128_is_minus_one",
+     "def f(x, n):\n    return x >> n\n"
+     "def main(k):\n    printf(\"%ld\", f(0 - 5, 128))\n    return 0\n", 0, "-1"),
+    ("shl_negative_amount_64_is_zero",
+     "def f(x, n):\n    return x << n\n"
+     "def main(k):\n    printf(\"%ld\", f(0 - 5, 64))\n    return 0\n", 0, "0"),
+    # The in-range arithmetic shift, which the same fix must NOT change:
+    # `-5 >> 1` is `-3`, so a "fix" that made every `>>` logical would fail
+    # this row while passing the two above it.
+    ("shr_negative_in_range_is_arithmetic",
+     "def main(n):\n    a = 0 - 5\n    b = a >> 1\n    if b == 0 - 3:\n"
+     "        return 1\n    return 0\n", 1, None),
+    # ── the fill comes from the VALUE, not from the shift AMOUNT ─────────
+    #
+    # `UInt64 >> Int` computed 0xFFFFFFFFFFFFFFFF >> 4 as 0xFFFFFFFFFFFFFFFF
+    # (arithmetic) where the answer is 0x0FFFFFFFFFFFFFFF (logical): the
+    # amount is a COUNT, and `common_type` is signed-wins, so an unannotated
+    # (hence signed) count won the promotion and then decided the fill.
+    # The rows differ ONLY in how the amount is spelled, which is the
+    # diagnostic: the amount is the same number 4 in all of them.
+    ("ushift_u64_by_typed_int_amount",
+     "def ushr(x: UInt64, n: Int) -> UInt64:\n    return x >> n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var a: UInt64 = 18446744073709551615\n"
+     "    printf(\"%016lx\", ushr(a, 4))\n    return 0\n", 0,
+     "0fffffffffffffff"),
+    ("ushift_u64_by_typed_u64_amount",
+     "def ushr(x: UInt64, n: UInt64) -> UInt64:\n    return x >> n\n"
+     "def main(k: Int) -> Int:\n"
+     "    var a: UInt64 = 18446744073709551615\n"
+     "    printf(\"%016lx\", ushr(a, 4))\n    return 0\n", 0,
+     "0fffffffffffffff"),
+    ("ushift_u64_by_literal_amount",
+     "def ushr(x: UInt64) -> UInt64:\n    return x >> 4\n"
+     "def main(k: Int) -> Int:\n"
+     "    var a: UInt64 = 18446744073709551615\n"
+     "    printf(\"%016lx\", ushr(a))\n    return 0\n", 0, "0fffffffffffffff"),
+    # ...and the VARIABLE amount, which was wrong for the same reason and is
+    # the shape a real bit-manipulating algorithm uses.
+    ("ushift_u64_by_variable_amount",
+     "def ushr(x: UInt64, n: Int) -> UInt64:\n    var k = n\n    return x >> k\n"
+     "def main(k: Int) -> Int:\n"
+     "    var a: UInt64 = 18446744073709551615\n"
+     "    printf(\"%016lx\", ushr(a, 4))\n    return 0\n", 0,
+     "0fffffffffffffff"),
+    # ── the AUGMENTED spelling, which is a SECOND shift emitter ──────────
+    #
+    # `y <<= n` is the same operator as `y = y << n` and it reached a
+    # different emitter: arm64's `_emit_shift_reg` and x86-64's augmented
+    # arm each had their own shift, neither of which knew about the
+    # saturation rule. So `y <<= 64` left `y` unchanged while
+    # `y = y << 64` zeroed it — one operator, two answers, in the same
+    # program. These rows are what caught it, and they are the reason the
+    # rule now lives in ONE emitter per backend that both spellings reach.
+    ("augmented_shl_amount_64_is_zero",
+     "def f(x, n):\n    var y = x\n    y <<= n\n    return y\n"
+     "def main(k):\n    printf(\"%ld\", f(3, 64))\n    return 0\n", 0, "0"),
+    ("augmented_shr_amount_64_is_zero",
+     "def f(x, n):\n    var y = x\n    y >>= n\n    return y\n"
+     "def main(k):\n    printf(\"%ld\", f(3, 64))\n    return 0\n", 0, "0"),
+    # The augmented unsigned shift, same defect and same fix: the fill came
+    # from the promoted type of the AMOUNT rather than from the value.
+    ("augmented_ushift_u64_by_typed_int_amount",
+     "def f(x: UInt64, n: Int) -> UInt64:\n    var y = x\n    y >>= n\n"
+     "    return y\n"
+     "def main(k: Int) -> Int:\n"
+     "    var a: UInt64 = 18446744073709551615\n"
+     "    printf(\"%016lx\", f(a, 4))\n    return 0\n", 0, "0fffffffffffffff"),
+    # ...and the in-range augmented shift, which must be UNCHANGED: a fix
+    # that saturated every augmented shift would pass the two above.
+    ("augmented_shift_in_range_still_shifts",
+     "def f(x, n):\n    var y = x\n    y <<= n\n    return y\n"
+     "def main(k):\n    printf(\"%ld\", f(1, 12))\n    return 0\n", 0, "4096"),
+    # A SIGNED value is still arithmetic even when the amount is unsigned.
+    # Without this row, "the amount never decides the fill" could be
+    # satisfied by refusing to decide at all.
+    ("signed_shift_by_unsigned_amount_stays_arithmetic",
+     "def sshr(x: Int, n: UInt64) -> Int:\n    return x >> n\n"
+     "def main(k: Int) -> Int:\n"
+     "    if sshr(0 - 5, 1) == 0 - 3:\n        return 1\n    return 0\n", 1, None),
+]
+
+
+# The ninth-argument and read-before-store rows are REFUSALS, and they are in
+# their own group because they assert a DIAGNOSTIC rather than a value — the
+# whole point is that the program must not build, so no exit status can carry
+# the assertion. `refuse:` also pins both backends to the same words, which is
+# the property these two fixes are really about: one language, two machines.
+REFUSAL_CASES = [
+    # A function of NINE parameters read its ninth as ZERO: the callee's
+    # prologue `break`ed out of the argument loop at i == 8 and `_emit_call`
+    # dropped the extra arguments after evaluating them for side effects.
+    # `nine(1,...,9)` returned 1 where the source says 90001.
+    #
+    # Zero is the worst possible wrong answer here, and the reason is
+    # structural: a callee cannot tell a dropped argument from a caller who
+    # passed zero, so the value is not merely wrong but INDISTINGUISHABLE from
+    # a legitimate one. x86-64 has refused this program since it was written,
+    # which is the evidence the author knew the class existed and arm64 was
+    # the side left open.
+    #
+    # The needle names the arity and the limit and not the backend, so the
+    # two architectures' differing register counts (8 vs 6) do not have to
+    # be spelled twice.
+    ("nine_arguments_refused",
+     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
+     "    return a8 * 10000 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"nine=%d\", nine(1, 2, 3, 4, 5, 6, 7, 8, 9))\n    return 0\n",
+     "refuse:9 arguments exceeds the", None),
+    # The CALLEE end of the same convention, reached with no call site at
+    # all — a dylib export, or an entry point the driver calls directly. It
+    # refused on the arity rather than `break`ing, which left the parameter's
+    # home slot never written and made the first read a build-dependent word.
+    ("nine_parameters_refused_without_a_call_site",
+     "def nine(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "         a5: int, a6: int, a7: int, a8: int) -> int:\n"
+     "    return a8 * 10000 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"x=%d\", 7)\n    return 0\n",
+     "refuse:9 parameters exceeds the", None),
+    # EIGHT arguments is the boundary and it must still WORK: the fix is a
+    # refusal past the limit, not a smaller limit. Without this row a fix
+    # that cut the ABI to 6 to match x86-64 would pass the two above.
+    ("eight_arguments_still_work",
+     "def eight(a0: int, a1: int, a2: int, a3: int, a4: int,\n"
+     "          a5: int, a6: int, a7: int) -> int:\n"
+     "    return a7 * 1000 + a6 * 100 + a5 * 10 + a0\n\n"
+     "def main() -> int:\n"
+     "    printf(\"eight=%d\", eight(1, 2, 3, 4, 5, 6, 7, 8))\n    return 0\n",
+     0, "8761"),
+    # A name read before anything in the function stores it. CPython raises
+    # UnboundLocalError; this path cannot, because the emitted image has no
+    # way to mean "unbound" — the allocator gave the name a register (the
+    # function assigns it somewhere) and the read returned whatever the
+    # CALLER left in it, a word that changed with the build and disagreed
+    # between the two backends.
+    ("read_before_store_in_a_loop_refused",
+     "def f():\n"
+     "    for i in range(3):\n"
+     "        G = G + i\n"
+     "    printf(\"G=%d\", G)\n"
+     "f()\n",
+     "refuse:is read at line 3 before anything in this function stores it",
+     None),
+    # The same defect at MODULE level, where CPython's error is NameError
+    # rather than UnboundLocalError. Both spellings are in the diagnostic.
+    ("read_before_store_at_module_level_refused",
+     "x = x + 1\n"
+     "printf(\"x=%d\", x)\n",
+     "refuse:is read at line 1 before anything in this function stores it",
+     None),
+    # The AUGMENTED spelling, which reads more like ordinary code than
+    # `x = x + 1` does and is the one most likely to be missed.
+    ("augmented_read_before_store_refused",
+     "def f(n):\n"
+     "    total += n\n"
+     "    printf(\"total=%d\", total)\n"
+     "    return 0\n",
+     "refuse:is read at line 2 before anything in this function stores it",
+     None),
+    # THE CONTROLS, and they are the reason the three above are believable:
+    # each is a name that IS stored before it is read, in a shape close
+    # enough to the refused ones that a check which refused them would be
+    # refusing working code. A false refusal is the worse error — it breaks a
+    # program that runs — so these rows are as load-bearing as the refusals.
+    ("stored_before_read_still_builds",
+     "def f(n):\n"
+     "    y = 0\n"
+     "    for i in range(3):\n"
+     "        y = y + i\n"
+     "    printf(\"y=%d\", y)\n    return 0\n",
+     0, "y=3"),
+    # A `for` target is bound before its body runs, so `total += v` reads a
+    # stored `v`. The row is here because a check that treated the target as
+    # unstored would refuse the single most ordinary accumulator in the
+    # language.
+    ("for_target_is_stored_for_its_own_body",
+     "def f(n):\n"
+     "    var s = 0\n"
+     "    for v in [1, 2, 3]:\n"
+     "        s = s + v\n"
+     "    printf(\"s=%d\", s)\n    return 0\n",
+     0, "s=6"),
+    # A name assigned only inside an `if` is NOT this case: whether the
+    # register holds a value depends on which arm ran, which is the
+    # reachability question this check does not attempt. Pinning that it
+    # still BUILDS records the deliberate limit rather than leaving it to be
+    # discovered as a new bug (bugs/FORMAL_read_before_store_dominating_store.md).
+    ("branch_local_still_builds",
+     "def f(n):\n"
+     "    if n:\n"
+     "        p = 1\n"
+     "    printf(\"p=%d\", p)\n    return 0\n",
+     0, "p=1"),
+    # A comprehension's generator target is bound inside its own scope, so
+    # `[i + 1 for i in xs]` is not a read of an unstored `i`. This is the row
+    # that a flat node walk gets wrong, and it was wrong here: the first
+    # version of the check reported it and refused a working program.
+    ("comprehension_target_is_not_an_unstored_read",
+     "def f(n):\n"
+     "    var xs = [1, 2, 3]\n"
+     "    var ys = [i + 1 for i in xs]\n"
+     "    printf(\"y=%d\", len(ys))\n    return 0\n",
+     0, "y=3"),
+]
+
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -6394,6 +6710,7 @@ def main():
                   + POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
                   + WAVE6_TRUTHY_CASES
                   + WAVE6_NAME_CASES + WAVE7_G2_CASES
+                  + SHIFT_CASES + REFUSAL_CASES
                   + [X86_ONLY_1SLOT_BUG_CASE])
     selected = [c for c in everything if not args.cases or c[0] in args.cases]
     known = {c[0] for c in everything}

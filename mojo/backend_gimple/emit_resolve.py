@@ -59,6 +59,7 @@ from mojo.middle.resolve_shared import (
     _lbn_walk, _module_const_int, _parse_fstring_parts, _prepass_callee_key, _quick_type, _record_closure_alias,
     _refine_generic_return_type, _sms_key, _str_literal_to_slit, _subst_idents, _type_expr_to_ann
 )
+from mojo.middle.calls_shared import user_dunder_repr_call
 # gimple_gen_coro is reached via `gimple_codegen.gimple_gen_coro` below,
 # not a separate import of its own here -- see gimple_codegen.py's own
 # module-level `import gimple_gen_coro` and its comment on why a
@@ -1114,6 +1115,34 @@ def _register_link_imports(gen, stmts) -> list:
                             gen._link_inline_modules.add(
                                 gimple_ctypes._join_import_member(stmt.module, name))
                             continue
+                        # A module that only RE-EXPORTS `name` (a package
+                        # `__init__.py` doing `from .sub import tri`) is the
+                        # same dead end for a different reason: there is no
+                        # `def` in its source for the classification below to
+                        # find, and no submodule file of that name, so
+                        # nothing at all was registered — while the call
+                        # site's `extern` (emitted from the call-site
+                        # registration in module_shared.py's
+                        # `_register_sym`, which DOES follow the hop) names
+                        # the DEFINING module's symbol. The program then
+                        # failed to link with
+                        # `Undefined symbols: "_sub_tri_9f63a2"`, where
+                        # before the call-site half was fixed it had bound
+                        # the extern preamble's `weak` "unavailable in
+                        # compiled mode" stub and printed a wrong 0.
+                        #
+                        # Inline the DEFINING module, which is the same
+                        # mechanism the submodule branch just above uses and
+                        # needs no reflection bookkeeping: the inline-compile
+                        # loop emits the real definition into this
+                        # translation unit. The ref is the spelling that
+                        # statement used, which is exactly what that loop
+                        # keys its own compilation by.
+                        _reex_home = gen._find_symbol_home_module(
+                            stmt.module, name, 'fn')
+                        if _reex_home and _reex_home != stmt.module:
+                            gen._link_inline_modules.add(_reex_home)
+                            continue
                         # Not a concrete export — classify `name` against the
                         # module's own SOURCE TEXT and record how to make it
                         # available: on-demand elaboration for a generic /
@@ -1273,6 +1302,35 @@ def _register_link_imports(gen, stmts) -> list:
                         _csym = gen._func_csym(sym)
                         decls.append(
                             f"extern {ret} {_csym} ({', '.join(ptypes) if ptypes else 'void'});")
+            elif isinstance(stmt, gimple_ctypes.ImportStmt):
+                # A plain `import a.b` binds `a` and makes the SUBMODULE
+                # `a.b` reachable as an attribute, so `a.b.f(...)` is a real
+                # cross-module call whose symbol link mode has to be able to
+                # provide. `scan` only ever looked at FromImportStmt, so
+                # nothing registered the submodule, and the call site bound
+                # the extern preamble's `weak` "unavailable in compiled mode"
+                # stub — printing `tri: unavailable in compiled mode` then
+                # `0`, exit 0, with the diagnostic on the program's own
+                # stdout (bugs/CODEGEN_import_dotted_name_two_hop_attribute_
+                # call_exits_1.md's link-mode half).
+                #
+                # Only the DOTTED form, and only when nothing else can
+                # provide the module: a real dylib/reflection entry keeps
+                # its own path, and `import a` (no dot) names a module the
+                # normal machinery already handles. `import a.b as q` is
+                # left alone — the alias names the submodule directly, which
+                # is the single-hop spelling `_register_sym` already
+                # resolves.
+                for _im_pair in ([(stmt.module, stmt.alias)]
+                                 + list(getattr(stmt, 'extra', None) or [])):
+                    _im_m = gimple_ctypes._as_str(_im_pair[0])
+                    if '.' not in _im_m or gimple_ctypes._as_str(_im_pair[1]):
+                        continue
+                    _exp2, _refl2, _src2 = _exports(_im_m)
+                    if _exp2:
+                        continue
+                    if _src2 and gen._submodule_source_path(_im_m):
+                        gen._link_inline_modules.add(_im_m)
             elif isinstance(stmt, gimple_ctypes.FunctionDef):
                 scan(stmt.body)
             elif isinstance(stmt, gimple_ctypes.IfStmt):
@@ -1801,25 +1859,20 @@ def _repr_value(gen, rat: str, rav: str) -> str:
         # which its `repr(p)` spelling reached through an import but which
         # is NOT an import bug.
         #
-        # Deliberately CONSERVATIVE: each condition below is one "we know
-        # this is right", and anything unproven falls through to the
-        # pre-existing lowering, so this can only ever replace a wrong
-        # answer with a right one, never introduce a new shape.
+        # The lookup itself is `user_dunder_repr_call` in
+        # mojo/middle/calls_shared.py, SHARED with `_stringify_value` (the
+        # `str()` / `%s` / f-string route) so the two spellings cannot
+        # disagree about which dunder a struct answers. `repr()` passes
+        # `('__repr__',)` only: CPython's own fallback here is `__str__`, and
+        # taking it would silently change the repr of every struct in the
+        # tree that defines `__str__` without `__repr__` — a wide behaviour
+        # change, recorded rather than smuggled in here.
         _rsn = rat[:-2].strip() if rat.endswith(' *') else ''
-        if _rsn and '__repr__' in (gen._struct_method_names.get(_rsn) or ()):
-            _rcs = gen._struct_method_csym(_rsn, '__repr__', '')
-            if gen.func_return_types.get(_rcs) == 'char *':
-                _rcall = gen._call_expr('char *', _rcs, [(rat, rav_local)])
-                # Same null semantics the generated field-dump has: a NULL
-                # object reprs as "None" rather than crashing. Interned
-                # through `_intern_string` because a bare `"None"` literal is
-                # not a GIMPLE r-value (see its own docstring), and bound to
-                # a local first rather than nested in the f-string so the
-                # expression uses no quote nesting at all — this file is
-                # compiled by the compiler it implements.
-                _none_slit = gen._intern_string('None')
-                return gen._new_val(
-                    'char *', f'({rav_local} ? {_rcall} : {_none_slit})')
+        if _rsn:
+            _rcall = user_dunder_repr_call(gen, _rsn, rat, rav_local,
+                                           ('__repr__',))
+            if _rcall is not None:
+                return _rcall
         # Dispatch through the per-struct field-by-field reprs generated
         # in gen_module (see reflect_structs) when the runtime type tag
         # is one this program actually allocates — falls back to the

@@ -1,18 +1,37 @@
-# TOOLS_deleting_a_bug_doc_leaves_dangling_pointers: 184 places in this tree cite a `bugs/*.md` that does not exist, and nothing checks
+# TOOLS_deleting_a_bug_doc_leaves_dangling_pointers: 117 `bugs/*.md` targets in this tree do not exist, and nothing checks
 
 **Area:** TOOLS / the repo's own documentation discipline: every `bugs/*.md`
 path written into a source comment, a test's docstring or another bug doc.
 
-**Found while:** landing `work/fix-merge-formal-cross-module`, which deleted
-five bug docs (correctly — CLAUDE.md: "A doc for a bug that is fully fixed is
-deleted, not left behind") and which left, in the two docs it filed in the same
-commit, three pointers to two of them. Those three are fixed by that branch.
-The seventy other dead targets are not, and the one in this backend is
+**Found while:** landing `work/fix-merge-fix-merge-fix-merge-formal-cross-module`,
+which deleted five bug docs (correctly — CLAUDE.md: "A doc for a bug that is
+fully fixed is deleted, not left behind") and which left, in the two docs it
+filed in the same commit, three pointers to two of them. Those three are fixed
+by that branch. The other dead targets are not, and the one in this backend is
 measured below.
 
 **Status: OPEN, measured, pre-existing on `master`.** Not caused by any branch:
 `git cat-file -e master:bugs/FORMAL_toplevel_statements_dropped.md` fails, and
 every site below is master's.
+
+**Re-measured after the `integ` merge, because that merge is now the single
+biggest contributor and the mechanism below predicted it.** `integ` deleted 13
+bug docs (each correctly — its bug was fixed) and left 17 new dead targets
+behind them:
+
+```console
+$ for r in 86d862fc integ; do
+    git grep -h -o -E 'bugs/[A-Za-z0-9_./-]+\.md' $r | … resolve against bugs/ …
+  done
+86d862fc   dead targets= 99   docs=132
+integ      dead targets=116   docs=119
+merged     dead targets=117   docs=118
+```
+
+That is the whole argument of this doc in three lines: a batch of correct doc
+deletions took the count from 99 to 116 with no code change at all, and the
+merged tree is at 117. **The number only grows, it grows on the CORRECT action,
+and nothing in the tree objects.**
 
 ## What I ran
 
@@ -27,13 +46,17 @@ Results: 170 passed, 1 failed
   - the estate: every test file is run by something, or says why not: …
 ```
 
+(The first two lines are the 2026-09-30 measurement of a smaller tree; the
+table below is the reproducible one, and the 99/116/117 above supersedes it.)
+
+
 The `test_suite.py` line is the neighbouring half of the same hole and is
 already filed: `TOOLS_the_test_estate_check_has_been_red_since_eight_formal_
 suites_landed`. It checks that every `test_*.py` is run or excused. There is no
 such check for the other direction — that every `bugs/*.md` a file CITES still
 exists — and `tools/suite.py` has none either.
 
-**The 70/184 is a FLOOR, not a count.** The scan resolves paths written as
+**That scan is a FLOOR, not a count.** The scan resolves paths written as
 `bugs/<name>.md`, and the house convention after a doc is deleted is to name the
 SLUG without the prefix (this repo's own rule: a deleted bug's slug stays
 findable in the commit that fixed it). Every such citation is invisible to a
@@ -59,7 +82,7 @@ citations of it:
 | `formal/model.py:9350` | a premise's provenance |
 | `test_formal_imports.py:590` | a test's docstring |
 | `test_formal_toplevel.py:4` | that suite's own docstring |
-| `bugs/FORMAL_read_before_store_returns_a_register.md:4` | "…lowered module top-level statements — `bugs/FORMAL_toplevel_statements_dropped.md`" |
+| `bugs/FORMAL_read_before_store_returns_a_register.md:4` | "…lowered module top-level statements — `bugs/FORMAL_toplevel_statements_dropped.md`" — **this citing file was itself deleted** by the `integ` merge (its bug is fixed), so the row is now a citation inside a doc that no longer exists: two deletions, one pointer |
 | `bugs/FORMAL_module_state_no_storage.md:146` | a sweep census cell, bare slug, no `bugs/` |
 
 The first two are the worst shape, because they are the sentences a future
@@ -70,16 +93,24 @@ deleted and which commit deleted it, and keep the substance of the sentence
 that pointed at it — which every one of these seven already has, they just also
 carry a dead path.
 
+**The sixth row is the shape the check has to survive, and this doc was going to
+get it wrong.** It is easy to read "one of the seven citing files is gone" as
+"drop the row" — and dropping it loses the only evidence that deleting a doc
+produces dangling pointers *from other bug docs*, not just from source. The row
+stays, annotated, which is the same rule the table's own advice gives: keep the
+substance, mark the path dead.
+
 ## Why this is worth a check and not just a sweep
 
-A one-off sweep fixes today's seventy and leaves the mechanism, and the
-mechanism is the whole of it: **deleting a bug doc is now the CORRECT action
-under CLAUDE.md and it is exactly the action that produces a dangling pointer**,
-because the discipline added in the other direction (a fixed bug must not stay
-listed) has no counterpart saying that the pointers to it must move with it. So
-the number only grows, and it grows in the direction that makes the tree's
-provenance unreadable — which is the only reason most of this repo is
-navigable.
+A one-off sweep fixes today's hundred and seventeen and leaves the mechanism,
+and the mechanism is the whole of it: **deleting a bug doc is now the CORRECT
+action under CLAUDE.md and it is exactly the action that produces a dangling
+pointer**, because the discipline added in the other direction (a fixed bug must
+not stay listed) has no counterpart saying that the pointers to it must move
+with it. The `integ` merge is the measurement: thirteen correct deletions, +17
+dead targets, no code change. So the number only grows, and it grows in the
+direction that makes the tree's provenance unreadable — which is the only
+reason most of this repo is navigable.
 
 Two shapes of check would do it, and the cheap one is enough:
 
@@ -105,8 +136,12 @@ docs were removed and the reason this doc is about the pointers instead.
 - **Not** a stale `UNREGISTERED` entry or a stale `expect=` marker. Both already
   have anti-rot checks that work; those checks are about the *test estate* and
   about *known failures*, and neither can see a comment in `formal/model.py`.
-- **Not** worth seventy doc rewrites in one commit. The six FILES this
-  backend's area owns (`formal/build.py`, `formal/model.py`,
-  `test_formal_imports.py`, `test_formal_toplevel.py` and the two `bugs/` docs
-  in the table) are the ones to do first; the rest belong to whoever owns the
-  area, which is why the count is reported and not enumerated here.
+- **Not** worth a hundred doc rewrites in one commit. The FILES this backend's
+  area owns (`formal/build.py`, `formal/model.py`, `test_formal_imports.py`,
+  `test_formal_toplevel.py` and the `bugs/` docs in the table) are the ones to
+  do first; the rest belong to whoever owns the area, which is why the count is
+  reported and not enumerated here. Done for the two backends' emitters in the
+  `integ` merge that produced the 99→116 measurement above — see
+  `bugs/TOOLS_the_integ_merge_deleted_13_docs_and_left_17_dead_targets.md`
+  for the twenty-odd sites in other claims' files that are still open, and which
+  this branch deliberately did not edit.
