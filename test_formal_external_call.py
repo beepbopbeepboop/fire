@@ -169,6 +169,24 @@ CASES = [
      "    return 0\n",
      0, "ptr_null=1 sum=7"),
 
+    # A TYPE argument that is ITSELF a two-element bracket. `_CPointer[UInt8,
+    # UntrackedOrigin[…]]` is the shape `std/os/env.mojo` declares, and it is
+    # the shape the name check walks when it sees a `SubscriptExpr` rooted at a
+    # bare name — so it was two independent things going wrong at once and only
+    # the outer one is this construct: the inner one is a type the module never
+    # declares, there is no local by that spelling, and the answer is not that
+    # the program has a bug but that the reader has reached the wrong pass.
+    # `env_round_trip` above exercises it inside three functions; it is
+    # separated here so a regression names itself.
+    ("a_nested_bracket_in_the_type_argument_is_not_a_tuple_index",
+     "def main() -> Int32:\n"
+     "    var p = external_call[\"getenv\",\n"
+     "        _CPointer[UInt8, UntrackedOrigin[mut=False]]\n"
+     f"    ](\"{ABSENT}\")\n"
+     "    printf(\"ptr_null=%d\", 0 - 1 if p else 1)\n"
+     "    return 0\n",
+     0, "ptr_null=1"),
+
     # ── 3. the declared return type, per kind ─────────────────────────────
     # A 64-bit signed integer is the whole register, so nothing is emitted;
     # a signed 32-bit one is the low half, so the register is extended (see
