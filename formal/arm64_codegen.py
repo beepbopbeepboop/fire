@@ -5546,7 +5546,7 @@ class ARM64Codegen:
         unsigned default). Remainder is DIV then MSUB (n - (n/d)*d). Shifts
         use LSLV/LSRV/ASRV (immediate form when the RHS is a small literal),
         and an amount at or past the word's width SATURATES rather than being
-        masked to a shift by zero — `model.shift_saturated_value` is the rule
+        masked to a shift by zero — `model.shift_saturated_is_zero` is the rule
         and this is only its instruction selection. `**` unrolls a small
         literal exponent.
 
@@ -5616,16 +5616,12 @@ class ARM64Codegen:
             # register form, where the hardware would mask the amount back to
             # a shift by zero. `3 >> 64` was `3` and `3 << 64` was `3`. The
             # saturation rule (and why the arithmetic `>>` case is not simply
-            # 0) is `model.shift_saturated_value`; only the SIGN is a runtime
+            # 0) is `model.shift_saturated_is_zero`; only the SIGN is a runtime
             # fact here, so the operand is still evaluated and `ASR #63`
             # replicates it.
             lit = self._static_int(imm_r)
             if lit is not None and M.shift_saturates(lit):
-                self._emit_expr(e.left)
-                if op == "<<" or not signed:
-                    self.asm.emit(encode_movz_xd_imm(0, 0))
-                else:
-                    self.asm.emit(encode_asr_xd_xn_imm(0, 0, 63))
+                self._emit_saturated(op, signed)
                 self._emit_trunc(result_t)
                 return
             # The register form: `_emit_shift_reg` is the ONE emitter for it
@@ -6141,7 +6137,7 @@ class ARM64Codegen:
         spelled the shift `x <<= n` went through THIS one and got the
         hardware's modulo-64 masking, so `y <<= 64` left `y` unchanged
         while `y = y << 64` zeroed it. Both spellings are the same operator
-        and the rule is one rule (`model.shift_saturated_value`), so the
+        and the rule is one rule (`model.shift_saturated_is_zero`), so the
         rule lives here and both callers come to it.
 
         The amount is compared against 64 and a saturating branch taken
@@ -6178,11 +6174,24 @@ class ARM64Codegen:
         self.asm.emit(encode_b(0))
         self.asm.emit_label_rel(end_label, here_offset=-4)
         self.asm.label(sat_label)
-        if op == "<<" or not signed:
+        self._emit_saturated(op, signed)
+        self.asm.label(end_label)
+
+    def _emit_saturated(self, op: str, signed: bool) -> None:
+        """Materialise the answer a SATURATING shift gives, in X0.
+
+        The decision is `model.shift_saturated_is_zero` and this is only its
+        instruction selection, so that a second backend cannot answer the
+        same question differently. Two cases, and the second is the one a
+        `return 0` saturation gets wrong: `ASR X0, X0, #63` is exactly "the
+        sign-extended word", which is 0 for a non-negative operand and -1 for
+        a negative one — which is what Python's arithmetic `>>` gives at any
+        amount at or past 64. `X0` holds the value being shifted on entry, so
+        the sign is read from it rather than recomputed."""
+        if M.shift_saturated_is_zero(op, signed):
             self.asm.emit(encode_movz_xd_imm(0, 0))
         else:
             self.asm.emit(encode_asr_xd_xn_imm(0, 0, 63))
-        self.asm.label(end_label)
 
     def _check_comptime_target(self, name: str, what: str) -> None:
         """Refuse a store to a name that is currently a `comptime` binding.

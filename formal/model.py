@@ -520,7 +520,7 @@ def incoming_args(fn) -> list:
 # `>>` is arithmetic on a signed value and that is not a defect — it is what
 # Python means, and `test_formal_run.py` pins both directions so a "fix" that
 # made every `>>` logical would be caught. A program that wants zeros shifted
-# in says so with an unsigned type, which is what `shift_is_logical` is for.
+# in says so with an unsigned type, which is what `shift_signedness` is for.
 
 # The width a shift saturates at, and the amount the hardware masks to.
 SHIFT_WIDTH = 64
@@ -539,26 +539,29 @@ def shift_saturates(amount, width: int = SHIFT_WIDTH) -> bool:
     return amount is not None and amount >= width
 
 
-def shift_saturated_value(value, op: str, signed: bool):
-    """The answer a shift that saturates gives, as a function of the value.
+def shift_saturated_is_zero(op: str, signed: bool) -> bool:
+    """Whether a shift that saturates answers 0, whatever the value was.
 
-    `op` is `<<` or `>>`; `signed` says whether the value being shifted is a
-    signed one (and so whether `>>` replicates its sign). The value itself is
-    passed because the arithmetic case's answer depends on it, and returning
-    0 for a negative operand is precisely the wrong answer documented above."""
-    if op == "<<" or not signed:
-        return 0
-    return 0 if (value is not None and value >= 0) else -1
+    True for `<<` (every bit is shifted out) and for a LOGICAL `>>` (the
+    zeros come in). False only for an ARITHMETIC `>>` of a signed value,
+    where the answer is the sign-extended word — 0 for a non-negative
+    operand and -1 for a negative one — because Python's `>>` on a negative
+    value rounds toward negative infinity and keeps replicating the sign no
+    matter how far the shift goes. Returning 0 for a negative operand is
+    precisely the wrong answer, which is the whole reason this asks the
+    question in this shape.
 
+    The backend needs to know whether the answer is a CONSTANT 0 it can
+    materialise in one instruction, or a run-time fact (the operand's sign
+    bit) that has to be computed. Asking for the value itself would need the
+    value, and the value is in a register at that point rather than in hand.
 
-def shift_is_logical(signed) -> bool:
-    """Whether `>>` on a value of this signedness shifts in zeros.
-
-    The backend's own instruction choice, stated once: signed gets the
-    arithmetic shift (ASRV/ASR, `sar`), unsigned gets the logical one
-    (LSRV/LSR, `shr`). `signed` is a bool, not a type, because every consumer
-    already resolved it through `types.cmp_signed`."""
-    return not signed
+    BOTH backends branch on this rather than writing `if op == "<<" or not
+    signed` themselves, because that test IS the rule and a second copy in a
+    second backend is the same duplication that let `y <<= 64` and
+    `y << 64` disagree about the same operator. See
+    `shift_signedness` for the other half of the rule."""
+    return op == "<<" or not signed
 
 
 def shift_signedness(left_type):
