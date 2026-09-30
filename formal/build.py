@@ -821,8 +821,7 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     # resolves a bare callee to the same entry the map above resolved it to —
     # the two are built from one iteration rather than from two
     # re-implementations of "first library on the line wins".
-    dylib_exports = [{"exports": list(d.get("exports") or [])}
-                     for d in dylibs]
+    dylib_exports = dylib_export_lists(dylibs)
     if fmt == "elf":
         from formal.elf import (DEFAULT_BASE, DEFAULT_LIBC, build_elf,
                                  compute_got_addrs)
@@ -1100,7 +1099,25 @@ def compile_formal(source_path: str, output: str = None,
     # load-time failure after this change. No module dylib on the line, no
     # dotted call.
     from formal.imports import imported_modules
+    # Read once and used twice: the constants an imported module publishes (for
+    # the substitution below) and the libraries this image links (further
+    # down). Reading the manifests in both places is a second answer to the
+    # same question, taken at two different moments.
+    import_manifests = load_dylib_manifests(import_dylibs)
     try:
+        # A module-level CONSTANT of an IMPORTED module, in both spellings
+        # (`from mod import CONST` and `mod.CONST`), BEFORE the checks below
+        # and after `_resolve_imports` — which is the only place the link line's
+        # manifests exist, and the build that compiled each module is the only
+        # place its folded values were ever computed. A literal needs no
+        # storage to cross a dylib boundary (there is exactly one value of a
+        # folded module-level name in a whole program), so this is a
+        # substitution rather than a symbol; a module-level name the folder
+        # could not fold has no value to substitute and is still refused by
+        # name below, which is what keeps `sys.argv` and `os.sep` different
+        # answers (`bugs/FORMAL_module_state_no_storage.md`).
+        symbols = _publish_imported_constants(functions, symbols,
+                                              import_manifests)
         M.publish_module_symbols(symbols)
         check_frame_field_blob_premises(structs)
         check_frame_subscript_escapes(functions)
@@ -1113,7 +1130,7 @@ def compile_formal(source_path: str, output: str = None,
         raise FormalBuildError(str(e))
     if import_dylibs:
         have = {d["install_name"] for d in linked}
-        linked = linked + [d for d in load_dylib_manifests(import_dylibs)
+        linked = linked + [d for d in import_manifests
                            if d["install_name"] not in have]
 
     # The gimple runtime's C library, on this image's link line, if and only if
@@ -1274,7 +1291,7 @@ def _formal_module_functions(source_path: str,
         raise FormalBuildError(str(e))
     module = re.sub(r"[^A-Za-z0-9_]", "_",
                     os.path.splitext(os.path.basename(source_path))[0])
-    return module, functions, source, structs
+    return module, functions, source, structs, _module_constants(symbols)
 
 
 def _struct_methods(stmts: list) -> list:
@@ -3272,6 +3289,31 @@ def _module_constant_sites() -> dict:
             if sym.literal is not None}
 
 
+def _module_constants(symbols: dict) -> dict:
+    """`{name: literal}` for the module-level names a symbols table folded.
+
+    The VALUE half of `_module_constant_sites`, and what a dylib records so an
+    importer can answer the same question across the boundary: a folded
+    module-level name has exactly one value in a whole program, so the build
+    that compiled the module is the authority on it and the importer
+    materializes the same literal. What is NOT here is every module-level name
+    the folder could not fold — those are real globals, and a dylib has nowhere
+    to put one (`bugs/FORMAL_module_state_no_storage.md`).
+
+    A name the folder turned into an `IntLiteral` is a number, including for a
+    `True`, because a formal value has no separate boolean: `fold_literal_expr`
+    already decided that and `_folded_node` already encoded it, and re-deciding
+    it here is how the two would come to disagree about what `X = True` is."""
+    out = {}
+    for name, sym in (symbols or {}).items():
+        lit = getattr(sym, "literal", None)
+        value = getattr(lit, "value", None) if lit is not None else None
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            continue
+        out[name] = value
+    return out
+
+
 def _names_bound_in(fn) -> set:
     """Every name `fn` binds itself: its parameters and everything it assigns.
 
@@ -3367,6 +3409,228 @@ def _substitute_module_constants(functions: list) -> int:
                 done += 1
         _apply_module_constant_sites(fn.body, mine, stores)
     return done
+
+
+def _publish_imported_constants(functions: list, symbols: dict,
+                                imported: list) -> dict:
+    """Substitute the link line's folded constants into `functions`, in place.
+
+    Returns the symbols table the substitution needs the callers to PUBLISH, so
+    one function owns both halves and they cannot be applied out of order: the
+    rewrite needs the sites, and the checks after it need the table those sites
+    came from.
+
+    Both spellings of the read are answered, because they are two spellings of
+    one question — what is the value of a module-level name another module
+    declares:
+
+      * a BARE read — `from mod import CONST`, then `CONST` — goes through the
+        module-constant substitution this unit already runs, because a name a
+        linked module publishes as a literal is foldable in exactly the sense
+        that pass means. It is done by re-publishing the table with those names
+        promoted and re-running the pass, rather than by a second rewriter, so
+        the two can never disagree about a name that is BOTH a unit-level
+        constant and an imported one (the unit's own binding wins, which is
+        what the shadowing rule already says) or about a store position.
+      * a DOTTED read — `mod.CONST`, the spelling `import mod` binds and the one
+        this is for — is answered from the module its own qualifier names. There
+        is no bare name in it to fold, so it is its own walk, and it is here
+        rather than in a backend because it is a source-to-source rewrite: both
+        architectures have to see the same literal, and a rewrite performed in
+        an emitter is two implementations of one decision.
+
+    A STORE is not a read and is left alone: `mod.X = 5` writes another
+    module's state, which has nowhere to live and is refused by name
+    (`bugs/FORMAL_module_state_no_storage.md`). Substituting it would trade a
+    refused store for a dropped one.
+
+    `imported` is the link line's `load_dylib_manifests` entries, which is the
+    only place the answer exists: the build that compiled each module is the
+    only place its folded values were ever computed, and it left them in that
+    module's manifest. An empty list is a no-op, so an image with no dylibs on
+    its line behaves exactly as it did before."""
+    tables = M.dylib_module_constants(imported)
+    if not tables:
+        return symbols
+    sites = _imported_constant_sites(imported, symbols)
+    merged = _with_imported_constants(symbols, sites)
+    if sites:
+        M.publish_module_symbols(merged)
+        _substitute_module_constants(functions)
+    for fn in functions:
+        _apply_imported_constant_sites(fn.body, tables,
+                                       _names_bound_in(fn))
+    return merged
+
+
+def _imported_constant_sites(imported: list, symbols: dict) -> dict:
+    """`{bare name: literal node}` for the constants a linked module publishes.
+
+    The BARE half of the answer, and it works by the same argument as the
+    dotted half: a `from mod import CONST` binds a bare name, and the only
+    question is which module's value of that name is meant. A linked library
+    that publishes it as a folded literal is the authority, and the libraries
+    are consulted in LINK ORDER, which is `load_dylib_manifests`'s own
+    precedence for every other name on the line — so a bare constant resolves
+    by the same rule a bare callee does, and a dotted one resolves by module
+    identity exactly as a dotted callee does.
+
+    Only names the PUBLISHED table records as `imported` are candidates, and
+    that is what keeps this from answering a question the source did not ask: a
+    bare name this unit defines itself is not `imported`, and a bare name no
+    linked module publishes as a literal keeps the ordinary module-global
+    refusal, which is the answer for a real global and for a typo alike."""
+    tables = M.dylib_module_constants(imported)
+    sites = {}
+    for name, sym in (symbols or {}).items():
+        if getattr(sym, "site", None) != "imported":
+            continue
+        for value in _constants_named(tables, name):
+            sites[name] = M.constant_literal_node(
+                value, getattr(sym, "line", 0) or 0, 0)
+            break
+    return sites
+
+
+def _constants_named(tables: dict, name: str) -> list:
+    """Every value a linked module publishes under the bare `name`.
+
+    In link order, because `dylib_module_constants` preserves it. A bare name
+    cannot say which module it means, and a program that imports two modules
+    publishing the same constant has a question this path does not answer
+    precisely; the first library on the line is the answer it already gives
+    for a bare callee, so the choice is made once, here, rather than at each
+    read site."""
+    return [table[name] for table in tables.values() if name in table]
+
+
+def _with_imported_constants(symbols: dict, sites: dict) -> dict:
+    """`symbols` with each imported constant promoted to a FOLDABLE binding.
+
+    The substitution reads the published table, so a name has to be IN it with
+    a literal for a bare read of it to be answered at all. The site stays
+    `imported` and keeps its module: a read that survives the substitution for
+    any reason (a store, a callee) must still be refused as an imported name
+    rather than as a local this unit happens to define, and the message that
+    says so names the module it came from."""
+    out = {}
+    for name, sym in (symbols or {}).items():
+        lit = sites.get(name)
+        if lit is None or getattr(sym, "site", None) != "imported":
+            out[name] = sym
+        else:
+            out[name] = M.GlobalSymbol(name, lit, "imported",
+                                       getattr(sym, "module", None),
+                                       getattr(sym, "line", 0) or 0)
+    return out
+
+
+def _apply_imported_constant_sites(node, tables: dict, bound: set) -> int:
+    """The dotted read `mod.CONST` walk, in place. Returns the sites rewritten.
+
+    Parent-directed, for the one reason the identifier rewriter is: a store
+    target is not a read, and only the parent can say so. A chain is answered
+    from its WHOLE qualifier (`os.path.SEP` asks `os.path`), because that is
+    the module the name belongs to; and a name the qualifier's module does not
+    publish is left alone, so `xs.count`, `struct.field` and a module's own
+    function keep whatever answers they had.
+
+    ONE test, in `_rewrite_dotted_child`, used from every parent shape — and that is
+    the whole design. A child reached from a list element, from a dataclass
+    field and from a call's argument list are three spellings of the same
+    parent-directed rewrite, and the first version of this walked the argument
+    list element by element, so `printf("%d", mod.K)` — the single most common
+    shape there is — recursed into the `MemberExpr` instead of testing it and
+    rewrote nothing while reporting success. A rewrite that is applied in one
+    spelling of a position and not in another is not a rewrite."""
+    if isinstance(node, list):
+        done = 0
+        for i, child in enumerate(node):
+            node[i], n = _rewrite_dotted_child(child, tables, bound)
+            done += n
+        return done
+    if isinstance(node, (F.AssignStmt, F.AugAssignStmt, F.VarDecl)):
+        # The target is a store: leave it, and walk the value side only.
+        return _apply_imported_constant_sites(getattr(node, "value", None),
+                                              tables, bound)
+    if isinstance(node, F.CallExpr):
+        # The callee is a SYMBOL, not a read of a value — the same rule the
+        # identifier rewriter follows, for the same reason: `mod.f(...)` must
+        # not become `7(...)`, a call to a number, if some module on the line
+        # also publishes a constant `f`.
+        done = _apply_imported_constant_sites(node.args or [], tables, bound)
+        for i, pair in enumerate(node.kwargs or []):
+            if not isinstance(pair, (tuple, list)) or len(pair) < 2:
+                continue
+            value, n = _rewrite_dotted_child(pair[1], tables, bound)
+            node.kwargs[i] = (pair[0], value)
+            done += n
+        return done
+    done = 0
+    for fname in getattr(node, "__dataclass_fields__", {}):
+        if fname in ("line", "col"):
+            continue
+        child, n = _rewrite_dotted_child(getattr(node, fname, None), tables, bound)
+        setattr(node, fname, child)
+        done += n
+    return done
+
+
+def _rewrite_dotted_child(child, tables: dict, bound: set):
+    """`(possibly-replaced child, sites rewritten)`.
+
+    The one test, and the one place a replacement is produced: a node this
+    rewrites is a node its PARENT holds, so the replacement is recorded in the
+    parent's slot. A rewrite that handed a new node back to a caller with
+    nowhere to put it would be a rewrite that silently did nothing."""
+    if child is None or isinstance(child, (str, int, float, bool)):
+        return child, 0
+    if _is_dotted_constant(child, tables, bound):
+        return _imported_constant_node(child, tables), 1
+    return child, _apply_imported_constant_sites(child, tables, bound)
+
+
+def _imported_constant_node(expr, tables: dict):
+    """The literal node for the constant `expr` reads, at `expr`'s position."""
+    return M.constant_literal_node(
+        _dotted_constant_value(expr, tables),
+        getattr(expr, "line", 0) or 0, getattr(expr, "col", 0) or 0)
+
+
+def _dotted_qualifier(expr):
+    """`("os.path", "SEP")` for `os.path.SEP`, or None.
+
+    The root has to be a bare name — a call result or a subscript is not a
+    module reference and not a name a module can be asked about. Whether that
+    root is a LOCAL of the reading function is the caller's question, because
+    only the caller has the function: a local shadows nothing, and a local has
+    no module behind it either way."""
+    parts = []
+    node = expr
+    while isinstance(node, F.MemberExpr):
+        parts.append(node.member)
+        node = node.obj
+    if not parts or not isinstance(node, F.IdentExpr):
+        return None
+    return ".".join([node.name] + list(reversed(parts[:-1]))), parts[0]
+
+
+def _dotted_constant_value(expr, tables: dict):
+    """The literal `expr` names, or None. None is a refusal, never a zero."""
+    pair = _dotted_qualifier(expr)
+    if pair is None:
+        return None
+    return M.imported_constant(tables, pair[0], pair[1])
+
+
+def _is_dotted_constant(expr, tables: dict, bound: set) -> bool:
+    """Whether `expr` is a read of a constant some linked module publishes."""
+    if not isinstance(expr, F.MemberExpr):
+        return False
+    pair = _dotted_qualifier(expr)
+    if pair is None or pair[0].split(".", 1)[0] in bound:
+        return False
+    return M.imported_constant(tables, pair[0], pair[1]) is not None
 
 
 def _assigned_names(body) -> set:
@@ -3660,6 +3924,31 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         break
             if why is not None:
                 bracketed[id(root_ident)] = why
+        # A BRACKETED CALLEE, `f[x](...)`, is a comptime SPECIALIZATION of `f`
+        # and so a call, as much as a bare `f(...)` is — and the bare form is
+        # already exempt above, which is why this shape was left out of that
+        # set and reached the module-global refusal below. It is NOT added to
+        # `callees` here, and that is deliberate: a name this module's export
+        # rule keeps off the boundary (a leading `_`, a generic template — the
+        # two together are `std/sys/_assembly.mojo`'s
+        # `_get_kgen_string[asm]()`, nineteen swept files' worth) has no symbol
+        # for the call to bind however the name check treats it, so the honest
+        # answer is a refusal that says THAT, not one that lets the call
+        # through to a dangling `BL` and a link-audit message about a symbol
+        # the reader has to go and look up. The two construct refusals above
+        # are asked first, so an MLIR template in callee position is still
+        # refused by name — the message here is about the EXPORT, and a
+        # template that is not exported is two different facts.
+        bracket_callees = set()
+        for c in M.iter_nodes(fn.body):
+            if not isinstance(c, F.CallExpr) \
+                    or not isinstance(c.func, F.SubscriptExpr):
+                continue
+            root = c.func
+            while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
+                root = root.obj
+            if isinstance(root, F.IdentExpr) and id(root) not in bracketed:
+                bracket_callees.add(id(root))
         for node in M.iter_nodes(fn.body):
             if not isinstance(node, F.IdentExpr) or id(node) in callees:
                 continue
@@ -3682,6 +3971,14 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 raise CodegenError(f"{fn.name}: {why}" if fn.name else why)
             sym = M.module_symbol(name)
             if sym is not None:
+                if id(node) in bracket_callees \
+                        and getattr(sym, "site", None) == "imported":
+                    # A CALL to a name this module does not export, which is a
+                    # fact about the boundary and not about storage — see the
+                    # `bracket_callees` note above for why this is refused here
+                    # rather than allowed to reach a dangling `BL`.
+                    raise CodegenError(M.imported_callee_refusal(
+                        name, sym, fn.name))
                 # A module-level name, refused for the reason a module-level
                 # name is refused: it has no storage with a lifetime longer
                 # than a frame's.  `model.module_global_refusal` says which of
@@ -4212,7 +4509,8 @@ def dylib_manifest_path(dylib_path: str) -> str:
 
 
 def write_dylib_manifest(dylib_path: str, install_name: str,
-                         exports: list) -> str:
+                         exports: list, module: str = None,
+                         constants: dict = None) -> str:
     """Record what a formal dylib exports, next to the dylib.
 
     An executable that links this library has to rewrite each call site's
@@ -4221,19 +4519,38 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
     callee is just a bare name. The build that *made* the library is the only
     place the mapping exists, so it leaves it behind. JSON because the
     executable build has to read it without importing this module's
-    compile-time dependencies."""
+    compile-time dependencies.
+
+    `module` is the ABI identity of the module this library was built from
+    (`model.abi_module_name`), and it is what makes a DOTTED call resolvable
+    through a library that exports nothing: every export entry already carries
+    its module, so a normal library could be keyed from its own table, but a
+    package `__init__` that only re-exports has an empty table BY DESIGN (see
+    `_namespace_library`) and nothing in its manifest named it. A consumer
+    asking "does `pkg` publish `f`?" had no way to find `pkg` at all, so
+    `pkg.f(...)` reached the link audit as a dangling symbol instead of a
+    refusal that could name the module.
+
+    `constants` is the module-level name → folded LITERAL table, and it is the
+    one thing a dylib publishes that is not a symbol. It exists because a
+    literal needs no storage: there is exactly one value of a folded
+    module-level name in a whole program (the module-level sequence is its only
+    writer, and a function that assigns the name shadows it), so an importer
+    can materialize the same value in its own image instead of reading an
+    address. A module-level name the build could NOT fold is not here — it is
+    a real global with nowhere to live, and it stays refused, which is what
+    keeps `sys.argv` and `os.sep` different answers
+    (`bugs/FORMAL_module_state_no_storage.md`)."""
     import json
     path = dylib_manifest_path(dylib_path)
     payload = {
         "dylib": os.path.abspath(dylib_path),
         "install_name": install_name,
-        # What the executable records in its LC_LOAD_DYLIB. The library's own
-        # id is `@rpath/...`, which a dependent can only resolve with an
-        # LC_RPATH of its own, so a dependent links the real location.
-        "load_path": os.path.abspath(dylib_path),
         # The reflection payload, in the shape doc/ABI.md's table carries: the
         # boundary symbol, its signature, and the module that owns it, so a
         # client can bind a call without ever reading the module's source.
+        "module": module,
+        "constants": dict(constants or {}),
         "exports": [{"module": e["module"], "name": e["name"],
                      "symbol": e["symbol"], "arity": e.get("arity"),
                      "signature": e.get("signature", ""),
@@ -4250,10 +4567,11 @@ def load_dylib_manifests(dylib_paths: list) -> list:
     """Read the manifests of the libraries an executable links against.
 
     Each entry is `{"install_name", "map": {bare callee -> exported symbol},
-    "exports"}`. A library whose manifest is missing is an error rather than a
-    silently ignored dependency: the executable would emit calls to symbols
-    nothing defines and produce an image that dies in dyld at launch — which
-    is exactly the failure this mechanism exists to prevent.
+    "exports", "module", "reexports", "constants"}`. A library whose manifest
+    is missing is an error rather than a silently ignored dependency: the
+    executable would emit calls to symbols nothing defines and produce an image
+    that dies in dyld at launch — which is exactly the failure this mechanism
+    exists to prevent.
 
     The `map` is keyed by the BARE name and only by the bare name, and that is
     the whole contract: it is what a BARE callee resolves through, first
@@ -4264,7 +4582,25 @@ def load_dylib_manifests(dylib_paths: list) -> list:
     library's `f`. The two spellings of the same export are therefore NOT both
     written into the map: there is one resolution per spelling, and each is
     where it can see the module the name is qualified by.
-    """
+
+    `module`, `reexports` and `constants` are the parts of the manifest that do
+    not name a SYMBOL, and each exists for a spelling the symbol table cannot
+    answer:
+
+      * `module` — which module this library IS. A normal library could be
+        keyed from its own exports, but a namespace library's table is empty by
+        design and nothing else in its manifest named it.
+      * `reexports` — the names this module publishes by forwarding rather than
+        by defining, each with the symbol the DEFINING module really exports.
+        This is what makes `pkg.f(...)` — the spelling `import pkg` binds, and
+        the only spelling a package has for a re-exported name — resolve.
+      * `constants` — the module-level names the build folded to literals.
+        A dylib cannot export a variable (there is nowhere for one to live,
+        `bugs/FORMAL_module_state_no_storage.md`), but a LITERAL needs no
+        storage: the importer materializes the same value in its own image,
+        which is what a module-level constant substitution already does inside
+        one unit. That is the whole of what makes `mod.CONST` and `sys.argv`
+        different answers."""
     import json
     out = []
     for dylib in dylib_paths or []:
@@ -4286,8 +4622,10 @@ def load_dylib_manifests(dylib_paths: list) -> list:
         # its export table is empty on purpose, so that no consumer resolves a
         # name to an address inside an image that has no code. It contributes
         # an empty map and its load commands, which is all it has to
-        # contribute. Every other library still has to offer something, so
-        # the check above is unchanged for them.
+        # contribute — plus the forwarding under `reexports`, which is how a
+        # consumer binds `pkg.f` to the definition in the submodule rather than
+        # to an address in this one. Every other library still has to offer
+        # something, so the check above is unchanged for them.
         # Two libraries may export the same callee name; first one listed
         # wins, matching the dylib ordinal order the image will record.
         amap = {}
@@ -4297,8 +4635,33 @@ def load_dylib_manifests(dylib_paths: list) -> list:
             "install_name": payload.get("load_path") or payload["dylib"],
             "map": amap,
             "exports": exports,
+            "module": payload.get("module") or "",
+            "reexports": payload.get("reexports") or {},
+            "constants": payload.get("constants") or {},
         })
     return out
+
+
+def dylib_export_lists(dylibs: list) -> list:
+    """The `[{"module", "exports", "reexports", "constants"}]` view of a link
+    line.
+
+    What both emitters are constructed with, and one iteration over the link
+    line rather than the two it used to be: `_dylib_syms` (the flat bare-name
+    map), the flat map's own entries and the module-keyed table are three
+    questions about the same libraries in the same order, and asking them in
+    three places is three places to disagree about which library won a name.
+    `constants` rides along because it is the same link line and the same
+    manifests — `model.dylib_module_constants` reads this list — and a
+    manifest's constants dropped here would silently answer every imported
+    constant read with "no value", which is the refusal this whole mechanism
+    exists to replace.
+    """
+    return [{"module": d.get("module") or "",
+             "exports": list(d.get("exports") or []),
+             "reexports": d.get("reexports") or {},
+             "constants": d.get("constants") or {}}
+            for d in (dylibs or [])]
 
 
 # ── The gimple runtime's C library, on a formal link line ──────────────────
@@ -5285,7 +5648,8 @@ def _record_link_deps(manifest_path: str, linked: list) -> None:
 
 def _namespace_library(output: str, install_name: str, arch: str,
                        reexports: dict, dylib_syms: dict, dep_install: list,
-                       linked: list) -> dict:
+                       linked: list, module: str = None,
+                       constants: dict = None) -> dict:
     """A dylib for a module whose whole API is RE-EXPORTED — a package
     `__init__.mojo`.
 
@@ -5333,7 +5697,18 @@ def _namespace_library(output: str, install_name: str, arch: str,
     complete.
     """
     functions = {n: v for n, v in reexports.items() if v[1] != "type"}
-    missing = sorted(n for n in functions if n not in dylib_syms)
+    # A re-exported name is missing only if NO module this one imports provides
+    # it — by SYMBOL or, for a constant, by VALUE. A constant has no symbol to
+    # forward, so counting it missing refused every package that re-exports one
+    # (`from .limits import NAME`), and the message pointed at a missing
+    # definition where the value was sitting in a manifest on the same link
+    # line. The constants table is keyed by MODULE, so the names are its
+    # values' keys — asking it for the modules instead would make every
+    # re-exported constant look missing again, which is the bug.
+    dep_constants = M.dylib_module_constants(dylib_export_lists(linked))
+    provided = set(dylib_syms) | {name for table in dep_constants.values()
+                                  for name in table}
+    missing = sorted(n for n in functions if n not in provided)
     if missing:
         listed = ", ".join(missing[:8])
         mods = ", ".join(sorted({functions[n][0] for n in missing})[:4])
@@ -5354,7 +5729,8 @@ def _namespace_library(output: str, install_name: str, arch: str,
         f.write(binary)
     os.chmod(output, 0o755)
     _ad_hoc_sign(output)
-    manifest_path = write_dylib_manifest(output, install_name, [])
+    manifest_path = write_dylib_manifest(output, install_name, [],
+                                         module=module, constants=constants)
     _record_namespace(manifest_path, reexports, dylib_syms)
     if linked:
         _record_link_deps(manifest_path, linked)
@@ -5368,6 +5744,37 @@ def _namespace_library(output: str, install_name: str, arch: str,
         "reexports": reexports,
         "backend": f"{arch}/macho-dylib-namespace",
     }
+
+
+def _namespace_constants(reexports: dict, own: dict, linked: list) -> dict:
+    """The constants a namespace library publishes: its own, plus the ones it
+    RE-EXPORTS.
+
+    A package `__init__` that is nothing but `from .x import NAME` publishes
+    `NAME` as part of its API whatever `NAME` is, and a re-exported CONSTANT is
+    the one kind that needs no symbol to forward: the value is a literal, so the
+    consumer materializes the same one in its own image. The library that
+    DEFINES it is already on this one's link line and its value is already in
+    that library's manifest, so this is a copy of a fact rather than a second
+    derivation of it — and the name is looked up in the dependencies' published
+    constants rather than re-folded from source, because the build that folded
+    it is the one whose answer counts.
+
+    `kind` here is `declared_kinds`' verdict on the DEFINING declaration, and a
+    module-level binding is not a declaration it recognizes, so a re-exported
+    constant arrives as `"unknown"` — which is exactly why it must be looked up
+    rather than trusted to be a function. A name that is a function re-export
+    keeps its own route (the `reexports` forwarding), and a name that is a TYPE
+    has no value of this kind at all."""
+    out = dict(own or {})
+    tables = M.dylib_module_constants(dylib_export_lists(linked))
+    for name, (_module, kind) in (reexports or {}).items():
+        if kind != "unknown" or name in out:
+            continue
+        for value in _constants_named(tables, name):
+            out[name] = value
+            break
+    return out
 
 
 def _record_namespace(manifest_path: str, reexports: dict,
@@ -5436,10 +5843,19 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     ordered = []
     seen: dict = {}
     structs_by_file: dict = {}
+    # What this library PUBLISHES besides its symbols: the module-level names
+    # its own build folded to literals, which a consumer materializes in its
+    # own image rather than reading an address for (there is nowhere for one to
+    # live — `bugs/FORMAL_module_state_no_storage.md` — and a literal does not
+    # need one). Collected from the module's own symbol table, so the values
+    # are the ones THIS build folded rather than a second reading of the source.
+    constants: dict = {}
     for source_path in source_paths:
-        module, functions, module_source, file_structs = \
+        module, functions, module_source, file_structs, file_constants = \
             _formal_module_functions(source_path, link_dylibs)
         structs_by_file[source_path] = file_structs
+        for name, value in file_constants.items():
+            constants.setdefault(name, value)
         for fn in functions:
             # A repeated name is an OVERLOAD, not a collision — and Mojo
             # overloads are ordinary (`def tile[...]` appears three times in
@@ -5484,7 +5900,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # map cannot answer: a DOTTED sibling call (`leaf.base(x)` resolved by
     # module identity, which the map's first-wins-per-bare-name cannot
     # express) and a call's declared return kind.
-    dylib_exports = [{"exports": list(d.get("exports") or [])} for d in linked]
+    dylib_exports = dylib_export_lists(linked)
     dep_install = [d["install_name"] for d in linked]
     dep_syms = {d["install_name"]: list((d.get("map") or {}).values())
                 for d in linked}
@@ -5526,8 +5942,12 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                 f"code and there is nothing to prove. Its definitions are in "
                 f"{', '.join(sorted({v[0] for v in reexports.values()})[:4])}"
                 f", whose libraries are on this one's link line.")
-        return _namespace_library(output, install_name, arch, reexports,
-                                  dylib_syms, dep_install, linked)
+        return _namespace_library(
+            output, install_name, arch, reexports, dylib_syms, dep_install,
+            linked,
+            module=(module_prefixes or {}).get(source_paths[0])
+            or _module_prefix(source_paths[0]),
+            constants=_namespace_constants(reexports, constants, linked))
 
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                             dylib_exports=dylib_exports)
@@ -5588,7 +6008,11 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         f.write(binary)
     os.chmod(output, 0o755)
     _ad_hoc_sign(output)
-    manifest_path = write_dylib_manifest(output, install_name, exports)
+    manifest_path = write_dylib_manifest(
+        output, install_name, exports,
+        module=(module_prefixes or {}).get(source_paths[0])
+        or _module_prefix(source_paths[0]),
+        constants=constants)
     if linked:
         _record_link_deps(manifest_path, linked)
 

@@ -5856,14 +5856,27 @@ def _param_list(fn):
 #     `mod.f(...)` spells the same function with a qualifier this path had no
 #     table for — so the only Python spelling of a module call that worked was
 #     the one that renames what it calls.
+#   * AND THE RE-EXPORTED SPELLING, which is the same table with one more
+#     source of names. A package `__init__` that is nothing but `from .sub
+#     import f` publishes `f` as part of its API and has an EMPTY export trie
+#     on purpose (a re-export is not a new definition, so an entry for it in
+#     this image's trie would be an address lookup into a file with no code —
+#     `build._namespace_library`). So the names a package publishes are its
+#     FORWARDINGS, and the dotted table did not have them: `pkg.f(...)` found
+#     nothing, was not refused (there was no table to report), and reached the
+#     link audit as a dangling symbol — the same function, reachable only
+#     through the spelling that renames it. The manifest already recorded the
+#     forwarding (`reexports`, with the symbol the defining module really
+#     exports); nothing was reading it for this.
 #
 # Keyed by MODULE IDENTITY, not by bare name, and that is the whole safety
 # argument for the dotted table: `mod.f` can only ever reach an export of the
-# library built for `mod`, so two modules that both define `helper` cannot
-# cross-bind, and a bare `f()` cannot reach either of them through the dotted
-# table. (The flat bare-name map is a different, older, coarser answer and
-# stays where it is; `bugs/FORMAL_known_limits.md` §1.1 is why a `_CLIB_SYMS`
-# name is not advertised there at all.)
+# library built for `mod` — or a name that module explicitly forwards — so two
+# modules that both define `helper` cannot cross-bind, and a bare `f()` cannot
+# reach either of them through the dotted table. (The flat bare-name map is a
+# different, older, coarser answer and stays where it is;
+# `bugs/FORMAL_known_limits.md` §1.1 is why a `_CLIB_SYMS` name is not
+# advertised there at all.)
 
 
 def signature_return_type(signature: str) -> str:
@@ -5927,10 +5940,12 @@ def abi_module_name(dotted: str) -> str:
 def dylib_export_module(by_module: dict, qualifier: str) -> dict:
     """The export table of the module a dotted qualifier names, or `{}`.
 
-    Asked twice of every dotted callee — once for the export it names, and
-    once to tell "this module does not export that" apart from "that is not a
-    module at all", which are different answers with different consequences —
-    so both spellings are resolved here rather than at the two call sites.
+    Asked of every dotted callee — for the export it names, and to tell "this
+    module does not export that" apart from "that is not a module at all",
+    which are different answers with different consequences — so both spellings
+    are resolved here rather than at the call sites. It reads whatever table it
+    is handed, so the same resolution answers for a module's own exports and
+    for what it forwards (`dylib_export_tables`).
     """
     if not qualifier:
         return {}
@@ -5940,7 +5955,85 @@ def dylib_export_module(by_module: dict, qualifier: str) -> dict:
     return by_module.get(abi_module_name(qualifier)) or {}
 
 
-def dylib_export_lookup(by_name: dict, by_module: dict, callee: str):
+def dylib_export_tables(dylib_exports: list):
+    """`(by_name, by_module, forwarded)` — the three tables a callee is
+    resolved through, built once so the two backends cannot disagree.
+
+    `dylib_exports` is the linked libraries' manifest export lists in LINK
+    ORDER (what `formal/build.py` hands both emitters), and the three tables
+    are the three questions a callee spelling can ask:
+
+      * `by_name` — `{bare name: entry}`, first library on the line winning, so
+        a BARE callee (`from mod import f`) resolves to exactly the entry
+        `dylib_syms` resolved it to. Built with `setdefault` in link order for
+        that reason, and it is the same iteration `dylib_syms` comes from.
+      * `by_module` — `{module identity: {bare name: entry}}`, which is what
+        makes a DOTTED callee (`import mod`, spelled `mod.f`) resolvable
+        without ever consulting a bare name. This is the table that carries the
+        safety argument: `mod.f` can only ever reach an export of the library
+        built for `mod`.
+      * `forwarded` — `{module identity: {bare name: entry}}` again, but for
+        the names a module's API is made of by RE-EXPORT rather than by
+        definition: a package `__init__` that is nothing but `from .sub import
+        f` has a real, public, importable API, and it deliberately has an EMPTY
+        export trie (`build._namespace_library` — a re-export is not a new
+        definition, so an entry for it in this image's trie would be an address
+        lookup into a file with no code). Its manifest records the forwarding
+        under `reexports`, and this is where a dotted call to that name is
+        answered.
+
+    Every library contributes a `by_module` slot even when it has no exports,
+    because "this module is linked and exports nothing" is a distinct fact from
+    "that qualifier is not a module at all", and only the first of the two is
+    reportable: the second is a value's method (`xs.append`), which is a
+    different construct entirely.
+
+    A forwarded entry carries the symbol the DEFINING module really exports
+    (taken verbatim from that module's own manifest when the package's library
+    was built), so the call binds the definition rather than the forwarding —
+    which is the same symbol the BARE spelling binds, so `from pkg import f`
+    and `pkg.f` cannot disagree about where `f` lives. Its declared signature
+    is borrowed from `by_name` when the symbols agree, which is what keeps a
+    `char *` result classified as a string for a re-exported function exactly
+    as it is for a defined one. A name with no match in `by_name` keeps an
+    empty signature, which is the honest "the build does not know" — never a
+    guess at one that would change how a result is printed."""
+    by_name: dict = {}
+    by_module: dict = {}
+    forwarded: dict = {}
+    libs = list(dylib_exports or [])
+    for lib in libs:
+        for entry in (lib.get("exports") or []):
+            by_name.setdefault(entry.get("name"), entry)
+    for lib in libs:
+        module = lib.get("module") or ""
+        if module:
+            by_module.setdefault(module, {})
+        for entry in (lib.get("exports") or []):
+            by_module.setdefault(entry.get("module") or "",
+                                 {}).setdefault(entry.get("name"), entry)
+        for name, fwd in (lib.get("reexports") or {}).items():
+            if fwd.get("kind") == "type" or not fwd.get("symbol"):
+                # A TYPE has no function symbol to forward: it crosses as a
+                # layout in the reflection table and reaches the importer as a
+                # `StructDef` (`imported_struct_defs`), so there is nothing
+                # here for a CALL to bind and nothing to put in this table.
+                continue
+            known = by_name.get(name)
+            entry = {"name": name, "symbol": fwd.get("symbol"),
+                     "module": fwd.get("module") or module,
+                     "signature": (known.get("signature") or "")
+                     if known and known.get("symbol") == fwd.get("symbol")
+                     else "",
+                     "arity": known.get("arity") if known else None,
+                     "forwarded_by": module}
+            if module:
+                forwarded.setdefault(module, {}).setdefault(name, entry)
+    return by_name, by_module, forwarded
+
+
+def dylib_export_lookup(by_name: dict, by_module: dict, callee: str,
+                        forwarded: dict = None):
     """The manifest export a callee name reaches, or None.
 
     `by_name` is the flat `{bare name: entry}` table in LINK ORDER with
@@ -5950,13 +6043,174 @@ def dylib_export_lookup(by_name: dict, by_module: dict, callee: str):
     a DOTTED callee, whose qualifier names the module that has to own the
     export. The qualifier is resolved by `dylib_export_module`, so a package
     submodule (`os.path.join`) is found under the prefix its manifest uses.
-    """
+
+    `forwarded` is the same shape for the names a module publishes by
+    RE-EXPORT, and it is consulted only after the module's OWN table, because
+    a name the module defines itself is its definition and anything else is a
+    forwarding of somebody else's."""
     if not callee:
         return None
     if "." in callee:
         module, _, leaf = callee.rpartition(".")
-        return dylib_export_module(by_module, module).get(leaf)
+        entry = dylib_export_module(by_module, module).get(leaf)
+        if entry is not None or not forwarded:
+            return entry
+        return dylib_export_module(forwarded, module).get(leaf)
     return by_name.get(callee)
+
+
+def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
+                        forwarded: dict = None) -> str:
+    """The boundary symbol an unbound callee `name` is emitted against.
+
+    THE ONE implementation, shared by both backends' `_extern_symbol`, which
+    were two copies of the same decision and therefore two places for them to
+    disagree about what a dotted name binds.
+
+    Two spellings, and the second is why this is a function rather than a
+    `dict.get`:
+
+      * a BARE name — what `from mod import f` binds — is answered by the
+        flat `{name: symbol}` map, first library on the line winning, which is
+        `load_dylib_manifests`'s own precedence and stays it;
+      * a DOTTED name — what `import mod` binds, spelled `mod.f` — is
+        answered ONLY by the export table of the library built for `mod`, or by
+        what that module forwards (`dylib_export_tables`' `forwarded`). Falling
+        back to the flat map for a dotted name would let `mod.f` bind some
+        other library's `f`, which is the silently-wrong binding the whole
+        module-identity mechanism exists to prevent.
+
+    A dotted name whose module is linked but which that module does not publish
+    — by definition or by re-export — is REFUSED, naming both halves and
+    listing what the module does publish. It used to fall through to the bare
+    name, which produced a BL against a symbol nothing defines and an image
+    that died in dyld — the failure this whole mechanism was built to make a
+    build-time error instead. It is also what a namespace library's empty trie
+    used to produce: a package whose whole API is re-exported had no table to
+    consult, so `pkg.f` found nothing, was not refused (there was nothing to
+    report), and reached the link audit as a dangling symbol.
+
+    The module is identified by `dylib_export_module`, which knows that a
+    manifest keys a package submodule by its ABI prefix (`os.path` → `os_path`)
+    — which is what makes `os.path.join(...)`, the spelling 532 measured call
+    sites in this tree are written with, resolve at all."""
+    if "." not in name:
+        return (syms or {}).get(name, name)
+    entry = dylib_export_lookup(by_name, by_module, name, forwarded)
+    if entry is not None:
+        return entry.get("symbol") or name
+    module, _, leaf = name.rpartition(".")
+    have = set(dylib_export_module(by_module, module))
+    have |= set(dylib_export_module(forwarded, module) if forwarded else ())
+    if have or _module_is_linked(by_module, forwarded, module):
+        shown = ", ".join(sorted(have)[:8]) + (", …" if len(have) > 8 else "")
+        if not shown:
+            shown = ("nothing — every name this module publishes is "
+                     "re-exported, and none of the modules it re-exports "
+                     "from publishes that one")
+        raise CodegenError(
+            f"{name}(): `{module}` is a linked module but it exports no "
+            f"`{leaf}`, so the call has no symbol to bind. What it does "
+            f"export: {shown}. A name `doc/ABI.md`'s export rule excludes (a "
+            f"leading `_`, a generic template, an overload, or a C library "
+            f"symbol such as `exit` or `write`) is not advertised, so a module "
+            f"that defines one cannot be called by that name. The exclusion is "
+            f"measured and settled in bugs/FORMAL_known_limits.md 1.1; a module "
+            f"that needs to publish mutable state rather than functions is a "
+            f"different gap, written down in "
+            f"bugs/FORMAL_module_state_no_storage.md")
+    return (syms or {}).get(name, name)
+
+
+def _module_is_linked(by_module: dict, forwarded: dict, module: str) -> bool:
+    """Whether `module` names a library on this link line at all.
+
+    "Linked and publishes nothing" and "not a module" are different facts, and
+    only the first of them is a refusal that can say what the module does
+    export: the second is a value's method (`xs.append`), which is a different
+    construct with its own answer. `dylib_export_module` cannot tell them apart
+    — it answers `{}` for both — so this asks the tables' keys directly, in
+    both the dotted and the ABI spelling, which is the same two spellings that
+    function resolves."""
+    if not module:
+        return False
+    for tables in (by_module or {}, forwarded or {}):
+        if module in tables or abi_module_name(module) in tables:
+            return True
+    return False
+
+
+# ── A module's CONSTANTS, read across a dylib boundary ───────────────────
+#
+# A dylib cannot export a VARIABLE: there is nowhere for one to live, because
+# every value a formal program can name lives in a function's own stack scratch
+# (`bugs/FORMAL_module_state_no_storage.md`). But a module-level name the build
+# FOLDED to a literal needs no storage, for the reason the in-unit substitution
+# already relies on: the module-level sequence is its only writer, and a
+# function that writes the name writes a LOCAL of the same name, which shadows
+# it. There is therefore exactly one value of that name in the whole program,
+# and it is a literal both sides can hold.
+#
+# So the importer does not need an address for it — it needs the VALUE, and the
+# build that compiled the module is the only place that value was ever
+# computed. That is what the manifest's `constants` records, and it is why
+# `sys.argv` (a list) and `os.sep` (a string literal) come out differently:
+# the first has no literal to record and stays refused, the second has one and
+# lowers.
+
+
+def dylib_module_constants(dylib_exports: list) -> dict:
+    """`{module identity: {name: value}}` for every linked library.
+
+    Keyed by the same ABI identity the export tables use, so the consumer
+    resolves a qualifier with `dylib_export_module` and gets the same two
+    spellings (`os.path` and `os_path`) the symbol tables answer. A name two
+    libraries both publish as a constant takes the FIRST on the link line,
+    which is `load_dylib_manifests`'s precedence for a bare name and the only
+    one available here: a dotted read says which module it means, and a bare
+    read does not."""
+    out: dict = {}
+    for lib in (dylib_exports or []):
+        module = lib.get("module") or ""
+        constants = lib.get("constants") or {}
+        if not module or not constants:
+            continue
+        for name, value in constants.items():
+            if isinstance(value, bool) or not isinstance(value, (int, str)):
+                # Only what `fold_literal_expr` can produce crosses here, and
+                # anything else in a manifest is a producer this path does not
+                # understand. Refusing to invent a value for it is the honest
+                # answer; the read then falls through to the ordinary
+                # module-global refusal, which says so.
+                continue
+            out.setdefault(module, {}).setdefault(name, value)
+    return out
+
+
+def imported_constant(tables: dict, qualifier: str, name: str):
+    """The value a linked module publishes as a constant under `name`, or None.
+
+    None is a refusal and never a zero: a name no module publishes as a
+    literal is a real global or a name that does not exist, and those are two
+    different mistakes with two different repairs."""
+    table = dylib_export_module(tables, qualifier)
+    return table.get(name) if table else None
+
+
+def constant_literal_node(value, line: int = 0, col: int = 0):
+    """An AST literal node carrying a constant that crossed a dylib boundary.
+
+    At the READ site's line and column, not the module-level line the value was
+    written on: a diagnostic raised after the substitution points at the read,
+    which is the line the reader wrote. `_folded_node` is the same rule for the
+    in-unit case and is deliberately not reused here — it takes a template node
+    to copy the position from, and a value that arrived through a manifest has
+    no node behind it.
+    """
+    if isinstance(value, str):
+        return F.StringLiteral(value=value, line=line or 0, col=col or 0,
+                               is_bytes=False)
+    return F.IntLiteral(value=value, line=line or 0, col=col or 0, raw="")
 
 
 def _target_names(target):
@@ -10086,6 +10340,43 @@ def comptime_fold_refusal(name: str) -> str:
         f"`var` and read it at run time")
 
 
+def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
+    """The diagnostic for a CALL to a name the defining module does not export.
+
+    Distinct from `module_global_refusal` because the two are different facts,
+    and the generic one is FALSE about this one. `f[x](...)` roots at a name,
+    `check_module_symbols` sees a bare `IdentExpr` that is not a local, and the
+    imported case answered "a module-level name is not exported as a word —
+    there is no storage for it" about what is a call: a call needs a SYMBOL, and
+    the question is whether the library has one, not whether a value has a home.
+    A reader sent by the old wording to look for storage finds a `_`-prefixed
+    generic with no storage question at all.
+
+    What it says instead is the reason the export set excludes the name, which
+    is `reflect.collect_exports_src`'s rule and is the same rule the dylib
+    build's own `no_public_api_reason` reports by: a leading `_`, a generic
+    template (each instantiation is its own symbol, and this path has no
+    monomorphization — `bugs/FORMAL_known_limits.md` §1.2), an overload (no one
+    symbol denotes it) or a C library name. `_get_kgen_string` in
+    `std/sys/_assembly.mojo` is the first two at once, and it is the terminal
+    construct for nineteen swept files."""
+    who = f"{fn_name}: " if fn_name else ""
+    mod = getattr(sym, "module", None)
+    return (f"{who}`{name}` is called, and it is imported from `{mod}`, so the "
+            f"call has to bind a symbol `{mod}` exports. That module does not "
+            f"export it, and the reason is `doc/ABI.md`'s export rule rather "
+            f"than anything about this call: a name with a leading `_` is "
+            f"private, a generic template is not one symbol but one per "
+            f"instantiation (`_get_kgen_string[asm]()` is the measured case — "
+            f"both at once), an overload has no single symbol, and a C library "
+            f"name like `exit` or `write` is provided by libSystem. The "
+            f"exclusion is measured and settled in "
+            f"bugs/FORMAL_known_limits.md §1.1, and the generic case in §1.2. "
+            f"Write the operation in this module, or call a public function "
+            f"that does it — which is the same program with a definition this "
+            f"image can bind")
+
+
 def module_global_refusal(name: str, sym, fn_name: str) -> str:
     """The one-line diagnostic for a module-level name this path cannot read.
 
@@ -10117,14 +10408,34 @@ def module_global_refusal(name: str, sym, fn_name: str) -> str:
         # lower. The sweep's own comment says the house style — "a codegen
         # diagnostic quotes nothing of this shape (`self.<field>` is in
         # backticks)" — and this is the case that makes it load-bearing.
-        return (f"{who}{name!r} is imported from `{mod}`, so it is a "
+        #
+        # What a dylib DOES publish, because the sentence has to be true as
+        # well as discouraging and the previous one named a repair that does
+        # not lower: its FUNCTIONS, as symbols, and its module-level names the
+        # build FOLDED TO A LITERAL, as values — a literal needs no storage to
+        # cross the boundary (there is exactly one value of a folded
+        # module-level name in a whole program), so the importer materializes
+        # the same one in its own image. A name that reached this refusal is
+        # therefore not one of those: it is a real variable, a list, an object,
+        # or a function used as a value. Saying so is what makes the remaining
+        # sentence a repair rather than a deflection.
+        return (f"{who}{name!r} is imported from `{mod}`, and it is a "
                 f"module-level name of another module. This path compiles an "
-                f"import into a dylib, and a module-level name is not exported "
-                f"as a word — there is no storage for it here: every value a "
-                f"formal program can name lives in a function's own stack "
-                f"scratch, which is reclaimed when the function returns. "
-                f"Give it a function (a `{mod}.fn()` call lowers) or write the "
-                f"value at the use site")
+                f"import into a dylib, and a dylib publishes FUNCTIONS and "
+                f"folded CONSTANTS — a name whose value the build knows "
+                f"(`{mod}.K = 1`, `{mod}.S = \"x\"`, a `comptime` constant) "
+                f"lowers, and a call `{mod}.fn(...)` lowers. What it cannot "
+                f"publish is a VARIABLE: there is no storage for one here, "
+                f"because every value a formal program can name lives in a "
+                f"function's own stack scratch, which is reclaimed when the "
+                f"function returns — and a list, a stream object or a function "
+                f"used as a value is one of those, not a constant. So this "
+                f"name's value is a real global with nowhere to live, which is "
+                f"a property of the value model rather than of this call: "
+                f"`{mod}.fn(...)` where `{mod}` publishes that function as a "
+                f"function is the same program with a representation. "
+                f"bugs/FORMAL_module_state_no_storage.md records the design "
+                f"and what would have to be true to close it")
     if site == "declared":
         return (f"{who}{name!r} is declared at module level with no value "
                 f"(`{name}: T`), so nothing ever writes it and no value "
