@@ -182,13 +182,14 @@ EXECUTED = [
     # binds the name to that. Two mechanisms, one answer — and if either were
     # missing, this case is the one that notices.
     #
-    # Asserted through the EXIT STATUS rather than through `print`, because
-    # printing a `comptime`-bound STRING is refused on this path for a reason
-    # that has nothing to do with this construct ("print() cannot tell whether
-    # IdentExpr is a string or a number"): the case is about the rewrite, and
-    # an exit status tests it without depending on an unrelated limit. That
-    # print-of-a-comptime-string gap is pre-existing and is recorded in
-    # bugs/FORMAL_comptime_string_print.md.
+    # Asserted through the EXIT STATUS rather than through `print`, and that is
+    # not a stylistic choice: `print` of a `comptime`-bound STRING is refused on
+    # this path, and routing around it one `var` further prints a NUMBER
+    # instead (`t= 4296786840` on arm64, `t= 4300370841` on x86-64, for
+    # `comptime OS = "darwin"; var t = OS; print(t)`). That is a pre-existing
+    # wrong-answer bug in the `print` materialization, recorded in
+    # bugs/FORMAL_comptime_string_print.md; a case for this construct must not
+    # be built on top of it.
     ("function_local_comptime_of_a_query_is_folded",
      "def main():\n"
      "    comptime PW = "

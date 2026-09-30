@@ -59,7 +59,7 @@ architectures, both scopes).
 | family | files (arm64, stdlib scope) | distinct causes | it is really |
 |---|---|---|---|
 | 1. `formal dylib has no public functions` | **30** | **8** terminal modules | 7 true limits + 1 reached by a separate bug |
-| 2. `__mlir_attr[...]` assembles an MLIR attribute | **46** | **1** terminal module | 1 true limit |
+| 2. `__mlir_attr[...]` assembles an MLIR attribute | **46** | **1** terminal module | 1 true limit for the dialect attributes; a `#kgen.param.expr<…>` target QUERY is now answered (§2.0) — and no file moved, because `std/sys/info.mojo`'s next blocker is a different construct |
 | 3. the small shapes nobody else claimed | 8 | 6 | 6 true limits |
 
 Two facts about the *shape* of these families matter more than their sizes,
@@ -309,7 +309,57 @@ document's lane — it belongs to whoever owns `formal/imports.py`.
 
 # 2. MLIR attribute templates — 46 files, 1 cause
 
-## 2.1 The refusal is true, and it is the right refusal
+**PARTLY CLOSED, 2026-09-29. The "true limit, and permanent on this path" verdict
+below was right about two thirds of the family and wrong about the rest, and the
+wrong part was the part that mattered.** Read §2.0 first; the rest of the section
+is unchanged and still describes the dialect-attribute half.
+
+## 2.0 What is now answered, and what the family actually is
+
+The refusal's ground is "there is no MLIR on this path for the template to
+become". That is **true of a dialect attribute** — `#kgen.simd<1>`,
+`#pop.float_literal<nan>`, `#lit.struct<{…}>`, `#kgen.downcast<:…>`, `#kgen.dtype
+.constant<bool>` — and it was applied to **the whole family**, including the one
+member whose meaning is not an MLIR object at all: a
+`#kgen.param.expr<…>` **target query**.
+
+A formal image is compiled for ONE target, and that target is stated by the build
+itself (`compile_formal(arch=…, fmt=…)`, the same `arch`/`fmt` pair
+`formal/imports.py` keys its dylib cache on). So `target_get_field<current_target,
+"arch">` has exactly one correct answer, and answering it at build time is not a
+guess. `formal/model.py` now has a leaf-most evaluator for them —
+`Target`, `target_template`, `fold_target_template`, `template_is_answered` —
+answering `arch`, `os`, `endianness`, `pointer_width`, `simd_bit_width`,
+`cross_compilation` (measured against `os.uname().machine`, so it is *false* for
+the native build and *true* for `--arch=x86_64` on the same Mac, which no
+constant gets right) and `accelerator_arch`.
+
+What it refuses, and why, is the half that was right:
+
+| query | verdict | why |
+|---|---|---|
+| `target_has_feature` | **refused** | a CPU feature is a property of a CPU; the build names the architecture it emits and never a CPU. A hand-kept feature table would rot into a wrong answer no test could see |
+| `"triple"`, `"stdlib_plugin"`, any unknown field | **refused**, naming the field | a property of a target *description*; the build commits to two facts and states neither of these |
+| `current_target` as a **value** | **refused** | a target is a description, not a 64-bit word. Its FIELDS answer — and the message says so, because the old MLIR wording sent the reader looking for a missing MLIR while every `target_get_field` in the same file worked |
+| `__mlir_type` templates | **refused, and now as a TYPE** | they name a type. The message used to call them attributes, which is false of `std/sys/info.mojo`'s `_TargetType` — the module this whole family hangs on |
+| `#kgen.simd<N>`, `#pop.…`, `#lit.…`, `#kgen.dtype.…` | **refused, unchanged** | the original true limit. §2.1 below still describes these |
+
+**Measured effect on the sweep: no file moved.** `std/sys/info.mojo` is still a
+direct finding, now on its `_TargetType` **type** binding rather than on an
+attribute — the same module, one message corrected. The next terminal behind it
+is a different construct entirely and is filed as
+**`FORMAL_target_query_evaluator.md`**, with the measurement.
+
+Two builds of the two spellings and the two nesting positions a query reaches
+(`formal/build.py:_fold_target_queries`, `model.fold_module_value`) are the
+whole of the plumbing, and they are in the SHARED pipeline so the two
+architectures cannot get different answers — the property §2's original verdict
+was most worried about losing. The suite is
+`test_formal_target_queries.py` (25 checks, arm64 images EXECUTED against values
+stated independently of the code under test, refusals asserted on both
+architectures).
+
+## 2.1 The remaining refusal is true, and it is the right refusal
 
 `formal/model.py`'s `is_mlir_template` reads a bracket or a dotted member
 access on one of four names (`__mlir_attr`, `__mlir_deferred_attr`,
@@ -351,8 +401,18 @@ index to lower hiding behind these.
 honest closure is a *different target*: a build that embeds an MLIR dialect
 registry and evaluates `#kgen.*` attributes to concrete values at compile time
 — which is what the real compiler does and is the entire content of the formal
-backend's premise. Until then this refusal is the correct answer, and its cost
-is 46 files of coverage that are unreachable by construction.
+backend's premise. Until then this refusal is the correct answer for the
+DIALECT-ATTRIBUTE half, and its cost is 46 files of coverage that are
+unreachable by construction.
+
+**Corrected 2026-09-29:** the sentence used to end "…and its cost is 46 files of
+coverage that are unreachable by construction", which overstated it. The
+dialect attributes really are unreachable, but one member of the family — a
+`#kgen.param.expr<…>` target query — is a *question*, not an MLIR object, and it
+is answered now. §2.0 has the split and the numbers. **The 46 is unchanged as a
+file count**, so the cost statement stands; what changed is that the reason is
+narrower than the section claimed, and a reader who took "permanent" as covering
+the whole family would not have looked for the query case at all.
 
 ## 2.2 `__mlir_op` still builds and segfaults
 
@@ -396,7 +456,7 @@ drive-by.
 | shape | files (arm64, stdlib scope) | verdict | evidence / what it should be |
 |---|---|---|---|
 | `constructing X has no representation: this image has no declaration of X` | 4 — `stdlib_core.mojo` (`StringRef`, direct) and `std/testing/prop/{__init__,random,runner}.mojo` (`Error`, at depth) | **refusal TRUE** | `Error` really is 2 fields and `StringRef` is a fat pointer, so neither fits one word, and neither is a struct in these images. The message now says the one thing it has checked — that there is no declaration here to ask — instead of asserting a shape it cannot see |
-| `__mlir_attr[...]` assembles an MLIR attribute | 46 | **true limit** | §2 |
+| `__mlir_attr[...]` assembles an MLIR attribute | 46 | **true limit for the dialect attributes** | §2.1; §2.0 for the target-query half, which is answered |
 | `comptime X = … does not fold to a compile-time constant` | 2 (`std/math/polynomial.mojo`, `std/algorithm/backend/tile.mojo`) | **true limit** — and the arch drift is **CLOSED** (2026-09-27) | `comptime n = len(coefficients)` over a *runtime* parameter, which is genuinely not knowable at compile time. The **drift** was that x86-64 refused **earlier and differently** (`unsupported call target on the formal x86-64 path (got SubscriptExpr)` for `polynomial.mojo`, `unsupported statement ComptimeForStmt` for `tile.mojo`), so one construct got two different limits from two architectures that are one language implementation. Closed by giving x86-64 the same `mojo/middle/comptime.py` resolver arm64 uses — that module documents x86-64 as an intended consumer of exactly this seam and it never was one — so both now refuse with `model.comptime_fold_refusal`, byte for byte. Side effect: x86-64 now *builds* a comptime binding that folds, which it used to refuse outright |
 | `a \`...\` stands where this path needs instructions to emit` | 1 (`std/builtin/len.mojo`) | **true limit**, message **CLOSED** (2026-09-27) | `def len(value: StringSlice) -> Int: ...` has no instructions, and the old message (`unsupported expression EllipsisLiteral on the formal <arch> path`) named an AST node the author never wrote and said nothing about what to do. On x86-64 it was worse than weak: `_unsupported_expr_message` appended "container and string values are not", false of a `...`. Now one arch-free `model.ellipsis_refusal`, naming the language's own no-implementation marker and both repairs. **Measured, both arches, because the old note's scope claim was wrong in a way worth recording:** a `...` in a `trait` method builds, but a `...` in a plain function is refused whether or not anything ever CALLS it — so the distinction is the declaration KIND, not reach |
 | `a Optional receiver is stored in a container` | 1 (`std/iter/__init__.mojo`) | **true limit** | by-reference receiver work; **already pinned** by `byref_refuse_stored_in_a_list` (`test_formal_run.py`). Not duplicated here |
@@ -758,7 +818,7 @@ re-derive from scratch.
 | **3** | `Slice.__init__` — run a declared `__init__` / field-filling construction | 20 | **days**, self-contained | The cheapest *capability* in the residue, and the message that describes it is already exact. Nothing about it needs a new value model |
 | **4** | `env.mojo`'s message, rewritten to name a template application | 0 (55 already unblocked by #1) | **under an hour** | Not a coverage item at all. Listed because a wrong explanation on the largest family costs the next reader more than the fix does |
 | **5** | the 19 singleton direct causes (§3) | 19 | one sitting each | Already audited in §3; several are weak messages rather than capabilities, and §3's own guidance applies: **prefer fixing a wrong message to adding a capability** |
-| — | MLIR attribute templates | 41 | **nothing — permanent** | §2. Not work. Read as a fact about those modules |
+| — | MLIR attribute templates | 41 | **nothing — permanent** for the dialect attributes (§2.1); the `#kgen.param.expr<…>` target queries ARE answered (§2.0) | §2 for the attributes; `FORMAL_target_query_evaluator.md` for what the query half still does not reach |
 | — | host-import | 166 (160 in reach) | sized, see below | not a limit at all |
 
 **So: the biggest remaining lever is Stage 5 monomorphization, and the numbers
