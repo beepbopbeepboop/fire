@@ -553,6 +553,19 @@ def _template_fragments(e):
     return "".join(out), holes
 
 
+# The prefix every "this build cannot answer that" sentence carries, and the
+# reason it is a constant rather than a habit: `tools/formal_sweep.py` buckets
+# findings by a marker substring, and three separate wordings for one class of
+# limit would put three of them in whatever matched next — which is how
+# `no_public_api_reason`'s three false branches happened. One marker, one
+# family, and the sentence after it is free to be as specific as the case is.
+TARGET_QUERY_UNANSWERED = "this build cannot answer this target query:"
+
+
+def _unanswered(why: str) -> tuple:
+    return ("unanswered", TARGET_QUERY_UNANSWERED + " " + why)
+
+
 def _split_top_level(text: str, sep: str) -> list:
     """`text` split on `sep` outside quotes and outside <>/()/[] nesting."""
     parts = []
@@ -636,20 +649,20 @@ def _arg_operand(token: str, holes: list, tgt: Target):
 def _op_target_get_field(args: list, tgt: Target):
     """`target_get_field(TARGET, "field")` — the field this build can state."""
     if not isinstance(args[0], Target):
-        return ("unanswered",
+        return _unanswered(
                 "the first argument of target_get_field is not the current "
                 "target, and this build can only read a field of the target it "
                 "is emitting")
     name = args[1]
     if not isinstance(name, str):
-        return ("unanswered",
+        return _unanswered(
                 "the second argument of target_get_field is not a field name, "
                 "so there is no field to read")
     value = tgt.field(name)
     if value is None:
         value = tgt.numeric_field(name)
     if value is None:
-        return ("unanswered", target_field_refusal(name, tgt))
+        return _unanswered(target_field_refusal(name, tgt))
     return ("value", value)
 
 
@@ -682,34 +695,34 @@ def _op_target_has_feature(args: list, tgt: Target):
     not build even with every field query answered — see
     bugs/FORMAL_target_query_evaluator.md."""
     if not isinstance(args[0], Target) or not isinstance(args[1], str):
-        return ("unanswered",
-                "target_has_feature is not decidable on this path: a CPU "
-                "feature is a property of a CPU, and this build names the "
-                "architecture it emits and never a CPU")
-    return ("unanswered",
-            f"target_has_feature({args[1]!r}) is not decidable on this path: a "
-            f"CPU feature is a property of a CPU, and this build names the "
-            f"architecture it emits and never a CPU, so there is no "
-            f"feature database here to answer it from")
+        return _unanswered(
+                "a CPU feature is a property of a CPU, and this build names "
+                "the architecture it emits and never a CPU")
+    return _unanswered(
+            f"target_has_feature({args[1]!r}) is a per-CPU question: a CPU "
+            f"feature is a property of a CPU, and this build names the "
+            f"architecture it emits and never a CPU, so there is no feature "
+            f"database here to answer it from — and a hand-kept one would rot "
+            f"into a wrong answer that no test could see")
 
 
 def _op_eq(args: list, tgt: Target):
     """`eq(a, b)` — equality of two values that both already folded."""
     if isinstance(args[0], Target) or isinstance(args[1], Target):
-        return ("unanswered",
+        return _unanswered(
                 "eq compares two values, and one of them is the current target "
                 "attribute, which has no value on this path")
     try:
         return ("value", args[0] == args[1])
     except Exception:
-        return ("unanswered", "eq's operands are not comparable here")
+        return _unanswered("eq's operands are not comparable here")
 
 
 def _op_add(args: list, tgt: Target):
     """`add(a, b)` on two integers that both already folded."""
     if not (isinstance(args[0], int) and isinstance(args[1], int)) \
             or isinstance(args[0], bool) or isinstance(args[1], bool):
-        return ("unanswered",
+        return _unanswered(
                 "add is integer addition on this path, and at least one "
                 "operand is not an integer this build could fold")
     return ("value", args[0] + args[1])
@@ -816,8 +829,8 @@ def target_template(e, tgt: Target = None):
         return None
     arity, impl = entry
     if arity != len(arg_texts):
-        return ("unanswered",
-                f"the {op!r} target query is written here with "
+        return _unanswered(
+                f"the {op!r} query is written here with "
                 f"{len(arg_texts)} argument(s) and this path knows it with "
                 f"{arity}, so it will not guess what the operands mean")
     # An argument may carry its own type annotation (`"arch" : !kgen.string`),
@@ -826,17 +839,16 @@ def target_template(e, tgt: Target = None):
     for arg_text in arg_texts:
         operand = _arg_operand(arg_text.split(" : ")[0], holes, tgt)
         if operand is None:
-            return ("unanswered",
-                    f"an argument of the {op!r} target query is one this build "
-                    f"cannot fold: it is neither a literal nor another target "
-                    f"query it can read. The whole query reads "
+            return _unanswered(
+                    f"an argument of the {op!r} query is neither a literal nor "
+                    f"another query this build can read. The whole query reads "
                     f"{_spell_template(frag)}.")
         operands.append(operand)
     if impl is None:
         # The one operation that is a value only as an argument.
         if result_type not in (None, "!kgen.target"):
-            return ("unanswered",
-                    f"the {op!r} target query is declared to produce "
+            return _unanswered(
+                    f"the {op!r} query is declared to produce "
                     f"{result_type} and the current target is a target, not a "
                     f"{result_type}")
         return ("target", tgt)
@@ -847,19 +859,19 @@ def target_template(e, tgt: Target = None):
     if result_type is not None:
         want = _TARGET_RESULT_TYPES.get(result_type)
         if want is None:
-            return ("unanswered",
-                    f"the {op!r} target query declares a result of "
-                    f"{result_type}, and this path has no Python type to lower "
-                    f"that to — refusing rather than materializing the value "
-                    f"as something the source did not declare")
+            return _unanswered(
+                    f"the {op!r} query declares a result of "
+                    f"{result_type}, and this path has no type to lower that "
+                    f"to — refusing rather than materializing the value as "
+                    f"something the source did not declare")
         if want == "target" or isinstance(want, type) \
                 and not isinstance(value, want):
-            return ("unanswered",
-                    f"the {op!r} target query declares a result of "
+            return _unanswered(
+                    f"the {op!r} query declares a result of "
                     f"{result_type} but evaluates to "
                     f"{type(value).__name__}, which is a different value than "
-                    f"the source declared. Refused rather than materialized "
-                    f"as one.")
+                    f"the source declared, so it is refused rather than "
+                    f"materialized as one")
     return ("value", value)
 
 
@@ -887,6 +899,65 @@ def fold_target_template(e, tgt: Target = None):
     if got is not None and got[0] == "value":
         return got[1]
     return None
+
+
+def template_is_answered(e) -> bool:
+    """True when this build CAN answer `e`, so nothing inside it is still open.
+
+    The rule both walks over a template tree use, in one place because two
+    copies of it is how the same construct came to be answered in one position
+    and refused in another. It matters for the NESTED case rather than the
+    obvious one: `std/sys/info.mojo` writes its field queries with
+    `#kgen.param.expr<current_target>` as an ARGUMENT, and that inner node on
+    its own is a target-as-a-VALUE, which is a refusal. With the outer query
+    answered, the inner node is not a use at all — it is part of a question
+    already answered — so a walk that visited it and refused would reject a
+    construct the build handles. Measured, not reasoned: that is exactly the
+    failure `std/sys/info.mojo`'s `_os` and `__arch` hit, one of which is the
+    whole reason this exists."""
+    return is_mlir_template(e) and fold_target_template(e) is not None
+
+
+def iter_templates_preorder(node):
+    """Every template in `node`'s tree, outermost first, stopping at an answered one.
+
+    The single walking rule for the MLIR-template family, shared by the
+    module-level refusal here and `formal/build.py`'s function-body rewrite,
+    because the two were once the same walk written twice and disagreed: the
+    refusal visited the nested `#kgen.param.expr<current_target>` inside a
+    field query and refused a construct the evaluator answers. One rule, one
+    place, and neither caller can reach a node the other would have skipped.
+    """
+    if template_is_answered(node):
+        return
+    if is_mlir_template(node):
+        yield node
+        # A template's own elements are backtick fragments and sub-expressions.
+        # Those are walked, so a query nested in a query is still seen, but an
+        # `__mlir_type` template's elements are TYPE fragments and nothing
+        # inside one is a value this path can read.
+        if not is_mlir_type_template(node):
+            frag = _template_fragments(node)
+            for hole in (frag[1] if frag else ()):
+                for inner in iter_templates_preorder(hole):
+                    yield inner
+        return
+    if isinstance(node, (list, tuple)):
+        # A tuple as well as a list, and not as a generality: a call's KEYWORD
+        # arguments are a list of `(name, value)` pairs — `CallExpr.kwargs` — and
+        # `std/builtin/type_aliases.mojo` puts its templates under one
+        # (`Origin[0, _mlir_origin=__mlir_attr[…]]()`). A walk that descends only
+        # into lists reads past them and reports a module as clean, which is the
+        # false-PASS shape this whole walk exists to prevent.
+        for child in node:
+            for inner in iter_templates_preorder(child):
+                yield inner
+        return
+    if node is None or isinstance(node, (str, int, float, bool)):
+        return
+    for name in getattr(node, "__dataclass_fields__", {}):
+        for inner in iter_templates_preorder(getattr(node, name)):
+            yield inner
 
 
 def target_value_refusal(e) -> str:
@@ -961,12 +1032,22 @@ def refuse_module_level_mlir_templates(stmts) -> None:
     which is the module-constant path that already substitutes a folded value
     at every read. A binding the evaluator declines, and a binding that is a
     template about anything other than the target, is refused exactly as
-    before."""
+    before.
+
+    The walk is PRE-ORDER and does not descend into a query it can answer, for
+    the reason `template_is_answered` gives: `#kgen.param.expr<current_target>`
+    appears as an ARGUMENT inside every field query `std/sys/info.mojo` writes,
+    and on its own that node is a target read as a value — a refusal. Visiting
+    it and refusing would reject the very construct this evaluator exists to
+    answer, and the binding that names it is the one the 46-file family hangs
+    on. The recursion is kept (it is what catches the templates nested two
+    levels down under `Origin[0, _mlir_origin=__mlir_attr[…]]()`), so the rule
+    is "stop at an answered query", not "only look at the top node"."""
     for st in stmts:
         value = getattr(st, "value", None)
         if value is None or not isinstance(st, F.ComptimeVarStmt):
             continue
-        for node in iter_nodes(value):
+        for node in iter_templates_preorder(value):
             why = mlir_template_refusal(node)
             if why is not None:
                 # "attribute" vs "type" is the node's own base name, not a

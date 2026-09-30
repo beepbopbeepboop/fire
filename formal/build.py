@@ -3092,20 +3092,48 @@ def _fold_target_queries_in(node, count: list):
     through `setattr`, and one walk serves both — so the number of sites folded
     comes back through a box rather than as a return value that only one of the
     two shapes could carry."""
-    if isinstance(node, list):
+    if isinstance(node, (list, tuple)):
+        # A tuple as well as a list, and not as a generality: a call's KEYWORD
+        # arguments are a list of `(name, value)` pairs (`CallExpr.kwargs`),
+        # which is where `std/builtin/type_aliases.mojo` keeps its templates —
+        # `Origin[0, _mlir_origin=__mlir_attr[…]]()`. Descent that stops at
+        # lists walks straight past them and leaves the query in the tree, so
+        # the backend then refuses a construct the build can answer, and the
+        # read of a `comptime` bound from it materializes a register.
+        #
+        # A tuple cannot be assigned into, so a tuple with a replaced element
+        # comes back as a LIST and the list slot it was read from takes it. A
+        # tuple with nothing replaced returns None, which is what keeps the
+        # common case — every keyword argument in the corpus that is not a
+        # template — from rewriting the list it lives in.
+        out = []
+        changed = isinstance(node, tuple)
         for i, child in enumerate(node):
             if M.is_mlir_template(child):
                 # A template this pass could not answer keeps its shape, WHOLE:
-                # see the function's note on `selector.mojo`.
+                # see the function's note on `selector.mojo`. The test is
+                # `model.template_is_answered`, the SAME one the module-level
+                # refusal asks, because these two walks over the same tree used
+                # to disagree and refused a construct the build answers.
                 folded = M.fold_target_template(child)
                 if folded is not None:
-                    node[i] = M._folded_node(folded, child)
+                    folded = M._folded_node(folded, child)
                     count[0] += 1
+                    changed = True
+                if isinstance(node, list):
+                    node[i] = folded if folded is not None else child
+                else:
+                    out.append(folded if folded is not None else child)
                 continue
             repl = _fold_target_queries_in(child, count)
             if repl is not None:
-                node[i] = repl
-        return None
+                changed = True
+            if isinstance(node, list):
+                if repl is not None:
+                    node[i] = repl
+            else:
+                out.append(child if repl is None else repl)
+        return out if (changed and isinstance(node, tuple)) else None
     if node is None or isinstance(node, (str, int, float, bool)):
         return None
     folded = M.fold_target_template(node)
@@ -3114,7 +3142,7 @@ def _fold_target_queries_in(node, count: list):
         return M._folded_node(folded, node)
     for name in getattr(node, "__dataclass_fields__", {}):
         child = getattr(node, name)
-        if isinstance(child, list):
+        if isinstance(child, (list, tuple)):
             _fold_target_queries_in(child, count)
         elif child is not None and not isinstance(child, (str, int, float,
                                                           bool)):
@@ -3199,6 +3227,15 @@ def check_module_symbols(functions: list, structs_by_name: dict = None) -> None:
         bracketed = {}
         for sub in M.iter_nodes(fn.body):
             if not isinstance(sub, (F.SubscriptExpr, F.MemberExpr)):
+                continue
+            if M.template_is_answered(sub):
+                # Answered at build time, so nothing is left to refuse about it
+                # and the tree below it is not a use of anything. The rewrite
+                # (`_fold_target_queries`) has normally already replaced these
+                # with literals before this check runs, so reaching here means
+                # the rewrite did not cover this position — which is why the
+                # condition is the shared `template_is_answered` rather than a
+                # second opinion written beside it.
                 continue
             root_ident = sub.obj
             while isinstance(root_ident, (F.MemberExpr, F.SubscriptExpr)):

@@ -4317,7 +4317,7 @@ SUBSCRIPT_CASES = [
      "        `, \"neon\"`,\n"
      "        `> : i1`]\n"
      "    return 0\n",
-     "refuse:target_has_feature('neon') is not decidable on this path", None),
+     "refuse:target_has_feature('neon') is a per-CPU question", None),
     # `del a[i, j]`. arm64 reaches the subscript here and refuses with the
     # shared message; x86-64 has no `del` at all and refuses the STATEMENT
     # first, which is correct and complete but names a different thing. Both
