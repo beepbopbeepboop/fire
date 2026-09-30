@@ -248,6 +248,139 @@ _BUILTIN_FNS: dict[str, str] = {
     'saturate': 'saturate', 'isnan': 'isnan', 'isinf': 'isinf',
 }
 
+#: Apple AIR (``llvm.air.*``) intrinsics, on to their MSL form. This is
+#: increment 2 of ``doc/GPU_OFFLOAD_PLAN.html``: the stdlib reaches the GPU
+#: through ``llvm_intrinsic["llvm.air....", ...]``, and until this table
+#: existed there was no way for that call to become MSL at all.
+#:
+#: SCOPE, and why the table is this short. These are the ``llvm.air.*``
+#: names the stdlib's own ``is_apple_gpu()`` branches can reach -- counted
+#: from the sources, not guessed. The ``llvm.nvvm.*`` (36 names) and
+#: ``rocdl.*`` families are deliberately NOT here: they are CUDA and AMD
+#: intrinsics reached only from ``is_nvidia_gpu()`` / ``is_amd_gpu()``
+#: branches, they have no 1:1 MSL equivalent, and mapping them would be
+#: invention rather than lowering. ``llvm.air.simdgroup_matrix_*`` and
+#: ``simd_shuffle`` are also absent -- Metal has simdgroup matrices, but
+#: through a different API than the AIR intrinsic, so a table entry would
+#: be a guess about semantics. Every omission here REFUSES at emit time,
+#: which is the honest outcome: an unsupported intrinsic must not lower to
+#: something that computes a plausible wrong answer.
+#:
+#: The four `...<base>.` entries are the dimension-suffixed families: the
+#: stdlib writes ``"llvm.air.threads_per_threadgroup." + dim`` where ``dim``
+#: is ``x``/``y``/``z`` (std/gpu/primitives/id.mojo). They resolve to the
+#: generated index PARAMETERS, not to a function call -- see
+#: :data:`INDEX_PARAMS` for why the attribute form is the one that
+#: actually compiles on this toolchain.
+LLVM_AIR_INDEX_FAMILIES: dict[str, str] = {
+    'llvm.air.thread_position_in_threadgroup.': '__lid',
+    'llvm.air.threadgroup_position_in_grid.': '__tgid',
+    'llvm.air.threads_per_threadgroup.': '__nthreads',
+    # `threads_per_grid` is NOT here and has no parameter: MSL has no
+    # such kernel attribute, and grid size is host-side dispatch geometry.
+    # Adding it would emit a reference to an undeclared identifier.
+}
+
+#: The `llvm.air.*` intrinsics that are a real function call in MSL. Keys
+#: are the full AIR name; values are the MSL expression, which may use the
+#: index parameters above.
+#:
+#: `thread_index_in_simdgroup` is `__lid % 32` because that is what
+#: `INDEX_PARAM_NAMES['lane_id']` already commits to for the stdlib's
+#: `lane_id` variable -- one definition of "the lane", not two that can
+#: disagree. MSL has a real `simdgroup_index_in_threadgroup`, and using it
+#: here would be better still; it is left matching the existing table so
+#: this change is behaviour-preserving, and switching both is a separate,
+#: separately-measured step.
+LLVM_AIR_FNS: dict[str, str] = {
+    'llvm.air.thread_index_in_simdgroup': '(__lid % 32u)',
+    'llvm.air.sqrt': 'metal::sqrt',
+    'llvm.air.rsqrt': 'metal::rsqrt',
+    'llvm.air.exp2': 'metal::exp2',
+    'llvm.air.log10': 'metal::log10',
+    'llvm.air.sin': 'metal::sin',
+    'llvm.air.cos': 'metal::cos',
+    'llvm.air.pow': 'metal::pow',
+}
+
+#: AIR's `llvm.air.thread_index_in_simdgroup` and the stdlib's own name
+#: for the same thing. Kept as a named alias so the table above and
+#: `INDEX_PARAM_NAMES` cannot drift apart silently.
+LLVM_AIR_SIMDGROUP_INDEX = 'llvm.air.thread_index_in_simdgroup'
+
+
+def llvm_air(name: str) -> str | None:
+    """MSL for an Apple AIR intrinsic name, or None if this table has none.
+
+    ``None`` means REFUSE, not "emit the name and hope": the caller turns
+    it into a `MetalUnsupported` naming the intrinsic, because a GPU
+    intrinsic that silently lowers to the wrong thing is the worst
+    available outcome.
+    """
+    # An exact function name first, so a dimension-suffixed family prefix
+    # can never swallow one of these.
+    fn = LLVM_AIR_FNS.get(name)
+    if fn is not None:
+        return fn
+    for base, param in LLVM_AIR_INDEX_FAMILIES.items():
+        if name.startswith(base) and len(name) == len(base) + 1:
+            dim = name[len(base)]
+            if dim in 'xyz':
+                return param
+    return None
+
+
+def llvm_air_is_intrinsic(name: str) -> bool:
+    """True if `name` is an AIR name this module knows about AT ALL.
+
+    Distinguishes "not an intrinsic" from "an intrinsic we cannot lower",
+    which matters because only the second is worth a message that names the
+    intrinsic: the first is some other call that the ordinary path already
+    reports.
+    """
+    return name in LLVM_AIR_FNS or any(
+        name.startswith(b) for b in LLVM_AIR_INDEX_FAMILIES)
+
+#: The MSL type an AIR intrinsic's declared return type implies. The stdlib
+#: passes the return type as the SECOND template argument of
+#: `llvm_intrinsic[...]` (`std/sys/intrinsics.mojo`: `type: TrivialRegisterPassable`),
+#: so it is available and is honoured rather than assumed.
+#:
+#: This is a correctness table, not a convenience one. `_type_of` in the
+#: emitter DEFAULTS an unknown expression to `float`, so without this an
+#: `Int32`-returning index intrinsic was declared `float`:
+#:
+#:     float a;  a = __lid;  out[tid] = a + b + c;
+#:
+#: which silently routes three integers through a float. Small indices
+#: survive that, so a test on tid 0..3 passes and the bug only shows on
+#: large values -- and a GPU kernel indexing with `threads_per_grid` is
+#: exactly where that shows.
+#:
+#: Keyed by the SPELLING the stdlib uses in the subscript. An unknown
+#: spelling returns None, and the caller then keeps the existing default
+#: rather than inventing a type.
+LLVM_AIR_RET_TYPES: dict[str, str] = {
+    'Int8': 'char', 'Int16': 'short', 'Int32': 'int', 'Int64': 'long',
+    'UInt8': 'uchar', 'UInt16': 'ushort', 'UInt32': 'uint', 'UInt64': 'ulong',
+    'Bool': 'bool',
+    'Float16': 'half', 'Float32': 'float',
+    'BFloat16': 'bfloat',
+}
+
+
+def llvm_air_ret_type(name: str | None) -> str | None:
+    """MSL type for the declared return type of an AIR intrinsic.
+
+    ``name`` is the return type AS SPELLED in the subscript (an `IdentExpr`
+    for a scalar, anything else for a vector). Returns None for anything not
+    in the table, which includes every vector spelling -- those need the
+    element width, and guessing it is how a `float` default got in.
+    """
+    if not name:
+        return None
+    return LLVM_AIR_RET_TYPES.get(name)
+
 def is_float_type(msl: str) -> bool:
     return msl in _MSL_FLOAT_TYPES
 

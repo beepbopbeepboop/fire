@@ -129,6 +129,19 @@ class MetalEmitter:
                     if em:
                         return em
             return 'float'
+        if isinstance(node, CallExpr) and isinstance(node.func, SubscriptExpr):
+            # `llvm_intrinsic[name, ReturnType, ...]()`. The stdlib declares
+            # the return type as the second template argument, so read it
+            # rather than defaulting: the emitter's fallback is `float`, and
+            # an `Int32` index intrinsic silently declared `float` is a
+            # wrong answer that only shows on large values. See
+            # metal_ops.LLVM_AIR_RET_TYPES.
+            el = list(getattr(node.func.index, 'elements', None) or ())
+            if len(el) >= 2 and isinstance(el[1], IdentExpr):
+                rt = mops.llvm_air_ret_type(_as_str(el[1].name))
+                if rt is not None:
+                    return rt
+            return 'float'
         if isinstance(node, CallExpr) and isinstance(node.func, IdentExpr):
             nm = _as_str(node.func.name)
             if nm in ('abs', 'min', 'max', 'clamp', 'sign'):
@@ -521,7 +534,73 @@ class MetalEmitter:
             raise MetalUnsupported(f'kernel {self.name}: empty comparison chain.')
         return ' && '.join(terms) if len(terms) > 1 else terms[0]
 
+    def _llvm_intrinsic_call(self, node: CallExpr) -> str | None:
+        """`llvm_intrinsic["llvm.air...", Type, ...](args)` on a device.
+
+        The stdlib reaches the GPU ONLY through this shape
+        (`std/sys/intrinsics.mojo`, called from the `is_apple_gpu()` branches
+        of `std/gpu/primitives/id.mojo` and friends), so without it no real
+        stdlib GPU code can lower at all -- increment 2 of
+        `doc/GPU_OFFLOAD_PLAN.html` is exactly this.
+
+        The callee is a `SubscriptExpr` whose index is a TUPLE of the
+        template arguments: the intrinsic NAME first (a string literal), then
+        the return type, then any argument types, then the flags. Only the
+        name matters here; the type arguments are compile-time and have no
+        MSL spelling, and the runtime arguments are the call's own `args`.
+
+        Returns the MSL expression, or None if this is not an
+        `llvm_intrinsic` subscript call (so the caller reports it normally).
+        A recognised AIR name with no MSL form RAISES, naming the
+        intrinsic: an unimplemented GPU intrinsic must not quietly become
+        something that computes a plausible wrong answer.
+        """
+        sub = node.func
+        if not isinstance(sub, SubscriptExpr):
+            return None
+        base = sub.obj
+        if not isinstance(base, IdentExpr) or _as_str(base.name) != 'llvm_intrinsic':
+            return None
+        tup = sub.index
+        elements = list(getattr(tup, 'elements', None) or ())
+        if not elements:
+            return None
+        first = elements[0]
+        if not isinstance(first, gimple_ctypes.StringLiteral):
+            # A name built at runtime (`"llvm.air..." + dim` in the stdlib,
+            # where `dim` is a `StaticString` parameter) does not reach here
+            # as a literal. Refuse with that said plainly rather than
+            # treating a non-literal as some default name.
+            raise MetalUnsupported(
+                f'kernel {self.name}: the llvm_intrinsic name is not a string '
+                'literal, so the AIR intrinsic it names cannot be resolved. '
+                'A device kernel must name its intrinsic statically.')
+        name = _as_str(first.value)
+        args = [self._expr(a) for a in (node.args or [])]
+        msl = mops.llvm_air(name)
+        if msl is None:
+            if mops.llvm_air_is_intrinsic(name):
+                raise MetalUnsupported(
+                    f'kernel {self.name}: {name!r} has no MSL lowering on this '
+                    'target. See metal_ops.LLVM_AIR_FNS for what is '
+                    'implemented, and the omission note there for why the '
+                    'simdgroup-matrix and shuffle forms are not in it.')
+            # A non-AIR intrinsic (llvm.nvvm.*, rocdl.*, llvm.masked.*).
+            # Naming it is the useful part: it says the program reached for
+            # a vendor intrinsic this target does not have.
+            raise MetalUnsupported(
+                f'kernel {self.name}: intrinsic {name!r} has no MSL lowering. '
+                'Only llvm.air.* (Apple) intrinsics are implemented; this '
+                'name is not one of them.')
+        # An index family is a bare parameter, not a call.
+        if msl.startswith('__') and not args:
+            return msl
+        return f'{msl}({", ".join(args)})' if args else msl
+
     def _call(self, node: CallExpr) -> str:
+        air = self._llvm_intrinsic_call(node)
+        if air is not None:
+            return air
         if not isinstance(node.func, IdentExpr):
             raise MetalUnsupported(
                 f'kernel {self.name}: only a bare function call lowers on a '
