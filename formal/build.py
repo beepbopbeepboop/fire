@@ -99,7 +99,7 @@ def parse_module(source: str, filename: str = "<input>") -> list:
 MODULE_BODY_NAME = M.MODULE_BODY_NAME
 
 
-def _module_body_function(body: list) -> F.FunctionDef:
+def _module_body_function(body: list, declares: list = None) -> F.FunctionDef:
     """`def __module_body__(): <body>` — the module's top level as a function.
 
     The whole of the fix for `bugs/FORMAL_toplevel_statements_dropped.md`. A
@@ -135,7 +135,23 @@ def _module_body_function(body: list) -> F.FunctionDef:
     (a script that runs off the end exits 0) — and deliberately NOT the value
     of the last statement, because CPython's is 0 and the last statement's
     value is what a REPL would print, not what a process exits with.
+
+    `declares` is the module's own FunctionDefs, and is checked for one of
+    this name. `__module_body__` is a legal Python identifier, so a file CAN
+    define it, and both backends key their function tables by name
+    (`self._functions[f.name] = f`) — two functions of one name means the
+    second silently replaces the first, and which one wins would depend on
+    emission order. Refusing by name is the only answer that is not a
+    coin toss, and the reader can rename their function in one edit.
     """
+    if any(getattr(f, "name", None) == MODULE_BODY_NAME
+           for f in (declares or [])):
+        raise CodegenError(
+            f"this module defines a function named `{MODULE_BODY_NAME}`, "
+            f"which is the name this path compiles a module's top-level "
+            f"statements under. Both backends key their function tables by "
+            f"name, so two functions of one name means one silently replaces "
+            f"the other depending on emission order. Rename it")
     fn = F.FunctionDef(name=MODULE_BODY_NAME,
                        params=[],
                        return_type=None,
@@ -665,7 +681,8 @@ def _extract_functions(stmts: list, synthetic: bool = True,
     functions = [s for s in stmts if isinstance(s, F.FunctionDef)]
     if body is None:
         body = M.module_body(stmts, symbols)
-    entry = [_module_body_function(body)] if body else []
+    entry = ([_module_body_function(body, functions)]
+             if body else [])
     if not functions and not entry and synthetic:
         functions = [_synthetic_main()]
     # The body first, then `main`, then the rest. The body is the module's own

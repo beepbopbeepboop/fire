@@ -8558,7 +8558,14 @@ def entry_function(functions: list):
         # `main` second. The body calls `main` if the source says so.
         body = body + [f for f in functions
                        if getattr(f, "name", None) == "main"]
-    rest = [f for f in functions if f not in body]
+    # By IDENTITY, not by `not in`: `F.FunctionDef` is a dataclass, so `in`
+    # compares by VALUE, and two functions that happen to be spelled the same
+    # way — `def f(): return 0` twice, which Mojo overloads and this tree
+    # does contain — would make the second one compare equal to the first and
+    # be dropped from `rest`. That is a silently missing function, which is
+    # the failure this whole module exists to remove.
+    taken = {id(f) for f in body}
+    rest = [f for f in functions if id(f) not in taken]
     return body + rest if body else functions
 
 

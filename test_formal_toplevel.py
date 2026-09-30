@@ -708,6 +708,51 @@ def test_entry_order_is_the_module_body(tmpdir, verbose):
     return ok
 
 
+def test_a_name_collision_with_the_body_function_is_refused(tmpdir, verbose):
+    """A file that defines `__module_body__` itself is refused, by name.
+
+    `__module_body__` is a legal Python identifier, so a file CAN define it,
+    and both backends key their function tables by name — two functions of
+    one name means the second silently replaces the first, and which one
+    wins would depend on emission order. Refused, because a coin toss is not
+    an answer.
+
+    The second half is the one that makes the first safe: the SAME name in a
+    file with no module body is an ordinary function and must still build and
+    run, or the refusal would be refusing a name rather than a collision."""
+    ok = case_refused(
+        "body_name_collision",
+        "def __module_body__():\n    return 5\n\nexit(0)\n",
+        "which is the name this path compiles a module's top-level "
+        "statements under", tmpdir, verbose)
+    ok &= case_agrees_with_cpython(
+        "body_name_no_collision",
+        "def __module_body__():\n    return 5\n", tmpdir, verbose,
+        expect_stdout="", expect_exit=5)
+    return ok
+
+
+def test_a_folded_constant_the_body_rebinds_keeps_its_store(tmpdir, verbose):
+    """`total = 0` at file level, then a loop that accumulates into it.
+
+    The wrong answer this whole rule exists to prevent, and it is a WRONG
+    ANSWER rather than a refusal, which is why it is pinned: `total = 0`
+    folds to a literal, so the store is normally left out of the body and the
+    literal substituted at each read. The substitution does not fire inside
+    the body — it skips a name the reading function BINDS, and the loop binds
+    `total` — so with the store left out the read at the top of the loop has
+    no value at all. Measured before the fix: `total=-157679350` on arm64
+    and `total=240046802` on x86-64, for a program CPython answers 10 on.
+
+    The two architectures disagreeing about a word neither of them wrote is
+    the reason this is a case and not a note."""
+    return case_agrees_with_cpython(
+        "rebound_constant",
+        "total = 0\nfor i in range(5):\n    total = total + i\n"
+        "printf(\"total=%d\", total)\n", tmpdir, verbose,
+        expect_stdout="total=10", expect_exit=0)
+
+
 # ── driver ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -736,6 +781,8 @@ def main():
         test_t1_is_a_named_finding_not_a_pass,
         test_a_module_body_reaches_its_next_real_finding,
         test_a_module_body_can_still_be_refused_by_the_ordinary_codegen,
+        test_a_name_collision_with_the_body_function_is_refused,
+        test_a_folded_constant_the_body_rebinds_keeps_its_store,
     ]
     for fn in cases:
         if args.verbose:
