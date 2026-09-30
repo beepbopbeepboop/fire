@@ -393,7 +393,7 @@ build/fire: build/system.o build/fire_runtime.o $(CORO_RUNTIME_OBJS)
 	@mkdir -p build
 	$(BOOTSTRAP_CC) $(BIG_STACK_LDFLAGS) -o $@ build/system.o build/fire_runtime.o $(CORO_RUNTIME_OBJS)
 	@chmod +x $@
-	@echo "build/mojo linked successfully"
+	@echo "build/fire linked successfully"
 
 # ── aside/bside/compare-a-b: per-file self-host A/B sweep at scale ───────────
 # This one really is Make's job, and the reason is worth keeping: each file

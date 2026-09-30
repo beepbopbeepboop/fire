@@ -1,26 +1,18 @@
 #!/usr/bin/env python3
 """
-fire.py - Mojo interpreter/compiler system
+fire.py — the Mojo compiler/interpreter command line.
 
-Modes:
-- mojo                             Interactive REPL
-- mojo repl                        Interactive REPL (explicit)
-- mojo <file.mojo>                 Interpret and execute file
-- mojo build <file.mojo>           Compile to executable (output name = file basename)
-- mojo build -o <output> <file>    Compile to executable with specified output name
-- mojo --backend=arm64 ...         Select the arm64 formal backend (no gimple)
-- mojo --backend=x86_64 ...        Select the x86-64 formal backend (no gimple)
-- mojo build --formal <file.mojo>  Formal arm64 build (Mach-O + Lean proof)
-- mojo build --formal --backend=x86_64 <f>  Formal x86-64 build (Mach-O, no proof)
-- mojo build --formal -o <out> <f> Same, with specified output path
-- mojo build --formal -n <int> <f> Same, with X0 input for the entry call (default 10)
-- mojo --no-prove <file>           Skip proof generation and checking
-- mojo --formal <file.mojo>        Formal build, then run it
-- mojo dylib --formal -o <out> <f> [...]  One arm64 dylib from N modules, formal codegen
-- mojo --jit <file.mojo>           JIT compile and execute (ARM64)
-- mojo --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
-- mojo --dump-full <file.mojo>     Generate single .ci with transitive closure (for bootstrap)
-- mojo -h, --help                  Show usage
+`fire.py -h` is the one authoritative list of modes, flags and backends. It
+used to be duplicated in this docstring, and the copy drifted: it advertised a
+`formalbuild` spelling that no longer exists and omitted `dylib` and `run`,
+which do — so a second list could only ever mislead whoever read it. Say it
+once, where it is maintained.
+
+The name this tool prints in its own usage and error text comes from
+`_tool_name()` below, not from a string typed in here: this one program is
+invoked as `fire.py`, as `mojoc` (one-step self-host build) and as
+`stage2/mojo` (bootstrap stage binaries), and each of those is spelled by the
+person running it.
 """
 
 import sys
@@ -43,6 +35,83 @@ from build_config import (find_gcc, find_gxx, optional_unit_cc,
                           referenced_optional_runtime_units)
 _GCC_BIN = find_gcc()
 _GXX_BIN = find_gxx()
+
+
+def _tool_name() -> str:
+    """The name to print when this program names ITSELF — usage, version, errors.
+
+    Read off `sys.argv[0]` rather than spelled out at each print site, because
+    the same program is three commands and only the invoker knows which one is
+    being run: `python3 fire.py` (the script), `./mojoc` (the one-step
+    self-host build) and `stage2/mojo` (the bootstrap stage binaries, compiled
+    from this very file). Hardcoding any one of those names made the others
+    print a command that does not exist — which is exactly what happened when
+    mojo.py became fire.py and `--help` went on advertising `mojo build`.
+
+    Falls back to `fire` when argv[0] carries no usable name (`python3 -c`, an
+    embedded `import fire`, a harness that scrubs it), so the text can never
+    degrade to an empty string or a bare `-c`.
+    """
+    argv0 = sys.argv[0] if sys.argv else ''
+    name = os.path.splitext(os.path.basename(argv0))[0]
+    if not name or name.startswith('-'):
+        return 'fire'
+    return name
+
+
+def _usage_text() -> str:
+    """`fire.py -h` output: every mode, flag and backend, named by invocation.
+
+    Kept in a function (not a literal at the print site) so it is the one
+    place the tool's own name is spelled into prose, and so a test can read it
+    without shelling out.
+    """
+    tool = _tool_name()
+    return f"""Usage:
+  {tool}                             Interactive REPL (interpreter)
+  {tool} --jit                       Interactive REPL (JIT mode, ARM64)
+  {tool} repl                        Interactive REPL (explicit, interpreter)
+  {tool} repl --jit                  Interactive REPL (explicit, JIT mode)
+  {tool} <file.mojo>                 Compile and run (falls back to the interpreter on failure)
+  {tool} run <file.mojo>             Run through the interpreter only (myinterpreter.py, no compile attempt)
+  {tool} --jit <file.mojo>           JIT compile and execute (ARM64)
+  {tool} build <file.mojo>           Compile to executable (same name as file, no extension)
+  {tool} build -o <output> <file>    Compile to executable with specified output name
+  {tool} build --formal [-o <out>] [-n <int>] <file.mojo>
+                                    Formal arm64 build: Mach-O executable + a Lean
+                                    proof (checked by default). -n is the X0 value
+                                    the entry function is called with (default 10);
+                                    it needs --formal.
+  {tool} --formal [-n <int>] <file.mojo>
+                                    Same, then run it (bare form = build and run)
+  {tool} --no-prove <file> [...]     Formal backend only: skip proof generation/checking
+  {tool} --backend=arm64 ...         Select the arm64 formal backend (no gimple) [same as --formal]
+  {tool} --backend=gimple ...        Select the gimple backend (default)
+  {tool} dylib <file.mojo> [...]     Compile library module(s) to a standalone .dylib/.so
+  {tool} dylib -o <out> <file> [...] Same, with specified output path
+  {tool} dylib --formal -o <out> <f> [...]  One arm64 dylib from N modules, formal codegen;
+                                    public fns export as _<module>__<fn> (leading _ = private)
+  {tool} --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
+  {tool} --dump-full <file.mojo>     Generate single .ci with transitive closure (for bootstrap)
+  {tool} -v, --version               Show the compiler version (git SHA / release)
+  {tool} -h, --help                  Show this help message
+
+Formal backend notes:
+  `formalbuild` is gone: it was `build --formal` with a second name, and now
+  that --formal covers -o/-n/prove, one spelling does everything.
+  Proofs are emitted next to the output (<stem>_proof.lean) and typechecked with
+  the Lean version pinned in ./lean-toolchain. Each verdict is cached in the
+  content-addressed store (~/.gmojo/cas/proof) keyed on the proof bytes, the
+  lib/*.olean bytes and the toolchain, so an unchanged proof is not re-checked
+  ("(verified from cache)"). Any of those changing re-runs Lean from scratch.
+
+Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache key):
+  -O0 -O1 -O2 -O3 -Os -Oz -Og      Optimization level (JIT default -Og, build default -O0, dylib default -O2)
+  -g -g0 -g1 -g2 -g3               Debug info level (build default -g3)
+
+Backend selector (may appear anywhere; selects the codegen path):
+  --backend=gimple|arm64           gimple = default C/GIMPLE path; arm64 = formal arm64 + Mach-O (no gimple, no driver)"""
+
 
 def _extract_codegen_flags(args: list):
     """Pull optimization (-O0/-O1/-O2/-O3/-Os/-Oz/-Og) and debug (-g/-g0../-g3)
@@ -151,8 +220,8 @@ def _pop_test_input(argv: list):
 
     Only from the CLI's own portion of the command line: `-n` is consumed when
     it appears before the input file, and left alone when it appears after it,
-    so `mojo --formal -n 5 prog.mojo` sets the entry argument while
-    `mojo --formal prog.mojo -n 5` still hands -n to prog (everything after the
+    so `fire --formal -n 5 prog.mojo` sets the entry argument while
+    `fire --formal prog.mojo -n 5` still hands -n to prog (everything after the
     input file is the program's argv). A bare `-n` with no value, or a
     non-integer one, is a usage error.
     """
@@ -162,14 +231,14 @@ def _pop_test_input(argv: list):
         return None
     i = argv.index('-n', 1, first_file)
     if i + 1 >= len(argv):
-        print("mojo: -n requires an integer argument", file=sys.stderr)
+        print(f"{_tool_name()}: -n requires an integer argument", file=sys.stderr)
         sys.exit(2)
     raw = argv[i + 1]
     del argv[i:i + 2]
     try:
         return int(raw)
     except ValueError:
-        print(f"mojo: -n expects an integer, got {raw!r}", file=sys.stderr)
+        print(f"{_tool_name()}: -n expects an integer, got {raw!r}", file=sys.stderr)
         sys.exit(2)
 
 
@@ -201,8 +270,8 @@ def _sorry_note(result) -> str:
 
 def _formal_executable(input_file: str, output, test_input: int, prove: bool,
                        run_it: bool, link_dylibs=None, arch: str = "arm64") -> int:
-    """The one formal executable path: `mojo build --formal` and bare
-    `mojo --formal <file>` both land here, and nothing else builds one.
+    """The one formal executable path: `fire build --formal` and bare
+    `fire --formal <file>` both land here, and nothing else builds one.
 
     `run_it` is the only difference between them, and it mirrors the gimple
     split exactly: `build` compiles and stops, a bare filename compiles and
@@ -821,56 +890,13 @@ def main():
     if sys.argv[1] in ('-v', '--version', 'version'):
         try:
             from version import version
-            print(f"mojo {version()}")
+            print(f"{_tool_name()} {version()}")
         except Exception:
-            print("mojo unknown")
+            print(f"{_tool_name()} unknown")
         return
 
     if sys.argv[1] in ('-h', '--help', 'help'):
-        print("""Usage:
-  mojo                             Interactive REPL (interpreter)
-  mojo --jit                       Interactive REPL (JIT mode, ARM64)
-  mojo repl                        Interactive REPL (explicit, interpreter)
-  mojo repl --jit                  Interactive REPL (explicit, JIT mode)
-  mojo <file.mojo>                 Compile and run (falls back to the interpreter on failure)
-  mojo run <file.mojo>             Run through the interpreter only (myinterpreter.py, no compile attempt)
-  mojo --jit <file.mojo>           JIT compile and execute (ARM64)
-  mojo build <file.mojo>           Compile to executable (same name as file, no extension)
-  mojo build -o <output> <file>    Compile to executable with specified output name
-  mojo build --formal [-o <out>] [-n <int>] <file.mojo>
-                                    Formal arm64 build: Mach-O executable + a Lean
-                                    proof (checked by default). -n is the X0 value
-                                    the entry function is called with (default 10);
-                                    it needs --formal.
-  mojo --formal [-n <int>] <file.mojo>
-                                    Same, then run it (bare form = build and run)
-  mojo --no-prove <file> [...]     Formal backend only: skip proof generation/checking
-  mojo --backend=arm64 ...         Select the arm64 formal backend (no gimple) [same as --formal]
-  mojo --backend=gimple ...        Select the gimple backend (default)
-  mojo dylib <file.mojo> [...]     Compile library module(s) to a standalone .dylib/.so
-  mojo dylib -o <out> <file> [...] Same, with specified output path
-  mojo dylib --formal -o <out> <f> [...]  One arm64 dylib from N modules, formal codegen;
-                                    public fns export as _<module>__<fn> (leading _ = private)
-  mojo --dump <file.mojo>          Generate .tok, .ast, .ci, .pyi files
-  mojo --dump-full <file.mojo>     Generate single .ci with transitive closure (for bootstrap)
-  mojo -v, --version               Show the compiler version (git SHA / release)
-  mojo -h, --help                  Show this help message
-
-Formal backend notes:
-  `formalbuild` is gone: it was `build --formal` with a second name, and now
-  that --formal covers -o/-n/prove, one spelling does everything.
-  Proofs are emitted next to the output (<stem>_proof.lean) and typechecked with
-  the Lean version pinned in ./lean-toolchain. Each verdict is cached in the
-  content-addressed store (~/.gmojo/cas/proof) keyed on the proof bytes, the
-  lib/*.olean bytes and the toolchain, so an unchanged proof is not re-checked
-  ("(verified from cache)"). Any of those changing re-runs Lean from scratch.
-
-Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache key):
-  -O0 -O1 -O2 -O3 -Os -Oz -Og      Optimization level (JIT default -Og, build default -O0, dylib default -O2)
-  -g -g0 -g1 -g2 -g3               Debug info level (build default -g3)
-
-Backend selector (may appear anywhere; selects the codegen path):
-  --backend=gimple|arm64           gimple = default C/GIMPLE path; arm64 = formal arm64 + Mach-O (no gimple, no driver)""")
+        print(_usage_text())
         return
 
     # Check for repl command
@@ -912,7 +938,7 @@ Backend selector (may appear anywhere; selects the codegen path):
         build = True
         sys.argv.pop(1)
         build_output = _pop_flag_value(sys.argv, '-o')
-        # Formal libraries this program links against: `mojo build --formal
+        # Formal libraries this program links against: `fire build --formal
         # --link-dylib <path>`, repeatable. Each library's export manifest
         # says which bare callee names it exports and under what symbol, so a
         # cross-module call becomes a real dependency instead of a BL against
@@ -921,7 +947,7 @@ Backend selector (may appear anywhere; selects the codegen path):
         while '--link-dylib' in sys.argv:
             i = sys.argv.index('--link-dylib')
             if i + 1 >= len(sys.argv):
-                print("mojo build: --link-dylib needs a .dylib path",
+                print(f"{_tool_name()} build: --link-dylib needs a .dylib path",
                       file=sys.stderr)
                 sys.exit(2)
             build_link_dylibs.append(sys.argv[i + 1])
@@ -932,8 +958,8 @@ Backend selector (may appear anywhere; selects the codegen path):
     # command line — before the input file — and reject it on the gimple
     # backend, where there is no such stub and it would silently do nothing.
     if not formal and '-n' in sys.argv[1:_first_input_index(sys.argv)]:
-        print("mojo: -n is the formal backend's entry-argument flag (X0) and "
-              "requires --formal", file=sys.stderr)
+        print(f"{_tool_name()}: -n is the formal backend's entry-argument flag "
+              "(X0) and requires --formal", file=sys.stderr)
         sys.exit(2)
     formal_test_input = _pop_test_input(sys.argv)
 
@@ -953,11 +979,12 @@ Backend selector (may appear anywhere; selects the codegen path):
         dylib_output = _pop_flag_value(sys.argv, '-o')
         dylib_inputs = sys.argv[1:]
         if formal_test_input is not None:
-            print("mojo dylib --formal: -n does not apply — a dylib has no "
-                  "entry stub to pass an argument to", file=sys.stderr)
+            print(f"{_tool_name()} dylib --formal: -n does not apply — a dylib "
+                  "has no entry stub to pass an argument to", file=sys.stderr)
             sys.exit(2)
         if not dylib_inputs:
-            print("mojo dylib: at least one .mojo file is required", file=sys.stderr)
+            print(f"{_tool_name()} dylib: at least one .mojo file is required",
+                  file=sys.stderr)
             sys.exit(1)
         if formal:
             _fb = _load_formal_build()
@@ -980,7 +1007,8 @@ Backend selector (may appear anywhere; selects the codegen path):
     if sys.argv[1] == 'formalbuild':
         # Removed rather than aliased: `build --formal` is the same code path
         # (see _formal_executable), so there is nothing left to forward to.
-        print("mojo formalbuild: removed. Use: mojo build --formal "
+        tool = _tool_name()
+        print(f"{tool} formalbuild: removed. Use: {tool} build --formal "
               "[-n <int>] [-o <out>] <file.mojo>", file=sys.stderr)
         sys.exit(2)
 
@@ -1193,7 +1221,7 @@ Backend selector (may appear anywhere; selects the codegen path):
             sys.exit(1)
         return
 
-    # `mojo run <file>`: force the interpreter, no compile attempt at all.
+    # `fire run <file>`: force the interpreter, no compile attempt at all.
     if run_interp:
         interpret_and_execute(src, filename=input_file, argv=[input_file] + program_args)
         return
@@ -1205,9 +1233,9 @@ Backend selector (may appear anywhere; selects the codegen path):
     # block execution; that is deferred).
     if input_file.endswith('.mojo'):
         if backend in ('arm64', 'x86_64'):
-            # Bare `mojo --formal f.mojo` (and `mojo --backend=arm64 f.mojo`)
-            # compile AND run, exactly like a bare `mojo f.mojo` on the gimple
-            # backend; `mojo build --formal` compiles and stops. The x86_64
+            # Bare `fire --formal f.mojo` (and `fire --backend=arm64 f.mojo`)
+            # compile AND run, exactly like a bare `fire f.mojo` on the gimple
+            # backend; `fire build --formal` compiles and stops. The x86_64
             # image is a Mach-O and runs under Rosetta (see
             # _formal_run_argv).
             sys.exit(_formal_executable(

@@ -1312,9 +1312,30 @@ def gen_module_impl(self, stmts):
 
     imported_code = []
     imported_stmts = []
-    if self.do_imports:
+    # ONE inline-compile loop, TWO sources for the module set. The do_imports
+    # (single-translation-unit) path inlines every module any import in this
+    # closure names; link mode inlines only the ones Phase 0's
+    # `_register_link_imports` could NOT satisfy from a dylib
+    # (`self._link_inline_modules` — everything else is already a recorded
+    # dylib + extern decl, and inlining those too would emit a second
+    # definition of a symbol the dylib defines). Everything downstream of
+    # that choice — the cross-module hint pre-passes below, which MUST run
+    # before the first module is inlined, and the compile loop itself — is
+    # shared. This used to be a second, hand-rolled copy of the loop placed
+    # AFTER this block, which inlined the module correctly but skipped the
+    # pre-passes entirely; the concrete consequence was that a struct defined
+    # in a link-inlined sibling compiled with int64_t field defaults, so a
+    # client `Class('v', 7)` call site became a real GIMPLE "non-trivial
+    # conversion" hard error instead of a correctly-typed constructor call
+    # (the cross-module-import report's rows 2/4/6/8; see the 2026-09-29
+    # section of bugs/hard/README.md).
+    if self.do_imports or self.link_imports:
         modules_to_compile = {}  # dict not set: `sorted(<set>)` self-hosted is address order -> nondeterministic module COMPILE order in --dump-full (whole modules emitted vs stubbed run to run; also feeds the OOM per comment below)
-        _collect_import_modules(modules_to_compile, stmts)
+        if self.do_imports:
+            _collect_import_modules(modules_to_compile, stmts)
+        else:
+            for _lmi in sorted(self._link_inline_modules):
+                modules_to_compile[_as_str(_lmi)] = True
 
         # Cross-module generator scalar contracts (pre-pass, MUST run
         # before any imported module is inlined): for every bare-name call
@@ -1330,7 +1351,14 @@ def gen_module_impl(self, stmts):
         # local-variable inference has run, so an identifier argument has
         # no trustworthy type yet; non-unanimous or non-literal sites hint
         # nothing and keep today's behavior.
-        if self.do_imports:
+        #
+        # Ungated since the block above already established that this is a
+        # do_imports OR link_imports compile: these pre-passes are pure
+        # functions of `self` + `stmts` (they never read
+        # `modules_to_compile`), and the link-mode path inlines real modules
+        # through the very same loop, so it needs them for exactly the same
+        # reason.
+        if self.do_imports or self.link_imports:
             _xg_alias_mod: dict = {}
             _xg_alias_orig: dict = {}
             # Bound-MODULE bindings for `<module>.<gen>(...)` attribute
@@ -1678,32 +1706,12 @@ def gen_module_impl(self, stmts):
                             self._imported_struct_home.setdefault(_ms.name, _mn)
                 self._compiled_modules.add(_mn)
 
-        already_in_stmts = set(id(s) for s in imported_stmts)
-        for s in self._all_transitive_stmts_ordered:
-            if id(s) not in already_in_stmts:
-                imported_stmts.append(s)
-                already_in_stmts.add(id(s))
-
-    if self.link_imports:
-        for module_name in sorted(self._link_inline_modules):
-            if module_name not in self._compiled_modules:
-                self._compiled_modules.add(module_name)
-                code, module_stmts = self._compile_imported_module(module_name)
-                if code:
-                    imported_code.append(f"/* ─── Imported module (link-mode fallback): {module_name} ───────────────────── */")
-                    imported_code.append(code)
-                    imported_code.append('')
-                    imported_stmts.extend(module_stmts)
-                    for _ms in module_stmts:
-                        if isinstance(_ms, FunctionDef):
-                            self._global_inline_defs.add(_ms.name)
-                            self._imported_func_home.setdefault(_ms.name, module_name)
-                            self._note_own_func_home(_ms.name, module_name, record_scope=False)
-                        elif isinstance(_ms, StructDef):
-                            for _m in _ms.methods:
-                                self._global_inline_defs.add(_m.name)
-                                self._global_inline_defs.add(f"{_ms.name}_{_m.name}")
-                            self._imported_struct_home.setdefault(_ms.name, module_name)
+        if self.do_imports:
+            already_in_stmts = set(id(s) for s in imported_stmts)
+            for s in self._all_transitive_stmts_ordered:
+                if id(s) not in already_in_stmts:
+                    imported_stmts.append(s)
+                    already_in_stmts.add(id(s))
 
     self.struct_field_types['Span'] = {
         '_data': 'char *',

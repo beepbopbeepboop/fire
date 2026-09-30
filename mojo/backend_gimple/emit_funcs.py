@@ -399,11 +399,36 @@ def _gen_stmt_FromImportStmt(gen, node):
                 gen.func_return_types[symbol_name] = ret
             if _fi_qual:
                 # Same mode-dependent qualifier rule as the top-level
-                # Process-imports loop (do_imports inlines siblings under
-                # the dotted-import string sanitized; per-file dylib
-                # pipelines use the path-derived qualifier).
-                if getattr(gen, 'do_imports', False):
-                    _fi_home = node.module.replace('.', '_').replace('-', '_')
+                # Process-imports loop (a module this compile INLINES is
+                # keyed by the import string sanitized; a module satisfied
+                # by a dylib uses the path-derived qualifier). `lstrip('.')`
+                # is load-bearing and was missing here, the same way it was
+                # missing in `_register_sym` (mojo/middle/module_shared.py)
+                # — it made this the outlier among the call sites that mangle
+                # a module string into a C symbol prefix (`_note_own_func_home`
+                # and `_func_qualifier._sanitize_qualifier` both strip it
+                # already, so a leading depth dot survived ONLY here):
+                #
+                #   def f():
+                #       from .sub import tri     # `node.module` == '.sub'
+                #       return tri(14)
+                #     here        : '.sub' -> '_sub'  (dot + the module's own
+                #                   name, with the module's real leading
+                #                   underscore now doubled in)
+                #     definition : 'sub'    (leading dot dropped)
+                #   => call site emitted `_sub_tri_<suffix>(...)` against a
+                #      definition emitted as `sub_tri_<suffix>(...)`:
+                #      `implicit declaration of function '_sub_tri_...'`.
+                #
+                # The link-mode arm is gated the same way as the top-level
+                # one: only a module link mode actually INLINES
+                # (`_link_inline_modules`, the imports with no dylib behind
+                # them) is compiled under the import-string spelling, so only
+                # that one must spell the qualifier that way.
+                if (getattr(gen, 'do_imports', False)
+                        or node.module in getattr(gen, '_link_inline_modules', ())):
+                    _fi_home = (node.module.lstrip('.').replace('.', '_')
+                                .replace('-', '_'))
                 else:
                     _fi_home = _fi_qual
                 gen._note_own_func_home(symbol_name, _fi_home)

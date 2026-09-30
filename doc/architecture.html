@@ -29,7 +29,7 @@ delegate to real Python while the true native backend is being hardened.</p>
 <h2>1. Overview</h2>
 
 <p>A Mojo compiler written in Python, bootstrapped to a native binary via GCC
-<code>-fgimple</code>. The end goal: <code>build/mojo</code> (the compiled
+<code>-fgimple</code>. The end goal: <code>mojoc</code> (the compiled
 binary) runs <em>its own</em> compiled compiler for everything — no Python
 subprocess at runtime.</p>
 
@@ -38,7 +38,7 @@ subprocess at runtime.</p>
 │  Mojo source (.mojo)                             │
 │                                                  │
 │  Path A: python3 fire.py &lt;file&gt;.mojo  ────────┐  │
-│  Path B: build/mojo &lt;file&gt;.mojo       ──────┐ │  │
+│  Path B: mojoc &lt;file&gt;.mojo       ──────┐ │  │
 │                                             │ │  │
 │         ┌────────────────────────────────────┤ │  │
 │         │  gimple_codegen.compile_to_gimple  │ │  │
@@ -73,8 +73,8 @@ subprocess at runtime.</p>
 <p>The interpreter path (<code>fire.py run</code> / <code>interpret_and_execute</code>) uses <code>myinterpreter.py</code> directly, bypassing compilation entirely.</p>
 
 <h3>Path B — Self-hosted (compiled)</h3>
-<p><code>build/mojo &lt;file&gt;.mojo</code></p>
-<p><code>build/mojo</code> is the <em>compiled</em> transitive closure of <code>fire.py</code> — it contains compiled versions of <code>fire_compiler.py</code>, <code>gimple_codegen.py</code>, <code>module_loader.py</code>, etc. When it compiles code, every call to <code>gimple_codegen.compile_to_gimple[_cached](...)</code> is <strong>intercepted at lowering time</strong> and replaced by the C runtime shim (§4). The compiled binary therefore never runs its own compiled codegen for <code>.ci</code> generation — it shells out to real Python.</p>
+<p><code>mojoc &lt;file&gt;.mojo</code></p>
+<p><code>mojoc</code> is the <em>compiled</em> transitive closure of <code>fire.py</code> — it contains compiled versions of <code>fire_compiler.py</code>, <code>gimple_codegen.py</code>, <code>module_loader.py</code>, etc. When it compiles code, every call to <code>gimple_codegen.compile_to_gimple[_cached](...)</code> is <strong>intercepted at lowering time</strong> and replaced by the C runtime shim (§4). The compiled binary therefore never runs its own compiled codegen for <code>.ci</code> generation — it shells out to real Python.</p>
 
 <p>Why this matters: <strong><code>.ci</code> output from the compiled binary is real Python's, not the compiled compiler's.</strong> Bug fidelity for the self-hosted backend has never been tested for <code>.ci</code>. Only the <code>.tok</code> / <code>.ast</code> diagnostic dumps call compiled <code>Parser</code> / <code>py_tokenize</code> directly — and those historically exposed many bugs (<code>doc/IMPL.md:302-309</code>).</p>
 
@@ -137,7 +137,7 @@ print(gimple_codegen.compile_to_gimple(src, &lt;do_imports&gt;, '&lt;filename&gt
 
 <div class="bug">
 <p><strong>1. Silent error masking (<code>2&gt;/dev/null</code> + stub fallback)</strong><br>
-Every Python traceback is sent to <code>/dev/null</code>. On any failure (Python exception, import error, syntax error), the shim returns a do-nothing C stub. The compiled binary writes this stub as the <code>.ci</code> — it compiles and links, but the program does nothing. Errors are invisible: <code>build/mojo --dump bad.mojo</code> silently succeeds with a stub.</p>
+Every Python traceback is sent to <code>/dev/null</code>. On any failure (Python exception, import error, syntax error), the shim returns a do-nothing C stub. The compiled binary writes this stub as the <code>.ci</code> — it compiles and links, but the program does nothing. Errors are invisible: <code>mojoc --dump bad.mojo</code> silently succeeds with a stub.</p>
 </div>
 
 <div class="bug">
@@ -212,7 +212,7 @@ Verify:   stage1 == stage2 == stage3            for all artifacts
 <h3>Steps</h3>
 <ol>
 <li><strong>Temporarily remove the interception</strong> (comment out lines 9175-9218, or add a runtime flag) so the compiled <code>compile_to_gimple</code> is called as an ordinary module function.</li>
-<li><strong>Rebuild</strong> <code>mojoc</code> / <code>build/mojo</code> from the modified source.</li>
+<li><strong>Rebuild</strong> <code>mojoc</code> / <code>build/fire</code> from the modified source.</li>
 <li><strong>Run <code>--dump</code> on a small file</strong> (e.g. <code>test_simple.mojo</code> or a minimal <code>def main(): print(42)</code>).</li>
 <li><strong>Observe the first bugs</strong> — likely in compiled <code>gen_module</code>, <code>GimpleGen</code> internals, or the compiled <code>py_tokenize</code> / <code>Parser</code> pipeline when invoked from inside the codegen (vs. the <code>.tok</code> path).</li>
 <li><strong>Fix bugs iteratively</strong>, rebuild, re-test.</li>

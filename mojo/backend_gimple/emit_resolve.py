@@ -905,6 +905,64 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
     return (None, [])
 
 
+def _classify_unresolved_export(gen, sym: str, name: str, inline_module: str,
+                                 src_path: str, text: str) -> bool:
+    """Link mode: how to make an imported name available when the module has
+    no concrete export for it (no dylib reflection entry, not in
+    module_loader's stdlib/test export table) — the only two answers are
+    "elaborate it on demand at the use site" and "inline the whole module".
+    Records the first and returns True if `name` was recognised in `text`
+    (the source of `src_path`), else returns False having recorded nothing.
+
+    `sym` is the name actually bound here (an alias, or `name` itself),
+    `inline_module` the module string to add to `_link_inline_modules`.
+
+    One function, not two: this classification used to be a 15-branch
+    `if/elif` ladder written out TWICE inside `_register_link_imports` —
+    once over the module's own source and once over its `__init__.mojo`
+    package siblings — with only the scanned text and the recorded source
+    path differing. The duplicated copy is the one that drifted: it knew
+    `struct` and `def` but not `class`, so a name this compiler's OWN parser
+    turns into a StructDef (`fire_compiler._parse_struct` accepts
+    `class X:` unconditionally, and `_parse_statement` routes it straight
+    there) matched nothing, the module was never inlined, and the client's
+    `X.ATTR` / `X(...)` bound to the extern-preamble's `weak` "unavailable
+    in compiled mode" stub — a wrong value printed into the program's own
+    stdout, exit 0 (the cross-module-import report's rows 1-4; see the
+    2026-09-29 section of bugs/hard/README.md). A source-text classifier
+    cannot be exhaustive about
+    spelling, so it has to be the same classifier everywhere.
+
+    Text-based, deliberately: this only runs when the module is NOT reachable
+    through any structured interface (no dylib, not a tracked stdlib/test
+    module), and the authoritative answer for the single-TU path is the
+    PARSED module — `_compile_imported_module` re-parses the same file
+    anyway. The regexes are a routing decision, not a type decision; every
+    type the imported name gets still comes from the inlined module's own
+    compile."""
+    _nre = gimple_ctypes.re.escape(name)
+    if gimple_ctypes.re.search(rf'\bstruct\s+{_nre}\s*\[', text):
+        gen._imported_generic_structs.setdefault(sym, src_path)
+        return True
+    if gimple_ctypes.re.search(rf'\b(?:fn|def)\s+{_nre}\s*\[', text):
+        gen._imported_generics.setdefault(sym, src_path)
+        return True
+    if len(gimple_ctypes.re.findall(rf'\b(?:fn|def)\s+{_nre}\s*\(', text)) > 1:
+        gen._imported_overloads.setdefault(sym, src_path)
+        return True
+    # A struct DEFINITION (not a generic one): inline the whole module, which
+    # brings the typedef, its `__init__`, its methods and its class
+    # attributes with it. `class` and `struct` are the same node to this
+    # parser — see this function's docstring.
+    if gimple_ctypes.re.search(rf'\b(?:struct|class)\s+{_nre}\s*(\(|:)', text):
+        gen._link_inline_modules.add(inline_module)
+        return True
+    if gimple_ctypes.re.search(rf'\b(?:fn|def)\s+{_nre}\s*\(', text):
+        gen._link_inline_modules.add(inline_module)
+        return True
+    return False
+
+
 def _register_link_imports(gen, stmts) -> list:
     """Link mode (MODULE_CACHE_DESIGN.md): `import` is the seam. For each
     imported symbol, resolve its signature from the module's dylib
@@ -1056,31 +1114,19 @@ def _register_link_imports(gen, stmts) -> list:
                             gen._link_inline_modules.add(
                                 gimple_ctypes._join_import_member(stmt.module, name))
                             continue
-                        # Not a concrete export — if the module source defines
-                        # it as a generic (struct or fn), record it for
-                        # on-demand elaboration at use sites.
+                        # Not a concrete export — classify `name` against the
+                        # module's own SOURCE TEXT and record how to make it
+                        # available: on-demand elaboration for a generic /
+                        # overloaded `def`, whole-module inlining for
+                        # anything else. See `_classify_unresolved_export`.
                         if source:
                             try:
                                 msrc = open(source).read()
                             except Exception as e:
                                 gimple_ctypes._debug_note(f'cannot read module source {source!r}', e)
                                 msrc = ''
-                            _found = False
-                            if gimple_ctypes.re.search(rf'\bstruct\s+{gimple_ctypes.re.escape(name)}\s*\[', msrc):
-                                gen._imported_generic_structs.setdefault(sym, source)
-                                _found = True
-                            elif gimple_ctypes.re.search(rf'\b(?:fn|def)\s+{gimple_ctypes.re.escape(name)}\s*\[', msrc):
-                                gen._imported_generics.setdefault(sym, source)
-                                _found = True
-                            elif len(gimple_ctypes.re.findall(rf'\b(?:fn|def)\s+{gimple_ctypes.re.escape(name)}\s*\(', msrc)) > 1:
-                                gen._imported_overloads.setdefault(sym, source)
-                                _found = True
-                            elif gimple_ctypes.re.search(rf'\bstruct\s+{gimple_ctypes.re.escape(name)}\s*(\(|:)', msrc):
-                                gen._link_inline_modules.add(stmt.module)
-                                _found = True
-                            elif gimple_ctypes.re.search(rf'\b(?:fn|def)\s+{gimple_ctypes.re.escape(name)}\s*\(', msrc):
-                                gen._link_inline_modules.add(stmt.module)
-                                _found = True
+                            _found = _classify_unresolved_export(
+                                gen, sym, name, stmt.module, source, msrc)
                             # Package fallback: when the primary source is
                             # __init__.mojo and the name wasn't found there,
                             # search sibling .mojo files in the same package
@@ -1089,7 +1135,6 @@ def _register_link_imports(gen, stmts) -> list:
                             # like os.mojo, dict.mojo, etc.).
                             if not _found and source.endswith('__init__.mojo'):
                                 _pkg_dir = gimple_ctypes.os.path.dirname(source)
-                                _name_re = gimple_ctypes.re.escape(name)
                                 if gimple_ctypes.os.path.isdir(_pkg_dir):
                                     for _sf in sorted(gimple_ctypes.os.listdir(_pkg_dir)):
                                         if (not _sf.endswith('.mojo')
@@ -1100,24 +1145,9 @@ def _register_link_imports(gen, stmts) -> list:
                                             _smsrc = open(_sibling).read()
                                         except Exception:
                                             continue
-                                        if gimple_ctypes.re.search(rf'\bstruct\s+{_name_re}\s*\[', _smsrc):
-                                            gen._imported_generic_structs.setdefault(sym, _sibling)
-                                            _found = True
-                                            break
-                                        elif gimple_ctypes.re.search(rf'\b(?:fn|def)\s+{_name_re}\s*\[', _smsrc):
-                                            gen._imported_generics.setdefault(sym, _sibling)
-                                            _found = True
-                                            break
-                                        elif len(gimple_ctypes.re.findall(rf'\b(?:fn|def)\s+{_name_re}\s*\(', _smsrc)) > 1:
-                                            gen._imported_overloads.setdefault(sym, _sibling)
-                                            _found = True
-                                            break
-                                        elif gimple_ctypes.re.search(rf'\bstruct\s+{_name_re}\s*(\(|:)', _smsrc):
-                                            gen._link_inline_modules.add(stmt.module)
-                                            _found = True
-                                            break
-                                        elif gimple_ctypes.re.search(rf'\b(?:fn|def)\s+{_name_re}\s*\(', _smsrc):
-                                            gen._link_inline_modules.add(stmt.module)
+                                        if _classify_unresolved_export(
+                                                gen, sym, name, stmt.module,
+                                                _sibling, _smsrc):
                                             _found = True
                                             break
                         continue
@@ -1757,6 +1787,39 @@ def _repr_value(gen, rat: str, rav: str) -> str:
     if rat == 'MojoMemoryView *':
         return gen._call_expr('char *', 'mojo_memoryview_repr', [('MojoMemoryView *', rav)])
     if rat.endswith(' *') or rat == 'void *':
+        rav_local = gen._ensure_local(rat, rav)
+        # A user-defined `__repr__` WINS over the generated field dump.
+        # CPython calls it, and this compiler already emits the real method
+        # body plus its extern declaration (`char * Foo___repr__ (Foo *)`) —
+        # the generated `_mojo_repr_Foo` field-dump simply shadowed it, so a
+        # perfectly correct `__repr__` compiled, was exported, and was never
+        # called from anywhere, while `repr(obj)` printed
+        # `Foo(a=1, b=2)` (or a raw pointer decimal, for a struct the
+        # runtime has no field table for). Reproduces with no imports at
+        # all — it was the repr half of the cross-module-import report's
+        # rows 2/4 (see the 2026-09-29 section of `bugs/hard/README.md`),
+        # which its `repr(p)` spelling reached through an import but which
+        # is NOT an import bug.
+        #
+        # Deliberately CONSERVATIVE: each condition below is one "we know
+        # this is right", and anything unproven falls through to the
+        # pre-existing lowering, so this can only ever replace a wrong
+        # answer with a right one, never introduce a new shape.
+        _rsn = rat[:-2].strip() if rat.endswith(' *') else ''
+        if _rsn and '__repr__' in (gen._struct_method_names.get(_rsn) or ()):
+            _rcs = gen._struct_method_csym(_rsn, '__repr__', '')
+            if gen.func_return_types.get(_rcs) == 'char *':
+                _rcall = gen._call_expr('char *', _rcs, [(rat, rav_local)])
+                # Same null semantics the generated field-dump has: a NULL
+                # object reprs as "None" rather than crashing. Interned
+                # through `_intern_string` because a bare `"None"` literal is
+                # not a GIMPLE r-value (see its own docstring), and bound to
+                # a local first rather than nested in the f-string so the
+                # expression uses no quote nesting at all — this file is
+                # compiled by the compiler it implements.
+                _none_slit = gen._intern_string('None')
+                return gen._new_val(
+                    'char *', f'({rav_local} ? {_rcall} : {_none_slit})')
         # Dispatch through the per-struct field-by-field reprs generated
         # in gen_module (see reflect_structs) when the runtime type tag
         # is one this program actually allocates — falls back to the
@@ -1765,7 +1828,6 @@ def _repr_value(gen, rat: str, rav: str) -> str:
         # `repr(ast)` on a parsed AST list: every node printed as a
         # meaningless `<object at 0x...>` instead of its real fields,
         # since only mojo_repr_obj (no field-metadata table) existed.
-        rav_local = gen._ensure_local(rat, rav)
         vp = gen._new_val('void *', f'(void *){rav_local}')
         return gen._call_expr('char *', '_mojo_dispatch_repr', [('void *', vp)])
     if rat in ('double', 'float'):

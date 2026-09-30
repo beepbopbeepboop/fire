@@ -563,29 +563,42 @@ def _extract_functions(stmts: list, synthetic: bool = True) -> list:
 
 
 def _make_codegen(arch: str, fmt: str, test_input: int,
-                  dylib_syms: dict = None, comptime_hook=None):
+                  dylib_syms: dict = None, comptime_hook=None,
+                  dylib_exports: list = None):
     """The codegen for `arch`, configured for the `fmt` binary it feeds.
 
     The only format-dependent choice is how an unbound symbol is called:
     Mach-O carries a __TEXT,__stubs trampoline (`call rel32` to it), while
     ELF has no stub section and calls through the .got slot the loader fills
     (`call [rip+disp32]`). Everything else about the two backends is the
-    same contract, so it is selected here rather than at each call site."""
+    same contract, so it is selected here rather than at each call site.
+
+    `dylib_exports` is the linked libraries' manifest export lists, in the
+    same LINK ORDER as `dylib_syms`, so the two answer identically about a
+    bare callee. It is a separate argument rather than a re-derivation from
+    `dylib_syms` because it carries two things the flat map threw away: the
+    module that owns each export (which is what makes `mod.f()` resolvable
+    without ever consulting a bare name) and the declared signature (which is
+    what says whether a call's result is a string). See
+    `model.dylib_export_lookup`."""
     if arch == "arm64":
         return ARM64Codegen(test_input=test_input,
                             dylib_syms=dylib_syms,
-                            comptime_hook=comptime_hook)
+                            comptime_hook=comptime_hook,
+                            dylib_exports=dylib_exports)
     if arch == "x86_64":
         from formal.x86_64_codegen import X86_64Codegen
         return X86_64Codegen(test_input=test_input,
                              extern_style="got" if fmt == "elf" else "stub",
                              dylib_syms=dylib_syms,
-                             comptime_hook=comptime_hook)
+                             comptime_hook=comptime_hook,
+                             dylib_exports=dylib_exports)
     raise FormalBuildError(
         f"unknown arch {arch!r} (expected one of {', '.join(ARCHES)})")
 
 
-def _audit_bound_symbols(external_syms, dylib_syms, where: str) -> list:
+def _audit_bound_symbols(external_syms, dylib_syms, where: str,
+                          dylib_exports=None) -> list:
     """Every extern must be accounted for: a C library, or a linked dependency.
 
     An image that binds a symbol nothing provides is not a working image — it
@@ -608,12 +621,28 @@ def _audit_bound_symbols(external_syms, dylib_syms, where: str) -> list:
     one. Comparing them raw reports every dependency symbol as unprovided, so
     both sides are compared without the underscore.
 
+    `dylib_exports` is the same libraries' manifest export LISTS, and it is a
+    separate argument because the flat map is lossy in a way this check must
+    not inherit: it keeps only the FIRST library's answer for each bare name,
+    so with two modules that both export `which`, `left.which` wins the bare
+    entry and `right_which` appears nowhere in it. A dotted call
+    (`ARM64Codegen._extern_symbol`) resolves by MODULE IDENTITY and so can bind
+    the second one — and this check then reported the library's own export as
+    a symbol nothing provides, which is the opposite of the truth and stopped
+    a perfectly good program from building. Everything the link line really
+    provides is accounted for, whoever it belongs to.
+
     Returns the unaccounted names, which is empty when the image is sound. The
     caller decides how to report, because the two paths have different names to
     report it against.
     """
     provided = {n.lstrip("_") for n in (dylib_syms or {})}
     provided |= {n.lstrip("_") for n in (dylib_syms or {}).values()}
+    for lib in (dylib_exports or []):
+        for entry in (lib.get("exports") or []):
+            name = entry.get("symbol") or entry.get("name")
+            if name:
+                provided.add(name.lstrip("_"))
     return [sym for sym in sorted(set(external_syms or []))
             if sym.lstrip("_") not in provided
             and not _is_libsystem(sym)]
@@ -657,10 +686,17 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     for d in dylibs:
         for bare, mangled in (d.get("map") or {}).items():
             dylib_syms.setdefault(bare, mangled)
+    # The export ENTRIES, in the same order, so the codegen's own flat lookup
+    # resolves a bare callee to the same entry the map above resolved it to —
+    # the two are built from one iteration rather than from two
+    # re-implementations of "first library on the line wins".
+    dylib_exports = [{"exports": list(d.get("exports") or [])}
+                     for d in dylibs]
     if fmt == "elf":
         from formal.elf import (DEFAULT_BASE, DEFAULT_LIBC, build_elf,
                                  compute_got_addrs)
-        codegen = _make_codegen(arch, fmt, test_input, dylib_syms, comptime_hook)
+        codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
+                                comptime_hook, dylib_exports)
         try:
             code, info = codegen.compile(ordered, base_addr=DEFAULT_BASE,
                                          structs=structs)
@@ -673,7 +709,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
                                     lib_name=DEFAULT_LIBC)
             codegen.asm.resolve_extern(got)
             code = bytes(codegen.asm.sections["text"])
-        unaccounted = _audit_bound_symbols(external_syms, dylib_syms, "image")
+        unaccounted = _audit_bound_symbols(external_syms, dylib_syms,
+                                          "image", dylib_exports)
         if unaccounted:
             raise FormalBuildError(
                 _unaccounted_report(source_path or "<program>", unaccounted,
@@ -689,7 +726,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     base_extern = TEXT_BASE + extern_entry_offset(
         [d["install_name"] for d in dylibs])
     base_noextern = TEXT_BASE + NOEXTERN_ENTRYOFF
-    codegen = _make_codegen(arch, fmt, test_input, dylib_syms, comptime_hook)
+    codegen = _make_codegen(arch, fmt, test_input, dylib_syms, comptime_hook,
+                            dylib_exports)
     try:
         code, info = codegen.compile(ordered, base_addr=base_noextern,
                                      structs=structs)
@@ -697,7 +735,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
         if external_syms:
             # Re-emit at the extern entry base (the layout differs, and so do
             # every address the code computed off its own base).
-            codegen = _make_codegen(arch, fmt, test_input, dylib_syms, comptime_hook)
+            codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
+                                    comptime_hook, dylib_exports)
             code, info = codegen.compile(ordered, base_addr=base_extern,
                                          structs=structs)
             external_syms = info.get("external_syms") or []
@@ -711,7 +750,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
             code = bytes(codegen.asm.sections["text"])
     except CodegenError as e:
         raise FormalBuildError(str(e))
-    unaccounted = _audit_bound_symbols(external_syms, dylib_syms, "image")
+    unaccounted = _audit_bound_symbols(external_syms, dylib_syms,
+                                        "image", dylib_exports)
     if unaccounted:
         raise FormalBuildError(
             _unaccounted_report(source_path or "<program>", unaccounted,
@@ -918,13 +958,26 @@ def compile_formal(source_path: str, output: str = None,
     # imported module on x86-64, because the two architectures built the
     # dylibs in a different order and so had a different module's table
     # published at the point the check read it.
+    #
+    # `imported_modules(stmts)` GATED on `import_dylibs`, and the gate is
+    # load-bearing rather than defensive. `_resolve_imports` is a no-op for a
+    # target with no module mechanism (an ELF image: no dylib form, nothing to
+    # link), so on that target an `import` produces no library and a dotted
+    # call `mod.f()` has no symbol to bind. Handing the checker the module
+    # names there would stop it refusing that call and let the image be
+    # emitted with a `BL` against a symbol nothing defines — refused today, a
+    # load-time failure after this change. No module dylib on the line, no
+    # dotted call.
+    from formal.imports import imported_modules
     try:
         M.publish_module_symbols(symbols)
         check_frame_field_blob_premises(structs)
         check_frame_subscript_escapes(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
         check_module_symbols(
-            functions, {st.name: st for st in structs})
+            functions, {st.name: st for st in structs},
+            imported_module_names=(imported_modules(stmts)
+                                   if import_dylibs else None))
     except CodegenError as e:
         raise FormalBuildError(str(e))
     if import_dylibs:
@@ -1019,7 +1072,8 @@ def compile_formal(source_path: str, output: str = None,
     return result
 
 
-def _formal_module_functions(source_path: str) -> tuple[str, list]:
+def _formal_module_functions(source_path: str,
+                             link_dylibs: list = None) -> tuple[str, list]:
     try:
         with open(source_path) as f:
             source = f.read()
@@ -1069,8 +1123,11 @@ def _formal_module_functions(source_path: str) -> tuple[str, list]:
         # a name the build cannot place is a codegen finding about THIS file,
         # and a file that imports a host module has a more fundamental fact
         # about it that a raise from `_prepare_functions` would have hidden.
+        from formal.imports import imported_modules
         check_module_symbols(
-            functions, {st.name: st for st in structs})
+            functions, {st.name: st for st in structs},
+            imported_module_names=(imported_modules(stmts)
+                                   if link_dylibs else None))
     except CodegenError as e:
         raise FormalBuildError(str(e))
     module = re.sub(r"[^A-Za-z0-9_]", "_",
@@ -3032,7 +3089,8 @@ def _rewrite_child(child, sites: dict, stores: set):
     return child
 
 
-def check_module_symbols(functions: list, structs_by_name: dict = None) -> None:
+def check_module_symbols(functions: list, structs_by_name: dict = None,
+                         imported_module_names=None) -> None:
     """Refuse every name a function reads that no table in the compiler places.
 
     A LATE check, called beside `check_frame_field_blob_premises` and
@@ -3066,7 +3124,14 @@ def check_module_symbols(functions: list, structs_by_name: dict = None) -> None:
     An MLIR TEMPLATE is asked about FIRST, in its own spelling, because its
     refusal names the construct and this one would name a symptom: `__mlir_
     attr[`…`]`'s callee is a bare name with no home, and the diagnostic that
-    says "a multi-index subscript" was already wrong about it once."""
+    says "a multi-index subscript" was already wrong about it once.
+
+    `imported_module_names` is the set of module names this unit imports. It
+    is what tells the DOTTED callee `mod.f(...)` from a value's method: the
+    root of the chain is a module reference, not a read of a value, and the
+    emitter resolves the call from that module's own export table. Omitted (or
+    empty) the dotted spelling is refused exactly as before, so a caller that
+    has not resolved its imports still gets the old answer."""
     struct_names = set(structs_by_name or {})
     for fn in functions:
         shape = M.function_param_shape(fn)
@@ -3095,6 +3160,62 @@ def check_module_symbols(functions: list, structs_by_name: dict = None) -> None:
         callees = {id(c.func) for c in M.iter_nodes(fn.body)
                    if isinstance(c, F.CallExpr) and isinstance(c.func,
                                                                F.IdentExpr)}
+        # …and the DOTTED callee, `mod.f(...)`, which is the other spelling of
+        # a cross-module call and the only one `import mod` produces. The root
+        # of the chain is not a read of a value either: it names the MODULE,
+        # and the emitter answers the call from that module's own export table
+        # (see `ARM64Codegen._extern_symbol`). Without this the check refused
+        # `mod` — "is imported from `mod`, so it is a module-level name of
+        # another module" — for a call the emitter can already lower, which
+        # made `import mod` unusable and left `from mod import f` as the only
+        # spelling of a module call this path had. The refusal was worse than
+        # useless here: its own remedy sentence said "give it a function (a
+        # `struct.fn()` call lowers)", recommending the very spelling it
+        # refused.
+        #
+        # `struct.pack(...)` parses as `CallExpr(func=MemberExpr(obj=
+        # IdentExpr('struct'), member='pack'))`, so the set comprehension above
+        # misses it — `c.func` is a MemberExpr, and the root IdentExpr is never
+        # collected. So the fix is to collect that root, by node IDENTITY (the
+        # only way to name a node again, since `M.iter_nodes` has no parent),
+        # and only in CALLEE position: the same name in a genuine read
+        # (`len(struct)`) is still refused, which is the point — a module
+        # object has no storage either way, and what has no storage is the
+        # READ, not the call through it.
+        #
+        # Restricted to a root that names an IMPORTED MODULE, which is what
+        # makes it safe: a dotted call on anything else — a value's method
+        # (`xs.append`), a struct's field (`h.f.g`), a module-global table with
+        # no storage (`TABLE.lookup`) — keeps whatever answer it had, so this
+        # adds a spelling and changes no existing verdict. Without the gate the
+        # last of those would stop being the precise refusal it is and become a
+        # failure from further in, naming the allocator instead of the
+        # construct.
+        #
+        # A root that is, or is a PACKAGE PREFIX of, an imported name. Not a
+        # detail: `import os.path` binds the name `os` — that is what Python
+        # does, and `os.path.join(...)` is 532 of the measured `os` call sites
+        # in this tree — so the root of that chain is `os` while the only
+        # imported name is `os.path`. Matching for equality refused the one
+        # spelling a package module is written with, and a name that is a
+        # dotted PREFIX of an import cannot be a value: a local, a parameter
+        # and a module-global are all bare names, and nothing in this language
+        # puts an attribute on one. The dotted qualifier itself is resolved by
+        # module identity further in (`_extern_symbol`), where the manifest
+        # says whether that submodule exports the name at all.
+        imported = imported_module_names or ()
+        if imported:
+            for c in M.iter_nodes(fn.body):
+                if not isinstance(c, F.CallExpr) \
+                        or not isinstance(c.func, F.MemberExpr):
+                    continue
+                root = c.func
+                while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
+                    root = root.obj
+                if isinstance(root, F.IdentExpr) and any(
+                        root.name == m or m.startswith(f"{root.name}.")
+                        for m in imported):
+                    callees.add(id(root))
         # A BRACKETED or DOTTED form has the same problem one level up:
         # `__mlir_attr[…]`, `__mlir_attr.`lit`` and
         # `__mlir_op.`lit.materialize_into`[value=v]` are a SubscriptExpr and/or
@@ -3595,7 +3716,18 @@ def load_dylib_manifests(dylib_paths: list) -> list:
     "exports"}`. A library whose manifest is missing is an error rather than a
     silently ignored dependency: the executable would emit calls to symbols
     nothing defines and produce an image that dies in dyld at launch — which
-    is exactly the failure this mechanism exists to prevent."""
+    is exactly the failure this mechanism exists to prevent.
+
+    The `map` is keyed by the BARE name and only by the bare name, and that is
+    the whole contract: it is what a BARE callee resolves through, first
+    library on the line winning. A DOTTED callee — `mod.f`, the spelling
+    `import mod` binds — is answered from `exports` by module identity
+    (`model.dylib_export_lookup`), because the flat map cannot say which module
+    owns a name and answering it from here would let `mod.f` bind some other
+    library's `f`. The two spellings of the same export are therefore NOT both
+    written into the map: there is one resolution per spelling, and each is
+    where it can see the module the name is qualified by.
+    """
     import json
     out = []
     for dylib in dylib_paths or []:
@@ -3606,7 +3738,7 @@ def load_dylib_manifests(dylib_paths: list) -> list:
         except OSError as e:
             raise FormalBuildError(
                 f"cannot read the export manifest for {dylib} ({mpath}): {e}. "
-                f"It is written next to the dylib by `mojo dylib --formal`.")
+                f"It is written next to the dylib by `fire dylib --formal`.")
         exports = payload.get("exports") or []
         if not exports and payload.get("kind") != "namespace":
             raise FormalBuildError(
@@ -4769,7 +4901,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     structs_by_file: dict = {}
     for source_path in source_paths:
         module, functions, module_source, file_structs = \
-            _formal_module_functions(source_path)
+            _formal_module_functions(source_path, link_dylibs)
         structs_by_file[source_path] = file_structs
         for fn in functions:
             # A repeated name is an OVERLOAD, not a collision — and Mojo
@@ -4811,6 +4943,11 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     for d in linked:
         for bare, mangled in (d.get("map") or {}).items():
             dylib_syms.setdefault(bare, mangled)
+    # …and the export ENTRIES, in the same order, for the two things the flat
+    # map cannot answer: a DOTTED sibling call (`leaf.base(x)` resolved by
+    # module identity, which the map's first-wins-per-bare-name cannot
+    # express) and a call's declared return kind.
+    dylib_exports = [{"exports": list(d.get("exports") or [])} for d in linked]
     dep_install = [d["install_name"] for d in linked]
     dep_syms = {d["install_name"]: list((d.get("map") or {}).values())
                 for d in linked}
@@ -4855,7 +4992,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         return _namespace_library(output, install_name, arch, reexports,
                                   dylib_syms, dep_install, linked)
 
-    codegen = _make_codegen(arch, fmt, test_input, dylib_syms)
+    codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
+                            dylib_exports=dylib_exports)
     try:
         code, info = codegen.compile(
             ordered,
@@ -4867,7 +5005,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             # The dependency load commands are known BEFORE compiling, so the
             # no-extern offset already accounts for them; only the extern
             # segment and libSystem are discovered by the first pass.
-            codegen = _make_codegen(arch, fmt, test_input, dylib_syms)
+            codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
+                                    dylib_exports=dylib_exports)
             code_file = dylib_code_offset(install_name, True, dep_install)
             code, info = codegen.compile(ordered,
                                          base_addr=TEXT_BASE + code_file,
@@ -4890,7 +5029,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     # cleanly and then cannot be loaded, which is the failure mode this whole
     # import work exists to remove, just moved later. Checking here says it
     # where the library is built, and names the symbols.
-    unaccounted = _audit_bound_symbols(external_syms, dylib_syms, "library")
+    unaccounted = _audit_bound_symbols(external_syms, dylib_syms,
+                                        "library", dylib_exports)
     if unaccounted:
         raise FormalBuildError(
             _unaccounted_report(source_paths[0], unaccounted, "library"))

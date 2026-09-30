@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import os
 import sys
+import gimple_codegen
 from gimple_codegen import compile_to_gimple
 import platform
 from build_config import find_gcc
@@ -5814,9 +5815,10 @@ def root_cas_hash_call(parts) -> str:
         real source was _collections_abc.py. FIXED; the report that recorded
         it (bugs/hard/CODEGEN_function_scoped_import_rettype_and_literal_cast_
         mismatches.md) was removed 2026-09-26 after verification. Its live
-        residue is bugs/hard/CODEGEN_function_scoped_import_module_not_inlined
-        .md, a different mechanism (a function-scoped import never inlines its
-        module) that does not own this test."""
+        residue was the cross-module-import report — a different mechanism
+        (a function-scoped import never inlining its module), since itself
+        fixed and deleted; see the 2026-09-29 section of
+        bugs/hard/README.md. Neither report owns this test."""
         global _PASS, _FAIL
         name = "inherited_method_line_directive_names_its_own_module"
         with tempfile.TemporaryDirectory() as wd:
@@ -6399,6 +6401,129 @@ def main():
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_user_defined_dunder_repr_is_called():
+        """`repr(obj)` must call the struct's OWN `__repr__`. The generated
+        field-dump `_mojo_repr_<Struct>` used to shadow it: the real method
+        body WAS emitted (and an `extern` declared for it) and then nothing
+        ever called it, so `repr(p)` printed `P(x=1)` — or, for a struct the
+        runtime has no field table for, a raw pointer decimal. Silent wrong
+        value, exit 0, and the dunder the user wrote was simply dead code.
+
+        A SHAPE check, because that is all this file's `gcc -fsyntax-only`
+        harness can do; the value-level counterpart (which actually runs the
+        binary and compares against CPython) is
+        `user_defined_dunder_repr_value` below, on both pipelines.
+        Two structs, because the fix is deliberately conservative and BOTH
+        halves are load-bearing: `P` defines `__repr__` and must reach it,
+        while `Q` does not and must KEEP the generated field-dump dispatch —
+        a fix that simply deleted `_mojo_dispatch_repr` would pass the first
+        assertion and leave every struct without a `__repr__` unprintable."""
+        global _PASS, _FAIL
+        name = "user_defined_dunder_repr_is_called"
+        c = compile_to_gimple("""\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "P!"
+
+class Q:
+    def __init__(self, y):
+        self.y = y
+
+def main():
+    p = P(1)
+    q = Q(2)
+    print(repr(p))
+    print(repr(q))
+""")
+        main_start = c.find('main (void)\n{')
+        body = c[main_start:] if main_start >= 0 else c
+        if '= P___repr__ (' not in body:
+            print(f"FAIL  {name}: repr(p) did not call the real P___repr__")
+            _FAIL += 1
+            return
+        if '= _mojo_dispatch_repr (' not in body:
+            print(f"FAIL  {name}: repr(q), for a struct with no user "
+                  f"__repr__, no longer routes through the generated "
+                  f"field-dump dispatch")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_user_defined_dunder_repr_value():
+        """The same thing with the VALUE checked, on BOTH pipelines
+        (single-TU and link mode — they are separate codegen paths and this
+        chokepoint, `_repr_value`, is shared by both, so a one-sided fix
+        would be invisible to either alone). `repr()` and `%r` are the two
+        entry points into that chokepoint, and they are both here because a
+        fix at only one of them is the same bug with a different spelling.
+
+        CPython is run on the SAME text and its stdout is the expectation;
+        nothing is written down as a literal answer, so a change in what
+        Python does cannot turn this into a test that protects a wrong
+        value. Covers a struct whose `__repr__` computes a string from a
+        field, since a `__repr__` that returned the field verbatim would
+        coincide with the generated field dump and prove nothing."""
+        global _PASS, _FAIL
+        name = "user_defined_dunder_repr_value"
+        src = '''\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "P<" + self.x + ">"
+
+p = P("a")
+print(repr(p))
+print("%r" % p)
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'repr_case.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                c_src = gimple_codegen._run_pipeline(
+                    src, filename=entry,
+                    **({'do_imports': True} if mode == 'single-TU'
+                       else {'link_mode': True}))[0]
+                c_file = os.path.join(td, f'repr_{mode}.c')
+                exe = os.path.join(td, f'repr_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          f"{cc.stderr[:800]}")
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     test_ctor_arg_container_literal_field_is_container_typed()
     test_ctor_arg_dict_and_set_literal_fields_are_container_typed()
     test_ctor_arg_mixed_container_and_scalar_stays_int64()
@@ -6409,6 +6534,8 @@ def main():
     test_generator_bool_tuple_slot_is_bool()
     test_generator_int_yield_slot_stays_int64()
     test_generator_mixed_bool_and_int_yields_widen_to_int()
+    test_user_defined_dunder_repr_is_called()
+    test_user_defined_dunder_repr_value()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

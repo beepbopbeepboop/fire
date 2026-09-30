@@ -469,7 +469,36 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
                 for cp in (sym_info.get('c_parameters') or [])
             ]
     if _sib_qualifier and sym_info:
-        if self.do_imports:
+        # The condition is "will THIS compile emit that module's own
+        # definition into this translation unit?", NOT `do_imports`. Two
+        # modes inline modules and they must spell the qualifier the same
+        # way, because the qualifier is half of a mangled symbol and the
+        # two halves come from two different code paths:
+        #   * the DEFINITION's half comes from the inline-compile loop's
+        #     own module key (`modules_to_compile`), which is the IMPORT
+        #     STRING — `p.sub` for `from p.sub import tri` (gen_module_impl
+        #     now runs that one shared loop for link mode too, so
+        #     link-mode definitions are keyed the same way);
+        #   * the CALL SITE's half is what is computed here.
+        # `do_imports`-only let link mode fall to the `else` and use
+        # `_local_sibling_module_exports`' path-derived qualifier, which is
+        # `module_name_for_path`'s BASENAME — `sub` for `p/sub.py`. The two
+        # halves then disagreed on a DOTTED module name: the call site
+        # emitted `sub_tri_<suffix>` against a definition emitted as
+        # `p_sub_tri_<suffix>`, a hard "implicit declaration of function
+        # 'sub_tri_...'; did you mean 'p_sub_tri_...'?" — the same class of
+        # divergence the comment below records fixing for the RELATIVE
+        # spelling, and the same requirement the inline loop keys its own
+        # registration by. Measured: `from p.sub import tri` in a package
+        # sibling.
+        #
+        # Restricted to the modules link mode actually INLINES
+        # (`_link_inline_modules`, filled by Phase 0's
+        # `_register_link_imports` for exactly the imports with no dylib to
+        # link against) rather than to every `link_imports` compile, so a
+        # module that IS satisfied by a recorded dylib keeps the
+        # path-derived spelling the dylib's own export table used.
+        if self.do_imports or s.module in self._link_inline_modules:
             # `lstrip('.')` is LOAD-BEARING and was missing here, making this
             # the single outlier among five call sites that mangle a module
             # string into a C symbol prefix (compare
