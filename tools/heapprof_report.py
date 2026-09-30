@@ -27,6 +27,9 @@ def load(path):
     return meta, images, stacks, crash
 
 
+LINES = False
+
+
 def symbolise(images, addrs):
     """addr -> 'function' using atos per image (frames sit after the image base)."""
     images = sorted(images)
@@ -50,7 +53,12 @@ def symbolise(images, addrs):
         except Exception:
             lines = []
         for a, ln in zip(al, lines + [""] * len(al)):
-            out[a] = ln.split(" (in ")[0] if ln and not ln.startswith("0x") else hex(a)
+            if ln and not ln.startswith("0x"):
+                fn = ln.split(" (in ")[0]
+                loc = ln.rsplit(") (", 1)[-1].rstrip(")") if LINES and ") (" in ln else ""
+                out[a] = fn + ("  @" + loc.split("/")[-1] if loc else "")
+            else:
+                out[a] = hex(a)
     return out
 
 
@@ -65,7 +73,10 @@ def main():
     ap.add_argument("--by", choices=["leaf", "stack", "caller"], default="caller")
     ap.add_argument("--skip", default=r"^(mojo_|_mojo_|_str_|_list_|_dict_|_set_|_ptr|_slot|malloc|calloc|realloc|strdup|hp_|_dict|_set|_list)")
     ap.add_argument("--total", action="store_true", help="rank by bytes allocated over the run instead of live bytes")
+    ap.add_argument("--lines", action="store_true", help="append file:line (needs line tables in the binary)")
     a = ap.parse_args()
+    global LINES
+    LINES = a.lines
     meta, images, stacks, crash = load(a.snapshot)
     print(meta)
     stacks = [s for s in stacks if (s[2] if a.total else s[0]) > 0]

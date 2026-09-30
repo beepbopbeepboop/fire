@@ -239,14 +239,18 @@ def _reset_func(gen, body: list = None, params: list = None,
     # `_emit_call` frees it right after the one call that consumes it. Temp
     # names repeat across functions, so this MUST reset per function (a stale
     # entry would free a temp that never owned anything). See doc/MEMORY.html.
-    gen._cstr_key_src: dict[str, str] = {}
-    gen._kw_key_src: dict[str, str] = {}
-    gen._fresh_vals: set = set()   # per function: temp names repeat across functions
+    # Emptied IN PLACE, not rebound to a new container (the four below exist
+    # from GimpleGen.__init__): a dropped container is only garbage under
+    # CPython; self-hosted, each function leaked its old set/dict and every
+    # temp-name string in it (2.7M strings on `--dump-full fire.py`).
+    gen._cstr_key_src.clear()
+    gen._kw_key_src.clear()
+    gen._fresh_vals.clear()   # per function: temp names repeat across functions
     # Temps holding a heap string THIS function's own concatenation lowering
     # just built (`_emit_str_cat`) and that nothing else can hold yet. The
     # parent concatenation that consumes one as a direct operand frees it.
     # Same per-function reset requirement as `_cstr_key_src`.
-    gen._fresh_str_tmps: set = set()
+    gen._fresh_str_tmps.clear()
     gen.loop_stack:  list[tuple[str,str]] = []
     gen.exc_depth    = 0
     # Entry `len(loop_stack)` of each currently-open `try` body. A

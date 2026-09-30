@@ -4206,6 +4206,9 @@ class GimpleGen:
                                 _base_var_types=None) -> str | None:
         return grsl._infer_return_elem_type(self, body, func_def=func_def,
                                             _base_var_types=_base_var_types)
+    def _scratch_dict_copy(self, src: dict) -> dict:
+        return grsl._scratch_dict_copy(self, src)
+
     def _infer_local_var_types(self, func: FunctionDef) -> dict[str, str]:
         return grsl._infer_local_var_types(self, func)
     def _collect_calls(self, expr, out):
@@ -4710,6 +4713,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # here, while still deduping correctly *within* one call across every
     # nested GimpleGen instance recursive import-inlining creates (shared
     # by reference — see `_compile_imported_module`'s sharing block).
+    gfn._selfhost_begin_compile()
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)

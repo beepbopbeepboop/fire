@@ -412,5 +412,36 @@ string conversion, and a program checked against CPython through every operation
 <p><strong>Follow-up fix:</strong> iterating an Int-keyed dict used to hand back the keys as strings (<code>for k in d: total += k</code> added string pointers). Loops over an annotated <code>Dict[Int, V]</code> name now read integer keys (<code>mojo_dict_iter_key_int</code>, <code>mojo_dict_items_int</code>); see §7. String building still allocates a result per concatenation and does not free the bound result (§7.2).
 A first version of the set benchmark failed to build: <code>var s: Set[Int] = {}</code> is refused (filed, §7).</p>
 
+<h2>11. The compiler compiling itself (<code>mojoc --dump-full fire.py</code>): measured sites and fixes (2026-09-30)</h2>
+<p>The §2-§7 work used small compiled programs. The worst case in the repo is the self-hosted compiler on its own source; it peaked at
+34-47 GB (and once 192 GB) and died with a SIGSEGV. Full log: <code>bugs/PERF_selfhost_memory_leak_hunt.md</code>. Tools:
+<code>tools/heapprof.c</code> (sampling live-heap profiler and use-after-free quarantine, <code>DYLD_INSERT_LIBRARIES</code>) and
+<code>tools/heapprof_report.py --lines</code>; <code>leaks</code> is not the tool here, nearly everything the compiler keeps is still reachable.</p>
+<table>
+<tr><th>build</th><th>peak RSS</th><th>note</th></tr>
+<tr><td>master</td><td>33.8 GB</td><td>SIGSEGV after 48 s</td></tr>
+<tr><td>master + crash fixes</td><td>37.2 GB</td><td>SIGSEGV after 65 s</td></tr>
+<tr><td>+ parse-once cache</td><td>9.0 GB</td><td>partial run</td></tr>
+<tr><td>+ shared 1-char strings, freed <code>in</code> displays</td><td>1.45 GB</td><td>partial run (still crashing)</td></tr>
+<tr><td>+ crashes fixed, run completes</td><td>22.4 GB</td><td>exit 0, ends in AttributeError: platform</td></tr>
+<tr><td>+ type-scan scratch pool, more copy sites</td><td><b>12.2 GB</b></td><td>61 s</td></tr>
+<tr><td>ab-native snippet (<code>--dump-full</code> from the repo root)</td><td>17.6 GB &rarr; <b>0.44 GB</b></td><td>26 s &rarr; 3.7 s</td></tr>
+</table>
+<p><b>Where the bytes were.</b> (1) A tuple used as a dict key is keyed by its address self-hosted, so a <code>(path, mtime)</code> cache never hit and every
+call re-parsed the ~60 compiler sources (16 of 19 GB). (2) <code>mojo_char_to_str</code> malloc'd per character and a tuple display built per <code>in</code> test:
+~150 B per scanned character, owned by nothing. The 256 one-character strings are now shared and immortal (so <code>mojo_char_to_str</code> is deliberately NOT in
+<code>_FRESH_STRING_RETURNS</code>, and <code>String + char</code> must not free it), and a display that is only the right side of <code>in</code> is freed after the test (class C).
+(3) The hermetic type scans copied a ~1,650-entry dict, keys strdup'd, on each of 153,580 calls (~23 GB): a depth-indexed pool of scratch dicts
+(<code>resolve_shared._scan_scratch_dict</code>, <code>gen._scan_scratch_top</code>; every user restores the top where it restores the dict it replaced) bounds it. Rule for new code:
+a "save, copy, mutate, restore" of a big dict takes its scratch from the pool, and per-function containers are emptied in place, never rebound
+(a rebound container is only garbage under CPython).</p>
+<p><b>What is left (12 GB, ~2,700 sites, none over 5%).</b> The list-kind registry table (512 MB, it is sized by the number of leaked containers);
+<code>_walk_ast</code> flat lists (~720 MB); <code>_dedup_variadic_externs</code> substrings (~650 MB); per-function inferred-type tables and an unresolved set under
+<code>_lower_call</code> (~640 MB); every parsed module's AST kept to the end. The next fixes have the same shape: find the per-call copy or temporary, pool it, empty it,
+or give it an owner.</p>
+<p><b>Regression checks.</b> <code>gimple_char_scan_allocates_nothing_per_character</code> (4,377 MB before, 1.5 MB after) in test_gimple_runner.py;
+<code>test_selfhost_memory.py</code> (<code>selfhost-memory</code>: one <code>--dump-full</code> under 1.5 GB; <code>selfhost-memory-fire</code>: fire.py under 16 GB, a tripwire to ratchet down).</p>
+<p><b>Bugs found on the way.</b> <code>bugs/CODEGEN_tuple_dict_key_hashed_by_address.md</code>, <code>bugs/CODEGEN_list_of_pairs_iterated_as_dict.md</code> (a heap overflow in
+<code>mojo_dict_order_indices</code> is fixed, the type confusion is not), <code>bugs/CODEGEN_selfhost_dumpfull_ends_in_attributeerror_platform.md</code>.</p>
 </body>
 </html>

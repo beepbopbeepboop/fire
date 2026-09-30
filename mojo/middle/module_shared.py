@@ -624,7 +624,8 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> 
                 self._quick_type(_n.value.args[0]))
         if isinstance(_n, FunctionDef):
             _saved = self.var_types
-            self.var_types = dict(_saved)
+            _scratch_mark_17: int = self._scan_scratch_top
+            self.var_types = self._scratch_dict_copy(_saved)
             for _pname, _ptype in (_n.params or []):
                 if _ptype:
                     self.var_types[_pname] = _mojo_type(_ptype)
@@ -633,6 +634,7 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> 
                     self.var_types[_lname] = _ltype
             _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
             self.var_types = _saved
+            self._scan_scratch_top = _scratch_mark_17
         elif isinstance(_n, IfStmt):
             _gmi_phase17_collect_appends(self, _n.then_body or [], _append_hits)
             if _n.else_body:

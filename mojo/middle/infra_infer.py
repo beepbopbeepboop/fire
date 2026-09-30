@@ -1446,7 +1446,8 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     if not _locals:
         return _infer_return_type_core(gen, body)
     _saved = gen.var_types
-    _merged = dict(_saved)
+    _scratch_mark_ml: int = gen._scan_scratch_top
+    _merged: dict = gen._scratch_dict_copy(_saved)
     for _n, _t in _locals.items():
         if _n not in _merged:
             _merged[_n] = _t
@@ -1455,6 +1456,7 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
         return _infer_return_type_core(gen, body)
     finally:
         gen.var_types = _saved
+        gen._scan_scratch_top = _scratch_mark_ml
 
 
 def _infer_return_type(gen, body: list) -> str:

@@ -754,6 +754,15 @@ def _scan_scratch_dict(gen) -> dict:
     return _d
 
 
+def _scratch_dict_copy(gen, src) -> dict:
+    """A pooled scratch dict holding a copy of `src` (see `_scan_scratch_dict`).
+    The caller takes `mark = gen._scan_scratch_top` BEFORE calling and restores
+    `gen._scan_scratch_top = mark` where it restores the dict it replaced."""
+    _d: dict = _scan_scratch_dict(gen)
+    _d.update(_as_dict(src))
+    return _d
+
+
 def _infer_return_elem_type(gen, body, func_def=None,
                             _base_var_types=None) -> str | None:
     """Infer the container ELEMENT type a function returns, or None when it

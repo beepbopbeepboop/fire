@@ -1099,11 +1099,20 @@ def _selfhost_extracted_fn_index() -> dict:
     `mojo/middle` + `mojo/backend_gimple`) — the extracted helper that a
     `class GimpleGen` delegate method `return <alias>.<fn>(self, ...)`
     forwards to. Cached with the field scanner's cache key."""
+    # Validated once per top-level compile (see `_selfhost_begin_compile`), not
+    # on every call: this is asked once per function parameter, and each
+    # validation listed the source directories and stat'ed ~60 files, building
+    # a fresh path list and key string that nothing freed (~1.3 GB on
+    # `--dump-full fire.py`).
+    _validated = _SELFHOST_FNIDX_VALIDATED.get('idx')
+    if _validated is not None:
+        return _validated
     _sd = gimple_codegen._SELFHOST_DIR
     _files = sorted(_selfhost_impl_py_files(_sd))
     _key = 'fnidx#' + _selfhost_files_key(_files)
     _hit = _SELFHOST_EXTRA_FIELD_CACHE.get(_key)
     if _hit is not None:
+        _SELFHOST_FNIDX_VALIDATED['idx'] = _hit
         return _hit
     _idx: dict = {}
     for _f in _files:
@@ -1114,7 +1123,20 @@ def _selfhost_extracted_fn_index() -> dict:
                     and _fn.name not in _idx):
                 _idx[_fn.name] = _fn
     _SELFHOST_EXTRA_FIELD_CACHE[_key] = _idx
+    _SELFHOST_FNIDX_VALIDATED['idx'] = _idx
     return _idx
+
+
+# The fn-index answer already checked against the source files' mtimes during
+# this compile; emptied by `_selfhost_begin_compile` so the next top-level
+# compile re-validates (an edited source file is still picked up).
+_SELFHOST_FNIDX_VALIDATED: dict = {}
+
+
+def _selfhost_begin_compile() -> None:
+    """Start of one top-level compile: forget which source-file-derived answers
+    were validated, so they are checked once more (and only once)."""
+    _SELFHOST_FNIDX_VALIDATED.clear()
 
 
 # --- the compiler's own sources, parsed ONCE per process ------------------
