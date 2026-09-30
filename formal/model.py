@@ -1409,6 +1409,78 @@ def _string_operand_refusal(op: str, spelled_op, left_kind,
         "string_concat_refusal for the `+` half of this table")
 
 
+def string_compare_number_refusal(op: str, left_kind, right_kind,
+                                  left, right, spelled_op=None) -> str | None:
+    """Why `a {op} b` cannot be a string comparison when ONE side is a number.
+
+    THE OTHER HALF of `string_comparison_lowering`'s precondition, and it was
+    live the moment `p[i]` on a declared pointer became a byte read. That
+    lowering is `strcmp(a, b) == 0`, whose precondition is that BOTH operands
+    are addresses, and it decided that by asking whether AT LEAST ONE side is a
+    string — which is the right question for `a == "x"` and the wrong one for
+    `p[0] == "."`.
+
+    `p[0]` is a byte, a byte is an integer on this path, and `strcmp` was handed
+    the byte's VALUE as an address. Measured, on this tree, arm64:
+
+        def is_dot(name: Pointer[UInt8]):
+            if name[0] != ".":
+                return 0
+            ...
+
+    SIGSEGV, with no output at all — the number 46 is not a mapping. Before the
+    pointer subscript landed the same line took the blob path, so this is a new
+    way for the same spelling to be a crash, and a crash is the outcome the
+    byte read was supposed to replace.
+
+    It is refused rather than worked around, and the message gives both
+    readings because both are right answers to different questions: the byte's
+    value (`p[0] == 46`, with the byte code written as a number, which is the
+    same rule `os/path`'s `SLASH` and `DOT` constants are there for), or the
+    string's content (`str_at(s, 0, ".")`, or `s.startswith(".")`).
+
+    NOT the same arm as the null test, and both are asked from the same pair of
+    operands: `p == 0` is "is it there", which IS a word compare and is what
+    every function in `os` means by it; `p[0] == "."` is a number against a
+    string, which is nothing.
+    """
+    if (spelled_op or op) not in ("==", "!="):
+        return None
+    if left is None or right is None:
+        return None
+    if string_is_null_test(left, right):
+        return None
+    if not (string_operand_is_string(left_kind)
+            or string_operand_is_string(right_kind)):
+        return None
+    # EXACTLY ONE side classified. `None` counts as "not a string" on purpose:
+    # `p[0]` on a `Pointer[UInt8]` is definitively a byte and `ValueKinds`
+    # reports None for it, because a subscript's element kind is not something
+    # the whole-function scan derives. Requiring INT_KIND would have missed the
+    # measured case exactly, and it would have missed a `char *` from an
+    # unannotated callee too — which is a crash by the same route.
+    if (string_operand_is_string(left_kind)
+            == string_operand_is_string(right_kind)):
+        return None
+    # The STRING side is `txt` and the other is `num`, whichever side it is on.
+    num, txt = ((right, left) if string_operand_is_string(left_kind)
+                else (left, right))
+    return (
+        f"`{spelled(left)} {spelled_op or op} {spelled(right)}` compares a "
+        f"NUMBER with a string, and the string comparison this would lower to "
+        f"is `strcmp`, which DEREFERENCES both operands — so it would be handed "
+        f"the value of `{spelled(num)}` as an address. Measured on this tree: "
+        f"`p[0] != \".\"` on a `Pointer[UInt8]` segfaults with no output, "
+        f"because a byte is a number here and the number is not a mapping. "
+        f"Python has no such comparison at all: it is False for every pair. "
+        f"Ask one of the two questions instead — the byte's value, "
+        f"`{spelled(num)} == 46` with the byte written as a number (the same "
+        f"rule `os.path`'s `SLASH` and `DOT` constants exist for, since a "
+        f"character argument to a C library call is an `int` there), or the "
+        f"string's content, `str_at({spelled(txt)}, 0, \".\")` or "
+        f"`{spelled(txt)}.startswith(\".\")`")
+
+
 def string_binary_refusal(op: str, left_kind, right_kind,
                           spelled_op: str | None = None,
                           left=None, right=None, fn=None,
@@ -1443,7 +1515,9 @@ def string_binary_refusal(op: str, left_kind, right_kind,
             return word
     return (string_concat_refusal(spelled_op or op, left_kind, right_kind)
             or string_arithmetic_refusal(op, left_kind, right_kind,
-                                         spelled_op))
+                                         spelled_op)
+            or string_compare_number_refusal(op, left_kind, right_kind,
+                                             left, right, spelled_op))
 
 
 def _word_from_an_unannotated_call(fn, operand, untyped_callee) -> bool:
@@ -2287,6 +2361,21 @@ def spelled(expr) -> str:
     if isinstance(expr, F.CallExpr):
         callee = _flat_callee(expr)
         return f"{callee}(...)" if callee else f"{type(expr).__name__}(...)"
+    if isinstance(expr, F.IntLiteral):
+        # The literal's VALUE, which is its spelling. Same reason as the
+        # subscript arm below: a message that quotes `IntLiteral` instead of
+        # `46` names the node's type rather than the thing the reader is
+        # looking at.
+        return str(expr.value)
+    if isinstance(expr, F.SubscriptExpr):
+        # `p[0]`, not `SubscriptExpr`. A subscript is the one non-name shape
+        # whose spelling is both short and exact, and it is the shape a byte
+        # read arrives as — so the diagnostic that explains `p[0] != "."` was
+        # quoting `SubscriptExpr != '.'`, which names neither the expression
+        # nor the byte.
+        if isinstance(expr.index, F.SliceExpr):
+            return f"{spelled(expr.obj)}[...]"
+        return f"{spelled(expr.obj)}[{spelled(expr.index)}]"
     return type(expr).__name__
 
 

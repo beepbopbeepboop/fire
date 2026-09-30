@@ -47,7 +47,9 @@ deviations that are properties of this target and are stated on each one:
     `join_all(parts)`; and a list's capacity is the number of `append` SITES in
     the function that builds it, so nothing here can return a list whose length
     is only known at run time. That is what `split` returning a two-element
-    tuple is for, and it is the whole reason there is no `listdir` here.
+    tuple is for. It is NOT why there is no `listdir`: `os.listdir` is in the
+    `os` module and answers with a `malloc`'d blob, because an allocation
+    outlives the function that made it where a frame does not.
 
 The pure-string half — `join`, `split`, `dirname`, `basename`, `splitext`,
 `normpath`, `isabs`, `splitdrive`, `commonprefix` — is CPython's

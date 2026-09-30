@@ -46,7 +46,7 @@ what this suite exists to catch, and no case here settles for a build.
 import argparse
 import os
 import platform
-import shutil
+import re
 import subprocess
 import sys
 import tempfile
@@ -85,7 +85,7 @@ class Case:
 
     Every program below ends its records with `@@` rather than a newline, for
     the reason `test_formal_os.py` gives: a Mojo string literal's `\n` is not
-    unescaped on this path, so a formal image prints the two characters `\` and
+    unescaped on this path, so a formal image prints the two characters backslash and
     `n` and a record-structured program has to choose its own terminator.
     """
 
@@ -574,6 +574,115 @@ def make_shapes(root):
 SOCK_KEEP = []
 
 
+# ── 6. `listdir` and `walk`, against the real filesystem ───────────────────
+#
+# The fourth construct, and the one with the most surface: a run-time-length
+# sequence, which is a blob in `malloc`'d memory rather than a frame blob, and
+# a `struct dirent` whose name is bytes at a fixed offset.
+#
+# The program prints the listing of a FIXTURE TREE this process created, and
+# the oracle is `os.listdir` in this process. Both sides see the same
+# directory, so the entries, their order and their count have to agree — and
+# `os.listdir`'s order is the filesystem's, which is the order `readdir` gives
+# and therefore the order CPython gives.
+LISTDIR_PROGRAM = """\
+from os import listdir, listdir_len, listdir_get, listdir_free
+from os import walk, walk_free
+
+def show_listing(tag, p):
+    names = listdir(p)
+    n = listdir_len(names)
+    printf("L %s n=%d@@", tag, n)
+    i = 0
+    while i < n:
+        printf("E %s %d [%s]@@", tag, i, listdir_get(names, i))
+        i = i + 1
+    printf("L %s oob=[%s]@@", tag, listdir_get(names, n))
+    printf("L %s neg=[%s]@@", tag, listdir_get(names, 0 - 1))
+    listdir_free(names)
+    return 0
+
+
+def show_walk(d, p):
+    paths = walk(p, d)
+    n = listdir_len(paths)
+    printf("W %d n=%d@@", d, n)
+    i = 0
+    while i < n:
+        q = listdir_get(paths, i)
+        printf("P %d %d [%s]@@", d, i, q)
+        printf("C %d %d %d@@", d, i, listdir_len(listdir(q)))
+        i = i + 1
+    walk_free(paths)
+    return 0
+
+
+def main(n):
+    show_listing("root", "@@ROOT@@")
+    show_listing("dir", "@@ROOT@@/dir")
+    show_listing("inner", "@@ROOT@@/dir/inner")
+    show_listing("link", "@@ROOT@@/link")
+    show_listing("dangle", "@@ROOT@@/dangle")
+    show_listing("missing", "@@ROOT@@/no-such-dir")
+    show_listing("file", "@@ROOT@@/reg")
+    show_walk(9, "@@ROOT@@")
+    show_walk(1, "@@ROOT@@")
+    show_walk(0, "@@ROOT@@")
+    return 0
+"""
+
+
+def _listdir_oracle(root):
+    """CPython's answers for `LISTDIR_PROGRAM` over the fixture tree.
+
+    The listing, in `os.listdir` order — which is `readdir` order, the order
+    this program's `readdir` walk also produces.
+
+    The walk is `os.walk(root, followlinks=True)` filtered by depth, and BOTH
+    of those are deliberate. `followlinks=True` because `os.walk` does NOT
+    follow a directory symlink by default and this module's `walk` DOES — it
+    asks `isdir`, which follows, and `formal/hostmods/os/__init__.mojo`'s
+    `walk` says so. The fixture has a `dl` that is exactly that case, so the
+    question is asked rather than assumed, and the count at depth 1 is the
+    thing that would move if the two disagreed. The depth FILTER is because
+    `os.walk` has no depth argument, and a hand-rolled walk here would be the
+    program under test checked against itself.
+    """
+    out = {}
+    for tag, path in (("root", root),
+                      ("dir", os.path.join(root, "dir")),
+                      ("inner", os.path.join(root, "dir", "inner")),
+                      ("link", os.path.join(root, "link")),
+                      ("dangle", os.path.join(root, "dangle")),
+                      ("missing", os.path.join(root, "no-such-dir")),
+                      ("file", os.path.join(root, "reg"))):
+        try:
+            names = os.listdir(path)
+        except OSError:
+            out[f"L {tag} n"] = "-1"
+            out[f"L {tag} oob"] = ""
+            out[f"L {tag} neg"] = ""
+            continue
+        out[f"L {tag} n"] = str(len(names))
+        for i, nm in enumerate(names):
+            out[f"E {tag} {i}"] = nm
+        out[f"L {tag} oob"] = ""
+        out[f"L {tag} neg"] = ""
+    for d in (9, 1, 0):
+        rows = []
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+            rel = os.path.relpath(dirpath, root)
+            depth = 0 if rel == "." else rel.count(os.sep) + 1
+            if depth > d:
+                continue
+            rows.append((dirpath, len(dirnames) + len(filenames)))
+        out[f"W {d} n"] = str(len(rows))
+        for i, (dirpath, count) in enumerate(rows):
+            out[f"P {d} {i}"] = dirpath
+            out[f"C {d} {i}"] = str(count)
+    return out
+
+
 def build(src, out, arch):
     cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove",
            "--backend=" + arch, "-o", out, src]
@@ -588,6 +697,37 @@ def run(out, arch):
         argv = ["arch", "-x86_64", out]        # Rosetta 2
     p = subprocess.run(argv, capture_output=True, text=True, timeout=RUN_TIMEOUT)
     return p.returncode, p.stdout, p.stderr
+
+
+def parse_listdir(text):
+    """The `listdir`/`walk` program's records, keyed the way the oracle is.
+
+    Two record shapes and one key: `L root n=8` and `E root 0 [reg]` both
+    become `("<what>", "<a>", "<b>")` with a value, so a directory listing is
+    compared ENTRY BY ENTRY AND IN ORDER rather than as a set of names — a
+    listing is exactly where two entries can share a name, and a comparison
+    keyed on the name alone would not see the difference.
+
+    Written as a split rather than one regex because the two shapes differ in
+    where the value sits, and a single pattern for that is a pattern with an
+    optional group in the middle of it and no way to tell which branch matched.
+    """
+    got = {}
+    for chunk in text.split(REC):
+        chunk = chunk.strip("\n").strip()
+        if not chunk:
+            continue
+        parts = chunk.split(" ", 3)
+        what = parts[0]
+        a = parts[1] if len(parts) > 1 else ""
+        b = parts[2] if len(parts) > 2 else ""
+        rest = parts[3] if len(parts) > 3 else ""
+        if "=" in b and not rest:
+            b, _, rest = b.partition("=")
+        if rest.startswith("[") and rest.endswith("]"):
+            rest = rest[1:-1]
+        got[(what, a, b)] = rest
+    return got
 
 
 def parse(text):
@@ -622,6 +762,33 @@ def rosetta():
 
 
 # ── the runner ────────────────────────────────────────────────────────────
+
+def run_listdir_case(arch, tmpdir, fixture, verbose):
+    """(ok, detail) for the `listdir`/`walk` program on one architecture."""
+    src = os.path.join(tmpdir, "os_listdir.mojo")
+    with open(src, "w") as f:
+        f.write(LISTDIR_PROGRAM.replace("@@ROOT@@", fixture))
+    out = os.path.join(tmpdir, "os_listdir." + arch)
+    rc, text = build(src, out, arch)
+    if rc != 0:
+        return False, f"build failed: {text.strip()[-400:]}"
+    rc, stdout, stderr = run(out, arch)
+    if rc != 0:
+        return False, f"exit {rc}, stderr {stderr.strip()[:200]!r}"
+    want = {(k.split()[0], k.split()[1] if len(k.split()) > 1 else "",
+            k.split()[2] if len(k.split()) > 2 else ""): v
+            for k, v in _listdir_oracle(fixture).items()}
+    got = parse_listdir(stdout)
+    bad = [f"{k}: the image says {got.get(k)!r}, os.listdir says {v!r}"
+           for k, v in sorted(want.items()) if got.get(k) != v]
+    if bad:
+        return False, ("%d of %d answers differ from CPython's:\n      %s"
+                       % (len(bad), len(want), "\n      ".join(bad[:20])))
+    if verbose:
+        print(f"      {len(want)} listing answers identical to os.listdir/"
+              f"os.walk")
+    return True, ""
+
 
 def run_case(case, arch, tmpdir, verbose):
     """(ok, detail) for one case on one architecture."""
@@ -703,6 +870,7 @@ def main():
         cases.append(build_stat_case(os.path.join(fixture, "no-such"),
                                      tmpdir))
 
+        cases.append(Case("listdir_and_walk", "", None, archs=["arm64"]))
         names = args.cases or [c.name for c in cases]
         by_name = {c.name: c for c in cases}
         for n in names:
@@ -711,6 +879,22 @@ def main():
                 return 2
         for n in names:
             case = by_name[n]
+            if case.name == "listdir_and_walk":
+                for arch in archs:
+                    if arch not in (case.archs or archs):
+                        print(f"SKIP {n} [{arch}]  (an `os` dylib that calls "
+                              f"the C library is arm64-only on this backend: "
+                              f"bugs/FORMAL_x86_64_dylib_with_an_extern_call_"
+                              f"does_not_load.md)")
+                        continue
+                    total += 1
+                    ok, detail = run_listdir_case(arch, tmpdir, fixture,
+                                                  args.verbose)
+                    print(("PASS " if ok else "FAIL ") + f"{n} [{arch}]" +
+                          (("  " + detail) if detail else ""))
+                    if not ok:
+                        failed.append(f"{n}[{arch}]")
+                continue
             for arch in archs:
                 if case.archs is not None and arch not in case.archs:
                     print(f"SKIP {n} [{arch}]  (an `os` dylib that calls the C "

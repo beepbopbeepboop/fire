@@ -427,14 +427,102 @@ def fs_opendir(p) -> int:
 def fs_readdir(d) -> int:
     """`readdir(d)`: a `struct dirent *`, or 0 at the end of the directory.
 
-    Present but NOT yet the answer to anything, and the reason is at the top of
-    this file: a `struct dirent`'s name is a `char[1024]` at a fixed offset
-    inside a struct the source never declares, so before the byte read landed
-    there was no width and no offset to trust. It is here because
-    `fs_dirent_name` below can now copy the name out, and
-    `bugs/FORMAL_listdir_no_run_time_sequence.md` has the rest of the story.
+    A `char *` and NOT a string on purpose: it is the address of a struct, not
+    of bytes, and `-> str` would tell a call site to compare its contents as a
+    string. It is an `int` for the same reason `fs_opendir` is — a pointer this
+    path carries as a word.
     """
     return readdir(d)
+
+
+def fs_rewinddir(d) -> int:
+    """`rewinddir(d)`: back to the first entry, so a directory can be read
+    twice.
+
+    Which is what `os.listdir` does: one pass to count the entries, one to
+    copy them out. The C library will not say how many there are without reading
+    them, and the blob this module builds has to be exactly the size its
+    contents need — see `os.listdir` for why "big enough" is not the answer.
+    """
+    return rewinddir(d)
+
+
+# ── Reading a name out of a `struct dirent` ────────────────────────────────
+#
+# The layout, measured rather than quoted: 48 bytes of the struct dumped
+# through `ctypes` for the first four entries of `/etc`, with the name read out
+# of each.
+#
+#      0  d_ino        int64
+#      8  (padding, 8)
+#     16  d_reclen     uint16   32 or 40
+#     18  d_namlen     uint16   the length of the name
+#     20  (one byte this reading does not account for)
+#     21  d_name       char[]   NUL-terminated
+#
+# `d_name` at 21 is what those four entries say: byte 21 is `.` for `.`, `..`
+# for `..`, `h` for `hostconfig~orig` and `s` for `sshd_config.~6~`, each
+# followed by its own NUL. The byte at 20 is not accounted for here and is not
+# read, which is the only safe thing to do with a byte whose meaning this
+# source does not state.
+#
+# This is the half of `bugs/FORMAL_listdir_no_run_time_sequence.md` the byte
+# read made answerable. It was not answerable before because a read of the
+# struct was a COUNT-WALK — a bounds check against whatever word sat at offset
+# 0 — and now each byte is a load of the width it declares.
+
+def fs_dirent_name(e: Pointer[UInt8]) -> str:
+    """The `d_name` of the entry `e`, in a fresh buffer the caller owns.
+
+    COPIED rather than returned as a pointer into the struct, and the reason is
+    the one this whole module is about: a `readdir` result is only valid until
+    the next `readdir` on the same descriptor, so an interior pointer into it
+    would be a name that changes under the caller. `d_name` is at byte 21 (see
+    the table above) and the copy stops at the NUL.
+
+    `e` is ANNOTATED `Pointer[UInt8]` and that annotation is load-bearing: it
+    is what makes `e[21 + i]` a one-byte load rather than a list-blob walk
+    bounds-checked against the inode number at offset 0. Without it the same
+    line returns a fabricated number, and
+    `bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md` has the
+    measurement.
+
+    1024 bytes is the array's own size on this target, so a name that long
+    cannot be truncated.
+    """
+    var d: Pointer[UInt8] = str_alloc(1024)
+    i = 0
+    while e[21 + i] != 0 and i < 1023:
+        d[i] = e[21 + i]
+        i = i + 1
+    d[i] = 0
+    return d
+
+
+def fs_name_is_dot(name: Pointer[UInt8]) -> int:
+    """1 if `name` is `.` or `..` — the two entries a listing drops.
+
+    BYTE VALUES and not `name[0] == "."`: a byte is a number on this path, and
+    comparing it to a string literal lowers to `strcmp`, which dereferences the
+    number — measured, SIGSEGV with no output
+    (`model.string_compare_number_refusal`). 46 is `.`, the same number
+    `os/path`'s `DOT` constant carries under the name the path functions use it
+    by.
+
+    The four cases, because the interesting one is the second: `.`, `..`, a
+    name that merely BEGINS with two dots (`.profile`) and a name that begins
+    with one (`.hidden`) are four answers, and a two-term test gets two of them
+    wrong.
+    """
+    if name[0] != 46:
+        return 0
+    if name[1] == 0:
+        return 1
+    if name[1] != 46:
+        return 0
+    if name[2] == 0:
+        return 1
+    return 0
 
 
 # ── The `struct stat` this target fills in ────────────────────────────────
