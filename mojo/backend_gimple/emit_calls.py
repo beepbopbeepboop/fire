@@ -50,6 +50,7 @@ from mojo.middle.calls_shared import (
     _as_str, _build_call_args_for_candidate, _default_expr_to_pair, _ident_call_name, _isinstance_type_name, _pack_kwargs_dict,
     _resolve_overload, _sms_key
 )
+from mojo.middle.methods_shared import _is_selfhost_source_file
 
 def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
                                fname_raw: str) -> str:
@@ -2014,11 +2015,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # fire; every other file falls through to the generic
             # untyped-int64_t path below unchanged (the ONLY behavior
             # this ever had before A5 was added).
-            _cur_file = getattr(gen, '_current_filename', None)
-            _cur_abs = os.path.abspath(_cur_file) if _cur_file else ''
-            _is_selfhost_file = bool(_cur_file) and (
-                _cur_abs == gimple_codegen._SELFHOST_DIR
-                or _cur_abs.startswith(gimple_codegen._SELFHOST_DIR + os.sep))
+            # `_is_selfhost_source_file`, the shared answer to "is the file
+            # being compiled one of the compiler's OWN modules" — see its
+            # docstring for why the bare `_SELFHOST_DIR` prefix test this
+            # replaced was wrong (it answered yes for anything merely under
+            # the install directory, so a fixture or a downstream project's
+            # subdirectory got this self-host-only type hint, and
+            # `_lower_method_call`'s module-qualified-call branch was denied
+            # its resolution outright — a silent wrong value whose only
+            # trigger was where the file sat).
+            _is_selfhost_file = _is_selfhost_source_file(
+                getattr(gen, '_current_filename', None))
             _boxed_ft = gen._known_field_type(_attr) if _is_selfhost_file else None
             if _boxed_ft is not None:
                 ot, ov = gen.lower_expr(node.args[0])
