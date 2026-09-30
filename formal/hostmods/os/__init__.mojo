@@ -82,7 +82,7 @@ from ._syscalls import str_alloc, str_len, str_at, str_prefix, str_starts
 from ._syscalls import fs_cwd, fs_getenv, fs_setenv, fs_unsetenv
 from ._syscalls import fs_chdir, fs_chmod, fs_rename, fs_unlink, fs_rmdir
 from ._syscalls import fs_mkdir, fs_free
-from .path import exists, isfile, isdir, getsize
+from .path import exists, isfile, isdir, islink, lexists, getsize
 
 # ── The constants CPython spells as attributes ──────────────────────────────
 #

@@ -43,13 +43,15 @@ out rather than guessed at:
     reason it has to is here. Filed as
     `bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md`.
 
-  * BYTE READS. `p[0]` on a `Pointer[UInt8]` is NOT a one-byte load. It takes
-    the blob path in `_emit_subscript_addr`, which reads a COUNT from offset 0
-    and bounds-checks against it: `byteat("ab")` returns -1879048144, which is
-    `ab` plus whatever follows it in the text section, read as a little-endian
-    word. A wrong answer, silently. `str_at` below therefore asks "what byte is
-    at i" with `strspn`, which is a real character test and needs no load:
-    `strspn(s + i, chars) == 1` holds exactly when `s[i]` is in `chars`.
+  * BYTE READS. `p[0]` on a `Pointer[UInt8]` is a one-byte load now. It used to
+    take the blob path in `_emit_subscript_addr`, which reads a COUNT from
+    offset 0 and bounds-checks against it: `byteat("ab")` returned
+    -1879048144, which is `ab` plus whatever follows it in the text section,
+    read as a little-endian word. A subscript on a base with a DECLARED
+    pointee is routed through the pointer value model now
+    (`model.subscript_base_lowering`), so `p[i]` and `p.value()` are the same
+    load at the same width. The `UInt8` ANNOTATION on the parameter is what
+    makes it so, and it is why every reader below takes `b: Pointer[UInt8]`.
     (bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md.)
 
   * `len()`. It is a builtin whose kind comes from the call site, and a value
@@ -66,13 +68,15 @@ out rather than guessed at:
     there" from "could not be made" ask `isdir` instead, which is a fact rather
     than an error code.
 
-  * `stat`, and therefore `st_mode`/`st_dev`/`st_ino`/`st_size`. `stat` takes
-    its answer in an out-parameter struct, and a struct is a frame blob whose
-    word 0 is a COUNT: subscripting it is a bounds check against a device
-    number, and the layout, the padding and the field offsets are all
-    unstated by the source. Anything that read it that way would be assembling
-    a plausible number out of adjacent bytes. `getsize` uses `lseek` instead,
-    which returns the size as a value; `isfile` says what it actually decides.
+  * `stat`'s STRUCT is not a blob and is not read as one. The out-parameter is
+    a `malloc`'d byte buffer and the fields come out of it ONE BYTE AT A TIME at
+    the offsets this target's own `struct stat` puts them at, which is a
+    property of the ABI rather than of the source and is written down in full
+    under `ST_DEV` below. The general half — a struct read for a struct the
+    SOURCE declares — is still not possible, and nothing here pretends to do
+    it: see `bugs/FORMAL_pointer_value_model.md`. What changed is that the
+    buffer is readable at all, so `st_mode` is a value and `isfile` is
+    CPython's answer rather than an approximation of it.
 """
 
 # ── Memory: a buffer, and the only two ways a string is built here ──────────
@@ -418,6 +422,252 @@ def fs_opendir(p):
     link to one, which is what `os.path.isdir` does.
     """
     return opendir(p)
+
+
+def fs_readdir(d):
+    """`readdir(d)`: a `struct dirent *`, or 0 at the end of the directory.
+
+    Present but NOT yet the answer to anything, and the reason is at the top of
+    this file: a `struct dirent`'s name is a `char[1024]` at a fixed offset
+    inside a struct the source never declares, so before the byte read landed
+    there was no width and no offset to trust. It is here because
+    `fs_dirent_name` below can now copy the name out, and
+    `bugs/FORMAL_listdir_no_run_time_sequence.md` has the rest of the story.
+    """
+    return readdir(d)
+
+
+# ── The `struct stat` this target fills in ────────────────────────────────
+#
+# `stat(2)` and `lstat(2)` take their answer in an out-parameter, and that
+# out-parameter is a `struct stat` this source does not declare. The offsets
+# below are therefore a property of the TARGET, not of this program, and they
+# are written out in full so that a reader can check them rather than trust
+# them. They are the `__DARWIN_64_BIT_INO_T` layout — the one an arm64 macOS
+# uses, where `st_ino` is 64 bits — and they are NOT the 32-bit-inode layout
+# that `st_mode` at 16 and `st_size` at 96 describe; that is the layout a
+# 32-bit target uses, and reading this one with those offsets gets a plausible
+# wrong number rather than an error.
+#
+# Measured on this host by calling the C library's own `stat(2)` through
+# `ctypes` and dumping the buffer, against `os.stat` in the same process:
+#
+#      0  st_dev          int32     4  st_mode        uint16
+#      6  st_nlink        uint16    8  st_ino         int64
+#     16  st_uid          uint32   20  st_gid         uint32
+#     24  st_rdev         int32   28  (padding)
+#     32  st_atimespec    { int64 sec; int64 nsec; }
+#     48  st_mtimespec    { int64 sec; int64 nsec; }
+#     64  st_ctimespec    { int64 sec; int64 nsec; }
+#     80  st_birthtimespec{ int64 sec; int64 nsec; }
+#     96  st_size         int64
+#    104  st_blocks       int64
+#    112  st_blksize      int64
+#
+# Every field this module reads is read ONE BYTE AT A TIME through
+# `le16`/`le32`/`le64` below, so each load has the width the field declares.
+# That is the difference from the state
+# `bugs/FORMAL_stat_out_parameter_is_unreadable.md` describes: it was not the
+# offsets that made the struct unreadable, it was that a read of it was a
+# COUNT-WALK — a bounds check against whatever word was at offset 0. A byte
+# read at a declared offset is what C does, and it is now answerable.
+#
+# The offsets are CONSTANTS, and a module-level constant is not exported as a
+# word across a dylib boundary (`FORMAL_module_state_no_storage.md`), so they
+# are `int` PARAMETERS of the readers and the values live at the use sites.
+# The names are spelled `ST_*` here as the numbers they are; the spellings a
+# caller uses are the functions further down, which is also where the layout is
+# checked.
+
+def le16(b: Pointer[UInt8], i):
+    """The little-endian 16-bit field at byte `i` of `b`."""
+    return b[i] + 256 * b[i + 1]
+
+
+def le32(b: Pointer[UInt8], i):
+    """The little-endian 32-bit field at byte `i` of `b`."""
+    return b[i] + 256 * b[i + 1] + 65536 * b[i + 2] + 16777216 * b[i + 3]
+
+
+def le64(b: Pointer[UInt8], i):
+    """The little-endian 64-bit field at byte `i` of `b`.
+
+    A LOOP rather than eight terms: the shift is `1 << (8*k)`, and eight of
+    those in one expression is a long line whose associativity nobody has to
+    check by eye. `v + byte * scale` is the same addition the other two readers
+    do, and `*` binds tighter than `+` on this path.
+    """
+    v = 0
+    k = 0
+    while k < 8:
+        v = v + b[i + k] * (1 << (8 * k))
+        k = k + 1
+    return v
+
+
+def fs_stat(p, buf):
+    """`stat(p, buf)`: 0 when `buf` was filled, -1 when it was not.
+
+    The two-argument spelling. The C library's own third parameter is an
+    `audit_t` the caller does not have to pass for the call to work, and there
+    is no way to spell a three-argument extern here that is not also a way to
+    pass a stack address as the third word.
+    """
+    return stat(p, buf)
+
+
+def fs_lstat(p, buf):
+    """`lstat(p, buf)`: as `fs_stat`, without following a symbolic link.
+
+    This is the whole of what `lexists`, `islink` and `samefile` need and the
+    reason they are exact rather than approximate: the difference between
+    `stat` and `lstat` is the difference between the mode of a link and the
+    mode of what it points at, and it is one word of the callee's behaviour
+    rather than anything this path has to compute.
+    """
+    return lstat(p, buf)
+
+
+# ── Reading `struct stat` back out, and CHECKING that it is one ─────────────
+#
+# Everything above reads a field the caller named. What follows reads the
+# fields this path is actually asked for, and the first of them is the one that
+# makes the rest trustworthy.
+#
+# `st_size` is the canary, and it is a canary because it is a fact this module
+# can establish TWO INDEPENDENT WAYS: `lseek(fd, 0, SEEK_END)` on a
+# read-only descriptor is a value, and it is the same number `stat` puts at
+# offset 96. So `fs_stat_layout_ok` asks both and refuses if they disagree.
+# That turns the offsets above from a table this file asserts into a table this
+# file CHECKS, on every call, against the C library itself — and a target whose
+# `struct stat` is laid out differently gets 0 from every `stat_*` function
+# below rather than a plausible wrong number out of adjacent bytes. That is the
+# whole difference from the state
+# `bugs/FORMAL_stat_out_parameter_is_unreadable.md` describes.
+#
+# It runs only when the mode says the path is a REGULAR file, for two reasons.
+# `lseek` on a directory descriptor reports something about the directory
+# rather than a file size, so the two answers would differ for a reason that has
+# nothing to do with the layout. And `open` on a FIFO blocks until a writer
+# arrives, so a canary that ran for every non-directory would hang on one — the
+# mode is read first precisely so that the only shape that is opened is the one
+# that cannot block. The mode is the thing under test, so this is not a proof;
+# it is a guard that catches a layout which disagrees with the C library about
+# a size, and `test_formal_os.py` pins every field against CPython on a
+# regular file, a directory, a device node, a FIFO and a symbolic link.
+
+def fs_stat_layout_ok(p, buf):
+    """1 if the bytes in `buf` can be read as this target's `struct stat`.
+
+    0 means either that `stat` failed (nothing was written) or that the
+    offsets do not describe what the C library put in the buffer. The two are
+    not told apart on purpose: both of them mean "there is no `struct stat`
+    here", and every caller below has the same answer to give.
+    """
+    m = le16(buf, 4)
+    if m == 0:
+        return 0
+    if (m & 61440) != 32768:
+        # Not S_IFREG. See above: this is what keeps the canary from opening a
+        # FIFO. 32768 is 0x8000, the format bits of a regular file; the mask
+        # keeps the permission bits out of the comparison.
+        return 1
+    fd = fs_open_ro(p)
+    if fd < 0:
+        return 1
+    n = fs_lseek(fd, 0, 2)
+    fs_close(fd)
+    if n < 0:
+        return 1
+    if n != le64(buf, 96):
+        return 0
+    return 1
+
+
+def fs_stat_fill(p, follow):
+    """`p`'s `struct stat` in a fresh buffer, or 0 when there is not one.
+
+    THE one place the `stat`/`lstat` choice, the status check and the layout
+    check happen. Three field readers below need all three, and a second copy of
+    the sequence is a second thing to be wrong about which of the three
+    produces a -1.
+
+    `follow` 0 means `lstat` and 1 means `stat`, spelled as a number because
+    the C library's own two names are two functions and a name is not a value
+    on this path. 0 rather than -1 for "no struct here", so a caller can test
+    it against 0 the way it tests every other pointer the C library hands back.
+    The buffer is `malloc`'d and the CALLER OWNS it; every reader above gives
+    the buffer away inside the call, and the field readers below are the only
+    things that keep one.
+    """
+    buf = str_alloc(256)
+    r = 0
+    if follow == 1:
+        r = fs_stat(p, buf)
+    else:
+        r = fs_lstat(p, buf)
+    if r != 0:
+        return 0
+    if fs_stat_layout_ok(p, buf) == 0:
+        return 0
+    return buf
+
+
+def fs_stat_mode(p, follow):
+    """`st_mode` of `p`, or -1. `follow` 0 means `lstat`, 1 means `stat`.
+
+    -1 is the answer for a path that does not exist, for one this process
+    cannot stat, and for a target whose `struct stat` the offsets above do not
+    describe. All three are "there is no mode here", and a caller that has to
+    tell them apart is asking a question the C library's error accessor would
+    answer, which this path cannot bind (`__error`, at the top of this file).
+    """
+    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
+    if buf == 0:
+        return 0 - 1
+    return le16(buf, 4)
+
+
+def fs_stat_field64(p, follow, at):
+    """The 64-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+
+    One function for `st_ino`, `st_size`, `st_blocks` and `st_blksize` rather
+    than four that each pass a different constant, because the reading is the
+    same instruction sequence four times over and a second implementation of it
+    is a second thing to be wrong. The offset is a PARAMETER because a
+    module-level constant is not exported as a word across a dylib boundary.
+    """
+    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
+    if buf == 0:
+        return 0 - 1
+    return le64(buf, at)
+
+
+def fs_stat_field16(p, follow, at):
+    """The 16-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+
+    `st_mode` and `st_nlink`. The mode is what every predicate above is
+    `S_IFxxx` of, and its width being 16 is why those comparisons are against
+    `32768` and not against a value read at 32 bits: a 32-bit read at offset 4
+    would take `st_nlink` as its high half.
+    """
+    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
+    if buf == 0:
+        return 0 - 1
+    return le16(buf, at)
+
+
+def fs_stat_field32(p, follow, at):
+    """The 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
+
+    `st_uid`, `st_gid` and `st_rdev`. The field is 32 bits in the layout above
+    and reading it as 64 would take the four bytes of padding after it, so the
+    width is the field's and not the alignment's.
+    """
+    var buf: Pointer[UInt8] = fs_stat_fill(p, follow)
+    if buf == 0:
+        return 0 - 1
+    return le32(buf, at)
 
 
 def fs_realpath(p):

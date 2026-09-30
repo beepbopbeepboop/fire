@@ -53,8 +53,10 @@ from .._syscalls import str_dup, str_prefix, str_build, str_repeat
 from .._syscalls import str_len, str_eq_n, str_starts, str_at
 from .._syscalls import str_rfind, str_rindex_of, str_rstrip_len, str_lead
 from .._syscalls import str_chr_from
-from .._syscalls import fs_access, fs_open_ro, fs_lseek, fs_close
+from .._syscalls import fs_access
 from .._syscalls import fs_opendir, fs_closedir, fs_realpath, fs_cwd, fs_getenv
+from .._syscalls import fs_stat_mode
+from .._syscalls import fs_stat_field16, fs_stat_field32, fs_stat_field64
 
 # The two bytes this module asks about by value. They are NUMBERS because a
 # character argument to a C library call is an `int` there and a `char *` here:
@@ -341,17 +343,42 @@ def commonprefix(a, b):
 
 
 # ── Asking the filesystem ──────────────────────────────────────────────────
+#
+# The format bits of `st_mode`, and the three constants they are asked about.
+# NUMBERS rather than names because a module-level constant is not exported as
+# a word across a dylib boundary (the note at the top of this file), so a named
+# constant is not a thing a function in another image can read. `test_formal_os.py`
+# checks every value below against CPython's own `os.stat` on the same path.
+#
+#   S_IFMT   61440   the mask that selects the format bits
+#   S_IFREG  32768   a regular file          S_IFDIR  16384  a directory
+#   S_IFLNK  40960   a symbolic link
+#
+# 0x8000 / 0x4000 / 0xA000 are the POSIX values and they are what this target's
+# `struct stat` carries; `os/_syscalls.mojo` writes the layout out in full and
+# says where each of these was read from.
 
-def exists(p):
-    """1 if `p` resolves to something, following symbolic links.
+def isfile(p):
+    """1 if `p` is a regular file, following symbolic links — CPython's
+    `os.path.isfile` exactly.
 
-    `access(p, F_OK)`, which is the C library's own answer to the question and
-    follows a link to what it points at, so a dangling link is 0 — which is
-    what CPython's `os.path.exists` says too. (`lexists`, which is the same
-    question WITHOUT following links, is not here: `lstat` reports through an
-    out-parameter struct, and see the note in `os/_syscalls.mojo`.)
+    `S_ISREG(st_mode)` from `stat`, so it is a value read out of the C library's
+    own answer rather than a fact assembled from two other questions. That
+    distinction is the whole history of this function: it used to be
+    `exists(p) and not isdir(p)`, which agrees with CPython for a regular file,
+    a directory, a link to either and a path that is not there, and DISAGREES
+    for a device node, a FIFO and a socket — three of which are ordinary things
+    to ask about. `test_formal_os.py` asserts the agreement now rather than the
+    disagreement.
+
+    A link to a regular file is a regular file here, as in CPython, because the
+    link is followed: `follow` is 1. `islink` is the question that is not
+    followed.
     """
-    if fs_access(p, 0) == 0:
+    m = fs_stat_mode(p, 1)
+    if m < 0:
+        return 0
+    if (m & 61440) == 32768:
         return 1
     return 0
 
@@ -364,6 +391,10 @@ def isdir(p):
     which is CPython's `os.path.isdir` exactly. The descriptor is closed
     again here rather than handed back, so the answer costs no resource the
     caller has to remember to release.
+
+    The `st_mode` route would answer this too, and does not: `opendir` needs no
+    layout to be right, so this is the one predicate here that cannot be wrong
+    about a target's `struct stat`.
     """
     d = fs_opendir(p)
     if d == 0:
@@ -372,42 +403,174 @@ def isdir(p):
     return 1
 
 
-def isfile(p):
-    """1 if `p` is something that exists and is not a directory.
+def islink(p):
+    """1 if `p` is a symbolic link, WITHOUT following it — CPython's
+    `os.path.islink` exactly.
 
-    WHAT IT DECIDES, precisely: `exists(p) and not isdir(p)`. That is
-    CPython's answer for a regular file, for a symbolic link to one, and for a
-    path that does not exist (0, correctly). It is NOT the same for a FIFO, a
-    socket or a device node, which CPython calls 0 and this calls 1.
-
-    The reason is the one `os/_syscalls.mojo` records at length: the exact
-    answer is `S_ISREG(st_mode)`, `stat` reports through an out-parameter
-    struct, and a struct is a frame blob whose first word is a COUNT — so
-    reading a mode out of it means a bounds check against a device number and
-    a field offset the source never states. Rather than assemble a plausible
-    number out of adjacent bytes, this says the largest fact it can actually
-    establish and says that here. Use `isdir` to separate the two cases.
+    `S_ISLNK(lstat(p))`. The `l` is the whole function: `stat` follows the link
+    and reports the mode of what it points at, so `islink` on a link to a
+    regular file would be 0 with `stat` and 1 with `lstat`, and only the second
+    is the question. A path that is not a link, and a path that is not there,
+    are both 0.
     """
-    if isdir(p) == 1:
+    m = fs_stat_mode(p, 0)
+    if m < 0:
         return 0
-    return exists(p)
+    if (m & 61440) == 40960:
+        return 1
+    return 0
+
+
+def lexists(p):
+    """1 if `p` is a path the system knows about, links NOT followed.
+
+    CPython's `os.path.lexists`, and the difference from `exists` is a dangling
+    symbolic link: `exists` follows the link, finds nothing at the far end and
+    says 0; `lexists` asks whether the NAME resolves and says 1. So
+    `lexists` is `lstat` succeeding, and `exists` is `access(p, F_OK)`, and the
+    two disagree on exactly the links whose target is not there.
+    """
+    m = fs_stat_mode(p, 0)
+    if m < 0:
+        return 0
+    return 1
+
+
+def samefile(a, b):
+    """1 if `a` and `b` are the same file, following symbolic links.
+
+    `st_dev` and `st_ino` agreeing, which is what CPython's
+    `os.path.samefile` compares and the only definition of "the same file" a
+    POSIX system has: a hard link and the path it was made from have the same
+    pair, and two paths that happen to have the same name in different
+    directories do not.
+
+    A path that cannot be stat'd is 0 rather than an error, so a caller that
+    wants to know which of the two is bad asks `exists` on each. There is no
+    exception on this path to raise the one CPython raises.
+    """
+    da = fs_stat_field64(a, 1, 0)
+    ia = fs_stat_field64(a, 1, 8)
+    if da < 0 or ia < 0:
+        return 0
+    db = fs_stat_field64(b, 1, 0)
+    ib = fs_stat_field64(b, 1, 8)
+    if db < 0 or ib < 0:
+        return 0
+    if da != db:
+        return 0
+    if ia != ib:
+        return 0
+    return 1
+
+
+def exists(p):
+    """1 if `p` resolves to something, following symbolic links.
+
+    `access(p, F_OK)`, which is the C library's own answer to the question and
+    follows a link to what it points at, so a dangling link is 0 — which is
+    what CPython's `os.path.exists` says too. (`lexists` above is the same
+    question WITHOUT following links.)
+    """
+    if fs_access(p, 0) == 0:
+        return 1
+    return 0
 
 
 def getsize(p):
-    """The size of `p` in bytes, or -1 if it cannot be opened.
+    """The size of `p` in bytes, or -1 if it cannot be stat'd.
 
-    `lseek(fd, 0, SEEK_END)` on a read-only descriptor, which is the size as
-    a VALUE — there is no struct to read and no field offset to guess. For a
-    regular file this is exactly `os.path.getsize`; for a directory it is
-    whatever the C library's `lseek` reports for a directory descriptor, which
-    is a number about the directory rather than a file size.
+    `st_size` out of `stat`, which is what CPython's `os.path.getsize` reads —
+    for a regular file, a directory, a device node, a FIFO, a socket and a
+    symbolic link alike, and for a path that does not exist it is -1 where
+    CPython raises.
+
+    IT USED TO BE `lseek(fd, 0, SEEK_END)` on a read-only descriptor, and the
+    reason it was is gone the moment `stat`'s out-parameter became readable: an
+    exact answer was available and this was the largest one that was not a
+    struct. Keeping the `lseek` spelling anyway would have been a HANG, not a
+    deviation — `open(O_RDONLY)` on a FIFO blocks until a writer arrives, so
+    `getsize` on a FIFO would never return. A hang is the one outcome a
+    path library cannot have. `lseek` is still what `os/_syscalls.mojo` uses,
+    there to CHECK the layout on every call rather than to answer.
+
+    So this now depends on the offsets in `os/_syscalls.mojo` being this
+    target's, and says -1 rather than a wrong number when they are not. That is
+    the trade this module makes everywhere: a documented limitation beats an
+    answer nothing can check.
     """
-    fd = fs_open_ro(p)
-    if fd < 0:
-        return 0 - 1
-    n = fs_lseek(fd, 0, 2)
-    fs_close(fd)
-    return n
+    return fs_stat_field64(p, 1, 96)
+
+
+# ── The `stat(2)` fields, one function each ────────────────────────────────
+#
+# CPython's `os.stat_result` is a struct with ten fields, and a struct is a
+# frame blob whose first word is a COUNT on this path — so there is no
+# `stat_result` here and there is not going to be one without a struct value
+# form. What there is instead is one function per field, each with the offset
+# it reads spelled as a parameter, and each -1 for a path that cannot be stat'd
+# or for a target whose `struct stat` those offsets do not describe (which
+# `os/_syscalls.mojo` checks on every call against `lseek`).
+#
+# `follow` is 1 for `stat` and 0 for `lstat`, so every one of these has both
+# spellings available: `stat_ino(p, 0)` is the inode of a symbolic link itself
+# and `stat_ino(p, 1)` the inode of what it points at. `os.lstat_*` are the
+# same functions reached under the other name.
+
+def stat_mode(p, follow):
+    """`st_mode` — the whole mode word, permissions and format bits both."""
+    return fs_stat_mode(p, follow)
+
+
+def stat_size(p, follow):
+    """`st_size` — 64 bits at offset 96.
+
+    The same number `getsize` returns for a regular file, and the `follow`
+    argument is the whole difference: `stat_size(p, 0)` is the LENGTH OF A
+    SYMBOLIC LINK, which is what CPython's `os.lstat(p).st_size` says, and it
+    is not a file size at all.
+    """
+    return fs_stat_field64(p, follow, 96)
+
+
+def stat_ino(p, follow):
+    """`st_ino` — the inode number, which with `st_dev` identifies the file."""
+    return fs_stat_field64(p, follow, 8)
+
+
+def stat_dev(p, follow):
+    """`st_dev` — the device the inode lives on, 32 bits at offset 0.
+
+    Read at 32 bits and not at 64 because that is its width in the layout: the
+    next four bytes are padding, and a 64-bit read of a 32-bit field is a
+    number assembled out of the field and whatever the compiler put after it.
+    """
+    return fs_stat_field32(p, follow, 0)
+
+
+def stat_nlink(p, follow):
+    """`st_nlink` — how many names this inode has, 16 bits at offset 6."""
+    return fs_stat_field16(p, follow, 6)
+
+
+def stat_uid(p, follow):
+    """`st_uid` — the owning user id, 32 bits at offset 16."""
+    return fs_stat_field32(p, follow, 16)
+
+
+def stat_gid(p, follow):
+    """`st_gid` — the owning group id, 32 bits at offset 20."""
+    return fs_stat_field32(p, follow, 20)
+
+
+def stat_blocks(p, follow):
+    """`st_blocks` — 512-byte blocks allocated, 64 bits at offset 104."""
+    return fs_stat_field64(p, follow, 104)
+
+
+def stat_blksize(p, follow):
+    """`st_blksize` — the filesystem's preferred I/O size, at offset 112."""
+    return fs_stat_field64(p, follow, 112)
 
 
 # ── Making a path absolute ─────────────────────────────────────────────────
