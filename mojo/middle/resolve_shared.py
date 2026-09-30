@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import re
 import determinism_trace as _dtrace
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _sms_key, _as_assignstmt_node, _as_vardecl_node, _as_multiassignstmt_node
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_dict, _sms_key, _as_assignstmt_node, _as_vardecl_node, _as_multiassignstmt_node
 import regex_compile
 import mlir
 from mojo.middle.types import *  # noqa: F401,F403
@@ -726,6 +726,34 @@ def _collect_return_elems(gen, stmts, acc) -> None:
         elif isinstance(node, gimple_ctypes.WithStmt):
             gen._collect_return_elems(node.body, acc)
 
+def _scan_scratch_dict(gen) -> dict:
+    """The next reusable scratch dict of the type-scan pool, emptied.
+
+    The hermetic type scans (`_infer_return_elem_type`, `_infer_local_var_types`)
+    each need a private, throwaway copy of the ambient type maps. They used to
+    build it with `dict(base)` on every call, and a copy that is dropped is only
+    garbage under CPython: the self-hosted binary has no collector, so each call
+    leaked a table of ~1,650 entries plus a strdup of every key.
+    `_infer_return_elem_type` runs 153,580 times on a `--dump-full fire.py` (Pass
+    2c, once per function per fixpoint round per nesting level): 254 million
+    entries, ~23 GB, the dominant cost of the whole compile.
+
+    The scans are strictly nested (each releases what it took in a `finally`),
+    so a pool indexed by depth serves them: a scratch dict is emptied when it is
+    handed out and refilled from the base, and its table is reused by the next
+    scan at the same depth instead of being allocated again. Memory is bounded
+    by the deepest nesting, not by the number of calls. `gen._scan_scratch_top`
+    is the pool's stack pointer; callers restore it to the value they saw on
+    entry."""
+    _top: int = gen._scan_scratch_top
+    if _top >= len(gen._scan_scratch):
+        gen._scan_scratch.append({})
+    _d: dict = _as_dict(gen._scan_scratch[_top])
+    gen._scan_scratch_top = _top + 1
+    _d.clear()
+    return _d
+
+
 def _infer_return_elem_type(gen, body, func_def=None,
                             _base_var_types=None) -> str | None:
     """Infer the container ELEMENT type a function returns, or None when it
@@ -761,7 +789,13 @@ def _infer_return_elem_type(gen, body, func_def=None,
     # entry-by-entry. Content is identical either way; when no snapshot
     # is supplied the legacy path below still seeds from
     # gen.func_return_types directly.
-    gen.var_types = dict(_base_var_types) if _base_var_types is not None else {}
+    # Scratch dicts come from the depth-indexed pool (`_scan_scratch_dict`), not
+    # a fresh `dict(...)` per call: see its docstring for the ~23 GB this saves.
+    _scratch_mark: int = gen._scan_scratch_top
+    _scratch_vt: dict = _scan_scratch_dict(gen)
+    if _base_var_types is not None:
+        _scratch_vt.update(_as_dict(_base_var_types))
+    gen.var_types = _scratch_vt
     # Seed with facts that are TRUE regardless of processing order: this
     # function's own annotated params, every registered cross-function
     # return type (imported externs + Pass-2a inferred), and the fixed
@@ -775,9 +809,13 @@ def _infer_return_elem_type(gen, body, func_def=None,
             gen.var_types.setdefault(k, v)
     for k, v in KNOWN_LEAF_RETS.items():
         gen.var_types.setdefault(k, v)
-    gen._elem_types = dict(_saved[1])   # container elem types stay visible
-    gen._dict_val_types = {}
-    gen._actual_types = dict(_saved[3])
+    _scratch_et: dict = _scan_scratch_dict(gen)
+    _scratch_et.update(_as_dict(_saved[1]))   # container elem types stay visible
+    gen._elem_types = _scratch_et
+    gen._dict_val_types = _scan_scratch_dict(gen)
+    _scratch_at: dict = _scan_scratch_dict(gen)
+    _scratch_at.update(_as_dict(_saved[3]))
+    gen._actual_types = _scratch_at
     gen._prepass_local_elems = {}
     # Scalar assignment seeding: `ret = _mojo_type(...)` — record the
     # callee's registered return type for simple Ident targets so the
@@ -822,6 +860,7 @@ def _infer_return_elem_type(gen, body, func_def=None,
         gen.var_types, gen._elem_types, gen._dict_val_types, \
             gen._actual_types, _ps = _saved
         gen._prepass_struct = _ps
+        gen._scan_scratch_top = _scratch_mark
 
 def _local_value_type(gen, value) -> str:
     """The C type an unannotated local takes from one assigned VALUE, for the
@@ -872,7 +911,10 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
     # var_types just for this scan (saved/restored below) so identifier
     # lookups inside it resolve correctly.
     _saved_var_types = gen.var_types
-    gen.var_types = dict(_saved_var_types)
+    _scratch_mark: int = gen._scan_scratch_top
+    _scratch_lvt: dict = _scan_scratch_dict(gen)
+    _scratch_lvt.update(_as_dict(_saved_var_types))
+    gen.var_types = _scratch_lvt
     for pname, ptype in (func.params or []):
         if pname not in gen.var_types and ptype:
             gen.var_types[pname] = gimple_ctypes._mojo_type(ptype)
@@ -1031,6 +1073,7 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
         collect_assigned_types(func.body)
     finally:
         gen.var_types = _saved_var_types
+        gen._scan_scratch_top = _scratch_mark
 
     # Join all types for each variable using TypeLattice
     result: dict[str, str] = {}
