@@ -1971,54 +1971,65 @@ def _forward_tagged(cvar: str, val_expr) -> N.ExprStmt:
 _NO_WD_FORWARD: set = set()
 
 
-def _await_needs_channel(fn: N.FunctionDef, proven_clean: set) -> bool:
-    """True iff `fn` can put a wait-descriptor on its own yield channel.
+def _await_targets(fn: N.FunctionDef) -> tuple[list, bool]:
+    """One pass over `fn`, answering the question the fixed point needs of
+    every await in it: the bare names it awaits (`targets`), and whether it
+    has any await that parks outright no matter what (`other`).
 
-    The classification is deliberately the EXACT complement of the ONE
+    Every await that is NOT an inline drive of a never-parking callee counts
+    as parking, and that is deliberately the EXACT complement of the ONE
     non-parking branch of `_await_drive_stmts` below (its final
-    `name = _await_target_name(inner)` case, an inline nested drive): every
-    other shape that function lowers -- sleep, sock_recv, an Event/Future
-    `.wait()`, a handle held in a struct field, a bare Future handle, a
-    create_task handle -- parks. So a bare `await f(...)` counts as
-    parking unless `f` is itself proven channel-free, which makes this a
-    fixed point rather than a one-pass scan (a clean `f` is only known once
-    everything `f` awaits is known)."""
+    `name = _await_target_name(inner)` case): every other shape that function
+    lowers -- sleep, sock_recv, an Event/Future `.wait()`, a handle held in a
+    struct field, a bare Future handle, a create_task handle -- parks. So a
+    bare `await f(...)` is only as clean as `f` is, which is what makes the
+    whole thing a fixed point rather than a one-pass scan (a clean `f` is
+    only known once everything `f` awaits is known).
+
+    Why the targets are collected ONCE, here, instead of re-asked per round:
+    see `_compute_no_wd_forward`'s note on `==` between two containers."""
+    targets: list = []
+    other = False
     for n in _walk(fn):
         if not isinstance(n, N.AwaitExpr):
             continue
         t = _await_target_name(n.value)
-        if t is not None and t in proven_clean:
-            continue                      # inline drive of a never-parking callee
-        return True
-    return False
+        if t is None:
+            other = True                  # not a bare `await f(...)` -> parks
+        else:
+            targets.append(t)
+    return targets, other
 
 
 def _compute_no_wd_forward(stmts: list) -> None:
     """Fill `_NO_WD_FORWARD` for one `lower()` call.
 
-    Greatest fixed point: start by assuming EVERY async function is
-    channel-free, then relax until the answer stops shrinking. Starting
-    from the optimistic (smallest) set instead would be a least fixed
-    point, which is the unsound direction under mutual recursion -- a
-    cycle of awaits would each conclude the other is clean and neither
-    would be listed. Every other unresolvable case (an awaited name that
-    is not an `async def` of this module, or one that is also a struct
-    method's name, so its `__mgco_*_start` base is ambiguous) resolves to
-    "parks", so a hole here is a refusal upstream, never a miscompile."""
+    Greatest fixed point over the module's async functions: which of them can
+    NEVER put a wait-descriptor on their own yield channel? Computed as a
+    worklist over the await graph rather than by re-deriving the whole answer
+    per round, because the self-hosted runtime is where this has to terminate
+    -- see the TERMINATION note below the loop.
+
+    Greatest, not least, because mutual recursion is a hole under a least
+    fixed point: a cycle of awaits would have each side conclude the other is
+    clean. Every unresolvable case (an awaited name that is not an `async def`
+    of this module, or one that is also a struct method's name, so its
+    `__mgco_*_start` base is ambiguous) resolves to "parks", so a hole here is
+    a refusal upstream, never a miscompile."""
     global _NO_WD_FORWARD
     fns: dict = {}
-    ambiguous: set = set()
+    ambiguous: dict = {}
     for s in stmts:
         if isinstance(s, N.FunctionDef) and getattr(s, 'is_async', False):
             key = _cm_as_str(s.name)
             if key in fns:
-                ambiguous.add(key)        # two top-level async defs, one name
+                ambiguous[key] = 1        # two top-level async defs, one name
             fns[key] = s
         if isinstance(s, N.StructDef):
             for m in s.methods:
                 if isinstance(m, N.FunctionDef) and getattr(m, 'is_async', False):
                     fns[f'{_cm_as_str(s.name)}_{_cm_as_str(m.name)}'] = m
-                    ambiguous.add(_cm_as_str(m.name))
+                    ambiguous[_cm_as_str(m.name)] = 1
         # nested `async def` locals -- keyed by their enclosing function, the
         # same `__mgco_<outer>_<inner>` qualification `_hoist_nested_async`
         # gives them, and why two enclosing functions may each define a
@@ -2027,15 +2038,82 @@ def _compute_no_wd_forward(stmts: list) -> None:
             for inner in s.body:
                 if isinstance(inner, N.FunctionDef) and getattr(inner, 'is_async', False):
                     fns[f'{_cm_as_str(s.name)}_{_cm_as_str(inner.name)}'] = inner
-    proven = set(fns)
-    while True:
-        resolvable = proven.difference(ambiguous)
-        nxt = {name for name, fn in fns.items()
-               if not _await_needs_channel(fn, resolvable)}
-        if nxt == proven:
-            break
-        proven = nxt
-    _NO_WD_FORWARD = proven
+    # The call graph, built ONCE: `preds[t]` is the list of functions whose
+    # body awaits the bare name `t`, and `seeds` the functions that park
+    # whatever the answer turns out to be -- an await that is not a bare
+    # `await f(...)` at all (`_await_targets`' `other`), or one naming a
+    # function that is not in this module, or naming an `ambiguous` bare name
+    # (a struct method of the same name, or two top-level async defs with one
+    # name), so whose `__mgco_*_start` base cannot be resolved.
+    #
+    # Dicts, not sets, for every name-keyed table here -- deliberately. A
+    # compiled `set` stores int- and str-tagged slots in SEPARATE fields, so
+    # an entry added through one view is invisible to the other, while the
+    # codegen picks that view per USE SITE: a name read out of a list lowers
+    # to `mojo_list_get_int` and a set insert of it to `mojo_set_add_int`,
+    # while the same name read out of a dict lowers to `char *` and the
+    # insert to `mojo_set_add_str` -- so one set fed from both sources is two
+    # disjoint sets wearing one name (runtime/fire_runtime.c says so at
+    # `mojo_set_contains_str`: "an `add_int` / `contains_str` mismatch is a
+    # codegen element-type inference gap and has to be fixed there"). A dict
+    # keeps one value word per entry, so its int and str views agree by
+    # construction and every key spelling lands in the one domain.
+    preds: dict = {}
+    seeds: list = []
+    for name in fns:
+        targets, other = _await_targets(fns[name])
+        if not other:
+            for t in targets:
+                if t not in fns or t in ambiguous:
+                    other = True
+                    break
+        if other:
+            seeds.append(name)
+            continue
+        for t in targets:
+            if t in preds:
+                preds[t].append(name)
+            else:
+                preds[t] = [name]
+    # Greatest fixed point, as a worklist: everything not in `dirty` is clean,
+    # and a callee that turns out to park makes every caller that awaits it
+    # park, transitively. Starting optimistic is the SOUND direction here --
+    # a least fixed point (assuming nothing is clean) would let a cycle of
+    # mutually-awaiting functions each conclude the other is clean.
+    #
+    # TERMINATION (why `while True` was the wrong shape): the worklist holds
+    # each name at most once -- the `caller not in dirty` guard is what
+    # enforces it -- so `dirty` grows by one per iteration and never exceeds
+    # `len(fns)`. That monotone measure (the number of names ever enqueued)
+    # is bounded above by the number of async functions in the module, so the
+    # loop runs at most that many times, whatever the graph. The previous
+    # `while True: ... if nxt == proven: break` had no such bound it could
+    # see: it terminated only if `==` between two `MojoSet *` meant set
+    # equality, and it does not -- gimple_codegen lowers `==` between two
+    # container-typed operands to a POINTER comparison (verified in the
+    # generated C: `_t = a == b;` on two `MojoSet *`), which is False for
+    # every pair of distinct sets. Self-hosted, that loop therefore never
+    # exits, and since the runtime has no garbage collector each round's
+    # fresh `resolvable` set and dict-items list are never freed either:
+    # measured, a TWO-LINE program drove it past 8 GB of resident memory in
+    # under two minutes (see bugs/CODEGEN_container_eq_is_pointer_identity.md).
+    # So the termination test here is the worklist draining, never a `==`.
+    dirty: dict = {}
+    queue: list = seeds
+    for name in seeds:
+        dirty[name] = 1
+    while len(queue) > 0:
+        name = queue.pop()
+        if name in preds:
+            for caller in preds[name]:
+                if caller not in dirty:
+                    dirty[caller] = 1
+                    queue.append(caller)
+    clean: set = set()
+    for name in fns:
+        if name not in dirty:
+            clean.add(name)                  # add_str only: see the note above
+    _NO_WD_FORWARD = clean
 
 
 def _base_is_channel_free(base: str) -> bool:

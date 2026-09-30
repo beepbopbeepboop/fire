@@ -62,6 +62,16 @@ STILL not covered here, and deliberately so:
     coroutine outright for that, and the ordinary loop lowering's
     `MojoGenerator *` route is what the item-3 fix is about, not this
     file's capture plan.
+
+The wait-descriptor FIXED POINT that decides the boundary above
+(`coro._compute_no_wd_forward`) IS covered here, in the last three cases,
+because it is the one piece of this area with no native runtime to fail
+against: the first two run the analysis in-process over synthetic call
+graphs -- the walk budget and the answer on every shape that has ever
+distinguished a correct implementation from a wrong one -- and the third
+runs the algorithm's SHAPE compiled and native, against CPython, which is
+the only way to see that the containers it uses still mean what they mean
+once this codegen has erased their element types.
 """
 import os
 import platform
@@ -71,6 +81,8 @@ import tempfile
 os.environ['MOJO_CORO'] = 'stackswitch'
 
 import gimple_codegen
+import fire_compiler
+from mojo.middle import coro
 from build_config import find_gcc, find_gxx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -105,24 +117,23 @@ def check(name, cond, detail=""):
         _FAIL += 1
 
 
-def _build_and_run(mojo_src: str) -> str:
+def _build_and_run(mojo_src: str, require=('__mgco_', '__mojo_box_new_')) -> str:
     wd = tempfile.mkdtemp(prefix='mojo_coro_capture_')
     src_path = os.path.join(wd, 'prog.mojo')
     with open(src_path, 'w') as f:
         f.write(mojo_src)
 
     c_code = gimple_codegen.compile_to_gimple(mojo_src, do_imports=False, filename=src_path)
-    if '__mgco_' not in c_code:
-        raise RuntimeError(
-            "expected the nested async def in this source to be lowered by "
-            "gimple_gen_coro (stack-switch) -- no __mgco_ symbols in the "
-            "generated C, so this test isn't exercising the code path it "
-            "claims to")
-    if '__mojo_box_new_' not in c_code:
-        raise RuntimeError(
-            "expected the captured local to be heap-boxed -- no "
-            "__mojo_box_new_* call in the generated C, so the capture "
-            "wasn't actually threaded through as designed")
+    for sym, why in (('__mgco_', "expected the nested async def in this source to be "
+                                 "lowered by gimple_gen_coro (stack-switch) -- no "
+                                 "__mgco_ symbols in the generated C, so this test "
+                                 "isn't exercising the code path it claims to"),
+                     ('__mojo_box_new_', "expected the captured local to be "
+                                          "heap-boxed -- no __mojo_box_new_* call in "
+                                          "the generated C, so the capture wasn't "
+                                          "actually threaded through as designed")):
+        if sym in require and sym not in c_code:
+            raise RuntimeError(why)
 
     c_path = os.path.join(wd, 'prog.c')
     with open(c_path, 'w') as f:
@@ -508,6 +519,267 @@ asyncio.run(outer())
     check("nested async gen consumed by `async for` in its own enclosing "
           f"function -> {want.strip()!r}", out == want, detail=f"got {out!r}, "
           f"CPython {want!r}")
+
+
+def _synthetic_module(src: str):
+    """Parse `src` with the compiler's own parser -- the statement list
+    `coro.lower()` is handed, and the only thing `_compute_no_wd_forward`
+    takes."""
+    return (fire_compiler.Parser(fire_compiler.py_tokenize(src))
+            .with_filename('synthetic.py').parse_module())
+
+
+def _no_wd_forward(src: str) -> tuple:
+    """Run the wait-descriptor fixed point over `src`; return
+    (`_NO_WD_FORWARD`, the number of `_walk` calls it made).
+
+    The walk count is the budget this test exists to hold: the analysis may
+    walk each function's body exactly ONCE, and nothing more. The runtime
+    has no garbage collector, so a walk per ROUND of a fixed point is
+    memory no later round can give back -- see
+    `test_no_wd_forward_walks_each_body_once`."""
+    stmts = _synthetic_module(src)
+    calls = [0]
+    real_walk = coro._walk
+
+    def counting(node):
+        calls[0] += 1
+        return real_walk(node)
+
+    coro._walk = counting
+    try:
+        coro._compute_no_wd_forward(stmts)
+    finally:
+        coro._walk = real_walk
+    return coro._NO_WD_FORWARD, calls[0]
+
+
+def test_no_wd_forward_walks_each_body_once():
+    """The regression test for the self-host blowup: a chain of async
+    functions `f0 -> f1 -> ... -> f(n-1)`, whose tail parks.
+
+    Re-deriving the whole answer per round -- the shape this replaced -- takes
+    one round per function here (each round proves exactly one more link of
+    the chain dirty) and walks EVERY body on each round, so n*(n+1) walks.
+    The worklist walks each body once and never revisits it: n. With n = 150
+    that is 22,650 walks against a budget of 300, and the difference is not
+    academic: this is the analysis the self-hosted compiler runs on every
+    module it compiles, with no garbage collector to reclaim the lists."""
+    n = 150
+    lines = ['import asyncio', '']
+    for i in range(n - 1):
+        lines.append('async def f%d():' % i)
+        lines.append('    await f%d()' % (i + 1))
+        lines.append('')
+    lines.append('async def f%d():' % (n - 1))
+    lines.append('    await asyncio.sleep(0)')
+    clean, walks = _no_wd_forward('\n'.join(lines))
+    check('a %d-deep await chain costs at most 2 AST walks per function '
+          '(took %d, budget %d)' % (n, walks, 2 * n), walks <= 2 * n)
+    check('a chain whose tail parks leaves nothing clean',
+          clean == set(), detail='clean=%r' % (sorted(clean),))
+
+
+def test_no_wd_forward_graph_shapes():
+    """The fixed point's ANSWER on every shape that has ever distinguished a
+    correct implementation from a wrong one: a body that parks, propagation
+    through both arms of a diamond, an awaited name that is not in the module
+    at all, an awaited bare name that is ALSO a struct method's (ambiguous,
+    so unresolvable), and a cycle of awaits with no parking await anywhere
+    in it -- which is CLEAN here, because the fixed point is a greatest one
+    and each side of the cycle can only conclude "clean" about the other."""
+    src = '''\
+import asyncio
+
+
+async def clean_leaf():
+    pass
+
+
+async def parks():
+    await asyncio.sleep(0)
+
+
+async def calls_parks():
+    await parks()
+
+
+async def also_calls_parks():
+    await parks()
+
+
+async def diamond():
+    await calls_parks()
+    await also_calls_parks()
+
+
+async def unresolvable():
+    await nowhere()
+
+
+async def over_ambiguous():
+    await meth()
+
+
+async def live_cycle_a():
+    await live_cycle_b()
+
+
+async def live_cycle_b():
+    await live_cycle_a()
+
+
+struct S:
+    var x: Int
+
+    async def meth(self):
+        pass
+'''
+    clean, _walks = _no_wd_forward(src)
+    want = {'clean_leaf', 'live_cycle_a', 'live_cycle_b', 'S_meth'}
+    check('parks / diamond / unresolvable / ambiguous propagate, a '
+          'seedless cycle stays clean -> %r' % (sorted(want),),
+          clean == want, detail='got %r' % (sorted(clean),))
+
+
+# The fixed point's SHAPE, as a compiled program: the same statement sequence
+# `coro._compute_no_wd_forward` runs, over a call graph handed in as data.
+# In-process Python tests cannot see any of what this one checks -- that the
+# dict-of-lists `preds`, the name-keyed membership tables and the
+# `while len(queue) > 0` worklist loop mean the same thing once COMPILED.
+#
+# Two properties of this program are deliberate, both consequences of how this
+# codegen erases a generic container's element type, and neither is what this
+# case is testing:
+#   * it is ONE function, because a container handed across a call boundary
+#     reaches codegen as a boxed `int64_t`, and `x in <boxed dict>` then goes
+#     through `mojo_in_dispatch_int`, which has no dict branch at all
+#     (bugs/CODEGEN_in_dispatch_int_has_no_dict_branch.md) -- a silent "not
+#     present". coro.py's fixed point keeps every one of its tables local for
+#     the same reason.
+#   * it prints each clean function's INDEX in `names`, so the comparison
+#     needs no string value back out of a `list[str]`.
+_FIXED_POINT_PROGRAM = '''\
+def main() raises:
+    var names = ["f0", "f1", "f2", "p", "a", "b", "d", "c", "h", "u"]
+    var edges = {}
+    edges["f0"] = ["f1"]
+    edges["f1"] = ["f2"]
+    edges["f2"] = []
+    edges["p"] = ["zz"]
+    edges["a"] = ["p"]
+    edges["b"] = ["p"]
+    edges["d"] = ["a", "b"]
+    edges["c"] = []
+    edges["h"] = ["c"]
+    edges["u"] = ["nope"]
+    var amb = ["m"]
+    var fns = {}
+    var ambiguous = {}
+    var preds = {}
+    var seeds = []
+    for name in names:
+        fns[name] = len(fns)
+    for a in amb:
+        ambiguous[a] = 1
+    for name in fns:
+        var targets = edges[name]
+        var other = False
+        for t in targets:
+            if t not in fns or t in ambiguous:
+                other = True
+        if other:
+            seeds.append(name)
+        else:
+            for t in targets:
+                if t in preds:
+                    preds[t].append(name)
+                else:
+                    preds[t] = [name]
+    var dirty = {}
+    var queue = seeds
+    for name in seeds:
+        dirty[name] = 1
+    while len(queue) > 0:
+        var name = queue.pop()
+        if name in preds:
+            var callers = preds[name]
+            for caller in callers:
+                if caller not in dirty:
+                    dirty[caller] = 1
+                    queue.append(caller)
+    for name in fns:
+        if name not in dirty:
+            print(fns[name])
+'''
+
+# The same algorithm as CPython runs it -- the oracle, measured at test time
+# for the reason `_cpython_stdout`'s own docstring gives.
+_FIXED_POINT_TWIN = '''\
+def main():
+    names = ["f0", "f1", "f2", "p", "a", "b", "d", "c", "h", "u"]
+    edges = {"f0": ["f1"], "f1": ["f2"], "f2": [], "p": ["zz"],
+             "a": ["p"], "b": ["p"], "d": ["a", "b"], "c": [], "h": ["c"],
+             "u": ["nope"]}
+    amb = ["m"]
+    fns = {}
+    ambiguous = {}
+    preds = {}
+    seeds = []
+    for name in names:
+        fns[name] = len(fns)
+    for a in amb:
+        ambiguous[a] = 1
+    for name in fns:
+        targets = edges[name]
+        other = False
+        for t in targets:
+            if t not in fns or t in ambiguous:
+                other = True
+        if other:
+            seeds.append(name)
+        else:
+            for t in targets:
+                if t in preds:
+                    preds[t].append(name)
+                else:
+                    preds[t] = [name]
+    dirty = {}
+    queue = seeds
+    for name in seeds:
+        dirty[name] = 1
+    while len(queue) > 0:
+        name = queue.pop()
+        if name in preds:
+            for caller in preds[name]:
+                if caller not in dirty:
+                    dirty[caller] = 1
+                    queue.append(caller)
+    for name in fns:
+        if name not in dirty:
+            print(fns[name])
+
+
+main()
+'''
+
+
+def test_no_wd_forward_shape_when_compiled():
+    """The worklist, compiled and run, agrees with CPython.
+
+    This is the half of the fix that `test_no_wd_forward_walks_each_body_once`
+    cannot reach. It failed before: the fixed point it replaced terminated on
+    `if nxt == proven: break`, and `==` between two containers lowers to a
+    POINTER comparison (runtime/fire_runtime.c and the generated C agree), so
+    self-hosted the loop never exited -- a two-line program sat in it past
+    8 GB. Nothing here can hang on that any more: the loop ends when the
+    worklist drains, and the harness's own 30s timeout would fail this case
+    if it ever did."""
+    out = _build_and_run(_FIXED_POINT_PROGRAM, require=())
+    want = _cpython_stdout(_FIXED_POINT_TWIN)
+    check('the fixed point compiled to native code agrees with CPython '
+          f'-> {want.split()!r}', out == want,
+          detail=f'got {out!r}, CPython {want!r}')
 
 
 def run_all():
