@@ -302,6 +302,20 @@ void        mojo_list_set_kinds(MojoList *l, const char *kinds);
 const char *mojo_list_get_kinds(MojoList *l);
 char        mojo_list_slot_kind(MojoList *l, int64_t i);
 void        mojo_list_inherit_kinds(MojoList *dst, MojoList *src);
+/* The per-slot kind alphabet, as named constants. A MojoList slot is a raw
+ * int64_t, so anything that ORDERS a list (mojo_list_sort) or READS one has
+ * to be told what a slot holds — comparing the slots as integers orders a
+ * list of strings by ADDRESS, which is non-deterministic across runs and
+ * different from Python's alphabetical order. The call site passes what its
+ * own element-type inference knows; the constants are here so the generated
+ * C reads `mojo_list_sort (l, MOJO_KIND_STR, 0, 0)` instead of a bare
+ * `'p'`, and so a new kind has one definition. */
+#define MOJO_KIND_INT     'i'   /* int64_t (and bool, and None) */
+#define MOJO_KIND_DOUBLE  'd'
+#define MOJO_KIND_BYTES   's'
+#define MOJO_KIND_STR     'p'
+#define MOJO_KIND_LIST    'l'   /* nested container: not totally ordered */
+#define MOJO_KIND_NONE    'n'
 /* A read whose slot index is not known at compile time (`for x in
  * struct.unpack('<if', buf)`, `t[i]`) has to land in ONE C type, and for a
  * heterogeneous list no single accessor is right for every slot. This
@@ -751,7 +765,13 @@ int         mojo_list_any(MojoList *l);
 int64_t     mojo_list_pop(MojoList *l);
 int64_t     mojo_list_pop_at(MojoList *l, int64_t idx);
 void        mojo_list_extend(MojoList *dst, MojoList *src);
-void        mojo_list_sort(MojoList *l);
+/* `l.sort()` in place. `kind` is a MOJO_KIND_* byte for the elements (or for
+ * the KEYS, when `keys` is given), or 0 to let the runtime decide from the
+ * per-slot kinds and then its own discriminator. `keys` is the parallel key
+ * list codegen built for a `key=` call, or NULL. A list with no order (mixed
+ * or nested-container elements) is a TypeError here exactly as it is in
+ * Python — never a silent no-op, which is what this used to be. */
+void        mojo_list_sort(MojoList *l, int kind, int reverse, MojoList *keys);
 void        mojo_list_reverse(MojoList *l);
 void        mojo_list_clear(MojoList *l);
 void        mojo_list_remove_str(MojoList *l, const char *v);

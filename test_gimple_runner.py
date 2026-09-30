@@ -671,6 +671,90 @@ print(sorted([1, 3, 2], reverse=True))
 print(sorted(["b", "a", "c"], reverse=True))
 """, "[3, 2, 1]\n['c', 'b', 'a']\n")
 
+    # `l.sort()` — the METHOD — used to be a no-op stub in the runtime
+    # (`void mojo_list_sort(MojoList *l) { (void)l; }`), so it returned the
+    # list in its original order with exit 0 and said nothing: the worst
+    # shape, because `sorted(l)` was right and `l.sort(); x = l` was silently
+    # wrong, so the two spellings of one operation disagreed.
+    test_gimple_stdout("gimple_list_sort_method_in_place", """\
+def main():
+    l = [3, 1, 2]
+    l.sort()
+    print(l)
+    m = ['c', 'a', 'b']
+    m.sort()
+    print(m)
+    n = [3, 1, 2]
+    print(sorted(n))
+main()
+""", "[1, 2, 3]\n['a', 'b', 'c']\n[1, 2, 3]\n")
+
+    # Every element kind the sort has to tell apart. A MojoList slot is a raw
+    # int64_t, so a double is its IEEE bits and a str is a pointer: ordering
+    # the slots as integers sorts floats by SIGN and strings by ADDRESS. The
+    # kind byte the call site passes (gen._elem_of -> TypeLattice.slot_kind_byte)
+    # is what makes each of these right. `bool` is an int subclass in Python,
+    # so False sorts before True.
+    test_gimple_stdout("gimple_list_sort_every_element_kind", """\
+def main():
+    f = [3.5, -1.25, 2.0]
+    f.sort()
+    print(f)
+    b = [True, False, True]
+    b.sort()
+    print(b)
+    d = ['b', 'a', 'c']
+    d.sort()
+    print(d)
+    n = [[2], [1]]
+    n.sort()
+    print(n)
+main()
+""", "[-1.25, 2.0, 3.5]\n[False, True, True]\n['a', 'b', 'c']\n[[1], [2]]\n")
+
+    # `key=` and `reverse=` on the METHOD, which used to be dropped on the
+    # floor exactly as they were on `sorted()` before its own fix.
+    test_gimple_stdout("gimple_list_sort_key_and_reverse", """\
+def main():
+    l = [1, 3, 2]
+    l.sort(key=lambda v: -v)
+    print(l)
+    m = [1, 3, 2]
+    m.sort(reverse=True)
+    print(m)
+    w = ['ccc', 'a', 'bb']
+    w.sort(key=len)
+    print(w)
+main()
+""", "[3, 2, 1]\n[3, 2, 1]\n['a', 'bb', 'ccc']\n")
+
+    # A list of lists sorts ELEMENTWISE (Python's ordering, shorter first) —
+    # the one total order a MojoList-of-MojoList has. Past
+    # MOJO_SORT_MAX_DEPTH nesting the two compare equal rather than risking
+    # unbounded recursion on a self-referential list.
+    test_gimple_stdout("gimple_list_sort_nested_shorter_first", """\
+def main():
+    l = [[1, 2], [1], [1, 2, 3], []]
+    l.sort()
+    print(l)
+main()
+""", "[[], [1], [1, 2], [1, 2, 3]]\n")
+
+    # What Python REFUSES to sort must be refused here too, and loudly. The
+    # silent no-op this replaced was indistinguishable from a sort that
+    # happened to leave the list alone; a heterogeneous list's only correct
+    # answer is the TypeError, so that is what this must be — verified by
+    # stderr text because the compiled binary's exit code alone cannot tell a
+    # TypeError from an unrelated failure (and the signal it replaced was
+    # exit 0 with a wrong list).
+    test_gimple_runtime_error("gimple_list_sort_mixed_types_is_a_typeerror", """\
+def main():
+    l = [1, 'a', 2.5]
+    l.sort()
+    print(l)
+main()
+""", "TypeError: list.sort()")
+
     # reverse=True composes with key= (the sort is by key, then flipped) —
     # sorting by -v descending puts the original order back.
     test_gimple_stdout("gimple_sorted_key_and_reverse", """\

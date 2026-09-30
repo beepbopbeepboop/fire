@@ -4278,22 +4278,15 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
 
 
 # The one byte per list-literal element that mojo_list_set_kinds' alphabet
-# uses, from the element's own lowered C type. `None` is detected from the
-# ELEMENT expression rather than its lowered type, which is the same
-# int64_t every other integer has.
+# uses. `None` is detected from the ELEMENT expression rather than from its
+# lowered type, which is the same int64_t every other integer has; everything
+# else is the shared element-type mapping (TypeLattice.slot_kind_byte), the
+# same one the sorters and the per-slot readers use.
 def _list_literal_slot_kind(gen, el, et) -> str:
     if isinstance(el, (gimple_ctypes.NoneLiteral,)) or (
             isinstance(el, gimple_ctypes.IdentExpr) and el.name == 'None'):
         return 'n'
-    if et in gimple_ctypes._TYPE_FLOAT:
-        return 'd'
-    if et in ('char *', 'MojoStr *'):
-        return 'p'
-    if et == 'MojoBytes *':
-        return 's'
-    if et in ('MojoList *', 'MojoDict *', 'MojoSet *'):
-        return 'l'
-    return 'i'
+    return gimple_ctypes.TypeLattice.slot_kind_byte(et)
 
 
 def _lower_dict_literal(gen, node: gimple_ctypes.DictExpr) -> tuple[str, str]:

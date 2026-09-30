@@ -2680,6 +2680,10 @@ class GimpleGen:
         'mojo_dict_items_int':   ('MojoList *', ['MojoDict *']),
         'mojo_sorted':           ('MojoList *', ['void *']),
         'mojo_list_sorted_str':  ('MojoList *', ['MojoList *']),
+        # `l.sort()`: the kind byte is a MOJO_KIND_* alphabet constant and
+        # `keys` is NULL unless a `key=` built one, so the two are passed as
+        # plain C text rather than as a coerced temp.
+        'mojo_list_sort':        ('void', ['MojoList *', 'int', 'int', 'MojoList *']),
         'mojo_set_sorted':       ('MojoList *', ['MojoSet *']),
         'mojo_set_to_list':      ('MojoList *', ['MojoSet *']),
         'mojo_dict_sorted_keys': ('MojoList *', ['MojoDict *']),
@@ -3345,8 +3349,9 @@ class GimpleGen:
         return gmp._lower_method_call(self, node)
     def _lower_dict_method(self, ov: str, method: str, args: list) -> tuple:
         return gmp._lower_dict_method(self, ov, method, args)
-    def _lower_list_method(self, ov: str, method: str, args: list) -> tuple:
-        return gmp._lower_list_method(self, ov, method, args)
+    def _lower_list_method(self, ov: str, method: str, args: list,
+                           kwargs: list = None) -> tuple:
+        return gmp._lower_list_method(self, ov, method, args, kwargs)
     def _lower_set_method(self, ov: str, method: str, args: list) -> tuple:
         return gmp._lower_set_method(self, ov, method, args)
     def _lower_pointer_method(self, ov: str, ot: str, method: str, args: list) -> tuple:
