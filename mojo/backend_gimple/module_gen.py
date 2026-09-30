@@ -181,6 +181,21 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
         # and linkable.
         call_type = list(ctypes)[0]
         cur = ipt.get(fname, {}).get(pname)
+        # Every UNANIMOUS literal container also grounds the callee's
+        # `==` / `!=` lowering, which cannot see through an erased
+        # int64_t parameter: record the KIND separately, in a table of its
+        # own, so a container-typed parameter reaches
+        # `mojo_value_eq`/`mojo_set_eq` instead of a pointer comparison.
+        # Separate table because `_inferred_param_types` above re-types
+        # parameters all over the backend and a container entry there has
+        # effects far past comparison; this one is read only by the
+        # comparison lowering. A unanimous CHAR * proves nothing about
+        # equality (two separately-built strings compare by content through
+        # a different, already-correct path), so only containers are kept.
+        if call_type in containers:
+            kinds = gen._container_param_kinds.setdefault(fname, {})
+            kinds[pname] = ('list' if call_type == 'MojoList *' else
+                            'set' if call_type == 'MojoSet *' else 'dict')
         if cur == call_type:
             continue
         if not ((cur in containers and call_type == 'char *')
@@ -4414,6 +4429,15 @@ def gen_module_impl(self, stmts):
                     self._elaborated_externs.append(bare_decl)
 
     self._inferred_param_types: dict[str, dict[str, str]] = {}  # func_name -> {param_name -> type}
+    # Function name -> parameter name -> container kind ('list'/'dict'/'set'),
+    # for parameters every unambiguous literal CALL SITE agrees is a
+    # container. Read only by the `==` / `!=` lowering, which cannot see
+    # through an erased int64_t parameter and would otherwise emit a pointer
+    # comparison for it. Filled by `_gmi_apply_call_site_param_evidence`
+    # beside `_inferred_param_types` — a table of its own because THAT one
+    # re-types parameters all over the backend, and a container entry there
+    # has effects far past comparison.
+    self._container_param_kinds: dict[str, dict[str, str]] = {}
     # Function name -> its parameter NAMES in order. Populated here, in the
     # same pass that fills `_inferred_param_types`, because that map is keyed
     # by param NAME while a call site identifies a callee's parameter only by
