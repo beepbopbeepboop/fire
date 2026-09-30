@@ -44,7 +44,7 @@ import mojo.backend_gimple.emit_calls as ggc
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.methods_shared import *  # noqa: F401,F403
 from mojo.middle.methods_shared import (
-    _SELFHOST_SIBLING_MODULE_PREFIXES, _as_str, _gmm_callexpr_node, _is_selfhost_sibling_alias, _sms_key
+    _SELFHOST_SIBLING_MODULE_PREFIXES, _as_str, _gmm_callexpr_node, _is_selfhost_sibling_alias, _is_selfhost_source_file, _sms_key
 )
 
 # Sentinel for "this api entry has no `receiver` key at all", so a
@@ -2543,31 +2543,53 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # elaboration mechanism (generics, overloads, struct
         # construction) that some earlier, more specific branch in this
         # very function already owns.
-        # Excluded entirely for this compiler's OWN self-hosting sources
-        # (mirrors `_is_selfhost_sibling_alias`'s identical directory
-        # gate): `_func_qualifier` deliberately returns '' (an
-        # UNQUALIFIED bare symbol) for every function while compiling a
-        # `_SELFHOST_DIR` file — self-hosting relies on flat, hand-
-        # verified bare-name registration (see doc/ "self-host
-        # hardcoded struct tables"), not module-qualified mangling.
-        # `_note_own_func_home`/`_func_csym` still WORK in that mode
-        # (returning the bare name), but calling `_call_expr` directly
-        # here bypasses whatever separate bookkeeping the NORMAL bare-
-        # name call path (`_lower_call`/`_lower_named_call`) performs to
-        # get that bare symbol actually forward-declared/defined in the
-        # self-hosted output — confirmed via a real regression: routing
+        # Excluded entirely for this compiler's OWN self-hosting sources:
+        # `_func_qualifier` deliberately returns '' (an UNQUALIFIED bare
+        # symbol) for the functions such a module defines, so self-hosting
+        # relies on flat, hand-verified bare-name registration (see doc/
+        # "self-host hardcoded struct tables"), not module-qualified
+        # mangling. `_note_own_func_home`/`_func_csym` still WORK in that
+        # mode (returning the bare name), but calling `_call_expr` directly
+        # here bypasses whatever separate bookkeeping the NORMAL bare-name
+        # call path (`_lower_call`/`_lower_named_call`) performs to get that
+        # bare symbol actually forward-declared/defined in the self-hosted
+        # output — confirmed via a real regression: routing
         # `build_stdlib_dylib`'s `_imported_sigs`/`build` through this
         # branch during `imports.py`'s own self-host compile produced
-        # `implicit declaration of function '_imported_sigs'` (no
-        # forward decl ever emitted), where the pre-existing behavior
-        # (falling through to whatever handled it before this branch
-        # existed) at least compiled clean.
-        _mgc_cur = getattr(gen, '_current_filename', None)
-        _mgc_is_selfhost = False
-        if _mgc_cur and _mgc_cur.endswith('.py'):
-            _mgc_abs = gimple_ctypes.os.path.abspath(_mgc_cur)
-            _mgc_is_selfhost = (_mgc_abs == gimple_codegen._SELFHOST_DIR
-                                 or _mgc_abs.startswith(gimple_codegen._SELFHOST_DIR + '/'))
+        # `implicit declaration of function '_imported_sigs'` (no forward
+        # decl ever emitted), where the pre-existing behavior (falling
+        # through to whatever handled it before this branch existed) at
+        # least compiled clean.
+        #
+        # "This compiler's own source" is `_is_selfhost_source_file`, the
+        # shared answer to exactly that question (it lives beside
+        # `_is_selfhost_sibling_alias`, which adds the name of the thing
+        # being referenced on top of it). It used to be spelled inline here
+        # as a bare `_SELFHOST_DIR` equality/prefix test on `_current_filename`
+        # — the same predicate MINUS its "and only the compiler's own
+        # modules" half, and a file's location is not something the language
+        # gives a compiler any reason to treat specially. Anything checked
+        # out inside the compiler's own tree (a test fixture, a scratch
+        # script, a downstream project's subdirectory) was therefore denied
+        # this resolution, so a `<marker>.<plain_top_level_fn>(...)` call
+        # fell through to the generic scalar-receiver stub and answered a
+        # literal `0` — a silent wrong value, exit 0, no diagnostic.
+        #
+        # Measured, byte-identical source text, one process, only the
+        # fixture's directory differing:
+        #   <repo>/.tmp/fi/pkg2/main.py -> `_t4 = _t2;  /* int64_t.doubleval()
+        #                                           stubbed */`     (prints 0)
+        #   /tmp/fi/pkg2/main.py        -> `_t2 = base2_doubleval_9f63a2 (_t3);`
+        # `test_link_mode.py` builds its packages with
+        # `tempfile.TemporaryDirectory()`, so `$TMPDIR` — not the compiler —
+        # decided whether the registered `linkmode` gate step passed, which
+        # is why the very same case was red in some checkouts and green in
+        # every other. Pinned now by that file's
+        # `test_bare_submodule_import_call_inside_source_tree`, which builds
+        # the identical package at a path under this checkout so the
+        # invariant is tested in BOTH locations however the suite is run.
+        _mgc_is_selfhost = _is_selfhost_source_file(
+            getattr(gen, '_current_filename', None))
         if (not _mgc_is_selfhost
                 and module_name in getattr(gen, '_module_alias_names', ())
                 and not getattr(node, 'kwargs', None)):

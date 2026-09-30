@@ -30,6 +30,66 @@ def _gmm_callexpr_node(x) -> CallExpr:
     (miss sentinel 1 -> `mojo_list_len(1)` SIGSEGV)."""
     return x
 
+def _is_selfhost_source_file(path: str) -> bool:
+    """True when `path` is a source file OF this compiler — a root-level
+    `*.py` beside `fire_compiler.py`, or one inside its own `mojo/` package
+    or `jit/` helper package. The one answer to "is the file being compiled
+    the compiler itself?", for every caller that needs exactly that and not
+    the name of the thing being referenced (`_is_selfhost_sibling_alias`
+    below answers the other, stricter question).
+
+    Deliberately NOT "any `.py` at or under `_SELFHOST_DIR`". A program's
+    location is not something a compiler has any reason to treat specially,
+    so a bare prefix test silently classified as "the compiler's own source"
+    every file that merely happens to sit inside the install directory: a
+    test fixture, a scratch script, a downstream project's subdirectory, a
+    `build/` artifact. Anything gated on it then behaved differently purely
+    because of where the file was written, and in
+    `_lower_method_call`'s generic module-qualified-call branch
+    (`mojo/backend_gimple/emit_methods.py`) that meant a
+    `<marker>.<plain_top_level_fn>(...)` call was refused module-qualifier
+    resolution, fell through to the generic scalar-receiver stub, and
+    answered a literal `0` — a silent wrong value whose only trigger was
+    `$TMPDIR`, which is what made the registered `linkmode` gate step pass or
+    fail depending on the checkout it ran in. `test_link_mode.py`'s
+    `test_bare_submodule_import_call_inside_source_tree` pins it.
+
+    Realpath- and symlink-tolerant like the predicate it replaces: both
+    `abspath` and `realpath` of `_SELFHOST_DIR` are accepted as a base, so
+    a source root reached through a symlink is still recognised. Note the
+    COMPILED binary's own `_SELFHOST_DIR` is its CWD, not the real source
+    dir (see `gimple_codegen._selfhost_load_gimplegen_class`) — that
+    imprecision is unchanged from the prefix test this replaces, and is
+    conservative in the same direction: an unrecognised self-host file
+    simply takes the ordinary resolution path, which is what every
+    self-host compile already did under the compiled binary.
+    """
+    if not path:
+        return False
+    _rp = os.path.realpath(os.path.abspath(path))
+    _sd = gimple_codegen._SELFHOST_DIR
+    _rsd = os.path.realpath(_sd)
+    _dir = os.path.dirname(_rp)
+    # `'/'`, not `os.sep`: `gimple_ctypes.os` is an opaque module marker on
+    # the compiled backend and `.sep` raised `AttributeError: sep`
+    # (mojo/backend_gimple/emit_resolve.py's own note on the same trap).
+    # The `if not _base` guard is for the OTHER half of that hazard —
+    # `_SELFHOST_DIR` is a module-level global that reads back as a boxed
+    # int64_t on the self-hosted path unless `_seed_selfhost_module_globals`
+    # has already corrected its type for this call site, and a boxed `0`
+    # would otherwise be concatenated as if it were a path.
+    for _base in (_sd, _rsd):
+        if not _base:
+            continue
+        if _dir == _base:
+            return True
+        for _sub in ('mojo', 'jit'):
+            _pkg = _base + '/' + _sub
+            if _rp == _pkg or _rp.startswith(_pkg + '/'):
+                return True
+    return False
+
+
 def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     """True when compiling this compiler's OWN backend source and
     `module_name` is a local alias for one of its sibling implementation
