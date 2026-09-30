@@ -4839,6 +4839,19 @@ class X86_64Codegen:
         else:
             name = _callee_symbol(e.func)
         if name is None:
+            # A BRACKETED callee this unit does not compile is asked about by
+            # the ONE shared reader arm64 asks too, so the two architectures
+            # cannot give different answers about one construct — measured,
+            # arm64 named the specialization while x86-64 said "got
+            # SubscriptExpr", which is a symptom naming an AST node the author
+            # never wrote. Scoped to a base name with no declaration in hand,
+            # because a LOCAL generic's specialization is a different question
+            # and this backend still answers that one where it always has.
+            if isinstance(e.func, F.SubscriptExpr) \
+                    and isinstance(e.func.obj, F.IdentExpr) \
+                    and e.func.obj.name not in self._functions:
+                raise CodegenError(
+                    M.specialization_call_refusal(e.func.obj.name))
             raise CodegenError(
                 "unsupported call target on the formal x86-64 path "
                 f"(got {type(e.func).__name__})")
@@ -4939,6 +4952,25 @@ class X86_64Codegen:
         # almost always literals like `flush=True`. A known callee gets them
         # bound to their parameters' registers.
         args = list(e.args) if is_extern else self._bind_call_args(name, e)
+        if is_extern and not is_extern_call \
+                and isinstance(e.func, F.SubscriptExpr):
+            # A BRACKETED callee this unit does not compile, refused with the
+            # SAME shared text arm64 asks (`model.specialization_call_refusal`)
+            # so the two architectures cannot answer differently about one
+            # construct. Without it the brackets are dropped on the extern path
+            # too, and `plain[3](5)` is emitted as `plain(5)`.
+            #
+            # `not is_extern_call` is load-bearing, and it is the merge of two
+            # constructs that both spell a callee with a bracket. An
+            # `external_call["sym", RetType](…)` IS a `SubscriptExpr` callee
+            # and IS lowered, above, by this very path — so without the guard
+            # the refusal would eat it and every `std/os/env.mojo` in the tree
+            # would go back to failing on a construct that lowers. A template
+            # that was already answered or already refused has returned by the
+            # time execution reaches here, so `is_extern_call` False is the
+            # statement that the bracket is a specialization's comptime
+            # parameters rather than a C symbol and a return type.
+            raise CodegenError(M.specialization_call_refusal(name))
 
         if len(args) > len(ARG_REGS):
             raise CodegenError(

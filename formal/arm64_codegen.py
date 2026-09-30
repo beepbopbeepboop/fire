@@ -5288,6 +5288,26 @@ class ARM64Codegen:
             if ct_params:
                 bound = self._specialization_args(e, ct_params)
                 args = bound + list(args)
+        elif not is_extern_call and isinstance(e.func, F.SubscriptExpr):
+            # A BRACKETED callee this unit does not compile. The branch above
+            # is the only place a specialization's brackets are turned into
+            # arguments, so without this the brackets are silently DROPPED and
+            # `plain[3](5)` is emitted as `plain(5)` — measured, an image that
+            # built, ran and printed a number the source never wrote. The
+            # shared text is `model.specialization_call_refusal`, which x86-64
+            # asks too.
+            #
+            # `not is_extern_call` is load-bearing, and it is the merge of two
+            # constructs that both spell a callee with a bracket. An
+            # `external_call["sym", RetType](…)` IS a `SubscriptExpr` callee
+            # and IS lowered, above, by this very path — so without the guard
+            # the refusal would eat it and every `std/os/env.mojo` in the tree
+            # would go back to failing on a construct that lowers. A template
+            # that was already answered or already refused has returned by the
+            # time execution reaches here, so `is_extern_call` False is the
+            # statement that the bracket is a specialization's comptime
+            # parameters rather than a C symbol and a return type.
+            raise CodegenError(M.specialization_call_refusal(name))
         # Flatten `*star` / reject `**dst` before the arity check so a
         # single list literal expands to its elements (common: f(*[a,b])).
         flat: list = []

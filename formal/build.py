@@ -3509,96 +3509,121 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # missing local.  Collected by node identity because `M.iter_nodes`
         # has no parent, and an un-compiled callee is the common case in a
         # file that calls into a dylib.
-        callees = {id(c.func) for c in M.iter_nodes(fn.body)
-                   if isinstance(c, F.CallExpr) and isinstance(c.func,
-                                                               F.IdentExpr)}
-        # …and the DOTTED callee, `mod.f(...)`, which is the other spelling of
-        # a cross-module call and the only one `import mod` produces. The root
-        # of the chain is not a read of a value either: it names the MODULE,
-        # and the emitter answers the call from that module's own export table
-        # (see `ARM64Codegen._extern_symbol`). Without this the check refused
-        # `mod` — "is imported from `mod`, so it is a module-level name of
-        # another module" — for a call the emitter can already lower, which
-        # made `import mod` unusable and left `from mod import f` as the only
-        # spelling of a module call this path had. The refusal was worse than
-        # useless here: its own remedy sentence said "give it a function (a
-        # `struct.fn()` call lowers)", recommending the very spelling it
-        # refused.
+        # …four spellings of it, and ONE loop collects all four, because the
+        # question is one question — "is this occurrence a CALLEE rather than a
+        # read of a value" — and four loops answering it would be free to
+        # disagree about where the answer stops. Collected by node IDENTITY,
+        # which is the only way to name a node again: `M.iter_nodes` has no
+        # parent.
         #
-        # `struct.pack(...)` parses as `CallExpr(func=MemberExpr(obj=
-        # IdentExpr('struct'), member='pack'))`, so the set comprehension above
-        # misses it — `c.func` is a MemberExpr, and the root IdentExpr is never
-        # collected. So the fix is to collect that root, by node IDENTITY (the
-        # only way to name a node again, since `M.iter_nodes` has no parent),
-        # and only in CALLEE position: the same name in a genuine read
-        # (`len(struct)`) is still refused, which is the point — a module
-        # object has no storage either way, and what has no storage is the
-        # READ, not the call through it.
+        #   1. `f(…)` — a bare name. A callee this unit does not compile is a
+        #      link-time fact rather than a missing local, and an un-compiled
+        #      callee is the common case in a file that calls into a dylib.
+        #   2. `mod.f(…)` — a module, which is the other spelling of a
+        #      cross-module call and the only one `import mod` produces. The
+        #      emitter answers the call from that module's own export table
+        #      (see `ARM64Codegen._extern_symbol`). Without this the check
+        #      refused `mod` — "is imported from `mod`, so it is a module-level
+        #      name of another module" — for a call the emitter can already
+        #      lower, which made `import mod` unusable and left
+        #      `from mod import f` as the only spelling of a module call this
+        #      path had. The refusal was worse than useless here: its own
+        #      remedy sentence said "give it a function (a `struct.fn()` call
+        #      lowers)", recommending the very spelling it refused.
+        #      GATED on the root naming an imported module, and that gate is
+        #      what makes this safe: a dotted call on anything else — a value's
+        #      method (`xs.append`), a struct's field (`h.f.g`), a
+        #      module-global table with no storage (`TABLE.lookup`) — keeps
+        #      whatever answer it had, so this adds a spelling and changes no
+        #      existing verdict. The gate admits a PACKAGE PREFIX of an
+        #      imported name, not just an exact match: `import os.path` binds
+        #      the name `os` — that is what Python does, and
+        #      `os.path.join(…)` is 532 of the measured `os` call sites in this
+        #      tree — while a name that is a dotted PREFIX of an import cannot
+        #      be a value, because a local, a parameter and a module-global are
+        #      all bare names and nothing in this language puts an attribute on
+        #      one. The dotted qualifier itself is resolved by module identity
+        #      further in (`_extern_symbol`), where the manifest says whether
+        #      that submodule exports the name at all.
+        #   3. `f[T](…)` — a comptime SPECIALIZATION, whose callee is a
+        #      `SubscriptExpr` and whose root is therefore walked as a read if
+        #      only `isinstance(c.func, F.IdentExpr)` is asked. That is the
+        #      false diagnosis the arm64 sweep reported for seventeen files:
+        #      `std/sys/_assembly.mojo` spells `_get_kgen_string[asm]()` and
+        #      was told `'_get_kgen_string' is imported from
+        #      std.collections.string.string_slice, so it is a module-level
+        #      name of another module` — which names a storage problem the file
+        #      does not have. The name is a CALLEE. What crosses the dylib
+        #      boundary is the instantiation, and whether this path has a
+        #      symbol for it is a question for the export rule and the linker,
+        #      not for the allocator's local table; that question is asked
+        #      where it belongs (see `_callee_defs` for the generic's base
+        #      name, and the export rule in `no_public_api_reason` for what a
+        #      generic can bind as). Exempted only when the bracket is not a
+        #      template some other rule has a sentence about — an MLIR template
+        #      in CALLEE position is a construct refusal, and the
+        #      `bracketed` scan below is the one that words it.
+        #   4. `external_call["setenv", Int32](…)` — a C symbol named by a
+        #      string literal in the bracket, so `external_call` is left as a
+        #      bare name with no home, and the bracket's second element is a
+        #      type EXPRESSION (`Int32`, `_CPointer[UInt8,
+        #      UntrackedOrigin[mut=False]]`) that is compile-time by
+        #      construction and is not a read of a value either. Only a
+        #      WELL-FORMED template is exempt: a malformed one still reaches
+        #      the bracketed refusal below, which words the malformed template
+        #      rather than a name-placement symptom. The type nodes are added
+        #      rather than left to fall through because `'Int32' has no home`
+        #      is a true statement about this pass and a useless one — it names
+        #      an allocator table the reader has to go and look up instead of
+        #      the subscript they wrote, and it was what every
+        #      `external_call[…]` in the stdlib was reported as.
+        #      `xc_callees` is the same set of templates, kept apart because
+        #      the bracketed scan below needs the OPPOSITE answer for a
+        #      template that is NOT a callee: `var x = external_call["sym", T]`
+        #      is a template used as a value, and the name-placement message
+        #      there names a symptom of this pass rather than the construct.
+        #      `M.iter_nodes` has no parent, so "is this subscript a call's
+        #      callee" is answerable here and nowhere else.
         #
-        # Restricted to a root that names an IMPORTED MODULE, which is what
-        # makes it safe: a dotted call on anything else — a value's method
-        # (`xs.append`), a struct's field (`h.f.g`), a module-global table with
-        # no storage (`TABLE.lookup`) — keeps whatever answer it had, so this
-        # adds a spelling and changes no existing verdict. Without the gate the
-        # last of those would stop being the precise refusal it is and become a
-        # failure from further in, naming the allocator instead of the
-        # construct.
-        #
-        # A root that is, or is a PACKAGE PREFIX of, an imported name. Not a
-        # detail: `import os.path` binds the name `os` — that is what Python
-        # does, and `os.path.join(...)` is 532 of the measured `os` call sites
-        # in this tree — so the root of that chain is `os` while the only
-        # imported name is `os.path`. Matching for equality refused the one
-        # spelling a package module is written with, and a name that is a
-        # dotted PREFIX of an import cannot be a value: a local, a parameter
-        # and a module-global are all bare names, and nothing in this language
-        # puts an attribute on one. The dotted qualifier itself is resolved by
-        # module identity further in (`_extern_symbol`), where the manifest
-        # says whether that submodule exports the name at all.
+        # `xc_type_args` is every node of a well-formed template's TYPE
+        # argument, kept as its own set rather than folded into `callees`,
+        # because it has to be exempt from the `bracketed` scan BELOW as well
+        # and that scan runs first. `_CPointer[UInt8, UntrackedOrigin[…]]` is
+        # a two-element subscript whose root is a bare name, so the scan would
+        # record the tuple-index refusal against `_CPointer` and then report it
+        # — a construct refusal about a TYPE, raised because of where the type
+        # was written. The scan's own `template_is_answered` skip is the
+        # precedent and the same statement: an argument that is compile-time by
+        # construction is not a use of anything this pass places.
+        xc_callees = set()
+        xc_type_args = set()
+        callees = set()
         imported = imported_module_names or ()
-        if imported:
-            for c in M.iter_nodes(fn.body):
-                if not isinstance(c, F.CallExpr) \
-                        or not isinstance(c.func, F.MemberExpr):
-                    continue
-                root = c.func
+        for c in M.iter_nodes(fn.body):
+            if not isinstance(c, F.CallExpr):
+                continue
+            func = c.func
+            if isinstance(func, F.IdentExpr):
+                callees.add(id(func))
+            elif isinstance(func, F.MemberExpr):
+                root = func
                 while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
                     root = root.obj
                 if isinstance(root, F.IdentExpr) and any(
                         root.name == m or m.startswith(f"{root.name}.")
                         for m in imported):
                     callees.add(id(root))
-        # The same rule one level up, for a callee spelled with a BRACKET.
-        # `external_call["setenv", Int32](…)` puts the C symbol in the bracket
-        # and leaves `external_call` as a bare name with no home — but it is the
-        # callee of a call, exactly as `_sym` above is, and a callee is not a
-        # read of a value.  The bracket's second element is a type EXPRESSION
-        # and is compile-time by construction, so it is not a read of a value
-        # either — `Int32` is a type the module need not declare and there is no
-        # local by that spelling to find.  Only a WELL-FORMED template is
-        # exempt: a malformed one still reaches the bracketed refusal below with
-        # a message about the template rather than a name-placement symptom.
-        # Collected here rather than added to `name_resolves_without_a_local`
-        # because that list is a statement about NAMES THAT HAVE A VALUE, and
-        # `external_call` has none — it is a template, and the value the call
-        # produces is the C function's, not this name's.
-        #
-        # `xc_callees` is the same set, kept apart because the bracketed scan
-        # below needs the OPPOSITE answer for a template that is NOT a callee:
-        # `var x = external_call["sym", T]` is a template used as a value, and
-        # the name-placement message ("`external_call` has no home") names a
-        # symptom of this pass rather than the construct.  `M.iter_nodes` has no
-        # parent, so "is this subscript a call's callee" is answerable here and
-        # nowhere else.
-        xc_callees = set()
-        for c in M.iter_nodes(fn.body):
-            if not isinstance(c, F.CallExpr) \
-                    or not M.is_external_call_template(c.func) \
-                    or M.external_call_spec(c.func)[2] is not None:
-                continue
-            xc_callees.add(id(c.func))
-            callees.add(id(c.func.obj))
-            callees |= {id(n) for n in _external_call_type_nodes(c.func.index)}
+            elif isinstance(func, F.SubscriptExpr) \
+                    and isinstance(func.obj, F.IdentExpr):
+                if M.is_external_call_template(func) \
+                        and M.external_call_spec(func)[2] is None:
+                    xc_callees.add(id(func))
+                    callees.add(id(func.obj))
+                    xc_type_args |= {id(n)
+                                     for n in _external_call_type_nodes(func.index)}
+                elif M.mlir_template_refusal(func) is None:
+                    callees.add(id(func.obj))
+        callees |= xc_type_args
         # A BRACKETED or DOTTED form has the same problem one level up:
         # `__mlir_attr[…]`, `__mlir_attr.`lit`` and
         # `__mlir_op.`lit.materialize_into`[value=v]` are a SubscriptExpr and/or
@@ -3612,7 +3637,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         for sub in M.iter_nodes(fn.body):
             if not isinstance(sub, (F.SubscriptExpr, F.MemberExpr)):
                 continue
-            if M.template_is_answered(sub):
+            if M.template_is_answered(sub) or id(sub) in xc_type_args:
                 # Answered at build time, so nothing is left to refuse about it
                 # and the tree below it is not a use of anything. The rewrite
                 # (`_fold_target_queries`) has normally already replaced these
@@ -3620,6 +3645,11 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # the rewrite did not cover this position — which is why the
                 # condition is the shared `template_is_answered` rather than a
                 # second opinion written beside it.
+                #
+                # …and a well-formed `external_call[…]` template's TYPE
+                # argument, which is compile-time by construction and has the
+                # same consequence by a different route: nothing was written
+                # that reads a value, so there is nothing here to place.
                 continue
             root_ident = sub.obj
             while isinstance(root_ident, (F.MemberExpr, F.SubscriptExpr)):
@@ -3657,10 +3687,22 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             if why is not None:
                 bracketed[id(root_ident)] = why
         for node in M.iter_nodes(fn.body):
-            if not isinstance(node, F.IdentExpr) or id(node) in callees:
+            if not isinstance(node, F.IdentExpr):
                 continue
+            # `bracketed` is asked BEFORE the callee exemption, and the order
+            # is load-bearing rather than tidiness. A construct refusal is
+            # about the whole expression — `external_call['setenv', Int32]`
+            # assembles a two-element subscript, and `Int32` inside it is a
+            # TYPE ARGUMENT rather than a read of a value. Skipping a callee
+            # root without asking first made the type argument the reported
+            # failure, which names an allocator table the reader has to go and
+            # look up instead of the subscript they wrote; measured, it
+            # replaced the tuple-index refusal on every `external_call[…]` in
+            # the stdlib with `'Int32' has no home`.
             if id(node) in bracketed:
                 raise CodegenError(bracketed[id(node)])
+            if id(node) in callees:
+                continue
             name = node.name
             if name in placed or name in frame_slots \
                     or M.module_constant_literal(name) is not None \
