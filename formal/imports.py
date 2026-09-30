@@ -164,9 +164,17 @@ HOST_MODELLED = frozenset((
     #     `formal_sweep.py` sizes its "not answerable" column from, and it
     #     reported seven files as blocked on a module that now exists.
     #
+    #   `re`  — `formal/hostmods/re.mojo`, a backtracking regex engine in
+    #     the subset the formal backends can lower, checked SPAN FOR SPAN and
+    #     character for character against CPython's own `re` by
+    #     `test_re_formal.py`. Its own docstring lists the four measured limits
+    #     it is written around: the arm64 `<<`-by-a-literal bug, the fixed
+    #     128 KiB frame that bounds recursion, `list.append` in a loop, and
+    #     the four fixed sizes of its arena.
+    #
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
-    "json", "re", "math", "random", "decimal", "fractions",
+    "json", "math", "random", "decimal", "fractions",
     "numbers", "array", "operator", "functools", "itertools", "collections",
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
     "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
