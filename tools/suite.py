@@ -232,6 +232,48 @@ def memclass_for(spec) -> str:
     return getattr(spec, 'mem', None) or DEFAULT_MEMCLASS
 
 
+# ── The concurrent-memory budget ──────────────────────────────────────────────
+# A per-job ceiling bounds ONE process tree. It says nothing about how many
+# trees may run at once, so on its own it is not a bound on the machine at all:
+# the three `bootstrap-stage*-dumps` fanouts are 47 items each at the `module`
+# class, and `-j18` of them is 18 x 24 GB = 432 GB of ALLOWED ceiling on a
+# 128 GB box. That is not hypothetical — on 2026-09-29 those fanouts ran about
+# thirty items at once, each observed between 30 and 43 GB, until the machine
+# collapsed and a human killed them by hand. Every individual process was
+# inside its own cap the whole time, which is exactly the point: a per-process
+# ceiling cannot be defeated by width unless the runner bounds the SUM.
+#
+# So the runner spends a memory budget, not just CPU slots. A job may start
+# only if the ceilings of everything already running plus its own fit under
+# MEMBUDGET_GB. That is a statement about concurrency and it composes with the
+# exclusive mechanism rather than replacing it: an exclusive job already gets
+# the machine to itself, and a budget narrower than a job's own class (which
+# only happens if someone sets MEMBUDGET_GB below a class, or raises a class)
+# still runs the job alone rather than stalling the plan forever.
+#
+# 100 GB is the number for a 128 GB machine: the largest two classes that are
+# meant to coexist (`program` 55 + `module` 24 = 79) fit, a 47-item fanout runs
+# 4-wide instead of 18-wide, and a `stage` job (96) still runs with room to
+# spare. Override with MEMBUDGET_GB; 0 means the concurrency bound is off,
+# which with MEMLIMIT_GB=0 means nothing is bounded at all.
+MEMBUDGET_GB_DEFAULT = 100.0
+
+
+def membudget() -> float:
+    """The concurrent ceiling-sum budget in GB, honouring MEMBUDGET_GB.
+
+    Read from the environment on every call rather than captured at import,
+    because the tests in test_suite.py change it to prove the throttle works
+    and must be able to put it back. A float for the same reason `memlimit`
+    returns one: `MEMBUDGET_GB=0.5` is a real setting and truncating it to an
+    int would turn "half a gigabyte at a time" into "none".
+    """
+    raw = os.environ.get('MEMBUDGET_GB', '').strip()
+    if raw:
+        return max(0.0, float(raw))
+    return MEMBUDGET_GB_DEFAULT
+
+
 
 # ── Registry ─────────────────────────────────────────────────────────────────
 class Spec:
