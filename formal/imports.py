@@ -154,8 +154,8 @@ HOST_MODELLED = frozenset((
     #     real filesystem. `listdir` and `walk` need a run-time-length
     #     sequence, which a list on this path cannot be, and `environ` needs
     #     a `char **` walk; both are bug docs rather than approximations.
-    "errno", "stat", "platform", "time", "select", "io",
-    "pathlib", "glob", "fnmatch", "hashlib", "secrets", "uuid",
+    "errno", "stat", "platform", "select", "io",
+    "pathlib", "glob", "fnmatch", "secrets", "uuid",
     #   `struct`  — `formal/hostmods/struct.mojo`, in the subset the formal
     #     backends can lower, compared BYTE FOR BYTE against CPython's own
     #     answers by `test_struct_formal.py`. The four measured limits it is
@@ -163,6 +163,30 @@ HOST_MODELLED = frozenset((
     #     the work accounting: an entry here is the claim
     #     `formal_sweep.py` sizes its "not answerable" column from, and it
     #     reported seven files as blocked on a module that now exists.
+    #   `time`  — `formal/hostmods/time.mojo`, checked by `test_formal_time.py`
+    #     against CPython's own clocks: every value it produces is a clock
+    #     READING, so the test asserts relations (the image's wall clock within
+    #     2 s of this process's, monotonic never decreasing, `sleep_ns` at
+    #     least as long as asked) rather than a table. A float is not a value
+    #     on this path — `formal/arm64_codegen.py` truncates a `FloatLiteral`
+    #     to an integer and there is no float arithmetic — so the fractional
+    #     `time.time()` is the IEEE-754 BIT PATTERN of one, verified bit-exact
+    #     against exact rational arithmetic over 534 inputs. What it cannot
+    #     answer is written at the top of the file: `localtime`, `gmtime`,
+    #     `mktime`, `strftime` and `get_clock_info` all return a `struct tm`
+    #     or a named tuple, and a struct is a frame blob, so they are absent
+    #     rather than approximated. Filed as
+    #     `bugs/FORMAL_time_struct_shaped_answers.md`.
+    #   `hashlib` — `formal/hostmods/hashlib.mojo`, checked BYTE FOR BYTE
+    #     against CPython's own digests by `test_formal_hashlib.py`: six
+    #     digests from CommonCrypto (which libSystem provides) and BLAKE2b
+    #     computed from RFC 7693 because libSystem has no BLAKE2 and
+    #     `py314_cache.py` asks for `blake2b(digest_size=20)`. 1,182 digests
+    #     compared, none from a table. CPython's factory API is not
+    #     expressible — a hash object is 8 to 64 bytes of state that cannot
+    #     cross a dylib boundary — so each digest is one function, and the
+    #     seven absent names (SHA-3, SHAKE, blake2s) are named with the
+    #     measurements in `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md`.
     #
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
