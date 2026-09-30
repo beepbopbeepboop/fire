@@ -53,7 +53,8 @@ void mojo_exc_pop(void)
  * stack address — undefined behavior, corrupting the heap allocator). */
 typedef enum { MOJO_CLEANUP_DICT, MOJO_CLEANUP_LIST, MOJO_CLEANUP_SET,
                MOJO_CLEANUP_DICT_STACK, MOJO_CLEANUP_LIST_STACK, MOJO_CLEANUP_SET_STACK,
-               MOJO_CLEANUP_PTR   /* a plain malloc/calloc block: a struct instance */
+               MOJO_CLEANUP_PTR,   /* a plain malloc/calloc block: a struct instance */
+               MOJO_CLEANUP_LIST_STRS  /* a list that owns its string elements */
              } mojo_cleanup_kind_t;
 #define MOJO_CLEANUP_STACK_MAX 8192
 static mojo_cleanup_kind_t _mojo_cleanup_kind[MOJO_CLEANUP_STACK_MAX];
@@ -87,6 +88,7 @@ void mojo_cleanup_push_dict_stack(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_DIC
 void mojo_cleanup_push_list_stack(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_LIST_STACK, p); }
 void mojo_cleanup_push_set_stack(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_SET_STACK, p); }
 void mojo_cleanup_push_ptr(void *p)        { _mojo_cleanup_push(MOJO_CLEANUP_PTR, p); }
+void mojo_cleanup_push_list_strs(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_LIST_STRS, p); }
 
 void mojo_cleanup_cancel_n(int64_t n)
 {
@@ -124,6 +126,7 @@ static void _mojo_cleanup_unwind_to(int chk)
             case MOJO_CLEANUP_LIST_STACK: mojo_list_destroy((MojoList *)ptr); break;
             case MOJO_CLEANUP_SET_STACK:  mojo_set_destroy((MojoSet *)ptr);  break;
             case MOJO_CLEANUP_PTR:        free(ptr);                         break;
+            case MOJO_CLEANUP_LIST_STRS:  mojo_list_free_owned_strs((MojoList *)ptr); break;
         }
     }
 }
@@ -1092,6 +1095,31 @@ void mojo_list_free(MojoList *l)
 {
     mojo_list_destroy(l);
     free(l);
+}
+
+/* A list of STRINGS that the list SOLELY owns — every element freshly
+ * allocated by the function that built the list, and by nothing else.
+ * `mojo_list_append_str` stores the pointer it is given and never copies it
+ * (see its definition above), so a plain `mojo_list_free` on such a list
+ * releases the container and leaves every element behind: that is the
+ * ~48 B/iteration of `String("a b c").split(" ")` in
+ * bugs/CODEGEN_call_result_container_never_freed.md, where the list itself
+ * was already being freed and only the strings inside it were not.
+ *
+ * The counterpart rule is what makes this safe: a list of strings is USUALLY
+ * borrowed (string literals, `d[k]` read back out of a dict, the elements of
+ * a list built by `extend`), and freeing those is a crash. So this is never
+ * the default free for a `MojoList *` — codegen picks it only for a value it
+ * has matched to one of the runtime functions in `_OWNS_STR_ELEMS`
+ * (mojo/backend_gimple/emit_infra.py), each of which was read to allocate
+ * every element it appends and to append nothing it did not allocate.
+ * `mojo_str_rsplit` is deliberately NOT in that set: it hands its result the
+ * very same pointers its own intermediate list holds. */
+void mojo_list_free_owned_strs(MojoList *l)
+{
+    if (!l) return;
+    for (int64_t i = 0; i < l->len; i++) free((void *)(intptr_t)l->data[i]);
+    mojo_list_free(l);
 }
 
 static void _list_grow(MojoList *l)
@@ -3635,6 +3663,7 @@ MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit) {
     int64_t n = mojo_list_len(all);
     if (maxsplit < 0 || maxsplit >= n - 1) {
         for (int64_t i = 0; i < n; i++) mojo_list_append_str(l, mojo_list_get_str(all, i));
+        mojo_list_free(all);      /* the strings moved to `l`; the list did not */
         return l;
     }
     /* Merge the leftmost (n - maxsplit) tokens back together with sep
@@ -3660,6 +3689,11 @@ MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit) {
      * struct method's forward-declared parameter list. */
     mojo_list_append_str(l, merged);
     for (int64_t i = n_keep; i < n; i++) mojo_list_append_str(l, mojo_list_get_str(all, i));
+    /* `all` is a scratch list whose ELEMENTS `l` now shares (the merge above
+     * copies them into `merged`; the tail is moved by pointer), so only the
+     * list's own struct and buffer are released here — the strings belong to
+     * `l`, which is the returned value. */
+    mojo_list_free(all);
     return l;
 }
 

@@ -1448,6 +1448,113 @@ def _name_uses_consumed(node, name: str, consumed: bool = False) -> bool:
     return True
 
 
+def list_elements_owned(fn_body, name: str) -> bool:
+    """True iff a list local `name` that owns its own string ELEMENTS
+    (`mojo_str_split`/`mojo_str_splitlines`, whose every element is a fresh
+    allocation made by the function that built the list) may be torn down with
+    the element strings included, without leaving a dangling pointer anywhere.
+
+    The list is the only owner of the allocations, but the PROGRAM can still
+    hand an element pointer out, and then the list is no longer the owner of
+    that element's lifetime: `kept.append(parts[0])` stores a pointer the free
+    then invalidates, and the read comes back as the pointer's bits. So this
+    asks a strictly narrower question than the container analyses do — may any
+    ELEMENT of `name` be named at all? — and the answer is deliberately the
+    smallest one that is still useful:
+
+      - the declaration's own target (`var name = ...`, `name = ...`) is not a
+        use;
+      - `len(name)`, `repr/str/print/bool/hash/id(name)` read the list's
+        length or its contents and hand nothing back;
+      - `name` as a statement of its own, and as an operand of `==`/`!=`/`<`/
+        `>`/`<=`/`>=` (which compare, and build no new list);
+      - `not name` and a condition.
+
+    Everything else is rejected, which is the fail-closed direction: a missed
+    free leaks a few bytes, a wrong one is a use-after-free. So `parts[0]`,
+    `for p in parts:`, `list(parts)`, `parts[:]`, `parts + other`, `sorted
+    (parts)`, `kept.extend(parts)` and every method call on `parts` all keep
+    the plain `mojo_list_free` and the pre-existing leak. That is the same
+    trade doc/MEMORY.html section 7 records for nested list literals ("Left
+    leaking on purpose") and for a dict/set's `key_views_consumed` above; this
+    is the LIST-element counterpart, and the leak it does close — the
+    ~48 B/iteration of `String("a b c").split(" ")` measured over 100k and
+    400k iterations in bugs/CODEGEN_call_result_container_never_freed.md — is
+    the `len()`-and-drop shape, which is the common one."""
+    return _list_str_uses_ok(fn_body, name)
+
+
+# Read-only builtins that read a container without handing any of its contents
+# back. `str` is here (unlike `_NONRETAINING_BUILTINS`, where it is not): for a
+# LIST `str(x)` is `repr(x)`, which builds a new string from the contents; the
+# string-identity case that excluded it there is a different question.
+_LIST_READ_BUILTINS = frozenset(['len', 'repr', 'str', 'print', 'bool',
+                                 'hash', 'id'])
+# Comparison operators only. `+`/`*` are absent on purpose: `parts + other`
+# builds a list that SHARES the element pointers.
+_LIST_SAFE_CMP = frozenset(['==', '!=', '<', '>', '<=', '>='])
+
+
+def _list_str_uses_ok(node, name: str, seen: bool = False) -> bool:
+    """`seen` is True when this subtree has already been accepted by a
+    recognised read-only parent (the argument of `len(name)`, an operand of a
+    comparison), so a bare `name` inside it is a use that is fine rather than
+    one that hands an element out."""
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            if not _list_str_uses_ok(item, name, False):
+                return False
+        return True
+    if not _is_node(node):
+        return True
+    # The binding itself: the target is not a use of the value.
+    if isinstance(node, N.VarDecl) and _as_str(node.name) == name:
+        return _list_str_uses_ok(node.value, name, False)
+    if (isinstance(node, (N.AssignStmt, N.AugAssignStmt))
+            and isinstance(node.target, N.IdentExpr)
+            and _as_str(node.target.name) == name):
+        return _list_str_uses_ok(node.value, name, False)
+    if isinstance(node, N.CallExpr) and isinstance(node.func, N.IdentExpr) \
+            and _as_str(node.func.name) in _LIST_READ_BUILTINS:
+        for a in node.args:
+            if not _list_str_uses_ok(a, name, True):
+                return False
+        for kw in (node.kwargs or []):
+            if not _list_str_uses_ok(kw[1], name, True):
+                return False
+        return True
+    if isinstance(node, N.ExprStmt):
+        return _list_str_uses_ok(node.value, name, True)
+    if isinstance(node, N.BinaryOp) and node.op in _LIST_SAFE_CMP:
+        return (_list_str_uses_ok(node.left, name, True)
+                and _list_str_uses_ok(node.right, name, False))
+    if isinstance(node, N.CompareChain):
+        for o in node.operands:
+            if not _list_str_uses_ok(o, name, True):
+                return False
+        for op in (node.ops or []):
+            if op not in _LIST_SAFE_CMP:
+                return False
+        return True
+    if isinstance(node, N.UnaryOp) and node.op == 'not':
+        return _list_str_uses_ok(node.operand, name, True)
+    if isinstance(node, (N.IfStmt, N.WhileStmt, N.TernaryExpr)):
+        for f in dataclasses.fields(node):
+            v = getattr(node, f.name)
+            if not _list_str_uses_ok(v, name, f.name == 'condition'):
+                return False
+        return True
+    if isinstance(node, N.IdentExpr):
+        return seen or _as_str(node.name) != name
+    for f in dataclasses.fields(node):
+        v = getattr(node, f.name)
+        if v is None:
+            continue
+        if not _list_str_uses_ok(v, name, False):
+            return False
+    return True
+
+
 def _key_view_source(it, name: str) -> str:
     """'keys' when the iterable `it` walks `name`'s keys/elements (`name` or
     `name.keys()`), 'items' for `name.items()`, else ''."""

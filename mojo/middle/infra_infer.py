@@ -1919,6 +1919,16 @@ def _key_views_ok(body, name: str) -> bool:
     except Exception:
         return False
 
+def _list_elements_ok(body, name: str) -> bool:
+    """A list local that owns its own string elements (a `split()` result) may
+    be freed WITH them only if no element of it is ever named — see
+    ownership_destruct.list_elements_owned. A failure inside the check answers
+    False, so an unanalysable body keeps the plain `mojo_list_free`."""
+    try:
+        return ownership_destruct.list_elements_owned(body, name)
+    except Exception:
+        return False
+
 def _string_uses_ok(body, name: str) -> bool:
     """Every method call on `name` in `body` has its result consumed at once
     (ownership_destruct.receiver_results_consumed), so a string local cannot be

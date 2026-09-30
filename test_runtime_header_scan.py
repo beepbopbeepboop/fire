@@ -172,7 +172,12 @@ def test_every_declaration_is_seen():
     # whose index is not a compile-time constant (`mojo_list_get_boxed`,
     # `mojo_is_boxed`, `mojo_box_double`, `mojo_box_int`, `mojo_repr_boxed`) —
     # see bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
-    for header, want in (('fire_runtime.h', 474),
+    # 474 -> 476 (2026-09-30): `mojo_list_free_owned_strs` and
+    # `mojo_cleanup_push_list_strs`, the free and the matching cleanup thunk
+    # for a list that owns its own string elements (a `split()` result) — see
+    # bugs/CODEGEN_call_result_container_never_freed.md and
+    # mojo/backend_gimple/emit_infra.py's `_OWNS_STR_ELEMS`.
+    for header, want in (('fire_runtime.h', 476),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

@@ -58,7 +58,7 @@ from ownership_check import _block_terminates
 from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
-    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
+    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
     _pair_key, _prepass_list_elem, _ptr_slot_in_range, _resolve_member_expr_type, _resolve_type, _scan_container_elems,
     _seed_addressed_locals, _type_of
@@ -163,6 +163,24 @@ def _reset_func(gen, body: list = None, params: list = None,
             gimple_lambdareduce.reducible_lambdas(gen)
     gen.bb_counter   = 2
     gen.temp_counter = 0
+    # The per-function value tables, reset HERE rather than left to the
+    # feature-level resets because `temp_counter` is: temp names repeat
+    # across functions, so an entry a previous function left behind is read
+    # as THIS function's. All of them decide WHICH free is emitted for a
+    # value, so a stale entry is a wrong free, not a missed one — the one
+    # table that was actually reset per function (`_cstr_key_src`) says so in
+    # its own comment, and the others are the same shape.
+    gen._fresh_vals = set()
+    gen._fresh_str_tmps = set()
+    gen._owned_str_elem_vals = set()
+    gen._owned_str_elem_names = set()
+    # Self-hosting cannot infer a set field's element type from an assignment,
+    # only from this table (see `begin_function`'s note).
+    _fet = gen._field_elem_types.setdefault('GimpleGen', {})
+    _fet['_fresh_vals'] = 'char *'
+    _fet['_fresh_str_tmps'] = 'char *'
+    _fet['_owned_str_elem_vals'] = 'char *'
+    _fet['_owned_str_elem_names'] = 'char *'
     gen.decls:       list[str]         = []
     gen.body_lines:  list[str]         = []
     gen.var_types:   dict[str, str]    = {}
@@ -242,6 +260,16 @@ def _reset_func(gen, body: list = None, params: list = None,
     gen._cstr_key_src: dict[str, str] = {}
     gen._kw_key_src: dict[str, str] = {}
     gen._fresh_vals: set = set()   # per function: temp names repeat across functions
+    # The subset of `_fresh_vals` whose value is a list that owns its own
+    # string elements (see `_OWNS_STR_ELEMS`). A temporary that gets freed by
+    # its consumer uses the same distinction, so it lives here rather than
+    # being re-derived. Same per-function reset requirement — a stale entry
+    # would make an unrelated list of BORROWED strings be freed as if it owned
+    # them.
+    gen._owned_str_elem_vals: set = set()
+    # The NAMES (not temps) of owned locals whose value owns its string
+    # elements; the free is emitted for the name at the scope exit.
+    gen._owned_str_elem_names: set = set()
     # Temps holding a heap string THIS function's own concatenation lowering
     # just built (`_emit_str_cat`) and that nothing else can hold yet. The
     # parent concatenation that consumes one as a direct operand frees it.
@@ -950,6 +978,26 @@ _FRESH_CONTAINER_RETURNS = frozenset([
 ])
 
 
+# The subset of `_FRESH_CONTAINER_RETURNS` whose result is a list that SOLELY
+# owns its string ELEMENTS — every one freshly allocated by that function, and
+# nothing else holding a pointer to any of them. Those elements are invisible
+# to `mojo_list_free`, which releases the container and leaves them behind
+# (`mojo_list_append_str` stores the pointer it is given and never copies it),
+# so an owned list built by one of these is torn down with
+# `mojo_list_free_owned_strs` instead. Membership is read off each function's
+# source, not inferred from its result type; a function not named here keeps
+# the plain free, which is the safe direction (a missed free leaks, a wrong
+# one frees a string literal).
+#
+# `mojo_str_rsplit` is deliberately absent: it hands its result the very same
+# pointers its own scratch list holds (see its comment in fire_runtime.c), so
+# it is not a sole owner. Neither is any list built by `extend` or by reading
+# a key back out of a dict, which is the common case and is borrowed.
+_OWNS_STR_ELEMS = frozenset([
+    'mojo_str_split', 'mojo_str_splitlines',
+])
+
+
 # Runtime functions that ALWAYS return a string they just allocated. Unlike the
 # container list this one is EARNED, not assumed: a mechanical pass over every
 # `char *`-returning function in runtime/fire_runtime.c kept only those whose every
@@ -999,13 +1047,33 @@ def is_fresh_container_operand(gen, node, val: str) -> bool:
                              TstringLiteral))
 
 
+def owned_free_fn_for(gen, val: str, ctype: str) -> str:
+    """The free for ONE value, not for one type: a list built by a function in
+    `_OWNS_STR_ELEMS` also owns the strings in it, and they are invisible to
+    `mojo_list_free`. Every place that emits a free for a specific lowered
+    value goes through here so the choice is made in exactly one spot."""
+    if ctype == 'MojoList *' and val in gen._owned_str_elem_vals:
+        return 'mojo_list_free_owned_strs'
+    return _owned_free_runtime_fn(ctype)
+
+
+def owned_push_fn_for(gen, val: str, ctype: str) -> str:
+    """The cleanup thunk that matches `owned_free_fn_for` — the two must name
+    the same teardown or an exception would unwind a value differently from the
+    normal path."""
+    if ctype == 'MojoList *' and val in gen._owned_str_elem_vals:
+        return 'mojo_cleanup_push_list_strs'
+    return _owned_push_runtime_fn(ctype)
+
+
 def free_fresh_container(gen, val: str, ctype: str) -> None:
     """Free a fresh container operand after its consumer has read it, and
     forget it so it can never be freed twice."""
-    fn = _owned_free_runtime_fn(ctype)
+    fn = owned_free_fn_for(gen, val, ctype)
     if fn != '':
         gen._emit(f"  {fn} ({val});")
         gen._fresh_vals.discard(val)
+        gen._owned_str_elem_vals.discard(val)
 
 
 def claim_loop_iterable_temp(gen, node, val: str, ctype: str) -> None:
@@ -1018,13 +1086,14 @@ def claim_loop_iterable_temp(gen, node, val: str, ctype: str) -> None:
     leaking it."""
     if not is_fresh_container_operand(gen, node, val):
         return
-    push_fn = _owned_push_runtime_fn(ctype)
-    free_fn = _owned_free_runtime_fn(ctype)
+    push_fn = owned_push_fn_for(gen, val, ctype)
+    free_fn = owned_free_fn_for(gen, val, ctype)
     if push_fn == '' or free_fn == '':
         return
     gen._emit(f"  {push_fn} ({val});")
     _scope_register(gen, val, free_fn)
     gen._fresh_vals.discard(val)
+    gen._owned_str_elem_vals.discard(val)
 
 
 def emit_statement_temp_frees(gen, mark: int) -> None:
@@ -1054,6 +1123,8 @@ def _emit(gen, line: str):
         if _pi > 0 and (_rest[:_pi] in _FRESH_CONTAINER_RETURNS
                         or _rest[:_pi] in _FRESH_STRING_RETURNS):
             gen._fresh_vals.add(line[:_fi].strip())
+            if _rest[:_pi] in _OWNS_STR_ELEMS:
+                gen._owned_str_elem_vals.add(line[:_fi].strip())
     # Track whether this is a terminal statement (can't have code after it)
     stripped = line.strip()
     if stripped.startswith('return ') or stripped.startswith('goto ') or stripped == 'return;':
@@ -4035,17 +4106,35 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
     # Anything else (a call returning a stored container, an alias) means the
     # name does not own its value, so it stops being a candidate at this
     # declaration and nothing about it is ever freed.
+    # A declaration whose value is a container the runtime built and that
+    # SOLELY owns its string elements (see `_OWNS_STR_ELEMS`); decided once,
+    # here, where the value is still the temp the producing call returned.
+    owns_str_elems = False
     if value is not None and not _is_ctor_display(value):
         rhs = gen._decl_rhs_val
         if rhs == '' or not is_fresh_container_operand(gen, value, rhs):
             candidates.discard(name)
             return
         gen._fresh_vals.discard(rhs)
+        # The NAME inherits the property, because the free is emitted for the
+        # name at the scope exit, long after the temp is gone.
+        if rhs in gen._owned_str_elem_vals:
+            gen._owned_str_elem_vals.discard(rhs)
+            if not _list_elements_ok(gen._own_fn_body, name):
+                # The list owns its strings, but the program may hand an
+                # element pointer out (`kept.append(parts[0])`), and the
+                # element free would then dangle. Fail closed to the plain
+                # `mojo_list_free`: a few bytes leak instead.
+                owns_str_elems = False
+            else:
+                owns_str_elems = True
+                gen._owned_str_elem_names.add(name)
         # A fresh STRING is owned only if no method call on it can hand back
         # the receiver itself (`t = s.strip()` may alias `s`): see
         # ownership_destruct.receiver_results_consumed.
         if gen.var_types.get(name) == 'char *' and not _string_uses_ok(gen._own_fn_body, name):
             candidates.discard(name)
+            gen._owned_str_elem_names.discard(name)
             return
     ctype = gen.var_types.get(name)
     if not _container_keys_safe(gen, name, ctype):
@@ -4072,8 +4161,12 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
             if name in gen._scope_armed:
                 _scope_register(gen, name, '')
     else:
-        push_fn = _owned_push_runtime_fn(ctype)
-        free_fn = _owned_free_runtime_fn(ctype)
+        if owns_str_elems and ctype == 'MojoList *':
+            push_fn = 'mojo_cleanup_push_list_strs'
+            free_fn = 'mojo_list_free_owned_strs'
+        else:
+            push_fn = _owned_push_runtime_fn(ctype)
+            free_fn = _owned_free_runtime_fn(ctype)
         if push_fn == '' and ctype is not None and ctype.endswith(' *'):
             # A struct instance (a constructor call of a vetted struct): a plain
             # heap block, torn down with free() and, on an exception, by a PTR
@@ -4130,6 +4223,13 @@ def _emit_owned_local_frees(gen):
         # this file's "Phase 6" section.
         if name in stack_allocated:
             runtime_fn = _owned_destroy_runtime_fn(ctype)
+        elif name in gen._owned_str_elem_names and ctype == 'MojoList *':
+            # Decided at the DECLARATION, where the value was still the temp a
+            # `_OWNS_STR_ELEMS` function returned; re-derived here from
+            # `var_types` it would be indistinguishable from any other list,
+            # and the wrong free either leaks the strings or frees borrowed
+            # ones.
+            runtime_fn = 'mojo_list_free_owned_strs'
         else:
             runtime_fn = _owned_free_runtime_fn(ctype)
             if runtime_fn == '' and _struct_ptr_owned(gen, name, ctype):

@@ -1523,6 +1523,76 @@ def main():
     print(total)
 """, "33\n75\n8\n242\n3200000\n")
 
+    # ── A list that owns its own string ELEMENTS (doc/MEMORY.html §3.B). A
+    # `split()` result's elements are fresh allocations made by the runtime
+    # function that built the list and by nothing else, but
+    # `mojo_list_append_str` stores the pointer it is given, so
+    # `mojo_list_free` released the container and left every string behind —
+    # ~48 B/iteration, measured over 100k and 400k iterations and now flat.
+    # The second program is the fail-closed half: `parts[0]` appended to a
+    # list the caller keeps hands an element pointer out of the list, and
+    # freeing the elements would dangle it, so the analysis
+    # (ownership_destruct.list_elements_owned) must refuse the element free
+    # there. The runner scribbles freed memory, so a wrong free shows up as
+    # the comparisons (printed 4th) failing rather than usually passing.
+    test_gimple_bounded_memory("gimple_split_result_element_strings_are_owned", """\
+def work(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var parts = String("a b c").split(" ")
+        t += len(parts)
+        if i == 2:
+            continue
+        if i == 4:
+            break
+    return t
+
+def lines(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var parts = String("x\\ny\\nz").splitlines()
+        t += len(parts)
+    return t
+
+def main():
+    print(work(3))
+    print(work(9))
+    print(lines(6))
+    var total = 0
+    for r in range(300000):
+        total += work(6) % 1000 + lines(4)
+    print(total)
+""", "9\n15\n18\n8100000\n", 40)
+
+    test_gimple_stdout("gimple_split_elements_that_escape_are_not_freed", """\
+def work(kept: List[String]) -> Int:
+    var t = 0
+    for i in range(4):
+        var parts = String("a b c").split(" ")
+        t += len(parts)
+        kept.append(parts[0])
+        var one = parts[1]
+        kept.append(one)
+    return t
+
+def main():
+    var kept: List[String] = []
+    print(work(kept))
+    print(len(kept))
+    var hits = 0
+    for k in range(len(kept)):
+        if kept[k] == "a":
+            hits += 1
+        if kept[k] == "b":
+            hits += 10
+    print(hits)
+    var total = 0
+    for r in range(20000):
+        var kk: List[String] = []
+        total += work(kk) % 1000
+    print(total)
+""", "12\n8\n44\n240000\n")
+
     # ── Strings bound to locals (doc/MEMORY.html section 3.B). A local bound
     # to a provably FRESH string (a `+` result, `String(i)`, a slice) is owned and
     # freed at scope exit, but only when every use is a read: `len`, a comparison,

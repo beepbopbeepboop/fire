@@ -211,6 +211,11 @@ void mojo_cleanup_push_dict_stack(void *p);
 void mojo_cleanup_push_list_stack(void *p);
 void mojo_cleanup_push_set_stack(void *p);
 void mojo_cleanup_push_ptr(void *p);   /* a struct instance: unwinding free()s the block */
+/* A list that SOLELY owns its string elements (every one freshly allocated by
+ * the runtime function that built it) — see mojo_list_free_owned_strs. A
+ * list of strings is usually BORROWED, so this is chosen by the owner, never
+ * inferred from the list's element type. */
+void mojo_cleanup_push_list_strs(void *p);
 /* Pop the `n` most-recently-pushed thunks WITHOUT invoking them -- call
  * immediately at a point that is itself about to (or just did) free those
  * same `n` locals inline. */
@@ -318,6 +323,12 @@ double      mojo_box_double(int64_t v);
 int64_t     mojo_box_int(int64_t v);
 char       *mojo_repr_boxed(int64_t v);
 void      mojo_list_free(MojoList *l);
+/* A list that SOLELY owns its string elements: frees every element as a
+ * `char *` and then the list. NOT the default free for a list of strings —
+ * `mojo_list_append_str` borrows, so the elements of a list built by
+ * `extend`, or read out of a dict, are somebody else's. Only the owner may
+ * choose this; see mojo/backend_gimple/emit_infra.py's `_OWNS_STR_ELEMS`. */
+void      mojo_list_free_owned_strs(MojoList *l);
 /* mojo_list_init/mojo_list_destroy: the in-place halves of mojo_list_new/
  * mojo_list_free, for a stack-declared MojoList (doc/OWNERSHIP_MODEL.md
  * Phase 6) -- init/destroy never touch the MojoList* itself with
