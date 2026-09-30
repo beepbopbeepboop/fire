@@ -25,19 +25,32 @@ called the blocker.**
 ```
 $ MOJO_DEBUG=1 python3 fire.py build -o fsutil fsutil.py
 Error building: cannot compile module: function(s) _walk_tree, glob_tree,
-iter_files, iter_files_by_suffix, process_filenames, walk_tree ...
+iter_files, process_filenames ...
 Unsupported shape(s):
   _walk_tree:           unsupported for-loop iterable type: CallExpr
   glob_tree:            unsupported for-loop iterable type: CallExpr
   iter_files:           a `lambda` with more than one parameter, a
                         `*`/`**`-forwarding parameter, or a parameter default
-  iter_files_by_suffix: call to unresolved callee '_iter_files(...)'
   process_filenames:    call to unresolved callee 'Exception(...)'
-  walk_tree:            unsupported for-loop iterable type: CallExpr
 ```
 
-Before this change the same command listed all six, including
-`walk_tree` and `iter_files_by_suffix`.
+Before this change the same command listed SIX — the two above plus
+`iter_files_by_suffix: call to unresolved callee '_iter_files(...)'` and
+`walk_tree: unsupported for-loop iterable type: CallExpr`. Those two are
+the ones this change fixed.
+
+### Corpus impact — measured, not assumed
+
+Because this change is deliberately NOT behaviour-preserving, the usual
+"byte-identical C" bar does not apply; but the *silent*-regression bar
+does, so: `python3 fire.py --dump-full fire_compiler.py` (the whole
+compiler closure, ~1.2 M lines of generated C, run from one directory
+before and after) has an **unchanged generator/refusal profile** —
+`__mgco_` (A3 stack-switch) 185/185, `_mojogen_` (C++20 path) 15/15,
+`mojo_unsupported_iter` 124/124. Nothing in the corpus moved between
+"compiled", "refused", and "zero-iterated". The rest of that diff is the
+two new `GimpleGen` fields, the new `_default_expr_to_pair` parameter, and
+temp renumbering inside the compiler's own functions.
 
 ### What was actually wrong
 
