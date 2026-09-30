@@ -6081,7 +6081,20 @@ class ValueKinds:
         """What the local `name` holds, or None if this does not say."""
         if name in self._conflicts:
             return None
-        return self.locals.get(name)
+        kind = self.locals.get(name)
+        if kind is not None:
+            return kind
+        # A MODULE GLOBAL this function does not bind. Its value's shape is
+        # stated at module level, in the slot's own initializer, and a use site
+        # has nothing else to go on — so without this a container global is an
+        # unclassified word and `len(arr)` refuses a length the image has.
+        # Measured, on the tree this landed on: `arr = [1,2,3]` at module level
+        # with `len(arr)` in the body stopped being answerable the moment the
+        # binding stopped being a body statement (a container global's store is
+        # the slot's initializer, not a store — `module_body`), and the
+        # refusal sent the reader to annotate a name the source had already
+        # given a list to.
+        return global_slot_kind(name)
 
     def kind_of(self, e):
         """What `e` evaluates to, or None when the source does not say."""
@@ -11560,6 +11573,31 @@ def module_slots() -> dict:
 def module_slot(name: str):
     """The `GlobalSlot` for a written module-level `name`, or None."""
     return _MODULE_SLOTS.get(name)
+
+
+def global_slot_kind(name: str):
+    """The `ValueKinds` kind a module global's SLOT says its value is, or None.
+
+    The value model's answer to "what does this name hold", asked of a name the
+    function being emitted does not bind. A local gets its kind from the
+    assignment it is bound by; a module global's only statement about its value
+    is the module-level binding, and the slot table is where that binding's
+    shape ended up — so the two tables are asked the same question and cannot
+    disagree.
+
+    A DICT is `LIST_PREFIX` because `F.DictExpr` already classifies that way
+    everywhere else (`ValueKinds.kind_of`), and this path's dict is a pair blob
+    with a count in its first word, which is all `len` needs. The dict-vs-
+    sequence distinction that a SUBSCRIPT needs is not a kind question and is
+    `global_slot_is_dict`'s."""
+    slot = module_slot(name)
+    if slot is None:
+        return None
+    if slot.init[0] == "str":
+        return STR_KIND
+    if slot.init[0] == "blob":
+        return LIST_PREFIX
+    return None
 
 
 def global_slot_is_dict(name: str) -> bool:
