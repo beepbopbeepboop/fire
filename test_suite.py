@@ -956,6 +956,31 @@ UNREGISTERED = {
         'against CPython struct, on both architectures. A subtly wrong byte '
         'packer writes malformed Mach-O and ELF headers that still link, so '
         '"it built" is not evidence of anything here.',
+    'test_formal_frame_len.py': 'len() on a frame address is the struct\'s own '
+        '__len__(): 10 differential cases, each written twice — once as Mojo, '
+        'once as Python — and required to AGREE, on arm64 AND x86-64, with the '
+        'four refusals additionally requiring CPython to raise TypeError.',
+    'test_formal_toplevel.py': 'A module\'s top-level statements RUN, as the '
+        'body of the entry: every case builds the image, EXECUTES it and '
+        'compares stdout and exit status with CPython on the same text, plus '
+        'the shapes that cannot be lowered exactly (a file-level return, '
+        'global, break, yield, await) and the dylib path\'s refusal of a body.',
+    'test_formal_hashlib.py': 'formal/hostmods/hashlib.mojo (six CommonCrypto '
+        'digests, BLAKE2b from RFC 7693) against the hashlib in this process, '
+        'on arm64 AND x86-64. An oracle rather than a table of digests: '
+        'sha256(b"abc") has one answer forever and a table of them is wrong the '
+        'moment someone transposes a character.',
+    'test_formal_time.py': 'formal/hostmods/time.mojo on libSystem\'s five '
+        'clocks, on arm64 AND x86-64. Every value is a CLOCK READING, so each '
+        'case is asserted as a RELATION against this process\'s own time and '
+        'never as a stored number; the ns-to-double conversion, which is pure '
+        'arithmetic rather than a reading, is checked against exact rationals '
+        'rather than ns / 1e9, which double-rounds above 2**53.',
+    'test_formal_argparse.py': 'formal/hostmods/argparse.mojo against '
+        'CPython\'s own argparse: one table of parser declarations and command '
+        'lines drives two generated programs, and stdout, stderr and exit '
+        'status must be identical — so THE PARSE IS CPYTHON\'S rather than a '
+        'transcription agreeing with itself. arm64 AND x86-64.',
 
     # ── the interpreter, which is the oracle everything else is compared to ──
     'test_myinterpreter.py': 'Runs a real .mojo file end to end through '
