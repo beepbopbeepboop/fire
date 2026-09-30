@@ -335,8 +335,11 @@ MEASURED_PEAK_GB = {
 # How much room above a measured peak a class must leave. 1.5x, and the reason
 # it is not 1.0x: a ceiling is also the answer to "how much can this job grow
 # before it is killed", and a machine's memory use is not a constant. It is not
-# 2x because the ladder is coarse (the classes are 4/8/24/55/96) and 2x would
-# push half of the measured jobs up a rung they do not need.
+# 2x either, and the ladder is the reason: 2x moves exactly one job
+# (`native-dumpfull`, 31.3 → 62.6 GB, the only class that covers it), and the
+# whole point of the ratchet is that `stage` should have no members at all.
+# A headroom that pushed work up a rung would be a smaller ratchet with more
+# steps in it.
 PEAK_HEADROOM = 1.5
 
 # A class this many times the measured peak is not covering a measurement, it is
@@ -474,12 +477,13 @@ def memclass_for(spec) -> str:
 #
 # So `excl` now reserves its CLASS, like every other job, and says what it
 # actually says: nothing else in this run starts while it runs. The machine-wide
-# property is not lost, it is arithmetic: the ledger admits no set of jobs
-# whose reservations sum past the budget, and the classes are now measured, so
-# two jobs that together could hurt the machine still cannot both be admitted
-# (55 + 55 > 96; 31 + 55 > 96). A job that genuinely needs the machine to itself
-# is a job whose class is more than half the budget, and that is expressed by
-# its class rather than by a flag on top of it.
+# property is not lost, it is arithmetic: the ledger admits no set of jobs whose
+# reservations sum past the budget, and the classes are now measured, so two
+# jobs that together could hurt the machine still cannot both be admitted —
+# 55 + 55 > 96 for the two `program` jobs, which is the case that mattered when
+# `excl` was taking the whole ledger. A job that genuinely needs the machine to
+# itself is a job whose class is more than half the budget, and that is
+# expressed by its class rather than by a flag on top of it.
 #
 # An earlier attempt at a second bound lived here as `MEMBUDGET_GB`, a
 # sum-of-ceilings the runner compared before launching. It was never wired to
