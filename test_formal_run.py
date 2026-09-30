@@ -6826,11 +6826,12 @@ TYPE_VALUE_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    return Int(DType.float8_e4m3fn)\n",
      "refuse:DType.float8_e4m3fn names a type", None),
-    # `len()` of a type. The refusal is the length machinery's own — a tag is
-    # neither a string nor a counted blob, so the two things `len` can answer
-    # are both correctly declined — and the WORDING is the one imprecision this
-    # construct leaves behind: it says the source does not say what the operand
-    # holds, where the source in fact says `bool`. See the bug doc.
+    # `len()` of a type. A GUARD rather than a new refusal: the four production
+    # files reverted in place give byte-identical messages for `len(bool)` and
+    # `len(List)` before this construct existed, so what this case pins is that
+    # making a type a VALUE did not turn `len()` of one into a count. The
+    # wording is the imprecision it has always had — the source does say what the
+    # operand holds, and it says `bool` — and the bug doc has the next step.
     ("len_of_a_type_is_refused",
      "def main(n: Int) -> Int:\n"
      "    return len(bool)\n",

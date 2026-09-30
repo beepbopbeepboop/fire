@@ -1,5 +1,15 @@
 # FORMAL_type_argument_call_base_name_has_no_home: `List[Int]()` is reported as a NAME that cannot be placed
 
+**Status: still not fixed in this tree, and the hand-off below has been acted on
+by two neighbours.** `bugs/FORMAL_type_name_as_a_value.md` now answers the
+BARE-TYPE-NAME half of this row (a type in a value position is a tag), and
+`work/formal-sweep-next`'s `69f20418` lands the bracketed-callee recognition and
+the empty-container lowering. This document stays because the construct it names —
+a SUBSCRIPT callee — is neither of those: `List[Int]()` still refuses with
+"'List' has no home" on both architectures as of this commit, deliberately, so
+that the bracketed-callee question is decided by the change that owns it rather
+than pre-empted by the one that owns the type value.
+
 **Status:** found, not fixed. It is the terminal cause behind the 35 sweep files
 that `len()` on a frame address used to be, and it is a name-resolution
 question, not a codegen one — so it is a different lane's file and this

@@ -88,16 +88,14 @@ load-bearing and it was measured, not chosen:
   a specialization of `f`, not a read of a value named `f`, and that is a
   different question with its own answer (`model.subscript_callee_names`).
 
-One side effect worth stating because it is visible in a message: in a VALUE
-position a type name is now placeable, so `len(List)` — the same spelling
-`List[Int]()` has — is refused by the length machinery ("`len(List)` is len() of
-a value classified as 'int'") where it used to be refused by the name walk. Still
-refused, still on both architectures, and the new sentence is closer to the truth
-(a tag is a word, and a word has no count). Unifying the two SPELLINGS of the
-construction — `List[Int]()` and `List()` still answer differently, the first
-with the walk's "no home" and the second with the type-constructor refusal — is
-`work/formal-sweep-next`'s `subscript_callee_names` and not this change's; the
-subscript exclusion above is what keeps that split where it is.
+One side effect worth stating because it is easy to assume and was measured not
+to be there: `len()` of a type name. `len(List)` and `len(bool)` are refused by
+the length machinery with **byte-identical messages before and after** this
+change, on both architectures (the four production files reverted in place and
+the same two programs rebuilt), so this construct neither introduces nor repairs
+that refusal. It is a pre-existing imprecision and §5 has it. What is *not*
+claimed here is anything about what another branch's test pins for it — that is
+answerable by running that branch, not by reading this one.
 
 ### What is admitted, and what is refused
 
@@ -179,12 +177,10 @@ either of them; both directions were checked by building every case above.
 * **`work/formal-sweep-next`'s `L[T]()` half** (`model.subscript_callee_names`,
   `empty_blob_constructor`) is the other spelling of row 2 and is orthogonal: it
   lowers the zero-operand container constructor, this one makes the type NAME a
-  value. Their `TYPE_APPLICATION_REFUSALS` pins `len(List)` refusing with the
-  **register-allocator** sentence; with this change `List` in `len(List)` is
-  placeable (it is a type name), so the refusal is now the length machinery's
-  ("`len(List)` is len() of a value classified as 'int'"). Still refused, still on
-  both architectures, different words — that expectation needs updating, and the
-  new words are the more accurate ones.
+  value. The subscript exclusion in §2 is what keeps the two from colliding — it
+  holds `List[Self.T]()` at "'List' has no home" and `List()` at "constructing
+  List has no representation", the two spellings exactly as they were, so that
+  branch's `subscript_callee_names` is still the thing that decides them.
 * **`work/frontend-silent`'s `f5bcb0a1`** (a bare TYPE name in a value position is
   refused as a type, not as a register) rewords the same refusal this change
   LIFTS, and it defines a recogniser over the same four tables this change
@@ -200,25 +196,30 @@ either of them; both directions were checked by building every case above.
 
 ## 5. What is still open, each with its next step
 
-* **`len()` of a type is refused with the wrong reason.** `len(bool)` gets
-  "the source does not say what this operand holds … Annotate it (`x: String`) or
-  bind it to a list" — true as far as it goes (a tag is neither a `char *` nor a
-  counted blob, so both of the two things `len` can answer are correctly
-  declined) and false in the only clause that matters for the reader, because the
-  source does say what the operand holds: it says `bool`. **Next step:** three
-  lines in each backend's `_emit_len`, before `M.len_refusal` — ask
-  `M.type_value_tag(operand)` and raise a message that says a type is not a
-  container. Deliberately not done here: it is a fourth diagnostic for a program
-  that cannot mean anything, and the two arms would have to agree on it.
-* **A type is classified as an `int`.** `ValueKinds` has no `TYPE_KIND`, so a
-  local bound to a type is an integer for every consumer — which is why `len` of
-  one says the wrong thing above, and why a subscript by one (`xs[bool]`) would
-  read a blob at tag-derived offset instead of refusing. **Next step:** a
-  `TYPE_KIND` in `formal/model.py` plus the two `if kind == M.INT_KIND` format
-  switches in the backends, which is why it is a separate piece of work and not a
-  line in this one. Nothing a program that typechecks can observe today: a
-  subscript by a type is not a program, and this path already computes an answer
-  for `1[0]`.
+* **`len()` of a type is refused with the wrong reason.** `len(bool)` and
+  `len(List)` get "the source does not say what this operand holds … Annotate it
+  (`x: String`) or bind it to a list" — true as far as it goes (a tag is neither
+  a `char *` nor a counted blob, so both of the two things `len` can answer are
+  correctly declined) and false in the only clause that matters for the reader,
+  because the source does say what the operand holds: it says `bool`. **This is
+  pre-existing and unchanged by this change** — measured with the four
+  production files reverted, byte-identical either way — so it is here as an
+  inherited imprecision, not as something this construct introduced.
+  **Next step:** three lines in each backend's `_emit_len`, before
+  `M.len_refusal` — ask `M.type_value_tag(operand)` and raise a message that says
+  a type is not a container. Deliberately not done here: it is a fourth
+  diagnostic for a program that cannot mean anything, and the two arms would have
+  to agree on it.
+* **A type is classified as an `int`, or as nothing at all.** `ValueKinds` has no
+  `TYPE_KIND`: a bare type-name read is unclassified (None — which is why `len` of
+  one takes its "the source does not say" branch above), and a LOCAL bound to a
+  type is an integer by `_value_kind`'s word default. So a subscript by one
+  (`xs[bool]`) would read a blob at a tag-derived offset instead of refusing.
+  **Next step:** a `TYPE_KIND` in `formal/model.py` plus the two
+  `if kind == M.INT_KIND` format switches in the backends, which is why it is a
+  separate piece of work and not a line in this one. Nothing a program that
+  typechecks can observe today: a subscript by a type is not a program, and this
+  path already computes an answer for `1[0]`.
 * **`DType` as a value is a refusal, and that is a real limit.** A program that
   wants the runtime type object — `DType(Int32)`, `dtype.name`, `dtype.is_signed()`
   — still has no answer, and `formal/model.py`'s `POINTEES_REFUSED` already
