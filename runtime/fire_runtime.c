@@ -54,7 +54,8 @@ void mojo_exc_pop(void)
 typedef enum { MOJO_CLEANUP_DICT, MOJO_CLEANUP_LIST, MOJO_CLEANUP_SET,
                MOJO_CLEANUP_DICT_STACK, MOJO_CLEANUP_LIST_STACK, MOJO_CLEANUP_SET_STACK,
                MOJO_CLEANUP_PTR,   /* a plain malloc/calloc block: a struct instance */
-               MOJO_CLEANUP_LIST_STRS  /* a list that owns its string elements */
+               MOJO_CLEANUP_LIST_STRS, /* a list that owns its string elements */
+               MOJO_CLEANUP_CLOSURE   /* a bound method plus the env it owns */
              } mojo_cleanup_kind_t;
 #define MOJO_CLEANUP_STACK_MAX 8192
 static mojo_cleanup_kind_t _mojo_cleanup_kind[MOJO_CLEANUP_STACK_MAX];
@@ -89,6 +90,7 @@ void mojo_cleanup_push_list_stack(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_LIS
 void mojo_cleanup_push_set_stack(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_SET_STACK, p); }
 void mojo_cleanup_push_ptr(void *p)        { _mojo_cleanup_push(MOJO_CLEANUP_PTR, p); }
 void mojo_cleanup_push_list_strs(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_LIST_STRS, p); }
+void mojo_cleanup_push_closure(void *p)    { _mojo_cleanup_push(MOJO_CLEANUP_CLOSURE, p); }
 
 void mojo_cleanup_cancel_n(int64_t n)
 {
@@ -127,6 +129,7 @@ static void _mojo_cleanup_unwind_to(int chk)
             case MOJO_CLEANUP_SET_STACK:  mojo_set_destroy((MojoSet *)ptr);  break;
             case MOJO_CLEANUP_PTR:        free(ptr);                         break;
             case MOJO_CLEANUP_LIST_STRS:  mojo_list_free_owned_strs((MojoList *)ptr); break;
+            case MOJO_CLEANUP_CLOSURE:    mojo_closure_free(ptr);            break;
         }
     }
 }
@@ -1064,6 +1067,46 @@ int mojo_is_bound_method(void *p) {
     int64_t v = (int64_t)(intptr_t)p;
     if (v < 65536) return 0;
     return _pr_has(&_reg_bound_method, (uint64_t)v);
+}
+
+/* Two frees for the two things a `MojoBoundMethod` can be, because `self`
+ * belongs to only one of them:
+ *
+ *  - `mojo_bound_method_free` — a METHOD taken as a value (`f = self.m`,
+ *    `readline.set_completer(self.complete)`). `self` is the receiver object,
+ *    owned by whoever holds it; only the wrapper is ours. Its REGISTRY entry is
+ *    discarded here, which is the whole reason this function exists and is
+ *    what the container registries already do in their `_destroy` helpers: an
+ *    address left in `_reg_bound_method` outlives its object, `malloc` hands
+ *    that address straight back out for something else, and
+ *    `mojo_is_bound_method` then reports a plain function pointer as a
+ *    bound method — so `mojo_fnptr_call_N` dispatches through a
+ *    `((int64_t (*)(void *))bm->fn)(bm->self)` on two words of whatever the
+ *    new object is. That is the dangling-registry shape of
+ *    bugs/CODEGEN_container_free_registry_dangling_entries.md, and it is what
+ *    makes freeing a bound method safe to do at all.
+ *  - `mojo_closure_free` — a CAPTURING LAMBDA. There `self` is the
+ *    `malloc(sizeof(env))` emit_calls' closure constructor allocated one
+ *    instruction earlier and filled with the captured values, and nothing
+ *    else holds either half, so the pair is one allocation unit.
+ *
+ * Neither is `mojo_bound_method_new`'s default free: a bound method that
+ * escapes (handed to a callee that stores it, returned, appended) must stay
+ * alive, and codegen only reaches these for a value it has proven cannot.
+ */
+void mojo_bound_method_free(MojoBoundMethod *bm)
+{
+    if (!bm) return;
+    _pr_del(&_reg_bound_method, (uint64_t)(uintptr_t)bm);
+    free(bm);
+}
+
+void mojo_closure_free(void *bmv)
+{
+    MojoBoundMethod *bm = (MojoBoundMethod *)bmv;
+    if (!bm) return;
+    free(bm->self);
+    mojo_bound_method_free(bm);
 }
 
 /* mojo_list_init/mojo_list_destroy: see mojo_set_init/mojo_set_destroy's

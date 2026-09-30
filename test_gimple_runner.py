@@ -1523,6 +1523,93 @@ def main():
     print(total)
 """, "33\n75\n8\n242\n3200000\n")
 
+    # ── A capturing lambda's value, and the environment it captured, are ONE
+    # allocation unit (doc/MEMORY.html §3.B): a `malloc(sizeof env)` plus a
+    # `malloc(sizeof MojoBoundMethod)` plus a `_reg_bound_method` entry per
+    # creation, ~74 B/iteration, now flat at 100k and 400k. Four consumers of
+    # that ownership are in one program: a lambda in a LOOP BODY (freed at the
+    # end of the body and on every `break`/`continue` that leaves it), a
+    # function-level one, a non-capturing one (a bare static function pointer,
+    # which allocates nothing and must NOT be freed), and one raised past by an
+    # exception (freed by the cleanup thunk the declaration pushed, not by the
+    # skipped free). The second program is the fail-closed half: a closure
+    # stored in a list, captured by another lambda, or aliased must stay alive.
+    test_gimple_bounded_memory("gimple_owned_closure_env_is_freed", """\
+def work(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var f = lambda x: x + i
+        t += f(1)
+        if i == 2:
+            continue
+        if i == 4:
+            break
+    return t
+
+def once() -> Int:
+    var g = lambda x: x * 3
+    return g(5)
+
+def boom(n: Int) -> Int:
+    var f = lambda x: x + n
+    if n > 2:
+        raise ValueError("no")
+    return f(10)
+
+def main():
+    print(work(3))
+    print(work(9))
+    print(once())
+    var total = 0
+    for r in range(300000):
+        total += work(6) % 1000 + once()
+    print(total)
+    var hits = 0
+    for r in range(20000):
+        try:
+            hits += boom(9)
+        except ValueError as e:
+            hits += 1
+    print(hits)
+""", "6\n15\n15\n9000000\n20000\n", 40)
+
+    test_gimple_stdout("gimple_closure_that_escapes_is_not_freed", """\
+def escape_list(kept: List) -> Int:
+    var t = 0
+    for i in range(4):
+        var f = lambda x: x + i
+        kept.append(f)
+        t += f(1)
+    return t
+
+def escape_rebind() -> Int:
+    var f = lambda x: x + 1
+    var g = f
+    return g(2)
+
+def capture_chain() -> Int:
+    var f = lambda x: x + 1
+    var h = lambda y: f(y) + 1
+    return h(3)
+
+def main():
+    var kept: List = []
+    print(escape_list(kept))
+    print(len(kept))
+    var seen = 0
+    for k in range(len(kept)):
+        var fv = kept[k]
+        seen += 1
+    print(seen)
+    print(escape_rebind())
+    print(capture_chain())
+    var acc = 0
+    for r in range(20000):
+        var kk: List = []
+        acc += escape_list(kk) % 1000 + escape_rebind() + capture_chain()
+    print(acc)
+""", "10\n4\n4\n3\n5\n360000\n")
+
     # ── A callee that provably returns a FRESH STRING hands ownership to its
     # caller, exactly as one returning a fresh container always has
     # (analyze_returns_fresh, which until now accepted only a container

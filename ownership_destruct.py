@@ -1585,6 +1585,97 @@ def _list_str_uses_ok(node, name: str, seen: bool = False) -> bool:
     return True
 
 
+def lambda_value_owned(fn_body, name: str) -> bool:
+    """True iff the callable local `name` may be freed at scope exit TOGETHER
+    with the environment it captured, i.e. nothing can name it except the call
+    it is written for.
+
+    A capturing lambda's value is a `MojoBoundMethod` wrapping a `malloc`'d
+    environment: two allocations and a `_reg_bound_method` entry per creation,
+    ~74 B/iteration measured over 100k and 400k iterations
+    (bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md). That object dies
+    with the scope that made it only if the scope is its last holder, and
+    "holder" here is narrow: the ONLY acceptable mention of `name` after its
+    binding is as the CALLEE of a call (`f(x)`). Everything else can keep the
+    pointer past the free —
+      `g = f`, `return f`, `kept.append(f)`, `f` in a list/tuple display,
+      `f` captured by another `lambda`/`def`, `f.attr`, `f[0]`, or a call
+      through a container it was put into — and is rejected.
+
+    The binding itself must be a `lambda` expression and there must be exactly
+    one: a second assignment is a second value with an independent lifetime,
+    and a non-lambda RHS is some other callable whose allocation the free does
+    not know the shape of (a bare function pointer, or a bound method whose
+    `self` is somebody's receiver — that one is `mojo_bound_method_free`, not
+    this, see runtime/fire_runtime.c).
+
+    Deliberately separate from the container candidate analysis rather than
+    folded into it: a function containing a `lambda` is excluded from that one
+    outright (`_is_free_eligible_function`), because inside a closure the
+    receiver rules that make `d[k]`/`d.x`/`d[a:b]`/`for x in d` safe are not
+    safe, and lifting that exclusion is a separate piece of work. This rule
+    asks nothing about containers, so it holds on a body the container analysis
+    refuses to look at."""
+    return _lambda_uses_ok(fn_body, name)
+
+
+def _lambda_uses_ok(node, name: str, as_callee: bool = False) -> bool:
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            if not _lambda_uses_ok(item, name, False):
+                return False
+        return True
+    if not _is_node(node):
+        return True
+    if isinstance(node, N.VarDecl) and _as_str(node.name) == name:
+        return isinstance(node.value, N.LambdaExpr)
+    if (isinstance(node, (N.AssignStmt, N.AugAssignStmt))
+            and isinstance(node.target, N.IdentExpr)
+            and _as_str(node.target.name) == name):
+        return False        # a rebinding: a second value, independently owned
+    if isinstance(node, N.CallExpr):
+        if not _lambda_uses_ok(node.func, name, True):
+            return False
+        for a in node.args:
+            if not _lambda_uses_ok(a, name, False):
+                return False
+        for kw in (node.kwargs or []):
+            if not _lambda_uses_ok(kw[1], name, False):
+                return False
+        return True
+    if isinstance(node, N.IdentExpr):
+        return as_callee or _as_str(node.name) != name
+    if isinstance(node, (N.FunctionDef, N.LambdaExpr)):
+        # A nested scope that MENTIONS `name` captures it into its environment,
+        # and that environment can outlive this scope — the exact hazard this
+        # rule exists to prevent. Reject on the mention, whatever shape it has
+        # inside (a call position included).
+        return not _mentions_name(node, name)
+    for f in dataclasses.fields(node):
+        v = getattr(node, f.name)
+        if v is None:
+            continue
+        if not _lambda_uses_ok(v, name, False):
+            return False
+    return True
+
+
+def _mentions_name(node, name: str) -> bool:
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            if _mentions_name(item, name):
+                return True
+        return False
+    if not _is_node(node):
+        return False
+    if isinstance(node, N.IdentExpr):
+        return _as_str(node.name) == name
+    for f in dataclasses.fields(node):
+        if _mentions_name(getattr(node, f.name), name):
+            return True
+    return False
+
+
 def _key_view_source(it, name: str) -> str:
     """'keys' when the iterable `it` walks `name`'s keys/elements (`name` or
     `name.keys()`), 'items' for `name.items()`, else ''."""

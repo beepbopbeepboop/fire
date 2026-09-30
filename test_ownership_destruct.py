@@ -11,7 +11,7 @@ import fire_compiler as N
 import mojo.middle.infra_infer as II
 from ownership_destruct import (analyze_module, analyze_function, analyze_scoped_locals,
                                 analyze_returns_fresh, receiver_results_consumed,
-                                key_views_consumed, list_elements_owned)
+                                key_views_consumed, list_elements_owned, lambda_value_owned)
 
 
 def _candidates(src, fname):
@@ -1165,6 +1165,74 @@ def _listelems(src, name):
     return list_elements_owned([st for st in stmts if isinstance(st, N.FunctionDef)][0].body, name)
 
 
+# lambda_value_owned: a capturing lambda's bound method and the environment it
+# captured are ONE allocation unit, freed together only if the only mention of
+# the name after the binding is the call it is written for — see
+# ownership_destruct.lambda_value_owned.
+LAMBDA_CASES = [
+    ("called_in_place_is_owned", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var g = lambda x: x + i
+        t += g(1)
+    return t
+""", "g", True),
+    ("called_in_place_at_function_level_is_owned", """
+def f(n: Int) -> Int:
+    var g = lambda x: x + n
+    return g(1)
+""", "g", True),
+    ("stored_in_a_container_escapes", """
+def f(kept: List) -> Int:
+    var t = 0
+    for i in range(4):
+        var g = lambda x: x + i
+        kept.append(g)
+        t += g(1)
+    return t
+""", "g", False),
+    ("aliased_to_another_name_escapes", """
+def f() -> Int:
+    var g = lambda x: x + 1
+    var h = g
+    return h(2)
+""", "g", False),
+    ("captured_by_another_lambda_escapes", """
+def f() -> Int:
+    var g = lambda x: x + 1
+    var h = lambda y: g(y)
+    return h(3)
+""", "g", False),
+    ("returned_escapes", """
+def f() -> Int:
+    var g = lambda x: x + 1
+    return g
+""", "g", False),
+    ("passed_as_an_argument_escapes", """
+def use(cb: Int) -> Int:
+    return 0
+
+def f() -> Int:
+    var g = lambda x: x + 1
+    return use(g)
+""", "g", False),
+    ("a_rebinding_is_a_second_value", """
+def f() -> Int:
+    var g = lambda x: x + 1
+    g = lambda x: x + 2
+    return g(3)
+""", "g", False),
+]
+
+
+def _lambda_owned(src, name):
+    stmts = N.Parser(N.py_tokenize(src)).with_filename("<test>").parse_module()
+    fns = [st for st in stmts if isinstance(st, N.FunctionDef)]
+    f = fns[-1]
+    return lambda_value_owned(f.body, name)
+
+
 def run():
     failures = []
     for name, body, fname, exp_whole, exp_scoped in STRUCT_CASES:
@@ -1186,6 +1254,10 @@ def run():
         got = _candidates(src, fname)
         if got != expected:
             failures.append(f"{name!r}: expected {expected}, got {got}")
+    for name, src, var, expected in LAMBDA_CASES:
+        got = _lambda_owned(src, var)
+        if got != expected:
+            failures.append(f"{name!r}: expected lambda_value_owned={expected}, got {got}")
     for name, src, var, expected in LIST_ELEM_CASES:
         got = _listelems(src, var)
         if got != expected:
@@ -1199,7 +1271,7 @@ def run():
         if got != expected:
             failures.append(f"{name!r}: expected key_views_consumed={expected}, got {got}")
     total = (len(CASES) + len(SCOPED_CASES) + len(FRESH_RETURN_CASES) + len(STRUCT_CASES)
-             + len(RECEIVER_CASES) + len(KEYVIEW_CASES) + len(LIST_ELEM_CASES))
+             + len(RECEIVER_CASES) + len(KEYVIEW_CASES) + len(LIST_ELEM_CASES) + len(LAMBDA_CASES))
     passed = total - len(failures)
     for f in failures:
         print("FAIL:", f)

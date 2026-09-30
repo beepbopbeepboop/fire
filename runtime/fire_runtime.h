@@ -96,6 +96,16 @@ typedef struct { void *fn; void *self; } MojoBoundMethod;
  * self.m; f()`). */
 MojoBoundMethod *mojo_bound_method_new(void *fn, void *self);
 int mojo_is_bound_method(void *p);
+/* The two frees for the two things a bound method can be — `self` belongs to
+ * only one of them, so they cannot be one function. `mojo_bound_method_free`
+ * is a METHOD taken as a value: the receiver is not ours, only the wrapper,
+ * and its `_reg_bound_method` entry MUST be discarded or a later allocation
+ * at the same address is dispatched as a bound method (a dangling registry
+ * entry, the same shape as the container registries' `_destroy` helpers).
+ * `mojo_closure_free` is a CAPTURING LAMBDA, whose `self` is the environment
+ * the constructor allocated with it. */
+void mojo_bound_method_free(MojoBoundMethod *bm);
+void mojo_closure_free(void *bm);
 static inline int64_t mojo_bound_method_call_0(MojoBoundMethod *bm) {
     return ((int64_t (*)(void *))bm->fn)(bm->self);
 }
@@ -216,6 +226,9 @@ void mojo_cleanup_push_ptr(void *p);   /* a struct instance: unwinding free()s t
  * list of strings is usually BORROWED, so this is chosen by the owner, never
  * inferred from the list's element type. */
 void mojo_cleanup_push_list_strs(void *p);
+/* A closure's bound method and its environment are one allocation unit; this
+ * is the unwind thunk that frees both (see mojo_closure_free). */
+void mojo_cleanup_push_closure(void *p);
 /* Pop the `n` most-recently-pushed thunks WITHOUT invoking them -- call
  * immediately at a point that is itself about to (or just did) free those
  * same `n` locals inline. */

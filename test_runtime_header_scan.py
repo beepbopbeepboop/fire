@@ -177,7 +177,14 @@ def test_every_declaration_is_seen():
     # for a list that owns its own string elements (a `split()` result) — see
     # bugs/CODEGEN_call_result_container_never_freed.md and
     # mojo/backend_gimple/emit_infra.py's `_OWNS_STR_ELEMS`.
-    for header, want in (('fire_runtime.h', 476),
+    # 476 -> 479 (2026-09-30): `mojo_bound_method_free` and `mojo_closure_free`
+    # (the two frees for the two things a bound method can be — a method value
+    # whose `self` belongs to the receiver, and a capturing lambda whose `self`
+    # is the environment its constructor allocated with it; the first is what
+    # discards the `_reg_bound_method` entry, which is what makes freeing one
+    # safe at all) and `mojo_cleanup_push_closure`, their unwind thunk — see
+    # bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md.
+    for header, want in (('fire_runtime.h', 479),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

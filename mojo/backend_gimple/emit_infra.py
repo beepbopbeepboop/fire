@@ -58,7 +58,7 @@ from ownership_check import _block_terminates
 from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
-    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
+    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
     _pair_key, _prepass_list_elem, _ptr_slot_in_range, _resolve_member_expr_type, _resolve_type, _scan_container_elems,
     _seed_addressed_locals, _type_of
@@ -163,24 +163,22 @@ def _reset_func(gen, body: list = None, params: list = None,
             gimple_lambdareduce.reducible_lambdas(gen)
     gen.bb_counter   = 2
     gen.temp_counter = 0
-    # The per-function value tables, reset HERE rather than left to the
-    # feature-level resets because `temp_counter` is: temp names repeat
-    # across functions, so an entry a previous function left behind is read
-    # as THIS function's. All of them decide WHICH free is emitted for a
-    # value, so a stale entry is a wrong free, not a missed one — the one
-    # table that was actually reset per function (`_cstr_key_src`) says so in
-    # its own comment, and the others are the same shape.
+    # The TEMP tables are reset HERE rather than left to the feature-level
+    # resets because `temp_counter` is: temp names repeat across functions, so
+    # an entry a previous function left behind is read as THIS function's, and
+    # an entry that says "this value is fresh and nobody else can name it" is
+    # what makes a consumer FREE it — a stale one is a wrong free, not a
+    # missed one. The one table that was already reset per function
+    # (`_cstr_key_src`) says so in its own comment; these are the same shape.
+    #
+    # A LIFTED CLOSURE runs this too, in the middle of its parent, so this
+    # also drops the parent's not-yet-consumed temps. That loses frees (the
+    # safe direction) and cannot add one. The per-FUNCTION ownership state
+    # (`_owned_free_candidates`, `_scope_*`, and the element/closure tables in
+    # `_reset_scope_state`) is deliberately NOT touched here, because the
+    # parent's has to survive the closure's lowering intact.
     gen._fresh_vals = set()
     gen._fresh_str_tmps = set()
-    gen._owned_str_elem_vals = set()
-    gen._owned_str_elem_names = set()
-    # Self-hosting cannot infer a set field's element type from an assignment,
-    # only from this table (see `begin_function`'s note).
-    _fet = gen._field_elem_types.setdefault('GimpleGen', {})
-    _fet['_fresh_vals'] = 'char *'
-    _fet['_fresh_str_tmps'] = 'char *'
-    _fet['_owned_str_elem_vals'] = 'char *'
-    _fet['_owned_str_elem_names'] = 'char *'
     gen.decls:       list[str]         = []
     gen.body_lines:  list[str]         = []
     gen.var_types:   dict[str, str]    = {}
@@ -270,6 +268,13 @@ def _reset_func(gen, body: list = None, params: list = None,
     # The NAMES (not temps) of owned locals whose value owns its string
     # elements; the free is emitted for the name at the scope exit.
     gen._owned_str_elem_names: set = set()
+    # The values (not names) that are a CLOSURE — a bound method whose `self`
+    # is the malloc'd environment emit_calls' constructor paired with it, so
+    # both are one allocation unit and one free.
+    gen._closure_vals: set = set()
+    # The NAMES of owned locals bound to a closure; the free is emitted for the
+    # name at the scope exit.
+    gen._owned_closure_names: set = set()
     # Temps holding a heap string THIS function's own concatenation lowering
     # just built (`_emit_str_cat`) and that nothing else can hold yet. The
     # parent concatenation that consumes one as a direct operand frees it.
@@ -4109,6 +4114,23 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
     pushed = gen._owned_free_pushed
     if name in pushed:
         return
+    # A CAPTURING LAMBDA bound to this name: the value is a `MojoBoundMethod`
+    # plus the environment its constructor allocated with it, and the two are
+    # one allocation unit. It is not a container, so it does not go through the
+    # freshness/`var_types` machinery below — `_closure_vals` is the record
+    # that the value really is one (the non-capturing lambda case, which is a
+    # bare static function pointer and allocates nothing, never appears there).
+    if gen._decl_rhs_val != '' and gen._decl_rhs_val in gen._closure_vals:
+        gen._closure_vals.discard(gen._decl_rhs_val)
+        if not _lambda_owned(gen._own_fn_body, name):
+            _drop_owned_candidate(gen, name)
+            return
+        gen._owned_closure_names.add(name)
+        gen._emit(f"  mojo_cleanup_push_closure ({name});")
+        pushed.add(name)
+        if name in gen._scope_armed:
+            _scope_register(gen, name, 'mojo_closure_free')
+        return
     # A declaration whose value is not a container display (a call, a slice, a
     # comprehension, a `+`) only MAY have built a fresh container — the
     # analysis credited the name on that "maybe". Ownership is kept only when
@@ -4234,6 +4256,9 @@ def _emit_owned_local_frees(gen):
         # this file's "Phase 6" section.
         if name in stack_allocated:
             runtime_fn = _owned_destroy_runtime_fn(ctype)
+        elif name in gen._owned_closure_names:
+            # A bound method and the environment it owns (see mojo_closure_free).
+            runtime_fn = 'mojo_closure_free'
         elif name in gen._owned_str_elem_names and ctype == 'MojoList *':
             # Decided at the DECLARATION, where the value was still the temp a
             # `_OWNS_STR_ELEMS` function returned; re-derived here from
@@ -4307,6 +4332,15 @@ def _reset_scope_state(gen) -> None:
     gen._scope_live = []
     gen._scope_live_depth = []
     gen._scope_live_fn = []
+    # Per-FUNCTION ownership state, reset here and NOT in `_reset_func`:
+    # a lifted closure runs `_reset_func` in the middle of its parent, and the
+    # parent's entries have to survive that intact (they are what the parent's
+    # own scope exit frees). `_owned_str_elem_vals` is a table of temps but
+    # belongs to the same decision as `_owned_str_elem_names` — a push and its
+    # cancel must not disagree — so it moves with it.
+    gen._owned_str_elem_names = set()
+    gen._owned_str_elem_vals = set()
+    gen._owned_closure_names = set()
     # See `begin_function`'s note: self-hosting cannot infer a set/list
     # field's element type from an assignment, only from this table.
     _fet = gen._field_elem_types.setdefault('GimpleGen', {})
@@ -4314,6 +4348,11 @@ def _reset_scope_state(gen) -> None:
     _fet['_scope_armed'] = 'char *'
     _fet['_scope_live'] = 'char *'
     _fet['_scope_live_fn'] = 'char *'
+    _fet['_owned_str_elem_names'] = 'char *'
+    _fet['_owned_str_elem_vals'] = 'char *'
+    _fet['_owned_closure_names'] = 'char *'
+    _fet['_fresh_vals'] = 'char *'
+    _fet['_fresh_str_tmps'] = 'char *'
 
 
 def _scope_register(gen, name: str, fn: str) -> None:
@@ -4599,7 +4638,8 @@ def begin_function(gen, fn) -> None:
     just triggered manually instead of automatically at the one
     assignment site automatic propagation can't reach — is correct
     permanently, not a one-off workaround for today's specific bug."""
-    gen._owned_free_candidates = _compute_owned_free_candidates(fn, gen._analysis_funcs, gen._analysis_structs)
+    gen._owned_free_candidates = (_compute_owned_free_candidates(fn, gen._analysis_funcs, gen._analysis_structs)
+                                  | _compute_closure_candidates(fn))
     gen._field_elem_types.setdefault('GimpleGen', {})['_owned_free_candidates'] = 'char *'
     gen._owned_free_pushed = set()
     gen._owned_stack_allocated = set()
@@ -4607,6 +4647,13 @@ def begin_function(gen, fn) -> None:
     gen._own_fn_body = fn.body
     gen._int_keyed_dicts = _compute_int_keyed_dicts(fn)
     gen._scoped_free_candidates = _compute_scoped_free_candidates(fn, gen._owned_free_candidates, gen._analysis_funcs, gen._analysis_structs)
+    # A lambda local declared in a LOOP BODY is owned by the body, on the same
+    # terms as a container local there (`analyze_scoped_locals`' credit: its one
+    # binding is a direct child statement of the body and the name is mentioned
+    # nowhere outside it), so the same arming and the same three exit points
+    # apply. Computed from the same body, so the two sets cannot disagree.
+    gen._scoped_free_candidates = (gen._scoped_free_candidates
+                                   | _compute_scoped_closure_candidates(fn, gen._owned_free_candidates))
 
 
 def reset_no_candidates(gen) -> None:

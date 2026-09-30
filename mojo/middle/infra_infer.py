@@ -1919,6 +1919,121 @@ def _key_views_ok(body, name: str) -> bool:
     except Exception:
         return False
 
+def _compute_closure_candidates(fn) -> set:
+    """The locals of `fn` bound to a CAPTURING LAMBDA that this function alone
+    can free (ownership_destruct.lambda_value_owned).
+
+    Deliberately NOT routed through `_is_free_eligible_function`, which
+    refuses any function containing a `lambda` — the rule it guards is about
+    CONTAINERS, and inside a closure the receiver rules that make `d[k]`,
+    `d.x`, `d[a:b]` and `for x in d` safe are not safe (that lifting is a
+    separate piece of work, and this rule asks nothing about containers). Same
+    fail-open-to-"free nothing" contract as its siblings: a bug in this optional
+    analysis must never fail a build."""
+    if getattr(fn, 'is_async', False) or getattr(fn, 'is_generator', False):
+        return set()
+    try:
+        in_loop = _lambda_names_in_loop_bodies(fn)
+        return {nm for nm in _lambda_bindings(fn)
+                if nm not in in_loop and _lambda_owned(fn.body, nm)}
+    except Exception:
+        return set()
+
+def _lambda_names_in_loop_bodies(fn) -> set:
+    """The names bound to a lambda by a DIRECT child statement of a loop body.
+    Those are owned by the BODY, not the function: a declaration inside a loop
+    is simply not there on the path that reaches the function's fallthrough
+    before the first iteration, so the function-level free would run on an
+    uninitialised pointer. `_compute_scoped_closure_candidates` credits them
+    instead, and the two are disjoint by construction."""
+    out = set()
+    bodies = []
+    ownership_destruct._collect_loop_bodies(fn.body, bodies)
+    for body in bodies:
+        for st in body:
+            if isinstance(getattr(st, 'value', None), LambdaExpr):
+                nm = ownership_destruct._decl_name(st)
+                if nm != '':
+                    out.add(nm)
+    return out
+
+def _compute_scoped_closure_candidates(fn, whole: set) -> set:
+    """`fn`'s lambda locals owned by a LOOP BODY rather than the whole function,
+    on `analyze_scoped_locals`' terms (one direct-child declaration per body,
+    no `else:`, mentioned nowhere outside). The two ownership levels are
+    mutually exclusive by `whole`, so a name is freed at exactly one."""
+    if getattr(fn, 'is_async', False) or getattr(fn, 'is_generator', False):
+        return set()
+    try:
+        out = set()
+        bodies = []
+        ownership_destruct._collect_loop_bodies(fn.body, bodies)
+        for nm in sorted(_lambda_bindings(fn)):
+            if nm in whole:
+                continue
+            if not _lambda_owned(fn.body, nm):
+                continue
+            decls = 0
+            region = 0
+            ok = True
+            for body in bodies:
+                first = -1
+                in_body = 0
+                for idx in range(len(body)):
+                    if (ownership_destruct._decl_name(body[idx]) == nm
+                            and isinstance(getattr(body[idx], 'value', None), LambdaExpr)):
+                        in_body += 1
+                        if first < 0:
+                            first = idx
+                if in_body > 1:
+                    ok = False
+                if first >= 0:
+                    decls += 1
+                    for j in range(first, len(body)):
+                        region += ownership_destruct._count_name(body[j], nm)
+            if ok and decls >= 1 and _lambda_binding_count(fn, nm) == decls \
+                    and ownership_destruct._count_name(fn.body, nm) == region:
+                out.add(nm)
+        return out
+    except Exception:
+        return set()
+
+def _lambda_bindings(fn) -> set:
+    """Every name `fn` binds to a `lambda` expression, however deeply — the
+    whole-program node walk `exprtypes._walk_ast` already provides, not a
+    second generic walker."""
+    names = set()
+    for n in gimple_exprtypes._walk_ast(fn.body):
+        if isinstance(n, VarDecl) and isinstance(n.value, LambdaExpr):
+            names.add(ownership_destruct._as_str(n.name))
+        elif (isinstance(n, AssignStmt) and isinstance(n.target, IdentExpr)
+                and isinstance(n.value, LambdaExpr)):
+            names.add(ownership_destruct._as_str(n.target.name))
+    return names
+
+def _lambda_binding_count(fn, name: str) -> int:
+    """How many statements in `fn` bind `name` to a lambda, whole function."""
+    n = 0
+    for x in gimple_exprtypes._walk_ast(fn.body):
+        if isinstance(x, VarDecl) and isinstance(x.value, LambdaExpr) \
+                and ownership_destruct._as_str(x.name) == name:
+            n += 1
+        elif (isinstance(x, AssignStmt) and isinstance(x.target, IdentExpr)
+                and isinstance(x.value, LambdaExpr)
+                and ownership_destruct._as_str(x.target.name) == name):
+            n += 1
+    return n
+
+def _lambda_owned(body, name: str) -> bool:
+    """A capturing-lambda local may be freed with its environment only if the
+    only mention of it after the binding is the call it is written for (see
+    ownership_destruct.lambda_value_owned). A failure inside the check answers
+    False, so an unanalysable body keeps the value alive."""
+    try:
+        return ownership_destruct.lambda_value_owned(body, name)
+    except Exception:
+        return False
+
 def _list_elements_ok(body, name: str) -> bool:
     """A list local that owns its own string elements (a `split()` result) may
     be freed WITH them only if no element of it is ever named — see

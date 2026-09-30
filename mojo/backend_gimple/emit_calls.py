@@ -4113,8 +4113,20 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         gen._emit(f'  {_envp}->{_cn} = {_cv};')
     _fnv = gen._new_val('void *', f'(void *){lifted_name}')
     _bm = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
-                         [('void *', _fnv), ('void *', gen._new_val('void *', _envp))])
-    return 'void *', gen._new_val('void *', f'(void *){_bm}')
+                         [('void *', _fnv), ('void *', gen._new_val('void *', f'(void *){_envp}'))])
+    _val = gen._new_val('void *', f'(void *){_bm}')
+    # This value, and the `_envp` it carries, are one allocation unit: the env
+    # is the `malloc` one instruction above and nothing else holds either half.
+    # Marked so the ownership machinery can free the pair with
+    # `mojo_closure_free` when the binding this lands in provably cannot
+    # escape (ownership_destruct.lambda_value_owned) — a captured lambda is
+    # otherwise a `malloc(sizeof env)` plus a `malloc(sizeof MojoBoundMethod)`
+    # plus a `_reg_bound_method` entry per creation, ~74 B/iteration measured
+    # over 100k and 400k iterations. The value MARKED is the one RETURNED (it
+    # is `_tN = (void *) _tM`, a different temp from the `_call_expr`'s), since
+    # that is what a declaration's `_decl_rhs_val` records.
+    gen._closure_vals.add(_val)
+    return 'void *', _val
 
 
 def _lower_async_closure_construct(gen, key: tuple, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
