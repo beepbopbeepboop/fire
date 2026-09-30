@@ -187,10 +187,25 @@ HOST_MODELLED = frozenset((
     #     cross a dylib boundary — so each digest is one function, and the
     #     seven absent names (SHA-3, SHAKE, blake2s) are named with the
     #     measurements in `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md`.
+    #   `json`  — `formal/hostmods/json.mojo`, checked case for case against
+    #     CPython's own `json` by `test_formal_json.py`: RFC 8259's accept and
+    #     reject over ~180 documents, the kind of every one of them, the
+    #     scanner's and the encoder's escape tables, and `dumps_str` over
+    #     every code point in nineteen ranges — the surrogate-pair arithmetic
+    #     is the part most likely to be wrong at exactly one point. Its
+    #     `loads`/`load`/`dump`/`dumps` of a CONTAINER are absent, because a
+    #     dict is a frame blob and cannot cross a dylib boundary; what is here
+    #     is the scanner, which is the half of the module whose answers are
+    #     one word each. Its docstring also records WHY the byte-value read
+    #     that a 2026-09-29 attempt at this module measured as UNAVAILABLE is
+    #     in fact available — it is a spelling, `var q: Pointer[UInt8] = s + i`
+    #     before `q.value()`, and not a capability the target lacks — and
+    #     `test_formal_json.py`'s `primitive` group is the assertion that says
+    #     so over 351 byte values, each against the byte CPython's `ord` names.
     #
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
-    "json", "re", "math", "random", "decimal", "fractions",
+    "re", "math", "random", "decimal", "fractions",
     "numbers", "array", "operator", "functools", "itertools", "collections",
     "heapq", "bisect", "textwrap", "csv", "difflib", "base64",
     "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
