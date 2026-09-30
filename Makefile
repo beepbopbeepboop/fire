@@ -8,7 +8,7 @@
 # test is in, which driver runs it, which memory ceiling applies, and what it
 # depends on. `python3 tools/suite.py --dry-run <bucket>` prints the plan.
 
-.PHONY: run demo check gate check-gimple check-runner check-gimple-runner \
+.PHONY: run demo check gate native check-gimple check-runner check-gimple-runner \
         check-modcache check-selfhost check-runtimediff check-linkmode \
         check-no-new-casts check-coro check-stdlib check-stdlib-interp \
         check-examples-parse \
@@ -70,6 +70,9 @@ GCC_MP15     = /opt/local/bin/gcc-mp-15
 BOOTSTRAP_CC = $(shell command -v gcc-15 >/dev/null 2>&1 && echo gcc-15 || (test -x $(GCC_MP15) && echo $(GCC_MP15)) || echo gcc)
 BOOTSTRAP_OPT ?= -O0
 MOJO_OPT ?= -O2 -g0
+# The `python3` that builds everything here. Overridable so the memcap wrapper
+# below cannot end up in a different interpreter than the recipe it wraps.
+PYTHON   ?= python3
 
 # 512MB main-thread stack (default 8MB). The self-hosted compiler's regex
 # engine and generic AST walkers are deeply CPS-recursive — a re.sub/findall
@@ -111,6 +114,47 @@ export SDKROOT
 ifneq ($(strip $(MEMLIMIT_GB)),)
 export MEMLIMIT_GB
 endif
+
+# ── Memory: reserved before a job starts, and capped while it runs ──────────
+# `make mojoc` and `make stage2/mojo` are the two recipes in this file that
+# start a whole-closure self-compile: the same workload as
+# bootstrap-stage1-transitive, which has been measured at 55.8 GB healthy and
+# 192 GB when it ran away, plus a `gcc -fgimple` over the resulting 40 MB
+# translation unit. Both used to run with no ceiling at all, which is worse in
+# a Makefile than it is in the test runner: `make mojoc` is the command a
+# developer types by hand when they want the binary, and a runaway there is
+# stopped by a human watching the machine.
+#
+# So the wrapper is spelled ONCE, here, and every recipe that starts a
+# compiler uses it. $(call memslot,<label>,<class>) expands to
+#
+#     python3 tools/memslot.py --gb <GB> --label <label> --
+#
+# which does two things, in this order, and the order is the point:
+#
+#   1. RESERVES <GB> out of one machine-wide budget (tools/memslot.py's ledger,
+#      ~/.gmojo/memslot, MEMSLOT_BUDGET_GB) and WAITS for room before starting
+#      anything. This is the half that was missing everywhere: a per-process
+#      ceiling says nothing about how many processes may run at once, and on
+#      2026-09-29 about thirty compiler processes at 30-43 GB each — every one
+#      inside its own ceiling — collapsed the machine until a human killed them
+#      by hand.
+#   2. Runs the job under tools/memcap.py at exactly the gigabytes it reserved,
+#      SIGKILLing the tree and exiting 125 if it goes over.
+#
+# So a hand-run `make mojoc` and a `make gate` running the same workload queue
+# behind each other in the same ledger instead of stacking, and neither can
+# exceed what it was given. `MEMSLOT_BUDGET_GB` moves the machine-wide number.
+#
+# Both numbers come from tools/suite.py (MEMCLASS, via `--prefix`) rather than
+# from a value typed into a recipe, which is how the coverage rotted the first
+# time: `make mojoc` and `make stage2/mojo` each had their own idea about
+# memory and neither had any. It is also empty when MEMLIMIT_GB=0, the
+# run-wide "no ceiling anywhere" switch: that has to remove the wrapper, not
+# pass it a zero, because `memcap --limit-gb 0` would kill the first process it
+# sampled and `memslot --gb 0` would reserve nothing (i.e. admit everything).
+memslot = $(shell $(PYTHON) $(CURDIR)/tools/suite.py --prefix memslot $(1) $(2))
+
 # `make -jN` → J=N, where the make in use records a count (GNU Make 4.x).
 MAKE_JOBS := $(patsubst -j%,%,$(filter -j%,$(MAKEFLAGS)))
 J         ?= $(strip $(MAKE_JOBS))
@@ -137,24 +181,40 @@ suite-help:
 # that only one target used.
 wholeprogram-help:
 	@echo "A WHOLE-PROGRAM self-compile (one process, whole transitive closure)"
-	@echo "is bounded by a memory ceiling applied by tools/memcap.py, which"
-	@echo "SIGKILLs the process tree on breach and exits 125. A ceiling rather"
-	@echo "than an opt-in, because macOS will not reliably pick what to kill"
-	@echo "when memory runs out, and ulimit gives no usable cap — the kill has"
-	@echo "to be aimed by us at a process we own."
+	@echo "is RESERVED before it starts and CAPPED while it runs, by one macro:"
+	@echo "it takes its gigabytes out of a machine-wide budget and WAITS for"
+	@echo "room, then runs under tools/memcap.py, which SIGKILLs the process"
+	@echo "tree on breach and exits 125. Both halves are needed: a cap with no"
+	@echo "reservation is 30 processes each ALLOWED 30 GB, which is not a bound"
+	@echo "on the machine at all (that is what happened on 2026-09-29), and a"
+	@echo "reservation with no cap is a promise with nothing behind it."
 	@echo ""
 	@echo "  which ceiling, and why:   make check-list    (MEMCLASS)"
 	@echo "  which jobs are capped:    make check-list    (the mem= column)"
 	@echo ""
 	@echo "      make check MEMLIMIT_GB=96              # raise every ceiling"
 	@echo "      make gate  MEMLIMIT_GB=0               # no cap; watch it"
+	@echo "      MEMSLOT_BUDGET_GB=64 make gate         # shrink the machine budget"
 	@echo ""
-	@echo "The program/stage classes are also EXCLUSIVE: the runner starts"
-	@echo "nothing else while one runs, so a 55 GB job is safe to leave"
-	@echo "unattended on a 128 GB box."
+	@echo "EVERY job the runner launches is RESERVED and capped, and so is"
+	@echo "every build recipe here that compiles a whole closure — 'make mojoc',"
+	@echo "'make stage2/mojo', 'make fire.ci', 'make build/system.o' — through"
+	@echo "the one \$$(call memslot,LABEL,CLASS) macro, so the answer does not"
+	@echo "depend on which recipe someone remembered to wrap. Reserved means it"
+	@echo "takes its gigabytes out of ONE machine-wide budget and waits its turn:"
+	@echo "a hand-run 'make mojoc' and a running 'make gate' queue behind each"
+	@echo "other instead of stacking, which is what 30 processes at 30 GB each"
+	@echo "looks like from the inside."
 	@echo ""
-	@echo "Bounded per-file alternative, safe to run unattended:"
+	@echo "The program/stage classes are also EXCLUSIVE, which now means the"
+	@echo "machine and not just this run: an exclusive job reserves the WHOLE"
+	@echo "machine-wide budget, so nothing is admitted anywhere — not in"
+	@echo "another worktree, not from your own terminal — while it runs."
+	@echo "That is what makes a 55 GB job safe to leave unattended."
+	@echo ""
+	@echo "Per-file alternative, bounded and reserved per file:"
 	@echo "    gmake -j20 aside bside && make compare-a-b"
+	@echo "    python3 tools/memslot.py status"
 
 check-plan:
 	@$(SUITE) --dry-run $(or $(BUCKET),check)
@@ -182,6 +242,15 @@ check:
 
 gate:
 	@$(SUITE) $(SUITE_J) gate
+
+# The self-hosted binary's own compiled codegen: build `mojoc`, then the two
+# steps that run it. Its own target because it is the one bucket a developer
+# runs when they have just touched codegen and want the binary's opinion, and
+# because the `mojoc` build is the single most memory-hungry recipe here —
+# it now reserves its class out of the machine-wide budget, so a hand-run
+# `make native` queues behind a running gate instead of stacking with it.
+native:
+	@$(SUITE) $(SUITE_J) native
 
 # Every individual check, still one `make` target each, now a one-line recipe.
 # (The old recipes each carried their own copy of the list of files that
@@ -309,9 +378,18 @@ dump-all-stage3:
 # coroutine runtime, which `fire.py build`'s link (driver.py) pulls in when
 # the compiler's own source contains a generator/async function and which was
 # missing here for the same reason: editing it did not rebuild `mojoc`.
+#
+# `stage` (96 GB) is the class: this recipe is the whole-closure self-compile
+# (healthy peak 55.8 GB, measured) AND the `gcc -O2 -fgimple` over the
+# resulting 40 MB translation unit, and a build's peak is the larger of those
+# two phases rather than their sum. It is the workload `stage` is documented
+# on, read from the same table tools/suite.py applies, so this recipe and the
+# runner's `mojoc` step cannot drift apart. The whole build's peak has never
+# actually been recorded — nothing capped it until now — so this number is the
+# class, not a measurement; see bugs/BUILD_mojoc_ceiling_unmeasured.md.
 mojoc: $(SELFHOST_INPUTS) $(CORO_RUNTIME_SRC)
 	@echo "=== Building mojoc from $(MOJO_MAIN) ($(MOJO_OPT)) ==="
-	python3 fire.py build fire.py $(MOJO_OPT) -o mojoc
+	@$(call memslot,mojoc,stage) $(PYTHON) fire.py build fire.py $(MOJO_OPT) -o mojoc
 	@echo "✓ mojoc ready"
 
 # stage1/fire.ci is written by the runner's stage1 steps (a whole-closure
@@ -333,10 +411,17 @@ stage1/fire.ci:
 # `mojo_str_cat` (strlen on a garbage pointer). Zero-init makes the read
 # well-defined (NULL), which the codegen's own `_ptr_slot_in_range` guard
 # already treats as "no known type" and falls back on safely.
+#
+# The gcc -fgimple over the 40 MB closure is the single most memory-hungry step
+# in the chain, and this recipe — the way a developer gets `stage2/mojo` by
+# hand — ran it with no ceiling. `stage` (96 GB) is the class documented for
+# exactly this shape, read from tools/suite.py's MEMCLASS so it cannot drift
+# from the runner's `bootstrap-stage2-cc` step, which names the same class.
+# `MEMLIMIT_GB=96` raises it, `MEMLIMIT_GB=0` removes the wrapper.
 stage2/mojo: stage1/fire.ci $(RUNTIME_SRC) $(RUNTIME_HDR) $(CORO_RUNTIME_SRC)
 	@mkdir -p stage2
 	@echo "=== Compiling stage2/mojo from stage1/fire.ci ==="
-	$(BOOTSTRAP_CC) $(BOOTSTRAP_OPT) -fgimple -ftrivial-auto-var-init=zero -I runtime \
+	$(call memslot,stage2/mojo,stage) $(BOOTSTRAP_CC) $(BOOTSTRAP_OPT) -fgimple -ftrivial-auto-var-init=zero -I runtime \
 	    $(BIG_STACK_LDFLAGS) \
 	    -o stage2/mojo \
 	    -x c stage1/fire.ci \
@@ -352,15 +437,22 @@ stage2/mojo: stage1/fire.ci $(RUNTIME_SRC) $(RUNTIME_HDR) $(CORO_RUNTIME_SRC)
 # those can change without mojo.py itself changing, and a stale fire.ci built
 # before such a change silently gets reused otherwise (confirmed: caused a
 # bare-vs-qualified symbol mismatch after an unrelated codegen.py edit).
+#
+# `fire.ci` and `build/system.o` are the other two whole-closure compiles in
+# this file — the `--dump-full` that `mojoc`/`stage2/mojo` also start, and the
+# `gcc -fgimple` over the 40 MB it writes — and both ran uncapped, so the rule
+# applied here is the one that does not rot: every recipe in this file whose
+# workload is a whole-closure compile goes through `$(call memslot,...)`, and
+# test_suite.py fails the build if a new one does not.
 .PHONY: FORCE
 FORCE:
 
 fire.ci: $(MOJO_MAIN) FORCE
-	PYTHONPATH=. python3 fire.py --dump-full $(MOJO_MAIN) 2>/dev/null
+	$(call memslot,fire.ci,program) env PYTHONPATH=. $(PYTHON) fire.py --dump-full $(MOJO_MAIN) 2>/dev/null
 
 build/system.o: fire.ci
 	@mkdir -p build
-	$(BOOTSTRAP_CC) -fgimple -I runtime -c -o $@ -x c fire.ci
+	$(call memslot,build/system.o,stage) $(BOOTSTRAP_CC) -fgimple -I runtime -c -o $@ -x c fire.ci
 
 build/fire_runtime.o: $(RUNTIME_SRC) $(RUNTIME_HDR)
 	$(BOOTSTRAP_CC) -I runtime -c -o $@ $(RUNTIME_SRC)
@@ -419,6 +511,20 @@ build/fire: build/system.o build/fire_runtime.o $(CORO_RUNTIME_OBJS)
 # `make ab-clean` before a full re-sweep after any compiler-source change
 # (per-rule Make caching only tracks each rule's own input file + mojoc, not
 # the whole compiler source graph).
+#
+# `-j20` here is twenty concurrent COMPILES of files drawn from this compiler's
+# own sources, where one `--dump` has been measured at 15-30 GB. So each
+# per-file job RESERVES its class out of the machine-wide budget before it
+# starts (tools/ab_run_one.py, `memslot.Slot`): the width `-j20` asks for and
+# the memory the machine can give are now separate numbers, and the second one
+# wins — four at a time on a 96 GB budget, not twenty. Make's job server still
+# decides how many are *ready*; the ledger decides how many run.
+#
+# The one place that does NOT apply is `tools/suite.py ab`, whose `ab-aside` /
+# `ab-bside` jobs already reserved `program` for the whole `make` tree and hand
+# it down: a reservation covers its own tree, so the per-file ones are served
+# from it instead of double-claiming, and the tree cap of 55 GB is what bounds
+# that sweep. Nothing in the gate runs it.
 ab.mk: tools/gen_ab_makefile.py tools/ab_filelist.py
 	python3 tools/gen_ab_makefile.py > ab.mk
 
