@@ -976,6 +976,13 @@ UNREGISTERED = {
         'never as a stored number; the ns-to-double conversion, which is pure '
         'arithmetic rather than a reading, is checked against exact rationals '
         'rather than ns / 1e9, which double-rounds above 2**53.',
+    'test_dataclasses_formal.py': '@dataclass as a compile-time transform: '
+        'every execution case is run TWICE on the same text — once as a formal '
+        'arm64 image that is executed, once by this process\'s own python3 — and '
+        'the two must agree, because the two failures that motivated the whole '
+        'feature (a bare struct == comparing two frame ADDRESSES, and '
+        'frozen=True accepted silently) both ran and were wrong. The refused '
+        'subset is pinned by its MESSAGE.',
     'test_formal_argparse.py': 'formal/hostmods/argparse.mojo against '
         'CPython\'s own argparse: one table of parser declarations and command '
         'lines drives two generated programs, and stdout, stderr and exit '
