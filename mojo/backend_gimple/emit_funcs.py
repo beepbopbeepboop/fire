@@ -50,7 +50,7 @@ from mojo.middle.funcs_shared import (
     _SELFHOST_EXTRA_FIELD_CACHE, _as_dict, _as_funcdef_node, _as_str, _as_structdef_node, _find_generic_source,
     _find_imported_struct, _from_import_name_is_submodule, _imported_field_ctype, _local_sibling_module_exports, _note_vararg_trailing_param_types, _pair_key,
     _param_ctype, _parsed_import, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
-    _ris_collect, _scan_from_imports_flat, _selfhost_extracted_fn_index, _selfhost_gen_self_param_ctype, _sgfs_resolve_ann, _signature_ctypes,
+    _ris_collect, _scan_from_imports_flat, _selfhost_extracted_fn_index, _selfhost_files_key, _selfhost_gen_self_param_ctype, _selfhost_parsed_source, _sgfs_resolve_ann, _signature_ctypes,
     _struct_method_overload_ids, _struct_method_qualifier
 )
 
@@ -975,24 +975,20 @@ def _selfhost_scan_gimplegen_extra_fields(_src_dir=None) -> dict[str, str]:
         if _cand_files:
             _files = _cand_files
             break
-    _key = tuple((f, gimple_ctypes.os.path.getmtime(f)) for f in _files)
-    _hit = _SELFHOST_EXTRA_FIELD_CACHE.get('k')
-    if _hit is not None and _hit[0] == _key:
-        return _hit[1]
+    _key = 'k#' + _selfhost_files_key(_files)
+    _hit = _SELFHOST_EXTRA_FIELD_CACHE.get(_key)
+    if _hit is not None:
+        return _hit
     _fields: dict[str, str] = {}
     for _f in _files:
-        try:
-            _mod: list = ast_rewriter.rewrite(
-                Parser(py_tokenize(open(_f).read())).with_filename(_f).parse_module())
-        except Exception:
-            continue
+        _mod: list = _selfhost_parsed_source(_f)
         for _fn in _mod:
             if not (isinstance(_fn, FunctionDef) and _fn.params
                     and _fn.params[0][0].lstrip('*') in ('gen', 'self')):
                 continue
             _p0 = _fn.params[0][0].lstrip('*')
             _selfhost_walk_stmts_for_assign_targets(_fn.body, _p0, _fields)
-    _SELFHOST_EXTRA_FIELD_CACHE['k'] = (_key, _fields)
+    _SELFHOST_EXTRA_FIELD_CACHE[_key] = _fields
     return _fields
 
 

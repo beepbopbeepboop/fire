@@ -25,6 +25,7 @@ from mojo.middle.closures import (
 )
 import gimple_codegen  # constants used by some extracted helpers
 from gimple_codegen import _selfhost_impl_py_files
+from mojo.middle.funcs_shared import _selfhost_parsed_source
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -97,12 +98,10 @@ def _selfhost_parsed_modules(sd: str) -> list:
     `_selfhost_module_scalar_globals` covers a superset — so a whole-list
     key could never be shared between them anyway).
 
-    A file that fails to parse is cached as a parse FAILURE, not
-    re-attempted on every pass: the three call sites all `continue` on
-    exception, and without this the same unparseable file would be
-    tokenized once per pass per call, forever. Read errors are NOT cached
-    (they are not content-derived), so a file that appears later is still
-    picked up.
+    The per-file cache and its string key live in
+    funcs_shared._selfhost_parsed_source (shared with the fn-index and
+    extra-field scans). A file that fails to parse is cached as a FAILURE and
+    contributes an empty statement list.
     """
     _files = sorted(_selfhost_impl_py_files(sd)
                     + [os.path.join(sd, n) for n in
@@ -114,25 +113,7 @@ def _selfhost_parsed_modules(sd: str) -> list:
     for _f in _files:
         if not os.path.isfile(_f):
             continue
-        try:
-            _mtime = os.path.getmtime(_f)
-        except OSError:
-            continue
-        _ck = (_f, _mtime)
-        if _ck in _SELFHOST_PARSE_CACHE:
-            _entry = _SELFHOST_PARSE_CACHE[_ck]
-        else:
-            _entry = _PARSE_FAILED
-            try:
-                with open(_f) as _fh:
-                    _src = _fh.read()
-                _entry = ast_rewriter.rewrite(
-                    Parser(py_tokenize(_src)).with_filename(_f).parse_module())
-            except Exception:
-                _entry = _PARSE_FAILED
-            _SELFHOST_PARSE_CACHE[_ck] = _entry
-        if _entry is not _PARSE_FAILED:
-            _out.append((_f, _entry))
+        _out.append((_f, _selfhost_parsed_source(_f)))
     return _out
 
 def _selfhost_module_scalar_globals(sd: str) -> dict:
@@ -1174,16 +1155,7 @@ def _gmi_as_str(x) -> str:
 # `_SELFHOST_MODGLOBAL_CACHE` under three private keys ('k' / 'sdfvt' /
 # 'httrf'). That dict is GONE: three result caches over one shared file list
 # is three parses of the same source and three AST copies retained for the
-# life of the process. `_selfhost_parsed_modules` below keys one cache per
-# FILE on `(path, mtime)` and all three passes read it.
-#
-# `{ (path, mtime): stmts }`, plus one distinguished entry recording a file
-# that failed to parse. Deliberately NOT one whole-list key: the three
-# passes cover different file lists, so a whole-list key could never be
-# shared between them anyway.
-_SELFHOST_PARSE_CACHE: dict = {}
-# A module-level sentinel, not `None`: a parse can legitimately produce
-# `None`, and `None` as a cache value would be indistinguishable from a miss.
-_PARSE_FAILED = object()
+# life of the process. `_selfhost_parsed_modules` above reads the one
+# per-FILE cache (funcs_shared._SELFHOST_PARSE_CACHE, keyed `path@mtime`).
 from mojo.middle.exprtypes import _walk_ast
 from mojo.middle.types import _LIST_RETURNING_METHODS, _STR_RETURNING_METHODS, _extract_init_expr, _import_targets, _mojo_type
