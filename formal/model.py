@@ -1023,7 +1023,16 @@ def len_refusal(kind, spelled: str, slot_ann: str = None,
             f"why the type this slot has was established (a struct of this "
             f"module whose receiver is a frame) before this refusal was "
             f"chosen. Read the field you mean: `len(self.xs)` where the field "
-            f"is a list, or return the count from the object that has one")
+            f"is a list, or return the count from the object that has one. "
+            f"If that struct declares a `__len__` then `len(x)` is "
+            f"`x.__len__()` — a method of the receiver's own struct, which "
+            f"this backend calls, and the build pass rewrites that spelling for "
+            f"a bare name holding a frame and for a nested frame it placed. "
+            f"This operand is neither: it is a frame address from a shape the "
+            f"holder analysis could not settle to a struct (an untyped or "
+            f"reassigned slot), so there is no field list to write the call "
+            f"against. Bind it to a name, which is the same program with a "
+            f"lifetime this analysis can see")
     if kind is None:
         return (
             f"len({spelled}) — the source does not say what this operand holds, "
@@ -6379,6 +6388,176 @@ def struct_frame_slot_candidates(structs, name):
     if len(slots) > 1 or have != len(rows):
         return (None, (True, rows))
     return ((slots.pop() if slots else None), (False, rows))
+
+
+# ── `len(x)` where x is a FRAME ADDRESS: the receiver's own `__len__` ─────────
+#
+# The third answer to "what is a frame address", after "read a field out of it"
+# and "hand it to a method of its own struct", and the one the sweep's terminal
+# finding was asking for.
+#
+# `len` is in `FRAME_VALUE_ONLY_CALLS` and the refusal there is right about the
+# CATEGORY: a frame is a block of 8-byte slots with no header, so there is no
+# count in it to read, and the number a count-field load would produce is the
+# struct's FIRST FIELD.  What it is answering is the wrong QUESTION, because
+# Mojo's answer to "how long is this object" for a user-defined type is the
+# type's own `__len__` — and a method of the receiver's OWN struct is exactly
+# the one hand-off a frame address does make.  So `len(h)` on a `Heap` frame is
+# not "a length read out of a frame"; it is `h.__len__()`.
+#
+# That is why this is a REWRITE and not a new lowering: `h.__len__()` is already
+# what `formal/build.py`'s `_rewrite_method_calls` turns into
+# `Heap___len__(h)`, and the callee takes the frame address as its FIRST
+# parameter, which is the whole of the by-reference ABI
+# (`struct_is_framed` above, and `FRAME_ADDRESS_CTORS` for the shape where the
+# callee dereferences what it is handed).  One lowering, so the two spellings of
+# one question cannot come to disagree — the `_emit_binop` /
+# `_emit_branch_unless` lesson, twice applied.
+#
+# Which is also the soundness argument in full.  A frame belongs to the function
+# that created it, and an address only ever travels DOWN an active call chain,
+# so for the instant of the `__len__` call the creator is an ancestor of the
+# callee and every slot the callee reads is live: the same licence a method
+# receiver already has, on the same evidence, for the same kind of callee.  What
+# the argument does NOT buy is anything about the RESULT — `__len__` returns an
+# `Int` here exactly as it does in the source, and that is ordinary value
+# lowering.
+DUNDER_LEN = "__len__"
+
+
+def dunder_len_method(struct_def):
+    """This struct's `__len__`, or None when it declares none it could be reached by.
+
+    A method declared with NO parameters has no receiver, by the same rule
+    `struct_receivers` applies to a field read and
+    `formal/build.py`'s `_receiverless_methods` applies to a call: there is
+    nothing for a frame address to be handed to, so it cannot answer `len(x)`.
+    A `@staticmethod` is excluded for the same reason and by the same helper.
+    """
+    for m in struct_methods(struct_def):
+        if m.name != DUNDER_LEN:
+            continue
+        if "staticmethod" in _decorator_names(m):
+            continue
+        if not (getattr(m, "params", None) or []):
+            continue
+        return m
+    return None
+
+
+def struct_dunder_len_candidates(structs):
+    """`(owner, disagreeing)` — the struct whose `__len__` answers `len(x)`.
+
+    The same contract and the same reason as `struct_frame_slot_candidates`
+    immediately above, over a different fact: WHICH struct the name's frame is,
+    rather than which slot a field sits in.  `structs` is the holder's candidate
+    list in a stable order; `disagreeing` is `(True, [(struct_name, has_it), …])`
+    when there is no single answer and `None` otherwise.  An empty candidate list
+    yields `(None, (False, []))`, which is the same "not a frame address at all"
+    answer that function gives.
+
+    "No single answer" has both of the shapes the slot version has, and the
+    second is again the one a "did they agree?" test written over the SET of
+    owners misses: one candidate declares `__len__` and another does not, so
+    which call the rewrite emits depends on which frame the name holds — and
+    which frame it holds depends on the path taken, and there is no path
+    sensitivity here to answer it.  `rows` comes back either way because the
+    refusal has to name WHICH candidate declares one.
+
+    ONE difference from `struct_frame_slot_candidates`, and it is a difference
+    in what the two facts mean rather than in the shape of the test.  A field
+    that no candidate declares is a MISSING FIELD and the caller refuses it as
+    one; a `__len__` that no candidate declares is simply the answer "this type
+    has no length operator", which is what `len` on a list-free struct means and
+    which the hand-off check reports with its own message.  So `have == 0` is
+    `(None, (False, rows))` here and a DISAGREEMENT there, and the test is
+    written with the `owners and` guard for exactly that reason: without it, a
+    one-candidate holder whose struct simply has no `__len__` would be reported
+    as two candidates disagreeing, which is false and is a message about a
+    program that does not have the problem.
+    """
+    rows, owners, have = [], set(), 0
+    for st in structs:
+        found = dunder_len_method(st)
+        rows.append((st.name, found is not None))
+        if found is not None:
+            owners.add(st.name)
+            have += 1
+    if owners and (len(owners) > 1 or have != len(rows)):
+        return (None, (True, rows))
+    return ((owners.pop() if owners else None), (False, rows))
+
+
+def frame_len_candidates_disagree(spelled: str, struct_names, rows) -> str:
+    """Why `len(<name>)` has no single `__len__` to call, when the name's
+    candidate frames do not agree about declaring one.
+
+    The AGREE-OR-REFUSE refusal for this one fact, and it is a different
+    message from `frame_len_refusal` because the answer is a different shape:
+    there is no length to refuse to read, there is a CALL that would be one of
+    two.  `rows` is `[(struct_name, declares_it), …]` from
+    `struct_dunder_len_candidates`, and the refusal names every row because
+    "they disagree" without saying which is which sends the reader to look at
+    the wrong declaration.
+    """
+    who = ", ".join(struct_names) if struct_names else "this struct"
+    return (
+        f"len({spelled}) is len() of a FRAME ADDRESS, whose answer is the "
+        f"frame's own struct's `__len__({spelled})` — so WHICH struct's is "
+        f"the whole of the question, and {who} does not settle it: "
+        + "; ".join(f"{sn} declares one"
+                    if has else f"{sn} declares none"
+                    for sn, has in rows)
+        + ". The name holds a different frame on each path that binds it, and "
+          "this analysis has no path sensitivity to say which one is live at "
+          "this call, so the call this would lower to is one of two and the "
+          "program would build, run, and answer with the other struct's "
+          "length. Give the name one binding, or give every candidate the "
+          "same `__len__`")
+
+
+def frame_len_refusal(spelled: str, struct_names) -> str:
+    """Why `len(<frame address>)` cannot be lowered, for a frame whose struct
+    declares no `__len__`.
+
+    One message for both backends, and it says what the ANSWER to the question
+    is rather than restating the rule, because the rule ("a frame has no
+    header") is true and is not what is stopping this program: the answer in
+    Mojo is the struct's own `__len__`, and a struct that declares none is a
+    type with no length operator — which is what `len` on a list-free struct
+    means in every language that has one.  So the message says that, and then
+    names the two things the source can do about it, of which the second is the
+    one this backend can lower.
+
+    There is deliberately no "and the struct DOES declare one" arm.  Every shape
+    where that is true is a shape the rewrite takes, or a shape whose REAL fault
+    is something else:
+
+      * `len(h)` with one argument — rewritten to `Struct___len__(h)`;
+      * `len(h, x)` or `len(h, k=v)` — the ARITY is what is wrong, and the
+        emitter has its own message for it ("len() takes exactly one argument
+        on this path").  An arm that claimed the operand "is not a bare name"
+        there would be false in its first clause — the operand IS the bare name
+        `h` — and it is reachable, measured: `return len(b, b)` on a `Bag`
+        frame hits it.  A refusal whose stated reason is entirely false is the
+    worst outcome on this path (`bugs/FORMAL_frame_receiver_handoff.md` §4), so
+    the arm is not there to be right about a case that should have a different
+        message.
+    """
+    who = ", ".join(struct_names) if struct_names else "this struct"
+    return (
+        f"len({spelled}) is len() of a FRAME ADDRESS — the address of a block "
+        f"of 8-byte slots that is one struct's fields in declaration order. "
+        f"There is no count anywhere in it: a blob's count is a header word "
+        f"the blob itself carries, and a frame has no header. Reading 8 bytes "
+        f"at offset 0 of a frame does not invent a length, it reads the FIRST "
+        f"FIELD's value and calls it a count — which is a number of the right "
+        f"magnitude meaning nothing, and that is why this is refused rather "
+        f"than lowered. {who} declares no `__len__`, so there is no method of "
+        f"its own struct to call and no length in the frame to read. Read the "
+        f"field you mean (`len({spelled}.xs)` where the field is a list), or "
+        f"give the struct a `__len__` — `len(x)` is `x.__len__()`, and a "
+        f"method of the receiver's own struct is a call this backend makes")
 
 
 # ── A field's DECLARED type: agree, or refuse ─────────────────────────────

@@ -2492,6 +2492,17 @@ BYREF_REFUSALS = [
     # arrives is a pointer where it wants the object. The old text said "the
     # callee cannot know the frame's layout", which is not what is wrong and
     # sends the reader to look at the wrong thing.
+    #
+    # RE-POINTED at the `__len__` wording, and the reason is a change in what
+    # this backend can do rather than a rewording for its own sake: `len` on a
+    # frame address is now `x.__len__()` — a method of the receiver's own
+    # struct, the one hand-off a frame address makes — so `P` declaring no
+    # `__len__` is the whole of what is wrong, and a message that only said
+    # "wrong category of argument" would be telling a reader who is about to
+    # add the `__len__` that they have to change the program instead.
+    # `len_frame_address_calls_the_struct_dunder_len` is the case that now
+    # BUILDS; this is the one that still refuses, and it refuses for the
+    # opposite reason.
     ("byref_refuse_receiver_to_a_builtin",
      "struct P:\n"
      "    var a: Int\n"
@@ -2501,7 +2512,7 @@ BYREF_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var p = P()\n"
      "    return p.n()\n",
-     "refuse:lowered as an operation on a VALUE", None),
+     "refuse:declares no `__len__`", None),
     # A field of a field that is NOT a call: the value-position shape, which is
     # the one that stays a layout refusal. The needle is the CHAIN, because the
     # old message printed `self.<last member>` and so described a field the
@@ -5473,8 +5484,17 @@ WAVE7_G2_CASES = [
     # `self.<field>` was rewritten to `self` long before the emitter runs,
     # because a single-field struct's receiver IS its field.  So the operand
     # here is a bare `self` and the declared type has to be recovered from the
-    # struct's one field.  This is the shape `std/collections/binary_heap.mojo`
-    # is in, and it is the shape the 30-file group is blocked on.
+    # struct's one field.
+    #
+    # NOT the shape `std/collections/binary_heap.mojo` is in, which is what
+    # this comment used to say: `BinaryHeap` has TWO fields here, because its
+    # comptime parameter `T` is in `struct_field_names` and `struct_is_framed`
+    # counts it, so `BinaryHeap` is a frame and its `len(self)` is the
+    # `__len__` call `formal/build.py`'s `_rewrite_len_on_frame_receivers` now
+    # makes (see `bugs/FORMAL_frame_receiver_handoff.md` §14).  A one-field
+    # struct is not a frame, `b` below is a plain word, and the `__len__` on it
+    # is not reached at all — which is why this case still refuses, for the
+    # field-value reason and not for a length reason.
     ("len_one_word_struct_receiver_is_a_list_field",
      "struct B:\n"
      "    var _data: List[Int]\n"
@@ -5604,6 +5624,12 @@ WAVE7_G2_CASES = [
     # A FRAME ADDRESS as a bare name: refused by the hand-off check, and the
     # reason it gives is the value/bytes one rather than "no definition in
     # hand".  This is the 30-file `binary_heap.mojo` refusal, in miniature.
+    #
+    # RE-POINTED for the same reason as `byref_refuse_receiver_to_a_builtin`:
+    # the same program with a `__len__` on the struct now BUILDS and computes
+    # the right answer, so what is left to refuse here is specifically "this
+    # struct declares no `__len__`", and the needle says that rather than the
+    # category claim it used to.
     ("guard_len_on_a_frame_address",
      "struct R:\n"
      "    var a: Int\n"
@@ -5617,7 +5643,7 @@ WAVE7_G2_CASES = [
      "    var r = R()\n"
      "    n = len(r)\n"
      "    return 0\n",
-     "refuse:which is lowered as an operation on a VALUE", None),
+     "refuse:declares no `__len__`", None),
     # ── (6) GUARDS: the value-method receiver matrix ──
     # A string method against each of the four operand kinds.  Two of these are
     # the wrong answer rather than a crash if they were lowered kind-blind: on a

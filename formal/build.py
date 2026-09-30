@@ -1673,6 +1673,28 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                     hstruct[node.func.name][callee] = \
                         list(hstruct[fn.name][r[0]])
                     changed = True
+    # AFTER the fixpoint and BEFORE the per-function loop below, and both of
+    # those positions are load-bearing rather than tidy:
+    #
+    #   * after, because the question is "does this name hold a frame, and of
+    #     WHICH struct" and the fixpoint is what settles both.  Before it, a
+    #     parameter that only some call site reaches with a frame address would
+    #     not be a holder yet and the rewrite would fire on nothing.
+    #   * before, because `_check_frame_escapes` refuses `len(<frame address>)`
+    #     as a value-only call, and the whole point is that it must no longer
+    #     see one.  The rewrite changes the CALLEE, so the check below is
+    #     looking at a call this pass has already turned into a method call with
+    #     the frame as its first argument — which is the shape the by-reference
+    #     design exists for, and needs nothing new to be right about.
+    #
+    # No second fixpoint run is needed afterwards, and that is a fact rather
+    # than an omission: the rewrite introduces exactly one edge, `Struct___len__`
+    # reached with a frame in argument 0, and `Struct___len__`'s first parameter
+    # is already a holder because it is a method of a framed struct
+    # (`struct_receivers` above).  If that ever stopped being true,
+    # `_check_holder_agreements` at the end of this function is what would say
+    # so, by name, at the call site.
+    _rewrite_len_on_frame_receivers(functions, holders, hstruct)
     for fn in functions:
         hs = holders[fn.name]
         if not hs:
@@ -1963,6 +1985,14 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
         # guessing a nested receiver there is exactly the name-dispatch bug
         # `_check_method_receiver_types` exists for.
         _rewrite_nested_method_calls(fn, nested_fields)
+        # …and the `len` spelling of the same receiver, which is the second
+        # route to one `__len__` decision rather than a second decision about
+        # it.  It asks `_typed_nested_frame` rather than reading
+        # `nested_fields`, because that table is populated only for a
+        # depth-2 CALL receiver and `len(h.a)` is a depth-1 value read — the
+        # struct and the lifetime have to be settled again, by the same
+        # function, or the two spellings would be answering from two tables.
+        _rewrite_len_on_nested_frames(fn, by_name, structs_by_name)
     # AFTER the loop, over every function including the ones that hold no frame.
     # A parameter's being a frame holder is a fact about the whole image, and
     # the call site that disagrees with it can be in a function the loop above
@@ -2013,6 +2043,151 @@ def _rewrite_nested_method_calls(fn, nested_fields) -> None:
         node.func = F.IdentExpr(name=M.method_function_name(st.name,
                                                             node.func.member))
         node.args = [obj] + list(node.args)
+
+
+def _rewrite_len_on_frame_receivers(functions, holders, hstruct) -> None:
+    """`len(h)` → `Struct___len__(h)`, for every `h` that holds a frame.
+
+    The `len` half of the by-reference hand-off, and the reason it is a REWRITE
+    rather than a lowering is that the lowering already exists: `h.__len__()` is
+    what `_rewrite_method_calls` turns into `Struct___len__(h)`, the callee is
+    compiled as an ordinary function taking its receiver first, and that first
+    parameter is a frame address on both the caller's and the callee's side of
+    the boundary.  So the question this pass answers is not "how do I compute a
+    length" — it is "WHICH struct's `__len__` is this", and
+    `model.struct_dunder_len_candidates` is the one place that is decided.
+
+    It cannot be done where `_rewrite_method_calls` runs, for the reason
+    `_rewrite_nested_method_calls`'s docstring gives about its own job: at that
+    point no frame analysis exists, so nothing knows that `h` is a frame rather
+    than a word, and a `len` on an ordinary value — a string, a list — must keep
+    going to the count-field and `strlen` lowerings.  Guessing there would
+    replace those with a call to a method the type may not have.
+
+    The three cases, and each one is a DIFFERENT answer rather than a variant:
+
+      * the name holds a frame and every candidate struct declares a
+        `__len__`  → rewritten;
+      * the name holds a frame and NO candidate declares one  → left alone, and
+        `model.frame_len_refusal` says so at the hand-off.  This is the case
+        `FRAME_VALUE_ONLY_CALLS` was right about all along and the old message
+        was not: there is genuinely no length in a frame;
+      * the name holds a frame and the candidates DISAGREE about `__len__`  →
+        refused, naming which candidate declares one.  Agree-or-refuse, the same
+        rule and for the same reason as `struct_frame_slot_candidates`: which
+        frame the name holds depends on the path taken, and this analysis has
+        none, so the call the rewrite would emit is one of two and the program
+        would build, run, and answer with the other struct's length.
+
+    Only a BARE NAME is rewritten.  A chain is a field read, and `len(h.xs)` is
+    the blob-count lowering that has always worked; rewriting it would call a
+    struct's `__len__` on a word that is a value.
+    """
+    for fn in functions:
+        hs = holders.get(fn.name) or ()
+        by_name = hstruct.get(fn.name) or {}
+        if not hs:
+            continue
+        # Collected first and mutated after, for the reason
+        # `_rewrite_nested_method_calls` is called outside the walk that
+        # discovers what it rewrites: `M.iter_nodes` yields a node and then
+        # recurses into its fields, so replacing a field while it is being
+        # walked is how a pass ends up seeing a node twice or not at all.  The
+        # rewrite is idempotent here, but the collection is what makes that a
+        # property of the shape rather than of the ordering.
+        pending = []
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, F.CallExpr) \
+                    or not isinstance(node.func, F.IdentExpr) \
+                    or node.func.name != "len" \
+                    or (node.kwargs or []) \
+                    or len(node.args or []) != 1:
+                continue
+            operand = node.args[0]
+            if not isinstance(operand, F.IdentExpr) or operand.name not in hs:
+                continue
+            cands = by_name.get(operand.name) or ()
+            if not cands:
+                # A name with no candidate struct is a plain word, and `len` on
+                # a plain word is the lowering that has always run.
+                continue
+            owner, (disagree, rows) = M.struct_dunder_len_candidates(cands)
+            if disagree:
+                raise CodegenError(M.frame_len_candidates_disagree(
+                    _expr_spelling(operand), [st.name for st in cands], rows))
+            if owner is None:
+                continue
+            pending.append(
+                (node, M.method_function_name(owner, M.DUNDER_LEN)))
+        for node, callee in pending:
+            node.func = F.IdentExpr(name=callee)
+
+
+def _rewrite_len_on_nested_frames(fn, by_name, structs_by_name) -> None:
+    """`len(h.a)` → `Struct___len__(h.a)`, when `h.a` holds a placed frame.
+
+    The same rewrite as `_rewrite_len_on_frame_receivers` for the OTHER spelling
+    of a frame address, and it settles its struct with `_typed_nested_frame` —
+    the SAME function the depth-2 paths use — so the two spellings reach one
+    decision by one route rather than by two decisions that could come apart.
+    That matters here in a way it did not for a bare name: whether the slot holds
+    this unit's placed frame or whatever some method last assigned into it is
+    the lifetime question, and `_typed_nested_frame`'s `_REASSIGNED` answer is
+    what settles it.  A struct this compiler placed in the outer object's own
+    block outlives the call; a frame belonging to whichever function ran the
+    assignment need not, and reading it would be a use-after-free.
+
+    It runs LATER than the bare-name pass, and for a reason that is about
+    reachability rather than order: `_check_frame_escapes` refuses a BARE NAME
+    holding a frame, and `h.a` is a field read — a 64-bit value, not an address
+    — so nothing refuses `len(h.a)` on the way past and it reaches the emitter
+    either way.  The bare-name spelling has to be rewritten before that check;
+    this one does not.
+
+    `_typed_nested_frame` returning `_NOT_TYPED` or `_REASSIGNED` is NOT
+    re-raised here, and deliberately: the emitter's own `model.len_refusal` is
+    already what refuses those programs, and a refusal raised from
+    `_prepare_functions` is reported INSTEAD of the import diagnosis — the
+    measured defect `check_frame_field_blob_premises` and
+    `check_construction_shapes` are placed outside the wrapper to avoid, which
+    cost `mojo/middle/closures.py` its import diagnosis once already.  Leaving
+    them to the emitter is both the smaller change and the one that keeps the
+    file's class.
+
+    The receiver stays the slot key `h.a` rather than becoming a copied-out
+    value, which is the whole of the by-reference argument for a nested frame:
+    the slot holds a real frame address placed in the outer object's own block
+    (`model.struct_nested_frame_fields`), so handing it to the method is handing
+    it the address, and the callee reads `[base + 8k]` out of storage whose
+    lifetime is the outer object's.
+    """
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.CallExpr) \
+                or not isinstance(node.func, F.IdentExpr) \
+                or node.func.name != "len" \
+                or (node.kwargs or []) \
+                or len(node.args or []) != 1:
+            continue
+        operand = node.args[0]
+        if not isinstance(operand, F.MemberExpr):
+            continue
+        key = _root_ident(operand)
+        if key is None or key[1] != 1:
+            continue
+        base, field = key[0], operand.member
+        cands = by_name.get(base) or ()
+        if not cands:
+            continue
+        nested = _typed_nested_frame(base, field, cands, structs_by_name, None)
+        if not isinstance(nested, F.StructDef):
+            # No `__len__` on the placed frame's struct, or the slot is not one
+            # this unit placed.  Both are the emitter's business and both are
+            # already refused there; see the docstring.
+            continue
+        if M.dunder_len_method(nested) is None:
+            continue
+        node.func = F.IdentExpr(name=M.method_function_name(nested.name,
+                                                            M.DUNDER_LEN))
 
 
 # The three answers a field's declared type can have, as one value rather than
@@ -2611,6 +2786,47 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                                 "type and the parameter list this argument "
                                 "lands in belongs to a declaration this walk "
                                 "has not read"))
+                    continue
+                if callee == "len" and isinstance(a, F.IdentExpr) \
+                        and a.name in holders \
+                        and len(node.args or []) == 1 and not (node.kwargs or []):
+                    # `len` first, and before `_callee_wants_a_value`, because
+                    # it is the one value-only callee whose argument is exactly
+                    # what it wants.
+                    #
+                    # A frame address IS a length's receiver: `len(h)` on a
+                    # `Heap` frame is `h.__len__()`, a method of the receiver's
+                    # OWN struct, which is the one hand-off a frame address
+                    # makes — the by-reference design settles its lifetime on
+                    # the same evidence a method receiver uses.
+                    # `_rewrite_len_on_frame_receivers` has therefore already
+                    # turned this into `Heap___len__(h)` whenever the struct
+                    # declares one, and reaching `len` here means it does not.
+                    #
+                    # So the refusal is `model.frame_len_refusal` and NOT
+                    # `frame_receiver_escape_refusal`'s "a wrong category of
+                    # argument" sentence.  That sentence is true about the
+                    # CATEGORY — a frame has no header, and a count-field read
+                    # of one is the struct's first field — and it answers a
+                    # question that is not what stops this program, which is why
+                    # a reader who follows its advice ("give it a field,
+                    # `len(self.n)`") is sent to change a program that is
+                    # already correct whenever the struct HAS a `__len__`.
+                    #
+                    # THE ARITY IS NOT THIS BRANCH'S BUSINESS, and the condition
+                    # above says so: it is the rewrite's own condition, one
+                    # positional argument and no keywords.  `len(h, x)` is a
+                    # shape the rewrite does not take, and the fault there is
+                    # the ARITY, which the emitter has its own message for.
+                    # Claiming the operand is not a bare frame name would be
+                    # false in its first clause — it is the bare name `h` — and
+                    # measured, `return len(b, b)` on a `Bag` frame reaches it.
+                    # Falling through leaves those programs on
+                    # `frame_receiver_escape_refusal`, which is what refused
+                    # them before this branch existed.
+                    _refuse_holder_use(
+                        fn, a, holders, by_name, "",
+                        M.frame_len_refusal(_expr_spelling(a), _names(a)))
                     continue
                 # 1. A value-taking callee, in ANY position.  This is the
                 #    check that was unreachable, because the old loop only
