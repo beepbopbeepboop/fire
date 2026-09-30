@@ -187,6 +187,51 @@ def test_x86_64_dylib_passes_strict_validation(tmpdir, shared):
           f"{(r.stderr or r.stdout).strip()}")
 
 
+def test_the_dylib_container_is_what_the_caller_asked_for(tmpdir, shared):
+    """A Mach-O container is what this path has, and `fmt` says so out loud.
+
+    `compile_formal_dylib(fmt="elf")` used to be accepted on a Mach-O host and
+    produce a Mach-O anyway — the refusal was conditioned on
+    `not fmt_wants_macho(arch)`, which on this host is false for every `fmt`.
+    An argument that is accepted and ignored is worse than a hardcoded
+    literal: the caller gets an artifact it did not ask for and no
+    diagnostic, three steps before dyld reports a container mismatch.
+
+    The container assertion is also the check the `arch` case in
+    `test_formal_dylib.py` was missing: it asserted the ARCHITECTURE, which a
+    Mach-O labelled `x86_64` passes, and so could not see the wrong container.
+    """
+    from formal.build import compile_formal_dylib, FormalBuildError
+    src = os.path.join(tmpdir, "anyfmt.mojo")
+    with open(src, "w") as f:
+        f.write("def add1(x):\n  return x + 1\n")
+    out = os.path.join(tmpdir, "anyfmt.dylib")
+    try:
+        compile_formal_dylib([src], output=out, arch="x86_64", fmt="elf",
+                             prove=False, check=False)
+    except FormalBuildError as e:
+        msg = str(e)
+        check("elf" in msg,
+              f"the refusal does not name the format it cannot honour: {msg!r}")
+        check("mach-o" in msg.lower(),
+              f"the refusal does not say what the container IS, so a reader "
+              f"cannot tell whether the gap is the code or the container: "
+              f"{msg!r}")
+    else:
+        raise TestFailure(
+            "compile_formal_dylib(fmt='elf') returned an image: this path "
+            "has no ELF dylib emitter, so it is handing the caller a Mach-O "
+            "under the name of the format it did not ask for")
+
+    # And the format it CAN honour produces the container it names.
+    compile_formal_dylib([src], output=out, arch="x86_64", fmt="macho",
+                         prove=False, check=False)
+    with open(out, "rb") as f:
+        head = f.read(4)
+    check(struct.unpack_from("<I", head, 0)[0] == MH_MAGIC_64,
+          "fmt='macho' did not produce a 64-bit Mach-O container")
+
+
 def test_every_byte_of_the_dylib_is_claimed(tmpdir, shared):
     """The image is exactly as long as its last segment claims.
 
@@ -315,6 +360,8 @@ TESTS = [
      test_x86_64_dylib_stub_entries_are_jmpq_rrip),
     ("x86-64 dylib passes codesign strict validation",
      test_x86_64_dylib_passes_strict_validation),
+    ("the dylib container is what the caller asked for",
+     test_the_dylib_container_is_what_the_caller_asked_for),
     ("every byte of the x86-64 dylib is claimed by a segment",
      test_every_byte_of_the_dylib_is_claimed),
     ("a program importing an extern module matches CPython",

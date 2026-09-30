@@ -5350,10 +5350,27 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     """
     if not source_paths:
         raise FormalBuildError("at least one source file is required")
-    if not fmt_wants_macho(arch) and fmt != "macho":
+    # `fmt` selects the CODEGEN, which is real — there is an x86-64 code
+    # generator. What has no x86-64 (or ELF) form here is the CONTAINER:
+    # `build_macho_dylib` is the only emitter on this path, and
+    # `formal/elf.py` builds executables with no `.dynamic`/`.dynsym`/
+    # `.dynstr`/`.hash` writer at all. So a `fmt` that asks for anything else
+    # is refused by name.
+    #
+    # The previous condition was `not fmt_wants_macho(arch) and fmt != "macho"`,
+    # which on a Mach-O host is `False and …` for EVERY `fmt` — so `fmt="elf"`
+    # on macOS was accepted, ignored, and returned a Mach-O labelled by the
+    # caller's own argument. An argument that reads like it is doing something
+    # and does not is worse than a hardcoded literal: the caller gets an
+    # artifact it did not ask for and no diagnostic. Refusing says the gap is
+    # the container, which is where the work is.
+    if fmt != "macho":
         raise FormalBuildError(
-            f"a formal dylib is a Mach-O container; {arch!r} defaults to "
-            f"{default_format(arch)!r}, which has no dylib form")
+            f"a formal dylib is a Mach-O container; {fmt!r} was asked for and "
+            f"this path has no {fmt} dylib emitter (formal/elf.py builds "
+            f"executables only — no .dynamic/.dynsym/.dynstr/.hash). The code "
+            f"generator is selected by arch={arch!r} and does honour it; the "
+            f"container is the missing half.")
     reexports = dict(reexports or {})
 
     # The libraries THIS library links. Their export spellings decide how a
