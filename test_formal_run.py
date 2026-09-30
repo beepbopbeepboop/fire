@@ -6101,6 +6101,109 @@ WAVE7_G2_CASES = [
      "        return 7\n"
      "    return 0\n",
      7, None),
+    # ── a module-level constant read in an `elif` ARM ──
+    #
+    # `elif x == K:` was REFUSED with "'K' has no home: the register allocator
+    # collected no home for it" on BOTH architectures, while `if x == K:` in the
+    # same function built. The message blamed the emitter's phi/web slot, and
+    # the emitter was innocent: `IfStmt.elifs` is a list of `(condition, body)`
+    # pairs, and the module-constant substitution walked lists but not tuples, so
+    # an `elif` condition was the one expression position in the tree the walk
+    # never reached. The unsubstituted `IdentExpr` then reached the emitter as a
+    # name with no home.
+    #
+    # Every answer must be 2, and each is 2 for a different reason — the
+    # `if` arm falling through, the `elif` arm matching, and neither matching —
+    # so a wrong answer cannot pass by landing on a neighbouring arm.
+    ("elif_arm_reads_a_module_constant",
+     "K = 7\n"
+     "\n"
+     "def f(x: Int) -> Int:\n"
+     "    if x == 0:\n"
+     "        return 1\n"
+     "    elif x == K:\n"
+     "        return 2\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    return f(7)\n",
+     2, None),
+    # …and the same shape when only SOME of the arms name the constant, which is
+    # what makes it a per-position bug rather than "elif is unsupported": a walk
+    # that skipped elif conditions would substitute arm 1 and leave arm 2, so
+    # the first call is right and the second is not. 4 arms here (3 elifs) also
+    # covers the label chain at its longest.
+    ("elif_chain_with_one_named_arm",
+     "K = 7\n"
+     "J = 9\n"
+     "\n"
+     "def f(x: Int) -> Int:\n"
+     "    if x == 0:\n"
+     "        return 1\n"
+     "    elif x == K:\n"
+     "        return 2\n"
+     "    elif x == J:\n"
+     "        return 3\n"
+     "    elif x == 100:\n"
+     "        return 4\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    # 2 and 3 name a constant; 1 and 4 do not. 1234 needs all four arms.\n"
+     "    return f(0) * 1000 / 10 + f(7) * 100 / 10 + f(9) * 10 / 10 + f(100) / 100\n",
+     123, None),
+    # The class-constant rewrite is the SECOND walk with the same shape, and it
+    # had the same one-position gap, so both spellings are here: through the
+    # class's own name, and through a local aliased from its constructor (which
+    # is how ordinary code reads one).
+    ("elif_arm_reads_a_class_constant",
+     "struct C:\n"
+     "    var B: Int = 5\n"
+     "\n"
+     "def f(x: Int) -> Int:\n"
+     "    if x == 0:\n"
+     "        return 1\n"
+     "    elif x == C.B:\n"
+     "        return 2\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    return f(5)\n",
+     2, None),
+    ("elif_arm_reads_an_aliased_class_constant",
+     "struct C:\n"
+     "    var B: Int = 5\n"
+     "\n"
+     "def f(x: Int) -> Int:\n"
+     "    var c = C()\n"
+     "    if x == 0:\n"
+     "        return 1\n"
+     "    elif x == c.B:\n"
+     "        return 2\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    return f(5)\n",
+     2, None),
+    # GUARD (passed before the change, and it is the case that says the fix is a
+    # POSITION fix and not "elif got more permissive"): an `elif` chain over
+    # plain literals was already correct, and 1234 is every arm. A fix that
+    # rewrote the arm chain would break this row.
+    ("elif_chain_of_literals_is_unchanged",
+     "def f(x: Int) -> Int:\n"
+     "    if x == 0:\n"
+     "        return 1\n"
+     "    elif x == 7:\n"
+     "        return 2\n"
+     "    elif x == 9:\n"
+     "        return 3\n"
+     "    elif x == 100:\n"
+     "        return 4\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    return f(0) * 1000 / 10 + f(7) * 100 / 10 + f(9) * 10 / 10 + f(100) / 100\n",
+     123, None),
 
     # ── (4) the C-library hand-off sets, audited by PROTOTYPE ──
     # `open(const char *, int, ...)` takes a path and a flag word; it does not

@@ -3395,12 +3395,30 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
     and a call's callee — are only identifiable from the parent, and replacing
     them would be the two wrong answers this whole change exists to remove
     (a store turned into a value is a dropped store; a callee turned into a
-    literal is a call to a number)."""
-    if isinstance(node, list):
-        for i, child in enumerate(node):
+    literal is a call to a number).
+
+    A TUPLE is descended into, and that is not a generalization — it is the
+    `elif` arm. `IfStmt.elifs` is a list of `(condition, body)` pairs, and a
+    condition is an ordinary expression position in every respect, so the
+    substitution covered `if x == K:` and skipped `elif x == K:`. The skipped
+    name then reached the emitter as a bare `IdentExpr` with no home and was
+    REFUSED ("'K' has no home") on both architectures, for a construct the
+    build answers everywhere else — measured in
+    bugs/CODEGEN_elif_arm_reading_a_module_constant_has_no_home.md, whose
+    diagnosis blamed the emitter's phi/web slot. It was this walk: the same
+    shape of mistake as the assignment case in that file, one position over.
+    The other walks over this tree already knew `elifs` was pairs and spelled
+    it out (`strip_body`, `walk_body`); this one did not, and a walk that has
+    to be re-derived per consumer is exactly how they drift.
+
+    A tuple has no assignable slots, so the walk RETURNS a new one for it and
+    the caller puts it back; a list is still rewritten in place."""
+    if isinstance(node, (list, tuple)):
+        out_items = []
+        for child in node:
             if isinstance(child, F.IdentExpr) and child.name in sites \
                     and child.name not in stores:
-                node[i] = copy.deepcopy(sites[child.name])
+                out_items.append(copy.deepcopy(sites[child.name]))
                 continue
             if isinstance(child, F.CallExpr) and isinstance(child.func,
                                                            F.IdentExpr) \
@@ -3410,8 +3428,18 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
                     _apply_module_constant_sites(a, sites, stores)
                 for _k, v in (child.kwargs or []):
                     _apply_module_constant_sites(v, sites, stores)
+                out_items.append(child)
                 continue
-            _apply_module_constant_sites(child, sites, stores)
+            # This walk rewrites a child's own slots IN PLACE and returns None
+            # for anything that is not itself a list or a tuple, so the
+            # original child is what goes back in the sequence — unless the
+            # recursion handed back a rebuilt sequence, which is the one case
+            # where the child itself is the container.
+            rebuilt = _apply_module_constant_sites(child, sites, stores)
+            out_items.append(child if rebuilt is None else rebuilt)
+        if isinstance(node, tuple):
+            return tuple(out_items)
+        node[:] = out_items
         return node
     if isinstance(node, (F.AssignStmt, F.AugAssignStmt, F.VarDecl)):
         # The target is a store: leave it, and walk the value side only.
@@ -3428,7 +3456,12 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
 
 
 def _rewrite_child(child, sites: dict, stores: set):
-    """One non-list child: replace an `IdentExpr` read, else recurse."""
+    """One non-list child: replace an `IdentExpr` read, else recurse.
+
+    A TUPLE is the one child that cannot be rewritten where it lies — the walk
+    rebuilds it and returns it, so the caller has to put it back. An `elif` PAIR
+    arrives here because `IfStmt.elifs` is a LIST of tuples, so the list branch
+    hands each one over rather than descending into it itself."""
     if child is None or isinstance(child, (str, int, float, bool)):
         return child
     if isinstance(child, F.IdentExpr):
@@ -3443,6 +3476,8 @@ def _rewrite_child(child, sites: dict, stores: set):
             for _k, v in (child.kwargs or []):
                 _apply_module_constant_sites(v, sites, stores)
             return child
+    if isinstance(child, tuple):
+        return _apply_module_constant_sites(child, sites, stores)
     _apply_module_constant_sites(child, sites, stores)
     return child
 
@@ -3818,11 +3853,19 @@ def _apply_constant_sites(node, sites: dict):
 
     Split from `_rewrite_class_constants` so the sites can be computed once per
     function: they are a census of the whole body, and recomputing them at every
-    node would be quadratic in the size of the function."""
+    node would be quadratic in the size of the function.
 
-    if isinstance(node, list):
-        for i, x in enumerate(node):
-            node[i] = _apply_constant_sites(x, sites)
+    A TUPLE is descended into and REBUILT, for the reason
+    `_apply_module_constant_sites` gives at length: `IfStmt.elifs` is a list of
+    `(condition, body)` pairs, so without this the class-constant rewrite covered
+    `if p.B == 1:` and skipped `elif p.B == 1:` — the same one-position gap, in
+    the second of the two walks that share it."""
+
+    if isinstance(node, (list, tuple)):
+        items = [_apply_constant_sites(x, sites) for x in node]
+        if isinstance(node, tuple):
+            return tuple(items)
+        node[:] = items
         return node
     if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr):
         st = sites.get(f"{node.obj.name}.{node.member}")
