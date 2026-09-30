@@ -220,15 +220,40 @@ def main():
             q.kill(); q.wait()
             os.environ['MEMSLOT_BUDGET_GB'] = '6'
             gone = subprocess.run([sys.executable, MEMSLOT, "--gb", "9", "--label", "over-budget",
-                                   "--", "true"], env=dict(os.environ, **memslot.held_env(6)),
+                                   "--", "true"], env=dict(os.environ, MEMSLOT_HELD=""),
                                   capture_output=True, text=True, timeout=30)
-            check("...and over the whole budget is refused, not queued (126)",
+            check("...and over the whole budget with nothing inherited is refused (126)",
                   gone.returncode == 126, 'rc=%s' % gone.returncode)
         finally:
             parent.release()
             check("...and releasing the parent frees the whole tree",
                   memslot.reserved_gb() == 0, '%.1f GB left' % memslot.reserved_gb())
             os.environ['MEMSLOT_HELD'] = ''
+
+    # An EXCLUSIVE job reserves the whole budget (`tools/suite.py`'s
+    # reserved_gb), and its recipe asks for its memclass, which need not be the
+    # budget: MEMSLOT_BUDGET_GB=64 with a `stage` job means the tree holds all
+    # 64 and the recipe asks for 96. Nothing is left to reserve and nothing is
+    # left to overrun — nothing else can be admitted at all — so it runs, and
+    # the ceiling still applies. Refusing it (126) would take `make mojoc` down
+    # for a budget setting that is meant to be supported.
+    with tempfile.TemporaryDirectory() as d:
+        os.environ['MEMSLOT_DIR'] = d
+        os.environ['MEMSLOT_BUDGET_GB'] = '64'
+        os.environ['MEMSLOT_HELD'] = ''
+        parent = memslot.Slot(64, 'stage-excl', budget=64).acquire()
+        try:
+            r = subprocess.run([sys.executable, MEMSLOT, "--gb", "96", "--label", "stage2/mojo",
+                                "--", sys.executable, "-c", "print('stage ran')"],
+                               env=dict(os.environ, **memslot.held_env(64)),
+                               capture_output=True, text=True, timeout=30)
+            check("a wrapper under an EXCLUSIVE reservation is covered whatever it asks for",
+                  r.returncode == 0 and 'stage ran' in r.stdout,
+                  "rc=%s: %s" % (r.returncode, r.stderr.strip()[:160]))
+            check("...and its own ceiling is still the one applied",
+                  'ceiling 96.0 GB' in r.stdout, r.stdout.strip()[:120])
+        finally:
+            parent.release()
 
     print("Results: %d passed, %d failed" % (passed, failed))
     return 1 if failed else 0

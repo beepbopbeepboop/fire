@@ -100,23 +100,39 @@ def inherited_gb():
         return 0.0
 
 
-def covering(gb, label):
+def covering(gb, label, budget=None):
     """(already_covered, inherited) for a request of `gb` inside this tree.
 
-    The mismatch case is separated out because it is a genuine bug in the
-    caller and the two answers are opposite: covered means run it now from the
-    ancestor's reservation, not covered means the caller is reaching for more
-    memory than the tree was admitted for, and it has to queue (or fail) for it
-    like anyone else.
+    Two ways to be covered, and both are the same statement — the tree is
+    already accounted for:
+
+      * the inherited reservation is at least the request. Normal case, and
+        the deadlock it exists to prevent: `make mojoc` admitted for 96 whose
+        recipe is `memslot.py --gb 96 -- …`.
+
+      * the inherited reservation IS the whole budget. An exclusive job
+        reserves every gigabyte the machine offers (`tools/suite.py`'s
+        `reserved_gb`), so there is nothing left for a second claim and
+        nothing left to overrun: nothing else can be admitted while it runs,
+        whatever it asks for. This is the case that shows up when
+        MEMSLOT_BUDGET_GB is set BELOW a memclass — a `stage` job reserves
+        the whole 64 GB budget and its recipe asks for the class's own 96,
+        which would otherwise be refused outright and take the build down.
+
+    Anything else is a real mismatch: the tree can reach past its own
+    accounting. It says so on stderr and takes its own reservation anyway,
+    because queueing there would hang and running under a bigger ceiling with
+    no accounting for it is the thing this file exists to prevent.
     """
     have = inherited_gb()
-    if have and gb > have + 1e-9:
+    if have and (gb <= have + 1e-9 or have >= budget_gb(budget) - 1e-9):
+        return True, have
+    if have:
         print("memslot: %s wants %.1f GB but this process tree was only "
               "admitted for %.1f GB (%s); taking a separate reservation, and "
               "the ceiling it is given is larger than its accounting"
               % (label, gb, have, HELD), file=sys.stderr, flush=True)
-        return False, have
-    return bool(have), have
+    return False, have
 
 
 def _alive(pid):
@@ -253,7 +269,7 @@ class Slot:
         self.owner = owner if owner is not None else f"{os.getpid()}:{label}"
         self.ticket = None
         self.waited = 0.0
-        self.covered, _ = covering(self.gb, label)
+        self.covered, _ = covering(self.gb, label, self.budget)
 
     def acquire(self):
         t0 = time.time()
@@ -326,7 +342,7 @@ def main(argv):
     if not cmd:
         ap.error("no command given")
     label = a.label or os.path.basename(cmd[0])
-    covered, _ = covering(a.gb, label)
+    covered, _ = covering(a.gb, label, budget_gb(a.budget_gb))
     if not covered:
         try:
             acquire(a.gb, label, budget_gb(a.budget_gb))
