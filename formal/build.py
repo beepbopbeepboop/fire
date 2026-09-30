@@ -78,7 +78,7 @@ def _ad_hoc_sign(path: str) -> None:
 
 def parse_module(source: str, filename: str = "<input>") -> list:
     from fire_compiler import py_tokenize, Parser
-    stmts = Parser(py_tokenize(source)).with_filename(filename).parse_module()
+    stmts = Parser(py_tokenize(source, filename)).with_filename(filename).parse_module()
     # One census of what this unit writes into a field, attached to every struct
     # it declares. It is what lets formal.model tell a class-level CONSTANT from
     # per-instance state (see the rule above struct_class_constants), and it has
