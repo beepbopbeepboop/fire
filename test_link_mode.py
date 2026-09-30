@@ -19,11 +19,11 @@ see each one's own docstring for the filed bug doc — so this suite still
 gives `make check` a meaningful, non-flaky pass/fail signal without
 either hiding a known gap or re-discovering it every run.
 
-WHERE the fixture packages are written must not change any verdict. The
-cases above use `tempfile.TemporaryDirectory()`, so their location follows
-`$TMPDIR` — which on some machines is a directory INSIDE this checkout and
-on others is the system temp dir. That used to be enough to flip
-`bare_submodule_import_call` from pass to fail, because
+WHERE the fixture packages are written must not change any verdict. Every
+case below except one uses `tempfile.TemporaryDirectory()`, so its location
+follows `$TMPDIR` — which on some machines is a directory INSIDE this
+checkout and on others is the system temp dir. That used to be enough to
+flip `bare_submodule_import_call` from pass to fail, because
 `_lower_method_call`'s generic module-qualified-call branch was gated on
 "is this file under the compiler's own source directory", so a fixture
 written there was refused the resolution and answered a literal `0`. The
