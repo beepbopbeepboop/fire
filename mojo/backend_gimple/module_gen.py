@@ -3610,6 +3610,28 @@ def gen_module_impl(self, stmts):
                         self._func_kwargs_has_vararg[_mangled_kw_name] = _seen_star
                     except Exception:
                         pass
+            # Same walk, recording the packed-parameter shape for a function
+            # taken as a VALUE (see `_variadic_func_shape`'s own comment).
+            # `_kw_i` above stops at the first `**`; this one needs the
+            # leading ordinary-parameter count too, so it is its own loop.
+            _vf_nfixed = 0
+            _vf_kind = -1
+            for _pn, _pt in (s.params or []):
+                if _pn.startswith('**'):
+                    _vf_kind = 1 if _vf_kind == 0 else 2
+                elif _pn.startswith('*'):
+                    if _vf_kind < 0:
+                        _vf_kind = 0
+                elif _vf_kind < 0:
+                    _vf_nfixed += 1
+            if _vf_kind >= 0 and _vf_nfixed <= 4:
+                self._variadic_func_shape[s.name] = (_vf_nfixed, _vf_kind)
+                if _s_owns_tiers:
+                    try:
+                        self._variadic_func_shape[self._func_csym(s.name)] = (
+                            _vf_nfixed, _vf_kind)
+                    except Exception:
+                        pass
         if isinstance(s, FunctionDef) and s.name not in self._NO_OVERLOAD_MANGLE:
             self._mangled_funcs.add(s.name)
         if isinstance(s, FunctionDef) and 'export' in (getattr(s, 'decorators', None) or []):

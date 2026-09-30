@@ -603,6 +603,30 @@ def main():
     print(both(1, z=5))
 """, "6\n30\n11\n")
 
+    # The SAME defect for a NAMED function taken as a value, which is the
+    # same packing with no lambda involved: `def m(*a)` really does take a
+    # `MojoList *`, so `r = m; r(1, 2, 3)` handed the callee the integer 1
+    # where a list pointer was wanted and it dereferenced address 1 — a
+    # SIGSEGV. A DIRECT call by name is untouched and still goes through
+    # `_lower_named_call`'s own packing; only the value form changes, and it
+    # changes to the same `MojoVarargFn` a variadic lambda gets.
+    test_gimple_stdout("gimple_variadic_named_function_through_a_value", """\
+def m(*a):
+    return len(a)
+
+def both(*a, **k):
+    return len(a) * 100 + len(k)
+
+def main():
+    r = m
+    print(r(1, 2, 3))
+    s = both
+    print(s(1, 2, z=3))
+    print(s(1, 2))
+    print(m(1, 2, 3))
+    print(both(1, 2, z=3))
+""", "3\n201\n200\n3\n201\n")
+
     # 10a3. Heterogeneous stack drained with .pop(), each popped value
     # discriminated with `isinstance(top, tuple)`. `isinstance(x, tuple)`
     # had no real lowering (fell through to an always-false runtime stub),

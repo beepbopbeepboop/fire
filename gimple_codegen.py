@@ -1854,6 +1854,20 @@ class GimpleGen:
         # Lib/importlib/metadata/__init__.py's `def distributions(**kwargs):`
         # called as plain `distributions()`.
         self._func_kwargs_has_vararg: dict[str, bool] = {}
+        # free-fn name (both mangled and plain) -> (n_fixed, kind) for a
+        # function that DECLARES a `*args`/`**kwargs`, exactly the pair
+        # `_lower_LambdaExpr` records for a variadic lambda. Used ONLY when
+        # the function is taken as a VALUE (`f = g`), where its real C
+        # signature (packed `MojoList *`/`MojoDict *` parameters) no longer
+        # matches the arity-based `mojo_fnptr_call_N` convention: `def f(*a)`
+        # called through `f` passed loose scalars where a `MojoList *` was
+        # wanted, and the callee dereferenced the integer 1 — a SIGSEGV.
+        # Materializing such a value as a `MojoVarargFn` (see
+        # runtime/fire_runtime.h's "Variadic callables") makes every holder
+        # of it — local, argument, container, struct field, `sorted(key=)` —
+        # pack correctly. A DIRECT call by name is unaffected and keeps going
+        # through `_lower_named_call`'s own `...`-sentinel packing.
+        self._variadic_func_shape: dict[str, tuple] = {}
         # A free function's own sentinel-preserving param C-type list, for
         # the `(fixed, *args, trailing_kwonly=default, ...)` shape (no
         # `**kwargs`) — populated ONCE at registration time so a call site
