@@ -614,12 +614,23 @@ def test_a_module_body_can_still_be_refused_by_the_ordinary_codegen(tmpdir,
     body. The message is the ordinary construction refusal, unchanged, because
     the body is a function and the function pipeline is what answers it. A
     second, body-specific refusal list would have made this a different
-    message for the same construct depending on where it was written."""
+    message for the same construct depending on where it was written.
+
+    The argument count is THREE, and that is what keeps the case about the
+    thing it claims to be about. It was two when this was written, and two is
+    exactly the arity the declared `__init__` takes, so `c0438b4`'s inline
+    started answering it: `Point(1, 2)` in a module body now builds, runs, and
+    prints 1, which is the right answer for the program. Three is refused by
+    the SAME message for the same reason the case is about — the body is a
+    function, so the ordinary construction check is what refuses it — and it
+    exercises the arm of the inline that genuinely has no answer (a count no
+    declared arity admits) rather than the arm that was fixed underneath it.
+    """
     return case_refused(
         "body_construction_refusal",
         "struct Point:\n    x: Int\n    y: Int\n    def __init__(self, x, y):\n"
         "        self.x = x\n        self.y = y\n\n"
-        "p = Point(1, 2)\nprintf(\"%d\\n\", p.x)\n",
+        "p = Point(1, 2, 3)\nprintf(\"%d\\n\", p.x)\n",
         "is a call to a user-defined `__init__`", tmpdir, verbose)
 
 

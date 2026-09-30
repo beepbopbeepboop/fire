@@ -33,11 +33,13 @@ import fire_compiler as F
 from formal import model as M
 from formal.arm64_codegen import ARM64Codegen, CodegenError
 from formal.macho import build_macho, compute_macho_got_addrs
-from formal.macho_linker import (EXTERN_ENTRYOFF, NOEXTERN_ENTRYOFF, TEXT_BASE,
-                                  build_macho_dylib, dylib_code_offset,
-                                  externer_layout)
+from formal.macho_linker import (EXTERN_ENTRYOFF, EXTERN_GLOBALS_ENTRYOFF,
+                                  NOEXTERN_ENTRYOFF, NOEXTERN_GLOBALS_ENTRYOFF,
+                                  TEXT_BASE, build_macho_dylib,
+                                  dylib_code_offset, externer_layout)
 from mojo.middle.closures import discover_closures
 from formal.comptime_runner import make_call_hook
+from formal import dataclass_transform as DC
 
 
 class FormalBuildError(Exception):
@@ -712,20 +714,67 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
     without ever consulting a bare name) and the declared signature (which is
     what says whether a call's result is a string). See
     `model.dylib_export_lookup`."""
+    # Where this unit's module-global data segment will be MAPPED, handed to
+    # both backends because every slot access is an absolute address computed
+    # before the image exists. None when the module declares no writable
+    # global, so an ordinary program pays nothing and emits no data segment.
+    gbase = globals_base(fmt) if M.module_slots() else None
     if arch == "arm64":
         return ARM64Codegen(test_input=test_input,
                             dylib_syms=dylib_syms,
                             comptime_hook=comptime_hook,
-                            dylib_exports=dylib_exports)
+                            dylib_exports=dylib_exports,
+                            globals_base=gbase)
     if arch == "x86_64":
         from formal.x86_64_codegen import X86_64Codegen
         return X86_64Codegen(test_input=test_input,
                              extern_style="got" if fmt == "elf" else "stub",
                              dylib_syms=dylib_syms,
                              comptime_hook=comptime_hook,
-                             dylib_exports=dylib_exports)
+                             dylib_exports=dylib_exports,
+                             globals_base=gbase)
     raise FormalBuildError(
         f"unknown arch {arch!r} (expected one of {', '.join(ARCHES)})")
+
+
+def globals_image(fmt: str = "macho"):
+    """The data image for the current unit's module-global slots, or None.
+
+    One function, and the only caller of `model.build_data_image` on the build
+    side, because the blob and its fixup list are ONE fact that the linker and
+    the codegen both act on: the linker writes the bytes and emits a relocation
+    per fixup, and the codegen addresses slot `i` at the same offsets the blob
+    was laid out from. Building it in two places would give two images and one
+    of them would be wrong in a way no test could attribute.
+
+    `fmt` selects the base address the image's data segment is MAPPED at, which
+    the two containers define separately (`macho_linker.GLOBALS_VM` and
+    `elf.GLOBALS_VM`) and which is not optional: both linkers' relocation
+    machinery adds the load slide to the value already in the file, so a slot
+    word must hold the link-time ADDRESS.
+
+    None for a module with no `global NAME` — the ordinary case — so a program
+    that does not use this capability gets byte-for-byte the image it got
+    before."""
+    table = M.module_slots()
+    if not table:
+        return None
+    return M.build_data_image(table, globals_base(fmt))
+
+
+def globals_base(fmt: str = "macho") -> int:
+    """The address this container maps a unit's module-global data at.
+
+    Read by THREE parties that must not each look it up: the image builder
+    (which writes `base + offset` into every address-valued slot), the two
+    backends' `_global_slot_address` (which compute where slot `i` lives), and
+    the linker (which declares the segment there). One function, so a format
+    whose base moved cannot leave three copies behind."""
+    if fmt == "elf":
+        from formal.elf import GLOBALS_VM
+        return GLOBALS_VM
+    from formal.macho_linker import GLOBALS_VM
+    return GLOBALS_VM
 
 
 def _audit_bound_symbols(external_syms, dylib_syms, where: str,
@@ -848,15 +897,22 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
                                     "image"))
         binary = build_elf(code, entry=info["base_addr"],
                            vaddr=info["base_addr"],
-                           external_syms=external_syms, lib_name=DEFAULT_LIBC)
+                           external_syms=external_syms, lib_name=DEFAULT_LIBC,
+                           globals_image=globals_image(fmt))
         return code, info, external_syms, binary
 
     # The extern entry offset depends on the linked dylibs: each adds a load
-    # command, and the code starts after the whole list.
+    # command, and the code starts after the whole list. `has_globals` moves it
+    # the same way, because a module-global `__DATA` segment is one more load
+    # command — and it is read from the PUBLISHED table rather than recomputed,
+    # so the image the linker is about to be handed and the layout the code was
+    # emitted for are the same fact read twice.
     from formal.macho_linker import extern_entry_offset
+    has_globals = bool(M.module_slots())
     base_extern = TEXT_BASE + extern_entry_offset(
-        [d["install_name"] for d in dylibs])
-    base_noextern = TEXT_BASE + NOEXTERN_ENTRYOFF
+        [d["install_name"] for d in dylibs], has_globals=has_globals)
+    base_noextern = TEXT_BASE + (NOEXTERN_GLOBALS_ENTRYOFF if has_globals
+                                 else NOEXTERN_ENTRYOFF)
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms, comptime_hook,
                             dylib_exports)
     try:
@@ -876,7 +932,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
             stub_addrs = compute_macho_got_addrs(
                 len(code), external_syms, vaddr=info["base_addr"], arch=arch,
                 entryoff=extern_entry_offset(
-                    [d["install_name"] for d in dylibs]))
+                    [d["install_name"] for d in dylibs],
+                    has_globals=has_globals))
             codegen.asm.resolve_extern(stub_addrs)
             code = bytes(codegen.asm.sections["text"])
     except CodegenError as e:
@@ -890,7 +947,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     binary = build_macho(code, external_syms=external_syms, arch=arch,
                          dylibs=[{"install_name": d["install_name"],
                                   "symbols": set((d.get("map") or {}).values())}
-                                 for d in dylibs] or None)
+                                 for d in dylibs] or None,
+                         globals_image=globals_image(fmt))
     return code, info, external_syms, binary
 
 
@@ -1022,6 +1080,21 @@ def compile_formal(source_path: str, output: str = None,
     except SyntaxError as e:
         raise FormalBuildError(f"parse error: {e}")
 
+    # The target this image is FOR, published BEFORE anything that can build a
+    # module — `_imported_structs` below compiles each imported module into a
+    # dylib, and each of those publishes the target of ITS OWN build (a dylib is
+    # always Mach-O, `formal/imports.py`). Publishing again after would work, but
+    # a value that is only correct because of the order of two lines is a value
+    # that will be wrong the day someone reorders them; so this one goes first
+    # and the dylib's publish is the one that has to be undone.
+    #
+    # The pipeline is where a `#kgen.param.expr<…>` target query is answered:
+    # `arch` and `fmt` are the two facts the linker is about to act on, and a
+    # query like "what is the current target's arch" has exactly one correct
+    # answer for them. They are the same pair the dylib cache is keyed on, so
+    # the two front ends cannot describe one target two ways.
+    M.publish_target(M.target_for(arch, fmt))
+
     # Structural acceptance: only FunctionDefs matter for codegen; imports /
     # module-level statements are fine (filtered here + in the codegen).
     # The modules this file imports contribute their struct declarations
@@ -1030,8 +1103,14 @@ def compile_formal(source_path: str, output: str = None,
     # name. Resolving this after would leave `c.get()` unrecognised in a file
     # that imported the struct, which is the only way such a call occurs.
     imported_structs = _imported_structs(source_path, stmts, arch)
+    # …and the target again, because the dylib builds above republished it as
+    # the dylib's own Mach-O target. This is the one place the two genuinely
+    # differ (an `--fmt=elf` build on a Mac asks for an ELF image and a Mach-O
+    # dylib), and the executable's functions are the ones the linker is about to
+    # act on.
+    M.publish_target(M.target_for(arch, fmt))
     try:
-        functions, structs, symbols = _prepare_functions(
+        functions, structs, symbols, slots = _prepare_functions(
             stmts, synthetic=True, extra_structs=imported_structs)
     except CodegenError as e:
         # A clean compile error. The function pipeline runs before codegen
@@ -1101,14 +1180,8 @@ def compile_formal(source_path: str, output: str = None,
     # dotted call.
     from formal.imports import imported_modules
     try:
-        M.publish_module_symbols(symbols)
-        check_frame_field_blob_premises(structs)
-        check_frame_subscript_escapes(functions)
-        check_construction_shapes(functions, {st.name: st for st in structs})
-        check_module_symbols(
-            functions, {st.name: st for st in structs},
-            imported_module_names=(imported_modules(stmts)
-                                   if import_dylibs else None))
+        _run_late_checks(stmts, functions, structs, symbols, slots,
+                         imported_modules(stmts) if import_dylibs else None)
     except CodegenError as e:
         raise FormalBuildError(str(e))
     if import_dylibs:
@@ -1203,8 +1276,9 @@ def compile_formal(source_path: str, output: str = None,
     return result
 
 
-def _formal_module_functions(source_path: str,
-                             link_dylibs: list = None) -> tuple[str, list]:
+def _formal_module_functions(source_path: str, link_dylibs: list = None,
+                             arch: str = "arm64",
+                             fmt: str = None) -> tuple[str, list]:
     try:
         with open(source_path) as f:
             source = f.read()
@@ -1222,6 +1296,13 @@ def _formal_module_functions(source_path: str,
     # (which finds nothing in binary_heap either, so it is refused a moment
     # later, by the check that can actually say why). Reporting the accurate
     # reason matters: "no top-level functions" reads like a codegen gap.
+    # The dylib is an image for the same target as the executable that will
+    # link it, and it is the executable's own `arch`/`fmt` that decides it
+    # (formal/imports.py keys its build cache on them for exactly that reason).
+    # Published HERE because it is the first thing in the dylib pipeline that
+    # knows the pair, and `_prepare_functions` is what every reader below
+    # consults.
+    M.publish_target(M.target_for(arch, fmt or default_format(arch)))
     #
     # `as_dylib=True` because a LIBRARY has no entry point. A module whose API
     # is its top-level statements — `sep = "/"` — compiles here to a dylib that
@@ -1232,8 +1313,12 @@ def _formal_module_functions(source_path: str,
     # the same message the executable path gives and the same answer the reader
     # needs: a module-level store needs storage, and this path has none
     # (`bugs/FORMAL_module_state_no_storage.md`).
-    functions, structs, symbols = _prepare_functions(stmts, synthetic=False,
-                                                    as_dylib=True)
+    #
+    # Four values out, not three: `slots` is this unit's table of module-global
+    # names that have real storage, and the caller publishes it beside
+    # `publish_module_symbols` for the reason that one is published twice here.
+    functions, structs, symbols, slots = _prepare_functions(
+        stmts, synthetic=False, as_dylib=True)
     # The other of the two call sites of `check_frame_field_blob_premises`, and
     # for the same reason: this is the dylib path, it has no import resolution
     # of its own to be preempted by, and the check has to apply to a dylib
@@ -1252,29 +1337,89 @@ def _formal_module_functions(source_path: str,
     # bug, on a construct that is a refusal.  Measured: with the check outside
     # the wrapper, `std/gpu/host/func_attribute.mojo` went from a named
     # `codegen` finding to `backend-crash`.
+    from formal.imports import imported_modules
     try:
-        # Re-publish THIS unit's table, for the reason the executable path
-        # does: a nested `_prepare_functions` publishes its own module's
-        # globals over the published one, and the dylib path builds imported
-        # modules before it gets here.
-        M.publish_module_symbols(symbols)
-        check_frame_field_blob_premises(structs)
-        check_frame_subscript_escapes(functions)
-        check_construction_shapes(functions, {st.name: st for st in structs})
-        # The third of the three, and HERE for the reason the other two are:
-        # a name the build cannot place is a codegen finding about THIS file,
-        # and a file that imports a host module has a more fundamental fact
-        # about it that a raise from `_prepare_functions` would have hidden.
-        from formal.imports import imported_modules
-        check_module_symbols(
-            functions, {st.name: st for st in structs},
-            imported_module_names=(imported_modules(stmts)
-                                   if link_dylibs else None))
+        _run_late_checks(stmts, functions, structs, symbols, slots,
+                         imported_modules(stmts) if link_dylibs else None)
     except CodegenError as e:
         raise FormalBuildError(str(e))
     module = re.sub(r"[^A-Za-z0-9_]", "_",
                     os.path.splitext(os.path.basename(source_path))[0])
-    return module, functions, source, structs
+    return module, functions, source, structs, slots
+
+
+def _run_late_checks(stmts: list, functions: list, structs: list,
+                     symbols: dict, slots: dict,
+                     imported_module_names) -> None:
+    """Publish this unit's module-level tables, then run every late check.
+
+    ONE function for the two front ends, and the reason is a measured drift
+    rather than a tidiness preference: this block was open-coded at both call
+    sites (`compile_formal` and `_formal_module_functions`), and merging four
+    branches into one tree showed what that costs — `formal-module-state` had
+    to remember to add `publish_global_slots` in two places and widen
+    `_prepare_functions`'s return from three values to four in both, and
+    `mod-dataclasses` had to remember to add `check_dataclass_constructs` in
+    two places. Two of four branches each paid double for the same capability,
+    and nothing would have failed if one had paid once. The set of checks is
+    therefore decided once, here, and the next one is a line rather than an
+    edit to two call sites that must agree.
+
+    THE ORDER IS LOAD-BEARING and is the reason this is not just a list:
+
+      * **publish first, always.** The two tables are re-published here rather
+        than at their construction because building an import is a NESTED
+        `_prepare_functions` — each imported module is compiled in full into a
+        dylib — and each one publishes ITS module's globals over ours. The
+        symptom when this was skipped was measured, and it was exactly the
+        two-architecture split this design exists to prevent: `_assembly.mojo`
+        refused `'_get_kgen_string'` with the message naming THIS module on
+        arm64 and the one naming the imported module on x86-64, because the
+        two architectures built the dylibs in a different order and so had a
+        different module's table published at the point the check read it.
+      * **`check_module_symbols` LAST.** It is the check with the fullest
+        story — "this path places a name in a register, a spill slot, a
+        receiver field's frame, or a folded module constant, and yours is in
+        none of them" — so a file that has a more specific problem should
+        report that one, and every check above it is more specific.
+      * **after the imports resolved, which is why this is HERE and not inside
+        `_prepare_functions`.** A file that imports a host module is out of
+        reach whatever its codegen says; raising this earlier reported the
+        secondary problem in 67 files and moved the coverage denominator for
+        it (`check_frame_field_blob_premises`), and 14 more for the
+        construction check.
+
+    Raises `CodegenError`. Both call sites wrap it, and the wrapping is a fix
+    rather than a courtesy: each caller's `except CodegenError` is around
+    `_prepare_functions` / the codegen step only, so a refusal from here
+    reached the sweep as a raised exception and was classified `backend-crash`
+    — a verdict for a compiler bug, on a construct that is a refusal. Measured:
+    with the construction check outside the wrapper,
+    `std/gpu/host/func_attribute.mojo` went from a named `codegen` finding to
+    `backend-crash`.
+
+    `imported_module_names` is `imported_modules(stmts)` GATED by the caller
+    on whether the build has any module dylib to link, and the gate is
+    load-bearing rather than defensive: `_resolve_imports` is a no-op for a
+    target with no module mechanism (an ELF image: no dylib form, nothing to
+    link), so on that target an `import` produces no library and a dotted call
+    `mod.f()` has no symbol to bind. Handing the checker the module names there
+    would stop it refusing that call and let the image be emitted with a `BL`
+    against a symbol nothing defines — refused today, a load-time failure after
+    this change. No module dylib on the line, no dotted call."""
+    M.publish_module_symbols(symbols)
+    M.publish_global_slots(slots)
+    by_name = {st.name: st for st in structs}
+    check_frame_field_blob_premises(structs)
+    check_frame_subscript_escapes(functions)
+    check_construction_shapes(functions, by_name)
+    check_frame_return_shapes(functions)
+    # A `@dataclass` option this backend cannot lower is a fact about the FILE
+    # rather than about the image, so it belongs with this group rather than
+    # with the construct checks that only an executable's codegen can answer.
+    check_dataclass_constructs(stmts, functions)
+    check_module_symbols(functions, by_name,
+                         imported_module_names=imported_module_names)
 
 
 def _struct_methods(stmts: list) -> list:
@@ -1408,22 +1553,17 @@ def _frame_argument_slots(call, params):
     return out
 
 
-def _member_chain(node) -> str:
-    """`a.b.c` for a MemberExpr chain, spelled the way the source spells it.
-
-    `_root_ident` reports a chain's root and depth and nothing else, which is
-    the right answer for a lookup and the wrong one for a MESSAGE: the old
-    field-of-a-field diagnostic printed `base.member`, so a refusal about
-    `self.asm.emit` read as though the source said `self.emit`, and the reader
-    went looking for a field of the wrong name. Every refusal that talks about a
-    chain now spells the chain."""
-    parts = []
-    while isinstance(node, F.MemberExpr):
-        parts.append(node.member)
-        node = node.obj
-    parts.append(node.name if isinstance(node, F.IdentExpr) else "?")
-    parts.reverse()
-    return ".".join(parts)
+# `a.b.c` for a MemberExpr chain, spelled the way the source spells it:
+# `model.member_chain_text`, the one chain spelling in the tree.
+#
+# It used to be spelled here as well, and it was here because the messages
+# wanted it: `_root_ident` reports a chain's root and depth and nothing else,
+# which is the right answer for a lookup and the wrong one for a MESSAGE.  The
+# old field-of-a-field diagnostic printed `base.member`, so a refusal about
+# `self.asm.emit` read as though the source said `self.emit`, and the reader
+# went looking for a field of the wrong name. Every refusal that talks about a
+# chain spells the chain, and one function does the spelling.
+_member_chain = M.member_chain_text
 
 
 def _subscript_chain(node) -> str:
@@ -1595,25 +1735,12 @@ def _check_holder_agreements(functions, holders, hstruct, params_of) -> None:
                     plain_spellings))
 
 
-def _expr_spelling(node) -> str:
-    """The source's own spelling of an expression, as far as a name needs one.
-
-    A refusal that quotes `CallExpr` where the source wrote `mid(1)` sends the
-    reader to the AST to find the call, which is the opposite of what a
-    diagnostic quoting a call site is for.  A shape with no short spelling is
-    named by its type, which is at least a true statement and is obviously a
-    placeholder to anyone who reads it."""
-    if isinstance(node, F.IdentExpr):
-        return node.name
-    if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr):
-        return f"{node.func.name}({', '.join(_expr_spelling(a) for a in (node.args or []))})"
-    if isinstance(node, F.MemberExpr):
-        return _member_chain(node)
-    for attr in ("value", "name"):
-        v = getattr(node, attr, None)
-        if isinstance(v, (str, int, float, bool)):
-            return str(v)
-    return type(node).__name__
+# The source's own spelling of an expression, and of a `.member` chain, are
+# `model.expr_spelling` / `model.member_chain_text`.  Both used to be spelled
+# here as well; `model.py` needs them for its own refusals and a model function
+# must not reach up into the build pass for a string, so the model owns the one
+# implementation and this file calls it.
+_expr_spelling = M.expr_spelling
 
 
 def _call_spelling(call, arg, position, pname) -> str:
@@ -1663,7 +1790,8 @@ def _call_receivers(fn):
     return out
 
 
-def _frame_receivers(functions: list, structs_by_name: dict) -> None:
+def _frame_receivers(functions: list, structs_by_name: dict,
+                     dc_classes: dict = None) -> None:
     """Annotate every function with its frame-pointer receivers and field slots.
 
     Writes `fn._frame_holders` (the names holding a frame address) and
@@ -1742,6 +1870,16 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
     # (`formal/model.py`'s `function_return_types`) so the three callers of
     # `struct_construction_plan` cannot answer differently.
     rets = M.function_return_types(functions)
+    # `{function name: struct}` — the functions that RETURN a frame address, and
+    # the struct whose layout that frame has.  It is the other half of the
+    # holder fixpoint below and is computed inside the same loop, because the
+    # two feed each other: a call to one of these functions binds a holder, and
+    # which functions are in the table is read out of the holder table.  It is
+    # a property of the WHOLE IMAGE for the same reason a parameter's being a
+    # holder is (`model.frame_holder_disagreement_refusal`): the caller has to
+    # reserve a block BEFORE the call and read the result out of it afterwards,
+    # so one call site's answer is not enough.
+    returns_frame: dict = {}
     for fn in functions:
         owner = owners.get(fn.name)
         if owner is not None and owner.name in framed:
@@ -1769,6 +1907,28 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                     hs.add(target)
                     hstruct[fn.name][target] = list(hstruct[fn.name][value.name])
                     changed = True
+                # A call to a function that RETURNS A FRAME binds a frame
+                # address, and this is the edge that makes the returned-frame
+                # convention a whole-image property rather than a per-file one:
+                # `q = make()` puts a frame address in `q`, so `q.x` is a frame
+                # read and `q` has to be in the holder table for the codegen to
+                # emit a load instead of a register move.
+                #
+                # It is inside the fixpoint rather than after it because it
+                # DEPENDS on what the fixpoint decides: which functions return
+                # a frame is itself read out of the holder table, so the two
+                # questions have to be asked together until neither answer
+                # moves.  It is keyed on the BINDING node — a `VarDecl` or an
+                # `AssignStmt` — and not on the `CallExpr`, because those are
+                # two different nodes in this walk and the binding is the one
+                # that says the address outlives the call.
+                if target and isinstance(value, F.CallExpr) \
+                        and isinstance(value.func, F.IdentExpr):
+                    st = returns_frame.get(value.func.name)
+                    if st is not None and target not in hs:
+                        hs.add(target)
+                        hstruct[fn.name].setdefault(target, []).append(st)
+                        changed = True
                 if not isinstance(node, F.CallExpr) \
                         or not isinstance(node.func, F.IdentExpr):
                     continue
@@ -1815,6 +1975,33 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                     hstruct[node.func.name][callee] = \
                         list(hstruct[fn.name][r[0]])
                     changed = True
+        # The OTHER half of the same fixpoint: which functions RETURN a frame.
+        # It has to be here and not after the loop because the edge above reads
+        # it — `q = make()` is a holder only if `make` is known to return a
+        # frame — and because it reads the holder table the same loop is still
+        # growing.  The two questions therefore have to be asked together until
+        # neither answer moves, which terminates because frame-ness only ever
+        # GROWS: a return value is a frame either because a name holds one (the
+        # holder table, monotone) or because it is a call to a function already
+        # known to return one (also monotone).
+        for fn in functions:
+            status, st = _frame_return_status(fn, holders[fn.name],
+                                              hstruct[fn.name], returns_frame)
+            fn._frame_return_status = status
+            if status == _RETURN_FRAME and returns_frame.get(fn.name) is not st:
+                changed = True
+            if status == _RETURN_FRAME:
+                returns_frame[fn.name] = st
+            elif returns_frame.pop(fn.name, None) is not None:
+                changed = True
+    # The whole image's table, published on every function, and the reason it
+    # is published rather than passed: the CALLER of a frame-returning function
+    # is a different function from the one that returns it, and the emitters
+    # ask the question per call site with no unit in hand — the same reason
+    # `_frame_candidates` is published rather than threaded.
+    for fn in functions:
+        fn._image_returns_frame = dict(returns_frame)
+    _check_returned_frame_budget(functions, returns_frame, params_of)
     # AFTER the fixpoint and BEFORE the per-function loop below, and both of
     # those positions are load-bearing rather than tidy:
     #
@@ -1857,6 +2044,19 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
         # no slot", which is the disagreement this whole pass exists to keep
         # apart from "this field is nested".
         slots, nested_slots = {}, {}
+        # `@dataclass` makes `==` a FIELD compare, and this is the only place
+        # a name's struct is known (the fixpoint above settled the locals, the
+        # interprocedural edge settled the parameters), so the desugaring runs
+        # HERE and takes `by_name` as given. Measured: a bare struct's `==` is a
+        # compare of two words, and for a multi-field struct those words are
+        # frame ADDRESSES — `Two(1, 2) == Two(1, 2)` is False on this path
+        # where CPython's `@dataclass` says True. The rewrite is into a chain
+        # this path already lowers correctly (`a.x == b.x and a.y == b.y`
+        # through a function boundary, measured to build and print what CPython
+        # prints), so it is a desugaring and not a new lowering. See
+        # formal/dataclass_transform.py.
+        if dc_classes:
+            DC.rewrite_equality(fn, hs, by_name, dc_classes)
         for node in M.iter_nodes(fn.body):
             if not isinstance(node, F.MemberExpr):
                 continue
@@ -1908,25 +2108,27 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                         nested = _typed_nested_frame(
                             base, outer, cands, structs_by_name, ost)
                         if nested is _NOT_TYPED:
-                            # No single declared type, so the slot's contents
-                            # are unknown — which is what the old message said,
-                            # and now it also says WHICH candidate disagreed.
+                            # No single type, so the slot's contents are unknown
+                            # — which is what the old message said, and now it
+                            # also says WHICH candidate disagreed and where each
+                            # one got its answer from.
                             raise CodegenError(
                                 f"{chain}() hands the word in the slot "
                                 f"{base}.{outer} to "
                                 f"{ost.name}.{node.member}(), whose receiver is "
                                 f"the ADDRESS of a frame of 8-byte slots — so "
                                 f"the slot would have to hold a frame address. "
-                                f"The declared type of {outer!r} is the only "
-                                f"thing here that could say so, and it does "
-                                f"not: {M.field_type_disagreement(cands, outer, _type_rows(cands, outer))}"
+                                f"Only a type for {outer!r} could say so — a "
+                                f"declaration in the class body, or a "
+                                f"construction its __init__ assigns — and there "
+                                f"is no single one: {M.field_type_disagreement(cands, outer, _type_rows(cands, outer, structs_by_name))}"
                                 f". Until every binding of the name agrees on "
                                 f"one type there is no frame to place here"
                             )
                         if nested is _REASSIGNED:
                             raise CodegenError(
-                                f"{base}.{outer} is declared as a "
-                                f"{M.annotation_base_name(_field_annotation(cands, outer))}"
+                                f"{base}.{outer} is a "
+                                f"{M.annotation_base_name(_field_annotation(cands, outer, structs_by_name))}"
                                 f", a struct of this module whose receiver is a "
                                 f"frame of 8-byte slots, so the slot does hold a "
                                 f"frame address — but a method of "
@@ -1998,21 +2200,21 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                         f"in the slot {base}.{outer_field} is a value, not a "
                         f"struct, so there is no second layout to read through. "
                         f"Two things would make it representable and neither is a "
-                        f"change to this function: an ANNOTATION on "
+                        f"change to this function: a TYPE for "
                         f"{outer_field!r} that EVERY binding of the name agrees "
-                        f"on and that names a struct declared here (a struct "
-                        f"declared here would then be a nested frame, placed in "
-                        f"the outer object's own block), or a builtin method on "
-                        f"the value — which is {node.member!r}() as a call, not "
-                        f"a field read. The declared type of {outer_field!r} does "
-                        f"not settle it: "
-                        f"{M.field_type_disagreement(cands, outer_field, _type_rows(cands, outer_field))}"
+                        f"on and that names a struct declared here — a declaration "
+                        f"in the class body, or a construction its __init__ "
+                        f"assigns — which would then be a nested frame, placed in "
+                        f"the outer object's own block, or a builtin method on "
+                        f"the value, which is {node.member!r}() as a call, not "
+                        f"a field read. Nothing types {outer_field!r} here: "
+                        f"{M.field_type_disagreement(cands, outer_field, _type_rows(cands, outer_field, structs_by_name))}"
                     )
                 if nested is _REASSIGNED:
                     raise CodegenError(
                         f"{chain} reads through {base}.{outer_field}, which is "
-                        f"declared as a "
-                        f"{M.annotation_base_name(_field_annotation(cands, outer_field))}"
+                        f"a "
+                        f"{M.annotation_base_name(_field_annotation(cands, outer_field, structs_by_name))}"
                         f" — a struct of this module whose receiver is a frame — "
                         f"but a method of "
                         f"{', '.join(sorted({st.name for st in cands}))} ASSIGNS "
@@ -2043,7 +2245,8 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                         f"read {chain} has no first load: "
                         + ("the candidate layouts disagree — "
                            + M.field_type_disagreement(
-                               cands, outer_field, _type_rows(cands, outer_field))
+                               cands, outer_field,
+                               _type_rows(cands, outer_field, structs_by_name))
                            if odis else
                            f"no candidate declares it as a field of a frame")
                     )
@@ -2362,31 +2565,36 @@ _NOT_TYPED = object()
 _REASSIGNED = object()
 
 
-def _field_annotation(cands, name):
-    """The declared type of `name` as a candidate spells it, for a message.
+def _field_annotation(cands, name, decls=None):
+    """The type of `name` as a candidate spells it, for a message.
 
     The first candidate's answer, and only ever used to NAME a type in a
     diagnostic — the decision itself is `frame_field_type_candidates`, which
     requires unanimity.  A reader is better served by the spelling one
     candidate used than by no type at all, and the message says "is declared as"
     rather than asserting it is the type.
+
+    `decls` is the same table the decision was made from, so the spelling is
+    the DECLARATION's when there is one and the constructor assignment's when
+    there is not; a message that printed "is declared as" for the second would
+    send the reader to a declaration the class does not have.
     """
     for st in cands:
-        _base, ann = M.struct_field_declared_type(st, name)
+        _base, ann, _ev, _why = M.struct_field_type(st, name, decls)
         if ann is not None:
             return ann
     return None
 
 
-def _type_rows(cands, name):
-    """The declared-type evidence for a field, for a refusal to quote.
+def _type_rows(cands, name, decls=None):
+    """The type evidence for a field, for a refusal to quote.
 
     A function rather than a call at each use site because the refusal has to
     quote the SAME table the decision was made from; recomputing it at the raise
     would be a second walk of the same candidates that could disagree with the
     first, and a refusal that misreports why it fired is worse than one that
     does not report at all."""
-    return M.field_type_rows(cands, name)
+    return M.field_type_rows(cands, name, decls)
 
 
 def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):
@@ -2535,6 +2743,48 @@ def check_frame_field_blob_premises(structs) -> None:
             raise CodegenError(M.frame_field_premise_refusal(st))
 
 
+def check_dataclass_constructs(stmts: list, functions: list) -> None:
+    """Every `@dataclass` construct in the unit, checked. One refusal each.
+
+    Called by the ENTRY POINTS, beside `check_construction_shapes`, and for the
+    same measured reason: `_prepare_functions` runs before `_resolve_imports`,
+    so a refusal raised from inside it preempts the import diagnosis and reports
+    the secondary problem on every file that imports a CPython host module.
+    This backend's `dataclasses` is a FRONT-END transform
+    (`formal/dataclass_transform.py` has the measurement that decides the
+    layer), so this check is the back half of it: the rewrites happened in
+    `_prepare_functions`, and what is left is what cannot be rewritten.
+
+    Two halves, and they are different in kind:
+
+      * the CLASS checks — inheritance, `@dataclass(...)` options, `__post_init__`,
+        `InitVar` — read the module's StructDefs. They are a fact about the file
+        and are true whatever the file imports;
+      * the REFLECTION checks — `dc.fields(x)`, `is_dataclass(v)` — read the
+        function bodies, and are gated on the file having IMPORTED
+        `dataclasses`, which is what `DC.bound_module_names` computes from the
+        import statements. Without that gate this would refuse every `.fields`
+        in the tree, including the ones on objects that have nothing to do with
+        this module.
+
+    Both halves are cheap when there is nothing to do: `dataclass_classes`
+    returns `{}` for a file with no `@dataclass`, and `bound_module_names`
+    returns `set()` for a file with no such import, so the whole check is a
+    function call on 578 of the sweep's files. That matters because it runs on
+    every build of every file, including the 664 stdlib ones."""
+    # …and over THIS MODULE'S OWN StructDefs, for the same reason the rewrite in
+    # `_prepare_functions` is: an imported declaration belongs to a separate
+    # compilation unit that goes through this same pipeline when it is built
+    # into a dylib, so checking it here reports another file's class against
+    # this file.
+    classes = DC.dataclass_classes(stmts)
+    if classes:
+        DC.check_dataclass_classes(classes)
+    names = DC.bound_module_names(stmts)
+    if names:
+        DC.check_reflection_calls(functions, names)
+
+
 def check_construction_shapes(functions, structs_by_name) -> None:
     """Decide every `S(...)` in the unit, and refuse the ones with no shape.
 
@@ -2617,6 +2867,143 @@ def _describe_value(value) -> str:
     if isinstance(value, F.StringLiteral):
         return f"the string {value.value!r}"
     return f"a {type(value).__name__}"
+
+
+# The three answers `_frame_return_status` gives, and why there are three and
+# not two.  `_RETURN_FRAME` is the only one that compiles, and it is a property
+# of the whole image: a caller reserves a block for this function's result and
+# reads it out of that block afterwards, so the answer cannot be per-path.
+_RETURN_FRAME = "frame"
+_RETURN_WORD = "word"
+_RETURN_UNSOUND = "unsound"
+
+
+def _frame_return_status(fn, holders, by_name, returns_frame):
+    """`(status, struct_or_None)` — what `fn` gives back to its callers.
+
+    The decision the returned-frame convention turns on, and it is asked of
+    every `return` in the body rather than of the first one, because the
+    convention is a property of the FUNCTION: a caller has to decide, before
+    the call, whether to reserve a block for the result, and it can only do
+    that if the answer is the same on every path.
+
+      * `_RETURN_FRAME` — every path returns a frame address, all of them of
+        one struct, and the body cannot fall off the end.  The struct is the
+        one the copy is laid out for.
+      * `_RETURN_WORD` — no path returns a frame address.  The ordinary case,
+        and everything that compiled before the convention existed.
+      * `_RETURN_UNSOUND` — a frame on one path and something else on another,
+        or a frame and a fall-off-the-end, or two frames of different widths.
+        The caller is PARKED a refusal for (`check_frame_return_shapes`)
+        rather than refused here, for the reason every other frame refusal in
+        this file is parked: `_prepare_functions` runs before the imports
+        resolve, and a refusal raised from inside it is reported in place of
+        the import diagnosis.
+
+    A value is frame-valued in exactly two ways, and they are the two the
+    holder analysis can recognise: a bare name that holds a frame address, and
+    a call to a function already known to return one.  Anything else is a
+    word — including a field read (`self.x` is a VALUE read out of the frame,
+    not the frame) and a copy construction, which is a frame in THIS function's
+    own scratch and is copied out by the same convention when it is returned.
+    """
+    frames, words = [], []
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.ReturnStmt) or node.value is None:
+            continue
+        value = node.value
+        if isinstance(value, F.IdentExpr) and value.name in holders:
+            cands = by_name.get(value.name) or []
+            if cands:
+                frames.append((cands, value.name))
+                continue
+        if isinstance(value, F.CallExpr) and isinstance(value.func, F.IdentExpr):
+            st = returns_frame.get(value.func.name)
+            if st is not None:
+                frames.append(([st], f"{value.func.name}()"))
+                continue
+        words.append(_expr_spelling(value))
+    if not frames:
+        return _RETURN_WORD, None
+    if words:
+        _park_frame_return(fn, M.frame_return_mixed_refusal(
+            fn.name, _frame_return_spelling(frames[0][1]),
+            f"the value {words[0]!r}", False))
+        return _RETURN_UNSOUND, None
+    if not M.returns_on_every_path(getattr(fn, "body", None)):
+        _park_frame_return(fn, M.frame_return_mixed_refusal(
+            fn.name, _frame_return_spelling(frames[0][1]), None, True))
+        return _RETURN_UNSOUND, None
+    # Every path returns a frame, so the only question left is WHICH frame, and
+    # the answer has to be one struct: the copy is `n` slots wide and the
+    # caller reserved a block sized for the struct this returns.
+    shapes = []
+    for cands, _spelling in frames:
+        for st in cands:
+            if st not in shapes:
+                shapes.append(st)
+    if len(shapes) > 1:
+        rows = [(st.name, len(M.struct_frame_slots(st))) for st in shapes]
+        _park_frame_return(fn, M.frame_return_candidates_refusal(fn.name, rows))
+        return _RETURN_UNSOUND, None
+    return _RETURN_FRAME, shapes[0]
+
+
+def _frame_return_spelling(value) -> str:
+    """How a refusal names the value a `return` gives a frame address."""
+    if isinstance(value, F.IdentExpr):
+        return f"the frame in {value.name!r}"
+    return f"the frame in {value!r}"
+
+
+def _park_frame_return(fn, message) -> None:
+    """Record a returned-frame refusal for `check_frame_return_shapes` to raise.
+
+    Parked, never raised, for the reason the subscript escape is parked
+    (`_defer_subscript_escape`): this pass runs inside `_prepare_functions`,
+    which is BEFORE the imports resolve, so a refusal raised from here is
+    reported in place of the import diagnosis — and a file that imports `os` is
+    out of this backend's reach whatever its codegen says, which is the more
+    useful of the two answers."""
+    fn._frame_return_problems = list(
+        getattr(fn, "_frame_return_problems", ())) + [message]
+
+
+def check_frame_return_shapes(functions) -> None:
+    """Raise the returned-frame refusals `_frame_receivers` parked.
+
+    The fourth of the late frame checks and the same reason as the other three:
+    a refusal raised before the imports resolve is reported in place of the
+    import diagnosis.  A returned frame that is unsound on one path is a real
+    finding and a late one — the import is the more fundamental fact, and this
+    one only matters if the imports resolve."""
+    for fn in functions or ():
+        for message in (getattr(fn, "_frame_return_problems", ()) or ()):
+            raise CodegenError(message)
+
+
+def _check_returned_frame_budget(functions, returns_frame, params_of) -> None:
+    """Refuse a frame-returning callee with no argument register left.
+
+    The hidden word is one more argument, and this path passes arguments in
+    registers: arm64 has X0..X7 and x86-64 has six.  A callee that already
+    takes the whole budget cannot be given the word, and the alternative is not
+    a rough edge — `_emit_call` drops arguments past the budget for
+    compile-only fidelity, so the word would be dropped and the callee would
+    copy the frame into whatever the register held.  That is the silent wrong
+    answer, and `model.returned_frame_convention_refusal` is the message for
+    it.  Counted from the DECLARED parameter list rather than from a call site,
+    because the callee is compiled once and every call site has to agree."""
+    for fn in functions or ():
+        if fn.name not in returns_frame:
+            continue
+        names = params_of.get(fn.name) or []
+        n = len(M.incoming_args(fn))
+        if n < len(names):
+            n = len(names)
+        message = M.returned_frame_convention_refusal(fn.name, n)
+        if message:
+            _park_frame_return(fn, message)
 
 
 def _constructor_bindings(fn, framed) -> dict:
@@ -2784,14 +3171,35 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
 
     for node in M.iter_nodes(fn.body):
         if isinstance(node, F.ReturnStmt) and node.value is not None:
-            # Whether the returning function CREATED the frame is not a thing
-            # this walk knows: a holder may have arrived as one of its
-            # parameters, in which case the creator is up the call chain.
-            # `owners` says which case this is, and the message says so,
+            # `return <frame>` used to be refused here, and the refusal was
+            # CORRECT: the block belongs to the function that reserved it and
+            # that function's scratch dies with it, so the address the caller
+            # would dereference names reclaimed stack. It is not the answer
+            # any more, because the answer exists: `_frame_receivers` has
+            # decided whether this function returns a frame, and when it does
+            # the CONVENTION puts the copy in a block in the CALLER's own
+            # scratch (`model.struct_returned_frame_sites`) with the caller's
+            # block address passed as one hidden trailing word. So the emitter
+            # copies and there is nothing left for this pass to object to.
+            #
+            # `_frame_return_status` is three-valued and the third value is why
+            # this branch is a branch at all: `_RETURN_UNSOUND` means the
+            # function returns a frame on one path and not on another, which
+            # is a real refusal — parked for
+            # `check_frame_return_shapes` to raise from the entry points,
+            # because a refusal raised from inside `_prepare_functions` is
+            # reported in place of the import diagnosis. It is NOT this
+            # message: the mechanism operating there is the two return
+            # conventions, not a frame escaping a frame.
+            #
+            # `owners` says which case the received frame is, and the message
+            # for a function that really does return a word still says so,
             # because "returned from the function that created it" is false for
-            # the second and sends the reader to the wrong function looking for
-            # it.
+            # a frame that arrived as a PARAMETER and sends the reader to the
+            # wrong function looking for it.
             owner = (owners or {}).get(fn.name)
+            if getattr(fn, "_frame_return_status", _RETURN_WORD) != _RETURN_WORD:
+                continue
             if isinstance(node.value, F.IdentExpr) \
                     and node.value.name in holders:
                 raise CodegenError(M.frame_return_refusal(
@@ -3267,9 +3675,20 @@ def _module_constant_sites() -> dict:
 
     Reads the PUBLISHED table rather than re-deriving it, so a caller with no
     statement list in hand and the executable path's consumer cannot answer
-    differently about the same name."""
+    differently about the same name.
+
+    A name with a `__DATA` SLOT is excluded, and that exclusion is the load-
+    bearing part rather than an optimisation. A slotted name is one some function
+    writes through `global`, so its value CHANGES while the program runs —
+    substituting its module-level initializer at every read would replace a value
+    the program computed with the constant it started at. Measured on the tree
+    this replaces: `G = 5` with `def bump(): global G; G = G + 1` called twice
+    printed `G=5` where CPython prints `G=7`, because the read was the folded 5
+    and the write went into a register nothing else named. Two homes for one
+    word, and the read picked the one that never changes."""
+    stored = M.module_slots()
     return {name: sym.literal for name, sym in M.module_symbols().items()
-            if sym.literal is not None}
+            if sym.literal is not None and name not in stored}
 
 
 def _names_bound_in(fn) -> set:
@@ -3415,8 +3834,22 @@ def _apply_module_constant_sites(node, sites: dict, stores: set) -> None:
         return node
     if isinstance(node, (F.AssignStmt, F.AugAssignStmt, F.VarDecl)):
         # The target is a store: leave it, and walk the value side only.
-        _apply_module_constant_sites(
-            getattr(node, "value", None), sites, stores)
+        #
+        # …through `_rewrite_child`, which RETURNS a replacement, and not
+        # through this function, which rewrites in place. That is the whole
+        # difference and it was a live bug: a bare `IdentExpr` has no child
+        # slots to rewrite (its fields are `name`, `line` and `col`, all
+        # scalars), so handing one to the in-place walk walked straight
+        # through it and left the name in place. Every other position reached
+        # the replacement — a list element is matched in the list branch, and
+        # every other single child goes through `_rewrite_child` — so the
+        # substitution silently covered `return G`, `print(G)` and `G + 1` and
+        # missed `x = G`, `x: Int = G` and `h.a = G`. The consequence is the
+        # `has no home` refusal, on both architectures, for a construct the
+        # build answers: `G = 7` then `h.v = G` inside a function was refused
+        # rather than reading the 7.
+        node.value = _rewrite_child(getattr(node, "value", None), sites,
+                                    stores)
         return
     for name in getattr(node, "__dataclass_fields__", {}):
         setattr(node, name,
@@ -3445,6 +3878,110 @@ def _rewrite_child(child, sites: dict, stores: set):
             return child
     _apply_module_constant_sites(child, sites, stores)
     return child
+
+
+def _fold_target_queries(functions: list) -> int:
+    """Replace every `#kgen.param.expr<…>` target query in a body with its value.
+
+    Returns the number of sites folded.
+
+    A source-to-source rewrite in the SHARED pipeline rather than a case in
+    either backend's expression walk, and the reason is the same one
+    `_substitute_module_constants` and `_rewrite_class_constants` give: a
+    question the BUILD answers is a question that must not be answered twice.
+    If this lived in the emitters then arm64 and x86-64 would each carry their
+    own copy of the answer to "what is the current target's arch", and the two
+    would be free to disagree about it — the failure mode this module's whole
+    design exists to prevent. Replacing the query with the literal it denotes
+    also means everything downstream — the comptime folder, the name check, both
+    instruction selectors — sees an ordinary `StringLiteral` and needs to know
+    nothing about MLIR at all.
+
+    PRE-ORDER, and it does NOT descend into a query it folded (that subtree is
+    gone with it) nor into one it did not. The second half is the part that is
+    not an optimisation: `std/_plugin/selector.mojo` nests a
+    `target_get_field` inside an `eq` that also needs a plugin table this build
+    has no value for, and replacing the inner node would leave the outer one
+    holding a hole no evaluator can read — turning a refusal that names the
+    missing plugin into one that names an argument. Refusing a whole template
+    is the honest answer, so the walk leaves it whole."""
+    done = 0
+    for fn in functions:
+        body = getattr(fn, "body", None)
+        if not isinstance(body, list):
+            continue
+        count = [0]
+        _fold_target_queries_in(body, count)
+        done += count[0]
+    return done
+
+
+def _fold_target_queries_in(node, count: list):
+    """The walk, in place. Returns a replacement node for `node`, or None.
+
+    `count` is a one-element list because a list element has to be replaced
+    through its parent while a single-attribute child has to be replaced
+    through `setattr`, and one walk serves both — so the number of sites folded
+    comes back through a box rather than as a return value that only one of the
+    two shapes could carry."""
+    if isinstance(node, (list, tuple)):
+        # A tuple as well as a list, and not as a generality: a call's KEYWORD
+        # arguments are a list of `(name, value)` pairs (`CallExpr.kwargs`),
+        # which is where `std/builtin/type_aliases.mojo` keeps its templates —
+        # `Origin[0, _mlir_origin=__mlir_attr[…]]()`. Descent that stops at
+        # lists walks straight past them and leaves the query in the tree, so
+        # the backend then refuses a construct the build can answer, and the
+        # read of a `comptime` bound from it materializes a register.
+        #
+        # A tuple cannot be assigned into, so a tuple with a replaced element
+        # comes back as a LIST and the list slot it was read from takes it. A
+        # tuple with nothing replaced returns None, which is what keeps the
+        # common case — every keyword argument in the corpus that is not a
+        # template — from rewriting the list it lives in.
+        out = []
+        changed = isinstance(node, tuple)
+        for i, child in enumerate(node):
+            if M.is_mlir_template(child):
+                # A template this pass could not answer keeps its shape, WHOLE:
+                # see the function's note on `selector.mojo`. The test is
+                # `model.template_is_answered`, the SAME one the module-level
+                # refusal asks, because these two walks over the same tree used
+                # to disagree and refused a construct the build answers.
+                folded = M.fold_target_template(child)
+                if folded is not None:
+                    folded = M.folded_literal_node(folded, child)
+                    count[0] += 1
+                    changed = True
+                if isinstance(node, list):
+                    node[i] = folded if folded is not None else child
+                else:
+                    out.append(folded if folded is not None else child)
+                continue
+            repl = _fold_target_queries_in(child, count)
+            if repl is not None:
+                changed = True
+            if isinstance(node, list):
+                if repl is not None:
+                    node[i] = repl
+            else:
+                out.append(child if repl is None else repl)
+        return out if (changed and isinstance(node, tuple)) else None
+    if node is None or isinstance(node, (str, int, float, bool)):
+        return None
+    folded = M.fold_target_template(node)
+    if folded is not None:
+        count[0] += 1
+        return M.folded_literal_node(folded, node)
+    for name in getattr(node, "__dataclass_fields__", {}):
+        child = getattr(node, name)
+        if isinstance(child, (list, tuple)):
+            _fold_target_queries_in(child, count)
+        elif child is not None and not isinstance(child, (str, int, float,
+                                                          bool)):
+            repl = _fold_target_queries_in(child, count)
+            if repl is not None:
+                setattr(node, name, repl)
+    return None
 
 
 def _materialize_entry_dunder_name(functions: list) -> int:
@@ -3564,65 +4101,121 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # missing local.  Collected by node identity because `M.iter_nodes`
         # has no parent, and an un-compiled callee is the common case in a
         # file that calls into a dylib.
-        callees = {id(c.func) for c in M.iter_nodes(fn.body)
-                   if isinstance(c, F.CallExpr) and isinstance(c.func,
-                                                               F.IdentExpr)}
-        # …and the DOTTED callee, `mod.f(...)`, which is the other spelling of
-        # a cross-module call and the only one `import mod` produces. The root
-        # of the chain is not a read of a value either: it names the MODULE,
-        # and the emitter answers the call from that module's own export table
-        # (see `ARM64Codegen._extern_symbol`). Without this the check refused
-        # `mod` — "is imported from `mod`, so it is a module-level name of
-        # another module" — for a call the emitter can already lower, which
-        # made `import mod` unusable and left `from mod import f` as the only
-        # spelling of a module call this path had. The refusal was worse than
-        # useless here: its own remedy sentence said "give it a function (a
-        # `struct.fn()` call lowers)", recommending the very spelling it
-        # refused.
+        # …four spellings of it, and ONE loop collects all four, because the
+        # question is one question — "is this occurrence a CALLEE rather than a
+        # read of a value" — and four loops answering it would be free to
+        # disagree about where the answer stops. Collected by node IDENTITY,
+        # which is the only way to name a node again: `M.iter_nodes` has no
+        # parent.
         #
-        # `struct.pack(...)` parses as `CallExpr(func=MemberExpr(obj=
-        # IdentExpr('struct'), member='pack'))`, so the set comprehension above
-        # misses it — `c.func` is a MemberExpr, and the root IdentExpr is never
-        # collected. So the fix is to collect that root, by node IDENTITY (the
-        # only way to name a node again, since `M.iter_nodes` has no parent),
-        # and only in CALLEE position: the same name in a genuine read
-        # (`len(struct)`) is still refused, which is the point — a module
-        # object has no storage either way, and what has no storage is the
-        # READ, not the call through it.
+        #   1. `f(…)` — a bare name. A callee this unit does not compile is a
+        #      link-time fact rather than a missing local, and an un-compiled
+        #      callee is the common case in a file that calls into a dylib.
+        #   2. `mod.f(…)` — a module, which is the other spelling of a
+        #      cross-module call and the only one `import mod` produces. The
+        #      emitter answers the call from that module's own export table
+        #      (see `ARM64Codegen._extern_symbol`). Without this the check
+        #      refused `mod` — "is imported from `mod`, so it is a module-level
+        #      name of another module" — for a call the emitter can already
+        #      lower, which made `import mod` unusable and left
+        #      `from mod import f` as the only spelling of a module call this
+        #      path had. The refusal was worse than useless here: its own
+        #      remedy sentence said "give it a function (a `struct.fn()` call
+        #      lowers)", recommending the very spelling it refused.
+        #      GATED on the root naming an imported module, and that gate is
+        #      what makes this safe: a dotted call on anything else — a value's
+        #      method (`xs.append`), a struct's field (`h.f.g`), a
+        #      module-global table with no storage (`TABLE.lookup`) — keeps
+        #      whatever answer it had, so this adds a spelling and changes no
+        #      existing verdict. The gate admits a PACKAGE PREFIX of an
+        #      imported name, not just an exact match: `import os.path` binds
+        #      the name `os` — that is what Python does, and
+        #      `os.path.join(…)` is 532 of the measured `os` call sites in this
+        #      tree — while a name that is a dotted PREFIX of an import cannot
+        #      be a value, because a local, a parameter and a module-global are
+        #      all bare names and nothing in this language puts an attribute on
+        #      one. The dotted qualifier itself is resolved by module identity
+        #      further in (`_extern_symbol`), where the manifest says whether
+        #      that submodule exports the name at all.
+        #   3. `f[T](…)` — a comptime SPECIALIZATION, whose callee is a
+        #      `SubscriptExpr` and whose root is therefore walked as a read if
+        #      only `isinstance(c.func, F.IdentExpr)` is asked. That is the
+        #      false diagnosis the arm64 sweep reported for seventeen files:
+        #      `std/sys/_assembly.mojo` spells `_get_kgen_string[asm]()` and
+        #      was told `'_get_kgen_string' is imported from
+        #      std.collections.string.string_slice, so it is a module-level
+        #      name of another module` — which names a storage problem the file
+        #      does not have. The name is a CALLEE. What crosses the dylib
+        #      boundary is the instantiation, and whether this path has a
+        #      symbol for it is a question for the export rule and the linker,
+        #      not for the allocator's local table; that question is asked
+        #      where it belongs (see `_callee_defs` for the generic's base
+        #      name, and the export rule in `no_public_api_reason` for what a
+        #      generic can bind as). Exempted only when the bracket is not a
+        #      template some other rule has a sentence about — an MLIR template
+        #      in CALLEE position is a construct refusal, and the
+        #      `bracketed` scan below is the one that words it.
+        #   4. `external_call["setenv", Int32](…)` — a C symbol named by a
+        #      string literal in the bracket, so `external_call` is left as a
+        #      bare name with no home, and the bracket's second element is a
+        #      type EXPRESSION (`Int32`, `_CPointer[UInt8,
+        #      UntrackedOrigin[mut=False]]`) that is compile-time by
+        #      construction and is not a read of a value either. Only a
+        #      WELL-FORMED template is exempt: a malformed one still reaches
+        #      the bracketed refusal below, which words the malformed template
+        #      rather than a name-placement symptom. The type nodes are added
+        #      rather than left to fall through because `'Int32' has no home`
+        #      is a true statement about this pass and a useless one — it names
+        #      an allocator table the reader has to go and look up instead of
+        #      the subscript they wrote, and it was what every
+        #      `external_call[…]` in the stdlib was reported as.
+        #      `xc_callees` is the same set of templates, kept apart because
+        #      the bracketed scan below needs the OPPOSITE answer for a
+        #      template that is NOT a callee: `var x = external_call["sym", T]`
+        #      is a template used as a value, and the name-placement message
+        #      there names a symptom of this pass rather than the construct.
+        #      `M.iter_nodes` has no parent, so "is this subscript a call's
+        #      callee" is answerable here and nowhere else.
         #
-        # Restricted to a root that names an IMPORTED MODULE, which is what
-        # makes it safe: a dotted call on anything else — a value's method
-        # (`xs.append`), a struct's field (`h.f.g`), a module-global table with
-        # no storage (`TABLE.lookup`) — keeps whatever answer it had, so this
-        # adds a spelling and changes no existing verdict. Without the gate the
-        # last of those would stop being the precise refusal it is and become a
-        # failure from further in, naming the allocator instead of the
-        # construct.
-        #
-        # A root that is, or is a PACKAGE PREFIX of, an imported name. Not a
-        # detail: `import os.path` binds the name `os` — that is what Python
-        # does, and `os.path.join(...)` is 532 of the measured `os` call sites
-        # in this tree — so the root of that chain is `os` while the only
-        # imported name is `os.path`. Matching for equality refused the one
-        # spelling a package module is written with, and a name that is a
-        # dotted PREFIX of an import cannot be a value: a local, a parameter
-        # and a module-global are all bare names, and nothing in this language
-        # puts an attribute on one. The dotted qualifier itself is resolved by
-        # module identity further in (`_extern_symbol`), where the manifest
-        # says whether that submodule exports the name at all.
+        # `xc_type_args` is every node of a well-formed template's TYPE
+        # argument, kept as its own set rather than folded into `callees`,
+        # because it has to be exempt from the `bracketed` scan BELOW as well
+        # and that scan runs first. `_CPointer[UInt8, UntrackedOrigin[…]]` is
+        # a two-element subscript whose root is a bare name, so the scan would
+        # record the tuple-index refusal against `_CPointer` and then report it
+        # — a construct refusal about a TYPE, raised because of where the type
+        # was written. The scan's own `template_is_answered` skip is the
+        # precedent and the same statement: an argument that is compile-time by
+        # construction is not a use of anything this pass places.
+        xc_callees = set()
+        xc_type_args = set()
+        callees = set()
         imported = imported_module_names or ()
-        if imported:
-            for c in M.iter_nodes(fn.body):
-                if not isinstance(c, F.CallExpr) \
-                        or not isinstance(c.func, F.MemberExpr):
-                    continue
-                root = c.func
+        for c in M.iter_nodes(fn.body):
+            if not isinstance(c, F.CallExpr):
+                continue
+            func = c.func
+            if isinstance(func, F.IdentExpr):
+                callees.add(id(func))
+            elif isinstance(func, F.MemberExpr):
+                root = func
                 while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
                     root = root.obj
                 if isinstance(root, F.IdentExpr) and any(
                         root.name == m or m.startswith(f"{root.name}.")
                         for m in imported):
                     callees.add(id(root))
+            elif isinstance(func, F.SubscriptExpr) \
+                    and isinstance(func.obj, F.IdentExpr):
+                if M.is_external_call_template(func) \
+                        and M.external_call_spec(func)[2] is None:
+                    xc_callees.add(id(func))
+                    callees.add(id(func.obj))
+                    xc_type_args |= {id(n)
+                                     for n in _external_call_type_nodes(func.index)}
+                elif M.mlir_template_refusal(func) is None:
+                    callees.add(id(func.obj))
+        callees |= xc_type_args
         # A BRACKETED or DOTTED form has the same problem one level up:
         # `__mlir_attr[…]`, `__mlir_attr.`lit`` and
         # `__mlir_op.`lit.materialize_into`[value=v]` are a SubscriptExpr and/or
@@ -3636,6 +4229,20 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         for sub in M.iter_nodes(fn.body):
             if not isinstance(sub, (F.SubscriptExpr, F.MemberExpr)):
                 continue
+            if M.template_is_answered(sub) or id(sub) in xc_type_args:
+                # Answered at build time, so nothing is left to refuse about it
+                # and the tree below it is not a use of anything. The rewrite
+                # (`_fold_target_queries`) has normally already replaced these
+                # with literals before this check runs, so reaching here means
+                # the rewrite did not cover this position — which is why the
+                # condition is the shared `template_is_answered` rather than a
+                # second opinion written beside it.
+                #
+                # …and a well-formed `external_call[…]` template's TYPE
+                # argument, which is compile-time by construction and has the
+                # same consequence by a different route: nothing was written
+                # that reads a value, so there is nothing here to place.
+                continue
             root_ident = sub.obj
             while isinstance(root_ident, (F.MemberExpr, F.SubscriptExpr)):
                 root_ident = root_ident.obj
@@ -3645,6 +4252,17 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             if why is None and isinstance(sub, F.SubscriptExpr):
                 why = M.multi_index_refusal_for(sub, False,
                                                 _callee_defs(functions))
+                if why is None and M.is_external_call_template(sub) \
+                        and id(sub) not in xc_callees:
+                    # A well-formed template that is not a call's callee: a
+                    # template read as a VALUE.  `multi_index_refusal_for`
+                    # cannot see it (no parent), and without this the name
+                    # would fall through to the placement message below, which
+                    # says `external_call` has no home — a true statement about
+                    # this pass and a useless one, because the file is not
+                    # missing a variable, it is using a call as a subscript.
+                    why = M.external_call_value_refusal(
+                        M.external_call_spelling(sub))
             if why is None and isinstance(sub, F.MemberExpr):
                 # The dotted spelling can also be the base of a bracket, and
                 # `std/builtin/value.mojo` spells an MLIR template exactly
@@ -3661,10 +4279,22 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             if why is not None:
                 bracketed[id(root_ident)] = why
         for node in M.iter_nodes(fn.body):
-            if not isinstance(node, F.IdentExpr) or id(node) in callees:
+            if not isinstance(node, F.IdentExpr):
                 continue
+            # `bracketed` is asked BEFORE the callee exemption, and the order
+            # is load-bearing rather than tidiness. A construct refusal is
+            # about the whole expression — `external_call['setenv', Int32]`
+            # assembles a two-element subscript, and `Int32` inside it is a
+            # TYPE ARGUMENT rather than a read of a value. Skipping a callee
+            # root without asking first made the type argument the reported
+            # failure, which names an allocator table the reader has to go and
+            # look up instead of the subscript they wrote; measured, it
+            # replaced the tuple-index refusal on every `external_call[…]` in
+            # the stdlib with `'Int32' has no home`.
             if id(node) in bracketed:
                 raise CodegenError(bracketed[id(node)])
+            if id(node) in callees:
+                continue
             name = node.name
             if name in placed or name in frame_slots \
                     or M.module_constant_literal(name) is not None \
@@ -3680,13 +4310,27 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # to the construct.
                 why = M.mlir_dialect_refusal(name)
                 raise CodegenError(f"{fn.name}: {why}" if fn.name else why)
+            gslot = M.module_slot(name)
+            if gslot is not None:
+                # A module-level name WITH a `__DATA` slot: the storage exists
+                # and both backends lower a read of it to a load, so it is
+                # placed — unless the slot has no initializer, in which case the
+                # load would read the zero an unwritten slot gives. That is a
+                # plausible-looking wrong number rather than a refusal, so it is
+                # refused by name with the reason the initializer is missing.
+                why = M.static_initializer_refusal_reason(gslot)
+                if why is not None:
+                    raise CodegenError(
+                        M.global_value_refusal(name, fn.name, why))
+                continue
             sym = M.module_symbol(name)
             if sym is not None:
-                # A module-level name, refused for the reason a module-level
-                # name is refused: it has no storage with a lifetime longer
-                # than a frame's.  `model.module_global_refusal` says which of
-                # the four kinds it is, because the four have four different
-                # repairs.
+                # A module-level name with no slot, refused for the reason a
+                # module-level name is refused: nothing writes it, so its value
+                # is the module-level one, and the build can only know that if
+                # it folds to a literal.  `model.module_global_refusal` says
+                # which of the four kinds it is, because the four have four
+                # different repairs.
                 raise CodegenError(M.module_global_refusal(name, sym,
                                                           fn.name))
             raise CodegenError(M.unresolved_name_refusal(
@@ -3761,6 +4405,23 @@ def _unstored_read(fn, placed: set, frame_slots: dict):
         return None
     hit = M.read_before_store(fn, params, own)
     return None if hit is None else (hit[0], hit[1], fn.name)
+
+
+def _external_call_type_nodes(index) -> list:
+    """Every node of an `external_call[...]` bracket's TYPE argument.
+
+    The template's second element is a type EXPRESSION — `Int32`,
+    `_CPointer[UInt8, UntrackedOrigin[mut=False]]` — so it is compile-time by
+    construction and the name-placement pass must not read it as a runtime
+    name.  Returns `[]` for the one-element bracket, where there is no type
+    argument at all, and is only ever called for a WELL-FORMED template
+    (`external_call_spec` with no `why`), which is exactly the set of brackets
+    whose second element `type_expr_text` could render — so no node it returns
+    is a value read."""
+    items = list(index.elements) if isinstance(index, F.TupleExpr) else [index]
+    if len(items) < 2:
+        return []
+    return list(M.iter_nodes(items[1]))
 
 
 def _callee_defs(functions: list) -> dict:
@@ -4028,6 +4689,45 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
             seen_struct.add(st.name)
             structs.append(st)
     structs_by_name = {st.name: st for st in structs}
+    # `@dataclass` is a COMPILE-TIME transform (formal/dataclass_transform.py
+    # has the measurement that decides the layer), so it runs HERE, in the one
+    # pipeline both front ends go through, and not in a backend: a Mojo
+    # `dataclasses` module could not be called, because a decorator applied to
+    # a class is dropped before the front end ever looks at it (measured:
+    # `.tmp/dc/q1.py` builds, runs, and the decorator's own `printf` never runs).
+    #
+    # Over THIS MODULE'S OWN StructDefs and not over `structs`, which also
+    # carries the declarations of everything it imports. Two reasons, and the
+    # second is the one that bites: an imported module is a SEPARATE
+    # compilation unit that goes through this same pipeline when it is built
+    # into a dylib (formal/imports.py's `build_module_dylib`), so its
+    # dataclasses are lowered and checked when IT is compiled — and doing it
+    # again here reported another file's class against this file. Measured: with
+    # the imported declarations included, `formal/types.py` was refused for a
+    # `field(default_factory=…)` in a class declared in `fire_compiler.py`,
+    # under a message that named neither the class nor the field.
+    #
+    # The `field(default=LITERAL)` lowering is a REWRITE and has to precede
+    # `_rewrite_class_constants` below, which is what materialises a class-level
+    # constant where it is read: a `field(...)` left in place is materialised as
+    # a CALL and refused, and the literal it wraps is materialised as the
+    # literal. So this is not a convenience — it is the only thing between a
+    # working class and a refusal. The CHECKS are deliberately NOT here; they
+    # run beside `check_construction_shapes`, for the reason the comment on
+    # that call site gives (a file that imports a host module has a more
+    # fundamental fact about it than a codegen gap).
+    dc_classes = DC.dataclass_classes(stmts)
+    if dc_classes:
+        DC.lower_field_defaults(dc_classes)
+    # The `==` rewrite's table is WIDER — this module's dataclasses PLUS the
+    # ones it imports — because a comparison between two values of an IMPORTED
+    # dataclass is as much this module's problem as a comparison between two of
+    # its own. An imported declaration is a separate parse of the other
+    # module's source, so a `field(default=…)` wrapper is still on its fields;
+    # only the field NAMES are read here (`struct_field_names`, which gets them
+    # from the declaration's target either way), so the wrapper is harmless.
+    dc_equality = (DC.dataclass_classes(stmts, structs) if structs
+                   else dc_classes)
     method_owners = M.method_owner_names(structs)
     functions = functions + _struct_methods(stmts)
     # A struct of more than one field is not refused here when its receiver is
@@ -4091,6 +4791,23 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     discover_closures(ctx, stmts)
     functions = _flatten_closures(functions, ctx._all_closures)
     functions = _lift_lambdas(functions)
+    # The module-global `__DATA` slots, on the FINAL function list and BEFORE
+    # the substitution below. Both positions are load-bearing:
+    #
+    #   * after every rewrite, because a `global G` inside a lifted lambda or a
+    #     flattened closure declares G a module global just as one inside a
+    #     top-level function does, and a slot table built from the pre-rewrite
+    #     list would not know that — the name would be folded away by the
+    #     substitution below and the write would be lost, which is the exact
+    #     defect this capability exists to fix.
+    #   * before the substitution, which must skip a slotted name because a
+    #     write through `global` changes its value while the program runs.
+    #
+    # Published for the reason `_MODULE_SYMBOLS` is: the consumers are a
+    # per-function walk inside each backend and the linker, and none of them has
+    # the module statements in hand.
+    slots = M.collect_global_slots(stmts, functions)
+    M.publish_global_slots(slots)
     # A module-level NAME whose value the build can FOLD is substituted at
     # every read, so `G = 5` read from a function is the 5 and not whatever
     # the register allocator left behind.  LAST of the rewrites, for the reason
@@ -4099,13 +4816,40 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # to be visible to the substitution or the module constant would replace
     # the function's OWN name.
     _substitute_module_constants(functions)
+    # …and a target query IN a body, which the constant substitution cannot
+    # reach: `__mlir_attr[...]` is an expression, not a name, and a function
+    # that asks the build what it is compiling for has to get the answer
+    # materialized as the literal it is.  Same list, same position, same
+    # reason.  Independently of order with the substitution above: a
+    # module-level `comptime ARCH = <query>` was already folded to a literal by
+    # `collect_module_symbols`, and this pass only sees the query where the
+    # SOURCE wrote one.
+    _fold_target_queries(functions)
+    # …and `__name__` read in the module body, which is the entry program's
+    # own name and has one knowable answer here.  Same list and position: it is
+    # a module-constant substitution like the two above, and it uses that pass's
+    # OWN rewriter so a store target or a call's callee is not mistaken for a
+    # read.
     _materialize_entry_dunder_name(functions)
     # LAST, on the FINAL function list: which local names hold a frame
     # address is a property of the code that survives every rewrite above, and
     # a lifted lambda or a flattened closure is a function with its own locals
     # and its own receivers.
-    _frame_receivers(functions, structs_by_name)
-    return functions, structs, symbols
+    #
+    # `dc_classes` goes in as an argument rather than being re-read from the
+    # module statements, for the same reason the pass publishes
+    # `fn._frame_candidates`: the holder analysis is the only thing in the
+    # compiler that can say a word is a frame address, so a second recognition
+    # of "is this name a dataclass value" — computed here from the AST instead
+    # of from `by_name` — is exactly the pair that agrees until the day it does
+    # not. `formal/dataclass_transform.rewrite_equality` takes the holder
+    # table as given.
+    _frame_receivers(functions, structs_by_name, dc_equality)
+    # The slot table is RETURNED as well as published, for the reason
+    # `symbols` is: building an import compiles the imported module through this
+    # same function, and that nested call publishes ITS globals over ours, so
+    # the caller re-publishes its own before anything reads the table.
+    return functions, structs, symbols, slots
 
 
 def _method_owners(stmts: list, extra_structs: list = None) -> dict:
@@ -5223,6 +5967,24 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
     exported = _export_entries(source_paths, prefixes)
     out = []
     emitted = set()
+    # A function that RETURNS A FRAME ADDRESS is not exportable, and the
+    # refusal is here rather than in the emitter because the emitter has no
+    # idea the function is being offered at a boundary.  The reason is the
+    # hidden word: the returned-frame convention is "the caller reserves a
+    # block and passes its address as one trailing argument", and that is a
+    # property of ONE image's calling convention.  An importer compiled the
+    # module's source with its own `_frame_receivers` pass, has no table saying
+    # which of this library's functions take the extra word, and passes
+    # arguments the way the source spells them — so an exported one copies its
+    # caller's block into whatever the seventh argument register held.
+    frame_returns = [fn.name for fn in ordered
+                     if getattr(fn, "_frame_return_status", None) == _RETURN_FRAME]
+    offered = [n for n in frame_returns
+               if n in exported or n in (methods or {})]
+    if offered:
+        raise CodegenError(M.dylib_frame_return_refusal(
+            source_paths[0] if source_paths else "this module",
+            sorted(offered)))
     for fn in ordered:
         # An overload was renamed to `<name>__ovN` above, so it no longer
         # matches — which is what keeps a name that reflect *did* export from
@@ -5436,10 +6198,48 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     ordered = []
     seen: dict = {}
     structs_by_file: dict = {}
+    # The library's merged module-global slot table, published before the
+    # codegen runs because every slot access is an absolute address computed
+    # against it. Built by hand here rather than by re-running
+    # `collect_global_slots`, because a library is compiled from SEVERAL
+    # sources and each one's table numbers its own slots from zero.
+    library_slots: dict = {}
+    library_slot_owners: dict = {}
     for source_path in source_paths:
-        module, functions, module_source, file_structs = \
-            _formal_module_functions(source_path, link_dylibs)
+        # Five values out, not four: `file_slots` is this source's own
+        # module-global slot table, numbered from zero, and it is merged into
+        # the library's below rather than published as the whole table — a
+        # library is compiled from several sources.
+        #
+        # `arch=arch, fmt="macho"` because a library's Mach-O-ness is not a
+        # choice: every Mach-O format spells its images the same way, and the
+        # target pair is published from it by `_formal_module_functions` for
+        # the `#kgen.param.expr` queries a dylib's own source can ask.
+        module, functions, module_source, file_structs, file_slots = \
+            _formal_module_functions(source_path, link_dylibs, arch=arch,
+                                    fmt="macho")
         structs_by_file[source_path] = file_structs
+        for name, slot in (file_slots or {}).items():
+            owner = library_slot_owners.get(name)
+            if owner is not None:
+                # Two files of ONE library both declaring the same module-level
+                # name is a genuine collision, not something to resolve: a slot
+                # is placed by its BARE name, so one `COUNT` in two files would
+                # silently share a word. (In Mojo they are `a.COUNT` and
+                # `b.COUNT`; this backend carries no module identity at a use
+                # site, which is the same limit
+                # `FORMAL_module_attribute_access_refused` records for
+                # module-attribute CALLS.) Refused by name, naming BOTH files,
+                # rather than one of them silently winning by ordering.
+                raise FormalBuildError(
+                    f"{source_path}: module-level name {name!r} is also "
+                    f"declared in {owner}, and this library compiles both files "
+                    f"into one image, so the two would share a single word. A "
+                    f"module global is placed by its bare name on this path, so "
+                    f"two files of one library cannot both declare it")
+            library_slots[name] = M.GlobalSlot(name, len(library_slots),
+                                               slot.init, slot.site)
+            library_slot_owners[name] = source_path
         for fn in functions:
             # A repeated name is an OVERLOAD, not a collision — and Mojo
             # overloads are ordinary (`def tile[...]` appears three times in
@@ -5529,13 +6329,20 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         return _namespace_library(output, install_name, arch, reexports,
                                   dylib_syms, dep_install, linked)
 
+    # The library's merged slot table is PUBLISHED before the codegen runs,
+    # because a slot access is an absolute address the codegen computes against
+    # it, and the image the linker is handed at the end has to be built from the
+    # same table. The per-file tables each numbered their slots from zero, so
+    # this merge is what makes the library's slots distinct.
+    M.publish_global_slots(library_slots)
+    has_globals = bool(library_slots)
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                             dylib_exports=dylib_exports)
     try:
         code, info = codegen.compile(
             ordered,
-            base_addr=TEXT_BASE + dylib_code_offset(install_name, False,
-                                                    dep_install),
+            base_addr=TEXT_BASE + dylib_code_offset(
+                install_name, False, dep_install, has_globals),
             emit_startup=False)
         external_syms = info.get("external_syms") or []
         if external_syms:
@@ -5544,7 +6351,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             # segment and libSystem are discovered by the first pass.
             codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                                     dylib_exports=dylib_exports)
-            code_file = dylib_code_offset(install_name, True, dep_install)
+            code_file = dylib_code_offset(install_name, True, dep_install,
+                                          has_globals)
             code, info = codegen.compile(ordered,
                                          base_addr=TEXT_BASE + code_file,
                                          emit_startup=False)
@@ -5581,9 +6389,10 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     binary = build_macho_dylib(
         code,
         TEXT_BASE + dylib_code_offset(install_name, bool(external_syms),
-                                      dep_install),
+                                      dep_install, has_globals),
         exports, install_name, arch=arch, external_syms=external_syms,
-        deps=dep_install, dep_syms=dep_syms)
+        deps=dep_install, dep_syms=dep_syms,
+        globals_image=globals_image("macho") if has_globals else None)
     with open(output, "wb") as f:
         f.write(binary)
     os.chmod(output, 0o755)

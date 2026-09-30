@@ -201,20 +201,60 @@ def _original_host_modules():
     return set(PRE_SPLIT_HOST_MODULES)
 
 
-def written_modules():
-    """The host-set names that have been WRITTEN, and so have left the set.
+def provided_modules():
+    """The host-set names this tree provides by a COMPILE-TIME transform.
 
-    A name belongs here when `resolve_module_path` finds real source for it in
-    this tree. That is the whole test: the host set exists to say "there is
-    nothing here to compile", and a module with a file is not in that condition
-    however much of CPython it covers. `os` was the first entry — 87 files of
-    the arm64 sweep stopped on it — and the entry is DERIVED rather than typed,
-    so writing the next module updates this by being written, and no list in
-    this file can drift away from what is on disk.
+    The second way a name can leave the host set, and the reason this function
+    exists is that the first one stopped being the only one. The host set says
+    "there is nothing here to compile"; a name leaves it when this tree can
+    answer for the module, and there are now two answers:
+
+      * real SOURCE — `formal/hostmods/<name>.mojo`, compiled into a dylib the
+        image links. That is `written_modules()` below, and it is derived from
+        the FILESYSTEM so that writing the next module updates the account by
+        being written.
+      * a FRONT-END TRANSFORM — `formal/imports.py`'s
+        `FRONTEND_PROVIDED_MODULES`, a shape over the source language that the
+        front end consumes while the statement list is still AST, so there is
+        no symbol for a dylib to export. `dataclasses` is the first: a
+        decorator transform, and a decorator applied to a class is dropped by
+        both backends before the front end looks at it, so a Mojo module would
+        export a symbol nothing calls. `formal/dataclass_transform.py` has the
+        measurement.
+
+    This reads PRODUCTION CODE rather than the filesystem, which is the one
+    asymmetry, and it is the right way round: the thing being derived is "which
+    names does the front end implement", and the front end's own set is the
+    authority on that — a hand-typed copy here would be a second list that can
+    disagree with the one that decides behaviour, which is the failure this
+    whole file exists to prevent. What keeps the derivation honest is the check
+    beside it: every name this function returns must appear in
+    `IMPLEMENTED_HOST_MODULE_TESTS`, which names a test file, and that file
+    must exist. A name added to `FRONTEND_PROVIDED_MODULES` with no test behind
+    it fails here.
+    """
+    return set(I.FRONTEND_PROVIDED_MODULES) & set(PRE_SPLIT_HOST_MODULES)
+
+
+def written_modules():
+    """The host-set names that have been PROVIDED, and so have left the set.
+
+    A name belongs here when this tree can answer for the module — either real
+    source that `resolve_module_path` finds, or a front-end transform
+    (`provided_modules()` above). That is the whole test: the host set exists to
+    say "there is nothing here to compile", and a name something here can
+    answer for is not in that condition however much of CPython it covers.
+    `os` was the first entry — 87 files of the arm64 sweep stopped on it — and
+    the entry is DERIVED rather than typed, so writing the next module updates
+    this by being written, and no list in this file can drift away from what is
+    on disk or in the tree.
     """
     found = set()
     for name in sorted(PRE_SPLIT_HOST_MODULES):
         if name in I.HOST_MODULES:
+            continue
+        if I.is_frontend_provided(name):
+            found.add(name)
             continue
         try:
             path = I.resolve_module_path(name, project_root=HERE)
@@ -225,20 +265,22 @@ def written_modules():
     return found
 
 
-# …and the test that keeps each written module honest. This carries no
-# arithmetic — `written_modules()` above is derived from the filesystem and is
-# the only thing the host-set account reads — it says WHICH test a removal
-# leans on, so that a module cannot leave the host set on the strength of a
-# file nobody ever builds. Both halves are checked: the keys must be exactly
-# the derived set, so a removal without an entry here fails, and an entry
-# without a module behind it fails too.
+# …and the test that keeps each provided module honest. This carries no
+# arithmetic — `written_modules()` above is derived from the filesystem and from
+# the front end's own set, and is the only thing the host-set account reads —
+# it says WHICH test a removal leans on, so that a module cannot leave the host
+# set on the strength of a file or a transform nobody ever runs. Both halves are
+# checked: the keys must be exactly the derived set, so a removal without an
+# entry here fails, and an entry without a module behind it fails too.
 IMPLEMENTED_HOST_MODULE_TESTS = {
     "argparse": "test_formal_argparse.py",
+    "ast": "test_ast_formal.py",
     "os": "test_formal_os.py",
     "struct": "test_struct_formal.py",
     "sys": "test_formal_sys.py",
     "time": "test_formal_time.py",
     "hashlib": "test_formal_hashlib.py",
+    "dataclasses": "test_dataclasses_formal.py",
 }
 
 
@@ -287,14 +329,34 @@ def test_host_tiers():
     # entry with a source behind it nor a removal without one can pass.
     for m in sorted(IMPLEMENTED_HOST_MODULE_TESTS):
         check(not I._is_host_module(m) and I.host_module_tier(m) == '',
-              f'{m} is no longer a host module: it has source now')
+              f'{m} is no longer a host module: this tree provides it now')
         check(m not in union,
-              f'{m} still classifies as a host module although a Mojo source '
-              f'exists for it, so the entry is false and the build is reached '
-              f'through the resolver instead')
-        got = I.resolve_module_path(m, project_root=HERE)
-        check(got is not None and os.path.isfile(got),
-              f'{m} resolves to a real source file', f'resolved to {got!r}')
+              f'{m} still classifies as a host module although this tree '
+              f'provides it, so the entry is false and the build is reached '
+              f'through the front end / the resolver instead')
+        if I.is_frontend_provided(m):
+            # A front-end-provided module resolves to NOTHING, and that is the
+            # correct answer rather than a missing one: there is no source file
+            # because there is no symbol for a dylib to export, and the
+            # resolver's contract is "the file to compile, or None". Asserting
+            # `is None` here is what keeps the distinction from eroding — a
+            # `None` that means "the front end has it" and a `None` that means
+            # "nothing here can answer for it" are the same value, and only
+            # `is_frontend_provided` tells them apart. It is also what proves
+            # the import is not going to be resolved to some OTHER tree's file
+            # by a later pass.
+            check(I.resolve_module_path(m, project_root=HERE) is None,
+                  f'{m} is provided by the front end, so there is no source '
+                  f'file to compile and the resolver says so',
+                  f'resolved to {I.resolve_module_path(m, project_root=HERE)!r}')
+            check(not I._is_inert_module(m),
+                  f'{m} is front-end-provided, not inert: it BINDS names the '
+                  f'program calls, so it must not be excluded from the '
+                  f'dependency walk the way `__future__` is')
+        else:
+            got = I.resolve_module_path(m, project_root=HERE)
+            check(got is not None and os.path.isfile(got),
+                  f'{m} resolves to a real source file', f'resolved to {got!r}')
     # A package's DOTTED form is a host-module name in its own right, so the
     # top-level half leaving the set is not enough to make `os.path` reach.
     check(not I._is_host_module('os.path')

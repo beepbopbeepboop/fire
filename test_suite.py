@@ -2038,6 +2038,90 @@ UNREGISTERED = {
         'are emitted at all, which the differential test above cannot tell from '
         'an instruction emitted where a different one should be.',
 
+    # ── the returned-frame convention, both machines, against CPython ──
+    #
+    # Unregistered on purpose rather than by omission, and the reason is in
+    # tools/suite.py's own terms: it builds and RUNS fourteen images (seven per
+    # architecture) and asks CPython for each answer, so a run of it is a
+    # measured cost on every invocation and nothing in the gate wants that
+    # shape. It is listed rather than left out because the estate check below
+    # exists to make an unaccounted-for test file impossible, and a file that is
+    # unaccounted-for is the state this is avoiding.
+    'test_formal_returned_frame.py': 'The returned-frame convention: builds, '
+        'runs and compares with CPython on arm64 AND x86-64. Runs beside '
+        'test_formal_run.py rather than inside it, because the convention is '
+        'one construct and the suite that hosts it is already the longest.',
+
+    # ── one construct per file, each an oracle against CPython, each a
+    #    build-and-RUN rather than a build ─────────────────────────────────────
+    #
+    # The same reason as the returned-frame entry above, at the same shape, and
+    # each is here rather than left out for the reason that check exists: a
+    # test file that nothing runs and nothing excuses is the state it is
+    # written to make impossible. They are grouped because what they share is
+    # the cost, not the subject — five constructs, five files, and the fifth is
+    # the one case where the file was missing from the table entirely.
+    'test_formal_external_call.py': 'external_call["sym", RetType](args): '
+        'builds, runs and compares with CPython os.environ on arm64 AND '
+        'x86-64, including the whole of std/os/env.mojo transcribed.',
+    'test_formal_target_queries.py': 'A #kgen.param.expr target query '
+        'answered at build time: BUILDS the image, EXECUTES it and requires '
+        'the printed arch, because a fabricated answer is indistinguishable '
+        'from a right one in a refusal.',
+    'test_formal_specialization.py': 'A comptime specialization call: the '
+        'dropped-bracket case builds and RUNS on both architectures, and the '
+        'fabricated-answer case (plain[3](5) printing plain(5)) is what the '
+        'refusal exists for.',
+    'test_formal_os.py': 'formal/hostmods/os and os.path, run on both '
+        'architectures against CPython posixpath and the real filesystem. A '
+        'transcription of posixpath is right on the inputs you tried; this is '
+        'the half that asks.',
+    'test_formal_sys.py': 'formal/hostmods/sys and the module-call lowering it '
+        'is the first real user of, run on both architectures against '
+        'CPython sys — including a str that crosses the dylib boundary.',
+    'test_struct_formal.py': 'formal/hostmods/struct.mojo byte-for-byte '
+        'against CPython struct, on both architectures. A subtly wrong byte '
+        'packer writes malformed Mach-O and ELF headers that still link, so '
+        '"it built" is not evidence of anything here.',
+    'test_formal_frame_len.py': 'len() on a frame address is the struct\'s own '
+        '__len__(): 10 differential cases, each written twice — once as Mojo, '
+        'once as Python — and required to AGREE, on arm64 AND x86-64, with the '
+        'four refusals additionally requiring CPython to raise TypeError.',
+    'test_formal_toplevel.py': 'A module\'s top-level statements RUN, as the '
+        'body of the entry: every case builds the image, EXECUTES it and '
+        'compares stdout and exit status with CPython on the same text, plus '
+        'the shapes that cannot be lowered exactly (a file-level return, '
+        'global, break, yield, await) and the dylib path\'s refusal of a body.',
+    'test_formal_hashlib.py': 'formal/hostmods/hashlib.mojo (six CommonCrypto '
+        'digests, BLAKE2b from RFC 7693) against the hashlib in this process, '
+        'on arm64 AND x86-64. An oracle rather than a table of digests: '
+        'sha256(b"abc") has one answer forever and a table of them is wrong the '
+        'moment someone transposes a character.',
+    'test_formal_time.py': 'formal/hostmods/time.mojo on libSystem\'s five '
+        'clocks, on arm64 AND x86-64. Every value is a CLOCK READING, so each '
+        'case is asserted as a RELATION against this process\'s own time and '
+        'never as a stored number; the ns-to-double conversion, which is pure '
+        'arithmetic rather than a reading, is checked against exact rationals '
+        'rather than ns / 1e9, which double-rounds above 2**53.',
+    # Spelled with the decorator's NAME split, and the reason is this file:
+    # `test_dataclasses_formal.py`'s corpus discovery is a textual scan for the
+    # decorator's source spelling, so writing it out in full here made
+    # `test_suite.py` ITSELF a corpus member — one more file for that test to
+    # build, decided by a sentence in a registry table. It is excluded from
+    # nothing and should be in nothing.
+    'test_dataclasses_formal.py': 'The dataclass decorator as a compile-time '
+        'transform: every execution case is run TWICE on the same text — once '
+        'as a formal arm64 image that is executed, once by this process\'s own '
+        'python3 — and the two must agree, because the two failures that '
+        'motivated the whole feature (a bare struct == comparing two frame '
+        'ADDRESSES, and frozen=True accepted silently) both ran and were '
+        'wrong. The refused subset is pinned by its MESSAGE.',
+    'test_formal_argparse.py': 'formal/hostmods/argparse.mojo against '
+        'CPython\'s own argparse: one table of parser declarations and command '
+        'lines drives two generated programs, and stdout, stderr and exit '
+        'status must be identical — so THE PARSE IS CPYTHON\'S rather than a '
+        'transcription agreeing with itself. arm64 AND x86-64.',
+
     # ── the interpreter, which is the oracle everything else is compared to ──
     'test_myinterpreter.py': 'Runs a real .mojo file end to end through '
         'myinterpreter.mojo, which is the reference every compiled-path answer '

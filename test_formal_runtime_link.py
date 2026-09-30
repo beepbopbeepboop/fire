@@ -154,7 +154,8 @@ def prepass(source, name='prepass'):
         f.write(source)
     with open(path) as f:
         stmts = B.parse_module(f.read(), filename=path)
-    functions, _structs, _symbols = B._prepare_functions(stmts, synthetic=True)
+    functions, _structs, _symbols, _slots = B._prepare_functions(
+        stmts, synthetic=True)
     return B._runtime_word_calls(functions)
 
 

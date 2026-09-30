@@ -156,6 +156,14 @@ HOST_MODELLED = frozenset((
     #     a `char **` walk; both are bug docs rather than approximations.
     "errno", "stat", "platform", "select", "io",
     "pathlib", "glob", "fnmatch", "secrets", "uuid",
+    #   `ast`  — `formal/hostmods/ast.mojo`, the TOKENIZER and a lexical
+    #     validator, not a tree: `parse`, `parse_reason`, `tokenize`,
+    #     `tokenize_from`, `token_bound` and `token_name`, with token kinds,
+    #     positions and counts compared against CPython's own `tokenize` by
+    #     `test_ast_formal.py`. What it cannot do is build a tree, because a
+    #     value on this path is one 64-bit word and a node is not one: the
+    #     subset, the 21 measured ways `parse` differs from CPython's verdict,
+    #     and the f-string collapsing are in `bugs/FORMAL_ast_module_subset.md`.
     #   `struct`  — `formal/hostmods/struct.mojo`, in the subset the formal
     #     backends can lower, compared BYTE FOR BYTE against CPython's own
     #     answers by `test_struct_formal.py`. The four measured limits it is
@@ -196,8 +204,20 @@ HOST_MODELLED = frozenset((
     "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
     "weakref", "pprint", "reprlib", "pickle",
     # A shape over the source language rather than a runtime facility: the
-    # parser, the type lattice, the dataclass transform.
-    "ast", "typing", "dataclasses",
+    # type lattice and the CLI parser. (`ast` and `argparse` were here until
+    # their host modules existed and are now written above.)
+    #
+    #   `dataclasses` — a COMPILE-TIME transform in
+    #     `formal/dataclass_transform.py`, and it has LEFT this list, which is
+    #     what `FRONTEND_PROVIDED_MODULES` below exists to say. The
+    #     measurement that decided the layer is in that file's docstring; the
+    #     short of it: `@dataclass` decorates a CLASS, a formal value is one
+    #     64-bit word with no type tag, and a decorator applied to a class is
+    #     DROPPED by both backends before the front end looks at it (measured:
+    #     a decorator whose body prints, applied to a class, produces an image
+    #     that runs without printing). So a `formal/hostmods/dataclasses.mojo`
+    #     would export a symbol nothing calls.
+    "typing",
     #   `argparse`  — `formal/hostmods/argparse.mojo`, in the subset the formal
     #     backends can lower, checked case for case against CPython's own
     #     `argparse` by `test_formal_argparse.py`: the same values, the same
@@ -232,6 +252,64 @@ HOST_MODELLED = frozenset((
 # about module RESOLUTION and is simply false of a CPython standard-library
 # module with no Mojo source.
 HOST_MODULES = HOST_UNREACHABLE | HOST_MODELLED
+
+
+# A module the formal FRONT END implements at COMPILE TIME, so the import is
+# legal and nothing goes on the link line.
+#
+# This is a third answer, and neither of the two above is it. A HOST module is
+# CPython's, and the build refuses it because there is no source to compile. A
+# WRITTEN module has a `formal/hostmods/*.mojo` and is compiled into a dylib the
+# image links. A FRONT-END-PROVIDED module is a shape over the SOURCE LANGUAGE
+# — a decorator transform — and it is consumed by the front end while the
+# statement list is still AST, so there is no symbol for a dylib to export and
+# no `BL` for the codegen to emit.
+#
+# `dataclasses` is the first and only member. The measurement that put it here
+# rather than in `formal/hostmods/` is in `formal/dataclass_transform.py`'s
+# docstring, and it is the reason a Mojo module would have been wrong: a
+# decorator applied to a CLASS is dropped by both backends before the front end
+# looks at it, so a `def dataclass(cls)` in a Mojo module would be a symbol
+# nothing calls, and the transform would silently do nothing — which is the
+# outcome this backend exists to prevent, because `@dataclass` changes what a
+# class MEANS and a dropped decorator is a program that runs and prints numbers
+# the source never wrote.
+#
+# It is separate from `INERT_MODULES` below, and the difference is load-bearing
+# rather than tidiness. `__future__` binds NOTHING and emits nothing, so there
+# is no name in the file for anything to answer about. `dataclasses` binds
+# NAMES the program uses — `dataclass`, `field`, `is_dataclass` — and every one
+# of them is answered by the front end: the decorator by
+# `dataclass_transform.dataclass_classes`, `field(default=…)` by
+# `lower_field_defaults`, and the runtime reflection names by
+# `check_reflection_calls`, which refuses each of them BY NAME with the reason
+# the capability is missing. So a name from this module is never silently
+# dropped — it is either lowered or refused, and the file says which.
+FRONTEND_PROVIDED_MODULES = frozenset(("dataclasses",))
+
+
+def is_frontend_provided(name: str) -> bool:
+    """True when the FRONT END implements this module at compile time.
+
+    The accessor the resolver asks before it looks for a file, and the reason
+    `dataclasses` resolves: pass 1 of `resolve_module_path` searches for Mojo
+    source (there is none, and there must not be — see
+    `dataclass_transform.py`), and pass 2 refuses a host module. This is the
+    answer in between: the import is satisfied by the front end, so
+    `resolve_module_path` returns None — the same `None` a host module returns,
+    meaning "nothing to compile" — and `_resolve_imports` skips it because
+    `imported_modules` does not list it at all.
+
+    Dotted, and on the FIRST component: `dataclasses.something` is the same
+    module, exactly as `_is_host_module` treats it. A member access into it is
+    refused by `dataclass_transform.check_reflection_calls` when the member is
+    one of the reflection names, and by `check_module_symbols` when it is not —
+    so an unknown member of a front-end-provided module is an unresolved name
+    in the file that uses it, which names the file."""
+    if not name:
+        return False
+    return name in FRONTEND_PROVIDED_MODULES \
+        or name.split(".")[0] in FRONTEND_PROVIDED_MODULES
 
 
 def host_module_tier(name: str) -> str:
@@ -335,12 +413,14 @@ def imported_modules(stmts) -> list:
                 names.append(mod)
             for m in names:
                 if (isinstance(m, str) and m and m not in out
-                        and not _is_inert_module(m)):
+                        and not _is_inert_module(m)
+                        and not is_frontend_provided(m)):
                     out.append(m)
         elif isinstance(st, F.FromImportStmt):
             m = st.module
             if (isinstance(m, str) and m and m not in out
-                    and not _is_inert_module(m)):
+                    and not _is_inert_module(m)
+                    and not is_frontend_provided(m)):
                 out.append(m)
     return out
 
@@ -407,6 +487,7 @@ def _search_roots(relative_to: str, project_root: str) -> list:
     # project root was to keep `import math` from binding to an unrelated
     # ~/math.mojo, and a bounded root cannot do that.
     roots.append(_REPO_ROOT)
+    roots.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".tmp", "exp", "dc"))
     # This backend's own modules — `os`, `os.path`, `sys`, `struct` — last, so
     # a project's own `os.mojo` beside the file importing it still wins. They
     # are Mojo source in a search root, so they are found by PASS 1, which is
@@ -593,6 +674,16 @@ def resolve_module_path(module_name: str, relative_to: str = None,
             for cand in _candidates(module_name, base, ext):
                 if os.path.isfile(cand):
                     return cand
+    if is_frontend_provided(module_name):        # pass 1b
+        # The front end implements it, at compile time, so there is no source
+        # to compile and no dylib to link — the same answer a host module
+        # gives, and the same `None`, for a different reason. Placed HERE,
+        # between pass 1 and pass 2 and not inside pass 2, because pass 2 is the
+        # HOST MODULE rule and this is not one: a name that left
+        # `HOST_MODLED` to become front-end-provided would otherwise fall
+        # through to pass 3, where this repository's own `dataclasses.py`-like
+        # siblings would capture it.
+        return None
     if _is_host_module(module_name):              # pass 2
         return None
     for ext in (".py",):                         # pass 3
@@ -620,10 +711,23 @@ def unresolvable_import_error(source_path: str, module_name: str) -> str:
     reasons applies, so the wording cannot drift from the resolution it
     describes.
     """
-    kind = ("a host module (CPython standard library), which has no Mojo "
-            "source for this backend to compile"
-            if _is_host_module(module_name)
-            else "not a stdlib or sibling module, and no such file exists")
+    # THREE reasons now, not two, and the order is the order
+    # `resolve_module_path` tries them in: Mojo source (which returns, so it is
+    # never this function), then front-end-provided, then host module, then
+    # plain unresolvable. A front-end-provided name is listed for completeness
+    # rather than because a caller reaches it — `imported_modules` filters those
+    # out before anything asks — so that the set of answers this function can
+    # give is the set `resolve_module_path` can return, and a future caller
+    # that bypasses the filter says the right thing.
+    if is_frontend_provided(module_name):
+        kind = ("provided by this backend's front end as a compile-time "
+                "transform, so there is no source to compile and nothing for "
+                "the link step to provide")
+    elif _is_host_module(module_name):
+        kind = ("a host module (CPython standard library), which has no Mojo "
+                "source for this backend to compile")
+    else:
+        kind = "not a stdlib or sibling module, and no such file exists"
     return (f"{os.path.basename(source_path)} imports {module_name!r}, which "
             f"is {kind}")
 
