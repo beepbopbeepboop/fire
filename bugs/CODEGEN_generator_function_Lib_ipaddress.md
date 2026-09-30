@@ -500,8 +500,9 @@ get used as real objects (`first.version`, `first._ip`, ...) —
 the same general "unannotated parameter/field defaults to int64_t"
 family; for the ORDINARY-function-parameter half of it — a parameter
 used as a real object's receiver, which is what `first.version`
-is — see `bugs/hard/CODEGEN_method_call_on_struct_param_mistyped.md`
-(verified 2026-09-26: a method call on a struct passed as a
+is — see `bugs/hard/CODEGEN_method_call_on_struct_param_mistyped.md`,
+now FIXED and deleted 2026-09-30 (2026-09-30 section of
+bugs/hard/README.md). It read, verified 2026-09-26: a method call on a struct passed as a
 free-function parameter is mis-typed in every case, giving a wrong
 value with exit 0 for some method names and SIGSEGV/SIGBUS for
 others; the struct-typed-parameter half is

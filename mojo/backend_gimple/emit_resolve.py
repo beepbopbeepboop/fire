@@ -1054,7 +1054,8 @@ def _inline_bare_import_struct(gen, stmt, marker_reads) -> None:
         value, and the reason the last remaining row of
         bugs/hard/CODEGEN_method_call_on_struct_param_mistyped.md was still
         red (the identical program spelled `from insp import Parameter`
-        printed `v` in the SAME build);
+        printed `v` in the SAME build; that doc is deleted as of this fix —
+        see the 2026-09-30 section of bugs/hard/README.md);
       * `x = insp.Parameter('v', 7); print(x.v)` raised
         `AttributeError: v`, exit 1, on the module handle.
 

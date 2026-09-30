@@ -208,7 +208,8 @@ _INSP_PY = (
 # module-qualified-constructor case below also exercises a method call
 # through a free-function parameter — the shape of
 # bugs/hard/CODEGEN_method_call_on_struct_param_mistyped.md's last
-# remaining row.
+# remaining row (that doc is deleted as of this fix; see the 2026-09-30
+# section of bugs/hard/README.md).
 _LABEL_PY = (
     'class Parameter:\n'
     '    def __init__(self, v, n):\n'
