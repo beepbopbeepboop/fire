@@ -1674,10 +1674,22 @@ test('formal-hashlib', [PY, 'test_formal_hashlib.py'], mem='tiny',
      deps=['preflight'], timeout=1800,
      extra=['test_formal_hashlib.py', 'formal'] + FORMAL_BUILD_INPUTS,
      desc='hashlib: sha/md5 from libSystem and BLAKE2b from scratch, byte-exact')
+# `struct`, the module every Mach-O and ELF header in this tree is written
+# through, and the reason its test compares BYTES rather than counting them: a
+# subtly wrong byte packer produces a malformed binary that still links.
+#
 # RED, and registered red rather than excused — the estate check's own rule,
 # and the reason it exists: a declared red is a report and an unrun red is
-# silence. Two of seventy checks, on both backends, and the next step is in
-# bugs/FORMAL_struct_pack_over_eight_arguments.md.
+# silence. 2 of 148, and the next step is written down in
+# bugs/FORMAL_struct_pack_over_eight_arguments.md: `pack(fmt, v0..v7)` is a
+# 9-argument call, and a formal arm64 call is limited to the 8 its ABI passes
+# in registers, so the call is refused before `struct.mojo`'s own "return an
+# empty list" decline can happen.
+#
+# `proofs` and not `check` for a reason the solo number hides: 43 s alone, and
+# 201 s measured in a `-j4` run beside the other seven (it is 148 checks, most
+# of them a build). A job's cost in a bucket is its cost beside the others, and
+# that is the number the everyday loop would have paid.
 test('formal-struct', [PY, 'test_struct_formal.py'], mem='tiny',
      deps=['preflight'],
      expect='bugs/FORMAL_struct_pack_over_eight_arguments.md — a formal arm64 '
@@ -1685,11 +1697,12 @@ test('formal-struct', [PY, 'test_struct_formal.py'], mem='tiny',
             'called for a format naming 8 values',
      extra=['test_struct_formal.py', 'formal'] + FORMAL_BUILD_INPUTS,
      desc='struct: calcsize/pack/pack_into byte-for-byte against CPython struct')
-# A module's top-level statements RUN. `bugs/FORMAL_toplevel_statements_dropped.md`
-# was a silent miscompile: a file whose whole body was `import sys; sys.exit(3)`
-# built, linked, passed the symbol-bind audit and exited 0. Every case here
-# builds the image, executes it, and compares stdout and exit status with
-# CPython on the same text.
+# A module's top-level statements RUN. A file whose whole body was
+# `import sys; sys.exit(3)` used to build, link, pass the symbol-bind audit
+# and exit 0: every statement outside a `FunctionDef` was dropped without a
+# diagnostic. That bug is closed and its doc deleted (6ad8efd5), so the
+# durable record is this file, and its cases build the image, EXECUTE it, and
+# compare stdout and exit status with CPython on the same text.
 test('formal-toplevel', [PY, 'test_formal_toplevel.py'], mem='tiny',
      deps=['preflight'],
      expect='bugs/FORMAL_toplevel_body_struct_construction_no_longer_refused.md '

@@ -994,6 +994,41 @@ def test_every_job_over_the_debt_line_says_why():
           f'nothing, and the next step for each job is written down nowhere')
 
 
+def test_an_expect_marker_points_at_a_doc_that_exists():
+    """An `expect=` reason that cites `bugs/` must cite a doc that is there.
+
+    The same trap `mem debt` checks for `memwhy`, on the other field, and for
+    the same reason: a doc in `bugs/` is DELETED when the bug it describes is
+    fixed (CLAUDE.md's rule, and `6ad8efd5` is an example — a closed bug's doc
+    removed in the same commit). So a reason that reads
+
+        expect='bugs/FORMAL_something.md — red on X'
+
+    is a pointer at a file whose deletion is the normal outcome, and nothing
+    checked it. The failure is quiet and it is the bad direction: the doc goes,
+    the row keeps saying "red on X" with no next step, and the row is now
+    indistinguishable from a test that was silenced for want of a sentence.
+
+    Not a requirement that every `expect=` cite a doc — several predate the
+    habit and say the reason in prose, which is fine. It is that a doc which IS
+    named has to be there, so "this row's next step is written down" stays a
+    fact about the tree rather than a claim about a file.
+    """
+    cited, dangling = {}, []
+    for name, spec in sorted(suite.REGISTRY.items()):
+        for path in re.findall(r'\bbugs/[\w./-]+\.md', getattr(spec, 'expect', '')):
+            cited.setdefault(path, []).append(name)
+            if not os.path.exists(os.path.join(HERE, path)):
+                dangling.append(f'{name} -> {path}')
+    check('expect: at least one registered reason cites a bug doc',
+          len(cited) >= 1,
+          f'{len(cited)} cited; the check below would be vacuous')
+    check('expect: every bug doc a registered reason cites exists',
+          not dangling,
+          f'these reasons point at nothing, and a doc is DELETED when its bug '
+          f'is fixed, so the row outlives its own next step: {dangling}')
+
+
 def _makefile_target_closure(start):
     """Every make target reachable from `start` through prerequisites.
 
@@ -2619,7 +2654,9 @@ def main():
                test_a_job_class_covers_its_measured_peak,
                test_a_job_class_covers_the_peak_the_last_run_recorded,
                test_over_provisioned_classes_are_reported_not_silently_kept,
-               test_every_job_over_the_debt_line_says_why,
+                test_every_job_over_the_debt_line_says_why,
+                test_an_expect_marker_points_at_a_doc_that_exists,
+
                test_a_make_recipe_never_asks_for_more_than_its_job_reserved):
         fn()
     print()
