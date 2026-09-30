@@ -3377,9 +3377,9 @@ DECLARED_TYPE_REFUSALS = [
     # No annotation at all: `in1 = 0` is a class-level ASSIGNMENT, so nothing
     # here says what the slot holds, and the untyped case must stay refused
     # rather than being treated as a value on the strength of `= 0`. The
-    # message has to say WHICH shape of untyped it is, because a class that
-    # assigns its fields in `__init__` and one that assigns a literal are both
-    # "no declared type" and only one of them is `= 0`.
+    # message has to say WHICH shape of untyped it is, because a field a
+    # `__init__` assigns and one only ever handed a literal are both "no
+    # declared type" and only one of them is `= 0`.
     ("byref_declared_type_absent_stays_refused",
      "struct Inner:\n"
      "    var a: Int\n"
@@ -3399,7 +3399,7 @@ DECLARED_TYPE_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    var p = P()\n"
      "    return p.go()\n",
-     "refuse:does not declare 'in1'", None),
+     "refuse:declares 'in1' nowhere and has no __init__ at all", None),
     # A field that IS written. `in1: Inner` agrees on a framed struct, so the
     # slot does hold a frame address — but `P.go` ASSIGNS the field, so what is
     # in the slot is a frame belonging to whichever function ran the assignment,
@@ -3486,6 +3486,327 @@ DECLARED_TYPE_REFUSALS = [
      "    var p = P()\n"
      "    return p.go()\n",
      "refuse:is a method call on a value", None),
+]
+
+# ── the SECOND evidence source for a field's type: what __init__ ASSIGNS ─────
+#
+# `DECLARED_TYPE_CASES` above is the declared half.  This is the constructor
+# half, and it exists because a class that assigns its fields in `__init__` and
+# declares none was the largest remaining group in the sweep's
+# `field slot holds a frame address` family: `self.asm.org()`,
+# `interpreter.scope.define()` and `self.in1.total()` all refused with "the
+# declared type of 'asm' is the only thing here that could say so" — and a
+# class that assigns its fields in `__init__` and declares none is the shape
+# that same sentence listed as its own reason for not knowing.
+#
+# `model.struct_field_type` is the one function that combines the two sources;
+# `model.struct_field_assigned_type` is the one that reads the constructor, and
+# the whole of why that is EVIDENCE rather than a guess is premise (B2): `S()`
+# does not run `__init__` on this path, so the word in the slot is the
+# constructor's and the only thing the `__init__` line contributes is the NAME of
+# the type.  That is also why a conditional or repeated assignment there is not a
+# problem, and why the emitter is what has to be right about the store — which is
+# what the tuple case below is about.
+#
+# Every expected exit below was read off CPython running the same program (the
+# translation is `struct`→`class`, `fn`→`def`, and a declared field's implicit
+# zero default made explicit, because CPython's annotation syntax produces no
+# attribute at all).  Where the reference is stated as a DIFFERENT text it is
+# premise (B2) saying which store does not execute, and the comment says which.
+ASSIGNED_TYPE_CASES = [
+    # The positive case, and the shape the sweep named: `self.in1.total()` where
+    # `in1` is assigned in `__init__` and declared nowhere.  123 + 5 = 128, and a
+    # build that computed 0 or 5 would be the silently-wrong outcome — a load
+    # from a slot nothing was ever written to.
+    ("assigned_type_nested_frame_method_call",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    fn total(self) -> Int:\n"
+     "        return self.a * 100 + self.b * 10 + self.c\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "    fn __init__(self):\n"
+     "        self.in1 = Inner()\n"
+     "\n"
+     "    fn go(self) -> Int:\n"
+     "        return self.in1.total() + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.tag = 5\n"
+     "    o.in1.a = 1\n"
+     "    o.in1.b = 2\n"
+     "    o.in1.c = 3\n"
+     "    return o.go()\n", 128, None),
+    # The same construct reached through a LOCAL rather than through `self`,
+    # which is `scripts/stage2_mojo_interpreter.mojo`'s
+    # `interpreter.scope.define()`: the base is a parameterless constructor in
+    # `main`, not a receiver.  It is a separate case because the two are decided
+    # by different tables — `fn._frame_candidates` for a local against
+    # `struct_receivers` for `self` — and a fix that taught one and not the other
+    # would leave half the sweep where it was.
+    #
+    # The method WRITES the nested frame (`self.depth`, `self.last`), so 201
+    # also says the placed address is the frame itself and not a copy of it: a
+    # copy would read back 0.
+    ("assigned_type_nested_frame_through_a_local",
+     "struct Scope:\n"
+     "    var depth: Int\n"
+     "    var names: Int\n"
+     "    var last: Int\n"
+     "\n"
+     "    fn define(self, v: Int) -> Int:\n"
+     "        self.depth = self.depth + 1\n"
+     "        self.last = v\n"
+     "        return self.depth * 100 + self.last\n"
+     "\n"
+     "    fn get(self) -> Int:\n"
+     "        return self.depth * 10000 + self.last\n"
+     "\n"
+     "struct Interpreter:\n"
+     "    var filename: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "    fn __init__(self):\n"
+     "        self.scope = Scope()\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var interpreter = Interpreter()\n"
+     "    interpreter.scope.depth = 0\n"
+     "    interpreter.scope.last = 0\n"
+     "    var a = interpreter.scope.define(7)\n"
+     "    var b = interpreter.scope.define(9)\n"
+     "    return a * 1000 + b\n", 201, None),
+    # TWO objects, each holding its own placed nested frame, and a WRITE
+    # through the nested struct's own method.  Each read is guarded by a
+    # different return code, so a regression says WHICH frame moved rather than
+    # only that a number is wrong.  A nested frame that were placed once and
+    # shared would still answer the first two guards and fail the last two —
+    # which is the whole reason this is not folded into the case above.
+    ("assigned_type_nested_frame_two_objects_no_alias",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    fn bump(self) -> Int:\n"
+     "        self.c = self.c + 1\n"
+     "        return self.a * 100 + self.b * 10 + self.c\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "    fn __init__(self):\n"
+     "        self.in1 = Inner()\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o1 = Outer()\n"
+     "    var o2 = Outer()\n"
+     "    o1.in1.a = 1\n"
+     "    o1.in1.b = 2\n"
+     "    o1.in1.c = 3\n"
+     "    o2.in1.a = 7\n"
+     "    o2.in1.b = 8\n"
+     "    o2.in1.c = 9\n"
+     "    if o1.in1.bump() != 124:\n"
+     "        return 1000 + o1.in1.bump()\n"
+     "    if o2.in1.bump() != 790:\n"
+     "        return 2000 + o2.in1.bump()\n"
+     "    if o1.in1.c != 4:\n"
+     "        return 3000 + o1.in1.c\n"
+     "    if o2.in1.c != 10:\n"
+     "        return 4000 + o2.in1.c\n"
+     "    return 0\n", 0, None),
+    # The GUARD on the precedence rule, and the one most likely to be quietly
+    # dropped: a DECLARATION still wins over a contradicting `__init__`
+    # assignment, and the reason is premise (B2) rather than a preference —
+    # `Outer()` does not run `__init__`, so the word in `in1` is the
+    # declaration's, whatever the assignment says.  Cross-checking the two
+    # would refuse correct code.
+    #
+    # The reference is the same program with `Other()` replaced by `Inner()`
+    # (CPython 128), which is what premise (B2) says the `__init__` line does
+    # not do.  A build that honoured the ASSIGNMENT would place an `Other` and
+    # call `Inner.total` on it: 1, 2, 3 at the slots `Other` shares, so it
+    # would answer 123 rather than 128 and exit 0 — the silently-wrong shape
+    # this case exists to catch.
+    ("assigned_type_a_declaration_still_wins",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    fn total(self) -> Int:\n"
+     "        return self.a * 100 + self.b * 10 + self.c\n"
+     "\n"
+     "struct Other:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var in1: Inner\n"
+     "\n"
+     "    fn __init__(self):\n"
+     "        self.in1 = Other()\n"
+     "\n"
+     "    fn go(self) -> Int:\n"
+     "        return self.in1.total() + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.tag = 5\n"
+     "    o.in1.a = 1\n"
+     "    o.in1.b = 2\n"
+     "    o.in1.c = 3\n"
+     "    return o.go()\n", 128, None),
+]
+
+ASSIGNED_TYPE_REFUSALS = [
+    # The field is a nested frame's type AND an executed method REPLACES it.
+    # The type is known, which is what the constructor half of
+    # `struct_field_type` bought, and what is not known is WHOSE frame the slot
+    # holds — so this must still be the `_REASSIGNED` diagnosis, not the
+    # untyped one.  A fix that made the type available and then placed the frame
+    # anyway would answer 123 where the source says 128: `Other`'s frame and
+    # `Inner`'s have the same layout here, so the wrong one is silent.
+    ("byref_refuse_assigned_field_written_by_a_method",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    fn total(self) -> Int:\n"
+     "        return self.a * 100 + self.b * 10 + self.c\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "    fn __init__(self):\n"
+     "        self.in1 = Inner()\n"
+     "\n"
+     "    fn reset(self):\n"
+     "        self.in1 = Inner()\n"
+     "\n"
+     "    fn go(self) -> Int:\n"
+     "        return self.in1.total() + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.tag = 5\n"
+     "    o.in1.a = 1\n"
+     "    o.in1.b = 2\n"
+     "    o.in1.c = 3\n"
+     "    return o.go()\n",
+     "refuse:which is a Inner — a struct of this module whose receiver is a frame — but a method of Outer ASSIGNS it", None),
+    # Two constructions, two types.  This is the agree-or-refuse rule doing its
+    # job over the SECOND source: one counter-example takes the capability back
+    # out, and the needle is both names because a refusal that does not say which
+    # candidates disagreed is a refusal the reader has to re-derive.
+    ("byref_refuse_two_assigned_types",
+     "struct A2:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    fn ta(self) -> Int:\n"
+     "        return self.a * 10 + self.b\n"
+     "\n"
+     "struct B2:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    fn tb(self) -> Int:\n"
+     "        return self.a * 10 + self.b\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "    fn __init__(self, c: Int):\n"
+     "        if c > 0:\n"
+     "            self.in1 = A2()\n"
+     "        else:\n"
+     "            self.in1 = B2()\n"
+     "\n"
+     "    fn go(self) -> Int:\n"
+     "        return self.in1.ta()\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer(1)\n"
+     "    return o.go()\n",
+     "refuse:__init__ assigns self.in1 more than one type — 'A2' and 'B2'", None),
+    # An assignment of a NAME.  This is the case that says the inference is not
+    # a type guess: a parameter carries no type, so the field stays untyped and
+    # is refused — and the refusal says so in the source's own words, because
+    # the reader's next move is to look at the assignment.
+    ("byref_refuse_an_assignment_of_a_name",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    fn total(self) -> Int:\n"
+     "        return self.a * 100 + self.b * 10 + self.c\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "    fn __init__(self, w: Int):\n"
+     "        self.in1 = w\n"
+     "\n"
+     "    fn go(self) -> Int:\n"
+     "        return self.in1.total() + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer(5)\n"
+     "    return o.go()\n",
+     "refuse:assigns `self.in1 = w`, which is not a construction of a struct declared in this module", None),
+    # A TUPLE target: `self.a, self.b = A(), B()`, which is what
+    # `tools/procrun.py` writes.  The field is recognised as assigned, so the
+    # message is about the STORE and not about the type — and the store is the
+    # real gap: a tuple store to a field is refused by name on x86-64 and
+    # ACCEPTED-AND-DROPPED on arm64.  This case is here so that reading a type
+    # out of a store the emitter does not perform cannot come back unnoticed;
+    # with it read as evidence the program built, ran, and answered 123 where
+    # the source says 128.
+    # bugs/FORMAL_tuple_store_to_a_field.md is the codegen bug.
+    ("byref_refuse_a_tuple_target_names_the_store",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    fn total(self) -> Int:\n"
+     "        return self.a * 100 + self.b * 10 + self.c\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "    fn __init__(self):\n"
+     "        self.tag, self.in1 = 5, Inner()\n"
+     "\n"
+     "    fn go(self) -> Int:\n"
+     "        return self.in1.total() + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.in1.a = 1\n"
+     "    o.in1.b = 2\n"
+     "    o.in1.c = 3\n"
+     "    return o.go()\n",
+     "refuse:a tuple store to a FIELD is not a store this path performs", None),
 ]
 
 # ── wave 5 (E2): the three CONSTRUCTION shapes ─────────────────────────────
@@ -5969,6 +6290,7 @@ def main():
                   + BYREF_REFUSALS + WIDE_OFF_CASES
                   + SUBSCRIPT_CASES + DECLARED_TYPE_CASES
                   + DECLARED_TYPE_REFUSALS
+                  + ASSIGNED_TYPE_CASES + ASSIGNED_TYPE_REFUSALS
                   + BYREF_HANDOFF_CASES + BYREF_HANDOFF_REFUSALS
                   + CROSS_MODULE_CASES + WAVE5_POSITION_CASES
                   + CONSTRUCTION_CASES + CONSTRUCTION_REFUSALS
