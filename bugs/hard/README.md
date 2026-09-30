@@ -10,7 +10,7 @@ Every entry carries a `**State: CLOSED | PARTIAL | OPEN.**` banner directly
 under its title, with the residue named. Start there; the banner tells you
 whether re-reading the body is worth your time.
 
-Last updated 2026-09-26.
+Last updated 2026-09-29.
 
 ## OPEN — not fixed, no code change yet
 
@@ -23,7 +23,6 @@ Last updated 2026-09-26.
 
 | doc | what remains |
 |---|---|
-| `CODEGEN_coro_captured_param_capture_crashes.md` | capturing an enclosing function's *parameter* in a nested `async def` raised `ValueError` in the compiler. **FIXED 2026-09-26** — and not with the doc's one-liner: the capture plan is now a named `_Capture` class with one constructor, because the positional 3-tuple that three passes unpacked blindly is what caused the crash. Items 2/3 remain: a cross-closure `async for` neighbour shape that is neither refused nor correct, and a nested async generator driven by `async for` in its own enclosing function. |
 | `CODEGEN_coro_yield_kind_unresolved_callsite.md` | one untypable call site silently re-poisoned the yield slot to `int64_t`. **FIXED 2026-09-26** for cases 1–7, and *correct* rather than refused — the evidence was always reachable, it just was not read. The doc's own docstring parenthetical is implemented, plus six sound widenings (any-annotation is not a hole; a bare identifier bound to a list answers `('list', k)`; `if caller_env:` was truthiness where membership was meant; ordinary `def`s are now scanned too). One shape has no reachable evidence and must stay refused. Case 8 reclassified: it is the ordinary loop lowering, not this subsystem. |
 | `CODEGEN_method_call_on_struct_param_mistyped.md` | a method call on a struct passed as a free-function *parameter* was mistyped by method name alone — 6 crashes plus 2 silent wrong values. **FIXED 2026-09-26** for everything it owns: 8/8 names now correct, via a new cross-call contract in Pass 1.3d plus three supporting fixes. The doc's suggested refusal was not needed; the call site knows the type. One cross-module row remains and is *not* this bug in link mode — `module.Class(...)` construction is unresolved on every path, the larger gap named above. |
 | `CODEGEN_bytes_silent_wrong_values.md` | six `bytes`/`memoryview` paths returning plausible wrong values with exit 0. **5 of 6 FIXED 2026-09-26**, plus several found alongside: a bytes fill char that emitted a heap-address byte, empty-bytes predicates, `memoryview.readonly`, `dict.get`/`pop` on a bytes key, a loop-target rebind that was never bytes-specific, and swapped `partition` arms, a non-raising empty separator, `center` padding on the wrong side and a `width` keyword read as the fill. `isprintable`/`isnumeric` were **removed from `bytes`** (CPython raises; only the buggy code dissented) and added to `str`, where they answered a silent `0`. Two enshrined-wrong test expectations were corrected. Residue: `partition` returns a `MojoList *` because **this runtime has no tuple type at all** — not a bytes fix. |
@@ -60,7 +59,7 @@ new OPEN doc above rather than losing the residue:
 | `CODEGEN_bytes_value_type.md` | `CODEGEN_bytes_silent_wrong_values.md` |
 | `CODEGEN_struct_module.md` | `CODEGEN_struct_kwargs_and_inline_unpack.md` |
 | `CODEGEN_struct_format_shadowed_by_format_attribute.md` | `CODEGEN_return_type_of_module_constructor_result_erased.md` |
-| `CODEGEN_coro_nested_async_closure_capture.md` | `CODEGEN_coro_captured_param_capture_crashes.md` |
+| `CODEGEN_coro_nested_async_closure_capture.md` | `CODEGEN_coro_captured_param_capture_crashes.md` — itself closed and removed 2026-09-29 |
 | `CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md` | `CODEGEN_coro_yield_kind_unresolved_callsite.md` |
 | `CODEGEN_function_scoped_import_rettype_and_literal_cast_mismatches.md` | `CODEGEN_function_scoped_import_module_not_inlined.md` |
 | `CODEGEN_unannotated_init_param_field_type_defaults_int64.md` | `CODEGEN_ctor_arg_field_type_scalars_only.md` |
@@ -87,15 +86,15 @@ still ~n^1.7), so the doc stays OPEN.
 
 ## Notes for future sessions
 
-- **Three test files run in NO suite bucket** — `test_gimple_runner.py` (120
-  tests), `test_gimple_generator_runner.py` (145) and
-  `test_coro_nested_async_capture.py` (9). No `make check`, no `make gate`
-  runs any of them. This is not theoretical: a correct fix sat **red** in
-  `test_gimple_runner.py` for a full pass because nothing ran it, and the
-  coro file is 0/9 partly because its source list still names pre-rename
-  `mojo_*` runtime files (now `fire_*`). Registering those three is the
-  highest-value structural fix available in this directory — bigger than any
-  single bug listed above it.
+- ~~**Three test files run in NO suite bucket**~~ — **RESOLVED
+  2026-09-27/29, this note is now history.** `test_gimple_runner.py` is
+  registered as `runner`-adjacent `gimplerunner`, `test_gimple_generator_
+  runner.py` as `gimplegenerators` (both in `check`/`gate`), and
+  `test_coro_nested_async_capture.py` as `coro-nested-capture` (in the
+  `coroutine` bucket, hence the gate) after its pre-rename `mojo_*` runtime
+  source list and its one inverted expectation were fixed — 10/10 as of
+  2026-09-29. It was the highest-value structural fix available here; keep
+  it in mind for any new test file, which arrives unregistered by default.
 - **Two of the OPEN entries were found by re-testing claims in an existing
   doc rather than by reading code.** The `.format` residual had been
   recorded as "returns a pointer-sized integer ... and a local is correct
