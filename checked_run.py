@@ -180,8 +180,9 @@ def check_key(name: str, extra_paths, glob_patterns=()) -> str:
     Deduplicated across both lists for the same reason: a file named by
     `extra` and matched by a glob is one input, and hashing it twice would make
     the key depend on the overlap between the two lists rather than on the
-    subject. (One registered spec did name a path twice; its key moved once,
-    which is a cache miss and nothing else.)
+    subject. (`gimplerunner` names `gimple_codegen.py` on top of the
+    `GIMPLE_SOURCES` list that already has it, so this is not hypothetical: that
+    spec's key moves once, which is a cache miss and nothing else.)
     """
     globbed, _empty = expand_globs(glob_patterns)
     inputs = sorted(set(extra_paths) | set(globbed))
@@ -222,7 +223,13 @@ def main():
         print("checked_run.py: no command given (pass it after --)", file=sys.stderr)
         sys.exit(2)
 
-    _globbed, empty_globs = expand_globs(args.extra_glob)
+    # The empty-pattern list is worked out here as well as inside `check_key`,
+    # which is a second expansion of the same patterns. It costs one listdir:
+    # `check_key` owns the expansion so that no caller can hand it a pattern it
+    # will hash as a path, and this line is here only because the warning below
+    # is a separate concern from the key. One function knows patterns are
+    # patterns; asking it twice is cheaper than a second way to get it wrong.
+    empty_globs = expand_globs(args.extra_glob)[1]
     key = check_key(args.name, args.extra, args.extra_glob)
 
     # Say so when an `--extra` path is not there. A missing path hashes to a

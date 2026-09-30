@@ -1967,7 +1967,7 @@ def test_checked_run_key_covers_what_it_names():
     # That is not a synthetic worry: it is the estate check's subject — the
     # repo's own `test_*.py` — behind a `cache=True` spec, which is the exact
     # shape of the hole in
-    # bugs/UNTESTED_estate_check_is_red_and_outside_the_gate.md.
+    # the bug that closing it deleted.
     flat = os.path.join(tempfile.mkdtemp(prefix='crglob_'), 'flat')
     os.makedirs(flat)
     for i in range(3):
@@ -2369,7 +2369,7 @@ def test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject():
          bucket, so `make gate` never executed the estate check at all: eight
          unregistered test files sat on disk through several landings and every
          gate was green. That is
-         `bugs/UNTESTED_estate_check_is_red_and_outside_the_gate.md`, and it is
+         a doc that is now closed and deleted, and it is
          the same shape as the `coro` failure CLAUDE.md tells this story about
          — a bucket that runs nothing, so a check that exists runs nothing.
 

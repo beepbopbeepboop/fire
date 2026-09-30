@@ -1156,9 +1156,10 @@ test('preflight', [PY, '-c',
 # that its inputs are its subject, and here the subject is a set of files that
 # nothing in `extra` could name without a list that rots on the next one.
 #
-# That is the whole of bugs/UNTESTED_estate_check_is_red_and_outside_the_gate.md
-# in one mechanism: the check existed, and the cache in front of it was a hole
-# exactly the shape of the thing the check looks for.
+# That is the whole of the bug this doc used to point at
+# (`bugs/UNTESTED_estate_check_is_red_and_outside_the_gate.md`, closed and
+# DELETED with the fix) in one mechanism: the check existed, and the cache in
+# front of it was a hole exactly the shape of the thing the check looks for.
 test('suite-self-test', [PY, 'test_suite.py'], cache=True,
      extra=['test_suite.py', 'tools/suite.py', 'tools/procrun.py',
             'tools/memslot.py', 'tools/memcap.py', 'checked_run.py',
@@ -1769,10 +1770,10 @@ BUCKETS = {
               # never executed either — and `suite-self-test` is where the
               # estate check lives, so a landing that added an unregistered
               # test file was reported green by the gate and discovered by
-              # whoever ran `smoke` next. That is the whole of
-              # bugs/UNTESTED_estate_check_is_red_and_outside_the_gate.md, and
-              # it is a coverage check outside every gate, which is how 50 test
-              # files became 94 one at a time. `preflight` is here for the
+              # whoever ran `smoke` next. That is the whole of a doc that is
+              # now closed and deleted, and the defect was a coverage check
+              # outside every gate, which is how 50 test files became 94 one at
+              # a time. `preflight` is here for the
               # same reason and the smaller one: it is a `deps` of seven
               # members of this bucket and of mojoc/ab-native/native-dumpfull,
               # so it already runs in almost every gate — as a dependency
