@@ -174,7 +174,7 @@ def test_a_specialization_root_is_a_callee_not_a_read(tmpdir):
            "    var b = widen[3](5)\n"
            "    return b\n")
     stmts = F.Parser(F.py_tokenize(src)).with_filename("t").parse_module()
-    fns, structs, syms = B._prepare_functions(stmts, synthetic=False)
+    fns, structs, syms, _slots = B._prepare_functions(stmts, synthetic=False)
     M.publish_module_symbols(syms)
     try:
         B.check_module_symbols(fns, {s.name: s for s in structs})
@@ -204,7 +204,7 @@ def test_the_true_case_for_that_check_is_a_plain_read(tmpdir):
            "    var b = plain\n"
            "    return 0\n")
     stmts = F.Parser(F.py_tokenize(src)).with_filename("t").parse_module()
-    fns, structs, syms = B._prepare_functions(stmts, synthetic=False)
+    fns, structs, syms, _slots = B._prepare_functions(stmts, synthetic=False)
     M.publish_module_symbols(syms)
     refused = False
     try:

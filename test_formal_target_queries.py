@@ -408,7 +408,8 @@ def keyword_walk_detail(source):
     if refused == "raised":
         left = seen = -1          # not reached; the refusal was the result
     else:
-        fns, _structs, _syms = B._prepare_functions(stmts, synthetic=False)
+        fns, _structs, _syms, _slots = B._prepare_functions(
+            stmts, synthetic=False)
         left = sum(1 for fn in fns
                    for n in M.iter_nodes(getattr(fn, "body", None) or [])
                    if M.is_mlir_template(n))
