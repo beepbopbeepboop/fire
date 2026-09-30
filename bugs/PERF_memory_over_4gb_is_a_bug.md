@@ -82,14 +82,25 @@ more fixable form of the debt:
 
 ## What is NOT over the line, and why that is the interesting part
 
-Before 2026-09-30, `mojoc`, `selfhost`, `bootstrap-stage2-cc` and the three
-`bootstrap-stage*-dumps` fanouts were `stage` (96) or `program` (55) — between
-12x and 80x their measured peaks, and each one a queue for every other job on
-the machine. The `MEMCLASS` comments used to justify them with "55.8 GB healthy
-peak" and "the largest footprint ever observed completing a self-compile is
-~96 GB".
+Before 2026-09-30, every job below was sized from the shape of its workload
+rather than from a measurement, and the `MEMCLASS` comments justified them with
+"55.8 GB healthy peak" and "the largest footprint ever observed completing a
+self-compile is ~96 GB":
 
-Those are the numbers a **footprint** probe reported, on a tree state weeks
+| job | class then | measured peak | over by |
+|---|---|---|---|
+| `selfhost`, `mojoc` | `stage` (96) | 3.7 GB | 26x |
+| `bootstrap-stage2-cc` | `stage` (96) | 1.2 GB | 80x |
+| the three `bootstrap-stage*-dumps` fanouts | `module` (24) | 0.5 GB per item | 48x |
+| the three `bootstrap-stage*-transitive` dumps | `program` (55) | 1.2 GB | 46x |
+
+A 96 GB class IS the whole machine budget (96 of 96), so a `stage` job queued
+every other job on the machine behind it whether or not it was marked `excl` —
+and `mojoc`, which was, did the same by definition. A 24 GB class simply
+admitted four of a fanout's 45 items at a time, for items that need 0.5 GB
+each.
+
+Those are the numbers a **footprint** probe reported, on a tree state days
 older. What a ceiling is enforced against — and what `memcap` measures, and
 what these classes are now assigned from — is the summed RSS of the process
 tree, and the runner's own instrument has now measured the same python

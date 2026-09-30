@@ -213,9 +213,11 @@ GIMPLE_SOURCES = (
 #   tiny     4 GB. A python check, a snippet compile, or a single `--dump` of
 #            one source file. The measured peaks at this end of the registry
 #            are 0.2-1.5 GB (`MEASURED_PEAK_GB`), so 4 covers the largest of
-#            them with 2.7x. It exists because `small` was the floor and the
-#            floor was set for a workload — a mojoc run over the A/B corpus —
-#            that nothing in the everyday registry actually does any more.
+#            them with 2.7x. It exists because `small` was the floor, and that
+#            floor was documented for a mojoc run over the A/B corpus — the
+#            one workload in the tree that turned out not to fit it (9.4 GB on
+#            2026-09-29, a guaranteed RESOURCE, and a class that still had to
+#            keep covering the cheap end).
 #   small    8 GB. A mojoc run over a snippet-sized input, a pure-python check
 #            that compiles snippet-sized programs, and the whole-closure
 #            self-compile as it measures TODAY (`selfhost` 3.7 GB, `mojoc`
@@ -238,11 +240,11 @@ GIMPLE_SOURCES = (
 #
 # `program` and `stage` used to be justified by "55.8 GB healthy / 192 GB
 # runaway" and "the largest footprint ever observed completing a self-compile
-# is ~96 GB". Those are real observations, but the second is a *footprint* probe
-# and every ceiling here is enforced against summed RSS, and the first is from
-# a tree state four weeks older than the measurements below. The measurement
-# that a ceiling is actually enforced against is in `MEASURED_PEAK_GB`, read
-# off the run log by the same wrapper that does the killing.
+# is ~96 GB". Those are real observations — 2026-09-25/26, days before the gate
+# below — but the second is a *footprint* probe and every ceiling here is
+# enforced against summed RSS, and neither has been re-measured since. The
+# measurement a ceiling is actually enforced against is in `MEASURED_PEAK_GB`,
+# read off the run log by the same wrapper that does the killing.
 #
 # Override with MEMLIMIT_GB (absolute, all classes) or MEMLIMIT_GB=0 (no cap at
 # all, loudly).

@@ -404,29 +404,47 @@ def test_an_exclusive_job_reserves_its_class_and_nothing_more():
     """
     with _SandboxEnv(MEMSLOT_BUDGET_GB=64):
         excl_spec = suite.REGISTRY['mojoc']
-        plain = suite.Job(suite.REGISTRY['gimple'])
-        check('admission: an exclusive job reserves its CLASS, not the budget',
-              suite.reserved_gb(excl_spec) == suite.MEMCLASS[
-                  suite.memclass_for(excl_spec)],
-              f'{suite.reserved_gb(excl_spec)} GB, class '
-              f'{suite.memclass_for(excl_spec)}')
-        check('admission: ...which is exactly what an ordinary job reserves',
+        plain_spec = suite.REGISTRY['gimple']
+        check('admission: an exclusive job reserves exactly what its ceiling is',
               suite.reserved_gb(excl_spec)
               == suite.memlimit(suite.memclass_for(excl_spec)),
+              f'{suite.reserved_gb(excl_spec)} GB reserved, '
+              f'{suite.memlimit(suite.memclass_for(excl_spec))} GB ceiling — the '
+              f'reservation is a promise, and it is the one the ceiling keeps')
+        check('admission: ...which is exactly what an ordinary job reserves',
+              suite.reserved_gb(excl_spec) == suite.reserved_gb(plain_spec)
+              or suite.memclass_for(excl_spec) != suite.memclass_for(plain_spec),
               'excl adds nothing to the number: it is about scheduling')
-        check('admission: ...and an ordinary one reserves its class',
-              suite.reserved_gb(suite.REGISTRY['gimple'])
-              == suite.memlimit(suite.memclass_for(suite.REGISTRY['gimple'])),
-              'the class is the promise the ceiling has to keep')
         check('admission: the flag itself is untouched (the scheduler reads it)',
               bool(suite.Job(excl_spec).excl), 'mojoc is still exclusive')
         check('admission: on a 64 GB budget nothing is refused for being big',
               all(suite.MEMCLASS[suite.memclass_for(s)]
                   <= suite.memslot_budget() for s in suite.REGISTRY.values()),
               'a class over the budget is a job the ledger can never admit')
+    if os.environ.get('MEMLIMIT_GB', '').strip() in ('', '0', '0.0'):
+        # The rest of this case is about the number in the TABLE, and
+        # MEMLIMIT_GB replaces every class with one value — under an override
+        # "its class, not the budget" has no meaning, so the checks that
+        # distinguish them are skipped rather than reported as failures.
+        check('admission: an exclusive job reserves its class and NOT the budget',
+              suite.reserved_gb(suite.REGISTRY['mojoc'])
+              == suite.MEMCLASS[suite.memclass_for(suite.REGISTRY['mojoc'])]
+              < suite.memslot_budget(),
+              f'{suite.reserved_gb(suite.REGISTRY["mojoc"])} GB of a '
+              f'{suite.memslot_budget():g} GB budget: mojoc measures 3.7 GB, and '
+              f'a 3.7 GB build that holds the whole machine is the queue this '
+              f'used to be')
+        check('admission: ...and an ordinary one reserves its class',
+              suite.reserved_gb(suite.REGISTRY['gimple'])
+              == suite.MEMCLASS[suite.memclass_for(suite.REGISTRY['gimple'])],
+              'the class is the promise the ceiling has to keep')
+    else:
+        print('      admission: MEMLIMIT_GB is set, so the checks that compare a '
+              'reservation against the class TABLE are skipped (every class is '
+              'the override, so they would be vacuous)')
     with _SandboxEnv(MEMLIMIT_GB=0):
         check('admission: no ceiling means no reservation, not a zero one',
-              suite.reserved_gb(suite.REGISTRY['gimple']) == 0,
+              suite.reserved_gb(plain_spec) == 0,
               'MEMLIMIT_GB=0 is the run-wide "no memory bound anywhere" switch')
 
 
@@ -862,16 +880,23 @@ def test_a_job_class_covers_the_peak_the_last_run_recorded():
           len(parsed) == 3 and 'gimple' not in
           {k for k, v in parsed.items() if v == 0}, f'{parsed}')
     # The negative control, on a real registered job: a log that says a job
-    # peaked above its class MUST produce a shortfall, or the check above is a
-    # tautology over a list that happens to be empty.
-    check('peak log: a peak above the class is reported, not tolerated',
-          [n for n, _p, _c, _g in suite.class_shortfalls({'modcache': 9.9})]
-          == ['modcache'],
-          f'class_shortfalls on a synthetic 9.9 GB modcache: '
-          f'{suite.class_shortfalls({"modcache": 9.9})}')
-    check('peak log: a peak the class covers produces no shortfall',
-          not suite.class_shortfalls({'modcache': 0.3, 'gimple': 7.9}),
-          f'{suite.class_shortfalls({"modcache": 0.3, "gimple": 7.9})}')
+    # peaked above its class MUST produce a shortfall, or the check below is a
+    # tautology over a list that happens to be empty. Both of these compare a
+    # peak against the class TABLE, so they are meaningless under
+    # MEMLIMIT_GB — which replaces every class with one number and makes "the
+    # class cannot cover the peak" impossible by construction.
+    if os.environ.get('MEMLIMIT_GB', '').strip() in ('', '0', '0.0'):
+        check('peak log: a peak above the class is reported, not tolerated',
+              [n for n, _p, _c, _g
+               in suite.class_shortfalls({'modcache': 9.9})] == ['modcache'],
+              f'class_shortfalls on a synthetic 9.9 GB modcache: '
+              f'{suite.class_shortfalls({"modcache": 9.9})}')
+        check('peak log: a peak the class covers produces no shortfall',
+              not suite.class_shortfalls({'modcache': 0.3, 'gimple': 7.9}),
+              f'{suite.class_shortfalls({"modcache": 0.3, "gimple": 7.9})}')
+    else:
+        print('      peak log: MEMLIMIT_GB is set, so the shortfall checks are '
+              'skipped (every class is the override)')
 
     if not os.path.exists(log):
         print('      peak log: no build/suite.log in this worktree, so the '
