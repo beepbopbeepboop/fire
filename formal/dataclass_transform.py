@@ -403,14 +403,29 @@ def reflection_member_refusal(name: str) -> str:
 # result: a module-level name has no storage (formal/model.py's no-storage
 # rule) and a local built in the constructor's frame dies with it. Refused.
 
-# The nodes a class-level default may be written as. Deliberately a set and not
-# `isinstance(x, (int, str))`: the question is whether the FRONT END can fold
-# the node to a word, and a node type is what it folds on. A `NoneLiteral` is
-# in it because `Optional[int] = None` is a field default in
-# `type_system.py`, and `x: T = None` is measured to build (`r2.py`'s
-# neighbour case, and `q2.py`'s `a: int = 5` shape).
-LITERAL_NODES = (F.IntLiteral, F.FloatLiteral, F.StringLiteral, F.BoolLiteral,
-                 F.NoneLiteral)
+# The nodes a class-level default may be written as. Deliberately NOT a set
+# here: the question "can the build KNOW this value" already has an owner, and
+# it is `model.fold_literal_expr` — the function `formal/build.py`'s
+# `_rewrite_class_constants` and the module-constant substitution both ask. A
+# second node-type list in this file would be a second recognition of a
+# question with one answer, which is the pair that agrees until the day it does
+# not, and it was WRONG on the first program it met: `x: Optional[int] = None`
+# parses to `IdentExpr('None')` on this parser, not to a `NoneLiteral`, so a
+# node-type list would have called it a call.
+def _folds(value) -> bool:
+    """Whether the build can KNOW this class-level default's value.
+
+    `model.fold_literal_expr` is the whole test, called rather than
+    reimplemented. It is deliberately literal-only and that is what makes it the
+    right authority: its docstring says its job is "can the build KNOW this
+    value", and a class-level constant is materialized WHERE IT IS READ
+    (`formal/build.py`'s `_rewrite_class_constants`), so a default it cannot
+    fold is materialized as a call and refused by `module_global_refusal`."""
+    if value is None:
+        return True          # no default: the field is uninitialized, which is
+                             # what `x: T` already means
+    M = _model()
+    return M.fold_literal_expr(value) is not None
 
 
 def lower_field(node):
@@ -487,24 +502,39 @@ def lower_field(node):
 def field_refusal(name: str, default, declared_type) -> str:
     """The refusal for a field whose default this path cannot hold.
 
-    Only reached for a default that is not a literal. A literal class-level
-    constant is materialized where it is read (formal/build.py's
-    `_rewrite_class_constants`) and works — measured, `x: int = 5` builds and
-    `P3()` prints 5. A non-literal one is a class-level name with no storage,
-    and `model.module_global_refusal` already says so; this exists so the
-    message names the FIELD and the dataclass option that put it there, which
-    the module-level message does not."""
-    if default is None:
+    Only reached for a default `model.fold_literal_expr` cannot fold, which is
+    the same test the materialiser applies — so this does not claim a
+    classification the build does not make. That matters: an earlier version
+    of this message asserted the default "is a call", which is FALSE of the
+    first real case it met (`type_system.py`'s
+    `bit_width: Optional[int] = None`, which parses to `IdentExpr('None')` on
+    this parser and is not a call). A refusal that mis-describes the construct
+    sends the next reader looking for the wrong thing, which is the failure
+    `bugs/FORMAL_known_limits.md` exists to prevent.
+
+    A `None` default is the common case and is worth naming, because it is the
+    one a reader is most likely to believe is free: on this path `None` is a
+    NAME (`IdentExpr('None')`), not a literal, so it is materialized as a call
+    and refused — the same thing a module-level `G = None` does."""
+    if _folds(default):
         return ""
-    if isinstance(default, LITERAL_NODES):
-        return ""
-    return (f"the default for field {name!r} is not a literal, and a "
-            f"class-level default on this path must be one: a formal value is "
-            f"one 64-bit word, so the only thing a class-level name can be read "
-            f"as is the literal it is written with, and this is a call. Write "
-            f"the value at the use site (a literal, or an assignment the "
-            f"compiler can see), which is the same program with a "
-            f"representation")
+    if isinstance(default, F.IdentExpr) and default.name == "None":
+        return (f"the default for field {name!r} is `None`, and on this path "
+                f"`None` is a NAME rather than a literal — it parses to a bare "
+                f"identifier, not to a value — so there is nothing for a "
+                f"class-level constant to be materialized as. A formal value "
+                f"is one 64-bit word, and the only thing a class-level name "
+                f"can be read as is the literal it is written with. Leave the "
+                f"field undeclared (`{name}: T`) so it reads as the zero an "
+                f"unwritten slot gives, or give it a literal")
+    return (f"the default for field {name!r} is not a value this build can "
+            f"materialize, and a class-level default on this path has to be "
+            f"one: a formal value is a single 64-bit word, a class-level "
+            f"constant is materialized WHERE IT IS READ rather than stored "
+            f"(`formal/build.py`'s `_rewrite_class_constants`), and a value "
+            f"that is not literal-only has nothing to materialize. Write a "
+            f"literal, or an expression over literals, or leave the field "
+            f"undeclared")
 
 
 # ── the field-wise == / != rewrite ─────────────────────────────────────────
@@ -734,9 +764,7 @@ def check_dataclass_classes(classes: dict) -> None:
         for f in M.struct_fields(st):
             ann = getattr(f, "type_ann", None)
             if isinstance(ann, str) and "InitVar" in ann:
-                raise CodegenError(init_var_refusal(
-                    name, getattr(f, "name", None)
-                    or getattr(getattr(f, "target", None), "name", "?")))
+                raise CodegenError(init_var_refusal(name, _field_name(f)))
 
 
 def lower_field_defaults(classes: dict) -> None:
@@ -754,17 +782,33 @@ def lower_field_defaults(classes: dict) -> None:
     for name, info in classes.items():
         st = info["struct"]
         for f in M.struct_fields(st):
-            fname = (getattr(f, "name", None)
-                     or getattr(getattr(f, "target", None), "name", "?"))
+            fname = _field_name(f)
             new_value, why = lower_field(f)
             if why:
-                raise_from_field(why)
+                raise_from_field(f"{name}.{fname}: {why}")
             if new_value is not None:
                 f.value = new_value
             bad = field_refusal(fname, getattr(f, "value", None),
-                                getattr(f, "type_ann", None))
+                               getattr(f, "type_ann", None))
             if bad:
                 raise_from_field(f"{name}.{fname}: {bad}")
+
+
+def _field_name(f) -> str:
+    """A field's name, whichever node shape declares it.
+
+    Measured on this tree's parser: `x: int` is a `VarDecl` with `.name`, and
+    `x: int = 5` — and `x: int = field(default=5)` — are an `AssignStmt` whose
+    `.target` is the `IdentExpr` that carries it. `struct_field_names` reads
+    both, so anything that wants to NAME a field in a diagnostic has to as
+    well, and a reader who is told `formal/types.py` line 12 is bad deserves to
+    be told WHICH field."""
+    name = getattr(f, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    target = getattr(f, "target", None)
+    name = getattr(target, "name", None)
+    return name if isinstance(name, str) and name else "?"
 
 
 def raise_from_field(message: str) -> None:

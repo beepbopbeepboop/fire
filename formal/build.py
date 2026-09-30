@@ -975,7 +975,7 @@ def compile_formal(source_path: str, output: str = None,
         check_frame_field_blob_premises(structs)
         check_frame_subscript_escapes(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
-        check_dataclass_constructs(stmts, functions, structs)
+        check_dataclass_constructs(stmts, functions)
         check_module_symbols(
             functions, {st.name: st for st in structs},
             imported_module_names=(imported_modules(stmts)
@@ -1125,7 +1125,7 @@ def _formal_module_functions(source_path: str,
         # the dylib path, and a `@dataclass` option this backend cannot lower
         # is a fact about the FILE rather than about the image, so a file whose
         # import is the more fundamental problem should say that first.
-        check_dataclass_constructs(stmts, functions, structs)
+        check_dataclass_constructs(stmts, functions)
         # The third of the three, and HERE for the reason the other two are:
         # a name the build cannot place is a codegen finding about THIS file,
         # and a file that imports a host module has a more fundamental fact
@@ -2239,8 +2239,7 @@ def check_frame_field_blob_premises(structs) -> None:
             raise CodegenError(M.frame_field_premise_refusal(st))
 
 
-def check_dataclass_constructs(stmts: list, functions: list,
-                               structs: list) -> None:
+def check_dataclass_constructs(stmts: list, functions: list) -> None:
     """Every `@dataclass` construct in the unit, checked. One refusal each.
 
     Called by the ENTRY POINTS, beside `check_construction_shapes`, and for the
@@ -2269,7 +2268,12 @@ def check_dataclass_constructs(stmts: list, functions: list,
     returns `set()` for a file with no such import, so the whole check is a
     function call on 578 of the sweep's files. That matters because it runs on
     every build of every file, including the 664 stdlib ones."""
-    classes = DC.dataclass_classes(stmts, structs)
+    # …and over THIS MODULE'S OWN StructDefs, for the same reason the rewrite in
+    # `_prepare_functions` is: an imported declaration belongs to a separate
+    # compilation unit that goes through this same pipeline when it is built
+    # into a dylib, so checking it here reports another file's class against
+    # this file.
+    classes = DC.dataclass_classes(stmts)
     if classes:
         DC.check_dataclass_classes(classes)
     names = DC.bound_module_names(stmts)
@@ -3558,6 +3562,17 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # a class is dropped before the front end ever looks at it (measured:
     # `.tmp/dc/q1.py` builds, runs, and the decorator's own `printf` never runs).
     #
+    # Over THIS MODULE'S OWN StructDefs and not over `structs`, which also
+    # carries the declarations of everything it imports. Two reasons, and the
+    # second is the one that bites: an imported module is a SEPARATE
+    # compilation unit that goes through this same pipeline when it is built
+    # into a dylib (formal/imports.py's `build_module_dylib`), so its
+    # dataclasses are lowered and checked when IT is compiled — and doing it
+    # again here reported another file's class against this file. Measured: with
+    # the imported declarations included, `formal/types.py` was refused for a
+    # `field(default_factory=…)` in a class declared in `fire_compiler.py`,
+    # under a message that named neither the class nor the field.
+    #
     # The `field(default=LITERAL)` lowering is a REWRITE and has to precede
     # `_rewrite_class_constants` below, which is what materialises a class-level
     # constant where it is read: a `field(...)` left in place is materialised as
@@ -3567,9 +3582,18 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # run beside `check_construction_shapes`, for the reason the comment on
     # that call site gives (a file that imports a host module has a more
     # fundamental fact about it than a codegen gap).
-    dc_classes = DC.dataclass_classes(stmts, structs)
+    dc_classes = DC.dataclass_classes(stmts)
     if dc_classes:
         DC.lower_field_defaults(dc_classes)
+    # The `==` rewrite's table is WIDER — this module's dataclasses PLUS the
+    # ones it imports — because a comparison between two values of an IMPORTED
+    # dataclass is as much this module's problem as a comparison between two of
+    # its own. An imported declaration is a separate parse of the other
+    # module's source, so a `field(default=…)` wrapper is still on its fields;
+    # only the field NAMES are read here (`struct_field_names`, which gets them
+    # from the declaration's target either way), so the wrapper is harmless.
+    dc_equality = (DC.dataclass_classes(stmts, structs) if structs
+                   else dc_classes)
     method_owners = M.method_owner_names(structs)
     functions = functions + _struct_methods(stmts)
     # A struct of more than one field is not refused here when its receiver is
@@ -3654,7 +3678,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # of from `by_name` — is exactly the pair that agrees until the day it does
     # not. `formal/dataclass_transform.rewrite_equality` takes the holder
     # table as given.
-    _frame_receivers(functions, structs_by_name, dc_classes)
+    _frame_receivers(functions, structs_by_name, dc_equality)
     return functions, structs, symbols
 
 
