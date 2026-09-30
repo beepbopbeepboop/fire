@@ -48,6 +48,17 @@ CodegenError = M.CodegenError
 
 _CALLEE_SAVED = [19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
 
+# How many arguments AAPCS passes in registers: X0..X7. Named once and used by
+# BOTH ends of the convention (the callee's prologue and `_emit_call`), because
+# the two are one fact and a program that is refused at one end and silently
+# truncated at the other is the bug this constant exists to prevent.
+#
+# The x86-64 backend has its own (`ARG_REGS`, six of them) for the same reason:
+# the limit is the platform's, not the language's, and it belongs in the
+# backend. What is NOT the backend's is what to do past the limit, and both
+# refuse.
+_ABI_ARG_REGS = 8
+
 
 def _for_target_tree(target: str):
     """Parse a for/comprehension target string into a leaf name or nested list.
@@ -858,9 +869,20 @@ class ARM64Codegen:
         # parameters first (the call site passes them ahead of the runtime
         # ones), then its runtime parameters.
         incoming = M.incoming_args(f)
+        if len(incoming) > _ABI_ARG_REGS:
+            # The other end of the same refusal. `_emit_call` catches a call
+            # SITE with too many arguments, but a function can also be REACHED
+            # without one — a dylib export, a reflection-resolved call, an
+            # entry point the driver calls directly — and this used to answer
+            # that by `break`ing out of the loop, which leaves every parameter
+            # past the eighth with its home slot never written. The first read
+            # of such a name then loaded whatever the slot held, so the value
+            # was not merely wrong but BUILD-DEPENDENT. Refusing here means
+            # the arity is rejected whichever way the function is entered.
+            raise CodegenError(
+                f"{f.name}: {len(incoming)} parameters exceeds the "
+                f"{_ABI_ARG_REGS} the formal arm64 ABI passes in registers")
         for i, (pname, ptype) in enumerate(incoming):
-            if i >= 8:
-                break            # AAPCS has no register for argument 8+
             if i == 0:
                 # Already in X19 by the unconditional save above, which also
                 # keeps the no-parameter case (unknown-name reads fall back to
@@ -873,11 +895,10 @@ class ARM64Codegen:
                     # home is a spill slot: write the incoming argument there
                     # now, or its first read in the body would load whatever
                     # the slot happened to hold. Same addressing as
-                    # `_store_var`'s spill path. NOT reachable today — the
-                    # caller only ever passes 8 arguments (AAPCS X0-X7, see
-                    # `_emit_call`), so at most 8 parameters exist to be
-                    # spilled — but it is written rather than left as a
-                    # silent-wrong-value trap for whoever raises that limit.
+                    # `_store_var`'s spill path. Reachable for arguments 0..7
+                    # of a function with more than ten parameters — the
+                    # arity check above bounds how MANY arguments there are,
+                    # not how many names want a register.
                     if pname in self._var_spills:
                         self.asm.emit(encode_mov_zr_xn(17, i))
                         _emit_sub_imm(self.asm, 17, 17,
@@ -5129,14 +5150,22 @@ class ARM64Codegen:
         # (they don't produce call arguments).
         for se in side_effects:
             self._emit_expr(se)
-        # AAPCS: only X0..X7 are argument registers. Args past 8 are
-        # evaluated for side effects then dropped (same compile-only
-        # fidelity as unknown-signature kwargs / dynamic *unpack).
-        if len(args) > 8:
-            extra = args[8:]
-            args = args[:8]
-            for x in extra:
-                self._emit_expr(x)
+        # AAPCS passes the first eight arguments in X0..X7. A ninth has no
+        # register, and this path has no stack-argument convention to fall
+        # back on, so the call is REFUSED here rather than truncated: the
+        # alternative — evaluate the extra arguments for their side effects,
+        # drop them, and branch — built an image that ran and read the ninth
+        # parameter as ZERO, which is a perfectly good answer to a great many
+        # questions (measured: `nine(1,...,9)` returned 1 where the source
+        # says 90001). A wrong value is strictly worse than a refusal here,
+        # because nothing downstream can tell a dropped argument from a
+        # caller who passed zero. Same shape, same words, as the x86-64
+        # check in `_emit_call` there — the two differ in their limit (8 vs
+        # 6) because the ABIs do, not in what they do about it.
+        if len(args) > _ABI_ARG_REGS:
+            raise CodegenError(
+                f"call {name}(): {len(args)} arguments exceeds the "
+                f"{_ABI_ARG_REGS} the formal arm64 ABI passes in registers")
 
         # AAPCS: pass up to 8 integer args in X0..X7. Evaluate left-to-right,
         # spilling each result so nested evaluations (which clobber X0/X1/X2)
