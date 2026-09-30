@@ -1574,10 +1574,10 @@ def main():
 """, "6\n15\n15\n9000000\n20000\n", 40)
 
     test_gimple_stdout("gimple_closure_that_escapes_is_not_freed", """\
-def escape_list(kept: List) -> Int:
+def escape_list(kept: List, base: Int) -> Int:
     var t = 0
     for i in range(4):
-        var f = lambda x: x + i
+        var f = lambda x: x + base
         kept.append(f)
         t += f(1)
     return t
@@ -1594,21 +1594,25 @@ def capture_chain() -> Int:
 
 def main():
     var kept: List = []
-    print(escape_list(kept))
+    print(escape_list(kept, 10))
     print(len(kept))
+    # CALL each stored closure AFTER escape_list returned: freeing it with its
+    # scope would dispatch through a freed pointer here, and the base is a
+    # PARAMETER precisely so that every stored closure answers the same number
+    # and the two engines' answers can be compared.
     var seen = 0
     for k in range(len(kept)):
         var fv = kept[k]
-        seen += 1
+        seen += fv(1)
     print(seen)
     print(escape_rebind())
     print(capture_chain())
     var acc = 0
     for r in range(20000):
         var kk: List = []
-        acc += escape_list(kk) % 1000 + escape_rebind() + capture_chain()
+        acc += escape_list(kk, 10) % 1000 + escape_rebind() + capture_chain()
     print(acc)
-""", "10\n4\n4\n3\n5\n360000\n")
+""", "44\n4\n44\n3\n5\n1040000\n")
 
     # ── A callee that provably returns a FRESH STRING hands ownership to its
     # caller, exactly as one returning a fresh container always has
