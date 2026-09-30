@@ -415,6 +415,101 @@ def _class_attr_ctype(v) -> str | None:
     if isinstance(v, CallExpr) and isinstance(v.func, MemberExpr) and isinstance(v.func.obj, IdentExpr) and (v.func.obj.name == 'struct') and (v.func.member == 'Struct'):
         return 'MojoStructFmt *'
     return None
+
+
+def _struct_format_codes(fmt):
+    """The per-VALUE format codes of a const-foldable struct format string
+    ('4h' -> ['h','h','h','h'], 'x' padding dropped, '10s' -> ['s']), or
+    None if the format isn't statically known. Mirrors the runtime's own
+    format compiler (runtime/fire_runtime.c's mojo_struct_compile) code for
+    code, so a codegen answer and a runtime answer cannot disagree; the
+    runtime is the one that has to be right when they do, which is why its
+    per-slot kinds are the ones recorded on the value
+    (mojo_list_set_kinds) and this table is only ever used to decide
+    statically. Lives here, beside `_struct_ctor_format`, so the
+    struct-format knowledge the low-level middle tier and the backend share
+    has ONE definition."""
+    if not isinstance(fmt, str):
+        return None
+    codes = []
+    i, n = 0, len(fmt)
+    if i < n and fmt[i] in '<>=!@':
+        i += 1
+    while i < n:
+        c = fmt[i]
+        if c in ' \t\n':
+            i += 1
+            continue
+        count = None
+        if c.isdigit():
+            count = 0
+            while i < n and fmt[i].isdigit():
+                count = count * 10 + int(fmt[i]); i += 1
+            if i >= n:
+                return None
+            c = fmt[i]
+        i += 1
+        if c not in 'xbBhHiIlLqQfds?c':
+            return None
+        if c in 'sc':
+            codes.append('s')
+        elif c == 'x':
+            continue
+        else:
+            codes.extend([c] * (1 if count is None else count))
+    return codes
+
+
+def _struct_format_is_mixed(fmt) -> bool:
+    """True when a const-foldable struct format has values of more than one
+    kind, i.e. its unpack result is a heterogeneous container. The
+    condition the whole per-slot-kinds mechanism exists for: a uniform
+    format's answer is the same through any accessor, so a format this
+    rejects costs nothing."""
+    codes = _struct_format_codes(fmt)
+    if not codes:
+        return False
+    kinds = set()
+    for c in codes:
+        if c in 'fd':
+            kinds.add('d')
+        elif c == 's':
+            kinds.add('s')
+        else:
+            kinds.add('i')
+    return len(kinds) > 1
+
+
+def _struct_ctor_format(v) -> str | None:
+    """The const-folded format string of a `struct.Struct('<fmt>')`
+    initializer, or None for anything else.
+
+    A `struct.Struct` handle is a runtime `MojoStructFmt *`: the format
+    travels inside it, not in the C type. A codegen that can read the
+    format back out of the SOURCE recovers the per-slot kinds of that
+    handle's `unpack` result, which is what a mixed format's float slot
+    needs to be read as a float rather than as its raw IEEE-754 bits
+    (`self.F.unpack(data)` with `var F = struct.Struct('<if')` is the case
+    that motivated this: a class-attribute handle has no local name for the
+    codegen to have recorded the format against).
+
+    Only a literal format is answered, which is the same
+    compile-time-constant bar the module-level `struct.unpack('<if', b)`
+    path already uses. A computed format yields None, and the caller then
+    has no static kinds — where the runtime's own record of the unpack
+    result's per-slot kinds (runtime/fire_runtime.c's
+    `mojo_list_set_kinds`) is what keeps the answer right."""
+    if not (isinstance(v, CallExpr) and isinstance(v.func, MemberExpr)
+            and isinstance(v.func.obj, IdentExpr)
+            and v.func.obj.name == 'struct' and v.func.member == 'Struct'):
+        return None
+    if len(v.args) != 1 or getattr(v, 'kwargs', None):
+        return None
+    a = v.args[0]
+    if isinstance(a, StringLiteral):
+        val = a.value
+        return val if isinstance(val, str) and not a.is_bytes else None
+    return None
 _FIXED_ARRAY_ANN_RE = re.compile('^\\[\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*;\\s*([A-Za-z_0-9]+)\\s*\\]$')
 
 
