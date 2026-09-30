@@ -1180,17 +1180,8 @@ def compile_formal(source_path: str, output: str = None,
     # dotted call.
     from formal.imports import imported_modules
     try:
-        M.publish_module_symbols(symbols)
-        M.publish_global_slots(slots)
-        check_frame_field_blob_premises(structs)
-        check_frame_subscript_escapes(functions)
-        check_construction_shapes(functions, {st.name: st for st in structs})
-        check_frame_return_shapes(functions)
-        check_dataclass_constructs(stmts, functions)
-        check_module_symbols(
-            functions, {st.name: st for st in structs},
-            imported_module_names=(imported_modules(stmts)
-                                   if import_dylibs else None))
+        _run_late_checks(stmts, functions, structs, symbols, slots,
+                         imported_modules(stmts) if import_dylibs else None)
     except CodegenError as e:
         raise FormalBuildError(str(e))
     if import_dylibs:
@@ -1346,36 +1337,89 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
     # bug, on a construct that is a refusal.  Measured: with the check outside
     # the wrapper, `std/gpu/host/func_attribute.mojo` went from a named
     # `codegen` finding to `backend-crash`.
+    from formal.imports import imported_modules
     try:
-        # Re-publish THIS unit's table, for the reason the executable path
-        # does: a nested `_prepare_functions` publishes its own module's
-        # globals over the published one, and the dylib path builds imported
-        # modules before it gets here.
-        M.publish_module_symbols(symbols)
-        M.publish_global_slots(slots)
-        check_frame_field_blob_premises(structs)
-        check_frame_subscript_escapes(functions)
-        check_construction_shapes(functions, {st.name: st for st in structs})
-        check_frame_return_shapes(functions)
-        # …and the dataclass check, HERE for the same reason: this is the
-        # dylib path, and a `@dataclass` option this backend cannot lower is a
-        # fact about the FILE rather than about the image, so a file whose
-        # import is the more fundamental problem should say that first.
-        check_dataclass_constructs(stmts, functions)
-        # The last of the late checks, and HERE for the reason the others are:
-        # a name the build cannot place is a codegen finding about THIS file,
-        # and a file that imports a host module has a more fundamental fact
-        # about it that a raise from `_prepare_functions` would have hidden.
-        from formal.imports import imported_modules
-        check_module_symbols(
-            functions, {st.name: st for st in structs},
-            imported_module_names=(imported_modules(stmts)
-                                   if link_dylibs else None))
+        _run_late_checks(stmts, functions, structs, symbols, slots,
+                         imported_modules(stmts) if link_dylibs else None)
     except CodegenError as e:
         raise FormalBuildError(str(e))
     module = re.sub(r"[^A-Za-z0-9_]", "_",
                     os.path.splitext(os.path.basename(source_path))[0])
     return module, functions, source, structs, slots
+
+
+def _run_late_checks(stmts: list, functions: list, structs: list,
+                     symbols: dict, slots: dict,
+                     imported_module_names) -> None:
+    """Publish this unit's module-level tables, then run every late check.
+
+    ONE function for the two front ends, and the reason is a measured drift
+    rather than a tidiness preference: this block was open-coded at both call
+    sites (`compile_formal` and `_formal_module_functions`), and merging four
+    branches into one tree showed what that costs — `formal-module-state` had
+    to remember to add `publish_global_slots` in two places and widen
+    `_prepare_functions`'s return from three values to four in both, and
+    `mod-dataclasses` had to remember to add `check_dataclass_constructs` in
+    two places. Two of four branches each paid double for the same capability,
+    and nothing would have failed if one had paid once. The set of checks is
+    therefore decided once, here, and the next one is a line rather than an
+    edit to two call sites that must agree.
+
+    THE ORDER IS LOAD-BEARING and is the reason this is not just a list:
+
+      * **publish first, always.** The two tables are re-published here rather
+        than at their construction because building an import is a NESTED
+        `_prepare_functions` — each imported module is compiled in full into a
+        dylib — and each one publishes ITS module's globals over ours. The
+        symptom when this was skipped was measured, and it was exactly the
+        two-architecture split this design exists to prevent: `_assembly.mojo`
+        refused `'_get_kgen_string'` with the message naming THIS module on
+        arm64 and the one naming the imported module on x86-64, because the
+        two architectures built the dylibs in a different order and so had a
+        different module's table published at the point the check read it.
+      * **`check_module_symbols` LAST.** It is the check with the fullest
+        story — "this path places a name in a register, a spill slot, a
+        receiver field's frame, or a folded module constant, and yours is in
+        none of them" — so a file that has a more specific problem should
+        report that one, and every check above it is more specific.
+      * **after the imports resolved, which is why this is HERE and not inside
+        `_prepare_functions`.** A file that imports a host module is out of
+        reach whatever its codegen says; raising this earlier reported the
+        secondary problem in 67 files and moved the coverage denominator for
+        it (`check_frame_field_blob_premises`), and 14 more for the
+        construction check.
+
+    Raises `CodegenError`. Both call sites wrap it, and the wrapping is a fix
+    rather than a courtesy: each caller's `except CodegenError` is around
+    `_prepare_functions` / the codegen step only, so a refusal from here
+    reached the sweep as a raised exception and was classified `backend-crash`
+    — a verdict for a compiler bug, on a construct that is a refusal. Measured:
+    with the construction check outside the wrapper,
+    `std/gpu/host/func_attribute.mojo` went from a named `codegen` finding to
+    `backend-crash`.
+
+    `imported_module_names` is `imported_modules(stmts)` GATED by the caller
+    on whether the build has any module dylib to link, and the gate is
+    load-bearing rather than defensive: `_resolve_imports` is a no-op for a
+    target with no module mechanism (an ELF image: no dylib form, nothing to
+    link), so on that target an `import` produces no library and a dotted call
+    `mod.f()` has no symbol to bind. Handing the checker the module names there
+    would stop it refusing that call and let the image be emitted with a `BL`
+    against a symbol nothing defines — refused today, a load-time failure after
+    this change. No module dylib on the line, no dotted call."""
+    M.publish_module_symbols(symbols)
+    M.publish_global_slots(slots)
+    by_name = {st.name: st for st in structs}
+    check_frame_field_blob_premises(structs)
+    check_frame_subscript_escapes(functions)
+    check_construction_shapes(functions, by_name)
+    check_frame_return_shapes(functions)
+    # A `@dataclass` option this backend cannot lower is a fact about the FILE
+    # rather than about the image, so it belongs with this group rather than
+    # with the construct checks that only an executable's codegen can answer.
+    check_dataclass_constructs(stmts, functions)
+    check_module_symbols(functions, by_name,
+                         imported_module_names=imported_module_names)
 
 
 def _struct_methods(stmts: list) -> list:

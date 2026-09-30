@@ -790,7 +790,7 @@ class ARM64Codegen:
         self._cur_fn = f
         # This function's LOCAL names, which is what decides whether a bare
         # name is served from `__DATA` or from a register — see
-        # `_module_global`. Built from the same shared allocation order the
+        # `model.module_slot_for`. Built from the same shared allocation order
         # registers come from, so the two cannot disagree.
         self._fn_local_names = set(_collect_var_names(f))
         self.asm.label(f.name)
@@ -1059,7 +1059,7 @@ class ARM64Codegen:
         if slot is not None:
             self._emit_frame_load(name, slot, dst)
             return
-        gslot = self._module_global(name)
+        gslot = M.module_slot_for(name, self._fn_local_names)
         if gslot is not None:
             self._emit_global_load(gslot, dst)
             return
@@ -1244,47 +1244,6 @@ class ARM64Codegen:
         self._load_var(holder, 17)
         self.asm.emit(encode_str_xt_xn_imm(src, 17, 8 * slot))
 
-    def _module_global(self, name: str):
-        """The `__DATA` slot that holds `name` in the function being EMITTED.
-
-        CPython's rule for a bare name inside a function, which is the rule
-        being implemented:
-
-          * bound in THIS function, with no `global` → a local, full stop;
-          * declared `global` here → the module's storage;
-          * neither → a free variable, so it resolves in module scope and reads
-            the module's storage.
-
-        The middle case is the one that has to get both ends right, and keying
-        on either end alone gets one of them wrong:
-
-            G = 5
-
-            def bump_local():
-                G = G + 1        # NO `global` — a LOCAL; module stays 5
-
-            def read_only():
-                return G         # no assignment anywhere — the MODULE's 5
-
-            def set_it():
-                global G
-                G = 100
-
-        Gating on "does the name have a slot" sends `bump_local`'s read and
-        write to `__DATA`, and the module's 5 becomes 6 — measured on arm64 and
-        x86_64 alike, with the interpreter disagreeing. Gating on "did this
-        function declare it `global`" sends `read_only`'s read to a dead
-        register, and the build refuses with "has no home".
-
-        So the gate is the local set, which answers both ends at once:
-        `_collect_var_names` is already the shared allocation order and already
-        excludes names declared `global`, so a name in it is local and a name
-        outside it is not. One list, one rule, and the register allocation and
-        the load/store path cannot disagree about it."""
-        if name in self._fn_local_names:
-            return None
-        return M.module_slot(name)
-
     def _store_var(self, name: str, src: int) -> None:
         """local `name` = src. Register homes MOV; spill slots STR via X17.
 
@@ -1298,7 +1257,7 @@ class ARM64Codegen:
         if slot is not None:
             self._emit_frame_store(name, slot, src)
             return
-        gslot = self._module_global(name)
+        gslot = M.module_slot_for(name, self._fn_local_names)
         if gslot is not None:
             self._emit_global_store(gslot, src)
             return

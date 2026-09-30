@@ -11628,6 +11628,58 @@ def module_slot(name: str):
     return _MODULE_SLOTS.get(name)
 
 
+def module_slot_for(name: str, local_names) -> object:
+    """The `GlobalSlot` a bare `name` resolves to in a function, or None.
+
+    CPython's rule for a bare name inside a function, which is the rule being
+    implemented:
+
+      * bound in THIS function, with no `global` -> a local, full stop;
+      * declared `global` here -> the module's storage;
+      * neither -> a free variable, so it resolves in module scope and reads
+        the module's storage.
+
+    The middle case is the one that has to get both ends right, and keying on
+    either end alone gets one of them wrong:
+
+        G = 5
+
+        def bump_local():
+            G = G + 1        # NO `global` — a LOCAL; module stays 5
+
+        def read_only():
+            return G         # no assignment anywhere — the MODULE's 5
+
+        def set_it():
+            global G
+            G = 100
+
+    Gating on "does the name have a slot" sends `bump_local`'s read and write
+    to `__DATA`, and the module's 5 becomes 6 — measured on arm64 and x86-64
+    alike, with the interpreter disagreeing. Gating on "did this function
+    declare it `global`" sends `read_only`'s read to a dead register, and the
+    build refuses with "has no home".
+
+    So the gate is the local set, which answers both ends at once:
+    `bound_names_in_order` is already the shared allocation order and already
+    excludes names declared `global`, so a name in it is local and a name
+    outside it is not. One list, one rule, and the register allocation and the
+    load/store path cannot disagree about it.
+
+    HERE rather than in each backend, and the reason is that the answer has no
+    architecture in it: it is a membership test against a set both backends
+    already hold (`_fn_local_names`, built from the same shared walk) and a
+    lookup in the published table. Each backend used to carry this as a private
+    method with a byte-identical body and a byte-identical copy of the argument
+    above, which is two answers to one question that are free to disagree the
+    day one of them is edited — and the docstring above claims a property ("one
+    list, one rule, and the register allocation and the load/store path cannot
+    disagree about it") that only holds while there is one copy of it."""
+    if name in local_names:
+        return None
+    return module_slot(name)
+
+
 def global_slot_bytes(table: dict, base: int) -> bytes:
     """The whole data image as bytes. `build_data_image` is the real reader;
     this is the same bytes for a caller that has no use for the fixup list."""

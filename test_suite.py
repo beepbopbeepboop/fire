@@ -976,13 +976,19 @@ UNREGISTERED = {
         'never as a stored number; the ns-to-double conversion, which is pure '
         'arithmetic rather than a reading, is checked against exact rationals '
         'rather than ns / 1e9, which double-rounds above 2**53.',
-    'test_dataclasses_formal.py': '@dataclass as a compile-time transform: '
-        'every execution case is run TWICE on the same text — once as a formal '
-        'arm64 image that is executed, once by this process\'s own python3 — and '
-        'the two must agree, because the two failures that motivated the whole '
-        'feature (a bare struct == comparing two frame ADDRESSES, and '
-        'frozen=True accepted silently) both ran and were wrong. The refused '
-        'subset is pinned by its MESSAGE.',
+    # Spelled with the decorator's NAME split, and the reason is this file:
+    # `test_dataclasses_formal.py`'s corpus discovery is a textual scan for the
+    # decorator's source spelling, so writing it out in full here made
+    # `test_suite.py` ITSELF a corpus member — one more file for that test to
+    # build, decided by a sentence in a registry table. It is excluded from
+    # nothing and should be in nothing.
+    'test_dataclasses_formal.py': 'The dataclass decorator as a compile-time '
+        'transform: every execution case is run TWICE on the same text — once '
+        'as a formal arm64 image that is executed, once by this process\'s own '
+        'python3 — and the two must agree, because the two failures that '
+        'motivated the whole feature (a bare struct == comparing two frame '
+        'ADDRESSES, and frozen=True accepted silently) both ran and were '
+        'wrong. The refused subset is pinned by its MESSAGE.',
     'test_formal_argparse.py': 'formal/hostmods/argparse.mojo against '
         'CPython\'s own argparse: one table of parser declarations and command '
         'lines drives two generated programs, and stdout, stderr and exit '
