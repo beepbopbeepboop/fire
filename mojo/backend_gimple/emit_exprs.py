@@ -2552,6 +2552,25 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         lv = gen._new_val('MojoBytes *', f"{lv}->_data"); lt = 'MojoBytes *'
     if gen._bytes_subclass_of(rt):
         rv = gen._new_val('MojoBytes *', f"{rv}->_data"); rt = 'MojoBytes *'
+    # An operand read out of a heterogeneous container at an index that is not
+    # a compile-time constant may be a BOX (see mojo_list_get_boxed), and
+    # arithmetic on the box's ADDRESS is a silent wrong value — the float's
+    # IEEE-754 bits were wrong before the box existed and the box's address is
+    # not better. Take the box apart here, ALWAYS as a double: a box only
+    # ever holds a float, and in Python a float operand makes the whole
+    # operation a float one (`1.5 + 1` is 2.5, not 2), so promoting is the
+    # semantics rather than an approximation. The cost of it is that
+    # arithmetic on a NON-float slot of a mixed list now yields a float-typed
+    # result — the same number, printed `2.0` where CPython prints `2` —
+    # because the choice would otherwise have to be a runtime branch around
+    # the whole operand dispatch. A wrong value traded for a wrong format is
+    # the right way round; see the doc's Residue section.
+    if lv in getattr(gen, '_boxed_vals', ()):
+        lv = gen._new_val('double', f"mojo_box_double ({lv})")
+        lt = 'double'
+    if rv in getattr(gen, '_boxed_vals', ()):
+        rv = gen._new_val('double', f"mojo_box_double ({rv})")
+        rt = 'double'
 
     # A list local may be boxed as int64_t (the slice pre-pass hint is the
     # machine word when the sliced object's type isn't yet known); _actual_types
@@ -4194,7 +4213,15 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
 
     scalar_sufs = {gimple_ctypes.TypeLattice.list_suffix(et)
                    for el, et, _ev in lowered if not _is_spread(el, et)}
-    per_element = 'str' in scalar_sufs and scalar_sufs != {'str'}
+    # A numeric mix is as much a mix as a string/non-string one. `[1, 2.5]`
+    # used to append EVERY element through the list-wide 'double' suffix, so
+    # the int 1 was stored as 1.0 and the literal printed `[1.0, 2.5]` and
+    # iterated as `1.0, 2.5` where CPython gives `[1, 2.5]` / `1, 2.5` — the
+    # same single-element-ctype limit a mixed `struct` format has, one level
+    # lower. Appending each element by its own type is what makes the
+    # per-slot record below describe the list that was actually built.
+    per_element = (('str' in scalar_sufs and scalar_sufs != {'str'})
+                   or ('double' in scalar_sufs and scalar_sufs != {'double'}))
 
     for el, et, ev in lowered:
         # Spread element (*seq): extend the list instead of appending
@@ -4229,8 +4256,44 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
         # type (char * vs int64_t vs double) — see BUG-2026-044.
         if et == 'MojoDict *' and ev in gen._dict_val_types:
             gen._dict_val_types[t] = gen._dict_val_types[ev]
+    # Record the per-slot kinds on the VALUE (runtime/fire_runtime.c's
+    # mojo_list_set_kinds) when they are not all the same, so every read of
+    # this literal — the whole-result repr, a copy, a slice, iteration, a
+    # computed subscript — describes each slot by what it actually holds
+    # instead of by one list-wide ctype. A homogeneous literal records
+    # nothing: its single accessor is already exact, and the side-table
+    # probe is the only cost a program that never builds a heterogeneous
+    # list ever pays.
+    _kinds = ''.join(_list_literal_slot_kind(gen, el, et) for el, et, _ev in lowered)
+    if _kinds and len(set(_kinds)) > 1:
+        gen._emit_call('void', '', 'mojo_list_set_kinds',
+                       [('MojoList *', t),
+                        ('const char *', gen._intern_string(_kinds))])
+        # Reads with no compile-time slot index (iteration, `t[i]`) have to
+        # go through the runtime to learn the kind, and this value is one
+        # where that is possible — see gen._maybe_kinds_vals.
+        gen._maybe_kinds_vals.add(t)
     gen._note_fresh_result(t)
     return 'MojoList *', t
+
+
+# The one byte per list-literal element that mojo_list_set_kinds' alphabet
+# uses, from the element's own lowered C type. `None` is detected from the
+# ELEMENT expression rather than its lowered type, which is the same
+# int64_t every other integer has.
+def _list_literal_slot_kind(gen, el, et) -> str:
+    if isinstance(el, (gimple_ctypes.NoneLiteral,)) or (
+            isinstance(el, gimple_ctypes.IdentExpr) and el.name == 'None'):
+        return 'n'
+    if et in gimple_ctypes._TYPE_FLOAT:
+        return 'd'
+    if et in ('char *', 'MojoStr *'):
+        return 'p'
+    if et == 'MojoBytes *':
+        return 's'
+    if et in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+        return 'l'
+    return 'i'
 
 
 def _lower_dict_literal(gen, node: gimple_ctypes.DictExpr) -> tuple[str, str]:

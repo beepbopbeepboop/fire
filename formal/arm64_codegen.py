@@ -690,9 +690,7 @@ class ARM64Codegen:
         for st in (structs or []):
             self._structs[st.name] = st
         if emit_startup:
-            main = [f for f in functions if f.name == "main"]
-            rest = [f for f in functions if f.name != "main"]
-            functions = (main + rest) if main else functions
+            functions = M.entry_function(functions)
         for f in functions:
             # async def and generators lower as ordinary functions: formal
             # has no event loop / iterator protocol, so `await` is identity
@@ -4830,26 +4828,39 @@ class ARM64Codegen:
             # A ONE-FIELD struct with an argument is a positional construction
             # whose store is free: the receiver IS the field, so the argument
             # is not stored anywhere, it is the result.  The old text here —
-            # "a struct is default-initialized and its fields assigned" —
-            # was stale for the wrong reason: it was true before the by-
+            # "a struct is default-initialized and its fields assigned" — was
+            # stale for the wrong reason: it was true before the by-
             # reference receiver gave a multi-field struct a block to fill and
             # it stopped being the reason at the same moment.  What is still
             # refused is what the DECISION refuses, by name: see
             # `model.struct_construction_plan`.
+            #
+            # A struct that DECLARES an `__init__` is the one case where the
+            # result is not simply the argument: the constructor's body decides
+            # what lands in the field, and a body this path inlines gives a
+            # list of stores whose LAST one is the field's final value.  The
+            # same word for the same reason — the receiver IS the field, so
+            # there is nothing to store it into.
             plan, refusal = M.struct_construction_plan(
                 st, e, self._structs, self._frame_candidates,
                 self._return_types)
             if refusal is not None:
                 raise CodegenError(refusal)
+            if plan[0] == M.CONSTRUCTION_INIT:
+                if plan[1]:
+                    self._emit_expr(plan[1][-1][2])
+                    return
+                self._emit_fresh_one_word(name, st)
+                return
             self._emit_expr(e.args[0])
             return
         self._emit_fresh_one_word(name, st)
 
     def _emit_frame_constructor(self, e: F.CallExpr, name: str,
                                 st: F.StructDef) -> None:
-        """`S()`, `S(a, b, …)` or `S(x)` for a struct of more than one field.
+        """`S()`, `S(a, b, …)`, `S(a, b, c)` with an `__init__`, or `S(x)`.
 
-        Three shapes, one decision (`model.struct_construction_plan`) and one
+        Four shapes, one decision (`model.struct_construction_plan`) and one
         exit convention: the ADDRESS of the fresh block is in X0.
 
         * `S()` — every field brought up at its own default in its own slot, and
@@ -4864,6 +4875,13 @@ class ARM64Codegen:
           up first, because a positional argument may not land on a slot one
           of them occupies (`model.struct_construction_plan` refuses that) and
           so every placed nested frame is still the block's own.
+        * `S(a, b, c)` on a struct that DECLARES `__init__` — the same block,
+          brought up at the class-level defaults first and then given the
+          constructor's own stores, in the constructor's own order, because the
+          language default-initializes the object before the constructor runs
+          and this path inlines the body rather than calling it.  So a field the
+          constructor assigns wins and a field it does not keeps its default —
+          which is the language's rule, arrived at by a different route.
         * `S(x)` — a COPY: no defaults at all, and an `n`-slot copy of the
           source's slots into the fresh block.  Shallow, and that is the
           language's semantics and not a shortcut: a slot holds one word, and
@@ -4911,28 +4929,20 @@ class ARM64Codegen:
         # its own base, and the outer base is recomputed per store anyway.
         # `site[2]` is the PLACEMENT (`model.struct_constructor_sites`), so a
         # declared type that was not placed cannot reach this loop.
-        for _fname, _slot, _child, child_off in site[2]:
-            self._emit_nested_frame_init(_child, child_off)
+        self._emit_frame_nested(site)
         for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):
             if kind == M.DEFAULT_STRING:
-                self._emit_expr(F.StringLiteral(value=payload))
+                value = F.StringLiteral(value=payload)
             else:
-                self.asm.emit(encode_movz_xn_imm(0, int(payload or 0)))
-            # The base is recomputed per store: materializing a default goes
-            # through X0, and a string default goes through ADRP, which
-            # clobbers X9.
-            self._emit_frame_base(site[1])
-            self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
-        # Now each nested field's slot gets the ADDRESS of the frame just
-        # brought up, which is the whole of "the slot holds a nested frame":
-        # one store per typed-nested field, in the same order as
-        # `site[2]`, so the address stored and the frame initialized are the
-        # same one by construction rather than by two walks agreeing.
-        for _fname, slot, _child, child_off in site[2]:
-            self._emit_frame_base(child_off)
-            self.asm.emit(encode_mov_zr_xn(0, 9))
-            self._emit_frame_base(site[1])
-            self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
+                value = int(payload or 0)
+            self._emit_block_store(site, slot, value)
+        # …and then the constructor's own stores, for the one shape that has
+        # them.  Empty for `S()`, which is why this is the same code as the
+        # default constructor's rather than a fourth copy of it.
+        for _field, slot, value in (plan[1] if shape == M.CONSTRUCTION_INIT
+                                    else ()):
+            self._emit_block_store(site, slot, value)
+        self._emit_frame_nested_addresses(site)
         # …and once more at the end, because the address is the RESULT and
         # every store above left something else in X0. An address materialized
         # once and then overwritten is a null pointer, and the program
@@ -4940,34 +4950,73 @@ class ARM64Codegen:
         self._emit_frame_base(site[1])
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
-    def _emit_frame_positional(self, e: F.CallExpr, name: str, st, site,
-                               fields) -> None:
-        """`S(a, b, …)` — one store per argument, at `base + 8k` in declaration order.
+    def _emit_frame_nested(self, site) -> None:
+        """Bring every PLACED nested frame of this site's struct up.
 
-        The register discipline is the existing one, unchanged: the argument is
-        evaluated into X0 and the base is recomputed into X9 immediately before
-        the store, because evaluating an argument can be anything (a call, a
-        string LEA) and both of those clobber X9.  So the base is recomputed
-        per store rather than hoisted, which is what the default constructor
-        above does for the same reason and the same number of instructions.
-
-        The nested frames are brought up first and their addresses stored
-        afterwards, in the same order `model.struct_constructor_sites` laid them
-        out.  A positional argument can never land on one of those slots — the
-        plan refuses that by name — so the two halves cannot fight over a slot,
-        and the two loops are the same two loops the default constructor runs.
+        Nested frames first, and first because the block is laid out with the
+        object's own slots at the bottom: bringing a nested frame up needs its
+        own base, and the outer base is recomputed per store anyway.
+        `site[2]` is the PLACEMENT (`model.struct_constructor_sites`), so a
+        declared type that was not placed cannot reach this loop.
         """
         for _fname, _slot, _child, child_off in site[2]:
             self._emit_nested_frame_init(_child, child_off)
-        for arg, (_field, slot) in zip(e.args, fields):
-            self._emit_expr(arg)
-            self._emit_frame_base(site[1])
-            self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
+
+    def _emit_frame_nested_addresses(self, site) -> None:
+        """Store the ADDRESS of each frame `_emit_frame_nested` just brought up.
+
+        Which is the whole of "the slot holds a nested frame": one store per
+        typed-nested field, in the same order as `_emit_frame_nested`, so the
+        address stored and the frame initialized are the same one by
+        construction rather than by two walks agreeing.
+        """
         for _fname, slot, _child, child_off in site[2]:
             self._emit_frame_base(child_off)
             self.asm.emit(encode_mov_zr_xn(0, 9))
             self._emit_frame_base(site[1])
             self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
+
+    def _emit_block_store(self, site, slot: int, value) -> None:
+        """One store into a CONSTRUCTION's fresh block: `value` to `8·slot`.
+
+        The register discipline every construction shape shares, and unchanged
+        by any of them: the value is evaluated into X0 and the base is
+        recomputed into X9 immediately before the store, because evaluating a
+        value can be anything (a call, a string LEA) and both of those clobber
+        X9.  So the base is recomputed per store rather than hoisted.
+
+        `value` is either an AST node to evaluate or an `int` to materialize,
+        which is what lets the class-level defaults and an inlined
+        constructor's stores share one loop: a literal default has nothing to
+        evaluate, and a literal inside a constructor body is the same node.
+        """
+        if isinstance(value, int):
+            self.asm.emit(encode_movz_xn_imm(0, value))
+        else:
+            self._emit_expr(value)
+        self._emit_frame_base(site[1])
+        self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
+
+    def _emit_frame_positional(self, e: F.CallExpr, name: str, st, site,
+                               fields) -> None:
+        """`S(a, b, …)` — one store per argument, at `base + 8k` in declaration order.
+
+        `_emit_frame_store` is the register discipline and `_emit_frame_nested`
+        / `_emit_frame_nested_addresses` are the two placement loops, all three
+        shared with the default and `__init__` shapes; what is specific here is
+        only that a positional argument covers EVERY field, so no slot is
+        brought up at its class-level default first — there would be nothing
+        left of the default to keep.
+
+        The nested frames are brought up first and their addresses stored
+        afterwards, in the same order `model.struct_constructor_sites` laid them
+        out.  A positional argument can never land on one of those slots — the
+        plan refuses that by name — so the two halves cannot fight over a slot.
+        """
+        self._emit_frame_nested(site)
+        for arg, (_field, slot) in zip(e.args, fields):
+            self._emit_block_store(site, slot, arg)
+        self._emit_frame_nested_addresses(site)
         # The address is the RESULT, and every store above left something else
         # in X0.  Same last line as the default constructor's, and for the same
         # reason: an address materialized once and then overwritten is a null

@@ -542,36 +542,13 @@ def _struct_value_codes(fmt: str | None):
     ('4h' -> ['h','h','h','h'], 'x' padding dropped, '10s' -> ['s']), or
     None if the format isn't statically known. Used to pick the right
     MojoList append (int vs double vs bytes-pointer) per argument and the
-    element type of an unpack result."""
-    if not isinstance(fmt, str):
-        return None
-    codes = []
-    i, n = 0, len(fmt)
-    if i < n and fmt[i] in '<>=!@':
-        i += 1
-    while i < n:
-        c = fmt[i]
-        if c in ' \t\n':
-            i += 1
-            continue
-        count = None
-        if c.isdigit():
-            count = 0
-            while i < n and fmt[i].isdigit():
-                count = count * 10 + int(fmt[i]); i += 1
-            if i >= n:
-                return None
-            c = fmt[i]
-        i += 1
-        if c not in 'xbBhHiIlLqQfds?c':
-            return None
-        if c in 'sc':
-            codes.append('s')
-        elif c == 'x':
-            continue
-        else:
-            codes.extend([c] * (1 if count is None else count))
-    return codes
+    element type of an unpack result.
+
+    A THIN delegate: the format grammar is `_struct_format_codes` in
+    mojo/middle/types.py, shared with `_struct_format_is_mixed` and
+    `_struct_ctor_format` there so the struct-format knowledge the low-level
+    middle tier and this backend both need has one definition."""
+    return gimple_ctypes._struct_format_codes(fmt)
 
 
 def _struct_slot_kinds(codes):
@@ -891,6 +868,15 @@ def _struct_tag_unpack_result(gen, t, codes):
     kinds = _struct_slot_kinds(codes)
     if kinds:
         gen._struct_slot_kinds[t] = kinds
+    # A MIXED format also marks its value as one whose slot kinds are
+    # recorded on the VALUE itself, so a read with no compile-time index
+    # (iteration, a computed subscript) can still be right: the runtime
+    # returns a BOX for such a slot and the consumer resolves it by tag
+    # (see _maybe_kinds_vals in gimple_codegen and mojo_list_get_boxed).
+    # A uniform format does not mark, because its answer is the same either
+    # way and an ordinary list must keep the plain accessor it always had.
+    if len(set(kinds)) > 1:
+        gen._maybe_kinds_vals.add(t)
 
 
 def _lower_struct_module_call(gen, node, method_name):
@@ -1062,6 +1048,45 @@ def _lower_struct_instance_method(gen, fmt_val, method, node):
 # Arguments are still lowered first: real Python evaluates them before it
 # discovers the callee is not callable, so `s.format(side_effect())` must
 # run `side_effect()`.
+def _struct_attr_format(gen, member_node):
+    """The const-folded format string of the `struct.Struct('<fmt>')` a
+    `MojoStructFmt *` receiver was read from, or None.
+
+    `member_node` is the receiver expression, e.g. the `r.F` of `r.F.unpack(b)`.
+    The owner is recovered in three ways, in decreasing order of how much can
+    be concluded from it:
+
+      * a local of a KNOWN struct type (`var r: Rec` / `r = Rec()`), from the
+        receiver's declared `var_types` entry;
+      * `self` inside that struct's own method, from `_current_struct_name`;
+      * the class named directly (`A.F`).
+
+    With an owner, the answer comes from the `(owner, attr)` table and is
+    exact even when two classes declare the same attribute name with
+    DIFFERENT formats. With no owner, the name-only table answers only while
+    the name is unambiguous across the whole module — a collision records
+    None rather than a guess, and the read falls back to the runtime's own
+    per-slot kinds (correct for the whole-result repr, untyped for the rest).
+    """
+    owner = getattr(member_node, 'obj', None)
+    attr = member_node.member
+    if isinstance(owner, gimple_ctypes.IdentExpr):
+        cands = []
+        vt = gen.var_types.get(owner.name)
+        if isinstance(vt, str) and vt.endswith(' *'):
+            cands.append(vt[:-2])
+        if owner.name == 'self':
+            cur = getattr(gen, '_current_struct_name', None)
+            if cur:
+                cands.append(_as_str(cur))
+        cands.append(owner.name)
+        for c in cands:
+            fmt = gen._struct_attr_formats_scoped.get((c, attr))
+            if fmt:
+                return fmt
+    return gen._struct_attr_formats.get(attr)
+
+
 def _lower_struct_attr_call(gen, method, node):
     for a in node.args:
         gen.lower_expr(a)
@@ -2622,6 +2647,21 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `MojoStructFmt *`. Deliberately TOTAL (not gated on a method-name
     # whitelist that falls through): see _lower_struct_attr_call.
     if ot == 'MojoStructFmt *':
+        # A handle reached through a field or class attribute
+        # (`self.F.unpack(buf)` with `var F = struct.Struct('<if')`) has no
+        # local name for `_struct_formats` to be keyed on, so recover the
+        # format from the attribute's declaration instead. Without it the
+        # unpack result had no per-slot kinds at all and a mixed format's
+        # float slot read back as its raw IEEE-754 bits on every statically
+        # indexed read (`t[1]`, `a, b = t`) — the whole-result repr was
+        # right only because the runtime records the kinds on the value
+        # itself (see gimple_codegen's `_struct_attr_formats`). Looked up
+        # once per call site, and only when the value key already missed, so
+        # a local handle (`s = struct.Struct('<if')`) never pays for it.
+        if ov not in gen._struct_formats and isinstance(func.obj, gimple_ctypes.MemberExpr):
+            _afmt = _struct_attr_format(gen, func.obj)
+            if _afmt:
+                gen._struct_formats[ov] = _afmt
         if method in ('pack', 'unpack', 'unpack_from', 'pack_into',
                       'iter_unpack'):
             return _lower_struct_instance_method(gen, ov, method, node)

@@ -166,7 +166,13 @@ def test_every_declaration_is_seen():
     # keys passed as a raw word; doc/MEMORY.html section 10.4).
     # 451 -> 452 (2026-09-28): `mojo_cleanup_push_ptr`, the cleanup-stack kind
     # for an owned struct instance (doc/MEMORY.html section 3.B).
-    for header, want in (('fire_runtime.h', 465),
+    # 465 -> 474 (2026-09-29): the per-slot-kind side table on a MojoList
+    # (`mojo_list_set_kinds` / `_get_kinds` / `_slot_kind` /
+    # `_inherit_kinds`) and the box that carries an element kind out of a slot
+    # whose index is not a compile-time constant (`mojo_list_get_boxed`,
+    # `mojo_is_boxed`, `mojo_box_double`, `mojo_box_int`, `mojo_repr_boxed`) —
+    # see bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
+    for header, want in (('fire_runtime.h', 474),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

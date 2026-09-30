@@ -26,7 +26,7 @@ Last updated 2026-09-29.
 | `CODEGEN_coro_yield_kind_unresolved_callsite.md` | one untypable call site silently re-poisoned the yield slot to `int64_t`. **FIXED 2026-09-26** for cases 1–7, and *correct* rather than refused — the evidence was always reachable, it just was not read. The doc's own docstring parenthetical is implemented, plus six sound widenings (any-annotation is not a hole; a bare identifier bound to a list answers `('list', k)`; `if caller_env:` was truthiness where membership was meant; ordinary `def`s are now scanned too). One shape has no reachable evidence and must stay refused. Case 8 reclassified: it is the ordinary loop lowering, not this subsystem. |
 | `CODEGEN_method_call_on_struct_param_mistyped.md` | a method call on a struct passed as a free-function *parameter* was mistyped by method name alone — 6 crashes plus 2 silent wrong values. **FIXED 2026-09-26** for everything it owns: 8/8 names now correct, via a new cross-call contract in Pass 1.3d plus three supporting fixes. The doc's suggested refusal was not needed; the call site knows the type. One cross-module row remains and is *not* this bug in link mode — `module.Class(...)` construction is unresolved on every path, the larger gap named above. |
 | `CODEGEN_bytes_silent_wrong_values.md` | six `bytes`/`memoryview` paths returning plausible wrong values with exit 0. **5 of 6 FIXED 2026-09-26**, plus several found alongside: a bytes fill char that emitted a heap-address byte, empty-bytes predicates, `memoryview.readonly`, `dict.get`/`pop` on a bytes key, a loop-target rebind that was never bytes-specific, and swapped `partition` arms, a non-raising empty separator, `center` padding on the wrong side and a `width` keyword read as the fill. `isprintable`/`isnumeric` were **removed from `bytes`** (CPython raises; only the buggy code dissented) and added to `str`, where they answered a silent `0`. Two enshrined-wrong test expectations were corrected. Residue: `partition` returns a `MojoList *` because **this runtime has no tuple type at all** — not a bytes fix. |
-| `CODEGEN_struct_kwargs_and_inline_unpack.md` | `struct.*` keyword arguments were silently dropped, and mixed int+float `unpack` returned raw IEEE-754 bits. **BOTH FIXED 2026-09-26.** Keywords are *honoured* rather than refused, bounded to the three names CPython actually accepts (measured by brute force over the real module), including its error-message precedence. The doc's mechanism for the unpack half was wrong: it is not about locals — of six consuming spellings exactly one worked, and the literal-index subscript was the survivor. Residue: a read with no compile-time slot index still needs one C type for a heterogeneous value, which is the runtime's missing container tag. |
+| `CODEGEN_struct_kwargs_and_inline_unpack.md` | `struct.*` keyword arguments were silently dropped, and mixed int+float `unpack` returned raw IEEE-754 bits. **BOTH FIXED 2026-09-26**, and the residue under the second one **FIXED 2026-09-29**: the per-slot kinds now travel with the VALUE (a side table on the live `MojoList` address, `mojo_list_set_kinds`) instead of dying with one compile-time C name, so a copy, a slice, a concat, a returned value and a class attribute's `Struct` handle all read back correctly; and a read with no compile-time slot index — iteration, a computed subscript — is **boxed** (`mojo_list_get_boxed` + `mojo_repr_boxed`), which also fixes the heterogeneous `[1, 2.5]` literal that the doc named as the root cause underneath it. A uniform format records nothing and pays nothing. One thing the work uncovered is a DIFFERENT bug and is filed separately: a function returning a `MojoList *` it built in a local is typed `int64_t`, so the caller print()s the address and iterating it segfaults (pre-existing, not `struct`). |
 | `CODEGEN_generator_lambda_expr_unsupported.md` | **rewritten 2026-09-26: the recorded residue was stale.** Escaping/rebound capturing lambdas are CLOSED — they take a heap env, and the escape analysis now only picks between two correct lowerings. What remains is the **variadic** shape, and it is a call-site SIGSEGV rather than a lost capture: the lifted definition is correct (`int64_t f (MojoList * a)`) but the call site passes loose args positionally as scalars and never packs the list, so the callee dereferences address 4. Three corpus sites. Still excluded: capturing lambdas inside a coroutine body. |
 | `COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` | **corrected 2026-09-26: both of the doc's conclusions were wrong.** The real file is on disk, and rebuilding the audit against it (every earlier reconstruction had dropped the kw-only callable-parameter indirection) shows **4 of the 6 shapes the doc called "WORKS" are still refused**. The real blocker is *invoking a kw-only param as a callee*, the same missing callable-value representation the lambda doc names, from a different direction. Its shape-5 mapping is RETRACTED: that shape is refused outright, so it never witnessed the `value_ctype` bug at all. |
 
@@ -114,15 +114,18 @@ still ~n^1.7), so the doc stays OPEN.
 
 ## Notes for future sessions
 
-- **Three test files run in NO suite bucket** — `test_gimple_runner.py` (120
-  tests), `test_gimple_generator_runner.py` (145) and
-  `test_coro_nested_async_capture.py` (9). No `make check`, no `make gate`
-  runs any of them. This is not theoretical: a correct fix sat **red** in
-  `test_gimple_runner.py` for a full pass because nothing ran it, and the
-  coro file is 0/9 partly because its source list still names pre-rename
-  `mojo_*` runtime files (now `fire_*`). Registering those three is the
-  highest-value structural fix available in this directory — bigger than any
-  single bug listed above it.
+- **CORRECTED 2026-09-29: those three test files are registered now.** This
+  paragraph used to say `test_gimple_runner.py`, `test_gimple_generator_runner.py`
+  and `test_coro_nested_async_capture.py` run in no suite bucket, and it was
+  the highest-value structural fix available in this directory. `tools/suite.py`
+  registers the first two as `gimplerunner` and `gimplegenerators`, both in
+  `check` (`python3 tools/suite.py --list` is the authority), and
+  `test_suite.py`'s own estate walk now reports 83 test files, 52 registered
+  and 33 each with a written reason — 0 undeclared. Kept as a paragraph
+  because "no bucket" was the single most expensive rot in this file's
+  history: the same `test_gimple_runner.py` that once hid a correct fix red
+  for a full pass is what caught this branch's regression tests, and what
+  reported 176/176 after every change to it.
 - **Two of the OPEN entries were found by re-testing claims in an existing
   doc rather than by reading code.** The `.format` residual had been
   recorded as "returns a pointer-sized integer ... and a local is correct

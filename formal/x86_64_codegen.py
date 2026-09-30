@@ -598,9 +598,7 @@ class X86_64Codegen:
         if not functions:
             raise CodegenError("no function definitions to compile")
         if emit_startup:
-            main = [f for f in functions if f.name == "main"]
-            rest = [f for f in functions if f.name != "main"]
-            functions = (main + rest) if main else functions
+            functions = M.entry_function(functions)
         # The module's struct declarations, by name. `formal/build.py` hands
         # both backends the same list through one `_codegen_and_link`, so
         # consuming it here is what lets the two agree about which callee names
@@ -5187,12 +5185,25 @@ class X86_64Codegen:
             # what the shared DECISION refuses, by name — see
             # `model.struct_construction_plan`, which is the same function
             # arm64 calls, so the two architectures cannot disagree about which
-            # of the three shapes this is or about why one of them is refused.
+            # of the shapes this is or about why one of them is refused.
+            #
+            # A struct that DECLARES an `__init__` is the one case where the
+            # result is not simply the argument: the constructor's body decides
+            # what lands in the field, and a body this path inlines gives a
+            # list of stores whose LAST one is the field's final value.  The
+            # same word for the same reason — the receiver IS the field, so
+            # there is nothing to store it into.
             plan, refusal = M.struct_construction_plan(
                 st, e, self._structs, self._frame_candidates,
                 self._return_types)
             if refusal is not None:
                 raise CodegenError(refusal)
+            if plan[0] == M.CONSTRUCTION_INIT:
+                if plan[1]:
+                    self._emit_expr(plan[1][-1][2])
+                    return
+                self._emit_fresh_one_word(name, st)
+                return
             self._emit_expr(e.args[0])
             return
         self._emit_fresh_one_word(name, st)
@@ -5235,11 +5246,12 @@ class X86_64Codegen:
         self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R10))
 
     def _emit_frame_constructor(self, e: F.CallExpr, name: str, st) -> None:
-        """`S()`, `S(a, b, …)` or `S(x)` — the x86-64 half of the three shapes.
+        """`S()`, `S(a, b, …)`, `S(a, b, c)` with an `__init__`, or `S(x)`.
 
-        The DECISION is shared (`formal/model.py`'s `struct_construction_plan`,
+        The x86-64 half of the four shapes.  The DECISION is shared
+        (`formal/model.py`'s `struct_construction_plan`,
         `struct_frame_representable`, `struct_frame_defaults`), so which of the
-        three shapes a call is — and which of them is refused, and why — is not
+        shapes a call is — and which of them is refused, and why — is not
         expressible differently on the two machines.  What differs is the
         instruction: arm64 emits `LDR`/`STR Xt, [Xn, #8k]` for the same layout
         and this emits `mov` to and from `[RBP + 8k]`."""
@@ -5274,47 +5286,85 @@ class X86_64Codegen:
         # bottom, and the outer base is recomputed per store anyway.  The
         # layout and the list of children both come from the shared model, so
         # the bytes reserved and the defaults stored cannot disagree.
-        for _fname, _slot, _child, child_off in site[2]:
-            self._emit_nested_frame_init(_child, child_off + self._blob_base)
+        self._emit_frame_nested(site)
         for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):
             if kind == M.DEFAULT_STRING:
-                self._emit_expr(F.StringLiteral(value=payload))
+                value = F.StringLiteral(value=payload)
             else:
-                self._emit_mov_imm(Reg.RAX, int(payload or 0))
-            self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
-                                              Reg.RAX))
+                value = int(payload or 0)
+            self._emit_block_store(base, slot, value)
+        # …and then the constructor's own stores, for the one shape that has
+        # them.  Empty for `S()`, which is why this is the same code as the
+        # default constructor's rather than a fourth copy of it.
+        for _field, slot, value in (plan[1] if shape == M.CONSTRUCTION_INIT
+                                    else ()):
+            self._emit_block_store(base, slot, value)
         # Each nested field's slot then gets the ADDRESS of the frame just
         # brought up.  Same order as the loop above, so the address stored and
         # the frame initialized are the same one by construction.
+        self._emit_frame_nested_addresses(base, site)
+        # The address is the RESULT and every store above left something else
+        # in RAX, so it is materialized last.
+        self._emit_blob_base(base, Reg.RAX)
+
+    def _emit_frame_nested(self, site) -> None:
+        """Bring every PLACED nested frame of this site's struct up.
+
+        Nested frames FIRST, in the same order arm64 does it and for the same
+        reason: the block is laid out with the object's own slots at the
+        bottom.  `site[2]` is the PLACEMENT (`model.struct_constructor_sites`),
+        so a declared type that was not placed cannot reach this loop.
+        """
+        for _fname, _slot, _child, child_off in site[2]:
+            self._emit_nested_frame_init(_child, child_off + self._blob_base)
+
+    def _emit_frame_nested_addresses(self, base: int, site) -> None:
+        """Store the ADDRESS of each frame `_emit_frame_nested` just brought up.
+
+        Which is the whole of "the slot holds a nested frame": one store per
+        typed-nested field, in the same order as `_emit_frame_nested`, so the
+        address stored and the frame initialized are the same one by
+        construction rather than by two walks agreeing.
+        """
         for _fname, slot, _child, child_off in site[2]:
             self._emit_blob_base(child_off + self._blob_base, Reg.RAX)
             self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
                                               Reg.RAX))
-        # The address is the RESULT and every store above left something else
-        # in RAX, so it is materialized last.
-        self._emit_blob_base(base, Reg.RAX)
+
+    def _emit_block_store(self, base: int, slot: int, value) -> None:
+        """One store into a CONSTRUCTION's fresh block: `value` to `8·slot`.
+
+        The x86-64 twin of arm64's `_emit_frame_store`, and the register
+        discipline is the existing one: the value is evaluated into RAX and
+        stored straight to `[RBP + 8k]`, with no base register to recompute
+        because the destination is RBP-relative and therefore fixed.  That is
+        also why evaluating a value between two stores is safe here — a call or
+        a string LEA cannot move RBP.
+
+        `value` is either an AST node to evaluate or an `int` to materialize,
+        which is what lets the class-level defaults and an inlined
+        constructor's stores share one loop: a literal default has nothing to
+        evaluate, and a literal inside a constructor body is the same node.
+        """
+        if isinstance(value, int):
+            self._emit_mov_imm(Reg.RAX, value)
+        else:
+            self._emit_expr(value)
+        self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot, Reg.RAX))
 
     def _emit_frame_positional(self, e: F.CallExpr, name: str, st, base: int,
                                site, fields) -> None:
         """`S(a, b, …)` — one store per argument, at `base + 8k` in declaration order.
 
-        The x86-64 twin of arm64's.  The register discipline is the existing
-        one: the argument is evaluated into RAX and stored straight to
-        `[RBP + 8k]`, with no base register to recompute because the
-        destination is RBP-relative and therefore fixed.  That is also why
-        evaluating an argument between two stores is safe here — a call or a
-        string LEA cannot move RBP.
+        The x86-64 twin of arm64's, over the same three shared helpers.  What
+        is specific here is only that a positional argument covers EVERY field,
+        so no slot is brought up at its class-level default first — there would
+        be nothing left of the default to keep.
         """
-        for _fname, _slot, _child, child_off in site[2]:
-            self._emit_nested_frame_init(_child, child_off + self._blob_base)
+        self._emit_frame_nested(site)
         for arg, (_field, slot) in zip(e.args, fields):
-            self._emit_expr(arg)
-            self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
-                                              Reg.RAX))
-        for _fname, slot, _child, child_off in site[2]:
-            self._emit_blob_base(child_off + self._blob_base, Reg.RAX)
-            self.asm.emit(encode_mov_rm64_r64(Reg.RBP, base + 8 * slot,
-                                              Reg.RAX))
+            self._emit_block_store(base, slot, arg)
+        self._emit_frame_nested_addresses(base, site)
         # The address is the RESULT and every store above left something else
         # in RAX, so it is materialized last — the same last line the default
         # constructor ends with, and for the same reason.

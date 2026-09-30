@@ -1,0 +1,466 @@
+#!/usr/bin/env python3
+"""Build `time` for the formal backend and RUN it, against CPython's own
+clocks.
+
+    python3 test_formal_time.py [-v] [group ...]
+
+Why an oracle rather than a table of expected numbers. Every value this module
+produces is a reading of a CLOCK, so a table would be a table of numbers that
+were right when it was written: `time.time_ns()` is different on every run by
+construction. So each case is asserted as a RELATION — the formal image's
+`time_ns()` lies within a few milliseconds of this process's own
+`time.time_ns()`, the monotonic clock does not go backwards, `sleep_ns` takes
+at least the time it was asked for — and the only case with an exact expected
+answer is the one thing about `time` that is not a clock reading: the
+nanosecond-to-double conversion, which is pure arithmetic over a chosen input
+and is checked against EXACT rational arithmetic rather than against
+`ns / 1e9` in Python.
+
+That last distinction is not pedantry and it is the reason this file's
+conversion check is written the way it is. `ns / 1e9` in CPython converts `ns`
+to a float FIRST and then divides, which for any `ns` above `2**53` discards
+the low 11 bits before the division — a double rounding. The formal module
+computes the correctly-rounded value of the exact rational `ns / 10**9`, and
+the two disagree on roughly a quarter of realistic timestamps (measured:
+129308 of 500000 random values in the range). Asserting against CPython's
+`ns / 1e9` would therefore fail a CORRECT module and pass an incorrect one, so
+the oracle here is `fractions.Fraction` with the IEEE-754 rounding rule
+written out, and CPython's own `float()` is used only for the values small
+enough that the two agree.
+
+Building and RUNNING, not building. `test_formal.py` typechecks the generated
+proof and never executes the image, and an entire class of Mach-O emission bug
+can be green there; every case here exits with a status this file checks.
+
+Groups: `clocks`, `sleep`, `convert`, `limits`. With no argument, all of them.
+"""
+import argparse
+import math
+import os
+import platform
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+import time as hosttime
+from fractions import Fraction
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+FIRE = os.path.join(HERE, "fire.py")
+BUILD_TIMEOUT = 300
+RUN_TIMEOUT = 60
+
+# The record terminator. NOT a newline: `\n` inside a Mojo string literal is
+# not unescaped on this path — a formal image prints the two characters `\` and
+# `n` — so every program in this file emits its records back to back and this
+# token is what separates them. Same convention, and the same reason, as
+# `test_formal_os.py`.
+REC = "@@"
+
+# How far the formal image's wall clock may sit from this process's, and how
+# far apart the two `time_ns()` readings inside ONE image may be. Both are
+# generous on purpose: a tight bound would make this file a flaky test of the
+# machine's load rather than a test of the module. Two seconds is far more than
+# any build/run here takes between the two readings, and still five orders of
+# magnitude tighter than "it is the right decade".
+WALL_SKEW_NS = 2_000_000_000
+
+
+class Failure(Exception):
+    pass
+
+
+def check(cond, msg):
+    if not cond:
+        raise Failure(msg)
+
+
+# ── the oracle for the conversion ───────────────────────────────────────────
+
+def exact_double_bits(ns):
+    """The IEEE-754 bits of the correctly-rounded double nearest `ns / 10**9`.
+
+    Written out rather than taken from `float(ns / 1e9)` because that is the
+    thing being tested. `Fraction` is exact, and the rounding rule below is
+    IEEE-754 round-half-to-even, so this is the answer the module is supposed
+    to be producing.
+    """
+    if ns <= 0:
+        return 0
+    v = Fraction(ns, 10**9)
+    e = 0
+    while Fraction(2) ** e > v:
+        e -= 1
+    while Fraction(2) ** (e + 1) <= v:
+        e += 1
+    scaled = v / (Fraction(2) ** (e - 52))
+    m = scaled.numerator // scaled.denominator
+    rem = scaled - m
+    if rem > Fraction(1, 2) or (rem == Fraction(1, 2) and m % 2):
+        m += 1
+    if m >> 53:
+        m >>= 1
+        e += 1
+    return ((e + 1023) << 52) | (m & ((1 << 52) - 1))
+
+
+def build(src, name):
+    tmp = os.path.join(TEMP, name + ".mojo")
+    out = os.path.join(TEMP, name)
+    with open(tmp, "w") as f:
+        f.write(src)
+    r = subprocess.run([sys.executable, FIRE, "build", "--formal", "--no-prove",
+                        "-o", out, tmp],
+                       capture_output=True, text=True, timeout=BUILD_TIMEOUT,
+                       cwd=HERE)
+    check(r.returncode == 0,
+          f"build failed: {(r.stderr or r.stdout).strip()[-500:]}")
+    check(os.path.isfile(out), f"no image at {out}")
+    return out
+
+
+def run(out):
+    r = subprocess.run([out], capture_output=True, text=True,
+                       timeout=RUN_TIMEOUT, cwd=HERE)
+    check(r.returncode == 0, f"image exited {r.returncode}: "
+                             f"{(r.stderr or r.stdout).strip()[-300:]}")
+    got = {}
+    for tag, val in re.findall(r"([A-Za-z0-9_]+)=([^@]*)" + REC, r.stdout):
+        got[tag] = val
+    return got
+
+
+# ── group: the clocks ───────────────────────────────────────────────────────
+
+CLOCKS_PROGRAM = """\
+import time
+
+def main() -> int:
+  printf("wall_bits=%.6f@@", time.time_seconds_bits())
+  printf("wall_ns=%lld@@", time.time_ns())
+  printf("wall_sec=%lld@@", time.time_seconds())
+  printf("mono_a=%lld@@", time.monotonic_ns())
+  printf("mono_b=%lld@@", time.monotonic_ns())
+  printf("perf_ns=%lld@@", time.perf_counter_ns())
+  printf("proc_ns=%lld@@", time.process_time_ns())
+  printf("thread_ns=%lld@@", time.thread_time_ns())
+  printf("clk_rt=%lld@@", time.clock_gettime_ns(time.CLOCK_REALTIME()))
+  printf("clk_mono=%lld@@", time.clock_gettime_ns(time.CLOCK_MONOTONIC()))
+  printf("clk_raw=%lld@@", time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW()))
+  printf("clk_proc=%lld@@", time.clock_gettime_ns(time.CLOCK_PROCESS_CPUTIME_ID()))
+  printf("clk_thr=%lld@@", time.clock_gettime_ns(time.CLOCK_THREAD_CPUTIME_ID()))
+  printf("const_rt=%d@@", time.CLOCK_REALTIME())
+  printf("const_mono=%d@@", time.CLOCK_MONOTONIC())
+  printf("const_raw=%d@@", time.CLOCK_MONOTONIC_RAW())
+  printf("const_proc=%d@@", time.CLOCK_PROCESS_CPUTIME_ID())
+  printf("const_thr=%d@@", time.CLOCK_THREAD_CPUTIME_ID())
+  return 0
+"""
+
+
+def group_clocks(tmpdir, verbose):
+    # The host's own reading, taken as close to the image's as this process
+    # can manage, so the two are comparable to within the build/run latency.
+    before = hosttime.time_ns()
+    got = run(build(CLOCKS_PROGRAM, "clocks"))
+    after = hosttime.time_ns()
+
+    wall = int(got["wall_ns"])
+    check(before - WALL_SKEW_NS <= wall <= after + WALL_SKEW_NS,
+          f"wall clock outside the host's: image {wall}, host {before}..{after}")
+
+    # `time.time()` rendered from the bit pattern must be the same reading as
+    # `time_ns()`, to within the microseconds between the two calls. This is
+    # the cross-check that matters most: it ties the two representations
+    # together, so a `time_seconds_bits` wired to the wrong clock is caught
+    # here. The conversion itself is checked exactly, with no clock involved,
+    # in the `convert` group — this one is about which counter is read, and a
+    # tolerance is the honest form of that question.
+    #
+    # `wall_bits` is printed BEFORE `wall_ns` in the program, so it is the
+    # earlier reading and the assertion is directional.
+    bits_ns = int(round(float(got["wall_bits"]) * 1e9))
+    check(0 <= wall - bits_ns < 1_000_000,
+          f"time_seconds_bits printed {got['wall_bits']!r} but the "
+          f"time_ns() read after it says {wall} — {wall - bits_ns} ns apart")
+
+    # And the truncated form must be that same value's whole seconds.
+    check(int(got["wall_sec"]) == wall // 10**9,
+          f"time_seconds() {got['wall_sec']} != time_ns()//1e9 {wall // 10**9}")
+
+    # The monotonic clock must not go backwards between two readings inside
+    # one image. This is the property that distinguishes it from the wall
+    # clock, and it is the one assertion here that needs no host oracle at
+    # all — a wall clock read twice would also be non-decreasing, but only
+    # because the two reads are microseconds apart, whereas this one is a
+    # claim about the counter itself.
+    a, b = int(got["mono_a"]), int(got["mono_b"])
+    check(b >= a, f"monotonic went backwards: {a} then {b}")
+
+    # perf_counter is documented in the module as the same counter on this
+    # target, so the two must be within a millisecond of each other.
+    check(abs(int(got["perf_ns"]) - a) < 1_000_000,
+          f"perf_counter_ns {got['perf_ns']} is not monotonic_ns {a}")
+
+    # CPU clocks are a different counter from the monotonic one and must be
+    # far smaller — a process that has existed for a second has used a small
+    # fraction of a second of CPU.
+    for tag in ("proc_ns", "thread_ns"):
+        v = int(got[tag])
+        check(0 <= v < 10 ** 12, f"{tag} = {v} is not a plausible CPU count")
+
+    # `clock_gettime_ns` must agree with the dedicated function for the same
+    # clock, to the microsecond — the two are the same hardware counter read
+    # through two spellings, and a divergence would mean one of them is wired
+    # to something else.
+    check(abs(int(got["clk_rt"]) - wall) < 1_000_000,
+          f"clock_gettime_ns(REALTIME) {got['clk_rt']} != time_ns() {wall}")
+    check(abs(int(got["clk_mono"]) - a) < 1_000_000,
+          f"clock_gettime_ns(MONOTONIC) {got['clk_mono']} != monotonic_ns {a}")
+
+    # Darwin's clock ids, against the C library's own numbers. Not a table of
+    # facts about time: a table of facts about the TARGET, which is what these
+    # constants are, and which would silently stop being true if the module
+    # ever passed a Linux id to a Darwin kernel.
+    for tag, want in (("const_rt", 0), ("const_mono", 6), ("const_raw", 4),
+                      ("const_proc", 12), ("const_thr", 16)):
+        check(int(got[tag]) == want,
+              f"{tag} = {got[tag]}, Darwin says {want}")
+
+    if verbose:
+        print(f"    image wall={wall} host {before}..{after} "
+              f"mono={a} cpu={got['proc_ns']}")
+    return True, f"wall {wall} (host {before}..{after})"
+
+
+# ── group: sleep ────────────────────────────────────────────────────────────
+
+SLEEP_PROGRAM = """\
+import time
+
+def main() -> int:
+  var t0 = time.monotonic_ns()
+  var r = time.sleep_ns(120000000)
+  var t1 = time.monotonic_ns()
+  printf("ret=%d@@", r)
+  printf("asked_ns=120000000@@", 0)
+  printf("slept_ns=%lld@@", t1 - t0)
+  # A negative argument is CPython's ValueError. There is no exception on this
+  # path, so it sleeps zero and returns 0; the test asserts THAT, which is the
+  # documented behaviour rather than a crash.
+  var t2 = time.monotonic_ns()
+  printf("neg_ret=%d@@", time.sleep_ns(-5000000))
+  printf("neg_elapsed=%lld@@", time.monotonic_ns() - t2)
+  var t3 = time.monotonic_ns()
+  printf("zero_ret=%d@@", time.sleep_ns(0))
+  printf("zero_elapsed=%lld@@", time.monotonic_ns() - t3)
+  var t4 = time.monotonic_ns()
+  printf("sec_ret=%d@@", time.sleep_seconds(1))
+  printf("sec_elapsed=%lld@@", time.monotonic_ns() - t4)
+  return 0
+"""
+
+
+def group_sleep(tmpdir, verbose):
+    got = run(build(SLEEP_PROGRAM, "sleep"))
+
+    check(int(got["ret"]) == 0, f"sleep_ns returned {got['ret']}, CPython returns None")
+    slept = int(got["slept_ns"])
+    # usleep(2) is what this calls, and Darwin's usleep can return early by a
+    # signal; the floor is what matters (it must not return before the time is
+    # up) and the ceiling is generous (a loaded machine is allowed to be late).
+    check(slept >= 120_000_000, f"sleep_ns(120ms) returned after {slept} ns")
+    check(slept < 2_000_000_000, f"sleep_ns(120ms) took {slept} ns")
+
+    check(int(got["neg_ret"]) == 0, "sleep_ns(-) did not return 0")
+    check(int(got["neg_elapsed"]) < 50_000_000,
+          f"sleep_ns(-) slept {got['neg_elapsed']} ns; it must not sleep at all")
+    check(int(got["zero_ret"]) == 0, "sleep_ns(0) did not return 0")
+    check(int(got["zero_elapsed"]) < 50_000_000,
+          f"sleep_ns(0) slept {got['zero_elapsed']} ns")
+
+    check(int(got["sec_ret"]) == 0, "sleep_seconds did not return 0")
+    check(int(got["sec_elapsed"]) >= 1_000_000_000,
+          f"sleep_seconds(1) returned after {got['sec_elapsed']} ns")
+
+    if verbose:
+        print(f"    slept {slept} ns for a 120 ms request")
+    return True, f"120ms -> {slept}ns"
+
+
+# ── group: the nanosecond-to-double conversion ──────────────────────────────
+
+def conversion_cases():
+    """The inputs `ns_to_double_bits` is checked on.
+
+    Chosen for the SHAPES rather than the values, because the shapes are where
+    this arithmetic goes wrong:
+
+      * every count from 1 to 399, which covers the whole sub-second range
+        (a negative exponent) and every rounding boundary in it;
+      * `10**9` and `10**9 - 1`, the two sides of the integer-second split;
+      * `2**30 * 10**9` and its neighbours, which is where `ns` first exceeds
+        `2**53` — the boundary at which CPython's own `ns / 1e9` starts
+        double-rounding, and where this function's chunked shift is most
+        exercised;
+      * `10**12`, `10**15`, `2**53`, `2**62` and the top of the range, for the
+        same reason at four more magnitudes;
+      * a deterministic spread of random values across the whole timestamp
+        range, so the property is not only checked at boundaries.
+
+    Seeded, so a failure is reproducible: `random.seed(17)` and the same 120
+    values come out on every run and on every machine.
+    """
+    import random
+    random.seed(17)
+    vals = list(range(1, 400))
+    vals += [10**9 - 1, 10**9, 10**9 + 1,
+             2**30 * 10**9 - 1, 2**30 * 10**9, 2**30 * 10**9 + 1,
+             2**31 * 10**9, 10**12, 10**15, 2**53, 2**53 + 1, 2**62,
+             4_000_000_000 * 10**9 - 1, 12345, 999999999]
+    vals += [random.randrange(1, 4_000_000_000 * 10**9) for _ in range(120)]
+    return vals
+
+
+def convert_program(vals):
+    lines = ["import time", "", "def main() -> int:"]
+    for i, v in enumerate(vals):
+        lines.append(f'  printf("c{i}=%.9f@@", time.ns_to_double_bits({v}))')
+    lines.append("  return 0")
+    return "\n".join(lines) + "\n"
+
+
+def group_convert(tmpdir, verbose):
+    vals = conversion_cases()
+    got = run(build(convert_program(vals), "convert"))
+    check(len(got) == len(vals),
+          f"got {len(got)} records for {len(vals)} cases")
+    bad = []
+    for i, v in enumerate(vals):
+        want = struct.unpack("<d", struct.pack("<Q", exact_double_bits(v)))[0]
+        have = float(got[f"c{i}"])
+        if have != want:
+            bad.append((v, have, want))
+    check(not bad,
+          f"{len(bad)}/{len(vals)} conversions differ from the exact rational"
+          + (f"; first: ns={bad[0][0]} got {bad[0][1]!r} want {bad[0][2]!r}"
+             if bad else ""))
+
+    # And the same values against CPython's own `float(ns / 1e9)`, asserted
+    # only where the two are the same question — `ns` below 2**53, where
+    # CPython has not discarded any bits and is therefore not double-rounding.
+    # This is the check that would fail if the module were right for the wrong
+    # reason, and it is bounded precisely because above 2**53 CPython is
+    # computing something else.
+    agree = [v for v in vals if v < 2**53]
+    mism = [v for v in agree
+            if float(got[f"c{vals.index(v)}"]) != v / 1e9]
+    check(not mism, f"{len(mism)} conversions below 2**53 differ from "
+                    f"CPython's float(ns/1e9); first: ns={mism[0] if mism else ''}")
+
+    # The double rounding is real and is why the oracle above is `Fraction`.
+    # Asserted rather than assumed, so that a future reader who replaces the
+    # exact oracle with CPython's finds out here instead of in a flaky test.
+    above = [v for v in vals if v >= 2**53]
+    if above:
+        differ = sum(1 for v in above if v / 1e9 !=
+                     struct.unpack("<d", struct.pack("<Q", exact_double_bits(v)))[0])
+        check(differ > 0,
+              "CPython's float(ns/1e9) agreed with the exact rational on every "
+              "value above 2**53, so this file's justification for not using it "
+              "as the oracle no longer holds")
+
+    if verbose:
+        print(f"    {len(vals)} conversions exact "
+              f"({len(agree)} cross-checked against CPython directly)")
+    return True, f"{len(vals)} conversions bit-exact"
+
+
+# ── group: what this module cannot do ───────────────────────────────────────
+
+def group_limits(tmpdir, verbose):
+    """The absent names, asserted as refusals rather than left to discovery.
+
+    Each of these is a CPython `time` name with no representation on this
+    target, and the module docstring says which capability each one needs. A
+    module that omits a name silently is indistinguishable from a module that
+    has it, so each omission is pinned here as a build that fails with a
+    message naming the missing thing.
+    """
+    absent = {
+        "localtime": "struct tm",
+        "gmtime": "struct tm",
+        "mktime": "struct tm",
+        "strftime": "struct tm",
+        "get_clock_info": "namedtuple",
+    }
+    for name in absent:
+        src = (f"import time\n\ndef main() -> int:\n"
+               f"  time.{name}(0)\n  return 0\n")
+        tmp = os.path.join(TEMP, f"absent_{name}.mojo")
+        with open(tmp, "w") as f:
+            f.write(src)
+        r = subprocess.run(
+            [sys.executable, FIRE, "build", "--formal", "--no-prove",
+             "-o", os.path.join(TEMP, f"absent_{name}"), tmp],
+            capture_output=True, text=True, timeout=BUILD_TIMEOUT, cwd=HERE)
+        check(r.returncode != 0,
+              f"time.{name}() built, but the module documents it as absent — "
+              f"either the docstring is wrong or the module grew a name")
+        msg = (r.stderr or r.stdout)
+        check(name in msg,
+              f"time.{name}() failed without naming itself: {msg.strip()[-300:]}")
+
+    if verbose:
+        print(f"    {len(absent)} absent names refused, each naming itself")
+    return True, f"{len(absent)} absent names refused"
+
+
+GROUPS = {
+    "clocks": group_clocks,
+    "sleep": group_sleep,
+    "convert": group_convert,
+    "limits": group_limits,
+}
+
+TEMP = None
+
+
+def main():
+    global TEMP
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("groups", nargs="*", help="subset: " + ", ".join(GROUPS))
+    args = ap.parse_args()
+    if platform.machine() not in ("arm64", "aarch64"):
+        print(f"SKIP: formal output is arm64-only, host is "
+              f"{platform.machine()}")
+        return 0
+    names = args.groups or list(GROUPS)
+    for n in names:
+        if n not in GROUPS:
+            print(f"ERROR: unknown group {n!r}; known: {sorted(GROUPS)}",
+                  file=sys.stderr)
+            return 2
+    failed = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        TEMP = tmpdir
+        for name in names:
+            try:
+                ok, detail = GROUPS[name](tmpdir, args.verbose)
+            except Exception as e:
+                import traceback
+                if args.verbose:
+                    traceback.print_exc()
+                ok, detail = False, f"{type(e).__name__}: {e}"
+            print(("PASS " if ok else "FAIL ") + name + (
+                ("  " + detail) if detail else ""))
+            if not ok:
+                failed.append(name)
+    print(f"\n{len(names) - len(failed)}/{len(names)} groups passed")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -204,6 +204,83 @@ def _seed_selfhost_return_elem_types(self):
             self._return_elem_types[_k] = _e
 
 
+def _returns_kinds_valued(node) -> bool:
+    """True when `node` is an expression that produces a value whose
+    per-slot element kinds are recorded on the VALUE itself — a
+    `struct.unpack` of a format that mixes kinds, or a `Struct` handle's
+    `unpack`/`iter_unpack` on such a format. The kinds then survive a
+    `return` even though the compile-time NAME they were recorded against
+    does not, which is the whole reason this question needs answering at
+    the callee (see `_infer_return_maybe_kinds`).
+
+    Only literal formats answer, the same bar `_struct_ctor_format` sets:
+    a computed format is not statically known, and guessing would be the
+    wrong-static-answer failure the whole table exists to avoid."""
+    if not isinstance(node, gimple_ctypes.CallExpr):
+        return False
+    f = node.func
+    # `struct.unpack(fmt, buf)` / `struct.unpack_from(fmt, buf, off)` /
+    # `struct.iter_unpack(fmt, buf)` — fmt is the first argument.
+    if (isinstance(f, gimple_ctypes.MemberExpr)
+            and isinstance(f.obj, gimple_ctypes.IdentExpr)
+            and f.obj.name == 'struct'
+            and f.member in ('unpack', 'unpack_from', 'iter_unpack')
+            and node.args):
+        return gimple_ctypes._struct_format_is_mixed(node.args[0].value)
+    # `H.unpack(buf)` where H is `struct.Struct('mixed-format')`.
+    if (isinstance(f, gimple_ctypes.MemberExpr)
+            and f.member in ('unpack', 'unpack_from', 'iter_unpack')):
+        return gimple_ctypes._struct_format_is_mixed(
+            gimple_ctypes._struct_ctor_format(f.obj))
+    return False
+
+
+def _infer_return_maybe_kinds(gen, body) -> bool:
+    """Does any `return` in this body hand back a kinds-carrying value?
+
+    The cross-function half of the per-slot-kinds mechanism. A
+    `struct.unpack` result records its kinds on the VALUE (runtime side,
+    `mojo_list_set_kinds`), which is what keeps the whole-result repr right
+    through a function boundary — but a read with no compile-time slot index
+    (iteration, a computed subscript) has to be lowered as a BOXED read
+    (mojo_list_get_boxed), and whether it may be is a compile-time
+    decision. Inside one function the marker rides along on the local name
+    (`gen._maybe_kinds_vals`); across a `return` it cannot, so it is
+    inferred here and read back at the call site, the same
+    whole-program-then-lower-the-callee shape Pass 2c already uses for
+    `_return_elem_types`.
+
+    One round of intra-body propagation: a local bound from such a call and
+    then returned by name counts. Two hops (`a = f(); b = a; return b`) do
+    not — recorded rather than approximated, since over-approximating here
+    would only cost a boxed read on a value the runtime then reports as
+    unboxed, while under-approximating costs a wrong answer, and a missing
+    case is a missing case either way."""
+    bound: set = set()
+    for _round in range(2):
+        found = False
+        for nd in _walk_ast(body):
+            if (isinstance(nd, gimple_ctypes.AssignStmt)
+                    and isinstance(nd.target, gimple_ctypes.IdentExpr)):
+                if _returns_kinds_valued(nd.value) or (
+                        isinstance(nd.value, gimple_ctypes.IdentExpr)
+                        and nd.value.name in bound):
+                    bound.add(nd.target.name)
+            elif (isinstance(nd, gimple_ctypes.VarDecl) and nd.name
+                    and _returns_kinds_valued(getattr(nd, 'value', None))):
+                bound.add(nd.name)
+            elif isinstance(nd, gimple_ctypes.ReturnStmt):
+                v = getattr(nd, 'value', None)
+                if _returns_kinds_valued(v):
+                    found = True
+                elif (isinstance(v, gimple_ctypes.IdentExpr)
+                      and v.name in bound):
+                    found = True
+        if found:
+            return True
+    return False
+
+
 def _homogeneous_tuple_ann_elem(self, _ret_ann):
     """`tuple[T, T, ...]` / `Tuple[...]` return annotation whose slots are all
     the SAME resolved C type → that element ctype (else None). Used to seed
@@ -582,6 +659,20 @@ def _emit_reflection_dispatch(self, parts):
                "  return mojo_repr_int(val);\n"
                "}\n"
                "static char * _mojo_repr_list (MojoList *lst) {\n"
+               "  /* A list that carries its own per-slot element kinds — a\n"
+               "     `struct.unpack` result for a format that MIXES int/float/\n"
+               "     bytes fields, or a heterogeneous list literal — describes\n"
+               "     its slots one at a time, and the generic walker below\n"
+               "     cannot: it reads every slot through mojo_list_get_int, so a\n"
+               "     float prints as its raw IEEE-754 bit pattern. The codegen\n"
+               "     picks the kinds-aware helper for a value whose kinds it\n"
+               "     knows statically, but every DERIVED value (list(t), t[:],\n"
+               "     t returned from a function) has no compile-time name to\n"
+               "     look them up by — the runtime recorded them on the value\n"
+               "     itself instead, so ask it here. One failed probe for a\n"
+               "     list with no kinds, which is every other list. */\n"
+               "  if (mojo_list_get_kinds(lst))\n"
+               "    return mojo_repr_list_kinds(lst, 0);\n"
                "  int _is_tup = lst && mojo_is_tuple(lst);\n"
                "  if (!lst) return _is_tup ? \"()\" : \"[]\";\n"
                "  int64_t _n = mojo_list_len(lst);\n"
@@ -2854,6 +2945,40 @@ def gen_module_impl(self, stmts):
                 mangled = f"_classattr_{s.name}__{aname}"
                 self._class_attrs[s.name][aname] = mangled
                 ctype = _class_attr_ctype(v)
+                # A class attribute holding a `struct.Struct('<fmt>')` with a
+                # literal format: remember the format under the attribute
+                # NAME, so `self.F.unpack(buf)` on it can recover the same
+                # per-slot kinds the module-level `struct.unpack` path reads
+                # straight off its own format argument. Without it, a mixed
+                # format read through a class attribute gave its float slot
+                # back as raw IEEE-754 bits on every statically-indexed read
+                # (`t[1]`), because the handle is a runtime `MojoStructFmt *`
+                # with no local name to record the format against.
+                #
+                # Keyed by NAME and not by (class, attr) on purpose, and only
+                # recorded when that name is unambiguous: the read site
+                # reaches the attribute through a lowered C value whose owning
+                # type is not always recoverable (a free function's local, a
+                # `Class.attr` spelled three different ways), and guessing
+                # between two DIFFERENT formats is exactly the wrong-static-
+                # answer failure this table exists to remove. A collision
+                # records nothing and the read falls back to the runtime's
+                # own kinds, which is right for the whole-result repr and
+                # merely untyped for the rest.
+                # Keyed BOTH ways, because the read site can usually name the
+                # owner and sometimes cannot: `(cls, attr)` is the precise
+                # key, and the name-only entry is what a read whose owner is
+                # not recoverable falls back to — recorded only while it
+                # stays unambiguous, and set to None the moment a second
+                # class declares the same name with a DIFFERENT format, so a
+                # guess is never made between two of them.
+                _sfmt = gimple_ctypes._struct_ctor_format(v)
+                if _sfmt is not None:
+                    self._struct_attr_formats_scoped[(s.name, aname)] = _sfmt
+                    if aname not in self._struct_attr_formats:
+                        self._struct_attr_formats[aname] = _sfmt
+                    elif self._struct_attr_formats[aname] != _sfmt:
+                        self._struct_attr_formats[aname] = None
                 if ctype is None:
                     if isinstance(v, StringLiteral):
                         ctype = 'char *'
@@ -3846,6 +3971,33 @@ def gen_module_impl(self, stmts):
             break
 
     _p2c_base_var_types = dict(self.func_return_types)
+    # Which functions hand back a value whose per-slot kinds are recorded
+    # on the VALUE (see _infer_return_maybe_kinds). Answered ONCE, before the
+    # fixpoint below, and NOT inside it: it is a pure function of a body, so
+    # the 8 iterations could only ever repeat the same walk, and they do —
+    # measured, putting it in the loop made `test_silent_noop_iter.py` go
+    # from 5m00s to 19m48s on the same machine, because `_walk_ast`
+    # materialises the WHOLE body as a node list and Pass 2c already runs it
+    # over every function (twice: free functions and methods) up to 8 times
+    # per nesting level. Memoised by body identity so a body is walked once
+    # per compile even when the enclosing structure revisits it.
+    _mk_cache: dict = {}
+    def _mk(name, body):
+        _k = id(body)
+        _v = _mk_cache.get(_k)
+        if _v is None:
+            _v = _mk_cache[_k] = _infer_return_maybe_kinds(self, body)
+        if _v:
+            self._return_maybe_kinds.add(name)
+    for s in all_functions:
+        if not _is_foreign_main(s) and isinstance(s, FunctionDef):
+            _mk(s.name, s.body)
+    for s in all_structs_for_methods:
+        if isinstance(s, StructDef):
+            _sk = _as_structdef_node(s)
+            for _m in _sk.methods:
+                if _m.name != '__init__':
+                    _mk(f"{_sk.name}_{_m.name}", _m.body)
     for _pass2c_iter in range(8):
         _c_changed = False
         for s in all_functions:

@@ -125,7 +125,7 @@ SAMPLES = [
      "`comptime <expr>` are not supported by this compiler"),
     ("construction with arguments needs __init__",
      "constructing FuncAttribute with 2 argument(s) is a call to a "
-     "user-defined `__init__`, not a field-filling construction"),
+     "user-defined `__init__` and none of them takes that count"),
     ("receiver stored in a container",
      "a Optional receiver is stored in a container, which has no layout for a "
      "frame address on this path"),

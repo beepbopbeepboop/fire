@@ -1,5 +1,14 @@
 # FORMAL_frame_receiver_handoff: who can take a frame address, measured rather than asserted
 
+> **WAVE 8 (H1) — one row of the table below is now WRONG, and it was this
+> file's own defect class.** The `len` row reads "refused, soundly: `len(x)`
+> reads a length out of an object; a frame address is a pointer to slots", and
+> that verdict is right about the CATEGORY and about the wrong question. For a
+> user type, `len(x)` is `x.__len__()` — a method of the receiver's own struct,
+> which is row 1's hand-off, and the two spellings now go through one lowering.
+> 39 stdlib files moved; §21 has the measurements and the two routes it takes.
+> Everything else in the table, and every section below it, stands as written.
+
 Wave 4 (D4). The question this file answers is the one wave 3 left open: of the
 three kinds of callee a frame address can be handed to, **which can take it,
 and which is refused for a reason that is not operating.**
@@ -882,3 +891,165 @@ decision rather than a patch.
 | the only gate on the constructor half | `formal/model.py` `_constructed_struct_name` |
 | the four-way answer, and the emitter that acts on it | `formal/build.py` `_typed_nested_frame`, `model.struct_nested_frame_fields` |
 | the spelling the diagnostics share | `formal/model.py` `member_chain_text` / `expr_spelling` — which is where `formal/build.py`'s two private copies went |
+||||||| a0c0969
+
+---
+
+# Wave 8 (H1): the `len` row is a refusal for a reason that was not operating
+
+The table at the top has a row reading
+
+> a value-only builtin (`len`, `isinstance`, `String`, …) | refused, soundly |
+> `len(x)` reads a length out of an object; a frame address is a pointer to slots
+
+and it is the one row of the eight that this wave had to correct, for the reason
+this file exists: the verdict is right about the CATEGORY and about the wrong
+QUESTION. A frame is a block of 8-byte slots with no header, so there is no count
+in it to read and the number a count-field load produces is the struct's FIRST
+FIELD — that part is all true and is still what `model.frame_len_refusal` says.
+What is not true is that this is why the program is stopped. For a user type,
+Mojo's answer to "how long is this object" is the type's own `__len__`, and a
+method of the receiver's **own** struct is row 1's hand-off — the one this file
+measures to be sound, on the same evidence, for the same kind of callee.
+
+`len` was in `FRAME_VALUE_ONLY_CALLS` because it is lowered as an operation on a
+value. It still is — of a string or a blob. What changed is that a THIRD receiver
+kind now reaches it: a frame address whose struct declares a `__len__`, and for
+that one `len(x)` is `x.__len__()` and there is nothing to refuse.
+
+## 19. What landed, and the two routes it takes
+
+`len(h)` is rewritten to `Struct___len__(h)` — which is **not a new lowering**.
+`h.__len__()` was already rewritten by `_rewrite_method_calls` to
+`Struct___len__(h)`, the callee is compiled as an ordinary function taking its
+receiver first, and that first parameter is a frame address on both sides of the
+call. So the change is the knowledge of WHICH `__len__`, and it is decided once,
+in `model.struct_dunder_len_candidates`, and read from two places:
+
+| spelling of the frame address | who rewrites it | how the struct is settled |
+|---|---|---|
+| a bare name holding a frame | `build._rewrite_len_on_frame_receivers`, after the holder fixpoint and before `_check_frame_escapes` | the name's CANDIDATE list, agree-or-refuse |
+| a nested frame `len(h.a)` | `build._rewrite_len_on_nested_frames`, beside the method-call rewrite | `_typed_nested_frame` — the SAME function, so `struct_nested_frame_fields`'s write-once placement list is what makes those bytes live |
+
+Two spellings, one lowering, one decision — which is the point. The two
+backends' private copies of the `len` decision is the bug wave 5's
+`len_operand_lowering` was written to kill, and adding a third route to the
+question would have started it again.
+
+**Where each of them sits in the pass is load-bearing, in opposite directions,
+and both are recorded at the call site.** The bare-name rewrite must run BEFORE
+`_check_frame_escapes`, or the hand-off check refuses the `len` it is supposed to
+stop seeing. The nested rewrite must run AFTER it, and for a different reason:
+`h.a` is a FIELD READ, a 64-bit value rather than an address, so
+`_refuse_holder_use` never fires on it and `len(h.a)` reaches the emitter either
+way. `_typed_nested_frame` answering `_REASSIGNED` there is deliberately NOT
+re-raised: the emitter's `model.len_refusal` is already what refuses those
+programs, and a refusal raised from `_prepare_functions` is reported INSTEAD of
+the import diagnosis — the defect `check_frame_field_blob_premises` and
+`check_construction_shapes` were placed outside the wrapper to avoid, and which
+cost `mojo/middle/closures.py` its import diagnosis once already (§13).
+
+**One difference from `struct_frame_slot_candidates`, and it is about what the two
+facts MEAN.** A field no candidate declares is a missing field and the caller
+refuses it as one. A `__len__` no candidate declares is the answer "this type has
+no length operator", which is what `len` on a list-free struct means — so
+`have == 0` is `(None, (False, rows))` here and a DISAGREEMENT there, and the
+test carries an `owners and` guard. Without it, the one-candidate holder whose
+struct simply has no `__len__` is reported as two candidates disagreeing, which
+is false and is a message about a program that does not have the problem. Caught
+by the existing test `byref_refuse_receiver_to_a_builtin` before it was written
+down here, which is the only reason it is written down now.
+
+**And a receiverless `__len__` is not one.** `def __len__():` inside a class is a
+function that happens to be spelled like a method, and the language gives it no
+`self` — the rule `struct_receivers` applies to a field read and
+`_receiverless_methods` applies to a call. There is nothing for a frame ADDRESS
+to be handed to, so it is refused for the same reason a struct with no `__len__`
+at all is, and the refusal says "declares no `__len__`", which is true.
+
+**One dead arm, found by writing the message and then going looking for who
+reaches it.** `frame_len_refusal` first took a `declares` flag so it could also
+cover "the struct DOES declare a `__len__` and this call site is not a shape the
+rewrite takes". There is such a shape — `return len(b, b)`, a wrong-arity `len`
+whose operand is a `Bag` frame — and the arm was reachable, and it was **false
+in its first clause**: it said "this operand is not a bare name", and the
+operand IS the bare name `b`. The real fault is the arity, which the emitter
+has its own message for. So the flag and the arm are gone, the hand-off branch
+is gated on the rewrite's own condition (one positional argument, no keywords),
+and `len(b, b)` falls through to the pre-existing value-only message. A refusal
+whose stated reason is entirely false is the worst outcome on this path — §4 of
+this file is three examples of it — and the shape is now a labelled case in
+`test_formal_frame_len.py` so a future arm cannot be written for it silently.
+
+## 20. The message, which is the half worth keeping
+
+The refusal that remains — a frame address whose struct declares no `__len__` —
+used to say "lowered as an operation on a VALUE … a wrong category of argument.
+Give it a field (`len(self.n)`) or copy the value out first". Every clause about
+the CATEGORY is true and the ADVICE is now wrong for a reader who is about to
+add the `__len__`: they are told to change a program that is already correct.
+`model.frame_len_refusal` says what the answer to the question is instead, and
+names the `__len__` as the alternative. Two existing cases were re-pointed at it
+(`byref_refuse_receiver_to_a_builtin`, `guard_len_on_a_frame_address`), and both
+are refusals for the OPPOSITE reason to the case that now builds, which is what
+makes the pair worth having.
+
+`model.len_refusal`'s own `FRAME_KIND` arm — the emitter's, for an operand the
+build pass could not settle to a struct — got the same paragraph, phrased for the
+shapes that can still reach it rather than for the one that was the point.
+
+## 21. What it moved, measured on both architectures
+
+The terminal finding this closes was `std/collections/binary_heap.mojo`, whose
+`len(self)` four times, and it is the whole `std/collections` subtree's blocker.
+Per-file, over 599 files (repo + stdlib `std/`), on arm64 and again on x86-64:
+
+| | arm64 before → after | x86-64 before → after |
+|---|---|---|
+| PASS | 108 → **108** | 105 → **105** |
+| coverage | 108/418 = 25.8% → **108/418 = 25.8%** | 105/416 = 25.2% → **105/416 = 25.2%** |
+| files whose reported refusal was the `len` value-only sentence | **42** | **42** |
+| files whose CLASS moved | **1** (`_grapheme_break.mojo`, `codegen → codegen/dependency`) | the same one |
+| repo scope, 221 non-pass files | — | **0 class moves, PASS 84 → 84, coverage 84/125 both** |
+
+**Zero files gained a PASS and zero lost one, on all four axes**, and the
+coverage rates are identical, so nothing here is denominator drift. The one class
+move is in the GOOD direction and is the chain working: `_grapheme_break.mojo`'s
+own finding WAS a `len` on a `Span` frame, it is now fixed, and the file's next
+blocker is in a module it imports (`builtin_slice.mojo`'s `Slice(...)`
+construction with arguments). The family tally moves accordingly, which is the
+shape a fixed terminal finding is supposed to have:
+
+| family | before | after |
+|---|---|---|
+| `frame address passed where a value is wanted` | 54 | **15** |
+| `construction with arguments needs __init__` | 21 | **22** |
+| `receiver passed as an argument` | 23 | **25** |
+| `other refusal` | 201 | **237** |
+
+The `+1`, `+2` and `+36` are next blockers becoming VISIBLE, which is the only
+way a fixed refusal can move a number in this table.
+
+**The new terminal cause is `List[Self.T]()`, and it is not a codegen gap** — it
+is `List` being reported as a name with no home, which is a name-placement
+question about a TYPE. Handed over as
+`bugs/FORMAL_type_argument_call_base_name_has_no_home.md`, with a
+three-line reproducer and the one set to add the subscript base to.
+
+## 22. Where the code is
+
+| what | where |
+|---|---|
+| which struct's `__len__`, agree-or-refuse | `formal/model.py` `struct_dunder_len_candidates`, with `dunder_len_method` |
+| the refusal that remains | `formal/model.py` `frame_len_refusal` |
+| the refusal when the candidates disagree | `formal/model.py` `frame_len_candidates_disagree` |
+| the bare-name rewrite, and the hand-off check that must stop seeing it | `formal/build.py` `_rewrite_len_on_frame_receivers`, `_check_frame_escapes` |
+| the nested rewrite | `formal/build.py` `_rewrite_len_on_nested_frames` |
+| the cases | `test_formal_frame_len.py` — 10 differential cases, each compared against CPython running the same program, both architectures built and executed |
+
+The cases are differential rather than a hand-written expected value, which is
+the discipline `test_interp_oracle.py` set for the other engine: eight of them
+fail on the pre-change tree and two are labelled GUARDs because they are correct
+before and after. The four refusals additionally require CPython to raise
+`TypeError` on the same program, so what is pinned is that the decision is
+RIGHT, not merely that this compiler makes it.

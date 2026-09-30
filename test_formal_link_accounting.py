@@ -233,9 +233,12 @@ def written_modules():
 # the derived set, so a removal without an entry here fails, and an entry
 # without a module behind it fails too.
 IMPLEMENTED_HOST_MODULE_TESTS = {
+    "argparse": "test_formal_argparse.py",
     "os": "test_formal_os.py",
     "struct": "test_struct_formal.py",
     "sys": "test_formal_sys.py",
+    "time": "test_formal_time.py",
+    "hashlib": "test_formal_hashlib.py",
 }
 
 
@@ -305,9 +308,15 @@ def test_host_tiers():
     # them "not fixable" was false. A name that has been WRITTEN is not in
     # this list because it is implemented rather than unreachable; see
     # `written_modules()` above for the derived account.
-    for m in ('math', 'time', 'json', 're'):
+    for m in ('math', 'json', 're'):
         check(I.host_module_tier(m) == 'modelled',
               f'{m} is modelled (reachable in principle, not implemented)')
+    # `time` is NOT in that list and the omission is the point: it is one of
+    # the four names this check originally asserted, and it stopped being
+    # 'modelled' when `formal/hostmods/time.mojo` was written. A name reaches
+    # this list by being written and leaves it by being named, so adding one
+    # here is a separate edit from adding the module — and the account above
+    # fails if only one of the two is done.
     for m in ('subprocess', 'ctypes', 'asyncio', 'threading', 'socket',
               'tempfile', 'shutil', 'concurrent.futures', 'zlib', 'traceback'):
         check(I.host_module_tier(m) == 'unreachable',
