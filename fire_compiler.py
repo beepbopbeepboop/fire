@@ -1111,6 +1111,54 @@ def _scan_string_end(src: str, i: int, quote: str, triple: bool) -> int:
         j += 1
     return -1
 
+def _ends_inside_string(line: str) -> bool:
+    r"""True when `line` stops part-way through an unterminated string literal.
+
+    The companion question to `_scan_string_end` ("where does the literal that
+    OPENS at `i` end") — this one asks "is the line's last character inside one",
+    which is what the backslash-continuation join in `py_tokenize` needs to know.
+    Same escape rule, so the two cannot disagree: a backslash consumes the NEXT
+    character, and a backslash at the very end of the line therefore consumes
+    the line break that follows it, leaving the line still inside its string.
+
+    A backtick string is skipped as an opaque unit and is NOT reported as being
+    inside: it has no backslash escape, so a trailing backslash in one is not a
+    continuation and the join must keep treating it as one (the pre-existing
+    behaviour for that spelling, unchanged).
+
+    Only single-quoted literals can reach `True`. `py_tokenize` replaces
+    triple-quoted spans with placeholder names before this is consulted, and a
+    single-quoted literal cannot hold a raw newline, so a line can only end
+    inside one by way of the backslash-newline pair this function exists for.
+    """
+    i = 0
+    n = len(line)
+    delim = None
+    while i < n:
+        c = line[i]
+        if delim is None:
+            if c == '`':
+                j = line.find('`', i + 1)
+                if j < 0:
+                    return False
+                i = j + 1
+                continue
+            if c in ('"', "'"):
+                delim = c * 3 if line.startswith(c * 3, i) else c
+                i += len(delim)
+                continue
+            i += 1
+            continue
+        if c == '\\':
+            i += 2
+            continue
+        if line.startswith(delim, i):
+            i += len(delim)
+            delim = None
+            continue
+        i += 1
+    return delim is not None
+
 def _src_loc(src: str, pos: int, filename: str = "") -> str:
     """gcc-style `file:line:col: ` prefix for a diagnostic about `src[pos]`.
 
@@ -1302,6 +1350,36 @@ def py_tokenize(src: str, filename: str = "") -> list[Token]:
     src = replace_multiline_strings(src)
     raw_lines = src.splitlines()
     # Join backslash-continued lines: "expr = \\\n    continuation" → one logical line
+    #
+    # CPython deletes a backslash-newline pair from the source BEFORE it
+    # tokenizes, and what the pair is worth depends on where it sits. Outside a
+    # string it separates two tokens, so a space is the right thing to put
+    # between the joined halves and the next line's indentation is
+    # insignificant. INSIDE a string the pair is worth nothing and the next
+    # line's indentation is CONTENT, and CPython keeps both facts:
+    #
+    #     x = "a\
+    #     b"          CPython: 'ab'         here, before: 'a b'
+    #     x = "a\
+    #         b"      CPython: 'a    b'     here, before: 'a  b'
+    #
+    # (the second is `a`, four spaces, `b` — the join put one space in and took
+    # the four out). Both were the silent-miscompile class, and both are the
+    # same defect shape as the one `_scan_string_end` was written for: a
+    # line-joining pass with no idea where the literals are. `_ends_inside_string`
+    # is the one place that now answers that, and it is asked about the
+    # RSTRIPPED line, which is the text whose last character the loop has just
+    # decided is a backslash.
+    #
+    # What the pair is worth is CPython's own rule, measured with `tokenize`
+    # rather than inferred: the STRING token's TEXT is `'"a\\nb"'` for
+    # `"a\<nl>b"` and `'r"a\\\nb"'` for `r"a\<nl>b"` — deleted unless the
+    # literal is raw. This join deletes it unconditionally, which is right for
+    # three of the four shapes and wrong for a raw single-quoted literal, where
+    # CPython keeps the pair as content. That one is pinned with its exact next
+    # step in bugs/CODEGEN_backslash_continuation_in_a_raw_literal.md; the
+    # triple-quoted shapes are placeholdered before this pass runs and so are
+    # untouched by it either way.
     joined = []
     line_nums = []  # track physical line number (1-based) for each logical line
     i = 0
@@ -1309,10 +1387,13 @@ def py_tokenize(src: str, filename: str = "") -> list[Token]:
         start_line = i + 1  # 1-indexed physical line number
         line = raw_lines[i]
         while line.rstrip().endswith('\\'):
-            line = line.rstrip()[:-1]  # strip the backslash
+            stripped = line.rstrip()
+            inside = _ends_inside_string(stripped)
+            line = stripped[:-1]  # strip the backslash
             i += 1
             if i < len(raw_lines):
-                line = line + ' ' + raw_lines[i].lstrip()
+                nxt = raw_lines[i] if inside else raw_lines[i].lstrip()
+                line = line + ('' if inside else ' ') + nxt
             else:
                 break
         joined.append(line)

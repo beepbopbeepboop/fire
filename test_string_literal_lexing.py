@@ -172,6 +172,155 @@ PROGRAMS = {
         '    print(1)\n', None),
 }
 
+# A backslash-newline pair inside a literal is a LINE CONTINUATION, and
+# CPython's tokenizer decides what it is worth before the parser ever sees the
+# token — measured with `tokenize`, the STRING token's own text differs:
+#
+#     "a\<nl>b"        token text 'a\\nb'  → the pair is DELETED
+#     r"a\<nl>b"       token text 'r"a\\\nb"' → the pair is KEPT, it is content
+#
+# so the rule is "deleted unless the literal is raw", and it is a rule about
+# TOKEN TEXT, which is exactly what this path's byte-exact value contract is
+# stated over. Before the fix the line-joining pass deleted the backslash and put
+# a SPACE there, so `"ab\<nl>cd"` was `abcd` in CPython and `ab cd` here — a
+# character the source never wrote, silently, in every one of these shapes.
+#
+# Each row is (name, the statement, the value HERE, the value CPython gives it,
+# or None when CPython's answer is not the contract for this row — see the two
+# rows that say so). Where both are given they must be EQUAL, because that is
+# the whole claim for a non-raw continuation: this path can be CPython's oracle
+# for one, since a line continuation is not an escape.
+CONTINUATIONS = [
+    ("plain",              'a = "ab\\\ncd"',            "abcd",  "abcd"),
+    # The next line's INDENTATION is content inside a string — CPython deletes
+    # the pair and nothing else, so these are `ab` + four spaces + `cd`. The
+    # old join put one space in and lstripped the four, which is two wrong
+    # characters in opposite directions.
+    ("indented_next_line", 'a = "ab\\\n    cd"',        "ab    cd", "ab    cd"),
+    # The closing delimiter lands on the next physical line. The old join put
+    # the space BEFORE the closing quote, so the value grew a trailing space
+    # that no amount of reading the source would predict.
+    ("closes_on_the_next_line", 'a = "ab\\\n"',         "ab",    "ab"),
+    ("two_continuations",  'a = "a\\\nb\\\nc"',         "abc",   "abc"),
+    ("single_quotes",      "a = 'p\\\nq'",              "pq",    "pq"),
+    # A `b` prefix is dropped by this front end (it has no bytes type), so the
+    # value is a `str` here and CPython's is a `bytes` — a different question
+    # from what the pair is worth, and the row still pins that the pair is
+    # worth nothing.
+    ("bytes_prefix",       'a = b"ab\\\ncd"',           "abcd",  None),
+    # A quote run that does not close the literal is literal CONTENT, and so is
+    # the next line's `b"` — which is only true if the join invented nothing
+    # between them. Both sides read this as two adjacent literals, so the
+    # concatenation is the parser's and the value must be `xb`.
+    ("quote_run_then_text", 'a = "x\\\n""b"',           "xb",    "xb"),
+    # ── the two rows where this path's answer is NOT CPython's ──
+    #
+    # A RAW literal keeps the pair (it is content: CPython's token text for it
+    # is 'r"a\\\nb"'), and this path cannot, because a value only reaches the
+    # token stream with a newline in it through the placeholder
+    # `replace_multiline_strings` builds — and the join runs after it. The row
+    # is spelled out anyway, because a divergence that is pinned is a fact and
+    # one that is not is a surprise. Next step, in full:
+    # bugs/CODEGEN_backslash_continuation_in_a_raw_literal.md.
+    ("raw_keeps_the_pair_in_cpython_only", 'a = r"a\\\nb"',
+     "ab", None),
+    # The same rule on a TRIPLE-quoted span, which IS placeholdered and so does
+    # keep the pair — and CPython deletes it there, because a triple-quoted
+    # literal is not raw either. Pre-existing, unchanged by the join, and part
+    # of the same no-escape-processing contract as `"\n"` being four
+    # characters rather than one.
+    ("triple_keeps_the_pair_here_too", 'a = """ab\\\ncd"""',
+     "ab\\\ncd", None),
+]
+
+
+def our_literal_value(text):
+    """The value of the name `text` assigns, as this front end reads it."""
+    src = "def main():\n    " + text + "\n    return a\n"
+    stmts = F.Parser(F.py_tokenize(src, "<t>")).with_filename("<t>").parse_module()
+    return _value_of(stmts[0].body[0].value)
+
+
+def cpython_literal_value(text):
+    """The same statement, run by CPython."""
+    ns = {}
+    exec("def main():\n    " + text + "\n    return a\n", ns)
+    return ns["main"]()
+
+
+def _value_of(expr):
+    """The `value` of an expression that is one literal, or its evaluated
+    string for the two forms a continuation can produce that are not a single
+    literal node — adjacent literals, and a concatenation of them."""
+    cls = type(expr).__name__
+    if cls in ("StringLiteral", "IntLiteral", "BoolLiteral"):
+        return expr.value
+    if cls == "BinaryOp" and expr.op == "+":
+        return _value_of(expr.left) + _value_of(expr.right)
+    raise AssertionError(f"{cls} is not a literal this check can read a value "
+                         f"from: {expr!r}")
+
+
+def check_continuation(name, text, ours_expected, cpython_expected, verbose):
+    try:
+        ours = our_literal_value(text)
+    except SyntaxError as e:
+        return False, (f"continuation {name}: refused a literal CPython accepts "
+                       f"({text!r}): {e}")
+    if ours != ours_expected:
+        return False, (f"continuation {name}: {text!r} is {ours!r} here, "
+                       f"expected {ours_expected!r}")
+    if cpython_expected is not None:
+        try:
+            theirs = cpython_literal_value(text)
+        except SyntaxError as e:
+            return False, (f"continuation {name}: the row is not valid Python "
+                           f"({text!r}): {e} — a row that cannot be the oracle "
+                           f"is not a row")
+        if theirs != cpython_expected or ours != theirs:
+            return False, (f"continuation {name}: {text!r} is {ours!r} here and "
+                           f"{theirs!r} in CPython, expected {cpython_expected!r} "
+                           f"from both")
+    if verbose:
+        note = "" if cpython_expected is None else f"   (CPython: {cpython_expected!r})"
+        print(f"  continuation {name:34s} {text!r} -> {ours!r}{note}")
+    return True, ""
+
+
+def check_code_continuation_is_unchanged(verbose):
+    """The guard in the other direction: OUTSIDE a string the pair is still a
+    line continuation, and the space the join has always put there is what keeps
+    `1 +` and `2` two tokens. A fix that dropped the space unconditionally would
+    glue them into one NAME, and would break every `\` continuation in the 392
+    `.mojo` files on this tree — the pair is common there, just never inside a
+    literal."""
+    src = ("def main():\n"
+           "    a = 1 + \\\n"
+           "        2\n"
+           "    return a\n")
+    try:
+        stmts = F.Parser(F.py_tokenize(src, "<t>")).with_filename("<t>").parse_module()
+    except SyntaxError as e:
+        return False, f"a backslash continuation in plain code was refused: {e}"
+    body = stmts[0].body
+    if [type(s).__name__ for s in body] != ["AssignStmt", "ReturnStmt"]:
+        return False, (f"a backslash continuation in plain code parsed into "
+                       f"{[type(s).__name__ for s in body]}, expected the assign "
+                       f"and the return: {body!r} — the pair no longer joins the "
+                       f"lines")
+    expr = body[0].value
+    if type(expr).__name__ != "BinaryOp" or expr.op != "+":
+        return False, (f"'1 + \\\\<nl> 2' read as {expr!r}, so the two operands "
+                       f"were glued into one token")
+    ns = {}
+    exec(src, ns)
+    if ns["main"]() != 3:
+        return False, f"CPython disagrees about '1 + \\\\<nl> 2': {ns['main']()!r}"
+    if verbose:
+        print(f"  continuation {'code_join':34s} '1 + \\\\\\n 2' -> "
+              f"BinaryOp('+')")
+    return True, ""
+
 
 def cpython_verdict(literal):
     """('ok', value) if CPython accepts the literal, else ('refuse', msg)."""
@@ -334,10 +483,27 @@ def run_end_to_end(verbose):
                   '    print(len(a))\n'
                   '    print(len(b))\n'
                   '    return 0\n')
+    # The third oracle-able program: backslash-newline pairs INSIDE literals.
+    # CPython's tokenizer decides a line continuation is worth nothing before
+    # the parser sees the token, and this path now does the same, so for a
+    # non-raw literal the two agree on the bytes even though they disagree about
+    # every other escape. The raw spelling is deliberately absent here: there
+    # CPython keeps the pair and this path cannot, which is pinned with the rest
+    # of that divergence in CONTINUATIONS rather than here.
+    continued = ('def main():\n'
+                 '    a = "ab\\\ncd"\n'
+                 '    b = "x\\\ny"\n'
+                 '    c = "m"\n'
+                 '    print(a)\n'
+                 '    print(b)\n'
+                 '    print(c)\n'
+                 '    print(len(a) + len(b) + len(c))\n'
+                 '    return 0\n')
     cases = [
         # (name, mojo text, python text or None, expected stdout, expected exit)
         ("agree", agree, agree + "main()\n", 'p"q\nx\ny\nsay "hi"\n14\n', 0),
         ("byte_exact", byte_exact, None, 'a\\"b\np\\nq\n4\n4\n', 0),
+        ("continued", continued, continued + "main()\n", 'abcd\nxy\nm\n7\n', 0),
     ]
     failures = []
     with tempfile.TemporaryDirectory() as tmp:
@@ -392,6 +558,14 @@ def main(argv):
         ok, why = check_program(name, source, shape, verbose)
         if not ok:
             failures.append(why)
+    for name, text, ours_expected, cpython_expected in CONTINUATIONS:
+        ok, why = check_continuation(name, text, ours_expected, cpython_expected,
+                                     verbose)
+        if not ok:
+            failures.append(why)
+    ok, why = check_code_continuation_is_unchanged(verbose)
+    if not ok:
+        failures.append(why)
     ok, why = check_refusal_message(verbose)
     if not ok:
         failures.append(why)
@@ -399,7 +573,7 @@ def main(argv):
     if not ok:
         failures.append(why)
 
-    total = len(LITERALS) + len(PROGRAMS) + 3
+    total = len(LITERALS) + len(PROGRAMS) + len(CONTINUATIONS) + 4
     print()
     if failures:
         for f in failures:
