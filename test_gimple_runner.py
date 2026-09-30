@@ -2976,11 +2976,10 @@ fn main():
     # mojo_repr_list_kinds); the un-assigned `print(struct.unpack(...))`
     # spelling is here too, because per-slot kinds are a property of the
     # VALUE and not of whether it was bound to a local.
-    # NOT covered, and deliberately: iteration and a computed subscript.
-    # Both read a slot whose index is not known at compile time, so the
-    # consumer needs ONE static C type for a read that has no single right
-    # answer — the same limit a heterogeneous `[1, 2.5]` literal has. See
-    # bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
+    # The reads with NO compile-time slot index — iteration, a computed
+    # subscript, a copy — are in the two tests below; they are a different
+    # mechanism (a BOX, plus the kinds recorded on the value itself) and not
+    # a continuation of this one.
     test_gimple_stdout("gimple_struct_mixed_int_float_formats", """\
 fn main():
     var m = struct.unpack('<if', b'\\x01\\x00\\x00\\x00\\x00\\x00\\x80?')
@@ -3009,6 +3008,193 @@ fn main():
     # The uniform cases must be unchanged by the per-slot-kind path — and the
     # whole-result repr has to stay right for them too, which is a different
     # helper from the one a mixed format takes.
+    # A DERIVED value — one the codegen never saw as a `struct.unpack` call —
+    # used to lose the per-slot kinds entirely and print raw IEEE-754 bits
+    # again, because they lived in a table keyed by the C value name the
+    # unpack was assigned to. They now travel with the VALUE (the runtime
+    # records them on it, `mojo_list_set_kinds`), so `list(t)`, `t[:]`,
+    # `t + t` and a copy made by any spelling are right. Every expectation
+    # here is CPython's, checked on the same program.
+    test_gimple_stdout("gimple_struct_mixed_reads_survive_a_derivation", """\
+fn main():
+    var b = struct.pack('<if', 1, 1.0)
+    var t = struct.unpack('<if', b)
+    print(t)
+    print(list(t))
+    print(t[:])
+    print(t + t)
+    var c = struct.unpack('>dhh', struct.pack('>dhh', 1.0, 2, 1))
+    print(c)
+    print(list(c))
+    print(c[:])
+    print(c + c)
+    var s = struct.Struct('>dhh')
+    print(list(s.unpack(struct.pack('>dhh', 1.0, 2, 1))))
+""", "(1, 1.0)\n[1, 1.0]\n(1, 1.0)\n(1, 1.0, 1, 1.0)\n"
+       "(1.0, 2, 1)\n[1.0, 2, 1]\n(1.0, 2, 1)\n(1.0, 2, 1, 1.0, 2, 1)\n"
+       "[1.0, 2, 1]\n")
+
+    # A read whose slot index is NOT a compile-time constant. There is no
+    # single right C type for the value it produces, because the list holds
+    # both an int and a float, so the read boxes a float slot
+    # (`mojo_list_get_boxed`) and `print` resolves the box by tag. Before
+    # this, all three spellings handed back 4607182418800017408 for 1.0.
+    # `t[i]` with a computed `i` and `for x in t` are the two shapes the
+    # removed doc named; `list(t)` and `t[:]` exercise the same read on a
+    # derived value.
+    test_gimple_stdout("gimple_struct_mixed_reads_without_a_static_index", """\
+fn main():
+    var b = struct.pack('<if', 1, 1.0)
+    var t = struct.unpack('<if', b)
+    for x in t:
+        print(x)
+    var i = 1
+    print(t[i])
+    print(t[0])
+    for y in list(t):
+        print(y)
+    var j = 0
+    print(list(t)[j])
+    var s = struct.Struct('<if')
+    for z in s.unpack(b):
+        print(z)
+""", "1\n1.0\n1.0\n1\n1\n1.0\n1\n1\n1.0\n")
+
+    # Arithmetic on an element read out of a heterogeneous container. The
+    # read produces a BOX (a heap cell, because a float has no int64_t
+    # spelling), so the operand has to be taken apart before it can be added
+    # to or multiplied by. Before this, `t[i] + 1` printed 4353979905 — the
+    # box's own address, which is a silent wrong value and the outcome this
+    # repo ranks above every other. `_to_int64` is the hook for an integer
+    # context; `_lower_binary` always unpacks as a DOUBLE, because a box only
+    # ever holds a float and in Python a float operand makes the whole
+    # operation a float one.
+    #
+    # The sixth and ninth lines are the ONE recorded cost of "always a
+    # double", asserted here rather than left to rot: a boxed read whose
+    # runtime slot turns out to be an INT gets promoted, so its arithmetic
+    # result is float-typed and prints `2.0` where CPython prints `2` — the
+    # same number, a different format. Choosing per slot would need a
+    # runtime branch around the whole operand dispatch, and a wrong value
+    # traded for a wrong format is the right way round. Line seven is the
+    # control: a read with a COMPILE-TIME index takes no box at all, so
+    # `t[0] + 1` is exact.
+    test_gimple_stdout("gimple_heterogeneous_element_arithmetic_unboxes", """\
+fn main():
+    var t = struct.unpack('<if', struct.pack('<if', 1, 1.5))
+    var i = 1
+    print(t[i])
+    print(t[i] + 1)
+    print(t[i] * 2.0)
+    print(str(t[i]))
+    print(f"{t[i]}")
+    var k = 0
+    print(t[k] + 1)
+    print(t[0] + 1)
+    var a = [1, 2.5]
+    for x in a:
+        print(x + 1)
+""", "1.5\n2.5\n3.0\n1.5\n1.5\n2.0\n2\n2.0\n3.5\n")
+
+    # The same limit one level lower, without `struct` at all: a
+    # HETEROGENEOUS LITERAL. `[1, 2.5]` used to append the int through the
+    # list-wide 'double' suffix, so the literal printed `[1.0, 2.5]` and
+    # iterated as `1.0, 2.5`. The uniform cases must be untouched — a
+    # promoted `[1, 2.0]` still holds two doubles, and an all-int list is
+    # unchanged.
+    test_gimple_stdout("gimple_heterogeneous_list_literal_keeps_each_slot", """\
+fn main():
+    var a = [1, 2.5]
+    print(a)
+    for y in a:
+        print(y)
+    var i = 0
+    print(a[i])
+    var j = 1
+    print(a[j])
+    print(len(a))
+    print([1, 2.0])
+    print([1, 2, 3])
+    print(['a', 1])
+    for e in [1, 2.5]:
+        print(e)
+    var f = [1, 2.5]
+    print(list(f))
+    print(f[:])
+""", "[1, 2.5]\n1\n2.5\n1\n2.5\n2\n[1, 2.0]\n[1, 2, 3]\n['a', 1]\n"
+       "1\n2.5\n[1, 2.5]\n[1, 2.5]\n")
+
+    # A `struct.Struct` handle held in a CLASS ATTRIBUTE has no local name
+    # for the codegen to have recorded the handle's format against, so its
+    # unpack result had no per-slot kinds at all and a mixed format's float
+    # slot came back as its raw bits on every statically-indexed read
+    # (`t[1]`) — the class-attribute residue the removed doc named. Two
+    # classes declaring the SAME attribute name with DIFFERENT formats is
+    # the case where guessing would be wrong, so the lookup is keyed by the
+    # owning type and both must come out right.
+    test_gimple_stdout("gimple_struct_class_attribute_handle_format_known", """\
+struct A:
+    var F = struct.Struct('<if')
+
+    def go(self):
+        var t = self.F.unpack(struct.pack('<if', 1, 2.5))
+        print(t)
+        print(t[0])
+        print(t[1])
+        var p, q = self.F.unpack(struct.pack('<if', 1, 2.5))
+        print(p)
+        print(q)
+
+struct B:
+    var F = struct.Struct('<2f')
+
+fn main():
+    var a = A()
+    a.go()
+    var t = A.F.unpack(struct.pack('<if', 3, 4.5))
+    print(t)
+    print(t[0])
+    print(t[1])
+    var b = B()
+    var u = b.F.unpack(struct.pack('<2f', 1.5, 2.5))
+    print(u)
+    print(u[0])
+    print(u[1])
+""", "(1, 2.5)\n1\n2.5\n1\n2.5\n(3, 4.5)\n3\n4.5\n(1.5, 2.5)\n1.5\n2.5\n")
+
+    # The same value crossing a FUNCTION boundary. The kinds are recorded on
+    # the value at runtime, so the whole-result repr was already right; the
+    # read with no compile-time index additionally needs to be LOWERED as a
+    # boxed read, and whether it may be is a compile-time question the
+    # per-value marker cannot answer — the name the kinds were recorded
+    # against died with the callee's frame. So the callee is scanned
+    # whole-program before anything is lowered (the same shape as the
+    # existing return-ELEMENT-type inference) and the call site reads the
+    # answer back. A callee that returns a UNIFORM format is in the test on
+    # purpose: it must keep the plain accessor it always had.
+    test_gimple_stdout("gimple_struct_mixed_reads_survive_a_function_boundary", """\
+fn make(buf: DynamicVector):
+    return struct.unpack('<if', buf[0])
+
+fn uniform(buf: DynamicVector):
+    return struct.unpack('<HH', buf[0])
+
+fn main():
+    var u = make([struct.pack('<if', 7, 0.5)])
+    print(u)
+    print(u[0])
+    print(u[1])
+    for x in u:
+        print(x)
+    var i = 1
+    print(u[i])
+    print(list(u))
+    var v = uniform([struct.pack('<HH', 4, 5)])
+    print(v)
+    print(v[0])
+    print(v[1])
+""", "(7, 0.5)\n7\n0.5\n7\n0.5\n0.5\n[7, 0.5]\n(4, 5)\n4\n5\n")
+
     test_gimple_stdout("gimple_struct_uniform_formats_still_uniform", """\
 fn main():
     var d = struct.unpack('<2f', b'\\x00\\x00\\x80?\\x00\\x00\\x00@')
