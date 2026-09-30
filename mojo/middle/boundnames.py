@@ -12,12 +12,10 @@ the C/GIMPLE emission stack — same constraint as `mojo.middle.closures`.
 from __future__ import annotations
 
 from fire_compiler import (
-    AssignStmt, AugAssignStmt, Comprehension, ComptimeForStmt,
-    ComptimeIfStmt, ForStmt, GlobalStmt,
+    AssignStmt, AugAssignStmt, Comprehension, ForStmt, GlobalStmt,
     NonlocalStmt,
     IdentExpr, IfStmt, ListExpr, MultiAssignStmt, TryStmt, TupleExpr,
     VarDecl, WhileStmt, WithStmt, _as_str,
-    for_target_names, target_slots,
 )
 
 
@@ -65,20 +63,33 @@ class _OrderedNames:
 
 
 def _lbn_split_commas(s: str) -> list:
-    """Split on top-level commas only (paren depth 0), dropping empty parts.
+    """Split on top-level commas only (paren depth 0).
 
-    `fire_compiler.target_slots` under the name this module's callers use
-    (formal's for-target emit imports it directly), and an alias rather than a
-    second implementation. This copy tracked `(`/`)` but not `[`/`]`, so a
-    comprehension's list-pattern target `for [a, b] in xs` was split into
-    `'[a'` and `'b]'` and both leaked into a bound-name set as if they were
-    variables. One bracket-aware splitter now serves the target string, and
-    the fire_compiler one is the only place a target's commas are read.
-
-    `target_slots` also drops the empty slot a 1-tuple target's trailing
-    comma leaves (`for (a,) in xs` is spelled `'(a,)'`), which this copy turned
-    into a variable named `''`."""
-    return target_slots(s)
+    A naive `.split(',')` tore nested tuple-target slots into paren-
+    carrying fragments (`'(_n, (_mod, _sem))'` → `'_n'`, `'(_mod'`,
+    `'_sem)'`). Shared by `_lbn_target_names` and formal's for-target
+    emit."""
+    parts = []
+    depth = 0
+    cur = []
+    for ch in s:
+        if ch == "(":
+            depth += 1
+            cur.append(ch)
+        elif ch == ")":
+            depth -= 1
+            cur.append(ch)
+        elif ch == "," and depth == 0:
+            part = "".join(cur).strip()
+            if part:
+                parts.append(part)
+            cur = []
+        else:
+            cur.append(ch)
+    part = "".join(cur).strip()
+    if part:
+        parts.append(part)
+    return parts
 
 
 def _lbn_target_names(t) -> list:
@@ -91,18 +102,34 @@ def _lbn_target_names(t) -> list:
     including nested `"(a, (b, c))"`), never an IdentExpr. Missing the str
     case dropped every for-loop variable from the shared bound set (formal
     register allocation then aliased the loop counter onto the X19
-    fallback). Returns LEAF names only (nested groups flattened).
-
-    The walk itself is `fire_compiler.for_target_names` — the representation
-    is fire_compiler.py's to own, and a private copy is what let a 1-tuple
-    target and a parenthesised single name be indistinguishable (they have
-    the same leaves; only `for_target_is_tuple` can tell them apart, and this
-    function never needed to). What stays here is the one thing that is
-    about BOUND NAMES rather than about parsing: a starred leaf binds the
-    name after the `*`, because `*rest` is a binding rule and not a
-    spelling."""
-    names = for_target_names(t)
-    return [n[1:].strip() if n.startswith('*') else n for n in names]
+    fallback). Returns LEAF names only (nested groups flattened)."""
+    if isinstance(t, str):
+        name = t.strip()
+        if name.startswith("(") and name.endswith(")"):
+            names = []
+            for part in _lbn_split_commas(name[1:-1]):
+                names.extend(_lbn_target_names(part))
+            return names
+        # Bare comma form: comprehension Generator.target is the parser's
+        # `"(a, b)"` spelling WITHOUT the surrounding parens (`"a, b"`).
+        if "," in name:
+            names = []
+            for part in _lbn_split_commas(name):
+                names.extend(_lbn_target_names(part))
+            if names:
+                return names
+        if name.startswith("*"):
+            # Starred leaf (`*_` / `*rest`): bind the name after `*`.
+            name = name[1:].strip()
+        return [name] if name else []
+    if isinstance(t, IdentExpr):
+        return [t.name]
+    if isinstance(t, (TupleExpr, ListExpr)):
+        names = []
+        for e in t.elements:
+            names.extend(_lbn_target_names(e))
+        return names
+    return []
 
 
 def _lbn_walk(bound: set, global_declared: set, nodes) -> None:
@@ -168,46 +195,6 @@ def _lbn_walk(bound: set, global_declared: set, nodes) -> None:
                 _lbn_walk(bound, global_declared, node.else_body)
             for _, elif_body in (node.elifs or []):
                 _lbn_walk(bound, global_declared, elif_body)
-        elif isinstance(node, ComptimeIfStmt):
-            # A `comptime if` is a DISTINCT NODE (`fire_compiler.ComptimeIfStmt`),
-            # not an `IfStmt` with a flag, so the arm above never saw it — and a
-            # name bound in a comptime branch got no home at all. The symptom is
-            # a refusal that names the allocator rather than the construct:
-            #
-            #     pick: 'a' has no home: the register allocator collected no home
-            #     for it, so the emitter and the allocation walk disagree about
-            #     this function's locals
-            #
-            # measured 2026-10-02, arm64 and x86-64 identically, on
-            # `comptime if T == 1: var a = k + 1 ... else: var b = k + 2` and
-            # on `std/testing/prop/random.mojo`'s `Rng.rand_scalar`, whose
-            # `comptime if dtype == .bool: … elif dtype.is_integral():` arms
-            # declare `offset`, `a`, `b`, `diff` and `uint64`.
-            #
-            # The arms below are the `IfStmt` arm verbatim, because the two nodes
-            # have the same four fields (`condition`, `then_body`, `elifs` as
-            # `(condition, body)` PAIRS, `else_body`) and one implementation of
-            # a shape is the whole reason the shape is not re-derived per node
-            # type. Only ONE arm is emitted for a statically decidable condition
-            # (`formal/model.py`'s comptime decision), so a name bound in a dead
-            # arm is given a register nothing writes — which costs one callee-
-            # saved register, and is the same trade `formal/arm64_codegen.py`'s
-            # `_allocation_order` already makes for every unused local.
-            _lbn_compr_targets(bound, node.condition)
-            for _c, _b in (node.elifs or []):
-                _lbn_compr_targets(bound, _c)
-            _lbn_walk(bound, global_declared, node.then_body)
-            if node.else_body:
-                _lbn_walk(bound, global_declared, node.else_body)
-            for _, elif_body in (node.elifs or []):
-                _lbn_walk(bound, global_declared, elif_body)
-        elif isinstance(node, ComptimeForStmt):
-            # The same gap one loop deeper, and the same shape as the `ForStmt`
-            # arm: the loop's own target is a local, and a `VarDecl` in its body
-            # is a local. Both were invisible here, for the same reason as above.
-            bound.update(_lbn_target_names(node.target))
-            _lbn_compr_targets(bound, node.iterable)
-            _lbn_walk(bound, global_declared, node.body)
         elif isinstance(node, TryStmt):
             _lbn_walk(bound, global_declared, node.body)
             for h in (node.handlers or []):

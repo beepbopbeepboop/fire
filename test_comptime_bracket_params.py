@@ -1,6 +1,6 @@
 """REAL behavioral test for the comptime bracket-parametrized function call
 fix (`f[N](...)`) — see
-CODEGEN_comptime_bracket_parametrized_function_calls_silently_wrong.
+bugs/CODEGEN_comptime_bracket_parametrized_function_calls_silently_wrong.md.
 
 Before the fix, `gimple_codegen.py`'s `_type_expr_to_ann` returned '' for any
 literal-valued bracket argument (IntLiteral/BoolLiteral/negative-int), which
@@ -33,7 +33,7 @@ def _build_and_run(mojo_src: str, filename: str = 'prog.mojo') -> str:
     and links in the elaborated per-call-site instantiation objects a
     comptime-bracket-parametrized call produces (unlike the plain
     compile_to_gimple_cached + single-.o build build_executable() uses for
-    `fire build`, which has no notion of extra elaboration objects at all).
+    `mojo build`, which has no notion of extra elaboration objects at all).
     Returns real captured stdout from actually running the built binary."""
     wd = tempfile.mkdtemp(prefix='mojo_comptime_bracket_')
     src_path = os.path.join(wd, filename)

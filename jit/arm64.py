@@ -1,10 +1,7 @@
 """ARM64 JIT compiler for Mojo.
 
 Compiles Mojo code to GIMPLE, then dynamically compiles to ARM64
-machine code using GCC, and executes it by running the result as a
-subprocess. (It used to be `ctypes`, and the import was still here with
-nothing reading through it: every step of this file drives gcc through
-`subprocess.run`. Dead, or stale, and the sentence was the stale half.)
+machine code using GCC, and executes it via ctypes.
 
 Uses SHA256-based caching to avoid recompilation of identical source code.
 """
@@ -13,11 +10,7 @@ import os
 import sys
 import tempfile
 import subprocess
-# `ctypes` was imported here and read NOTHING through it: this file drives gcc
-# with `subprocess.run` at every step and never dlopens anything. A dead import
-# blocks a file on the formal path for exactly the reason an absent module
-# does; see `bugs/FORMAL_a_call_result_field_access_has_no_representation.md`
-# §3.
+import ctypes
 import platform
 import hashlib
 from pathlib import Path
@@ -92,16 +85,12 @@ class ARM64JIT:
     """JIT compiler for ARM64 architecture with SHA256-based caching."""
 
     def __init__(self, opt_flag: str = _DEFAULT_OPT_FLAG,
-                 debug_flag: str | None = _DEFAULT_DEBUG_FLAG,
-                 auto_gpu: bool = True):
+                 debug_flag: str | None = _DEFAULT_DEBUG_FLAG):
         self.temp_dir = None
         self.loaded_libs = []
         # Codegen flags forwarded to gcc and mixed into the cache key.
         self.opt_flag = opt_flag or _DEFAULT_OPT_FLAG
         self.debug_flag = debug_flag
-        # `--no-gpu`. Kept on the instance because it belongs in the BINARY
-        # CACHE KEY below, which is computed from instance state.
-        self.auto_gpu = auto_gpu
         # Initialize cache directory
         self.cache_dir = os.path.expanduser("~/.gmojo/jit")
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -129,17 +118,6 @@ class ARM64JIT:
             f"opt={self.opt_flag}",
             f"debug={self.debug_flag or ''}",
             f"coro={os.environ.get('MOJO_CORO', 'stackswitch')}",
-            # auto_gpu changes the produced BINARY, so it belongs in the key
-            # exactly as -O* does. Without it a --no-gpu run executes the
-            # cached GPU binary: measured, `--no-gpu --jit` still reported
-            # `d 1` because the flag reached no part of this path.
-            f"autogpu={'1' if self.auto_gpu else '0'}",
-            # The auto-offload trip-count floor changes the produced BINARY for
-            # the same reason: it decides whether the host keeps its loop or
-            # gains a dispatch. Same defect found and fixed in cas.compile_key
-            # -- measured, the override appeared to do nothing because the
-            # cached binary predated it.
-            f"minel={os.environ.get('MOJO_OFFLOAD_MIN_ELEMENTS', '')}",
             _toolchain_id(),
             f"compiler={_compiler_id()}",   # codegen-source fingerprint + version
         ])
@@ -252,8 +230,7 @@ int main() {{
                 if not build_executable(
                         filename, mojo_src, output=exe_file,
                         opt_flag=self.opt_flag, debug_flag=self.debug_flag or '-g0',
-                        quiet=True,
-                        auto_gpu=self.auto_gpu):
+                        work_dir=build_dir, quiet=True):
                     print('JIT compilation failed: executable build failed', file=sys.stderr)
                     return False
                 os.replace(exe_file, cache_file)
