@@ -928,20 +928,29 @@ and that the row is an upper bound.
 
 ## 18. What the 25 files are, once the construct is looked at instead of the message
 
-Every one of the 25 was re-run with the position refusal lifted (a scratch
-harness that swallows `CodegenError` from `_check_frame_escapes` and reports the
-next one). **Zero of the 25 reach `pass`, and every one has another blocker
-behind the first** — so the row's honest reading is not "25 files":
+**Zero of the 25 reach `pass`, and every one has another blocker behind the
+first**, so the row's honest reading is not "25 files". Measured two ways, both
+before any code changed: a scratch harness that swallows `CodegenError` from
+`_check_frame_escapes` and reports the NEXT refusal, and an instrumented
+`_check_frame_escapes` that prints the callee object's node kind at the refused
+site. The first answers "what is behind this"; the second answers "what IS
+this", and the two together are what found §19.
+
+What is behind each of the 25, after the position refusal is lifted:
 
 | next blocker | files | whose it is |
 |---|---|---|
-| an imported function's name has no definition in hand (`coord_to_index_list`, `rebind`, `_b64encode`, `debug_assert`, `atof`) | 7 | row 8 |
+| a method call on a value receiver whose struct is not established — **the same defect, 17 of them** (`?.write_to` ×4, `encoder.encode*` ×3, `writer.write_string`, `w.write_string`, `value.__hash__`, `?.fields`, `?.enqueue_copy`, `values._write_to`, `Self.__eq__`, `self.mojo_value.write_repr_to`, `gfn._selfhost_…`, `Tensor.registry.append`) | 17 | §4a. Filed as `FORMAL_method_call_on_a_subscripted_receiver.md`, with the four shapes of receiver and where each one's type would come from |
 | an MLIR dialect construct in an imported module (`dtype.mojo`, `info.mojo`, `rebind.mojo`, `function.mojo`) | 6 | row 1, a **documented true limit** — 107 files, not work |
-| a method call on a value receiver whose struct is not resolvable (`?.write_to` ×5, `encoder.encode`, `writer.write_string`, `value.__hash__`, `?.fields`, `?.enqueue_copy`, `?._write_to`, `self.mojo_value.write_repr_to`, `gfn._selfhost_…`, `Tensor.registry.append`) | 14 | §4a, and its fix is type inference this path does not have |
+| an imported function's name has no definition in hand (`coord_to_index_list`, `rebind`, `_b64encode`, `atof`, `debug_assert`) | 5 | row 8, honest as written |
 | a frame address returned from a method that received it as its receiver | 6 | §4b |
 | `Slice.__eq__`'s `other.start` in `builtin_slice.mojo` | 3 | row 3, measured ceiling **0** (§3.2 of the map) |
-| a method-parameter field, `origin_of()`, a value-only callee | the rest | rows 3 and 7 |
+| a method-parameter field; `origin_of()`, a value-only callee | the rest | rows 3 and 7 |
 | a callee compiled into an imported module, whose own analysis this pass has not read | 3 | §7 case 3, honest as written |
+
+The rows overlap, because a file can have several and the walk reports the first
+— which is the whole of the map's §3 point. **The one number that does not
+overlap is the headline: 0 of 25.**
 
 ## 19. The fourth case: a comptime-specialized callee, which is not a method call at all
 
@@ -955,10 +964,13 @@ and **not one of them contains a method call.** The callee is a `SubscriptExpr`:
 `_reduce_generator[input_fn, output_fn, …](shape, init=init)` in
 `std/algorithm/reduction.mojo`, `BitSet_union[self_type](self, other)` in
 `std/collections/bitset.mojo`, `Self.compile_entries_runtime[0](…)` in
-`std/collections/string/format.mojo`. A message that mentions a receiver, a
-method and a NAME dispatch about a callee that is a plain name with none of them
-is §4's defect class exactly, and it sent the reader after "a receiver whose
-type names the struct" — which is not what these files need.
+`std/collections/string/format.mojo`, `StringLiteral_format[…](buffer, …)` in
+`std/builtin/string_literal.mojo`, `Span_get_immutable[…](self)` in
+`std/memory/span.mojo`, `Self.mojo_value.write_repr_to[…](…)` in
+`std/python/bindings.mojo`. A message that mentions a receiver, a method and a
+NAME dispatch about a callee that is a plain name with none of them is §4's
+defect class exactly, and it sent the reader after "a receiver whose type names
+the struct" — which is not what these files need.
 
 **It is not a method call, and it is not a position question: it is a
 specialization, and the callee's name is in hand.** `f[T](x)` names `f`; the
