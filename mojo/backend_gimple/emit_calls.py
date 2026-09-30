@@ -2011,6 +2011,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # Struct constructors. Map a C-keyword struct name (`auto()`) to its
     # renamed registration (`_kw_auto`) so the constructor resolves.
     _fname_ctor = gen._c_kw_struct_renames.get(fname_raw, fname_raw)
+    # ...and an IMPORT ALIAS to the struct's own bare name (`from M import
+    # Dialog as ADialog; ADialog(...)`). `struct_field_types` is keyed by
+    # the name as written in the DEFINING module, so without this the alias
+    # missed every struct table and fell into `_lower_opaque_ctor`, which
+    # returns a lone string argument unchanged — `x` became the literal
+    # `"a"` and `x.widgetName` then dispatched getattr on a `char *`
+    # (bugs/CODEGEN_aliased_imported_struct_construction_unresolved.md).
+    # Applied AFTER the keyword rename because `_struct_import_aliases`
+    # already records the renamed name (see `_note_struct_import_alias`).
+    _fname_ctor = (getattr(gen, '_struct_import_aliases', None)
+                   or {}).get(_fname_ctor, _fname_ctor)
     if _fname_ctor in gen.struct_field_types:
         # `node.kwargs` (a direct CallExpr field read) NOT
         # `getattr(node, 'kwargs', None)` — the 3-arg getattr lowers to a

@@ -18,6 +18,14 @@ import regex_compile
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
+# `_resolved_export_entry` — `from X import *` skips underscore names, and
+# `_register_sym` needs it to give a re-exported function's registered
+# signature the DEFINING module's real one instead of the export text scan's
+# parameter-less placeholder. (The re-export-hop WALK itself is not imported:
+# it needs `gen`, so it is reached as the `GimpleGen` method
+# `gen._find_symbol_home_module`, exactly like `gen._parsed_import` beside
+# it.)
+from mojo.middle.funcs_shared import _resolved_export_entry
 # Closure-scan leaf helpers live in mojo/middle.closures (formal + gimple
 # share one copy; closures must not import this module — it pulls gimple_codegen).
 from mojo.middle.closures import (
@@ -398,20 +406,116 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
         }
         self._module_alias_names.add(_sk)
         return
+    # `from M import Class as Alias`: the export table carries no class
+    # exports at all (module_loader only emits function and global_var
+    # entries), so `sym_info` is empty and the alias would otherwise land
+    # in `_unresolved_import_aliases` with nothing recorded. Recorded
+    # BEFORE the falsy-`sym_info` bail below so the constructor dispatch
+    # can still resolve the name; the alias map is deliberately NOT
+    # `imported_symbols`, which every reader treats as "a function I can
+    # emit an `extern` for" (see module_gen.py's re-export preamble).
+    if not s.wildcard:
+        self._note_struct_import_alias(s.module, _sk, orig_name)
+    # `from REEXPORTER import name`, where `REEXPORTER` only RE-EXPORTS
+    # `name` from somewhere else — the standard package layout
+    # (`p/__init__.py` doing `from .sub import tri`). The export table
+    # `load_module`/`_local_sibling_module_exports` builds is a TEXT scan of
+    # the module the statement NAMES, and a re-exporting `__init__.py`
+    # contains no `def` at all, so `sym_info` is empty and the import used
+    # to die in the `_unresolved_import_aliases` bail immediately below —
+    # nothing recorded, and the call site bound to the extern preamble's
+    # `weak` "unavailable in compiled mode" stub instead of the real
+    # definition (link mode) or failed to resolve outright. Follow the
+    # re-export hops and take the DEFINING module's own export entry,
+    # which is the entry the definer's C symbol was built from.
+    #
+    # Gated on `not sym_info` so the ordinary case (the named module does
+    # define the function) does no extra work at all, and on the resolver
+    # answering, so a name nothing reachable defines keeps today's exact
+    # behaviour — including the `_unresolved_import_aliases` bail. Every
+    # use of `s.module` BELOW is `_eff_mod` for the same reason: the
+    # registered entry's `module`, the sibling param resolution and the
+    # param-ctype snapshot all have to name the module that actually
+    # defines the symbol, not the one it was re-exported through, or each
+    # of them looks the answer up under a key nothing ever wrote.
+    _eff_mod = s.module
+    # Gated on the bail this is rescuing, NOT on `not sym_info` alone. An
+    # import that DID resolve is already registered correctly by the pass
+    # that owns it (`_emit_stdlib_import_externs` for a stdlib/test module),
+    # and re-pointing its recorded module changes the emitted symbol's
+    # spelling and whether it is overload-mangled at all — measured: with
+    # the wider gate, `from std.memory import alloc` stopped being the bare
+    # `extern int64_t alloc (...)` the stdlib dylib's own export table
+    # advertises and became a mangled `std_memory_alloc_alloc_9f63a2
+    # (int64_t layout)`, and four stdlib modules then failed with
+    # `implicit declaration of function 'mojo_memset'` (32 sites) plus a
+    # spurious `unsafe_memcpy: unavailable in compiled mode` weak stub.
+    # The narrower gate below can only ever REPLACE an abandoned import
+    # with a resolved one, so it cannot demote a name that already worked.
+    if _sib_qualifier and not sym_info and not s.wildcard:
+        _home_fn = self._find_symbol_home_module(s.module, orig_name, 'fn')
+        if _home_fn and _home_fn != s.module:
+            # The ABSOLUTIZED ref for opening the file: a relative spelling
+            # (`.alloc`, from a re-exporting `__init__.py`) resolved
+            # against THIS importing module is a different file as soon as
+            # the chain is more than one level deep, and the export lookup
+            # would then silently consult the wrong module's source.
+            _home_abs = self._find_symbol_home_module(s.module, orig_name, 'fn',
+                                                      want_abs=True) or _home_fn
+            _hexp = None
+            _hqual = None
+            try:
+                _hexp, _hqual = self._local_sibling_module_exports(_home_abs)
+            except Exception:
+                _hexp = None
+            if _hexp is None:
+                try:
+                    import module_loader as _mlmod_reexp
+                    if _mlmod_reexp.can_resolve_module_path(_home_abs):
+                        _hexp = load_module(_home_abs)
+                except Exception:
+                    _hexp = None
+            _hinfo = _hexp.get(orig_name) if _hexp else None
+            if _hinfo:
+                # Adopt the defining module ONLY now, when its own exports
+                # really have this name. Adopting it on the strength of the
+                # hop alone (with those exports still empty) also adopted
+                # `_hqual`, and that flipped the `_sib_qualifier and not
+                # sym_info` bail below ON for names that used to fall
+                # through to `_emit_stdlib_import_externs`' stdlib
+                # registration — so the symbol lost its `extern` entirely
+                # and its call site emitted a call to nothing. Measured
+                # across the stdlib dylib build: `implicit declaration of
+                # function 'mojo_memset'`, 32 sites in 4 modules, plus a
+                # spurious `unsafe_memcpy: unavailable in compiled mode`
+                # weak stub that had not been emitted before.
+                _eff_mod = _home_fn
+                # Through the DEFINING module's own parsed signature, not
+                # the text scan's: this entry is re-emitted as an `extern`
+                # for a symbol this translation unit does not define (the
+                # re-exporting module has no definition to skip it for), so
+                # the scan's parameter-less `int64_t tri (void)` for an
+                # unannotated `def tri(x)` would become the only prototype
+                # in the file and reject its own call site. See
+                # `_resolved_export_entry`.
+                sym_info = _resolved_export_entry(self, _eff_mod, orig_name,
+                                                  _hinfo)
+                if _hqual:
+                    _sib_qualifier = _hqual
     if _sib_qualifier and not sym_info:
         if not s.wildcard:
             self._unresolved_import_aliases.add(_sk)
         return
     if isinstance(sym_info, str):
         _reg_isym[_sk] = {
-            'module': s.module, 'original_name': orig_name,
+            'module': _eff_mod, 'original_name': orig_name,
             'return_type': sym_info, 'parameters': [],
             'signature': f"{sym_info} {_sk} (void)"
         }
         self.func_return_types[_sk] = sym_info
     elif isinstance(sym_info, dict):
         sym_info = _as_dict(dict(sym_info))
-        sym_info['module'] = s.module
+        sym_info['module'] = _eff_mod
         # Only record `original_name` for a genuine `import X as Y` alias.
         # For an unaliased import it equals `_sk`, and storing it makes
         # `_func_csym` read it back (MojoDict get -> int64_t, then a POINTER
@@ -428,7 +532,7 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
             pass
         elif _sib_is_local_project and sym_info.get('return_type'):
             _resolved_ret = self._resolve_sibling_param_ctype(
-                s.module, sym_info['return_type'])
+                _eff_mod, sym_info['return_type'])
             if _resolved_ret:
                 sym_info['c_return_type'] = _resolved_ret
                 _ret_changed = True
@@ -449,7 +553,7 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
                     sym_info.get('parameters') or [],
                     sym_info['c_parameters']):
                 _resolved_ctype = self._resolve_sibling_param_ctype(
-                    s.module, _p_raw_type)
+                    _eff_mod, _p_raw_type)
                 if _resolved_ctype:
                     _c_name = (_c_param.split()[-1]
                                if _c_param.strip() else _p_name)
@@ -531,10 +635,57 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
             # qualifier derived from the import STRING cannot honour that;
             # only the module_name the defining module was itself compiled
             # under can.
-            _qual = (s.module.lstrip('.').replace('.', '_')
-                     .replace('-', '_'))
+            #
+            # "The module the defining module was compiled under" is NOT
+            # always the module this statement names: a package
+            # `__init__.py` that re-exports (`from .sub import tri`) is a
+            # re-exporting module, not a defining one, so `from p import
+            # tri` was qualifying by `p` against a definition emitted as
+            # `sub_tri_<suffix>` — a hard gcc "implicit declaration of
+            # function 'p_tri_...'; did you mean 'sub_tri_...'?" on the
+            # single-TU path, and a silent wrong answer on the link-mode
+            # one (the extern preamble's `weak` "unavailable in compiled
+            # mode" stub binds instead). Worse than the wrong symbol: the
+            # same wrong qualifier is the `_home_def_param_types` /
+            # `_imported_home_param_types` lookup key beside it, so a
+            # mismatch there is a mis-TYPED result rather than a
+            # compile error — that is how a re-exported CLASS loses its
+            # field types (`from mod_root import Dialog` typed
+            # `Dialog.widgetName` `int64_t` and printed the `char *`'s
+            # bits). `_find_symbol_home_module` answers the question this
+            # half is actually asking ("which module DEFINES this name,
+            # following re-export hops"), with the visited-set that makes
+            # a re-export cycle terminate. A None answer (nothing
+            # resolvable defines it) falls back to the import string
+            # unchanged — no worse than before, and never a guess.
+            # `_eff_mod` already IS the defining module when the name only
+            # REACHES `s.module` through a re-export (resolved above);
+            # otherwise this statement names the defining module directly and
+            # the import string is the right spelling.
+            _home_ref = _eff_mod if _eff_mod != s.module else None
+            if _home_ref:
+                _qual = (_home_ref.lstrip('.').replace('.', '_')
+                         .replace('-', '_'))
+            else:
+                _qual = (s.module.lstrip('.').replace('.', '_')
+                         .replace('-', '_'))
         else:
+            # Same requirement, opposite spelling: a module satisfied by a
+            # recorded dylib keeps the PATH-derived qualifier, because that
+            # is what the dylib's own export table used. When the symbol
+            # only REACHES this module through a re-export, the defining
+            # module is a different file, so re-derive the basename from
+            # the DEFINING module's path instead of the importing one's.
             _qual = _sib_qualifier
+            _home_ref = _eff_mod if _eff_mod != s.module else None
+            if _home_ref:
+                try:
+                    _hp = self._parsed_import(_home_ref)[0]
+                    if _hp:
+                        import module_loader as _mlmod_home
+                        _qual = _mlmod_home.module_name_for_path(_hp)
+                except Exception:
+                    pass
         # BUG-2026-024: snapshot THIS import's param ctypes
         # under (home_qualifier, as_referenced_name) BEFORE
         # anything else can overwrite the shared bare-name
@@ -562,7 +713,7 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
         # slot.
         try:
             _pts_snap = None
-            for _fs in (self._parsed_import(s.module)[2] or []):
+            for _fs in (self._parsed_import(_eff_mod)[2] or []):
                 if isinstance(_fs, FunctionDef) and _fs.name == orig_name:
                     _pts_snap = self._signature_ctypes(_fs.params, _fs)
                     break
