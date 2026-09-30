@@ -385,5 +385,3 @@ def user_dunder_repr_call(gen, struct_name: str, ctype: str, cval: str, prefer):
         _none = gen._intern_string('None')
         return gen._new_val('char *', f'({_local} ? {_call} : {_none})')
     return None
-
-
