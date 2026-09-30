@@ -154,7 +154,7 @@ HOST_MODELLED = frozenset((
     #     real filesystem. `listdir` and `walk` need a run-time-length
     #     sequence, which a list on this path cannot be, and `environ` needs
     #     a `char **` walk; both are bug docs rather than approximations.
-    "errno", "stat", "platform", "time", "select", "io",
+    "errno", "stat", "platform", "select", "io",
     "pathlib", "glob", "fnmatch", "hashlib", "secrets", "uuid",
     #   `struct`  — `formal/hostmods/struct.mojo`, in the subset the formal
     #     backends can lower, compared BYTE FOR BYTE against CPython's own
@@ -163,6 +163,20 @@ HOST_MODELLED = frozenset((
     #     the work accounting: an entry here is the claim
     #     `formal_sweep.py` sizes its "not answerable" column from, and it
     #     reported seven files as blocked on a module that now exists.
+    #   `time`  — `formal/hostmods/time.mojo`, checked by `test_formal_time.py`
+    #     against CPython's own clocks: every value it produces is a clock
+    #     READING, so the test asserts relations (the image's wall clock within
+    #     2 s of this process's, monotonic never decreasing, `sleep_ns` at
+    #     least as long as asked) rather than a table. A float is not a value
+    #     on this path — `formal/arm64_codegen.py` truncates a `FloatLiteral`
+    #     to an integer and there is no float arithmetic — so the fractional
+    #     `time.time()` is the IEEE-754 BIT PATTERN of one, verified bit-exact
+    #     against exact rational arithmetic over 534 inputs. What it cannot
+    #     answer is written at the top of the file: `localtime`, `gmtime`,
+    #     `mktime`, `strftime` and `get_clock_info` all return a `struct tm`
+    #     or a named tuple, and a struct is a frame blob, so they are absent
+    #     rather than approximated. Filed as
+    #     `bugs/FORMAL_time_struct_shaped_answers.md`.
     #
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.
