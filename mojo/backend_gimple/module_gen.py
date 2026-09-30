@@ -4993,14 +4993,24 @@ def gen_module_impl(self, stmts):
             continue
         _sname = _as_str(s.name)
         _shome = self._struct_home_by_id.get(_sid, '')
+        # `_struct_cname_by_home` is keyed by the SANITIZED home, because its
+        # only reader (`_resolve_struct_cname`) sanitizes before looking up.
+        # Storing the raw `pkg.dia_b` against a reader that asks for
+        # `pkg_dia_b` is a silent miss, and a miss falls back to the WINNER's
+        # bare name — which is the whole bug this pass exists to fix, so it
+        # has to be the SANITIZED spelling on both sides or it is not a fix
+        # at all for any class in a package. For a flat module name the two
+        # spellings are identical, which is why the non-dotted tests did not
+        # see it.
+        _skey = _sanitize_cname_qualifier(_shome) if _shome else ''
         _owner = self._struct_name_owner.get(_sname)
         if _owner is None:
             # First claim on this bare name: it OWNS it, under the bare name.
             self._struct_name_owner[_sname] = s
             self._struct_cname_by_id[_sid] = _sname
             self._struct_cname_of_name[_sname] = _sname
-            if _shome:
-                self._struct_cname_by_home[_shome + '::' + _sname] = _sname
+            if _skey:
+                self._struct_cname_by_home[_skey + '::' + _sname] = _sname
             continue
         if _owner is s:
             self._struct_cname_by_id[_sid] = _sname
@@ -5021,7 +5031,7 @@ def gen_module_impl(self, stmts):
             _n += 1
         self._struct_cname_by_id[_sid] = _cname
         self._struct_name_owner[_cname] = s
-        self._struct_cname_by_home[_shome + '::' + _sname] = _cname
+        self._struct_cname_by_home[_skey + '::' + _sname] = _cname
         self._struct_qualified_cnames.add(_cname)
     for s in all_struct_defs:
         s = _as_structdef_node(s)

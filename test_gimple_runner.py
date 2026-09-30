@@ -11023,7 +11023,14 @@ main()
         stage that failed in the message."""
         with tempfile.TemporaryDirectory() as wd:
             for name, src in files.items():
-                open(os.path.join(wd, name), 'w').write(src)
+                path = os.path.join(wd, name)
+                # `name` may name a module INSIDE a package (`pkg/sub.py`),
+                # which is its own test subject and not just a convenience:
+                # a flat module name sanitizes to itself, a dotted one does
+                # not, so the package shape needs a real subdirectory to
+                # reproduce.
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                open(path, 'w').write(src)
             ep = os.path.join(wd, entry)
             from gimple_codegen import compile_to_gimple
             c_code = compile_to_gimple(files[entry], do_imports=True,
@@ -11510,6 +11517,36 @@ main()
                           "    print(b.n)\n"
                           "main()\n",
     }, 'colln4_main.py')
+
+    # The four shapes above all use FLAT module names. A class inside a
+    # PACKAGE has a dotted home (`pkg.dia_b`), and that is where the
+    # collision pass was still broken: `_struct_cname_by_home` was written
+    # under the raw home and read under the sanitized one, so every lookup
+    # missed, fell back to the WINNER's bare name, and the loser's field
+    # reads raised a runtime `AttributeError` instead of printing the value.
+    # Measured before the fix on exactly this file set: compiled
+    # `'5\n'` + `AttributeError: s` (exit 1), CPython `'5\nhi\n42\n'`.
+    # Note the two spellings are IDENTICAL for a flat module, which is why
+    # none of the four cases above could see it.
+    _check_agrees_with_cpython("same_bare_name_struct_in_a_package", {
+        'colln5pkg/__init__.py': "",
+        'colln5pkg/dia_a.py': "class Dialog:\n"
+                              "    def __init__(self, n):\n"
+                              "        self.n = n\n",
+        'colln5pkg/dia_b.py': "class Dialog:\n"
+                              "    def __init__(self, s: str):\n"
+                              "        self.s = s\n"
+                              "        self.n = 42\n",
+        'colln5_main.py': "from colln5pkg import dia_a\n"
+                          "from colln5pkg import dia_b\n"
+                          "def main():\n"
+                          "    a = dia_a.Dialog(5)\n"
+                          "    b = dia_b.Dialog('hi')\n"
+                          "    print(a.n)\n"
+                          "    print(b.s)\n"
+                          "    print(b.n)\n"
+                          "main()\n",
+    }, 'colln5_main.py')
 
     # An IMPORTED class's `__init__` PARAMETER names must not become struct
     # FIELDS. `_xmod_ctor_field_hints` records what a foreign call site
