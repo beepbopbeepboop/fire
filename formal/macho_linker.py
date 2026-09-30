@@ -1227,12 +1227,14 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
         for sym in (dep_syms or {}).get(dep) or []:
             dylib_of[sym] = (2 if n else 1) + i
     bind = _bind_info(external_syms, dylib_of=dylib_of, got_segment=1) if n else b""
-    if n:
-        linkedit_file = g_file + g_size
-    elif has_globals:
-        linkedit_file = g_file + g_size
-    else:
-        linkedit_file = text_size
+    # __LINKEDIT starts after whatever content precedes it, and the order is
+    # fixed: __TEXT, then __DATA_CONST (the GOT) when there are externs, then
+    # __DATA (the module-global slots) when there are any. Written as the sum of
+    # the pieces that are actually present rather than as a chain of cases,
+    # because the chain had a branch that returned 0 for the most ordinary
+    # dylib there is — one with externs and no globals — and produced an image
+    # whose load commands ran off the end of a 31-byte file.
+    linkedit_file = text_size + (data_size if n else 0) + g_size
     file = bytearray(linkedit_file + len(trie) + len(bind))
 
     def patch(off, fmt, *vals):
