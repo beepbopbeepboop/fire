@@ -1519,7 +1519,8 @@ def _callee_wants_a_value(callee: str) -> bool:
     return kind is not None and kind[0] in ("unsupported", "identity")
 
 
-def _check_holder_agreements(functions, holders, hstruct, params_of) -> None:
+def _check_holder_agreements(functions, holders, hstruct, params_of,
+                             declared=None, structs_by_name=None) -> None:
     """Refuse a parameter reached with a frame address at one call site and
     with something else at another.  A WHOLE-IMAGE pass, and that is the whole
     content of where it runs.
@@ -1553,7 +1554,22 @@ def _check_holder_agreements(functions, holders, hstruct, params_of) -> None:
     precisely the case where the disagreement is invisible from the frame's own
     function.  Measured: with the check inside `_check_frame_escapes`, that
     program built and died with SIGSEGV on both architectures.
+
+    `declared` is `{fn name: {parameter}}`, the holders whose status came from a
+    DECLARED type rather than from a call site, and it adds the one case the
+    two-bucket rule below cannot express.  Those holders are the ones with no
+    frame-side to compare against by construction: `Slice.__eq__` is a method
+    nothing in the image calls, so there is no site handing `other` a frame and
+    `holder_spellings` is empty however many sites pass something else.  The
+    rule as written reads that as agreement (`if not holder_spellings or not
+    plain_spellings: continue`) and emits a load from `base + 8k` on a word that
+    is not an address — which is the silently-wrong outcome this pass exists to
+    make impossible, reached through the fix rather than around it.  So for
+    these parameters the question is not "do the sites agree with each other"
+    but "does ANY site agree with the declaration", and the answer being no is
+    a refusal naming the declaration and every site.
     """
+    declared = declared or {}
     for fn in functions:
         hs = holders.get(fn.name) or ()
         by_name = hstruct.get(fn.name) or {}
@@ -1565,12 +1581,18 @@ def _check_holder_agreements(functions, holders, hstruct, params_of) -> None:
             params = params_of.get(callee)
             if not params:
                 continue
+            by_decl = declared.get(callee) or {}
             for position, arg, _kw in _frame_argument_slots(node, params):
                 pname = params[position] if position < len(params) else None
                 if not pname:
                     continue
                 here = isinstance(arg, F.IdentExpr) and arg.name in hs
                 there = pname in holders.get(callee, ())
+                if pname in by_decl:
+                    _check_declared_parameter(
+                        functions, callee, position, pname, by_decl[pname],
+                        holders, hstruct, structs_by_name or {}, params)
+                    continue
                 if here == there:
                     # Both frame addresses, or neither.  A parameter reached one
                     # way at every call site is the case the by-reference
@@ -1610,6 +1632,120 @@ def _check_holder_agreements(functions, holders, hstruct, params_of) -> None:
                 raise CodegenError(M.frame_holder_disagreement_refusal(
                     callee, position, pname, structs, holder_spellings,
                     plain_spellings))
+
+
+def _argument_frames(site_fn, arg, holders, hstruct, structs_by_name):
+    """The frame addresses `arg` could be at this call site, and what if not.
+
+    `([struct names], why)` — the structs whose FRAME the argument is, when this
+    image can say so, and otherwise the sentence a refusal should use for what
+    the argument turned out to be instead.  The two are not the same question:
+    an argument this analysis cannot place is not evidence of anything, and a
+    caller has to be told which of the two it is looking at.
+
+    Two shapes put an address on the stack for a callee, and they are the only
+    two:
+
+      * a bare NAME the site function's holder analysis recognised — the
+        ordinary `f(r)` with `r` a frame;
+      * a FIELD access whose root is a holder and whose slot holds a PLACED
+        NESTED FRAME (`take(self.in1)`), which is an address too.  That question
+        is `_typed_nested_frame`, the one place `struct_nested_frame_fields`'
+        placement is decided, and it is asked here rather than read off a
+        published table because the table records only the CALL shape
+        `h.a.m()`, and a nested frame handed over as an ordinary argument never
+        appears in it.
+
+    A frame of the WRONG struct comes back as a non-empty list naming it,
+    which is the whole point of returning the list rather than a bool: `base +
+    8k` is one layout, and reading another struct's word through it is the wrong
+    answer rather than a failure.
+    """
+    if isinstance(arg, F.IdentExpr):
+        if arg.name not in (holders.get(site_fn.name) or ()):
+            return ([], _describe_value(arg))
+        names = [st.name for st in
+                 ((hstruct.get(site_fn.name) or {}).get(arg.name) or ())]
+        why = f"a {'/'.join(names)} frame" if names else "an unplaced one"
+        return (names, why)
+    key = _root_ident(arg)
+    if key is not None and key[1] == 1 and isinstance(arg, F.MemberExpr) \
+            and key[0] in (holders.get(site_fn.name) or ()):
+        nested = _typed_nested_frame(key[0], arg.member,
+                                     ((hstruct.get(site_fn.name) or {})
+                                      .get(key[0]) or ()),
+                                     structs_by_name, None)
+        if isinstance(nested, F.StructDef):
+            return ([nested.name], f"a {nested.name} nested frame")
+    return ([], _describe_value(arg))
+
+
+def _check_declared_parameter(functions, callee, position, pname, want,
+                              holders, hstruct, structs_by_name,
+                              params) -> None:
+    """A parameter this image classified from its DECLARED type: refuse any
+    call site that hands it something of the wrong shape.
+
+    Two kinds share this check because they are the same decision read twice,
+    and the decision is always "does this image corroborate the declaration":
+    a parameter declared as a framed struct is compiled as a frame ADDRESS, and
+    one declared as a one-field struct is compiled as that struct's only FIELD.
+    Both are facts about every call site at once, and neither is a fact about
+    one.
+
+    The hole this closes is reachable only through the fix, which is why it is
+    worth stating rather than leaving to the two-bucket rule beside it.  Before
+    a declaration could classify a parameter, that happened only when a call
+    site handed it a frame, so `f(r, 1)` beside `f(2, 3)` was the disagreement
+    and both buckets were non-empty.  A declaration has no such site — the
+    construct exists precisely because the method is called from nowhere in this
+    image — so a program that DOES call it with a plain word produced
+    `plain_spellings` and an EMPTY `holder_spellings`, which the old rule reads
+    as agreement and then loads eight bytes from wherever the word points.
+
+    `want` is the struct the declaration named, which is the struct every other
+    consumer reads: the emitter's `base + 8k` is computed from this same table,
+    so a message naming a different struct would send the reader to a layout
+    that is not the one in the image.
+
+    The rule is therefore "every call site agrees", not "the sites agree with
+    each other", and the message names the declaration, the parameter and every
+    site: either can be the one the reader is standing at.
+
+    A method with NO call site in the image is not this function's business —
+    that is the construct being fixed, there is nothing to disagree with, and
+    `sites` being empty is what "nothing to say" looks like here.
+    """
+    framed = M.struct_is_framed(want)
+    sites = []
+    for site_fn in functions:
+        for site in M.iter_nodes(site_fn.body):
+            if not isinstance(site, F.CallExpr) \
+                    or not isinstance(site.func, F.IdentExpr) \
+                    or site.func.name != callee:
+                continue
+            for i, a, _k in _frame_argument_slots(site, params):
+                if i != position:
+                    continue
+                cands, why = _argument_frames(site_fn, a, holders, hstruct,
+                                              structs_by_name)
+                # A framed declaration is corroborated by a frame OF THAT
+                # STRUCT; a one-field one is corroborated by anything that is
+                # not a frame address at all, because its value is one word and
+                # this path cannot say which word — the same trust a one-field
+                # RECEIVER already gets, and refused the moment the site is
+                # provably handing over an address instead.
+                ok = want.name in cands if framed else not cands
+                if not ok:
+                    sites.append((_call_spelling(site, a, position, pname), why))
+    if sites:
+        raise CodegenError(M.frame_declared_parameter_refusal(
+            callee, position, pname, want.name,
+            "the ADDRESS of a frame of 8-byte slots, where every field is a "
+            "load at `base + 8k`" if framed else
+            "that struct's only field, because the receiver of a one-field "
+            "struct IS its field",
+            sites))
 
 
 def _expr_spelling(node) -> str:
@@ -1759,12 +1895,45 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
     # (`formal/model.py`'s `function_return_types`) so the three callers of
     # `struct_construction_plan` cannot answer differently.
     rets = M.function_return_types(functions)
+    # `declared_holders[fn.name]` is `{parameter: struct}` for the holders whose
+    # status came from the DECLARED TYPE rather than from a call site or a
+    # receiver, and it is carried to `_check_holder_agreements` below.  The
+    # distinction is load-bearing rather than bookkeeping: a holder the
+    # fixpoint found has at least one call site that hands it a frame address
+    # BY CONSTRUCTION, so the agreement check's "one kind of value at every
+    # call site" test has a frame side to compare the others against.  A holder
+    # the DECLARATION found has no such guarantee — the whole construct is a
+    # method nothing in the image calls — so that test has to be able to say
+    # "no call site agrees", which is a refusal the pre-existing rule does not
+    # make.
+    declared_holders = {fn.name: {} for fn in functions}
     for fn in functions:
         owner = owners.get(fn.name)
         if owner is not None and owner.name in framed:
             for recv in M.struct_receivers(owner):
                 holders[fn.name].add(recv)
                 hstruct[fn.name][recv] = [owner]
+        # Every parameter of every function, not only a method's: a free
+        # function's `def f(r: S)` is the same construct as `def __eq__(self,
+        # other: Self)`, the declaration is the same kind of evidence, and
+        # restricting it to methods would leave the identical refusal standing
+        # one function away with nothing in the reader's source to tell the two
+        # apart.
+        for pname, pst in M.parameter_declared_structs(
+                fn, structs_by_name, owner).items():
+            # A name something else already established keeps THAT
+            # classification: the fixpoint below runs over every call site and
+            # the receiver seeding above is the method's own declaration, so
+            # adding a second opinion here would put two structs in a candidate
+            # list where one layout is the truth.
+            if pname in holders[fn.name]:
+                continue
+            if M.struct_is_framed(pst):
+                holders[fn.name].add(pname)
+                hstruct[fn.name][pname] = [pst]
+            elif not M.struct_is_one_field(pst):
+                continue
+            declared_holders[fn.name][pname] = pst
         for name, sts in _constructor_bindings(fn, framed).items():
             holders[fn.name].add(name)
             hstruct[fn.name].setdefault(name, []).extend(sts)
@@ -2156,7 +2325,8 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
     # A parameter's being a frame holder is a fact about the whole image, and
     # the call site that disagrees with it can be in a function the loop above
     # skipped — see `_check_holder_agreements` for the program that measures it.
-    _check_holder_agreements(functions, holders, hstruct, params_of)
+    _check_holder_agreements(functions, holders, hstruct, params_of,
+                             declared_holders, structs_by_name)
 
 
 def _rewrite_nested_method_calls(fn, nested_fields) -> None:
@@ -3099,12 +3269,22 @@ def _refuse_holder_use(fn, node, holders, by_name, why, reason=None) -> None:
         f"what is still open about it")
 
 
-def _one_word_field_map(fn, structs_by_name: dict) -> dict:
+def _one_word_field_map(fn, structs_by_name: dict, owner=None) -> dict:
     """{local name: its field name} for locals holding a one-word struct.
 
     Found from the binding, not inferred: a local initialised from a one-word
     struct's constructor holds that struct's only field, and nothing else on
-    this path can produce such a value."""
+    this path can produce such a value.
+
+    A PARAMETER declared as a one-field struct joins them, from the
+    declaration rather than from a binding, because the declaration is the same
+    evidence for a parameter that the constructor call is for a local: the
+    receiver of a one-field struct IS its field, so a word the caller passed
+    for an `S` is that field.  `owner` is what a bare `Self` reduces to, and it
+    is the struct the caller's own `self` rewrite below already handles — so
+    the two never both fire for one name and cannot disagree about which field
+    a name means.
+    """
     mapping = {}
     for node in M.iter_nodes(fn.body):
         target = value = None
@@ -3118,9 +3298,13 @@ def _one_word_field_map(fn, structs_by_name: dict) -> dict:
         if not isinstance(value.func, F.IdentExpr):
             continue
         st = structs_by_name.get(value.func.name)
-        if st is not None and M.struct_fits_one_word(st) \
-                and M.struct_field_count(st) == 1:
+        if st is not None and M.struct_is_one_field(st):
             mapping[target] = _sole_field_name(st)
+    for pname, pst in M.parameter_declared_structs(
+            fn, structs_by_name, owner).items():
+        if pname in mapping or not M.struct_is_one_field(pst):
+            continue
+        mapping[pname] = _sole_field_name(pst)
     return mapping
 
 
@@ -4371,10 +4555,10 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         _rewrite_method_calls(fn.body, owners, wide, receiverless)
         # A method's `self` IS the field; a local initialised from a one-word
         # constructor holds that struct's only field directly.
-        mapping = _one_word_field_map(fn, structs_by_name)
+        mapping = _one_word_field_map(fn, structs_by_name,
+                                      method_owners.get(fn.name))
         st = method_owners.get(fn.name)
-        if st is not None and M.struct_fits_one_word(st) \
-                and M.struct_field_count(st) == 1:
+        if st is not None and M.struct_is_one_field(st):
             mapping["self"] = _sole_field_name(st)
         _rewrite_self_fields(fn.body, mapping)
         # A class-level CONSTANT is not part of any value, so it is not
