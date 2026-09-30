@@ -155,7 +155,7 @@ HOST_MODELLED = frozenset((
     #     sequence, which a list on this path cannot be, and `environ` needs
     #     a `char **` walk; both are bug docs rather than approximations.
     "errno", "stat", "platform", "select", "io",
-    "pathlib", "glob", "fnmatch", "hashlib", "secrets", "uuid",
+    "pathlib", "glob", "fnmatch", "secrets", "uuid",
     #   `struct`  — `formal/hostmods/struct.mojo`, in the subset the formal
     #     backends can lower, compared BYTE FOR BYTE against CPython's own
     #     answers by `test_struct_formal.py`. The four measured limits it is
@@ -177,6 +177,16 @@ HOST_MODELLED = frozenset((
     #     or a named tuple, and a struct is a frame blob, so they are absent
     #     rather than approximated. Filed as
     #     `bugs/FORMAL_time_struct_shaped_answers.md`.
+    #   `hashlib` — `formal/hostmods/hashlib.mojo`, checked BYTE FOR BYTE
+    #     against CPython's own digests by `test_formal_hashlib.py`: six
+    #     digests from CommonCrypto (which libSystem provides) and BLAKE2b
+    #     computed from RFC 7693 because libSystem has no BLAKE2 and
+    #     `py314_cache.py` asks for `blake2b(digest_size=20)`. 1,182 digests
+    #     compared, none from a table. CPython's factory API is not
+    #     expressible — a hash object is 8 to 64 bytes of state that cannot
+    #     cross a dylib boundary — so each digest is one function, and the
+    #     seven absent names (SHA-3, SHAKE, blake2s) are named with the
+    #     measurements in `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md`.
     #
     # Pure computation over representable values: string and text handling,
     # numeric containers, pattern matching, data structures.

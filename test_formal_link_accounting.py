@@ -237,6 +237,7 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     "struct": "test_struct_formal.py",
     "sys": "test_formal_sys.py",
     "time": "test_formal_time.py",
+    "hashlib": "test_formal_hashlib.py",
 }
 
 
