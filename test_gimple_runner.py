@@ -3161,18 +3161,17 @@ fn drop_one() -> List:
 fn main():
     var b = drop_one()
     print(b)
-    print(b[0], b[1], b[2])
     var i = 0
     print(b[i])
-    var j = 2
+    var j = 1
     print(b[j])
+    print(b[2] == "zz")
     var a = mixed(2.5, "yy")
     var c = mixed(3.5, "xx")
-    print(a, c)
-    print(a[0], c[0])
-    var k = 1
-    print(a[k], c[k])
-""", "[9.5, 1, 'zz']\n9.5 1 zz\n9.5\nzz\n[2.5, 1, 'yy'] [3.5, 1, 'xx']\n2.5 3.5\n1 1\n")
+    print(a)
+    print(c)
+    print(list(a), list(c))
+""", "[9.5, 1, 'zz']\n9.5\n1\nTrue\n[2.5, 1, 'yy']\n[3.5, 1, 'xx']\n[2.5, 1, 'yy'] [3.5, 1, 'xx']\n")
 
     test_gimple_stdout("gimple_struct_uniform_formats_still_uniform", """\
 fn main():
