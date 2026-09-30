@@ -533,7 +533,13 @@ def _lower_bound_method_call_value(gen, bm: str, node: gimple_ctypes.CallExpr,
         at, av = gen.lower_expr(a)
         widened.append(av if at == 'int64_t' else gen._new_val('int64_t', f'(int64_t){av}'))
     n = len(widened)
-    helper = f'mojo_bound_method_call_{min(n, 4)}'
+    # Arity 8, matching the sibling `_lower_fnptr_call_value` /
+    # `_lower_maybe_bound_call` paths (which the variadic-callable work
+    # widened from 4). This one still capped at 4, so a five-or-more-argument
+    # call through a `MojoBoundMethod *` value dropped its tail — the same
+    # silent wrong value, and a reader would rightly ask why the three
+    # sibling paths disagreed.
+    helper = f'mojo_bound_method_call_{min(n, 8)}'
     raw_t = gen._call_expr('int64_t', helper, [('MojoBoundMethod *', bm)] +
                              [('int64_t', w) for w in widened[:8]])
     if ret_type in ('int64_t', 'int'):
