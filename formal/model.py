@@ -483,6 +483,49 @@ def incoming_args(fn) -> list:
     return ct + list(getattr(fn, "params", None) or [])
 
 
+def call_callee_name(func) -> str | None:
+    """The name of the function a call names, for the two spellings that name
+    one: a plain `f`, and a comptime specialization `f[a, b]` of one.
+
+    `None` for every other callee, and the exclusions are the point rather than
+    an omission:
+
+      * `recv.m(x)` — a METHOD call. Its name lives in the method table
+        (`_method_owners`), not here, and a MemberExpr is also how `mod.f(x)`
+        spells a module-level function, which is a different question again.
+      * `mod.f[a](x)` — a specialization of a dotted name. arm64's
+        `_specialization_of` answers a dotted name for it and lowers it to a BL
+        against that symbol; there is no parameter list for a dotted name here
+        either, so `None` is the answer that keeps the two from disagreeing
+        about what is being called.
+      * a computed callee (`f()[0](x)`, a lambda, a tuple index) — no name at
+        all, which `frame_opaque_position_refusal` says in its own words.
+
+    **Why the subscript is safe to look through, which is what makes this worth
+    having.**  `incoming_args`, immediately above, puts a generic's comptime
+    parameters FIRST, and the call site passes them first — so the brackets
+    contribute no *call-time* argument and call-time position `i` is the `i`th
+    entry of `function_param_shape(fn).names`, which is the list every frame
+    table in `formal/build.py` is keyed by.  Measured on arm64 before this
+    function existed, because the answer had to be a fact rather than a reading:
+    `def f[type: Int](x: Int, y: Int)` called as `f[1](3, 7)` returns 307, with
+    `type`=1, `x`=3 and `y`=7, and each of the three read back correctly on its
+    own.
+
+    **It is the analysis's copy of what the EMITTER will call**, which is the
+    reason it is here and not written out again per reader.  arm64's
+    `_callee_symbol` answers the same two shapes this way (`_specialization_of`
+    → `specialization_name`), and an analysis that disagreed with its own
+    emitter would be reasoning about one call while the machine makes another.
+    x86-64's `_callee_symbol` deliberately does NOT — see the bug doc this is
+    filed with; there it is a refusal, and it has to stay one."""
+    if isinstance(func, F.IdentExpr):
+        return func.name
+    if isinstance(func, F.SubscriptExpr) and isinstance(func.obj, F.IdentExpr):
+        return func.obj.name
+    return None
+
+
 # ── Shifts ───────────────────────────────────────────────────────────────
 #
 # A shift is the one operator whose result depends on a value BOTH backends
@@ -4984,7 +5027,8 @@ def _where(position, total, kwname: str = None) -> str:
 
 def frame_opaque_position_refusal(where_the: str, callee: str, position,
                                   total, struct_names, method: str = None,
-                                  kwname: str = None, why: str = None) -> str:
+                                  kwname: str = None, why: str = None,
+                                  callee_shape: str = None) -> str:
     """A frame address in a position THIS PASS cannot establish.  Case 3.
 
     The honest remainder, and it is marked as a statement about the ANALYSIS
@@ -4997,10 +5041,38 @@ def frame_opaque_position_refusal(where_the: str, callee: str, position,
 
     `why` names which of the ways the declaration is missing, because "this
     pass cannot see it" without the reason is the sentence this whole family
-    was written to stop saying."""
+    was written to stop saying.
+
+    `method` is the source's spelling of a callee that IS a method call
+    (`recv.m`), and `callee_shape` the short name of a callee that is NOT — a
+    computed callee, say.  They are two different sentences because the method
+    one is about NAME dispatch, which is a real fact about the language, and
+    the other is about there being no name at all.  **One message covering both
+    was a refusal for a reason that was not operating**: a `f[comptime](x)`
+    call — a generic specialization, resolved by `call_callee_name` and
+    followed like any other callee — used to be reported as "a method call on a
+    value receiver is dispatched by NAME", which mentions a receiver, a method
+    and a dispatch that the source does not contain.  Measured on the corpus,
+    6 of the 25 files whose terminal finding this message produced had a
+    comptime specialization here and none of them has a method call."""
     who = _who(struct_names)
     head = (f"a {who} receiver is passed to {where_the} "
-            f"{_where(position, total, kwname)}, and {why}. ")
+            f"{_where(position, total, kwname)}, and {why or 'the callee is a shape this pass cannot name'}. ")
+    if callee_shape:
+        return (head +
+                f"The callee of this call is {callee_shape}, which names no "
+                f"function this pass has a parameter list for, so nothing here "
+                f"can say whether the callee treats that word as a frame "
+                f"address. This is a limit of the ANALYSIS and not a fact "
+                f"about the program: the frame belongs to the function that "
+                f"created it, that function is an ancestor of the callee — the "
+                f"address reached the callee through an active call — so a "
+                f"read or a write through this parameter would be in the right "
+                f"place. What is NOT the case is the shape this message used to "
+                f"be given for: a frame address in `f(x)` and in "
+                f"`f[comptime](x)` is followed into `f`'s parameter at that "
+                f"position, in every position and not only the first, because "
+                f"both spellings name `f` and its parameter list is in hand")
     if method:
         return (head +
                 f"This is not a question about the position: a METHOD call on a "
