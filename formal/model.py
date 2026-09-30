@@ -460,7 +460,7 @@ def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None):
     read-only check this replaces left `a[i, j] = v` unrefused.
 
     Callable UNCONDITIONALLY — the multi-element gate moved inside — because the
-    MLIR answer does not depend on the arity (`is_mlir_type` keys on the
+    MLIR answer does not depend on the arity (`is_mlir_template` keys on the
     base), and a caller that still guarded the call with `is_multi_index` would
     keep the single-element spelling `__mlir_type[x]` fabricated. A non-MLIR
     single index is not this function's business and returns None, exactly as

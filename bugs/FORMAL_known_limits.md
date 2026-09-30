@@ -689,7 +689,8 @@ Direct `codegen` — 127 files on arm64, 128 on x86-64 — decomposes as:
 | 19 distinct singleton causes | 19 | each its own file; §3 is the right home for these |
 
 `codegen/dependency` — 181 files — is **13 terminal modules**, and the top four
-are 168 of the 181:
+were 168 of the 181. **`env.mojo`'s 55 left this family on 2026-09-29**, so the
+table's top four are now three:
 
 | terminal module | files | terminal reason | the refusal is | to close it |
 |---|---|---|---|---|
