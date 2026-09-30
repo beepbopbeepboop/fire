@@ -107,7 +107,7 @@ placeholder that is not substituted back would be a value reading
 `__MOJO_STR_7__`, so the pin must be a byte-exact value assertion on a raw
 literal with a continuation, compared against CPython's `a\<nl>b` — which is
 what the `raw_keeps_the_pair_in_cpython_only` row in `CONTINUATIONS` is already
-shaped for. `test_string_literal_lexing.py` builds three arm64 images and runs
+shaped for. `test_string_literal_lexing.py` builds five arm64 images and runs
 them, so the fix is verifiable without a new harness.
 
 ## What is NOT the fix
@@ -124,3 +124,23 @@ for a line whose trailing backslash is inside a string literal: none. The token
 stream and parse verdict of all 392 are **byte-identical** before and after the
 commit that fixed the other three shapes. So this is a correctness item with no
 coverage behind it, which is why it is filed with a pin and not chased.
+
+## What was fixed in the same commit, and what that tells the next person
+
+The line-joining pass deleted the backslash and put a **SPACE** where it went,
+and lstripped the next line — unconditionally, because it had no idea where the
+literals were. So for every shape in the matrix above that reads `ab` in
+CPython, this tree produced `a b`: a character the source never wrote, in a
+program that built, ran and printed the wrong string. The indented variant was
+wrong in two directions at once (`a    cd` became `a  cd` — one space invented,
+four removed). Fixed by `_ends_inside_string`, and pinned by the seven
+`CONTINUATIONS` rows that must now AGREE with CPython.
+
+**The lesson worth keeping is the one the raw row teaches:** the fix is
+`if the backslash is inside a literal then the pair is worth nothing`, and that
+sentence is what made the raw case visible at all — it is the SAME sentence
+CPython applies, with one exception, and the exception is the entire remaining
+bug. Had the first fix been written as "delete the pair", the raw case would
+have looked correct and stayed wrong. Two of the three shapes that were fixed
+here are the same story: the rule is small, and the whole cost is in knowing
+which case it does not apply to.
