@@ -196,7 +196,6 @@ _PSAVE = 6720          # the group saves, _NSAVE words of 4 bytes
 _NSAVE = 16            # two slots per group, _MAXG groups
 _PSTACK = 6784         # the backtracking stack, _NSTACK entries of 16 bytes
 _NSTACK = 1024
-_ARENA = 23168
 
 # A frame is one piece's private parser state, indexed by nesting depth: the
 # group number its atom created, the node and range counts before that atom,
@@ -370,9 +369,17 @@ def _g4s(p, i: Int) -> Int:
 
 
 def _arena() -> Pointer[UInt8]:
-    """A zeroed block big enough for the whole engine's state."""
-    var p: Pointer[UInt8] = malloc(22208)
-    memset(p, 0, 22208)
+    """A zeroed block big enough for the whole engine's state.
+
+    The size is the sum of the layout constants above and it is spelled HERE
+    and only here. It was also a module constant, and the two disagreed: the
+    constant was 23168 and the `malloc` said 22208, because growing the arena
+    for the parser frames moved one and not the other. A reader taking the
+    constant for the arena's size would be off by a kilobyte, which is the
+    whole point of writing it down once.
+    """
+    var p: Pointer[UInt8] = malloc(23168)
+    memset(p, 0, 23168)
     return p
 
 
@@ -2058,18 +2065,6 @@ def _scan(a, subj, n: Int, pos: Int) -> Int:
         return 1
     _spa(a, _P_NEXT, _pa(a, _P_MSTART))
     _spa(a, _P_PHASE, 1)
-    return 1
-
-
-def _val_span(a, g: Int) -> Int:
-    """Where the value `findall` reports for this match sits, as an offset.
-
-    With no group it is the whole match; with exactly one it is that group;
-    with two or more CPython returns TUPLES, which is more than one span, and
-    the whole match is reported instead. Stated at `findall` too.
-    """
-    if g != 1:
-        return 0
     return 1
 
 
