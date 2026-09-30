@@ -863,8 +863,24 @@ def _gmi_emit_closure_recursive(self, func_parts: list, _emitted_closures: set,
             f"}}"
         )
         func_parts.append('')
+    # A LAMBDA inside this closure's body is lifted by `_lower_LambdaExpr`
+    # into `gen._lambda_parts` — a side table that only `gen_module` flushes
+    # into the output, and it used to be flushed only by the top-level-
+    # function, struct-method and toplevel paths. This path did not, so a
+    # lambda nested inside a nested `def` was DECLARED and had its address
+    # taken (`static void * _funcptr_X = (void *)X;`) but was never defined:
+    # `Undefined symbols ...: "__make_make_lambda_1", referenced from:
+    # __funcptr__make_make_lambda_1` at link time. Clear the table BEFORE
+    # generating the body (so nothing pending from an earlier function is
+    # misattributed to this one) and flush it AFTER (so this one's lambdas
+    # are emitted) — the same reset-then-flush the sibling paths do, and the
+    # reason their comments all repeat it.
+    self._lambda_parts = []
     func_parts.append(self._gen_lifted_closure(ci, outer_name))
     func_parts.append('')
+    if self._lambda_parts:
+        func_parts.extend(self._lambda_parts)
+        self._lambda_parts = []
 
 
 

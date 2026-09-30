@@ -706,6 +706,48 @@ print(sorted(["b", "a", "c"], reverse=True))
     # list in its original order with exit 0 and said nothing: the worst
     # shape, because `sorted(l)` was right and `l.sort(); x = l` was silently
     # wrong, so the two spellings of one operation disagreed.
+    # A lambda inside a nested `def` was lifted and its address taken but
+    # never DEFINED, because `_lower_LambdaExpr` puts the body in the
+    # `gen._lambda_parts` side table and the nested-closure emission path
+    # flushed nothing — so this was a hard `Undefined symbols
+    # ...: "__make_make_lambda_1"` LINK failure. A lambda at the same
+    # nesting depth in a TOP-LEVEL function does get its definition, which is
+    # what made the shape look supported. The shape-independent guard (every
+    # `_funcptr_X` initializer has a matching definition) is
+    # `every_funcptr_initializer_has_a_definition` in test_gimple.py; this
+    # is the end-to-end run beside CPython.
+    test_gimple_stdout("gimple_lambda_in_nested_def_is_emitted", """\
+def _make():
+    def make():
+        return lambda x: x + 1
+    return make
+
+def main():
+    f = _make()()
+    print(f(1))
+main()
+""", "2\n")
+
+    # The two-deep nest is a separate path — a second `gen._gen_lifted_closure`
+    # level, so its `_lambda_parts` flush has to happen at each one — and is
+    # here rather than assumed to follow from the single-level case.
+    # (`*args` is deliberately NOT here: a variadic lambda segfaults on this
+    # tree at every nesting depth including top level, which is
+    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md's already-fixed
+    # variadic work sitting in an unlanded branch, not this path.)
+    test_gimple_stdout("gimple_lambda_two_deep_nested_def", """\
+def a():
+    def b():
+        def c():
+            return lambda: 5
+        return c
+    return b
+
+def main():
+    print(a()()()())
+main()
+""", "5\n")
+
     test_gimple_stdout("gimple_list_sort_method_in_place", """\
 def main():
     l = [3, 1, 2]
