@@ -18,8 +18,26 @@ already-filed, not-yet-fixed defect at its CURRENT (broken) behavior —
 see each one's own docstring for the filed bug doc — so this suite still
 gives `make check` a meaningful, non-flaky pass/fail signal without
 either hiding a known gap or re-discovering it every run.
+
+WHERE the fixture packages are written must not change any verdict. Every
+case below except one uses `tempfile.TemporaryDirectory()`, so its location
+follows `$TMPDIR` — which on some machines is a directory INSIDE this
+checkout and on others is the system temp dir. That used to be enough to
+flip `bare_submodule_import_call` from pass to fail, because
+`_lower_method_call`'s generic module-qualified-call branch was gated on
+"is this file under the compiler's own source directory", so a fixture
+written there was refused the resolution and answered a literal `0`. The
+gate is now `_is_selfhost_source_file`, which asks whether the file is one
+of the compiler's OWN modules rather than merely under its install
+directory — but "the other cases happen to run in whichever location
+`$TMPDIR` names" is not a guarantee, so
+`test_bare_submodule_import_call_inside_source_tree` pins the hard case
+explicitly: it builds the same package at a path under this checkout, so
+the invariant is tested in BOTH locations no matter how the suite is
+invoked.
 """
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -55,7 +73,7 @@ def _build_and_run(pkg_files: dict, entry: str, td: str) -> tuple[int | None, st
         os.chdir(cwd)
 
 
-def _cpython_run(td: str, entry: str) -> tuple[int, str]:
+def _cpython_run(td: str, entry: str, as_module: bool = False) -> tuple[int, str]:
     """CPython's OWN exit code and stdout for the same file. Every case below
     asserts the compiled program matches THIS, not a hand-written literal — a
     literal here would just be the bug's current wrong answer frozen into the
@@ -66,11 +84,20 @@ def _cpython_run(td: str, entry: str) -> tuple[int, str]:
     `pkg/__init__.py`-style layouts the compiled pipeline resolves through
     the package root would fail under CPython with `ModuleNotFoundError` and
     the baseline would be empty for exactly the cases that need it. With both
-    set, `from p.sub import tri` means the same thing to the two engines."""
+    set, `from p.sub import tri` means the same thing to the two engines.
+
+    `as_module=True` runs `python3 -m <entry>` instead of `python3 <path>`,
+    which is the only way a `from . import SUB` baseline can work at all: run
+    as a plain script, a relative import has no parent package and CPython
+    exits 1 before executing a single statement (`ImportError: attempted
+    relative import with no known parent package`). `-m` gives the file the
+    package context the compiled pipeline gives it."""
     env = dict(os.environ)
     env['PYTHONPATH'] = (td + os.pathsep + env['PYTHONPATH']
                          if env.get('PYTHONPATH') else td)
-    result = subprocess.run([sys.executable, os.path.join(td, entry)],
+    argv = ([sys.executable, '-m', entry[:-3].replace('/', '.')]
+            if as_module else [sys.executable, os.path.join(td, entry)])
+    result = subprocess.run(argv,
                             capture_output=True, text=True, timeout=60,
                             cwd=td, env=env)
     return result.returncode, result.stdout
@@ -139,6 +166,56 @@ def test_bare_submodule_import_call() -> bool:
     ok = rc == 0 and stdout.strip() == '42'
     if not ok:
         print(f"  ✗ bare_submodule_import_call: rc={rc} stdout={stdout!r}")
+    return ok
+
+
+def test_bare_submodule_import_call_inside_source_tree() -> bool:
+    """`test_bare_submodule_import_call`'s exact package, built at a path
+    INSIDE this checkout instead of in `$TMPDIR`.
+
+    This is the case that pinned the flake. `_lower_method_call`'s generic
+    module-qualified-call branch was gated on "does the file being compiled
+    sit under the compiler's own source directory", so a fixture written
+    inside the checkout was denied the resolution and
+    `base2.doubleval(21)` fell through to the generic scalar-receiver stub
+    as a literal `0` — silently, exit 0, no diagnostic — while the very same
+    source built in `/tmp` called the real definition. Every other case in
+    this file takes its location from `tempfile.TemporaryDirectory()`, i.e.
+    from `$TMPDIR`, so whether the registered `linkmode` step passed was
+    decided by the caller's environment rather than by the compiler; two
+    workers saw it red in their own fresh worktrees while every integrator
+    round was green, with no source difference at all.
+
+    Duplicating the package rather than parameterising the case above is
+    deliberate: `_build_and_run` takes the fixture directory as an argument
+    already, so a shared helper would hide the one thing this case exists to
+    state, which is the directory it runs in.
+    """
+    pkg = {
+        'pkg2/__init__.py': '',
+        'pkg2/base2.py': 'def doubleval(x):\n    return x * 2\n',
+        'pkg2/main.py': (
+            'from . import base2\n'
+            'print(base2.doubleval(21))\n'
+        ),
+    }
+    # `build/` is git-ignored; a fixture left behind would be an untracked
+    # file in the tree, and `checked_run`'s cache key is content-addressed
+    # over `extra` (not over the tree), so a stale directory is exactly the
+    # kind of state this case must not depend on. Removed either way.
+    root = os.path.join(REPO, 'build', 'test_link_mode')
+    os.makedirs(root, exist_ok=True)
+    td = tempfile.mkdtemp(prefix='inside_source_tree_', dir=root)
+    try:
+        rc, stdout = _build_and_run(pkg, 'pkg2/main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'pkg2/main.py', as_module=True)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '42')
+    if not ok:
+        print(f"  ✗ bare_submodule_import_call_inside_source_tree: rc={rc} "
+              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
     return ok
 
 
@@ -403,6 +480,7 @@ def test_dotted_sibling_import_qualifier_agrees() -> bool:
 CASES = [
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
+    test_bare_submodule_import_call_inside_source_tree,
     test_from_submodule_import_symbol_value_read,
     test_sibling_function_import_call_is_inlined,
     test_sibling_class_attribute_function_scoped,

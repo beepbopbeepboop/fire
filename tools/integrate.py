@@ -20,7 +20,7 @@ One round:
      (`control.py spawn --base work/<culprit>`); the next round is master + what
      is still outstanding, so one bad set never blocks the rest.
 """
-import argparse, fcntl, os, subprocess, sys, time
+import argparse, fcntl, os, re, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
 
@@ -68,6 +68,29 @@ def infra_only(branch):
     r = subprocess.run(["git", "diff", "--name-only", "master..." + branch], cwd=C.MAIN, capture_output=True, text=True)
     files = r.stdout.split()
     return r.returncode == 0 and bool(files) and all(is_infra_file(f) for f in files)
+
+
+def failed_job_names(log):
+    """Job names from the FAILED section of a suite/gate log (real failures only, not EXPECTED/RESOURCE)."""
+    try:
+        txt = open(log, errors="replace").read()
+    except OSError:
+        return []
+    m = re.search(r"^FAILED:\n(.*?)(?=^[A-Z][A-Z-]+.*:\n|^suite:)", txt, re.S | re.M)
+    if not m:
+        return []
+    names = []
+    for line in m.group(1).splitlines():
+        t = line.strip().split()
+        if t and re.fullmatch(r"[\w.:-]+", t[0]) and "(" in line:
+            names.append(t[0].split(":")[0])
+    return sorted(set(names))
+
+
+def test_failures(tree):
+    """The set of 'FAIL  <check>' names test_suite.py reports in `tree` (its own registry-of-checks)."""
+    r = subprocess.run(["python3", "test_suite.py"], cwd=tree, capture_output=True, text=True)
+    return set(re.findall(r"^FAIL\s+(.+?)(?::|$)", r.stdout, re.M)), r
 
 
 def land_on_master():
@@ -186,7 +209,18 @@ def main():
         checks += [["python3", "tools/memslot.py", "--gb", "8", "--label", "fast:" + f, "--", "python3", f]
                    for f in changed if f != "test_suite.py"]
         print("fast lane for %s: %d check(s)" % (merged, len(checks)))
+        base_fail, _ = test_failures(C.MAIN)          # what test_suite.py already reports red on master itself
         for c in checks:
+            if c == ["python3", "test_suite.py"]:
+                now_fail, r = test_failures(INTEG)
+                open(os.path.join(INTEG, "fast.log"), "w").write(r.stdout + r.stderr)
+                if now_fail - base_fail or (r.returncode != 0 and not now_fail):
+                    print("RED in the fast lane: test_suite.py has NEW failures vs master: %s" % sorted(now_fail - base_fail))
+                    with C.registry() as reg:
+                        for n in merged: reg[n]["state"] = "integration-failed"
+                    sys.exit(1)
+                print("test_suite.py: no new failures vs master (still red on master itself: %s)" % sorted(base_fail & now_fail))
+                continue
             if run(c, INTEG, os.path.join(INTEG, "fast.log")) != 0:
                 with C.registry() as reg:
                     for n in merged: reg[n]["state"] = "integration-failed"
@@ -212,6 +246,16 @@ def main():
     if a.jobs:
         print("--jobs run finished with exit %d; master NOT touched (only a full gate lands)" % rc)
         sys.exit(rc)
+    if rc != 0 and not a.jobs:
+        # A red gate under load is often a timeout, not a verdict (2026-09-30: gimplegenerators 450-616 s, runner's
+        # 10 s per-program limit, each spawning a pointless fixer). Confirm it the way a human would: re-run exactly
+        # the jobs that failed, ALONE, on the same tree. If they pass alone the red was contention, not the branch.
+        failed = failed_job_names(os.path.join(INTEG, "gate.log"))
+        if failed:
+            print("gate red on %s: confirming by re-running them alone" % ", ".join(failed))
+            if run(["python3", "tools/suite.py"] + failed, INTEG, os.path.join(INTEG, "confirm.log")) == 0:
+                print("the red did NOT reproduce when the failed jobs ran alone (load): treating the gate as green")
+                rc = 0
     judg = subprocess.run("grep -h -E '^skip [a-z_./]+:|FAILED: [0-9]+' build/suite.log gate.log | sort | uniq -c | tail -20",
                           shell=True, cwd=INTEG, capture_output=True, text=True).stdout
     open(os.path.join(INTEG, "gate-judgement.txt"), "w").write(judg)
