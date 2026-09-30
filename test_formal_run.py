@@ -5996,18 +5996,112 @@ WAVE7_G2_CASES = [
     # default is a different program (the slot holds 0) and is the refusal
     # above, so this pair is what stops "every declared field is answered"
     # from being a way of making that one print 0.
-    ("int_literal_default_field_prints_its_value",
+     ("int_literal_default_field_prints_its_value",
+      "struct R:\n"
+      "    var n: Int = 7\n"
+      "    var m: Int\n"
+      "    def show(self) -> Int:\n"
+      "        printf(\"%d\\n\", self.n)\n"
+      "        return 0\n"
+      "def main(k: Int) -> Int:\n"
+      "    var r = R()\n"
+      "    r.show()\n"
+      "    return 0\n",
+      0, "7"),
+    # ── `None` as a value: the word 0, and the one comparison it cannot answer ──
+    #
+    # `x: T = None` is the default for an optional field and is the single most
+    # common class-level default in this repository's own dataclasses
+    # (`type_system.py`'s `Type` has ten of them on one class). It was REFUSED
+    # as "not a literal", because `None` parses to a bare `IdentExpr` on this
+    # front end and neither `fold_literal_expr` nor `literal_default_word` had
+    # an arm for it — a message that sends a reader looking for a call, where
+    # there is no call. It is a value this target represents exactly: the word
+    # 0, which is what an unwritten frame slot already is.
+    #
+    # There is deliberately no CPython comparison for this case. `printf("%d",
+    # None)` is a TypeError there, so the oracle does not exist; what the image
+    # must produce is the REPRESENTATION, and the two rows below pin it from
+    # both sides — a class-level constant, materialized at the read, and a
+    # module-level one, folded at the read. Both were refusals before.
+    ("none_class_default_is_the_word_zero",
      "struct R:\n"
-     "    var n: Int = 7\n"
-     "    var m: Int\n"
+     "    var a: Int = 1\n"
+     "    var b: Int = None\n"
      "    def show(self) -> Int:\n"
-     "        printf(\"%d\\n\", self.n)\n"
+     "        printf(\"a=%d b=%d\\n\", self.a, self.b)\n"
      "        return 0\n"
      "def main(k: Int) -> Int:\n"
      "    var r = R()\n"
      "    r.show()\n"
      "    return 0\n",
-     0, "7"),
+     0, "a=1 b=0"),
+    ("none_module_constant_is_the_word_zero",
+     "G = None\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    printf(\"g=%d\", G)\n"
+     "    return 0\n",
+     0, "g=0"),
+    # …and arithmetic on it is arithmetic on the word, which is the other half
+    # of "representable": the fold is not confined to being printed.
+    ("none_module_constant_arithmetics_as_zero",
+     "G = None\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    return G + 5\n",
+     5, None),
+    # THE LIMIT, and the reason this is a refusal and not a wrong answer.
+    # `None` is the word 0 and the model is ONE UNTAGGED WORD, so after the
+    # fold `p.b == 0` and `p.b is None` are the same expression — and CPython
+    # says one is False and the other True. Answering either from the folded
+    # word is the outcome this backend exists to prevent, so the comparison is
+    # refused BY NAME and the message says which construct and why. Checked on
+    # both backends by the `refuse:` machinery, because a wrong answer here is
+    # the shape where the two architectures would each be confidently wrong.
+    #
+    # Before the fold landed these three built and answered: the class-level
+    # one returned 7 for a `None`, where CPython returns 0.
+    ("refuse_none_compared_with_a_class_constant",
+     "struct R:\n"
+     "    var b: Int = None\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    if r.b == 0:\n"
+     "        return 7\n"
+     "    return 0\n",
+     "refuse:is class-level constant holding `None`", None),
+    ("refuse_none_compared_as_the_class_itself",
+     "struct R:\n"
+     "    var b: Int = None\n"
+     "def main(k: Int) -> Int:\n"
+     "    if R.b != 0:\n"
+     "        return 7\n"
+     "    return 0\n",
+     "refuse:is class-level constant holding `None`", None),
+    ("refuse_none_compared_as_a_module_constant",
+     "G = None\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    if G == 0:\n"
+     "        return 7\n"
+     "    return 0\n",
+     "refuse:is module-level name holding `None`", None),
+    # GUARD (passes before and after, and it is here because it is the case
+    # that would catch an over-correction in the other direction): an INTEGER
+    # class-level constant compared with a literal is ordinary, representable
+    # code and must keep building. If the refusal above were written as "any
+    # comparison against a constant", this row is what it would break.
+    ("int_class_constant_comparison_still_builds",
+     "struct R:\n"
+     "    var b: Int = 3\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    if r.b == 3:\n"
+     "        return 7\n"
+     "    return 0\n",
+     7, None),
+
     # ── (4) the C-library hand-off sets, audited by PROTOTYPE ──
     # `open(const char *, int, ...)` takes a path and a flag word; it does not
     # read the struct's storage, and it never mentions a struct.  This set used

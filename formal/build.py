@@ -3844,6 +3844,88 @@ def _apply_constant_sites(node, sites: dict):
     return node
 
 
+def _constant_read_spelling(node) -> str:
+    """The `S.NAME` access path `node` spells, or None.
+
+    The two spellings `_constant_read_sites` recognizes as a read of a CLASS's
+    own value, and nothing else — the same restriction, so this cannot name a
+    path that table does not have an answer for."""
+    if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr):
+        return f"{node.obj.name}.{node.member}"
+    return None
+
+
+def refuse_none_comparisons(functions: list, structs_by_name: dict) -> None:
+    """Refuse `==` / `!=` whose operand is a read of a `None`-valued constant.
+
+    Asked BEFORE either substitution, and that ordering is the whole reason this
+    function exists at all: `None` folds to the word 0 (`model.NONE_WORD`), which
+    is the representation and not an approximation, but the fold is lossy in
+    exactly one direction — after it, `p.b == 0` and `p.b is None` are the same
+    expression, and CPython says one is False and the other True. Answering
+    either from the folded word is a wrong answer rather than a refusal, and this
+    backend's rule is that a wrong answer is the one outcome it may not produce.
+
+    So the fold stands for every use that cannot observe the difference —
+    materializing the value, passing it, printing it, arithmeticking on it — and
+    the one construct that can is refused by name. A distinguishable null is not
+    offered as an alternative because the model is one untagged 64-bit word: there
+    is nowhere for a second bit of "this zero is a None" to live, which is the
+    same limit `model.pointer_value_model` records for pointers.
+
+    Both spellings of a read are covered, and each is covered by asking the
+    question the substitution would have answered:
+      * a CLASS-level constant (`S.NONE_FIELD`, or a local aliased from `S()`),
+        via the same `_constant_read_sites` census the rewrite uses;
+      * a MODULE-level `G = None`, via the published symbol table's
+        `none_valued` — which is the fact the folded `IntLiteral(0)` no longer
+        carries.
+    A function that BINDS the name shadows it, so a read of a local called `G`
+    is not this check's business, exactly as in `_substitute_module_constants`."""
+    none_names = {name for name, sym in M.module_symbols().items()
+                  if getattr(sym, "none_valued", False)}
+    none_consts = {(st.name, cname)
+                   for st in (structs_by_name or {}).values()
+                   for cname, default in M.struct_class_constants(st)
+                   if M.is_none_expr(default)}
+    if not none_names and not none_consts:
+        return
+    for fn in functions:
+        # The alias census is PER FUNCTION, because `p = Plain(1)` is a fact
+        # about one body: `p.b` is a read of the class's own value in the
+        # function that wrote that `p` and not in any other.
+        none_paths = {path for path, st in _constant_read_sites(
+            fn.body, structs_by_name).items()
+            if (st.name, path.partition(".")[2]) in none_consts}
+        if not none_names and not none_paths:
+            continue
+        bound = _names_bound_in(fn)
+        for node in M.iter_nodes(fn.body):
+            if not isinstance(node, F.BinaryOp) or node.op not in ("==", "!="):
+                continue
+            for operand in (node.left, node.right):
+                if isinstance(operand, F.IdentExpr) \
+                        and operand.name in none_names \
+                        and operand.name not in bound:
+                    spelling, kind = operand.name, "module-level name"
+                else:
+                    spelling = _constant_read_spelling(operand)
+                    kind = "class-level constant"
+                    if spelling is None or spelling not in none_paths:
+                        continue
+                raise CodegenError(
+                    f"{spelling} is {kind} holding `None`, and `{node.op}` cannot "
+                    f"be answered for it: `None` is this target's word 0 (which is "
+                    f"why the value itself is representable and is substituted), "
+                    f"and one untagged word cannot say whether that 0 arrived as "
+                    f"a `None` or as the integer 0 — where Python says `None == 0` "
+                    f"is False and `x is None` is not `x == 0`. Compare against a "
+                    f"value the model can tell apart (a field the function "
+                    f"assigns), or branch on the value being set some other way, "
+                    f"rather than on a comparison this path cannot answer")
+    return None
+
+
 def _prepare_functions(stmts: list, synthetic: bool = True,
                        extra_structs: list = None,
                        as_dylib: bool = False) -> tuple:
@@ -3998,6 +4080,12 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # bound a name with no home.  The call rewriting below skips the receiver
     # for exactly those, which is the language's rule and not a special case.
     receiverless = _receiverless_methods(owners, structs_by_name)
+    # A comparison against a `None`-valued constant is refused HERE, before the
+    # two rewrites below materialize the value: after them the fact is gone,
+    # because `None` is folded to the word 0 and the fold cannot say that this
+    # zero was a `None`. See `refuse_none_comparisons` for why the fold stands
+    # and only the comparison is refused.
+    refuse_none_comparisons(functions, structs_by_name)
     for fn in functions:
         _rewrite_method_calls(fn.body, owners, wide, receiverless)
         # A method's `self` IS the field; a local initialised from a one-word

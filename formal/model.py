@@ -8697,6 +8697,39 @@ DEFAULT_INT = "int"
 DEFAULT_STRING = "string"      # a formal string is a bare `char *`: one word
 DEFAULT_OPAQUE = "opaque"      # a real default this path cannot bring up
 
+# ── `None`, and the word it is ──────────────────────────────────────────────
+#
+# `None` is a NAME on this front end, not a literal:
+#
+#     Parser(py_tokenize("b: int = None")).parse_module()[0]
+#     AssignStmt(target=IdentExpr(name='b'), value=IdentExpr(name='None'), …)
+#
+# so neither `fold_literal_expr` nor `literal_default_word` had an arm for it,
+# and the single most common class-level default in this repository's own
+# dataclasses (`Type.bit_width: Optional[int] = None`, and nine more on the same
+# class) was refused as "not a literal" — a message that sends a reader looking
+# for a call, where there is no call.
+#
+# It is a value this target represents exactly: the word 0, which is what an
+# unwritten frame slot already is. Folding it is the representation, not an
+# approximation, and because both backends and `formal/build.py` read these two
+# functions it is one edit rather than three.
+#
+# What it is NOT is the integer 0, and the one-word model cannot tell them
+# apart. `None == 0` is False in Python and True here. So the fold is confined
+# to MATERIALIZING a value, and the one construct that can observe the
+# difference — a comparison against a folded `None` — is refused by name in
+# `refuse_none_comparisons` rather than answered. A distinguishable null is not
+# available and is not attempted: the model is one untagged word, so there is
+# nowhere for a second bit of "this zero is a None" to live.
+NONE_NAME = "None"
+NONE_WORD = 0
+
+
+def is_none_expr(node) -> bool:
+    """True when `node` is the NAME `None` (see the note above)."""
+    return isinstance(node, F.IdentExpr) and node.name == NONE_NAME
+
 
 def struct_default_word(struct_def) -> tuple:
     """`(kind, payload)` — what `S()` must leave in the word for this struct.
@@ -8744,6 +8777,12 @@ def literal_default_word(value) -> tuple:
     defaults are representable."""
     if value is None:
         return (DEFAULT_NONE, None)
+    if is_none_expr(value):
+        # `None` is the word 0 on this target (see NONE_WORD). Folded here, not
+        # refused: `x: T = None` is the default for an optional field and is the
+        # single most common class-level default in this repository's own
+        # dataclasses, and both backends materialize an int word exactly.
+        return (DEFAULT_INT, NONE_WORD)
     if isinstance(value, F.IntLiteral):
         return (DEFAULT_INT, int(value.value))
     if isinstance(value, F.BoolLiteral):
@@ -8902,17 +8941,26 @@ class GlobalSymbol:
     spelling for a diagnostic ("assigned at module level", "re-bound at module
     level", "declared at module level with no value", "imported from `m`"),
     because the four are different mistakes with different repairs and one
-    generic message sends the reader to the wrong line."""
+    generic message sends the reader to the wrong line.
 
-    __slots__ = ("name", "literal", "site", "module", "line")
+    `none_valued` says the folded word is the word `None` is spelled as, which
+    `literal` cannot: the fold represents `None` as `IntLiteral(0)` (NONE_WORD),
+    so the fact that this zero is a `None` and not the integer 0 is gone by the
+    time the node exists. It is kept here rather than re-derived at each use
+    site because the one construct that can observe the difference is a
+    comparison, and a comparison that answered "0 == 0 is True" for a `None`
+    would be a wrong answer rather than a refusal."""
+
+    __slots__ = ("name", "literal", "site", "module", "line", "none_valued")
 
     def __init__(self, name, literal=None, site="assigned", module=None,
-                 line=0):
+                 line=0, none_valued=False):
         self.name = name
         self.literal = literal
         self.site = site
         self.module = module
         self.line = line
+        self.none_valued = none_valued
 
     def __repr__(self):
         return (f"GlobalSymbol({self.name!r}, literal="
@@ -8975,12 +9023,19 @@ def fold_literal_expr(node):
 
     None means "the build does not know this", which is a refusal and not a
     zero — the distinction `literal_default_word` already draws, and the reason
-    this returns None rather than 0 for an opaque expression."""
+    this returns None rather than 0 for an opaque expression.
+
+    `None` folds to the word 0, which is the representation rather than an
+    approximation (see NONE_WORD), and it is the one folded value that is not
+    interchangeable with the integer 0 it is spelled as —
+    `refuse_none_comparisons` is what keeps the two apart."""
     if isinstance(node, F.IntLiteral):
         try:
             return int(node.value)
         except (TypeError, ValueError):
             return None
+    if is_none_expr(node):
+        return NONE_WORD
     if isinstance(node, F.BoolLiteral):
         return 1 if node.value else 0
     if isinstance(node, F.StringLiteral) and not getattr(node, "is_bytes", 0) \
@@ -9088,11 +9143,12 @@ def collect_module_symbols(stmts: list) -> dict:
             # somehow has no folded value is refused rather than guessed.
             table[name] = GlobalSymbol(
                 name, _folded_node(folded, value), "rebound", None,
-                getattr(stmt, "line", 0) or 0)
+                getattr(stmt, "line", 0) or 0, is_none_expr(value))
             continue
         table[name] = GlobalSymbol(name, _folded_node(folded, value),
                                    "assigned", None,
-                                   getattr(stmt, "line", 0) or 0)
+                                   getattr(stmt, "line", 0) or 0,
+                                   is_none_expr(value))
     return table
 
 
