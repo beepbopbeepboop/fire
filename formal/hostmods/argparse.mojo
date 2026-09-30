@@ -1706,6 +1706,23 @@ def _err(cls, ai):
     return 0 - 1 - cls * 4096 - ai
 
 
+def _short2(a, p):
+    """The two-character option string `-` + `p[0]`, as a fresh buffer.
+
+    CPython's peel builds exactly this (`char + explicit_arg[0]`, where `char`
+    is the argument's FIRST character), so `-vq` is `-v` and then `-q`. Looking
+    the second one up by the first two bytes of the WHOLE argument finds `-v`
+    again, and that is how `-vq` came to record `-v` twice, leave `-q` at its
+    default, and turn `-vx` — which must report `unrecognized arguments: -x` —
+    into a successful parse.
+    """
+    d = str_alloc(3)
+    u = str_put(d, 0, a, 1)
+    u = str_put(d, u, p, 1)
+    memset(d + u, 0, 1)
+    return d
+
+
 def _take_opt(spec, argv, argc, start, out, seen):
     """Consume the optional at `argv[start]`, writing its value into `out`.
 
@@ -1770,7 +1787,7 @@ def _take_opt(spec, argv, argc, start, out, seen):
                 return _err(E_TOOBIG, ai)
             rest = expl
             expl = expl + 1
-            nxt = _lookup(spec, arg, 2)
+            nxt = _lookup(spec, _short2(arg, rest), 2)
             if nxt == 0:
                 return _err(E_EXTRAS, rest - arg)
             ai = nxt - 1
@@ -2228,7 +2245,7 @@ def parse(spec, argv, argc, out, err, desc):
                 _exadd(ex, _dash_rest(argv[start], ai))
                 start = start + 1
                 continue
-            _opt_error(spec, argv[start], _badval(argv, argc, start),
+            _opt_error(spec, argv[start], _badval(spec, argv, argc, start),
                         ai, c, pmsg)
             _compose(spec, argv, pmsg, err)
             return ST_ERROR
@@ -2558,17 +2575,21 @@ def _opt_error(spec, arg, v, ai, cls, msg):
     return 0
 
 
-def _badval(argv, argc, start):
+def _badval(spec, argv, argc, start):
     """The argument string an optional's value error is about.
 
-    Either the explicit `=value` tail of `argv[start]` or the argument after it,
-    which is where a separate value is. CPython validates the same string in
-    both shapes: `_get_values` is reached with `explicit_arg` already split off.
+    Three shapes, and CPython reports the string it VALIDATED in each: the tail
+    after an `=`, the tail of an attached single-dash value (`-jq`, whose value
+    is `q` and not the `4` that follows it), or the argument after it, which is
+    where a separate value is. `_get_values` is reached with `explicit_arg`
+    already split off, so the message names that and not whatever is next.
     """
     a = argv[start]
     eq = strcspn(a, "=")
     if eq < str_len(a):
         return a + eq + 1
+    if str_len(a) > 2 and _short_exact(spec, a) == 1:
+        return a + 2
     if start + 1 < argc:
         return argv[start + 1]
     return ""

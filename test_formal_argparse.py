@@ -184,6 +184,52 @@ PARSERS = [
               (["last"], dict(nargs="?"))],
         cases=[["a"], ["a", "b"], []],
     ),
+    dict(
+        # `nargs="?"` on a POSITIONAL: CPython's `_get_values` answers the
+        # action's DEFAULT for it, where an OPTIONAL with `?` answers `const`.
+        # Two different answers to "no arguments", and the corpus has one of
+        # each shape across its files.
+        name="qmark",
+        prog="demo",
+        desc="",
+        args=[(["-v"], dict(action="store_true")),
+              (["--opt"], dict(nargs="?", default="D")),
+              (["--req"], dict(nargs="?", required=True)),
+              (["maybe"], dict(nargs="?", default="M")),
+              (["tail"], dict())],
+        cases=[["a"], ["--opt", "x", "a"], ["--req", "a"], ["a", "b"],
+               ["--opt", "a"], ["--", "-x"]],
+    ),
+    dict(
+        # The shapes a combined short argument can go wrong in: an unknown
+        # short flag after a real one, `=` where a flag does not take a value,
+        # and an option that looks like a negative number.
+        name="shorts",
+        prog="demo",
+        desc="",
+        args=[(["-v"], dict(action="store_true")),
+              (["-q"], dict(action="store_true")),
+              (["-j"], dict(type=int)),
+              (["-n", "--neg"], dict(type=int)),
+              (["rest"], dict(nargs="*"))],
+        cases=[["-vq"], ["-v=1"], ["-vx"], ["-v", "-j", "4"], ["-j4"],
+               ["-n-3"], ["-3"], ["-v", "--", "-q"], ["-jq", "4"]],
+    ),
+    dict(
+        # `metavar`, an explicit `dest`, and help text on a positional: the
+        # three ways the usage line and the help listing can disagree about
+        # what an action is called.
+        name="metavar",
+        prog="demo",
+        desc="A longer description that is still inside the width.",
+        args=[(["-j", "--jobs"], dict(type=int, dest="workers", metavar="N",
+                                     help="how many")),
+              (["--opt"], dict(choices=["alpha", "beta"], default="alpha",
+                               help="which one")),
+              (["paths"], dict(nargs="*", help="what to do"))],
+        cases=[[], ["-j", "2"], ["--opt", "beta"], ["--opt", "gamma"],
+               ["--help"], ["a", "b"]],
+    ),
 ]
 
 # ── Generating the two programs from one declaration ──────────────────────────
@@ -629,6 +675,8 @@ def test_the_parse_matches_cpython(tmp, _shared):
                 failures.append(str(e))
     check(not failures, f"{len(failures)} of {len(jobs)} cases differ from "
                         "CPython:\n  " + "\n  ".join(failures))
+    print(f"        {len(jobs)} cases: {len(PARSERS)} parsers, each built as "
+          f"an arm64 image and run against CPython's own argparse")
 
 
 # ── Refusals and limits, pinned as measurements ──────────────────────────────

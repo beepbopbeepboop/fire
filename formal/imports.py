@@ -178,7 +178,7 @@ HOST_MODELLED = frozenset((
     #     backends can lower, checked case for case against CPython's own
     #     `argparse` by `test_formal_argparse.py`: the same values, the same
     #     usage lines, the same error wording and the same exit statuses, on
-    #     twenty-eight generated programs whose declarations and command lines
+    #     sixty-three generated programs whose declarations and command lines
     #     are the same table. What it cannot do is written in that file's own
     #     docstring — `type=float` is REFUSED because a value on this path is
     #     one 64-bit integer word, `sys.argv` has no source here at all so the
