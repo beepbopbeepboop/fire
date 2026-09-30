@@ -1780,10 +1780,17 @@ class X86_64Codegen:
         `model.EMPTY_BLOB_CTORS`, and it is `_emit_list` with `n == 0` — the
         same eight bytes, the same `[count][elements]` layout and the same
         reservation, because an empty container IS the zero-element literal.
-        Spelled as its own method rather than reached by synthesising a
-        `ListExpr` so the two architectures cannot drift, and so the arm64
-        comment about a synthesized literal's invented `line`/`col` applies here
-        too.
+        The instruction sequence is `_emit_list`'s with its loop deleted, and
+        the shared parts (`_reserve_blob`, `_emit_blob_base`, `_emit_mov_imm`,
+        the store) are the same calls in the same order, so the two layouts and
+        the two architectures cannot drift.
+
+        Its own method rather than a call into `_emit_list` with a synthesised
+        `ListExpr`, for the reason arm64's `_emit_empty_blob` gives at length:
+        `_emit_list` also handles a star-unpack and reserves CAPACITY slots
+        when the function appends to the literal, and neither applies to a
+        constructor's result — appending to an empty container built by
+        `List()` is a different question that `_scan_list_caps` does not answer.
         """
         offset = self._reserve_blob(8, "empty containers")
         self._emit_blob_base(offset, Reg.R11)

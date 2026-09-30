@@ -4002,11 +4002,22 @@ class ARM64Codegen:
         `List()`, `List[Int]()`, `Dict()` and the rest of
         `model.EMPTY_BLOB_CTORS`, and it is `_emit_list` with `n == 0` — the
         same eight bytes, the same `[count][elements]` layout and the same
-        reservation, because an empty container IS the zero-element literal.
-        Spelled as its own method rather than reached by synthesising a
-        `ListExpr` so the two cannot drift: a synthesized literal would have to
-        fake a node the AST never had, and `expr.line`/`expr.col` on it would be
-        invented positions in a refusal that quotes them.
+        reservation, because an empty container IS the zero-element literal, and
+        the instruction sequence below is `_emit_list`'s with its loop deleted.
+
+        Its own method rather than a call into `_emit_list` with a synthesised
+        `ListExpr`, and the reason is that the two are NOT the same code with a
+        different argument: `_emit_list` also handles a star-unpack, reserves
+        CAPACITY slots when the function appends to the literal, and says
+        "list literals exceed the formal frame" when the reservation does not
+        fit. None of those applies here — there is nothing to unpack, and
+        appending to an empty container built by a CONSTRUCTOR is a different
+        question that `_scan_list_caps` does not answer — and a reader who had
+        to work out which of `_emit_list`'s four behaviours a constructor
+        inherits would be reasoning about the wrong thing. So the eight bytes
+        are written out, the shared parts (`_emit_list_base`,
+        `_emit_mov_imm`, the store) being the same calls in the same order as
+        `_emit_list` uses, so the two layouts cannot drift.
         """
         if self._list_cursor + 8 > self._blob_cap:
             raise CodegenError(
