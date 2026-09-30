@@ -483,6 +483,630 @@ def incoming_args(fn) -> list:
     return ct + list(getattr(fn, "params", None) or [])
 
 
+# ── Shifts ───────────────────────────────────────────────────────────────
+#
+# A shift is the one operator whose result depends on a value BOTH backends
+# have to agree about and neither can read off an instruction. The hardware
+# takes the amount modulo the word size, so `LSRV Xd, Xn, Xm` with `Xm = 64`
+# is a shift by ZERO, `3 >> 64` is `3`, and `3 << 64` is `3` — on arm64 and on
+# x86-64 alike, because both were written to the same wrong rule rather than
+# because the rule is the hardware's (bugs/FORMAL_shift_by_64_or_more_wraps_instead_of_saturating.md).
+#
+# It is here, in the shared model, because a per-backend fix is the one shape
+# that cannot be verified: the two shift emitters are separate functions with
+# the same structure, so a rule written twice is two rules that agree only
+# until one of them is edited. THIS is a value-model decision (what the
+# operator means), not instruction selection, which is the split this module
+# exists to enforce.
+#
+# The rule is CPython's, because CPython is the oracle every test in this tree
+# compares against: a shift by an amount at or beyond the word's width
+# SATURATES.
+#
+#   x << n  ==  0            for n >= 64, signed or unsigned
+#   x >> n  ==  0            for n >= 64, when x is non-negative
+#   x >> n  ==  -1           for n >= 64, when x is negative
+#
+# The last row is the one that is easy to get wrong, and it is why the rule
+# cannot be a bare "return 0": Python's `>>` on a negative value is an
+# ARITHMETIC shift (it rounds toward negative infinity — `-5 >> 1` is `-3`,
+# not `-2`), so the sign bit keeps being replicated no matter how far the
+# shift goes, and the answer at 64 is the sign extended word, which is `-1`.
+# A saturation that returned 0 for every amount at or past 64 would be right
+# for `x << n` and for every non-negative `x >> n`, and wrong for exactly the
+# negative operands that a bit-manipulating algorithm produces by subtracting.
+#
+# Note what is deliberately NOT here: the spelling for a LOGICAL right shift.
+# `>>` is arithmetic on a signed value and that is not a defect — it is what
+# Python means, and `test_formal_run.py` pins both directions so a "fix" that
+# made every `>>` logical would be caught. A program that wants zeros shifted
+# in says so with an unsigned type, which is what `shift_signedness` is for.
+
+# The width a shift saturates at, and the amount the hardware masks to.
+SHIFT_WIDTH = 64
+SHIFT_AMOUNT_MASK = 63
+
+
+def shift_saturates(amount, width: int = SHIFT_WIDTH) -> bool:
+    """Whether a shift by `amount` is at or past the word's width.
+
+    `amount` is whatever the source says: a Python int, possibly a variable's
+    unknown value (None, which is never saturating) or a negative one. A
+    negative amount is NOT saturating here — CPython raises `ValueError` for
+    it, and this path's existing behaviour for a negative amount is to let the
+    hardware mask it, which is a separate question from this one and is not
+    what this function is deciding."""
+    return amount is not None and amount >= width
+
+
+def shift_saturated_is_zero(op: str, signed: bool) -> bool:
+    """Whether a shift that saturates answers 0, whatever the value was.
+
+    True for `<<` (every bit is shifted out) and for a LOGICAL `>>` (the
+    zeros come in). False only for an ARITHMETIC `>>` of a signed value,
+    where the answer is the sign-extended word — 0 for a non-negative
+    operand and -1 for a negative one — because Python's `>>` on a negative
+    value rounds toward negative infinity and keeps replicating the sign no
+    matter how far the shift goes. Returning 0 for a negative operand is
+    precisely the wrong answer, which is the whole reason this asks the
+    question in this shape.
+
+    The backend needs to know whether the answer is a CONSTANT 0 it can
+    materialise in one instruction, or a run-time fact (the operand's sign
+    bit) that has to be computed. Asking for the value itself would need the
+    value, and the value is in a register at that point rather than in hand.
+
+    BOTH backends branch on this rather than writing `if op == "<<" or not
+    signed` themselves, because that test IS the rule and a second copy in a
+    second backend is the same duplication that let `y <<= 64` and
+    `y << 64` disagree about the same operator. See
+    `shift_signedness` for the other half of the rule."""
+    return op == "<<" or not signed
+
+
+def shift_signedness(left_type):
+    """The signedness that decides what `>>` shifts IN — from the LEFT
+    operand ALONE, never from a promotion of both operands.
+
+    This is the second half of the shift rule above, and it is a separate
+    decision from the saturation one because it has a different cause.
+
+    Both backends ask `cmp_signed(common_type(ttype(left), ttype(right)))`,
+    and `common_type` is signed-wins (`formal/types.py`). That is the right
+    rule for an ARITHMETIC operator, where the two operands genuinely
+    combine. It is the wrong rule for a shift, because the right operand of a
+    shift is not a value being combined with the left one — it is a COUNT.
+    How many bits to move says nothing about what to move them in, and
+    promoting a count into the decision is how `UInt64 >> Int` came to
+    compute `0xFFFFFFFFFFFFFFFF >> 4` as `0xFFFFFFFFFFFFFFFF` (an arithmetic
+    shift) where the answer is `0x0FFFFFFFFFFFFFFF` (a logical one): the
+    amount was an unannotated `int`, i.e. signed, and signedness won the
+    promotion and then decided the fill.
+
+    Measured, on both backends, over the shapes that differ only in the
+    amount's declared type:
+
+        x: UInt64, n: Int      x >> 4   0xffffffffffffffff   WRONG
+        x: UInt64, n: UInt64   x >> 4   0x0fffffffffffffff  right
+        x: UInt64, n: literal  x >> 4   0x0fffffffffffffff  right
+
+    The literal row is the diagnostic: it is the same shift, and the amount
+    is the same number 4, so the only thing that changed between the wrong
+    row and the right one is whether the count was TYPED. A count that
+    happens to agree with the answer is not a reason to give the right
+    answer.
+
+    So: the left operand decides, and the right one is not consulted. For an
+    unannotated `int` left operand that is signed, which is right — Python's
+    `>>` on a negative value IS arithmetic, and `test_formal_run.py` pins
+    that so a "fix" that made every `>>` logical would fail. For a declared
+    unsigned left operand the value cannot be negative, so a logical shift is
+    not merely correct but the only thing that can be.
+
+    The parameter is the LEFT OPERAND'S TYPE, not a bool: the backends pass
+    `types.cmp_signed(...)` of it, and keeping the decision here means the
+    two cannot pick different notions of "the type of the thing being
+    shifted"."""
+    return left_type
+
+
+# ── Read before store ─────────────────────────────────────────────────────
+#
+# A name the allocator gives a register is a name it cannot tell the
+# difference between "has a value" and "has a home". `_load_var` reads the
+# register, and a register nothing ever stored into is whatever the CALLER
+# left in it — not a wrong constant, but a wrong value that CHANGES WITH THE
+# BUILD, which is why it is a finding rather than a cosmetic issue: the same
+# source does not have one answer. Measured on this tree, arm64 and x86-64
+# disagreeing about a number neither of them wrote:
+#
+#     for i in range(3): G = G + i      then print G
+#         CPython  UnboundLocalError
+#         arm64    -157679357
+#         x86-64   240046802   (the same source with range(5))
+#
+#     x = x + 1  at file level, then print x
+#         CPython  NameError
+#         arm64    11
+#
+# The right answer for every one of these is a REFUSAL, because this backend
+# has no way to raise: it emits a Mach-O image, not a Python process, and
+# there is nothing in the emitted code that means "this name is unbound".
+#
+# So the question is asked at build time instead, and this is the analysis
+# that asks it. The honest version of it is a DOMINANCE question — every path
+# from the entry to the read must pass a store — which is a reachability
+# computation over the function's CFG. What ships here is the
+# STATEMENT-ORDER version: a strict improvement on nothing, and NOT the whole
+# fix. `read_before_store`'s docstring names the shape it still misses and
+# why closing that needs the other one.
+
+
+def _store_names(target) -> set:
+    """Every leaf name an assignment TARGET binds, as a set.
+
+    A thin wrapper over the two things that already know how to read a target
+    shape, rather than a third copy: the BARE-STRING form — which is what
+    `ForStmt.target` always is, including the nested `"(a, (b, c))"` spelling
+    and the comprehension generator's comma form — goes to `_target_names`
+    (i.e. `_lbn_target_names`), and the node forms (`IdentExpr`, and the
+    `TupleExpr`/`ListExpr` the parser builds for a parenthesised target) are
+    handled here because nothing else does.
+
+    Which is the point of the wrapper: a second implementation of the string
+    form is how the loop counter went missing from the shared bound set once
+    already, and `read_before_store` asking a DIFFERENT question of a
+    DIFFERENT parser is how it would go missing again."""
+    if isinstance(target, str):
+        return set(_target_names(target))
+    if isinstance(target, F.IdentExpr):
+        return {target.name}
+    if isinstance(target, (F.TupleExpr, F.ListExpr)):
+        out: set = set()
+        for el in (getattr(target, "elements", None) or []):
+            out |= _store_names(el)
+        return out
+    return set()
+
+
+def _callee_name_ids(e) -> set:
+    """The `id()` of every IdentExpr that is a CALLEE, anywhere in `e`.
+
+    A callee is a symbol reference, not a value read: `printf(...)` reads no
+    local named `printf`, and `mod.f(...)` reads no local named `mod`. Both
+    the bare and the dotted spelling are included, because the dotted one's
+    ROOT is the same kind of thing — a module or a receiver, not a local that
+    some path forgot to store.
+
+    Collected as node identities rather than names because a name can be both:
+    `xs.append(xs)` reads `xs` once as a value and once as a receiver, and a
+    name-set would drop the real read along with the receiver."""
+    out: set = set()
+    for node in iter_nodes(e):
+        if not isinstance(node, F.CallExpr):
+            continue
+        root = node.func
+        while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
+            root = root.obj
+        if isinstance(root, F.IdentExpr):
+            out.add(id(root))
+    return out
+
+
+def _expr_reads(e, bound: set) -> dict:
+    """`{name: line}` for the names an expression READS, minus the ones
+    `bound` says are already stored and minus the ones in CALLEE position.
+
+    The LINE is the read's own, not the enclosing statement's, because that
+    is what a reader has to go on: this defect is invisible in review, and a
+    diagnostic that points at the statement rather than the read sends them
+    looking at the wrong line of a program that looks correct.
+
+    A HAND-ROLLED walk rather than `iter_nodes`, and the reason is the whole
+    design of this function: `iter_nodes` yields every node and cannot be
+    told to stop descending, so it also yields a comprehension's own generator
+    target and reports `[i + 1 for i in xs]` as a read of an unstored `i`.
+    A false refusal breaks working code, so the walk here prunes — a
+    comprehension's scope is descended with its targets bound, a call's
+    callee is not descended at all, and both are the two places where the
+    shape of the tree is not the shape of the value flow.
+
+    A call's callee is skipped in BOTH spellings. `f(...)` names a symbol, and
+    `recv.m(...)` / `mod.m(...)` name a receiver or a module — neither is a
+    read of a local, and `check_module_symbols` has its own, better-worded
+    answer for a callee that resolves to nothing at all."""
+    if e is None:
+        return {}
+    out: dict = {}
+
+    def rec(node, live: set):
+        if node is None or isinstance(node, (str, int, float, bool, bytes)):
+            return
+        if isinstance(node, F.IdentExpr):
+            if node.name not in live:
+                out.setdefault(node.name, getattr(node, "line", None))
+            return
+        if isinstance(node, F.Comprehension):
+            inner = set(live)
+            gens = getattr(node, "generators", None) or []
+            for g in gens:
+                inner |= _store_names(getattr(g, "target", None))
+            for g in gens:
+                rec(getattr(g, "iterable", None), inner)
+                for cond in (getattr(g, "conditions", None) or []):
+                    rec(cond, inner)
+            rec(getattr(node, "element", None), inner)
+            rec(getattr(node, "key", None), inner)
+            return
+        if isinstance(node, F.CallExpr):
+            for a in (getattr(node, "args", None) or []):
+                rec(a, live)
+            for kw in (getattr(node, "kwargs", None) or []):
+                rec(getattr(kw, "value", None), live)
+            return
+        if isinstance(node, F.MemberExpr):
+            # `h.x` in a VALUE position reads `h`. (The receiver of a method
+            # call never gets here — the CallExpr branch returns first.)
+            rec(getattr(node, "obj", None), live)
+            return
+        for fname in (getattr(node, "__dataclass_fields__", None) or ()):
+            if fname in ("line", "col"):
+                continue
+            v = getattr(node, fname, None)
+            if isinstance(v, list):
+                for x in v:
+                    rec(x, live)
+            else:
+                rec(v, live)
+
+    rec(e, set(bound))
+    return out
+
+
+def _merge_reads(into: dict, more: dict) -> None:
+    """Union two read maps, keeping the FIRST line seen for a name."""
+    for name, ln in more.items():
+        into.setdefault(name, ln)
+
+
+def read_before_store(fn, params: set = None, placed: set = None):
+    """The first (name, line) a function reads that nothing stores first, or
+    None.
+
+    `params` is the function's incoming parameter names: they are stored by
+    the CALLER, so reading one is never reading an unstored name.
+    `placed` restricts the answer to names that have a home at all — a name
+    with no home is `check_module_symbols`' refusal to make, and this one
+    would be a second, worse message about the same name.
+
+    THE ALGORITHM, and what it is worth. A straight statement walk with a
+    `stored` set, where a name enters `stored` at the point its assignment
+    appears. Reading a name that is not yet in `stored` — and is not a
+    parameter — is this case.
+
+    Branches are walked conservatively: entering an `if`, a loop, a `try` or
+    a `with` body adds that body's stores to `stored` (so a read AFTER the
+    branch is not reported when the branch is the only writer), which is
+    exactly the soundness this version gives up. The alternative — adding
+    nothing — refuses `if c: p = 1` / `print(p)`, which is a program that
+    WORKS whenever `c` is true and raises otherwise, and refusing it would be
+    refusing a legal program on the strength of a path this analysis does not
+    look at.
+
+    So this version is EXACT on the shapes it decides and SILENT on the ones
+    it cannot, and both halves of that are deliberate: a false refusal breaks
+    working code, while a false silence leaves today's behaviour in place for
+    a program that already miscompiles and is now at least named by a bug doc.
+    The shape that survives is a name stored in only SOME arm of a branch:
+
+        def f(n):
+            for i in range(3):
+                if i:
+                    t = 1
+            printf("t=%d", t)
+
+    `t` is stored somewhere in the body, so this walk sees the store and the
+    read as fine; whether the register holds 1 or the caller's leftover
+    depends on which arm ran, and CPython raises UnboundLocalError when
+    `i == 0`. Catching it needs a store to DOMINATE the read — every path
+    from the entry to pass one — which is a reachability computation over the
+    function's CFG and not a walk over its statements. Recorded in
+    bugs/FORMAL_read_before_store_dominating_store.md rather than
+    approximated here, because an approximation that misses some arms is
+    indistinguishable from no check at all.
+    """
+    params = set(params if params is not None
+                 else (getattr(fn, "params", None) or ()))
+    params = {p[0] if isinstance(p, (tuple, list)) and p else p for p in params}
+    placed = None if placed is None else set(placed)
+    # Names this function cannot be asked about: a `global`/`nonlocal`
+    # declaration moves the storage out of the frame entirely, and a
+    # comprehension's targets are scoped to their own expression.
+    declared_global: set = set()
+    for node in iter_nodes(getattr(fn, "body", None) or []):
+        if type(node).__name__ in ("GlobalStmt", "NonlocalStmt"):
+            declared_global |= {n for n in (getattr(node, "names", None) or ())}
+
+    # Names a COMPTIME statement's expressions mention. They are excluded, and
+    # the reason is the ordering the build enforces rather than a subtlety of
+    # this walk: a `comptime X = f(coefficients)` that does not fold leaves
+    # `coefficients` with no compile-time value, and the refusal for THAT is
+    # `model.comptime_fold_refusal`, which says what to do about it ("make the
+    # initializer a literal … or bind it with an ordinary `var`"). A build
+    # that reported the read instead would be reporting a symptom of a
+    # construct it has a better-worded refusal for — measured on
+    # `std/math/polynomial.mojo:86`, where `comptime num_coefficients =
+    # len(coefficients)` is the real finding and "coefficients is read before
+    # anything stores it" is not.
+    comptime_names: set = set()
+    for node in iter_nodes(getattr(fn, "body", None) or []):
+        if type(node).__name__ not in ("ComptimeVarStmt", "ComptimeForStmt",
+                                       "ComptimeIfStmt", "ComptimeAssertStmt"):
+            continue
+        for fname in ("value", "iterable", "condition", "msg"):
+            comptime_names |= set(_expr_reads(getattr(node, fname, None), set()))
+
+    found: list = []
+
+    def note(name, line):
+        if found:
+            return
+        if name in params or name in declared_global:
+            return
+        if name in comptime_names:
+            return
+        if placed is not None and name not in placed:
+            return
+        found.append((name, line))
+
+    def walk_expr(e):
+        for name, ln in _expr_reads(e, stored).items():
+            note(name, ln if ln is not None else getattr(e, "line", None))
+
+    def walk_stmts(stmts):
+        nonlocal stored
+        for s in (stmts or []):
+            walk_stmt(s)
+
+    def stores_of(s) -> set:
+        """The names ONE statement stores, computed without running the walk.
+
+        Used for the branch bodies, where the stores have to be visible to
+        the code after the branch without being attributed to a position
+        inside it."""
+        kind = type(s).__name__
+        if kind in ("AssignStmt", "AugAssignStmt", "ForStmt"):
+            return _store_names(getattr(s, "target", None))
+        if kind == "VarDecl":
+            n = getattr(s, "name", None)
+            return {n} if isinstance(n, str) else set()
+        if kind == "MultiAssignStmt":
+            out: set = set()
+            for t in (getattr(s, "targets", None) or []):
+                out |= _store_names(t)
+            return out
+        if kind == "WithStmt":
+            out = set()
+            for it in (getattr(s, "items", None) or []):
+                a = getattr(it, "alias", None)
+                if isinstance(a, str):
+                    out.add(a)
+            return out
+        if kind == "TryStmt":
+            out = set()
+            for h in (getattr(s, "handlers", None) or []):
+                n = getattr(h, "name", None)
+                if isinstance(n, str):
+                    out.add(n)
+            return out
+        return set()
+
+    def walk_stmt(s):
+        nonlocal stored
+        kind = type(s).__name__
+        line = getattr(s, "line", None)
+        if kind == "AssignStmt":
+            # The VALUE is read before the target is written: `x = x + 1` is
+            # the canonical case, and reading the value after adding the
+            # target to `stored` would make it look initialised.
+            walk_expr(getattr(s, "value", None))
+            stored |= _store_names(getattr(s, "target", None))
+            return
+        if kind == "AugAssignStmt":
+            # `x += 1` READS x. An augmented assignment to a name nothing
+            # stored is the same defect as `x = x + 1` with a shorter
+            # spelling, and it is the one that reads most like ordinary code.
+            walk_expr(getattr(s, "target", None))
+            walk_expr(getattr(s, "value", None))
+            stored |= _store_names(getattr(s, "target", None))
+            return
+        if kind == "VarDecl":
+            walk_expr(getattr(s, "value", None))
+            n = getattr(s, "name", None)
+            if isinstance(n, str):
+                stored.add(n)
+            return
+        if kind == "MultiAssignStmt":
+            walk_expr(getattr(s, "value", None))
+            for t in (getattr(s, "targets", None) or []):
+                stored |= _store_names(t)
+            return
+        if kind == "IfStmt":
+            walk_expr(getattr(s, "condition", None))
+            # Every arm's stores become visible to the code after the `if`.
+            # See the docstring: this is the half of the analysis that is
+            # deliberately not exact, stated rather than implied.
+            for b in (getattr(s, "then_body", None) or []):
+                walk_stmt(b)
+            for _c, b in (getattr(s, "elifs", None) or []):
+                walk_stmt(b)
+            for b in (getattr(s, "else_body", None) or []):
+                walk_stmt(b)
+            return
+        if kind == "WhileStmt":
+            walk_expr(getattr(s, "condition", None))
+            for b in (getattr(s, "body", None) or []):
+                walk_stmt(b)
+            for b in (getattr(s, "else_body", None) or []):
+                walk_stmt(b)
+            return
+        if kind == "ForStmt":
+            # The ITERABLE is read before the target exists (a `for` target is
+            # a fresh binding, not a read of an enclosing one), and the target
+            # is bound BEFORE the body runs — `for v in xs: total += v` reads
+            # a stored `v` and must not be reported.
+            #
+            # The target STAYS stored after the loop, which is a deliberate
+            # divergence from CPython and the right side of it. CPython leaves
+            # it unbound when the iterable is empty, so
+            # `for i in []: pass` then `print(i)` is a NameError; treating
+            # that as this case refuses
+            #
+            #     for i in range(0, 100):
+            #         if i > 3: break
+            #     return i
+            #
+            # which is legal — the loop ran, so `i` is bound, and it returns
+            # 4. That is `test_formal_run.py`'s `for_range_break`, and it is
+            # the shape real code is written in. Deciding it properly needs
+            # "did this loop execute at least once", which is the same
+            # reachability question the branch arms need; refusing the legal
+            # shape to catch the illegal one would break working programs,
+            # and a false refusal is the worse of the two errors here.
+            walk_expr(getattr(s, "iterable", None))
+            stored |= stores_of(s)
+            for b in (getattr(s, "body", None) or []):
+                walk_stmt(b)
+            for b in (getattr(s, "else_body", None) or []):
+                walk_stmt(b)
+            return
+        if kind == "WithStmt":
+            for it in (getattr(s, "items", None) or []):
+                walk_expr(getattr(it, "expr", None))
+            for b in (getattr(s, "body", None) or []):
+                walk_stmt(b)
+            stored |= stores_of(s)
+            return
+        if kind == "TryStmt":
+            for b in (getattr(s, "body", None) or []):
+                walk_stmt(b)
+            for h in (getattr(s, "handlers", None) or []):
+                for b in (getattr(h, "body", None) or []):
+                    walk_stmt(b)
+            for b in (getattr(s, "else_body", None) or []):
+                walk_stmt(b)
+            for b in (getattr(s, "finally_body", None) or []):
+                walk_stmt(b)
+            stored |= stores_of(s)
+            return
+        if kind == "MatchStmt":
+            walk_expr(getattr(s, "subject", None))
+            for c in (getattr(s, "cases", None) or []):
+                for b in (getattr(c, "body", None) or []):
+                    walk_stmt(b)
+            return
+        if kind in ("ReturnStmt", "ExprStmt"):
+            walk_expr(getattr(s, "value", None))
+            return
+        if kind == "AssertStmt":
+            walk_expr(getattr(s, "value", None))
+            walk_expr(getattr(s, "msg", None))
+            return
+        if kind == "RaiseStmt":
+            walk_expr(getattr(s, "value", None))
+            return
+        if kind == "DelStmt":
+            # `del x` READS x, and a name nothing stored is the same case.
+            for t in (getattr(s, "targets", None) or []):
+                walk_expr(t)
+            return
+        if kind in ("ComptimeVarStmt",):
+            walk_expr(getattr(s, "value", None))
+            t = getattr(s, "target", None)
+            stored |= _store_names(t)
+            return
+        if kind in ("ComptimeForStmt", "ComptimeIfStmt"):
+            walk_expr(getattr(s, "iterable", None)
+                      if kind == "ComptimeForStmt"
+                      else getattr(s, "condition", None))
+            for b in (getattr(s, "body", None) or getattr(s, "then_body", None)
+                      or []):
+                walk_stmt(b)
+            for _c, b in (getattr(s, "elifs", None) or []):
+                walk_stmt(b)
+            for b in (getattr(s, "else_body", None) or []):
+                walk_stmt(b)
+            if kind == "ComptimeForStmt":
+                t = getattr(s, "target", None)
+                stored |= _store_names(t)
+            return
+        if kind in ("FunctionDef", "StructDef", "TraitDef", "LambdaExpr"):
+            # A nested definition's body is a DIFFERENT frame with its own
+            # parameters, and its locals are not this function's. Walking it
+            # here would report its own unstored names against this
+            # function's `stored` set.
+            return
+        # Anything else: walk its expressions rather than ignore it, so an
+        # unrecognised statement shape is a silence rather than a wrong
+        # answer.
+        for f in getattr(s, "__dataclass_fields__", ()) or ():
+            if f in ("line", "col"):
+                continue
+            v = getattr(s, f, None)
+            if isinstance(v, (F.IfStmt, F.WhileStmt, F.ForStmt, F.WithStmt,
+                              F.TryStmt, F.MatchStmt, F.ReturnStmt,
+                              F.ExprStmt, F.AssertStmt, F.RaiseStmt,
+                              F.DelStmt, F.AssignStmt, F.AugAssignStmt,
+                              F.VarDecl, F.MultiAssignStmt, F.FunctionDef,
+                              F.StructDef, F.TraitDef, F.LambdaExpr)):
+                walk_stmt(v)
+            elif isinstance(v, list) and v and all(
+                    isinstance(x, (F.IfStmt, F.WhileStmt, F.ForStmt,
+                                   F.WithStmt, F.TryStmt, F.ReturnStmt,
+                                   F.ExprStmt, F.AssertStmt, F.RaiseStmt,
+                                   F.DelStmt, F.AssignStmt, F.AugAssignStmt,
+                                   F.VarDecl, F.MultiAssignStmt))
+                    for x in v):
+                for x in v:
+                    walk_stmt(x)
+            else:
+                walk_expr(v)
+
+    stored: set = set()
+    walk_stmts(getattr(fn, "body", None) or [])
+    return found[0] if found else None
+
+
+def read_before_store_refusal(name: str, fn_name: str, line) -> str:
+    """The one-line diagnostic for a name read before anything stores it.
+
+    Names the language's own error, because that is the answer the source has
+    and the reader is comparing against: CPython raises
+    `UnboundLocalError` inside a function and `NameError` at module level for
+    this exact program, so a reader who has run it under CPython is looking
+    for that. It also says WHY the backend cannot raise it, which is the part
+    that is specific to this path and the part that would otherwise be
+    re-derived: the emitted image has no way to mean "unbound", so the value
+    would be a register nobody wrote.
+
+    The `line` is included because the defect is invisible in review — a
+    program that reads a name it never stores looks like ordinary code, and
+    the wrong answer is a build-dependent word rather than an error, so
+    without a location the reader has nothing to go on."""
+    where = f" at line {line}" if line else ""
+    who = f"{fn_name}: " if fn_name else ""
+    return (
+        f"{who}{name!r} is read{where} before anything in this function "
+        f"stores it, and CPython raises UnboundLocalError for that program "
+        f"(NameError at module level). This path cannot raise it: the "
+        f"register allocator gives {name!r} a home because the function "
+        f"assigns it somewhere, and the emitted image has no way to mean "
+        f"\"unbound\" — so the read would return whatever the CALLER left in "
+        f"that register, a word that changes with the build and differs "
+        f"between the two backends. Store {name!r} before reading it, or "
+        f"declare it where it is written.")
+
+
 def is_generic(fn) -> bool:
     return bool(getattr(fn, "comptime_params", None))
 
