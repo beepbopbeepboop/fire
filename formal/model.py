@@ -9462,6 +9462,13 @@ def _container_binding_names(node, receivers, out: set) -> None:
     Deliberately ONE hop and deliberately local: the point is to catch
     `tmp = [...]; self.x = tmp`, not to compute a value kind.  A name bound in
     another function, or a parameter, is the stated gap above.
+
+    **`var tmp = [...]` was missing and it is the spelling most of the corpus
+    uses**, so the one hop it exists to make did not happen for a `var` binding
+    and the write-through it was written to catch went uncaught: `var xs =
+    [1, 2]; self.items = xs` reads to a reader as covered and is not.  A
+    `VarDecl` binds its name in `.name`, not in `.target`, which is the whole
+    difference; `frame_binding_target` is the one reader of that.
     """
     if isinstance(node, list):
         for x in node:
@@ -9469,11 +9476,10 @@ def _container_binding_names(node, receivers, out: set) -> None:
         return
     if isinstance(node, F.FunctionDef):
         return
-    target = getattr(node, "target", None)
-    if isinstance(target, F.IdentExpr) \
-            and isinstance(getattr(node, "value", None),
-                           (F.ListExpr, F.TupleExpr, F.DictExpr)):
-        out.add(target.name)
+    target = frame_binding_target(node)
+    if target and isinstance(getattr(node, "value", None),
+                             (F.ListExpr, F.TupleExpr, F.DictExpr)):
+        out.add(target)
     for fname in getattr(node, "__dataclass_fields__", {}):
         if fname in ("line", "col"):
             continue

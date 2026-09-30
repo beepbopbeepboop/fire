@@ -2327,12 +2327,23 @@ def _returned_frame_calls(fn, ret_frame) -> list:
 
 
 def _position_under(node, field, where):
-    """The phrase for a child reached through `node.<field>`."""
-    if isinstance(node, F.AssignStmt) and field == "value":
+    """The phrase for a child reached through `node.<field>`.
+
+    Names the construct rather than saying "a position that binds no name" and
+    leaving the reader to work out which one: `xs[1] = make()` and `o.f =
+    make()` are both that sentence, and they are different programs with
+    different reasons — the first puts the address in a heap cell, the second in
+    a slot whose lifetime belongs to another object.
+    """
+    if field == "value" and isinstance(node, F.AssignStmt):
+        if isinstance(node.target, F.SubscriptExpr):
+            return "the right-hand side of a subscript assignment"
+        if isinstance(node.target, F.MemberExpr):
+            return "the right-hand side of a field assignment"
         return "the right-hand side of an assignment that binds no name"
-    if isinstance(node, F.VarDecl) and field == "value":
+    if field == "value" and isinstance(node, F.VarDecl):
         return "the initial value of a declaration that binds no name"
-    if isinstance(node, F.MultiAssignStmt) and field == "value":
+    if field == "value" and isinstance(node, F.MultiAssignStmt):
         return "the right-hand side of a multiple assignment"
     if isinstance(node, F.SubscriptExpr) and field == "index":
         return "the index of a subscript"
@@ -2340,7 +2351,7 @@ def _position_under(node, field, where):
         return "the receiver of an attribute access"
     if isinstance(node, F.ReturnStmt) and field == "value":
         return "the value of a return"
-    if isinstance(node, F.IfStmt) and field in ("test",):
+    if isinstance(node, F.IfStmt) and field == "test":
         return "the condition of an if"
     return where
 

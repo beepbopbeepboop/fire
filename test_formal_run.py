@@ -2367,19 +2367,16 @@ BYREF_CASES = [
 # after the function that created it has returned — the one outcome this
 # backend may not produce. They are here so that a future change which
 # "helpfully" lowers them is caught.
+# MOVED OUT, and the note says why: `byref_refuse_returned` asserted that
+# `return p` from the function that built `p` is refused, which was true and is
+# no longer.  The object is now built in a block the CALLER reserved and handed
+# over in a hidden trailing argument, so it outlives its creator; see
+# `bugs/FORMAL_returned_frame_caller_owned_block.md`.  It is a demonstration
+# now rather than a refusal, and it is in `test_formal_returned_frame.py` with
+# the rest of the family — this file's list is for constructs the backend still
+# refuses, and leaving a case here that says "refused" about a construct that
+# builds would be a test asserting the opposite of the truth.
 BYREF_REFUSALS = [
-    # Returned: the frame dies with the function that made it.
-    ("byref_refuse_returned",
-     "struct P:\n"
-     "    var a: Int\n"
-     "    var b: Int\n\n"
-     "def mk():\n"
-     "    var p = P()\n"
-     "    return p\n\n"
-     "def main(n) -> Int:\n"
-     "    var q = mk()\n"
-     "    return 0\n",
-     "refuse:is returned from the function that created it", None),
     # Into a container: a list blob has no layout for a frame address.
     ("byref_refuse_stored_in_a_list",
      "struct P:\n"

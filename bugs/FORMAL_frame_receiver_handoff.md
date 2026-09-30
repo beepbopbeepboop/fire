@@ -24,7 +24,18 @@ The short answer, and every clause of it is a measurement below:
 | a genuinely cross-module free function (`discover_closures`, `__get_mvalue_as_litref`) | refused, soundly | there is no definition in hand, whatever the argument |
 | a struct CONSTRUCTOR (`R(r)`, `Repeat(x)`, `StringSlice(x)`) | refused, soundly — and it was reported as an *invisible callee*, which is false twice over | `S()` takes no arguments on this path, so a one-argument construction has no lowering at all; verified by lifting the refusal and watching the constructor refuse it by name |
 | a non-first argument position | refused, soundly — and "a position whose meaning this path cannot see" was a statement about the analysis in a message a reader takes to be about the program | all three things under it are wrong answers without the check; each was built and run |
-| a frame address RETURNED | refused, soundly — and "returned from the function that created it" is **false** for a frame that arrived as a first parameter, which is the larger half of the family | the creator is the caller, and nothing here establishes the caller is still on the stack |
+| a frame address RETURNED — the frame this function **BUILT** | **it can — the object is built in a block the CALLER reserved** (`bugs/FORMAL_returned_frame_caller_owned_block.md`); the 19 findings are zero | the by-reference convention with one hidden trailing word: the caller owns the block, so the creator's lifetime is the caller's and never enters into it |
+| a frame address RETURNED — a frame that arrived as a parameter | refused, soundly — and "returned from the function that created it" is **false** for it, which is why it has its own message | the creator is the caller, and nothing here establishes the caller is still on the stack |
+
+> **WAVE 9 (returned frame).** The RETURNED row above was one row for two
+> constructs and is now two. A frame the function BUILT is built in a block the
+> CALLER owns — one hidden trailing argument, the object's lifetime is the
+> caller's — and that half's 19 sweep findings are zero; see
+> `bugs/FORMAL_returned_frame_caller_owned_block.md`. A frame that arrived as a
+> parameter is a different construct with no caller to reserve anything, and it
+> stays refused; see
+> `bugs/FORMAL_returned_frame_received_is_still_refused.md`. Everything else in
+> the table, and every section below it, stands as written.
 
 Nothing in this repository newly compiles, and the honest reason is in
 "Still open": the binding fix unblocked eleven files to a CPython host import
