@@ -1923,6 +1923,73 @@ def test_checked_run_key_covers_what_it_names():
     k2, k3 = K(gone), K(gone)
     check('cache key: a missing path is a CONSTANT, which is why main() warns',
           k2 == k3, 'a missing input still invalidates, so nothing to warn about')
+
+    # ── a SET that is flat, which is the shape `--extra <dir>` cannot reach ──
+    # The directory above covers a set that LIVES somewhere. This covers the
+    # other kind: N files in one directory, which has no directory of its own,
+    # so the only other way to name it is the hand-kept list that rots when the
+    # N+1'th file is added by somebody with no reason to know the list exists.
+    # That is not a synthetic worry: it is the estate check's subject — the
+    # repo's own `test_*.py` — behind a `cache=True` spec, which is the exact
+    # shape of the hole in
+    # bugs/UNTESTED_estate_check_is_red_and_outside_the_gate.md.
+    flat = os.path.join(tempfile.mkdtemp(prefix='crglob_'), 'flat')
+    os.makedirs(flat)
+    for i in range(3):
+        with open(os.path.join(flat, f'test_{i}.py'), 'w') as f:
+            f.write('v1')
+    with open(os.path.join(flat, 'helper.py'), 'w') as f:      # not a match
+        f.write('not part of the set')
+    pat = os.path.join(flat, 'test_*.py')
+    G = lambda: checked_run.check_key(f'globprobe{os.getpid()}', [], [pat])
+
+    hits, empty = checked_run.expand_globs([pat])
+    check('cache key: a glob expands to its matches and nothing else',
+          len(hits) == 3 and not empty and
+          not any(h.endswith('helper.py') for h in hits),
+          f'expanded to {hits}, empty patterns {empty} — the pattern is not '
+          f'being applied, or it is applied too widely')
+    g1 = G()
+    with open(os.path.join(flat, 'test_0.py'), 'w') as f:
+        f.write('v2')
+    check('cache key: a file inside the SET changing moves the key',
+          G() != g1, 'a glob input does not invalidate')
+    g1b = G()
+    with open(os.path.join(flat, 'test_9.py'), 'w') as f:
+        f.write('the N+1th file, added by nobody who knows the list exists')
+    check('cache key: a file ADDED to the set moves the key (this is the N+1th)',
+          G() != g1b, 'the whole point of a pattern over a list')
+    g2 = G()
+    with open(os.path.join(flat, 'helper.py'), 'w') as f:
+        f.write('changed and still not a match')
+    check('cache key: a file the pattern does NOT match does not move it',
+          G() == g2, 'the pattern is not filtering')
+    os.unlink(os.path.join(flat, 'test_9.py'))
+    check('cache key: a file REMOVED from the set moves it',
+          G() != g2, 'a subject set that has changed shape reported a hit')
+    # Two patterns that overlap name ONE set: listing a file twice because two
+    # patterns both matched it would make the key depend on the overlap.
+    both, _e = checked_run.expand_globs([pat, os.path.join(flat, 'test_0.py')])
+    check('cache key: two overlapping patterns name each file once',
+          len(both) == len(set(both)) == 3,
+          f'expanded to {len(both)} paths, {len(set(both))} distinct')
+    # …and the same for a file named by `extra` AND matched by the glob, which
+    # is the overlap the real registration has: `suite-self-test` names
+    # `test_suite.py` in `extra` and its `test_*.py` glob matches it too.
+    one = os.path.join(flat, 'test_0.py')
+    check('cache key: a file named by extra AND matched by a glob is hashed once',
+          checked_run.check_key(f'overlap{os.getpid()}', [one], [pat])
+          == checked_run.check_key(f'overlap{os.getpid()}', [], [pat]),
+          'the key depends on whether the same file was listed twice, which is '
+          'a property of the CALLER rather than of the subject')
+    # The empty case, which is the trap: a pattern that matches nothing is a
+    # subject that has gone, and it is reported rather than folded in.
+    nothing, empty = checked_run.expand_globs([os.path.join(flat, 'gone_*.py')])
+    check('cache key: a glob matching NOTHING is reported, not folded in',
+          nothing == [] and empty == [os.path.join(flat, 'gone_*.py')],
+          f'got {len(nothing)} paths and empty={empty}: an empty set has to be '
+          f'sayable, because the key is then blind to a subject that changed '
+          f'shape and nothing else would report it')
     del j
 
 
@@ -2257,6 +2324,72 @@ def test_every_test_file_is_registered():
           f'reason, {len(undeclared)} undeclared')
 
 
+def test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject():
+    """The three ways this check can be present and still never run.
+
+    Each of these was true at some point, and each is a different failure, so
+    they are three checks and not one:
+
+      1. IN A GATE. `suite-self-test` was in `smoke`, and `smoke` is in no
+         bucket, so `make gate` never executed the estate check at all: eight
+         unregistered test files sat on disk through several landings and every
+         gate was green. That is
+         `bugs/UNTESTED_estate_check_is_red_and_outside_the_gate.md`, and it is
+         the same shape as the `coro` failure CLAUDE.md tells this story about
+         — a bucket that runs nothing, so a check that exists runs nothing.
+
+      2. A KEY THAT SEES ITS SUBJECT. `suite-self-test` is `cache=True`, and a
+         cached PASS is replayed. Its key covered the runner's own sources and
+         `test_suite.py`, so ADDING `test_whatever.py` moved nothing and the
+         check that exists to report exactly that was served the last green run
+         instead of running. The fix is `--extra-glob`: the subject is a SET
+         (93 files, one directory, no directory of its own), which is the one
+         input shape `--extra <dir>` cannot express.
+
+      3. A GLOB THAT COVERS THE SET. The pattern is flat (`test_*.py`), so a
+         test file added in a SUBDIRECTORY would be found by the walk above and
+         invisible to the key — the walk and the key would disagree about the
+         subject, silently, in the direction that matters. The check below is
+         what keeps the two in agreement, and it is deliberately a check rather
+         than a comment: a promise nobody verifies is how the 50 became the 94.
+    """
+    spec = suite.REGISTRY.get('suite-self-test')
+    check('the estate: the spec that runs this check exists', spec is not None,
+          'suite-self-test is not in the registry, so nothing runs this file')
+    if spec is None:
+        return
+
+    in_gate = 'suite-self-test' in suite.expand_bucket('gate')
+    check('the estate: the check runs in a bucket the GATE contains',
+          in_gate,
+          'suite-self-test is in no bucket `gate` expands to, so a landing that '
+          'adds an unregistered test file is reported green by the gate that '
+          'was supposed to catch it')
+
+    check('the estate: ...and it is cached, so its key has to see the subject',
+          spec.cache and 'test_*.py' in spec.extraglob,
+          f'cache={spec.cache}, extraglob={list(spec.extraglob)}: a cached PASS '
+          f'is replayed, so a key that cannot see a new test file serves the '
+          f'last green run instead of running this check')
+
+    on_disk = set(_test_files_in_repo())
+    nested = sorted(f for f in on_disk if os.path.dirname(f))
+    check('the estate: every test file is where the glob can see it',
+          not nested,
+          f'the `test_*.py` glob is flat and these are not: {nested}. Either '
+          f'make the pattern recursive or say why a subdirectory is exempt — '
+          f'silently, the walk finds them and the cache key does not')
+
+    import checked_run
+    globbed, empty = checked_run.expand_globs(spec.extraglob)
+    check('the estate: the glob and the walk agree on the subject set',
+          {os.path.basename(g) for g in globbed} == {os.path.basename(f)
+                                                     for f in on_disk}
+          and not empty,
+          f'glob found {len(globbed)}, walk found {len(on_disk)}; '
+          f'empty patterns: {empty}')
+
+
 def _module_const_paths(src, tree):
     """`<NAME> = os.path.join(..., 'build', '<name>')` -> {NAME: that source text}.
 
@@ -2463,6 +2596,7 @@ def main():
                test_checked_run_replays_a_pass_and_reruns_a_failure,
                test_cached_spec_names_its_own_test,
                test_every_test_file_is_registered,
+               test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
                test_no_test_preflights_on_an_unbuildable_artifact,
                # The memory-campaign tests. They were DEFINED and never CALLED
                # — three functions, 300-odd lines, nothing in this list — which
