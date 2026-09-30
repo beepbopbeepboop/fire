@@ -1638,7 +1638,6 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                 if not plist:
                     continue
                 for pos, pname, _kw in _frame_argument_slots(node, plist):
-
                     if pos >= len(plist):
                         continue
                     r = _root_ident(pname)
