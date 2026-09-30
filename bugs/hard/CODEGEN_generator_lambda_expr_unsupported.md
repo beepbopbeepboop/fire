@@ -1,11 +1,126 @@
 # HARD BUG: some `lambda` shapes unsupported inside a compiled generator body
 
-**State: PARTIAL.** The real underlying defect (ANY capturing lambda silently returned 0) is FIXED, and so is what this doc
-recorded as the remaining escape/rebound half: a capturing lambda now gets a heap env, so it is correct whether or
-not it escapes. What is left is the variadic shape (`*args`/`**kwargs`), and the residue is worse than this doc
-recorded — it is a SEGFAULT, not a lost capture, because the call sites never pack the varargs. A capturing lambda
-inside a coroutine body remains deliberately excluded (that body model is scalar-only). `*a, **k` and the
-`sorted(key=lambda...)` struct-pointer case are the two named stdlib targets.
+**State: PARTIAL.** The variadic SIGSEGV is FIXED, and so are the two shapes this
+doc's 2026-09-26 entry called "the definition side is done; the call side is
+the whole of what remains" — a variadic lambda now works through EVERY way of
+holding the value, and the doc's second named target
+(`sorted(key=lambda ...)` with a struct pointer) is already correct on the
+current tree and did not need anything. What remains is listed precisely at the
+end of the section below: three defects, none of them a variadic one, each
+filed with its own doc.
+
+## Status (2026-09-29 — the variadic SIGSEGV is FIXED; the doc's two named targets re-tested; what is left is three OTHER bugs)
+
+### Re-tested first, because the doc is not evidence
+
+Every claim above was re-run against the current tree with CPython alongside.
+The variadic SIGSEGV reproduced exactly as documented, for every shape,
+including the one the doc says proves the defect is not about captures (a
+variadic lambda capturing nothing crashed identically):
+
+| program | CPython | compiled, before | compiled, now |
+|---|---|---|---|
+| `e = lambda *a: add(a[0], a[1]); e(4, 5)` | `9` | **SIGSEGV** | `9` |
+| `e = lambda *a: addall(a); e(1, 2, 3)` | `6` | **SIGSEGV** | `6` |
+| `e = lambda *args, **kwargs: add(n, args[0])` (captures `n`) | `8` | **SIGSEGV** | `8` |
+
+22 of a 25-shape matrix now compiles, links, runs and agrees with CPython.
+
+### What the mechanism turned out to be
+
+The doc's diagnosis was right in every particular: the lifted DEFINITION was
+correct (`int64_t f (MojoList * a)`), the call site chose its runtime helper by
+the number of arguments written at the call and passed them **positionally as
+scalars**, and the callee dereferenced address 4. The doc then concluded that
+fixing it needed a "signature-carrying callable-value representation with
+runtime args/kwargs packing", and called that feature-sized.
+
+It is not feature-sized, and the reason is that this repository **already had
+exactly that mechanism, one file over**: `MojoBoundMethod` is a heap value that
+carries `(fn, self)`, a runtime registry tells a callable value apart from a
+bare function pointer, and `mojo_fnptr_call_N` dispatches on it — precisely so
+that a closing lambda works everywhere an ordinary one does, "including as a
+map/filter/sorted key, a call straight through `_funcptr_*`, and a lambda handed
+to code this compiler never saw". A variadic callable needs the same thing
+with packing instead of a leading `self`.
+
+So the fix is that mechanism, reused rather than reinvented:
+
+- **`MojoVarargFn`** (`runtime/fire_runtime.h`, "Variadic callables") records
+  the lifted callee, the closure env, how many ordinary leading parameters
+  precede the `*args`, which of the three shapes the lambda has (`*args` /
+  `*args, **kwargs` / `**kwargs`), and whether the callee declares that
+  leading `self` at all. A new `_reg_vararg_fn` registry lets
+  `mojo_fnptr_call_N` and `mojo_maybe_bound_call_N` recognise it, exactly as
+  they already recognise a bound method.
+- **`_lower_LambdaExpr`** materializes such a lambda as a `MojoVarargFn` rather
+  than a bare `_funcptr_*` static.
+- **The packing happens in the runtime**, because that is the only place that
+  knows both the call's arity and the callee's real parameter list. This is
+  why one change fixed every call site at once — direct, escaped as an
+  argument, returned, stored in a dict, stored in a struct field, rebound
+  across branches, and used as a `sorted(key=)` / `map` / `filter` callable.
+  `Lib/doctest.py`'s `_colorize.can_colorize = lambda *args, **kwargs: False`
+  (an ATTRIBUTE, which the doc correctly called out) is now covered.
+- **Keyword arguments** reach the callee through new `_kw_` twins of both
+  dispatch families, emitted only when the call site actually writes some. For
+  every other kind of callee they behave identically to the helpers they twin,
+  so nothing else changed. A `**kwargs` callee is never handed NULL: `k['x']`
+  is an ordinary spelling and would segfault.
+
+Two supporting fixes, both load-bearing:
+
+- the **forward declaration** built for a lambda dropped its `*`-prefixed
+  parameters, so `lambda f, *a: ...` forward-declared `int64_t f(int64_t)`
+  against a definition of `int64_t f(int64_t, MojoList *)` — a hard
+  "conflicting types" error. The fixed-prefix variadic shape did not compile at
+  all before this;
+- the dispatch helpers **stopped at four arguments** and silently dropped the
+  rest, which for a `*args` callee means losing elements. They now go to
+  eight. The truncation was a silent wrong value for every
+  five-or-more-argument indirect call, not only this one.
+
+`lambda a, b, c, d, e, *rest: ...` — five ordinary parameters ahead of a
+`*args` — is now **refused** rather than mis-called: the runtime passes at most
+four leading scalars through un-packed, so five would be a wrong value, and the
+backend's `RuntimeError` makes the module fall back to interpreting from
+source, which is right. Four is far past anything real code writes.
+
+### The doc's SECOND named target was already fixed
+
+`sorted(key=lambda m: m.<field>)` where the element is a struct POINTER — the
+doc's narrower sub-gap, blamed on `_field_elem_types` being populated after
+generator bodies compile — **works on the current tree**, and did before this
+session. Verified in all four combinations, each matching CPython: a plain
+function, a generator, a `self.<field>` list, and a list passed as a
+parameter. The generated C declares the key lambda as
+`int64_t f (M * m)` — the struct pointer really is threaded into the parameter
+type — and the A3 stack-switch cutover has routed generator bodies through the
+gimple path, where that inference works. The doc's 2026-08-23 entry said the
+same thing about a subset of these and was not believed; it is now measured
+rather than argued.
+
+### What is left, precisely — none of it a variadic defect
+
+| shape | CPython | compiled | doc |
+|---|---|---|---|
+| `_colorize.can_colorize = lambda *args, **kwargs: False` | `False` | `0` | `bugs/CODEGEN_lambda_bool_return_prints_as_int.md` — a lambda whose body is a bool returns `int64_t` 0/1. Nothing to do with the call convention; an ordinary `def` returning the same value is right. |
+| a lambda inside a **nested `def`** | correct | link error, body never emitted | `bugs/CODEGEN_lambda_in_nested_def_body_never_emitted.md` — the lifted function is declared and referenced, never defined. |
+| `sorted(key=<any user function>)` | correct | interpreter crash | `bugs/CODEGEN_interpreter_user_function_as_builtin_callback_crashes.md` — so the compiled path cannot be diffed against the interpreter for that shape. |
+
+Two more were found and filed while measuring, and are also not this doc's:
+`bugs/CODEGEN_call_through_subscript_callee_stubbed.md` (a callable reached
+through a subscript, `d['k'](2, 3)`, prints `0`) and
+`bugs/CODEGEN_lambda_bool_return_prints_as_int.md`'s sibling, a named function
+with `*args` taken as a value — which WAS this defect and IS fixed, see
+`gimple_variadic_named_function_through_a_value`.
+
+### Still deliberately excluded
+
+A capturing or variadic lambda inside a **coroutine/generator body** remains
+refused by `_lambdas_ok`, and that refusal is honest: the whole module falls
+back to interpreting from source, so the answer is right. Verified with
+`fire.py run` (correct) and `fire.py --jit` (refuses, falls back, correct).
 
 ## Status (2026-09-26 re-verification — the escape/rebound residue is FIXED; the variadic residue is a SEGFAULT, re-scoped with a precise mechanism)
 
