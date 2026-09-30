@@ -906,6 +906,7 @@ def gen_module_impl(self, stmts):
     # preamble, and the wrapper definitions in the tail sidecar.
     self._device_kernels = {n: True for n in _device_names}
     self._device_launch_args = {}
+    self._device_launch_count: dict = {}
     _device_kernels_meta: dict = {}
     for _s in stmts:
         if (isinstance(_s, FunctionDef)
@@ -918,10 +919,20 @@ def gen_module_impl(self, stmts):
             # line instead of a stack through the call-site lowering.
             _gmi_device_glue.element_count_index(_nm, _ci)
             self._device_launch_args[_nm] = _tys
+            # A kernel's buffer parameters are `T *`, and a list argument at
+            # a call site is a MojoList -- so the kernel's own element types
+            # need the pack/unpack pair, whether or not any call site in this
+            # module has been reached yet. The call-site pass adds to the
+            # same set, so the preamble emits whichever is larger.
+            for _pn, _ct, _isb, _w in _tys:
+                if _isb:
+                    self._list_marshalling_needed.add(_ct[:-2])
             # (name, c_type, is_buffer) triples, plus the element-count
             # index. The wrapper generator needs to tell a buffer from a
             # scalar; emit_calls.py reads only the c_types, from
-            # `_device_launch_args`.
+            # `_device_launch_args`, plus the count index from here, which is
+            # what it needs to size a list-to-buffer marshalling.
+            self._device_launch_count[_nm] = _ci
             _device_kernels_meta[_nm] = (_tys, _ci)
     self._actual_types['stmts'] = 'MojoList *'
     if self._current_filename:
@@ -7487,6 +7498,25 @@ def gen_module_impl(self, stmts):
     # erased on the self-hosted path) — non-deterministic run to run. And
     # `_ptr_slot_in_range` drops an entry that is raw garbage rather than
     # a boxed-but-valid string pointer.
+    #
+    # list<->buffer helpers for exactly the element types some call site or
+    # kernel needed. Same value-dedup-then-sort treatment as `_ptr_helpers_`
+    # just below, for the same reason: iterating the raw set orders by the
+    # boxed pointer VALUE on the self-hosted path, which is non-deterministic
+    # run to run and would show up as a stage2-vs-stage3 idempotency failure.
+    _lmn: list = []
+    for _lm in self._list_marshalling_needed:
+        if not _ptr_slot_in_range(_lm):
+            continue
+        _lm_s = _as_str(_lm)
+        if _lm_s and _lm_s not in _lmn:
+            _lmn.append(_lm_s)
+    _emitted_list_marshalling: set = set()
+    for _lm_s in sorted(_lmn):
+        if _lm_s in _emitted_list_marshalling:
+            continue
+        _emitted_list_marshalling.add(_lm_s)
+        parts.append(_gmi_device_glue.list_marshalling_definitions([_lm_s]))
     _pth_names: list = []
     for _pth in self._ptr_helpers_needed:
         if not _ptr_slot_in_range(_pth):

@@ -183,6 +183,43 @@ def f(x: Int) -> Int:
     return 0
 """, must_have=["mojo_cstr_or_int_str ("], must_not_have=[])
 
+    # A boxed list passed where a scalar-element pointer is declared. The cast
+    # this replaces -- `(float *)list` -- pointed at the MojoList struct HEADER
+    # (data/len/cap/inline buffer), so the callee read the box as the array: it
+    # compiled, linked, ran, and printed 2.45e+26 where the interpreter printed
+    # 6.0, both at exit 0. Asserted on the SHAPE because the shape is the whole
+    # point: a wrong-but-plausible lowering here still prints a number.
+    test_c_shape("list_to_pointer_param_is_packed_not_cast", """\
+def total(p: UnsafePointer[Float32, MutAnyOrigin], n: Int) -> Float32:
+    s = Float32(0.0)
+    for i in range(n):
+        s = s + p[i]
+    return s
+
+
+def main():
+    a = [1.0, 2.0, 3.0]
+    print(total(a, 3))
+""", must_have=["_mg_pack_float(", "_mg_unpack_float(", ", -1)", "free ("],
+       must_not_have=["(float *)a"])
+
+    # The pack helper must not be emitted for a pointer type that is not an
+    # array of numbers. `char *`, `void *` and struct pointers all end in " *",
+    # and packing a list into one would compile, run, and be wrong in a way
+    # nothing in the tree would notice.
+    test_c_shape("list_is_not_packed_into_a_char_pointer", """\
+def show(p: UnsafePointer[UInt8, MutAnyOrigin], n: Int) -> Int:
+    s = 0
+    for i in range(n):
+        s = s + Int(p[i])
+    return s
+
+
+def main():
+    a = [1.0, 2.0]
+    print(show(a, 2))
+""", must_have=[], must_not_have=["_mg_pack_char"])
+
     # 1. Empty void function (pass body)
     test("hello_gimple", """\
 def foo():

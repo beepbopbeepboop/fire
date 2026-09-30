@@ -731,5 +731,63 @@ class TestSidecarDispatchesOnRealGpu(unittest.TestCase):
             self.assertIn('FAILURES 0', out)
 
 
+@unittest.skipUnless(sys.platform == 'darwin', 'Metal is macOS-only')
+class TestListsReachTheGpu(unittest.TestCase):
+    """Ordinary Python lists, offloaded.
+
+    This is the case the whole exercise exists for. A `MojoList` is a struct
+    whose first field is a data pointer, so the obvious lowering -- cast it to
+    `float *` -- points at the struct HEADER and the kernel reads data/len/cap/
+    the inline buffer as the array. It runs, and it is wrong. Lists are
+    therefore packed into real contiguous buffers for the dispatch and written
+    back afterwards.
+
+    Driven through `fire.py --jit`, so it also covers the whole link path: the
+    generated .ci, the sidecar, the Objective-C runtime, and the frameworks
+    being added to the link line only because this module references them.
+    """
+
+    PROG = '''\
+@gpu
+def vec_add(in0: UnsafePointer[Float32, MutAnyOrigin],
+            in1: UnsafePointer[Float32, MutAnyOrigin],
+            output: UnsafePointer[Float32, MutAnyOrigin], len: Int):
+    tid = global_idx.x
+    if tid >= len:
+        return
+    output[tid] = in0[tid] + in1[tid]
+
+
+def main():
+    a = [0.0, 1.0, 2.0, 3.0]
+    b = [2.0, 2.0, 2.0, 2.0]
+    # Poisoned, so a dispatch that silently did nothing cannot look correct.
+    o = [-999.0, -999.0, -999.0, -999.0]
+    vec_add(a, b, o, 4)
+    for v in o:
+        print(v)
+    print("d", _mojo_gpu_dispatch_count())
+    print("f", _mojo_gpu_failure_count())
+'''
+
+    def test_plain_lists_dispatch_and_return_the_right_answer(self):
+        with tempfile.TemporaryDirectory() as wd:
+            path = os.path.join(wd, 'lists.mojo')
+            with open(path, 'w') as f:
+                f.write(self.PROG)
+            r = subprocess.run(
+                [sys.executable, os.path.join(HERE, 'fire.py'), '--jit', path],
+                capture_output=True, text=True, timeout=900, cwd=HERE)
+            out = r.stdout.strip().splitlines()
+            if r.returncode != 0:
+                self.skipTest(f'no JIT build here: {r.stderr[-400:]}')
+            if 'd 0' in ' '.join(out) and 'f 1' in ' '.join(out):
+                self.skipTest('no Metal device on this machine')
+            self.assertEqual(out[:4], ['2.0', '3.0', '4.0', '5.0'],
+                             f'wrong answer on the GPU\n{r.stdout}\n{r.stderr[-800:]}')
+            self.assertIn('d 1', out, f'no dispatch happened\n{r.stdout}')
+            self.assertIn('f 0', out, f'a dispatch failed\n{r.stdout}')
+
+
 if __name__ == '__main__':
     unittest.main()

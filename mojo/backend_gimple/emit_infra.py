@@ -32,6 +32,7 @@ from fire_compiler import (
 )
 import regex_compile
 import mlir
+import mojo.backend_gimple.device_glue as _gmi_glue
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
@@ -1231,6 +1232,29 @@ def _addressable_to_target(gen, ctype: str, aval: str) -> bool:
     return aval in gen.var_types
 
 
+#: Scalar element types a boxed list may be packed into. Deliberately a
+#: closed set rather than "anything that ends in ` *`": a `void *`, a `char *`
+#: and a struct pointer all end in ` *` too, and none of them is an array of
+#: numbers. Packing a list into a `char *` would compile, run, and be wrong in
+#: a way no test in the tree would notice, so the gate is a list of names.
+_LIST_MARSHAL_ELEMS = frozenset((
+    'float', 'double', 'int', 'int32_t', 'int64_t',
+    'uint16_t', 'uint32_t', 'uint64_t', 'int16_t', 'uint8_t', 'int8_t',
+    '__fp16', '_Bool',
+))
+
+
+def _list_pack_name(elem: str) -> str:
+    """The generated pack helper for `elem`. Lives in device_glue so the
+    name is computed the same way by the call site and by the emitter that
+    defines it -- a name spelled twice is a name that eventually drifts."""
+    return _gmi_glue._c_helper_name(elem)
+
+
+def _list_unpack_name(elem: str) -> str:
+    return _gmi_glue._c_unpack_name(elem)
+
+
 def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]]) -> None:
     """Emit a function call with GIMPLE-valid argument coercions.
 
@@ -1292,6 +1316,11 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         arg_pairs = fixed_pairs + [('MojoList *', lst)]
         param_types = list(param_types[:-1]) + ['MojoList *']
 
+    # Buffers packed for this call, written back and freed once it is emitted.
+    # Local, not on `gen`: `_emit_call` can be re-entered by a nested lowering
+    # while a call is still being built, and a shared list would then write the
+    # inner call's buffers back at the outer call's return.
+    _pending_list_unpacks: list = []
     coerced_args = []
     for i, _apair in enumerate(arg_pairs):
         # `_as_str` on every unpacked slot — a `(ctype, varname)` tuple boxes
@@ -1516,6 +1545,38 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             gen._emit(f'  {ip} = (int64_t){aval};')
             gen._emit(f'  {pp} = (ModuleLoader *){ip};')
             coerced_args.append(pp)
+        elif (actual_atype == 'MojoList *' and ptype.endswith(' *')
+                and ptype[:-2] in _LIST_MARSHAL_ELEMS):
+            # A BOXED LIST where the callee declared a scalar-element pointer.
+            #
+            # This must never be a cast, and the branch below would make it one.
+            # `MojoList` is a struct whose first field is a data pointer, so
+            # `(float *)l` points at the struct HEADER and the callee reads
+            # data/len/cap/the inline buffer as the array's contents. It
+            # compiles, links, runs, and returns garbage at exit 0 -- measured
+            # on `sumf([1.0, 2.0, 3.0], 3)`: the interpreter says 6.0, the
+            # compiled path says 2.45e+26.
+            #
+            # So the list is packed into a real contiguous buffer, the call
+            # runs against that, and the buffer is written back into the list
+            # and freed afterwards. The write-back covers EVERY list-typed
+            # pointer argument, not just the ones the callee writes: a
+            # `T *` parameter does not say whether it is read-only, skipping a
+            # write-back that was needed loses the result, and writing back an
+            # argument the callee did not touch restores the values it already
+            # held. Data loss is the worse of the two failures.
+            #
+            # `-1` for the count means "the whole list": the general call path
+            # has no length argument, and the list's own length is the only
+            # thing that can size the buffer. It cannot change during the call
+            # -- the callee is handed a plain buffer and has no route back to
+            # the list -- so the unpack side clamps to the same count.
+            _elem = ptype[:-2]
+            gen._list_marshalling_needed.add(_elem)
+            _mb = gen._new_temp(f'{_elem} *')
+            gen._emit(f'  {_mb} = {_list_pack_name(_elem)}({aval}, -1);')
+            coerced_args.append(_mb)
+            _pending_list_unpacks.append((aval, _mb, _elem))
         elif ptype.endswith(' *') and atype.endswith(' *') and ptype != atype:
             # Two different pointer types (e.g. MojoList * where MojoDict * is
             # declared, or a struct ptr vs Span *): cast via a temp rather than
@@ -1593,6 +1654,11 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         gen._emit(f'  {result_var} = {fname} ({args_str});')
     else:
         gen._emit(f'  {fname} ({args_str});')
+    for _lv, _bv, _le in _pending_list_unpacks:
+        gen._emit(f'  if ({_bv}) {{')
+        gen._emit(f'    {_list_unpack_name(_le)}({_lv}, {_bv}, -1);')
+        gen._emit(f'    free ({_bv});')
+        gen._emit('  }')
     _release_transient_cstr_args(gen, arg_pairs)
 
 

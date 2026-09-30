@@ -31,6 +31,7 @@ from fire_compiler import (
 )
 import regex_compile
 import mlir
+import mojo.backend_gimple.device_glue as _gmi_glue
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -454,13 +455,63 @@ def _lower_device_launch(gen, node: gimple_ctypes.CallExpr):
             f'cannot compile module: call to GPU kernel {_kname!r} has no '
             f'recorded parameter types, so the host marshalling wrapper '
             f'cannot be generated for it')
+    # The kernel's length parameter indexes BOTH the device-side bound and the
+    # host-side marshalling, so a list can be sized for the conversion. It is
+    # recorded per kernel by the classification pass (module_gen), because a
+    # DEVICE function never runs through gen_func and so has no inferred
+    # signature to read a length out of.
+    _count_idx = getattr(gen, '_device_launch_count', {}).get(_kname, -1)
+    # Two passes, because the marshalling for buffer i needs the count
+    # argument's C value, and the count argument is itself one of the lowered
+    # arguments -- which does not exist until the first pass has run.
+    _lowered = []
+    for _a in node.args:
+        _lowered.append(gen.lower_expr(_a))
+    _count_val = _lowered[_count_idx][1] if 0 <= _count_idx < len(_lowered) else None
+
     _parts = []
+    _unpacks = []
     for _i, _a in enumerate(node.args):
         # `_device_launch_args` holds (name, c_type, is_buffer) triples so the
         # wrapper generator can tell buffers from scalars; the call site only
-        # needs the C type.
-        _want = _argtypes[_i][1] if isinstance(_argtypes[_i], tuple) else _argtypes[_i]
-        _t, _v = gen.lower_expr(_a)
+        # needs the C type and the is_buffer flag.
+        _spec = _argtypes[_i]
+        _want = _spec[1] if isinstance(_spec, tuple) else _spec
+        _is_buf = _spec[2] if isinstance(_spec, tuple) and len(_spec) > 2 else False
+        _t, _v = _lowered[_i]
+        if _is_buf and _t == 'MojoList *':
+            # A boxed list where the kernel wants a `T *`.
+            #
+            # This is the conversion that MUST NOT be a cast: a MojoList is
+            # a struct whose first field is a data pointer, so `(float *)l`
+            # points at the struct HEADER and `p[i]` reads data/len/cap/the
+            # inline buffer as floats. It links, runs, and returns garbage.
+            # So the list is packed into a real contiguous buffer, dispatched
+            # against that, and written back afterwards.
+            if _count_val is None:
+                raise RuntimeError(
+                    f'cannot compile module: GPU kernel {_kname!r} was given a '
+                    f'list for argument {_spec[0]!r}, which needs the '
+                    f"kernel's length parameter to size the buffer, but no "
+                    f'length parameter was recorded')
+            _elem = _want[:-2] if _want.endswith(' *') else 'float'
+            _pack = _gmi_glue._c_helper_name(_elem)
+            _unpack = _gmi_glue._c_unpack_name(_elem)
+            gen._list_marshalling_needed.add(_elem)
+            _buf = gen._new_temp(f'{_elem} *')
+            # The count handed to the unpacker is the SAME expression the
+            # packer got. Both helpers clamp it to the list's length, and the
+            # list cannot change length in between because the callee is
+            # handed a plain buffer and has no way to reach the list -- so
+            # recomputing the clamp on the other side is not an approximation
+            # of a count the packer knew, it is the same count. (The first
+            # design passed it back through an `int64_t *` out-parameter; that
+            # needed an extra uninitialised pointer local at every call site,
+            # which segfaults inside the helper. See _PACK_TEMPLATE.)
+            gen._emit(f'  {_buf} = {_pack}({_v}, (int64_t){_count_val});')
+            _parts.append(_buf)
+            _unpacks.append((_v, _buf, _count_val, _elem))
+            continue
         if _t != _want:
             # _safe_coerce_emit returns None -- it writes the coercion into
             # the lhs temp it is handed, so the value to pass on is the temp,
@@ -470,6 +521,11 @@ def _lower_device_launch(gen, node: gimple_ctypes.CallExpr):
             _v = _tmp
         _parts.append(_v)
     gen._emit(f'  {_wname}(' + ', '.join(_parts) + ');')
+    for _list_v, _buf_v, _n_v, _elem in _unpacks:
+        gen._emit(f'  if ({_buf_v}) {{')
+        gen._emit(f'    {_gmi_glue._c_unpack_name(_elem)}({_list_v}, {_buf_v}, (int64_t){_n_v});')
+        gen._emit(f'    free ({_buf_v});')
+        gen._emit('  }')
     return 'void', '0'
 
 

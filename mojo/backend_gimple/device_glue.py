@@ -196,6 +196,82 @@ def emit_launch_wrappers(kernels: dict) -> str:
     return '\n'.join(lines)
 
 
+def _c_helper_name(elem_ctype: str) -> str:
+    """A C identifier for a pack/unpack helper of `elem_ctype`.
+
+    Same shape as the `_mojo_at_<T>` naming in module_gen, and for the same
+    reason: the helper name has to be a stable function of the element type
+    so it can be emitted once, deduplicated, and referenced from every call
+    site that needs it.
+    """
+    return '_mg_pack_' + ''.join(
+        ch if (ch.isalnum() or ch == '_') else '_' for ch in elem_ctype)
+
+
+def _c_unpack_name(elem_ctype: str) -> str:
+    return '_mg_unpack_' + _c_helper_name(elem_ctype)[len('_mg_pack_'):]
+
+
+#: The C template for one element type's pack helper. `%s` is the element
+#: type.
+#:
+#: The list length is NOT carried back from the packer to the unpacker, which
+#: was the first design and was wrong twice over. A `int64_t *` out-parameter
+#: means every call site needs an extra pointer VARIABLE, and a `_new_temp`
+#: pointer is an uninitialised local -- passing it without initialising stores
+#: through stack junk, and initialising it to NULL defeats the very write it
+#: exists to receive. Neither is reachable from a wrong answer here; one
+#: segfaults inside the helper.
+#:
+#: Recomputing `min(n, mojo_list_len(l))` on the unpack side gives the
+#: identical count, because the callee is handed a `%(t)s *` and has no way
+#: to reach the list -- so the length cannot have changed between the two
+#: calls. Both helpers clamp to the list's real length, so a caller that
+#: over-reports gets a short read rather than a read past the end.
+_PACK_TEMPLATE = """static %(t)s *%(cn)s(MojoList *l, int64_t n) {
+    int64_t len = l ? mojo_list_len(l) : 0;
+    if (n < 0 || n > len) n = len;
+    %(t)s *b = (%(t)s *)calloc(n < 1 ? 1 : n, sizeof(%(t)s));
+    if (!b) return 0;
+    for (int64_t i = 0; i < n; i++) b[i] = (%(t)s)mojo_list_get_double(l, i);
+    return b;
+}"""
+
+_UNPACK_TEMPLATE = """static void %(un)s(MojoList *l, %(t)s *b, int64_t n) {
+    if (!l || !b) return;
+    int64_t len = mojo_list_len(l);
+    if (n > len) n = len;
+    for (int64_t i = 0; i < n; i++) mojo_list_set_double(l, i, (double)b[i]);
+}"""
+
+
+def list_marshalling_prototypes(elem_ctypes) -> str:
+    """Forward declarations for the pack/unpack pair of each element type."""
+    lines = ['/* list <-> contiguous buffer. A boxed list is NOT a buffer: each',
+             '   element is one int64_t slot holding a bit-cast double. Casting a',
+             '   MojoList* to T* instead points at the struct HEADER (data / len /',
+             '   cap / inline array), so the callee reads the box as data --',
+             '   measured: summing [1.0, 2.0, 3.0] that way printed 2.45e+26, at',
+             '   exit 0. These two functions are the only place it happens. */']
+    for _et in elem_ctypes:
+        lines.append('static %s *%s(MojoList *l, int64_t n);'
+                     % (_et, _c_helper_name(_et)))
+        lines.append('static void %s(MojoList *l, %s *b, int64_t n);'
+                     % (_c_unpack_name(_et), _et))
+    return '\n'.join(lines)
+
+
+def list_marshalling_definitions(elem_ctypes) -> str:
+    """The pack/unpack pair for each element type."""
+    lines = []
+    for _et in elem_ctypes:
+        _subs = {'t': _et, 'cn': _c_helper_name(_et), 'un': _c_unpack_name(_et)}
+        lines.append(_PACK_TEMPLATE % _subs)
+        lines.append(_UNPACK_TEMPLATE % _subs)
+        lines.append('')
+    return '\n'.join(lines)
+
+
 def msl_module(parts: list[str]) -> str:
     """The accumulated MSL as one compilable translation unit.
 
@@ -293,6 +369,10 @@ def emit_device_sidecar(parts: list[str], kernel_names: list[str],
     lines.append('}')
     lines.append('')
     if kernels:
+        # The pack/unpack helpers are NOT emitted here: they live in the
+        # preamble, next to the `_mojo_at_<T>` pointer helpers, because a call
+        # site in an ordinary function body needs them and those bodies are
+        # emitted before this tail.
         lines.append(emit_launch_wrappers(kernels))
     lines.append('/* The device kernels this module contains. Lets a host program, or a')
     lines.append('   test, ask what was offloaded instead of guessing. */')

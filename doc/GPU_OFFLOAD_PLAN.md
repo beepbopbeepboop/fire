@@ -163,16 +163,51 @@ silently rather than loudly:
   "followed by `(` and not preceded by a quote" heuristic's real blind spot,
   not by renaming anything around it.
 
-**Still open, and it is the next thing.** A program written in Mojo cannot yet
-*reach* a dispatch: `MojoList` is boxed, so there is no way to obtain the
-contiguous `float *` a kernel takes. The plumbing is complete and verified —
-generated MSL, embedded string, launch wrappers, a routed call site, a real
-dispatch, `max |diff| = 0.000e+00` — and the missing piece is the buffer
-representation, which is on the critical path for auto-offloading ordinary
-Python anyway. The end-to-end GPU test therefore drives the generated launch
-wrapper from a C harness, and asserts the Mojo call site on the generated C.
-That is a real gap, stated plainly rather than papered over: nothing yet
-computes on the GPU from a program whose source is Mojo.
+**Lists reach the GPU.** The first version of this ended by claiming that
+nothing computes on the GPU from Mojo source, because `MojoList` is boxed and
+there seemed to be no way to obtain the contiguous `float *` a kernel takes.
+That was wrong, and wrong in the direction of under-claiming:
+`UnsafePointer[Float32].alloc(n)` already produced a real `float *`, so the
+representational gap was narrower than it looked. The real gap was the
+*conversion*, and it was the more dangerous half:
+
+- Passing a list where a `T *` is declared used to emit `(T *)list`, and a
+  `MojoList` is a struct whose **first field is a data pointer** — so the
+  callee read `data`/`len`/`cap`/the inline buffer as the array's contents. It
+  compiles, links, runs, and returns garbage at exit 0. Measured on
+  `sumf([1.0, 2.0, 3.0], 3)`: the interpreter printed `6.0`, the compiled
+  path printed `2.45e+26`.
+- A list argument at a kernel call site now goes pack → dispatch → write-back
+  → free, and so does one at an ordinary function call (`emit_infra._emit_call`,
+  the single chokepoint every call path funnels through).
+
+The write-back covers *every* list-typed pointer argument, not only the ones
+the callee writes. A `T *` parameter does not say whether it is read-only, and
+the two ways to be wrong are not symmetric: skipping a write-back that was
+needed drops the result, while writing back an argument the callee never
+touched restores values it already held. So the rule is the safe one.
+
+The pack helpers are emitted per element type, only for a module that needs
+them, and only for a **closed set** of scalar types. `char *`, `void *` and
+struct pointers all end in ` *` too; packing a list into one would compile,
+run, and be wrong in a way nothing in the tree would notice, so the gate is a
+list of names rather than a suffix test.
+
+So ordinary Python lists now offload:
+
+```python
+a = [0.0, 1.0, 2.0, 3.0]
+b = [2.0, 2.0, 2.0, 2.0]
+o = [-999.0, -999.0, -999.0, -999.0]   # poisoned, so a no-op cannot look right
+vec_add(a, b, o, 4)                    # -> [2.0, 3.0, 4.0, 5.0] from the GPU
+```
+
+`TestListsReachTheGpu` runs exactly that through `fire.py --jit`, so it covers
+the whole chain including the link step. **Still open:** the *automatic*
+offload — nothing yet decides on its own to move a loop to the device, and a
+packed/unpacked round trip per dispatch is not yet cheaper than the CPU for
+small inputs. Both are the next two items on this plan, not gaps in the
+mechanism.
 
 ## Order of work
 

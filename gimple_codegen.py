@@ -1335,6 +1335,14 @@ class GimpleGen:
         # final once every function has been walked.
         self._device_kernels: dict[str, bool] = {}
         self._device_parts: list[str] = []
+        self._device_launch_args: dict = {}
+        self._device_launch_count: dict = {}
+        # Element C types needing a _mg_pack_/_mg_unpack_ helper pair. A
+        # MojoList handed to a `T *` parameter cannot be cast (the cast points
+        # at the struct header), so the call is routed through an explicit
+        # pack/call/unpack/free instead. Emitted once per element type, and
+        # only for a module that actually does it.
+        self._list_marshalling_needed: set[str] = set()
         # dict.items()/values() result temp -> the dict's VALUE type. The
         # runtime stores item pairs as [char* key, boxed value] (append_str +
         # append_int — see mojo_dict_items), so the for-loop tuple branch needs
