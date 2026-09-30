@@ -30,6 +30,18 @@ deviations that are properties of this target and are stated on each one:
     the one function here that CPython gives a default to, and it requires its
     argument instead. (bugs/FORMAL_default_argument_not_applied_across_a_dylib.md)
 
+  * FOUR FUNCTIONS CARRY NO RETURN ANNOTATION, and it is not an oversight.
+    `split`, `splitdrive`, `splitext` and `_next_component` return a TUPLE, and
+    a tuple on this path is a frame blob whose first word is a COUNT — so
+    `-> int` on any of them would be a claim nothing here can keep, and a wrong
+    one would reach a caller as a dylib manifest signature. Every other
+    function in this module and in `os/_syscalls.mojo` IS annotated, and that
+    is what lets a CALL SITE classify what it got back
+    (bugs/FORMAL_string_equality_of_two_unclassified_words.md): a call result
+    with no annotation is a word whose provenance is unknown, and `f() == g()`
+    on two of those was a comparison of two addresses — `c == d` FALSE for two
+    equal strings.
+
   * NO ARGUMENT IS VARIADIC AND NO RESULT IS A RUN-TIME-LENGTH SEQUENCE. `*p`
     is refused on this path, so `join` is `join(a, b)`, `join3(a, b, c)` and
     `join_all(parts)`; and a list's capacity is the number of `append` SITES in
@@ -72,7 +84,7 @@ DOT = 46
 
 # ── Joining ────────────────────────────────────────────────────────────────
 
-def join(a, b):
+def join(a, b) -> str:
     """`a` and `b` joined with `/`, as CPython's `os.path.join(a, b)` joins them.
 
     CPython's rules, in its order: an absolute `b` discards `a` entirely; an
@@ -89,7 +101,7 @@ def join(a, b):
     return str_build(a, "/", b)
 
 
-def join3(a, b, c):
+def join3(a, b, c) -> str:
     """`join(join(a, b), c)`.
 
     Not a convenience: `*c` is refused on this path, and this is the
@@ -99,7 +111,7 @@ def join3(a, b, c):
     return join(join(a, b), c)
 
 
-def join_all(parts):
+def join_all(parts) -> str:
     """Every element of the list `parts`, joined with `/`.
 
     The list spelling of `join`, for a caller that has its components in a
@@ -155,7 +167,7 @@ def split(p):
     return (head, tail)
 
 
-def dirname(p):
+def dirname(p) -> str:
     """CPython's `os.path.dirname`: the `head` of `split(p)`.
 
     The empty string for `""`, `"."` when there is no separator at all, and
@@ -166,7 +178,7 @@ def dirname(p):
     return h[0]
 
 
-def basename(p):
+def basename(p) -> str:
     """CPython's `os.path.basename`: the `tail` of `split(p)`.
 
     An ALIAS into `p` whenever the answer is non-empty — it is a pointer to
@@ -217,7 +229,7 @@ def splitext(p):
     return (root, p + di)
 
 
-def normpath(path):
+def normpath(path) -> str:
     """CPython's `posixpath.normpath`, rule for rule.
 
     Duplicate separators collapse, `.` components vanish, `..` removes the
@@ -319,12 +331,12 @@ def normpath(path):
     return out
 
 
-def isabs(p):
+def isabs(p) -> int:
     """1 if `p` is absolute — if it begins with `/` on this target."""
     return str_starts(p, "/")
 
 
-def commonprefix(a, b):
+def commonprefix(a, b) -> str:
     """The longest common PREFIX of `a` and `b`, character-wise.
 
     CPython's is character-wise rather than path-wise, so `commonprefix("a/b",
@@ -358,7 +370,7 @@ def commonprefix(a, b):
 # `struct stat` carries; `os/_syscalls.mojo` writes the layout out in full and
 # says where each of these was read from.
 
-def isfile(p):
+def isfile(p) -> int:
     """1 if `p` is a regular file, following symbolic links — CPython's
     `os.path.isfile` exactly.
 
@@ -383,7 +395,7 @@ def isfile(p):
     return 0
 
 
-def isdir(p):
+def isdir(p) -> int:
     """1 if `p` is a directory, following symbolic links.
 
     `opendir` succeeding IS the question: the C library fails it with ENOTDIR
@@ -403,7 +415,7 @@ def isdir(p):
     return 1
 
 
-def islink(p):
+def islink(p) -> int:
     """1 if `p` is a symbolic link, WITHOUT following it — CPython's
     `os.path.islink` exactly.
 
@@ -421,7 +433,7 @@ def islink(p):
     return 0
 
 
-def lexists(p):
+def lexists(p) -> int:
     """1 if `p` is a path the system knows about, links NOT followed.
 
     CPython's `os.path.lexists`, and the difference from `exists` is a dangling
@@ -436,7 +448,7 @@ def lexists(p):
     return 1
 
 
-def samefile(a, b):
+def samefile(a, b) -> int:
     """1 if `a` and `b` are the same file, following symbolic links.
 
     `st_dev` and `st_ino` agreeing, which is what CPython's
@@ -464,7 +476,7 @@ def samefile(a, b):
     return 1
 
 
-def exists(p):
+def exists(p) -> int:
     """1 if `p` resolves to something, following symbolic links.
 
     `access(p, F_OK)`, which is the C library's own answer to the question and
@@ -477,7 +489,7 @@ def exists(p):
     return 0
 
 
-def getsize(p):
+def getsize(p) -> int:
     """The size of `p` in bytes, or -1 if it cannot be stat'd.
 
     `st_size` out of `stat`, which is what CPython's `os.path.getsize` reads —
@@ -517,12 +529,12 @@ def getsize(p):
 # and `stat_ino(p, 1)` the inode of what it points at. `os.lstat_*` are the
 # same functions reached under the other name.
 
-def stat_mode(p, follow):
+def stat_mode(p, follow) -> int:
     """`st_mode` — the whole mode word, permissions and format bits both."""
     return fs_stat_mode(p, follow)
 
 
-def stat_size(p, follow):
+def stat_size(p, follow) -> int:
     """`st_size` — 64 bits at offset 96.
 
     The same number `getsize` returns for a regular file, and the `follow`
@@ -533,12 +545,12 @@ def stat_size(p, follow):
     return fs_stat_field64(p, follow, 96)
 
 
-def stat_ino(p, follow):
+def stat_ino(p, follow) -> int:
     """`st_ino` — the inode number, which with `st_dev` identifies the file."""
     return fs_stat_field64(p, follow, 8)
 
 
-def stat_dev(p, follow):
+def stat_dev(p, follow) -> int:
     """`st_dev` — the device the inode lives on, 32 bits at offset 0.
 
     Read at 32 bits and not at 64 because that is its width in the layout: the
@@ -548,34 +560,34 @@ def stat_dev(p, follow):
     return fs_stat_field32(p, follow, 0)
 
 
-def stat_nlink(p, follow):
+def stat_nlink(p, follow) -> int:
     """`st_nlink` — how many names this inode has, 16 bits at offset 6."""
     return fs_stat_field16(p, follow, 6)
 
 
-def stat_uid(p, follow):
+def stat_uid(p, follow) -> int:
     """`st_uid` — the owning user id, 32 bits at offset 16."""
     return fs_stat_field32(p, follow, 16)
 
 
-def stat_gid(p, follow):
+def stat_gid(p, follow) -> int:
     """`st_gid` — the owning group id, 32 bits at offset 20."""
     return fs_stat_field32(p, follow, 20)
 
 
-def stat_blocks(p, follow):
+def stat_blocks(p, follow) -> int:
     """`st_blocks` — 512-byte blocks allocated, 64 bits at offset 104."""
     return fs_stat_field64(p, follow, 104)
 
 
-def stat_blksize(p, follow):
+def stat_blksize(p, follow) -> int:
     """`st_blksize` — the filesystem's preferred I/O size, at offset 112."""
     return fs_stat_field64(p, follow, 112)
 
 
 # ── Making a path absolute ─────────────────────────────────────────────────
 
-def abspath(p):
+def abspath(p) -> str:
     """CPython's `os.path.abspath`: `p` made absolute, without resolving links.
 
     An absolute `p` is only normalized; a relative one is joined to the
@@ -587,7 +599,7 @@ def abspath(p):
     return normpath(str_build(fs_cwd(), "/", p))
 
 
-def realpath(p):
+def realpath(p) -> str:
     """CPython's `os.path.realpath`: absolute, normalized, links resolved.
 
     The C library's own `realpath`, which allocates, so the answer is a fresh
@@ -609,7 +621,7 @@ def realpath(p):
     return r
 
 
-def relpath(path, start):
+def relpath(path, start) -> str:
     """`path` relative to `start` — CPython's `os.path.relpath`.
 
     Both are made absolute, the components they share are dropped, one `..` is
@@ -697,7 +709,7 @@ def _next_component(s, i):
     return (i, n - str_len(t))
 
 
-def _same_component(a, ca, b, cb):
+def _same_component(a, ca, b, cb) -> int:
     """1 if the components of `a` and `b` at `ca` and `cb` are the same.
 
     Spelled with a bounded compare rather than `str_eq`, because the two
@@ -711,7 +723,7 @@ def _same_component(a, ca, b, cb):
     return str_eq_n(a + ca[0], b + cb[0], ca[1] - ca[0])
 
 
-def expanduser(p):
+def expanduser(p) -> str:
     """CPython's `os.path.expanduser`: a leading `~` replaced from `$HOME`.
 
     `"~"` is the home directory and `"~/x"` is `x` inside it. A `~name` for

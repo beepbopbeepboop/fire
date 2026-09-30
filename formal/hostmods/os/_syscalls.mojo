@@ -86,7 +86,7 @@ out rather than guessed at:
 # normally — that is the whole reason a new string can exist on a target whose
 # string representation has no growable buffer of its own.
 
-def str_alloc(n):
+def str_alloc(n) -> str:
     """A writable, ZEROED buffer of at least `n` bytes plus a terminator.
 
     `n + 1` rather than `n`: every buffer here holds a NUL-terminated string,
@@ -107,7 +107,7 @@ def str_alloc(n):
     return p
 
 
-def str_copy(dst, src, n):
+def str_copy(dst, src, n) -> str:
     """`n` bytes of `src` into `dst`, then a NUL. Returns `dst`.
 
     `memmove`, not `memcpy`: the two ranges may overlap, and a caller copying
@@ -119,7 +119,7 @@ def str_copy(dst, src, n):
     return dst
 
 
-def str_trunc(dst, used):
+def str_trunc(dst, used) -> str:
     """Cut the NUL-terminated string in `dst` back to `used` bytes.
 
     The only way a string gets SHORTER on this path. There is no `rstrip` and
@@ -132,7 +132,7 @@ def str_trunc(dst, used):
     return dst
 
 
-def str_put(dst, used, src, n):
+def str_put(dst, used, src, n) -> int:
     """Append `n` bytes of `src` at `dst + used`, NUL-terminating. New `used`.
 
     The append form of `str_copy`, and it re-terminates because a scan over a
@@ -144,7 +144,7 @@ def str_put(dst, used, src, n):
     return used + n
 
 
-def str_append(dst, src):
+def str_append(dst, src) -> str:
     """`src` onto the end of the NUL-terminated string in `dst`. Returns `dst`.
 
     `strcat` for the same reason `str_copy` is `memmove`: the C library's
@@ -155,7 +155,7 @@ def str_append(dst, src):
     return dst
 
 
-def str_dup(s):
+def str_dup(s) -> str:
     """A `malloc`'d copy of `s`. The caller owns it.
 
     This is the only allocation in the module that a caller has to think about.
@@ -165,7 +165,7 @@ def str_dup(s):
     return str_copy(str_alloc(str_len(s)), s, str_len(s))
 
 
-def str_prefix(s, n):
+def str_prefix(s, n) -> str:
     """The first `n` bytes of `s`, in a fresh buffer the caller owns.
 
     What a string SLICE would be. `s[0:n]` is refused on this path — the count
@@ -177,7 +177,7 @@ def str_prefix(s, n):
     return str_copy(str_alloc(n), s, n)
 
 
-def str_build(a, sep, b):
+def str_build(a, sep, b) -> str:
     """`a + sep + b`, in a fresh buffer. The caller owns it.
 
     String `+` is refused on this path, so this is the spelling of
@@ -193,7 +193,7 @@ def str_build(a, sep, b):
     return d
 
 
-def str_repeat(s, k):
+def str_repeat(s, k) -> str:
     """`s` written `k` times, in a fresh buffer. The caller owns it.
 
     `k <= 0` gives the empty string. Used for the `../` of a `relpath` and for
@@ -215,19 +215,19 @@ def str_repeat(s, k):
 # implementation of a routine that already exists, and the project has already
 # paid for one of those (the `lstrip` loop that two backends got differently).
 
-def str_len(s):
+def str_len(s) -> int:
     """`strlen(s)`."""
     return strlen(s)
 
 
-def str_eq_n(a, b, n):
+def str_eq_n(a, b, n) -> int:
     """1 if the first `n` bytes agree, else 0."""
     if memcmp(a, b, n) == 0:
         return 1
     return 0
 
 
-def str_starts(s, p):
+def str_starts(s, p) -> int:
     """1 if `s` begins with `p`. An empty `p` is 1, as in Python."""
     if strncmp(s, p, str_len(p)) == 0:
         return 1
@@ -235,7 +235,7 @@ def str_starts(s, p):
 
 
 
-def str_at(s, i, chars):
+def str_at(s, i, chars) -> int:
     """1 if `s[i]` is one of the bytes of `chars`.
 
     A character test with no byte load, which is the only way to ask this
@@ -256,7 +256,7 @@ def str_at(s, i, chars):
 
 
 
-def str_rfind(s, p):
+def str_rfind(s, p) -> int:
     """Index of the LAST occurrence of `p` in `s`, or -1.
 
     A scan, not a library call, and the reason is measured: this target's C
@@ -278,7 +278,7 @@ def str_rfind(s, p):
     return last
 
 
-def str_rindex_of(s, chars, m):
+def str_rindex_of(s, chars, m) -> int:
     """Index of the last byte of `s[0:m]` that is in `chars`, or -1.
 
     The bounded "last separator" question, and it is the one every path
@@ -301,12 +301,12 @@ def str_rindex_of(s, chars, m):
     return 0 - 1
 
 
-def str_lead(s, chars):
+def str_lead(s, chars) -> int:
     """How many bytes of `s`, from the start, are in `chars`. `strspn`."""
     return strspn(s, chars)
 
 
-def str_rstrip_len(s, m):
+def str_rstrip_len(s, m) -> int:
     """The length of `s[0:m]` with trailing `/` removed.
 
     Does not copy and does not allocate: it answers the LENGTH, and the caller
@@ -318,13 +318,13 @@ def str_rstrip_len(s, m):
     return m
 
 
-def str_chr_from(s, i, c):
+def str_chr_from(s, i, c) -> str:
     """Pointer to the first `c` at or after `s[i]`, or 0."""
     return strchr(s + i, c)
 
 
 
-def fs_cwd():
+def fs_cwd() -> str:
     """The current working directory, in a fresh buffer the caller owns.
 
     A `malloc`'d copy rather than the descriptor's own buffer, so the caller
@@ -347,62 +347,62 @@ def fs_cwd():
 # not Python's exception, and there is no exception on this path (FORMAL.md
 # phase 7); `os.remove` below says what it does instead.
 
-def fs_access(p, mode):
+def fs_access(p, mode) -> int:
     """`access(p, mode)`. `mode` 0 is F_OK: does the path resolve at all."""
     return access(p, mode)
 
 
-def fs_chdir(p):
+def fs_chdir(p) -> int:
     """`chdir(p)`: 0 on success, -1 on failure."""
     return chdir(p)
 
 
-def fs_chmod(p, mode):
+def fs_chmod(p, mode) -> int:
     """`chmod(p, mode)`: 0 on success, -1 on failure."""
     return chmod(p, mode)
 
 
-def fs_close(fd):
+def fs_close(fd) -> int:
     """`close(fd)`."""
     return close(fd)
 
 
-def fs_closedir(d):
+def fs_closedir(d) -> int:
     """`closedir(d)` on a descriptor from `fs_opendir`."""
     return closedir(d)
 
 
-def fs_getcwd(buf, n):
+def fs_getcwd(buf, n) -> str:
     """`getcwd(buf, n)`: `buf`, or 0 if the path does not fit in `n`."""
     return getcwd(buf, n)
 
 
-def fs_getenv(name):
+def fs_getenv(name) -> str:
     """`getenv(name)`: the value, or 0 when the variable is not set."""
     return getenv(name)
 
 
-def fs_setenv(name, value, overwrite):
+def fs_setenv(name, value, overwrite) -> int:
     """`setenv(name, value, overwrite)`: 0 on success, -1 on failure."""
     return setenv(name, value, overwrite)
 
 
-def fs_unsetenv(name):
+def fs_unsetenv(name) -> int:
     """`unsetenv(name)`: 0 on success, -1 on failure."""
     return unsetenv(name)
 
 
-def fs_lseek(fd, off, whence):
+def fs_lseek(fd, off, whence) -> int:
     """`lseek(fd, off, whence)`."""
     return lseek(fd, off, whence)
 
 
-def fs_mkdir(p, mode):
+def fs_mkdir(p, mode) -> int:
     """`mkdir(p, mode)`: 0 on success, -1 with EEXIST if it is already there."""
     return mkdir(p, mode)
 
 
-def fs_open_ro(p):
+def fs_open_ro(p) -> int:
     """`open(p, O_RDONLY)`: a descriptor, or -1.
 
     Spelled `open(p, "r")` and not `open(p, O_RDONLY)`: this path lowers
@@ -414,7 +414,7 @@ def fs_open_ro(p):
     return open(p, "r")
 
 
-def fs_opendir(p):
+def fs_opendir(p) -> int:
     """`opendir(p)`: a descriptor, or 0.
 
     This is what answers `isdir`, and it answers it exactly: `opendir` fails
@@ -424,7 +424,7 @@ def fs_opendir(p):
     return opendir(p)
 
 
-def fs_readdir(d):
+def fs_readdir(d) -> int:
     """`readdir(d)`: a `struct dirent *`, or 0 at the end of the directory.
 
     Present but NOT yet the answer to anything, and the reason is at the top of
@@ -479,17 +479,17 @@ def fs_readdir(d):
 # caller uses are the functions further down, which is also where the layout is
 # checked.
 
-def le16(b: Pointer[UInt8], i):
+def le16(b: Pointer[UInt8], i) -> int:
     """The little-endian 16-bit field at byte `i` of `b`."""
     return b[i] + 256 * b[i + 1]
 
 
-def le32(b: Pointer[UInt8], i):
+def le32(b: Pointer[UInt8], i) -> int:
     """The little-endian 32-bit field at byte `i` of `b`."""
     return b[i] + 256 * b[i + 1] + 65536 * b[i + 2] + 16777216 * b[i + 3]
 
 
-def le64(b: Pointer[UInt8], i):
+def le64(b: Pointer[UInt8], i) -> int:
     """The little-endian 64-bit field at byte `i` of `b`.
 
     A LOOP rather than eight terms: the shift is `1 << (8*k)`, and eight of
@@ -505,7 +505,7 @@ def le64(b: Pointer[UInt8], i):
     return v
 
 
-def fs_stat(p, buf):
+def fs_stat(p, buf) -> int:
     """`stat(p, buf)`: 0 when `buf` was filled, -1 when it was not.
 
     The two-argument spelling. The C library's own third parameter is an
@@ -516,7 +516,7 @@ def fs_stat(p, buf):
     return stat(p, buf)
 
 
-def fs_lstat(p, buf):
+def fs_lstat(p, buf) -> int:
     """`lstat(p, buf)`: as `fs_stat`, without following a symbolic link.
 
     This is the whole of what `lexists`, `islink` and `samefile` need and the
@@ -556,7 +556,7 @@ def fs_lstat(p, buf):
 # a size, and `test_formal_os.py` pins every field against CPython on a
 # regular file, a directory, a device node, a FIFO and a symbolic link.
 
-def fs_stat_layout_ok(p, buf):
+def fs_stat_layout_ok(p, buf) -> int:
     """1 if the bytes in `buf` can be read as this target's `struct stat`.
 
     0 means either that `stat` failed (nothing was written) or that the
@@ -584,7 +584,7 @@ def fs_stat_layout_ok(p, buf):
     return 1
 
 
-def fs_stat_fill(p, follow):
+def fs_stat_fill(p, follow) -> int:
     """`p`'s `struct stat` in a fresh buffer, or 0 when there is not one.
 
     THE one place the `stat`/`lstat` choice, the status check and the layout
@@ -613,7 +613,7 @@ def fs_stat_fill(p, follow):
     return buf
 
 
-def fs_stat_mode(p, follow):
+def fs_stat_mode(p, follow) -> int:
     """`st_mode` of `p`, or -1. `follow` 0 means `lstat`, 1 means `stat`.
 
     -1 is the answer for a path that does not exist, for one this process
@@ -628,7 +628,7 @@ def fs_stat_mode(p, follow):
     return le16(buf, 4)
 
 
-def fs_stat_field64(p, follow, at):
+def fs_stat_field64(p, follow, at) -> int:
     """The 64-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
 
     One function for `st_ino`, `st_size`, `st_blocks` and `st_blksize` rather
@@ -643,7 +643,7 @@ def fs_stat_field64(p, follow, at):
     return le64(buf, at)
 
 
-def fs_stat_field16(p, follow, at):
+def fs_stat_field16(p, follow, at) -> int:
     """The 16-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
 
     `st_mode` and `st_nlink`. The mode is what every predicate above is
@@ -657,7 +657,7 @@ def fs_stat_field16(p, follow, at):
     return le16(buf, at)
 
 
-def fs_stat_field32(p, follow, at):
+def fs_stat_field32(p, follow, at) -> int:
     """The 32-bit field of `stat`/`lstat` on `p` at byte `at`, or -1.
 
     `st_uid`, `st_gid` and `st_rdev`. The field is 32 bits in the layout above
@@ -670,7 +670,7 @@ def fs_stat_field32(p, follow, at):
     return le32(buf, at)
 
 
-def fs_realpath(p):
+def fs_realpath(p) -> str:
     """`realpath(p, NULL)`: a `malloc`'d absolute path, or 0.
 
     The C library allocates, so the caller owns the result and it is already
@@ -679,22 +679,22 @@ def fs_realpath(p):
     return realpath(p, 0)
 
 
-def fs_rename(a, b):
+def fs_rename(a, b) -> int:
     """`rename(a, b)`: atomic, and it replaces `b` if `b` is there."""
     return rename(a, b)
 
 
-def fs_rmdir(p):
+def fs_rmdir(p) -> int:
     """`rmdir(p)`: 0 on success, -1 on failure."""
     return rmdir(p)
 
 
-def fs_unlink(p):
+def fs_unlink(p) -> int:
     """`unlink(p)`: 0 on success, -1 on failure."""
     return unlink(p)
 
 
-def fs_free(p):
+def fs_free(p) -> int:
     """`free(p)`, for a buffer this module allocated that the caller is done
     with. Nothing above calls it: the strings `os` and `os.path` return are
     the caller's to keep, and releasing one while a derived string still points

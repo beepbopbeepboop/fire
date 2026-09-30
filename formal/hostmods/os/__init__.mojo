@@ -50,6 +50,16 @@ because it is not a matter of taste:
     is a refusal at the call site with a name in it rather than a function
     that returns something plausible. (bugs/FORMAL_listdir_no_run_time_sequence.md)
 
+  * **EVERY FUNCTION HERE SAYS WHAT IT RETURNS.** `-> str` or `-> int` on all
+    of them, which is not documentation: the annotation is what puts `char *` in
+    the module dylib's manifest signature, and a call site reads that to decide
+    whether the value it got back is a string. Without it a call result is a
+    word of unknown provenance, and `f() == g()` on two of those was an
+    ADDRESS comparison — two equal strings compared unequal, silently, on both
+    backends (bugs/FORMAL_string_equality_of_two_unclassified_words.md). The
+    four functions in `os.path` that return a TUPLE carry no annotation, for
+    the reason that file gives.
+
   * `environ` IS ITS THREE FUNCTIONS. A process environment is a `char **` in
     the C library's data, and enumerating it needs a buffer walk this path
     cannot do. `getenv`, `putenv` and `unsetenv` are the whole of what can be
@@ -89,32 +99,32 @@ from .path import exists, isfile, isdir, islink, lexists, getsize
 # Functions, and the reason is at the top of this file. Each returns the
 # interned literal, so there is nothing to free and no two calls can disagree.
 
-def sep():
+def sep() -> str:
     """The path separator: `"/"`."""
     return "/"
 
 
-def curdir():
+def curdir() -> str:
     """The current directory, as a name: `"."`."""
     return "."
 
 
-def pardir():
+def pardir() -> str:
     """The parent directory, as a name: `".."`."""
     return ".."
 
 
-def extsep():
+def extsep() -> str:
     """The extension separator: `"."`."""
     return "."
 
 
-def pathsep():
+def pathsep() -> str:
     """The separator between entries of a search path: `":"`."""
     return ":"
 
 
-def linesep():
+def linesep() -> str:
     """The line separator: a single newline byte.
 
     BUILT, not written `"\\n"`. A string literal on this path is interned
@@ -132,14 +142,14 @@ def linesep():
     return b
 
 
-def devnull():
+def devnull() -> str:
     """The bit bucket: `"/dev/null"`."""
     return "/dev/null"
 
 
 # ── The working directory ──────────────────────────────────────────────────
 
-def getcwd():
+def getcwd() -> str:
     """The current working directory, in a fresh buffer the caller owns.
 
     `""` if the C library cannot report it, which on this target means the
@@ -150,7 +160,7 @@ def getcwd():
     return fs_cwd()
 
 
-def chdir(path):
+def chdir(path) -> int:
     """Change the working directory. 0 on success, -1 on failure.
 
     CPython raises `OSError`; see the note at the top of this module.
@@ -160,7 +170,7 @@ def chdir(path):
 
 # ── The environment ────────────────────────────────────────────────────────
 
-def getenv(name):
+def getenv(name) -> str:
     """The value of the environment variable `name`, or `""` when it is unset.
 
     CPython's `os.getenv(name)`. For `os.getenv(name, default)` use
@@ -175,7 +185,7 @@ def getenv(name):
     return getenv_or(name, "")
 
 
-def getenv_or(name, default):
+def getenv_or(name, default) -> str:
     """`getenv(name)`, with `default` as the answer when it is unset.
 
     A separate function rather than a default argument on `getenv`, and the
@@ -188,7 +198,7 @@ def getenv_or(name, default):
     return v
 
 
-def putenv(name, value):
+def putenv(name, value) -> int:
     """Set the environment variable `name`. 0 on success, -1 on failure.
 
     Always overwrites, which is `os.environ.__setitem__` rather than
@@ -199,7 +209,7 @@ def putenv(name, value):
     return fs_setenv(name, value, 1)
 
 
-def unsetenv(name):
+def unsetenv(name) -> int:
     """Remove the environment variable `name`. 0 on success, -1 if it was
     not set."""
     return fs_unsetenv(name)
@@ -207,7 +217,7 @@ def unsetenv(name):
 
 # ── Creating, removing and renaming ────────────────────────────────────────
 
-def remove(path):
+def remove(path) -> int:
     """Remove the file at `path`. 0 on success, -1 on failure.
 
     `os.remove` and `os.unlink` are the same call on a POSIX target and are
@@ -221,17 +231,17 @@ def remove(path):
     return fs_unlink(path)
 
 
-def unlink(path):
+def unlink(path) -> int:
     """`remove(path)`, under the other name CPython gives it."""
     return fs_unlink(path)
 
 
-def rmdir(path):
+def rmdir(path) -> int:
     """Remove the DIRECTORY at `path`. 0 on success, -1 on failure."""
     return fs_rmdir(path)
 
 
-def mkdir(path, mode):
+def mkdir(path, mode) -> int:
     """Create the directory `path` with permission bits `mode`. 0 or -1.
 
     `mode` is REQUIRED, not defaulted to 0777: a default argument is not
@@ -246,7 +256,7 @@ def mkdir(path, mode):
     return fs_mkdir(path, mode)
 
 
-def makedirs(path, mode):
+def makedirs(path, mode) -> int:
     """Create `path` and every directory above it that is missing.
 
     `mode` is required, for the reason `mkdir` gives. 0 when the whole path
@@ -274,7 +284,7 @@ def makedirs(path, mode):
     return 0
 
 
-def _prefix_end(path, i, n):
+def _prefix_end(path, i, n) -> int:
     """Index of the next `/` at or after `i` in `path`, or `n` if there is none.
 
     The step `makedirs` takes between components. Returning the index of the
@@ -290,7 +300,7 @@ def _prefix_end(path, i, n):
     return j
 
 
-def _make_one(path, j, mode):
+def _make_one(path, j, mode) -> int:
     """Create the directory `path[0:j]` unless it is already there.
 
     Existence is asked with `isdir` rather than with `errno`, and the reason is
@@ -305,7 +315,7 @@ def _make_one(path, j, mode):
     return fs_mkdir(seg, mode)
 
 
-def rename(src, dst):
+def rename(src, dst) -> int:
     """Rename `src` to `dst`, atomically, replacing `dst` if it is there.
 
     0 on success, -1 on failure. CPython's `os.rename` raises; see the top of
@@ -315,19 +325,19 @@ def rename(src, dst):
     return fs_rename(src, dst)
 
 
-def replace(src, dst):
+def replace(src, dst) -> int:
     """`rename(src, dst)`, under CPython's other name for the same call."""
     return fs_rename(src, dst)
 
 
-def chmod(path, mode):
+def chmod(path, mode) -> int:
     """Set the permission bits of `path`. 0 on success, -1 on failure."""
     return fs_chmod(path, mode)
 
 
 # ── Releasing what the path functions allocated ────────────────────────────
 
-def os_free(p):
+def os_free(p) -> int:
     """Release a string one of these functions allocated.
 
     `os.path.join`, `abspath`, `normpath`, `relpath` and the rest return a

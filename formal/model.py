@@ -1127,7 +1127,54 @@ def string_operand_is_string(kind) -> bool:
     return kind == STR_KIND
 
 
-def string_comparison_lowering(op: str, left_kind, right_kind):
+def _is_zero_literal(e) -> bool:
+    """True for the integer literal `0` and for `0 - 0`, and nothing else.
+
+    NOT a string `"0"`: `s == "0"` asks whether a string is the
+    one-character string, and that is a content comparison. `s == 0` asks
+    whether a pointer is NULL, which on this target is a different question
+    with a different answer, and the line between them is drawn by
+    `string_is_null_test`.
+    """
+    if isinstance(e, F.IntLiteral):
+        return e.value == 0
+    if isinstance(e, F.UnaryOp) and e.op == "-":
+        return isinstance(e.operand, F.IntLiteral) and e.operand.value == 0
+    return False
+
+
+def string_is_null_test(left, right) -> bool:
+    """True for `p == 0` / `p != 0` where the other side is not also a zero.
+
+    A POINTER'S NULL TEST, and the reason a function that can return NULL
+    cannot be annotated `-> str` on this path without breaking its own caller.
+    A string is a bare `char *`, a NULL string is 0, and "is it there" is
+    written `x == 0` — which is what every function in
+    `formal/hostmods/os` does with `getenv`, `realpath`, `strchr` and `getcwd`.
+    With the annotation in place `x` is classified a string, one side of `==`
+    is a string, and the comparison this would otherwise choose is
+    `strcmp(x, "0") == 0` — a CONTENT comparison that dereferences the very
+    NULL the test was written to detect.
+
+    The decision lives beside `string_comparison_lowering` because the two
+    answers are chosen from the same pair of operands, and a third caller
+    asking the question separately is how two architectures come to disagree
+    about whether a program works.
+
+    Python has no such spelling — `s == 0` is False for every string there — so
+    this is a RECORDED DIVERGENCE and not an approximation of an answer. What it
+    is instead is the one reading that makes a pointer test mean what the
+    pointer's own convention says, and the alternative is that every
+    NULL-returning function on this path stays unannotated forever, which
+    reopens `bugs/FORMAL_string_equality_of_two_unclassified_words.md` for every
+    caller of one.
+    """
+    return ((_is_zero_literal(left) and not _is_zero_literal(right))
+            or (_is_zero_literal(right) and not _is_zero_literal(left)))
+
+
+def string_comparison_lowering(op: str, left_kind, right_kind,
+                               left=None, right=None):
     """How `a {op} b` lowers when either side is a string: content, identity,
     or None when it is not a string comparison.
 
@@ -1160,6 +1207,16 @@ def string_comparison_lowering(op: str, left_kind, right_kind):
             or string_operand_is_string(right_kind)):
         return None
     if op in ("==", "!="):
+        # The NULL test, asked BEFORE the content compare and only of a pair
+        # whose SYNTAX the caller has in hand. `left`/`right` are optional
+        # because a caller with no nodes cannot ask, and a caller with no nodes
+        # is not deciding about `p == 0` — see `string_is_null_test` for why the
+        # question exists and what it costs to get wrong. Every comparison site
+        # in both backends passes them, so one architecture cannot be answering
+        # `p == 0` and the other `strcmp(p, "0")`.
+        if left is not None and right is not None \
+                and string_is_null_test(left, right):
+            return None
         return STRING_COMPARE_CONTENT
     if op in STRING_IDENTITY_OPS:
         return STRING_COMPARE_IDENTITY
@@ -1353,7 +1410,9 @@ def _string_operand_refusal(op: str, spelled_op, left_kind,
 
 
 def string_binary_refusal(op: str, left_kind, right_kind,
-                          spelled_op: str | None = None) -> str | None:
+                          spelled_op: str | None = None,
+                          left=None, right=None, fn=None,
+                          untyped_callee=None) -> str | None:
     """The ONE place a binary operator with a string operand is decided not to
     be lowered, so both backends ask the same question in the same order.
 
@@ -1365,10 +1424,170 @@ def string_binary_refusal(op: str, left_kind, right_kind,
     by x86-64 for the augmented forms, so `s += t` printed `[]` on arm64 and
     segfaulted on x86-64 — the same non-answer as `s = s + t`, which both
     backends refused, from the same line of source.
+
+    `left`/`right` are the operand NODES, `fn` the function being emitted and
+    `untyped_callee` the backend's "is this a Mojo callee with no declared
+    return type".
+    Only `string_compare_word_refusal` below uses them — the other two arms ask
+    about kinds and have no use for the syntax — and they are all OPTIONAL so
+    that a caller which has none of them still gets the first two arms. Both
+    backends pass all four at every comparison site, so the third arm cannot be
+    reached from one site and missed from another: that is the failure this
+    function exists to prevent, applied to itself.
     """
+    if (left is not None and right is not None and fn is not None
+            and untyped_callee is not None):
+        word = string_compare_word_refusal(
+            op, left_kind, right_kind, left, right, fn, untyped_callee)
+        if word is not None:
+            return word
     return (string_concat_refusal(spelled_op or op, left_kind, right_kind)
             or string_arithmetic_refusal(op, left_kind, right_kind,
                                          spelled_op))
+
+
+def _word_from_an_unannotated_call(fn, operand, untyped_callee) -> bool:
+    """True when `operand` is a word whose only provenance is an UNTYPED call.
+
+    The three shapes, and each one is measured:
+
+      * a call result directly — `mk("abc") == other`;
+      * a NAME bound from a call in this very function — which is what the
+        measured case is, and the reason this function exists rather than an
+        `isinstance(operand, F.CallExpr)` test: `c = mk("abc"); d = mk("abc");
+        c == d` puts two `IdentExpr` at the `==`, and a syntactic test would
+        see two unremarkable names;
+      * an ALIAS of such a name — `e = c` — which `_name_bindings` walks, so it
+        comes out of the same two cases rather than a third rule.
+
+    A name whose binding CARRIES AN ANNOTATION is not in this set at all, which
+    is the fourth shape and the one that keeps the refusal off correct code:
+    `var buf: Pointer[UInt8] = fill(p)` binds a name with a declared type from a
+    call that declares nothing, and `buf == 0` is a NULL test on a declared
+    pointer.
+
+    `untyped_callee(name)` is the backend's answer to "is this a MOJO function
+    that does not say what it returns", and the question is asked in the
+    backend rather than derived from the kind because `ValueKinds` cannot
+    answer it: an unannotated call's result and an `-> int` call's result are
+    both `INT_KIND` here, because a word is an integer. The third case matters
+    as much as the second — an UNBOUND EXTERN is not this at all.
+    `memcmp(a, b, n) == 0` is a comparison of a C library function's return
+    value against zero and is correct in every `os` function on this path;
+    `getenv(name) == 0` is a NULL check. So the test asks about Mojo callees
+    only, and the backend answers it from the parser's `return_type` for a
+    function of this image and from the dylib manifest's signature for one in
+    another — where an unannotated function's signature return is `void` (see
+    `reflect._c_signature`), which is how the two are told apart there.
+    """
+    if isinstance(operand, F.CallExpr):
+        callee = _flat_callee(operand)
+        return callee is not None and untyped_callee(callee)
+    if isinstance(operand, F.IdentExpr) and fn is not None:
+        from_call = False
+        for ann, rhs in _name_bindings(fn, operand.name):
+            if ann:
+                # A DECLARED type, so the name is not an untyped word whatever
+                # it was bound from. `var buf: Pointer[UInt8] = fill(p)` is the
+                # case that needs this: `fill` says nothing about its return,
+                # the local says `Pointer[UInt8]`, and `buf == 0` is a NULL
+                # test on a declared pointer rather than a comparison of two
+                # words of unknown provenance.
+                return False
+            if isinstance(rhs, F.CallExpr):
+                callee = _flat_callee(rhs)
+                if callee is not None and untyped_callee(callee):
+                    from_call = True
+        return from_call
+    return False
+
+
+def string_compare_word_refusal(op: str, left_kind, right_kind, left, right,
+                                fn, untyped_callee) -> str | None:
+    """Why `a {op} b` must not be lowered as a comparison of two NUMBERS, or None.
+
+    `bugs/FORMAL_string_equality_of_two_unclassified_words.md`, and the worst
+    shape a backend bug can have: a correct program taking the wrong branch,
+    silently, on both architectures. `string_comparison_lowering` returns None
+    when neither side is a string, and the caller's fallback for None is the
+    ordinary integer comparison of two words — so two `char *` into two
+    `malloc`'d buffers holding the same four bytes compared UNEQUAL:
+
+        def mk(t):
+            var p: Pointer[UInt8] = malloc(64)
+            snprintf(p, 64, "%s", t)
+            return p
+
+        c = mk("abc"); d = mk("abc")
+        c == d                        # FALSE; the answer is TRUE
+        strncmp(c, d, strlen(d) + 1)  # 0 — the comparison this is documented
+                                      # to lower to, agreeing they are equal
+
+    Three rows localise it exactly. Two interned LITERALS compare equal, so a
+    pointer compare would pass. A literal on ONE side makes it a string
+    comparison, so `call-lit` is right. And the content compare the code
+    documents itself as making says the two are equal. So the content compare
+    is not mis-LOWERED — it is never REACHED, because a value that came out of
+    a call is classified `INT_KIND` and a word is an integer on this path.
+
+    WHEN IT FIRES, and the narrowness is the design. `==`/`!=` only; neither
+    side classified as a string (so this never competes with the content
+    compare, which is the right answer); and at least one side a word whose
+    only provenance is a call to a MOJO FUNCTION THAT DOES NOT SAY WHAT IT
+    RETURNS. Three things that leaves alone, each for a measured reason:
+
+      * an ANNOTATED callee — so `count() == other_count()` for two `-> int`
+        functions is untouched, and once `formal/hostmods/os` carries its
+        `-> str` / `-> int` annotations (the OTHER half of that bug doc, and
+        thirty-odd one-word edits) this stops firing for a path library
+        altogether;
+      * an UNBOUND EXTERN — `memcmp(a, b, n) == 0` and `getenv(name) == 0` are
+        comparisons of a C library function's return value, and they are
+        correct on every one of them;
+      * two unannotated PARAMETERS — `p == q` on two words from a caller is a
+        comparison of two integers far more often than of two strings, and
+        refusing it would put a diagnostic in front of correct code;
+      * an INTEGER LITERAL on either side — see the comment at the test. The
+        measured defect has no literal in it.
+
+    The cost of the narrowness, stated rather than hidden: a function that
+    returns a string, says nothing about it, and is called through a name that
+    is never bound to a local — `f() == g()` where the result is compared
+    directly against another call — is refused, and one compared against a
+    PARAMETER is not. The message says exactly what to do about it.
+    """
+    if op not in ("==", "!="):
+        return None
+    if string_operand_is_string(left_kind) or string_operand_is_string(right_kind):
+        return None
+    # A LITERAL on either side is a number, and a comparison against one is a
+    # numeric comparison in every case the corpus has. That is not a guess: it
+    # is what the two regressions this refusal caused were.
+    # `struct Counter: count: Int` with `def get(self): return self.count` and
+    # `if c.get() != 37:` has no return annotation to be missing, and a
+    # diagnostic in front of it is a diagnostic in front of correct code. The
+    # measured defect has NO literal — it is `c == d`, two computed words.
+    if isinstance(left, F.IntLiteral) or isinstance(right, F.IntLiteral):
+        return None
+    if not (_word_from_an_unannotated_call(fn, left, untyped_callee)
+            or _word_from_an_unannotated_call(fn, right, untyped_callee)):
+        return None
+    return (
+        f"`{spelled(left)} {op} {spelled(right)}` compares two values this path "
+        f"can only call numbers, and at least one of them arrived from a call "
+        f"that does not say what it returns. A string on this path is a bare "
+        f"`char *` to a `malloc`'d buffer, and two such buffers holding the "
+        f"same four bytes are at DIFFERENT addresses, so the comparison this "
+        f"lowers to says they are unequal. Measured, on both backends: "
+        f"`c = mk(\"abc\")` and `d = mk(\"abc\")` gave `c == d` FALSE while "
+        f"`strncmp(c, d, strlen(d) + 1)` returned 0. A correct program takes "
+        f"the wrong branch and nothing downstream can tell. The missing thing "
+        f"is the CALLEE's return type: annotate it `-> str` or `-> int`, which "
+        f"is what puts the answer in the dylib manifest's signature and lets "
+        f"this call site classify the result. Until then ask the question with "
+        f"the comparison itself — `strncmp(a, b, strlen(b) + 1) == 0` or "
+        f"`memcmp(a, b, n) == 0` — which is a real content test and needs no "
+        f"kind to be recovered")
 
 
 def string_unary_refusal(op: str, kind, spelled_operand: str) -> str | None:

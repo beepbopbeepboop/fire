@@ -356,7 +356,82 @@ def main(n):
     refusal="STRUCT",
 ))
 
-# ── 4. `stat(2)`'s out-parameter, against the real filesystem ──────────────
+# ── 4. `==` between two computed strings ───────────────────────────────────
+#
+# The third construct, and the one whose failure mode is a correct program
+# taking the wrong branch rather than a wrong number. Two cases, and they are
+# the two halves of the fix:
+#
+#   * an ANNOTATED callee classifies at the CALL SITE, across a dylib boundary,
+#     so `dirname(p) == "a"` is a content compare. Measured FALSE before the
+#     annotations, on both backends.
+#   * an UNANNOTATED one is REFUSED rather than compared, so a program that
+#     means to compare two strings and forgot the annotation gets a diagnostic
+#     naming the fix instead of a silent FALSE.
+#
+# The null test is the third case and it is a DIVERGENCE, pinned here so it
+# cannot change unnoticed: `p == 0` on a `char *` is "is it there", which is
+# what every function in `os` means by it, and it is a word compare. Python has
+# no such spelling — `s == 0` is False for every string there — so this is
+# recorded rather than claimed to match anything.
+CASES.append(Case(
+    "string_equality_annotated_callee",
+    '''\
+from os.path import join, dirname, basename, normpath
+
+def main(n):
+    p = join("a", "b")
+    printf("a=%d@@", 1 if dirname(p) == "a" else 0)
+    printf("b=%d@@", 1 if dirname(p) == "b" else 0)
+    printf("c=%d@@", 1 if basename(p) == "b" else 0)
+    printf("d=%d@@", 1 if normpath(p) == "a/b" else 0)
+    printf("e=%d@@", 1 if dirname(p) != "b" else 0)
+    return 0
+''',
+    {"a": "1", "b": "0", "c": "1", "d": "1", "e": "1"},
+    archs=["arm64"],
+))
+
+CASES.append(Case(
+    "refuse_unannotated_string_equality",
+    '''\
+def mk(t):
+    var p: Pointer[UInt8] = malloc(64)
+    snprintf(p, 64, "%s", t)
+    return p
+
+
+def main(n):
+    c = mk("abc")
+    d = mk("abc")
+    printf("%d@@", 1 if c == d else 0)
+    return 0
+''',
+    refusal="CALLEE",
+))
+
+# The call form with no local binding, and the parameter form beside it. The
+# first is refused; the second is left alone on purpose, and this is the case
+# that says so — see `model.string_compare_word_refusal`'s "two unannotated
+# PARAMETERS" bullet for why a diagnostic there would be in front of correct
+# code.
+CASES.append(Case(
+    "refuse_unannotated_string_equality_call_form",
+    '''\
+def mk(t):
+    var p: Pointer[UInt8] = malloc(64)
+    snprintf(p, 64, "%s", t)
+    return p
+
+
+def main(n):
+    printf("%d@@", 1 if mk("abc") == mk("abc") else 0)
+    return 0
+''',
+    refusal="CALLEE",
+))
+
+# ── 5. `stat(2)`'s out-parameter, against the real filesystem ──────────────
 #
 # Every field this module reads, on every shape a path can have, compared with
 # CPython's own `os.stat` in this process. The shapes are the point: a layout

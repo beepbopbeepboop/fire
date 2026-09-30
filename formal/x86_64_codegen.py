@@ -3686,7 +3686,9 @@ class X86_64Codegen:
         # `model.string_binary_refusal`, which is the one table both backends
         # ask and which holds the measurements.
         reason = M.string_binary_refusal(
-            op, self._expr_str_kind(e.left), self._expr_str_kind(e.right))
+            op, self._expr_str_kind(e.left), self._expr_str_kind(e.right),
+            left=e.left, right=e.right, fn=self._cur_fn,
+            untyped_callee=self._untyped_callee)
         if reason is not None:
             raise CodegenError(reason)
         if op in _CMP_CONDS:
@@ -3781,8 +3783,8 @@ class X86_64Codegen:
         answer, which is the same trap `_emit_str_affix` documents.
         """
         if M.string_comparison_lowering(
-                op, self._expr_str_kind(l), self._expr_str_kind(r)) \
-                != M.STRING_COMPARE_CONTENT:
+                op, self._expr_str_kind(l), self._expr_str_kind(r),
+                l, r) != M.STRING_COMPARE_CONTENT:
             return False
         # push l, then r  =>  [rsp] = r, [rsp+16] = l. The same two-slot shape
         # `_emit_str_affix` uses, and for the same reason: an expression leaves
@@ -4636,6 +4638,40 @@ class X86_64Codegen:
                 f"gap, written down in "
                 f"bugs/FORMAL_module_state_no_storage.md")
         return self._dylib_syms.get(name, name)
+
+    def _untyped_callee(self, name) -> bool:
+        """Is `name` a MOJO function that does not say what it returns?
+
+        The question `string_compare_word_refusal` needs and `ValueKinds` cannot
+        answer: an unannotated call's result and an `-> int` call's result are
+        both `INT_KIND` on this path, because a word is an integer, and the two
+        are not the same thing — one of them may be a `char *`, and `f() == g()`
+        on two of those compares two addresses.
+
+        Two sources, because there are two kinds of Mojo callee, and the third
+        kind is the one that must NOT be in this set:
+
+          * a function of THIS image — the parser recorded its `return_type`,
+            and `None` is the answer when the source has no `->`;
+          * an export of a LINKED MODULE — its manifest signature carries the
+            return type, and `reflect._c_signature` spells an unannotated
+            function's as `void`, so `void` here is the same fact as `None`
+            above. `dylib_export_return_kind` reads the `char *` case out of
+            the same string, which is how a cross-image `-> str` classifies;
+          * and an UNBOUND EXTERN is NOT in this set at all. `memcmp(a, b, n)
+            == 0` is in every `os` function on this path and is correct on
+            every one of them; `getenv(name) == 0` is a NULL check. A C
+            library function has no Mojo return annotation to be missing.
+        """
+        fn = self._functions.get(name)
+        if fn is not None:
+            return getattr(fn, "return_type", None) is None
+        entry = M.dylib_export_lookup(self._dylib_by_name,
+                                      self._dylib_by_module, name)
+        if entry is None:
+            return False
+        return M.signature_return_type(
+            entry.get("signature") or "").strip() == "void"
 
     def _callee_kind(self, name, stack):
         """What a call to the local function `name` produces, or None."""
