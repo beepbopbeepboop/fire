@@ -1702,10 +1702,42 @@ def gen_module_impl(self, stmts):
                         _xf_orig = _xf_call.func.member
                 if not _xf_mod or not _xf_orig:
                     continue
+                # The module the binding NAMES is not necessarily the module
+                # that DEFINES the struct: a package `__init__.py` that
+                # re-exports (`from .sub import Dialog`) is a re-exporting
+                # module. Both consumers below are keyed on the DEFINING
+                # module — `_xf_struct_init_params` has to find a real
+                # StructDef to read `__init__`'s param names from (a
+                # re-exporting module has none, so it returned None and the
+                # hint was silently never recorded), and `_xf_key_base`'s
+                # qualifier half is matched by the defining temp_gen against
+                # its OWN `module_name` when it merges the hint. Without
+                # this, a `from pkg import Struct as Alias; Alias("s")` left
+                # the struct's unannotated `self.f = f` field at the
+                # `int64_t` default (a hard `gcc -fgimple` "non-trivial
+                # conversion in 'var_decl'" when unaliased, and a `char *`
+                # laundered through `int64_t` and printed as a pointer
+                # decimal when aliased). Resolving to the defining module
+                # first makes both spellings correct, which is what
+                # `_find_symbol_home_module` exists for; a None answer (no
+                # reachable module defines the name, e.g. the call is not a
+                # struct constructor at all) leaves `_xf_mod` untouched.
+                _xf_home = self._find_symbol_home_module(_xf_mod, _xf_orig, 'struct')
+                if _xf_home:
+                    _xf_mod = _xf_home
                 _xf_pnames = _xf_struct_init_params(_xf_mod, _xf_orig)
                 if not _xf_pnames:
                     continue  # not a known struct constructor in that module
-                _xf_key_base = _xf_mod.replace('.', '_').replace('-', '_') + '::' + _xf_orig
+                # `lstrip('.')` on the qualifier half, matching
+                # `_note_own_func_home`'s canonicalization of the module key
+                # the DEFINING gen was keyed by (and so the spelling its own
+                # `_note_own_func_home` call recorded) — see
+                # `_find_symbol_home_module`'s docstring. Without it a module
+                # reached as `.sub` produced the key `_sub::Struct::field`
+                # while the defining gen compared against `sub`, so a
+                # package whose `__init__.py` re-exports never saw its own
+                # struct's field hints.
+                _xf_key_base = _xf_mod.lstrip('.').replace('.', '_').replace('-', '_') + '::' + _xf_orig
                 for _xfi, _xfa in enumerate(_xf_call.args):
                     if _xfi >= len(_xf_pnames):
                         break
@@ -3423,6 +3455,31 @@ def gen_module_impl(self, stmts):
     if self.do_imports or self.link_imports:
         _scan_body_for_local_field_access(imported_stmts, None)
 
+    # Aliased CLASS imports (`from M import Class as Alias`) for the WHOLE
+    # module, module scope AND function bodies, resolved HERE rather than
+    # only where the from-import statement is later lowered. The reason is
+    # ordering, not tidiness: `_note_struct_import_alias` is gated on
+    # `struct_field_types`, which is only populated by the struct passes
+    # above, and the alias has to be known to every inference pass that
+    # runs after this point — a function-scoped `from M import C as A`
+    # whose `return A("s")` feeds the free-function RETURN-type inference
+    # (below, in `_gmi_collect_return_values`' consumers) otherwise infers
+    # `int64_t`, and the caller then reads the struct through an integer
+    # (`assignment to 'char *' from 'int64_t' ... makes pointer from
+    # integer without a cast`). `_gen_stmt_FromImportStmt` keeps its own
+    # call for the `not do_imports` shape, where this pass does not run;
+    # `_note_struct_import_alias` is first-writer-wins, so the two can
+    # never disagree about what an alias names.
+    for _al_n in _walk_ast(stmts):
+        if not (isinstance(_al_n, FromImportStmt)
+                and not getattr(_al_n, 'wildcard', False)):
+            continue
+        for _al_ip in (getattr(_al_n, 'name_alias_strs', None) or []):
+            _al_name = gimple_ctypes._fi_name(_al_ip)
+            _al_alias = gimple_ctypes._fi_alias(_al_ip)
+            if _al_alias:
+                self._note_struct_import_alias(_al_n.module, _al_alias, _al_name)
+
     _phase0_func_types = dict(self.func_return_types)   # save Phase 0 registrations
     _phase0_imported   = dict(getattr(self, 'imported_symbols', {}))  # save Phase 0 imported_symbols
     self.func_return_types = dict(_RUNTIME_FUNCS)
@@ -4261,7 +4318,13 @@ def gen_module_impl(self, stmts):
     # preamble (reads struct_field_types directly) and the `__init__` body's
     # own store codegen (reads it at emission time, later still) agree.
     if getattr(self, '_xmod_ctor_field_hints', None) and self.module_name:
-        _xf_self_q = self.module_name.replace('.', '_').replace('-', '_')
+        # `lstrip('.')` — the same canonicalization `_find_symbol_home_module`
+        # documents and the producer above applies: this gen's `module_name`
+        # is the import string that first pulled the module in, and a
+        # RELATIVE spelling (`.sub`) canonicalizes with its leading dots
+        # stripped, exactly as `_note_own_func_home` does when it records
+        # this module's own free functions' home.
+        _xf_self_q = self.module_name.lstrip('.').replace('.', '_').replace('-', '_')
         for _xf_key in self._xmod_ctor_field_hints:
             _xf_hq, _xf_hstruct, _xf_hfield = _xf_key.split('::', 2)
             if _xf_hq != _xf_self_q:
@@ -8571,6 +8634,36 @@ def gen_module_impl(self, stmts):
 
     _stub_only_modules = {'jit.arm64', 'jit'}
     _imp_syms = _as_dict(self.imported_symbols)
+
+    def _sn_def_name(_si, _sn):
+        """The name this TU's OWN inline definitions use for the symbol
+        `imported_symbols` records under `_sn` — the `original_name` for a
+        genuine `from M import f as g` alias, else `_sn` itself.
+
+        `inline_defined` is built from the parsed FunctionDef NAMES, so a
+        bare-name entry always hits it and an ALIAS entry never did. That
+        miss is not cosmetic: the `inline_defined` skip exists precisely
+        because a symbol this TU defines must not get a second,
+        independently-typed declaration from the text-scan export table,
+        and an alias skipped the skip and so emitted one. With an
+        unannotated `def` the scan's signature has no parameters
+        (`int64_t helper (void)`), so the single-TU output carried a
+        forward declaration contradicting the definition compiled a few
+        hundred lines below it:
+        #
+        #   conflicting types for 'helper_mod_helper_9f63a2';
+        #     have 'int64_t(void)'
+        #   main2.py:4:9: error: too many arguments to function
+        #     'helper_mod_helper_9f63a2'; expected 0, have 1
+        #
+        # for `from helper_mod import helper as h; h(41)`. Same module, same
+        # alias, no re-export involved.
+        """
+        _od = _si.get('original_name')
+        if isinstance(_od, str) and _od:
+            return _od
+        return _sn
+
     for sym_name in sorted(_imp_syms):
         # `_sn` — a FRESH `_as_str` view (the sorted() loop var is int64_t;
         # reassigning `sym_name` would re-widen it via whole-function
@@ -8619,6 +8712,7 @@ def gen_module_impl(self, stmts):
         # runs first and would win the race to define `_MOJO_STUB_<sym>`,
         # suppressing the definition pass's own declaration.
         if (_sn in inline_defined
+                or _sn_def_name(sym_info, _sn) in inline_defined
                 or (_sn in self._global_inline_defs and 'signature' not in sym_info)):
             continue
         if _sn in self.struct_field_types:

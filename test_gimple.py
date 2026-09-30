@@ -6487,6 +6487,142 @@ print("%r" % p)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_aliased_and_reexported_imports_resolve_to_the_defining_module():
+        """`from M import X as A` and `from R import X` where `R` only
+        RE-EXPORTS `X`, on both the single-TU and link-mode pipelines, with
+        CPython's own stdout as the expectation.
+
+        Four distinct bugs lived under these two spellings and each had a
+        different, mostly silent failure, which is why they are pinned
+        together rather than one per line:
+
+        * A CLASS alias missed every struct table (`struct_field_types` is
+          keyed by the struct's own bare name in its DEFINING module), so
+          `Alias("s")` fell into the generic one-string-argument "opaque
+          constructor" and returned the ARGUMENT — `x` became the literal
+          `"a"` and `x.widgetName` raised AttributeError
+          (bugs/CODEGEN_aliased_imported_struct_construction_unresolved.md).
+        * The same class reached THROUGH a re-export then lost its field
+          TYPES: the cross-module constructor-hint pass looked the struct
+          up in the RE-EXPORTING module, which has no `class`, so
+          `widgetName` stayed `int64_t` and a `char *`'s bits printed as a
+          pointer decimal (unaliased, the same miss is a hard gcc
+          "non-trivial conversion in 'var_decl'").
+        * A FUNCTION alias got a second, independently-typed `extern` from
+          the re-export preamble: the preamble's "this TU already defines
+          it" skip tests the name it is keyed by, which for an alias is not
+          the name the definitions use, so the text scan's parameter-less
+          `int64_t helper (void)` for an unannotated `def helper(x)`
+          contradicted the definition compiled a few hundred lines below it
+          (bugs/CODEGEN_reexported_function_import_qualifier_names_the_
+          wrong_module.md, and the direct-alias variant of the same shape).
+        * A re-exported FUNCTION never resolved at all — the export table
+          is a text scan of the re-exporting `__init__.py`, which contains
+          no `def` — so the call site bound to the extern preamble's `weak`
+          "unavailable in compiled mode" stub, or emitted
+          `p_tri_<suffix>` against a definition emitted as
+          `sub_tri_<suffix>`.
+
+        CPython is run on the SAME files and its stdout is the expectation;
+        no answer is written down as a literal, so a change in what Python
+        does cannot turn this into a test that protects a wrong value.
+        """
+        global _PASS, _FAIL
+        name = "aliased_and_reexported_imports_resolve_to_the_defining_module"
+        files = {
+            # A package `__init__.py` that re-exports is the standard
+            # layout, and the case every one of the four bugs above needs.
+            'p/__init__.py': 'from .sub import Dialog, helper, tri\n',
+            'p/sub.py': (
+                'class Dialog:\n'
+                '    def __init__(self, widgetName):\n'
+                '        self.widgetName = widgetName\n'
+                '\n'
+                'def tri(x):\n'
+                '    return x * 3\n'
+                '\n'
+                'def helper(x):\n'
+                '    return x + 1\n'
+            ),
+            # An UNRELATED module exporting the same function name, so a
+            # fix that resolves "where does this name live" by scanning
+            # for any module that defines it (rather than by following
+            # THIS import statement's re-export hops) has somewhere to
+            # resolve to wrongly.
+            'other.py': 'def tri(x):\n    return 1000 + x\n',
+            'p/main.py': (
+                'from p import Dialog as D\n'
+                'from p import helper as H\n'
+                'from p import tri as T\n'
+                'from p.sub import Dialog as D2\n'
+                'from other import tri as T2\n'
+                '\n'
+                'def build():\n'
+                '    from p import Dialog as D3\n'
+                '    return D3("inner")\n'
+                '\n'
+                'def probe():\n'
+                '    from p import tri\n'
+                '    return tri(4)\n'
+                '\n'
+                'def main():\n'
+                '    print(D("a").widgetName)\n'
+                '    print(D2("b").widgetName)\n'
+                '    print(build().widgetName)\n'
+                '    print(H(41))\n'
+                '    print(T(7))\n'
+                '    print(T2(1))\n'
+                '    print(probe())\n'
+                '\n'
+                'main()\n'
+            ),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            for rel, body in files.items():
+                fp = os.path.join(td, rel)
+                os.makedirs(os.path.dirname(fp), exist_ok=True)
+                with open(fp, 'w') as fh:
+                    fh.write(body)
+            entry = os.path.join(td, 'p', 'main.py')
+            # cwd=td so `import p` / `import other` resolve for CPython.
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:400]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            for mode in ('single-TU', 'link-mode'):
+                c_src = gimple_codegen._run_pipeline(
+                    files['p/main.py'], filename=entry,
+                    **({'do_imports': True} if mode == 'single-TU'
+                       else {'link_mode': True}))[0]
+                c_file = os.path.join(td, f'aliased_{mode}.c')
+                exe = os.path.join(td, f'aliased_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          f"{cc.stderr[:1200]}")
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                if run.stdout != want:
+                    print(f"FAIL  {name} [{mode}]: printed {run.stdout!r}, "
+                          f"CPython printed {want!r}")
+                    _FAIL += 1
+                    return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     test_ctor_arg_container_literal_field_is_container_typed()
     test_ctor_arg_dict_and_set_literal_fields_are_container_typed()
     test_ctor_arg_mixed_container_and_scalar_stays_int64()
@@ -6499,6 +6635,7 @@ print("%r" % p)
     test_generator_mixed_bool_and_int_yields_widen_to_int()
     test_user_defined_dunder_repr_is_called()
     test_user_defined_dunder_repr_value()
+    test_aliased_and_reexported_imports_resolve_to_the_defining_module()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

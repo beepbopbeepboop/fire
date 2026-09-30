@@ -477,6 +477,217 @@ def _find_imported_struct(gen, module: str, name: str):
             return s
     return None
 
+def _resolved_export_entry(gen, module: str, name: str, info):
+    """`info` (one `module_loader` export-table entry) upgraded to the
+    DEFINING module's own parsed signature when the scan's is lossy.
+
+    `module_loader`'s export table is a TEXT scan: for an unannotated
+    `def tri(x)` it emits `int64_t tri (void)` — no parameters — because it
+    reads signatures off the text rather than off the parse tree. That is
+    survivable while a sibling import is inlined into the SAME translation
+    unit: the definition itself carries the true prototype, and the extern
+    preamble deliberately skips any symbol this TU defines. But the
+    re-export path RE-EMITS the entry for a symbol this TU does NOT define,
+    so the lossy prototype became the only declaration in the file:
+
+        too many arguments to function 'sub_tri_9f63a2'; expected 0, have 1
+
+    Rebuild it from the parsed FunctionDef — the same resolver the
+    definition side itself uses, so the two agree — and keep the scan's
+    return type when the def carries no annotation, since an absent
+    annotation means int64_t everywhere else in this path too.
+
+    Returns `info` unchanged when it is not a dict with a signature, or the
+    module's own source has no such top-level FunctionDef (nothing better to
+    say). Only the re-export callers use this; the ordinary
+    already-resolved import is left exactly as it was.
+    """
+    if not isinstance(info, dict) or not info.get('signature'):
+        return info
+    _fn = None
+    try:
+        for _fs in (gen._parsed_import(module)[2] or []):
+            if isinstance(_fs, gimple_ctypes.FunctionDef) and _fs.name == name:
+                _fn = _fs
+                break
+    except Exception:
+        _fn = None
+    if _fn is None:
+        return info
+    _ret = _as_str(info.get('c_return_type') or 'int64_t')
+    if _fn.return_type:
+        _ret = gen._resolve_type(_fn.return_type)
+    _pts = gen._signature_ctypes(_fn.params, _fn)
+    _cparams = []
+    for _i, _cpt in enumerate(_pts):
+        _pn = (_fn.params or [])[_i][0] if _i < len(_fn.params or []) else ''
+        _cparams.append(_cpt + ' ' + _as_str(_pn).lstrip('*'))
+    _out = dict(info)
+    _out['c_return_type'] = _ret
+    _out['c_parameters'] = _cparams
+    _out['signature'] = (_ret + ' ' + _as_str(name) + ' ('
+                         + (', '.join(_cparams) or 'void') + ')')
+    return _out
+
+def _module_defines_symbol(gen, module: str, name: str, kind: str) -> bool:
+    """Does `module`'s OWN top-level source define `name`? `kind` is
+    'struct' (a StructDef) or 'fn' (a top-level FunctionDef).
+
+    Top-level only by construction: `_parsed_import`'s statement list is
+    the module's own body, so a METHOD that happens to share the name (a
+    `__init__` inside a class, say) is never matched.
+    """
+    if kind == 'struct':
+        return gen._find_imported_struct(module, name) is not None
+    _p, _s, _stmts = gen._parsed_import(module)
+    for _st in (_stmts or []):
+        if isinstance(_st, gimple_ctypes.FunctionDef) and _st.name == name:
+            return True
+    return False
+
+def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int = 0):
+    """The module ref whose own source DIRECTLY defines top-level `name`,
+    starting from `module` and following its `from X import name` statements
+    transitively (re-export chains). None if no reachable module defines it
+    — an honest "not found", never a guess. `kind` is 'fn' or 'struct'.
+
+    Why this exists: the module a client imports a symbol FROM and the
+    module that DEFINES it are two different modules whenever the former
+    re-exports the latter, which is the standard layout for a Python
+    package (`p/__init__.py` doing `from .sub import tri`). The compiled
+    path's symbol mangling is `<qualifier>_<name>_<suffix>`, and the
+    qualifier half is supposed to be "the module that defines this symbol"
+    — every mangled name is emitted twice, once by the definer (keyed by the
+    module name IT was compiled under) and once by each importer, and the
+    two halves must name the same binding. Deriving the call site's half
+    from the import statement's own module string therefore emits
+    `p_tri_<suffix>` against a definition emitted as `sub_tri_<suffix>`:
+    a hard `implicit declaration of function 'p_tri_...'; did you mean
+    'sub_tri_...'?` on the single-TU path, and — because the same wrong
+    qualifier is what keys the `_imported_home_param_types` /
+    `_home_def_param_types` lookup beside it — a SILENTLY mis-typed result
+    wherever the mismatch is a field/inference key rather than a symbol
+    name (bugs/CODEGEN_reexported_function_import_qualifier_names_the_
+    wrong_module.md, and the struct-through-a-re-export shape
+    bugs/CODEGEN_aliased_imported_struct_construction_unresolved.md sits
+    next to).
+
+    Each hop matches on the LOCAL name the importing module binds, and
+    recurses under the name the SUBMODULE exports (`from .sub import tri
+    as triple` binds `triple` locally but the definition is `tri`), so a
+    re-export that renames still resolves.
+
+    The returned ref is the spelling AS WRITTEN in the re-exporting
+    statement (`st.module`), not the absolutized one the walk had to build
+    to parse the next hop, and that distinction is load-bearing: the
+    defining module compiles under exactly the spelling the import that
+    first pulled it in used (`modules_to_compile` is keyed by the import
+    string), and `_note_own_func_home` canonicalizes that spelling by
+    stripping LEADING DOTS only (`_func_qualifier._sanitize_qualifier`'s
+    own docstring records why the dot-stripped form is the convergent
+    one). So the same file reached as `.sub` and as `p.sub` compiles under
+    `sub` and `p_sub` respectively, and a caller that absolutized before
+    sanitizing would emit `p_sub` for the `.sub`-reached module — the very
+    mismatch this function exists to remove. Consumers that need to open
+    the file use `gen._submodule_source_path`, which resolves a relative
+    ref against the current module, or `_abs_module` with the base they
+    already know.
+
+    A re-export chain must terminate and a cycle (`p/__init__.py`
+    re-exporting from `q`, `q/__init__.py` from `p`) must not hang: the
+    memo stores None for an in-progress (kind, module, name) BEFORE
+    recursing, so a re-entry reads that None and stops, and the depth cap
+    is a second belt.
+    """
+    if depth > 5 or not module:
+        return None
+    cache = _as_dict(gen._struct_home_cache)
+    # String key, not a (kind, module, name) tuple: a 3-tuple set-key
+    # coerces to a boxed int64_t on the self-hosted path, so `key in cache`
+    # would never hit and every call would re-walk the whole chain (the
+    # same trap `_find_generic_source`'s docstring records for its own key).
+    key = kind + '\x1f' + module + '\x1f' + name
+    if key in cache:
+        return cache[key]
+    cache[key] = None
+    if _module_defines_symbol(gen, module, name, kind):
+        cache[key] = module
+        return module
+    _path, _src, stmts = gen._parsed_import(module)
+    if not stmts:
+        return None
+    for st in stmts:
+        if not (isinstance(st, gimple_ctypes.FromImportStmt)
+                and not getattr(st, 'wildcard', False)):
+            continue
+        for _fip6 in (getattr(st, 'name_alias_strs', None) or []):
+            nm = gimple_ctypes._fi_name(_fip6)
+            alias = gimple_ctypes._fi_alias(_fip6)
+            if (alias or nm) != name:
+                continue
+            sub = gen._abs_module(st.module, module) if st.module.startswith('.') else st.module
+            r = _find_symbol_home_module(gen, sub, nm, kind, depth + 1)
+            if r:
+                # `r` is the spelling the NEXT hop used to reach the
+                # definition, which for a relative hop is absolute
+                # (`p.sub` for `.sub`). What the defining module actually
+                # compiles under is `st.module` — the spelling THIS
+                # statement used — so re-derive it for the case where they
+                # differ. `r == sub` (the non-relative, therefore identical
+                # case) is by far the common one and is left untouched.
+                _raw = st.module if st.module.startswith('.') else r
+                cache[key] = _raw
+                return _raw
+    return None
+
+def _note_struct_import_alias(gen, module: str, alias: str, orig_name: str) -> str | None:
+    """Record `alias -> orig_name` in `gen._struct_import_aliases` when
+    `from <module> import <orig_name> as <alias>` names a CLASS, and return
+    the real bare name it was recorded under (or None).
+
+    One implementation for both spellings that need it — the module-scope
+    `_register_sym` and the function-scoped `_gen_stmt_FromImportStmt` — so
+    the two can never disagree about what an aliased class import means.
+
+    Two gates keep this off the hot path, because the alternative (a probe
+    per `from X import Y`) would re-parse an import for every imported
+    FUNCTION, which is the overwhelmingly common case:
+
+    * `orig_name` must already be a key of `gen.struct_field_types`. That
+      table is keyed by the struct's own bare name as written in its
+      defining module and is populated from the whole-program closure
+      BEFORE any import registration runs, so membership here is a free
+      dict test and says "some module in this closure defines a struct
+      with exactly this name".
+    * that membership is then CONFIRMED against `module`'s own source, by
+      the same re-export-hop walk `_find_struct_home_module` already does.
+      Without the confirmation a `from mod_b import f` for a FUNCTION `f`
+      would be captured whenever some other module happens to declare a
+      struct also named `f`, and `f(...)` would then construct that struct
+      instead of calling the function. With it, the answer is "the class
+      really is reachable from the module the import statement names", so
+      a same-named struct in an unrelated module is not enough.
+
+    The C-keyword rename (`auto` -> `_kw_auto`, `module_gen.py`'s
+    `_c_kw_struct_renames`) is applied to the RECORDED name, because the
+    consumer (the constructor dispatch) applies it to the name it is
+    handed before looking it up, and both must agree.
+    """
+    if not alias or alias == orig_name:
+        return None
+    if orig_name not in gen.struct_field_types:
+        return None
+    if not gen._find_struct_home_module(module, orig_name):
+        return None
+    _real = gen._c_kw_struct_renames.get(orig_name, orig_name)
+    # First-writer-wins, matching `struct_field_types`'s own collision
+    # semantics: two modules exporting the same class name under the same
+    # alias resolve to one of them the same way the struct table resolves a
+    # bare name to one of them.
+    if alias not in gen._struct_import_aliases:
+        gen._struct_import_aliases[alias] = _real
+    return gen._struct_import_aliases[alias]
+
 def _resolve_test_relative_module(gen, module: str) -> str | None:
     """Fallback for local test-only packages (e.g. `test_utils`) that
     `imports.py`'s resolver can't find: it only searches MOJO_PATH/
