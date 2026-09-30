@@ -6973,6 +6973,17 @@ def type_value_tags_are_distinct() -> list:
     return [names for names in seen.values() if len(names) > 1]
 
 
+def dtype_member_is_a_type(member: str) -> bool:
+    """Whether `DType.<member>` names a type this path gives a tag to.
+
+    The public reader of the spelling rule, for the one caller that has a
+    `MemberExpr`'s member and not the node: `formal/build.py`'s name walk sees
+    the `DType` IdentExpr and never the member, so it asks this rather than
+    reaching into `_dtype_member_type`.
+    """
+    return _dtype_member_type(member) is not None
+
+
 def dtype_object_refusal(spelled: str) -> str:
     """Why a bare `DType` in a value position is not a type.
 

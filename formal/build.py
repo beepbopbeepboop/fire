@@ -4000,7 +4000,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 continue
             member = dtype_members.get(id(node))
             if member is not None:
-                if M._dtype_member_type(member) is not None:
+                if M.dtype_member_is_a_type(member):
                     continue
                 raise CodegenError(M.dtype_member_refusal(name, member))
             if id(node) not in subscript_bases \
