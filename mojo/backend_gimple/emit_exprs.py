@@ -722,7 +722,10 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
             gen._emit(f"  {zero} = (int64_t)0;")
             gen._emit(f"  {t} = {ip} == {zero};")
         elif ot == 'int64_t':
-            zero = gen._new_val('int64_t', "(int64_t)0")
+            # `0LL`, not `(int64_t)0`: it becomes a COMPARISON OPERAND below,
+            # and a C-style cast is not a legal gimple operand. See
+            # emit_infra.py's range()-bound note for the full rationale.
+            zero = gen._new_val('int64_t', "0LL")
             gen._emit(f"  {t} = {ov} == {zero};")
         elif ot == '_Bool':
             # GIMPLE: both operands of comparison must have same type

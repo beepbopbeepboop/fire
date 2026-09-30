@@ -6014,7 +6014,14 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             # `mojo_cstr_slice` rather than a `char`-taking helper:
             # gimple rejects a `char` argument ("invalid argument to
             # gimple call" — a char is promoted to int64_t non-trivially).
-            _one_cs = gen._new_val('int64_t', f"{idx64} + (int64_t)1")
+# `1LL`, not `(int64_t)1`: a C-style cast is not a legal gimple
+            # operand. `_t = _i + (int64_t)1` is rejected at gimplification
+            # with "expected expression before '(' token" -- a HARD error
+            # under `gcc -fgimple`, so it takes out the whole self-host
+            # closure, not just this subscript. The `LL` suffix is the
+            # tree's existing idiom for a width-correct int64_t literal
+            # (`0LL` appears throughout the generated C) and needs no cast.
+            _one_cs = gen._new_val('int64_t', f"{idx64} + 1LL")
             return 'char *', gen._new_val(
                 'char *', f"mojo_cstr_slice ({cp}, {idx64}, {_one_cs})")
         # A STRING index proves the container is a dict even when its own
@@ -6205,7 +6212,14 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         # `mojo_cstr_slice` rather than a `char`-taking helper: gimple
         # rejects a `char` argument ("invalid argument to gimple call"),
         # since a char is promoted to int64_t non-trivially.
-        _one_gs = gen._new_val('int64_t', f"{idx64} + (int64_t)1")
+# `1LL`, not `(int64_t)1`: a C-style cast is not a legal gimple
+        # operand. `_t = _i + (int64_t)1` is rejected at gimplification
+        # with "expected expression before '(' token" -- a HARD error
+        # under `gcc -fgimple`, so it takes out the whole self-host
+        # closure, not just this subscript. The `LL` suffix is the
+        # tree's existing idiom for a width-correct int64_t literal
+        # (`0LL` appears throughout the generated C) and needs no cast.
+        _one_gs = gen._new_val('int64_t', f"{idx64} + 1LL")
         return 'char *', gen._new_val(
             'char *', f"mojo_cstr_slice ({ov}, {idx64}, {_one_gs})")
     t = gen._new_val(et, f"*{addr}")

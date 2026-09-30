@@ -1975,13 +1975,43 @@ def _declare_var(gen, name: str, ctype: str, elem: str | None = None, force: boo
     # The `decls.append(f"  {ctype} {c_name};")` calls below would then
     # write the string's ADDRESS as the type — `47303466400 * _t34;`.
     ctype = _as_str(ctype)
-    if force and name in gen.var_types:
-        gen.temp_counter += 1
+    if force:
+        # The shadow counter is `gen._shadow_seq_box`, NOT `temp_counter`.
+        # `temp_counter` restarts at 0 in every function's prologue, and every
+        # function's `decls` are all emitted into ONE translation unit -- so two
+        # functions could mint the same `_shadow7_n` and the second use
+        # inherited the first one's declared type. A box rather than a bare int
+        # because each imported module is emitted by a throwaway temp_gen; the
+        # box is shared by reference (see emit_resolve's temp_gen sharing
+        # block), and a bare int would restart in each one.
+        #
+        # Measured in the self-host closure: `module_gen.py`'s
+        # `{_safe_name(n) for n in _imported_names}` is a set-of-str
+        # comprehension whose loop variable is `char *`, and it collided with
+        # an `int64_t` `_shadow272_n` from another function, so
+        # `char * = mojo_set_iter_val_str(...)` would not gimplify. One
+        # translation unit needs one counter.
+        # `if force:` and NOT `if force and name in gen.var_types:` -- a
+        # self-shadowing loop target must ALWAYS get its own C variable,
+        # which is what this branch's own docstring above promises. The old
+        # `and name in var_types` guard made the behaviour depend on whether
+        # a PREVIOUS loop with the same target name had already cleaned up
+        # after itself: when it had, this call fell through to the normal
+        # path, which reuses `gen._c_names[name]` -- i.e. the earlier loop's
+        # C identifier, declared with the earlier loop's element type.
+        #
+        # Measured: `gen_module_impl` has two self-shadowing loops both named
+        # `_n` (`for _n in _n`). One iterates ints and the other
+        # `{_safe_name(n) for n in _imported_names}` iterates a set of
+        # strings, so the second needs `char *` and the shared variable was
+        # declared `int64_t` -- `char * = mojo_set_iter_val_str(...)` then
+        # failed to gimplify. Distinct variables per loop, always.
+        gen._shadow_seq_box[0] += 1
         import re as _re
         safe = _re.sub(r'[^a-zA-Z0-9_]', '_', name.strip('`'))
         if safe and safe[0].isdigit():
             safe = '_' + safe
-        c_name = f"_shadow{gen.temp_counter}_{safe}"
+        c_name = f"_shadow{gen._shadow_seq_box[0]}_{safe}"
         gen._c_names[name] = c_name
         gen.decls.append(f"  {ctype} {c_name};")
         gen.var_types[name] = ctype
@@ -3041,7 +3071,8 @@ def _maybe_lower_mlir_op(gen, node: gimple_ctypes.CallExpr):
 
 
 def _compr_range_loop(gen, node, gen0, res, res_type):
-    gen._declare_var(gen0.target, 'int64_t')
+    gen._declare_var(gen0.target, 'int64_t',
+                    force=_compr_target_is_shadowed(gen, gen0.target))
     args = gen0.iterable.args
     dynamic_step = False
     if len(args) == 1:
@@ -3066,8 +3097,13 @@ def _compr_range_loop(gen, node, gen0, res, res_type):
         # the resulting bare temp name used in the binary expression.
         # Found via Tools/cases_generator/cwriter.py's `CWriter.
         # __init__`: `self.indents = [i * 4 for i in range(indent + 1)]`.
-        start_v = gen._new_val('int64_t', '(int64_t)0')
-        step_v = gen._new_val('int64_t', '(int64_t)1')
+# `1LL`/`0LL`, not `(int64_t)1`/`(int64_t)0`: a C-style cast is not a
+# legal gimple OPERAND, so `idx + (int64_t)1` is a hard gimplification
+# error ("expected expression before '(' token") that takes out the whole
+# self-host closure. The `LL` suffix is the tree's existing idiom for a
+# width-correct int64_t literal and needs no cast.
+        start_v = gen._new_val('int64_t', '0LL')
+        step_v = gen._new_val('int64_t', '1LL')
         cond_op = '<'
         _stop_t, stop_v = gen.lower_expr(args[0])
         if _stop_t != 'int64_t':
@@ -3096,7 +3132,12 @@ def _compr_range_loop(gen, node, gen0, res, res_type):
         # mirroring `one64`/the 1-arg branch's own `start_v` construction.
         if start_t != 'int64_t':
             start_v = gen._new_val('int64_t', f"(int64_t){start_v}")
-        step_v = gen._new_val('int64_t', '(int64_t)1')
+# `1LL`/`0LL`, not `(int64_t)1`/`(int64_t)0`: a C-style cast is not a
+# legal gimple OPERAND, so `idx + (int64_t)1` is a hard gimplification
+# error ("expected expression before '(' token") that takes out the whole
+# self-host closure. The `LL` suffix is the tree's existing idiom for a
+# width-correct int64_t literal and needs no cast.
+        step_v = gen._new_val('int64_t', '1LL')
         cond_op = '<'
     elif len(args) == 3:
         start_t, start_v = gen.lower_expr(args[0])
@@ -3302,7 +3343,12 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         gen._gen_compr_append(node, gen0, res, res_type, bb_post)
         gen._emit(f"  goto {bb_post};")
         gen._emit_label(bb_post)
-        one64 = gen._new_val('int64_t', "(int64_t)1")
+# `1LL`/`0LL`, not `(int64_t)1`/`(int64_t)0`: a C-style cast is not a
+# legal gimple OPERAND, so `idx + (int64_t)1` is a hard gimplification
+# error ("expected expression before '(' token") that takes out the whole
+# self-host closure. The `LL` suffix is the tree's existing idiom for a
+# width-correct int64_t literal and needs no cast.
+        one64 = gen._new_val('int64_t', "1LL")
         st = gen._new_val('int64_t', f"{idx64} + {one64}")
         gen._emit(f"  {idx64} = {st};")
         gen._emit(f"  goto {bb_cond};")
@@ -3409,7 +3455,8 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
         var_names = [v.strip() for v in _inner_str.split(',')]
     else:
         var_names = None
-        gen._declare_var(gen0.target, vct)
+        gen._declare_var(gen0.target, vct,
+                        force=_compr_target_is_shadowed(gen, gen0.target))
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._emit(f"  goto {bb_cond};")
@@ -3445,7 +3492,8 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
 
 def _compr_dict_loop(gen, node, gen0, res, res_type, it_val):
     _iv = _as_str(it_val)   # see _compr_list_loop: keep the ptr a char* in the f-string
-    gen._declare_var(gen0.target, 'char *')
+    gen._declare_var(gen0.target, 'char *',
+                    force=_compr_target_is_shadowed(gen, gen0.target))
     iter_t = gen._new_temp('MojoDictIter *')
     more_t = gen._new_temp('int')
     gen._emit(f"  {iter_t} = mojo_dict_iter_new ({_iv});")
@@ -3475,6 +3523,30 @@ def _compr_dict_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  mojo_dict_iter_free ({iter_t});")
 
 
+def _compr_target_is_shadowed(gen, target) -> bool:
+    """True when a comprehension's loop target must get its OWN C variable.
+
+    A comprehension's `for` target is a fresh binding in the comprehension's
+    own scope, so it can never share the enclosing function's C variable for
+    that source name. Without this, `_declare_var`'s first-decl-wins guard
+    reused whatever was already declared -- and a self-shadowing `for n in n`
+    earlier in the function leaves behind a SHADOW variable with that name,
+    typed for THAT loop's elements.
+
+    Measured in the self-host closure: `gen_module_impl` has a
+    `for _n in _n` loop (int64_t elements) and later
+    `{_safe_name(n) for n in _imported_names}` (a set of strings, so
+    `char *`). The comprehension reused the loop's `_shadow5_n`, declared
+    `int64_t`, and `char * = mojo_set_iter_val_str(...)` would not
+    gimplify -- one of the four errors that took out bootstrap-stage2-cc.
+
+    Only true when a variable of that name is already live, so the
+    single-comprehension case -- by far the common one -- is completely
+    unchanged.
+    """
+    return _as_str(target) in gen.var_types
+
+
 def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     _iv = _as_str(it_val)   # see _compr_list_loop
     # A source set of strings (e.g. `frozenset({'a','b'})`) must round-trip
@@ -3483,7 +3555,8 @@ def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     # mojo_set_contains_str misses every element.
     _sv_elem = _as_str(gen._elem_of(_iv))
     _sv_is_str = (_sv_elem == 'char *')
-    gen._declare_var(gen0.target, 'char *' if _sv_is_str else 'int64_t')
+    gen._declare_var(gen0.target, 'char *' if _sv_is_str else 'int64_t',
+                    force=_compr_target_is_shadowed(gen, gen0.target))
     iter_t = gen._new_temp('MojoSetIter *')
     more_t = gen._new_temp('int')
     gen._emit(f"  {iter_t} = mojo_set_iter_new ({_iv});")

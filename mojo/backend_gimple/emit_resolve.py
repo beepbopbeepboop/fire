@@ -518,6 +518,12 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # symbol always agree (log_match c52cbf-vs-7a6366 family).
                 temp_gen._home_def_param_types = gen._home_def_param_types
                 temp_gen._emitted_ptr_helpers = gen._emitted_ptr_helpers
+                # share by reference: the self-shadowing-temp counter must be
+                # monotonic across the WHOLE closure, or two modules mint the
+                # same `_shadowN_<name>` and -- since every module's decls land
+                # in one translation unit -- the second inherits the first's
+                # declared type. A bare int would not survive this copy.
+                temp_gen._shadow_seq_box = gen._shadow_seq_box
                 # share: a builtin-as-bare-value static (`_funcptr_mojo_make_dict`
                 # etc.) must be declared at most once across the WHOLE transitive
                 # closure, not once per submodule's own throwaway GimpleGen — see
@@ -2458,7 +2464,14 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     # `mojo_cstr_slice` rather than a `char`-taking helper: gimple
     # rejects a `char` argument ("invalid argument to gimple call"), since
     # a char is promoted to int64_t non-trivially. See _gen_for_cstr.
-    _one_cs = gen._new_val('int64_t', "(int64_t)1")
+# `1LL`, not `(int64_t)1`: a C-style cast is not a legal gimple
+    # operand. `_t = _i + (int64_t)1` is rejected at gimplification
+    # with "expected expression before '(' token" -- a HARD error
+    # under `gcc -fgimple`, so it takes out the whole self-host
+    # closure, not just this subscript. The `LL` suffix is the
+    # tree's existing idiom for a width-correct int64_t literal
+    # (`0LL` appears throughout the generated C) and needs no cast.
+    _one_cs = gen._new_val('int64_t', "1LL")
     _end_cs = gen._new_val('int64_t', f"{idx64} + {_one_cs}")
     gen._emit(f"  {gen._cname(gen0.target)} = mojo_cstr_slice ({_iv}, {idx64}, {_end_cs});")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)

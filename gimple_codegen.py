@@ -1333,6 +1333,14 @@ class GimpleGen:
         # gen_module_impl's Seam-3 pass and read by the sidecar emitter at
         # the very end of the module; module scope because the MSL is only
         # final once every function has been walked.
+        # A translation-unit-monotonic counter for self-shadowing loop
+        # targets (`for tail in tail:`). Deliberately NOT reset with the
+        # per-function state in emit_infra's function prologue, and held in a
+        # one-element BOX rather than a bare int so every per-module
+        # temp_gen shares it by reference the way the dicts/sets above do --
+        # a bare int would restart at 0 in each throwaway GimpleGen and
+        # reproduce the very collision this fixes. See emit_infra's mint site.
+        self._shadow_seq_box = [0]
         self._device_kernels: dict[str, bool] = {}
         self._device_parts: list[str] = []
         self._device_launch_args: dict = {}
