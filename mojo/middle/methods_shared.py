@@ -63,8 +63,16 @@ def _is_selfhost_source_file(path: str) -> bool:
     conservative in the same direction: an unrecognised self-host file
     simply takes the ordinary resolution path, which is what every
     self-host compile already did under the compiled binary.
+
+    `.py` only, for the same reason `_is_selfhost_sibling_alias` below
+    requires it: the self-hosting bootstrap is this compiler's own Python,
+    so no `.mojo` file is ever part of it. That matters for a synthetic
+    name — `os.path.abspath('client.mojo')` resolves against the process
+    CWD, which IS this checkout whenever a test runs from the repo root, so
+    without the extension check a bare relative name would read as a
+    compiler source file.
     """
-    if not path:
+    if not path or not path.endswith('.py'):
         return False
     _rp = os.path.realpath(os.path.abspath(path))
     _sd = gimple_codegen._SELFHOST_DIR
