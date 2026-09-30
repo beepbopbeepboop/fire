@@ -265,6 +265,67 @@ CASES = [
      "    printf(\"%s\", NAME)\n"
      "    return 0\n", "bye\n"),
 
+    # A string ELEMENT inside a container global, which is the case
+    # `bugs/FORMAL_module_global_string_elements.md` was about. The word is a
+    # `char *` and the only `char *` to those bytes on this path is the INTERNED
+    # literal — so the initializer stores the address a `"a"` written anywhere
+    # in the program already has, rather than a copy of the bytes into `__DATA`.
+    # A copy would satisfy this row and be wrong: `printf("%s")` cannot tell two
+    # copies of the same text apart, which is exactly why a row that only checks
+    # output is not enough here, and why the dict row below is in the file.
+    ("read_list_of_strings",
+     "L = [\"a\", \"b\"]\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"%s\", L[0])\n"
+     "    printf(\"%s\", L[1])\n"
+     "    return 0\n", "ab"),
+
+    # The same shape as a DICT, and the row that would fail if the elements
+    # were copied rather than interned. A dict subscript is a raw 64-bit compare
+    # of the key against each pair's key word (`_emit_dict_lookup_addr`), so a
+    # `__DATA` copy of "a" is not the key the lookup is looking for: the image
+    # exits 1 on a missing key, where CPython answers 1. This is also the only
+    # row here that needs `global_slot_is_dict` — without it a dict global's
+    # `D["a"]` is emitted as a SEQUENCE subscript and the key's address becomes
+    # an element offset, which is a load from a nonsense address.
+    ("read_dict_of_strings_by_key",
+     "D = {\"a\": 1, \"b\": 2}\n"
+     "\n"
+     "def main(n):\n"
+     "    x: Int = D[\"a\"]\n"
+     "    printf(\"%d\", x)\n"
+     "    y: Int = D[\"b\"]\n"
+     "    printf(\"%d\", y)\n"
+     "    return 0\n", "12"),
+
+    # A dict whose VALUES are strings, so both halves of a pair are pointers and
+    # the interleave in the blob is two string cells per pair.
+    ("read_dict_string_values",
+     "M = {\"k\": \"v\", \"j\": \"w\"}\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"%s\", M[\"k\"])\n"
+     "    printf(\"%s\", M[\"j\"])\n"
+     "    return 0\n", "vw"),
+
+    # THE CONTROL for the interning claim, and the reason the two rows above are
+    # worth having: a string global and a string LITERAL are the same string, so
+    # the comparison is true. Before, the global's bytes were a COPY in
+    # `__DATA` and the literal's were the interned one in `__TEXT`; this row
+    # passed anyway, because a name bound to a string literal classifies as a
+    # string and its `==` lowers to a content compare. So it pins the address
+    # identity that the dict row needs without pinning it by proxy.
+    ("string_global_is_the_interned_literal",
+     "NAME = \"hi\"\n"
+     "\n"
+     "def main(n):\n"
+     "    c: Int = 0\n"
+     "    if NAME == \"hi\":\n"
+     "        c = 1\n"
+     "    printf(\"%d\", c)\n"
+     "    return 0\n", "1"),
+
     # ── module boundaries ──
     # A dylib's `__DATA` is emitted with `emit_startup=False`, so there is no
     # startup stub to run an initializer from: the lazy per-function check is
@@ -301,28 +362,22 @@ CASES = [
 # one, so the program would produce an answer rather than an error. Refusing is
 # the only honest option, and these rows pin that it still does.
 REFUSALS = [
-    # A dict is the case that motivated the refusal. Its keys and values are
-    # strings, and a string inside a container is a pointer to bytes that would
-    # each need their own slot and their own relocation — a different data
-    # structure, not a bigger blob. `mlir.py` in this repository is a real file
-    # of this shape, which is how the gap was found.
-    ("dict_global_refused",
-     "D = {\"a\": 1}\n"
+    # A string ELEMENT inside a container global is NOT a refusal any more —
+    # `read_list_of_strings` above runs it. What is still refused is a container
+    # element that is neither an int nor a string, and the pin is here because
+    # the refusal machinery is what stops a slot with no initializer from
+    # reading as the zero an unwritten slot gives: a list would report length 0
+    # and print an answer.
+    #
+    # A nested container is the interesting one, because its element IS a word
+    # (a pointer to a blob) and only the SECOND level of fixups is missing — so
+    # this is a real extension rather than a limit, and the message says which.
+    ("nested_container_global_refused",
+     "L = [[1, 2], [3]]\n"
      "\n"
      "def main(n):\n"
-     "    d: Int = D[\"a\"]\n"
-     "    print(d)\n"
-     "    return 0\n",
-     "no initializer"),
-
-    # A list of strings is the same gap with a smaller surface: the container
-    # word itself could be laid out, but each element is a pointer.
-    ("list_of_strings_refused",
-     "L = [\"a\", \"b\"]\n"
-     "\n"
-     "def main(n):\n"
-     "    s: String = L[0]\n"
-     "    print(s)\n"
+     "    v: Int = L[0][1]\n"
+     "    print(v)\n"
      "    return 0\n",
      "no initializer"),
 

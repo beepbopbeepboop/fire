@@ -759,6 +759,13 @@ class X86_64Codegen:
         self._container_ctx = 0
         self._string_vars = set()
         self._dict_vars = set()
+        # …seeded with the module globals this function mentions, because the
+        # literal that says what they hold is in the MODULE's statement list and
+        # `_note_binding` only ever sees this function's. Seeded BEFORE the body
+        # is walked, and not instead of it: a name the function also binds is
+        # still module-scoped until the local store, which is the same
+        # order-dependent rule the local marks already implement.
+        self._note_global_kinds(f)
         self._blob_vars = set()
         self._fd_vars = set()
         # `comptime NAME = value` bindings in scope, and the list-valued ones
@@ -975,6 +982,18 @@ class X86_64Codegen:
             self.asm.emit_label_rel32(skip_label, here_offset=-4)
         for at, target in image.fixups:
             self._lea_abs(Reg.R10, base + target)
+            self._store_at_abs(base + at, Reg.R10)
+        # A word holding a STRING, which is the same store with the other end
+        # computed from a LABEL rather than from the data segment: the interned
+        # literal is the one `char *` to these bytes on this path, so the word
+        # has to be the address the rest of the program already uses for this
+        # text. The LEA + `emit_label_rip` pair is the addressing a string
+        # literal in an expression already uses here (see `_emit_comptime_val`),
+        # and the equality of the two addresses is the whole point — see
+        # `GlobalDataImage.string_cells`.
+        for at, text in image.string_cells:
+            self.asm.emit(encode_lea_r64_rip(Reg.R10, 0))
+            self.asm.emit_label_rip(self._intern_string(text), here_offset=-4)
             self._store_at_abs(base + at, Reg.R10)
         if skip_label:
             # The flag goes LAST, after every store, so a slot is never observed
@@ -4961,6 +4980,23 @@ class X86_64Codegen:
                 by_node[id(literal)] = want if prev is None else min(prev, want)
             by_name[name] = want
         return by_node, by_name
+
+    def _note_global_kinds(self, fn) -> None:
+        """Mark the module globals `fn` mentions, from their SLOTS.
+
+        The counterpart of `_note_binding` for a name this function does not
+        bind, and the x86-64 twin of arm64's copy of this method — same
+        `model` predicates, so the two architectures cannot disagree about what
+        a module global holds. See that copy for what goes wrong without it (a
+        dict global's `D["a"]` emitted as a sequence subscript, so the key's
+        interned address became an element offset and the image exited 1)."""
+        for node in M.iter_nodes(getattr(fn, "body", None) or []):
+            if not isinstance(node, F.IdentExpr):
+                continue
+            if M.global_slot_is_dict(node.name):
+                self._dict_vars.add(node.name)
+            elif M.global_slot_is_string(node.name):
+                self._string_vars.add(node.name)
 
     def _note_binding(self, name: str, value) -> None:
         """Record that `name` now holds a string address (or stop saying so).

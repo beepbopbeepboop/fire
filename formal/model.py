@@ -11007,29 +11007,55 @@ class GlobalSlot:
 class GlobalDataImage:
     """The whole data image for one unit, plus where its fixups go.
 
-    `blob` is the bytes, laid out slot-first, then the container blobs and string
-    bytes the address-valued slots point at, and `fixups` is `[(offset, target)]`
-    — for each address-valued slot word, the offset WITHIN `blob` of the thing it
+    `blob` is the bytes, laid out slot-first, then the container blobs the
+    address-valued slots point at, and `fixups` is `[(offset, target)]` — for
+    each address-valued slot word, the offset WITHIN `blob` of the thing it
     points at. Both are expressed as OFFSETS rather than addresses precisely
     because the linker knows the segment's base address and the backend does not
     need it: one number, added to a base each side already has, instead of two
     independently-computed absolutes that can disagree.
 
+    `string_cells` is the OTHER kind of address-valued word, and it is a
+    different list rather than a second entry in `fixups` because its target is
+    not in this image at all. A word holding a string is a pointer to
+    NUL-terminated bytes, and on this path those bytes are the INTERNED literal
+    — one copy per distinct literal, in `__TEXT`, shared by every expression
+    that spells the string. So a `string_cells` entry is `(offset, text)`: the
+    offset of the word to write, and the string whose interned address belongs
+    in it. Only the CODE can carry that out, because only the codegen interns;
+    a linker writing the file's initial bytes has nothing to point at and does
+    not need to, since the initializer overwrites the word before any read can
+    reach it (`initialization_is_lazy` is what makes the overwrite ordered
+    before the first read, and the flag is set last).
+
+    Why interned and not a copy in `__DATA`, which would have been the easier
+    layout: because a copy is a DIFFERENT string with the same bytes, and this
+    value model compares strings by address. Measured on the tree this replaces:
+    a dict literal with a string key is found by a raw 64-bit compare against
+    the interned literal (`arm64_codegen._emit_dict_lookup_addr`), and two
+    separate lists of `"a"` compare EQUAL because both elements are the one
+    interned literal. A `__DATA` copy would make `D["a"]` miss and
+    `L[0] == M[0]` false, so it is not a smaller version of this feature; it is
+    a set of wrong answers wearing one.
+
     `init_flag_offset` is the word that says "this unit's globals have been
-    filled in", and it is PART of the image rather than a module-level name: it is
-    the backend's own bookkeeping, it has no source spelling a program could
+    filled in", and it is PART of the image rather than a module-level name: it
+    is the backend's own bookkeeping, it has no source spelling a program could
     collide with, and it has to exist in a dylib as much as in an executable.
     See `initialization_is_lazy` for why the filling is deferred at all."""
 
-    __slots__ = ("blob", "fixups", "init_flag_offset")
+    __slots__ = ("blob", "fixups", "init_flag_offset", "string_cells")
 
-    def __init__(self, blob: bytes, fixups: list, init_flag_offset: int = 0):
+    def __init__(self, blob: bytes, fixups: list, init_flag_offset: int = 0,
+                 string_cells: list = ()):
         self.blob = blob
         self.fixups = fixups
         self.init_flag_offset = init_flag_offset
+        self.string_cells = list(string_cells)
 
     def __len__(self):
         return len(self.blob)
+
 
     def __bool__(self):
         return bool(self.blob)
@@ -11256,7 +11282,7 @@ def _static_initializer(value):
     honest answer."""
     blob = _static_container_words(value)
     if blob is not None:
-        return ("blob", blob)
+        return ("blob", _container_shape(value), blob)
     if isinstance(value, F.StringLiteral) and not getattr(value, "is_bytes", 0):
         return ("str", value.value)
     if isinstance(value, F.BoolLiteral):
@@ -11280,6 +11306,20 @@ def _int_literal_value(node):
         return None
 
 
+def _container_shape(value) -> str:
+    """`"dict"` or `"sequence"`, the two blob layouts there are.
+
+    One word, because the two are the whole of what a subscript of the container
+    has to know: `[count][e0][e1]…` against `[npairs][k0][v0]…`, and a pair blob
+    indexed by a key is a SCAN (`arm64_codegen._emit_dict_lookup_addr`) while a
+    sequence's is an address computation. Carried in the slot's initializer
+    rather than re-derived at each use, because a use site has only the NAME and
+    the name's value is what says which of the two it is — and getting it wrong
+    is not a refusal: a pair blob indexed with a key as if it were an element
+    offset reads a word at a nonsense address."""
+    return "dict" if isinstance(value, F.DictExpr) else "sequence"
+
+
 def _static_container_words(value):
     """The blob words a module-level container literal is, or None if not one.
 
@@ -11291,33 +11331,60 @@ def _static_container_words(value):
     slot holds its address: the blob then has STATIC STORAGE DURATION, which is
     exactly what a frame blob does not have and exactly what a global needs.
 
-    A string ELEMENT is the one case not handled, and it is refused rather than
-    half-done: a string element is a pointer to NUL-terminated bytes, so the
-    blob would need those bytes in `__DATA` with a relocation per element. That
-    is a real extension and it is recorded as one — with the failing program and
-    the next step — in `bugs/FORMAL_module_global_string_elements.md`, rather
-    than smuggled in here where it would be a SECOND answer to "what is a word",
-    the question this file exists to keep single."""
+    A word may be a STRING rather than an int, and that is the whole of the
+    second kind: a string on this path is a `char *`, so a string element is a
+    word holding a pointer, and the pointer is filled in from code at first call
+    (`GlobalDataImage.string_cells` for why the target is the interned literal
+    and not a copy here). A dict is a DIFFERENT shape from a list — pairs, not
+    elements — so its keys and values are read with their own accessor and
+    interleaved, and asking one for the other is a silent wrong answer.
+
+    Anything else is refused rather than half-done: a nested container or a call
+    as an element is a word this cannot compute, and a container that is not
+    all-words has no initializer to write into the slot. That is said by name
+    from `static_initializer_refusal_reason`."""
+    if isinstance(value, F.DictExpr):
+        words = []
+        pairs = [p for p in (value.pairs or []) if len(p) >= 2]
+        words.append(len(pairs))
+        for pair in pairs:
+            for cell in pair[:2]:
+                word = _static_word(cell)
+                if word is None:
+                    return None
+                words.append(word)
+        return words
     if not isinstance(value, (F.ListExpr, F.TupleExpr, F.SetExpr)):
         return None
     elements = list(value.elements or [])
     words = [len(elements)]
     for el in elements:
-        n = _static_word(el)
-        if n is None:
+        word = _static_word(el)
+        if word is None:
             return None
-        words.append(n)
+        words.append(word)
     return words
 
 
 def _static_word(node):
-    """The integer a container ELEMENT (or a unary sign of one) is, else None."""
+    """The word a container ELEMENT (or a unary sign of one) is, else None.
+
+    An `int` for a number, the `str` itself for a string. The two are told
+    apart by their type rather than by a tag because a formal value is one word
+    and a word holds one of them; `int` is never a `str` here, so the test is
+    exact. A bytes literal is deliberately NOT a string element: it is a numeric
+    buffer rather than text, and nothing in this path reads one out of a
+    container as a NUL-terminated string."""
+    if isinstance(node, F.StringLiteral) and not getattr(node, "is_bytes", 0):
+        return node.value
     if isinstance(node, F.BoolLiteral):
         return 1 if node.value else 0
     if isinstance(node, F.IntLiteral):
         return _int_literal_value(node)
     if isinstance(node, F.UnaryOp) and node.op in ("-", "+"):
         n = _static_word(node.operand)
+        if isinstance(n, str):
+            return None
         return None if n is None else (-n if node.op == "-" else n)
     return None
 
@@ -11327,34 +11394,21 @@ def static_initializer_refusal_reason(slot) -> str:
 
     A slot can always EXIST — the storage is the easy half — but a slot with no
     initializer would read as zero, and zero is a plausible-looking wrong answer
-    rather than a refusal. So this names which of the two shapes landed on
-    `("unknown", …)`, because the two have different repairs."""
+    rather than a refusal. So this names which of the shapes landed on
+    `("unknown", …)`, because they have different repairs: a value computed by a
+    call needs the module-level sequence that would fill it, a name imported
+    from another module needs that module's storage, and a container with an
+    element that is not a word needs a nested layout."""
     if slot is None or slot.init[0] != "unknown":
         return None
     node = getattr(slot.site, "value", None)
-    if isinstance(node, (F.DictExpr, F.SetExpr)) and _container_has_string(node):
-        return "string_element"
+    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr)):
+        return "nested_element"
     if isinstance(node, F.CallExpr):
         return "computed"
-    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-        return "string_element"
     if isinstance(node, (F.ImportStmt, F.FromImportStmt)):
         return "imported"
     return "unknown"
-
-
-def _container_has_string(node) -> bool:
-    """True when any element/pair of a container literal is a string.
-
-    A dict is a different shape from a list (pairs, not elements) and asking one
-    accessor for the other is a silent wrong answer, so each is read with its
-    own."""
-    if isinstance(node, F.DictExpr):
-        items = [x for pair in (node.pairs or []) for x in pair if x is not None]
-    else:
-        items = list(getattr(node, "elements", None) or [])
-    return any(isinstance(x, F.StringLiteral) and
-               not getattr(x, "is_bytes", 0) for x in items)
 
 
 def global_value_refusal(name: str, fn_name: str, why: str) -> str:
@@ -11369,12 +11423,14 @@ def global_value_refusal(name: str, fn_name: str, why: str) -> str:
     their program."""
     who = f"{fn_name}: " if fn_name else ""
     detail = {
-        "string_element": (
-            "a container element is a string, and a string is a pointer to "
-            "NUL-terminated bytes, so the blob would need those bytes in "
-            "`__DATA` with a relocation per element. The container itself is "
-            "stored; only the string inside it is not — "
-            "bugs/FORMAL_module_global_string_elements.md"),
+        "nested_element": (
+            "a container element is itself a container, or is computed by a "
+            "call, and a container is laid out here as a FLAT run of words — so "
+            "an element that is not itself a word has nothing to put in the "
+            "blob. An int element and a string element both do (the string as a "
+            "pointer the initializer fills in); a nested container would need "
+            "its own blob and a second level of fixups, which this does not "
+            "do yet"),
         "computed": (
             "its module-level value is computed by a call, and a call's result "
             "is not known before the program runs. The storage is there and is "
@@ -11417,14 +11473,18 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
 
     Layout, in this order and for a reason: every SLOT first, in `index` order,
     so a backend that computes `GLOBAL_SLOT_BYTES * slot.index` addresses the
-    right word whatever else the module has; then the container blobs and string
-    bytes the address-valued slots point at, each 8-byte aligned so a blob word
-    is a word at the address the slot holds.
+    right word whatever else the module has; then the container blobs the
+    address-valued slots point at, each 8-byte aligned so a blob word is a word
+    at the address the slot holds.
 
     A slot's own word is `base + offset-of-what-it-points-at`, and the fixup
-    records where that word is so the linker can emit one relocation for it."""
+    records where that word is so the codegen can emit one store. A STRING word
+    — a slot bound to a string, or an element of a container literal — is the
+    other kind: its target is the interned literal in `__TEXT`, which is not in
+    this image, so it goes in `string_cells` for the code to fill and its eight
+    bytes here are left zero."""
     if not table:
-        return GlobalDataImage(b"", [])
+        return GlobalDataImage(b"", [], 0, [])
     count = max(s.index for s in table.values()) + 1
     # The initializer flag occupies the word immediately after the slots, so it
     # is at a fixed offset from the slot table and both backends and the linker
@@ -11432,6 +11492,7 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
     flag_offset = count * GLOBAL_SLOT_BYTES
     blob = bytearray(flag_offset + GLOBAL_SLOT_BYTES)
     fixups = []
+    string_cells = []
     # The trailing area starts after the flag, so a slot's address never depends
     # on how many trailing items there are.
     tail = bytearray()
@@ -11441,23 +11502,37 @@ def build_data_image(table: dict, base: int) -> GlobalDataImage:
         if kind == "int":
             blob[at:at + GLOBAL_SLOT_BYTES] = int(slot.init[1]).to_bytes(
                 GLOBAL_SLOT_BYTES, "little", signed=True)
-        elif kind in ("blob", "str"):
+        elif kind == "str":
+            # NOT a copy of the bytes here. The word is a `char *` and the only
+            # `char *` to these bytes on this path is the interned literal, so
+            # copying would make a second, different string with the same
+            # content — which is invisible to `printf` and fatal to every
+            # address comparison. See `GlobalDataImage.string_cells`.
+            string_cells.append((at, slot.init[1]))
+        elif kind == "blob":
             while len(tail) % GLOBAL_SLOT_BYTES:
                 tail.append(0)
             offset = flag_offset + GLOBAL_SLOT_BYTES + len(tail)
-            if kind == "blob":
-                for w in slot.init[1]:
-                    tail.extend(int(w).to_bytes(GLOBAL_SLOT_BYTES, "little",
-                                                signed=True))
-            else:
-                tail.extend(slot.init[1].encode("utf-8") + b"\x00")
+            for j, word in enumerate(slot.init[2]):
+                at_word = offset + GLOBAL_SLOT_BYTES * j
+                if isinstance(word, str):
+                    # Eight zero bytes until the initializer runs; the blob is
+                    # STATIC storage, so a word left unwritten is a pointer
+                    # nobody chose, and the lazy init writes it before the
+                    # flag says the globals are ready.
+                    tail.extend(b"\x00" * GLOBAL_SLOT_BYTES)
+                    string_cells.append((at_word, word))
+                    continue
+                tail.extend(int(word).to_bytes(GLOBAL_SLOT_BYTES, "little",
+                                               signed=True))
             blob[at:at + GLOBAL_SLOT_BYTES] = (base + offset).to_bytes(
                 GLOBAL_SLOT_BYTES, "little", signed=True)
             fixups.append((at, offset))
         # `("unknown", …)` writes eight zero bytes, and the read is refused by
         # name before anything can observe the zero.
     # The flag starts CLEAR: zero means "not yet filled in".
-    return GlobalDataImage(bytes(blob) + bytes(tail), fixups, flag_offset)
+    return GlobalDataImage(bytes(blob) + bytes(tail), fixups, flag_offset,
+                           string_cells)
 
 
 # Published for the same reason `_MODULE_SYMBOLS` is: the consumers are a
@@ -11485,6 +11560,36 @@ def module_slots() -> dict:
 def module_slot(name: str):
     """The `GlobalSlot` for a written module-level `name`, or None."""
     return _MODULE_SLOTS.get(name)
+
+
+def global_slot_is_dict(name: str) -> bool:
+    """True when module global `name` holds a DICT pair-blob.
+
+    A use site has only the name, and the name's value is what says whether
+    `D[k]` is a key SCAN or an element address computation — so a backend that
+    cannot answer this emits a pair blob indexed by an element offset, which is
+    a load from a nonsense address rather than a refusal. Measured, both
+    architectures, on `D = {"a": 1}` read as `D["a"]`: the string literal's
+    interned address became the index, the bounds check failed and the image
+    exited 1.
+
+    Asked from the slot's own initializer, which is where the shape is recorded,
+    so the answer cannot disagree with the bytes the linker laid out."""
+    slot = module_slot(name)
+    return slot is not None and slot.init[0] == "blob" and slot.init[1] == "dict"
+
+
+def global_slot_is_string(name: str) -> bool:
+    """True when module global `name` holds a `char *` to interned bytes.
+
+    The other half of `global_slot_is_dict`, and for the same reason: a name
+    classified as a plain word is an INT on this path, so `print` renders its
+    address as a number and a `==` compares two addresses. Both were right for a
+    LOCAL bound to a string literal because `_note_binding` saw the literal; a
+    module global's literal is in the module's statement list, not in the
+    function being emitted."""
+    slot = module_slot(name)
+    return slot is not None and slot.init[0] == "str"
 
 
 def global_slot_bytes(table: dict, base: int) -> bytes:
