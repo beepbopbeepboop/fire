@@ -9,16 +9,286 @@ Usage:
     python3 test_ab_native.py [file.mojo ...]
 
 If no files given, tests a built-in set of small Mojo programs.
+
+Where the scratch files go, and why it is not the repo root
+------------------------------------------------------------
+Both dump paths still run with `cwd=HERE` (see `run_native_dump`'s docstring
+for the self-host reason, which is unchanged and not negotiable). What changed
+is where this test's own `.mojo` sources live: they go in a private
+per-process directory under `<repo>/.tmp/`, never in the repo root.
+
+That is a bug fix, not tidiness. The repo root is a shared, writable scratch
+surface that several jobs touch at once, and this test was writing
+`_abt_<case>.mojo` there for the whole run. On 2026-09-29 (integrator gate,
+round 6) a `bootstrap-stage1-dumps` fan-out item failed with
+
+    Error reading ../_abt_minimal_main.mojo: [Errno 2] No such file or directory
+
+which SKIPPED all eight tests behind it. The mechanism was two jobs in one
+directory: this test creates the transient, and the other test's fan-out
+enumerated the repo root's `*.mojo` and picked it up as one of its own items
+(to see the enumeration side, `tools/suite.py`'s `tracked_mojo_files`; the two
+halves are fixed together and either alone leaves the flake reachable).
+
+Four constraints shape the replacement, each verified rather than assumed:
+
+  * cwd stays HERE, so the OUTPUT artifacts (`<basename>.ci/.tok/.ast/.pyi`)
+    are still written into the repo root by the compiler itself. That is why
+    the source BASENAME carries a per-process tag as well as living in a
+    private directory: the output name is derived from the input's basename, so
+    two concurrent runs of this test would otherwise overwrite each other's
+    `.ci` in the one directory they cannot avoid. Tagged, they cannot collide.
+  * The scratch dir must be under the WORKTREE, not the system temp dir.
+    `_is_selfhost_source_dir` (mojo/backend_gimple/module_gen.py) decides
+    whether a source is this compiler's own by walking UP from the file's
+    directory looking for `fire_compiler.py`; `<repo>/.tmp/...` still finds it
+    and `/tmp/...` does not. A scratch dir on the wrong side of that boundary
+    silently compiles the test corpus through a different code path, which
+    would make the A/B comparison meaningless.
+  * Sibling `--dump-full` resolution is relative to the source file's own
+    directory (`_resolve_test_relative_module`), so the driver and its leaf
+    modules travel together in the same private dir. That is why the corpus's
+    module names are per-process too: a fixed `abfulltest_leaf` would resolve
+    to the repo-root tracked file of that name on one run and to the private
+    one on the next.
+  * `memcap` kills this test's whole tree with SIGKILL when it exceeds its
+    8 GB ceiling, and SIGKILL runs no `finally`. So "clean up on every exit
+    path" cannot mean only `try/finally` — it means a `finally` for the
+    ordinary paths plus a startup sweep for the ones no handler can reach.
+    The sweep removes scratch directories and repo-root artifacts belonging to
+    a pid that is no longer alive, and only those, so a concurrently running
+    sibling process is never touched.
 """
+import atexit
 import os
+import re
 import sys
 import subprocess
 import tempfile
 import shutil
 import textwrap
+import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOJOC = os.path.join(HERE, 'mojoc')
+
+# The one place this test's transient files are allowed to live. Under the
+# worktree on purpose — see the module docstring's second constraint.
+SCRATCH_ROOT = os.path.join(HERE, '.tmp')
+
+# pid + random. The pid makes a leftover attributable and makes the liveness
+# check in the sweep exact; the random half keeps two runs started in the same
+# clock tick (or a pid recycled after a crash) from sharing a name.
+_RUN_TAG = f'{os.getpid()}_{uuid.uuid4().hex[:8]}'
+
+# What a source file is named in the private dir, and therefore what the
+# compiler names the `.ci`/`.tok`/`.ast`/`.pyi` it leaves in HERE. The tag is
+# load-bearing: see the module docstring's first constraint.
+SRC_PREFIX = f'abt{_RUN_TAG}_'
+# Artifacts the compiler writes into HERE beside the source basename.
+ARTIFACT_EXTS = ('ci', 'tok', 'ast', 'pyi')
+
+# The naming scheme above, as patterns rather than as one run's literal tag, so
+# the sweep can recognise a DEAD run's leftovers. Written against
+# `<pid>_<hex>` rather than against this process's own tag: a pattern
+# containing this run's pid matches only this run, which would make the sweep
+# delete nothing at all — the exact opposite of what it is for, and a bug that
+# looks like "the sweep is fine, there was nothing to clean".
+_SCRATCH_DIR_RE = re.compile(r'ab-native-(\d+)_[0-9a-f]{8}-.+')
+_ARTIFACT_RE = re.compile(
+    r'abt(\d+)_[0-9a-f]{8}_\w+\.(?:' + '|'.join(ARTIFACT_EXTS) + r')')
+
+_scratch = None
+
+
+def scratch_dir() -> str:
+    """This process's private scratch directory, created on first use.
+
+    Exists for the whole process rather than per case so that a case's source,
+    its `.ci` and its siblings share one directory — the `--dump-full` sibling
+    cases resolve their imports relative to the driver's own directory, so a
+    per-case directory would work too, but one directory for the run means one
+    thing to sweep and one thing to reason about.
+    """
+    global _scratch
+    if _scratch is None:
+        os.makedirs(SCRATCH_ROOT, exist_ok=True)
+        _scratch = tempfile.mkdtemp(prefix=f'ab-native-{_RUN_TAG}-',
+                                    dir=SCRATCH_ROOT)
+    return _scratch
+
+
+def cleanup_scratch() -> None:
+    """Remove everything this process left behind: its scratch directory, and
+    any dump artifact a case left in HERE (the compiler writes those into its
+    CWD, which has to be the repo root — see the module docstring — so they are
+    this run's litter even though the run is not where they are written).
+
+    Idempotent, and safe to call from a signal handler or from `atexit` after
+    the normal path already ran.
+    """
+    global _scratch
+    if _scratch and os.path.isdir(_scratch):
+        shutil.rmtree(_scratch, ignore_errors=True)
+    _scratch = None
+    for name in _our_artifacts_in(HERE):
+        _remove_if_present(os.path.join(HERE, name))
+
+
+def _our_artifacts_in(directory: str) -> list:
+    """Names in `directory` matching this run's artifact tag. The tag is
+    unique per process, so this never returns another run's file."""
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return []
+    return [n for n in entries if n.startswith(SRC_PREFIX)
+            and n.endswith(ARTIFACT_EXTS)]
+
+
+def _pid_alive(pid: int) -> bool:
+    """Is `pid` still running? Signal 0 does the permission/existence check
+    without delivering anything. `PermissionError` means it exists and belongs
+    to someone else, which counts as alive — deleting another user's scratch
+    would be worse than leaving ours."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def sweep_stale_scratch() -> None:
+    """Remove scratch dirs and repo-root artifacts left by a DEAD run.
+
+    This is the half of "clean up on every exit path" that no exit path can
+    do for itself: `memcap` kills this test's tree with SIGKILL at its 8 GB
+    ceiling, and a SIGKILLed process runs no `finally`, no `atexit` and no
+    signal handler. Without this, a killed run's artifacts accumulate in the
+    repo root forever.
+
+    Scoped to our own naming scheme and to pids that are not alive, which is
+    what makes running it at import time safe: a concurrently running
+    `test_ab_native.py` has a live pid, so its directory and its `.ci` files
+    are left alone. The pid is parsed out of the name we ourselves generate,
+    so nothing that is not one of our own scratch entries can match.
+    """
+    if not os.path.isdir(SCRATCH_ROOT):
+        return
+    for name in os.listdir(SCRATCH_ROOT):
+        m = _SCRATCH_DIR_RE.fullmatch(name)
+        if not m:
+            continue                                   # not ours
+        pid = int(m.group(1))
+        if pid == os.getpid() or _pid_alive(pid):
+            continue                                   # still running
+        shutil.rmtree(os.path.join(SCRATCH_ROOT, name), ignore_errors=True)
+    # Artifacts a killed run left in HERE, same liveness rule. These are
+    # gitignored, so they never become a fan-out item — but a stale `_ci` from
+    # a previous run is exactly what tools/ab_run_one.py's `_run_locked` has to
+    # defensively delete "so a leftover file is never mistaken for this run's",
+    # and this is the other end of that: do not produce them in the first place.
+    try:
+        entries = os.listdir(HERE)
+    except OSError:
+        return
+    for name in entries:
+        m = _ARTIFACT_RE.fullmatch(name)
+        if not m:
+            continue
+        pid = int(m.group(1))
+        if pid == os.getpid() or _pid_alive(pid):
+            continue
+        try:
+            os.remove(os.path.join(HERE, name))
+        except OSError:
+            pass
+
+
+sweep_stale_scratch()
+atexit.register(cleanup_scratch)
+
+
+def _scratch_source(basename: str, source: str) -> str:
+    """Write `source` as this run's private copy of `basename`; return its path.
+
+    `basename` is a filename (`abfulltest_leaf.mojo`), not a stem: the corpus
+    names its modules the same way the import lines in its drivers do, and
+    making the two different shapes is how a case ends up writing
+    `..._leaf.mojo.mojo` and failing with a path that looks present. The tag
+    and the extension are both applied here, in one place, so the file this
+    case writes and the module name the corpus imports cannot drift apart.
+
+    Tagged basename, so the `.ci` the compiler writes into HERE cannot collide
+    with another process's. The `.mojo` itself never enters the repo root, so
+    no concurrent fan-out over that directory can ever enumerate it.
+    """
+    path = os.path.join(scratch_dir(), _tagged(basename))
+    with open(path, 'w') as f:
+        f.write(source)
+    return path
+
+
+def _remove_if_present(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _tagged(basename: str) -> str:
+    """`abfulltest_leaf.mojo` -> `abt<pid>_<hex>_abfulltest_leaf.mojo`.
+
+    Accepts a filename or a bare stem, because this file's two corpora spell
+    their cases differently — `--dump` names them by stem (`minimal_main`),
+    `--dump-full` by filename (`abfulltest_leaf.mojo`, because that is also how
+    the import lines in its drivers name them). Normalising here rather than at
+    each call site is what keeps `..._leaf.mojo.mojo` from being possible.
+
+    The FILENAME form. The MODULE-NAME form — the same string without the
+    extension — is what the corpus's `{m}` placeholder expands to, and the two
+    have to agree: a `--dump-full` case is only testing sibling resolution if
+    the `from X import Y` in its driver names the module the case actually
+    wrote. Both derive from this run's single tag, so the one place they could
+    disagree is right here.
+    """
+    stem, ext = os.path.splitext(basename)
+    if not ext:
+        stem, ext = basename, '.mojo'
+    return f'{SRC_PREFIX}{stem}{ext}'
+
+
+
+def _collect_artifacts(src_path: str, out_dir: str) -> str:
+    """Move the dump's artifacts out of the repo root into `out_dir`; return
+    the `.ci`'s new path.
+
+    Both dump paths run with `cwd=HERE` (non-negotiable, see each function's
+    docstring), so the compiler writes `<basename>.ci` — and, for `--dump`,
+    `.tok`/`.ast`/`.pyi` — into the shared repo root, named after the INPUT's
+    basename regardless of where the input itself lives. Moving them out here
+    rather than in each caller is what keeps the repo root clear: a `.tok` or
+    `.ast` left behind is gitignored and therefore harmless to the fan-out, but
+    it is still litter in a directory other jobs read, and one implementation
+    of "where does the artifact go" is one that cannot be forgotten by the
+    next caller.
+
+    The destination is keyed on the input's basename, which is unique per
+    process (see `SRC_PREFIX`), so two concurrent runs of this test never
+    clobber each other's collected `.ci`.
+    """
+    basename = os.path.splitext(os.path.basename(src_path))[0]
+    ci_path = os.path.join(out_dir, f'{basename}.ci')
+    for ext in ARTIFACT_EXTS:
+        produced = os.path.join(HERE, f'{basename}.{ext}')
+        if not os.path.exists(produced):
+            continue
+        dest = ci_path if ext == 'ci' else os.path.join(out_dir, f'{basename}.{ext}')
+        if os.path.abspath(produced) != os.path.abspath(dest):
+            shutil.move(produced, dest)
+    return ci_path
 
 
 def run_python_dump(src_path: str, out_dir: str, flag: str = '--dump') -> str:
@@ -31,16 +301,15 @@ def run_python_dump(src_path: str, out_dir: str, flag: str = '--dump') -> str:
     compiled backend. `flag` is '--dump' (do_imports=False, single-TU) or
     '--dump-full' (do_imports=True, transitive closure) — see
     test_dump_full_file's docstring for why the two need separate corpora.
+
+    `src_path` may live anywhere — the corpus writes it into a private
+    scratch dir (module docstring); only its BASENAME is load-bearing, because
+    that is what the output files are named after.
     """
     src_path = os.path.abspath(src_path)
     cmd = [sys.executable, os.path.join(HERE, 'fire.py'), flag, src_path]
     subprocess.run(cmd, cwd=HERE, capture_output=True, text=True, timeout=60)
-    basename = os.path.splitext(os.path.basename(src_path))[0]
-    here_ci = os.path.join(HERE, f'{basename}.ci')
-    ci_path = os.path.join(out_dir, f'{basename}.ci')
-    if os.path.exists(here_ci) and os.path.abspath(here_ci) != os.path.abspath(ci_path):
-        shutil.move(here_ci, ci_path)
-    return ci_path
+    return _collect_artifacts(src_path, out_dir)
 
 
 def run_native_dump(src_path: str, out_dir: str, flag: str = '--dump') -> str:
@@ -68,14 +337,8 @@ def run_native_dump(src_path: str, out_dir: str, flag: str = '--dump') -> str:
                             timeout=120, env=env)
     if result.returncode != 0:
         print(f"  NATIVE STDERR: {result.stderr[:2000]}", file=sys.stderr)
-    basename = os.path.splitext(os.path.basename(src_path))[0]
-    ci_path = os.path.join(out_dir, f'{basename}.ci')
-    # The binary writes the .ci to ITS cwd (HERE); move it to out_dir.
-    here_ci = os.path.join(HERE, f'{basename}.ci')
-    if os.path.exists(here_ci) and os.path.abspath(here_ci) != os.path.abspath(ci_path):
-        import shutil
-        shutil.move(here_ci, ci_path)
-    return ci_path
+    # The binary writes the .ci to ITS cwd (HERE); _collect_artifacts moves it.
+    return _collect_artifacts(src_path, out_dir)
 
 
 def diff_ci_files(ci_a: str, ci_b: str) -> tuple:
@@ -120,16 +383,29 @@ def diff_ci_files(ci_a: str, ci_b: str) -> tuple:
     return False, summary + "\n" + "\n".join(snippet)
 
 
+def _compare(py_ci: str, nc_ci: str, name: str) -> bool:
+    """Diff one case's two `.ci` files and print its verdict line. The single
+    place the pass/fail line is formatted, so every case in this file reports
+    identically."""
+    match, summary = diff_ci_files(py_ci, nc_ci)
+    status = "PASS" if match else "FAIL"
+    print(f"  {status}  {name}: {summary.splitlines()[0]}")
+    if not match:
+        print(f"         {summary}")
+    return match
+
+
 def test_inline_source(name: str, source: str):
     """Test an inline Mojo source snippet.
 
-    The `.mojo` file is written INTO the repo root (not a temp dir): both
-    dump paths' self-host/stdlib resolution is path-sensitive, and only a
-    file that lives beside `fire.py` produces the full, comparable `.ci`.
+    The `.mojo` goes into this process's private scratch dir under
+    `<repo>/.tmp/`, never the repo root — see the module docstring. The old
+    `_abt_<name>.mojo`-in-the-root arrangement is what a concurrent
+    `bootstrap-stage*-dumps` fan-out enumerated (2026-09-29), and moving the
+    file is the fix; the tagged basename then keeps the `.ci` the compiler
+    writes into HERE from colliding with another run's.
     """
-    src_file = os.path.join(HERE, f'_abt_{name}.mojo')
-    with open(src_file, 'w') as f:
-        f.write(source)
+    src_file = _scratch_source(name, source)
     try:
         with tempfile.TemporaryDirectory() as td:
             py_dir = os.path.join(td, 'py')
@@ -140,20 +416,21 @@ def test_inline_source(name: str, source: str):
             ci_py = run_python_dump(src_file, py_dir)
             ci_nc = run_native_dump(src_file, nc_dir)
 
-            match, summary = diff_ci_files(ci_py, ci_nc)
-        status = "PASS" if match else "FAIL"
-        print(f"  {status}  {name}: {summary.splitlines()[0]}")
-        if not match:
-            print(f"         {summary}")
-        return match
+            return _compare(ci_py, ci_nc, name)
     finally:
-        for _p in (src_file, src_file[:-5] + '.ci'):
-            if os.path.exists(_p):
-                os.remove(_p)
+        # The scratch dir is removed wholesale at exit; removing the source
+        # here as well keeps a single case's footprint small while the run
+        # continues, so a long corpus is not holding 27 sources at once.
+        _remove_if_present(src_file)
 
 
 def test_file(path: str):
-    """Test a .mojo file from disk."""
+    """Test a .mojo file from disk.
+
+    Nothing is written into the repo root for a file the caller already has:
+    the source stays where it is and only the dump artifacts are collected out
+    of HERE.
+    """
     name = os.path.splitext(os.path.basename(path))[0]
     with tempfile.TemporaryDirectory() as td:
         py_dir = os.path.join(td, 'py')
@@ -164,12 +441,7 @@ def test_file(path: str):
         ci_py = run_python_dump(path, py_dir)
         ci_nc = run_native_dump(path, nc_dir)
 
-        match, summary = diff_ci_files(ci_py, ci_nc)
-        status = "PASS" if match else "FAIL"
-        print(f"  {status}  {name}: {summary.splitlines()[0]}")
-        if not match:
-            print(f"         {summary}")
-        return match
+        return _compare(ci_py, ci_nc, name)
 
 
 def test_dump_full_multi(name: str, files: dict, driver: str):
@@ -192,23 +464,26 @@ def test_dump_full_multi(name: str, files: dict, driver: str):
     must fail cleanly (guarded) instead of raising uncaught on the
     compiled backend.
 
-    Files are written INTO the repo root (not a temp dir), same
-    path-sensitivity reason as test_inline_source.
+    Every module — driver and leaves alike — is written into the private
+    scratch dir, which is also what makes the sibling import resolve: the
+    lookup walks up from the DRIVER's own directory. That is why the module
+    names carry this run's tag: the corpus's literal `abfulltest_leaf` is
+    also the name of a tracked repo-root file, and an untagged leaf written
+    to a private dir would resolve to whichever the search found first.
+    Tagging keeps "the file this case wrote" and "the file the compiler read"
+    the same file, which is the whole point of a sibling-import case.
     """
     written = []
-    saved = {}      # path -> the bytes a file of that name held before we wrote it
+    # The driver goes through _scratch_source like every other module (which
+    # is where the tag is applied — one place, so a module cannot be written
+    # tagged and imported untagged) and is written with the same content the
+    # corpus declared for it, so there is no second, differently-derived path
+    # to the file the test is actually about.
+    driver_source = files[driver].format(m=SRC_PREFIX)
+    driver_path = _scratch_source(driver, driver_source)
     try:
         for basename, source in files.items():
-            path = os.path.join(HERE, basename)
-            # `abfulltest_driver.mojo` / `abfulltest_leaf.mojo` are also tracked
-            # corpus files: put back what was there rather than deleting them.
-            if os.path.exists(path):
-                with open(path, 'rb') as f:
-                    saved[path] = f.read()
-            with open(path, 'w') as f:
-                f.write(source)
-            written.append(path)
-        driver_path = os.path.join(HERE, driver)
+            written.append(_scratch_source(basename, source.format(m=SRC_PREFIX)))
         with tempfile.TemporaryDirectory() as td:
             py_dir = os.path.join(td, 'py')
             nc_dir = os.path.join(td, 'nc')
@@ -218,26 +493,24 @@ def test_dump_full_multi(name: str, files: dict, driver: str):
             ci_py = run_python_dump(driver_path, py_dir, flag='--dump-full')
             ci_nc = run_native_dump(driver_path, nc_dir, flag='--dump-full')
 
-            match, summary = diff_ci_files(ci_py, ci_nc)
-        status = "PASS" if match else "FAIL"
-        print(f"  {status}  {name}: {summary.splitlines()[0]}")
-        if not match:
-            print(f"         {summary}")
-        return match
+            return _compare(ci_py, ci_nc, name)
     finally:
         for p in written:
-            if p in saved:
-                with open(p, 'wb') as f:
-                    f.write(saved[p])
-            elif os.path.exists(p):
-                os.remove(p)
-        driver_ci = os.path.join(HERE, os.path.splitext(driver)[0] + '.ci')
-        if os.path.exists(driver_ci):
-            os.remove(driver_ci)
+            _remove_if_present(p)
+        _remove_if_present(driver_path)
 
 
 # ── Built-in --dump-full sibling-import test cases ────────────────────────
-# Each entry: name -> (files: {basename: source}, driver: basename).
+# Each entry: name -> (files: {basename.mojo: source}, driver: basename.mojo).
+#
+# `{m}` in a source expands to this run's module-name tag (SRC_PREFIX). It is
+# not decoration: the files are written to a private scratch dir, and a
+# sibling `from X import Y` is resolved by walking up from the DRIVER's own
+# directory, so the module name in the import line and the file this case
+# actually wrote have to be the same name. Spelling that as a placeholder
+# rather than substituting the module name textually keeps the substitution
+# impossible to get wrong in a way a reader cannot see — the corpus shows the
+# import, and the tag is visibly applied to both sides of it.
 DUMP_FULL_TESTS = {
     "sibling_from_import": (
         {
@@ -246,7 +519,7 @@ DUMP_FULL_TESTS = {
                     return 7
             """),
             "abfulltest_driver.mojo": textwrap.dedent("""\
-                from abfulltest_leaf import leaf_value
+                from {m}abfulltest_leaf import leaf_value
 
                 def main() -> Int:
                     return leaf_value() + 1
@@ -264,7 +537,7 @@ DUMP_FULL_TESTS = {
                     return 2
             """),
             "abfulltest_driver2.mojo": textwrap.dedent("""\
-                from abfulltest_leaf2 import (leaf_a, leaf_b)
+                from {m}abfulltest_leaf2 import (leaf_a, leaf_b)
 
                 def main() -> Int:
                     return leaf_a() + leaf_b()
@@ -279,13 +552,13 @@ DUMP_FULL_TESTS = {
                     return 3
             """),
             "abfulltest_mid3.mojo": textwrap.dedent("""\
-                from abfulltest_leaf3 import leaf_value3
+                from {m}abfulltest_leaf3 import leaf_value3
 
                 def mid_value() -> Int:
                     return leaf_value3() * 2
             """),
             "abfulltest_driver3.mojo": textwrap.dedent("""\
-                from abfulltest_mid3 import mid_value
+                from {m}abfulltest_mid3 import mid_value
 
                 def main() -> Int:
                     return mid_value() + 1
@@ -579,6 +852,12 @@ def main():
 
     print()
     print(f"Results: {passed} passed, {failed} failed")
+    # Explicit, not implicit in the interpreter's exit: `sys.exit` raises
+    # SystemExit, which unwinds through `finally` blocks, but spelling the
+    # cleanup here means the guarantee does not depend on that interaction
+    # holding for every future edit above. `atexit` is the backstop for the
+    # paths that never reach this line.
+    cleanup_scratch()
     sys.exit(0 if failed == 0 else 1)
 
 
