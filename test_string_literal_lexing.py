@@ -47,7 +47,18 @@ What this test asserts, per literal:
 One end-to-end case builds an arm64 image and RUNS it, because "the tokenizer
 agreed with CPython" is not the claim a caller depends on — "the program
 printed the same thing" is, and the lowering is a separate implementation
-(formal/arm64_codegen.py) from the evaluator.
+(formal/arm64_codegen.py) from the evaluator. There are five of them now, one
+per family of literal this file covers.
+
+The third family is the one that generalizes. Every pre-pass that rewrites a
+line used to do it without asking where the literals are, and each wrote a
+character the source never wrote — a SPACE where a backslash-newline pair is
+worth nothing, SPACES where a TAB is content, and a whole invented LINE BREAK
+for any of the eight characters `str.splitlines()` calls a line break and the
+language does not. So the two tables a reader should look at second are
+`CONTINUATIONS` (the pair) and the control-character rows in `LITERALS`, and
+between them they cover every character whose treatment in this front end is a
+decision rather than an accident.
 
 Run:  python3 test_string_literal_lexing.py [-v]
 """
