@@ -851,20 +851,13 @@ def compile_formal(source_path: str, output: str = None,
     except SyntaxError as e:
         raise FormalBuildError(f"parse error: {e}")
 
-    # Structural acceptance: only FunctionDefs matter for codegen; imports /
-    # module-level statements are fine (filtered here + in the codegen).
-    # The modules this file imports contribute their struct declarations
-    # BEFORE the function pipeline runs, because a method call is rewritten to
-    # `<Struct>_<method>` and the rewrite needs to know which struct owns the
-    # name. Resolving this after would leave `c.get()` unrecognised in a file
-    # that imported the struct, which is the only way such a call occurs.
     # The target this image is FOR, published BEFORE anything that can build a
     # module — `_imported_structs` below compiles each imported module into a
     # dylib, and each of those publishes the target of ITS OWN build (a dylib is
-    # always Mach-O, `formal/imports.py`). Publishing first and again after
-    # would work, but a value that is only correct because of the order is a
-    # value that will be wrong the day someone reorders these two lines; so this
-    # one comes first and the dylib's publish is the one that has to be undone.
+    # always Mach-O, `formal/imports.py`). Publishing again after would work, but
+    # a value that is only correct because of the order of two lines is a value
+    # that will be wrong the day someone reorders them; so this one goes first
+    # and the dylib's publish is the one that has to be undone.
     #
     # The pipeline is where a `#kgen.param.expr<…>` target query is answered:
     # `arch` and `fmt` are the two facts the linker is about to act on, and a
@@ -872,11 +865,20 @@ def compile_formal(source_path: str, output: str = None,
     # answer for them. They are the same pair the dylib cache is keyed on, so
     # the two front ends cannot describe one target two ways.
     M.publish_target(M.target_for(arch, fmt))
+
+    # Structural acceptance: only FunctionDefs matter for codegen; imports /
+    # module-level statements are fine (filtered here + in the codegen).
+    # The modules this file imports contribute their struct declarations
+    # BEFORE the function pipeline runs, because a method call is rewritten to
+    # `<Struct>_<method>` and the rewrite needs to know which struct owns the
+    # name. Resolving this after would leave `c.get()` unrecognised in a file
+    # that imported the struct, which is the only way such a call occurs.
     imported_structs = _imported_structs(source_path, stmts, arch)
-    # …and again, because the dylib builds above republished it as the dylib's
-    # own Mach-O target. This is the one place the two genuinely differ (an
-    # `--fmt=elf` build on a Mac asks for an ELF image and a Mach-O dylib), and
-    # the executable's functions are the ones the linker is about to act on.
+    # …and the target again, because the dylib builds above republished it as
+    # the dylib's own Mach-O target. This is the one place the two genuinely
+    # differ (an `--fmt=elf` build on a Mac asks for an ELF image and a Mach-O
+    # dylib), and the executable's functions are the ones the linker is about to
+    # act on.
     M.publish_target(M.target_for(arch, fmt))
     try:
         functions, structs, symbols = _prepare_functions(
