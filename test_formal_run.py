@@ -5484,8 +5484,17 @@ WAVE7_G2_CASES = [
     # `self.<field>` was rewritten to `self` long before the emitter runs,
     # because a single-field struct's receiver IS its field.  So the operand
     # here is a bare `self` and the declared type has to be recovered from the
-    # struct's one field.  This is the shape `std/collections/binary_heap.mojo`
-    # is in, and it is the shape the 30-file group is blocked on.
+    # struct's one field.
+    #
+    # NOT the shape `std/collections/binary_heap.mojo` is in, which is what
+    # this comment used to say: `BinaryHeap` has TWO fields here, because its
+    # comptime parameter `T` is in `struct_field_names` and `struct_is_framed`
+    # counts it, so `BinaryHeap` is a frame and its `len(self)` is the
+    # `__len__` call `formal/build.py`'s `_rewrite_len_on_frame_receivers` now
+    # makes (see `bugs/FORMAL_frame_receiver_handoff.md` §14).  A one-field
+    # struct is not a frame, `b` below is a plain word, and the `__len__` on it
+    # is not reached at all — which is why this case still refuses, for the
+    # field-value reason and not for a length reason.
     ("len_one_word_struct_receiver_is_a_list_field",
      "struct B:\n"
      "    var _data: List[Int]\n"

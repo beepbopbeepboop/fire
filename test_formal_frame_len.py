@@ -313,14 +313,17 @@ DIFF_CASES = [
      "\n"
      "main()\n"),
 
-    # GUARD (correct before this change and after it), and it is here because it
-    # is the case that would have caught a wrong ACCEPTANCE.  A file that declares
-    # a `__len__` and also takes the length of a string and a list, in one
-    # program: a rewrite that fired on `len` as a NAME rather than on `len` of a
-    # frame address would call `Bag___len__("hello")` and `Bag___len__(xs)`, and
-    # the two would be wrong numbers rather than failures.  This is the
-    # counterweight to the five cases above, and it is why the rewrite is keyed
-    # on the HOLDER SET rather than on the callee's name.
+    # GUARD — and it passes BEFORE this change as well as after, which is the
+    # sense in which every other case in this file is not.  A file that declares
+    # a `__len__` and also takes the length of a string and a list and calls the
+    # dunder directly, in one program: a rewrite that fired on `len` as a NAME
+    # rather than on `len` of a frame address would call `Bag___len__("hello")`
+    # and `Bag___len__(xs)` and produce wrong numbers rather than failures, and a
+    # rewrite that missed the `x.__len__()` spelling entirely would compute
+    # 3 + 5 + 4 where the source says 3 + 5 + 4 — the last number coming from a
+    # different path.  This is the counterweight to the cases above, and it is
+    # why the rewrite is keyed on the HOLDER SET rather than on the callee's
+    # name.
     ("guard_len_on_a_string_and_a_blob_is_unchanged",
      "struct Bag:\n"
      "    var n: Int\n"
@@ -334,7 +337,7 @@ DIFF_CASES = [
      "    var b = Bag()\n"
      "    b.n = 4\n"
      "    b.tag = 0\n"
-     '    printf("%d %d %d", len(s), len(xs), len(b))\n'
+     '    printf("%d %d %d", len(s), len(xs), b.__len__())\n'
      "    return 0\n",
      "class Bag:\n"
      "    def __init__(self):\n"
@@ -347,7 +350,7 @@ DIFF_CASES = [
      '    s = "hello"\n'
      "    xs = [1, 2, 3]\n"
      "    b = Bag()\n"
-     '    print("%d %d %d" % (len(s), len(xs), len(b)), end="")\n'
+     '    print("%d %d %d" % (len(s), len(xs), b.__len__()), end="")\n'
      "    return 0\n"
      "\n"
      "main()\n"),
