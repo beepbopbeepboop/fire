@@ -2099,7 +2099,7 @@ def _compute_no_wd_forward(stmts: list) -> None:
     # under two minutes (see bugs/CODEGEN_container_eq_is_pointer_identity.md).
     # So the termination test here is the worklist draining, never a `==`.
     dirty: dict = {}
-    queue: list = seeds
+    queue: list = seeds                # the seeds ARE the initial worklist
     for name in seeds:
         dirty[name] = 1
     while len(queue) > 0:
