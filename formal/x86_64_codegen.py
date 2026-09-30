@@ -171,6 +171,16 @@ def _collect_var_names(f: F.FunctionDef) -> list:
     appended after every real name so they only ever spill.
     """
     names = bound_names_in_order(f.body, f.params)
+    # A name the function declares `global` is NOT a local of it, whatever the
+    # assignment walk said: `global G; G = G + 1` assigns G, so the walk reports
+    # it bound, and giving it a register here would make the function keep TWO
+    # homes for one word — a register, which the emitter would read back as the
+    # current value, and the `__DATA` slot, which is where the module's value
+    # lives. The arm64 backend excludes exactly these names, from the same
+    # shared helper, so the two cannot allocate differently for one program.
+    module_globals = M.global_names_bound_in(f)
+    if module_globals:
+        names = [n for n in names if n not in module_globals]
     seen = set(names)
 
     def walk(stmts, depth: int, acc: list) -> None:
@@ -399,7 +409,8 @@ class X86_64Codegen:
 
     def __init__(self, test_input: int = 10, extern_style: str = "stub",
                  dylib_syms: dict = None, comptime_hook=None,
-                 module_source: str = "", dylib_exports: list = None):
+                 module_source: str = "", dylib_exports: list = None,
+                 globals_base: int = None):
         """test_input: the value the startup stub passes to the entry.
 
         extern_style: how a call to an unbound symbol is emitted.
@@ -455,9 +466,13 @@ class X86_64Codegen:
                 _owner.setdefault(_entry.get("name"), _entry)
         self._comptime_hook = comptime_hook
         self._module_source = module_source
+        # Where this unit's module-global data segment is MAPPED. A parameter
+        # and not a lookup, because it differs per container (macho_linker and
+        # elf define separate constants) and because every slot access has to be
+        # computed against it BEFORE the image exists. None means "this unit has
+        # no module globals", which is the ordinary case.
+        self._globals_base = globals_base
         self.asm = Assembler()
-
-
         self._functions = {}
         self._current_function = None
         # The FUNCTION NODE, not just its name — the pointer value model reads
@@ -606,6 +621,10 @@ class X86_64Codegen:
             # build runnable (same contract as the arm64 startup stub).
             self.asm.emit(encode_push_r64(Reg.RBP))
             self.asm.emit(encode_mov_r64_r64(Reg.RBP, Reg.RSP))
+            # The module-global initializer runs BEFORE the entry function, so a
+            # slot an entry function reads is already correct. See
+            # `_emit_global_init` for why this is CODE and not a relocation.
+            self._emit_global_init()
             if functions[0].params:
                 self._emit_mov_imm(ARG_REGS[0], self.test_input)
             self.asm.emit(encode_call_rel32(0))
@@ -855,6 +874,10 @@ class X86_64Codegen:
             self._load_var(name.rsplit(".", 1)[0], Reg.R11)
             self.asm.emit(encode_mov_r64_rm64(dst, Reg.R11, 8 * slot))
             return
+        gslot = M.module_slot(name)
+        if gslot is not None:
+            self._emit_global_load(gslot, dst)
+            return
         # A NESTED frame slot is TWO loads.  Checked before the one-load table
         # would matter if the key could collide, and before the register and
         # spill homes for the reason that matters: an x86-64 backend with no
@@ -891,11 +914,87 @@ class X86_64Codegen:
             "the register allocator collected no home for it, so the emitter "
             "and the allocation walk disagree about this function's locals")
 
+    def _emit_global_init(self) -> None:
+        """Fill every address-valued module-global slot, before the entry runs.
+
+        WHY CODE AND NOT A RELOCATION — the same answer, and the same
+        measurement, as arm64's `_emit_global_init`: a classic dyld `REBASE`
+        stream is parsed and then silently not applied on the macOS this backend
+        actually runs on. A RIP-relative LEA is how a string literal's address
+        already reaches a register here, and it is PC-relative, so it is correct
+        under whatever slide dyld chose. Two LEAs and one store per slot.
+
+        R10 and R11, the same two the frame paths use for an address and a
+        parked value; the startup stub holds nothing else live."""
+        table = M.module_slots()
+        base = self._globals_base
+        if not table or base is None:
+            return
+        image = M.build_data_image(table, base)
+        for at, target in image.fixups:
+            self._lea_abs(Reg.R10, base + target)
+            # The RIP-relative displacement counts from the END of the store
+            # instruction, so it is measured from here PLUS that instruction's
+            # length — 7 bytes for both (REX, opcode, ModRM, disp32), which is
+            # why this asks the encoder rather than hardcoding a size: getting
+            # it wrong by one produces an address one byte off, i.e. a
+            # plausible-looking wrong pointer rather than a fault.
+            here = self.asm._org + len(self.asm.sections["text"])
+            store = encode_mov_rip_r64(0, Reg.R10)
+            self.asm.emit(encode_mov_rip_r64(
+                base + at - (here + len(store)), Reg.R10))
+
+    def _global_slot_address(self, slot) -> None:
+        """R11 = the address of a module-global's `__DATA` slot.
+
+        A RIP-relative LEA, the x86-64 counterpart of arm64's ADRP/ADD pair for
+        a string literal, computed from the instruction's own position for the
+        same reason: a slot's address is a constant in another segment, not a
+        label in the code, so the assembler's label table has nothing to resolve.
+
+        The address is `globals_base() + 8 * slot.index` and all of it comes
+        from shared functions — `formal.build.globals_base` for the container's
+        mapping base and `model.GLOBAL_SLOT_BYTES` for the stride, the same
+        pair the image builder used to LAY the bytes out. Two independent
+        computations of an address would be two answers to one question."""
+        addr = self._globals_base + M.GLOBAL_SLOT_BYTES * slot.index
+        self._lea_abs(Reg.R11, addr)
+
+    def _lea_abs(self, reg: Reg, addr: int) -> None:
+        """LEA reg, [rip + disp32] for an absolute `addr`.
+
+        `encode_lea_r64_rip` takes a displacement and the assembler's `rip`
+        reloc back-patches it against a LABEL; a slot's address is a constant in
+        another segment, so there is no label to resolve and the displacement is
+        computed here — measured from the end of the instruction, which is where
+        RIP-relative addressing counts from."""
+        pos = self.asm._org + len(self.asm.sections["text"])
+        self.asm.emit(encode_lea_r64_rip(reg, addr - (pos + 7)))
+
+    def _emit_global_load(self, slot, dst: Reg) -> None:
+        """dst = a module-global's value — one load from its `__DATA` slot."""
+        self._global_slot_address(slot)
+        self.asm.emit(encode_mov_r64_rm64(dst, Reg.R11, 0))
+
+    def _emit_global_store(self, slot, src: Reg) -> None:
+        """A module-global's value = src — one store to its `__DATA` slot.
+
+        R11 holds the address, so a value already in R11 is parked in R10
+        first — the same two-scratch dance `_emit_frame_store` does, and for the
+        same reason: R10/R11 hold no local on this path."""
+        if src == Reg.R11:
+            self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.R11))
+            src = Reg.R10
+        self._global_slot_address(slot)
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, src))
+
     def _store_var(self, name: str, src: Reg) -> None:
         """local `name` = src. Register homes MOV; spill slots store to
         [RBP + off]. A frame slot is a store into the receiver's frame, and
         that store is the whole reason a method's effect reaches its caller:
-        the caller's local holds the same address."""
+        the caller's local holds the same address. A module global is a store
+        into the image's `__DATA` — the name was kept out of this function's
+        registers, so this is the only place the store can land."""
         slot = self._frame_slots.get(name)
         if slot is not None:
             if src == Reg.R11:
@@ -916,6 +1015,10 @@ class X86_64Codegen:
                 src = Reg.R10
             self._load_var(name.rsplit(".", 1)[0], Reg.R11)
             self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * nested, src))
+            return
+        gslot = M.module_slot(name)
+        if gslot is not None:
+            self._emit_global_store(gslot, src)
             return
         if name in self._var_regs:
             r = self._var_regs[name]

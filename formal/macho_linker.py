@@ -122,6 +122,33 @@ NOEXTERN_SIZEOFCMDS = 72 + 152 + 72 + 48 + DYLINKER_CMDSIZE + 24 + 24 + 24
 EXTERN_SIZEOFCMDS = (72 + 232 + 152 + 72 + 48 + DYLINKER_CMDSIZE + 24
                      + 24 + 56 + 24)
 
+# The `__DATA` segment a module-global slot table needs: its segment command
+# (72) plus one section header (80). A PARAMETER of the two layouts above
+# rather than a constant folded into them, because whether an image HAS module
+# state is a property of the source, and a program with no `global NAME` in it
+# must keep the layout it had — the entry offset moves with sizeofcmds, so
+# folding this in unconditionally would move every image on the tree for a
+# segment most of them do not have.
+DATA_SIZEOFCMDS = 72 + 80
+
+# Where `__DATA` is MAPPED for every image this module emits, Mach-O and dylib
+# alike. A fixed address rather than "the page after __TEXT", and that is the
+# whole design decision behind this capability:
+#
+# __TEXT's size is a function of the CODE, and the code needs to know where
+# __DATA is (every access is an ADRP to it), so deriving __DATA from __TEXT makes
+# each depend on the other. Placing it at a fixed address a few MB past the text
+# breaks the cycle: the codegen reads this constant before it emits anything,
+# the linker writes the segment here, and neither needs the other's output.
+#
+# The distance is chosen for ADRP's ±4 GB page range, not for tidiness: a page
+# delta is (target - pc) >> 12, so anything within 4 GB works and this is three
+# orders of magnitude inside it. It is also far enough past TEXT_BASE that no
+# realistic formal image's __TEXT reaches it — and a `__DATA` that OVERLAPPED
+# __TEXT would be a mapping failure at launch, which is why the builders below
+# raise rather than emit one.
+GLOBALS_VM = TEXT_BASE + 0x400000
+
 # sizeofcmd of LC_CODE_SIGNATURE, and the alignment the entry offset needs.
 #
 # Every image this module emits is signed after the fact by `codesign -s -`,
@@ -153,6 +180,16 @@ def executable_entry_offset(sizeofcmds: int) -> int:
 
 NOEXTERN_ENTRYOFF = executable_entry_offset(NOEXTERN_SIZEOFCMDS)
 EXTERN_ENTRYOFF = executable_entry_offset(EXTERN_SIZEOFCMDS)
+
+# Entry offsets for an image that carries module-global storage. Separate
+# constants rather than arguments to the two above because the CODEGEN reads
+# them before it has compiled anything (`_codegen_and_link` picks the base
+# address to emit for), and the choice of which one is the same decision twice:
+# has_externs decides between NOEXTERN/EXTERN, has_globals adds to whichever.
+NOEXTERN_GLOBALS_ENTRYOFF = executable_entry_offset(
+    NOEXTERN_SIZEOFCMDS + DATA_SIZEOFCMDS)
+EXTERN_GLOBALS_ENTRYOFF = executable_entry_offset(
+    EXTERN_SIZEOFCMDS + DATA_SIZEOFCMDS)
 
 
 def _align_up(value: int, alignment: int) -> int:
@@ -223,32 +260,45 @@ def _write_text_segment(file: bytearray, o: int, filesize: int,
 MH_EXECUTE_FLAGS = 0x1 | 0x4 | 0x80 | 0x200000
 
 
-def build_macho_executable(code: bytes, arch: str = "arm64") -> bytes:
+def build_macho_executable(code: bytes, arch: str = "arm64",
+                           globals_image=None) -> bytes:
     """Minimal MH_EXECUTE: no external symbols, no stubs, no GOT.
 
     The entry offset is derived from this layout (see executable_entry_offset)
     rather than passed in, so the code, LC_MAIN and the __text section offset
     cannot drift apart the way a caller-supplied constant allowed.
-    """
+
+    `globals_image` is a `model.GlobalDataImage` or None. Non-None adds a
+    writable `__DATA` segment for the module-global slot table. Its
+    presence changes `sizeofcmds`, so it changes the entry offset — which is why
+    `NOEXTERN_ENTRYOFF` has a globals-carrying twin and the codegen picks
+    between them before it emits."""
     spec = arch_spec(arch)
-    entryoff = NOEXTERN_ENTRYOFF
+    gblob = _globals_blob(globals_image)
+    has_globals = bool(gblob)
+    entryoff = (NOEXTERN_GLOBALS_ENTRYOFF if has_globals
+                else NOEXTERN_ENTRYOFF)
     body_end = entryoff + len(code)
     text_size = _text_filesize(body_end)
-    linkedit_file = text_size          # __LINKEDIT starts on the next page
+    g_file = text_size if has_globals else 0
+    g_size = _align_up(len(gblob), PAGE_SIZE) if has_globals else 0
+    g_vm = GLOBALS_VM if has_globals else 0
+    _check_globals_do_not_overlap_text(text_size, has_globals)
+    linkedit_file = g_file + g_size if has_globals else text_size
     linkedit_size = PAGE_SIZE
     file = bytearray(linkedit_file + linkedit_size)
 
     def patch(off: int, fmt: str, *vals) -> None:
         struct.pack_into(fmt, file, off, *vals)
 
-    sizeofcmds = NOEXTERN_SIZEOFCMDS
+    sizeofcmds = NOEXTERN_SIZEOFCMDS + (DATA_SIZEOFCMDS if has_globals else 0)
 
     patch(0, "<I", MAGIC_64)
     patch(4, "<I", spec["cputype"])
     patch(8, "<I", spec["cpusubtype"])
 
     patch(12, "<I", MH_EXECUTE)
-    patch(16, "<I", 8)
+    patch(16, "<I", 8 + (1 if has_globals else 0))
     patch(20, "<I", sizeofcmds)
     patch(24, "<I", MH_EXECUTE_FLAGS)
 
@@ -266,6 +316,12 @@ def build_macho_executable(code: bytes, arch: str = "arm64") -> bytes:
          0x80000400, 0),
     ])
 
+    # __DATA (module-global slots). Its ORDINAL is 2: an executable spends 0 on
+    # __PAGEZERO and 1 on __TEXT, and this layout has no __DATA_CONST — the
+    # ordinal 2, and the segment is emitted immediately after it.
+    if has_globals:
+        o = _write_data_segment(file, o, g_vm, g_file, g_size, gblob)
+
     patch(o + 0, "<I", SEGMENT_64_CMD)
     patch(o + 4, "<I", 72)
     file[o + 8 : o + 24] = b"__LINKEDIT".ljust(16, b"\0")
@@ -279,6 +335,13 @@ def build_macho_executable(code: bytes, arch: str = "arm64") -> bytes:
 
     patch(o + 0, "<I", DYLD_INFO_ONLY_CMD)
     patch(o + 4, "<I", 48)
+    # No rebase stream. The address-valued module globals are filled by CODE in
+    # the startup stub rather than by the loader; see
+    # `arm64_codegen._emit_global_init` for the measurement behind that choice,
+    # which is that a classic LC_DYLD_INFO_ONLY rebase stream is parsed and then
+    # silently ignored on the macOS this backend runs on.
+    patch(o + 8, "<I", 0)
+    patch(o + 12, "<I", 0)
     o += 48
 
     file[o : o + DYLINKER_CMDSIZE] = _dylinker_cmd()
@@ -304,8 +367,11 @@ def build_macho_executable(code: bytes, arch: str = "arm64") -> bytes:
 
     assert o <= entryoff, (o, entryoff)
     file[entryoff : entryoff + len(code)] = code
-    _assert_no_unclaimed_bytes(file, [(0, text_size),
-                                      (linkedit_file, linkedit_size)])
+    if has_globals:
+        file[g_file : g_file + len(gblob)] = gblob
+    _assert_no_unclaimed_bytes(file, [(0, text_size)]
+                               + ([(g_file, g_size)] if has_globals else [])
+                               + [(linkedit_file, linkedit_size)])
     return bytes(file)
 
 
@@ -320,7 +386,7 @@ def dylib_command_size(install_name: str) -> int:
     return (24 + len(install_name.encode("utf-8")) + 1 + 7) & ~7
 
 
-def extern_entry_offset(dylib_install_names=()) -> int:
+def extern_entry_offset(dylib_install_names=(), has_globals: bool = False) -> int:
     """File offset of the entry point for the extern executable layout.
 
     The no-dependency case is the historical constant; each linked dylib adds
@@ -329,9 +395,14 @@ def extern_entry_offset(dylib_install_names=()) -> int:
     LC_CODE_SIGNATURE codesign appends). The codegen needs this BEFORE it
     emits, because the entry offset decides the base address every ADRP and
     relative branch is computed against — hence a function rather than a
-    constant."""
+    constant.
+
+    `has_globals` adds the `__DATA` segment's load command, for the same reason
+    and with the same consequence: it moves the entry point, so the codegen has
+    to know it before emitting and the linker has to use the same value."""
     extra = sum(dylib_command_size(n) for n in dylib_install_names)
-    return executable_entry_offset(EXTERN_SIZEOFCMDS + extra)
+    return executable_entry_offset(EXTERN_SIZEOFCMDS + extra
+                                   + (DATA_SIZEOFCMDS if has_globals else 0))
 
 
 def _bind_info(external_syms: list[str], dylib_of: dict = None,
@@ -421,6 +492,96 @@ def _uleb(out: bytearray, value: int) -> None:
             return
 
 
+def _write_data_segment(file: bytearray, o: int, data_vm: int, data_file: int,
+                        data_size: int, blob: bytes) -> int:
+    """Write the `__DATA` segment command + its `__globals` section header.
+
+    One section, `__globals`, holding the module-global slot table and the blobs
+    and string bytes the address-valued slots point at. `initprot` is rw- (3)
+    because a `global NAME` store WRITES here — a read-only data segment would
+    fault on the first write, which is the one operation the segment exists for.
+
+    Returns the offset just past the command."""
+    def patch(off, fmt, *vals):
+        struct.pack_into(fmt, file, off, *vals)
+
+    patch(o + 0, "<I", SEGMENT_64_CMD)
+    patch(o + 4, "<I", 72 + 80)
+    file[o + 8 : o + 24] = b"__DATA".ljust(16, b"\0")
+    patch(o + 24, "<Q", data_vm)
+    patch(o + 32, "<Q", data_size)
+    patch(o + 40, "<Q", data_file)
+    patch(o + 48, "<Q", data_size)
+    patch(o + 56, "<I", 0x3)
+    patch(o + 60, "<I", 0x3)
+    patch(o + 64, "<I", 1)
+    patch(o + 68, "<I", 0)
+    s = o + 72
+    file[s : s + 16] = b"__globals".ljust(16, b"\0")
+    file[s + 16 : s + 32] = b"__DATA".ljust(16, b"\0")
+    patch(s + 32, "<Q", data_vm)
+    patch(s + 40, "<Q", len(blob))
+    patch(s + 48, "<I", data_file)
+    patch(s + 52, "<I", 3)
+    patch(s + 56, "<I", 0)
+    patch(s + 60, "<I", 0)
+    patch(s + 64, "<I", 0x3)          # S_... : initialized data
+    patch(s + 68, "<I", 0)
+    patch(s + 72, "<I", 0)
+    return o + 72 + 80
+
+
+def data_segment_ordinal(segments_before_data: int) -> int:
+    """The segment ordinal of `__DATA` in a given image.
+
+    An executable spends ordinal 0 on __PAGEZERO, so its __DATA is 2 with no
+    GOT segment and 3 with one; a dylib has no __PAGEZERO, so it is 1 and 2.
+    Passed in as a count rather than derived here because the two builders
+    already know their own segment list — the bug this shape exists to prevent is
+    a hardcoded ordinal pointing the fixups at the wrong segment, which dyld
+    reports as a fault inside its own applyFixups and not as anything about this
+    module."""
+    return segments_before_data
+
+
+def _globals_blob(globals_image) -> bytes:
+    """The data blob for a `model.GlobalDataImage`, or b"" for None.
+
+    The one reader of that object for the Mach-O path, so the three builders
+    cannot each spell the blob differently. Accepting None is the NORMAL case — a
+    module with no `global NAME` in it has no slots — so every builder takes the
+    same argument and decides for itself whether it emits a segment."""
+    if globals_image is None:
+        return b""
+    return bytes(globals_image.blob)
+
+
+def _check_globals_do_not_overlap_text(text_size: int, has_globals: bool) -> None:
+    """Refuse an image whose `__TEXT` would run into the fixed `__DATA`.
+
+    `GLOBALS_VM` is a constant, so "does the text reach it" is a real question
+    rather than an arithmetic impossibility — and the failure if it ever came to
+    pass would be two load commands describing overlapping mappings, which dyld
+    resolves by refusing to launch the image, with nothing in the output naming
+    the segment that collided.
+
+    Measured threshold, not a guess: `GLOBALS_VM` is 4 MB past `TEXT_BASE`, and
+    the largest formal image measured on this tree (`fire.py` itself, ~1.5 MB of
+    arm64 code with its whole stdlib dylib set) is an order of magnitude below
+    it. So this raises on a program no repository source produces, and the
+    alternative — deriving __DATA from __TEXT's size — reintroduces the
+    circular dependency between the code and the address every slot access is
+    computed against, which is the harder bug to find."""
+    if not has_globals:
+        return
+    if text_size > GLOBALS_VM - TEXT_BASE:
+        raise ValueError(
+            f"__TEXT is {text_size} bytes, which reaches the fixed __DATA at "
+            f"{GLOBALS_VM:#x} ({GLOBALS_VM - TEXT_BASE} bytes past the text "
+            f"base); the two mappings would overlap and dyld would refuse the "
+            f"image without naming the segment that collided")
+
+
 def _stub_bytes(got_vm: int, stub_vm: int, arch: str = "arm64") -> bytes:
     """One __TEXT,__stubs entry: jump through the GOT slot at `got_vm`.
 
@@ -469,7 +630,7 @@ def externer_layout(code_len: int, external_syms: list,
 
 def build_macho_executable_extern(
     code: bytes, external_syms: list, arch: str = "arm64",
-    dylibs: list = None,
+    dylibs: list = None, globals_image=None,
 ) -> bytes:
     """Executable with __TEXT,__stubs + __DATA_CONST,__got + LC_LOAD_DYLIB
     libSystem + classic bind. `code` already contains call instructions whose
@@ -486,11 +647,19 @@ def build_macho_executable_extern(
     binds with ordinal k+2; everything else binds from libSystem (ordinal 1).
     Each one adds a load command, which moves the entry point, so the caller
     must have compiled `code` for the offset `extern_entry_offset` reports for
-    the SAME dylib list."""
+    the SAME dylib list.
+
+    `globals_image` is a `model.GlobalDataImage` (or None): the module-global
+    slot table this image needs in `__DATA`. Its presence adds a segment, which
+    moves the entry point, so `has_globals` has to be threaded through the same
+    `extern_entry_offset` the caller computed the base address from."""
     spec = arch_spec(arch)
     ssize = spec["stub_size"]
     dylibs = list(dylibs or [])
-    entryoff = extern_entry_offset([d["install_name"] for d in dylibs])
+    gblob = _globals_blob(globals_image)
+    has_globals = bool(gblob)
+    entryoff = extern_entry_offset([d["install_name"] for d in dylibs],
+                                   has_globals=has_globals)
     external_syms = sorted(external_syms)
     n = len(external_syms)
     stub_file = (entryoff + len(code) + 3) & ~3
@@ -509,13 +678,21 @@ def build_macho_executable_extern(
     text_size = _text_filesize(stub_file + ssize * n)
     data_file = text_size
     data_size = _align_up(8 * n, PAGE_SIZE) or PAGE_SIZE
-    bind_file = data_file + data_size
+    # __DATA (module-global slots) goes after __DATA_CONST, so its ordinal is
+    # one past the GOT's: __PAGEZERO 0, __TEXT 1, __DATA_CONST 2, __DATA 3.
+    g_file = data_file + data_size if has_globals else 0
+    g_size = _align_up(len(gblob), PAGE_SIZE) if has_globals else 0
+    g_vm = GLOBALS_VM if has_globals else 0
+    _check_globals_do_not_overlap_text(text_size, has_globals)
+    bind_file = g_file + g_size if has_globals else data_file + data_size
     got_base_vm = TEXT_BASE + data_file
-    sizeofcmds = EXTERN_SIZEOFCMDS + sum(
+    sizeofcmds = (EXTERN_SIZEOFCMDS + sum(
         dylib_command_size(d["install_name"]) for d in dylibs)
+        + (DATA_SIZEOFCMDS if has_globals else 0))
     # The extern layout emits 10 load commands (…LC_LOAD_DYLIB libSystem,
-    # LC_BUILD_VERSION, LC_MAIN); each linked dylib adds one more.
-    ncmds = 10 + len(dylibs)
+    # LC_BUILD_VERSION, LC_MAIN); each linked dylib adds one more, and the
+    # __DATA segment one more still.
+    ncmds = 10 + len(dylibs) + (1 if has_globals else 0)
     file = bytearray(bind_file + bind_len)
 
     def patch(off: int, fmt: str, *vals) -> None:
@@ -579,26 +756,31 @@ def build_macho_executable_extern(
     patch(s + 72, "<I", 0)
     o += 72 + 80
 
+    if has_globals:
+        o = _write_data_segment(file, o, g_vm, g_file, g_size, gblob)
+
     # __LINKEDIT
+    linkedit_len = bind_len
     patch(o + 0, "<I", SEGMENT_64_CMD)
     patch(o + 4, "<I", 72)
     file[o + 8 : o + 24] = b"__LINKEDIT".ljust(16, b"\0")
     patch(o + 24, "<Q", TEXT_BASE + bind_file)
-    patch(o + 32, "<Q", _align_up(bind_len, PAGE_SIZE))
+    patch(o + 32, "<Q", _align_up(linkedit_len, PAGE_SIZE))
     patch(o + 40, "<Q", bind_file)
-    patch(o + 48, "<Q", bind_len)
+    patch(o + 48, "<Q", linkedit_len)
     patch(o + 56, "<I", 1)   # maxprot r--: __LINKEDIT holds the code signature
     patch(o + 60, "<I", 1)   # initprot r--; dyld only reads the bind opcodes
     o += 72
 
-    # LC_DYLD_INFO_ONLY -> bind_off/bind_size = bind data in __LINKEDIT.
+    # LC_DYLD_INFO_ONLY -> bind_off/bind_size = bind data in __LINKEDIT;
+    # rebase_off/rebase_size stay zero (see the noextern builder for why).
     # NOTE: dyld_info_command fields are uint32_t, not uint64_t.
     patch(o + 0, "<I", DYLD_INFO_ONLY_CMD)
     patch(o + 4, "<I", 48)
-    patch(o + 8, "<I", 0)          # rebase_off
-    patch(o + 12, "<I", 0)         # rebase_size
-    patch(o + 16, "<I", bind_file) # bind_off
-    patch(o + 20, "<I", bind_len)  # bind_size
+    patch(o + 8, "<I", 0)
+    patch(o + 12, "<I", 0)
+    patch(o + 16, "<I", bind_file)            # bind_off
+    patch(o + 20, "<I", bind_len)             # bind_size
     patch(o + 24, "<I", 0)         # weak_bind_off/size/...
     patch(o + 28, "<I", 0)
     patch(o + 32, "<I", 0)
@@ -684,8 +866,11 @@ def build_macho_executable_extern(
         f = stub_file + i * ssize
         file[f : f + ssize] = _stub_bytes(got_vm, stub_vm, arch)
     file[bind_file : bind_file + bind_len] = bind
-    _assert_no_unclaimed_bytes(file, [(0, text_size), (data_file, data_size),
-                                      (bind_file, bind_len)])
+    if has_globals:
+        file[g_file : g_file + len(gblob)] = gblob
+    _assert_no_unclaimed_bytes(file, [(0, text_size), (data_file, data_size)]
+                               + ([(g_file, g_size)] if has_globals else [])
+                               + [(bind_file, bind_len)])
     return bytes(file)
 
 
@@ -897,7 +1082,7 @@ def _export_trie(exports: list) -> bytes:
 
 
 def dylib_load_commands(install_name: str, has_externs: bool,
-                        deps: list = None) -> tuple:
+                        deps: list = None, has_globals: bool = False) -> tuple:
     """(sizeofcmds, ncmds) of a dylib's load-command list.
 
     One function, because the code offset is DERIVED from this and the two
@@ -912,7 +1097,10 @@ def dylib_load_commands(install_name: str, has_externs: bool,
     their LC_LOAD_DYLIB commands are emitted. That order IS the bind stream's
     ordinal space (1 = libSystem when present, then deps), so it is passed in
     rather than sorted here: reordering it would silently rebind every symbol.
-    """
+
+    `has_globals` adds the module-global `__DATA` segment, which pushes the code
+    down by the same amount — so both effects have to be visible here, where
+    the code offset is decided, rather than discovered later by the builder."""
     deps = list(deps or [])
     name = install_name.encode("utf-8") + b"\0"
     id_cmdsize = (24 + len(name) + 7) & ~7
@@ -922,19 +1110,22 @@ def dylib_load_commands(install_name: str, has_externs: bool,
     dep_cmds = sum(dylib_command_size(d) for d in deps)
     sizeofcmds = (text_cmdsize + 72 + id_cmdsize + 24 + 24 + 48 + 16 + dep_cmds
                   + (dylib_command_size(LIBSYSTEM_PATH.decode()) + 152
-                     if has_externs else 0))
-    return sizeofcmds, (7 + (2 if has_externs else 0) + len(deps))
+                     if has_externs else 0)
+                  + (DATA_SIZEOFCMDS if has_globals else 0))
+    return sizeofcmds, (7 + (2 if has_externs else 0) + len(deps)
+                        + (1 if has_globals else 0))
 
 
 def dylib_code_offset(install_name: str, has_externs: bool = False,
-                      deps: list = None) -> int:
+                      deps: list = None, has_globals: bool = False) -> int:
     """File offset of a dylib's code.
 
-    `has_externs` and `deps` must match what the library is actually built
-    with — the caller needs them BEFORE compiling, because they decide the base
-    address the code is emitted for.
+    `has_externs`, `deps` and `has_globals` must match what the library is
+    actually built with — the caller needs them BEFORE compiling, because they
+    decide the base address the code is emitted for.
     """
-    sizeofcmds, _n = dylib_load_commands(install_name, has_externs, deps)
+    sizeofcmds, _n = dylib_load_commands(install_name, has_externs, deps,
+                                         has_globals)
     return ((32 + sizeofcmds + 31) & ~15)
 
 
@@ -956,7 +1147,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
                       install_name: str, arch: str = "arm64",
                       external_syms: list = None,
                       entryoff: int = None, deps: list = None,
-                      dep_syms: dict = None) -> bytes:
+                      dep_syms: dict = None, globals_image=None) -> bytes:
     """MH_DYLIB with an export trie, and — when `external_syms` is given —
     the same extern machinery an executable has: __TEXT,__stubs, a
     __DATA_CONST,__got, an LC_LOAD_DYLIB for libSystem, and a bind stream.
@@ -979,7 +1170,16 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     with "Symbol not found" for a function that exists in the sibling. Bind
     ordinals are assigned in this order — libSystem is 1, then deps in the
     order given — so the same list drives both the commands and the stream.
-    """
+
+    `globals_image` gives the library its own `__DATA` slot table, which is the
+    same treatment an executable gets and for the same reason: a `global NAME`
+    inside a library function writes a word that a LATER call has to read, and
+    a word in that library's frames would be gone by then. It is deliberately
+    NOT exported in the trie — see `bugs/FORMAL_module_state_no_storage.md` for
+    why a cross-module global is a separate capability and not this one: an
+    exporting module's slot would need the importing module's GOT to carry a
+    POINTER-TO-DATA symbol, and this backend's export/bind machinery is
+    function-shaped."""
     spec = arch_spec(arch)
     trie = _export_trie(exports)
     name = install_name.encode("utf-8") + b"\0"
@@ -991,8 +1191,11 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     # real bind stream, so both add to the load-command list — which is what
     # moves the code (and so the stubs).
     deps = list(deps or [])
-    sizeofcmds, ncmds = dylib_load_commands(install_name, bool(n), deps)
-    code_file = dylib_code_offset(install_name, bool(n), deps)
+    gblob = _globals_blob(globals_image)
+    has_globals = bool(gblob)
+    sizeofcmds, ncmds = dylib_load_commands(install_name, bool(n), deps,
+                                             has_globals)
+    code_file = dylib_code_offset(install_name, bool(n), deps, has_globals)
     if base_addr != TEXT_BASE + code_file:
         raise ValueError("dylib base address does not match Mach-O layout")
     # Stubs follow the code exactly as in the executable, so a call site's
@@ -1003,6 +1206,16 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     data_file = text_size if n else 0
     data_size = _align_up(8 * n, PAGE_SIZE) if n else 0
     got_base_vm = TEXT_BASE + data_file if n else 0
+    # __DATA (module-global slots) after __DATA_CONST, so its ORDINAL is 1 with
+    # no GOT segment and 2 with one. That is the executable's numbering less
+    # one, because a dylib has no __PAGEZERO — the same off-by-one the GOT
+    # ordinal already has to get right, and the reason this is computed from
+    # `n` rather than written down.
+    g_file = (data_file + data_size) if (n and has_globals) else (
+        text_size if has_globals else 0)
+    g_size = _align_up(len(gblob), PAGE_SIZE) if has_globals else 0
+    g_vm = GLOBALS_VM if has_globals else 0
+    _check_globals_do_not_overlap_text(text_size, has_globals)
     # A dylib has no __PAGEZERO, so its segments are 0=__TEXT,
     # 1=__DATA_CONST, 2=__LINKEDIT — the GOT is ordinal 1 here, not the
     # executable's 2 (see _bind_info).
@@ -1014,7 +1227,12 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
         for sym in (dep_syms or {}).get(dep) or []:
             dylib_of[sym] = (2 if n else 1) + i
     bind = _bind_info(external_syms, dylib_of=dylib_of, got_segment=1) if n else b""
-    linkedit_file = data_file + data_size if n else text_size
+    if n:
+        linkedit_file = g_file + g_size
+    elif has_globals:
+        linkedit_file = g_file + g_size
+    else:
+        linkedit_file = text_size
     file = bytearray(linkedit_file + len(trie) + len(bind))
 
     def patch(off, fmt, *vals):
@@ -1065,6 +1283,9 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
             (b"__text", base_addr, len(code), code_file, 0x80000400, 0),
         ])
 
+    if has_globals:
+        o = _write_data_segment(file, o, g_vm, g_file, g_size, gblob)
+
     patch(o, "<I", SEGMENT_64_CMD)
     patch(o + 4, "<I", 72)
     file[o + 8 : o + 24] = b"__LINKEDIT".ljust(16, b"\0")
@@ -1109,7 +1330,10 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
 
     patch(o, "<I", DYLD_INFO_ONLY_CMD)
     patch(o + 4, "<I", 48)
-    # bind_off/bind_size, in that field order, so dyld has GOT slots to fill.
+    # bind_off/bind_size in that field order, so dyld has GOT slots to fill;
+    # rebase_off/rebase_size stay zero (see the noextern builder).
+    patch(o + 8, "<I", 0)
+    patch(o + 12, "<I", 0)
     patch(o + 16, "<I", linkedit_file + len(trie) if n else 0)
     patch(o + 20, "<I", len(bind))
     o += 48
@@ -1128,8 +1352,10 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
             f = stub_file + i * ssize
             got_vm = got_base_vm + i * 8
             file[f : f + ssize] = _stub_bytes(got_vm, stub_base_vm + i * ssize)
+    if has_globals:
+        file[g_file : g_file + len(gblob)] = gblob
     file[linkedit_file : linkedit_file + len(trie)] = trie
-    file[linkedit_file + len(trie) : linkedit_file + linkedit_len] = bind
+    file[linkedit_file + len(trie) : linkedit_file + len(trie) + len(bind)] = bind
     return bytes(file)
 
 

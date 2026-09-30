@@ -93,10 +93,21 @@ def _collect_var_names(f: F.FunctionDef) -> list:
 
     Statement-level names come from the shared middle-end walk
     (`mojo.middle.boundnames`) — same structure GIMPLE's
-    `_locally_bound_names` uses. Formal only adds MemberExpr field-slot
+    `_lbn_locally_bound_names` uses. Formal only adds MemberExpr field-slot
     keys on top (scalar replacement; backend-specific, not middle-end)."""
     names = bound_names_in_order(f.body, f.params)
+    # A name the function declares `global` is NOT a local of it, whatever the
+    # assignment walk said: `global G; G = G + 1` assigns G, so the walk reports
+    # it bound, and giving it a register here would make the function keep TWO
+    # homes for one word — a register, which the emitter would read back as the
+    # current value, and the `__DATA` slot, which is where the module's value
+    # lives. Which one a read picked would decide the program's answer, and the
+    # two architectures would not have to pick the same one.
+    module_globals = M.global_names_bound_in(f)
+    if module_globals:
+        names = [n for n in names if n not in module_globals]
     seen = set(names)
+
     # `h.x` for a frame receiver is a SLOT IN MEMORY, not a local: the value
     # lives at `[h, #8k]` and is loaded by `_load_var`. Allocating a register
     # for it would waste one of the ten callee-saved registers on a name nothing
@@ -508,8 +519,14 @@ class ARM64Codegen:
 
     def __init__(self, test_input: int = 10, dylib_syms: dict = None,
                  comptime_hook=None, module_source: str = "",
-                 dylib_exports: list = None):
+                 dylib_exports: list = None, globals_base: int = None):
         self.test_input = test_input
+        # Where this unit's module-global data segment is MAPPED. A parameter
+        # and not a lookup, because it differs per container (macho_linker and
+        # elf define separate constants) and because every slot access has to be
+        # computed against it BEFORE the image exists. None means "this unit has
+        # no module globals", which is the ordinary case.
+        self._globals_base = globals_base
         self.asm = Assembler()
         self._functions = {}
         self._structs: dict = {}
@@ -681,6 +698,10 @@ class ARM64Codegen:
         first_func_name = functions[0].name
         if emit_startup:
             self.asm.emit(encode_stp_sp_pre(29, 30))
+            # The module-global initializer runs BEFORE the entry function, so a
+            # slot an entry function reads is already correct. See
+            # `_emit_global_init` for why this is CODE and not a relocation.
+            self._emit_global_init()
             test_val = self.test_input
             if test_val <= 0xffff:
                 self.asm.emit(encode_movz_xn_imm(0, test_val))
@@ -930,6 +951,14 @@ class ARM64Codegen:
         this one function, so one branch here covers all of them and there is
         no second lowering to keep in step.
 
+        A MODULE GLOBAL is also not a local, and for the sharper reason: its
+        home has to outlive every frame, so it is in the image's `__DATA` and
+        this is an ADRP/ADD to that address followed by a load. Intercepted
+        here for the same reason as the frame slot, and for one more: the name
+        is deliberately absent from `_var_regs`/`_var_spills` (see
+        `_collect_var_names`), so this branch is the ONLY place it can be read
+        from — there is no second home for a read to disagree with.
+
         A name in none of those tables has NO ADDRESS, and the two answers the
         old code gave it were the two answers the two architectures gave the
         same program: X19 (a callee-saved register holding whatever the caller
@@ -939,6 +968,10 @@ class ARM64Codegen:
         slot = self._frame_slots.get(name)
         if slot is not None:
             self._emit_frame_load(name, slot, dst)
+            return
+        gslot = M.module_slot(name)
+        if gslot is not None:
+            self._emit_global_load(gslot, dst)
             return
         # A NESTED frame slot is TWO loads and is checked before the one-load
         # table, because the name is `h.a.b` and the one-load table keys on
@@ -974,6 +1007,97 @@ class ARM64Codegen:
             return
         raise CodegenError(self._no_home(name))
 
+    def _emit_global_init(self) -> None:
+        """Fill every address-valued module-global slot, before `main` runs.
+
+        WHY CODE AND NOT A RELOCATION. The obvious mechanism is a relocation —
+        dyld's classic `REBASE` opcode stream for Mach-O, `R_X86_64_RELATIVE` for
+        ELF — and it is what the file-format documentation describes. It does not
+        work on the target this backend actually runs on: measured on macOS 26,
+        a well-formed `LC_DYLD_INFO_ONLY` rebase stream naming `__DATA` ordinal 3
+        is parsed (a malformed one aborts at launch with "missing
+        REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB") and then SILENTLY NOT
+        APPLIED — the slot still held the link-time address, and the first read
+        through it was a segfault. A silent no-op relocation is the worst
+        possible failure for this, because the image is well-formed by every
+        check available.
+
+        So the addresses are computed by the same instructions that already work
+        here: ADRP/ADD is how a string literal's address reaches a register, and
+        it is PC-relative, so it is correct under whatever slide dyld chose. The
+        cost is a handful of instructions per address-valued slot at startup; the
+        benefit is that the mechanism is the one already proven against a real
+        dyld on this exact target rather than one taken from a specification.
+
+        X16 and X17, because the startup stub has saved the frame and holds
+        nothing else live — the same two registers `_emit_global_store` uses for
+        an address and a parked value."""
+        table = M.module_slots()
+        base = self._globals_base
+        if not table or base is None:
+            return
+        image = M.build_data_image(table, base)
+        for at, target in image.fixups:
+            self._adrp_add_abs(16, base + target)
+            self._adrp_add_abs(17, base + at)
+            self.asm.emit(encode_str_xt_xn_imm(16, 17, 0))
+
+    def _global_slot_address(self, slot) -> None:
+        """X17 = the address of a module-global's `__DATA` slot.
+
+        ADRP brings the page and ADD the offset, the same pair the string
+        literals use (`emit_adrp_add`), so the addressing is the one this
+        backend already proves against a real dyld rather than a new one. X17
+        because it is this function's existing scratch for spill addressing and
+        is dead across the load that follows.
+
+        The address is `globals_base() + 8 * slot.index`, and all three parts
+        come from shared functions — `formal.build.globals_base` for the
+        container's mapping base and `model.GLOBAL_SLOT_BYTES` for the stride,
+        which is the same pair the image builder used to LAY the bytes out. Two
+        independent computations of an address would be two answers to one
+        question, and the linker writing one while the code reads the other is
+        not a crash anyone can attribute."""
+        addr = self._globals_base + M.GLOBAL_SLOT_BYTES * slot.index
+        self._adrp_add_abs(17, addr)
+
+    def _adrp_add_abs(self, reg: int, addr: int) -> None:
+        """ADRP Xreg, page ; ADD Xreg, Xreg, #off, for an ABSOLUTE address.
+
+        `emit_adrp_add` takes a LABEL and resolves it against the assembler's
+        label table; a slot's address is not a label in the code, it is a
+        constant in another segment, so it is encoded here directly. The page
+        delta is measured from the instruction's own position, which the
+        assembler knows — hence going through `emit_adrp_add` with a synthetic
+        label would be one indirection for a number already known."""
+        pos = self.asm._org + len(self.asm.sections["text"])
+        page_delta = ((addr & ~0xFFF) - (pos & ~0xFFF)) // 4096
+        immlo = page_delta & 3
+        immhi = (page_delta >> 2) & 0x7FFFF
+        self.asm.emit(struct.pack("<I", 0x90000000 | (immlo << 29)
+                                  | (immhi << 5) | reg))
+        self.asm.emit(struct.pack("<I", 0x91000000 | ((addr & 0xFFF) << 10)
+                                  | (reg << 5) | reg))
+
+    def _emit_global_load(self, slot, dst: int) -> None:
+        """Xdst = a module-global's value — one load from its `__DATA` slot."""
+        self._global_slot_address(slot)
+        self.asm.emit(encode_ldr_xt_xn_imm(dst, 17, 0))
+
+    def _emit_global_store(self, slot, src: int) -> None:
+        """A module-global's value = Xsrc — one store to its `__DATA` slot.
+
+        The address goes into X17 and the value has to be somewhere else, so a
+        store whose value is already in X17 parks it in X16 first. X16 is the
+        IP0/intra-procedure-call scratch on AAPCS and holds nothing across these
+        two instructions on this path, which is the same reason `_emit_frame_store`
+        uses it."""
+        if src == 17:
+            self.asm.emit(encode_mov_zr_xn(16, src))
+            src = 16
+        self._global_slot_address(slot)
+        self.asm.emit(encode_str_xt_xn_imm(src, 17, 0))
+
     def _emit_frame_load(self, name: str, slot: int, dst: int) -> None:
         """`LDR Xdst, [Xholder, #8*slot]` — a receiver field read.
 
@@ -1008,10 +1132,17 @@ class ARM64Codegen:
 
         A frame slot is a store into the receiver's frame — see
         `_emit_frame_store` and `_load_var` above for why the branch is here
-        rather than at the call sites."""
+        rather than at the call sites. A module global is a store into the
+        image's `__DATA`, for the same reason and with the same single-home
+        argument: the name was kept out of this function's registers, so this
+        is the only place the store can land."""
         slot = self._frame_slots.get(name)
         if slot is not None:
             self._emit_frame_store(name, slot, src)
+            return
+        gslot = M.module_slot(name)
+        if gslot is not None:
+            self._emit_global_store(gslot, src)
             return
         # A NESTED frame slot, and the same two-step as `_load_var`: the OUTER
         # load gives the nested frame's base and the store lands in the nested

@@ -269,6 +269,25 @@ def encode_mov_rm64_r64(base: Reg, disp: int, src: Reg) -> bytes:
     return bytes([rex, 0x89, modrm]) + extra
 
 
+def encode_mov_rip_r64(disp: int, src: Reg) -> bytes:
+    """mov [rip + disp], src — a RIP-relative STORE, 6 bytes.
+
+    The counterpart of `encode_lea_r64_rip`, and the reason it exists here
+    rather than being spelt at the call site: the module-global initializer
+    needs to write a computed address to a computed address, and both operands
+    are absolute addresses in another segment. A base register for the store
+    would mean materialising the slot address first and keeping it live across
+    the second LEA, which costs a register this path does not have spare.
+
+    mod=00 with rm=101 is the RIP-relative form of the r/m field (no SIB byte —
+    see `encode_lea_r64_rip`), and the displacement counts from the END of the
+    instruction, which is what makes it 6 bytes: REX, opcode, ModRM, disp32."""
+    assert -2**31 <= disp < 2**31
+    rex = _rex(w=1, r=1 if src.value >= 8 else 0)
+    return bytes([rex, 0x89, _modrm(0, src.value & 7, 5)]) \
+        + struct.pack("<i", disp)
+
+
 def encode_mov_r32_r32(dst: Reg, src: Reg) -> bytes:
     """mov dst32, src32 (zero-extends into the full 64-bit register)."""
     rex = _rex(r=1 if src.value >= 8 else 0, b=1 if dst.value >= 8 else 0)
