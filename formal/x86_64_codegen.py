@@ -1773,6 +1773,24 @@ class X86_64Codegen:
         the function returns."""
         self.asm.emit(encode_lea_r64_rm64(reg, Reg.RBP, offset))
 
+    def _emit_empty_blob(self) -> None:
+        """The empty container: eight bytes with a zero count, base in RAX.
+
+        `List()`, `List[Int]()`, `Dict()` and the rest of
+        `model.EMPTY_BLOB_CTORS`, and it is `_emit_list` with `n == 0` — the
+        same eight bytes, the same `[count][elements]` layout and the same
+        reservation, because an empty container IS the zero-element literal.
+        Spelled as its own method rather than reached by synthesising a
+        `ListExpr` so the two architectures cannot drift, and so the arm64
+        comment about a synthesized literal's invented `line`/`col` applies here
+        too.
+        """
+        offset = self._reserve_blob(8, "empty containers")
+        self._emit_blob_base(offset, Reg.R11)
+        self._emit_mov_imm(Reg.R10, 0)
+        self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+        self._emit_blob_base(offset, Reg.RAX)
+
     def _emit_list(self, expr) -> None:
         """A list/tuple/set literal → its blob address in RAX.
 
@@ -4796,6 +4814,32 @@ class X86_64Codegen:
     def _emit_call(self, e: F.CallExpr) -> None:
         name = _callee_symbol(e.func)
         if name is None:
+            # A SUBSCRIPT callee, `List[Int]()`. arm64's `_callee_symbol` has
+            # carried a `SubscriptExpr` arm for a long time and this copy has
+            # not, so a bracketed call target reaches the refusal below on this
+            # architecture alone — a pre-existing x86-64 gap, listed in
+            # `bugs/FORMAL_wide_receiver_by_reference.md` §5.1 among the
+            # architecture gaps, and NOT closed here: closing it means teaching
+            # this backend a comptime-specialization call convention it does not
+            # have, which is a change of far more than this construct.
+            #
+            # What IS closed here is the one bracketed callee this path can
+            # answer, and it is closed by asking the SAME two shared predicates
+            # arm64 asks rather than by copying its decision: the base name
+            # (`model.subscript_callee_name`) and whether that name has an
+            # empty form (`model.empty_blob_constructor`). So the two
+            # architectures reach the same answer for `List[Int]()` by the same
+            # rule, and the residual gap stays a gap instead of becoming a
+            # third private copy of the flattening.
+            base = M.subscript_callee_name(e)
+            if base is not None and M.empty_blob_constructor(base):
+                operands = list(e.args) + [v for _n, v in (e.kwargs or [])]
+                if operands:
+                    raise CodegenError(
+                        M.blob_constructor_with_operands_refusal(
+                            base, len(operands)))
+                self._emit_empty_blob()
+                return
             raise CodegenError(
                 "unsupported call target on the formal x86-64 path "
                 f"(got {type(e.func).__name__})")
@@ -4957,6 +5001,30 @@ class X86_64Codegen:
         not the program's."""
         kind, info = tkind
         if kind == "unsupported":
+            operands = list(e.args) + [v for _n, v in (e.kwargs or [])]
+            if M.empty_blob_constructor(name):
+                # The EMPTY container, which is a different question from the
+                # one this arm was written for and the one `List[Int]()` was
+                # refused for.  A container's value is a pointer to a blob laid
+                # out `[count:i64][element 0]…`, so the empty one is eight
+                # bytes with a zero count in them — the same eight bytes and the
+                # same layout `_emit_list` builds for `[]`, and the same one
+                # `LEN_FROM_BLOB_FIELD` reads a length from.  arm64 does this in
+                # its own `_emit_type_constructor` with the same wording, and
+                # `model.empty_blob_constructor` is the one predicate both ask,
+                # so the two cannot answer differently about which names have
+                # an empty form.
+                #
+                # With ARGUMENTS it is a genuinely different problem and keeps
+                # its own diagnostic: a blob's size is fixed when the function
+                # is laid out, so one that has to hold n elements needs a frame
+                # reservation sized by a value this compiler does not have.
+                if operands:
+                    raise CodegenError(
+                        M.blob_constructor_with_operands_refusal(
+                            name, len(operands)))
+                self._emit_empty_blob()
+                return
             raise CodegenError(
                 f"constructing {name} has no representation on this path: this "
                 f"image has no declaration of {name} to construct — it is not a "

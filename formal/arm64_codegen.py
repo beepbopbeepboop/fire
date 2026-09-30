@@ -3996,6 +3996,29 @@ class ARM64Codegen:
         total = _SCRATCH + 16 * self._npairs - offset
         _emit_sub_imm(self.asm, 9, 29, total)
 
+    def _emit_empty_blob(self) -> None:
+        """The empty container: eight bytes with a zero count, base in X0.
+
+        `List()`, `List[Int]()`, `Dict()` and the rest of
+        `model.EMPTY_BLOB_CTORS`, and it is `_emit_list` with `n == 0` — the
+        same eight bytes, the same `[count][elements]` layout and the same
+        reservation, because an empty container IS the zero-element literal.
+        Spelled as its own method rather than reached by synthesising a
+        `ListExpr` so the two cannot drift: a synthesized literal would have to
+        fake a node the AST never had, and `expr.line`/`expr.col` on it would be
+        invented positions in a refusal that quotes them.
+        """
+        if self._list_cursor + 8 > self._blob_cap:
+            raise CodegenError(
+                f"an empty container exceeds the formal frame "
+                f"({self._list_cursor + 8} > {self._blob_cap} bytes)")
+        offset = self._list_cursor
+        self._list_cursor += 8
+        self._emit_list_base(offset)
+        self._emit_mov_imm("X10", 0)
+        self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
+        self.asm.emit(encode_mov_zr_xn(0, 9))
+
     def _emit_list(self, expr: F.ListExpr) -> None:
         """Stack-allocate a list blob: [count:i64][elem0]...[elemN-1].
 
@@ -4603,6 +4626,28 @@ class ARM64Codegen:
         `StringLiteral` in any sense this value model can state."""
         kind, info = tkind
         if kind == "unsupported":
+            operands = list(e.args) + [v for _n, v in (e.kwargs or [])]
+            if M.empty_blob_constructor(name):
+                # The EMPTY container, which is a different question from the
+                # one this arm was written for and the one `List[Int]()` was
+                # refused for.  A container's value is a pointer to a blob laid
+                # out `[count:i64][element 0]…`, so the empty one is eight
+                # bytes with a zero count in them — the same eight bytes and the
+                # same layout `_emit_list` builds for `[]`, and the same one
+                # `LEN_FROM_BLOB_FIELD` reads a length from.  So it is emitted
+                # as the zero-element literal rather than refused: `len()` of it
+                # is 0, which is what the source says.
+                #
+                # With ARGUMENTS it is a genuinely different problem and keeps
+                # its own diagnostic: a blob's size is fixed when the function
+                # is laid out, so one that has to hold n elements needs a frame
+                # reservation sized by a value this compiler does not have.
+                if operands:
+                    raise CodegenError(
+                        M.blob_constructor_with_operands_refusal(
+                            name, len(operands)))
+                self._emit_empty_blob()
+                return
             raise CodegenError(
                 f"constructing {name} has no representation on this path: this "
                 f"image has no declaration of {name} to construct — it is not a "

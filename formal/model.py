@@ -5757,6 +5757,20 @@ class ValueKinds:
             return list_kind(ek)
         if isinstance(e, F.CallExpr):
             callee = _flat_callee(e)
+            # The empty-container constructor, in EITHER spelling — `List()` and
+            # `List[Int]()` are the same construction and must be the same
+            # answer, which is why this is asked of `subscript_callee_name(e)
+            # or callee` rather than in either arm. Without it, `var a =
+            # List[Int]()` bound `a` to the "a word is an integer" default and
+            # every later `len(a)` was refused with "len() of a value classified
+            # as 'int'" — a claim about the value kind that the CONSTRUCTOR in
+            # the same line contradicts, and one the two spellings disagreed
+            # about (the bracketed one reached `_flat_callee`'s None arm, the
+            # bare one reached the type-constructor fallback).
+            ctor = subscript_callee_name(e) or callee
+            if ctor is not None and empty_blob_constructor(ctor) \
+                    and not (e.args or e.kwargs):
+                return LIST_PREFIX
             if callee is None:
                 return None
             # A lowered string method, asked first: `m = s.strip()` binds `m`,
@@ -5827,6 +5841,31 @@ def _flat_callee(call) -> str | None:
         parts.append(node.name)
         return ".".join(reversed(parts))
     return None
+
+
+def subscript_callee_name(call) -> str | None:
+    """The bare name a SUBSCRIPT callee is applied to, or None.
+
+    `List[Int]()` → `List`.  The counterpart to `_flat_callee`, which answers
+    None for this shape on purpose (a bracket is not a dotted chain), so the two
+    together cover every spelling a call's callee can have and neither
+    re-derives the other's rule.
+
+    PUBLIC, and asked from all three places that need it — `ValueKinds.kind_of`
+    (what the call produces), and BOTH backends (whether it is the empty-
+    container constructor) — because the two backends disagree about how much
+    of a subscript callee they can flatten (`arm64_codegen._callee_symbol` has
+    carried a `SubscriptExpr` arm for a long time and `x86_64_codegen`'s copy
+    has not, which is a pre-existing x86-64 gap listed in
+    `bugs/FORMAL_wide_receiver_by_reference.md` §5.1).  Collapsing that gap is
+    not this change's job, so the shared question is asked at the level both
+    backends can answer: the BASE NAME, which is the whole of what the
+    empty-container decision needs.
+    """
+    func = getattr(call, "func", None)
+    if not isinstance(call, F.CallExpr) or not isinstance(func, F.SubscriptExpr):
+        return None
+    return func.obj.name if isinstance(func.obj, F.IdentExpr) else None
 
 
 def _param_list(fn):
@@ -6091,6 +6130,119 @@ def type_constructor_kind(callee_name: str):
     if callee_name in UNREPRESENTABLE_TYPE_CTORS:
         return ("unsupported", None)
     return None
+
+
+# The container types whose EMPTY value this path can represent exactly.
+#
+# `BLOB_TYPE_CTORS` is the set of names whose *field annotation* means "a
+# counted region" (a `len` off a slot declared `List[Int]`), and it is a
+# different question from this one: this set is about the CONSTRUCTOR. A
+# container's value on this path is a pointer to a blob laid out `[count:i64]
+# [element 0]…`, so an empty one is a blob of exactly eight bytes whose count
+# word is zero — which is the same eight bytes `_emit_list` reserves for `[]`,
+# and the same layout `LEN_FROM_BLOB_FIELD` reads a length from. So
+# `List[Int]()` is representable, and refusing it refused a program whose
+# answer this path could state exactly.
+#
+# DERIVED rather than written out, and the derivation is the point: the set is
+# `BLOB_TYPE_CTORS` minus the names this path has no blob layout for. A second
+# hand-kept list is a list that goes stale the day `BLOB_TYPE_CTORS` gains a
+# name — and the failure is silent in the worst direction, because the stale
+# name is then refused as "no representation", which reads as a fact about the
+# target when it is a fact about a table.
+#
+# The exclusions, and why each is a fact about the layout rather than a
+# preference:
+#   * `Optional` — a value OR the empty one, and the empty one is the integer
+#     0, so an empty `Optional` is indistinguishable from `Some(0)`. This is
+#     the one-word value model showing through, and it is
+#     `bugs/FORMAL_pointer_value_model.md`'s niche question, not a table entry.
+#   * `StringRef` / `InlineArray` / `Array` / `StaticTuple` — each is a blob in
+#     the *source* language with an element width or a pointer this path does
+#     not carry, so "empty" for them is a statement about a layout nothing here
+#     has. `BLOB_TYPE_CTORS` names them for the annotation question only.
+EMPTY_BLOB_CTORS = frozenset(
+    n for n in BLOB_TYPE_CTORS
+    if n not in ("Optional", "InlineArray", "StaticTuple", "Array", "StringRef"))
+
+
+def empty_blob_constructor(callee_name: str) -> bool:
+    """Whether `callee_name()` denotes the empty container, i.e. a zero count.
+
+    The half of the container question that is about REPRESENTATION, asked
+    separately from `type_constructor_kind` because the two disagree on purpose:
+    `type_constructor_kind("List")` answers `("unsupported", None)` — a `List` is
+    not one word, and saying so is true — while the empty `List` IS eight bytes
+    with a zero in them. A backend asks this one to lower the zero-operand
+    form and keeps the other one for every form that has to hold a value.
+    """
+    return callee_name in EMPTY_BLOB_CTORS
+
+
+def blob_constructor_with_operands_refusal(callee_name: str, nargs: int) -> str:
+    """Why `List[Self.T](capacity=n)` is refused, given that `List()` is not.
+
+    A separate diagnostic from `type_constructor_kind`'s "unsupported", because
+    it is a DIFFERENT question and the difference is the whole reason the empty
+    form became answerable. A blob's size is decided when the function is laid
+    out, so an empty one is free; one that must hold `n` elements needs a frame
+    reservation sized by a value the compiler does not have, and emitting it
+    anyway would mean a blob whose capacity is whatever the allocator left —
+    which is the X19 fall-through this path refuses everywhere else.
+    """
+    return (
+        f"constructing {callee_name}[…](…) with {nargs} argument(s) has no "
+        f"representation on this path, and the empty form is a different "
+        f"question: a {callee_name} on this path is a pointer to a blob laid "
+        f"out [count:i64][element 0]…, so {callee_name}() is eight bytes with a "
+        f"zero count in them and lowers, while a blob that has to HOLD {nargs} "
+        f"element(s) needs a frame reservation whose size is a value this "
+        f"compiler does not have at layout time. Build the container in the "
+        f"caller and assign the field after construction, or append to a "
+        f"{callee_name} literal, which reserves the room it needs")
+
+
+def subscript_callee_names(call) -> list:
+    """The names a call's SUBSCRIPT callee consumes, or `[]` when it has none.
+
+    `List[Int]()` and `f[a, b](x)` are the same shape and the same answer: the
+    call names `List[Int]` / `f[a, b]`, so the base is a SYMBOL the call is
+    dispatched on and the bracket is its compile-time argument list. Neither is
+    a read of a value, and `build.py`'s name-placement walk already says so
+    about a BARE callee (`f(x)` collects `f` and does not try to place it);
+    this is the same rule one level up, and it is asked here so the walk, both
+    backends and any future reader have ONE recogniser of the shape rather than
+    three.
+
+    THE NAMES RETURNED ARE NODES, not strings, and that is deliberate. The walk
+    exempts by node identity because `iter_nodes` has no parent and a name can
+    legitimately be placed in one position and not in another: the same `List`
+    is a type in `List[Int]()` and an unplaceable value in `len(List)`. Keying
+    on the string would exempt every read of that name in the function, which
+    is the silently-wrong direction this whole pass is arranged to refuse.
+
+    Deliberately NOT gated on the base being a known type name, and the reason
+    is that the gate would have to be a name list, and a name list is a second
+    copy of `type_constructor_kind` / `POINTEE_WIDTHS` / `BLOB_TYPE_NAMES` that
+    rots the day one of them grows. A subscript in CALLEE position on a bare
+    name is a type application or a generic specialization, and in BOTH the
+    base is not a value — so the position itself is the evidence. The one thing
+    this does give up is a name that is a genuine value AND is subscripted AND
+    is called (`xs[0](f)`), which nothing in this backend lowers either way; it
+    now reaches the emitter instead of the allocator, which is a better place
+    for that answer to come from.
+    """
+    func = getattr(call, "func", None)
+    if not isinstance(call, F.CallExpr) or not isinstance(func, F.SubscriptExpr):
+        return []
+    base = func.obj
+    if not isinstance(base, F.IdentExpr):
+        return []
+    out = [base]
+    for node in iter_nodes(func.index):
+        if isinstance(node, F.IdentExpr):
+            out.append(node)
+    return out
 
 
 def type_constructor_prefers_local_struct(callee_name: str, structs: dict,

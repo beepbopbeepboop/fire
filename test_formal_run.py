@@ -5268,6 +5268,58 @@ def run_case(name, source, want_exit, want_stdout, tmpdir, verbose):
     return True, ""
 
 
+def run_cpython_pair_case(name, source, cpython_source, tmpdir, verbose):
+    """Build the image on BOTH backends, run both, and require CPython's answer.
+
+    The expected output is whatever CPython prints for `cpython_source`, run
+    here, at test time. That is the whole difference from every other case in
+    this file, and it is the reason this group exists rather than four more
+    hand-written constants: a constant is an assertion about a lowering made by
+    the same person who wrote the lowering, and a program that computes the
+    right number for the wrong reason passes either way.
+
+    Both architectures are required to match CPython, not just the host's. The
+    two disagreeing answers this group is here to catch have both happened —
+    arm64 refusing a bracketed callee as a name with no home while x86-64
+    refused it as an unsupported call target, from two private copies of the
+    callee-flattening rule — and a one-sided assertion would have been green
+    throughout.
+    """
+    py = os.path.join(tmpdir, name + ".py")
+    # The CALL is the runner's, not the case's. `def main()` is Mojo's entry
+    # point — the build driver calls it — and in Python it is only a definition,
+    # so a case that wrote its own call would be carrying a fact about the
+    # harness in the text that is supposed to be the computation. It is also
+    # the one thing every case would have to get right identically, which is
+    # exactly the kind of duplication that goes wrong in one case and not the
+    # others.
+    with open(py, "w") as f:
+        f.write(cpython_source + "\nmain()\n")
+    ref = subprocess.run([sys.executable, py], capture_output=True, text=True,
+                         timeout=RUN_TIMEOUT)
+    if ref.returncode != 0:
+        return False, (f"the CPython reference itself failed (exit "
+                       f"{ref.returncode}): {ref.stderr.strip()[-200:]}")
+    want = ref.stdout
+    for backend in ("arm64", "x86_64"):
+        out = os.path.join(tmpdir, f"{name}.{backend}")
+        rc, text = build_formal(os.path.join(tmpdir, name + ".mojo"), out,
+                                backend=backend)
+        if rc != 0:
+            return False, f"--backend={backend} did not build: {text.strip()[-300:]}"
+        run = subprocess.run([out], capture_output=True, text=True,
+                             timeout=RUN_TIMEOUT)
+        if run.stdout != want:
+            return False, (f"--backend={backend} printed {run.stdout!r}, CPython "
+                           f"printed {want!r}")
+        if run.returncode != 0:
+            return False, (f"--backend={backend} computed the right answer and "
+                           f"exited {run.returncode}")
+        if verbose:
+            print(f"      {backend}: {run.stdout!r} == CPython")
+    return True, ""
+
+
 # ── the POINTER VALUE MODEL (wave 6, F2) ────────────────────────────────────
 #
 # `bugs/FORMAL_pointer_value_model.md` is the long form; the model is
@@ -6646,6 +6698,149 @@ REFUSAL_CASES = [
 ]
 
 
+# ── A TYPE APPLICATION, and the empty container ────────────────────────────
+#
+# Every answered case here is a PAIR of programs: the Mojo text the formal
+# backends build, and the CPython text that must print the same thing. The
+# expected value is not written down anywhere in this file — it is whatever
+# CPython prints, computed at test time by actually running CPython — so a case
+# cannot pass because a hand-derived constant happened to be right about a
+# lowering that is wrong.
+#
+# WHY THE PAIR RATHER THAN ONE TEXT. `List[Int]()` is not valid Python
+# (`typing.List[int]()` raises `TypeError`) and `printf` is not a Python
+# function, so "run the same source through both" is not available for this
+# construct, and pretending otherwise would mean asserting a constant. The pair
+# is the honest form: two spellings of one computation, and the equality
+# asserted is of the OUTPUT.
+#
+# WHAT WAS BROKEN, and why it was filed as worth 41 sweep files and 0 coverage.
+# `List[Int]()` — a subscript in CALLEE position — was refused by
+# `formal/build.py`'s name-placement walk with "'List' has no home: the
+# module-level symbol table is empty for this unit … the register allocator
+# collected no home for it", because the walk exempted a BARE callee and a
+# subscript callee's base fell through to the name-placement rules. That
+# sentence is false about the file: `List` is a TYPE, it is in none of the four
+# places a value can be, and no amount of reading `_load_var` would have found
+# anything. 41 files of the 2026-09-30 sweep were filed under it, 35 of them
+# through `std/collections/binary_heap.mojo`'s `self._data = List[Self.T]()`.
+#
+# TWO SEPARATE FIXES, and the rows below exist to tell them apart:
+#   * the walk no longer places a subscript callee — a CALL-SITE exemption, so
+#     `len(List)` (the same spelling in a value position) still refuses and
+#     `var xs: List[Int]` (a type in a non-callee position) is untouched;
+#   * the zero-operand container constructor now LOWERS, to the eight-byte blob
+#     that IS the empty container, on BOTH architectures. x86-64 could not do
+#     this before: its `_callee_symbol` has no `SubscriptExpr` arm (arm64's has
+#     had one for a long time), so a bracketed call target was refused on that
+#     architecture alone. The gap itself is NOT closed — the x86-64 backend's
+#     own comment says so and names what would close it — but this construct is
+#     answered on both, by the same two shared predicates rather than by a third
+#     private copy of the flattening.
+#
+# `bugs/FORMAL_sweep_work_map_2026-09-30.md` §3.1 is where the "worth 41 files
+# and 0 coverage" is measured: `binary_heap.mojo` is behind two further limits
+# (premise B2, and an `Optional` niche), so all 41 files stay refused and the
+# value of this fix is the diagnostic and the construct, not the count.
+TYPE_APPLICATION_CASES = [
+    # The construct itself, in the spelling that was refused. `len` of an empty
+    # container is 0, and 0 is what CPython prints for `len([])`.
+    ("empty_list_constructor_len_is_zero",
+     "def main() -> Int:\n"
+     "    var xs = List[Int]()\n"
+     "    printf(\"len=%d\", len(xs))\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n    xs = []\n"
+     "    sys.stdout.write(\"len=%d\" % len(xs))\n"),
+    # The BARE spelling of the same type. It reached a DIFFERENT refusal before
+    # ("constructing List has no representation on this path") and must land on
+    # the same answer, which is the whole reason the decision is
+    # `model.empty_blob_constructor` rather than a recognition of the bracket.
+    ("empty_list_constructor_bare_len_is_zero",
+     "def main() -> Int:\n"
+     "    var xs = List()\n"
+     "    printf(\"len=%d\", len(xs))\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n    xs = []\n"
+     "    sys.stdout.write(\"len=%d\" % len(xs))\n"),
+    # Four container types in ONE program, so a lowering that handled `List` and
+    # not `Dict` is caught by the joined output rather than by four cases that
+    # each pass. CPython's `[]` / `{}` / `set()` / `()` are the same four
+    # answers, and `Tuple` is in the group precisely because it is the one whose
+    # CPython spelling is a literal and whose Mojo spelling is a constructor —
+    # the row that would fail if the type-argument reader were bracket-shaped.
+    ("every_empty_container_ctor_is_zero_length",
+     "def main() -> Int:\n"
+     "    var a = List[Int]()\n"
+     "    var b = Dict[Int, Int]()\n"
+     "    var c = Set[Int]()\n"
+     "    var d = Tuple[Int, Int]()\n"
+     "    printf(\"%d %d %d %d\", len(a), len(b), len(c), len(d))\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n"
+     "    a, b, c, d = [], {}, set(), ()\n"
+     "    sys.stdout.write(\"%d %d %d %d\" % (len(a), len(b), len(c), "
+     "len(d)))\n"),
+    # An empty container NEXT TO a non-empty one, in the same function, because
+    # the blob the constructor emits is the same reservation `_emit_list` makes
+    # and the only way to tell the two apart is to read both. A constructor that
+    # emitted a count of garbage, or a base one slot off, would pass the
+    # zero-length rows above and fail here.
+    ("empty_container_ctor_beside_a_literal",
+     "def main() -> Int:\n"
+     "    var xs = List[Int]()\n"
+     "    var ys = [1, 2, 3]\n"
+     "    printf(\"%d %d\", len(xs), len(ys))\n"
+     "    return 0\n",
+     "import sys\n"
+     "def main():\n    xs, ys = [], [1, 2, 3]\n"
+     "    sys.stdout.write(\"%d %d\" % (len(xs), len(ys)))\n"),
+]
+
+
+# The rows that assert a DIAGNOSTIC rather than a value, with the words BOTH
+# backends must use. Declared here rather than inline so `main`'s dispatch stays
+# one lookup and a reader can see at a glance which rows are refusals.
+TYPE_APPLICATION_REFUSALS = [
+    # THE COUNTER-CASE, and the reason the exemption is not "a bracket is not a
+    # value". `len(List)` is the same name in a VALUE position: there is no
+    # container there at all and this path cannot say what a word is, so it
+    # must keep refusing — by name, with the register-allocator sentence,
+    # because that sentence is TRUE about this program. A fix that exempted
+    # every read of a type name would build this and print an address.
+    ("a_type_name_in_a_value_position_is_still_refused",
+     "def main() -> Int:\n"
+     "    return len(List)\n",
+     "refuse:'List' has no home", None),
+    # …and the ANNOTATION position, which must be untouched: `var xs: List[Int]`
+    # DECLARES a slot, and the whole exemption is about a CALL site. This one
+    # BUILDS, so it is here as the guard against an exemption that reached a
+    # type in any position rather than the one position it is about.
+    ("a_type_annotation_is_not_a_call_site",
+     "struct Bag:\n"
+     "    var xs: List[Int]\n"
+     "def main() -> Int:\n"
+     "    var b = Bag()\n"
+     "    printf(\"ok\")\n"
+     "    return 0\n",
+     0, "ok"),
+    # WITH ARGUMENTS it is a genuinely different question and gets its own
+    # diagnostic, which says why: a blob's size is fixed when the function is
+    # laid out, so one that must hold n elements needs a reservation sized by a
+    # value the compiler does not have. Before this change it was refused as
+    # "has no representation on this path", which is FALSE about the empty form
+    # and true about this one, and so true of neither — the diagnostic this row
+    # pins is the one that says both halves.
+    ("blob_constructor_with_operands_is_refused_by_its_own_reason",
+     "def main(n: Int) -> Int:\n"
+     "    var xs = List[Int](capacity=n)\n"
+     "    return 0\n",
+     "refuse:the empty form is a different question", None),
+]
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
@@ -6668,10 +6863,20 @@ def main():
                   + WAVE6_TRUTHY_CASES
                   + WAVE6_NAME_CASES + WAVE7_G2_CASES
                   + SHIFT_CASES + REFUSAL_CASES
+                  + TYPE_APPLICATION_REFUSALS
                   + [X86_ONLY_1SLOT_BUG_CASE])
+    # The CPython-pair group is a DIFFERENT SHAPE (three columns: name, Mojo
+    # text, CPython text), so it is selected and dispatched separately rather
+    # than forced into the four-column table every other group uses. Forcing it
+    # in would mean a sentinel in the exit-status column and a branch that reads
+    # a sentinel as if it were a status — which is how a case ends up asserting
+    # nothing.
+    pair_names = {c[0] for c in TYPE_APPLICATION_CASES}
+    wanted_pairs = ([c for c in TYPE_APPLICATION_CASES
+                     if not args.cases or c[0] in args.cases])
     selected = [c for c in everything if not args.cases or c[0] in args.cases]
-    known = {c[0] for c in everything}
-    if args.cases and len(selected) != len(args.cases):
+    known = {c[0] for c in everything} | pair_names
+    if args.cases and len(selected) + len(wanted_pairs) != len(args.cases):
         missing = set(args.cases) - known
         print(f"ERROR: unknown case(s): {sorted(missing)}", file=sys.stderr)
         return 2
@@ -6680,6 +6885,26 @@ def main():
 
     passed = failed = 0
     with tempfile.TemporaryDirectory() as tmpdir:
+        for name, source, cpython_source in wanted_pairs:
+            src = os.path.join(tmpdir, name + ".mojo")
+            with open(src, "w") as f:
+                f.write(source)
+            try:
+                ok, detail = run_cpython_pair_case(
+                    name, source, cpython_source, tmpdir, args.verbose)
+            except subprocess.TimeoutExpired:
+                ok, detail = False, "timed out"
+            except Exception as e:  # unexpected: report, do not mask
+                ok, detail = False, f"{type(e).__name__}: {e}"
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
+            if ok:
+                passed += 1
+                print(f"  PASS  {name} (== CPython, both architectures)")
+            else:
+                failed += 1
+                print(f"  FAIL  {name}: {detail}")
         for name, source, want_exit, want_stdout in selected:
             try:
                 if name in off_names:
