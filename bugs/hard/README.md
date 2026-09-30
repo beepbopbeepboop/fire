@@ -87,15 +87,18 @@ still ~n^1.7), so the doc stays OPEN.
 
 ## Notes for future sessions
 
-- **Three test files run in NO suite bucket** — `test_gimple_runner.py` (120
-  tests), `test_gimple_generator_runner.py` (145) and
-  `test_coro_nested_async_capture.py` (9). No `make check`, no `make gate`
-  runs any of them. This is not theoretical: a correct fix sat **red** in
-  `test_gimple_runner.py` for a full pass because nothing ran it, and the
-  coro file is 0/9 partly because its source list still names pre-rename
-  `mojo_*` runtime files (now `fire_*`). Registering those three is the
-  highest-value structural fix available in this directory — bigger than any
-  single bug listed above it.
+- **CORRECTED 2026-09-29: those three test files are registered now.** This
+  paragraph used to say `test_gimple_runner.py`, `test_gimple_generator_runner.py`
+  and `test_coro_nested_async_capture.py` run in no suite bucket, and it was
+  the highest-value structural fix available in this directory. `tools/suite.py`
+  registers the first two as `gimplerunner` and `gimplegenerators`, both in
+  `check` (`python3 tools/suite.py --list` is the authority), and
+  `test_suite.py`'s own estate walk now reports 83 test files, 52 registered
+  and 33 each with a written reason — 0 undeclared. Kept as a paragraph
+  because "no bucket" was the single most expensive rot in this file's
+  history: the same `test_gimple_runner.py` that once hid a correct fix red
+  for a full pass is what caught this branch's regression tests, and what
+  reported 176/176 after every change to it.
 - **Two of the OPEN entries were found by re-testing claims in an existing
   doc rather than by reading code.** The `.format` residual had been
   recorded as "returns a pointer-sized integer ... and a local is correct
