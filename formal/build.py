@@ -1121,6 +1121,7 @@ def compile_formal(source_path: str, output: str = None,
         M.publish_module_symbols(symbols)
         check_frame_field_blob_premises(structs)
         check_frame_subscript_escapes(functions)
+        check_returned_frame_blob_writes(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
         check_module_symbols(
             functions, {st.name: st for st in structs},
@@ -1277,6 +1278,7 @@ def _formal_module_functions(source_path: str,
         M.publish_module_symbols(symbols)
         check_frame_field_blob_premises(structs)
         check_frame_subscript_escapes(functions)
+        check_returned_frame_blob_writes(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
         # The third of the three, and HERE for the reason the other two are:
         # a name the build cannot place is a codegen finding about THIS file,
@@ -1759,7 +1761,55 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
     # (`formal/model.py`'s `function_return_types`) so the three callers of
     # `struct_construction_plan` cannot answer differently.
     rets = M.function_return_types(functions)
+    # Which function HANDS BACK a frame it built — `{fn: (holder, struct)}` —
+    # and computed BEFORE the fixpoint because the fixpoint needs it: `q = f()`
+    # binds `q` to a frame exactly when `f` returns one, and that is an edge of
+    # the same propagation as a frame passed down as an argument.
+    #
+    # It is a FIXED POINT and not a single pass, because a function can FORWARD
+    # a frame rather than build one (`def twice(a): var q = make(a); return q`)
+    # and the struct it forwards is the callee's answer.  The direction is
+    # "callee first", which is what a frame cannot be returned before it is
+    # built, so the loop terminates; a cycle (`f` returns `g()`, `g` returns
+    # `f()`) simply never reaches a plan, and then the `received` arm of
+    # `frame_return_refusal` refuses the return — which is right, because a
+    # cycle has no outermost caller to own the block.
+    #
+    # The one ambiguity there can be — a returned name bound by two layouts on
+    # two paths — is a refusal rather than a guess, because the CALLER sizes the
+    # block from this answer and two layouts leave no width to size.
+    ret_frame = {}
+    changed = True
+    while changed:
+        changed = False
+        for fn in functions:
+            if fn.name in ret_frame:
+                continue
+            bound = dict(M.struct_constructor_bindings(fn, framed))
+            for name, sts in M.returned_frame_forward_bindings(
+                    fn, ret_frame).items():
+                bound.setdefault(name, []).extend(sts)
+            plan = M.returned_frame_holder(fn, bound)
+            if plan is None:
+                continue
+            holder, ret_struct, rows = plan
+            if ret_struct is None:
+                raise CodegenError(M.returned_frame_ambiguous_refusal(
+                    fn.name, holder, rows))
+            ret_frame[fn.name] = (holder, ret_struct)
+            changed = True
     for fn in functions:
+        # Which locals hold a block that OUTLIVES this function, for every
+        # function and not only the ones that build one.  Published here,
+        # before the per-function loop below, because that loop is what asks.
+        # The model computes it (`returned_frame_owned_names`) rather than this
+        # file walking the body a second time: "which names may a `return` hand
+        # back" is one question, and an emitter asking it for itself is how a
+        # caller and a callee come to disagree about which object a return
+        # refers to.
+        fn._frame_owned_names = M.returned_frame_owned_names(
+            fn, framed, ret_frame)
+        fn._returned_frame = ret_frame.get(fn.name)
         owner = owners.get(fn.name)
         if owner is not None and owner.name in framed:
             for recv in M.struct_receivers(owner):
@@ -1786,6 +1836,26 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
                     hs.add(target)
                     hstruct[fn.name][target] = list(hstruct[fn.name][value.name])
                     changed = True
+                # `q = f()`, where `f` HANDS BACK a frame.  One more edge in
+                # the same propagation, and it is the only way a frame address
+                # crosses a call boundary in the other direction — every other
+                # edge in this loop travels DOWN an active call chain, and this
+                # one arrives in a block the CALLER reserved
+                # (`model.struct_returned_frame_sites`), so the object is
+                # alive for exactly as long as the name that holds it.
+                #
+                # Only a call that IS the whole right-hand side has a call site
+                # whose block the caller can reserve; every other position is
+                # refused by name below, so this edge and that check cover the
+                # same set and neither can be the only one.
+                if target and isinstance(value, F.CallExpr) and ret_frame:
+                    ret = ret_frame.get(value.func.name
+                                        if isinstance(value.func, F.IdentExpr)
+                                        else None)
+                    if ret is not None and target not in hs:
+                        hs.add(target)
+                        hstruct[fn.name][target] = [ret[1]]
+                        changed = True
                 if not isinstance(node, F.CallExpr) \
                         or not isinstance(node.func, F.IdentExpr):
                     continue
@@ -2120,7 +2190,8 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
         # function can see.  `params_of` is complete before the fixpoint runs,
         # so it is complete here.
         _check_frame_escapes(fn, hs, by_name, param0, owners, structs_by_name,
-                             set(_constructor_bindings(fn, framed)), rets,
+                             getattr(fn, "_frame_owned_names", None)
+                             or set(), rets,
                              holders, hstruct, params_of)
         _check_method_receiver_types(fn, hs, by_name, owners, structs_by_name)
         fn._frame_holders = hs
@@ -2157,6 +2228,121 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
     # the call site that disagrees with it can be in a function the loop above
     # skipped — see `_check_holder_agreements` for the program that measures it.
     _check_holder_agreements(functions, holders, hstruct, params_of)
+    # …and the returned-frame half, which is also a whole-image fact and also
+    # has readers in functions the loop above skipped: a function that never
+    # holds a frame can still CALL one that returns one, and its call site is
+    # where the block has to be reserved.  Published on each function rather
+    # than returned, because both backends read it per function and a second
+    # table beside this one could disagree about which functions return a
+    # frame.
+    for fn in functions:
+        _check_returned_frame_calls(fn, ret_frame)
+
+
+def _check_returned_frame_calls(fn, ret_frame) -> None:
+    """Refuse a call that RETURNS a frame from a position with no block.
+
+    `q = f()` is the only shape the convention covers: the statement binds a
+    name, so there is one call site and `model.struct_returned_frame_sites`
+    reserves one block for it.  Every other position — `f(g())`, `xs[f()]`,
+    `f() + 1` — needs a block for the result too, and this path cannot say how
+    long that block must live or which site owns it.
+
+    Refusing rather than reserving pessimistically is a deliberate direction: a
+    block reserved for a call that turns out not to need one is wasted scratch
+    and harmless, while a call that NEEDS one and does not get it is the silent
+    wrong answer, so the conservative side to err on is the one that refuses.
+    `model.struct_returned_frame_sites` states the same rule about the caller
+    half and for the same reason; this is the check that keeps the two halves
+    from disagreeing about which shape they cover.
+    """
+    for call, position in _returned_frame_calls(fn, ret_frame):
+        raise CodegenError(M.returned_frame_shape_refusal(call, position))
+
+
+def _returned_frame_calls(fn, ret_frame) -> list:
+    """`[(callee_name, how_it_is_spelled)]` for every call in `fn` to a callee
+    that returns a frame, EXCEPT the ones that bind a plain name.
+
+    The excluded shape is `q = f()` and `var q = f()`: the statement names the
+    holder, `model.struct_returned_frame_sites` reserves the block for it, and
+    the callee builds the object there.  Which statements those are comes from
+    `model.frame_binding_target`, the same function the model's own layout uses
+    — the two halves of the convention have to agree about what a binding is, or
+    a caller reserves a block for a statement the callee treats as something
+    else.
+
+    The phrase is carried DOWN the tree so it names the construct the call is an
+    argument of rather than the statement it happens to sit in, which is what
+    makes the refusal read as a statement about the program.
+    """
+    if not ret_frame:
+        return []
+    bound = set()
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        target = M.frame_binding_target(node)
+        value = M.frame_binding_value(node)
+        if not target or not isinstance(value, F.CallExpr) \
+                or not isinstance(value.func, F.IdentExpr) \
+                or value.func.name not in ret_frame:
+            continue
+        bound.add(id(value))
+
+    out = []
+
+    def walk(node, where):
+        if isinstance(node, (list, tuple)):
+            for x in node:
+                walk(x, where)
+            return
+        if isinstance(node, F.FunctionDef):
+            return
+        if isinstance(node, F.CallExpr):
+            callee = node.func.name if isinstance(node.func, F.IdentExpr) else None
+            if callee in ret_frame and id(node) not in bound:
+                out.append((callee, where))
+            inner = (f"an argument of {callee}()" if callee
+                     else "an argument of a call")
+            for a in node.args or []:
+                walk(a, inner)
+            for _k, v in (node.kwargs or []):
+                walk(v, "a keyword argument")
+            return
+        if isinstance(node, (F.ListExpr, F.TupleExpr)):
+            for el in node.elements or []:
+                walk(el, "an element of a container display")
+            return
+        if isinstance(node, F.DictExpr):
+            for _k, v in (node.pairs or []):
+                walk(v, "a value in a dict display")
+            return
+        for fname in getattr(node, "__dataclass_fields__", {}):
+            if fname in ("line", "col"):
+                continue
+            child = getattr(node, fname, None)
+            walk(child, _position_under(node, fname, where))
+
+    walk(getattr(fn, "body", None), "a statement of this function")
+    return out
+
+
+def _position_under(node, field, where):
+    """The phrase for a child reached through `node.<field>`."""
+    if isinstance(node, F.AssignStmt) and field == "value":
+        return "the right-hand side of an assignment that binds no name"
+    if isinstance(node, F.VarDecl) and field == "value":
+        return "the initial value of a declaration that binds no name"
+    if isinstance(node, F.MultiAssignStmt) and field == "value":
+        return "the right-hand side of a multiple assignment"
+    if isinstance(node, F.SubscriptExpr) and field == "index":
+        return "the index of a subscript"
+    if isinstance(node, F.MemberExpr) and field == "obj":
+        return "the receiver of an attribute access"
+    if isinstance(node, F.ReturnStmt) and field == "value":
+        return "the value of a return"
+    if isinstance(node, F.IfStmt) and field in ("test",):
+        return "the condition of an if"
+    return where
 
 
 def _rewrite_nested_method_calls(fn, nested_fields) -> None:
@@ -2497,6 +2683,34 @@ def check_frame_subscript_escapes(functions) -> None:
                 f"program exiting 0")
 
 
+def check_returned_frame_blob_writes(functions) -> None:
+    """Refuse a CONTAINER written into the block a function RETURNS.
+
+    The fourth of the late frame checks and here for the reason the other three
+    are: `_prepare_functions` runs before the imports resolve, so a refusal
+    raised from inside it is reported in place of the import diagnosis, and the
+    import is the more useful of the two answers.
+
+    It is a new check because the returned-frame convention opens a hole the
+    by-reference receiver does not have.  Premise (B1) — a frame slot never
+    holds a blob — is true because a blob is bump-allocated in the function that
+    made it, and it is enforced for METHODS by `check_frame_field_blob_premises`.
+    A returned block outlives the function that made it, so the same reasoning
+    applies with the sign reversed: a blob written into that block names scratch
+    the caller has already taken for its own frames, and the first append
+    through it writes into the callee's reclaimed stack.  The program builds,
+    runs, and returns a number nobody wrote.
+    """
+    for fn in functions:
+        plan = getattr(fn, "_returned_frame", None)
+        if plan is None:
+            continue
+        holder, _struct = plan
+        for field, why in M.returned_frame_container_writes(fn, holder):
+            raise CodegenError(M.returned_frame_blob_refusal(
+                fn.name, holder, field, why))
+
+
 def check_frame_field_blob_premises(structs) -> None:
     """Refuse a method that puts a CONTAINER into a field of a framed receiver.
 
@@ -2639,36 +2853,12 @@ def _describe_value(value) -> str:
 def _constructor_bindings(fn, framed) -> dict:
     """`{name: [struct, …]}` for locals bound from a framed struct's constructor.
 
-    A LIST per name, and that is the fix for a miscompile rather than a
-    refinement: `x = A()` on one path and `x = B()` on another is one name with
-    two frame layouts, and a dict that kept the last binding computed a slot
-    index from that one alone — so on the `A` path `x.v` read `A`'s idea of
-    where `v` is, which is generally not where `A` puts it. Every candidate is
-    kept and `model.struct_frame_slot_candidates` decides whether they agree.
-
-    The empty list is meaningful and not an oversight: a name bound from a
-    constructor this path does NOT frame holds a plain word, and remembering
-    that is what stops a later `x.f` from being read as a frame slot."""
-    out = {}
-    for node in M.iter_nodes(fn.body):
-        target = value = None
-        if isinstance(node, F.VarDecl):
-            target, value = node.name, node.value
-        elif isinstance(node, F.AssignStmt) and isinstance(node.target,
-                                                          F.IdentExpr):
-            target, value = node.target.name, node.value
-        if not target or not isinstance(value, F.CallExpr):
-            continue
-        if isinstance(value.func, F.IdentExpr) and value.func.name in framed:
-            # De-duplicated, order kept: `x = A()` twice on two paths is ONE
-            # candidate, and a refusal that printed "a A, A receiver" because it
-            # counted a binding twice would be reporting the walk rather than
-            # the program.
-            got = out.setdefault(target, [])
-            st = framed[value.func.name]
-            if st not in got:
-                got.append(st)
-    return out
+    The model's function, called from here, and it is the model's rather than a
+    second copy: the returned-frame convention below asks the SAME question —
+    which name does this function build a frame for, and of which struct — and
+    two answers to it would be a caller that reserves a block for one struct and
+    a callee that builds another."""
+    return M.struct_constructor_bindings(fn, framed)
 
 
 def _check_method_receiver_types(fn, holders, by_name, owners,
@@ -2738,7 +2928,7 @@ def _check_method_receiver_types(fn, holders, by_name, owners,
 
 
 def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
-                         structs_by_name=None, created_here=frozenset(),
+                         structs_by_name=None, owned_here=frozenset(),
                          rets=None, all_holders=None, all_hstruct=None,
                          params_of=None) -> None:
     """Refuse every construct a frame ADDRESS may not take part in.
@@ -2767,7 +2957,8 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
     optional so the dylib path, which has no imported structs and so has no
     cross-module callee to recognise, can call this with neither.
 
-    `created_here` is the set of holder names this function BUILT; a holder
+    `owned_here` is the set of holder names whose block OUTLIVES this function
+    (`model.returned_frame_owned_names`); a holder
     outside it arrived from a caller, and the return refusal says so rather than
     naming this function as the creator.
 
@@ -2811,9 +3002,24 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
             owner = (owners or {}).get(fn.name)
             if isinstance(node.value, F.IdentExpr) \
                     and node.value.name in holders:
+                if node.value.name in owned_here:
+                    # The frame this function BUILT.  Not a refusal any more:
+                    # the object is built in a block the CALLER reserved
+                    # (`model.struct_returned_frame_sites`) and handed over in
+                    # the hidden trailing word, so it outlives this function —
+                    # which is the whole content of the rule this branch used to
+                    # state.  `_frame_receivers` has already settled WHICH name
+                    # and WHICH struct, and refused a name with two of them, so
+                    # there is nothing left to decide here.
+                    #
+                    # The `received` case below is a DIFFERENT construct and
+                    # stays refused: that frame belongs to an ancestor, and
+                    # handing it on is a lifetime question about a function
+                    # this analysis cannot name.
+                    continue
                 raise CodegenError(M.frame_return_refusal(
                     owner.name if owner is not None else None,
-                    node.value.name not in created_here,
+                    True,
                     _names(node.value)))
             _refuse_holder_use(fn, node.value, holders, by_name,
                                "is returned from the function that created it")

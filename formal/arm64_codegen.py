@@ -570,6 +570,23 @@ class ARM64Codegen:
         # `a.b.c` member path (scalar replacement, a local). Reset per function.
         self._frame_holders: set = set()
         self._frame_base = 0
+        # ── The RETURNED frame: a block the CALLER owns ─────────────────────
+        # `_returned_frame` is `(holder, struct)` for a function that builds a
+        # frame and hands it back, published by `formal/build.py` and read
+        # here rather than re-derived: the caller sizes the block from the same
+        # answer, and two answers about which struct a function returns would be
+        # a block sized for one layout and built as another.
+        # `_ret_block_sites` is `{id(call): (struct, block_bytes)}` — the
+        # constructions that build that object — and every one of them writes
+        # through the caller's block instead of a block of this function's own,
+        # which is what makes the object outlive the function that made it.
+        # `_ret_recv_sites` is the other half: the blocks THIS function
+        # reserves for the frames its callees hand back.
+        self._returned_frame = None
+        self._ret_block_sites: dict = {}
+        self._ret_block_reg = None
+        self._ret_recv_sites: dict = {}
+        self._ret_recv_bytes = 0
         # Stack of enclosing loops, innermost last. Each entry:
         #   start -- loop top (continue target for `while`)
         #   step  -- iteration step (continue target for `for`)
@@ -692,6 +709,30 @@ class ARM64Codegen:
             # and `yield` leaves its value in X0 (compile-only fidelity).
             self._functions[f.name] = f
 
+        # Whether this is an EXECUTABLE or a dylib, and the entry name, both
+        # read by the returned-frame convention: a frame cannot be handed back
+        # from a library (the importer is a compilation this build does not
+        # perform) nor from the entry point (there is no caller to reserve the
+        # block — the startup stub is).  Settled ONCE here rather than per
+        # function so the two decisions cannot be taken on different functions.
+        self._emit_startup = emit_startup
+        self._entry_name = functions[0].name if emit_startup else None
+        # `{callee: (holder, struct)}` for every function in this image that
+        # hands back a frame.  The CALLER's half of the convention reads it,
+        # and it is built here from the same `f._returned_frame` the CALLEE
+        # side reads, so the two halves cannot disagree about which calls need
+        # a block.
+        # The STRUCT each frame-returning callee returns, not the whole plan:
+        # `model.struct_returned_frame_sites`'s predicate is `(callee, name) ->
+        # struct`, and handing it the `(holder, struct)` pair made it size every
+        # block from a tuple — a block of zero bytes, so every call site in a
+        # function got the SAME address and the second object overwrote the
+        # first.  Two calls in one function is the case that shows it, and it is
+        # in this file's own test suite now.
+        self._returns_frame = {f.name: f._returned_frame[1]
+                               for f in functions
+                               if getattr(f, "_returned_frame", None)}
+
         self.asm.org(base_addr)
 
         first_func_name = functions[0].name
@@ -707,7 +748,6 @@ class ARM64Codegen:
             self.asm.emit_label_rel(first_func_name, here_offset=-4)
             self.asm.emit(encode_ldp_sp_post(29, 30))
             self.asm.emit(encode_ret())
-
         for f in functions:
             self._emit_function(f)
 
@@ -754,10 +794,49 @@ class ARM64Codegen:
         self._cur_fn = f
         self.asm.label(f.name)
 
+        # ── The returned frame, decided FIRST because it takes a home ────────
+        # It has to be settled before the locals are allocated: the hidden word
+        # naming the caller's block is given a register (or a spill slot) of its
+        # own, and the register allocator is what hands those out.  Deciding it
+        # afterwards would mean either clobbering a local's home or writing a
+        # second allocator, and the first is a wrong answer rather than a
+        # failure.
+        self._returned_frame = getattr(f, "_returned_frame", None)
+        self._ret_block_sites = {}
+        self._ret_fwd_sites = set()
+        self._ret_block_reg = None
+        if self._returned_frame is not None:
+            if not self._emit_startup:
+                raise CodegenError(M.returned_frame_library_refusal(f.name))
+            if f.name == self._entry_name:
+                raise CodegenError(M.returned_frame_entry_refusal(f.name))
+            incoming_now = M.incoming_args(f)
+            if M.returned_frame_hidden_arg(f, _ABI_ARG_REGS) is None:
+                raise CodegenError(M.returned_frame_convention_refusal(
+                    f.name, len(incoming_now), _ABI_ARG_REGS))
+            self._ret_block_arg = M.returned_frame_hidden_arg(f, _ABI_ARG_REGS)
+            self._ret_block_sites = M.returned_frame_constructor_sites(
+                f, self._structs, self._returned_frame[0])
+            self._ret_fwd_sites = M.returned_frame_forward_sites(
+                f, self._returns_frame, self._returned_frame[0])
+
         var_names = _allocation_order(f)
         n_reg = min(len(var_names), len(_CALLEE_SAVED))
+        if self._returned_frame is not None:
+            # The hidden word's home, under a name no source can spell, in the
+            # LAST callee-saved register.  Capping `n_reg` one lower rather
+            # than hoping there is a spare is deliberate: a function with ten
+            # locals would otherwise push the word into a spill slot, and every
+            # construction site of the returned object would then pay a load
+            # through a scratch register to find its own base.  The cost is one
+            # local of such a function spilling, and this construct is refused
+            # outright today, so no program that already builds is affected.
+            n_reg = min(n_reg, len(_CALLEE_SAVED) - 1)
         self._var_regs = {name: _CALLEE_SAVED[i]
                           for i, name in enumerate(var_names[:n_reg])}
+        if self._returned_frame is not None:
+            self._var_regs[M.RETURNED_BLOCK_WORD] = _CALLEE_SAVED[n_reg]
+            n_reg += 1
         self._var_spills = {name: i
                             for i, name in enumerate(var_names[n_reg:])}
         self._spill_bytes = 8 * len(self._var_spills)
@@ -767,8 +846,9 @@ class ARM64Codegen:
                 f"({len(var_names)}; spill {self._spill_bytes} > {_SCRATCH})")
         # Spill slots sit at the TOP of the scratch (just below the
         # saved-pair area); list/dict blobs grow from the bottom and
-        # must stop before the first spill slot.
-        self._blob_cap = _SCRATCH - self._spill_bytes
+        # must stop before the first spill slot.  `self._blob_cap` is
+        # computed further down, once the returned-frame region is known, so
+        # that all four regions of the scratch are placed in one place.
         self._npairs = max(1, (n_reg + 1) // 2)
         # Receiver frames for this function's multi-field structs. They live at
         # the BOTTOM of the same reserved scratch the list/dict blobs use, and
@@ -832,6 +912,27 @@ class ARM64Codegen:
         }
         self._vtypes = function_var_types(f, self._call_types)
         self._pending_finally = []
+        # The CALLER's half of the returned-frame convention: one block per call
+        # site whose result is a frame some callee hands back.  They go between
+        # the blobs and the spill slots — above the blobs so a blob growing
+        # upward cannot run into one, below the spill slots because those are
+        # already spoken for — and that ordering is `model.RET_FRAME_REGION_ABOVE_BLOBS`
+        # rather than a paragraph, because the x86-64 backend has to place the
+        # same four regions the same way and a scratch laid out differently on
+        # the two machines is a returned frame that is correct on one and a
+        # use-after-free on the other.
+        self._ret_recv_sites = M.struct_returned_frame_sites(
+            f, self._structs, self._returns_frame.get)
+        self._ret_recv_bytes = sum(v[2] for v in self._ret_recv_sites.values())
+        # ONE place decides the blob cap, now that all four regions are known.
+        self._blob_cap = _SCRATCH - self._spill_bytes - self._ret_recv_bytes
+        if self._blob_cap < self._frame_recv_bytes:
+            raise CodegenError(
+                f"{f.name}: the scratch cannot hold this function's frames: "
+                f"{self._frame_recv_bytes} bytes of receiver frames and "
+                f"{self._ret_recv_bytes} bytes of returned-frame blocks do not "
+                f"fit in the {_SCRATCH - self._spill_bytes} bytes left after "
+                f"{self._spill_bytes} bytes of spill slots")
         # The blob cursor starts ABOVE the receiver frames, not at the bottom
         # of the scratch: the frames live there (see above) and a blob must not
         # land on one.
@@ -918,6 +1019,15 @@ class ARM64Codegen:
                 continue         # a comptime parameter: already a full word
             self._emit_extend(home, src,
                               resolve(parse_type_name(ptype) or DEFAULT_INT_TYPE))
+        # The hidden word naming the CALLER's block, saved before the body runs
+        # because `X0..X7` are caller-saved and the first call in this function
+        # would destroy it.  Its home is whatever the allocator above gave the
+        # reserved name — a callee-saved register or a spill slot — and it goes
+        # through `_store_var` for exactly the reason every other name does, so
+        # the one place that decides "register or spill" stays the only place.
+        if self._returned_frame is not None:
+            self.asm.emit(encode_mov_zr_xn(17, self._ret_block_arg))
+            self._store_var(M.RETURNED_BLOCK_WORD, 17)
         _emit_sub_imm(self.asm, 31, 31, _SCRATCH)
 
         for stmt in f.body:
@@ -4876,28 +4986,28 @@ class ARM64Codegen:
         # its own base, and the outer base is recomputed per store anyway.
         # `site[2]` is the PLACEMENT (`model.struct_constructor_sites`), so a
         # declared type that was not placed cannot reach this loop.
-        self._emit_frame_nested(site)
+        self._emit_frame_nested(e, site)
         for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):
             if kind == M.DEFAULT_STRING:
                 value = F.StringLiteral(value=payload)
             else:
                 value = int(payload or 0)
-            self._emit_block_store(site, slot, value)
+            self._emit_block_store(e, site, slot, value)
         # …and then the constructor's own stores, for the one shape that has
         # them.  Empty for `S()`, which is why this is the same code as the
         # default constructor's rather than a fourth copy of it.
         for _field, slot, value in (plan[1] if shape == M.CONSTRUCTION_INIT
                                     else ()):
-            self._emit_block_store(site, slot, value)
-        self._emit_frame_nested_addresses(site)
+            self._emit_block_store(e, site, slot, value)
+        self._emit_frame_nested_addresses(e, site)
         # …and once more at the end, because the address is the RESULT and
         # every store above left something else in X0. An address materialized
         # once and then overwritten is a null pointer, and the program
         # segfaults on the first field read rather than computing anything.
-        self._emit_frame_base(site[1])
+        self._emit_site_base(e, site)
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
-    def _emit_frame_nested(self, site) -> None:
+    def _emit_frame_nested(self, e, site) -> None:
         """Bring every PLACED nested frame of this site's struct up.
 
         Nested frames first, and first because the block is laid out with the
@@ -4906,10 +5016,14 @@ class ARM64Codegen:
         `site[2]` is the PLACEMENT (`model.struct_constructor_sites`), so a
         declared type that was not placed cannot reach this loop.
         """
-        for _fname, _slot, _child, child_off in site[2]:
-            self._emit_nested_frame_init(_child, child_off)
+        redirected = id(e) in self._ret_block_sites
+        for _fname, _slot, child, child_off in site[2]:
+            self._emit_nested_frame_init(
+                child,
+                child_off - site[1] if redirected else child_off,
+                rel=redirected)
 
-    def _emit_frame_nested_addresses(self, site) -> None:
+    def _emit_frame_nested_addresses(self, e, site) -> None:
         """Store the ADDRESS of each frame `_emit_frame_nested` just brought up.
 
         Which is the whole of "the slot holds a nested frame": one store per
@@ -4917,13 +5031,15 @@ class ARM64Codegen:
         address stored and the frame initialized are the same one by
         construction rather than by two walks agreeing.
         """
+        redirected = id(e) in self._ret_block_sites
         for _fname, slot, _child, child_off in site[2]:
-            self._emit_frame_base(child_off)
+            self._emit_block_base(child_off - site[1] if redirected
+                                  else child_off, redirected)
             self.asm.emit(encode_mov_zr_xn(0, 9))
-            self._emit_frame_base(site[1])
+            self._emit_site_base(e, site)
             self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
 
-    def _emit_block_store(self, site, slot: int, value) -> None:
+    def _emit_block_store(self, e, site, slot: int, value) -> None:
         """One store into a CONSTRUCTION's fresh block: `value` to `8·slot`.
 
         The register discipline every construction shape shares, and unchanged
@@ -4941,7 +5057,7 @@ class ARM64Codegen:
             self.asm.emit(encode_movz_xn_imm(0, value))
         else:
             self._emit_expr(value)
-        self._emit_frame_base(site[1])
+        self._emit_site_base(e, site)
         self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
 
     def _emit_frame_positional(self, e: F.CallExpr, name: str, st, site,
@@ -4960,15 +5076,15 @@ class ARM64Codegen:
         out.  A positional argument can never land on one of those slots — the
         plan refuses that by name — so the two halves cannot fight over a slot.
         """
-        self._emit_frame_nested(site)
+        self._emit_frame_nested(e, site)
         for arg, (_field, slot) in zip(e.args, fields):
-            self._emit_block_store(site, slot, arg)
-        self._emit_frame_nested_addresses(site)
+            self._emit_block_store(e, site, slot, arg)
+        self._emit_frame_nested_addresses(e, site)
         # The address is the RESULT, and every store above left something else
         # in X0.  Same last line as the default constructor's, and for the same
         # reason: an address materialized once and then overwritten is a null
         # pointer and the program segfaults on the first field read.
-        self._emit_frame_base(site[1])
+        self._emit_site_base(e, site)
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
     def _emit_frame_copy(self, e: F.CallExpr, name: str, st, site,
@@ -5005,14 +5121,15 @@ class ARM64Codegen:
         """
         self._emit_expr(e.args[0])
         self.asm.emit(encode_mov_zr_xn(10, 0))
-        self._emit_frame_base(site[1])
+        self._emit_site_base(e, site)
         for slot in range(nslots):
             self.asm.emit(encode_ldr_xt_xn_imm(0, 10, 8 * slot))
             self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
-        self._emit_frame_base(site[1])
+        self._emit_site_base(e, site)
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
-    def _emit_nested_frame_init(self, st, offset: int, depth: int = 0) -> None:
+    def _emit_nested_frame_init(self, st, offset: int, depth: int = 0,
+                                rel: bool = False) -> None:
         """Bring a NESTED receiver frame up at its own slot defaults.
 
         The recursion is the same shape as `model.struct_frame_block_bytes`,
@@ -5029,16 +5146,23 @@ class ARM64Codegen:
         """
         if depth >= M.MAX_NESTED_FRAME_DEPTH:
             return
-        for _fname, _slot, child, child_off in \
-                M.struct_nested_frame_fields(st, self._structs):
-            self._emit_nested_frame_init(child, child_off, depth + 1)
-        self._emit_frame_base(offset)
+        # `rel` says the block lives in the CALLER's scratch rather than this
+        # function's, in which case `offset` is already relative to that block's
+        # base and every child offset has to be too.  `struct_block_children`
+        # answers with `base=0` for exactly that reading and with `base=offset`
+        # for this function's own scratch, so the recursion is one walk and the
+        # only difference between the two is the number it starts from.
+        base = 0 if rel else offset
+        for _fname, _slot, child, child_off in M.struct_block_children(
+                st, self._structs, base):
+            self._emit_nested_frame_init(child, child_off, depth + 1, rel)
+        self._emit_block_base(offset, rel)
         for slot, (kind, payload) in enumerate(M.struct_frame_defaults(st)):
             if kind == M.DEFAULT_STRING:
                 self._emit_expr(F.StringLiteral(value=payload))
             else:
                 self.asm.emit(encode_movz_xn_imm(0, int(payload or 0)))
-            self._emit_frame_base(offset)
+            self._emit_block_base(offset, rel)
             self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * slot))
 
     def _emit_frame_base(self, offset: int) -> None:
@@ -5051,6 +5175,52 @@ class ARM64Codegen:
         makes "a frame is a blob that the cursor skips" true by construction
         instead of by two address computations agreeing."""
         self._emit_list_base(offset)
+
+    # ── The RETURNED frame: two base computations, and ONE place to choose ──
+    #
+    # A block is addressed either by a compile-time offset into this function's
+    # own scratch, or — for the block this function is BUILDING FOR ITS CALLER —
+    # by a word the caller passed in.  Those are the only two cases, and they
+    # are chosen by the same table (`_ret_block_sites`, published by
+    # `formal/build.py`) that says which construction sites they apply to, so
+    # the address a store uses and the block it belongs to cannot come apart.
+    #
+    # Building in the caller's block rather than copying into it is the whole of
+    # why this is small: a copy would have had to re-base the ADDRESS of every
+    # nested frame in the block, at every depth, or hand back an object whose
+    # nested fields point into scratch that is about to be reclaimed.
+
+    def _ret_block_home(self) -> int:
+        """The callee-saved register holding the caller's block address."""
+        home = self._var_regs.get(M.RETURNED_BLOCK_WORD)
+        if home is None:
+            raise CodegenError(
+                f"{self._current_function} returns a frame address but its "
+                f"hidden block word has no register home, which the allocation "
+                f"above guarantees — the frame layout and the register "
+                f"allocation disagree, which is a compiler bug")
+        return home
+
+    def _emit_site_base(self, e, site) -> None:
+        """X9 = the base of the block the construction at `e` builds into."""
+        self._emit_block_base(site[1], id(e) in self._ret_block_sites)
+
+    def _emit_block_base(self, offset: int, rel: bool) -> None:
+        """X9 = `offset` bytes into the block this function is building for its
+        caller (`rel`), or into this function's own scratch (not `rel`).
+
+        The one place the two bases are chosen.  A nested offset measured from
+        the bottom of the caller's block has to be added to the word the caller
+        passed, and a nested offset measured from the bottom of this function's
+        scratch is an X29-relative constant; everything above this function goes
+        through one or the other and so cannot mix them.
+        """
+        if rel:
+            self.asm.emit(encode_mov_zr_xn(9, self._ret_block_home()))
+            if offset:
+                _emit_add_imm(self.asm, 9, 9, offset)
+            return
+        self._emit_frame_base(offset)
 
     def _emit_fresh_one_word(self, name: str, st) -> None:
         """`S()` for a struct of zero or one field — a value, not a call.
@@ -5245,10 +5415,20 @@ class ARM64Codegen:
         # caller who passed zero. Same shape, same words, as the x86-64
         # check in `_emit_call` there — the two differ in their limit (8 vs
         # 6) because the ABIs do, not in what they do about it.
-        if len(args) > _ABI_ARG_REGS:
+        # The CALLER's half of the returned-frame convention: a callee that
+        # builds a frame in a block IT owns passes the address of the block the
+        # CALLER reserved, in the one argument register past its own parameters
+        # (`model.returned_frame_hidden_arg`).  It is pushed LAST so that the
+        # reverse pop below leaves it in the highest register, which is the
+        # index the callee's prologue reads it from.
+        ret_site = None if is_extern else self._ret_recv_sites.get(id(e))
+        nargs = len(args) + (1 if ret_site is not None else 0)
+        if nargs > _ABI_ARG_REGS:
             raise CodegenError(
-                f"call {name}(): {len(args)} arguments exceeds the "
-                f"{_ABI_ARG_REGS} the formal arm64 ABI passes in registers")
+                f"call {name}(): {nargs} arguments exceeds the "
+                f"{_ABI_ARG_REGS} the formal arm64 ABI passes in registers"
+                + (" (one of which is the block this callee returns a frame "
+                   "in)" if ret_site is not None else ""))
 
         # AAPCS: pass up to 8 integer args in X0..X7. Evaluate left-to-right,
         # spilling each result so nested evaluations (which clobber X0/X1/X2)
@@ -5257,7 +5437,23 @@ class ARM64Codegen:
         for arg in args:
             self._emit_expr(arg)
             self.asm.emit(encode_stp_sp_pre(0, 31))
-        for i in range(len(args) - 1, -1, -1):
+        if ret_site is not None:
+            # FORWARDING: this call binds the block this function itself hands
+            # back, so the callee is given the block THIS function was given and
+            # the object is built in the outermost caller's scratch.  Anything
+            # else gets a block of this function's own, at the BOTTOM of the
+            # returned-frame region — which `_emit_function` placed immediately
+            # above the blobs, so its address is a compile-time offset here.
+            if id(e) in self._ret_fwd_sites:
+                self.asm.emit(encode_mov_zr_xn(0, self._ret_block_home()))
+            else:
+                self._emit_frame_base(self._blob_cap + ret_site[1])
+                # `_emit_frame_base` leaves the address in X9 by the convention
+                # every block store shares; the push below reads X0, so the one
+                # move is here rather than a second base-emitting routine.
+                self.asm.emit(encode_mov_zr_xn(0, 9))
+            self.asm.emit(encode_stp_sp_pre(0, 31))
+        for i in range(nargs - 1, -1, -1):
             self.asm.emit(encode_ldp_sp_post(0, 31))
             if i != 0:
                 self.asm.emit(encode_mov_zr_xn(i, 0))

@@ -9755,6 +9755,41 @@ def iter_nodes(node):
         yield from iter_nodes(getattr(node, name))
 
 
+def struct_block_children(struct_def, decls: dict, base: int = 0,
+                          depth=None) -> list:
+    """`[(field, slot, child_struct, offset)]` — the nested frames in this
+    struct's BLOCK and where each one sits, to EVERY depth the model places.
+
+    The offset arithmetic `struct_frame_block_bytes` performs, made a function
+    rather than an inline loop, because two readers need the answer and the
+    bytes reserved have to be the bytes addressed: `struct_constructor_sites`
+    uses it to lay a site out, and the emitters use it to bring the frames up.
+    Written twice, one of them would place a nested frame at an offset the other
+    had reserved a different one for, and the first field read of it would be a
+    read of whatever else is there.
+
+    `base` is added to every offset, so `base=0` answers "relative to this
+    struct's own block" — which is what a caller that hands the block over
+    wants, since the block it is building into is not at a compile-time offset
+    in the callee's frame at all.
+
+    The recursion's depth bookkeeping is `struct_frame_block_bytes`'s exactly:
+    children come from `struct_nested_frame_fields(st, decls, depth)` and their
+    own sizes from `struct_frame_block_bytes(child, decls, depth - 1)`.  Two
+    functions walking one layout with two different depth rules is how a block
+    ends up half its size.
+    """
+    depth = MAX_NESTED_FRAME_DEPTH if depth is None else depth
+    out = []
+    inner = base + struct_frame_bytes(struct_def)
+    for fname, slot, child in struct_nested_frame_fields(struct_def, decls,
+                                                          depth):
+        out.append((fname, slot, child, inner))
+        out.extend(struct_block_children(child, decls, inner, depth - 1))
+        inner += struct_frame_block_bytes(child, decls, depth - 1)
+    return out
+
+
 def struct_constructor_sites(fn, structs_by_name) -> dict:
     """`{id(call): (struct, offset, nested)}` — this function's receiver BLOCKS.
 
@@ -9792,11 +9827,8 @@ def struct_constructor_sites(fn, structs_by_name) -> dict:
         if st is None:
             continue
         block = struct_frame_block_bytes(st, structs_by_name)
-        nested, inner = [], offset + struct_frame_bytes(st)
-        for fname, slot, child in struct_nested_frame_fields(st, structs_by_name):
-            nested.append((fname, slot, child, inner))
-            inner += struct_frame_block_bytes(child, structs_by_name)
-        out[id(node)] = (st, offset, nested)
+        out[id(node)] = (st, offset, struct_block_children(st, structs_by_name,
+                                                           offset))
         offset += block
     return out
 
@@ -9869,18 +9901,21 @@ def struct_returned_frame_sites(fn, structs_by_name, returns_frame) -> dict:
         return {}
     out, offset = {}, 0
     for node in iter_nodes(getattr(fn, "body", None)):
-        # `q = make()` and the annotated `q: Point = make()` are the same
-        # binding; an annotated target is still an AssignStmt, with the
-        # annotation in `node.annotation` (fire_compiler.py:474). A
-        # MultiAssignStmt binds a tuple and is deliberately not followed —
-        # see `_as_ident_name`.
-        if not isinstance(node, F.AssignStmt) or node.value is None:
-            continue
-        name = _as_ident_name(node.target)
+        # `q = make()`, `var q = make()` and the annotated `q: Point = make()`
+        # are the same binding: an annotated target is still an AssignStmt
+        # (fire_compiler.py:474) and `var q = …` is a VarDecl.  **The VarDecl
+        # half was missing and is the shape most of the corpus uses** — a
+        # callee called from a `def` almost always binds its result with `var` —
+        # so `var q = make()` reserved no block at all while `q = make()` did,
+        # and the callee wrote the object into a block nobody owned.  A
+        # MultiAssignStmt binds a tuple and is deliberately not followed; see
+        # `frame_binding_target`.
+        name = frame_binding_target(node)
         if name is None:
             continue
-        value = node.value
-        if not isinstance(value, F.CallExpr) or not isinstance(value.func, F.IdentExpr):
+        value = frame_binding_value(node)
+        if not isinstance(value, F.CallExpr) \
+                or not isinstance(value.func, F.IdentExpr):
             continue
         st = returns_frame(value.func.name, name)
         if st is None:
@@ -9903,7 +9938,302 @@ def _as_ident_name(node):
     return None
 
 
-def returned_frame_convention_refusal(callee, n_source_args: int) -> str:
+def frame_binding_target(node):
+    """The plain NAME a `VarDecl` / `AssignStmt` binds, or None.
+
+    The one reader of "is this statement a binding of a single name", and it is
+    one function because four readers needed it and three of them had grown
+    their own version: `struct_constructor_bindings` (which locals hold a
+    frame), `struct_returned_frame_sites` (which call sites reserve a block for
+    a frame a callee hands back), `returned_frame_constructor_sites` (which
+    constructions build the block this function returns) and
+    `returned_frame_owned_names` (which names a `return` may hand on).  A
+    version that answered for `AssignStmt` but not for `VarDecl` is exactly the
+    gap that let `var q = make()` reserve no block while `q = make()` did — a
+    caller and a callee disagreeing about the same binding.
+
+    `MultiAssignStmt` (`a, b = f()`) and any non-`IdentExpr` target answer None:
+    they bind a tuple, and a frame holder in a tuple position is a different
+    question — and a refusal — rather than a block to reserve.
+    """
+    if isinstance(node, F.VarDecl):
+        return node.name
+    if isinstance(node, F.AssignStmt) and isinstance(node.target, F.IdentExpr):
+        return node.target.name
+    return None
+
+
+def frame_binding_value(node):
+    """The value a `VarDecl` / `AssignStmt` binds, or None for anything else.
+
+    The companion to `frame_binding_target` and for the same reason: the two
+    have to agree about which statements are bindings, or a caller reserves a
+    block for a statement the callee does not treat as one.
+    """
+    if isinstance(node, (F.VarDecl, F.AssignStmt, F.MultiAssignStmt)):
+        return getattr(node, "value", None)
+    return None
+
+
+# The synthetic name the hidden "caller's block" word gets a home under.
+#
+# It is not a source name and nothing in the language can spell it: the
+# backends allocate a callee-saved register (or a spill slot) for it exactly
+# as they do for a local, and `load_var`/`store_var` reach it by that name. A
+# separate mechanism — a reserved register — would have been one more thing the
+# two backends could disagree about, and this way they disagree about the same
+# string, which a rename in this file fixes once.
+RETURNED_BLOCK_WORD = "__returned_frame_block__"
+
+
+def struct_constructor_bindings(fn, framed) -> dict:
+    """`{name: [struct, …]}` for locals bound from a framed struct's constructor.
+
+    A LIST per name, and that is the fix for a miscompile rather than a
+    refinement: `x = A()` on one path and `x = B()` on another is one name with
+    two frame layouts, and a dict that kept the last binding computed a slot
+    index from that one alone — so on the `A` path `x.v` read `A`'s idea of
+    where `v` is, which is generally not where `A` puts it. Every candidate is
+    kept and `struct_frame_slot_candidates` decides whether they agree.
+
+    The empty list is meaningful and not an oversight: a name bound from a
+    constructor this path does NOT frame holds a plain word, and remembering
+    that is what stops a later `x.f` from being read as a frame slot.
+
+    In the model rather than in `formal/build.py` because TWO readers need it
+    and they must not be able to disagree: the holder fixpoint asks "which names
+    in this function hold a frame", and `returned_frame_holder` below asks "which
+    one of them does this function build and hand back". A second copy of this
+    walk would be a caller reserving a block for one struct and a callee
+    building another.
+    """
+    out = {}
+    for node in iter_nodes(getattr(fn, "body", None)):
+        target = frame_binding_target(node)
+        value = frame_binding_value(node)
+        if not target or not isinstance(value, F.CallExpr):
+            continue
+        if isinstance(value.func, F.IdentExpr) and value.func.name in framed:
+            # De-duplicated, order kept: `x = A()` twice on two paths is ONE
+            # candidate, and a refusal that printed "a A, A receiver" because it
+            # counted a binding twice would be reporting the walk rather than
+            # the program.
+            got = out.setdefault(target, [])
+            st = framed[value.func.name]
+            if st not in got:
+                got.append(st)
+    return out
+
+
+def returned_frame_forward_bindings(fn, ret_frame) -> dict:
+    """`{name: [struct, …]}` — locals bound from a callee that HANDS BACK a
+    frame.
+
+    The second way a function can have a frame to return, and the one that
+    makes the convention compose: `def twice(a): var q = make(a); return q`
+    builds nothing itself, and the object it returns belongs to the block its
+    OWN caller reserved.  So the hidden word is FORWARDED — `twice` hands its
+    caller's block down to `make` instead of reserving one of its own — and the
+    object is built there, which is the same place all the way up and so cannot
+    outlast anything.
+
+    Forwarding rather than copying is what keeps it composable: a chain of
+    forwarders builds one object in the outermost caller's block, and there is
+    no point in the chain at which a copy would have to be taken.
+
+    `ret_frame` is the whole image's `{fn: (holder, struct)}` — a fixed point,
+    because a forwarder needs its callee's answer to have one.
+    """
+    out = {}
+    for node in iter_nodes(getattr(fn, "body", None)):
+        target = frame_binding_target(node)
+        value = frame_binding_value(node)
+        if not target or not isinstance(value, F.CallExpr) \
+                or not isinstance(value.func, F.IdentExpr):
+            continue
+        plan = ret_frame.get(value.func.name)
+        if plan is None:
+            continue
+        got = out.setdefault(target, [])
+        if plan[1] not in got:
+            got.append(plan[1])
+    return out
+
+
+def returned_frame_holder(fn, bound):
+    """`(holder, struct_or_None, rows)` — the local this function BUILDS or
+    FORWARDS and RETURNS, or None when it returns no frame of its own.
+
+    `bound` is `{name: [struct, …]}` — the caller assembles it from
+    `struct_constructor_bindings` (built here) and
+    `returned_frame_forward_bindings` (received from a callee) and resolves it
+    here, because "which struct does this function's returned object have" is
+    one question over one candidate set and answering it from either half
+    separately is how a forwarder ends up forwarding a block sized for a
+    layout the callee is not building.
+
+    `struct` is None with non-empty `rows` when the candidates disagree: the
+    agree-or-refuse rule of `struct_frame_slot_candidates` applied to the
+    question "how many bytes is the caller's block" — two candidates of
+    different widths leave no width, and picking one would size the caller's
+    block for a layout this function does not build.
+
+    **Only a name BOUND in this function's own body.** A name that arrived as a
+    parameter or as a method receiver names a block this function does not own
+    at all, and handing it back is the `received` case of `frame_return_refusal`,
+    which stays refused: the creator is not a function this analysis can name.
+    That is a different construct from this one and it keeps its own refusal, so
+    neither has to re-derive the other's reasoning.
+    """
+    for node in iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.ReturnStmt):
+            continue
+        name = _as_ident_name(node.value)
+        if name is None:
+            continue
+        cands = bound.get(name)
+        if not cands:
+            continue
+        rows = [(st.name, st) for st in cands]
+        if len(cands) == 1:
+            return (name, cands[0], rows)
+        return (name, None, rows)
+    return None
+
+
+def returned_frame_container_writes(fn, holder) -> list:
+    """`[(field, why)]` — containers this function writes into the block it
+    RETURNS.
+
+    The one hole the returned-frame convention opens that the by-reference
+    receiver does not.  Premise (B1) says a frame slot never holds a blob,
+    because a blob is bump-allocated in the function that made it, and it is
+    enforced for METHODS (`check_frame_field_blob_premises`).  A returned block
+    outlives the function that made it, so the same reasoning applies with the
+    sign flipped: a blob written into that block names scratch the caller is
+    already using, and the first `q.items.append(1)` after the return writes into
+    the callee's reclaimed stack.
+
+    `holder` is the returned NAME, so this reads the body the same way
+    `struct_field_container_writes` reads a method — one hop of name propagation
+    (`tmp = [1]; p.items = tmp`) and the same three decidable shapes, so a
+    program this cannot decide about is not refused here.
+    """
+    body = getattr(fn, "body", None)
+    containers: set = set()
+    found: list = []
+    _container_binding_names(body, {holder}, containers)
+    _container_write(body, {holder}, found, containers)
+    return found
+
+
+def returned_frame_owned_names(fn, framed, ret_frame) -> set:
+    """The locals whose block OUTLIVES this function — the names a `return` may
+    hand back.
+
+    Two ways a name gets one, and both are one hop and both are local:
+
+      * a **CONSTRUCTION** of the name in this body.  The caller reserved the
+        block the object is built in (`returned_frame_constructor_sites`), so
+        the block belongs to the activation that is about to receive the word.
+      * a **DIRECT call** in this body to a callee that returns a frame.  That
+        callee built the object in a block of THIS function's caller, so
+        handing the address back moves it exactly one activation further out
+        and cannot outlast anything: it is still inside the caller that made
+        it.
+
+    A name that arrived as a PARAMETER is in neither set, and that is not an
+    oversight — it is the `received` arm of `frame_return_refusal`, which stays
+    refused.  The distinction is real rather than cautious: `q = make()` binds a
+    name this function's own caller owns the block for, while `def fwd(q): return
+    q` binds one whose creator this analysis cannot name at all, because a
+    function can be reached from anywhere.
+
+    `ret_frame` is the whole image's `{fn: (holder, struct)}` table (see
+    `formal/build.py`'s `_frame_receivers`), because "does this call hand back a
+    frame" is a fact about the CALLEE and this function's answer to it has to be
+    the same one the caller reserved a block for.
+    """
+    out = set(struct_constructor_bindings(fn, framed))
+    for node in iter_nodes(getattr(fn, "body", None)):
+        target = frame_binding_target(node)
+        if not target:
+            continue
+        value = frame_binding_value(node)
+        if isinstance(value, F.CallExpr) and isinstance(value.func, F.IdentExpr) \
+                and value.func.name in ret_frame:
+            out.add(target)
+    return out
+
+
+def returned_frame_forward_sites(fn, ret_frame, holder) -> set:
+    """`{id(call)}` — the calls whose result is bound to `holder` and must
+    therefore be handed THIS function's own block instead of one of their own.
+
+    The emitter's half of `returned_frame_forward_bindings`, and keyed by
+    `id(call)` for the same reason every other frame table is: the layout and
+    the instruction have to agree about which call is which, and identity is the
+    only thing they can both be given.
+    """
+    out = set()
+    for node in iter_nodes(getattr(fn, "body", None)):
+        if frame_binding_target(node) != holder:
+            continue
+        value = frame_binding_value(node)
+        if isinstance(value, F.CallExpr) and isinstance(value.func, F.IdentExpr) \
+                and value.func.name in ret_frame:
+            out.add(id(value))
+    return out
+
+
+def returned_frame_constructor_sites(fn, structs_by_name, holder):
+    """`{id(call): (struct, block_bytes)}` — the constructions that build the
+    block this function RETURNS.
+
+    The callee's half of `struct_returned_frame_sites`, and the two are the same
+    shape on purpose: a site is a site, whether the block behind it lives in
+    this function's scratch or in the caller's, and the emitters index both
+    tables by `id(call)` for exactly that reason.
+
+    `holder` is `returned_frame_holder`'s name. Every site that binds it is in
+    the answer, and that is what makes two branches correct rather than one:
+    `if c: p = Point() else: p = Point()` is one object with two initialisations,
+    and both initialisations belong in the ONE block the caller reserved — the
+    same thing a C local does when it is assigned in two branches.
+    """
+    framed = framed_struct_names(list(structs_by_name.values()))
+    if not framed:
+        return {}
+    out = {}
+    for node in iter_nodes(getattr(fn, "body", None)):
+        if frame_binding_target(node) != holder:
+            continue
+        value = frame_binding_value(node)
+        if not isinstance(value, F.CallExpr) \
+                or not isinstance(value.func, F.IdentExpr):
+            continue
+        st = framed.get(value.func.name)
+        if st is None:
+            continue
+        out[id(value)] = (st, struct_frame_block_bytes(st, structs_by_name))
+    return out
+
+
+def returned_frame_hidden_arg(fn, arg_regs: int) -> int:
+    """The argument-register index the caller's block word arrives in, or None
+    when the callee has no register left to give it.
+
+    One past the last incoming argument, which is the whole of it: AAPCS delivers
+    argument `i` in `Xi`, so a callee of seven parameters has `X7` free and a
+    callee of eight has nothing. `returned_frame_convention_refusal` is what
+    turns the None into a refusal; this function is only the arithmetic.
+    """
+    n = len(incoming_args(fn))
+    return n if n < arg_regs else None
+
+
+def returned_frame_convention_refusal(callee, n_source_args: int,
+                                      arg_regs: int = 8) -> str:
     """The returned-frame convention cannot be applied to this callee.
 
     The copy needs ONE word: the address of the caller's block. Getting it to
@@ -9930,31 +10260,157 @@ def returned_frame_convention_refusal(callee, n_source_args: int) -> str:
        once.
     3. **A trailing argument on the returning function** (chosen). The
        returning function gains one hidden word, and `return <frame>` becomes
-       "copy the block to that word, return that word". This reuses the
-       by-reference receiver convention that already exists — a frame address
-       is one word and the receiver is already passed as one — so it needs no
-       new register, no new calling-convention section, and it leaves the
-       value model, `MojoFunc`, `evalFunc`, `evalBodyEnv` and the machine model
-       untouched. That is the same property the by-reference design was chosen
-       for, and it is why this is a codegen change rather than an ABI one.
+       "build the object in the block that word names, and return that word".
+       This reuses the by-reference receiver convention that already exists — a
+       frame address is one word and the receiver is already passed as one — so
+       it needs no new register, no new calling-convention section, and it
+       leaves the value model, `MojoFunc`, `evalFunc`, `evalBodyEnv` and the
+       machine model untouched. That is the same property the by-reference
+       design was chosen for, and it is why this is a codegen change rather
+       than an ABI one.
 
        The cost is a limit this has to refuse rather than approximate: the
-       hidden word is a ninth argument, and this path passes at most eight
-       (`_emit_call` drops the rest for compile-only fidelity). A callee that
-       already takes eight arguments cannot be given the word, and a program
-       that does that is refused HERE, by name, instead of being handed a
-       dropped argument and a frame copied into scratch nobody reserved."""
-    if n_source_args >= 8:
+       hidden word is an argument register, and this path has a fixed number
+       of them — eight on arm64, six on x86-64, which is why `arg_regs` is a
+       parameter and the message quotes the number it was given. A callee
+       that already takes that many arguments cannot be given the word, and a
+       program that does that is refused HERE, by name, instead of being
+       handed a dropped argument and a frame written into scratch nobody
+       reserved.
+
+       **The block is built in place rather than copied into it**, which is
+       the same convention with one fewer step: `p = Point()` in the callee
+       writes through the hidden word, so `p.x = 3` afterwards and
+       `return p` need nothing more, and a nested frame placed in the block is
+       addressed inside the block rather than being re-based after the fact.
+       A copy would have had to re-base every nested frame's ADDRESS into the
+       new block, at every depth, or hand back an object pointing into the
+       callee's own scratch.
+    """
+    if n_source_args >= arg_regs:
         return (
             f"{callee} returns a frame address, so it needs one hidden word "
-            f"for the caller's block — and it already takes {n_source_args} "
-            f"argument(s), which is this path's whole argument budget (AAPCS "
-            f"X0..X7, and this backend already drops arguments past eight for "
-            f"compile-only fidelity). Copy the struct's fields out instead of "
-            f"returning the object, which is the same program with a "
-            f"lifetime this analysis can follow, or reduce the callee's "
-            f"parameter count")
+            f"for the caller's block — and it already takes "
+            f"{_count_word(n_source_args)} argument"
+            f"{'' if n_source_args == 1 else 's'}, which is this path's whole "
+            f"argument budget: this ABI passes values in "
+            f"{_count_word(arg_regs)} argument registers, and this backend "
+            f"already drops arguments past that for compile-only fidelity. "
+            f"Copy the struct's fields out instead of returning the object, "
+            f"which is the same program with a lifetime this analysis can "
+            f"follow, or reduce the callee's parameter count")
     return ''
+
+
+_COUNT_WORDS = {0: "no", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+                6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+
+
+def _count_word(n: int) -> str:
+    """`n` as a word, because a diagnostic is read rather than parsed.
+
+    Falls back to the digits for anything outside the table rather than
+    inventing a word: an argument count above ten is already a refusal about
+    the count, and spelling it wrongly would be a second thing to be wrong
+    about.
+    """
+    return _COUNT_WORDS.get(n, str(n))
+
+
+def returned_frame_entry_refusal(name: str) -> str:
+    """The ENTRY function cannot return a frame, and the reason is the startup
+    stub rather than anything about frames.
+
+    The stub passes one word — the test input — and branches to the entry, so a
+    hidden block word would be whatever `X1`/`RSI` happened to hold. The callee
+    would build the object there and the program would fault on the first field
+    read, which is the failure mode this whole path exists to make impossible.
+    Nothing can supply the block, because there is no caller: the kernel is."""
+    return (f"{name} is this image's entry point and returns a frame address, "
+            f"so it would need a block from a caller — and there is no caller, "
+            f"the startup stub branches to it with one word (the test input) "
+            f"and nothing else. Return an integer from the entry: that is what "
+            f"the exit status is, and `return <expr>` inside it already "
+            f"reaches the stub")
+
+
+def returned_frame_library_refusal(name: str) -> str:
+    """A dylib cannot export a function that returns a frame.
+
+    The convention needs the CALLER to reserve the block, and the caller is a
+    compilation this build does not perform: an importer gets the symbol and
+    nothing else, so it would have to reserve a block for a callee whose
+    returned width it cannot see. Refusing here is the honest answer rather
+    than emitting a function whose every importer gets wrong."""
+    return (f"{name} returns a frame address, so it cannot be compiled into a "
+            f"dylib: the returned-frame convention needs the CALLER to reserve "
+            f"the block the object is built in, and an importer of this library "
+            f"is a compilation this build does not perform — it binds the "
+            f"symbol and has no way to learn the width of the block it must "
+            f"reserve. Build it into the program image instead, where the "
+            f"caller and the callee are compiled together")
+
+
+def returned_frame_shape_refusal(callee: str, spelling: str) -> str:
+    """A call that RETURNS a frame, in a position with no block to put it in.
+
+    `q = f()` is the only shape the convention covers: the statement binds a
+    name, so there is one site and one block. Every other position —
+    `f(g())`, `h[f()]`, `[f()]`, `f() + 1` — needs a block for the inner result
+    as well, and this path has no way to say how long it has to live or which
+    site owns it. Reserving a block for a call that turns out not to need one is
+    harmless, so the alternative would be to reserve pessimistically; but a call
+    that NEEDS one and does not get it is the silent wrong answer, so the
+    predicate is deliberately conservative and this names the shape."""
+    return (f"{callee}() returns a frame address, and this call is {spelling} "
+            f"— a position that binds no name, so there is no call site to "
+            f"reserve the block the object has to be built in. The convention "
+            f"covers the one shape that binds a name (`q = {callee}()`); "
+            f"bind it to a name first, which is the same program with a "
+            f"lifetime this analysis can follow")
+
+
+def returned_frame_ambiguous_refusal(fn_name: str, holder: str,
+                                     rows) -> str:
+    """The returned name is one name with two frame layouts.
+
+    The agree-or-refuse rule again, asked about the WIDTH rather than about a
+    slot index: the caller's block is sized by the struct the callee builds, and
+    a name bound by two different constructors on two paths has no single
+    width. Picking one would size the caller's block for a layout the callee
+    does not build on the other path, and the field read past its end is a
+    number the source never wrote."""
+    return (f"{fn_name} returns {holder!r}, and that name is bound by more than "
+            f"one constructor — "
+            + "; ".join(f"{sn}() on one path" for sn, _st in rows)
+            + f" — so the caller's block has no width this path can settle: "
+            f"the object is built in the CALLER's scratch, and the caller "
+            f"sizes that block before the callee has said which layout it is "
+            f"building. Bind one name per construction, which is the same "
+            f"program with one layout")
+
+
+def returned_frame_blob_refusal(fn_name: str, holder: str, field: str,
+                                spelling: str) -> str:
+    """A CONTAINER written into the block this function hands back.
+
+    The one hole the convention opens that the by-reference receiver does not:
+    premise (B1) says a frame slot never holds a blob, and it is enforced for
+    METHODS (`check_frame_field_blob_premises`) because a blob is bump-allocated
+    in the function that made it. A returned block outlives the function that
+    made it, so a blob in one would be an address into scratch the caller is
+    already using for its own frames — and a later `q.items.append(1)` would
+    write into the callee's reclaimed stack. The program builds, runs, and
+    returns a number nobody wrote."""
+    return (f"{fn_name} returns {holder!r}, whose block outlives this "
+            f"function, and it assigns {spelling} to {holder}.{field} — a list "
+            f"or a dict on this path is a bump-allocated region of the "
+            f"function's OWN scratch, so the slot would name bytes this "
+            f"function is about to give back and a later append through it "
+            f"would write into reclaimed stack. Copy the elements out into the "
+            f"returned block's own fields, which is the same program with a "
+            f"lifetime this analysis can follow")
+
 
 
 # What a FRESH one-word value has to hold, and whether this path can produce it.
