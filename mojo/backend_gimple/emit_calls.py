@@ -424,7 +424,59 @@ def _ggc_as_str(x) -> str:
     return x
 
 
+def _lower_device_launch(gen, node: gimple_ctypes.CallExpr):
+    """A call whose target is an offloaded DEVICE function.
+
+    A `@gpu` function has no C definition -- it is MSL, living in the
+    sidecar's string -- so an ordinary call would emit a reference to an
+    undefined C symbol and fail at link time. Instead the call is routed to
+    the generated host wrapper `_mg_launch_<name>`, which the sidecar emits
+    with the kernel's real parameter list. Keeping the *wrapper* named after
+    the kernel and the *signature* mirroring it is what makes the host side
+    look like an ordinary function call at the call site.
+
+    Returns None when the callee is not a device kernel, so the caller falls
+    through to the ordinary path. Returns (type, value) like every other
+    lowering: kernels return void, so the value is a `void`-typed int64_t 0
+    only if someone writes the call in value position -- which is an error
+    the type layer should catch, and returning 0 is the honest "nothing"
+    rather than a plausible-looking garbage int.
+    """
+    if not isinstance(node.func, gimple_ctypes.IdentExpr):
+        return None
+    if node.func.name not in getattr(gen, '_device_kernels', ()):
+        return None
+    _kname = node.func.name
+    _wname = '_mg_launch_' + gimple_ctypes._safe_name(_kname)
+    _argtypes = getattr(gen, '_device_launch_args', {}).get(_kname)
+    if _argtypes is None:
+        raise RuntimeError(
+            f'cannot compile module: call to GPU kernel {_kname!r} has no '
+            f'recorded parameter types, so the host marshalling wrapper '
+            f'cannot be generated for it')
+    _parts = []
+    for _i, _a in enumerate(node.args):
+        # `_device_launch_args` holds (name, c_type, is_buffer) triples so the
+        # wrapper generator can tell buffers from scalars; the call site only
+        # needs the C type.
+        _want = _argtypes[_i][1] if isinstance(_argtypes[_i], tuple) else _argtypes[_i]
+        _t, _v = gen.lower_expr(_a)
+        if _t != _want:
+            # _safe_coerce_emit returns None -- it writes the coercion into
+            # the lhs temp it is handed, so the value to pass on is the temp,
+            # not a result.
+            _tmp = gen._new_temp(_want)
+            gen._safe_coerce_emit(_t, _want, _v, _tmp)
+            _v = _tmp
+        _parts.append(_v)
+    gen._emit(f'  {_wname}(' + ', '.join(_parts) + ');')
+    return 'void', '0'
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    _dev = _lower_device_launch(gen, node)
+    if _dev is not None:
+        return _dev
     if (isinstance(node.func, gimple_ctypes.IdentExpr)
             and node.func.name in ('__mojo_future_add_done_callback',
                                    '__mojo_future_remove_done_callback')

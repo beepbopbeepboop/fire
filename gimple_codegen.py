@@ -226,6 +226,13 @@ _RUNTIME_FUNCS: dict[str, str] = {
     # opaque handle and there is no file-object model to dispatch a
     # `.write()` against. See the runtime function's own comment.
     'mojo_stream_write':         'void',
+    # GPU offload introspection (see mojo/backend_gimple/device_glue.py).
+    # Registered so a call from compiled Mojo resolves to the sidecar's real
+    # definition instead of colliding with a weak auto-stub.
+    '_mojo_gpu_kernel_count':   'int64_t',
+    '_mojo_gpu_have_device':    'int64_t',
+    '_mojo_gpu_dispatch_count': 'int64_t',
+    '_mojo_gpu_failure_count':  'int64_t',
     'mojo_bytes_new_lit':         'MojoBytes *',
     'mojo_bytes_empty':           'MojoBytes *',
     'mojo_bytes_zeros':           'MojoBytes *',
@@ -1322,6 +1329,12 @@ class GimpleGen:
         # slot types to a call site EMITTED LATER, which a per-function
         # reset would erase between the two.
         self._return_slot_types: dict[str, list] = {}
+        # Device kernels this module offloaded, and their MSL. Filled by
+        # gen_module_impl's Seam-3 pass and read by the sidecar emitter at
+        # the very end of the module; module scope because the MSL is only
+        # final once every function has been walked.
+        self._device_kernels: dict[str, bool] = {}
+        self._device_parts: list[str] = []
         # dict.items()/values() result temp -> the dict's VALUE type. The
         # runtime stores item pairs as [char* key, boxed value] (append_str +
         # append_int — see mojo_dict_items), so the for-loop tuple branch needs

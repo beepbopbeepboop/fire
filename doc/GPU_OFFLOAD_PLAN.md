@@ -125,6 +125,55 @@ device emitter fills side buffers on the gen object:
 and the function-emission loop at `module_gen.py:8808` routes a device
 `fdef` to the MSL emitter instead of the C one.
 
+**Landed.** `mojo/backend_gimple/device_glue.py` emits the whole channel as
+pure C appended to the module, and the C API it calls lives in
+`runtime/fire_metal.h` / `fire_metal.m`. Pure C is a hard constraint, not a
+preference: the `.ci` is compiled `gcc -fgimple -x c`, and gimple is a C
+front end, so `@autoreleasepool` and `id<MTLLibrary>` do not survive it.
+`fire_metal.m` is therefore the only file in the tree that touches Metal, it
+is Objective-C, and the registry row that links it
+(`build_config._OPTIONAL_RUNTIME_UNITS`) carries the per-unit `clang` +
+`-fobjc-arc` that the build-wide gcc cannot provide.
+
+Four things this cost that the plan did not foresee, each of which failed
+silently rather than loudly:
+
+- **The scalar ABI.** MSL declares a scalar kernel parameter as
+  `constant T &`, and the device reads exactly the bytes bound at that index.
+  Binding a host `double` for a Mojo `Int` (MSL `int`, 4 bytes) delivered
+  the low 4 bytes of a float's mantissa, so `len=1024` arrived as `0`: every
+  thread took the bounds guard, the kernel wrote nothing, and the program
+  exited 0 with plausible arrays and no output. The widths now travel from
+  the emitter (which chose the MSL type) to the wrapper (which narrows the
+  value) to the runtime, which binds that many bytes.
+- **The grid.** Under-dispatching leaves the tail of the output
+  uninitialised and over-dispatching is safe because kernels guard on `len`,
+  so the runtime covers the largest buffer exactly.
+- **Copy-back needs a length, and a `float *` has none.** The contract is the
+  kernel's first `Int`/`Int64` parameter, which every hand-written kernel
+  here already has, and it is *checked* rather than guessed: a kernel with no
+  length raises at compile time, because silently copying back nothing
+  produces a program that runs and is wrong.
+- **The optional-unit probe.** A code generator that emits C from Python
+  string templates has those templates in its own source, and compiling the
+  compiler inlines them as `_slit_N` initializers — so the emitted
+  `_mg_have_device = (int64_t) mojo_metal_init(...)` text made every build
+  that imports `build_config` link Metal. Fixed in the probe
+  (`build_config._strip_c_literals_and_comments`), which also removes the
+  "followed by `(` and not preceded by a quote" heuristic's real blind spot,
+  not by renaming anything around it.
+
+**Still open, and it is the next thing.** A program written in Mojo cannot yet
+*reach* a dispatch: `MojoList` is boxed, so there is no way to obtain the
+contiguous `float *` a kernel takes. The plumbing is complete and verified —
+generated MSL, embedded string, launch wrappers, a routed call site, a real
+dispatch, `max |diff| = 0.000e+00` — and the missing piece is the buffer
+representation, which is on the critical path for auto-offloading ordinary
+Python anyway. The end-to-end GPU test therefore drives the generated launch
+wrapper from a C harness, and asserts the Mojo call site on the generated C.
+That is a real gap, stated plainly rather than papered over: nothing yet
+computes on the GPU from a program whose source is Mojo.
+
 ## Order of work
 
 **Increment 1 — prove the path with one explicit kernel.** `@gpu def

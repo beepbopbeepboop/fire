@@ -43,6 +43,9 @@ from mojo.middle.exprtypes import _walk_ast
 import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
 from mojo.middle.closures import discover_closures
+import mojo.backend_gimple.device_select as _gmi_device_select
+import mojo.backend_gimple.device_glue as _gmi_device_glue
+import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
 # Re-export shared helpers from mojo.middle.module_shared via explicit imports.
@@ -882,6 +885,44 @@ def _gmi_has_unresolved_base(_struct_bases_map: dict, _all_struct_names: set,
 
 
 def gen_module_impl(self, stmts):
+
+    # ── GPU offload, Seam 1 ──────────────────────────────────────────────
+    # Classified ONCE, at the very top, because three different places
+    # need the answer and they run at different times: the preamble (to emit
+    # the runtime include and the prototypes the compiled program calls),
+    # the function-body loop (to route a device function to the MSL emitter
+    # instead of gen_func), and the tail (to emit the sidecar). Deciding
+    # "emit this one to a different target" is not something an emitter can
+    # do about a function it has already started, which is why this is a
+    # pre-pass and not a check inside gen_func.
+    _device_kinds = _gmi_device_select.classify_functions(stmts)
+    _device_parts: list[str] = []
+    _device_names = sorted(n for n, k in _device_kinds.items()
+                           if k == _gmi_device_select.DEVICE)
+    # The host-side marshalling signature of every device kernel, computed
+    # HERE, off the AST, because a device function never runs through
+    # gen_func and so never gets an inferred C signature to read back. It
+    # feeds two emissions at different times: the prototypes in the
+    # preamble, and the wrapper definitions in the tail sidecar.
+    self._device_kernels = {n: True for n in _device_names}
+    self._device_launch_args = {}
+    _device_kernels_meta: dict = {}
+    for _s in stmts:
+        if (isinstance(_s, FunctionDef)
+                and _device_kinds.get(_as_str(_s.name)) == _gmi_device_select.DEVICE):
+            _nm = _as_str(_s.name)
+            _tys, _ci = _gmi_device_glue.launch_arg_types(_s.params)
+            # Fail here, at the classification pass, rather than at the first
+            # call site: an un-marshallable kernel is a build error either
+            # way, and failing before anything is emitted gives a file and
+            # line instead of a stack through the call-site lowering.
+            _gmi_device_glue.element_count_index(_nm, _ci)
+            self._device_launch_args[_nm] = _tys
+            # (name, c_type, is_buffer) triples, plus the element-count
+            # index. The wrapper generator needs to tell a buffer from a
+            # scalar; emit_calls.py reads only the c_types, from
+            # `_device_launch_args`.
+            _device_kernels_meta[_nm] = (_tys, _ci)
     self._actual_types['stmts'] = 'MojoList *'
     if self._current_filename:
         self._inline_module_qualifiers[os.path.abspath(self._current_filename)] = self.module_name
@@ -6664,12 +6705,39 @@ def gen_module_impl(self, stmts):
             if _shn not in self.func_param_types:
                 self.func_param_types[_shn] = _shp
 
+    # ── GPU offload, Seam 1 + Seam 3 ──────────────────────────────────────
+    # Which functions are DEVICE is decided ONCE, here, before any body is
+    # emitted -- "emit this one to a different target" is not a decision an
+    # emitter can make about a function it has already started, which is why
+    # device_select is a separate pre-pass rather than a check inside
+    # gen_func. Cheap when there are no device functions (the overwhelmingly
+    # common case), and it only walks the AST for functions, never bodies.
+
     for stmt in stmts:
         if isinstance(stmt, FunctionDef):
             if (stmt.name in self._supported_generators or stmt.name in self._supported_async
                     or stmt.name in self._supported_async_gen):
                 continue
             if stmt.name in self._unsupported_generator_names:
+                continue
+            # A DEVICE function becomes MSL, accumulated into
+            # `_device_parts` and embedded as a C string at the end of the
+            # module -- the same trick `test_llm/kernels.metal.inc` uses, and
+            # the reason this needs no offline metallib step at all. It is
+            # NOT emitted as C, because a C definition of a kernel would be
+            # dead code that still has to typecheck.
+            if _device_kinds.get(_as_str(stmt.name)) == _gmi_device_select.DEVICE:
+                try:
+                    _msl = _gmi_emit_metal.emit_kernel(stmt, kernel=True)
+                except _gmi_emit_metal.MetalUnsupported as _me:
+                    # A kernel that cannot be lowered honestly is a build
+                    # error, not a silently-stubbed C function: the whole
+                    # point of the path is that the GPU runs the code the
+                    # user wrote, and a stub would be a lie with exit 0.
+                    raise RuntimeError(
+                        f'GPU kernel {_as_str(stmt.name)!r} did not lower to '
+                        f'MSL: {_me}') from _me
+                _device_parts.append(_msl)
                 continue
             _nested_pushed = []
             _prefix = f"{stmt.name}::"
@@ -6929,6 +6997,17 @@ def gen_module_impl(self, stmts):
         '#include <Python.h>',
         '#endif',
         '#include <fire_runtime.h>',
+        # Only when this module actually offloads something. A module with
+        # no kernels must not acquire a dependency on the Metal runtime, or
+        # it stops being linkable against a plain fire_runtime. Header first,
+        # then the launch prototypes -- these are plain C signatures and do
+        # not need the header, but the sidecar's own definitions call through
+        # it and reading them in the order they are used is worth more than
+        # the dependency they do not have. The star-unpack-of-a-conditional
+        # is the same shape as the coroutine shim just below.
+        *(['#include <fire_metal.h>',
+           _gmi_device_glue.emit_launch_prototypes(_device_kernels_meta)]
+          if _device_kernels_meta else []),
         '#include <fire_sqlite3.h>',
         '#include <fire_zlib.h>',
         '#include <fire_ssl.h>',
@@ -8813,6 +8892,15 @@ def gen_module_impl(self, stmts):
             continue
         if fdef.name in self._unsupported_generator_names:
             continue
+        # A DEVICE function has no C definition -- it is MSL in the tail
+        # sidecar, entered through `_mg_launch_<name>`. This pass emits each
+        # local function's C prototype, and for a device function that
+        # prototype describes a symbol nothing ever defines: dead, and
+        # actively misleading to a reader, who sees a declaration with real
+        # parameter types and no matching body. Its host entry point gets a
+        # REAL prototype in the preamble instead (see emit_launch_prototypes).
+        if _as_str(fdef.name) in getattr(self, '_device_kernels', ()):
+            continue
         ret    = self.func_return_types.get(fdef.name, 'int64_t')
         # This SECOND, later computation of `param_ctypes`/
         # `func_param_types` OVERWRITES the earlier forward-declaration
@@ -9543,6 +9631,25 @@ def gen_module_impl(self, stmts):
     if _ss_units:
         parts.append('')
         parts.extend(_ss_units)
+
+    # ── GPU offload, Seam 3: the device sidecar ───────────────────────────
+    # Emitted LAST, because the MSL text is only final once every device
+    # function has been walked. It goes into the SAME .ci as a C string
+    # literal, so one generated file is still the whole program — which is
+    # what removes the offline `xcrun metal`/`metallib` step entirely: the
+    # Metal runtime compiles the string at load time, for the GPU actually
+    # present. The alternative (a second emitted artifact) would need build
+    # wiring and a cache key for it, and buys nothing that
+    # `newLibraryWithSource:` does not already do.
+    if _device_parts:
+        # The definitions -- MSL string, init, dispatch shim, per-kernel
+        # launch wrappers, introspection. The `#include` and the wrapper
+        # PROTOTYPES went into the preamble instead, because a host function
+        # can call a kernel defined later in the file and an implicit
+        # declaration of `float *` vs `int64_t` is a "conflicting types"
+        # error reported against the wrong line.
+        parts.append(_gmi_device_glue.emit_device_sidecar(
+            _device_parts, sorted(self._device_kernels), _device_kernels_meta))
 
     return self._dedup_variadic_externs(parts)
 

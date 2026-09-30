@@ -2902,6 +2902,14 @@ def _gen_stmt_ContinueStmt(gen, node):
 def _gen_stmt_ExprStmt(gen, node):
     if isinstance(node.value, gimple_ctypes.CallExpr) and isinstance(node.value.func, gimple_ctypes.IdentExpr):
         raw_name = gen._ident_call_name(node.value.func)
+        # A bare, value-discarding call to an offloaded DEVICE function.
+        # This handler has its own fast path for statement-position calls and
+        # never reaches _lower_call, so without this the launch hook only
+        # fired for calls in value position and the ordinary
+        # `kernel(a, b, out, n)` line silently became a weak stub call.
+        if raw_name in getattr(gen, '_device_kernels', ()):
+            ggc._lower_device_launch(gen, node.value)
+            return
         if raw_name == 'print':
             gen._gen_print(node.value.args, node.value.kwargs)
             return

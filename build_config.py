@@ -89,12 +89,47 @@ from module_loader import STDLIB_PATH, TEST_PATH
 # assumed.  Hence: a flat tuple of flat tuples of flat STRINGS, every field
 # unpacked with an index, and the link flags kept as one space-separated
 # string rather than a list.
+# Every row has SEVEN fields, and _unit_field indexes positionally, so a
+# short row is an IndexError rather than a default. That is deliberate: the
+# uniform-tuple shape is what keeps this table readable by the self-hosted
+# backend (see the note above), and a helper that silently returned '' for a
+# missing field would hide a genuinely short row instead of failing on it.
+# Fields 5 and 6 are empty for every unit that is plain C built by the
+# build-wide compiler.
 _OPTIONAL_RUNTIME_UNITS = (
-    # unit        source                header                  link flags           dev package
-    ('sqlite3', 'fire_sqlite3.c', 'fire_sqlite3.h', '-lsqlite3', 'libsqlite3-dev'),
-    ('zlib', 'fire_zlib.c', 'fire_zlib.h', '-lz', 'zlib1g-dev'),
-    ('ssl', 'fire_ssl.c', 'fire_ssl.h', '-lssl -lcrypto', 'libssl-dev'),
-    ('ncurses', 'fire_ncurses.c', 'fire_ncurses.h', '-lncurses', 'libncurses-dev'),
+    # unit  source         header            link flags         dev pkg      cc     cc flags
+    ('sqlite3', 'fire_sqlite3.c', 'fire_sqlite3.h', '-lsqlite3', 'libsqlite3-dev', '', ''),
+    ('zlib', 'fire_zlib.c', 'fire_zlib.h', '-lz', 'zlib1g-dev', '', ''),
+    ('ssl', 'fire_ssl.c', 'fire_ssl.h', '-lssl -lcrypto', 'libssl-dev', '', ''),
+    ('ncurses', 'fire_ncurses.c', 'fire_ncurses.h', '-lncurses', 'libncurses-dev', '', ''),
+    # GPU offload. The odd one out in this table on purpose: it is
+    # Objective-C, because the generated `.ci` is compiled `gcc -fgimple -x c`
+    # and gimple has no `@autoreleasepool` / `id<MTLLibrary>` -- so this unit
+    # is the ONLY place Metal is touched, reached from generated C through the
+    # plain C API in its header. Hence the per-unit compiler and flags
+    # (fields 5 and 6): the portable gcc-mp-15 this build uses everywhere else
+    # rejects the file outright ("expected identifier or '(' before '^' token"
+    # from NSObjCRuntime.h, and no -fobjc-arc at all), and ARC is load-bearing
+    # rather than stylistic -- the device/library/queue are file-scope
+    # statics, and without ARC they are autoreleased and can be freed under
+    # the library while a later dispatch still uses them.
+    #
+    # Linking Foundation+Metal only when the generated C actually references
+    # mojo_metal_* is the same rule as every row above: a program with no
+    # kernels must not acquire a GPU-framework dependency.
+    #
+    # The `mojo_metal_` PREFIX is load-bearing, not a naming preference.
+    # `referenced_optional_runtime_units` probes the generated C for the unit's
+    # namespace, and this registry's own source is inlined into every module
+    # that imports build_config -- so a namespace of `fire_metal_` matches this
+    # table's own `'fire_metal.m'` / `'fire_metal.h'` filename strings as a
+    # prefix, and every such module then drags Metal onto its link line.
+    # Measured, not predicted: test_sqlite3_runtime.py's "compiling a module
+    # that imports build_config pulls in NO optional unit (their symbols are in
+    # the generated C only as string data)" check fails on it. `mojo_<lib>_` is
+    # the convention every other row already follows, so the C API follows it.
+    ('metal', 'fire_metal.m', 'fire_metal.h',
+     '-framework Foundation -framework Metal', '', 'clang', '-fobjc-arc'),
 )
 
 
@@ -168,6 +203,27 @@ def optional_unit_libs(unit: str) -> list:
     return out
 
 
+def optional_unit_cc(unit: str) -> str:
+    """The compiler to build `unit` with, or '' for the build's default.
+
+    Metal is Objective-C and the default gcc cannot parse it, so this is not
+    a hypothetical knob -- see the registry row. Returning '' rather than a
+    default name keeps the callers free of unit-specific conditionals."""
+    return _unit_field(unit, 5)
+
+
+def optional_unit_cc_flags(unit: str) -> list:
+    """Extra compile flags for `unit`, as a list. Split from the registry row
+    here, once, so no caller has to know the row stores them space-separated."""
+    out = []
+    spec = _unit_field(unit, 6)
+    if spec:
+        for flag in spec.split(' '):
+            if flag:
+                out.append(flag)
+    return out
+
+
 def optional_unit_dev_package(unit: str) -> str:
     """The system development package that provides `unit`'s headers, named in
     the diagnostic when the unit's own compile fails.  Empty if unknown."""
@@ -211,6 +267,77 @@ def optional_unit_namespace(unit: str, rt_dir: str = None) -> str:
         ns = ns[:n]
         i = i + 1
     return ns
+
+
+def _strip_c_literals_and_comments(c_code: str) -> str:
+    """`c_code` with every string literal, character literal and comment
+    blanked out (replaced by a space, so offsets and line structure survive).
+
+    `_called_in_c_code` decides "is this a call, or just a mention?" by
+    checking that the name is not preceded by a quote. That works when a
+    string literal mentions the name directly -- `_KNOWN_SIGS['x']` becomes
+    `"x"` in the output, quote adjacent to name -- but it FAILS when the
+    literal CONTAINS a call-shaped fragment, because then the quote is at the
+    start of the literal and the character immediately before the name is an
+    ordinary space:
+
+        static char * _slit_91 = "  _mg_have = (int64_t) mojo_metal_init(src);";
+
+    The name is followed by `(` and preceded by a space, so the probe reads it
+    as a real call. This is not hypothetical: it is what the compiler's own
+    closure produces, because a code generator that emits C from Python string
+    templates necessarily has those templates in its own source, and compiling
+    the compiler inlines them as `_slit_N` initializers. Measured -- the
+    "compiling a module that imports build_config pulls in NO optional unit"
+    check in test_sqlite3_runtime.py failed on exactly this.
+
+    Removing literals cannot lose a real reference: a symbol that is called is
+    called from CODE, so it is never inside a literal. This only ever removes
+    false positives, which is the direction the probe already prefers ("loud
+    beats quiet"). Comments go for the same reason and by the same argument.
+
+    A full C lexer is more than this needs. The only constructs that can
+    hide text from the probe are literals and comments, the scan only has to
+    be correct about where they END, and the file is generated -- unbalanced
+    quotes are not a state this has to survive.
+    """
+    out = []
+    i = 0
+    n = len(c_code)
+    while i < n:
+        c = c_code[i]
+        # Line comment, or a '/' that cannot be a comment (kept verbatim so
+        # a stray slash in an expression does not swallow the rest of it).
+        if c == '/' and i + 1 < n and c_code[i + 1] == '/':
+            j = c_code.find('\n', i)
+            if j < 0:
+                j = n
+            out.append(' ')
+            i = j
+            continue
+        if c == '/' and i + 1 < n and c_code[i + 1] == '*':
+            j = c_code.find('*/', i + 2)
+            j = n if j < 0 else j + 2
+            out.append(' ')
+            i = j
+            continue
+        if c in ('"', "'"):
+            quote = c
+            j = i + 1
+            while j < n:
+                if c_code[j] == '\\':
+                    j += 2
+                    continue
+                if c_code[j] == quote:
+                    j += 1
+                    break
+                j += 1
+            out.append(' ')
+            i = j
+            continue
+        out.append(c)
+        i += 1
+    return ''.join(out)
 
 
 def _called_in_c_code(c_code: str, sym: str) -> bool:
@@ -274,6 +401,13 @@ def referenced_optional_runtime_units(c_code: str, rt_dir: str = None) -> list:
     this function rather than a refinement: see its docstring for why a bare
     "does the namespace appear" test matches every unit in the tree.
     """
+    # String literals and comments are REMOVED before probing. See
+    # _strip_c_literals_and_comments for why that is necessary rather than
+    # merely tidier: a call-shaped fragment inside a string literal is
+    # invisible to the "is it preceded by a quote" test, because the quote is
+    # at the START of the literal and can be hundreds of characters away from
+    # the name.
+    c_code = _strip_c_literals_and_comments(c_code)
     hits = []
     for unit in optional_unit_names():
         ns = optional_unit_namespace(unit, rt_dir)
@@ -315,6 +449,7 @@ def optional_unit_compile_failed(unit: str, source: str, stderr: str) -> str:
 
 __all__ = ['find_gcc', 'find_gxx', 'STDLIB_PATH', 'runtime_dir',
            'optional_unit_names', 'optional_unit_source',
+           'optional_unit_cc', 'optional_unit_cc_flags',
            'optional_unit_header', 'optional_unit_libs',
            'optional_unit_dev_package', 'optional_unit_symbols',
            'optional_unit_namespace',

@@ -20,6 +20,7 @@ compiler.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -30,7 +31,11 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import gimple_codegen as gctypes
+from build_config import find_gcc as _find_gcc
+
+_GCC = _find_gcc()
 import mojo.backend_gimple.device_select as dsel
+import mojo.backend_gimple.device_glue as dglue
 import mojo.backend_gimple.emit_metal as eml
 import mojo.middle.metal_ops as mops
 
@@ -497,6 +502,233 @@ def vec_add(in0: UnsafePointer[Float32, MutAnyOrigin],
         if status == 'no_device':
             self.skipTest('no Metal device on this machine')
         self.assertEqual(status, 'ok', f'status={status}\n{out}\n--- msl ---\n{msl}')
+
+
+# ---------------------------------------------------------------------------
+# Seam 3: the module sidecar -- MSL embedded in the generated C, the host
+# launch wrappers, and a real dispatch through runtime/fire_metal.h.
+# ---------------------------------------------------------------------------
+
+KERNEL_AND_CALLER = '''
+@gpu
+def vec_add(in0: UnsafePointer[Float32, MutAnyOrigin],
+            in1: UnsafePointer[Float32, MutAnyOrigin],
+            output: UnsafePointer[Float32, MutAnyOrigin], len: Int):
+    tid = global_idx.x
+    if tid >= len:
+        return
+    output[tid] = in0[tid] + in1[tid]
+
+
+def run(n: Int):
+    vec_add(n, n, n, 8)
+
+
+def main():
+    print(_mojo_gpu_kernel_count())
+'''
+
+
+class TestLaunchArgTypes(unittest.TestCase):
+    """The host wrapper's signature, derived off the AST.
+
+    A DEVICE function never reaches gen_func, so there is no inferred C
+    signature to read back -- these are what stand in for it, and a wrong
+    answer here is a wrong pointer width at the dispatch.
+    """
+
+    def test_pointer_params_are_buffers_and_scalars_are_not(self):
+        mod = parse(KERNEL_AND_CALLER)
+        types, count = dglue.launch_arg_types(mod[0].params)
+        self.assertEqual(
+            [(n, isb) for n, _t, isb, _w in types],
+            [('in0', True), ('in1', True), ('output', True), ('len', False)])
+        self.assertEqual(count, 3)
+
+    def test_int_scalar_narrows_to_the_width_the_msl_declares(self):
+        """`Int` lowers to MSL `int`, so the host must hand over 4 bytes.
+
+        This is not a style choice. The device reads exactly the bytes bound
+        at that constant index; a host double there delivered the low 4 bytes
+        of the mantissa, and a length of 1024 arrived as 0 -- the kernel took
+        its bounds guard on every thread, wrote nothing, and exited 0.
+        """
+        mod = parse(KERNEL_AND_CALLER)
+        types, _ = dglue.launch_arg_types(mod[0].params)
+        self.assertEqual(types[3][1], 'int32_t')
+        self.assertEqual(types[3][3], 4)
+
+    def test_element_count_index_rejects_a_kernel_with_no_length(self):
+        """A `float *` carries no length, so without one the host cannot copy
+        results back. Silently copying back nothing would produce a program
+        that runs and prints plausible numbers and is wrong."""
+        with self.assertRaises(dglue.LaunchError) as cm:
+            dglue.element_count_index('k', -1)
+        self.assertIn('no Int/Int64 parameter', str(cm.exception))
+
+    def test_c_string_literal_escapes_trigraphs(self):
+        """MSL is full of `?:`, and a C preprocessor that eats trigraphs turns
+        the ternary into a digraph. Escaping `?` is what stops the emitted
+        string from being re-read differently than it was written."""
+        lit = dglue.c_string_literal('a ?: b')
+        self.assertIn(r'\?', lit)
+        self.assertNotIn('?', lit.replace(r'\?', ''))
+
+
+class TestDeviceSidecarEmission(unittest.TestCase):
+    """What the module generator actually puts in the .ci."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ci = gctypes.compile_to_gimple(KERNEL_AND_CALLER, False,
+                                            'sidecar_test.py')
+
+    def test_msl_is_embedded_as_a_c_string(self):
+        self.assertIn('_mg_msl_source', self.ci)
+        # The kernel text survives escaping, so look for a distinctive
+        # fragment rather than the whole (chunked, escaped) literal.
+        self.assertIn('kernel void vec_add', self.ci.replace('\\n', '\n'))
+
+    def test_runtime_header_is_included_only_when_offloading(self):
+        self.assertIn('#include <fire_metal.h>', self.ci)
+        plain = gctypes.compile_to_gimple('def main():\n    print(1)\n', False, 'p.py')
+        self.assertNotIn('fire_metal.h', plain,
+                         'a module with no kernels must not acquire a Metal '
+                         'dependency')
+
+    def test_launch_wrapper_is_generated_with_the_kernels_own_signature(self):
+        self.assertIn(
+            'void _mg_launch_vec_add(float * in0, float * in1, '
+            'float * output, int32_t len)', self.ci)
+
+    def test_wrapper_precedes_its_call_site_so_the_call_typechecks(self):
+        """The wrapper is defined in the tail sidecar but called from a
+        function body emitted much earlier, so the prototype in the preamble is
+        load-bearing: without it the call is an implicit declaration and gcc
+        reports "conflicting types" against the real definition."""
+        proto = self.ci.find('void _mg_launch_vec_add(float * in0')
+        call = self.ci.find('_mg_launch_vec_add(_t')
+        self.assertGreater(proto, 0, 'no prototype emitted')
+        self.assertGreater(call, 0, 'the Mojo call site was not routed')
+        self.assertLess(proto, call)
+
+    def test_mojo_call_site_routes_to_the_launch_wrapper(self):
+        """A call to a device function must become a dispatch, not a call to a
+        C function that does not exist. This is the assertion that would have
+        caught the stub: the generated code referenced `vec_add_<oid>` with a
+        weak stub, which linked and then did nothing."""
+        self.assertIn('_mg_launch_vec_add(', self.ci)
+        # No C definition of the kernel itself may survive.
+        self.assertNotIn('_MOJO_STUB_vec_add', self.ci)
+
+    def test_scalar_is_narrowed_before_it_reaches_the_runtime(self):
+        self.assertIn('int32_t _mg_sc0 = (int32_t)len;', self.ci)
+        self.assertIn('_mg_widths[] = {4}', self.ci)
+
+    def test_introspection_entry_points_are_registered(self):
+        """They are called from compiled Mojo, so they must be real registered
+        runtime functions -- otherwise the C backend mints a weak stub that
+        collides with the sidecar's definition."""
+        for n in ('_mojo_gpu_kernel_count', '_mojo_gpu_have_device',
+                  '_mojo_gpu_dispatch_count', '_mojo_gpu_failure_count'):
+            self.assertIn(f'int64_t {n}(void);', self.ci)
+            # The definition line is column-aligned in the emitter, so match
+            # on the name and the body rather than on exact spacing.
+            self.assertRegex(
+                self.ci,
+                r'int64_t ' + re.escape(n) + r'\(void\)\s*\{')
+
+
+# The C driver for the end-to-end dispatch. It calls the GENERATED wrapper
+# (not the runtime directly) because the wrapper is where the buffer table,
+# the narrowing and the width table live -- a test that skipped it would pass
+# with all of that deleted.
+_SIDECAR_DRIVER = r'''
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+#include <stdint.h>
+void _mg_launch_vec_add(float *a, float *b, float *o, int32_t n);
+int64_t _mojo_gpu_kernel_count(void);
+int64_t _mojo_gpu_have_device(void);
+int64_t _mojo_gpu_dispatch_count(void);
+int64_t _mojo_gpu_failure_count(void);
+int main(void) {
+    int64_t n = 1024;
+    float *a = malloc(n * 4), *b = malloc(n * 4), *o = malloc(n * 4);
+    for (int64_t i = 0; i < n; i++) { a[i] = (float)i * 0.5f;
+                                       b[i] = (float)i * 2.0f;
+                                       o[i] = -1.0f; }
+    if (_mojo_gpu_kernel_count() != 1) { printf("KCOUNT\n"); return 3; }
+    if (!_mojo_gpu_have_device()) { printf("NO_DEVICE\n"); return 2; }
+    _mg_launch_vec_add(a, b, o, (int32_t)n);
+    double worst = 0.0; int64_t bad = 0;
+    for (int64_t i = 0; i < n; i++) {
+        double d = fabs((double)a[i] + (double)b[i] - (double)o[i]);
+        if (d > worst) worst = d;
+        if (d > 0.0) bad++;
+    }
+    printf("DISPATCHES %lld FAILURES %lld MAXDIFF %.3e BAD %lld\n",
+           (long long)_mojo_gpu_dispatch_count(),
+           (long long)_mojo_gpu_failure_count(), worst, (long long)bad);
+    return 0;
+}
+'''
+
+
+@unittest.skipUnless(sys.platform == 'darwin', 'Metal is macOS-only')
+class TestSidecarDispatchesOnRealGpu(unittest.TestCase):
+    """Python -> MSL -> C string -> real Metal compiler -> real GPU, through
+    the generated host wrapper. The one test that can catch a marshalling bug
+    -- a wrong scalar width, a short grid, a missing copy-back -- because every
+    one of those produces a wrong answer at exit 0 rather than an error."""
+
+    def test_generated_wrapper_computes_the_right_answer(self):
+        ci = gctypes.compile_to_gimple(KERNEL_AND_CALLER, False, 'sidecar_gpu.py')
+        rt = os.path.join(HERE, 'runtime')
+        metal_m = os.path.join(rt, 'fire_metal.m')
+        if not os.path.exists(metal_m):
+            self.skipTest('runtime/fire_metal.m missing')
+        with tempfile.TemporaryDirectory() as wd:
+            ci_f = os.path.join(wd, 'm.ci')
+            drv_f = os.path.join(wd, 'drv.c')
+            with open(ci_f, 'w') as f:
+                f.write(ci)
+            with open(drv_f, 'w') as f:
+                f.write(_SIDECAR_DRIVER)
+            # The module's own `main` is renamed so the driver owns the entry
+            # point; everything else, including the sidecar, is untouched.
+            compile_r = subprocess.run(
+                [_GCC, '-O0', '-fgimple', '-fPIC', f'-I{rt}',
+                 '-Dmain=mojo_module_main', '-c', '-o',
+                 os.path.join(wd, 'm.o'), '-x', 'c', ci_f],
+                capture_output=True, text=True)
+            if compile_r.returncode != 0:
+                self.skipTest(f'gimple compile failed:\n{compile_r.stderr[:2000]}')
+            metal_r = subprocess.run(
+                ['clang', '-O0', '-fobjc-arc', f'-I{rt}', '-c', '-o',
+                 os.path.join(wd, 'fm.o'), metal_m],
+                capture_output=True, text=True)
+            if metal_r.returncode != 0:
+                self.skipTest(f'clang compile failed:\n{metal_r.stderr[:2000]}')
+            exe = os.path.join(wd, 'a.out')
+            link_r = subprocess.run(
+                [_GCC, '-O0', '-o', exe, drv_f, os.path.join(wd, 'm.o'),
+                 os.path.join(wd, 'fm.o'), os.path.join(rt, 'fire_runtime.c'),
+                 f'-I{rt}', '-framework', 'Foundation', '-framework', 'Metal',
+                 '-lm'], capture_output=True, text=True)
+            if link_r.returncode != 0:
+                self.fail(f'link failed:\n{link_r.stderr[:2000]}')
+            run = subprocess.run([exe], capture_output=True, text=True, timeout=300)
+            out = run.stdout
+            if 'NO_DEVICE' in out:
+                self.skipTest('no Metal device on this machine')
+            if 'KCOUNT' in out:
+                self.fail(f'sidecar registered the wrong kernel count\n{out}')
+            self.assertIn('MAXDIFF 0.000e+00 BAD 0', out,
+                          f'wrong answer on the GPU\n{out}')
+            self.assertIn('DISPATCHES 1', out)
+            self.assertIn('FAILURES 0', out)
 
 
 if __name__ == '__main__':

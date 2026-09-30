@@ -1,0 +1,319 @@
+"""The device sidecar: MSL into a C string, plus the host dispatch shims.
+
+Seam 3 of ``doc/GPU_OFFLOAD_PLAN.md``. The device emitter
+(``emit_metal.py``) produces MSL; this turns that MSL into something the
+already-generated C can call, and it does so **inside the same .ci file**.
+
+That single fact is the whole design. The alternative -- emit a second
+artifact and run ``xcrun metal`` / ``xcrun metallib`` over it, which is
+what ``doc/METAL.md`` proposes -- buys a precompiled binary and pays for
+it with build wiring, a second file to ship, and a cache key that has to
+be invalidated per GPU family. The Metal runtime compiles the same text at
+load time, for whatever GPU is actually present, for the cost of one
+``newLibraryWithSource:``. ``test_llm/kernels.metal.inc`` is the existing
+proof of that trick working in this tree; this generalises it from a
+hand-maintained file to compiler output.
+
+**Everything emitted here is pure C, and that is a hard constraint rather
+than a preference.** The generated ``.ci`` is compiled with
+``gcc -fgimple -x c`` (``jit/arm64.py``), and gimple is a C front end:
+Objective-C constructs -- ``@autoreleasepool``, ``id<MTLLibrary>``,
+``MTLCreateSystemDefaultDevice`` -- do not survive it. So the Metal calls
+go through a small C API implemented in the runtime
+(``runtime/fire_metal.h`` / ``fire_metal.m``), exactly as every other
+runtime capability in this tree already does, and this module emits only
+calls into it.
+"""
+
+from __future__ import annotations
+
+#: C-escape a Python string into C string literal bodies. `?` is escaped for
+#: trigraph safety: `??` followed by one of `=/()'<!>-` is eaten by a
+#: conforming preprocessor as a digraph, and MSL is full of `?:`.
+_C_ESCAPES = {
+    '\\': '\\\\', '"': '\\"', '\n': '\\n', '\r': '\\r', '\t': '\\t',
+    '?': '\\?',
+}
+
+
+def c_string_literal(text: str, indent: str = '', width: int = 72) -> str:
+    """`text` as a sequence of adjacent C string literals.
+
+    Adjacent literals concatenate, so the result is one runtime string with
+    no copying at compile time. Chunked because the MSL for a real kernel is
+    a few KB and one enormous source line makes the generated C unreadable
+    in a diff or an editor.
+    """
+    out: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+    for ch in text:
+        piece = _C_ESCAPES.get(ch, ch)
+        if cur_len + len(piece) > width:
+            out.append(indent + '"' + ''.join(cur) + '"')
+            cur, cur_len = [], 0
+        cur.append(piece)
+        cur_len += len(piece)
+    if cur:
+        out.append(indent + '"' + ''.join(cur) + '"')
+    return '\n'.join(out) if out else (indent + '""')
+
+
+#: Kernel parameter annotation -> the C type the host wrapper takes it as.
+#: Anything spelled as a pointer is a device buffer (it becomes an
+#: `[[buffer(n)]]` argument); everything else is a scalar.
+_POINTER_ANNOTATIONS = ('UnsafePointer[', 'Pointer[', 'DTypePointer[')
+
+#: Element type inside a pointer annotation -> the C type of the array.
+_ELEM_CTYPE = {
+    'Float32': 'float', 'Float16': 'uint16_t', 'BFloat16': 'uint16_t',
+    'Int32': 'int32_t', 'Int64': 'int64_t', 'Int': 'int64_t',
+    'UInt32': 'uint32_t', 'Bool': 'int8_t',
+}
+
+#: Scalar parameter type -> (C storage type, BYTES the MSL declares for it).
+#:
+#: The byte count is the load-bearing half. emit_metal.py lowers a Mojo `Int`
+#: to MSL `int`, so a `constant int &len` parameter reads 4 bytes; the host
+#: has to hand over exactly 4. MSL has no `double`, and the device reads the
+#: low bytes of whatever is bound, so passing a host double for an `int`
+#: parameter delivers the wrong number rather than a compile error --
+#: 1024.0 arrives as 0. These widths are the contract between the emitter
+#: (which chose the MSL type) and the wrapper (which narrows the value).
+_SCALAR_WIDTH = {
+    'Int': ('int32_t', 4), 'Int32': ('int32_t', 4), 'UInt32': ('uint32_t', 4),
+    'Int64': ('int64_t', 8), 'UInt64': ('uint64_t', 8),
+    'Float32': ('float', 4), 'Float16': ('uint16_t', 2),
+    'BFloat16': ('uint16_t', 2), 'Bool': ('int8_t', 1),
+}
+
+
+class LaunchError(Exception):
+    """A kernel whose host side cannot be marshalled honestly."""
+
+
+def launch_arg_types(params) -> tuple[list[tuple[str, str, bool, int]], int]:
+    """Per-parameter (name, c_type, is_buffer, scalar_width) for a kernel.
+
+    `params` is the AST's `[(name, annotation_string), ...]`, straight off the
+    FunctionDef -- usable without having run the C type inference, which is
+    the point: a DEVICE function never reaches gen_func, so there is no
+    inferred signature to read back.
+
+    `scalar_width` is in bytes and is 0 for buffers. See `_SCALAR_WIDTH` for
+    why it is not simply `sizeof(int64_t)`.
+
+    The second return value is the index of the parameter used as the element
+    count for the device->host copy-back, or -1. See `element_count_index`.
+    """
+    out: list[tuple[str, str, bool, int]] = []
+    count_idx = -1
+    for _i, (_pn, _ann) in enumerate(params):
+        _ann = (_ann or '').strip()
+        if _ann.startswith(_POINTER_ANNOTATIONS) or _ann.endswith('*'):
+            _inner = (_ann[_ann.find('[') + 1:].split(',')[0].strip()
+                      if '[' in _ann else 'Float32')
+            out.append((_pn, _ELEM_CTYPE.get(_inner, 'float') + ' *', True, 0))
+        else:
+            if count_idx < 0 and _ann in ('Int', 'Int64'):
+                count_idx = _i
+            _ct, _w = _SCALAR_WIDTH.get(_ann, ('int64_t', 8))
+            out.append((_pn, _ct, False, _w))
+    return out, count_idx
+
+
+def element_count_index(kernel: str, count_idx: int) -> int:
+    """Which parameter gives the element count for the copy-back.
+
+    A `float *` in C carries no length, so the host has to learn it from
+    somewhere to copy results back. The contract is the kernel's first
+    `Int`/`Int64` parameter -- which is the `len: Int` every hand-written
+    kernel in this tree already has (see std/gpu/primitives/id.mojo and
+    test_llm/metal.m).
+
+    It is a CONTRACT, checked here, rather than a heuristic: a kernel with no
+    length parameter cannot be marshalled, and silently copying back nothing
+    would produce a program that runs, prints plausible numbers, and is
+    wrong. The real fix is length-carrying buffers, which is already on the
+    critical path for auto-offloading ordinary Python (no contiguous
+    MojoList storage yet) -- so this raises instead of guessing.
+    """
+    if count_idx < 0:
+        raise LaunchError(
+            f'GPU kernel {kernel!r} has no Int/Int64 parameter, so the host '
+            f'wrapper has no way to know how many elements to copy back from '
+            f'the device. Add a `len: Int` parameter (the convention every '
+            f'hand-written kernel here already uses), or use a length-carrying '
+            f'buffer.')
+    return count_idx
+
+
+def emit_launch_wrappers(kernels: dict) -> str:
+    """The per-kernel host wrapper each host call site targets.
+
+    `kernels` maps kernel name -> (params, count index) as produced by
+    `launch_arg_types` + `element_count_index`.
+
+    The wrappers exist so the call site in emit_calls.py reads like an
+    ordinary function call (`_mg_launch_vec_add(a, b, out, n)`) while the
+    marshalling -- buffer table, length table, scalar narrowing to the width
+    the MSL declares -- happens exactly once, here.
+    """
+    lines: list[str] = []
+    for _kn, (params, count_idx) in kernels.items():
+        count_idx = element_count_index(_kn, count_idx)
+        _bufs = [(n, t) for n, t, isb, _w in params if isb]
+        _scals = [(n, t, w) for n, t, isb, w in params if not isb]
+        _sig = ', '.join(f'{t} {n}' for n, t, _b, _w in params) or 'void'
+        lines.append('/* host wrapper for kernel %r */' % _kn)
+        lines.append('void _mg_launch_%s(%s) {' % (_kn, _sig))
+        if _bufs:
+            lines.append('    void *_mg_bufs[] = {%s};'
+                         % ', '.join(n for n, _ in _bufs))
+            # Every buffer is cut to the kernel's element count. Writing past
+            # an output buffer because its own length was longer would be a
+            # heap corruption, so the count wins over any per-argument idea.
+            lines.append('    int64_t _mg_sizes[] = {%s};'
+                         % ', '.join([params[count_idx][0]] * len(_bufs)))
+        else:
+            lines.append('    void *_mg_bufs[1]; int64_t _mg_sizes[1];')
+        if _scals:
+            for _j, (_n, _t, _w) in enumerate(_scals):
+                lines.append('    %s _mg_sc%d = (%s)%s;' % (_t, _j, _t, _n))
+            lines.append('    void *_mg_scalars[] = {%s};'
+                         % ', '.join('&_mg_sc%d' % j
+                                     for j in range(len(_scals))))
+            lines.append('    static const uint8_t _mg_widths[] = {%s};'
+                         % ', '.join(str(w) for _n, _t, w in _scals))
+        else:
+            lines.append('    void *_mg_scalars[1];')
+            lines.append('    static const uint8_t _mg_widths[] = {8};')
+        lines.append('    _mg_run("%s", %d, _mg_bufs, _mg_sizes, %d, _mg_scalars,'
+                     ' _mg_widths, 0, 0);'
+                     % (_kn, len(_bufs), len(_scals)))
+        lines.append('}')
+        lines.append('')
+    return '\n'.join(lines)
+
+
+def msl_module(parts: list[str]) -> str:
+    """The accumulated MSL as one compilable translation unit.
+
+    The device emitter is called per function, so what arrives is a list of
+    complete `kernel void ... { ... }` definitions. They are concatenated
+    and the runtime compiles them as ONE library: compiling a library is
+    the expensive part, and every kernel carries the same two-line preamble.
+    """
+    return '\n\n'.join(parts)
+
+
+def emit_launch_prototypes(kernels: dict) -> str:
+    """Forward declarations for the launch wrappers.
+
+    Emitted in the PREAMBLE, not next to the definitions: a host function
+    can call a kernel that is declared later in the file, and without a
+    prototype the call is an implicit declaration -- which then collides
+    with the real `int64_t`/`float *` definition later as a
+    "conflicting types" error pointing at the wrong line entirely.
+    """
+    lines: list[str] = []
+    for _kn, (params, _ci) in kernels.items():
+        _sig = ', '.join(f'{t} {n}' for n, t, _isb, _w in params) or 'void'
+        lines.append(f'void _mg_launch_{_kn}({_sig});')
+    # The introspection entry points, unconditionally: they are REAL runtime
+    # functions (registered in _RUNTIME_FUNCS, so a call from compiled Mojo
+    # resolves to the sidecar's definition instead of colliding with a weak
+    # auto-stub), and Mojo code can call them to check that the device path
+    # was actually taken rather than trusting a plausible result.
+    for _n in ('_mojo_gpu_kernel_count', '_mojo_gpu_have_device',
+               '_mojo_gpu_dispatch_count', '_mojo_gpu_failure_count'):
+        lines.append('int64_t %s(void);' % _n)
+    if lines:
+        lines.insert(0, '/* host entry points for this module\'s GPU kernels */')
+    return '\n'.join(lines)
+
+
+def emit_device_sidecar(parts: list[str], kernel_names: list[str],
+                        kernels: dict | None = None) -> str:
+    """The whole device sidecar as C text, ready to append to the module.
+
+    `parts` and `kernel_names` are in the SAME order -- `module_gen` builds
+    both in one pass over the functions -- so they pair positionally rather
+    than by re-parsing the MSL to recover which kernel is which.
+    """
+    lines: list[str] = []
+    lines.append('/* ── GPU device code ──')
+    lines.append('   The MSL below is the compiler\'s output for this module\'s')
+    lines.append('   @gpu/registered kernels, embedded as a string. mojo_metal_*')
+    lines.append('   compiles it at load time for the GPU actually present, so')
+    lines.append('   this file stays self-contained: no .metallib, no second')
+    lines.append('   artifact, and nothing to wire into the build. */')
+    lines.append('static const char *_mg_msl_source =')
+    lines.append(c_string_literal(msl_module(parts), indent='    '))
+    lines.append(';')
+    lines.append('')
+    lines.append('/* Lazily initialised on FIRST DISPATCH, not at load. A module with a')
+    lines.append('   kernel that is never called must not compile any MSL, and a')
+    lines.append('   machine with no GPU must still load and run. */')
+    lines.append('static int64_t _mg_init_state = 0;   /* 0 uninit, 1 done */')
+    lines.append('static int64_t _mg_have_device = 0;')
+    lines.append('static int64_t _mg_dispatches = 0;')
+    lines.append('static int64_t _mg_failures = 0;')
+    lines.append('')
+    lines.append('static void _mg_init(void) {')
+    lines.append('    if (_mg_init_state) return;')
+    lines.append('    _mg_init_state = 1;')
+    lines.append('    _mg_have_device = (int64_t) mojo_metal_init(_mg_msl_source);')
+    lines.append('}')
+    lines.append('')
+    lines.append('static int64_t _mg_run(const char *name, int64_t n_bufs,')
+    lines.append('                          void *const *bufs, const int64_t *sizes,')
+    lines.append('                          int64_t n_scalars, void *const *scalars,')
+    lines.append('                          const uint8_t *widths,')
+    lines.append('                          int64_t nthreads, int64_t ngroups) {')
+    lines.append('    _mg_init();')
+    lines.append('    if (!_mg_have_device) {')
+    lines.append('        _mg_failures++;')
+    # Each C string literal is on ONE source line. An earlier version
+    # wrapped these as Python implicit concatenation across several physical
+    # lines, which emitted a C string split across source lines -- an
+    # unterminated literal, and gcc reported it against whatever #line the
+    # module last set, which was nowhere near the real cause.
+    lines.append('        fprintf(stderr,')
+    lines.append('            "mojo_gpu: kernel \'%s\' needs a Metal device and this "')
+    lines.append('            "machine has none; the result is left untouched. "')
+    lines.append('            "Move the work off the device path, or run on a "')
+    lines.append('            "machine with a GPU.\\n", name);')
+    lines.append('        return 0;')
+    lines.append('    }')
+    lines.append('    _mg_dispatches++;')
+    lines.append('    return (int64_t) mojo_metal_dispatch(name, n_bufs, bufs, sizes,')
+    lines.append('                                    n_scalars, scalars, widths,')
+    lines.append('                                    nthreads, ngroups);')
+    lines.append('}')
+    lines.append('')
+    if kernels:
+        lines.append(emit_launch_wrappers(kernels))
+    lines.append('/* The device kernels this module contains. Lets a host program, or a')
+    lines.append('   test, ask what was offloaded instead of guessing. */')
+    lines.append('static const char *_mg_kernels[] = {')
+    for name in kernel_names:
+        lines.append(f'    "{name}",')
+    lines.append('    0')
+    lines.append('};')
+    lines.append('')
+    # These four are REAL runtime functions, and they are also CALLED from
+    # compiled Mojo, so they must be in _RUNTIME_FUNCS with their true
+    # signatures -- otherwise the C backend sees an unknown name, mints a
+    # weak `int64_t f();` stub, and this definition collides with it
+    # ("conflicting types"). That is the same reason `mojo_list_new` is
+    # registered rather than declared ad hoc.
+    #
+    # There is deliberately no `_mojo_gpu_kernel_name`: returning a name
+    # would mean handing back a pointer into static storage as an int64_t,
+    # and a caller would have no way to read it.
+    lines.append('int64_t _mojo_gpu_kernel_count(void)   { return %d; }' % len(kernel_names))
+    lines.append('int64_t _mojo_gpu_have_device(void)  { _mg_init(); return _mg_have_device; }')
+    lines.append('int64_t _mojo_gpu_dispatch_count(void) { return _mg_dispatches; }')
+    lines.append('int64_t _mojo_gpu_failure_count(void)  { return _mg_failures; }')
+    return '\n'.join(lines)
