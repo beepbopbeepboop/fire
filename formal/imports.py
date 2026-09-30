@@ -172,8 +172,18 @@ HOST_MODELLED = frozenset((
     "codecs", "copy", "abc", "enum", "types", "contextlib", "queue",
     "weakref", "pprint", "reprlib", "pickle",
     # A shape over the source language rather than a runtime facility: the
-    # parser, the type lattice, the dataclass transform, the CLI parser.
-    "ast", "typing", "dataclasses", "argparse",
+    # parser, the type lattice, the dataclass transform.
+    "ast", "typing", "dataclasses",
+    #   `argparse`  — `formal/hostmods/argparse.mojo`, in the subset the formal
+    #     backends can lower, checked case for case against CPython's own
+    #     `argparse` by `test_formal_argparse.py`: the same values, the same
+    #     usage lines, the same error wording and the same exit statuses, on
+    #     sixty-three generated programs whose declarations and command lines
+    #     are the same table. What it cannot do is written in that file's own
+    #     docstring — `type=float` is REFUSED because a value on this path is
+    #     one 64-bit integer word, `sys.argv` has no source here at all so the
+    #     caller supplies the vector, and there is no `ArgumentParser` object
+    #     to accumulate into because a module has no state.
     # A SUBSET is reachable, and the subset is the point. `inspect` reads
     # attributes off live values, which this path has (the gimple runtime
     # carries a type tag and `mojo_obj_getattr`); what it cannot do is walk a
