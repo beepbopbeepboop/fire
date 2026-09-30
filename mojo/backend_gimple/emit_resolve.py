@@ -2509,6 +2509,67 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             gen._emit_label(bb_next)
         gen._emit_label(bb_append)
 
+    # A comprehension with MORE THAN ONE `for` clause. Python evaluates it as
+    # nested loops, but every `_compr_*_loop` helper takes a single generator
+    # and `_lower_comprehension` binds only `node.generators[0]`, so the extra
+    # clauses were silently DROPPED -- exit 0, wrong answer.
+    #
+    # Real, measured: `xs = [i + j for i in range(n) for j in range(n)]` with
+    # n=5 returned a 5-element list summing to 10 where Python's 25-element
+    # list sums to 100 (the inner `j` behaved as 0 throughout). That is
+    # `x86-containers`' `nested-comprehension` case, marked expected-failure
+    # with a reason pointing at a bug doc that no longer existed.
+    #
+    # The fix needs no change to the seven loop helpers, because they all
+    # funnel the loop body through THIS function. When `_lower_comprehension`
+    # sees a second clause it parks the remainder here; the clause-0 loop
+    # still runs, and instead of appending one element per iteration this
+    # lowers the remainder (recursively, so any depth works) and extends the
+    # result with it. `for i in A for j in B` is then exactly
+    # `extend([elt for j in B] for each i in A)`.
+    #
+    # The remainder is built WITHOUT conditions of its own because
+    # `_gen_compr_append` already applied `gen0.conditions` above -- a filter
+    # belongs to its own clause, and `node.generators[1:]` still carries its
+    # own per-generator conditions, so `[x for x in a if p for y in b if q]`
+    # filters at the right depth.
+    _inner = getattr(gen, '_compr_pending_inner', None)
+    if _inner is not None and node.kind in ('list', 'generator'):
+        # Clear BEFORE lowering, so the recursive `_lower_comprehension` call
+        # for the remainder installs its own pending inner instead of finding
+        # this one still set and extending with itself forever.
+        gen._compr_pending_inner = None
+        _ir = gen.lower_expr(_inner)
+        _it = _as_str(_ir[0])
+        _iv_raw = _as_str(_ir[1])
+        _iv = _iv_raw
+        if _it.endswith(' *') and _it != 'MojoList *':
+            _iv = gen._new_val('MojoList *', f'(MojoList *){_iv_raw}')
+        gen._emit(f"  mojo_list_extend ({res}, {_iv});")
+        # Carry the inner result's ELEMENT TYPE onto the outer one. The
+        # single-clause path ends with `gen._elem_types[res] = et`, and
+        # returning early here without the equivalent left the outer list's
+        # element type untracked: `len`, indexing and a `for`-loop sum were
+        # all right, but printing the list in place read element 0 through
+        # the wrong accessor, and an int 0 read as a `char *` is NULL --
+        # so `[i + j for i in range(3) for j in range(3)]` printed
+        # `[None, 1, 2, 1, 2, 3, 2, 3, 4]`. Keyed on the pre-cast name,
+        # which is what `lower_expr` registered.
+        if _iv_raw in gen._elem_types:
+            gen._elem_types[res] = gen._elem_types[_iv_raw]
+        if _iv_raw in gen._nested_elem_types:
+            gen._nested_elem_types[res] = gen._nested_elem_types[_iv_raw]
+        # ...and the TUPLE per-slot types, which are a THIRD map and not part
+        # of the other two. Missing this one is what made
+        # `[[i, j] for i in range(2) for j in range(2)]` print
+        # `[(0, None), (0, 1), (1, None), (1, 1)]`: each slot defaulted to the
+        # `char *` accessor, and an int 0 read as a `char *` is NULL, so every
+        # zero-valued slot rendered as `None` while non-zero ones happened to
+        # print. Same keying as the single-clause tuple branch below.
+        if _iv_raw in gen._tuple_slot_types:
+            gen._tuple_slot_types[res] = gen._tuple_slot_types[_iv_raw]
+        return
+
     if node.kind == 'list' or node.kind == 'generator':
         # `_lower_comprehension` initializes a 'generator' comprehension
         # identically to 'list' ("convert to list for simplicity" — see

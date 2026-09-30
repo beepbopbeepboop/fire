@@ -487,8 +487,11 @@ test('ownership-destruct', [PY, 'test_ownership_destruct.py'],
      desc='an owned value is destructed exactly once')
 test('x86-containers', [PY, 'test_x86_64_containers.py'],
      deps=['preflight'],
-     expect='bugs/CODEGEN_nested_comprehension.md — red on nested-comprehension',
-     desc='bugs/CODEGEN_nested_comprehension.md — red on nested-comprehension')
+     expect='nested-comprehension exits nondeterministically (58, or SIGSEGV, '
+            'want 100) in the FORMAL backend, not the gimple path — which gets '
+            'this case right and stably. See '
+            'bugs/FORMAL_nested_comprehension_nondeterministic_exit.md',
+     desc='nested-comprehension nondeterministic in the formal backend')
 test('mutable-async-capture', [PY, 'test_mutable_async_capture.py'],
      deps=['preflight'],
      expect='async capture of a mutable binding — behaviour gap, not registered before this',

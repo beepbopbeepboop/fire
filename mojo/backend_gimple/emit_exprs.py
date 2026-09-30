@@ -4610,6 +4610,21 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
                 gen._generator_var_api[it_val] = gen._generator_var_api[_old_it_val]
         it_type = _resolved_type
 
+    # Park the remaining `for` clauses for `_gen_compr_append` to consume from
+    # inside the clause-0 loop body. See its comment there for why the extra
+    # clauses used to vanish and why extending is the right lowering.
+    # Only list/generator: both are list-backed ('generator' is initialised
+    # "as a list for simplicity", per `_gen_compr_append`), so they share
+    # `mojo_list_extend`. A set/dict comprehension with 2+ clauses is still
+    # dropped -- those need per-kind insert/merge, not a list extend, and
+    # guessing at it is how this bug got in.
+    if len(node.generators) > 1 and node.kind in ('list', 'generator'):
+        gen._compr_pending_inner = gimple_ctypes.Comprehension(
+            kind=node.kind, element=node.element, key=node.key,
+            generators=list(node.generators[1:]))
+    else:
+        gen._compr_pending_inner = None
+
     if is_range:
         gen._compr_range_loop(node, gen0, res, res_type)
     elif it_type == 'MojoList *':
@@ -4627,6 +4642,10 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     else:
         gen._emit(f"  /* TODO: comprehension over {it_type} */")
 
+    # Nothing below may inherit this: the loop body consumed it (above), and
+    # leaving it set would make the NEXT comprehension in the same function
+    # extend with a stale remainder.
+    gen._compr_pending_inner = None
     gen._note_fresh_result(res)
     return res_type, res
 
