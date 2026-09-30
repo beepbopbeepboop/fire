@@ -100,8 +100,9 @@ Cross-module is no different, and the two forms fail differently:
 | `/tmp/vd1b/k3.py` — `import insp` + `def show(p): return p.label()`, called `show(insp.Parameter('v', 7))` | `v` | `0` | 0 |
 
 The two-module form is what made this surface: it is how `repr(obj)` is spelled
-in real code, and `bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md`
-row 4 (a cross-module `repr(Parameter('v', 7))`) is this bug, not that one.
+in real code, and row 4 of the (now fixed and deleted) cross-module-import
+report — a cross-module `repr(Parameter('v', 7))` — was this bug, not that one.
+See the 2026-09-29 section of `README.md` there for the removal record.
 
 ## Root cause
 

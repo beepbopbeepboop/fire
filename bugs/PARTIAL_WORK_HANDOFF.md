@@ -155,15 +155,18 @@ fallback, so `ADialog("a")` silently becomes the string `"a"`.
 
 ## 3. OPEN
 
-`bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md` — PARTIAL
-FIXED 2026-09-27 for the single-TU (`do_imports=True`) path: the original
-"`_compile_imported_module` never runs" diagnosis was stale (superseded
-before this session), and the real remaining blocker — a cross-module
-constructor call's field-type evidence never reaching the defining module's
-own struct — is fixed via a new `_xmod_ctor_field_hints` mechanism (see the
-doc's own updated Status). **Link-mode (`fire.py build`'s default pipeline)
-is UNCHANGED, still broken** — confirmed a separate pipeline bug, out of
-scope for this fix.
+`bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md` — this entry
+is STALE. It was PARTIAL on 2026-09-27 (single-TU fixed, link mode open) and
+is now **fully fixed and the doc deleted** (2026-09-29): the link-mode half
+was three independent defects, not the one the doc predicted — a
+`_parsed_import` that could not resolve a bare local `.py` sibling at all, a
+duplicated source-text classifier that did not know the `class X:` spelling,
+and a second hand-rolled copy of `gen_module_impl`'s inline-compile loop that
+skipped the cross-module hint pre-passes. See the 2026-09-29 section of
+`bugs/hard/README.md` for the record and for the five *other* bugs the work
+surfaced (including one that had the `linkmode` gate step red on master).
+Regression coverage: 5 new cases in `test_link_mode.py`, 2 in
+`test_gimple.py`.
 
 `bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md` — FIXED 2026-09-27,
 doc deleted. `_stringify_value` gained the same `MojoList *`/`MojoSet *`/

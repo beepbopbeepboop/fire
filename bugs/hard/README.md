@@ -10,13 +10,12 @@ Every entry carries a `**State: CLOSED | PARTIAL | OPEN.**` banner directly
 under its title, with the residue named. Start there; the banner tells you
 whether re-reading the body is worth your time.
 
-Last updated 2026-09-26.
+Last updated 2026-09-29.
 
 ## OPEN — not fixed, no code change yet
 
 | doc | one line |
 |---|---|
-| `CODEGEN_function_scoped_import_module_not_inlined.md` | a function-scoped `from X import Y` records Y's signature/exports and then returns without compiling the module: Y's `X.Y(...)` construction returns `0`, and reading a class attribute prints `unavailable in compiled mode` with exit 0. The module-scoped spelling of the same import works. **New 2026-09-26.** |
 | `CODEGEN_same_bare_name_struct_collision_across_modules.md` | two same-named structs in sibling modules collide on an unqualified field table / typedef name. Re-derived 2026-09-26: mechanism intact, but the documented `'Dialog' has no member named 'result'` C error is **gone** (the loser's field access now degrades to dynamic getattr/setattr), and the one genuinely silent residue is a field name **both** structs share — the loser's value is coerced into the winner's ctype, so a `str` field lands as a heap address in an `int64_t` slot. Unfixable *today* only because a **bigger bug sits in front of it**: `module.Class(...)` construction is unresolved on every path, so no program can exhibit this. Fix that first. |
 
 ## PARTIAL — the recorded gap is fixed; named residue remains
@@ -62,7 +61,7 @@ new OPEN doc above rather than losing the residue:
 | `CODEGEN_struct_format_shadowed_by_format_attribute.md` | `CODEGEN_return_type_of_module_constructor_result_erased.md` |
 | `CODEGEN_coro_nested_async_closure_capture.md` | `CODEGEN_coro_captured_param_capture_crashes.md` |
 | `CODEGEN_coro_stackswitch_yield_kind_identifier_inference.md` | `CODEGEN_coro_yield_kind_unresolved_callsite.md` |
-| `CODEGEN_function_scoped_import_rettype_and_literal_cast_mismatches.md` | `CODEGEN_function_scoped_import_module_not_inlined.md` |
+| `CODEGEN_function_scoped_import_rettype_and_literal_cast_mismatches.md` | `CODEGEN_function_scoped_import_module_not_inlined.md` — itself since fixed and deleted; see the 2026-09-29 section below |
 | `CODEGEN_unannotated_init_param_field_type_defaults_int64.md` | `CODEGEN_ctor_arg_field_type_scalars_only.md` |
 | `CODEGEN_generator_consuming_generator_value_ctype.md` | `CODEGEN_generator_value_slot_loses_bool.md` |
 
@@ -70,6 +69,34 @@ Nothing is left on the "still to verify" list. A ninth CLOSED report's
 analysis (`CODEGEN_same_bare_name_struct_collision_across_modules.md`) was
 re-derived and kept — see its OPEN row for the three load-bearing claims that
 turned out to be false.
+
+### 2026-09-29: one removal with no residue of its own — and what that cost
+
+`CODEGEN_function_scoped_import_module_not_inlined.md` (the OPEN row it came
+from, opened 2026-09-26, its own banner "link-mode still OPEN") is **fixed
+and deleted**. All five of its rows now match CPython on BOTH pipelines —
+measured, 11/11 shapes including a no-import control, and including the
+`enum.py.__signature__` three-class repro that is the original bug's exact
+territory. So this is the first removal here that did **not** follow the
+8-for-8 pattern above, and the reason is worth recording rather than
+letting the pattern look inviolable: the 2026-09-26 pass closed it on a
+narrower **spelling** (the single-TU path, cause (c) above), and the
+2026-09-29 pass closed it on the other pipeline. The residue it DID turn up
+belongs to other bugs, not to this one, so it is filed in `bugs/`, not here:
+
+| found while fixing it | filed as |
+|---|---|
+| `linkmode` was **already red on master** — a `from . import SUB` + `SUB.f(...)` call prints 0, exit 0 | `bugs/CODEGEN_link_mode_bare_submodule_marker_call_silent_wrong_value.md` |
+| a `from p import f` whose module only RE-EXPORTS `f` names the re-exporting module, not the defining one | `bugs/CODEGEN_reexported_function_import_qualifier_names_the_wrong_module.md` |
+| `import p.sub` + `p.sub.f(14)` exits 1 with no output, on both pipelines | `bugs/CODEGEN_import_dotted_name_two_hop_attribute_call_exits_1.md` |
+| an enclosing function's return type is `int64_t` when its only `return` is a method call, so a `char *` prints as a pointer decimal | `bugs/CODEGEN_return_type_not_inferred_from_a_method_call_result.md` |
+| `str()`/`%s` never consult `__str__`; a struct inside a list/tuple reprs as a raw pointer | `bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_container_spellings.md` |
+
+The first of those is the one to act on first: while `linkmode` is red it
+cannot be used to distinguish a new regression from a pre-existing failure,
+and the doc it came from had explicitly warned that a change in this area
+"owes the full gate plus manual re-triage of the `COMPILE_FAIL_*.md`
+corpus" — which is exactly what turned it up.
 
 **The rate matters more than the count.** 8-for-8 is not a coincidence, and
 it is not a reason to trust the next CLOSED banner either. The recurring

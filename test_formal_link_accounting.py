@@ -16,6 +16,11 @@ silently change verdicts if they broke:
    asserted equal, because a name that quietly migrated between tiers, or one
    that was added to one tier and forgotten in the other, changes a verdict in
    the coverage report with no diff anyone reads.
+   Less the names that have since been IMPLEMENTED -- `os` and `sys`, which
+   now have Mojo source in this tree (see `written_modules`, which derives
+   that subtraction from the filesystem instead of from a list typed here).
+   Each of those IS a change in what the build accepts, and it is checked
+   against the filesystem in both directions so it cannot rot either way.
 
 3. **The C-library provider is the real library, not a 19-name list.** And not
    the global namespace either: `CDLL(None)` answers questions about the
@@ -28,6 +33,14 @@ silently change verdicts if they broke:
    check at all. They share one function now, and it is the failure case that
    matters: an image that binds a symbol nothing provides builds cleanly and
    then cannot be loaded.
+
+5. **`formal/hostmods/` is a search root of the formal resolver and of nothing
+   else.** The `os`/`sys`/`struct` module sources live there, and the
+   repository root — which four other resolvers search — must not contain them.
+   The measured failure for getting this wrong is in the gate, not in a test:
+   `selfhost` and `bootstrap-stage2-cc` both failed on `os.sep` inside
+   `module_loader.py` itself. See
+   `test_hostmods_are_invisible_to_every_other_resolver`.
 
 No Lean, no proofs, no gate: this is a fast unit file, and it is meant to be.
 The one build it performs is a two-line program, to prove the audit does not
@@ -125,9 +138,22 @@ def test_relative_imports():
                                     project_root=os.path.join(REPO, 'fire.py'))
               == os.path.join(REPO, 'gimple_codegen.py'),
               'an absolute sibling name is unchanged')
-        check(I.resolve_module_path('os', relative_to=leaf,
+        # A host module with NO source still resolves to nothing, whatever the
+        # relative-import machinery does — this is the property the pass-1-first
+        # ordering exists to protect, and `os` used to be the example for it.
+        # `math` is the example now, because `os` has source: a name with a file
+        # beside the project resolves from ANY directory, since the repository
+        # root is one of the search roots, and that is the behaviour worth
+        # pinning in its place.
+        check(I.resolve_module_path('math', relative_to=leaf,
                                     project_root=leaf) is None,
               'a host module still resolves to nothing (pass 2 unaffected)')
+        check(I.resolve_module_path('os', relative_to=leaf,
+                                    project_root=leaf)
+              == os.path.join(REPO, 'formal', 'hostmods', 'os',
+                              '__init__.mojo'),
+              'a module with real source resolves from an unrelated directory, '
+              'because the hostmods root is a search root for every file')
     finally:
         import shutil
         shutil.rmtree(d, ignore_errors=True)
@@ -146,6 +172,15 @@ def test_relative_imports():
 # keeping two lists; here the second list is the expected value, and a
 # deliberate change to the host set is supposed to fail until someone updates
 # the specification on purpose.)
+#
+# Names have LEFT this set since it was pinned — `sys`, `os` and `struct` — and
+# each left by being IMPLEMENTED rather than by being reclassified. The set's
+# meaning is "CPython standard library with no Mojo source for this backend", so
+# a name that now HAS Mojo source does not belong in it however reachable the
+# capability is. That subtraction is not written here as a list of the names
+# that have left: it is DERIVED from the filesystem by `written_modules()` below,
+# so the next module to be written updates this check by being written, and no
+# hand-kept list can drift away from the tree.
 PRE_SPLIT_HOST_MODULES = frozenset((
     "os", "sys", "ast", "json", "re", "argparse", "dataclasses", "typing",
     "collections", "itertools", "functools", "math", "random", "time",
@@ -166,6 +201,44 @@ def _original_host_modules():
     return set(PRE_SPLIT_HOST_MODULES)
 
 
+def written_modules():
+    """The host-set names that have been WRITTEN, and so have left the set.
+
+    A name belongs here when `resolve_module_path` finds real source for it in
+    this tree. That is the whole test: the host set exists to say "there is
+    nothing here to compile", and a module with a file is not in that condition
+    however much of CPython it covers. `os` was the first entry — 87 files of
+    the arm64 sweep stopped on it — and the entry is DERIVED rather than typed,
+    so writing the next module updates this by being written, and no list in
+    this file can drift away from what is on disk.
+    """
+    found = set()
+    for name in sorted(PRE_SPLIT_HOST_MODULES):
+        if name in I.HOST_MODULES:
+            continue
+        try:
+            path = I.resolve_module_path(name, project_root=HERE)
+        except Exception:
+            path = None
+        if path and os.path.isfile(path):
+            found.add(name)
+    return found
+
+
+# …and the test that keeps each written module honest. This carries no
+# arithmetic — `written_modules()` above is derived from the filesystem and is
+# the only thing the host-set account reads — it says WHICH test a removal
+# leans on, so that a module cannot leave the host set on the strength of a
+# file nobody ever builds. Both halves are checked: the keys must be exactly
+# the derived set, so a removal without an entry here fails, and an entry
+# without a module behind it fails too.
+IMPLEMENTED_HOST_MODULE_TESTS = {
+    "os": "test_formal_os.py",
+    "struct": "test_struct_formal.py",
+    "sys": "test_formal_sys.py",
+}
+
+
 def test_host_tiers():
     check(I._host_tier_conflicts() == [],
           'no host module is in both tiers', str(I._host_tier_conflicts()))
@@ -175,30 +248,81 @@ def test_host_tiers():
           f"sym-diff {sorted(union ^ set(I.HOST_MODULES))}")
     orig = _original_host_modules()
     if orig is not None:
-        check(union == orig,
-              'the union is the ORIGINAL 77-name list: a classification change, '
-              'not a behaviour change',
-              f'added {sorted(union - orig)}, lost {sorted(orig - union)}')
+        # The union was the ORIGINAL list plus nothing, because splitting it in
+        # two was a classification change and not a behaviour change. It is now
+        # the original list MINUS the modules that have been WRITTEN, which is
+        # a behaviour change and a deliberate one: a name leaves this set when
+        # there is real source for it, and stays while there is not. So the
+        # check is a SUBSET relation plus an exact account of what left, rather
+        # than equality — equality would make writing a module a test failure,
+        # and a name that comes BACK would pass unnoticed.
+        check(union <= orig,
+              'nothing has been ADDED to the host set: a name enters it when a '
+              'module is unreachable, never because one is hard to write',
+              f'added {sorted(union - orig)}')
+        check(written_modules() <= (orig - union),
+              'every name that left the host set is one with real source '
+              'behind it',
+              f'left without source {sorted((orig - union) - written_modules())}')
+        check(set(orig) - union == written_modules(),
+              'the account of what left the host set is exact',
+              f'unaccounted {sorted((orig - union) ^ written_modules())}')
+        check(set(IMPLEMENTED_HOST_MODULE_TESTS) == written_modules(),
+              'every written module names the test that keeps it honest, and '
+              'no other name claims one',
+              f'sym-diff '
+              f'{sorted(set(IMPLEMENTED_HOST_MODULE_TESTS) ^ written_modules())}')
+        for name, test_file in sorted(IMPLEMENTED_HOST_MODULE_TESTS.items()):
+            check(os.path.isfile(os.path.join(HERE, test_file)),
+                  f'{name} left the host set on the strength of {test_file}, '
+                  f'and that test exists')
     else:
         check(False, 'the pre-split HOST_MODULES list could be read from git',
               'git show HEAD:formal/imports.py did not yield it')
+    # The written modules are not in either tier at all, and the resolver
+    # reaches them instead — checked in both directions, so neither a leftover
+    # entry with a source behind it nor a removal without one can pass.
+    for m in sorted(IMPLEMENTED_HOST_MODULE_TESTS):
+        check(not I._is_host_module(m) and I.host_module_tier(m) == '',
+              f'{m} is no longer a host module: it has source now')
+        check(m not in union,
+              f'{m} still classifies as a host module although a Mojo source '
+              f'exists for it, so the entry is false and the build is reached '
+              f'through the resolver instead')
+        got = I.resolve_module_path(m, project_root=HERE)
+        check(got is not None and os.path.isfile(got),
+              f'{m} resolves to a real source file', f'resolved to {got!r}')
+    # A package's DOTTED form is a host-module name in its own right, so the
+    # top-level half leaving the set is not enough to make `os.path` reach.
+    check(not I._is_host_module('os.path')
+          and I.host_module_tier('os.path') == '',
+          'the dotted form os.path is not a host module either')
+    check(I.resolve_module_path('os.path', project_root=HERE)
+          == os.path.join(REPO, 'formal', 'hostmods', 'os', 'path',
+                          '__init__.mojo'),
+          'os.path resolves to a real source file')
     # The claim the split exists to make true: these are reachable, so calling
-    # them "not fixable" was false.
-    for m in ('os', 'sys', 'math', 'struct', 'time', 'json', 're'):
+    # them "not fixable" was false. A name that has been WRITTEN is not in
+    # this list because it is implemented rather than unreachable; see
+    # `written_modules()` above for the derived account.
+    for m in ('math', 'time', 'json', 're'):
         check(I.host_module_tier(m) == 'modelled',
               f'{m} is modelled (reachable in principle, not implemented)')
     for m in ('subprocess', 'ctypes', 'asyncio', 'threading', 'socket',
               'tempfile', 'shutil', 'concurrent.futures', 'zlib', 'traceback'):
         check(I.host_module_tier(m) == 'unreachable',
               f'{m} is unreachable (needs an object the target does not have)')
-    for m in ('os.path', 'unittest.mock', 'importlib.util'):
+    for m in ('unittest.mock', 'importlib.util'):
         check(I.host_module_tier(m) != '',
               f'the dotted form {m} still classifies')
     check(I.host_module_tier('json') == I.host_module_tier('json.decoder'),
           'a dotted form follows its top-level component')
-    for m in ('__future__', 'sys', 'nosuchmodule'):
-        if m == 'sys':
-            continue
+    # A name that was a host module and is not any more is deliberately absent
+    # from this list: asserting it would pin the removal as permanent rather
+    # than as a consequence of a Mojo source existing, and the check that keeps
+    # that honest is the per-name pair in `written_modules()` above. `sys` was
+    # the first such name, and it is why the phrase is here at all.
+    for m in ('__future__', 'nosuchmodule'):
         check(I.host_module_tier(m) == '',
               f'{m} is not a host module')
     check(I._is_inert_module('__future__') and '__future__' not in I.HOST_MODULES,
@@ -368,6 +492,158 @@ def test_sorry_note():
           'the helper is annotated, so a caller can see it returns text')
 
 
+# ── 5. the hostmods directory is visible to ONE resolver ─────────────────────
+
+# The three modules this backend has written for CPython's, and the check names
+# of a test rather than the modules themselves: what has to hold is that a
+# module NAME with a Mojo source somewhere in this tree does not capture the
+# name everywhere else, and the next one written is covered by the same loop.
+HOST_MODULE_NAMES = ('os', 'sys', 'struct')
+
+
+def _short_repr(value, limit=120):
+    """`repr` cut to a line, for a failure detail.
+
+    A resolver's "found it" answer is a path from three of the four, but the
+    interpreter's is a whole executed module namespace — several hundred
+    characters of `repr` that bury the one fact the failure is about.
+    """
+    text = repr(value)
+    return text if len(text) <= limit else text[:limit - 1] + '…'
+
+# The resolvers that share the repository root, each named by the attribute or
+# call that answers for it, with a one-line statement of what it is FOR. Read
+# the list as the reason the modules are not at the top level: one of these was
+# enough to break the compiler, and the gate found it as gcc diagnostics in
+# `module_loader.py` and `mojo/middle/methods_shared.py` rather than as
+# anything about `os`.
+#
+# (`imports.Resolver` is the gimple compiled path's authority — MOJO_PATH puts
+# the repo root on every build's path. `ModuleLoader.resolve_module_path` is
+# the stdlib/test one. `myinterpreter.Interpreter._load_mojo_sibling_module` is
+# the interpreter's, and it walks UP from the importing file, so a file in a
+# subdirectory reached the root too. `emit_resolve._module_candidate_paths` is
+# the gimple backend's, and the repository is its last-resort search dir.)
+def _nonformal_resolvers():
+    out = []
+    import imports
+    # `_find` answers `(found, shadowed)`, and the second half is this
+    # resolver's "first on MOJO_PATH wins" note — irrelevant here, because a
+    # name with NO file is the answer being asserted. The first half is the
+    # question: is there a source for it.
+    resolver = imports.Resolver()
+    out.append(("imports.Resolver (the gimple path's MOJO_PATH authority)",
+                lambda name: resolver._find(name)[0]))
+    from module_loader import ModuleLoader
+    out.append(('module_loader.ModuleLoader.resolve_module_path (stdlib/test)',
+                ModuleLoader().resolve_module_path))
+    import myinterpreter
+    interp = myinterpreter.Interpreter(filename=os.path.join(REPO, 'fire.py'),
+                                       argv=['fire.py'])
+    out.append(('myinterpreter._load_mojo_sibling_module (the interpreter)',
+                interp._load_mojo_sibling_module))
+    from mojo.backend_gimple import emit_resolve
+
+    class _Gen:
+        _current_filename = os.path.join(REPO, 'fire.py')
+        _extra_search_paths = []
+
+    gen = _Gen()
+    out.append(('mojo.backend_gimple.emit_resolve._module_candidate_paths',
+                lambda name: next((p for p in
+                                   emit_resolve._module_candidate_paths(gen, name)
+                                   if os.path.isfile(p)), None)))
+    return out
+
+
+def test_hostmods_are_invisible_to_every_other_resolver():
+    """`formal/hostmods/` is a search root of `formal/imports.py` and of nothing
+    else, and this is what says so.
+
+    **The bug this makes unrepeatable.** `os`, `sys` and `struct` were written
+    at the REPOSITORY ROOT, which is a search root for four independent
+    resolvers, not only for the formal one. So a Mojo `os` there captured
+    `import os` inside `fire.py`, `module_loader.py` and `gimple_codegen.py` —
+    the compiler's own source — and the compiled path lowered `os.sep`, a
+    `char *` constant with no storage behind it, as a module-level name.
+    Measured in the integrator's gate, not inferred: `selfhost` failed, and
+    `bootstrap-stage2-cc` failed with
+
+        module_loader.py:305: error: invalid operands to binary +
+          (have 'char *' and 'void *')
+
+    where line 305 is `path.startswith(STDLIB_PATH + os.sep)`, and with
+    `mojo/middle/methods_shared.py:63` the same error on the same expression.
+    `os.sep` in a `+` is the whole story: the Mojo module was answering a name
+    the host module answers, and the host module's answer is a real string.
+
+    Nothing in the formal test files would ever have caught it. They ask
+    whether the module RESOLVES, and it did — better than before. What broke
+    was a different set of resolvers, in a different part of the tree, for a
+    program nobody in this file builds.
+
+    **The negative is the whole assertion.** Each resolver is asked the
+    question it is asked, from a file in the repository root — the position
+    `fire.py` itself imports `os` from — and must come back with the HOST
+    module: no file, or the ValueError `ModuleLoader` raises for a name that is
+    not `std*` and not a runtime test module, which is exactly what it has
+    always said for `os`.
+    """
+    import formal.imports as I
+
+    # The positive first, so a vacuous pass — a hostmods directory that does
+    # not exist, or a resolver loop that silently found nothing because it
+    # raised — cannot read as the negative passing.
+    for name in HOST_MODULE_NAMES:
+        path = I.resolve_module_path(name, relative_to=os.path.join(REPO, 't1.mojo'))
+        check(path is not None and os.path.isfile(path),
+              f'the formal resolver still finds a source for {name}',
+              f'got {path!r} — without this the checks below are vacuous')
+        check(path.startswith(I._HOSTMODS_ROOT + os.sep),
+              f'{name} resolves inside the hostmods directory and nowhere else',
+              f'got {path!r}, outside {I._HOSTMODS_ROOT}')
+
+    # …and the shape on disk, which is the thing a future contributor
+    # "tidies". A `struct.mojo` back at the root is a plausible thing to want
+    # and is the exact regression, so it is asserted as a path rather than
+    # left to the resolvers to notice.
+    for rel in ('os', 'os/__init__.mojo', 'os/path', 'os/_syscalls.mojo',
+                'sys.mojo', 'struct.mojo'):
+        check(not os.path.exists(os.path.join(REPO, rel)),
+              f'nothing named {rel} is at the repository root: the root is a '
+              f'search root for four other resolvers, and a Mojo module there '
+              f'captures the name in the compiler\'s own sources')
+
+    resolvers = _nonformal_resolvers()
+    check(len(resolvers) == 4,
+          'the estate: every non-formal resolver is exercised, so a fifth '
+          'cannot be added without this failing',
+          f'found {len(resolvers)}')
+    for name in HOST_MODULE_NAMES:
+        for label, ask in resolvers:
+            try:
+                got = ask(name)
+            except ValueError as e:
+                # `ModuleLoader` refusing a non-`std` name IS its host-module
+                # answer, and asserting on the message keeps a change that made
+                # it fail for some other reason from reading as a pass.
+                check('Only stdlib and test imports supported' in str(e),
+                      f'{label}: {name} is refused as a non-stdlib import, '
+                      f'which is its host-module answer', str(e))
+                continue
+            except Exception as e:                       # noqa: BLE001
+                check(False, f'{label}: {name} raised instead of answering',
+                      f'{type(e).__name__}: {e}')
+                continue
+            check(got is None,
+                  f'{label}: {name} is not a Mojo source in this tree, so the '
+                  f'HOST module answers the import',
+                  # Bounded: the interpreter's answer to a FOUND module is a
+                  # whole namespace object, and a repr of that buries the
+                  # one line that matters under a thousand.
+                  f'it resolved to {_short_repr(got)}')
+
+
 def main():
     test_relative_imports()
     test_host_tiers()
@@ -375,6 +651,7 @@ def main():
     test_bind_audit()
     test_audit_fires_on_a_real_build()
     test_sorry_note()
+    test_hostmods_are_invisible_to_every_other_resolver()
     npass = sum(1 for ok, _w in RESULTS if ok)
     nfail = len(RESULTS) - npass
     print(f"\n{npass} passed, {nfail} failed, {len(RESULTS)} checks")
