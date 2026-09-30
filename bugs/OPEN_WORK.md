@@ -34,22 +34,50 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 Verbatim, with the current measured state attached to each. Ordered as I would
 take them.
 
-### A1. `call_rel32` — 7 examples, the last big uncovered form — **high**
+### A1. `call_rel32` — WIRED, no longer a blocker — **done, needs a run**
 
-The largest single blocker left in the x86-64 proof work. `x86_step_call_rel32`
-**already exists** in `lib/X86.lean`; it is simply not wired into the
-generator's `_FORMS`/`_SUCCS`/`_resolve` trio. What makes it more than a
-lookup is that a call has **two** successors *and* a memory write: it pushes
-the return address and jumps. The pushed word has to be shown separated from
-the callee's frame, and the callee has to be in the path tree at all. Real
-design work, not a wiring change.
+`x86_step_call_rel32` exists in `lib/X86.lean` and **is now** wired into the
+generator's `_FORMS`/`_SUCCS`/`_resolve` trio
+(`formal/x86_64_endtoend_test.py`: `_FORMS` at :177, the successor expression at
+:259, the literal-address substitution at :429). `lib/X86.lean` also grew the
+call/return *pairing* section — `x86_call_post`, `x86_ret_post`,
+`x86_at_target` and the stack round-trip theorem — which is the "two successors
+and a memory write" work this item said was real design rather than a wiring
+change.
+
+**Measured 2026-09-30 (`_plan` over `formal/examples`, no Lean):** `call_rel32`
+is named as a missing lemma by **0 of 45** examples. Six plan clean *through*
+it — `count`, `fact`, `fib`, `pow2`, `sqsum`, `sum` — and none is blocked by it.
+So it is no longer on the critical path, and the "7 examples" figure in the
+header below is what it was on 2026-09-26.
+
+**What remains is verification, and the code says so itself**: the entry is
+commented `NOT VERIFIED. This was wired without running the suite`, with the
+open risk named as the continuation AT the target — a call's `rip` is
+`m + 5 + off`, a literal supplied by the generator, and whether the path from
+there re-enters a block whose certificate is wired is a question only a run
+answers. Running `formal/x86_64_endtoend_test.py` settles it, and it needs Lean
+runs this worker is not permitted to start; it belongs with the integrator.
+
+What the remaining blockers actually are, same measurement: `movsx_r64_r8` (3),
+`alu_ri32` (3), and one each of `alu_rr`, `shift_imm8`, `cqo`, `group3`,
+`lea_r64_rm64`, `mov_r64_rm64`, `mov_rm64_r64` — i.e. A2 below, which is now
+the whole of the uncovered-form work.
 
 ### A2. `movsx_r64_r8` (3 examples) + 8 one-example forms — **medium**
 
-After `call_rel32`, the remaining uncovered forms are `movsx_r64_r8` and
-singletons: `alu_rr:and`/`:or`/`:xor`, `alu_rr32:xor`, `shift_imm8:shl`/`:shr`,
-`group3:div`, `alu_ri32:and`. One lemma each, and most follow an existing
-shape — see the generalisation rule at the end of A4.
+With `call_rel32` done (A1) this is now the WHOLE of the uncovered-form work.
+The forms below are what `_plan` names as missing across `formal/examples`,
+measured 2026-09-30: `movsx_r64_r8` (3), `alu_ri32` (3), and one each of
+`alu_rr`, `shift_imm8`, `cqo`, `group3`, `lea_r64_rm64`, `mov_r64_rm64`,
+`mov_rm64_r64`.
+
+The list above names the old forms (`alu_rr:and`/`:or`/`:xor`, `alu_rr32:xor`,
+`shift_imm8:shl`/`:shr`, `group3:div`, `alu_ri32:and`) because that is the list
+this item was written from; where the measurement disagrees, the measurement
+wins — note that `cqo` and `lea_r64_rm64` were not on it, and `alu_ri32` is
+reported once as a family rather than per sub-op. One lemma each, and most
+follow an existing shape — see the generalisation rule at the end of A4.
 
 ### A3. 14 termination proofs carry a `sorry` — **medium**
 
