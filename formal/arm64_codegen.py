@@ -998,6 +998,27 @@ class ARM64Codegen:
             _emit_sub_imm(self.asm, 17, 17, off)
             self.asm.emit(encode_ldr_xt_xn_imm(dst, 17, 0))
             return
+        # A TYPE name read as a value is the FOURTH place a name's value comes
+        # from, after the three above, and it is asked HERE — at the end, where
+        # the X19 fall-through used to be — for two reasons. It is the only
+        # reader of "does this name have a home" in the file, so putting the tag
+        # anywhere earlier would mean a second one: measured, an arm in
+        # `_emit_expr` before `_load_var` made `var Int = 7; printf("%d", Int)`
+        # print the TAG of the type `Int` (-913451874) instead of the local's
+        # 7, silently and on every such program. And a type has no home by
+        # definition, so "no home" and "is a type" are not in competition here —
+        # they are the same observation read twice.
+        #
+        # Asked of the shared model reader so this architecture and x86-64
+        # cannot answer `t == Int32` differently, which for a tag is not a
+        # diagnostic that differs but a comparison that comes out one way on one
+        # side. `formal/build.py` places the name in a pre-pass, so a type
+        # reaching here is a route that pass does not model, and the tag is
+        # still the answer rather than the fall-through.
+        tag = M.type_tag_for_name(name)
+        if tag is not None:
+            self._emit_mov_imm(f"X{dst}", tag)
+            return
         raise CodegenError(self._no_home(name))
 
     def _emit_frame_load(self, name: str, slot: int, dst: int) -> None:
@@ -2269,6 +2290,22 @@ class ARM64Codegen:
             return
 
         if isinstance(expr, F.MemberExpr):
+            # `DType.<member>` is a VALUE naming a type — `dtype == DType.int32`
+            # is how `std/testing/prop/random.mojo:304` asks a question — and
+            # the value is the member's tag, the same word the bare `Int32` is.
+            # Asked BEFORE the member path below, which would read the slot key
+            # `DType.int32` and refuse it: this is a compile-time constant, not
+            # a field of anything.
+            tag = M.type_value_tag(expr)
+            if tag is not None:
+                self._emit_mov_imm("X0", tag)
+                return
+            if M.is_dtype_member_access(expr):
+                # `DType.float8_e4m3fn` and its siblings: a real Mojo type whose
+                # NAME is in no table on this path, so there is no tag to
+                # compute. Refused by name here, because the arm below would
+                # read the slot key `DType.<member>` and report a missing FIELD.
+                raise CodegenError(M.dtype_member_refusal("DType", expr.member))
             key = _member_slot_key(expr)
             if key is not None:
                 # A chain DEEPER than a frame slot reaching a VALUE position is

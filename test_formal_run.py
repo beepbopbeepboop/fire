@@ -6656,6 +6656,253 @@ REFUSAL_CASES = [
 ]
 
 
+# ── a TYPE as a VALUE ──────────────────────────────────────────────────────
+#
+# `bugs/FORMAL_type_name_as_a_value.md` is the long form. A type on this path
+# is a word, and the word is a TAG: one number per type, computed from the
+# type's name by `model.type_tag`, the same number in every unit of the image
+# and on both architectures. So `t == Int32` is an integer comparison, a type
+# can be passed to a function and returned from one, and a `dtype: DType` field
+# can hold one — the shape `std/testing/prop/random.mojo` and
+# `std/gpu/host/func_attribute.mojo` write.
+#
+# TWO LISTS, because the expected values have two provenances and claiming one
+# source for both would be false. `TYPE_VALUE_CASES` is written in the subset
+# CPython and this backend share (`bool` and `int` are Python's own type
+# objects, and `myinterpreter.py` binds those two names to exactly those
+# objects, so all three agree), and every one of its expected values is what
+# CPython prints for the same text — run, not asserted, with a `printf` shim:
+#
+#     a=12   b=10   c=1   d=1   h=7   (exit 0, and 5 for the last)
+#
+# `TYPE_VALUE_DTYPE_CASES` is the `DType.<member>` spelling, which CPython has
+# no word for, so its expected values come from the interpreter — which is where
+# this construct's semantics are established, and which agrees case for case
+# (`python3 fire.py run` on the same text, with `printf` written as `print`):
+#
+#     e=11   f=7    g=1
+#
+# A constant typed here by hand would be an assertion about a lowering written
+# by the same person who wrote the lowering, which is the one kind of expected
+# value this file exists not to have.
+TYPE_VALUE_CASES = [
+    # Two names, two answers. This is the case the construct exists for: before
+    # it, `kind_of(bool)` was refused with "'bool' has no home: … read out of
+    # whatever register the allocator left behind", which is false about the
+    # program — `bool` is a type, and the question is not where a register for
+    # it would come from.
+    ("type_value_two_names_two_answers",
+     "def kind_of(t):\n"
+     "    if t == bool:\n"
+     "        return 1\n"
+     "    if t == int:\n"
+     "        return 2\n"
+     "    return 0\n"
+     "def main(n):\n"
+     "    printf(\"a=%d\", 10 * kind_of(bool) + kind_of(int))\n"
+     "    return 0\n",
+     0, "a=12"),
+    # Across a CALL BOUNDARY, which is the half that needs the tag to be a
+    # function of the type's name rather than of the unit that compiled it: the
+    # callee is a separate frame, and a callee in another dylib is a separate
+    # image entirely, and both must see the same number.
+    ("type_value_crosses_a_call_boundary",
+     "def echo(t):\n"
+     "    return t\n"
+     "def same(t):\n"
+     "    if t == bool:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def main(n):\n"
+     "    printf(\"b=%d\", 10 * same(echo(bool)) + same(echo(int)))\n"
+     "    return 0\n",
+     0, "b=10"),
+    # A local holds it, so a type is an ordinary value once it is bound — the
+    # step the build pass's exemption has to be followed by.
+    ("type_value_a_local_holds_it",
+     "def main(n):\n"
+     "    t = bool\n"
+     "    if t == bool:\n"
+     "        printf(\"c=1\")\n"
+     "    else:\n"
+     "        printf(\"c=0\")\n"
+     "    return 0\n",
+     0, "c=1"),
+    # `!=`, the other direction. A tag that compared equal to everything would
+    # pass the three cases above.
+    ("type_value_inequality",
+     "def main(n):\n"
+     "    t = int\n"
+     "    if t != bool:\n"
+     "        printf(\"d=1\")\n"
+     "    return 0\n",
+     0, "d=1"),
+    # THE GUARD against the over-correction, and the row that caught the first
+    # version of this change: a local whose spelling is a type name must win.
+    # `Int = 7` printed the TAG of the type `Int` (-913451874) when the tag was
+    # materialised in `_emit_expr` ahead of `_load_var`, on both architectures,
+    # and exited 0. A rule written as "a type name is always a tag" produces
+    # that; the tag is the LAST place a name's value comes from, not the first.
+    ("a_local_named_like_a_type_still_wins",
+     "def main(n):\n"
+     "    Int = 7\n"
+     "    printf(\"h=%d\", Int)\n"
+     "    return 0\n",
+     0, "h=7"),
+    # And the same guard for a type name in CALLEE position, where nothing about
+    # the construct changed: `int(5)` is a CONSTRUCTION and still lowers to 5.
+    # A rule written as "any appearance of a type name" breaks this row.
+    ("a_type_name_as_a_callee_is_still_a_construction",
+     "def main(n):\n"
+     "    return int(int(5))\n",
+     5, None),
+]
+
+TYPE_VALUE_DTYPE_CASES = [
+    # `DType.<member>` is the SAME WORD as the bare name — the case that says
+    # so, and the reason the tag is computed from the type's name and not from
+    # the spelling that reached it. Interpreter: `2` and `1` for the same two
+    # questions.
+    ("type_value_dtype_member_is_the_same_word",
+     "def same(t) -> Int:\n"
+     "    if t == Int32:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"e=%d\", 10 * same(DType.int32) + same(Int32))\n"
+     "    return 0\n",
+     0, "e=11"),
+    # The alias rule, in the three forms the corpus writes: `DType.int` and
+    # `DType.index` are both `Int64`, so all three comparisons hold and the
+    # answer is 1+2+4.
+    ("type_value_dtype_int_is_int64",
+     "def main(n: Int) -> Int:\n"
+     "    var a = 0\n"
+     "    if DType.int == DType.index:\n"
+     "        a = a + 1\n"
+     "    if DType.int == Int64:\n"
+     "        a = a + 2\n"
+     "    if DType.int64 == Int64:\n"
+     "        a = a + 4\n"
+     "    printf(\"f=%d\", a)\n"
+     "    return 0\n",
+     0, "f=7"),
+    # Through a STRUCT FIELD, which is the shape the corpus uses: both files
+    # declare `dtype: DType` and store into it. The field is one word, so this
+    # is only interesting because the VALUE is a type.
+    ("type_value_through_a_struct_field",
+     "struct Bag:\n"
+     "    var tag: Int64\n"
+     "    var t: DType\n"
+     "def kind_of(b: Bag) -> Int:\n"
+     "    if b.t == DType.int32:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b = Bag()\n"
+     "    b.tag = 5\n"
+     "    b.t = DType.int32\n"
+     "    printf(\"g=%d\", kind_of(b))\n"
+     "    return 0\n",
+     0, "g=1"),
+]
+
+TYPE_VALUE_REFUSALS = [
+    # A bare `DType` is the type OF a type. Refused by name, because the
+    # alternative message — the walk's "no home … read out of whatever register
+    # the allocator left behind" — is false about it: there is no register
+    # question here at all.
+    ("a_bare_dtype_is_not_a_type_value",
+     "def main(n: Int) -> Int:\n"
+     "    var t = DType\n"
+     "    return 0\n",
+     "refuse:is the type OF a type", None),
+    # A `DType` member naming a real Mojo type whose NAME is in no table here
+    # (the float8/float4 formats and `uint128`, 202 spellings in the corpus).
+    # Refused with the member named, because the emitter's own fallback said
+    # "is a field access through 'DType'" — a struct field where there is a
+    # missing table entry, which sends the reader to the wrong file.
+    ("an_unknown_dtype_member_is_refused_by_name",
+     "def main(n: Int) -> Int:\n"
+     "    return Int(DType.float8_e4m3fn)\n",
+     "refuse:DType.float8_e4m3fn names a type", None),
+    # `len()` of a type. The refusal is the length machinery's own — a tag is
+    # neither a string nor a counted blob, so the two things `len` can answer
+    # are both correctly declined — and the WORDING is the one imprecision this
+    # construct leaves behind: it says the source does not say what the operand
+    # holds, where the source in fact says `bool`. See the bug doc.
+    ("len_of_a_type_is_refused",
+     "def main(n: Int) -> Int:\n"
+     "    return len(bool)\n",
+     "refuse:len(bool)", None),
+]
+
+
+# ── the tag is INJECTIVE over the type names this path admits ──────────────
+#
+# A type's value is its tag, and a tag is a 63-bit hash of the type's name, so
+# the one thing that could make the whole construct wrong is a COLLISION: two
+# types sharing a word would make `f(bool)` answer for `f(int)`. That is not a
+# probability to be argued about, because the tag is only ever asked about a
+# name in a CLOSED set (`model.type_value_name_space()`), and injectivity over a
+# closed set is a fact about it rather than a bound on it. This case IS that
+# fact, asked of the BACKEND: it compares every pair of the admitted names with
+# the language's own `==`, at run time, in the emitted image — 1275 comparisons
+# over 51 names — so what it proves is that the words the backends materialise
+# are pairwise distinct, not merely that a Python function returns what it
+# returns.
+#
+# GENERATED, because a hand-written list of 51 names goes stale the moment a
+# type is added to a table, and a stale list makes this case quietly prove less
+# while still passing. The names are read from the model, so the case grows
+# with the construct.
+#
+# The pairs are spread over helper functions because ONE function with 1275 `if`
+# statements does not build: `RecursionError: maximum recursion depth exceeded`,
+# raised from the model after ~1270 statements in a single body. That is a
+# pre-existing limit of the statement walk and not this case's problem to fix;
+# 26 comparisons per function is well inside it and the case builds in under
+# four seconds.
+_TYPE_VALUE_MODEL = __import__("formal.model", fromlist=["model"])
+_TYPE_VALUE_TAG_NAMES = sorted(_TYPE_VALUE_MODEL.type_value_name_space()
+                               - {"DType"})   # no tag: dtype_object_refusal
+
+# The same claim asked of the model directly, so a collision is loud at import
+# and not only in the image: two questions, two places. This one is a fact about
+# the FUNCTION and the case above is a fact about the WORDS the backends emit
+# for it.
+_TYPE_VALUE_TAG_COLLISIONS = _TYPE_VALUE_MODEL.type_value_tags_are_distinct()
+if _TYPE_VALUE_TAG_COLLISIONS:
+    raise AssertionError(
+        f"two type names share a tag, so `t == A` would answer for `t == B`: "
+        f"{_TYPE_VALUE_TAG_COLLISIONS}")
+
+
+def _every_type_tag_is_distinct_source(chunk: int = 26) -> str:
+    """A program that returns 1 if any two admitted type names share a tag."""
+    import itertools
+    funcs, index, made = [], 0, 0
+    while index < len(_TYPE_VALUE_TAG_NAMES):
+        part = _TYPE_VALUE_TAG_NAMES[index:index + chunk]
+        if len(part) < 2:
+            break
+        body = [f"def tag{made}(n):\n"]
+        body += [f"    if {a} == {b}: return 1\n"
+                 for a, b in itertools.combinations(part, 2)]
+        funcs.append("".join(body) + "    return 0\n")
+        made += 1
+        index += chunk
+    main = ["def main(n):\n", '    printf("distinct")\n']
+    main += [f"    if tag{j}(n): return 1\n" for j in range(made)]
+    return "".join(funcs) + "".join(main) + "    return 0\n"
+
+
+TYPE_VALUE_TAG_CASES = [
+    ("every_type_tag_is_distinct",
+     _every_type_tag_is_distinct_source(),
+     0, "distinct"),
+]
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
@@ -6678,6 +6925,8 @@ def main():
                   + WAVE6_TRUTHY_CASES
                   + WAVE6_NAME_CASES + WAVE7_G2_CASES
                   + SHIFT_CASES + REFUSAL_CASES
+                  + TYPE_VALUE_CASES + TYPE_VALUE_DTYPE_CASES
+                  + TYPE_VALUE_REFUSALS + TYPE_VALUE_TAG_CASES
                   + [X86_ONLY_1SLOT_BUG_CASE])
     selected = [c for c in everything if not args.cases or c[0] in args.cases]
     known = {c[0] for c in everything}

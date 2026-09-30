@@ -3949,6 +3949,27 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 root = root.obj
             if isinstance(root, F.IdentExpr) and id(root) not in bracketed:
                 bracket_callees.add(id(root))
+        # A TYPE name in a VALUE position is a compile-time constant whose value
+        # is the type's TAG, so it has a home — the same one a folded
+        # module-level constant has, which is the fourth of the four this walk
+        # already accepts, and both backends materialise it where they
+        # materialise the others. `bugs/FORMAL_type_name_as_a_value.md` is the
+        # long form; `model.TYPE_VALUE_NAMES` is the name space and
+        # `model.type_value_tag` the one reader both backends ask, so the two
+        # architectures cannot disagree about what a type is.
+        #
+        # `DType.<member>` is collected FIRST and by node identity, because
+        # `iter_nodes` has no parent and the walk only ever sees the `DType`
+        # IdentExpr: the value there is the MEMBER's tag, not the tag of a type
+        # called `DType`, so the base is placed as part of the member rather
+        # than as a name in its own right. A member with no tag (the float8
+        # family) is refused HERE, by the member's name, so that the two
+        # diagnostics that are about types stay apart: a bare `DType` is the
+        # type OF a type and `model.dtype_object_refusal` says so.
+        dtype_members = {}
+        for sub in M.iter_nodes(fn.body):
+            if M.is_dtype_member_access(sub):
+                dtype_members[id(sub.obj)] = sub.member
         for node in M.iter_nodes(fn.body):
             if not isinstance(node, F.IdentExpr) or id(node) in callees:
                 continue
@@ -3959,6 +3980,22 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                     or M.module_constant_literal(name) is not None \
                     or M.name_resolves_without_a_local(name):
                 continue
+            member = dtype_members.get(id(node))
+            if member is not None:
+                if M._dtype_member_type(member) is not None:
+                    continue
+                raise CodegenError(M.dtype_member_refusal(name, member))
+            if M.type_value_tag(node) is not None:
+                continue
+            if name == "DType":
+                # The one type name that is not a type as a value. Asked here
+                # rather than left to the fallback below, because the fallback's
+                # sentence — "no local or parameter by that spelling … read out
+                # of whatever register the allocator left behind" — is false
+                # about it: there is no register question here at all. AFTER the
+                # local check above, so a function that binds its own `DType`
+                # still reads its own.
+                raise CodegenError(M.dtype_object_refusal(name))
             if "." in name and name.split(".", 1)[0] in holders:
                 continue
             if name.startswith(M.MLIR_DIALECT_PREFIX):

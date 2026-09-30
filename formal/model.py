@@ -6748,6 +6748,283 @@ def type_constructor_kind(callee_name: str):
     return None
 
 
+# ── a TYPE as a VALUE ──────────────────────────────────────────────────────
+#
+# A formal value is one 64-bit word, and a TYPE is not one thing a word can
+# hold — which is why every name in the tables above used to be refused with
+# "'Int32' has no home", a sentence that is false about the program: `Int32` is
+# not a name that was left without a register, it is a TYPE, and the source
+# says so in the position it stands in. `bugs/FORMAL_type_name_as_a_value.md`
+# is the long form.
+#
+# The answer here is that a type IS a word on this path, and the word is a TAG:
+# one number per type, the same number in every unit of the image, so
+# `t == Int32` is an integer comparison and a type crosses a dylib boundary
+# without a registry on either side. Three things have to be true of that tag
+# and each one is a separate decision:
+#
+#   * it must be a function of the TYPE and not of the spelling that reached
+#     it, or `Int32` and `DType.int32` — the same type, two spellings, and the
+#     interpreter's own answer is that they are the same object — would be two
+#     words. `type_value_name` is that function, and it is the only reader.
+#   * it must be the same on both sides of a dylib boundary, so it cannot be an
+#     index into a per-unit discovery order. It is a hash of the canonical
+#     name, which is why it survives a build in which two units never meet.
+#   * it must be DISTINCT for distinct types, and that is not a probability
+#     argument: the tag is only ever asked about a name in the closed set
+#     `type_value_name_space()`, and `type_value_tags_are_distinct` (asked by
+#     `test_formal_run.py`) proves every pair in that set differs. A collision
+#     is therefore absent from the name space this path admits, not unlikely.
+#
+# DERIVED, not hand-kept, wherever a table already says what a name is — a
+# second list of type names is a list that goes stale the day one of the five
+# grows, and it goes stale in the worst direction: the new name is then refused
+# as "not a type", which reads as a fact about the language and is a fact
+# about a table. The two names that are in NO table are named here, with the
+# reason each is not in one.
+TYPE_VALUE_NAMES = frozenset(
+    POINTEE_WIDTHS                                   # a width, for a pointee
+) | frozenset(POINTEES_REFUSED) | frozenset(
+    INT_TYPE_CTORS) | frozenset(
+    IDENTITY_TYPE_CTORS) | frozenset(
+    UNREPRESENTABLE_TYPE_CTORS) | frozenset(
+    POINTER_TYPE_CTORS) | frozenset(
+    # `BFloat16` is the fourth of the language's four float type names and the
+    # only one no table here lists (`POINTEES_REFUSED` has the other three) —
+    # `myinterpreter.py`'s `_FLOAT_TYPE_NAMES` is where the language's four are
+    # written down, and the corpus writes `DType.bfloat16` 94 times. A tag does
+    # not need a float to be representable, only nameable, so its absence from
+    # a table about float BITS costs nothing here.
+    ("BFloat16",
+     # `Self` is in no table because every table here answers a question about
+     # a type this path can REPRESENT, and `Self` is the one name whose type
+     # is the enclosing declaration — which is a fact about the read, not about
+     # the name. It is still a type, and `t == Self` is a question a program
+     # can ask, so it gets a tag like every other.
+     "Self",
+     # `bool` beside `Bool`; `Int` and `UInt` are already in POINTEE_WIDTHS.
+     # `bool` is the SPELLING Python and CPython use for the same type, so a
+     # program written in the shared subset (`f(bool)`) has to have an answer
+     # here as well as in the interpreter — which binds `bool` to Python's own
+     # `bool`, so both agree that `f(bool)` is handed the same object.
+     "bool"))
+
+
+# A `DType` member whose name is not its type's name. `DType.int` is the 64-bit
+# signed type whatever its width says, and so is `DType.index`; `DType.uint` is
+# the unsigned one. Three entries against the ~20 a member-by-member table
+# needs — see `_dtype_member_type`.
+_DTYPE_MEMBERS = {
+    "int": "Int64", "index": "Int64", "uint": "UInt64",
+}
+
+# The SPELLING convention, and the reason `_dtype_member_type` is a table of
+# prefixes rather than a table of members. Mojo writes a `DType` member in
+# lower case and the type in upper case, and the upper-casing is not "the first
+# letter": `uint8` is `UInt8`, where the capital `U` is the unsigned marker and
+# `Int` is the type word. So the mapping is a FAMILY, and a family is five
+# entries however many widths Mojo adds to it — the alternative is one entry per
+# member, which is a list that goes stale the day a width is added and fails in
+# the direction that reads as a fact about the language.
+_DTYPE_MEMBER_PREFIXES = (
+    ("bfloat", "BFloat"),   # longest first, so `bfloat16` is not read as ... 
+    ("uint", "UInt"),
+    ("int", "Int"),
+    ("float", "Float"),
+    ("bool", "Bool"),
+)
+
+
+def _dtype_member_type(member: str) -> str | None:
+    """The type `DType.<member>` names, or None if this path has no such member.
+
+    `DType.int32` is a VALUE of type `DType` naming the type `Int32`, and it has
+    to be the same word `Int32` is — `std/testing/prop/random.mojo:295` writes
+    `Scalar[Self.dtype].MIN.cast[DType.int64]()` beside `dtype: DType`, so the
+    corpus puts two spellings of one type in the same expression, and the
+    interpreter binds them to the same object (its `DType` namespace holds the
+    `Int64` instance itself as `.int`, `.int64` and `.index`).
+
+    Two steps, in this order, and the order is the design: a member whose name
+    is not its type's name (`int`, `index`, `uint` — all three name `Int64` /
+    `UInt64` whatever their spelling suggests) is the exception table, and
+    everything else is the SPELLING, so every width and every format suffix
+    Mojo writes is covered by five prefixes rather than by a member list. The
+    answer is admitted only if it is a name this path knows, which is what
+    keeps the name space a tag is asked about FINITE and therefore checkable.
+
+    KNOWN AND DELIBERATELY NOT ADMITTED: the float8/float4 family
+    (`DType.float8_e4m3fn` and its six siblings, 191 spellings in the corpus)
+    and `DType.uint128` (11). Their type names — `Float8_e4m3fn`,
+    `UInt128` — are in no table here, and admitting them by SHAPE would make
+    the name space a tag is asked about unbounded, which is exactly what
+    `type_value_tags_are_distinct` needs it not to be. They are refused with the
+    member named, and the fix is the type names in `TYPE_VALUE_NAMES`.
+    """
+    over = _DTYPE_MEMBERS.get(member)
+    if over is not None:
+        return over
+    for lower, upper in _DTYPE_MEMBER_PREFIXES:
+        if member.startswith(lower):
+            spelled = upper + member[len(lower):]
+            return spelled if spelled in TYPE_VALUE_NAMES else None
+    return None
+
+
+def type_value_name_space() -> frozenset:
+    """Every canonical type name a tag can be asked for — the CLOSED set.
+
+    `TYPE_VALUE_NAMES` plus the names only a `DType` member reaches, which is
+    what makes the distinctness argument a fact rather than a bound: the rule
+    in `_dtype_member_type` only ever produces a name that is already in
+    `TYPE_VALUE_NAMES`, so the `DType` exceptions that are not are the
+    exception table's values and nothing else can widen this.
+    """
+    return frozenset(TYPE_VALUE_NAMES) | frozenset(_DTYPE_MEMBERS.values())
+
+
+def _tag_of_text(text: str | None) -> int | None:
+    """The tag of the type a type EXPRESSION's text names, or None.
+
+    The one place a spelling is read, because the two readers that need it have
+    different inputs and must not disagree: `type_value_tag` has an AST node and
+    `type_tag_for_name` has a bare name (which is all `_load_var` ever has).
+    """
+    if not text:
+        return None
+    base, dot, member = text.partition(".")
+    if dot:
+        # A dotted spelling is a MEMBER access, and only `DType.<member>` names a
+        # type; `Self.T` and `pkg.thing` are not type values at all.
+        canonical = _dtype_member_type(member) if base == "DType" else None
+    elif text == "DType" or text not in TYPE_VALUE_NAMES:
+        # `DType` is the type OF a type — `dtype_object_refusal` — and a name
+        # this path does not know as a type is not one.
+        canonical = None
+    else:
+        canonical = text
+    return None if canonical is None else type_tag(canonical)
+
+
+def type_value_tag(node) -> int | None:
+    """The tag of the type `node` names as a value, or None if it names none.
+
+    The one reader both backends ask for an EXPRESSION, so the two architectures
+    cannot disagree about what a type is — which for a tag is not a diagnostic
+    that differs but a comparison that comes out differently on one side.
+    """
+    return _tag_of_text(type_expr_text(node))
+
+
+def type_tag_for_name(name: str) -> int | None:
+    """`type_value_tag` for a reader that has the NAME and not the node.
+
+    `_load_var` is handed a name, and it is the right place for the tag — see
+    its own note — so this is the spelling it asks. A dotted name is never a
+    type here: a `DType.<member>` reaches the backends as a `MemberExpr`, and
+    every other dotted name is a field.
+    """
+    return None if "." in name else _tag_of_text(name)
+
+
+def type_tag(name: str) -> int:
+    """The word the type `name` IS on this path: a 63-bit FNV-1a of the name.
+
+    FNV-1a because it is three lines, has no table to keep, and is a function
+    of the STRING alone — which is the whole requirement. A tag has to be the
+    same number in every unit of the image, including two units that were
+    compiled apart and meet only at the dylib boundary, and it has to be the
+    same on both architectures. Anything derived from a discovery order, a
+    per-unit counter or an address fails the first of those; a hash of the name
+    passes all three by construction.
+
+    The top bit is cleared so the tag is a non-negative 63-bit number: the
+    word is printed by `printf("%d")` in a diagnostic and compared as a signed
+    value by a program, and neither should have to know that a type's tag can
+    come out negative. Distinctness over the admitted name space is proved by
+    `type_value_tags_are_distinct`, not assumed — see the note above.
+    """
+    h = 0xcbf29ce484222325
+    for byte in name.encode("utf-8"):
+        h = ((h ^ byte) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+    return h & 0x7FFFFFFFFFFFFFFF
+
+
+def type_value_tags_are_distinct() -> list:
+    """Every collision among the tags of the admitted type names, as lists.
+
+    The correctness argument for a hash being a value here, in the form a test
+    can ask: the tag function is only ever asked about a name in the closed set
+    `type_value_name_space()`, so if no two names in it share a tag then no
+    program this path admits can observe one type as another. Empty is the only
+    passing answer, and it is a fact about a FINITE set rather than a bound on
+    a probability.
+    """
+    seen: dict = {}
+    for name in sorted(type_value_name_space()):
+        seen.setdefault(type_tag(name), []).append(name)
+    return [names for names in seen.values() if len(names) > 1]
+
+
+def dtype_object_refusal(spelled: str) -> str:
+    """Why a bare `DType` in a value position is not a type.
+
+    `DType` names the type OF a type, so `DType` as a value would be the
+    runtime type object — the thing `DType(Int32)` builds and `dtype.name`
+    reads — and this path has no such object: a formal value is one word, and
+    there is nothing in the image that a word naming "a type" could point at.
+    The two things that DO work are the ones a reader can use: a member
+    (`DType.int32`), which is a type this path gives a tag to, or a declared
+    `dtype: DType` parameter, whose value arrives as that same tag from
+    whoever passed it.
+    """
+    return (f"{spelled} is the type OF a type, and a type object is not "
+            f"something this path has: a formal value is one 64-bit word, and "
+            f"there is nothing in this image for a word to point at that "
+            f"would answer 'what type is this'. A DType MEMBER names a type "
+            f"and is a value here ({spelled}.int32 is the same word Int32 is) "
+            f"— so spell the member you mean, or take the type as a parameter "
+            f"annotated `DType`, whose value is the member's tag by the "
+            f"caller's doing")
+
+
+def is_dtype_member_access(node) -> bool:
+    """Whether `node` is `DType.<member>` — the shape, whatever the member.
+
+    Asked by the two backends' member arms, after `type_value_tag` has declined,
+    so that a member this path has no type for is refused as the missing type
+    name it is rather than as a field read off a struct. It is a SHAPE test and
+    not a table lookup on purpose: the whole point is to name a member that is
+    not in any table.
+    """
+    return (isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr)
+            and node.obj.name == "DType")
+
+
+def dtype_member_refusal(spelled: str, member: str) -> str:
+    """Why `DType.<member>` is not a type value, given that other members are.
+
+    A different diagnostic from `dtype_object_refusal` because it is a
+    different fact: the bare `DType` is a type object and there is none, while
+    this is a member that names a real Mojo type whose NAME is in no table on
+    this path — the float8/float4 formats and `uint128`, 202 spellings in the
+    corpus. Saying "a field access through 'DType'" instead (which is what the
+    emitter's own fallback says, and did say, for all of them) sends the reader
+    to look for a struct field where there is a missing table entry.
+    """
+    return (f"DType.{member} names a type, and this path has no value for it: "
+            f"a type is a word here — its tag — and the tag is computed from "
+            f"the type's NAME, which for DType.{member} is a name no table in "
+            f"formal/model.py lists, so there is nothing to compute it from. "
+            f"The members that do work are the ones whose type name this path "
+            f"knows: DType.int8 … DType.int64, DType.uint8 … DType.uint64, "
+            f"DType.float16/float32/float64/bfloat16 and DType.bool, each of "
+            f"which is the same word the bare type name is. Naming the type "
+            f"instead of the member (Int8 rather than DType.int8) is the same "
+            f"value and always works")
+
+
+
 def type_constructor_prefers_local_struct(callee_name: str, structs: dict,
                                           nargs: int) -> bool:
     """Whether THIS MODULE's own `struct N` beats `N`'s place in
