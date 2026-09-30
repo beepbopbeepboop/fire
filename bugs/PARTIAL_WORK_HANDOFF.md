@@ -154,13 +154,17 @@ prints `a`); regression `test_gimple_runner.py`'s
 `qualified_module_struct_construction`.
 
 **Consequence, confirmed live**: with construction unblocked, the
-struct-collision bug — two same-named structs from different modules sharing a
-bare name, so one TU's field read lands in the other's layout, its doc deleted
-with its fix — is now genuinely reachable — a same-arity collision reproduces its predicted
-silent field-coercion as a real running program (see that doc's updated
-Status). The 4-step collision fix itself is still NOT attempted (rated
-moderate-to-high risk, foundational struct-identity machinery) — next
-session's natural continuation.
+struct-collision bug was genuinely reachable — a same-arity collision
+reproduced its predicted silent field-coercion as a real running program.
+**Fixed 2026-09-29, doc deleted**: two same-bare-named structs in different
+modules now get module-qualified C identities instead of sharing one field
+table and one typedef, so a loser's `str` field no longer lands in the
+winner's `int64_t` slot as a heap address. The prediction above turned out
+to be worth writing down — it is what made the fix a two-hour job rather
+than a research problem. The one thing it did not predict, and that the
+merge caught: the fix must key its lookup table on the SANITIZED module
+name, because a class inside a package has a dotted home and the two
+spellings only agree for a flat module name.
 
 **The ALIAS spelling is closed too** (`from mod_a import Dialog as ADialog;
 ADialog("a").widgetName` — it used to fall through to the generic
