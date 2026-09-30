@@ -54,8 +54,21 @@ SAMPLES = [
      "self.asm.org() hands the word in the slot self.asm to Assembler.org(), "
      "whose receiver is the ADDRESS of a frame of 8-byte slots"),
     ("name has two disagreeing shapes",
-     "gen.type_checker cannot be placed: this name holds a frame address in "
-     "more than one shape, and the shapes do not agree"),
+     "x.y cannot be placed: this name holds a frame address in more than one "
+     "shape, and the shapes do not agree"),
+    # The two shapes the message above was ALSO matching, before
+    # `formal/model.py`'s `member_read_without_a_field` told the two apart: it
+    # printed "more than one shape … the shapes do not agree" for a SINGLE
+    # candidate with nothing to disagree about, which put 4 files of row 13 in a
+    # family about a disagreement that did not exist. They need families of
+    # their own or they land in "other refusal" — which is the exact failure this
+    # file exists to catch, introduced by fixing a diagnostic.
+    ("member read of a method used as a value",
+     "self._untyped_callee names '_untyped_callee', which is a METHOD of "
+     "ARM64Codegen rather than one of its fields"),
+    ("member read of a name the struct does not have",
+     "gen.type_checker is a field of gen, and GimpleGen has no field "
+     "'type_checker'"),
     # The precedence case. This message contains "receiver is passed to" AND
     # "which is a name with no definition in hand", and must take the second.
     ("callee has no definition on this path",

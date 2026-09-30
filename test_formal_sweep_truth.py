@@ -542,8 +542,8 @@ class TestSystemModuleCall(unittest.TestCase):
         30-odd real codegen findings would silently become target facts and the
         headline would improve by about a quarter without anyone writing code.
         """
-        for term in ("gen.type_checker cannot be placed: this name holds a "
-                     "frame address in more than one shape",
+        for term in ("gen.type_checker is a field of gen, and GimpleGen has no "
+                     "field 'type_checker'",
                      "a Spec receiver is returned from the function that "
                      "created it on this path",
                      "Traceback (most recent call last): x = 1"):
