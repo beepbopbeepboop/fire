@@ -241,6 +241,8 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     "hashlib": "test_formal_hashlib.py",
     "json": "test_formal_json.py",
     "pathlib": "test_formal_pathlib.py",
+    "io": "test_formal_small_hosts.py",
+    "typing": "test_formal_small_hosts.py",
 }
 
 
