@@ -29,6 +29,34 @@ the same predicate — "what struct does this expression name" — and that pred
 is the work; this doc is scoped to the first row because it is the one whose
 diagnostic is measurably *wrong* rather than merely incomplete.
 
+### The NEXT blocker for three of these files, which is a different construct again
+
+`formal/model.py`'s `call_callee_name` (the change that resolved the bare-name
+comptime specialization — see
+`bugs/FORMAL_frame_receiver_handoff.md` §19) moved three files onto a
+specialization of a **dotted** callee, which is a fifth shape and not this one:
+
+| file | the callee now named in its refusal |
+|---|---|
+| `std/collections/bitset.mojo` | `Self._vectorize_apply[_union]` |
+| `std/collections/string/format.mojo` | `Self.compile_entries_runtime[0]` |
+| `std/builtin/string_literal.mojo` | `_FormatUtils.format_to_comptime[StaticString(Self())]` |
+
+`call_callee_name` deliberately answers `None` for these: a dotted name is a
+module-level function or an extern, and there is no parameter list for one here
+either — which is the same answer arm64's `_specialization_of` gives by way of
+`_member_slot_key`, so the two cannot drift.
+
+It is a different rewrite and not a small one, because `Self` is a **type name,
+not a receiver**: `Self.compile_entries_runtime[0](buf)` has no receiver
+argument, so it is not `recv.m(x)` → `Recv_m(recv, x)` and `_rewrite_method_calls`
+cannot be taught it by loosening its test — `_receiverless_methods` would have to
+answer for a specialization of a static method. None of the three files can
+pass today in any case (bitset imports `std.math` → `dtype.mojo`'s MLIR, format
+imports `std.builtin.globals` → `builtin_slice.mojo`, string_literal imports
+format), so the measured value of closing it is a better message on three files
+and nothing else. Recorded here rather than built.
+
 ## What the construct is
 
 `formal/build.py`'s `_rewrite_method_calls` lifts `recv.m(x)` to
