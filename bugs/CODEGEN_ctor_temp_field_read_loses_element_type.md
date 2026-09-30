@@ -1,9 +1,11 @@
 # OPEN: a field read straight off a constructor TEMPORARY loses element-type tracking
 
-**State: OPEN, and NARROWER than this doc claims — re-measured
-2026-09-30, see "Status (2026-09-30)" at the bottom. Two of the doc's own
-measurements no longer hold, in the doc's favour in one case and against
-it in the other.** Recorded 2026-09-27 while closing out
+**State: OPEN, and BOTH of the doc's scope claims are wrong — re-measured
+2026-09-30, see "Status (2026-09-30)" at the bottom: the trigger is
+narrower than "a `0` element to trip the sentinel" (it takes a
+COMPREHENSION) and the blast radius is wider than "through a constructor
+TEMPORARY" (reading it through a local fails identically).** Recorded
+2026-09-27 while closing out
 `bugs/PARTIAL_WORK_HANDOFF.md` §4.2 (the other two container-printing
 findings in that section — `print([True, False])` and `print({1, 2})` — are
 fixed; this third, related one is not).
