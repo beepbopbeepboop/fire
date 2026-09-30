@@ -89,6 +89,18 @@ def test_pointer_returns_are_seen():
                 'mojo_sqlite3_errmsg', 'mojo_sqlite3_prepare'):
         check(sym in sq, f'fire_sqlite3.h: {sym} is scanned (pointer return)')
 
+    # The count in test_every_declaration_is_seen moved 465 -> 476 for these;
+    # the composition is verified here rather than trusted from the total, in
+    # the same spirit as the `mojo_type` note above — a runtime symbol with no
+    # in-tree caller can still be reachable from GENERATED code, and every one
+    # of these is emitted by the compiler, not called from the runtime.
+    for sym in ('mojo_vararg_fn_new',      # _lower_LambdaExpr / _lower_IdentExpr
+                'mojo_is_vararg_fn',       # inside every mojo_fnptr_call_N
+                'mojo_vararg_call_0',      # reached from the inline helpers
+                'mojo_vararg_call_4',
+                'mojo_vararg_call_8'):
+        check(sym in rt, f'fire_runtime.h: {sym} is scanned (variadic callable)')
+
 
 def test_every_declaration_is_seen():
     """Header-by-header completeness against an independent count.
@@ -160,13 +172,25 @@ def test_every_declaration_is_seen():
     # `mojo_cstr_or_int_str`'s ownership contract (doc/MEMORY.html section 4).
     # 464 -> 465 (2026-09-29): mojo_dict_slot_key, the accessor that builds an integer
     # key's decimal string on demand (generated repr code read the field directly).
+    # 465 -> 476 (2026-09-29): the VARIADIC callable entry points —
+    # `mojo_vararg_fn_new` and `mojo_is_vararg_fn`, plus
+    # `mojo_vararg_call_0..8`. All eleven are real (non-`static`) declarations
+    # in fire_runtime.c and all eleven are reachable from GENERATED code, which
+    # is the lesson this file has already paid for twice over `mojo_type`:
+    # `mojo_vararg_fn_new` is emitted by `_lower_LambdaExpr` (and, for a named
+    # `*args`/`**kwargs` function, by `_lower_IdentExpr`), and
+    # `mojo_vararg_call_N` is what the `mojo_fnptr_call_N` / `mojo_maybe_bound_
+    # call_N` inline helpers call. The 20 new `mojo_fnptr_call_kw_N` /
+    # `mojo_maybe_bound_call_kw_N` / arity-5..8 helpers are `static inline`
+    # and are correctly NOT counted, exactly like the arity-0..4 family they
+    # extend — `test_non_exports_stay_excluded` now pins that too.
     # 462 -> 464 (2026-09-28): mojo_dict_iter_key_int and mojo_dict_items_int, the
     # integer-key readers for a loop over a Dict[Int, V].
     # 452 -> 462 (2026-09-28): the ten `mojo_dict_*_kw` entry points (integer dict
     # keys passed as a raw word; doc/MEMORY.html section 10.4).
     # 451 -> 452 (2026-09-28): `mojo_cleanup_push_ptr`, the cleanup-stack kind
     # for an owned struct instance (doc/MEMORY.html section 3.B).
-    for header, want in (('fire_runtime.h', 465),
+    for header, want in (('fire_runtime.h', 476),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),
@@ -188,6 +212,10 @@ def test_non_exports_stay_excluded():
     """
     rt = exports('fire_runtime.h')
     for sym in ('mojo_bound_method_call_0',   # static inline
+                'mojo_bound_method_call_8',   # static inline (variadic arity)
+                'mojo_fnptr_call_kw_4',       # static inline (keyword twin)
+                'mojo_fnptr_call_8',          # static inline (variadic arity)
+                'mojo_maybe_bound_call_kw_0', # static inline (keyword twin)
                 'mojo_uint64_from_int64',     # static inline
                 '_Bool_select',                # static inline
                 '__mojo_floordiv',             # static inline
