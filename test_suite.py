@@ -383,30 +383,50 @@ def test_a_registered_fanout_item_is_wrapped_in_the_built_argv():
           f'nothing')
 
 
-def test_an_exclusive_job_takes_the_whole_machine_budget():
-    """`excl` has always meant "the machine to itself" — in this run.
+def test_an_exclusive_job_reserves_its_class_and_nothing_more():
+    """`excl` is a scheduling statement; the reservation is the class.
 
-    The ledger is what carries that to the rest of the machine: the other
-    worktrees' hand-run `make mojoc` and the developer's own terminal were
-    never in the runner's exclusive set, and a reservation for a job's CLASS
-    rather than the whole budget would leave room beside a 55 GB exclusive job
-    for exactly those. So an exclusive job reserves the budget itself, and
-    this checks the number the runner actually takes rather than the flag it
-    sets.
+    It used to reserve the WHOLE machine budget, on the reasoning that the
+    other worktrees' hand-run `make mojoc` were not in the runner's exclusive
+    set. That conflated two claims and cost more than it bought: `mojoc` and
+    `selfhost` are marked exclusive and measure 3.7 GB, so a 3.7 GB build held
+    96 of the machine's 96 GB and every other job in every worktree waited
+    behind it. What `excl` is actually for here is interference between jobs in
+    ONE run — all four exclusive jobs write a shared artifact another job reads
+    or links — and `execute()` already enforces that (`test_exclusive_is_alone`).
+
+    So the number the runner takes is checked here, not the flag: an exclusive
+    job reserves exactly what an ordinary one with the same class reserves, and
+    the property that made the whole-budget reservation look necessary — that
+    the two biggest jobs still cannot share the machine — is the ledger's
+    arithmetic over these classes (55 + 55 > 96), which `test_memslot.py`
+    covers on the ledger itself.
     """
     with _SandboxEnv(MEMSLOT_BUDGET_GB=64):
+        excl_spec = suite.REGISTRY['mojoc']
         plain = suite.Job(suite.REGISTRY['gimple'])
-        excl = suite.Job(suite.REGISTRY['mojoc'])
-        check('admission: an exclusive job reserves the WHOLE budget',
-              suite.reserved_gb(excl, suite.REGISTRY['mojoc']) == 64,
-              f'{suite.reserved_gb(excl, suite.REGISTRY["mojoc"])} of 64 GB')
+        check('admission: an exclusive job reserves its CLASS, not the budget',
+              suite.reserved_gb(excl_spec) == suite.MEMCLASS[
+                  suite.memclass_for(excl_spec)],
+              f'{suite.reserved_gb(excl_spec)} GB, class '
+              f'{suite.memclass_for(excl_spec)}')
+        check('admission: ...which is exactly what an ordinary job reserves',
+              suite.reserved_gb(excl_spec)
+              == suite.memlimit(suite.memclass_for(excl_spec)),
+              'excl adds nothing to the number: it is about scheduling')
         check('admission: ...and an ordinary one reserves its class',
-              suite.reserved_gb(plain, suite.REGISTRY['gimple'])
+              suite.reserved_gb(suite.REGISTRY['gimple'])
               == suite.memlimit(suite.memclass_for(suite.REGISTRY['gimple'])),
               'the class is the promise the ceiling has to keep')
+        check('admission: the flag itself is untouched (the scheduler reads it)',
+              bool(suite.Job(excl_spec).excl), 'mojoc is still exclusive')
+        check('admission: on a 64 GB budget nothing is refused for being big',
+              all(suite.MEMCLASS[suite.memclass_for(s)]
+                  <= suite.memslot_budget() for s in suite.REGISTRY.values()),
+              'a class over the budget is a job the ledger can never admit')
     with _SandboxEnv(MEMLIMIT_GB=0):
         check('admission: no ceiling means no reservation, not a zero one',
-              suite.reserved_gb(plain, suite.REGISTRY['gimple']) == 0,
+              suite.reserved_gb(suite.REGISTRY['gimple']) == 0,
               'MEMLIMIT_GB=0 is the run-wide "no memory bound anywhere" switch')
 
 
@@ -729,6 +749,343 @@ def test_every_compiler_job_is_capped():
 class _FakeOpts:
     """Enough of an options object for build_cmd, and nothing else."""
     jobs, no_cache, verbose, timeout = 2, False, False, None
+
+
+# ── the ratchet: a class is a claim, so it is sized from a measurement ───────
+# Every class used to be assigned from the SHAPE of a job's workload — a
+# whole-closure compile got 55 or 96 GB, a per-file dump got 24 — and since a
+# class is also a RESERVATION (every job takes it out of one machine-wide
+# budget before it starts) that made the numbers a queue rather than a margin:
+# `mojoc` held 96 of a 96 GB budget for work measured at 3.7 GB. These are the
+# checks that keep the classes tied to the measurements, and they come in three
+# shapes because the numbers come from three places: the table in suite.py, the
+# log of the last real run, and the Makefile's own recipes.
+
+
+def test_a_job_class_covers_its_measured_peak():
+    """Every recorded peak fits inside the class the job runs under.
+
+    The floor, and the one that matters most: a class that has fallen behind
+    its workload is not a slow test, it is a job memcap SIGKILLs at its ceiling
+    and the runner reports as RESOURCE — a verdict that says nothing about
+    whether the output was right, so it is worth catching from a number first.
+
+    Checked both ways round, deliberately. The floor (`ceiling >= peak`) is
+    the safety property; the ratchet (`class == class_for_peak(peak)`) is the
+    one that keeps a reservation from creeping back up, and a table that only
+    enforced the floor would let every class in it double without a word.
+    """
+    table = suite.MEASURED_PEAK_GB
+    check('ratchet: the table is worth having (enough rows, both provenances)',
+          len(table) >= 10
+          and {'measured', 'derived'} <= {how for _p, how in table.values()},
+          f'{len(table)} rows, provenances '
+          f'{sorted({how for _p, how in table.values()})}')
+    stale = sorted(n for n in table if n not in suite.REGISTRY)
+    check('ratchet: every measured job still exists',
+          not stale, f'no such job: {stale} — a measurement of a job that was '
+                     f'renamed or deleted is a number nobody checks')
+    under = [(n, p, suite.memclass_for(suite.REGISTRY[n]))
+             for n, (p, _h) in sorted(table.items())
+             if suite.memlimit(suite.memclass_for(suite.REGISTRY[n])) < p]
+    check('ratchet: every class covers its measured peak', not under,
+          '; '.join(f'{n}: peak {p} GB > {c} '
+                    f'({suite.MEMCLASS[suite.memclass_for(suite.REGISTRY[n])]} GB)'
+                    for n, p, c in under))
+    mismatched = suite.class_mismatches()
+    check('ratchet: ...and is the class the ratchet assigns, not a bigger one',
+          not mismatched,
+          '; '.join(f'{n}: {c} where the measurement wants {w}'
+                    for n, c, w in mismatched))
+
+    # The ratchet itself, on a ladder small enough to answer by hand, because a
+    # rule that returns the wrong answer for a case this file can state exactly
+    # is a rule nobody should trust with the other fifteen.
+    ladder = {'a': 4, 'b': 8, 'c': 24}
+    check('ratchet: the smallest class covering 1.5x the peak is chosen',
+          suite.class_for_peak(0.3, ladder) == 'a'
+          and suite.class_for_peak(4.0, ladder) == 'b'
+          and suite.class_for_peak(15.0, ladder) == 'c',
+          f'{[suite.class_for_peak(p, ladder) for p in (0.3, 4.0, 15.0)]} for '
+          f'peaks 0.3/4/15 on a 4/8/24 ladder — note 2.5 stays at 4 (1.5x is '
+          f'3.75), which is the "smallest that covers" half of the rule')
+    check('ratchet: a peak with no class above it is refused, not rounded up',
+          _raises(lambda: suite.class_for_peak(30.0, ladder))
+          and _raises(lambda: suite.class_for_peak(0, ladder)),
+          'a measurement the ladder cannot cover must be an error: the honest '
+          'answer is a new class, not a silent jump to the biggest one')
+
+
+def _raises(fn):
+    try:
+        fn()
+    except ValueError:
+        return True
+    return False
+
+
+def test_a_job_class_covers_the_peak_the_last_run_recorded():
+    """The same floor, against build/suite.log — the log, not the table.
+
+    The table in `tools/suite.py` is a snapshot of one run. This is the check
+    that keeps it honest: it reads the peaks the last real run actually recorded
+    and asks the same question of them, so a workload that grew between two
+    gates is caught by a test rather than by a RESOURCE verdict on a machine
+    that is already busy. Skipped, loudly, when there is no log — a fresh
+    worktree has none — and the parser is self-tested on a synthetic one, so
+    "skipped" can never quietly become "matched nothing and passed".
+    """
+    log = os.path.join(HERE, 'build', 'suite.log')
+    synthetic = os.path.join(HERE, 'build', 'test-suite-peaklog.log')
+    os.makedirs(os.path.dirname(synthetic), exist_ok=True)
+    # Built by the runner's OWN line formatter rather than typed here, so the
+    # parser is checked against the writer and cannot drift from it: a fixture
+    # that stops looking like the real line is the classic way a log parser
+    # ends up matching nothing and reporting green.
+    def fake_line(key, secs, peak=None, cached=False):
+        job = suite.Job(suite.REGISTRY.get(key.split(':')[0]
+                                          or next(iter(suite.REGISTRY))))
+        res = suite.Result('pass', secs, peak_gb=peak, cached=cached)
+        return suite._line(job, res, 1, 5, 0)
+    with open(synthetic, 'w') as f:
+        f.write(fake_line('gimple', 1.0, peak=0.4) + '\n')
+        f.write(fake_line('modcache', 2.0, peak=0.3) + '\n')
+        f.write(fake_line('coro', 0.1, peak=0.9) + '\n')
+        f.write(fake_line('coro', 0.1, peak=1.4) + '\n')     # the worst of two
+        f.write(fake_line('gimple', 0.0, cached=True) + '\n')  # no peak at all
+    parsed = suite.peaks_from_log(synthetic)
+    check('peak log: the parser reads a job\'s peak', parsed.get('gimple') == 0.4,
+          f'{parsed}')
+    check('peak log: a repeated job keeps the WORST peak, not the last',
+          parsed.get('coro') == 1.4, f'{parsed}')
+    check('peak log: a cached replay has no peak and is not invented',
+          len(parsed) == 3 and 'gimple' not in
+          {k for k, v in parsed.items() if v == 0}, f'{parsed}')
+    # The negative control, on a real registered job: a log that says a job
+    # peaked above its class MUST produce a shortfall, or the check above is a
+    # tautology over a list that happens to be empty.
+    check('peak log: a peak above the class is reported, not tolerated',
+          [n for n, _p, _c, _g in suite.class_shortfalls({'modcache': 9.9})]
+          == ['modcache'],
+          f'class_shortfalls on a synthetic 9.9 GB modcache: '
+          f'{suite.class_shortfalls({"modcache": 9.9})}')
+    check('peak log: a peak the class covers produces no shortfall',
+          not suite.class_shortfalls({'modcache': 0.3, 'gimple': 7.9}),
+          f'{suite.class_shortfalls({"modcache": 0.3, "gimple": 7.9})}')
+
+    if not os.path.exists(log):
+        print('      peak log: no build/suite.log in this worktree, so the '
+              'cross-check is skipped (the parser above is checked on a '
+              'synthetic log instead)')
+        return
+    peaks = suite.peaks_from_log(log)
+    if not peaks:
+        print('      peak log: build/suite.log records no per-job peaks (a run '
+              'of cached tests, or a log from before every job was capped)')
+        return
+    short = suite.class_shortfalls(peaks)
+    check('peak log: every class covers the peak the last run recorded',
+          not short,
+          '; '.join(f'{n}: peak {p} GB > {c} ({g:.0f} GB)' for n, p, c, g in short))
+
+
+def test_over_provisioned_classes_are_reported_not_silently_kept():
+    """The >8x list, and the one exception that is not a job's fault.
+
+    A class twenty times its job's peak is a reservation, and reservations are
+    what stall every other worker on the machine — so the list is the early
+    warning. The exception is the floor: a 0.3 GB job in the 4 GB smallest
+    class is 13x its peak, and the alternative is not a smaller reservation, it
+    is a new rung. Counting those separately is the difference between "this
+    class is too big" and "the ladder is too coarse", and only the first is a
+    defect.
+    """
+    over = suite.is_over_provisioned
+    check('over-provisioned: a class far above a peak is listed',
+          over(2.0, 24) and not over(3.0, 8),
+          f'12x in a 24 GB class must be listed ({over(2.0, 24)}); 2.7x in an '
+          f'8 GB class must not ({over(3.0, 8)})')
+    check('over-provisioned: ...and the factor is the threshold, not a vibe',
+          not over(3.0, 24) and over(2.9, 24),
+          f'exactly 8x is not over ({over(3.0, 24)}), 8.3x is '
+          f'({over(2.9, 24)})')
+    check('over-provisioned: ...unless the class is already the smallest one',
+          not over(0.3, min(suite.MEMCLASS.values()))
+          and over(0.3, min(suite.MEMCLASS.values()), floor=0),
+          f'a job at the floor ({min(suite.MEMCLASS.values()):g} GB) is the '
+          f'ladder\'s ratio, not a defect — the exception has to be deliberate, '
+          f'and the same numbers DO trip it with a lower floor')
+    check('over-provisioned: the registry itself has no over-provisioned job',
+          not suite.over_provisioned(),
+          '; '.join(f'{n} {f:.0f}x in {c} ({g} GB)'
+                    for n, _p, c, g in suite.over_provisioned()))
+    check('over-provisioned: ...and it is not vacuous: some jobs ARE at the floor',
+          len(suite.at_floor()) >= 3,
+          f'{len(suite.at_floor())} at the floor class: a list that can only be '
+          f'empty is a list nothing checks')
+
+
+def test_every_job_over_the_debt_line_says_why():
+    """A job that is over the 4 GB line names the doc that says it shouldn't be.
+
+    The owner's standard is that anything over 3-4 GB in this compiler is a bug
+    rather than a fact about the workload. Two ways to be over it, and both are
+    in `needs_memwhy`: a job MEASURED above 4 GB (`native-dumpfull` at 31.3),
+    and a job handed a class above the default with nothing measured behind it
+    (`prooflib`, the A/B sweep). Either way the reason goes in the registry next
+    to the number and points at `bugs/PERF_memory_over_4gb_is_a_bug.md`, which
+    is where the next step for each one is written down.
+    """
+    over = {n: s for n, s in sorted(suite.REGISTRY.items())
+            if suite.needs_memwhy(s)}
+    check('mem debt: the rule is not vacuous, and names measured jobs',
+          len(over) >= 3
+          and any(suite.measured_peak(n) for n in over),
+          f'{sorted(over)}')
+    silent = [n for n, s in over.items()
+              if not getattr(s, 'memwhy', '')
+              or suite.MEM_DEBT_DOC not in s.memwhy]
+    check('mem debt: every job over the line has a reason pointing at the doc',
+          not silent, f'no memwhy, or no pointer to {suite.MEM_DEBT_DOC}: {silent}')
+    # ...and the rule does not fire on the whole registry, which is what makes
+    # a reason worth having.
+    check('mem debt: ...and it is not "everything above 4 GB is a debt": a '
+          'default-class job with no measurement is not asked to explain itself',
+          not suite.needs_memwhy(suite.REGISTRY['gimple'])
+          and not suite.needs_memwhy(suite.REGISTRY['modcache']),
+          'the default class is one documented decision, not 57 of them')
+    # A pointer into bugs/ is a file that can be deleted, and a doc that is
+    # deleted for being fixed is the policy in CLAUDE.md — so a reason pointing
+    # at a doc that no longer exists is a reason that says nothing.
+    check('mem debt: the doc the reasons point at exists',
+          os.path.exists(os.path.join(HERE, suite.MEM_DEBT_DOC)),
+          f'{suite.MEM_DEBT_DOC} is missing: every memwhy now points at '
+          f'nothing, and the next step for each job is written down nowhere')
+
+
+def _makefile_target_closure(start):
+    """Every make target reachable from `start` through prerequisites.
+
+    Transitive on purpose: `ab-bside` runs `make bside`, and `bside` depends on
+    `mojoc`, so the `mojoc` recipe — with its own `memslot` request — runs inside
+    `ab-bside`'s admission. A check that only looked at the target a spec names
+    would have called the registry and the Makefile consistent while that was
+    the one combination that deadlocks.
+    """
+    prereqs = {}
+    target = None
+    for line in open(os.path.join(HERE, 'Makefile')).read().splitlines():
+        if line.startswith('\t') or not line.strip():
+            continue
+        m = re.match(r'^([A-Za-z0-9_][\w./$-]*):(?!=)(.*)$', line)
+        if m:
+            target = m.group(1)
+            prereqs[target] = re.findall(r'[A-Za-z0-9_][\w./$-]*', m.group(2))
+    seen, stack = set(), [start]
+    while stack:
+        t = stack.pop()
+        if t in seen:
+            continue
+        seen.add(t)
+        stack.extend(prereqs.get(t, ()))
+    return seen
+
+
+def _makefile_memslot_classes():
+    """`(label, class)` for every `$(call memslot,LABEL,CLASS)` in the Makefile.
+
+    Read out of the RECIPE lines, reusing the parser above, because the file
+    also mentions the macro in prose and in `make check-help`'s echo of its own
+    documentation — a `$(call memslot,<label>,<class>)` in a comment is not a
+    reservation, and treating it as one would fail on a file that had never been
+    edited. `$$(call` is Make's own escaping for a literal `$(`, which is how
+    the help text spells it, and is the one thing filtered on here: an
+    `@echo` cannot be filtered by its first word, because the parser joins a
+    target's whole recipe into one line and `mojoc`'s first line IS an echo.
+
+    The class NAME is checked against the registry's table, because that is what
+    the expansion turns into gigabytes (`suite.py --prefix`): a name that does
+    not exist there expands to `--gb ` and reserves nothing, which admits
+    everything.
+    """
+    out = []
+    for target, line in _makefile_recipe_lines():
+        if '$$(call' in line:
+            continue
+        for label, cls in re.findall(r'\$\(call memslot,([^,]+),([^)]+)\)', line):
+            if cls not in suite.MEMCLASS:
+                raise AssertionError(
+                    f'Makefile {target}: $(call memslot,{label},{cls}) names a '
+                    f'class that does not exist: {sorted(suite.MEMCLASS)}')
+            out.append((label, cls))
+    return out
+
+
+def test_a_make_recipe_never_asks_for_more_than_its_job_reserved():
+    """A recipe's class cannot exceed the class of the job that runs it.
+
+    This is a deadlock, not a style question, and it is why the two numbers
+    have to move together. The runner admits a `make` job for its class and
+    publishes that in `MEMSLOT_HELD`; the recipe inside then asks `memslot.py`
+    for its own class. If the recipe asks for MORE than the admission, it is not
+    covered (`tools/memslot.py`'s `covering`), so it takes a second reservation
+    — for a tree the first reservation is already accounted for — and since the
+    parent is holding the bytes the child is waiting for, the second can never
+    be admitted. The job hangs with no verdict.
+
+    It was reachable: `bside` depends on `mojoc`, so `ab-bside` (a `program`
+    job, 55 GB) ran the `mojoc` recipe, which asked for `stage` (96), and
+    55 + 96 exceeds the 96 GB budget, so the recipe waited for a turn that
+    could not come. Both numbers now come from the same measured table, and
+    this is what stops them drifting apart again.
+    """
+    recipes = _makefile_memslot_classes()
+    check('recipe class: the Makefile\'s wrapped recipes are found',
+          {'mojoc', 'stage2/mojo', 'fire.ci'} <= {l for l, _c in recipes},
+          f'found {sorted(l for l, _c in recipes)}')
+    check('recipe class: ...and every one names a class that exists',
+          all(c in suite.MEMCLASS for _l, c in recipes),
+          'a recipe naming a missing class expands to `--gb ` and reserves '
+          'nothing, which admits everything')
+
+    # label -> the registered job that starts it, directly or through a
+    # prerequisite. One label can be reached by more than one job, and the
+    # binding constraint is the SMALLEST of them.
+    reachers = {}
+    for name, spec in sorted(suite.REGISTRY.items()):
+        if getattr(spec, 'driver', None) != 'make':
+            continue
+        targets = [str(c) for c in (spec.cmd or [])]
+        reached = set()
+        for t in targets:
+            reached.add(t)
+            reached |= _makefile_target_closure(t)
+        for label, _cls in recipes:
+            if label in reached:
+                reachers.setdefault(label, []).append(name)
+    check('recipe class: the specs that reach those recipes are identified',
+          any(reachers.get('mojoc') for _l, _c in recipes),
+          f'nothing maps to a job: {sorted(reachers)}')
+
+    too_big = []
+    for label, cls in recipes:
+        for job in reachers.get(label, ()):
+            admitted = suite.MEMCLASS[suite.memclass_for(suite.REGISTRY[job])]
+            if suite.MEMCLASS[cls] > admitted:
+                too_big.append(f'{label}: recipe asks {cls} '
+                               f'({suite.MEMCLASS[cls]} GB) but {job} is '
+                               f'admitted for '
+                               f'{suite.memclass_for(suite.REGISTRY[job])} '
+                               f'({admitted} GB)')
+    check('recipe class: no recipe asks for more than its job reserved',
+          not too_big, '; '.join(too_big))
+    # Hand-run targets (`fire.ci`, `build/system.o`) reach no job and so cannot
+    # deadlock against a parent. Said explicitly, because "no job reached it" is
+    # also what a mapping bug looks like.
+    orphans = sorted({l for l, _c in recipes} - set(reachers))
+    check('recipe class: the hand-run targets are the orphans, and only those',
+          set(orphans) <= {'fire.ci', 'build/system.o', 'stage1/fire.ci'},
+          f'no registered job runs: {orphans}')
 
 
 # ── admission: memory is allocated to a job BEFORE it starts ─────────────────
@@ -2090,7 +2447,15 @@ def main():
                test_a_reservation_the_budget_cannot_fit_is_reported,
                test_a_fanout_item_is_capped_and_reserved_like_any_other_job,
                test_a_registered_fanout_item_is_wrapped_in_the_built_argv,
-               test_an_exclusive_job_takes_the_whole_machine_budget):
+               test_an_exclusive_job_reserves_its_class_and_nothing_more,
+               # …and the ratchet that decides what the classes ARE: a class is
+               # a claim on the machine, so it has to be sized from a
+               # measurement rather than from the shape of the workload.
+               test_a_job_class_covers_its_measured_peak,
+               test_a_job_class_covers_the_peak_the_last_run_recorded,
+               test_over_provisioned_classes_are_reported_not_silently_kept,
+               test_every_job_over_the_debt_line_says_why,
+               test_a_make_recipe_never_asks_for_more_than_its_job_reserved):
         fn()
     print()
     print(f'Results: {PASSES} passed, {len(FAILURES)} failed')

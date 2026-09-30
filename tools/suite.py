@@ -257,12 +257,36 @@ MEMCLASS = {
 # The line above which a class is a DEBT rather than a ceiling. The owner's
 # standard is that anything over 3-4 GB in this compiler is a bug, not a fact
 # about the workload, so a job that has to be given more than this carries a
-# `memwhy` naming the reason and points at the doc that says the class should
+# `memwhy` naming the reason and pointing at the doc that says the class should
 # not have to be that big. Enforced by test_suite.py, not by a comment: a
 # comment is a promise nobody checks, and this one is the difference between a
 # reservation and a wish.
 MEM_DEBT_GB = 4.0
 MEM_DEBT_DOC = 'bugs/PERF_memory_over_4gb_is_a_bug.md'
+
+
+def needs_memwhy(spec) -> bool:
+    """Must this job carry a `memwhy`?
+
+    Two ways to be over the debt line, and neither of them is "the class table
+    has a big number in it":
+
+      * the job is MEASURED above the line, so it really does use that much
+        (`native-dumpfull` at 31.3 GB), or
+      * the job is given a class above `small` with nothing measured behind it
+        — an unbacked claim on the machine, which is the same thing wearing a
+        different hat.
+
+    A job on `DEFAULT_MEMCLASS` is neither: the default is one documented
+    decision, sized for a snippet-sized python check, taken once for the 57
+    jobs that inherit it. Requiring a reason there would be requiring 57
+    copies of the same sentence, and a rule that fires on almost everything is
+    a rule nobody reads.
+    """
+    peak = measured_peak(getattr(spec, 'name', ''))
+    if peak:
+        return peak[0] > MEM_DEBT_GB
+    return MEMCLASS[memclass_for(spec)] > MEMCLASS[DEFAULT_MEMCLASS]
 
 # ── Measured peaks: the ratchet's input ──────────────────────────────────────
 # Peak RSS in GB of a job's whole process tree, as `tools/memcap.py` measured it
@@ -399,19 +423,31 @@ def memclass_for(spec) -> str:
 # ── Admission: memory is ALLOCATED to a job before it starts ─────────────────
 # A per-job ceiling bounds ONE process tree. It says nothing about how many
 # trees may run at once, so on its own it is not a bound on the machine at all:
-# the three `bootstrap-stage*-dumps` fanouts are 47 items each at the `module`
-# class, and `-j18` of them is 18 x 24 GB = 432 GB of ALLOWED ceiling on a
-# 128 GB box. That is not hypothetical — on 2026-09-29 those fanouts ran about
-# thirty items at once, each observed between 30 and 43 GB, until the machine
-# collapsed and a human killed them by hand. Every individual process was
-# inside its own cap the whole time, which is exactly the point: a per-process
-# ceiling cannot be defeated by width unless something bounds the SUM.
+# the three `bootstrap-stage*-dumps` fanouts are 47 items each, and `-j18` of
+# them at the `module` class it used to be was 18 x 24 GB = 432 GB of ALLOWED
+# ceiling on a 128 GB box. That is not hypothetical — on 2026-09-29 those
+# fanouts ran about thirty items at once, each OBSERVED between 30 and 43 GB,
+# until the machine collapsed and a human killed them by hand. Every individual
+# process was inside its own cap the whole time, which is exactly the point: a
+# per-process ceiling cannot be defeated by width unless something bounds the
+# SUM.
+#
+# That 30-43 GB figure is NOT reproducible as a summed-RSS peak and the two
+# things said about it here used to contradict each other: the same per-file
+# `--dump` measures 0.5 GB and the same sources as one closure dump measure
+# 1.1-1.2 GB, through this same wrapper. Either the observation was a footprint
+# reading rather than RSS, or it was the python side on a tree state that
+# carried the self-hosting pre-pass (15-30 GB per call, BLOW.md §0), or it
+# summed shared pages. bugs/MEMCAP_module_class_under_the_stage_dumps_peak.md
+# has the three candidates and the command that settles it; what is not in
+# doubt is the SHAPE of the failure, which is why the reservation below exists
+# regardless of which number was right.
 #
 # So the ceiling is also a RESERVATION, taken out of one machine-wide budget
 # before the job is spawned (`tools/memslot.py`, the ledger in
 # ~/.gmojo/memslot). A 55 GB job takes 55 of the 96 GB budget, so a second one
-# waits instead of running beside it; a 24 GB fanout item runs four at a time
-# rather than eighteen. MEMSLOT_BUDGET_GB is the whole-machine number (default
+# waits instead of running beside it; a 4 GB fanout item runs 24 at a time
+# rather than four. MEMSLOT_BUDGET_GB is the whole-machine number (default
 # 96, memslot's own default: it leaves ~30 GB of a 128 GB box for the OS).
 #
 # `excl` used to be the same mechanism carried one step further: an exclusive
@@ -530,6 +566,23 @@ def class_mismatches():
             if c != w]
 
 
+def is_over_provisioned(peak_gb, ceiling, floor=None) -> bool:
+    """Is a class of `ceiling` GB over-provisioned for a `peak_gb` GB peak?
+
+    The warning rule, as a function of two numbers rather than of the table, so
+    it can be checked on cases whose answer is computable by hand. `floor` is
+    the smallest class in the ladder, and the exception it buys is the point
+    rather than a loophole: a 0.3 GB job in the 4 GB floor class is 13x its
+    peak, but the ladder has nothing below it, so the alternative is not a
+    smaller reservation, it is a new rung. Those are counted separately, by
+    `at_floor`, so "the class is too big" and "the ladder is too coarse" are two
+    different findings and only the first is a job's fault.
+    """
+    floor = min(MEMCLASS.values()) if floor is None else floor
+    return (bool(peak_gb) and peak_gb > 0 and ceiling > floor
+            and ceiling / peak_gb > OVER_PROVISIONED_FACTOR)
+
+
 def over_provisioned():
     """The measured jobs whose class is more than OVER_PROVISIONED_FACTOR their peak.
 
@@ -537,17 +590,9 @@ def over_provisioned():
     allowed to be over-provisioned on purpose, and the everyday jobs are not.
     It is the shape a regression takes when a class is left at a historical
     number — invisible in the run, since nothing fails, and visible here.
-
-    A job already at the SMALLEST class is not in it, and that exception is the
-    point rather than a loophole: a 0.3 GB job in the 4 GB floor class is 13x
-    its peak, but the ladder has nothing below it, so the alternative is not a
-    smaller reservation, it is a new rung. Those are counted separately, by
-    `at_floor`, so "the class is too big" and "the ladder is too coarse" are
-    two different findings and only one of them is a job's fault.
     """
-    floor = min(MEMCLASS.values())
-    return [(n, p, c, f) for n, p, _h, c, g, f, _w in memclass_ratios()
-            if f is not None and f > OVER_PROVISIONED_FACTOR and g > floor]
+    return [(n, p, c, g / p) for n, p, _h, c, g, _f, _w in memclass_ratios()
+            if is_over_provisioned(p, g)]
 
 
 def at_floor():
@@ -560,6 +605,85 @@ def at_floor():
 def unmeasured_jobs():
     """Registered jobs with no recorded peak, sorted: they keep their class."""
     return sorted(n for n in REGISTRY if n not in MEASURED_PEAK_GB)
+
+
+def class_shortfalls(peaks):
+    """`(name, peak, class, ceiling)` for every job whose class cannot cover `peak`.
+
+    The floor, as a function of a `{name: peak_gb}` mapping, so the same check
+    runs against a run's own measurements and against the peaks in a log left
+    by an earlier run. Empty is the healthy answer and is the whole point: a
+    job whose class has stopped covering its workload is a job memcap kills at
+    its ceiling and the runner reports as RESOURCE — a verdict that says
+    nothing about the output, which is exactly why it is worth catching in a
+    test first, from a number, rather than on a machine mid-gate.
+    """
+    out = []
+    for name, peak in sorted((peaks or {}).items()):
+        spec = REGISTRY.get(name.split(':')[0])
+        if spec is None or peak is None:
+            continue
+        cls = memclass_for(spec)
+        ceiling = memlimit(cls)
+        if ceiling > 0 and peak > ceiling:
+            out.append((name, peak, cls, ceiling))
+    return out
+
+
+# The per-job line `report` writes, read back. Parsed here rather than in
+# test_suite.py because the format is this module's own: a second copy of it is
+# a second thing to forget to update when the line changes, and a parser that
+# silently matches nothing is worse than no parser.
+_JOB_LINE = re.compile(r'^\[\s*\d+/\d+\]\s+\S+\s+(\S+)\s+[0-9.]+s\s+'
+                        r'\(\d+ running\)(?:\s+\[([^\]]*)\])?')
+_PEAK_IN_TAIL = re.compile(r'peak ([\d.]+) GB')
+
+
+def peaks_from_log(path):
+    """`{job key: peak_gb}` for every job a run log recorded a peak for.
+
+    Per job, the LARGEST peak seen — a fanout's 45 items are 45 lines with the
+    same test name, and the class has to cover the worst of them, not the one
+    that happened to finish first. Cached replays have no peak (they start no
+    process), which is why a log is not a complete record of what a job needs:
+    it is a record of what the jobs that actually ran needed.
+    """
+    peaks = {}
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            for line in f:
+                m = _JOB_LINE.match(line)
+                if not m:
+                    continue
+                key, tail = m.group(1), m.group(2) or ''
+                p = _PEAK_IN_TAIL.search(tail)
+                if p:
+                    peaks[key] = max(peaks.get(key, 0.0), float(p.group(1)))
+    except OSError:
+        return {}
+    return peaks
+
+
+def peak_drift(measured):
+    """`(name, this run, recorded)` for jobs whose measurement has moved.
+
+    The table is a snapshot of one run, and a snapshot goes stale silently:
+    a workload that grows keeps fitting its class until it does not, and one
+    that shrinks keeps reserving 20x what it needs until someone notices. Both
+    directions are reported, because both are how this file becomes a lie, and
+    "the number in the table is from a run, and this is a newer one" is the
+    only thing that keeps it honest.
+    """
+    out = []
+    for key, peak in sorted((measured or {}).items()):
+        name = key.split(':')[0]
+        recorded = MEASURED_PEAK_GB.get(name)
+        if recorded is None or peak <= 0:
+            continue
+        old = recorded[0]
+        if peak > old * (1 + PEAK_HEADROOM) or peak < old / (1 + PEAK_HEADROOM):
+            out.append((name, peak, old))
+    return out
 
 
 def memclass_report_lines():
@@ -2425,6 +2549,21 @@ def report(names, state, results, wall, peak, opts, log: Log):
                      f'ceiling {ceiling:>5.0f} GB  {used} of it')
         worst = measured[0]
         log.line(f'  worst: {worst[1]} at {worst[0]:.1f} GB')
+        # The two things a reader can do with this run's numbers, both of which
+        # used to be impossible: a class that this run's peak does not fit (a
+        # RESOURCE verdict waiting to happen), and a recorded peak this run
+        # contradicts (the table in MEASURED_PEAK_GB is a snapshot, and a
+        # snapshot that nobody compares to the next run is a rumour).
+        short = class_shortfalls({k: p for p, k in measured})
+        drift = peak_drift({k: p for p, k in measured})
+        for name, peak, cls, ceiling in short:
+            log.line(f'  CLASS TOO SMALL: {name} peaked at {peak:.1f} GB and '
+                     f'its {cls} class is {ceiling:.0f} GB — the next run will '
+                     f'be RESOURCE-capped')
+        for name, peak, old in drift:
+            log.line(f'  PEAK DRIFT: {name} measured {peak:.1f} GB here, '
+                     f'{old:.1f} GB in MEASURED_PEAK_GB — update the table (and '
+                     f'the class with it)')
 
     # The test count is in the tail as well as the job count, because those are
     # the two numbers a reader adds up, and the job count alone is what made the
