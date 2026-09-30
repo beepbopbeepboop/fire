@@ -555,6 +555,36 @@ y = g("a", "b")
 print(y)
 """, "ab\n")
 
+    # `print(<unannotated param>)` typed the parameter `char *` (the
+    # BUILTIN_PARAM_TYPES entry for `print`, since `print` accepts a value of
+    # ANY type in Python and so says nothing about its argument's type), and
+    # the call site then passed the integer as a pointer:
+    #
+    #   void g (char * x) { mojo_print (x); ... }
+    #   _t1 = (void *)1; g ((char *)_t1);
+    #
+    # so `g(1)` strlen'd address 1 and died with SIGSEGV, and `g(1.5)` did
+    # not even compile. Every OTHER use of the same parameter was already
+    # right (`print("v=", x)`, `print(str(x))`, `print(x + 1)`,
+    # `return x`), which is why the trigger is so narrow. The sibling
+    # `gimple_untyped_param_string_passthrough` above is the case that must
+    # keep working, and the string call site is the third: all three in one
+    # test so removing the inference cannot quietly trade a crash for a wrong
+    # string.
+    test_gimple_stdout("gimple_print_of_untyped_param_is_not_a_pointer", """\
+def gi(x):
+    print(x)
+
+def gs(x):
+    print(x)
+
+def gf(x):
+    print(x)
+gi(1)
+gf(1.5)
+gs("s")
+""", "1\n1.5\ns\n")
+
     # 15. Same two-param concat shape, but the result is read back through an
     # f-string interpolation (`{y}`) rather than a plain print(y) — the exact
     # surrounding shape that originally surfaced this bug class.
