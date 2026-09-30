@@ -3890,13 +3890,59 @@ class X86_64Codegen:
                 _SHIFT_CL[op] if signed else _SHIFT_IMM[op], Reg.RAX, lit))
             self._emit_trunc(result_t)
             return
+        # A literal amount at or past the word's width, decided HERE with no
+        # branch. The immediate form's range check above is what routes it
+        # here, and the hardware would mask it back to a shift by zero —
+        # `3 >> 64` was `3` on this backend exactly as on arm64, because both
+        # were written to the same wrong rule (the rule itself is
+        # `model.shift_saturated_value`; the arithmetic `>>` case is not 0,
+        # which is why only the SIGN is left to a run-time fact).
+        if lit is not None and M.shift_saturates(lit):
+            self._emit_expr(e.left)
+            if op == "<<" or not signed:
+                self._emit_mov_imm(Reg.RAX, 0)
+            else:
+                self.asm.emit(encode_shift_r64_imm8(">>signed", Reg.RAX, 63))
+            self._emit_trunc(result_t)
+            return
+        # The register form, with an amount only known at run time. RAX is the
+        # value and RCX the amount.
+        #
+        # The amount is compared against 64 and a saturating branch taken
+        # BEFORE the shift, because the three x86 shift forms do not agree
+        # about an out-of-range count and agreeing with none of them is not a
+        # rule: `SHR`/`SAR` saturate at 63 (so `x >> 64` would be `x >> 63`,
+        # which is 1 for a negative operand where Python says 0), while `SHL`
+        # masks the count to 6 bits (so `x << 64` is `x`). One comparison
+        # covers all three, and the saturated value is the same one arm64
+        # computes.
+        #
+        # The compare is SIGNED, matching arm64's and for the same reason: an
+        # amount of 64 or more saturates, and a negative one (which CPython
+        # rejects with ValueError, and which this path has always handed to
+        # the hardware) keeps the behaviour it had.
+        self._if_counter += 1
+        sid = self._if_counter
+        fn = self.func_name
+        sat_label = f"{fn}_sh{sid}_sat"
+        end_label = f"{fn}_sh{sid}_end"
         self._emit_expr(e.left)
         self._push_slot(Reg.RAX)
         self._emit_expr(e.right)
         self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.RAX))
         self._pop_slot(Reg.RAX)
+        self.asm.emit(encode_cmp_r64_imm32(Reg.RCX, M.SHIFT_WIDTH))
+        self._record_cond_branch()
+        self._emit_jcc(COND_GE, sat_label)
         self.asm.emit(encode_shift_r64_cl(
             _SHIFT_CL[op] if signed else _SHIFT_IMM[op], Reg.RAX))
+        self._emit_jmp(end_label)
+        self.asm.label(sat_label)
+        if op == "<<" or not signed:
+            self._emit_mov_imm(Reg.RAX, 0)
+        else:
+            self.asm.emit(encode_shift_r64_imm8(">>signed", Reg.RAX, 63))
+        self.asm.label(end_label)
         self._emit_trunc(result_t)
 
     def _emit_pow(self, e: F.BinaryOp) -> None:

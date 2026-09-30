@@ -5506,8 +5506,11 @@ class ARM64Codegen:
 
         Division is UDIV/SDIV (trunc toward zero; `//` matches `/` on the
         unsigned default). Remainder is DIV then MSUB (n - (n/d)*d). Shifts
-        use LSLV/LSRV/ASRV (immediate form when the RHS is a small literal).
-        `**` unrolls a small literal exponent."""
+        use LSLV/LSRV/ASRV (immediate form when the RHS is a small literal),
+        and an amount at or past the word's width SATURATES rather than being
+        masked to a shift by zero — `model.shift_saturated_value` is the rule
+        and this is only its instruction selection. `**` unrolls a small
+        literal exponent."""
         signed = cmp_signed(common_type(self._ttype(e.left),
                                         self._ttype(e.right)))
         if op in ("/", "//", "%"):
@@ -5543,6 +5546,8 @@ class ARM64Codegen:
             return
 
         if op in ("<<", ">>"):
+            result_t = common_type(self._ttype(e.left),
+                                   self._ttype(e.right))
             imm_r = e.right
             if isinstance(imm_r, F.IntLiteral) and 0 <= imm_r.value <= 63:
                 self._emit_expr(e.left)
@@ -5552,21 +5557,75 @@ class ARM64Codegen:
                     self.asm.emit(encode_asr_xd_xn_imm(0, 0, imm_r.value))
                 else:
                     self.asm.emit(encode_lsr_xd_xn_imm(0, 0, imm_r.value))
-                self._emit_trunc(common_type(self._ttype(e.left),
-                                             self._ttype(e.right)))
+                self._emit_trunc(result_t)
                 return
+            # A literal amount at or past the word's width is decided HERE,
+            # with no branch: the value cannot be shifted that far, and the
+            # immediate form's range check above is what sends it to the
+            # register form, where the hardware would mask the amount back to
+            # a shift by zero. `3 >> 64` was `3` and `3 << 64` was `3`. The
+            # saturation rule (and why the arithmetic `>>` case is not simply
+            # 0) is `model.shift_saturated_value`; only the SIGN is a runtime
+            # fact here, so the operand is still evaluated and `ASR #63`
+            # replicates it.
+            lit = self._static_int(imm_r)
+            if lit is not None and M.shift_saturates(lit):
+                self._emit_expr(e.left)
+                if op == "<<" or not signed:
+                    self.asm.emit(encode_movz_xd_imm(0, 0))
+                else:
+                    self.asm.emit(encode_asr_xd_xn_imm(0, 0, 63))
+                self._emit_trunc(result_t)
+                return
+            # The register form, which has to handle an amount only known at
+            # run time. X0 is the value, X1 the amount; the amount is compared
+            # against 64 and a saturating branch taken before the shift, so the
+            # hardware's modulo-64 masking is never the answer. The sign for
+            # the arithmetic case is X0's own, so it is read before X0 is
+            # overwritten.
+            self._if_counter += 1
+            sid = self._if_counter
+            fn = self.func_name
+            sat_label = f"{fn}_sh{sid}_sat"
+            end_label = f"{fn}_sh{sid}_end"
             self._emit_expr(e.left)
             self.asm.emit(encode_stp_sp_pre(0, 2))
             self._emit_expr_to(e.right, "X1")
             self.asm.emit(encode_ldp_sp_post(0, 2))
+            # CMP X1, #64 / B.GE sat. The compare is SIGNED, which is what
+            # keeps this change to the one case it fixes: an amount of 64 or
+            # more (signed, so 64..2^63-1) saturates, while a NEGATIVE amount
+            # is below 64 and keeps taking the hardware's modulo-64 masking.
+            # That is not an endorsement — CPython raises ValueError for a
+            # negative amount, and this path has always answered with the
+            # masked shift — it is the refusal of a separate question, so it
+            # is left exactly as it was rather than changed by a fix that
+            # claims to be about the saturation boundary.
+            #
+            # The polarity is the whole instruction: B.GE, not B.LT. The
+            # saturating block is the branch TARGET, so the condition names
+            # the amounts that SATURATE. B.LT here branches to the saturated
+            # value on exactly the amounts that are in range, and every shift
+            # under 64 returns the unshifted word — the defect this replaces,
+            # reached through a different route.
+            self.asm.emit(encode_cmp_xn_imm(1, 64))
+            self.asm.emit(encode_b_cond("ge", 8))
+            self.asm.emit_label_rel(sat_label, here_offset=-4)
             if op == "<<":
                 self.asm.emit(encode_lslv_xd_xn_xm(0, 0, 1))
             elif signed:
                 self.asm.emit(encode_asrv_xd_xn_xm(0, 0, 1))
             else:
                 self.asm.emit(encode_lsrv_xd_xn_xm(0, 0, 1))
-            self._emit_trunc(common_type(self._ttype(e.left),
-                                         self._ttype(e.right)))
+            self.asm.emit(encode_b(0))
+            self.asm.emit_label_rel(end_label, here_offset=-4)
+            self.asm.label(sat_label)
+            if op == "<<" or not signed:
+                self.asm.emit(encode_movz_xd_imm(0, 0))
+            else:
+                self.asm.emit(encode_asr_xd_xn_imm(0, 0, 63))
+            self.asm.label(end_label)
+            self._emit_trunc(result_t)
             return
 
         if op == "**":

@@ -483,6 +483,84 @@ def incoming_args(fn) -> list:
     return ct + list(getattr(fn, "params", None) or [])
 
 
+# ── Shifts ───────────────────────────────────────────────────────────────
+#
+# A shift is the one operator whose result depends on a value BOTH backends
+# have to agree about and neither can read off an instruction. The hardware
+# takes the amount modulo the word size, so `LSRV Xd, Xn, Xm` with `Xm = 64`
+# is a shift by ZERO, `3 >> 64` is `3`, and `3 << 64` is `3` — on arm64 and on
+# x86-64 alike, because both were written to the same wrong rule rather than
+# because the rule is the hardware's (bugs/FORMAL_shift_by_64_or_more_wraps_instead_of_saturating.md).
+#
+# It is here, in the shared model, because a per-backend fix is the one shape
+# that cannot be verified: the two shift emitters are separate functions with
+# the same structure, so a rule written twice is two rules that agree only
+# until one of them is edited. THIS is a value-model decision (what the
+# operator means), not instruction selection, which is the split this module
+# exists to enforce.
+#
+# The rule is CPython's, because CPython is the oracle every test in this tree
+# compares against: a shift by an amount at or beyond the word's width
+# SATURATES.
+#
+#   x << n  ==  0            for n >= 64, signed or unsigned
+#   x >> n  ==  0            for n >= 64, when x is non-negative
+#   x >> n  ==  -1           for n >= 64, when x is negative
+#
+# The last row is the one that is easy to get wrong, and it is why the rule
+# cannot be a bare "return 0": Python's `>>` on a negative value is an
+# ARITHMETIC shift (it rounds toward negative infinity — `-5 >> 1` is `-3`,
+# not `-2`), so the sign bit keeps being replicated no matter how far the
+# shift goes, and the answer at 64 is the sign extended word, which is `-1`.
+# A saturation that returned 0 for every amount at or past 64 would be right
+# for `x << n` and for every non-negative `x >> n`, and wrong for exactly the
+# negative operands that a bit-manipulating algorithm produces by subtracting.
+#
+# Note what is deliberately NOT here: the spelling for a LOGICAL right shift.
+# `>>` is arithmetic on a signed value and that is not a defect — it is what
+# Python means, and `test_formal_run.py` pins both directions so a "fix" that
+# made every `>>` logical would be caught. A program that wants zeros shifted
+# in says so with an unsigned type, which is what `shift_is_logical` is for.
+
+# The width a shift saturates at, and the amount the hardware masks to.
+SHIFT_WIDTH = 64
+SHIFT_AMOUNT_MASK = 63
+
+
+def shift_saturates(amount, width: int = SHIFT_WIDTH) -> bool:
+    """Whether a shift by `amount` is at or past the word's width.
+
+    `amount` is whatever the source says: a Python int, possibly a variable's
+    unknown value (None, which is never saturating) or a negative one. A
+    negative amount is NOT saturating here — CPython raises `ValueError` for
+    it, and this path's existing behaviour for a negative amount is to let the
+    hardware mask it, which is a separate question from this one and is not
+    what this function is deciding."""
+    return amount is not None and amount >= width
+
+
+def shift_saturated_value(value, op: str, signed: bool):
+    """The answer a shift that saturates gives, as a function of the value.
+
+    `op` is `<<` or `>>`; `signed` says whether the value being shifted is a
+    signed one (and so whether `>>` replicates its sign). The value itself is
+    passed because the arithmetic case's answer depends on it, and returning
+    0 for a negative operand is precisely the wrong answer documented above."""
+    if op == "<<" or not signed:
+        return 0
+    return 0 if (value is not None and value >= 0) else -1
+
+
+def shift_is_logical(signed) -> bool:
+    """Whether `>>` on a value of this signedness shifts in zeros.
+
+    The backend's own instruction choice, stated once: signed gets the
+    arithmetic shift (ASRV/ASR, `sar`), unsigned gets the logical one
+    (LSRV/LSR, `shr`). `signed` is a bool, not a type, because every consumer
+    already resolved it through `types.cmp_signed`."""
+    return not signed
+
+
 def is_generic(fn) -> bool:
     return bool(getattr(fn, "comptime_params", None))
 
