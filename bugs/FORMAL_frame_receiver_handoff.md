@@ -833,7 +833,16 @@ the codegen class for a *target* fact — `test_myinterpreter.py` and
 `test_myinterpreter_simple.py` import `sys`. That is the direction of drift
 that flatters a number, called out here rather than left in a table. The
 third is `formal/arm64_codegen.py`, which needs ~4.5 min and times out at
-`-t 300`; at `-t 600` it lands on `self._fd_vars = set()`.
+`-t 300`.
+
+**The timeout, because it is a finding the sweep was hiding.** At `-t 300` it
+is one of the 5 `tool` rows; at `-t 600` it builds long enough to refuse, and
+lands on `self._fd_vars = set()` — honestly untyped, and the family is **x3**
+rather than x2 with the whole run at 39 codegen findings and 84/123 = 68.3%.
+So two separate measurements of the same tree, and the honest one is the
+longer: a 30-second sweep timeout was reporting "no verdict" for a file that
+has a verdict, which is `tools/formal_sweep.py`'s own warning about `-t`
+being the usual cause, confirmed.
 
 **Where the 8 that left the family landed**, which is the part the task asks
 for and the part a count cannot say:
