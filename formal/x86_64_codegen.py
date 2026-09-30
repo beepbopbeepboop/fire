@@ -789,8 +789,14 @@ class X86_64Codegen:
         # and the spill slots, which is `model.RET_FRAME_REGION_ABOVE_BLOBS` —
         # above the blobs so a blob growing upward cannot run into one, below the
         # spill slots because those are already spoken for.
+        # `model.frame_returning_predicate`, not `self._returns_frame.get`:
+        # `struct_returned_frame_sites` takes a TWO-argument predicate and
+        # `dict.get` takes `(key, default)`, so passing the bound method
+        # answers "no" with the bound NAME and treats every call in the module
+        # as returning a frame.  The model's comment there has the measurement.
         self._ret_recv_sites = M.struct_returned_frame_sites(
-            f, self._structs, self._returns_frame.get)
+            f, self._structs,
+            M.frame_returning_predicate(self._returns_frame))
         self._ret_recv_bytes = sum(v[2] for v in self._ret_recv_sites.values())
         self._blob_cap = -self._top_bytes - self._ret_recv_bytes
         if self._blob_cap < self._blob_base + self._frame_recv_bytes:

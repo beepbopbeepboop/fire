@@ -26,7 +26,7 @@ callee by construction; nothing about the callee's lifetime enters into it.
 | the escape gate, and the one new edge in the holder fixpoint | `formal/build.py` `_check_frame_escapes`, `_frame_receivers` |
 | five refusals | `formal/model.py` `returned_frame_{entry,library,shape,ambiguous,blob}_refusal`, `returned_frame_convention_refusal` |
 | the codegen | `formal/arm64_codegen.py` and `formal/x86_64_codegen.py`: `_ret_block_sites`, `_ret_fwd_sites`, `_ret_recv_sites`, `_emit_site_base` / `_emit_block_base` |
-| the cases | `test_formal_returned_frame.py` — 10 differential + 8 refusal, both architectures built and executed, each differential case compared against CPython |
+| the cases | `test_formal_returned_frame.py` — 12 differential + 8 refusal, both architectures built and executed, each differential case compared against CPython |
 
 ## The three decisions, and why each went the way it did
 
@@ -116,9 +116,40 @@ every block store recomputes it there; the argument push reads `X0`. With one
 returned frame in a function the two happened to hold the same word often enough
 to pass; with two, it did not.
 
-Neither is a reasoning error; both are "a table read at two places" and "a
-register convention read at two places", which is why the fix for each is one
-reader rather than a second check.
+**3. `dict.get` was handed to a predicate that takes two arguments.**
+`struct_returned_frame_sites`'s contract is
+`returns_frame(callee_name, bound_name) -> struct`, and both backends passed
+`self._returns_frame.get`. `dict.get` takes `(key, default)`, so a MISSING
+callee answered with the second argument — the bound NAME — and **every call in
+a module that declares a multi-field struct was treated as returning a frame**:
+a zero-byte block reserved for each, and its address pushed as a ninth argument
+into a register the callee never reads. Five extra instructions per call, so
+every program's ANSWER was unchanged and no image was byte-identical to what it
+had been; and where a module also had an eight-argument call the ninth push
+crossed the ABI limit and the program was **refused for an argument it never
+had**:
+
+```
+build: call wide(): 9 arguments exceeds the 8 the formal arm64 ABI passes in
+registers (one of which is the block this callee returns a frame in)
+```
+
+for `def wide(a, b, c, d, e, f, g, h)` bound with `var r = wide(...)`, in a
+module that also declares a two-field struct. On x86-64 the same bug refuses a
+SIX-argument call.
+
+This one is worth recording for what it says about the LANDED code rather than
+about the new code: `struct_returned_frame_sites` and its two-argument contract
+were already on the tree, with ten cases in `test_returned_frame_layout.py`, and
+nothing failed — because that file's `_returns` helper is a real two-argument
+closure and the arity was never the thing under test. **A documented parameter
+list is not a check**, and the only thing that turned this into a failure rather
+than 20 bytes of dead code per call was an arity boundary.
+
+None of the three is a reasoning error; each is "a table read at two places", "a
+register convention read at two places", or "an argument list read at two
+places", which is why the fix for each is ONE reader rather than a second
+check.
 
 ## The measured effect on the 30 files this cause blocked
 
@@ -219,8 +250,9 @@ reserved, and both emitters read them.
 
 | command | result |
 |---|---|
-| `python3 test_formal_returned_frame.py` | **PASS=18 FAIL=0** — 10 differential against CPython, 8 refusals, both architectures built and executed |
-| the same file on the pre-change tree (`git archive HEAD~1` into `.tmp/pre`, this file dropped in) | **`PASS=1 FAIL=17`** — the 1 is `refuse_a_received_frame_handed_on`, labelled a GUARD in the file because it was refused before and after, for the same reason |
+| `python3 test_formal_returned_frame.py` | **PASS=21 FAIL=0** — 12 differential against CPython, 8 refusals, one structural guard, both architectures built and executed |
+| the same file on the **pre-change** tree (`git archive 53f89ae7` into a scratch root, this file dropped in) | **`PASS=3 FAIL=18`** — the 3 are `refuse_a_received_frame_handed_on` (labelled a GUARD in the file: refused before and after, for the same reason) and the two arity cases, which are guards for bug 3 below and are correct on a tree that has no convention at all |
+| the same file on the **intermediate** commit `e2892699`, which had the codegen but not bug 3's fix | **`PASS=16 FAIL=5`** — the four structural failures, both arity cases (`9 arguments exceeds the 8 …` / `7 … exceeds the 6`), and the two cases whose messages landed in the next commit |
 | `python3 test_formal_run.py` | `PASS=387 FAIL=0`, after `byref_refuse_returned` was re-pointed (see below) |
 | `python3 test_formal_frame_len.py` | `PASS=10 FAIL=0`, unchanged |
 | `python3 test_formal_imports.py` | `PASS=41 EXPECTED=0 FAIL=0`, unchanged |
@@ -228,6 +260,15 @@ reserved, and both emitters read them.
 | `python3 test_formal_link_accounting.py` | `133 passed, 0 failed`, unchanged |
 | `python3 test_returned_frame_layout.py` | `10 passed, 0 failed`, unchanged |
 | `formal_sweep` over the 30 files, arm64 | table above |
+| **byte-identical Mach-O for a program that already worked**, before vs after, same output filename in each tree | arm64 **byte-identical** (51152 bytes), x86-64 **byte-identical** (51360 bytes) — for a 60-line program with two structs, five methods, a list blob, a loop and a `printf` |
+
+The byte-identity measurement is what found bug 3, and it is worth recording
+WHY it found it: `CLAUDE.md` asks for byte-identical output from a
+behaviour-preserving change, this is a change that must be behaviour-preserving
+for every program that does not return a frame, and twenty bytes of extra
+instructions per call site is not that. The answers were all still right — which
+is exactly the shape the map's §3 warns about, where a file's verdict does not
+move and the image underneath it does.
 
 **`byref_refuse_returned` was re-pointed, not deleted.** It asserted that
 `return p` from the function that built `p` is refused. That was true and is no

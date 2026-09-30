@@ -10031,6 +10031,38 @@ def struct_constructor_bindings(fn, framed) -> dict:
     return out
 
 
+def frame_returning_predicate(table):
+    """`(callee, bound_name) -> struct or None` over a `{callee: struct}` table.
+
+    **`struct_returned_frame_sites` takes a TWO-argument predicate, and
+    `dict.get` is not one.**  `dict.get` takes `(key, default)`, so handing it
+    over as the predicate makes a MISSING callee answer with the second
+    argument — which is the bound NAME — and every call in a module that
+    declares a multi-field struct is then treated as returning a frame.  The
+    consequence is five extra instructions per call (a zero-byte block whose
+    address is pushed as a ninth argument into a register the callee never
+    reads), so the program's ANSWERS are unchanged and the image is not: and in
+    a module that also has an eight-argument call the ninth push crosses the ABI
+    limit and the program is refused for an argument it never had.  Measured,
+    both:
+
+        # `dict.get` as the predicate
+        call wide(): 9 arguments exceeds the 8 the formal arm64 ABI passes in
+        registers (one of which is the block this callee returns a frame in)
+
+    — for `def wide(a, b, c, d, e, f, g, h)` bound with `var r = wide(...)` in a
+    module that also declares a two-field struct.  The landed
+    `test_returned_frame_layout.py` did not catch it because its `_returns`
+    helper is a real two-argument closure.
+
+    So the predicate is built here, by the function whose contract states the
+    arity, rather than at each of the two call sites that supply one.
+    """
+    def _predicate(callee, _bound_name):
+        return table.get(callee)
+    return _predicate
+
+
 def returned_frame_forward_bindings(fn, ret_frame) -> dict:
     """`{name: [struct, …]}` — locals bound from a callee that HANDS BACK a
     frame.

@@ -921,8 +921,14 @@ class ARM64Codegen:
         # same four regions the same way and a scratch laid out differently on
         # the two machines is a returned frame that is correct on one and a
         # use-after-free on the other.
+        # `model.frame_returning_predicate`, not `self._returns_frame.get`:
+        # `struct_returned_frame_sites` takes a TWO-argument predicate and
+        # `dict.get` takes `(key, default)`, so passing the bound method
+        # answers "no" with the bound NAME and treats every call in the module
+        # as returning a frame.  The model's comment there has the measurement.
         self._ret_recv_sites = M.struct_returned_frame_sites(
-            f, self._structs, self._returns_frame.get)
+            f, self._structs,
+            M.frame_returning_predicate(self._returns_frame))
         self._ret_recv_bytes = sum(v[2] for v in self._ret_recv_sites.values())
         # ONE place decides the blob cap, now that all four regions are known.
         self._blob_cap = _SCRATCH - self._spill_bytes - self._ret_recv_bytes

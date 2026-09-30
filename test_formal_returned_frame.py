@@ -460,6 +460,79 @@ DIFF_CASES = [
      "    return 0\n\n"
      "main()\n"),
 
+    # AN EIGHT-ARGUMENT CALL TO A CALLEE THAT RETURNS NOTHING.  This is the case
+    # that found the second bug in this change's own code, and it is the only
+    # one of the 18 that would have FAILED rather than merely been wrong: the
+    # caller half takes a `(callee, bound_name) -> struct` predicate, and
+    # `dict.get` — which is `(key, default)` — was passed as one.  A module that
+    # declares a multi-field struct therefore treated EVERY call as returning a
+    # frame, reserved a zero-byte block for each, and pushed its address as a
+    # ninth argument.  Eight arguments plus one is nine, so this program was
+    # refused for an argument it never had.  The answers were unaffected
+    # everywhere else — the callee never reads that register — so nothing but an
+    # arity case could have told.
+    # (name, mojo, python, backends) — the two arity cases below are pinned to
+    # ONE architecture each, because the budget is a property of the ABI: eight
+    # argument registers on arm64 and six on x86-64.  An eight-argument call is
+    # a refusal on x86-64 and has always been, so running it there would be
+    # testing the arity check rather than the convention.
+    ("an_eight_argument_call_to_a_plain_callee_still_builds",
+     "struct Point:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "def wide(a, b, c, d, e, f, g, h):\n"
+     "    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8\n\n"
+     "def main(n):\n"
+     "    var p = Point()\n"
+     "    p.x = 1\n"
+     "    var r = wide(1, 2, 3, 4, 5, 6, 7, 8)\n"
+     '    printf("r=%d", r + p.x)\n'
+     "    return 0\n",
+     "class Point:\n"
+     "    def __init__(self):\n"
+     "        self.x = 0\n"
+     "        self.y = 0\n\n"
+     "def wide(a, b, c, d, e, f, g, h):\n"
+     "    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8\n\n"
+     "def main():\n"
+     "    p = Point()\n"
+     "    p.x = 1\n"
+     "    r = wide(1, 2, 3, 4, 5, 6, 7, 8)\n"
+     '    print("r=%d" % (r + p.x), end="")\n'
+     "    return 0\n\n"
+     "main()\n",
+     ("arm64",)),
+
+    # …and the x86-64 half of the same bug: six argument registers, so a
+    # SIX-argument call is the one the spurious seventh crosses.  Same program,
+    # one fewer parameter.
+    ("a_six_argument_call_to_a_plain_callee_still_builds",
+     "struct Point:\n"
+     "    var x: Int\n"
+     "    var y: Int\n\n"
+     "def wide(a, b, c, d, e, f):\n"
+     "    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6\n\n"
+     "def main(n):\n"
+     "    var p = Point()\n"
+     "    p.x = 1\n"
+     "    var r = wide(1, 2, 3, 4, 5, 6)\n"
+     '    printf("r=%d", r + p.x)\n'
+     "    return 0\n",
+     "class Point:\n"
+     "    def __init__(self):\n"
+     "        self.x = 0\n"
+     "        self.y = 0\n\n"
+     "def wide(a, b, c, d, e, f):\n"
+     "    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6\n\n"
+     "def main():\n"
+     "    p = Point()\n"
+     "    p.x = 1\n"
+     "    r = wide(1, 2, 3, 4, 5, 6)\n"
+     '    print("r=%d" % (r + p.x), end="")\n'
+     "    return 0\n\n"
+     "main()\n",
+     ("x86_64",)),
+
     # A FUNCTION THAT DOES NOT RETURN A FRAME IS UNCHANGED, byte for byte in
     # what it computes.  A convention that spent a register on every function
     # rather than only on the ones that need one would move this answer, and
@@ -674,6 +747,34 @@ REFUSALS = [
 ]
 
 
+def check_predicate_is_two_argument():
+    """Neither backend may hand `dict.get` to `struct_returned_frame_sites`.
+
+    Structural rather than behavioural, and it is here because the behavioural
+    consequence is invisible in every case except an eight-argument call: the
+    predicate's contract is `(callee, bound_name) -> struct`, `dict.get`'s is
+    `(key, default)`, and a missing callee therefore answers with the bound
+    NAME.  Both backends read the predicate from
+    `formal/model.py`'s `frame_returning_predicate`, whose comment carries the
+    measurement; this checks that neither of them grew a private one.
+    """
+    ok = True
+    for backend in ("formal/arm64_codegen.py", "formal/x86_64_codegen.py"):
+        path = os.path.join(HERE, backend)
+        with open(path) as fh:
+            src = fh.read()
+        if "frame_returning_predicate" not in src:
+            ok = False
+            print(f"FAIL  {backend} does not build the returns-a-frame "
+                  f"predicate from the model")
+        if "_returns_frame.get)" in src:
+            ok = False
+            print(f"FAIL  {backend} hands dict.get to a two-argument predicate")
+    if ok:
+        print("  PASS  neither_backend_passes_dict_get_as_the_predicate")
+    return ok
+
+
 def build_formal(src, out, backend):
     cmd = [sys.executable, FIRE, "build", "--formal", "--no-prove",
            f"--backend={backend}", "-o", out, src]
@@ -719,6 +820,11 @@ def main():
     diff_names = {c[0] for c in DIFF_CASES}
 
     passed = failed = 0
+    if not args.cases:
+        if check_predicate_is_two_argument():
+            passed += 1
+        else:
+            failed += 1
     with tempfile.TemporaryDirectory() as tmpdir:
         for case in selected:
             name = case[0]
@@ -753,7 +859,11 @@ def run_diff_case(case, tmpdir, verbose):
     wrong backends.  A case whose Python twin does not produce the answer the
     case is about is a bug in the case.
     """
-    name, source, oracle = case
+    name, source, oracle = case[0], case[1], case[2]
+    # An optional fourth element names the architectures this case is about,
+    # for the two whose premise is an ABI's ARGUMENT BUDGET and therefore
+    # differs between the two machines.
+    backends = case[3] if len(case) > 3 else BACKENDS
     want = run_cpython(oracle, tmpdir)
     if want.returncode != 0:
         return False, (f"the CPython oracle itself failed (exit "
@@ -762,7 +872,7 @@ def run_diff_case(case, tmpdir, verbose):
     src = os.path.join(tmpdir, name + ".mojo")
     with open(src, "w") as f:
         f.write(source)
-    for backend in BACKENDS:
+    for backend in backends:
         out = os.path.join(tmpdir, f"{name}.{backend}")
         rc, text = build_formal(src, out, backend)
         if rc != 0:
