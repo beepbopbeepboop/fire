@@ -1,9 +1,10 @@
 # FORMAL_read_before_store_returns_a_register: a name read before anything writes it returns whatever the allocator left behind
 
 **Status: OPEN, pre-existing on both backends, and it predates the work that
-lowered module top-level statements — `bugs/FORMAL_toplevel_statements_dropped.md`
-made it REACHABLE from a shape that looks valid, and is now fixed there. What is
-left is the general case, which is not that shape.**
+lowered module top-level statements — which made it REACHABLE from a shape that
+looks valid, and is now fixed (`formal/build.py`'s `module_body` /
+`entry_function`, whose own bug doc was removed with the fix). What is left is
+the general case, which is not that shape.**
 
 Found while lowering module top-level statements (2026-09-29, the
 `construct:toplevel-statements` claim), at `7214cc1`. Verified unchanged at

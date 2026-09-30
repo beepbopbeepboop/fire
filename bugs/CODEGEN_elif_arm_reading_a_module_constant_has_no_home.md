@@ -1,6 +1,53 @@
 # CODEGEN: a module-level constant read on the right of an assignment, or inside an `elif` arm, is refused as having "no home"
 
-## Status (2026-09-29 — OPEN, measured on arm64 and x86-64; the refusal is loud, never a wrong answer)
+> **HALF FIXED.** The assignment half is closed and the `elif` half is not. The
+> original diagnosis was wrong about which half was which; see Status below for
+> what actually caused the assignment half and where the fix went.
+
+## Status (2026-09-30 — HALF FIXED. The assignment half is closed; the `elif` half is OPEN)
+
+**The assignment half landed, and it was a different bug from the one described
+below.** `y = K` was not refused for the reason this file gives — the doc says
+an assignment's right-hand side "first wants a *destination* for the value",
+which is true of the EMITTER and was never where the refusal came from. It came
+from `formal/build.py`'s `_apply_module_constant_sites`, which rewrites IN PLACE
+and returns `None` while `_rewrite_child` is the one that RETURNS a
+replacement. Every position that needed a replacement went through
+`_rewrite_child` (a list element in the list branch, any other single child in
+the dataclass-fields branch) — except the `AssignStmt` / `AugAssignStmt` /
+`VarDecl` branch, which called the in-place walk directly on the value. A value
+that IS the constant is a bare `IdentExpr`, whose fields are `name`, `line` and
+`col` and therefore no child slots to rewrite, so it was walked straight through
+and the name was left in place. The substitution then never reached the
+emitter, which is why the emitter's message was the one reported: the emitter
+was refusing a name that the build was supposed to have already replaced.
+
+The fix is one line — that branch now assigns `node.value = _rewrite_child(...)`
+— and it closes the second shape the same walk mishandled, which this file did
+not know about: a CALL whose callee is the constant, `x = K()`. The in-place
+walk had no callee guard either, so the callee was replaced by a literal, i.e. a
+call to the number 7. Both are covered by two cases added to
+`test_formal_globals.py` (`read_global_as_an_assignment_value`,
+`read_global_into_a_field_store`), each run through the interpreter and both
+images; the field-store one is the shape ordinary struct code takes, which is
+why the uncovered position was reachable without writing anything unusual.
+
+**What remains OPEN is the `elif` arm**, unchanged and re-verified on this tree
+after the fix above: `elif x == K` is still refused with the same message on
+both architectures. That half really is the emitter-side problem this file
+describes — a saved condition value with no folded-constant case — and it is
+untouched by the substitution fix, which never reaches it because the name is
+not in a position the rewriter visits.
+
+Everything below is the ORIGINAL report of 2026-09-29, kept as written. Its
+reproducer table is still accurate except for the two rows marked fixed above
+(`y = K` now builds and prints 7), and its "Why it happens" section should now
+be read as describing the `elif` half only — the assignment half's real cause
+was upstream of the emitter entirely.
+
+---
+
+## Original report (2026-09-29 — OPEN, measured on arm64 and x86-64; the refusal is loud, never a wrong answer)
 
 A module-level constant is folded into the image, and most reads of one are
 fine. Two shapes are not: a read as the **direct right-hand side of an
@@ -53,8 +100,14 @@ defect rather than a policy:
 | `var y = [K, K]` (a list element) | builds |
 | `elif x == 7:` (a literal, in an `elif`) | builds |
 | `K = 3` inside a function (a local shadowing the name) | builds |
-| `y = K` | **refused** |
-| `elif x == K:` | **refused** |
+| `y = K` | **refused — FIXED 2026-09-30**, builds and prints 7 |
+| `elif x == K:` | **refused — still open** |
+
+`x = K()` — a CALL whose callee is the constant — built too, and was wrong in
+the other direction: the callee was replaced by a literal, so the image called
+the number 7. Fixed 2026-09-30 with the same one line. It is listed here
+because it was the same defect in the same walk and this file's table is the
+only place in the tree that enumerates what that walk does and does not cover.
 
 Also refused, and the same shape: `J = K` at module level, which gets a
 *different* message — `'J' is bound at module level, and this path has no
