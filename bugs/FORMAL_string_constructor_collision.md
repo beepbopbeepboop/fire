@@ -71,6 +71,45 @@ of them: it declares a three-field struct AND it calls a name the model has
 already decided is a string conversion. `model.struct_field_count` derives
 three fields from the declaration; the emitter never asks it.
 
+## The stdlib says the same thing about `String`, in a comment
+
+`std/collections/string/string.mojo:220-224` declares three fields and then says
+why there are two readings of them:
+
+```
+# Fields: String has two forms - the declared form here, and the "inline"
+# form when '_capacity_or_data.is_inline()' is true. The inline form
+# clobbers these fields (except the top byte of the capacity field) with
+# the string data.
+var _ptr_or_data: UnsafePointer[UInt8, MutUntrackedOrigin]
+var _len_or_data: Int
+var _capacity_or_data: Int
+```
+
+That is worth reading carefully next to the SIGBUS, because it says something
+the two candidate fixes do not agree about: **the two forms live in the SAME
+three slots.** The inline form is a `char *` written over the declared form's
+first bytes, chosen at run time by a flag in the top of the capacity field.
+
+So a returned-frame COPY is faithful for both forms — copying the three slots
+copies whichever form is in them, and the flag moves with the bytes. The
+returned-frame convention is not what is wrong about `String`, and the doc's
+"the next step is D2's" stands: the disagreement is about which form a given
+CONSTRUCTION produces, and about which of the two a local is.
+
+Which is also why the fix is (1) and not (2) as a first move. `String()` in the
+stdlib is called all over the place and its result is concatenated, appended to
+and compared — all of which on this path are `char *` operations, so those
+locals are inline-form words. Making the emitter prefer the local struct for a
+wide declaration would turn all of them into three-slot frames, and the string
+methods are lowered under the `char *` reading
+(`bugs/FORMAL_string_value_model.md`'s decision), so the two would then disagree
+in the other direction. The honest first move is to make the ANALYSIS stop
+claiming a frame for a construction the emitter does not lower as one, and to
+say so by name; the wider question — which form a `String` local is, per
+binding, with a flag read at run time — is a larger piece of work than either
+fix and is not a change to a constructor.
+
 ## Why it is not this lane's, and what the next step is
 
 The returned-frame convention is about where a frame LIVES. This is about
