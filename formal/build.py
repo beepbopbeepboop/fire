@@ -4065,7 +4065,11 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
     An MLIR TEMPLATE is asked about FIRST, in its own spelling, because its
     refusal names the construct and this one would name a symptom: `__mlir_
     attr[`…`]`'s callee is a bare name with no home, and the diagnostic that
-    says "a multi-index subscript" was already wrong about it once.
+    says "a multi-index subscript" was already wrong about it once. The same
+    holds for a BARE `__mlir_op` with no template attached, which is why it is
+    part of that pre-pass and not of the walk below — see the note on
+    `first_mlir` for the measured cost and for why pre-empting is the right
+    answer rather than a coin flip.
 
     `imported_module_names` is the set of module names this unit imports. It
     is what tells the DOTTED callee `mod.f(...)` from a value's method: the
@@ -4220,13 +4224,49 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # `__mlir_attr[…]`, `__mlir_attr.`lit`` and
         # `__mlir_op.`lit.materialize_into`[value=v]` are a SubscriptExpr and/or
         # a MemberExpr rooted at a bare name, and that root on its own is just a
-        # name with no home. The two refusals that NAME the construct are asked
+        # name with no home. The refusals that NAME the construct are asked
         # first, through the ONE reader both backends use, so the
         # better-worded message wins here rather than being pre-empted by the
         # symptom. Recorded by the identity of the ROOT IdentExpr, because
         # `M.iter_nodes` has no parent and the two spellings nest.
+        #
+        # `first_mlir` is the same rule for the BARE dialect name — `__mlir_op`
+        # with no template attached, which the walk below reaches as an ordinary
+        # `IdentExpr` and so used to be decided by SOURCE ORDER against every
+        # other name in the function. `std/sys/_assembly.mojo` is the live case
+        # and it is the whole of the bug: `NoneType` at line 94 pre-empted
+        # `__mlir_op.`pop.inline_asm`` at line 95, so the seventeen files behind
+        # that module were told a TYPE name has no register rather than that the
+        # file's entire purpose — inline assembly — cannot be lowered at all.
+        # Reverse the two lines and the same file gets the useful message, which
+        # is not a property a diagnostic should have.
+        #
+        # The pre-emption is deliberate and unconditional, and the judgement it
+        # encodes is this: a file containing an MLIR dialect construct cannot be
+        # lowered for ONE reason, and nothing else in it changes that, so the
+        # reason is what the reader needs first. A missing local may be a typo
+        # in the file — but the file will not build either way, and naming the
+        # deeper limit first is the same choice `_refuse_unlowerable_module_body`
+        # makes when it runs ahead of the ordinary codegen.
+        #
+        # It is asked in SOURCE ORDER among the MLIR constructs themselves, and a
+        # bare `__mlir_op` does not outrank an `__mlir_attr[…]` that appears
+        # earlier: both name an MLIR construct, and the bracketed one has a more
+        # specific message, so preferring it costs nothing and keeps a
+        # `__mlir_attr` template from being downgraded to the generic dialect
+        # text. That is why the IdentExpr arm reads `bracketed` rather than
+        # deciding on its own — pre-order visits the SubscriptExpr before the
+        # identifier it roots, so by the time the identifier is here its entry is
+        # already recorded.
         bracketed = {}
+        first_mlir = None
         for sub in M.iter_nodes(fn.body):
+            if isinstance(sub, F.IdentExpr):
+                if first_mlir is None \
+                        and sub.name.startswith(M.MLIR_DIALECT_PREFIX):
+                    first_mlir = bracketed.get(id(sub)) \
+                        or M.mlir_dialect_refusal(sub.name)
+                continue
             if not isinstance(sub, (F.SubscriptExpr, F.MemberExpr)):
                 continue
             if M.template_is_answered(sub) or id(sub) in xc_type_args:
@@ -4278,6 +4318,15 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         break
             if why is not None:
                 bracketed[id(root_ident)] = why
+        if first_mlir is not None:
+            # Before the walk, not inside it — see the note on `first_mlir`. The
+            # walk's own dialect arm is GONE rather than kept as a second
+            # opinion: the same reader asking the same question twice is how two
+            # architectures and two callsites come to name different limits for
+            # one construct, and an arm that cannot run would read as support
+            # for a shape that does not work.
+            raise CodegenError(
+                f"{fn.name}: {first_mlir}" if fn.name else first_mlir)
         for node in M.iter_nodes(fn.body):
             if not isinstance(node, F.IdentExpr):
                 continue
@@ -4302,14 +4351,6 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 continue
             if "." in name and name.split(".", 1)[0] in holders:
                 continue
-            if name.startswith(M.MLIR_DIALECT_PREFIX):
-                # An MLIR DIALECT construct no template rule covers — see
-                # `model.mlir_dialect_refusal` for why naming it beats the
-                # fallback's "no home", which names a symptom of the register
-                # fall-through and sends the reader to the allocator instead of
-                # to the construct.
-                why = M.mlir_dialect_refusal(name)
-                raise CodegenError(f"{fn.name}: {why}" if fn.name else why)
             gslot = M.module_slot(name)
             if gslot is not None:
                 # A module-level name WITH a `__DATA` slot: the storage exists
