@@ -1,23 +1,30 @@
 #!/usr/bin/env python3
-"""`a == b` must reach the struct's OWN `__eq__` — measured against CPython.
+"""The formal value model's shapes, measured against CPython rather than pinned.
 
-`a == b` on two struct receivers was one flag-setting compare of two WORDS, and
-for a multi-field struct a word is the ADDRESS of a frame of 8-byte slots.  So
-the operator answered "are these the same object", which is CPython's INHERITED
-`__eq__` and is correct for a struct that declares none — and completely bypassed
-the one a struct DOES declare.  The method was found, called and ignored: a
-class whose `__eq__` returned unconditionally True gave `eq=0 direct=1` against
-CPython's `eq=1 direct=1`, so a program took the wrong branch and said nothing
-about it, on both architectures.
+Two families, both of which were wrong on at least one of the two architectures
+and neither of which any existing suite could see:
 
-    python3 test_formal_eq_dispatch.py [-v] [case ...]
+  * `a == b` did not reach the struct's OWN `__eq__`.  On two struct receivers it
+    was one flag-setting compare of two WORDS, and for a multi-field struct a
+    word is the ADDRESS of a frame of 8-byte slots — so the operator answered
+    "are these the same object", which is CPython's INHERITED `__eq__` and is
+    correct for a struct that declares none, and a silent bypass of the one it
+    does.  The method was found, called and ignored: a class whose `__eq__`
+    returned unconditionally True gave `eq=0 direct=1` against CPython's
+    `eq=1 direct=1`, so a program took the wrong branch and said nothing about
+    it, on both architectures.
+  * `h.a, h.b = x, y` was refused on x86-64 while arm64 lowered it, which is the
+    one thing two architectures of one language implementation are not allowed to
+    do about a legitimate program.  See `TUPLE_STORE_CASES`.
+
+    python3 test_formal_value_model.py [-v] [case ...]
 
 **Why this file exists separately from `test_formal_run.py`**, which also builds
 and runs and also covers these programs with fixed expected values: this one
 holds no expectations of its own.  It derives the CPython program from the SAME
 text, runs it, and requires the image's stdout and exit status to be identical —
 so a case cannot be pinned to a value that was wrong in the first place, which is
-exactly the failure mode of the bug it guards (a hardcoded `1` where the source
+exactly the failure mode of the bugs it guards (a hardcoded `1` where the source
 says `1` and the image says `0` reads as a regression in the image, not as the
 pre-existing wrong answer it is).  The split is the one `test_runtime_diff.py`
 and `test_interp_oracle.py` already make: fixed expectations in the suite that
@@ -64,6 +71,8 @@ def cpython_source(source: str) -> str:
 # as against both images: a case whose expectation does not match CPython is a
 # case whose expectation is wrong, and saying so is more useful than reporting
 # the image.
+#
+# ── the comparison dunders ──
 CASES = [
     # THE REPRODUCER.  A class whose `__eq__` ignores its argument, compared
     # through the operator and through the explicit spelling, in one printf: the
@@ -202,6 +211,103 @@ CASES = [
      "r=1 back=0"),
 ]
 
+# ── the tuple-store target shapes ──
+#
+# `a, b = rhs` is one construct with four target shapes, and the two
+# architectures used to disagree about two of them.  arm64's `_tup_slot` already
+# routed a `MemberExpr` element through `_store_var`, which is the frame-slot
+# store; x86-64's `_emit_tuple_assign` built a list of NAMES and refused anything
+# that was not one, so `h.x, h.y = p, q` was refused by name on x86-64 and
+# answered correctly on arm64.  The fix is that the target element becomes
+# whatever `_store_var` can store into — the same store, through the same
+# function, so a tuple unpack and a plain `h.x = v` cannot disagree about where a
+# field's value lands.
+TUPLE_STORE_CASES = [
+    # A receiver-relative field target OUTSIDE any constructor, which is the
+    # reproducer the filing used and the shape `_store_var`'s frame-slot arm is
+    # for.  Three targets so an off-by-one in the element pairing would show: the
+    # answer is 3 + 4 + 7 and nothing else.
+    ("tuple_store_to_receiver_fields",
+     "class Tail:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    z: int\n"
+     "    def __init__(self):\n"
+     "        self.x = 0\n"
+     "        self.y = 0\n"
+     "        self.z = 0\n"
+     "    def total(self):\n"
+     "        return self.x + self.y + self.z\n"
+     "def main(n):\n"
+     "    var t = Tail()\n"
+     "    t.x, t.y, t.z = 3, 4, 7\n"
+     "    printf(\"total=%d\", t.total())\n"
+     "    return 0\n",
+     "total=14"),
+    # The same statement with `self` as the receiver, which is the spelling in
+    # this repository's own code (`tools/procrun.py` has
+    # `self.limit, self._chunks, self._size = limit, [], 0`) and which reaches a
+    # DIFFERENT store: the method's own receiver frame rather than a local
+    # holder's.  Pair it with a field target on a local too, so a pass that
+    # handled only one of the two receiver shapes would answer one and not the
+    # other.
+    ("tuple_store_to_self_and_to_a_local",
+     "class Pair:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    def __init__(self, p, q):\n"
+     "        self.x = p\n"
+     "        self.y = q\n"
+     "    def swap(self, p, q):\n"
+     "        self.x, self.y = p, q\n"
+     "    def total(self):\n"
+     "        return self.x + self.y\n"
+     "def main(n):\n"
+     "    var a = Pair(1, 2)\n"
+     "    a.swap(9, 8)\n"
+     "    var b = Pair(0, 0)\n"
+     "    b.x, b.y = 5, 6\n"
+     "    printf(\"a=%d b=%d\", a.total(), b.total())\n"
+     "    return 0\n",
+     "a=17 b=11"),
+    # A MIXED target: one field and one plain name.  The two shapes have
+    # different homes (a frame slot and a register) and the pairing has to hold
+    # across them, which is the case that would catch a rewrite that turned every
+    # element into a field store.
+    ("tuple_store_mixes_a_field_and_a_name",
+     "class Pair:\n"
+     "    x: int\n"
+     "    y: int\n"
+     "    def __init__(self, p, q):\n"
+     "        self.x = p\n"
+     "        self.y = q\n"
+     "    def total(self):\n"
+     "        return self.x + self.y\n"
+     "def main(n):\n"
+     "    var a = Pair(0, 0)\n"
+     "    var b = 0\n"
+     "    a.x, b = 7, 8\n"
+     "    printf(\"a=%d b=%d\", a.total(), b)\n"
+     "    return 0\n",
+     "a=7 b=8"),
+    # A NESTED group, which is the third shape and the one that was silently
+    # miscounted rather than refused: x86-64 flattened it, so the outer arity
+    # check compared the RHS blob's count (2) against a target count that
+    # included the group's own elements (3) and the image exited(1) with nothing
+    # printed — where arm64 and CPython both answer a=1 b=2 c=3.  Now the group
+    # is a second unpack against the element at its position, and the arity
+    # check at each level counts that level's elements and no other.
+    ("tuple_store_to_a_nested_group",
+     "def main(n):\n"
+     "    var a = 0\n"
+     "    var b = 0\n"
+     "    var c = 0\n"
+     "    a, (b, c) = 1, (2, 3)\n"
+     "    printf(\"a=%d b=%d c=%d\", a, b, c)\n"
+     "    return 0\n",
+     "a=1 b=2 c=3"),
+]
+
 # (name, source, needle the refusal must contain)
 #
 # AGREE-OR-REFUSE, and both of these are the shape the rule exists for: the
@@ -265,6 +371,7 @@ REFUSALS = [
      "    return 0\n",
      "does not settle it"),
 ]
+
 
 
 def run_cpython(source, tmpdir, verbose):
@@ -347,7 +454,9 @@ def main():
               f"{platform.machine()}")
         return 0
 
-    everything = [(c, False) for c in CASES] + [(c, True) for c in REFUSALS]
+    everything = ([(c, False) for c in CASES]
+                  + [(c, False) for c in TUPLE_STORE_CASES]
+                  + [(c, True) for c in REFUSALS])
     selected = [c for c in everything if not args.cases or c[0][0] in args.cases]
     known = {c[0][0] for c in everything}
     if args.cases and len(selected) != len(args.cases):
@@ -379,7 +488,7 @@ def main():
                 failed += 1
                 print(f"  FAIL  {entry[0]}: {detail}")
 
-    print(f"\nformal eq dispatch: PASS={passed} FAIL={failed}")
+    print(f"\nformal value model: PASS={passed} FAIL={failed}")
     return 1 if failed else 0
 
 
