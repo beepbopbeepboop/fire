@@ -901,8 +901,14 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 # (`async for` is only legal inside an async body), so
                 # this is the stackswitch path's matching honest refusal,
                 # not a new restriction.
-                if (getattr(node, 'is_async', False) and api.get('is_async_gen')
-                        and not api.get('no_wd_forward')):
+                #
+                # Deliberately NOT gated on `node.is_async`: a plain
+                # `for x in gen()` over an async generator is a TypeError in
+                # CPython, so there is no correct behaviour to preserve
+                # here -- only the silent-garbage one to remove. A clean
+                # async generator keeps its existing lowering on that
+                # spelling.
+                if api.get('is_async_gen') and not api.get('no_wd_forward'):
                     raise RuntimeError(
                         "cannot compile module: `async for` over async "
                         f"generator {api.get('base') or it_val!r} in an "

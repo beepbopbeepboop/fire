@@ -3777,6 +3777,80 @@ def main() raises:
     outer()
 """, "ordinary function")
 
+    # The OTHER consumer of the same channel. `next(g)` is lowered by
+    # `_lower_generator_next`, a different function in a different file, and
+    # it was left unguarded -- so the same generator printed a heap ADDRESS
+    # for the first `next(g)`, then the right 10 for the second, exit 0, no
+    # diagnostic. One question ("can this coroutine ever put a
+    # wait-descriptor on its channel?"), so one analysis, asked of each
+    # consumer in turn rather than duplicated per lowering.
+    test_generator_refused("next_on_parking_async_gen_refused", """\
+import asyncio
+
+async def gen():
+    await asyncio.sleep(0)
+    yield 10
+    yield 20
+
+def outer() raises:
+    var g = gen()
+    print(next(g))
+    print(next(g))
+
+def main() raises:
+    outer()
+""", "`next()` on async generator")
+
+    # ... and the same loop driver over a plain (non-`async`) `for`. A
+    # `TypeError` in CPython, so there is no correct answer to preserve
+    # here -- only the silent garbage to remove.
+    test_generator_refused("plain_for_over_parking_async_gen_refused", """\
+import asyncio
+
+async def gen():
+    await asyncio.sleep(0)
+    yield 10
+
+def outer() raises:
+    for x in gen():
+        print(x)
+
+def main() raises:
+    outer()
+""", "ordinary function")
+
+    # The control for both: the same two spellings over a generator that
+    # provably never parks keep working, so the guard is on the analysis
+    # rather than on the syntax.
+    test_generator_matches_cpython("next_and_plain_for_over_clean_async_gen", """\
+async def gen():
+    yield 10
+    yield 20
+
+def outer() raises:
+    var g = gen()
+    print(next(g))
+    for x in g:
+        print(x)
+
+def main() raises:
+    outer()
+""", """\
+import asyncio
+
+async def gen():
+    yield 10
+    yield 20
+
+async def outer():
+    g = gen()
+    print(await g.__anext__())
+    async for x in g:
+        print(x)
+
+asyncio.run(outer())
+""")
+
     # A nested async GENERATOR with NO captures of its own, driven by
     # `async for` from a sibling nested `async def`. The unthreadable-
     # call-site test used to run only for a generator that captured

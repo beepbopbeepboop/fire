@@ -134,6 +134,27 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
 
 
 def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
+    # An async GENERATOR's yield channel carries a wait-descriptor
+    # (is_wd=1) for every parking `await` as well as a real value (is_wd=0)
+    # for every `yield` -- see mojo_coro.h. Every caller of `next()` here
+    # is ordinary C with no channel of its own to forward a descriptor
+    # into, so a descriptor that reached one would be returned as the
+    # value: real, silent, garbage. Measured: a generator awaiting
+    # `asyncio.sleep(0)` and then yielding 10 printed a heap ADDRESS for
+    # `next(g)`, exit 0, no diagnostic. `no_wd_forward` on the api is
+    # coro.py's `_compute_no_wd_forward` fixed point over the module's
+    # async functions; drive the clean ones, refuse the rest. The same
+    # guard on the `async for` driver is in gimple_gen_loops.py's
+    # `_gen_for_iter` -- two consumers of the same channel, so the question
+    # is asked twice, and each refusal says which one it is.
+    if api.get('is_async_gen') and not api.get('no_wd_forward'):
+        raise RuntimeError(
+            "cannot compile module: `next()` on async generator "
+            f"{api.get('base') or av!r} — that generator's body can "
+            "suspend (it has an `await` that may park), so its yield "
+            "channel carries a wait-descriptor that an ordinary function "
+            "has no channel of its own to forward; `next()` can only drive "
+            "a generator whose every yield is a real value")
     base, vct = api['base'], api['value_ctype']
     resumed = gen._new_val('_Bool', f"{base}_resume ({av})")
     bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
