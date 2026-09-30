@@ -48,6 +48,17 @@ CodegenError = M.CodegenError
 
 _CALLEE_SAVED = [19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
 
+# How many arguments AAPCS passes in registers: X0..X7. Named once and used by
+# BOTH ends of the convention (the callee's prologue and `_emit_call`), because
+# the two are one fact and a program that is refused at one end and silently
+# truncated at the other is the bug this constant exists to prevent.
+#
+# The x86-64 backend has its own (`ARG_REGS`, six of them) for the same reason:
+# the limit is the platform's, not the language's, and it belongs in the
+# backend. What is NOT the backend's is what to do past the limit, and both
+# refuse.
+_ABI_ARG_REGS = 8
+
 
 def _for_target_tree(target: str):
     """Parse a for/comprehension target string into a leaf name or nested list.
@@ -858,9 +869,20 @@ class ARM64Codegen:
         # parameters first (the call site passes them ahead of the runtime
         # ones), then its runtime parameters.
         incoming = M.incoming_args(f)
+        if len(incoming) > _ABI_ARG_REGS:
+            # The other end of the same refusal. `_emit_call` catches a call
+            # SITE with too many arguments, but a function can also be REACHED
+            # without one — a dylib export, a reflection-resolved call, an
+            # entry point the driver calls directly — and this used to answer
+            # that by `break`ing out of the loop, which leaves every parameter
+            # past the eighth with its home slot never written. The first read
+            # of such a name then loaded whatever the slot held, so the value
+            # was not merely wrong but BUILD-DEPENDENT. Refusing here means
+            # the arity is rejected whichever way the function is entered.
+            raise CodegenError(
+                f"{f.name}: {len(incoming)} parameters exceeds the "
+                f"{_ABI_ARG_REGS} the formal arm64 ABI passes in registers")
         for i, (pname, ptype) in enumerate(incoming):
-            if i >= 8:
-                break            # AAPCS has no register for argument 8+
             if i == 0:
                 # Already in X19 by the unconditional save above, which also
                 # keeps the no-parameter case (unknown-name reads fall back to
@@ -873,11 +895,10 @@ class ARM64Codegen:
                     # home is a spill slot: write the incoming argument there
                     # now, or its first read in the body would load whatever
                     # the slot happened to hold. Same addressing as
-                    # `_store_var`'s spill path. NOT reachable today — the
-                    # caller only ever passes 8 arguments (AAPCS X0-X7, see
-                    # `_emit_call`), so at most 8 parameters exist to be
-                    # spilled — but it is written rather than left as a
-                    # silent-wrong-value trap for whoever raises that limit.
+                    # `_store_var`'s spill path. Reachable for arguments 0..7
+                    # of a function with more than ten parameters — the
+                    # arity check above bounds how MANY arguments there are,
+                    # not how many names want a register.
                     if pname in self._var_spills:
                         self.asm.emit(encode_mov_zr_xn(17, i))
                         _emit_sub_imm(self.asm, 17, 17,
@@ -1225,8 +1246,14 @@ class ARM64Codegen:
                 self.asm.emit(encode_stp_sp_pre(0, 2))
                 self._emit_expr_to(stmt.value, "X1")
                 self.asm.emit(encode_ldp_sp_post(0, 2))
+                # The LEFT operand is the name being shifted, so its own type
+                # decides the fill and the shift AMOUNT's type is not
+                # consulted — `model.shift_signedness`, the same rule
+                # `_emit_div_shift_pow` uses for the binary form. A `y <<= n`
+                # and a `y = y << n` are the same operator and must not
+                # disagree about whether the result is signed.
                 self._emit_shift_reg(op, signed=cmp_signed(
-                    self._ttype(F.IdentExpr(name))))
+                    M.shift_signedness(self._ttype(F.IdentExpr(name)))))
                 self._emit_trunc(common_type(
                     self._ttype(F.IdentExpr(name)), self._ttype(stmt.value)))
                 self._store_var(name, 0)
@@ -3116,8 +3143,11 @@ class ARM64Codegen:
         self._emit_expr_to(stmt.value, "X1")      # X1 = value
         self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))  # X0 = old (re-load)
         if want_shift:
+            # As above: the thing being shifted decides the fill, and for a
+            # subscript target that is the ELEMENT, which is what `target`
+            # types as.
             self._emit_shift_reg(op, signed=cmp_signed(
-                self._ttype(target)))
+                M.shift_signedness(self._ttype(target))))
         else:
             self.asm.emit(ops[op](0, 0, 1))       # X0 = old op value
         # addr is at [SP+16] after the two pushes.
@@ -5129,14 +5159,22 @@ class ARM64Codegen:
         # (they don't produce call arguments).
         for se in side_effects:
             self._emit_expr(se)
-        # AAPCS: only X0..X7 are argument registers. Args past 8 are
-        # evaluated for side effects then dropped (same compile-only
-        # fidelity as unknown-signature kwargs / dynamic *unpack).
-        if len(args) > 8:
-            extra = args[8:]
-            args = args[:8]
-            for x in extra:
-                self._emit_expr(x)
+        # AAPCS passes the first eight arguments in X0..X7. A ninth has no
+        # register, and this path has no stack-argument convention to fall
+        # back on, so the call is REFUSED here rather than truncated: the
+        # alternative — evaluate the extra arguments for their side effects,
+        # drop them, and branch — built an image that ran and read the ninth
+        # parameter as ZERO, which is a perfectly good answer to a great many
+        # questions (measured: `nine(1,...,9)` returned 1 where the source
+        # says 90001). A wrong value is strictly worse than a refusal here,
+        # because nothing downstream can tell a dropped argument from a
+        # caller who passed zero. Same shape, same words, as the x86-64
+        # check in `_emit_call` there — the two differ in their limit (8 vs
+        # 6) because the ABIs do, not in what they do about it.
+        if len(args) > _ABI_ARG_REGS:
+            raise CodegenError(
+                f"call {name}(): {len(args)} arguments exceeds the "
+                f"{_ABI_ARG_REGS} the formal arm64 ABI passes in registers")
 
         # AAPCS: pass up to 8 integer args in X0..X7. Evaluate left-to-right,
         # spilling each result so nested evaluations (which clobber X0/X1/X2)
@@ -5506,10 +5544,20 @@ class ARM64Codegen:
 
         Division is UDIV/SDIV (trunc toward zero; `//` matches `/` on the
         unsigned default). Remainder is DIV then MSUB (n - (n/d)*d). Shifts
-        use LSLV/LSRV/ASRV (immediate form when the RHS is a small literal).
-        `**` unrolls a small literal exponent."""
-        signed = cmp_signed(common_type(self._ttype(e.left),
-                                        self._ttype(e.right)))
+        use LSLV/LSRV/ASRV (immediate form when the RHS is a small literal),
+        and an amount at or past the word's width SATURATES rather than being
+        masked to a shift by zero — `model.shift_saturated_is_zero` is the rule
+        and this is only its instruction selection. `**` unrolls a small
+        literal exponent.
+
+        The two decisions a shift makes are NOT the same decision, and only
+        one of them promotes both operands: a shift's signedness comes from
+        the thing being SHIFTED (`model.shift_signedness`), because the right
+        operand is a count and a count's signedness says nothing about what to
+        shift in. Division and remainder keep the promotion, where the two
+        operands really do combine."""
+        result_t = common_type(self._ttype(e.left), self._ttype(e.right))
+        signed = cmp_signed(result_t)
         if op in ("/", "//", "%"):
             self._if_counter += 1
             cid = self._if_counter
@@ -5543,6 +5591,14 @@ class ARM64Codegen:
             return
 
         if op in ("<<", ">>"):
+            # The signedness that picks ASRV over LSRV is the LEFT operand's
+            # own, not the promotion's. `result_t` above is still the answer to
+            # "what width is the result", which is a different question and
+            # does involve both operands; only the FILL depends on this one.
+            # Without the split, `UInt64 >> Int` chose signedness from the
+            # unannotated (hence signed) shift AMOUNT and computed
+            # 0xFFFFFFFFFFFFFFFF >> 4 as 0xFFFFFFFFFFFFFFFF.
+            signed = cmp_signed(M.shift_signedness(self._ttype(e.left)))
             imm_r = e.right
             if isinstance(imm_r, F.IntLiteral) and 0 <= imm_r.value <= 63:
                 self._emit_expr(e.left)
@@ -5552,21 +5608,34 @@ class ARM64Codegen:
                     self.asm.emit(encode_asr_xd_xn_imm(0, 0, imm_r.value))
                 else:
                     self.asm.emit(encode_lsr_xd_xn_imm(0, 0, imm_r.value))
-                self._emit_trunc(common_type(self._ttype(e.left),
-                                             self._ttype(e.right)))
+                self._emit_trunc(result_t)
                 return
+            # A literal amount at or past the word's width is decided HERE,
+            # with no branch: the value cannot be shifted that far, and the
+            # immediate form's range check above is what sends it to the
+            # register form, where the hardware would mask the amount back to
+            # a shift by zero. `3 >> 64` was `3` and `3 << 64` was `3`. The
+            # saturation rule (and why the arithmetic `>>` case is not simply
+            # 0) is `model.shift_saturated_is_zero`; only the SIGN is a runtime
+            # fact here, so the operand is still evaluated and `ASR #63`
+            # replicates it.
+            lit = self._static_int(imm_r)
+            if lit is not None and M.shift_saturates(lit):
+                self._emit_saturated(op, signed)
+                self._emit_trunc(result_t)
+                return
+            # The register form: `_emit_shift_reg` is the ONE emitter for it
+            # and carries the saturation rule, so this only has to put the
+            # value in X0 and the amount in X1 and step aside. That is the
+            # whole consolidation — a second copy of the rule here is what
+            # let the `<<=` spelling keep the hardware's masking while the
+            # `<<` spelling did not.
             self._emit_expr(e.left)
             self.asm.emit(encode_stp_sp_pre(0, 2))
             self._emit_expr_to(e.right, "X1")
             self.asm.emit(encode_ldp_sp_post(0, 2))
-            if op == "<<":
-                self.asm.emit(encode_lslv_xd_xn_xm(0, 0, 1))
-            elif signed:
-                self.asm.emit(encode_asrv_xd_xn_xm(0, 0, 1))
-            else:
-                self.asm.emit(encode_lsrv_xd_xn_xm(0, 0, 1))
-            self._emit_trunc(common_type(self._ttype(e.left),
-                                         self._ttype(e.right)))
+            self._emit_shift_reg(op, signed)
+            self._emit_trunc(result_t)
             return
 
         if op == "**":
@@ -6057,13 +6126,72 @@ class ARM64Codegen:
                 pos += 16
 
     def _emit_shift_reg(self, op: str, signed: bool) -> None:
-        """Variable shift X0 = X0 <op> X1 (LSLV/LSRV/ASRV)."""
+        """Variable shift X0 = X0 <op> X1 (LSLV/LSRV/ASRV), SATURATING.
+
+        X0 holds the value and X1 the amount on entry; both are live and
+        X0 is the result on exit.
+
+        THE ONE register-form shift emitter on this backend. It was not,
+        and being the second one is how the same defect reached the source
+        twice: `_emit_div_shift_pow` had its own copy, and a program that
+        spelled the shift `x <<= n` went through THIS one and got the
+        hardware's modulo-64 masking, so `y <<= 64` left `y` unchanged
+        while `y = y << 64` zeroed it. Both spellings are the same operator
+        and the rule is one rule (`model.shift_saturated_is_zero`), so the
+        rule lives here and both callers come to it.
+
+        The amount is compared against 64 and a saturating branch taken
+        BEFORE the shift instruction runs, so the masking is never the
+        answer. The sign for the arithmetic case is X0's own, read before
+        X0 is overwritten.
+
+        The compare is SIGNED, which is what keeps this fix to the case it
+        fixes: an amount of 64 or more (signed, so 64..2^63-1) saturates,
+        and a NEGATIVE amount is below 64 and keeps the masking it has
+        always had. That is not an endorsement — CPython raises ValueError
+        for a negative amount, and this path answers with the masked shift
+        — it is a separate question left alone rather than changed under
+        cover of a fix about the saturation boundary. See
+        bugs/FORMAL_negative_shift_amount_masks_instead_of_raising.md, which
+        is also why the compare must not be made unsigned: unsigned, a
+        negative amount would take the saturating branch and answer 0, a
+        THIRD wrong answer rather than this one.
+        """
+        self._if_counter += 1
+        sid = self._if_counter
+        fn = self.func_name
+        sat_label = f"{fn}_sh{sid}_sat"
+        end_label = f"{fn}_sh{sid}_end"
+        self.asm.emit(encode_cmp_xn_imm(1, 64))
+        self.asm.emit(encode_b_cond("ge", 8))
+        self.asm.emit_label_rel(sat_label, here_offset=-4)
         if op == "<<":
             self.asm.emit(encode_lslv_xd_xn_xm(0, 0, 1))
         elif signed:
             self.asm.emit(encode_asrv_xd_xn_xm(0, 0, 1))
         else:
             self.asm.emit(encode_lsrv_xd_xn_xm(0, 0, 1))
+        self.asm.emit(encode_b(0))
+        self.asm.emit_label_rel(end_label, here_offset=-4)
+        self.asm.label(sat_label)
+        self._emit_saturated(op, signed)
+        self.asm.label(end_label)
+
+    def _emit_saturated(self, op: str, signed: bool) -> None:
+        """Materialise the answer a SATURATING shift gives, in X0.
+
+        The decision is `model.shift_saturated_is_zero` and this is only its
+        instruction selection, so that a second backend cannot answer the
+        same question differently. Two cases, and the second is the one a
+        `return 0` saturation gets wrong: `ASR X0, X0, #63` is exactly "the
+        sign-extended word", which is 0 for a non-negative operand and -1 for
+        a negative one — which is what Python's arithmetic `>>` gives at any
+        amount at or past 64. `X0` holds the value being shifted on entry, so
+        the sign is read from it rather than recomputed."""
+        if M.shift_saturated_is_zero(op, signed):
+            self.asm.emit(encode_movz_xd_imm(0, 0))
+        else:
+            self.asm.emit(encode_asr_xd_xn_imm(0, 0, 63))
 
     def _check_comptime_target(self, name: str, what: str) -> None:
         """Refuse a store to a name that is currently a `comptime` binding.
