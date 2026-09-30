@@ -5434,6 +5434,53 @@ def dylib_aliased_export_refusal(callee: str, aliases: dict,
         f"this file and not of the library.")
 
 
+def callee_declaration(functions: dict, by_name: dict, by_module: dict,
+                       aliases: dict, extern_decls: dict, callee: str):
+    """The `FunctionDef` that declares the callee `callee`, or None.
+
+    THE one implementation of "whose parameter list is this call bound
+    against", for both backends. It is here for the same reason
+    `bind_call_arguments` is: the two emitters each want the same answer from
+    their own state, and two copies of the answer are two chances for them to
+    disagree about a call that is on the boundary this backend exists to make
+    sound. It existed twice — `_extern_decl_for` plus `_callee_decl`, verbatim,
+    in `arm64_codegen.py` and in `x86_64_codegen.py` — where the drift would
+    have been invisible, because both copies were correct on the day they were
+    written and nothing in the type system can tell that a caller reads a
+    different one.
+
+    Three places, in this order, and the order is the answer rather than an
+    implementation detail:
+
+      1. **`functions`**, this image's own definitions. A local definition
+         always wins over an import of the same name, which is the same
+         precedence `imported_bindings` gives a local definition in the
+         importing file.
+      2. **`by_name`/`by_module`**, then **`aliases`**, which is the SAME two
+         steps in the SAME order `_extern_symbol` takes to decide what SYMBOL a
+         call binds. That is what makes the two agree by construction: the
+         declaration handed to `bind_call_arguments` is reached through the
+         export the call actually binds, so a call can never be checked against
+         the signature of a different library's same-named function.
+      3. **`extern_decls`**, `{export symbol: FunctionDef}`, keyed by that
+         symbol rather than by the name as spelled (`formal/imports.py`'s
+         `external_declarations`).
+
+    None means this image can see no declaration for the callee, and the caller
+    falls back to passing the arguments as written — which is the honest answer
+    for a library with no source behind its manifest, and the right one for a
+    raw C symbol whose only declaration is a header."""
+    fn = (functions or {}).get(callee)
+    if fn is not None:
+        return fn
+    entry = dylib_export_lookup(by_name, by_module, callee)
+    if entry is None:
+        entry = dylib_aliased_export(by_name, by_module, callee, aliases)
+    if entry is None:
+        return None
+    return (extern_decls or {}).get(entry.get("symbol"))
+
+
 def _target_names(target):
     from mojo.middle.boundnames import _lbn_target_names
     return _lbn_target_names(target) if isinstance(target, str) else []
@@ -9177,7 +9224,7 @@ def collect_module_symbols(stmts: list) -> dict:
     for stmt in (stmts or []):
         kind = type(stmt).__name__
         if kind in ("ImportStmt", "FromImportStmt"):
-            for name, module in _imported_names(stmt):
+            for name, module, _defined in import_bindings(stmt):
                 table.setdefault(name, GlobalSymbol(
                     name, None, "imported", module,
                     getattr(stmt, "line", 0) or 0))
@@ -9543,11 +9590,6 @@ def import_bindings(stmt) -> list:
             out.append((alias or orig, str(mod), orig))
         return out
     return []
-
-
-def _imported_names(stmt) -> list:
-    """`[(bound name, module)]` for one module-level import statement."""
-    return [(bound, module) for bound, module, _defined in import_bindings(stmt)]
 
 
 # The dunders and module attributes a bare read may legitimately name. Small on

@@ -4577,34 +4577,22 @@ class ARM64Codegen:
 
         self.asm.label(end_label)
 
-    def _extern_decl_for(self, name: str):
-        """The declaration of an IMPORTED callee `name`, or None.
-
-        Keyed by the SYMBOL the call binds, and the entry is found by the same
-        two steps in the same order as `_extern_symbol` — the plain export
-        lookup, then the import alias — so the declaration handed to
-        `bind_call_arguments` is always the one whose parameter list the call
-        is actually being checked against. Asking by bare name instead would be
-        a way to hand a call the signature of a same-named function in a
-        different library.
-        """
-        entry = M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name)
-        if entry is None:
-            entry = self._aliased_export(name)
-        if entry is None:
-            return None
-        return self._extern_decls.get(entry.get("symbol"))
-
     def _callee_decl(self, name: str):
         """The FunctionDef a callee `name` was declared by, or None.
 
         This module's own functions first — a local definition always wins —
         and then the linked libraries', read from their own source. None means
         the callee is not a function this image can see a declaration for, and
-        the caller falls back to passing the arguments as written."""
-        fn = self._functions.get(name)
-        return fn if fn is not None else self._extern_decl_for(name)
+        the caller falls back to passing the arguments as written.
+
+        The DECISION is `model.callee_declaration`, which the x86-64 backend
+        reads too, so the two cannot disagree about which declaration a call is
+        bound against. What is left here is the binding of this emitter's own
+        state to it, and nothing else."""
+        return M.callee_declaration(self._functions, self._dylib_by_name,
+                                    self._dylib_by_module,
+                                    self._import_aliases, self._extern_decls,
+                                    name)
 
     def _bind_call_args(self, name: str, e: F.CallExpr) -> list:
         """`e`'s arguments in positional form, for a known callee.
@@ -4617,19 +4605,18 @@ class ARM64Codegen:
         at all — which is how `f(1, 2, r)` reached a `def f(x, *rest)` and
         bound all three as fixed parameters.
 
-        `fdef` is the callee's declaration, and it is looked up in BOTH
-        registries — this module's own functions first, then the declarations
-        read from the source each linked library was compiled from
-        (`self._extern_decls`, keyed by the export symbol the call binds).
-        That second lookup is what makes a call into another image obey the
-        SAME contract as a call inside one: its arguments are bound to the
-        callee's real parameter list, so a defaulted parameter is materialized
-        and an argument count below the arity with nothing to fill it is a
-        refusal naming the callee. It used to pass `list(e.args)` and nothing
-        more, which made an omitted register hold a stale value — measured,
-        `need_two(1)` across a dylib returning 1867609072 where the callee's own
-        default says 511, while the identical call in the same file returned
-        511."""
+        `fdef` is the callee's declaration, found by `_callee_decl` — this
+        module's own functions first, then the declarations read from the
+        source each linked library was compiled from (`self._extern_decls`,
+        keyed by the export symbol the call binds). That second registry is what
+        makes a call into another image obey the SAME contract as a call inside
+        one: its arguments are bound to the callee's real parameter list, so a
+        defaulted parameter is materialized and an argument count below the
+        arity with nothing to fill it is a refusal naming the callee. It used
+        to pass `list(e.args)` and nothing more, which made an omitted register
+        hold a stale value — measured, `need_two(1)` across a dylib returning
+        1867609072 where the callee's own default says 511, while the identical
+        call in the same file returned 511."""
         fdef = self._callee_decl(name)
         if fdef is None:
             if e.kwargs:
