@@ -479,6 +479,61 @@ def external_declarations(linked: list) -> dict:
     return out
 
 
+def linked_module_paths(linked: list) -> list:
+    """The source path of every linked library that recorded one, in link order.
+
+    A library built from a module's own source records that path in its
+    manifest (`write_dylib_manifest`'s `source`), so this is the exact file the
+    library was compiled from and not a module name resolved a second time.
+    Duplicates are dropped and order is kept, so a program that links the same
+    module twice is read once.
+
+    A library with no recorded source — the runtime dylib, whose exports come
+    from a C header — contributes nothing, which is the honest answer: there is
+    no module declaration behind it to read."""
+    out, seen = [], set()
+    for lib in linked or []:
+        path = lib.get("source")
+        if path and os.path.isfile(path) and path not in seen:
+            seen.add(path)
+            out.append(path)
+    return out
+
+
+def module_struct_defs(path: str, project_root: str = None) -> list:
+    """The `StructDef`s the module at `path` declares, following its re-exports.
+
+    The one-module half of `imported_struct_defs`, split out because
+    `_imported_structs` reaches it from a LINKED LIBRARY as well as from an
+    import, and a library is a path rather than an importing file with
+    statements to walk out of. Same contract as the whole-module version: a
+    package's API is its re-exports, so reaching a type means walking to the
+    module that defines it, and the walk is transitive and cycle-safe."""
+    out, seen, visited = [], set(), set()
+
+    def collect(p):
+        key = os.path.abspath(p)
+        if key in visited:
+            return
+        visited.add(key)
+        mod_stmts = module_statements(p)
+        for st in mod_stmts:
+            name = getattr(st, "name", None)
+            if isinstance(st, F.StructDef) and name not in seen:
+                seen.add(name)
+                out.append(st)
+        for st in mod_stmts:
+            if not isinstance(st, F.FromImportStmt):
+                continue
+            dep = resolve_module_path(st.module, relative_to=p,
+                                      project_root=project_root or p)
+            if dep:
+                collect(dep)
+
+    collect(path)
+    return out
+
+
 def _search_roots(relative_to: str, project_root: str) -> list:
     """Directories a module name is looked for in, nearest first.
 
@@ -791,34 +846,16 @@ def imported_struct_defs(source_path: str, stmts: list,
     Transitive, and cycle-safe: a package that re-exports from a sibling that
     re-exports back terminates on the visited set, and a struct is collected
     once however many paths reach it."""
-    out, seen, visited = [], set(), set()
-
-    def collect(path):
-        key = os.path.abspath(path)
-        if key in visited:
-            return
-        visited.add(key)
-        mod_stmts = module_statements(path)
-        for st in mod_stmts:
-            name = getattr(st, "name", None)
-            if st.__class__.__name__ == "StructDef" and name not in seen:
-                seen.add(name)
-                out.append(st)
-        # Then whatever this module re-exports, which is where a package's
-        # types actually live.
-        for st in mod_stmts:
-            if not isinstance(st, F.FromImportStmt):
-                continue
-            dep = resolve_module_path(st.module, relative_to=path,
-                                      project_root=project_root or source_path)
-            if dep:
-                collect(dep)
-
+    out, seen = [], set()
     for mod in imported_modules(stmts):
         path = resolve_module_path(mod, relative_to=source_path,
                                    project_root=project_root or source_path)
-        if path is not None:
-            collect(path)
+        if path is None:
+            continue
+        for st in module_struct_defs(path, project_root or source_path):
+            if st.name not in seen:
+                seen.add(st.name)
+                out.append(st)
     return out
 
 

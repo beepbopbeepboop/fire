@@ -924,15 +924,40 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     return code, info, external_syms, binary
 
 
-def _imported_structs(source_path: str, stmts: list, arch: str) -> list:
+def _imported_structs(source_path: str, stmts: list, arch: str,
+                      linked: list = None) -> list:
     """Struct declarations from the modules this file imports, or [].
 
     A no-op for a target that has no module concept (an ELF image, or a
-    non-Mach-O format): there is nothing to import and nothing to bind."""
+    non-Mach-O format): there is nothing to import and nothing to bind.
+
+    `linked` widens it to the libraries the program was HANDED, which is not the
+    same set and used to be a hole. `--link-dylib heaplib.dylib` with a program
+    that has no import statement is the only way `Bag` reaches such a program —
+    the dylib carries the struct's METHODS in its manifest (`kind: "method"`
+    entries, one per `add`/`__len__`) but not its DECLARATION, and without one
+    `var b = Bag(); b.n = 4` was refused with a repair the reader cannot apply:
+    "Bind the base from a constructor THIS MODULE declares", for a struct
+    declared in a file this build does not have. That advice was right and
+    impossible. The declaration is read from the source the library recorded
+    when it was built — the same bytes its methods were compiled from — so the
+    field list, `struct_is_framed`'s answer and the frame slot table all come
+    from one file and cannot disagree with the library on the link line."""
     if not fmt_wants_macho(arch):
         return []
-    from formal.imports import imported_struct_defs
-    return imported_struct_defs(source_path, stmts, project_root=source_path)
+    from formal.imports import (imported_struct_defs, linked_module_paths,
+                                module_struct_defs)
+    out, seen = [], set()
+    for st in imported_struct_defs(source_path, stmts,
+                                   project_root=source_path):
+        seen.add(st.name)
+        out.append(st)
+    for path in linked_module_paths(linked):
+        for st in module_struct_defs(path, source_path):
+            if st.name not in seen:
+                seen.add(st.name)
+                out.append(st)
+    return out
 
 
 def _import_aliases(stmts: list) -> dict:
@@ -1084,7 +1109,14 @@ def compile_formal(source_path: str, output: str = None,
     # `<Struct>_<method>` and the rewrite needs to know which struct owns the
     # name. Resolving this after would leave `c.get()` unrecognised in a file
     # that imported the struct, which is the only way such a call occurs.
-    imported_structs = _imported_structs(source_path, stmts, arch)
+    # The libraries this program links against, resolved before codegen: their
+    # export spellings decide both the callee mangling and (via their load
+    # commands) where the entry point lands. Read BEFORE the function pipeline
+    # because `_imported_structs` needs them: a library handed over with
+    # `--link-dylib` and no import statement is the only way its struct
+    # declarations reach this file at all.
+    linked = load_dylib_manifests(link_dylibs)
+    imported_structs = _imported_structs(source_path, stmts, arch, linked)
     try:
         functions, structs, symbols = _prepare_functions(
             stmts, synthetic=True, extra_structs=imported_structs)
@@ -1095,11 +1127,6 @@ def compile_formal(source_path: str, output: str = None,
         # of the one-line diagnostic every other refusal produces.
         raise FormalBuildError(str(e))
     ordered = functions
-
-    # The libraries this program links against, resolved before codegen: their
-    # export spellings decide both the callee mangling and (via their load
-    # commands) where the entry point lands.
-    linked = load_dylib_manifests(link_dylibs)
 
     # `import X` means X is a dependency. Each imported module is compiled in
     # FULL into a dylib that represents it (formal/imports.py) and goes on the
