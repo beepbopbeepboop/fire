@@ -238,7 +238,7 @@ looked at.
 | `test_myinterpreter_simple.py`, `test_myinterpreter_validation.py` | name `mojo/ast_nodes.mojo` | Either the test moves to what the interpreter actually loads, or it is deleted. The second is defensible: the interpreter has been `fire_compiler` since the rename, and a test of a module that no longer exists is not a slow test, it is a wrong claim. **`test_myinterpreter_validation.py` is the expensive one to delete** — it validates the interpreter's output against Python's own tokenizer, and that check is worth having *somewhere*. It is the strongest cheap parity check in the tree and nothing runs it. |
 | `test_phase2_parser.py`, `test_phase2_parser_simple.py` | name a `parser` module that does not exist | Same decision, and the same argument: the parser is `fire_compiler.py` now. |
 | `test_type_system.py`, `test_type_system_integration.py` | `No module named 'pytest'` | pytest is not a dependency of this repo. A test that needs a package the gate does not install is a test the gate cannot run. |
-| `test_mixed_cpp_link.py` | `NameError: name 'mojo' is not defined` | Almost certainly a post-rename spelling in the test. Cheap to look at. |
+| `test_mixed_cpp_link.py` | `NameError: name 'mojo' is not defined` | Almost certainly a post-rename spelling in the test. Cheap to look at. **It is not alone — re-measured 2026-09-30, NINE files carry the same stale spelling, and eight of the nine are REGISTERED with an `expect=` marker, so this is a Tier 1 hole wearing Tier 3's clothes.** See §3.4. |
 | `test_py314_full.py` | points at `~/net/Python-3.14.6`, **outside the repository** | Takes the path as an argument and skips LOUDLY, or it stays unrun. A registered test that silently skips when a path is absent is a gate that measures nothing, which is worse than an unrun file. **And see below — it is also the one file in the estate that WRITES to `bugs/`.** |
 | `test_coro_bugs.py` | exits 0 while its own output reads `CFAIL=1 COMPILE=1` | §3.3 |
 | `test_coro_scoreboard.py` | >300 s; a file whose output IS the measurement | It has no assertion, so there is nothing to fail. Either something reads it or it is a report, not a test. |
@@ -257,7 +257,7 @@ with its reason, so a 51st orphan is loud.
 
 ---
 
-## 3. The three findings worth acting on
+## 3. The findings worth acting on
 
 ### 3.1 A cached test cannot see the files it is about
 
@@ -309,6 +309,98 @@ a scoreboard file, or through a return value that nothing reads is a test that
 cannot fail. `tools/suite.py` has a `reject=` pattern for exactly this shape
 (`mojo_unsupported_iter` prints and exits 0) and it is the right tool — it is
 simply not applied to the files that need it.
+
+---
+
+## 3a. A nine-file casualty of the `mojo.py` → `fire.py` rename, eight of them hidden behind `expect=`
+
+**State: OPEN, measured 2026-09-30, one-word fix per site, NOT fixed here
+because it lands outside this branch's claims and would require re-measuring
+eight `tools/suite.py` markers.**
+
+`563ec43a` ("Rename compiler and runtime sources to fire", 2026-09-16) renamed
+the compiler driver `mojo.py` → `fire.py`. `link_executable` (`fire.py:594`),
+`_GCC_BIN` / `_GXX_BIN` (`fire.py:35-36`) and `subprocess` all moved with it.
+Nine test files still spell the module `mojo`.
+
+`mojo` is bound in **none** of them — every one imports `fire` instead
+(measured: `importlib.import_module(f); 'mojo' in vars(f)` is `False` for all
+nine, and `True` for `fire` in the seven that import it at module level; the
+other two import `fire` inside the function, which does not help a name read
+from the same scope). So every one of these is a guaranteed `NameError` on the
+link step, and the link step is the *last* thing most of them do.
+
+| file:line | call | registered? |
+|---|---|---|
+| `test_mixed_cpp_link.py:121,141,146-154` | `mojo.link_executable`, `mojo._GCC_BIN`, `mojo._GXX_BIN`, `mock.patch('mojo.subprocess.run')` | **no** — 0 hits in `tools/suite.py` |
+| `test_taskgroup.py:116` | `mojo.link_executable` | yes, `expect='3 failing: TaskGroup'` |
+| `test_gimple_async_runner.py:84` | `mojo.link_executable` | yes, `expect='36 failing: ...'` |
+| `test_mutable_async_capture.py:112` | `mojo.link_executable` | yes, `expect='async capture of a mutable binding …'` |
+| `test_transitive_closure_capture.py:138` | `mojo.link_executable` | yes, `expect='closure capture through a transitive import …'` |
+| `test_async_void_return.py:120` | `mojo.link_executable` | yes, `expect='3 failing: an async function with no return value'` |
+| `test_async_with_lock_guard.py:119` | `mojo.link_executable` | yes, `expect='2 failing: ...'` |
+| `test_nested_async_generic.py:113` | `mojo.link_executable` | yes, `expect='2 failing: a generic inside a nested async'` |
+| `test_async_runtime_scaffold.py:221` (+ docstring `:6`, comment `:218`) | `mojo.link_executable` | yes, `expect='1 of 2: …'` |
+
+Reproduced live on the one that is not hidden, `python3 test_mixed_cpp_link.py`
+(under `tools/memslot.py --gb 8`):
+
+```
+PASS  find_gxx() returns a usable g++ binary
+PASS  g++ --version succeeds
+PASS  g++ compiles poc.cpp -> poc.o
+PASS  gcc -fgimple compiles main.c -> main.o
+  File ".../test_mixed_cpp_link.py", line 121, in test_mixed_compile_link_run
+    result = mojo.link_executable([c_o, cpp_o], exe_file, cxx=True)
+NameError: name 'mojo' is not defined
+```
+
+Four checks pass, then the file dies at the first *compile-and-link-and-run*,
+which is the entire subject of the file.
+
+### Why this is Tier 1 and not Tier 3
+
+Tier 3 above is "dead for a reason that is not a behaviour gap" — a red test
+nobody reads. These eight are worse than red: they are **`expect=`-marked, so
+the suite reports them as a known behaviour gap with a specific failure COUNT,
+and the `NameError` is inside that count.** A reader of `tools/suite.py` sees
+`gimple-async-runner — 36 failing` and concludes 36 async semantics are wrong.
+Some of those 36 are one missing module name, and the marker's own text ("an
+area with no gate coverage until now") is exactly the belief this sustains.
+
+This is cause (a) from the 8-for-8 rate table in `bugs/hard/README.md` — a
+regression test whose red is enshrined — arrived at from the other direction: the
+enshrinement is of a *crash*, not of a wrong answer, so nobody re-tests it.
+
+### Exact next step
+
+1. In the eight registered files, `mojo.` → `fire.` (18 call sites; the four in
+   `test_mixed_cpp_link.py` include two `mock.patch('mojo.subprocess.run')`,
+   which are target strings and must move with the module). One word per site.
+2. Re-run each and **re-measure its real failure count**. The counts in the
+   `expect=` strings are almost certainly too high, and `tools/suite.py` fails a
+   marker whose test *passes* — so leaving a stale count is a second, louder
+   hole. This is why the fix is not a one-liner and why it needs a session that
+   owns `tools/suite.py`.
+3. Register `test_mixed_cpp_link.py`, or add it to `test_suite.py`'s
+   `UNREGISTERED` with a reason. It is currently an orphan with no
+   declaration at all, which §1's own methodology calls out.
+
+Not pre-existing-and-ignored: this was found by a static sweep for
+"helper renamed by one branch, still called by the old name" during a merge,
+which is the check most likely to be repeated.
+
+### The same shape, already paid for, in the other direction
+
+`6ad8efd5` (master, 2026-09-29) deleted `bugs/FORMAL_toplevel_statements_dropped.md`
+— correctly, the bug is fixed — and left **seven** citations to a file that no
+longer exists: `formal/build.py:105,663`, `formal/model.py:9182`,
+`bugs/FORMAL_module_state_no_storage.md:146`,
+`bugs/FORMAL_read_before_store_returns_a_register.md:4`,
+`test_formal_toplevel.py:4`, `test_formal_imports.py:590`. Same rule, same
+cost, opposite direction from the nine above: a deleted doc rather than a
+renamed module. Recorded here rather than fixed in place because `formal/` is
+another worker's claimed area this session; it is four words per site.
 
 ---
 
