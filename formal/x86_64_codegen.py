@@ -580,9 +580,7 @@ class X86_64Codegen:
         if not functions:
             raise CodegenError("no function definitions to compile")
         if emit_startup:
-            main = [f for f in functions if f.name == "main"]
-            rest = [f for f in functions if f.name != "main"]
-            functions = (main + rest) if main else functions
+            functions = M.entry_function(functions)
         # The module's struct declarations, by name. `formal/build.py` hands
         # both backends the same list through one `_codegen_and_link`, so
         # consuming it here is what lets the two agree about which callee names
