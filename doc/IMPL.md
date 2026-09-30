@@ -819,7 +819,7 @@ pass, in **`mlir.py`** — table-driven, dialects-as-data.
   `_mojo_at_` helper). The `[name=value]` op params survive parsing via
   `SubscriptExpr.attrs`.
 - **Deferred (explicit, with a reason via `mlir.deferral_reason`)**: GPU
-  (`nvvm.*`/`rocdl.*` — see `METAL.md`), coroutines (`co.*`), atomics, true
+  (`nvvm.*`/`rocdl.*` — see `METAL.html`), coroutines (`co.*`), atomics, true
   vector SIMD, allocation/symbols, and compiler-internal `kgen`/`variant`/struct
   GEP. The codegen emits an honest `/* mlir …: deferred: <reason> */` stub.
 - **Parser**: a bare `__mlir_op` statement is a real side-effecting op (e.g.

@@ -1,6 +1,6 @@
 """MSL emitter: a second target for the same AST the C emitter walks.
 
-Selected by ``gen.target == 'metal'``; see ``doc/GPU_OFFLOAD_PLAN.md`` for
+Selected by ``gen.target == 'metal'``; see ``doc/GPU_OFFLOAD_PLAN.html`` for
 why the transform is split across three seams and why this one is
 statement-level. MSL is C-like for expressions, so much of an expression
 lowers to itself -- what is NOT the same is everything in

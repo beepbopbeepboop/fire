@@ -33,17 +33,17 @@
 </head>
 <body>
 
-<p class="banner">Generated from <code>GPU_OFFLOAD_PLAN.md</code> by <code>tools/md2html.py</code>. Edit the Markdown, not this file; rerun <code>python3 tools/md2html.py GPU_OFFLOAD_PLAN.md</code>.</p>
+<p class="banner">Rendered from Markdown by <code>tools/md2html.py</code>. This HTML is the document; edit it directly.</p>
 
 <h1>GPU offload: where the transform hooks in</h1>
-<p>Companion to <code>doc/METAL.md</code>, which holds the idea. This document is the answer to a narrower question: <strong>given the tree as it actually is, which seams do we cut, in what order, and what is the first runnable increment.</strong> <code>METAL.md</code> is a parking lot; this is the plan.</p>
+<p>Companion to <code>doc/METAL.html</code>, which holds the idea. This document is the answer to a narrower question: <strong>given the tree as it actually is, which seams do we cut, in what order, and what is the first runnable increment.</strong> <code>METAL.html</code> is a parking lot; this is the plan.</p>
 <h2>The one thing that changes the plan</h2>
-<p><code>METAL.md</code> assumes the offline toolchain: emit MSL/AIR, run <code>xcrun metal</code>, then <code>xcrun metallib</code>, ship a <code>.metallib</code>, load it at run time.</p>
+<p><code>METAL.html</code> assumes the offline toolchain: emit MSL/AIR, run <code>xcrun metal</code>, then <code>xcrun metallib</code>, ship a <code>.metallib</code>, load it at run time.</p>
 <p><strong>We do not need any of that.</strong> <code>test_llm/metal.m</code> already compiles MSL at run time with <code>-[MTLDevice newLibraryWithSource:options:error:]</code>, and <code>test_llm/kernels.metal.inc</code> already carries the MSL <em>as a C string</em> precisely so a single generated C file is self-contained. That is a different, better deal:</p>
 <table>
 <thead><tr>
 <th></th>
-<th>offline <code>.metallib</code> (METAL.md)</th>
+<th>offline <code>.metallib</code> (METAL.html)</th>
 <th>runtime <code>newLibraryWithSource:</code> (proven)</th>
 </tr></thead>
 <tbody>
@@ -69,7 +69,7 @@
 </tr>
 </tbody></table>
 <p>So the MSL becomes a <strong>sidecar string emitted by the compiler</strong>, not a separate compiled object. That removes the entire "how does this get built and cached" question, and it is the reason this is worth doing now rather than after the CPU path is solid.</p>
-<p>What we still take from <code>METAL.md</code>: the host/device split, <code>external_call</code> as the handoff, and the table-driven lowering discipline.</p>
+<p>What we still take from <code>METAL.html</code>: the host/device split, <code>external_call</code> as the handoff, and the table-driven lowering discipline.</p>
 <h2>The three seams</h2>
 <p>They are at three different granularities, which is why none of them can do the other's job.</p>
 <h3>Seam 1 — device region selection (function level, <em>before</em> emission)</h3>
@@ -83,12 +83,12 @@
 </ol>
 <p>Rule 2 is the one that answers "transform the hand-written speciality code as well as normal Python" — the stdlib kernels are unmarked, so reachability is the only honest way to find them.</p>
 <h3>Seam 2 — MSL emission (statement/op level)</h3>
-<p>A second emitter, parallel to <code>mojo/backend_gimple/emit_exprs.py</code>, selected by a target flag on the gen object (<code>gen.target</code>, <code>'c'</code> today, <code>'metal'</code> for a device function). This is the "two-target codegen shape" <code>METAL.md</code> already names: same AST, same walk discipline, different sink.</p>
+<p>A second emitter, parallel to <code>mojo/backend_gimple/emit_exprs.py</code>, selected by a target flag on the gen object (<code>gen.target</code>, <code>'c'</code> today, <code>'metal'</code> for a device function). This is the "two-target codegen shape" <code>METAL.html</code> already names: same AST, same walk discipline, different sink.</p>
 <p>New: <code>mojo/backend_gimple/emit_metal.py</code>, and its op table <code>mojo/middle/metal_ops.py</code>.</p>
 <p><strong><code>mlir.py</code> is the right model for the table, and the right place for the GPU ops</strong> — its own docstring says so: <em>"adding a newly-met op is one row here, not new backend control flow."</em> It already classifies the entire GPU op surface and defers it (<code>mlir.py:207-211</code>):</p>
 <pre><code class="language-python">_DEFERRED_PREFIXES = {
-    'nvvm.':  'GPU (NVIDIA) — see METAL.md / CUDA path',
-    'rocdl.': 'GPU (AMD)   — see METAL.md / ROCm path',
+    'nvvm.':  'GPU (NVIDIA) — see METAL.html / CUDA path',
+    'rocdl.': 'GPU (AMD)   — see METAL.html / ROCm path',
 }</code></pre>
 <p>with <code>pop.call_llvm_intrinsic</code> and <code>pop.inline_asm</code> deferred alongside. So every one of the ~100 <code>llvm_intrinsic[...]</code> sites and ~141 <code>inlined_assembly</code> sites in <code>std/gpu/</code> is <em>already classified</em> — the classifier works, the lowering does not exist. Building the lowering is therefore table work against an existing index, not new plumbing.</p>
 <p>The <code>mlir.*</code> family splits by vendor, and this is a Metal target, so the split is:</p>

@@ -13,11 +13,13 @@ Why a generator rather than a hand-written sibling file: `doc/` already has
 both patterns, and the hand-maintained pair is the one that goes stale. Two
 copies of the same prose cannot both be right after the next edit to the
 `.md`, and nothing in the tree fails when that happens. Regenerating is
-`python3 tools/md2html.py doc/GPU_OFFLOAD_PLAN.md`; the emitted file carries a
-"generated from" banner naming the source and the tool, so a reader knows
-which file is authoritative and an editor knows not to hand-edit the output.
+`python3 tools/md2html.py doc/Some_Doc.md`.
 
-    python3 tools/md2html.py doc/GPU_OFFLOAD_PLAN.md           # -> .html beside it
+Both documents this tool was written for have since had their `.md` sources
+removed, so it has no in-tree input today; it stays because `doc/` has a few
+dozen more Markdown files that convert with it.
+
+    python3 tools/md2html.py doc/Some_Doc.md                   # -> .html beside it
     python3 tools/md2html.py a.md b.md --stdout                # to stdout, for piping
     python3 tools/md2html.py --check doc/*.md                  # exit 1 if any is stale
 
@@ -65,9 +67,18 @@ CSS = """\
   em { color: #444; }
 """
 
-_BANNER = ('<p class="banner">Generated from <code>{src}</code> by '
-           '<code>tools/md2html.py</code>. Edit the Markdown, not this file; '
-           'rerun <code>python3 tools/md2html.py {src}</code>.</p>')
+# The banner deliberately does NOT claim a Markdown source, and does not say
+# "edit the Markdown". Both of these documents' `.md` sources have been
+# removed -- the HTML is the document now -- so a banner pointing at a file
+# that no longer exists is a lie that outlives the thing it described, and
+# the reader is the one who has to notice it is false.
+#
+# What is worth keeping is the provenance and the escape hatch: these pages
+# were rendered rather than hand-written, so a future editor knows the markup
+# is mechanical and knows the tool exists.
+_BANNER = ('<p class="banner">Rendered from Markdown by '
+           '<code>tools/md2html.py</code>. This HTML is the document; edit it '
+           'directly.</p>')
 
 
 # ── inline ──────────────────────────────────────────────────────────────────
@@ -324,7 +335,7 @@ def convert(md: str, src_name: str) -> str:
     return (f'<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
             f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
             f'<title>{html.escape(title)}</title>\n<style>\n{CSS}</style>\n</head>\n'
-            f'<body>\n\n{_BANNER.format(src=html.escape(src_name, quote=True))}\n\n'
+            f'<body>\n\n{_BANNER}\n\n'
             + '\n'.join(out)
             + '\n\n</body>\n</html>\n')
 

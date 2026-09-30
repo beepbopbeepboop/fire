@@ -13,7 +13,7 @@
  * the caller knows which arguments are buffers.
  *
  * The MSL arrives as a string from the compiler's sidecar rather than as a
- * precompiled `.metallib`. That is the whole reason doc/METAL.md's offline
+ * precompiled `.metallib`. That is the whole reason doc/METAL.html's offline
  * `xcrun metal` / `xcrun metallib` step is not needed: the driver compiles
  * the same text for whatever GPU is actually present, at load time, and
  * there is no second artifact to ship, cache-key, or wire into a build.

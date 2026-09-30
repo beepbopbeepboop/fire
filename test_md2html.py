@@ -22,13 +22,22 @@ sys.path.insert(0, os.path.join(HERE, 'tools'))
 
 import md2html as M  # noqa: E402
 
-# Every document this generator is responsible for. A doc listed here is
-# held to the same three checks: every source line survives, the committed
-# HTML is current, and the ASCII diagram inside METAL.md is byte-intact.
-DOCS = (
-    ('doc/GPU_OFFLOAD_PLAN.md', 'doc/GPU_OFFLOAD_PLAN.html'),
-    ('doc/METAL.md', 'doc/METAL.html'),
-)
+# The documents this generator produced, and the only place they are checked
+# against anything. The `.md` sources have been removed -- the HTML is the
+# document now -- so there is deliberately NO source to compare against here
+# any more, and the three checks below are what is left:
+#
+#   - the renderer still handles every construct (TestStructure,
+#     TestContentSurvival: fixtures, not documents);
+#   - each page is well-formed and its load-bearing content is intact
+#     (TestRenderedDocuments);
+#   - the tool still works (TestTooling).
+#
+# What is gone is the strongest check these files ever had: proving no word
+# of a source document was dropped in conversion, which is why the three
+# content-loss bugs this renderer had were caught at all. From here they are
+# guarded by fixture tests only.
+DOCS = ('doc/GPU_OFFLOAD_PLAN.html', 'doc/METAL.html')
 
 VOID = {'meta', 'br', 'hr', 'img', 'link', 'input'}
 
@@ -188,120 +197,75 @@ class TestContentSurvival(unittest.TestCase):
         self.assertIn('more', out)
 
 
-class TestRealDocument(unittest.TestCase):
-    """Checks against the document this was written for.
+class TestRenderedDocuments(unittest.TestCase):
+    """Checks on the two pages themselves, now that their sources are gone.
 
-    A fixture-only test proves the renderer works on the constructs someone
-    thought of. These run the real plan through the real renderer, which is
-    the only thing that catches a construct the fixture forgot.
+    A fixture-only test proves the renderer handles the constructs someone
+    thought of. These assert that each real page is well-formed and still
+    contains the specific things it exists to contain -- which is the check
+    that stays meaningful without a `.md` to diff against.
     """
 
-    def setUp(self):
-        self.md_path, self.html_path = DOCS[0]
-        with open(self.md_path, encoding='utf-8') as f:
-            self.md = f.read()
-        with open(self.html_path, encoding='utf-8') as f:
-            self.html = f.read()
+    def _html(self, rel: str) -> str:
+        path = os.path.join(HERE, rel)
+        if not os.path.exists(path):
+            self.skipTest(f'{rel} not present')
+        with open(path, encoding='utf-8') as f:
+            return f.read()
 
-    def test_every_source_line_survives_into_the_html(self):
-        for md_rel, html_rel in DOCS:
-            with self.subTest(doc=md_rel):
-                self._check_content(md_rel, html_rel)
+    def test_every_page_is_well_formed(self):
+        for rel in DOCS:
+            with self.subTest(doc=rel):
+                p = _Balance()
+                p.feed(self._html(rel))
+                self.assertEqual(p.errors, [], f'{rel}: {p.errors[:4]}')
+                self.assertEqual(p.stack, [], f'{rel} unclosed: {p.stack[:4]}')
 
-    def _check_content(self, md_rel: str, html_rel: str) -> None:
-        with open(os.path.join(HERE, md_rel), encoding='utf-8') as f:
-            md = f.read()
-        with open(os.path.join(HERE, html_rel), encoding='utf-8') as f:
-            htm = f.read()
-        text = visible_text(htm)
-        missing = []
-        in_fence = False
-        for raw in md.split('\n'):
-            s = raw.strip()
-            if s.startswith('```'):
-                in_fence = not in_fence
-                continue
-            if in_fence or not s or s.startswith(('---', '|---')):
-                continue
-            if s.startswith('|'):
-                probes = [c for c in (c.strip() for c in s.strip('|').split('|'))
-                          if len(c) > 8]
-            else:
-                s = re.sub(r'^>\s?', '', re.sub(r'^#{1,6}\s+', '', s))
-                probes = [re.sub(r'^\s*(?:[-*]|\d+\.)\s+', '', s)]
-            for probe in probes:
-                # A code span crossing a source line break cannot be probed
-                # per-line -- the renderer correctly joins it, so the source
-                # fragment appears nowhere. Skip those.
-                if probe.count('`') % 2:
-                    continue
-                q = _plain(probe)
-                if len(q) < 8:
-                    continue
-                if q[:50] not in text:
-                    missing.append(q[:60])
-        self.assertEqual(missing, [], f'content lost in {html_rel}: {missing}')
+    def test_plan_keeps_its_whole_comparison_table(self):
+        """The table whose first body row was once dropped.
 
-    def test_committed_html_is_current_for_every_doc(self):
-        for md_rel, html_rel in DOCS:
-            with self.subTest(doc=md_rel):
-                with open(os.path.join(HERE, md_rel), encoding='utf-8') as f:
-                    md = f.read()
-                with open(os.path.join(HERE, html_rel), encoding='utf-8') as f:
-                    cur = f.read()
-                self.assertEqual(
-                    M.convert(md, os.path.basename(md_rel)), cur,
-                    f'{html_rel} is stale -- regenerate with '
-                    f'`python3 tools/md2html.py {md_rel}`')
+        A row that fails to render leaves no trace: no empty cell, no broken
+        border, no error. Four rows where there should be four is the whole
+        test.
+        """
+        htm = self._html('doc/GPU_OFFLOAD_PLAN.html')
+        seg = htm[htm.find('<table>'):htm.find('</table>')]
+        for row in ('build wiring', 'artifact', 'portability', 'debuggability'):
+            self.assertIn(f'<td>{row}</td>', seg, f'table lost its {row!r} row')
+        self.assertEqual(seg.count('<tr>'), 5, 'header + 4 body rows')
+
+    def test_plan_still_renders_its_code_blocks(self):
+        htm = self._html('doc/GPU_OFFLOAD_PLAN.html')
+        self.assertGreaterEqual(htm.count('<pre>'), 2,
+                                'the _DEFERRED_PREFIXES quote and the '
+                                'lists-offload example are both load-bearing')
+        self.assertIn('_DEFERRED_PREFIXES', htm)
+        self.assertIn('vec_add(a, b, o, 4)', htm)
 
     def test_metals_ascii_diagram_is_intact(self):
-        """The pipeline diagram is the one thing in these docs that only
-        works if it is reproduced exactly. It lives in a fence, so it is
-        skipped by the line-survival check; if the fence ever stopped being
-        recognised, the diagram would reflow into a paragraph and nothing else
-        in the file would notice."""
-        with open(os.path.join(HERE, 'doc/METAL.html'), encoding='utf-8') as f:
-            htm = f.read()
+        """The pipeline diagram only works if reproduced exactly.
+
+        It lives in a fence, so nothing else here would notice if the fence
+        stopped being recognised and the diagram reflowed into a paragraph.
+        """
+        htm = self._html('doc/METAL.html')
         seg = htm[htm.find('<pre>'):htm.find('</pre>')]
         for probe in ('Mojo source', 'identify kernels', 'xcrun metal / metallib',
                       'foo.metallib', "binary for THIS Mac's GPU",
                       'GIMPLE C  (already done)'):
             self.assertIn(probe, seg, f'diagram lost {probe!r}')
 
-    def test_check_mode_reports_a_stale_file(self):
-        tmp = os.path.join(HERE, 'build', '_md2html_stale.md')
-        os.makedirs(os.path.dirname(tmp), exist_ok=True)
-        with open(tmp, 'w', encoding='utf-8') as f:
-            f.write('# T\n\nbody\n')
-        devnull = open(os.devnull, 'w')
-        real_err, sys.stderr = sys.stderr, devnull
-        try:
-            rc = M.main([tmp, '--check'])
-            self.assertEqual(rc, 1, '--check must fail for a missing .html')
-            M.main([tmp])
-            self.assertEqual(M.main([tmp, '--check']), 0,
-                             '--check must pass once regenerated')
-        finally:
-            sys.stderr = real_err
-            devnull.close()
-            for p in (tmp, tmp[:-3] + '.html'):
-                if os.path.exists(p):
-                    os.unlink(p)
+    def test_status_blockquote_is_present(self):
+        """The blockquote whose first line was once dropped.
 
-
-def _plain(s: str) -> str:
-    """The visible text of a markdown fragment, mirroring `M._inline`."""
-    spans: list[str] = []
-
-    def stash(m):
-        spans.append(m.group(1))
-        return f'\x00{len(spans) - 1}\x00'
-
-    s = re.sub(r'`([^`]+)`', stash, s)
-    s = s.replace('**', '').replace('*', '')
-    for i, c in enumerate(spans):
-        s = s.replace(f'\x00{i}\x00', c)
-    return re.sub(r'\s+', ' ', s).strip()
+        The status line is what tells a reader this document is a design note
+        rather than a description of working code, so losing its opening line
+        would misrepresent the document, not just truncate it.
+        """
+        htm = self._html('doc/METAL.html')
+        seg = htm[htm.find('<blockquote>'):htm.find('</blockquote>')]
+        self.assertIn('Status:', seg)
+        self.assertIn('design note / parking lot', seg)
 
 
 if __name__ == '__main__':

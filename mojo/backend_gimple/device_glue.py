@@ -1,12 +1,12 @@
 """The device sidecar: MSL into a C string, plus the host dispatch shims.
 
-Seam 3 of ``doc/GPU_OFFLOAD_PLAN.md``. The device emitter
+Seam 3 of ``doc/GPU_OFFLOAD_PLAN.html``. The device emitter
 (``emit_metal.py``) produces MSL; this turns that MSL into something the
 already-generated C can call, and it does so **inside the same .ci file**.
 
 That single fact is the whole design. The alternative -- emit a second
 artifact and run ``xcrun metal`` / ``xcrun metallib`` over it, which is
-what ``doc/METAL.md`` proposes -- buys a precompiled binary and pays for
+what ``doc/METAL.html`` proposes -- buys a precompiled binary and pays for
 it with build wiring, a second file to ship, and a cache key that has to
 be invalidated per GPU family. The Metal runtime compiles the same text at
 load time, for whatever GPU is actually present, for the cost of one
