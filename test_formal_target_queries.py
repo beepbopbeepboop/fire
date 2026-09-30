@@ -182,20 +182,21 @@ EXECUTED = [
     # binds the name to that. Two mechanisms, one answer — and if either were
     # missing, this case is the one that notices.
     #
-    # Asserted through the EXIT STATUS rather than through `print`, and that is
-    # not a stylistic choice: `print` of a `comptime`-bound STRING is refused on
-    # this path, and routing around it one `var` further prints a NUMBER
-    # instead (`t= 4296786840` on arm64, `t= 4300370841` on x86-64, for
-    # `comptime OS = "darwin"; var t = OS; print(t)`). That is a pre-existing
-    # wrong-answer bug in the `print` materialization, recorded in
-    # bugs/FORMAL_comptime_string_print.md; a case for this construct must not
-    # be built on top of it.
+    # Asserted through `print`, which is how this file says everything else, and
+    # which it could not do until the `comptime`-bound-string materialization
+    # was fixed: a `comptime` binding was never in the kind analysis, so
+    # `print` of one that held TEXT emitted the word — a `char *` — as a number
+    # (differently on each architecture). That was a bug in the `print`
+    # materialization, closed in `test_formal_comptime_string.py`, which is where
+    # the string case now lives. A `comptime` binding that holds an INTEGER was
+    # never affected, which is what makes this case a check of the FOLD rather
+    # than of the print materialization.
     ("function_local_comptime_of_a_query_is_folded",
      "def main():\n"
      "    comptime PW = "
      + query("pointer_width", "index", "index", "    ") + "\n"
-     "    return PW\n",
-     HOST_POINTER_BITS % 256),
+     "    print(\"pw=\", PW)\n",
+     "pw= %d" % HOST_POINTER_BITS),
     # A query NESTED inside a call's argument, which is the shape
     # `std/builtin/type_aliases.mojo` puts its templates in (two levels down,
     # under `Origin[0, _mlir_origin=__mlir_attr[…]]()`). The walk has to

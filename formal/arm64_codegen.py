@@ -3013,7 +3013,12 @@ class ARM64Codegen:
             if value.name in self._dict_vars:
                 self._dict_vars.add(name)
                 self._string_vars.discard(name)
-            elif value.name in self._string_vars:
+            elif self._expr_str_kind(value) == M.STR_KIND:
+                # `value.name in self._string_vars` OR a `comptime` binding
+                # whose folded value is the text: `var t = OS` binds exactly the
+                # `char *` `t = s` binds, and asking `_expr_str_kind` rather
+                # than re-deriving the test here is what keeps the two paths
+                # from disagreeing about the same read.
                 self._string_vars.add(name)
                 self._dict_vars.discard(name)
             else:
@@ -3555,12 +3560,19 @@ class ARM64Codegen:
     def _expr_str_kind(self, expr):
         """What `expr` holds: "str", "int", or None if undecidable.
 
-        Two sources, and `_string_vars` WINS where they disagree. It is
+        Three sources, and `_string_vars` WINS where they disagree. It is
         flow-sensitive and tracks what the emission of this very function has
         bound so far, so it is strictly better informed than the whole-function
         `ValueKinds`; the whole-function map is what covers the shapes
         `_note_binding` does not see (a parameter's annotation, a function's
-        return type, a subscript's element kind).
+        return type, a subscript's element kind). A `comptime` binding is the
+        third source and it is neither: `ValueKinds` never scans a
+        `comptime NAME = …` statement, so a folded binding reached this as an
+        unclassified read — and a STRING one, which `_emit_comptime_read`
+        materializes as the interned literal, was then emitted as an INTEGER,
+        differently on each architecture. The binding is a compile-time
+        constant the emission already holds, so what it holds is known rather
+        than guessed; `model.comptime_val_kind` is the one reader of it.
 
         Named for what it answers rather than for the first caller: `print`,
         the method-receiver guard and `_note_binding` all need the same
@@ -3570,8 +3582,12 @@ class ARM64Codegen:
             key = _member_slot_key(expr)
             if key is not None and key in self._string_vars:
                 return M.STR_KIND
-        elif isinstance(expr, F.IdentExpr) and expr.name in self._string_vars:
-            return M.STR_KIND
+        elif isinstance(expr, F.IdentExpr):
+            if expr.name in self._string_vars:
+                return M.STR_KIND
+            bound = M.comptime_val_kind(self._comptime_vals, expr.name)
+            if bound is not None:
+                return bound
         return self._vkinds.kind_of(expr)
 
     def _expr_is_fd(self, expr) -> bool:
