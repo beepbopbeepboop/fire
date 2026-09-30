@@ -1523,6 +1523,83 @@ def main():
     print(total)
 """, "33\n75\n8\n242\n3200000\n")
 
+    # ── A callee that provably returns a FRESH STRING hands ownership to its
+    # caller, exactly as one returning a fresh container always has
+    # (analyze_returns_fresh, which until now accepted only a container
+    # display). The three shapes are the ones the analysis reads off the
+    # lowering rather than infers from a type: a `+` (mojo_str_cat always
+    # copies), a local bound to a `+`, and a slice (mojo_cstr_slice). Both
+    # consumers of that ownership are in the same program: bound to a local and
+    # freed at scope exit, and consumed on the spot by `len` (which reads the
+    # length and nothing else). The second program is the other side of the
+    # rule: a callee that returns its own ARGUMENT, or a plain literal it never
+    # owned anything of, must NOT be freed — `str(s)` is the identity for a
+    # string, so freeing a returned `str(s)` is a crash. The runner scribbles
+    # freed memory, so a wrong free makes the comparisons (printed 3rd) fail
+    # rather than usually pass.
+    test_gimple_bounded_memory("gimple_fresh_returning_string_functions_are_owned", """\
+def mk(i: Int) -> String:
+    return "n" + String(i)
+
+def via_local(i: Int) -> String:
+    var s = "m" + String(i)
+    return s
+
+def via_slice(i: Int) -> String:
+    return ("abcdef")[1:3]
+
+def main():
+    print(mk(3))
+    print(via_local(9))
+    print(via_slice(0))
+    var total = 0
+    for r in range(600000):
+        total += len(mk(r % 100)) + len(via_local(r % 100)) + len(via_slice(0))
+    var bound = 0
+    for r in range(600000):
+        var a = mk(r % 100)
+        var b = via_local(r % 100)
+        var c = via_slice(0)
+        bound += len(a) + len(b) + len(c)
+    print(total)
+    print(bound)
+""", "n3\nm9\nbc\n4680000\n4680000\n", 40)
+
+    test_gimple_stdout("gimple_returned_string_that_is_not_fresh_is_not_freed", """\
+def alias(s: String) -> String:
+    return s
+
+def identity(s: String) -> String:
+    return str(s)
+
+def make() -> String:
+    return "kept-by-caller"
+
+def work(kept: List[String]) -> Int:
+    var t = 0
+    for i in range(4):
+        kept.append(alias("zz"))
+        kept.append(identity("yy"))
+        kept.append(make())
+        var c = String("q=") + String(i)
+        t += len(c)
+    return t
+
+def main():
+    var kept: List[String] = []
+    print(work(kept))
+    print(len(kept))
+    var hits = 0
+    for k in range(len(kept)):
+        if kept[k] == "zz":
+            hits += 1
+        if kept[k] == "yy":
+            hits += 10
+        if kept[k] == "kept-by-caller":
+            hits += 100
+    print(hits)
+""", "12\n12\n444\n")
+
     # ── A list that owns its own string ELEMENTS (doc/MEMORY.html §3.B). A
     # `split()` result's elements are fresh allocations made by the runtime
     # function that built the list and by nothing else, but

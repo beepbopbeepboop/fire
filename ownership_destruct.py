@@ -172,6 +172,35 @@ def _is_constructor_expr(node):
     return False
 
 
+def _is_fresh_string_expr(node) -> bool:
+    """True iff `node` is an EXPRESSION whose value is a brand-new heap
+    allocation the receiver/caller can never name — so a callee that returns it
+    hands its caller sole ownership, exactly as `analyze_returns_fresh` already
+    concludes for a container display.
+
+    Every form here was read in the lowering, not inferred from a type:
+      - `a + b` — `mojo_str_cat` always copies (doc/MEMORY.html §4.2), and on
+        a list the same spelling is `mojo_list_concat`, a fresh list. Either
+        way the result is not an alias of an operand. A non-container `+` (two
+        ints) is an `int64_t`, which the declaration gate never frees, so
+        accepting it is inert rather than wrong.
+      - an f-string — its accumulator is built by `_emit_str_cat` and is fresh
+        by the same argument.
+      - `s[a:b]` — `mojo_cstr_slice` is on the runtime's fresh-string list and
+        `mojo_list_slice` on its fresh-container one.
+
+    Deliberately NOT accepted, each because it can return its own argument and a
+    `free()` of that is a crash: `str(s)`/`String(s)` (the identity for a
+    string — emit_calls.py's `fname_raw == 'str'` branch returns `ev`
+    unchanged), a bare string method call (the receiver rules in
+    `receiver_results_consumed` decide those, per call site, and the receiver
+    may not even be a string), and any other call (whether it is fresh is
+    exactly the question being asked)."""
+    if isinstance(node, (N.TstringLiteral, N.SliceExpr)):
+        return True
+    return isinstance(node, N.BinaryOp) and node.op == '+'
+
+
 def _is_maybe_fresh_expr(node) -> bool:
     """A right-hand side that MAY build a brand-new container the assigned name
     would solely own: a call (a runtime function such as `.split()`/`.keys()`,
@@ -640,7 +669,8 @@ def _scan_stmt(stmt, facts: _FuncFacts, funcs, methods):
                 # even if y itself was otherwise a clean single-assignment
                 # constructor, x now holds the same pointer.
                 facts.disqualify(value.name)
-            facts.note_assign(name, is_ctor, _is_constructor_expr(value))
+            facts.note_assign(name, is_ctor,
+                               _is_constructor_expr(value) or _is_fresh_string_expr(value))
             _scan_expr(value, facts, funcs, methods)
         else:
             # Non-identifier target (subscript/member): its RHS is now
@@ -1279,7 +1309,7 @@ def analyze_returns_fresh(fn, funcs, methods, structs=None) -> bool:
         v = r.value
         if v is None:
             return False
-        if _is_constructor_expr(v):
+        if _is_constructor_expr(v) or _is_fresh_string_expr(v):
             continue
         nm = _moved_name(v)
         if nm == '':

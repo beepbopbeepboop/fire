@@ -1029,11 +1029,11 @@ def note_fresh_result(gen, t: str) -> None:
 
 def is_fresh_container_operand(gen, node, val: str) -> bool:
     """True iff `val`, the lowered value of operand expression `node`, is a
-    container that NOTHING else can reference, so the code that consumes it may
-    free it. Two conditions, both required:
+    value NOTHING else can reference — a container or a string — so the code
+    that consumes it may free it. Two conditions, both required:
       - `node` is a kind of expression that produces a value (a display, a
         call, a slice, a `+`) — never an identifier or a field read, which
-        merely name a container somebody else owns; and
+        merely name a value somebody else owns; and
       - `val` is a value a fresh-producing action created and that no consumer
         has claimed yet (`_fresh_vals`). A temp is never bound to a name or
         stored by the code that produces it, and a consumer removes it from the
@@ -1050,10 +1050,21 @@ def is_fresh_container_operand(gen, node, val: str) -> bool:
 def owned_free_fn_for(gen, val: str, ctype: str) -> str:
     """The free for ONE value, not for one type: a list built by a function in
     `_OWNS_STR_ELEMS` also owns the strings in it, and they are invisible to
-    `mojo_list_free`. Every place that emits a free for a specific lowered
-    value goes through here so the choice is made in exactly one spot."""
+    `mojo_list_free`; and a fresh STRING is a plain malloc block, so the
+    container table's blank answer for `char *` is not "nothing to free".
+    Every place that emits a free for a specific lowered value goes through
+    here so the choice is made in exactly one spot."""
     if ctype == 'MojoList *' and val in gen._owned_str_elem_vals:
         return 'mojo_list_free_owned_strs'
+    if ctype == 'char *':
+        # Every producer that puts a `char *` in `_fresh_vals` allocates it:
+        # `_FRESH_STRING_RETURNS` (each read off the runtime's own source), a
+        # module function `analyze_returns_fresh` proved returns a fresh
+        # string, and `_char_replace_impl` (always a copy). None of them can
+        # return its own argument, which is the case a `free` would crash on,
+        # and none of them is a string LITERAL (those are in `_slit_N` and
+        # never reach here — a literal is not the lowered value of a call).
+        return 'free'
     return _owned_free_runtime_fn(ctype)
 
 

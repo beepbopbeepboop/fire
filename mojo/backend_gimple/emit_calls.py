@@ -2148,7 +2148,17 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # fell all the way to the final "unsupported type" fallback,
         # so len(any_string) always silently returned 0. Found via
         # len(c_code) on a real compiled program's C output.
-        return 'int64_t', gen._call_expr('int64_t', 'mojo_strlen', [('char *', av)])
+        # A FRESH string temp (`len(mk(i))`, `len(s[1:3])`, `len("a" + b)`)
+        # is a malloc block nothing else can name, and the length is all this
+        # call reads — so it is freed here, the same bargain the container
+        # branch above makes, and AFTER the length has been read (the call is
+        # emitted first: freeing before it is a use-after-free, which is what
+        # the first version of this did). `_owned_free_runtime_fn` answers ''
+        # for a `char *`, which is why the branch it now takes is spelled out.
+        _len_t = gen._call_expr('int64_t', 'mojo_strlen', [('char *', av)])
+        if gen._is_fresh_container_operand(node.args[0], av):
+            gen._free_fresh_container(av, at)
+        return 'int64_t', _len_t
     _dsub_len = gen._dict_subclass_of(at)
     if _dsub_len and not gen._struct_defines_method(_dsub_len, '__len__'):
         dp = gen._new_val('MojoDict *', f"{av}->_data")
