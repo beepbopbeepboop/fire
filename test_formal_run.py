@@ -6482,6 +6482,34 @@ SHIFT_CASES = [
      "    var a: UInt64 = 18446744073709551615\n"
      "    printf(\"%016lx\", ushr(a, 4))\n    return 0\n", 0,
      "0fffffffffffffff"),
+    # ── the AUGMENTED spelling, which is a SECOND shift emitter ──────────
+    #
+    # `y <<= n` is the same operator as `y = y << n` and it reached a
+    # different emitter: arm64's `_emit_shift_reg` and x86-64's augmented
+    # arm each had their own shift, neither of which knew about the
+    # saturation rule. So `y <<= 64` left `y` unchanged while
+    # `y = y << 64` zeroed it — one operator, two answers, in the same
+    # program. These rows are what caught it, and they are the reason the
+    # rule now lives in ONE emitter per backend that both spellings reach.
+    ("augmented_shl_amount_64_is_zero",
+     "def f(x, n):\n    var y = x\n    y <<= n\n    return y\n"
+     "def main(k):\n    printf(\"%ld\", f(3, 64))\n    return 0\n", 0, "0"),
+    ("augmented_shr_amount_64_is_zero",
+     "def f(x, n):\n    var y = x\n    y >>= n\n    return y\n"
+     "def main(k):\n    printf(\"%ld\", f(3, 64))\n    return 0\n", 0, "0"),
+    # The augmented unsigned shift, same defect and same fix: the fill came
+    # from the promoted type of the AMOUNT rather than from the value.
+    ("augmented_ushift_u64_by_typed_int_amount",
+     "def f(x: UInt64, n: Int) -> UInt64:\n    var y = x\n    y >>= n\n"
+     "    return y\n"
+     "def main(k: Int) -> Int:\n"
+     "    var a: UInt64 = 18446744073709551615\n"
+     "    printf(\"%016lx\", f(a, 4))\n    return 0\n", 0, "0fffffffffffffff"),
+    # ...and the in-range augmented shift, which must be UNCHANGED: a fix
+    # that saturated every augmented shift would pass the two above.
+    ("augmented_shift_in_range_still_shifts",
+     "def f(x, n):\n    var y = x\n    y <<= n\n    return y\n"
+     "def main(k):\n    printf(\"%ld\", f(1, 12))\n    return 0\n", 0, "4096"),
     # A SIGNED value is still arithmetic even when the amount is unsigned.
     # Without this row, "the amount never decides the fill" could be
     # satisfied by refusing to decide at all.

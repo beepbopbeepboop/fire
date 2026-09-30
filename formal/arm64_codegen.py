@@ -1246,8 +1246,14 @@ class ARM64Codegen:
                 self.asm.emit(encode_stp_sp_pre(0, 2))
                 self._emit_expr_to(stmt.value, "X1")
                 self.asm.emit(encode_ldp_sp_post(0, 2))
+                # The LEFT operand is the name being shifted, so its own type
+                # decides the fill and the shift AMOUNT's type is not
+                # consulted — `model.shift_signedness`, the same rule
+                # `_emit_div_shift_pow` uses for the binary form. A `y <<= n`
+                # and a `y = y << n` are the same operator and must not
+                # disagree about whether the result is signed.
                 self._emit_shift_reg(op, signed=cmp_signed(
-                    self._ttype(F.IdentExpr(name))))
+                    M.shift_signedness(self._ttype(F.IdentExpr(name)))))
                 self._emit_trunc(common_type(
                     self._ttype(F.IdentExpr(name)), self._ttype(stmt.value)))
                 self._store_var(name, 0)
@@ -3137,8 +3143,11 @@ class ARM64Codegen:
         self._emit_expr_to(stmt.value, "X1")      # X1 = value
         self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))  # X0 = old (re-load)
         if want_shift:
+            # As above: the thing being shifted decides the fill, and for a
+            # subscript target that is the ELEMENT, which is what `target`
+            # types as.
             self._emit_shift_reg(op, signed=cmp_signed(
-                self._ttype(target)))
+                M.shift_signedness(self._ttype(target))))
         else:
             self.asm.emit(ops[op](0, 0, 1))       # X0 = old op value
         # addr is at [SP+16] after the two pushes.
@@ -5619,54 +5628,17 @@ class ARM64Codegen:
                     self.asm.emit(encode_asr_xd_xn_imm(0, 0, 63))
                 self._emit_trunc(result_t)
                 return
-            # The register form, which has to handle an amount only known at
-            # run time. X0 is the value, X1 the amount; the amount is compared
-            # against 64 and a saturating branch taken before the shift, so the
-            # hardware's modulo-64 masking is never the answer. The sign for
-            # the arithmetic case is X0's own, so it is read before X0 is
-            # overwritten.
-            self._if_counter += 1
-            sid = self._if_counter
-            fn = self.func_name
-            sat_label = f"{fn}_sh{sid}_sat"
-            end_label = f"{fn}_sh{sid}_end"
+            # The register form: `_emit_shift_reg` is the ONE emitter for it
+            # and carries the saturation rule, so this only has to put the
+            # value in X0 and the amount in X1 and step aside. That is the
+            # whole consolidation — a second copy of the rule here is what
+            # let the `<<=` spelling keep the hardware's masking while the
+            # `<<` spelling did not.
             self._emit_expr(e.left)
             self.asm.emit(encode_stp_sp_pre(0, 2))
             self._emit_expr_to(e.right, "X1")
             self.asm.emit(encode_ldp_sp_post(0, 2))
-            # CMP X1, #64 / B.GE sat. The compare is SIGNED, which is what
-            # keeps this change to the one case it fixes: an amount of 64 or
-            # more (signed, so 64..2^63-1) saturates, while a NEGATIVE amount
-            # is below 64 and keeps taking the hardware's modulo-64 masking.
-            # That is not an endorsement — CPython raises ValueError for a
-            # negative amount, and this path has always answered with the
-            # masked shift — it is the refusal of a separate question, so it
-            # is left exactly as it was rather than changed by a fix that
-            # claims to be about the saturation boundary.
-            #
-            # The polarity is the whole instruction: B.GE, not B.LT. The
-            # saturating block is the branch TARGET, so the condition names
-            # the amounts that SATURATE. B.LT here branches to the saturated
-            # value on exactly the amounts that are in range, and every shift
-            # under 64 returns the unshifted word — the defect this replaces,
-            # reached through a different route.
-            self.asm.emit(encode_cmp_xn_imm(1, 64))
-            self.asm.emit(encode_b_cond("ge", 8))
-            self.asm.emit_label_rel(sat_label, here_offset=-4)
-            if op == "<<":
-                self.asm.emit(encode_lslv_xd_xn_xm(0, 0, 1))
-            elif signed:
-                self.asm.emit(encode_asrv_xd_xn_xm(0, 0, 1))
-            else:
-                self.asm.emit(encode_lsrv_xd_xn_xm(0, 0, 1))
-            self.asm.emit(encode_b(0))
-            self.asm.emit_label_rel(end_label, here_offset=-4)
-            self.asm.label(sat_label)
-            if op == "<<" or not signed:
-                self.asm.emit(encode_movz_xd_imm(0, 0))
-            else:
-                self.asm.emit(encode_asr_xd_xn_imm(0, 0, 63))
-            self.asm.label(end_label)
+            self._emit_shift_reg(op, signed)
             self._emit_trunc(result_t)
             return
 
@@ -6158,13 +6130,59 @@ class ARM64Codegen:
                 pos += 16
 
     def _emit_shift_reg(self, op: str, signed: bool) -> None:
-        """Variable shift X0 = X0 <op> X1 (LSLV/LSRV/ASRV)."""
+        """Variable shift X0 = X0 <op> X1 (LSLV/LSRV/ASRV), SATURATING.
+
+        X0 holds the value and X1 the amount on entry; both are live and
+        X0 is the result on exit.
+
+        THE ONE register-form shift emitter on this backend. It was not,
+        and being the second one is how the same defect reached the source
+        twice: `_emit_div_shift_pow` had its own copy, and a program that
+        spelled the shift `x <<= n` went through THIS one and got the
+        hardware's modulo-64 masking, so `y <<= 64` left `y` unchanged
+        while `y = y << 64` zeroed it. Both spellings are the same operator
+        and the rule is one rule (`model.shift_saturated_value`), so the
+        rule lives here and both callers come to it.
+
+        The amount is compared against 64 and a saturating branch taken
+        BEFORE the shift instruction runs, so the masking is never the
+        answer. The sign for the arithmetic case is X0's own, read before
+        X0 is overwritten.
+
+        The compare is SIGNED, which is what keeps this fix to the case it
+        fixes: an amount of 64 or more (signed, so 64..2^63-1) saturates,
+        and a NEGATIVE amount is below 64 and keeps the masking it has
+        always had. That is not an endorsement — CPython raises ValueError
+        for a negative amount, and this path answers with the masked shift
+        — it is a separate question left alone rather than changed under
+        cover of a fix about the saturation boundary. See
+        bugs/FORMAL_negative_shift_amount_masks_instead_of_raising.md, which
+        is also why the compare must not be made unsigned: unsigned, a
+        negative amount would take the saturating branch and answer 0, a
+        THIRD wrong answer rather than this one.
+        """
+        self._if_counter += 1
+        sid = self._if_counter
+        fn = self.func_name
+        sat_label = f"{fn}_sh{sid}_sat"
+        end_label = f"{fn}_sh{sid}_end"
+        self.asm.emit(encode_cmp_xn_imm(1, 64))
+        self.asm.emit(encode_b_cond("ge", 8))
+        self.asm.emit_label_rel(sat_label, here_offset=-4)
         if op == "<<":
             self.asm.emit(encode_lslv_xd_xn_xm(0, 0, 1))
         elif signed:
             self.asm.emit(encode_asrv_xd_xn_xm(0, 0, 1))
         else:
             self.asm.emit(encode_lsrv_xd_xn_xm(0, 0, 1))
+        self.asm.emit(encode_b(0))
+        self.asm.emit_label_rel(end_label, here_offset=-4)
+        self.asm.label(sat_label)
+        if op == "<<" or not signed:
+            self.asm.emit(encode_movz_xd_imm(0, 0))
+        else:
+            self.asm.emit(encode_asr_xd_xn_imm(0, 0, 63))
+        self.asm.label(end_label)
 
     def _check_comptime_target(self, name: str, what: str) -> None:
         """Refuse a store to a name that is currently a `comptime` binding.
