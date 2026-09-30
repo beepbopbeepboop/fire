@@ -10512,7 +10512,17 @@ def module_body(stmts: list, symbols: dict = None) -> list:
     `symbols` is `collect_module_symbols(stmts)`'s table, which the caller
     already has (and publishes) on every path that asks this question, so the
     foldable-constant exemption is a LOOKUP in a table already built rather than
-    a second fold of the same expressions."""
+    a second fold of the same expressions.
+
+    A module-level store is left out when the IMAGE already holds its value, and
+    there are two ways that can be so: the value FOLDS and is substituted at each
+    read (`X = 5`), or the name is a `__DATA` SLOT whose initializer the linker
+    lays out before the program starts (`X = [1, 2, 3]`, which is storage-shaped
+    rather than foldable). Both exemptions ask the same question — "would
+    dropping this store change the program's answer?" — and a store that passes
+    either one is the image's business, not the body's. See
+    `_is_image_initialized` for the second, and for the entry point that a
+    leftover store silently changes."""
 
     def _is_folded_constant(stmt) -> bool:
         name = _module_binding_name(stmt)
@@ -10529,6 +10539,44 @@ def module_body(stmts: list, symbols: dict = None) -> list:
         return sym.site == "assigned" and sym.line == (getattr(stmt, "line", 0)
                                                        or 0)
 
+    def _is_image_initialized(stmt) -> bool:
+        """A module-level store the IMAGE already contains.
+
+        The same question `_is_folded_constant` asks — "does this store have an
+        effect the program would miss if the store were not emitted?" — with the
+        other of the two answers, and it is the answer that became reachable when
+        module globals got storage. A module-level name whose value is a
+        CONTAINER literal is a `__DATA` slot whose words are laid out by the
+        linker before the program starts (`collect_global_slots` gives every
+        such name a slot, precisely because a container is not a foldable
+        value). The store is therefore not a statement the body has to run: the
+        value is in the image.
+
+        Measured, and the failure this exemption prevents is not a missing value
+        but a program that computes the right answer somewhere nobody looks.
+        `NUMS = [10, 20, 30]` above a `def main` left the binding in the body,
+        so `entry_function` chose the MODULE BODY as the entry (rule 1 is "the
+        body first"), `main` was never called, and the image materialised the
+        list on its own stack, discarded it and exited 0 — printing nothing,
+        silently, on both architectures. The same source under
+        `NUMS = [10, 20, 30]` and a body that does nothing else has no other
+        statement to run, so the body was pure loss.
+
+        Asked from the STATEMENT, with the very predicate `collect_global_slots`
+        keys its second rule on, so "which names have a slot" and "which stores
+        the image already holds" cannot disagree. Which of the several stores to
+        one name is which does not matter: `collect_global_slots` keeps the LAST
+        binding as the initializer, so an earlier store of a container literal is
+        overwritten before anything can read it and dropping it changes nothing.
+        """
+        name = _module_binding_name(stmt)
+        if name is None:
+            return False
+        return _is_container_literal(getattr(stmt, "value", None))
+
+    def _is_real_store(stmt) -> bool:
+        return not (_is_folded_constant(stmt) or _is_image_initialized(stmt))
+
     out = []
     for stmt in stmts or []:
         kind = type(stmt).__name__
@@ -10539,11 +10587,11 @@ def module_body(stmts: list, symbols: dict = None) -> list:
             continue                    # the module docstring
         if kind == "PassStmt":
             continue                    # the statement that does nothing
-        if kind in _MODULE_BODY_BINDINGS and _is_folded_constant(stmt):
+        if kind in _MODULE_BODY_BINDINGS and not _is_real_store(stmt):
             continue
         out.append(stmt)
-    # A folded constant the body REBINDS is not a constant, and exempting its
-    # store is how a correct program gets a wrong answer.
+    # A store the image already holds that the body REBINDS is not redundant,
+    # and exempting it is how a correct program gets a wrong answer.
     #
     # `total = 0` at file level folds, so the store is normally left out and
     # the literal is substituted at each read. But if the body then writes the
@@ -10554,7 +10602,8 @@ def module_body(stmts: list, symbols: dict = None) -> list:
     # nothing ever wrote it, and the program printed 10 on the same source
     # where CPython says 10. Measured, both backends, and the identical
     # program inside a `def` is right — the difference is exactly the missing
-    # store.
+    # store. `NUMS = [10, 20, 30]` under a body that writes `NUMS` is the same
+    # shape with the slot as the module's home rather than a register.
     #
     # The condition is asked with the register allocator's OWN walk
     # (`bound_names_in_order`), not a second one: the exemption has to agree
@@ -10574,12 +10623,12 @@ def module_body(stmts: list, symbols: dict = None) -> list:
     kept = {id(s) for s in out}
     final = []
     for stmt in stmts or []:
-        folded = (type(stmt).__name__ in _MODULE_BODY_BINDINGS
-                  and _is_folded_constant(stmt))
-        if folded and _module_binding_name(stmt) in rebound:
+        exempt = (type(stmt).__name__ in _MODULE_BODY_BINDINGS
+                  and not _is_real_store(stmt))
+        if exempt and _module_binding_name(stmt) in rebound:
             final.append(stmt)          # the store the body needs
-        elif folded:
-            continue                    # substituted at each read; no store
+        elif exempt:
+            continue                    # in the image; no store to emit
         elif id(stmt) in kept:
             final.append(stmt)
     return final

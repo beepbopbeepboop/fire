@@ -191,6 +191,32 @@ CASES = [
      "    print(t)\n"
      "    return 0\n", "60\n"),
 
+    # TWO module-level stores of one container name. `collect_global_slots` keeps
+    # the LAST binding as the slot's initializer, so this pins that the earlier
+    # store is not what the reads see — and, just as much, that NEITHER store is
+    # a top-level statement the module body has to run.
+    #
+    # The second half is the reason this case exists rather than a one-line
+    # variant of the one above. A module-level store of a container is realized
+    # as the `__DATA` slot's initializer, so it is not body; but the entry point
+    # IS the module body when there is one (`entry_function` rule 1), and the
+    # whole body here is the two stores. Left in, the image materialised the
+    # second list on its own stack, discarded it, never called `main` and exited
+    # 0 — printing nothing, on both architectures, with a green build. A test
+    # that only asked "is the right number printed" would have caught it; what
+    # this row adds is the second store, so the case is about WHICH store is the
+    # initializer as well as about the entry.
+    ("rebound_list_global",
+     "NUMS = [1, 2]\n"
+     "NUMS = [30, 40, 50]\n"
+     "\n"
+     "def main(n):\n"
+     "    first: Int = NUMS[0]\n"
+     "    last: Int = NUMS[2]\n"
+     "    print(first)\n"
+     "    print(last)\n"
+     "    return 0\n", "30\n50\n"),
+
     # Bound to a local first. This is the shape that most exposed the lazy
     # initializer: the load of the slot happens once, in the prologue's shadow,
     # and every later use goes through the register — so a slot filled after
