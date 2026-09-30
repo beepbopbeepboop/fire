@@ -3970,6 +3970,24 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         for sub in M.iter_nodes(fn.body):
             if M.is_dtype_member_access(sub):
                 dtype_members[id(sub.obj)] = sub.member
+        # A name that is the BASE of a subscript is not read as a value, and
+        # this is the case that says so. `List[Self.T]()` and
+        # `rebind[Scalar[dtype]](…)` are type APPLICATIONS — the bracket is the
+        # type's argument list and the base names the symbol the call dispatches
+        # on — so the base has no tag, and asking `type_value_tag` about it
+        # would hand `List` a value and let this walk walk past the one question
+        # it should be asking. Measured: with the tag asked unconditionally,
+        # `std/collections/binary_heap.mojo` stopped being refused at
+        # `BinaryHeap___init__: 'List' has no home` and its next refusal moved
+        # to a LATER FUNCTION, which is the signature of a construct that has
+        # stopped being examined rather than one that has been answered. Whether
+        # a bracketed callee is answerable is a different question with its own
+        # answer (`model.subscript_callee_names`), and this arm must not
+        # pre-empt it in either direction.
+        subscript_bases = set()
+        for sub in M.iter_nodes(fn.body):
+            if isinstance(sub, F.SubscriptExpr) and isinstance(sub.obj, F.IdentExpr):
+                subscript_bases.add(id(sub.obj))
         for node in M.iter_nodes(fn.body):
             if not isinstance(node, F.IdentExpr) or id(node) in callees:
                 continue
@@ -3985,7 +4003,8 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 if M._dtype_member_type(member) is not None:
                     continue
                 raise CodegenError(M.dtype_member_refusal(name, member))
-            if M.type_value_tag(node) is not None:
+            if id(node) not in subscript_bases \
+                    and M.type_value_tag(node) is not None:
                 continue
             if name == "DType":
                 # The one type name that is not a type as a value. Asked here

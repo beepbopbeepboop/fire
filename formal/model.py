@@ -6826,8 +6826,14 @@ _DTYPE_MEMBERS = {
 # entries however many widths Mojo adds to it — the alternative is one entry per
 # member, which is a list that goes stale the day a width is added and fails in
 # the direction that reads as a fact about the language.
+#
+# The order is not load-bearing and is not relied on: no two of these are
+# prefixes of one another at the same position (`bfloat16` starts with `b`, so
+# only `bfloat` can match it, and `uint8` with `u`, so only `uint` can). Listed
+# longest-first because that is the order that would matter if Mojo ever added
+# one that did overlap.
 _DTYPE_MEMBER_PREFIXES = (
-    ("bfloat", "BFloat"),   # longest first, so `bfloat16` is not read as ... 
+    ("bfloat", "BFloat"),
     ("uint", "UInt"),
     ("int", "Int"),
     ("float", "Float"),
@@ -6874,11 +6880,12 @@ def _dtype_member_type(member: str) -> str | None:
 def type_value_name_space() -> frozenset:
     """Every canonical type name a tag can be asked for — the CLOSED set.
 
-    `TYPE_VALUE_NAMES` plus the names only a `DType` member reaches, which is
-    what makes the distinctness argument a fact rather than a bound: the rule
-    in `_dtype_member_type` only ever produces a name that is already in
-    `TYPE_VALUE_NAMES`, so the `DType` exceptions that are not are the
-    exception table's values and nothing else can widen this.
+    `TYPE_VALUE_NAMES` plus the exception table's own values, which is what
+    makes the distinctness argument a fact about a finite set rather than a
+    bound on a probability: the spelling rule in `_dtype_member_type` only ever
+    produces a name that is ALREADY in `TYPE_VALUE_NAMES` (it returns None for
+    any member whose type name this path does not know), so the only names it
+    adds are the three a member's own spelling cannot reach.
     """
     return frozenset(TYPE_VALUE_NAMES) | frozenset(_DTYPE_MEMBERS.values())
 
