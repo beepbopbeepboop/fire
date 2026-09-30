@@ -2265,32 +2265,46 @@ def _erase_identity_intrinsics(node):
     and puts it back through `setattr` instead, so a new child list shape is
     not a place this can be wrong.
 
+    NOTHING IS ALLOCATED unless something changes: a list or tuple comes back as
+    the object it was handed unless one of its elements moved, which is the case
+    for every list in every function of every unit this path compiles — the
+    compiler's own sources included, in the self-host steps. A rewrite that
+    rebuilt the whole tree unconditionally would be a per-compile cost paid by
+    programs that never write `origin_of` at all.
+
     A nested `FunctionDef` is rewritten too, which is deliberate and matches
     `model.iter_nodes`: the escape walk descends into one, so a call this
     rewrite erased from inside it has to be erased before the escape walk asks.
     Running over the flattened function list as well is harmless — the second
     pass finds nothing to do.
     """
-    if isinstance(node, tuple):
-        return tuple(_erase_identity_intrinsics(x) for x in node)
-    if isinstance(node, list):
-        return [_erase_identity_intrinsics(x) for x in node]
-    operand = None
+    if isinstance(node, (list, tuple)):
+        moved = None
+        for i, x in enumerate(node):
+            replacement = _erase_identity_intrinsics(x)
+            if replacement is x:
+                continue
+            if moved is None:
+                moved = list(node)
+            moved[i] = replacement
+        if moved is None:
+            return node
+        return tuple(moved) if isinstance(node, tuple) else moved
     if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr):
         operand = M.identity_call_operand(node.func.name, node)
-    if operand is not None:
-        # Recurse INTO the operand rather than returning it whole, so
-        # `origin_of(origin_of(s))` erases both and not just the outer one.
-        return _erase_identity_intrinsics(operand)
+        if operand is not None:
+            # Recurse INTO the operand rather than returning it whole, so
+            # `origin_of(origin_of(s))` erases both and not just the outer one.
+            return _erase_identity_intrinsics(operand)
     for fname in getattr(node, "__dataclass_fields__", ()):
         if fname in ("line", "col"):
             continue
         value = getattr(node, fname, None)
         if value is None or isinstance(value, (int, float, str, bool)):
             continue
-        replaced = _erase_identity_intrinsics(value)
-        if replaced is not value:
-            setattr(node, fname, replaced)
+        replacement = _erase_identity_intrinsics(value)
+        if replacement is not value:
+            setattr(node, fname, replacement)
     return node
 
 
