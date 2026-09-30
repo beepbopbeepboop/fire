@@ -925,6 +925,38 @@ UNREGISTERED = {
         'test_formal_run.py rather than inside it, because the convention is '
         'one construct and the suite that hosts it is already the longest.',
 
+    # ── one construct per file, each an oracle against CPython, each a
+    #    build-and-RUN rather than a build ─────────────────────────────────────
+    #
+    # The same reason as the returned-frame entry above, at the same shape, and
+    # each is here rather than left out for the reason that check exists: a
+    # test file that nothing runs and nothing excuses is the state it is
+    # written to make impossible. They are grouped because what they share is
+    # the cost, not the subject — five constructs, five files, and the fifth is
+    # the one case where the file was missing from the table entirely.
+    'test_formal_external_call.py': 'external_call["sym", RetType](args): '
+        'builds, runs and compares with CPython os.environ on arm64 AND '
+        'x86-64, including the whole of std/os/env.mojo transcribed.',
+    'test_formal_target_queries.py': 'A #kgen.param.expr target query '
+        'answered at build time: BUILDS the image, EXECUTES it and requires '
+        'the printed arch, because a fabricated answer is indistinguishable '
+        'from a right one in a refusal.',
+    'test_formal_specialization.py': 'A comptime specialization call: the '
+        'dropped-bracket case builds and RUNS on both architectures, and the '
+        'fabricated-answer case (plain[3](5) printing plain(5)) is what the '
+        'refusal exists for.',
+    'test_formal_os.py': 'formal/hostmods/os and os.path, run on both '
+        'architectures against CPython posixpath and the real filesystem. A '
+        'transcription of posixpath is right on the inputs you tried; this is '
+        'the half that asks.',
+    'test_formal_sys.py': 'formal/hostmods/sys and the module-call lowering it '
+        'is the first real user of, run on both architectures against '
+        'CPython sys — including a str that crosses the dylib boundary.',
+    'test_struct_formal.py': 'formal/hostmods/struct.mojo byte-for-byte '
+        'against CPython struct, on both architectures. A subtly wrong byte '
+        'packer writes malformed Mach-O and ELF headers that still link, so '
+        '"it built" is not evidence of anything here.',
+
     # ── the interpreter, which is the oracle everything else is compared to ──
     'test_myinterpreter.py': 'Runs a real .mojo file end to end through '
         'myinterpreter.mojo, which is the reference every compiled-path answer '
