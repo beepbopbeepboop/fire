@@ -251,8 +251,17 @@ codegen gap behind the import, and the sweep's own line says so per file.
 3. **The CAS carried the run**: 626 misses, 2 hits, ~4 minutes wall for 628
    files. The classification, not the compile, is what costs. Re-running after a
    `formal/` edit invalidates every entry (the key is `_criteria_id()`, this
-   tool's own bytes) — so a one-line edit to a *cause marker* in the ranking
-   script is free, and a one-line edit to `formal_sweep.py` is not.
+   tool's own bytes) — so a one-line edit to a *cause marker* in
+   `tools/formal_sweep_causes.py` is free, and a one-line edit to
+   `formal_sweep.py` is not. Editing `formal/` invalidates all 628, which is
+   why the post-fix re-sweeps in §3 took minutes rather than seconds.
+4. **The scope is "every `.py`/`.mojo` under the repo", so adding a Python tool
+   adds a file to the sweep.** `tools/formal_sweep_causes.py` makes the default
+   scope 629 rather than 628, and it lands in
+   `not-answerable/host-import` (it imports `collections`) — in no rate, and the
+   same as `tools/formal_sweep.py` itself, which is how the sweep comes to be
+   unable to classify its own source. Worth knowing before a reader diffs a
+   file count against this document and finds 629.
 
 ## 6. What was fixed, and what it bought
 
