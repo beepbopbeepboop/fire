@@ -1714,7 +1714,133 @@ def main():
     print(d)
 """, "6000000000\n6000000000\n1099511627776\n5000000000\n")
 
+    # `var s: Set[Int] = {}` — an empty `{}` is a dict DISPLAY, so resolving
+    # the binding from the initializer alone declared `s` a `MojoDict` and
+    # stack-allocated dict storage for it. `s.add(i)` then dispatched against
+    # a dict header and silently did nothing, `i in s` was False and `len(s)`
+    # was 0, all with exit 0; where the body needed the set's real kind the
+    # same program instead hard-refused ("cannot coerce MojoDict * to
+    # MojoSet *") depending on what else it contained. An empty literal is
+    # evidence for no container kind at all, so the annotation decides —
+    # through all three places that used to answer from the display alone
+    # (the owned-local storage decision, the declaration's ctype, and the
+    # coercion). The three spellings are `var s: Set[Int] = {}` (VarDecl),
+    # the bare annotated `s: Set[Int] = {}` (an AssignStmt carrying the
+    # annotation), and the same with strings.
+    test_gimple_stdout("gimple_annotated_set_from_empty_braces", """\
+def main():
+    var s: Set[Int] = {}
+    var acc = 0
+    for i in range(10):
+        s.add(i % 5)
+    for i in range(10):
+        if (i % 7) in s:
+            acc += 1
+    print(acc)
+    print(s)
+    print(len(s))
+    print(0 in s)
+    print(9 in s)
+
+main()
+""", "8\n{0, 1, 2, 3, 4}\n5\nTrue\nFalse\n")
+
+    test_gimple_stdout("gimple_annotated_set_from_empty_braces_unannotated_spelling", """\
+def main():
+    s: Set[String] = {}
+    s.add("a")
+    print(s)
+    print(len(s))
+    print("a" in s)
+    print("b" in s)
+    var t: Set[Int] = Set[Int]()
+    t.add(3)
+    print(t)
+    print(3 in t)
+    d: Dict[String, Int] = {}
+    d["k"] = 1
+    print(d)
+
+main()
+""", "{'a'}\n1\nTrue\nFalse\n{3}\nTrue\n{'k': 1}\n")
+
+    # A `List[String]` filled only from a CALLEE read back as ints: the
+    # element type of a list is otherwise recorded by its `append` sites,
+    # and a caller that only sees the list through a call has none — so
+    # `kept[0]` was typed int64_t, `len(kept[0])` read the string pointer's
+    # bits as a header (6581285), `print(kept[0])` formatted the pointer
+    # with %ld, and only the comparison still worked because it dispatched
+    # on the string-literal side. The declaration's own annotation is real
+    # evidence and is now honoured on all three paths that can consume a
+    # binding statement: the two ordinary statement paths, and the
+    # owned-local stack allocation that swallows `kept: List[String] = []`
+    # whole (which is the shape this very program takes, because `[]` is an
+    # empty constructor) and which had no element-type seeding at all.
+    # `other` is the control that stays broken and is NOT asserted as
+    # correct: an unannotated `other = []` genuinely has no static evidence
+    # anywhere, which is what the cross-call element-type contract is for.
+    test_gimple_stdout("gimple_annotated_list_string_filled_in_a_callee", """\
+def fill(kept):
+    kept.append("cde")
+
+def main():
+    kept: List[String] = []
+    fill(kept)
+    print(len(kept[0]))
+    print(kept[0])
+    print(kept[0] == "cde")
+    for k in kept:
+        print(k)
+        print(len(k))
+    ints: List[Int] = []
+    ints.append(7)
+    print(ints[0] + 1)
+    print(f"{kept[0]}")
+
+main()
+""", "3\ncde\nTrue\ncde\n3\n8\ncde\n")
+
+    # A dynamically-set attribute whose value is a STRING, read back through
+    # every spelling. The struct declared no such field, so the field-scan
+    # pass minted a phantom one — and minted it `int`, because that is the
+    # "nothing is known about this member" answer and a read-only phantom is
+    # the case it is right for. A member that IS assigned is not read-only,
+    # and storing a `char *` through a 4-byte `int` field truncates it: the
+    # read printed the low 32 bits of the string's address as a decimal, and
+    # `len(o.x)` then dereferenced that truncated value and SEGFAULTED. The
+    # minted field's type now comes from the value assigned to it (pointer-
+    # shaped and floating answers only, so a member assigned an ordinary
+    # integer keeps exactly the declaration it always had). `o.n` is that
+    # control. `getattr` is the same read by a different spelling, and it
+    # needed its own fix: the value was already in the field (the generated
+    # `_mojo_getattr_C` reads it) and only the call site's cast was missing,
+    # which is gated on the self-hosted source because a bare by-NAME field
+    # lookup is unsound for an arbitrary receiver. The receiver's OWN
+    # declared field is sound, and is what `o.x` already used, so the two
+    # spellings now agree by construction.
+    test_gimple_stdout("gimple_dynamic_attribute_string_keeps_its_type", """\
+class C:
+    pass
+
+def main():
+    o = C()
+    o.x = "hello"
+    o.n = 5
+    print(o.x)
+    print(len(o.x))
+    print(f"{o.x}")
+    print(str(o.x))
+    print("%s" % o.x)
+    print(o.x == "hello")
+    print(o.n)
+    print(o.n + 1)
+    print(getattr(o, "x", ""))
+
+main()
+""", "hello\n5\nhello\nhello\nhello\nTrue\n5\n6\nhello\n")
+
     # ── Struct methods get the same ownership treatment as plain functions, and the typed
+
     # empty constructors `List[T]()` / `Dict[K, V]()` / `Set[T]()` are containers like `[]`/`{}`:
     # stack-homed when they do not escape, freed at scope exit when they must live on the heap.
     # A method that stores a local into `self` (or returns it) must NOT free it.
@@ -3035,6 +3161,38 @@ fn main():
         print(x + 1)
 """, "1.5\n2.5\n3.0\n1.5\n1.5\n2.0\n2\n2.0\n3.5\n")
 
+    # The SAME case one level down, in the spelling that is not `var`:
+    # `b = [1, 2.5]` / `t = struct.unpack(...)` is an `AssignStmt`, and the
+    # per-slot-kind side tables were carried across only by the VarDecl path,
+    # so every read of the assigned name used the container's PROMOTED
+    # element type ('double') — `b[0]` printed `5e-324`, the int slot's bit
+    # pattern read as a denormal double, and the loop printed `5e-324` too.
+    # Exit 0, no diagnostic, and the identical `var` spelling one line away
+    # was right. `c` is the control: a homogeneous list is untouched, and
+    # `t`'s two reads are the static-index and computed-index cases of the
+    # same value. (The trailing `2.0` is the documented promotion above, not
+    # a defect: a boxed read whose slot turns out to be an int is computed
+    # in double.)
+    test_gimple_stdout("gimple_heterogeneous_reads_survive_a_plain_assignment", """\
+fn main():
+    b = [1, 2.5]
+    print(b)
+    print(b[0])
+    var i = 0
+    print(b[i])
+    for y in b:
+        print(y)
+    t = struct.unpack('<if', struct.pack('<if', 1, 1.5))
+    print(t[0])
+    var j = 1
+    print(t[j])
+    for z in t:
+        print(z)
+    c = [1, 2, 3]
+    for w in c:
+        print(w)
+""", "[1, 2.5]\n1\n1\n1\n2.5\n1\n1.5\n1\n1.5\n1\n2\n3\n")
+
     # The same limit one level lower, without `struct` at all: a
     # HETEROGENEOUS LITERAL. `[1, 2.5]` used to append the int through the
     # list-wide 'double' suffix, so the literal printed `[1.0, 2.5]` and
@@ -3613,6 +3771,123 @@ def f():
 
 print(f())
 """, "abc\n")
+
+    # The same class of gap one step further on: a function whose only
+    # `return` is a METHOD CALL on a local it just constructed. The call
+    # site was already exactly right — the right method, the right mangled
+    # symbol, `char *` into a `char *` temp — but the enclosing function's
+    # declared return type was `int64_t`, because return-type inference
+    # types each `return` expression with `_quick_type`, whose
+    # struct-receiver arm looks the receiver's C type up in `var_types`, and
+    # at return-inference time that table does not yet hold this function's
+    # own locals. One wrong declaration turned the value into a pointer
+    # decimal by the time `print` saw it. `h` (a `repr(...)` call, which
+    # returns an explicit typed pair) and `k` (a field read) were already
+    # right, so the difference is the expression kind, not the method.
+    # `m` and `n` are the alias and non-dunder-method forms of the same
+    # case.
+    test_gimple_stdout("gimple_return_type_from_a_method_call_on_a_local", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+    def twice(self):
+        return self.x + self.x
+
+def g():
+    p = P("a")
+    return p.__repr__()
+
+def h():
+    p = P("a")
+    return repr(p)
+
+def k():
+    p = P("a")
+    return p.x
+
+def m():
+    p = P("a")
+    q = p
+    return q.__repr__()
+
+def n():
+    p = P("a")
+    return p.twice()
+
+def mk():
+    return P("a")
+
+def mk2(x):
+    return P(x)
+
+def f1():
+    p = mk()
+    return p.__repr__()
+
+def f2():
+    p = mk2("b")
+    return p.__repr__()
+
+print(g())
+print(h())
+print(k())
+print(m())
+print(n())
+print(f1())
+print(f2())
+""", "R<a>\nR<a>\na\nR<a>\naa\nR<a>\nR<b>\n")
+
+    # A user-defined `__str__`, consulted by `str()` and by `"%s" %` — a
+    # SECOND, entirely separate route from the `repr()` one. Both lower to
+    # `_stringify_value`, which had no dunder awareness at all: a struct
+    # pointer fell to the generic `mojo_str`, i.e. the generated field dump
+    # with an empty field list, which is where the bare type name `P` came
+    # from. `__str__` is preferred and `__repr__` is the fallback, which is
+    # CPython's own order for `str` — so `Q`, which defines only
+    # `__repr__`, stringifies as its repr rather than as its type name.
+    # A struct with NEITHER is deliberately not asserted here: it keeps the
+    # pre-existing lowering, which prints the bare type name where CPython
+    # prints `<R object at 0x...>`. That is a real, separate gap — a
+    # struct-allocated local carries no runtime type tag for the field-dump
+    # dispatch to find, the same missing tag as the container rows left open
+    # in bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_
+    # container_spellings.md — and freezing the wrong answer here would make
+    # it invisible. The `%r` / `repr()` spellings are the controls:
+    # unchanged by this, because CPython's fallback there is `__str__` and
+    # taking it would change the repr of every struct in the tree that
+    # defines `__str__` alone.
+    test_gimple_stdout("gimple_user_defined_dunder_consulted_by_str_and_percent_s", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+    def __str__(self):
+        return "S<" + self.x + ">"
+
+class Q:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "Q<" + self.x + ">"
+
+p = P("a")
+q = Q("b")
+print(str(p))
+print("%s" % p)
+print(f"{p}")
+print(str(q))
+print("%s" % q)
+print(repr(p))
+print("%r" % p)
+print(repr(q))
+print(1)
+print("x")
+print([1, 2])
+print({"a": 1})
+""", "S<a>\nS<a>\nS<a>\nQ<b>\nQ<b>\nR<a>\nR<a>\nQ<b>\n1\nx\n[1, 2]\n{'a': 1}\n")
 
     # §4.2a: print([True, False]) printed [1, None] -- the generic list repr
     # both formats a bool slot with %d instead of True/False AND treats a

@@ -344,3 +344,46 @@ def _build_call_args_for_candidate(gen, chosen: dict, args: list, kwargs: list |
         out.append(gen._default_expr_to_pair(_dflt))
     return out
 
+def user_dunder_repr_call(gen, struct_name: str, ctype: str, cval: str, prefer):
+    """`char *` expression calling a struct RECEIVER'S OWN `__repr__` /
+    `__str__`, or None when it defines neither (or the one it defines is not
+    registered as returning `char *`).
+
+    THE shared dunder lookup for both spellings that have one, so they
+    cannot disagree about which dunder wins: `_repr_value` (`repr(x)`, `%r`)
+    passes `('__repr__',)` and `_stringify_value` (`str(x)`, `%s`, and every
+    f-string interpolation) passes `('__str__', '__repr__')` — CPython's own
+    order for `str`, which prefers `__str__` and falls back to `__repr__`
+    before the default object repr.
+
+    `cval` is materialized as a local of `ctype` first, because the emitted
+    NULL check needs it twice.
+
+    Returns None rather than a fallback expression: the caller then keeps its
+    OWN pre-existing lowering for the no-dunder case (the generated field
+    dump, `mojo_repr_obj`), which is what makes this a strict improvement —
+    it can only replace a wrong answer with a right one.
+
+    Deliberately conservative, exactly as `_repr_value`'s own copy of this
+    logic was: every condition is one "we know this is right" — a struct
+    this compile registered, a method it actually emitted, a return type it
+    actually registered as `char *` — and anything unproven falls through.
+    """
+    _have = gen._struct_method_names.get(struct_name) or ()
+    _local = gen._ensure_local(ctype, cval)
+    for _dunder in prefer:
+        if _dunder not in _have:
+            continue
+        _csym = gen._struct_method_csym(struct_name, _dunder, '')
+        if gen.func_return_types.get(_csym) != 'char *':
+            continue
+        _call = gen._call_expr('char *', _csym, [(ctype, _local)])
+        # Same null semantics the generated field-dump has: a NULL object
+        # reprs as "None" rather than crashing. Interned through
+        # `_intern_string` because a bare `"None"` literal is not a GIMPLE
+        # r-value (see its own docstring).
+        _none = gen._intern_string('None')
+        return gen._new_val('char *', f'({_local} ? {_call} : {_none})')
+    return None
+
+

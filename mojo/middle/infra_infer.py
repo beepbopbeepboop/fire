@@ -1359,11 +1359,12 @@ _CONTAINER_LITERAL_CTYPES: dict = {
     'TupleExpr': 'MojoList *',   # a tuple lowers to a real MojoList
 }
 
-def _container_literal_locals(body: list) -> dict:
+def _prebound_local_ctypes(gen, body: list) -> dict:
     """`{local name: ctype}` for every local in `body` whose FIRST binding
-    is a container literal, recursing through control flow but never into
-    a nested `FunctionDef` (which has its own locals and its own return
-    inference -- the same boundary `mutated_free_names` uses).
+    is already POINTER-SHAPED evidence about the value, recursing through
+    control flow but never into a nested `FunctionDef` (which has its own
+    locals and its own return inference -- the same boundary
+    `mutated_free_names` uses).
 
     First-binding-wins, matching this codegen's `_declare_var`
     first-decl-wins rule. A later rebinding to a DIFFERENT kind therefore
@@ -1393,6 +1394,47 @@ def _container_literal_locals(body: list) -> dict:
         t = _CONTAINER_LITERAL_CTYPES.get(type(n.value).__name__)
         if t:
             out[name] = t
+            return
+        # A local bound from a call whose RESULT is a struct THIS compile
+        # knows: `p = P("a")` (a constructor) and `p = mk()` (a factory)
+        # are both a real `P *` pointer, as much evidence as the literals
+        # above. Restricted to a struct this compile registered, so an
+        # opaque imported class — whose constructor/factory this codegen
+        # does not inline — keeps the int64_t default exactly as before,
+        # and no scalar, container or `char *` answer is touched.
+        #
+        # This is what makes a METHOD CALL on a local resolvable: the
+        # return-type inference types `p.__repr__()` by looking the
+        # receiver's C type up in `gen.var_types` and finding the callee's
+        # registered return type under its mangled name
+        # (`_quick_type`'s `CallExpr`/`MemberExpr` struct-receiver arm) —
+        # and at return-inference time `var_types` does not yet hold this
+        # function's locals, so the receiver read as an unknown, the
+        # enclosing function was declared `int64_t`, and the caller's
+        # `print` formatted the returned `char *` as a decimal address.
+        # See bugs/CODEGEN_return_type_not_inferred_from_a_method_call_
+        # result.md. `_quick_type` is the SAME estimator that call site
+        # uses, so the two agree by construction rather than by a second
+        # hand-written rule.
+        _v = n.value
+        if isinstance(_v, gimple_ctypes.CallExpr):
+            _vt = gen._quick_type(_v)
+            if _vt.endswith(' *') and _vt[:-2].strip() in gen.struct_field_types:
+                out[name] = _vt
+                return
+        # `q = p` — a local bound from ANOTHER local this map already knows,
+        # which is the same value under a second name (`p = P("a"); q = p;
+        # return q.__repr__()`). One extra round of the walk below is what
+        # makes the order irrelevant; the first-binding-wins guard above
+        # keeps a real first binding authoritative. Two hops is the same
+        # bound `_infer_return_maybe_kinds` documents for the identical
+        # one-hop propagation, and for the same reason: over-approximating
+        # here would only cost precision, while missing a case is a wrong
+        # signature.
+        if isinstance(_v, gimple_ctypes.IdentExpr):
+            _src = _as_str(_v.name)
+            if _src in out and _src != name:
+                out[name] = out[_src]
     def walk(stmts):
         for s in (stmts or []):
             if isinstance(s, gimple_ctypes.FunctionDef):
@@ -1419,11 +1461,16 @@ def _container_literal_locals(body: list) -> dict:
                 if getattr(s, 'finally_body', None):
                     walk(s.finally_body)
     walk(body)
+    # One more round, so `q = p` binds even when the alias is visited before
+    # the statement that gives `p` its type (a branch visited first, or a
+    # `for` body). `note` is idempotent — a name already recorded is left
+    # alone — so this only ever adds what the first pass could not resolve.
+    walk(body)
     return out
 
 def _infer_return_type_with_locals(gen, body: list) -> str:
-    """`_infer_return_type`, but with the body's own container-literal
-    locals visible to it.
+    """`_infer_return_type`, but with the body's own pointer-valued locals
+    visible to it (see `_prebound_local_ctypes`).
 
     Needed because `_collect_return_types` types each `return` expression
     with `_quick_type`, which resolves a bare `IdentExpr` through
@@ -1442,7 +1489,7 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
 
     The overlay is temporary and additive: a name already in `var_types`
     keeps the type an earlier pass decided for it."""
-    _locals = _container_literal_locals(body)
+    _locals = _prebound_local_ctypes(gen, body)
     if not _locals:
         return _infer_return_type_core(gen, body)
     _saved = gen.var_types
@@ -1459,7 +1506,7 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
 
 def _infer_return_type(gen, body: list) -> str:
     """`gen`'s public return-type inference: the core scan, with the
-    body's own container-literal locals made visible to it. Every consumer
+    body's own pointer-valued locals made visible to it. Every consumer
     (free functions, struct methods, lifted closures, lambdas) goes
     through this one entry point, so the fix cannot be half-applied."""
     return _infer_return_type_with_locals(gen, body)
