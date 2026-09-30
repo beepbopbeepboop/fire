@@ -806,6 +806,17 @@ test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
 test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
      deps=['preflight'],
      desc='every bound symbol is accounted for, on every container format')
+# `formal/hostmods/re.mojo` against CPython's own `re`: 112 patterns, eight
+# sections each, every integer compared.  In `proofs` rather than `check` for
+# the reason it is slow and not the reason it is fast: it builds and EXECUTES
+# ~140 arm64 images, and a suite that only checked the interpreter would miss
+# the whole class of bug this one exists for (a silently wrong span is
+# indistinguishable from a right one to anything downstream).
+test('formal-re', [PY, 'test_re_formal.py'],
+     deps=['preflight'],
+     extra=['test_re_formal.py', 'formal/hostmods/re.mojo',
+            'formal/hostmods/os/_syscalls.mojo', 'formal/imports.py'],
+     desc='the `re` host module, span for span, against CPython')
 # The gimple runtime's C library on a formal link line, and the three-way
 # split a `mojo_*` call now takes: linked, refused for its TYPES, and refused
 # because this library does not export the name. In `proofs` rather than
@@ -880,7 +891,7 @@ BUCKETS = {
     'proofs': ['formal', 'formal-call-proofgen',
                'formal-run', 'formal-dylib', 'formal-imports',
                'formal-sweep', 'formal-sweep-truth',
-               'formal-link-accounting', 'formal-runtime-link',
+               'formal-link-accounting', 'formal-re', 'formal-runtime-link',
                'refusal-taxonomy', 'comptime-parity',
                'returned-frame-layout', 'formal-x86',
                'formal-x86-endtoend', 'formal-x86-model'],

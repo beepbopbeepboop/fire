@@ -101,17 +101,18 @@ else in this path.
 
 LIMITS, MEASURED, NOT ASSUMED
 ------------------------------
-1. **A `<<` BY A LITERAL AMOUNT ABOVE 8 IS A WRONG ANSWER ON arm64.**
-   `formal/arm64.py`'s `encode_lsl_xd_xn_imm` uses base `0xd3780000`, which
-   has `immr = 0b111000` already in bits 21:16, so OR-ing a real `immr` in
-   forces its low three bits to 1 and the shift that runs is not the one
-   written. Measured: `z << 12`, `z << 16`, `z << 20` and `z << 24` run as
-   `<< 4`, `<< 8`, `<< 4` and `<< 8`; x86-64 is right for all four, and a
-   shift amount that is a VARIABLE is right on both. Filed as
-   `bugs/FORMAL_arm64_literal_left_shift_amount.md`. Every multi-byte value
-   below is therefore ASSEMBLED with `* 256` and friends and never with `<<`,
-   and every field is taken out with `>>`, which is a different encoder
-   (`0xd3400000`, correct).
+1. **`x << <literal>` IS CORRECT ON BOTH BACKENDS, AND IS NOW COVERED FOR ALL
+   64 AMOUNTS.** It was not. `formal/arm64.py`'s `encode_lsl_xd_xn_imm` used
+   base `0xd3780000` where its own docstring said `0xd3400000`, which puts
+   `immr = 0b111000` in bits 21:16 and makes OR-ing a real `immr` in force its
+   low three bits to 1 — so the shift that RAN was not the shift that was
+   WRITTEN, for 56 of the 64 amounts (`1 << 12` ran as `1 << 4`, `1 << 0` as
+   `1 << 8`, `1 << 31` as `1 << 7`). x86-64 was right for all of them and a
+   VARIABLE shift amount was right on both, so the tell was "`<<` by a literal
+   above 8". Found by writing this file and needing multi-byte field assembly;
+   the encoder is fixed and `test_arm64_encoders.py` now differential-tests LSL,
+   LSR and ASR against Apple's assembler for all 64 amounts — the coverage
+   whose absence let it sit there. `>>` was always right, and still is.
 
 2. **A FUNCTION'S FRAME IS A FIXED 128 KiB**, so recursion past about 61
    frames runs off the end of the 8 MiB main stack and SEGFAULTS with no
@@ -133,7 +134,26 @@ LIMITS, MEASURED, NOT ASSUMED
    time; they are chosen to cover every pattern in the corpus with room and
    are stated here so a reader can check that claim rather than take it.
 
-5. **`re.sub` AND `re.split` DO NOT RE-COMPILE PER MATCH** and a backtracking
+5. **A STRING IS A NUL-TERMINATED `char*`**, so a string that CONTAINS a NUL
+   has no measurable length: `str_len` stops at the NUL. The one place that
+   bites is `escape(0)`, whose answer under CPython is the one-byte string
+   NUL. The BYTES returned are right — they are what CPython returns, and
+   `Pointer[UInt8].value()` at offset 0 reads them — but the LENGTH is zero
+   and a caller that measures with `str_len` sees an empty string. This is the
+   string value model, not a decision of this module
+   (`bugs/FORMAL_string_value_model.md`); `test_re_formal.py`'s
+   `test_escape_every_byte` reads that one byte directly and says why.
+
+6. **A LIST ON THIS PATH HAS NO READABLE CAPACITY** — `[7, 8, 9][0]` is 7 and
+   not a count — and a store past its end is a SILENT `exit(1)` with nothing
+   printed. So every function here that writes into a caller's list takes the
+   capacity as an argument and answers `STATUS_LIMIT` when it is too small,
+   rather than making "you did not size it right" a process exit. The size a
+   caller needs is `2 * (re.ngroups(pattern) + 1)` for the three span
+   functions and `1 + 2 * maxn` for `findall` and `split`, and it is the one
+   thing a caller has to know that it cannot read back off the list.
+
+7. **`re.sub` AND `re.split` DO NOT RE-COMPILE PER MATCH** and a backtracking
    engine is exponential in the worst case, so a run is given a step budget.
    Exceeding it is `STATUS_LIMIT`, not a wrong answer. The budget is
    `STEP_LIMIT()` and it is far above anything the corpus needs.
@@ -164,19 +184,64 @@ from os._syscalls import str_len, str_alloc, str_put, str_copy
 # call, which is the same bargain `os.path.join` makes and for the same reason:
 # there is no `free` in this module and `os.os_free(p)` is the spelling.
 
-_PARSER = 0            # 18 words of 4 bytes
-_PPROG = 128           # the compiled program, _NNODES nodes of 8 bytes
+_PARSER = 0            # 24 words of 4 bytes
+_PFRAMES = 128         # the parser's per-piece frames, _PFRAMEW words each
+_PFRAMEW = 8
+_PDEPTHMAX = 24
+_PPROG = 1088          # the compiled program, _NNODES nodes of 8 bytes
 _NNODES = 640
-_PRNG = 5248           # character-class ranges, 2 bytes each
+_PRNG = 6208           # character-class ranges, 2 bytes each
 _NRNG = 256
-_PSAVE = 5760          # the group saves, _NSAVE words of 4 bytes
+_PSAVE = 6720          # the group saves, _NSAVE words of 4 bytes
 _NSAVE = 16            # two slots per group, _MAXG groups
-_PSTACK = 5824         # the backtracking stack, _NSTACK entries of 16 bytes
+_PSTACK = 6784         # the backtracking stack, _NSTACK entries of 16 bytes
 _NSTACK = 1024
-_ARENA = 22208
+_ARENA = 23168
+
+# A frame is one piece's private parser state, indexed by nesting depth: the
+# group number its atom created, the node and range counts before that atom,
+# the group count before the piece (which is also what the copies of a
+# quantified atom restore), the source offsets it started and ended at, the
+# offset just past its quantifier, and the limit to put back when a copy is
+# done parsing the atom's source again.
+_PF_GRP = 0
+_PF_NN = 1
+_PF_NR = 2
+_PF_NG = 3
+_PF_ASTART = 4
+_PF_AEND = 5
+_PF_AFTER = 6
+_PF_OLIM = 7
+
+
+def _pf(a, d: Int, w: Int) -> Int:
+    """Frame `d`'s word `w` — the per-piece parser state that used to be a
+    shared word in the arena and was therefore whatever the innermost nested
+    parse happened to leave behind.
+
+    Every one of these was a separate bug of the same shape before this
+    existed, and each was found by a different corpus case, which is the part
+    worth recording: `_P_ASTART` made the copies of `(?:ab)+` compile from the
+    `b`; `_P_NG0` numbered `(a)?`'s own group 2; `_P_AFTER` left the parser
+    pointing at the `)` of `(a+)?` and the pattern was then refused for having
+    a stray `)`; `_P_GRP` lost the group number of a quantified group whose
+    body had a repetition in it. A frame is indexed by nesting depth, so the
+    value a piece reads is its own and a nested parse cannot reach it.
+    """
+    return _g4(a, _PFRAMES + (d * _PFRAMEW + w) * 4)
+
+
+def _spf(a, d: Int, w: Int, v: Int) -> Int:
+    _s4(a, _PFRAMES + (d * _PFRAMEW + w) * 4, v)
+    return 0
 
 # Parser words, as indices; each occupies 4 bytes from _PARSER.
 _P_POS = 0
+# `_P_ERR` HOLDS A STATUS, not a boolean: `_prepare` returns this word
+# directly, so "unsupported" is 3 and "too big" is 2 and a plain 0 is a
+# pattern that compiled. It was 1 and 2 — and 1 is STATUS_OK, so every
+# refusal in the engine was reported to the caller as success with blanked
+# spans (measured: `a**`, `a)` and `[z-a]` all came back "OK, no match").
 _P_ERR = 1
 _P_NN = 2
 _P_NG = 3
@@ -185,22 +250,27 @@ _P_FLAGS = 5
 _P_DEPTH = 6
 _P_PATLEN = 7
 _P_LIMIT = 8
-_P_OLIM = 9
-_P_SUPP = 10
-_P_LO = 11
-_P_HI = 12
-_P_GRP = 13
-_P_ASTART = 14
-_P_AEND = 15
-_P_NG0 = 16
-_P_GREEDY = 17
-_P_STEPS = 18
-_P_PC = 19
-_P_SP = 20
-_P_TOP = 21
-_P_MSTART = 22
-_P_MEND = 23
-_P_ENTRY = 24
+_P_SUPP = 9
+_P_LO = 10
+_P_HI = 11
+_P_GRP = 12
+# Words 9, 14, 15, 16 and 24 used to be `_P_OLIM`, `_P_ASTART`, `_P_AEND`,
+# `_P_NG0` and `_P_AFTER`: a piece's source span, the group count to restore for
+# its copies, the limit to put back when a copy is done, and the offset just
+# past its quantifier. All five are per-PIECE state, and living in the arena as
+# shared words is the bug class `_pf` ends. They are frame words now, and the
+# numbering below is what is left, compacted.
+_P_GREEDY = 13
+_P_STEPS = 14
+_P_PC = 15
+_P_SP = 16
+_P_TOP = 17
+_P_MSTART = 18
+_P_MEND = 19
+_P_ENTRY = 20
+_P_NEXT = 21
+_P_PHASE = 22
+_P_CLROUT = 23
 
 # Opcodes. A node is 8 bytes: op, a, b, c, p0 (2 bytes), p1 (2 bytes).
 OP_CHAR = 1
@@ -238,10 +308,14 @@ _MAXDEPTH = 20
 #     (`bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md`);
 #   * `value()` needs a DECLARED pointee, so the receiver is a local
 #     `var q: Pointer[UInt8] = p + i` and never an inline `(p + i).value()`.
-# A multi-byte field is ASSEMBLED with `* 256` and friends and never with a
-# `<<`, because `<<` by a literal amount above 8 is a wrong answer on arm64
-# (`bugs/FORMAL_arm64_literal_left_shift_amount.md`), and taken out with `>>`,
-# which is a different encoder and is right.
+# A multi-byte field is assembled with `<<` and taken out with `>>`, both by a
+# literal amount. This file was WRITTEN with `* 256` and friends and a comment
+# saying it had to be, because `encode_lsl_xd_xn_imm` had base `0xd3780000`
+# where its own docstring said `0xd3400000`, and 56 of the 64 shift amounts
+# encoded to a different instruction (`1 << 12` ran as `1 << 4`). The encoder is
+# fixed and all 64 amounts are now differential-tested against Apple's
+# assembler (`test_arm64_encoders.py`), so the workaround is gone rather than
+# left in beside the thing that made it unnecessary.
 
 def _b(p, i: Int) -> Int:
     """The byte at `p[i]`, 0..255."""
@@ -259,13 +333,13 @@ def _g2(p, i: Int) -> Int:
     """Two bytes at `p[i]`, little-endian."""
     x = _b(p, i)
     y = _b(p, i + 1)
-    return x + y * 256
+    return x + (y << 8)
 
 
 def _s2(p, i: Int, v: Int) -> Int:
     """Two bytes of `v` at `p[i]`. Returns 0."""
     _sb(p, i, v)
-    _sb(p, i + 1, v / 256)
+    _sb(p, i + 1, v >> 8)
     return 0
 
 
@@ -275,7 +349,7 @@ def _g4(p, i: Int) -> Int:
     y = _b(p, i + 1)
     z = _b(p, i + 2)
     w = _b(p, i + 3)
-    return x + y * 256 + z * 65536 + w * 16777216
+    return x + (y << 8) + (z << 16) + (w << 24)
 
 
 def _s4(p, i: Int, v: Int) -> Int:
@@ -305,6 +379,14 @@ def _arena() -> Pointer[UInt8]:
 def _pa(a, w: Int) -> Int:
     """Parser word `w` (an index, not an offset)."""
     return _g4(a, _PARSER + w * 4)
+
+
+def _pas(a, w: Int) -> Int:
+    """Parser word `w` as a SIGNED value — for `_P_HI`, which is -1 for an
+    open-ended `{m,}` repeat. Read with `_pa` it comes back as 4294967295 and
+    `hi < 0` is false, so the open-ended repeats compiled as a loop over four
+    billion copies (measured: `re.ngroups("a*")` never returned)."""
+    return _g4s(a, _PARSER + w * 4)
 
 
 def _spa(a, w: Int, v: Int) -> Int:
@@ -382,21 +464,6 @@ def _term(a, op: Int, x: Int, y: Int, z: Int, nxt: Int) -> Int:
     return n
 
 
-def _clr(a, g: Int, tgt: Int) -> Int:
-    """Two SAVEs that blank group `g` and continue at `tgt`. The first node.
-
-    TWO and not one, because a backtrack entry remembers ONE word to put back
-    and a group that did not match has TWO words to blank. A single node that
-    cleared both would restore one of them on the way out and leave the group
-    half-matched, which is a wrong span rather than a missing one.
-    """
-    n = _nn(a, OP_SAVE, 2 * g, 2, 0)
-    m = _nn(a, OP_SAVE, 2 * g, 3, 0)
-    _sp0(a, n, m)
-    _sp0(a, m, tgt)
-    return n
-
-
 # ── CHARACTER CLASSES ───────────────────────────────────────────────────────
 #
 # A class is a run of (lo, hi) byte pairs in the arena, and its CLASS node
@@ -419,6 +486,7 @@ def _addr(a, lo: Int, hi: Int) -> Int:
 
 
 def _add_d(a, c: Int) -> Int:
+    """`\d` (`c` 0) or its complement over 0..255 (`c` 1)."""
     if c == 0:
         return _addr(a, 48, 57)
     c = _addr(a, 0, 47)
@@ -426,6 +494,7 @@ def _add_d(a, c: Int) -> Int:
 
 
 def _add_s(a, c: Int) -> Int:
+    """`\s` or its complement."""
     if c == 0:
         c = _addr(a, 9, 13)
         return _addr(a, 32, 32)
@@ -435,6 +504,7 @@ def _add_s(a, c: Int) -> Int:
 
 
 def _add_w(a, c: Int) -> Int:
+    """`\w` or its complement."""
     if c == 0:
         c = _addr(a, 48, 57)
         c = _addr(a, 65, 90)
@@ -452,8 +522,33 @@ def _add_w(a, c: Int) -> Int:
 # `c` has already been read. The shorthands are intercepted by the caller,
 # because outside a class they are one opcode and inside one they are ranges.
 
-def _escbyte(a, code, c: Int) -> Int:
-    """The byte an escape denotes, or -1 with `_P_ERR` set."""
+def _hexval(c: Int) -> Int:
+    """0..15 for a hex digit, -1 otherwise."""
+    if c >= 48 and c <= 57:
+        return c - 48
+    if c >= 97 and c <= 102:
+        return c - 87
+    if c >= 65 and c <= 70:
+        return c - 55
+    return 0 - 1
+
+
+def _escbyte(a, code, c: Int, incls: Int) -> Int:
+    """The byte an escape denotes, or -1 with `_P_ERR` set.
+
+    An escape of an ASCII LETTER that this module does not define is an error,
+    which is CPython's own rule since 3.12 (`re.compile(r"\q")` raises) — and
+    matching the letter instead would be a match where CPython refuses to
+    compile.
+
+    A backslash and DIGITS is CPython's octal-or-group-reference rule, and the
+    two halves of it are not the same thing: inside a character class it is
+    always octal (`[\1]` is the byte 1), and outside one it is a group
+    reference unless THREE octal digits follow (`\101` is `A`, `\12` is an
+    error about group 12). Measured, all of them:
+    `\101`->'A', `\100`->'\x40', `\123`->'S', `\012`->'\n', `\07`->'\x07',
+    `\12`->error, `\19`->error, `\1`->error, `\400`->error (out of range).
+    """
     if c == 110:
         return 10
     if c == 116:
@@ -474,7 +569,7 @@ def _escbyte(a, code, c: Int) -> Int:
         while k < 2:
             d = _p_peek(a, code)
             if _hexval(d) < 0:
-                _spa(a, _P_ERR, 1)
+                _spa(a, _P_ERR, 3)
                 return 0 - 1
             v = v * 16 + _hexval(d)
             _p_adv(a, code)
@@ -482,34 +577,28 @@ def _escbyte(a, code, c: Int) -> Int:
         return v
     if c >= 48 and c <= 57:
         v = c - 48
-        if c == 48:
-            k = 0
-            while k < 2:
-                d = _p_peek(a, code)
-                if d < 48 or d > 55:
-                    break
-                v = v * 8 + (d - 48)
-                _p_adv(a, code)
-                k = k + 1
+        nd = 1
+        while nd < 3:
+            d = _p_peek(a, code)
+            if d < 48 or d > 55:
+                break
+            v = v * 8 + (d - 48)
+            _p_adv(a, code)
+            nd = nd + 1
+        if c != 48 and nd < 3 and incls == 0:
+            _spa(a, _P_ERR, 3)
+            return 0 - 1
+        if v > 255:
+            _spa(a, _P_ERR, 3)
+            return 0 - 1
         return v
     if c >= 65 and c <= 90:
-        _spa(a, _P_ERR, 1)
+        _spa(a, _P_ERR, 3)
         return 0 - 1
     if c >= 97 and c <= 122:
-        _spa(a, _P_ERR, 1)
+        _spa(a, _P_ERR, 3)
         return 0 - 1
     return c
-
-
-def _hexval(c: Int) -> Int:
-    """0..15 for a hex digit, -1 otherwise."""
-    if c >= 48 and c <= 57:
-        return c - 48
-    if c >= 97 and c <= 102:
-        return c - 87
-    if c >= 65 and c <= 70:
-        return c - 55
-    return 0 - 1
 
 
 # ── PARSER PRIMITIVES ───────────────────────────────────────────────────────
@@ -578,23 +667,31 @@ def _p_more(a, code) -> Int:
 
 # ── ATOMS ───────────────────────────────────────────────────────────────────
 
-def _p_short(a, neg: Int, which: Int) -> Int:
-    """Append a shorthand's ranges; return the offset the CLASS node wants."""
+def _clsnode(a, which: Int, neg: Int, u: Int, nxt: Int) -> Int:
+    """A CLASS node for a shorthand, with its OWN negation flag.
+
+    Outside a character class the negation stays a FLAG and the ranges added
+    are the positive ones, which is one shape; inside a class it is folded into
+    the ranges, which is `regex_compile.py`'s shape and is the same set either
+    way. Doing both at once — adding the complement AND setting the flag —
+    negates twice, and `\D+` then matched the digits.
+    """
     off = _pa(a, _P_NR)
     if which == 0:
-        _add_d(a, neg)
+        _add_d(a, 0)
     elif which == 1:
-        _add_s(a, neg)
+        _add_s(a, 0)
     else:
-        _add_w(a, neg)
-    return off
+        _add_w(a, 0)
+    cnt = _pa(a, _P_NR) - off
+    return _term(a, OP_CLASS, off, cnt, neg, nxt)
 
 
 def _p_atom(a, code, nxt: Int) -> Int:
     """One atom, continuing at `nxt`."""
     _skip(a, code)
     if _pa(a, _P_POS) >= _pa(a, _P_LIMIT):
-        _spa(a, _P_ERR, 1)
+        _spa(a, _P_ERR, 3)
         return 0 - 1
     c = _p_adv(a, code)
     if c == 40:
@@ -610,16 +707,16 @@ def _p_atom(a, code, nxt: Int) -> Int:
     if c == 92:
         return _p_esc(a, code, nxt)
     if c == 41:
-        _spa(a, _P_ERR, 1)
+        _spa(a, _P_ERR, 3)
         return 0 - 1
     if c == 42:
-        _spa(a, _P_ERR, 1)
+        _spa(a, _P_ERR, 3)
         return 0 - 1
     if c == 43:
-        _spa(a, _P_ERR, 1)
+        _spa(a, _P_ERR, 3)
         return 0 - 1
     if c == 63:
-        _spa(a, _P_ERR, 1)
+        _spa(a, _P_ERR, 3)
         return 0 - 1
     return _term(a, OP_CHAR, c, 0, 0, nxt)
 
@@ -628,20 +725,20 @@ def _p_esc(a, code, nxt: Int) -> Int:
     """An escape OUTSIDE a character class. The backslash is consumed."""
     e = _p_adv(a, code)
     if e < 0:
-        _spa(a, _P_ERR, 1)
+        _spa(a, _P_ERR, 3)
         return 0 - 1
     if e == 100:
-        return _term(a, OP_CLASS, _p_short(a, 0, 0), 0, 0, nxt)
+        return _clsnode(a, 0, 0, 0, nxt)
     if e == 68:
-        return _term(a, OP_CLASS, _p_short(a, 1, 0), 0, 1, nxt)
+        return _clsnode(a, 0, 1, 0, nxt)
     if e == 115:
-        return _term(a, OP_CLASS, _p_short(a, 0, 1), 0, 0, nxt)
+        return _clsnode(a, 1, 0, 0, nxt)
     if e == 83:
-        return _term(a, OP_CLASS, _p_short(a, 1, 1), 0, 1, nxt)
+        return _clsnode(a, 1, 1, 0, nxt)
     if e == 119:
-        return _term(a, OP_CLASS, _p_short(a, 0, 2), 0, 0, nxt)
+        return _clsnode(a, 2, 0, 0, nxt)
     if e == 87:
-        return _term(a, OP_CLASS, _p_short(a, 1, 2), 0, 1, nxt)
+        return _clsnode(a, 2, 1, 0, nxt)
     if e == 98:
         return _term(a, OP_WORDB, 1, 0, 0, nxt)
     if e == 66:
@@ -652,16 +749,29 @@ def _p_esc(a, code, nxt: Int) -> Int:
         return _term(a, OP_EOL, 0, 0, 0, nxt)
     if e == 122:
         return _term(a, OP_EOL, 0, 0, 0, nxt)
-    if e >= 49 and e <= 57:
-        # A backreference. Refused rather than matched as a literal, because
-        # answering it wrongly would be a match where CPython finds one by
-        # looking at a group this engine does track.
-        _spa(a, _P_ERR, 1)
-        return 0 - 1
-    c = _escbyte(a, code, e)
+    # A backslash and DIGITS is NOT intercepted here: `_escbyte` decides,
+    # because outside a class it is a group reference only when fewer than
+    # three octal digits follow, and `\101` is the letter A. Refusing every
+    # `\` + digit made `\101` an error and it is not.
+    c = _escbyte(a, code, e, 0)
     if c < 0:
         return 0 - 1
     return _term(a, OP_CHAR, c, 0, 0, nxt)
+
+
+def _p_close(a, code) -> Int:
+    """Consume the `)` that ends a group. 0 if there is not one.
+
+    Every group needs it and nothing else did it: the body's parse stops AT the
+    `)` and leaves it there, so the concatenation after the group read it as
+    the next piece, `(a)(b)` compiled to one group, and `{2}` after a group was
+    not a quantifier at all — the parser was still inside the group.
+    """
+    if _p_peek(a, code) != 41:
+        _spa(a, _P_ERR, 3)
+        return 0
+    _p_adv(a, code)
+    return 1
 
 
 def _p_group(a, code, nxt: Int) -> Int:
@@ -677,36 +787,43 @@ def _p_group(a, code, nxt: Int) -> Int:
         if c == 80:
             _p_adv(a, code)
             if _p_peek(a, code) != 60:
-                _spa(a, _P_ERR, 1)          # (?P= — a backreference
+                _spa(a, _P_ERR, 3)          # (?P= — a backreference
                 return 0 - 1
             _p_adv(a, code)
             c = _p_peek(a, code)
             if c == 61 or c == 33:
-                _spa(a, _P_ERR, 1)          # (?<= and (?<! — a lookbehind
+                _spa(a, _P_ERR, 3)          # (?<= and (?<! — a lookbehind
                 return 0 - 1
             while 1:
                 d = _p_peek(a, code)
                 if d == 62:
                     break
                 if d < 0:
-                    _spa(a, _P_ERR, 1)
+                    _spa(a, _P_ERR, 3)
                     return 0 - 1
                 _p_adv(a, code)
             _p_adv(a, code)
             return _p_group1(a, code, nxt)
-        _spa(a, _P_ERR, 1)                  # lookahead, conditionals, inline
+        _spa(a, _P_ERR, 3)                  # lookahead, conditionals, inline
         return 0 - 1
     return _p_group1(a, code, nxt)
 
 
 def _p_group0(a, code, nxt: Int) -> Int:
-    """`(?: … )` — a group with no number."""
+    """`(?: … )` — a group with no number.
+
+    The body's continuation is the JMP and the JMP goes to `nxt`, in that
+    order. It was the other way round — the body ended at the JMP AND the JMP
+    pointed at the body — which is a LOOP that consumes nothing, so
+    `(?:a)+` matched nothing at all while `(a)+` matched (measured: a group
+    with a number builds its own two SAVEs and so never shared the JMP).
+    """
     t = _nn(a, OP_JMP, 0, 0, 0)
+    _sp0(a, t, nxt)
     b = _p_alt(a, code, t)
-    if b < 0:
+    if _p_close(a, code) == 0:
         return 0 - 1
-    _sp0(a, t, b)
-    return t
+    return b
 
 
 def _p_group1(a, code, nxt: Int) -> Int:
@@ -733,8 +850,15 @@ def _p_group1(a, code, nxt: Int) -> Int:
     _spa(a, _P_DEPTH, d)
     if b < 0:
         return 0 - 1
+    if _p_close(a, code) == 0:
+        return 0 - 1
     _sp0(a, gs, b)
-    _sp0(a, gend, nxt)
+    # AFTER the body, not before it: the body's own pieces each begin by
+    # clearing `_P_GRP`, so a write before the parse would not survive it. This
+    # word is the one piece of per-piece state still shared, and it is safe for
+    # the same reason the rest became frames — the reader writes its frame word
+    # before recursing and reads it after, and this one is written by the
+    # innermost thing that has an opinion about it.
     _spa(a, _P_GRP, g)
     if supp == 1:
         return b
@@ -742,10 +866,10 @@ def _p_group1(a, code, nxt: Int) -> Int:
 
 
 def _p_clsrange_bad(a, code) -> Int:
-    """`[\\d-x]`: a shorthand is not a range endpoint. -1, or the count."""
+    """`[\d-x]`: a shorthand is not a range endpoint. -1, or the count."""
     if _p_peek(a, code) == 45:
         if _p_at(a, code, 1) != 93:
-            _spa(a, _P_ERR, 1)
+            _spa(a, _P_ERR, 3)
             return 0 - 1
     return _pa(a, _P_NR)
 
@@ -780,10 +904,10 @@ def _p_clsitem(a, code, c: Int) -> Int:
             _add_w(a, 1)
             return _p_clsrange_bad(a, code)
         if e < 0:
-            _spa(a, _P_ERR, 1)
+            _spa(a, _P_ERR, 3)
             return 0 - 1
         _p_adv(a, code)
-        c = _escbyte(a, code, e)
+        c = _escbyte(a, code, e, 1)
         if c < 0:
             return 0 - 1
     else:
@@ -796,19 +920,19 @@ def _p_clsitem(a, code, c: Int) -> Int:
                 _p_adv(a, code)
                 e = _p_peek(a, code)
                 if e == 100 or e == 68 or e == 115 or e == 83 or e == 119 or e == 87:
-                    _spa(a, _P_ERR, 1)
+                    _spa(a, _P_ERR, 3)
                     return 0 - 1
                 if e < 0:
-                    _spa(a, _P_ERR, 1)
+                    _spa(a, _P_ERR, 3)
                     return 0 - 1
                 _p_adv(a, code)
-                d = _escbyte(a, code, e)
+                d = _escbyte(a, code, e, 1)
             else:
                 _p_adv(a, code)
             if d < 0:
                 return 0 - 1
             if d < c:
-                _spa(a, _P_ERR, 1)
+                _spa(a, _P_ERR, 3)
                 return 0 - 1
             return _addr(a, c, d)
     return _addr(a, c, c)
@@ -828,7 +952,7 @@ def _p_cls(a, code, nxt: Int) -> Int:
             _p_adv(a, code)
             return _term(a, OP_CLASS, off, _pa(a, _P_NR) - off, neg, nxt)
         if c < 0:
-            _spa(a, _P_ERR, 1)
+            _spa(a, _P_ERR, 3)
             return 0 - 1
         first = 0
         if _p_clsitem(a, code, c) < 0:
@@ -838,7 +962,7 @@ def _p_cls(a, code, nxt: Int) -> Int:
 
 # ── QUANTIFIERS ─────────────────────────────────────────────────────────────
 #
-# A quantifier is read BEFORE its atom, which is what lets a counted repeat
+# A quantifier is read AFTER its atom, which is what lets a counted repeat
 # re-parse the atom once per copy: an atom cannot be spliced into a
 # concatenation twice, because a node has one forward edge, and the only thing
 # that can be repeated is its SOURCE. So `_p_piece` records the atom's span,
@@ -893,7 +1017,12 @@ def _p_quant(a, code) -> Int:
         hi = lo
         if _p_peek(a, code) == 44:
             _p_adv(a, code)
-            hi = 0 - 1
+            # -1 is the "no upper bound" sentinel, and it must NOT be the
+            # accumulator: `hi * 10 + d` starting from -1 is -10 + 3, which is
+            # still negative, so `{2,3}` parsed as `{2,}` and `a{2,3}` matched
+            # four characters where CPython matches three (measured, and the
+            # whole `{m,n}` family was wrong with it — `a{2,2}` matched three).
+            hi = 0
             got2 = 0
             while 1:
                 d = _p_peek(a, code)
@@ -921,13 +1050,63 @@ def _p_quant(a, code) -> Int:
     return 0
 
 
-def _p_copy(a, code, cont: Int, grp: Int, idx: Int) -> Int:
+def _clr(a, g: Int, tgt: Int) -> Int:
+    """Two SAVEs that blank group `g` and continue at `tgt`. The first node.
+
+    TWO and not one, because a backtrack entry remembers ONE word to put back
+    and a group that did not match has TWO words to blank. A single node that
+    cleared both would restore one of them on the way out and leave the group
+    half-matched, which is a wrong span rather than a missing one.
+    """
+    n = _nn(a, OP_SAVE, 2 * g, 2, 0)
+    m = _nn(a, OP_SAVE, 2 * g, 3, 0)
+    _sp0(a, n, m)
+    _sp0(a, m, tgt)
+    return n
+
+
+def _clr0(a, g: Int) -> Int:
+    """A blanking pair whose LAST node's target is not known yet.
+
+    The head, which is where a SPLIT's skip branch goes. `_clrset` finishes it
+    once the target exists — the target is the next optional copy's SPLIT, and
+    that is allocated after this one.
+    """
+    n = _nn(a, OP_SAVE, 2 * g, 2, 0)
+    m = _nn(a, OP_SAVE, 2 * g, 3, 0)
+    _sp0(a, n, m)
+    _spa(a, _P_CLROUT, m)
+    return n
+
+
+def _clrset(a, tgt: Int) -> Int:
+    """Point the last `_clr0` at `tgt`, and remember it as the skip chain."""
+    _sp0(a, _pa(a, _P_CLROUT), tgt)
+    return _pa(a, _P_CLROUT)
+
+
+def _p_copy(a, code, d: Int, cont: Int, grp: Int) -> Int:
     """One repetition's body, compiled from the atom's source span.
 
-    `grp` is the group number the ATOM created (0 if it created none), and it
-    is 0 here precisely so the copies do not each number a group: the first
-    copy records the start, every copy records an end, and the last end to run
-    is the one that survives — which is what CPython reports for `(X){m,n}`.
+    `grp` is the group number the ATOM created, and it is passed as 0 on
+    every copy so the copies do not each number a group of their own — the
+    body's own group parses to the same number each time, because `ng0` puts
+    the counter back where the piece started.
+
+    EVERY copy brackets the body with a start SAVE and an end SAVE, and that
+    is what makes the reported group the LAST repetition rather than a mixture
+    of the first and the last: `(a|b)+c` on `ababc` has group 1 at (3, 4) —
+    the `b` — while a start SAVE emitted once, before the loop, stayed at 0
+    (measured). `{m,n}` is the same shape with m mandatory copies in front, so
+    `(ab){2}` reports (2, 4) and not (0, 4).
+
+    Everything else this needs — the atom's source span, the group count to
+    restore, and the pattern limit to put back — is read out of the PIECE'S OWN
+    frame at `d`, because every copy re-enters `_p_piece` (through the group
+    body it just parsed) and by then a shared word is holding something from the
+    inside of the atom. See `_pf`; the limit is the fourth of those and it is
+    what made `(\w+)?` come back refused, with the parser left pointing past
+    the end of the pattern and the limit two bytes short of it.
     """
     cn = cont
     gs = 0
@@ -935,37 +1114,49 @@ def _p_copy(a, code, cont: Int, grp: Int, idx: Int) -> Int:
         ge = _nn(a, OP_SAVE, 2 * grp, 1, 0)
         _sp0(a, ge, cont)
         cn = ge
-        if idx == 1:
-            gs = _nn(a, OP_SAVE, 2 * grp, 0, 0)
-    _spa(a, _P_POS, _pa(a, _P_ASTART))
-    _spa(a, _P_LIMIT, _pa(a, _P_AEND))
-    _spa(a, _P_NG, _pa(a, _P_NG0))
+        gs = _nn(a, OP_SAVE, 2 * grp, 0, 0)
+    _spa(a, _P_POS, _pf(a, d, _PF_ASTART))
+    _spa(a, _P_LIMIT, _pf(a, d, _PF_AEND))
+    _spa(a, _P_NG, _pf(a, d, _PF_NG))
     if grp > 0:
         _spa(a, _P_SUPP, 1)
     else:
         _spa(a, _P_SUPP, 0)
     h = _p_alt(a, code, cn)
-    _spa(a, _P_LIMIT, _pa(a, _P_OLIM))
+    _spa(a, _P_LIMIT, _pf(a, d, _PF_OLIM))
     if h < 0:
         return 0 - 1
-    if grp > 0 and idx == 1:
+    if grp > 0:
         _sp0(a, gs, h)
         return gs
     return h
 
 
-def _p_repeat(a, code, grp: Int, nxt: Int) -> Int:
-    """The repetition, for the atom whose span is in the parser words."""
-    lo = _pa(a, _P_LO)
-    hi = _pa(a, _P_HI)
+def _p_repeat(a, code, d: Int, nxt: Int) -> Int:
+    """The repetition, for the atom whose span is in the parser words.
+
+    `X{m,n}` is m copies in a chain and then n-m OPTIONAL copies. Each
+    optional copy is a SPLIT whose one branch is the copy and whose other goes
+    to the NEXT optional copy — and that next SPLIT does not exist yet when the
+    copy is parsed, which is why both links go through a JMP that is patched
+    afterwards. Drawing the shape directly is what makes the mistake easy here:
+    with the copy's exit wired straight to its own SPLIT, `a{2,3}` looped and
+    matched four characters where CPython matches three.
+    """
+    # Read the whole frame ONCE, before the first copy: a copy is a nested
+    # parse and will move `_P_LO`, `_P_HI` and `_P_GREEDY` under us.
+    lo = _pas(a, _P_LO)
+    hi = _pas(a, _P_HI)
     gred = _pa(a, _P_GREEDY)
+    grp = _pf(a, d, _PF_GRP)
+    after = _pf(a, d, _PF_AFTER)
     tramp = _nn(a, OP_JMP, 0, 0, 0)
     prev = tramp
     head = 0 - 1
     i = 1
     while i <= lo:
         j = _nn(a, OP_JMP, 0, 0, 0)
-        b = _p_copy(a, code, j, grp, i)
+        b = _p_copy(a, code, d, j, grp)
         if b < 0:
             return 0 - 1
         if head < 0:
@@ -976,7 +1167,7 @@ def _p_repeat(a, code, grp: Int, nxt: Int) -> Int:
     if hi < 0:
         j = _nn(a, OP_JMP, 0, 0, 0)
         lsp = _nn(a, OP_SPLIT, 0, 0, 0)
-        b = _p_copy(a, code, lsp, grp, i)
+        b = _p_copy(a, code, d, lsp, grp)
         if b < 0:
             return 0 - 1
         if gred == 1:
@@ -995,60 +1186,142 @@ def _p_repeat(a, code, grp: Int, nxt: Int) -> Int:
         _sp0(a, prev, lsp)
         prev = j
     else:
+        skip = 0 - 1
         while i <= hi:
             j = _nn(a, OP_JMP, 0, 0, 0)
-            b = _p_copy(a, code, j, grp, i)
+            sk = _nn(a, OP_JMP, 0, 0, 0)
+            s = _nn(a, OP_SPLIT, 0, 0, 0)
+            b = _p_copy(a, code, d, j, grp)
             if b < 0:
                 return 0 - 1
-            s = _nn(a, OP_SPLIT, 0, 0, 0)
             if gred == 1:
                 _sp0(a, s, b)
-                _sp1(a, s, j)
+                _sp1(a, s, sk)
             else:
-                _sp0(a, s, j)
+                _sp0(a, s, sk)
                 _sp1(a, s, b)
+            if skip >= 0:
+                _sp0(a, skip, s)
             if lo == 0 and i == 1 and grp > 0:
+                c = _clr0(a, grp)
                 if gred == 1:
-                    _sp1(a, s, _clr(a, grp, j))
+                    _sp1(a, s, c)
                 else:
-                    _sp0(a, s, _clr(a, grp, j))
+                    _sp0(a, s, c)
+                skip = _pa(a, _P_CLROUT)
+            else:
+                skip = sk
             if head < 0:
                 head = s
             _sp0(a, prev, s)
             prev = j
             i = i + 1
+        if skip >= 0:
+            _sp0(a, skip, nxt)
+    if grp > _pa(a, _P_NG):
+        _spa(a, _P_NG, grp)
     if head < 0:
         if grp > 0:
             _sp0(a, tramp, _clr(a, grp, nxt))
         else:
             _sp0(a, tramp, nxt)
+        _spa(a, _P_POS, after)
         return tramp
     _sp0(a, prev, nxt)
-    _spa(a, _P_POS, _pa(a, _P_AEND))
+    # PAST the quantifier, which is where the next piece starts. The atom's
+    # end would leave the parser looking at the `+` it just consumed, and the
+    # concatenation that follows would then try to make a piece of it —
+    # measured: every `+` and `*` reported an unsupported pattern.
+    _spa(a, _P_POS, after)
     return head
 
 
 def _p_piece(a, code, nxt: Int) -> Int:
-    """A quantifier and its atom, or a bare atom."""
+    """A quantifier and its atom, or a bare atom.
+
+    The ATOM is parsed first and the quantifier read afterwards, because the
+    quantifier is written after the atom: reading it first left the parser past
+    the atom, and `a+` then compiled to a program that matched the empty string
+    (measured, and the fix is the order of these two calls).
+
+    With a quantifier the atom's compiled nodes are then DISCARDED and
+    re-parsed from its source span, once per repetition, because a node has one
+    forward edge and a repetition needs as many. The atom is a GROUP in that
+    case and its own SAVE instructions belong around the whole repetition, not
+    inside each copy, which is what the frame's group number is for.
+
+    Every value this needs across the nested parse — the atom's node and range
+    counts, its source span, the group count, the group number the atom
+    created, and where its quantifier ended — lives in THIS piece's frame,
+    indexed by the nesting depth it claimed. See `_pf` for the four bugs that
+    is the fix for.
+    """
     _skip(a, code)
-    _spa(a, _P_ASTART, _pa(a, _P_POS))
-    _spa(a, _P_NG0, _pa(a, _P_NG))
-    _spa(a, _P_GRP, 0)
-    if _p_quant(a, code) == 0:
-        return _p_atom(a, code, nxt)
-    nn0 = _pa(a, _P_NN)
-    nr0 = _pa(a, _P_NR)
-    ng0 = _pa(a, _P_NG)
-    _p_atom(a, code, nxt)
-    _spa(a, _P_AEND, _pa(a, _P_POS))
-    grp = _pa(a, _P_GRP)
-    _spa(a, _P_NN, nn0)
-    _spa(a, _P_NR, nr0)
-    _spa(a, _P_NG, ng0)
-    _spa(a, _P_OLIM, _pa(a, _P_LIMIT))
-    if _pa(a, _P_ERR) != 0:
+    d = _pa(a, _P_DEPTH)
+    if d >= _PDEPTHMAX:
+        _spa(a, _P_ERR, 3)
         return 0 - 1
-    return _p_repeat(a, code, grp, nxt)
+    start = _pa(a, _P_POS)
+    _spf(a, d, _PF_NN, _pa(a, _P_NN))
+    _spf(a, d, _PF_NR, _pa(a, _P_NR))
+    _spf(a, d, _PF_NG, _pa(a, _P_NG))
+    _spf(a, d, _PF_ASTART, start)
+    _spf(a, d, _PF_AEND, start)
+    _spf(a, d, _PF_AFTER, start)
+    _spf(a, d, _PF_OLIM, _pa(a, _P_LIMIT))
+    # `_P_GRP` is cleared here as well as the frame word: it is the word
+    # `_p_group1` writes, and an atom that is NOT a group has to read 0 or the
+    # next piece inherits the previous one's group number. Without this,
+    # `(\w+)\s*` compiled the `\s*` as if it were `(\s*)` and bracketed it
+    # with the same group's SAVEs, so the group reported the span of the
+    # whitespace instead of the word (measured).
+    _spa(a, _P_GRP, 0)
+    _spf(a, d, _PF_GRP, 0)
+    _spa(a, _P_DEPTH, d + 1)
+    h = _p_atom(a, code, nxt)
+    if h < 0:
+        _spa(a, _P_DEPTH, d)
+        return 0 - 1
+    # The span is recorded AFTER the atom, not before it: the atom's own parse
+    # runs `_p_piece` again for every piece inside it, and each of those
+    # records its own span. Recording this one's start first and reading it
+    # back out of a shared word afterwards meant the LAST nested piece's start
+    # won, so the copies of `(?:ab)+` were compiled from the `b` and the `a`
+    # was never emitted (measured: the match was `b`, CPython's is `ababab`).
+    _spf(a, d, _PF_AEND, _pa(a, _P_POS))
+    grp = _pa(a, _P_GRP)
+    _spf(a, d, _PF_GRP, grp)
+    # `_P_DEPTH` STAYS at d + 1 across the repetition, so a copy's own pieces
+    # claim d + 1 and not d. Dropping it to d here handed every copy the
+    # enclosing piece's frame and the second copy of `X{2,n}` was compiled from
+    # the first copy's span.
+    keep = _pa(a, _P_POS)
+    q = _p_quant(a, code)
+    if q == 0:
+        _spa(a, _P_POS, keep)
+        _spa(a, _P_DEPTH, d)
+        return h
+    if q < 0:
+        # A quantifier that REFUSED. `0` is "there is none here" and -1 is
+        # "there is one and this module will not have it", and before these
+        # were told apart the refusal fell through to the repetition below with
+        # the quantifier's own limits never written: `a{70,80}` past the
+        # arena's repeat cap then built a program out of whatever was in the
+        # parser words and the image died with nothing printed.
+        _spa(a, _P_POS, keep)
+        _spa(a, _P_DEPTH, d)
+        return 0 - 1
+    _spf(a, d, _PF_AFTER, _pa(a, _P_POS))
+    _spa(a, _P_NN, _pf(a, d, _PF_NN))
+    _spa(a, _P_NR, _pf(a, d, _PF_NR))
+    _spa(a, _P_NG, _pf(a, d, _PF_NG))
+    _spf(a, d, _PF_OLIM, _pa(a, _P_LIMIT))
+    if _pa(a, _P_ERR) != 0:
+        _spa(a, _P_DEPTH, d)
+        return 0 - 1
+    r = _p_repeat(a, code, d, nxt)
+    _spa(a, _P_DEPTH, d)
+    return r
 
 
 def _p_cat(a, code, nxt: Int) -> Int:
@@ -1130,20 +1403,30 @@ def _prepare(a, code, flags: Int) -> Int:
     if n > _MAXPAT:
         return 2
     i = 0
-    while i < 25:
+    while i < 24:
         _spa(a, i, 0)
         i = i + 1
     _spa(a, _P_PATLEN, n)
     _spa(a, _P_FLAGS, flags)
     _spa(a, _P_LIMIT, n)
-    _spa(a, _P_OLIM, n)
     _spa(a, _P_GREEDY, 1)
-    _nn(a, OP_JMP, 0, 0, 0)
+    # Node 0 is the anchor `match` and `fullmatch` enter at: a BOL that is only
+    # true at position 0, with the program as its continuation. Without it
+    # `re.match("b", "abc")` finds the `b` at 1, which is `re.search`.
+    _nn(a, OP_BOL, 0, 0, 0)
     _nn(a, OP_MATCH, 0, 0, 0)
     e = _p_alt(a, code, 1)
+    if _pa(a, _P_ERR) != 0:
+        return _pa(a, _P_ERR)
+    # Nothing may be LEFT OVER. A concatenation stops at a `)` or a `|` and
+    # never looks at either again, so without this `a)` compiled to `a` and
+    # matched, where CPython refuses to compile it at all (measured).
+    if _pa(a, _P_POS) != _pa(a, _P_LIMIT):
+        _spa(a, _P_ERR, 3)
+        return 3
     _spa(a, _P_ENTRY, e)
     _sp0(a, 0, e)
-    return _pa(a, _P_ERR)
+    return 0
 
 
 # ── MATCHING ────────────────────────────────────────────────────────────────
@@ -1379,9 +1662,21 @@ def _st_match(a, mode: Int, n: Int) -> Int:
     save area holds one pair per CAPTURING group and the whole match is not a
     group, so slot 0 would be a fiction that only the reader of the arena could
     mistake for a real one.
+
+    Mode 3 is CPython's NOT-EMPTY: the match must consume something. It is
+    what the scan below needs after an empty match, and it is not a spelling
+    of anything CPython exposes — it is `re.finditer`'s rule that after an
+    empty match the next one starts at the SAME position and must be non-empty,
+    which measured as `finditer("a*?", "aaa")` giving (0,0) (0,1) (1,1) (1,2)
+    (2,2) (2,3) (3,3).
     """
     if mode == 2:
         if _pa(a, _P_SP) == n:
+            _spa(a, _P_MEND, _pa(a, _P_SP))
+            return 1
+        return 0
+    if mode == 3:
+        if _pa(a, _P_SP) > _pa(a, _P_MSTART):
             _spa(a, _P_MEND, _pa(a, _P_SP))
             return 1
         return 0
@@ -1463,10 +1758,10 @@ def _run(a, subj, sp0: Int, n: Int, mode: Int, budget: Int) -> Int:
     allocator could not give a home to (see the module docstring), and moving
     the three words out of the frame is what made it lowerable at all.
     """
-    if mode == 0:
-        _spa(a, _P_PC, _pa(a, _P_ENTRY))
-    else:
+    if mode == 1 or mode == 2:
         _spa(a, _P_PC, 0)
+    else:
+        _spa(a, _P_PC, _pa(a, _P_ENTRY))
     _spa(a, _P_SP, sp0)
     _spa(a, _P_TOP, 0)
     _spa(a, _P_MSTART, sp0)
@@ -1505,7 +1800,13 @@ def _steplim() -> Int:
 
 
 def _vm(a, subj, at: Int, n: Int, mode: Int) -> Int:
-    """The first match at or after `at`. The group saves are left in the arena."""
+    """The first match at or after `at`. The group saves are left in the arena.
+
+    `mode` 1 and 2 try ONE start position, not every one: `re.match` and
+    `re.fullmatch` are anchored, and trying sp0 = 1 after sp0 = 0 failed made
+    `re.fullmatch("", "abc")` report a match, because an empty match at the end
+    of the subject ends where a full match must end.
+    """
     budget = _steplim()
     sp0 = at
     while sp0 <= n:
@@ -1515,6 +1816,8 @@ def _vm(a, subj, at: Int, n: Int, mode: Int) -> Int:
             return 1
         if r == 2:
             return 2
+        if mode != 0:
+            return 0
         budget = budget - _pa(a, _P_STEPS)
         if budget <= 0:
             return 2
@@ -1541,17 +1844,28 @@ def _put_spans(out, a, g: Int) -> Int:
     return 0
 
 
-def _blanks(out, g: Int) -> Int:
-    """`out`'s `2 * (g + 1)` words filled with "no match".
+def _fits(out, n: Int, need: Int) -> Int:
+    """1 if `out` has room for `need` words.
+
+    `out` is unused on purpose: a list on this path is a plain array with no
+    readable count, so the capacity can only be something the caller says.
+    """
+    if n >= need:
+        return 1
+    return 0
+
+
+def _blanks(out, n: Int) -> Int:
+    """`out`'s first `n` words filled with "no match".
 
     A caller that ignores the status then reads -1 rather than whatever the
-    arena happened to hold, and the count is the PATTERN'S group count rather
-    than a fixed 18: a list subscript out of range on this path is a silent
-    `exit(1)` with nothing printed, so writing more slots than the caller
-    allocated is not a recoverable mistake.
+    arena happened to hold. The count is the PATTERN'S group count rather than
+    a fixed 18, and on the refusal paths it is the CAPACITY rather than that,
+    because a list subscript out of range on this path is a silent `exit(1)`
+    with nothing printed and this is the code that would have caused it.
     """
     i = 0
-    while i < 2 * (g + 1):
+    while i < n:
         out[i] = 0 - 1
         i = i + 1
     return 0
@@ -1580,51 +1894,70 @@ def _gspan(a, g: Int) -> Int:
 #
 # Each of these compiles the pattern itself, because a compiled pattern has
 # nowhere to live between calls on this path. `out` is always the caller's
-# list, and always has room for `2 * re.ngroups(pattern)` words unless the
-# function says otherwise below.
+# list, and every function that writes into one takes its CAPACITY as the
+# second argument and refuses with `STATUS_LIMIT` rather than writing past it.
+#
+# The capacity is a parameter and is NOT read out of the list because a list
+# here is a plain array — `st = [7, 8, 9]; st[0]` is 7, not a count — and a
+# store past its end is a SILENT `exit(1)` with nothing printed (measured). A
+# library that reports a caller's sizing mistake by exiting the process is
+# reporting it in the one way the caller cannot act on, so the size the caller
+# was going to get wrong anyway is now the one thing it has to pass.
 
-def search(out, pattern: String, subject: String, flags: Int) -> Int:
+def search(out, n: Int, pattern: String, subject: String, flags: Int) -> Int:
     """The first match anywhere in `subject`. The status; `out` the spans.
 
-    `out` must have room for `2 * (re.ngroups(pattern) + 1)` words.
+    `n` is `out`'s capacity and must be at least
+    `2 * (re.ngroups(pattern) + 1)`, which is the one size a caller has to
+    know; a smaller one is `STATUS_LIMIT` and `out` is blanked, never a store
+    past the end.
     """
     a = _arena()
     e = _prepare(a, pattern, flags)
     if e != 0:
-        _blanks(out, 0)
+        _blanks(out, n)
         return e
     g = _pa(a, _P_NG)
-    _blanks(out, g)
+    if _fits(out, n, 2 * (g + 1)) == 0:
+        _blanks(out, n)
+        return STATUS_LIMIT()
+    _blanks(out, 2 * (g + 1))
     r = _vm(a, subject, 0, str_len(subject), 0)
     if r == 1:
         _put_spans(out, a, g)
     return r
 
 
-def match_at(out, pattern: String, subject: String, flags: Int) -> Int:
+def match_at(out, n: Int, pattern: String, subject: String, flags: Int) -> Int:
     """A match anchored at position 0. `re.match`, not `re.search`."""
     a = _arena()
     e = _prepare(a, pattern, flags)
     if e != 0:
-        _blanks(out, 0)
+        _blanks(out, n)
         return e
     g = _pa(a, _P_NG)
-    _blanks(out, g)
+    if _fits(out, n, 2 * (g + 1)) == 0:
+        _blanks(out, n)
+        return STATUS_LIMIT()
+    _blanks(out, 2 * (g + 1))
     r = _vm(a, subject, 0, str_len(subject), 1)
     if r == 1:
         _put_spans(out, a, g)
     return r
 
 
-def fullmatch(out, pattern: String, subject: String, flags: Int) -> Int:
+def fullmatch(out, n: Int, pattern: String, subject: String, flags: Int) -> Int:
     """A match that starts at 0 and ends at the end of the subject."""
     a = _arena()
     e = _prepare(a, pattern, flags)
     if e != 0:
-        _blanks(out, 0)
+        _blanks(out, n)
         return e
     g = _pa(a, _P_NG)
-    _blanks(out, g)
+    if _fits(out, n, 2 * (g + 1)) == 0:
+        _blanks(out, n)
+        return STATUS_LIMIT()
+    _blanks(out, 2 * (g + 1))
     r = _vm(a, subject, 0, str_len(subject), 2)
     if r == 1:
         _put_spans(out, a, g)
@@ -1639,7 +1972,7 @@ def group_start(pattern: String, subject: String, flags: Int, k: Int) -> Int:
         return 0 - 1
     if _vm(a, subject, 0, str_len(subject), 0) != 1:
         return 0 - 1
-    if k < 0 or k >= _pa(a, _P_NG):
+    if k < 1 or k > _pa(a, _P_NG):
         return 0 - 1
     return _g4s(a, _slab(a, k))
 
@@ -1652,13 +1985,26 @@ def group_end(pattern: String, subject: String, flags: Int, k: Int) -> Int:
         return 0 - 1
     if _vm(a, subject, 0, str_len(subject), 0) != 1:
         return 0 - 1
-    if k < 0 or k >= _pa(a, _P_NG):
+    if k < 1 or k > _pa(a, _P_NG):
         return 0 - 1
     return _gspan(a, k)
 
 
-def group_text(status, pattern: String, subject: String, flags: Int, k: Int) -> Pointer[UInt8]:
-    """Group `k`'s text, in a buffer the CALLER owns. `""` if there is none."""
+def group_text(status, n: Int, pattern: String, subject: String, flags: Int,
+               k: Int) -> Pointer[UInt8]:
+    """Group `k`'s text, in a buffer the CALLER owns. `""` if there is none.
+
+    `k` 0 is the WHOLE match, as in CPython's `m.group(0)`, and it is answered
+    from the two words the VM records at MATCH rather than from the save area
+    — the whole match is not a group and pretending it is would put a span in
+    the save slots that no group owns.
+
+    `n` is `status`'s capacity and must be at least 1, like every other list
+    this module writes into. It is the same rule for one word as for six, and
+    having it for one word is what keeps the rule a rule.
+    """
+    if n < 1:
+        return _empty()
     a = _arena()
     e = _prepare(a, pattern, flags)
     if e != 0:
@@ -1668,23 +2014,81 @@ def group_text(status, pattern: String, subject: String, flags: Int, k: Int) -> 
     if r != 1:
         status[0] = r
         return _empty()
-    if k < 0 or k >= _pa(a, _P_NG):
+    if k == 0:
+        status[0] = 1
+        return _slice(subject, _pa(a, _P_MSTART), _pa(a, _P_MEND))
+    if k < 1 or k > _pa(a, _P_NG):
         status[0] = 0
         return _empty()
     status[0] = 1
     return _slice(subject, _g4s(a, _slab(a, k)), _gspan(a, k))
 
 
-def findall(out, pattern: String, subject: String, flags: Int, maxn: Int) -> Int:
-    """Every match's span, up to `maxn` of them. `out[0]` the status.
+def _scan(a, subj, n: Int, pos: Int) -> Int:
+    """The next match of the scan `findall`, `split` and `sub` perform.
+
+    0 no more, 1 a match (in the arena), 2 gave up. The position to continue
+    at is `_P_NEXT`, and after an EMPTY match it is the SAME position with
+    `_P_PHASE` set: the next call is the non-empty match CPython requires there.
+    That rule is not a detail — `finditer("a*?", "aaa")` alternates empty and
+    non-empty at every position, and a scan that simply steps past an empty
+    match gets `['a', 'a', 'a']` where CPython gets `['', 'a', '', 'a', ...]`.
+    """
+    if _pa(a, _P_PHASE) == 1:
+        _spa(a, _P_PHASE, 0)
+        r = _vm(a, subj, pos, n, 3)
+        if r == 1:
+            _spa(a, _P_NEXT, _pa(a, _P_MEND))
+            return 1
+        if r == 2:
+            return 2
+        # No non-empty match HERE, so the next one starts at the next
+        # position — the scan continues rather than stopping, which is the
+        # difference between `findall("a*", "bbb")` giving four empty strings
+        # and giving one.
+        pos = pos + 1
+    r = _vm(a, subj, pos, n, 0)
+    if r == 0:
+        return 0
+    if r == 2:
+        return 2
+    if _pa(a, _P_MEND) > _pa(a, _P_MSTART):
+        _spa(a, _P_NEXT, _pa(a, _P_MEND))
+        _spa(a, _P_PHASE, 0)
+        return 1
+    _spa(a, _P_NEXT, _pa(a, _P_MSTART))
+    _spa(a, _P_PHASE, 1)
+    return 1
+
+
+def _val_span(a, g: Int) -> Int:
+    """Where the value `findall` reports for this match sits, as an offset.
+
+    With no group it is the whole match; with exactly one it is that group;
+    with two or more CPython returns TUPLES, which is more than one span, and
+    the whole match is reported instead. Stated at `findall` too.
+    """
+    if g != 1:
+        return 0
+    return 1
+
+
+def findall(out, n: Int, pattern: String, subject: String, flags: Int,
+          maxn: Int) -> Int:
+    """Every match, up to `maxn` of them. `out[0]` the status, `out[1..]` spans.
 
     The span recorded is what `re.findall` would return as a STRING: the whole
     match when the pattern has no group, group 1 when it has exactly one. A
     pattern with two or more groups has `findall` return tuples, which is more
     than one span, so the whole match is recorded and the difference is stated
     at this function rather than papered over.
+
+    The scan is CPython's, empty matches included; see `_scan`.
     """
     a = _arena()
+    if _fits(out, n, 1 + 2 * maxn) == 0:
+        out[0] = STATUS_LIMIT()
+        return 0
     out[0] = 0
     e = _prepare(a, pattern, flags)
     if e != 0:
@@ -1695,12 +2099,12 @@ def findall(out, pattern: String, subject: String, flags: Int, maxn: Int) -> Int
     pos = 0
     cnt = 0
     while cnt < maxn and pos <= n:
-        r = _vm(a, subject, pos, n, 0)
+        r = _scan(a, subject, n, pos)
+        if r == 0:
+            break
         if r == 2:
             out[0] = 2
             return cnt
-        if r == 0:
-            break
         if g == 1:
             s0 = _g4s(a, _slab(a, 1))
             s1 = _gspan(a, 1)
@@ -1710,15 +2114,13 @@ def findall(out, pattern: String, subject: String, flags: Int, maxn: Int) -> Int
         out[1 + cnt * 2] = s0
         out[2 + cnt * 2] = s1
         cnt = cnt + 1
-        if s1 > s0:
-            pos = s1
-        else:
-            pos = s0 + 1
+        pos = _pa(a, _P_NEXT)
     out[0] = 1
     return cnt
 
 
-def sub(status, pattern: String, repl: String, subject: String, flags: Int, count: Int) -> Pointer[UInt8]:
+def sub(status, n: Int, pattern: String, repl: String, subject: String,
+        flags: Int, count: Int) -> Pointer[UInt8]:
     """`re.sub`, in a buffer the CALLER owns. `count` 0 means every match.
 
     The template understands `\\1`..`\\9`, `\\g<1>`, `\\g<name>` and `\\\\`,
@@ -1757,7 +2159,7 @@ def _subwalk(a, subj, n: Int, repl: String, count: Int, dst, used: Int, w: Int) 
     while pos <= n:
         if count > 0 and nsub >= count:
             break
-        r = _vm(a, subj, pos, n, 0)
+        r = _scan(a, subj, n, pos)
         if r == 2:
             return 0 - 2
         if r == 0:
@@ -1768,10 +2170,7 @@ def _subwalk(a, subj, n: Int, repl: String, count: Int, dst, used: Int, w: Int) 
         used = _repcopy(a, dst, used, repl, subj, w)
         prev = s1
         nsub = nsub + 1
-        if s1 > s0:
-            pos = s1
-        else:
-            pos = s0 + 1
+        pos = _pa(a, _P_NEXT)
     return _emit(a, subj, prev, n, dst, used, w)
 
 
@@ -1876,14 +2275,24 @@ def _subfill(a, dst, used: Int, subj, n: Int, repl: String, count: Int) -> Int:
     return _subwalk(a, subj, n, repl, count, dst, used, 1)
 
 
-def split(out, pattern: String, subject: String, flags: Int, maxn: Int) -> Int:
+def split(out, n: Int, pattern: String, subject: String, flags: Int,
+          maxn: Int) -> Int:
     """`re.split`, as the SPANS of its pieces, up to `maxn`. `out[0]` status.
 
     The captured groups are pieces, in order, exactly as CPython puts them:
     `re.split(r'(\s)', 'a b')` is `['a', ' ', 'b']`, and the middle piece here
-    is group 1's span.
+    is group 1's span. A group that did not participate is STILL a piece, with
+    the span (-1, -1): `re.split("(a)?b", "b")` is `['', None, '']` and the
+    count is three, so dropping it would be a shorter answer rather than a
+    different one. (-1, -1) reads back as the empty string, which is what a
+    caller can do with a piece that has no span.
+
+    The scan is CPython's, empty matches included; see `_scan`.
     """
     a = _arena()
+    if _fits(out, n, 1 + 2 * maxn) == 0:
+        out[0] = STATUS_LIMIT()
+        return 0
     out[0] = 0
     e = _prepare(a, pattern, flags)
     if e != 0:
@@ -1895,12 +2304,12 @@ def split(out, pattern: String, subject: String, flags: Int, maxn: Int) -> Int:
     prev = 0
     cnt = 0
     while cnt < maxn and pos <= n:
-        r = _vm(a, subject, pos, n, 0)
+        r = _scan(a, subject, n, pos)
+        if r == 0:
+            break
         if r == 2:
             out[0] = 2
             return cnt
-        if r == 0:
-            break
         s0 = _pa(a, _P_MSTART)
         s1 = _pa(a, _P_MEND)
         if cnt < maxn:
@@ -1908,17 +2317,13 @@ def split(out, pattern: String, subject: String, flags: Int, maxn: Int) -> Int:
             out[2 + cnt * 2] = s0
             cnt = cnt + 1
         k = 1
-        while k < g and cnt < maxn:
-            if _g4s(a, _slab(a, k)) >= 0:
-                out[1 + cnt * 2] = _g4s(a, _slab(a, k))
-                out[2 + cnt * 2] = _gspan(a, k)
-                cnt = cnt + 1
+        while k <= g and cnt < maxn:
+            out[1 + cnt * 2] = _g4s(a, _slab(a, k))
+            out[2 + cnt * 2] = _gspan(a, k)
+            cnt = cnt + 1
             k = k + 1
         prev = s1
-        if s1 > s0:
-            pos = s1
-        else:
-            pos = s0 + 1
+        pos = _pa(a, _P_NEXT)
     if cnt < maxn:
         out[1 + cnt * 2] = prev
         out[2 + cnt * 2] = n
@@ -2051,25 +2456,5 @@ def STEP_LIMIT():
     return _steplim()
 
 
-def dbg2(pattern: String, subject: String) -> Int:
-    a = _arena()
-    e = _prepare(a, pattern, 0)
-    r = _vm(a, subject, 0, str_len(subject), 0)
-    printf("e=%d r=%d entry=%d mstart=%d mend=%d\n", e, r, _pa(a, _P_ENTRY), _pa(a, _P_MSTART), _pa(a, _P_MEND))
-    i = 0
-    while i < 8:
-        printf("save%d=%d ", i, _g4s(a, _PSAVE + i * 4))
-        i = i + 1
-    printf("\nsteps=%d\n", _pa(a, _P_STEPS))
-    return 0
 
 
-def dbg(pattern: String) -> Int:
-    a = _arena()
-    e = _prepare(a, pattern, 0)
-    printf("prep=%d err=%d nn=%d ng=%d nr=%d\n", e, _pa(a, _P_ERR), _pa(a, _P_NN), _pa(a, _P_NG), _pa(a, _P_NR))
-    i = 0
-    while i < 20:
-        printf("n%d op=%d a=%d b=%d c=%d p0=%d p1=%d\n", i, _b(a, _PPROG + i * 8), _b(a, _PPROG + i * 8 + 1), _b(a, _PPROG + i * 8 + 2), _b(a, _PPROG + i * 8 + 3), _g2(a, _PPROG + i * 8 + 4), _g2(a, _PPROG + i * 8 + 6))
-        i = i + 1
-    return 0

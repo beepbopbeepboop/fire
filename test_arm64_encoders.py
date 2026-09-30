@@ -123,6 +123,24 @@ def cases():
                   A.encode_sub_xd_xn_imm_sh(9, 9, imm12, sh)))
         c.append((f"add x0, x0, #{imm12}{scale}",
                   A.encode_add_xd_xn_imm_sh(0, 0, imm12, sh)))
+    # ── the logical/arithmetic right-shift and left-shift immediates ────
+    #
+    # These three are the ONLY encoders here whose immediate is a PAIR of
+    # logical-immediate fields (immr and imms) inside a UBFM/SBFM word rather
+    # than one unsigned bitfield, and they were consequently the only ones with
+    # no coverage at all: `encode_lsl_xd_xn_imm` carried base `0xd3780000`
+    # where the docstring said `0xd3400000`, which put `immr = 0b111000` in
+    # bits 21:16 and made 56 of the 64 shift amounts encode to a different
+    # instruction. A sample of 3 would have caught that and 3 was what would
+    # have been written if this had been covered by a sample, so it is all 64.
+    for sh in range(64):
+        c.append((f"lsl x0, x1, #{sh}", A.encode_lsl_xd_xn_imm(0, 1, sh)))
+        c.append((f"lsr x0, x1, #{sh}", A.encode_lsr_xd_xn_imm(0, 1, sh)))
+        c.append((f"asr x0, x1, #{sh}", A.encode_asr_xd_xn_imm(0, 1, sh)))
+    for xd, xn in ((30, 31), (3, 7), (17, 16)):
+        for sh in (0, 1, 8, 12, 31, 63):
+            c.append((f"lsl x{xd}, x{xn}, #{sh}",
+                      A.encode_lsl_xd_xn_imm(xd, xn, sh)))
     # ── flag-setting ALU ───────────────────────────────────────────────
     for xn, xm in ((0, 1), (1, 0), (7, 31), (31, 31)):
         c.append((f"tst x{xn}, x{xm}", A.encode_tst_xn_xm(xn, xm)))

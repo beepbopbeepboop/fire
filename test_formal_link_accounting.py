@@ -236,6 +236,7 @@ IMPLEMENTED_HOST_MODULE_TESTS = {
     "os": "test_formal_os.py",
     "struct": "test_struct_formal.py",
     "sys": "test_formal_sys.py",
+    "re": "test_re_formal.py",
 }
 
 
@@ -305,9 +306,19 @@ def test_host_tiers():
     # them "not fixable" was false. A name that has been WRITTEN is not in
     # this list because it is implemented rather than unreachable; see
     # `written_modules()` above for the derived account.
-    for m in ('math', 'time', 'json', 're'):
+    for m in ('math', 'time', 'json'):
         check(I.host_module_tier(m) == 'modelled',
               f'{m} is modelled (reachable in principle, not implemented)')
+    # `re` was on that line until `formal/hostmods/re.mojo` was written. It is
+    # not moved to the pair above, because that pair is derived from the
+    # filesystem and this assertion is not: what this checks is that the tier
+    # function says the right thing about a name, and a name with real source
+    # behind it belongs in neither tier by construction. The comment below
+    # this loop is the rule; `IMPLEMENTED_HOST_MODULE_TESTS` is the place a
+    # written module is recorded.
+    check(I.host_module_tier('re') == '' and not I._is_host_module('re'),
+          're is in neither tier: it has a Mojo source, so it is implemented '
+          'rather than modelled')
     for m in ('subprocess', 'ctypes', 'asyncio', 'threading', 'socket',
               'tempfile', 'shutil', 'concurrent.futures', 'zlib', 'traceback'):
         check(I.host_module_tier(m) == 'unreachable',

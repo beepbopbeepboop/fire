@@ -584,7 +584,13 @@ def encode_lsl_xd_xn_imm(xd: int, xn: int, shift: int) -> bytes:
     assert 0 <= xd <= 30 and 0 <= xn <= 31 and 0 <= shift <= 63
     immr = (-shift) & 63
     imms = 63 - shift
-    insn = 0xd3780000 | (immr << 16) | (imms << 10) | (xn << 5) | xd
+    # 0xd3400000, which is what the docstring above always said. It WAS
+    # 0xd3780000, which has `immr = 0b111000` already sitting in bits 21:16, so
+    # OR-ing a real `immr` in forced its low three bits to 1 and the shift that
+    # RAN was not the one written: 56 of the 64 amounts encoded to some other
+    # instruction (1 << 12 came out as 1 << 4, 1 << 0 as 1 << 8). `>>` was and
+    # is right, because LSR and ASR are separate encoders and were correct.
+    insn = 0xd3400000 | (immr << 16) | (imms << 10) | (xn << 5) | xd
     return struct.pack('<I', insn)
 
 
