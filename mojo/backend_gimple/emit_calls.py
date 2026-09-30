@@ -31,6 +31,7 @@ from fire_compiler import (
 )
 import regex_compile
 import mlir
+import mojo.backend_gimple.device_glue as _gmi_glue
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -44,6 +45,7 @@ import mojo.backend_gimple.emit_calls as ggc
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.calls_shared import *  # noqa: F401,F403
+from mojo.middle.types import _SCALAR_INT_TYPES, _SCALAR_FLOAT_TYPES  # underscore: `import *` won't carry them
 from mojo.middle.calls_shared import (
     _as_str, _build_call_args_for_candidate, _default_expr_to_pair, _ident_call_name, _isinstance_type_name, _pack_kwargs_dict,
     _resolve_overload, _sms_key
@@ -423,7 +425,114 @@ def _ggc_as_str(x) -> str:
     return x
 
 
+def _lower_device_launch(gen, node: gimple_ctypes.CallExpr):
+    """A call whose target is an offloaded DEVICE function.
+
+    A `@gpu` function has no C definition -- it is MSL, living in the
+    sidecar's string -- so an ordinary call would emit a reference to an
+    undefined C symbol and fail at link time. Instead the call is routed to
+    the generated host wrapper `_mg_launch_<name>`, which the sidecar emits
+    with the kernel's real parameter list. Keeping the *wrapper* named after
+    the kernel and the *signature* mirroring it is what makes the host side
+    look like an ordinary function call at the call site.
+
+    Returns None when the callee is not a device kernel, so the caller falls
+    through to the ordinary path. Returns (type, value) like every other
+    lowering: kernels return void, so the value is a `void`-typed int64_t 0
+    only if someone writes the call in value position -- which is an error
+    the type layer should catch, and returning 0 is the honest "nothing"
+    rather than a plausible-looking garbage int.
+    """
+    if not isinstance(node.func, gimple_ctypes.IdentExpr):
+        return None
+    if node.func.name not in getattr(gen, '_device_kernels', ()):
+        return None
+    _kname = node.func.name
+    _wname = '_mg_launch_' + gimple_ctypes._safe_name(_kname)
+    _argtypes = getattr(gen, '_device_launch_args', {}).get(_kname)
+    if _argtypes is None:
+        raise RuntimeError(
+            f'cannot compile module: call to GPU kernel {_kname!r} has no '
+            f'recorded parameter types, so the host marshalling wrapper '
+            f'cannot be generated for it')
+    # The kernel's length parameter indexes BOTH the device-side bound and the
+    # host-side marshalling, so a list can be sized for the conversion. It is
+    # recorded per kernel by the classification pass (module_gen), because a
+    # DEVICE function never runs through gen_func and so has no inferred
+    # signature to read a length out of.
+    _count_idx = getattr(gen, '_device_launch_count', {}).get(_kname, -1)
+    # Two passes, because the marshalling for buffer i needs the count
+    # argument's C value, and the count argument is itself one of the lowered
+    # arguments -- which does not exist until the first pass has run.
+    _lowered = []
+    for _a in node.args:
+        _lowered.append(gen.lower_expr(_a))
+    _count_val = _lowered[_count_idx][1] if 0 <= _count_idx < len(_lowered) else None
+
+    _parts = []
+    _unpacks = []
+    for _i, _a in enumerate(node.args):
+        # `_device_launch_args` holds (name, c_type, is_buffer) triples so the
+        # wrapper generator can tell buffers from scalars; the call site only
+        # needs the C type and the is_buffer flag.
+        _spec = _argtypes[_i]
+        _want = _spec[1] if isinstance(_spec, tuple) else _spec
+        _is_buf = _spec[2] if isinstance(_spec, tuple) and len(_spec) > 2 else False
+        _t, _v = _lowered[_i]
+        if _is_buf and _t == 'MojoList *':
+            # A boxed list where the kernel wants a `T *`.
+            #
+            # This is the conversion that MUST NOT be a cast: a MojoList is
+            # a struct whose first field is a data pointer, so `(float *)l`
+            # points at the struct HEADER and `p[i]` reads data/len/cap/the
+            # inline buffer as floats. It links, runs, and returns garbage.
+            # So the list is packed into a real contiguous buffer, dispatched
+            # against that, and written back afterwards.
+            if _count_val is None:
+                raise RuntimeError(
+                    f'cannot compile module: GPU kernel {_kname!r} was given a '
+                    f'list for argument {_spec[0]!r}, which needs the '
+                    f"kernel's length parameter to size the buffer, but no "
+                    f'length parameter was recorded')
+            _elem = _want[:-2] if _want.endswith(' *') else 'float'
+            _pack = _gmi_glue._c_helper_name(_elem)
+            _unpack = _gmi_glue._c_unpack_name(_elem)
+            gen._list_marshalling_needed.add(_elem)
+            _buf = gen._new_temp(f'{_elem} *')
+            # The count handed to the unpacker is the SAME expression the
+            # packer got. Both helpers clamp it to the list's length, and the
+            # list cannot change length in between because the callee is
+            # handed a plain buffer and has no way to reach the list -- so
+            # recomputing the clamp on the other side is not an approximation
+            # of a count the packer knew, it is the same count. (The first
+            # design passed it back through an `int64_t *` out-parameter; that
+            # needed an extra uninitialised pointer local at every call site,
+            # which segfaults inside the helper. See _PACK_TEMPLATE.)
+            gen._emit(f'  {_buf} = {_pack}({_v}, (int64_t){_count_val});')
+            _parts.append(_buf)
+            _unpacks.append((_v, _buf, _count_val, _elem))
+            continue
+        if _t != _want:
+            # _safe_coerce_emit returns None -- it writes the coercion into
+            # the lhs temp it is handed, so the value to pass on is the temp,
+            # not a result.
+            _tmp = gen._new_temp(_want)
+            gen._safe_coerce_emit(_t, _want, _v, _tmp)
+            _v = _tmp
+        _parts.append(_v)
+    gen._emit(f'  {_wname}(' + ', '.join(_parts) + ');')
+    for _list_v, _buf_v, _n_v, _elem in _unpacks:
+        gen._emit(f'  if ({_buf_v}) {{')
+        gen._emit(f'    {_gmi_glue._c_unpack_name(_elem)}({_list_v}, {_buf_v}, (int64_t){_n_v});')
+        gen._emit(f'    free ({_buf_v});')
+        gen._emit('  }')
+    return 'void', '0'
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    _dev = _lower_device_launch(gen, node)
+    if _dev is not None:
+        return _dev
     if (isinstance(node.func, gimple_ctypes.IdentExpr)
             and node.func.name in ('__mojo_future_add_done_callback',
                                    '__mojo_future_remove_done_callback')
@@ -2193,9 +2302,24 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if _bsub_len and not gen._struct_defines_method(_bsub_len, '__len__'):
         bp = gen._new_val('MojoBytes *', f"{av}->_data")
         return 'int64_t', gen._call_expr('int64_t', 'mojo_bytes_len', [('MojoBytes *', bp)])
-    if at.endswith(' *') and at[:-2] in gen.struct_field_types \
-            and '_len' in gen.struct_field_types[at[:-2]]:
-        return 'int64_t', gen._new_val('int64_t', f'{av}->_len')
+    if at.endswith(' *') and at[:-2] in gen.struct_field_types:
+        _sn = at[:-2]
+        if '_len' in gen.struct_field_types[_sn]:
+            return 'int64_t', gen._new_val('int64_t', f'{av}->_len')
+        # `len(obj)` where obj is a user class that DEFINES `__len__` is a
+        # call to that method — Python's rule, and the same one the
+        # dict/bytes branches above already honour via
+        # `_struct_defines_method`. Without it the call fell through to the
+        # final "unsupported type" fallback and silently answered 0: a
+        # model's `len(self.vocab)` reported a 0-token vocabulary while
+        # every other number on the same line was right. The `_len` FIELD
+        # is the runtime's own convention (Span/Slice); a Python class
+        # spells it as a method instead, and both spellings are real.
+        if gen._struct_defines_method(_sn, '__len__'):
+            import mojo.backend_gimple.emit_funcs as _gef
+            _msym = _gef._struct_method_csym(gen, _sn, '__len__', '')
+            return 'int64_t', gen._call_expr(
+                'int64_t', _msym, [(at, av)])
     if at in ('int', 'int64_t'):
         # `at` is just the local's declared storage type — for a value
         # widened to int64_t because it's joined with other assignment
@@ -4257,6 +4381,15 @@ def _lower_fnptr_call(gen, fname_raw: str, var_ctype: str,
         fp_raw = gen._c_names.get(fname_raw, fname_raw)
         fp_type = var_ctype
     ret_type = gen.func_return_types.get(fname_raw, 'int64_t')
+    # A libm call's C return type is a property of the C FUNCTION, not of
+    # this module's inference: `sqrt` is `double sqrt(double)` whatever the
+    # argument infers as. Without this the call was typed int64_t and the
+    # double result was truncated on the way out — `sqrt(x) + exp(x) +
+    # log(x)` at x=1.0 printed `3` where CPython prints 3.718281828459045.
+    # Same table BUILTIN_VALUE_MAP's symbol entries come from, so the
+    # symbol and its type cannot disagree.
+    if fname_raw in gimple_ctypes._LIBM_FN_RETVALS and fname_raw not in gen.func_return_types:
+        ret_type = gimple_ctypes._LIBM_FN_RETVALS[fname_raw]
     return gen._lower_fnptr_call_value(fp_type, fp_raw, node, ret_type)
 
 
@@ -4543,7 +4676,22 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
             and fname_raw not in gimple_ctypes._FORCE_RENAME_RESERVED
             and (fname_raw not in gen.imported_symbols
                  or fname_raw in gen._unresolved_import_aliases)):
-        if fname_raw in gen._unresolved_import_aliases:
+        # A real implementation recorded in BUILTIN_VALUE_MAP beats the
+        # weak stub this branch otherwise binds to. `math` is the case that
+        # needs it: `math` is not a resolvable module here
+        # (module_loader's `can_resolve_module_path('math')` is False), so
+        # every `from math import sqrt` lands in _unresolved_import_aliases
+        # and the call bound to the stub's `mojo_sqrt` — a symbol nothing
+        # defines, which linked only against the auto-stub in the small case
+        # (answering 0, so `sqrt(x)+exp(x)+log(x)` printed 0) and failed to
+        # link outright in the whole-closure build. BUILTIN_VALUE_MAP
+        # exists precisely to record the names that DO have a backing
+        # implementation, and the libm entries added there are that answer
+        # for math, so consult it first. Every other name still routes to
+        # the stub, which is the entire point of the branch.
+        if fname_raw in gen.BUILTIN_VALUE_MAP:
+            fname = gen.BUILTIN_VALUE_MAP[fname_raw]
+        elif fname_raw in gen._unresolved_import_aliases:
             # A relative/external import this compile could never resolve
             # (`from .os_helper import unlink` at module scope — the name
             # lands in _unresolved_import_aliases, NOT imported_symbols).
@@ -5002,7 +5150,29 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # fixed upstream; we could then route abs back through llabs if desired.
     if fname_raw in ('abs', 'mojo_abs') and len(arg_pairs) == 1:
         at, av = arg_pairs[0]
-        if at in ('int64_t', 'long long') or at.endswith(' *'):
+        # EVERY integer ctype, not just int64_t/long long. A narrower one
+        # ('int' from a bool-typed comparison, 'int32_t' from an explicit
+        # annotation) used to fall through to the real libc `abs`, whose
+        # gimplified builtin gimple then refused to convert into the
+        # int64_t local it was assigned to — "invalid conversion in gimple
+        # call" at the enclosing statement, pointing at the wrong line
+        # entirely. The inline has no such overload problem: it is an
+        # ordinary conditional expression, widened once at the end.
+        if at in _SCALAR_FLOAT_TYPES:
+            # abs() of a FLOAT, not just an integer. This used to fall
+            # through to the libc `abs`, which truncates to int: `abs(-3.5)`
+            # returned `3` where CPython returns `3.5`. Wrong with no error
+            # at all -- the one failure mode a test suite catches last --
+            # and every float `abs()` in the tree hit it. Same inline shape
+            # as the integer case, in the argument's own floating type so a
+            # `float`/`__fp16` keeps its precision instead of being widened
+            # and narrowed again.
+            v = gen._ensure_local(at, av)
+            zero = gen._new_val(at, '(%s)0' % at)
+            neg = gen._new_val('_Bool', f'{v} < {zero}')
+            negv = gen._new_val(at, f'-{v}')
+            return at, gen._new_val(at, f'{neg} ? {negv} : {v}')
+        if at in _SCALAR_INT_TYPES or at == 'long long' or at.endswith(' *'):
             v = gen._ensure_local('int64_t', av if not at.endswith(' *')
                                    else gen._new_val('int64_t', f'(int64_t){av}'))
             zero = gen._new_val('int64_t', '(int64_t)0')
@@ -5204,6 +5374,13 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     if ret_type == 'void':
         return gen._void_call(fname, arg_pairs)
     t = gen._call_expr(ret_type, fname, arg_pairs)
+    # A multi-value return's per-slot types, carried across the call (see
+    # gen._return_slot_types's declaration). Same reason and same shape as
+    # the `_return_elem_types` block just below: the callee's slot types are
+    # keyed by ITS internal value, so they have to be re-keyed by this
+    # result for `a, b = f()` to read slot 0 with slot 0's type.
+    if fname_raw in gen._return_slot_types:
+        gen._tuple_slot_types[t] = gen._return_slot_types[fname_raw]
     if fname_raw in gen._return_elem_types:
         # Annotated `-> tuple[...]` functions resolve to boxed int64_t (see
         # _mojo_type), so unlike the MojoList*-typed case above the elem
@@ -5922,8 +6099,24 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
             gen._ptr_helpers_needed.add('char')
             addr = gen._new_val('char *', f"_mojo_at_char ({cp}, {idx64})")
-            t = gen._new_val('char', f"*{addr}")
-            return 'char', t
+            # `s[i]` on a str is a 1-char STRING, not a character code —
+            # the same rule as _gen_for_cstr / _compr_cstr_loop (see those
+            # for what returning a bare `char` broke). `mojo_char_to_str`
+            # is the existing helper; `rest[0]` comparing against a quote
+            # literal is the canonical use.
+            # `mojo_cstr_slice` rather than a `char`-taking helper:
+            # gimple rejects a `char` argument ("invalid argument to
+            # gimple call" — a char is promoted to int64_t non-trivially).
+# `1LL`, not `(int64_t)1`: a C-style cast is not a legal gimple
+            # operand. `_t = _i + (int64_t)1` is rejected at gimplification
+            # with "expected expression before '(' token" -- a HARD error
+            # under `gcc -fgimple`, so it takes out the whole self-host
+            # closure, not just this subscript. The `LL` suffix is the
+            # tree's existing idiom for a width-correct int64_t literal
+            # (`0LL` appears throughout the generated C) and needs no cast.
+            _one_cs = gen._new_val('int64_t', f"{idx64} + 1LL")
+            return 'char *', gen._new_val(
+                'char *', f"mojo_cstr_slice ({cp}, {idx64}, {_one_cs})")
         # A STRING index proves the container is a dict even when its own
         # type is opaque: no list is indexable by a string. `pat.fields`
         # in ast_rewriter.py is exactly this — the A5 boxed-member read
@@ -6101,6 +6294,27 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     if et in gen.struct_field_types:
         t = gen._new_val('int64_t', f"(int64_t){addr}")
         return 'int64_t', t
+    # A `char *` is this codegen's plain `str`, so `_elem_type` says `char`
+    # and the generic branch below would hand back the character CODE. But
+    # `s[i]` on a Python str is a 1-char STRING — the same rule as
+    # _gen_for_cstr / _compr_cstr_loop / the boxed-string subscript branch
+    # above, all of which now return `char *` via `mojo_char_to_str`.
+    # Without it every string index disagreed with every string iteration:
+    # `s[0]` was 97 while `for c in s` bound 'a'.
+    if et == 'char':
+        # `mojo_cstr_slice` rather than a `char`-taking helper: gimple
+        # rejects a `char` argument ("invalid argument to gimple call"),
+        # since a char is promoted to int64_t non-trivially.
+# `1LL`, not `(int64_t)1`: a C-style cast is not a legal gimple
+        # operand. `_t = _i + (int64_t)1` is rejected at gimplification
+        # with "expected expression before '(' token" -- a HARD error
+        # under `gcc -fgimple`, so it takes out the whole self-host
+        # closure, not just this subscript. The `LL` suffix is the
+        # tree's existing idiom for a width-correct int64_t literal
+        # (`0LL` appears throughout the generated C) and needs no cast.
+        _one_gs = gen._new_val('int64_t', f"{idx64} + 1LL")
+        return 'char *', gen._new_val(
+            'char *', f"mojo_cstr_slice ({ov}, {idx64}, {_one_gs})")
     t = gen._new_val(et, f"*{addr}")
     return et, t
 

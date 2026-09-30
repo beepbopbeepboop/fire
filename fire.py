@@ -29,7 +29,8 @@ os.environ['PATH'] = '/opt/homebrew/bin:/Users/mrs/bin:/opt/local/bin:/opt/local
 
 # Platform detection for cross-platform build support
 _IS_DARWIN = platform.system() == 'Darwin'
-from build_config import (find_gcc, find_gxx, optional_unit_compile_failed,
+from build_config import (find_gcc, find_gxx, optional_unit_cc,
+                          optional_unit_cc_flags, optional_unit_compile_failed,
                           optional_unit_libs, optional_unit_source,
                           referenced_optional_runtime_units)
 _GCC_BIN = find_gcc()
@@ -832,7 +833,13 @@ def build_executable(input_file: str, src: str, output: str = None,
         for _unit in referenced_optional_runtime_units(c_code, runtime_dir):
             _u_src = optional_unit_source(_unit, runtime_dir)
             _u_o = f"{basename}_{_unit}_rt.o"
-            _u_c = [_GCC_BIN] + cg_flags + ["-I", runtime_dir] + py_cflags + [
+            # Per-unit compiler and flags, not the build-wide gcc: the Metal
+            # unit is Objective-C (the generated .ci is gimple C, so this is
+            # the only place Metal can be reached) and needs clang + ARC. The
+            # ordinary C units take the default path unchanged.
+            _u_cc = optional_unit_cc(_unit) or _GCC_BIN
+            _u_c = [_u_cc] + cg_flags + optional_unit_cc_flags(_unit) + [
+                "-I", runtime_dir] + py_cflags + [
                 "-c", "-o", _u_o, _u_src]
             _r = subprocess.run(_u_c, capture_output=True, text=True)
             if _r.returncode != 0:

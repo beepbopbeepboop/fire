@@ -429,6 +429,19 @@ int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset);
 char *mojo_platform_system(void);
 char *mojo_platform_machine(void);
 char *mojo_stdin_read(void);
+/* `sys.stdout.write(s)` / `sys.stderr.write(s)` / `sys.stdin.write(s)`.
+ * `sys.stdout` is a POSIX fd (1) boxed as an opaque handle — see
+ * emit_exprs.py's sys-stream case for why that representation was chosen
+ * — so a `.write()` on it has to be resolved against the fd, not against
+ * a FILE*. Lowered by ast_rewriter.py's `sys_stdout_write` /
+ * `sys_stderr_write` / `sys_stdin_write` rules, which is what the
+ * `sys.stdin.read()` rule above already does for reads: there is no
+ * Python file-object model here, and without these the call fell through
+ * to the generic unknown-method stub, which emitted `int_write(1, s)` —
+ * treating the integer 1 as a `FILE *` and faulting inside fputs.
+ * `fd` is validated, so a handle that is not 0/1/2 is a no-op rather
+ * than a wild write(2). */
+void mojo_stream_write(int64_t fd, char *s);
 
 /* ── bytes ──────────────────────────────────────────────────────────────
  * Immutable byte string.  Heap value passed as `MojoBytes *` across the C

@@ -71,6 +71,10 @@ applies to every capped job rather than to one target:
     MEMLIMIT_GB=96 tools/suite.py gate       # raise every ceiling
     MEMLIMIT_GB=0  tools/suite.py gate       # no ceiling at all; watch it
 
+It is also the answer to a class that no longer fits its workload: the
+per-job classes are assigned from MEASURED peaks, and a run that legitimately
+needs more says so with the override rather than by editing the table.
+
 Drivers
 -------
 A test says what kind of thing it is and the runner works out how to launch
@@ -91,10 +95,39 @@ driver is kept because "this job's ceiling is deliberate" is worth being able
 to write down, and because a test that names a class is a test whose number a
 reviewer can see.
 
+Memory classes
+--------------
+Two mechanisms, and the second is the one that bounds the machine.
+
+A **ceiling** is per process tree: every job that runs a `mojoc` binary, or a
+whole-closure compile standing in for one, is capped by `tools/memcap.py` at
+the ceiling its `memclass` names — `tiny` 4 GB, `small` 8, `module` 24,
+`program` 55, `stage` 96 (the `MEMCLASS` table says which is which). Every
+class is assigned from the job's MEASURED peak (`MEASURED_PEAK_GB`, read off a
+real run's log by the same wrapper that does the killing) rather than from the
+shape of the workload it resembles, so a class is sized to what the job does
+and not to the worst thing the runner has ever seen; a class above the 4 GB
+line has to say why, in `memwhy`, and `--list` prints it.
+
+A **reservation** is per machine, and it is not optional. A ceiling bounds one
+tree and says nothing about how many may run at once, which is not a bound at
+all: on 2026-09-29 about thirty compiler processes at 30-43 GB each, every one
+of them inside its own ceiling, collapsed the box. So every job takes its
+memclass out of ONE machine-wide budget (`tools/memslot.py`, strict FIFO,
+`~/.gmojo/memslot`, `MEMSLOT_BUDGET_GB`, default 96) *before* it is spawned,
+and gives it back when it exits — so "18 x 24 GB" means four at a time, and
+the count includes the other worktrees and your own terminal. The classes being
+measured is what makes the reservation cheap: a class that is 20x the job's
+peak is not a safety margin, it is twenty other jobs that cannot run.
+
 Exclusive tests are dispatched only when nothing else is running, and while
-one is running nothing else is started — which is what makes a 55 GB job safe
-to leave running on a 128 GB box without anyone having to remember not to run
-two at once.
+one is running nothing else is started. That is a statement about jobs in THIS
+run racing on a shared artifact (`./mojoc`, `fire.ci`, the stdlib dylib), and
+it is what makes a big job safe to leave running without anyone having to
+remember not to start two at once. It is not a machine-wide claim: an
+exclusive job reserves its class like any other, and a job that really needs
+the machine to itself is one whose class is over half the budget, which the
+ledger's arithmetic already enforces.
 """
 
 from __future__ import annotations
@@ -166,39 +199,174 @@ GIMPLE_SOURCES = (
 # mojoc binary — or a whole-closure compile standing in for one — names a class
 # here, including the ones whose measured peak is well under 10 GB: a cheap
 # cap on a small job costs nothing, and it turns a future 2x regression into a
-# RESOURCE verdict instead of a machine-destroying one. The classes that are
-# *known* to pass 10 GB are `program` and `stage`; those are the ones the cap
-# is load-bearing for, and their numbers come from measurement:
+# RESOURCE verdict instead of a machine-destroying one.
 #
-#   program  a whole-transitive-closure self-compile (`--dump-full fire.py`,
-#            the compiler's own ~180-module closure). Healthy -O2 peak measured
-#            at 55.8 GB RSS; a runaway on 2026-09-26 passed 192 GB and had to
-#            be killed by hand. 55 is the healthy peak, not a guess.
-#   stage    one bootstrap stage: the closure plus `gcc -fgimple` over the
-#            resulting 40 MB translation unit. The largest footprint ever
-#            observed *completing* for a self-compile is ~96 GB (macOS peak
-#            footprint, 2026-09-25 flag probe, all three -O levels); RSS runs
-#            below that, so 96 does not fire on a healthy run.
-#   module   a single module of that closure — one `--dump` of one source file,
-#            natively. Growth here is cumulative over the closure rather than
-#            per file (bugs/CODEGEN_bootstrap_resource_blowup.md), so this is
-#            headroom, not a measurement. It is the class for a job that is
-#            documented to run a compiler and did not say how much of one, and
-#            `tools/ab_run_one.py` caps its per-file compile at this same class
-#            for the same reason.
-#   small    a mojoc run over a snippet-sized input (the A/B corpus), and a
-#            pure-python check that compiles snippet-sized programs. It is the
-#            floor: the smallest class in the table, and the one a job that
-#            names nothing gets.
+# THE NUMBERS ARE CEILINGS, NOT TARGETS, and a ceiling is also a RESERVATION
+# (see `reserved_gb`): a job reserves its class out of one machine-wide budget
+# before it is spawned. So a class is a claim on the machine, and a class that
+# is 25x the job's measured peak is not a safety margin — it is 25 other jobs
+# that cannot run at the same time. That is why every job's class below is
+# assigned from a MEASUREMENT (`MEASURED_PEAK_GB`) rather than from the shape
+# of the workload it resembles, and why the class ladder has a rung below
+# `small` at all:
+#
+#   tiny     4 GB. A python check, a snippet compile, or a single `--dump` of
+#            one source file. The measured peaks at this end of the registry
+#            are 0.2-1.5 GB (`MEASURED_PEAK_GB`), so 4 covers the largest of
+#            them with 2.7x. It exists because `small` was the floor, and that
+#            floor was documented for a mojoc run over the A/B corpus — the
+#            one workload in the tree that turned out not to fit it (9.4 GB on
+#            2026-09-29, a guaranteed RESOURCE, and a class that still had to
+#            keep covering the cheap end).
+#   small    8 GB. A mojoc run over a snippet-sized input, a pure-python check
+#            that compiles snippet-sized programs, and the whole-closure
+#            self-compile as it measures TODAY (`selfhost` 3.7 GB, `mojoc`
+#            3.7 GB). It is also the class a job that names nothing gets.
+#   module   24 GB. One module of the compiler's own closure compiled by a
+#            compiler we did not measure here, plus the honest "we do not know
+#            how much of a compiler this runs" class: `prooflib` hands the job
+#            to LEAN, whose 27 MB .olean is a real typechecker's memory, and
+#            `tools/ab_run_one.py` caps each per-file A/B compile at this same
+#            number for the same reason.
+#   program  55 GB. The measured peak of `native-dumpfull` (31.3 GB) with
+#            headroom — the largest job in the registry that still completes.
+#   stage    96 GB. Kept as the ceiling for a genuine whole-transitive-closure
+#            self-compile plus a `gcc -fgimple` over the resulting 40 MB
+#            translation unit. NO JOB IS IN THIS CLASS ANY MORE: the workloads
+#            it was written for measure 1.2-3.7 GB (below), which is 26-80x
+#            under it. It stays because the number is the documented ceiling
+#            for that shape and MEMLIMIT_GB=96 has to mean something; it is a
+#            debt, and bugs/PERF_memory_over_4gb_is_a_bug.md says so.
+#
+# `program` and `stage` used to be justified by "55.8 GB healthy / 192 GB
+# runaway" and "the largest footprint ever observed completing a self-compile
+# is ~96 GB". Those are real observations — 2026-09-25/26, days before the gate
+# below — but the second is a *footprint* probe and every ceiling here is
+# enforced against summed RSS, and neither has been re-measured since. The
+# measurement a ceiling is actually enforced against is in `MEASURED_PEAK_GB`,
+# read off the run log by the same wrapper that does the killing.
 #
 # Override with MEMLIMIT_GB (absolute, all classes) or MEMLIMIT_GB=0 (no cap at
 # all, loudly).
 MEMCLASS = {
+    'tiny': 4,
     'small': 8,
     'module': 24,
     'program': 55,
     'stage': 96,
 }
+
+# The line above which a class is a DEBT rather than a ceiling. The owner's
+# standard is that anything over 3-4 GB in this compiler is a bug, not a fact
+# about the workload, so a job that has to be given more than this carries a
+# `memwhy` naming the reason and pointing at the doc that says the class should
+# not have to be that big. Enforced by test_suite.py, not by a comment: a
+# comment is a promise nobody checks, and this one is the difference between a
+# reservation and a wish.
+MEM_DEBT_GB = 4.0
+MEM_DEBT_DOC = 'bugs/PERF_memory_over_4gb_is_a_bug.md'
+
+
+def needs_memwhy(spec) -> bool:
+    """Must this job carry a `memwhy`?
+
+    Two ways to be over the debt line, and neither of them is "the class table
+    has a big number in it":
+
+      * the job is MEASURED above the line, so it really does use that much
+        (`native-dumpfull` at 31.3 GB), or
+      * the job is given a class above `small` with nothing measured behind it
+        — an unbacked claim on the machine, which is the same thing wearing a
+        different hat.
+
+    A job on `DEFAULT_MEMCLASS` is neither: the default is one documented
+    decision, sized for a snippet-sized python check, taken once for the 57
+    jobs that inherit it. Requiring a reason there would be requiring 57
+    copies of the same sentence, and a rule that fires on almost everything is
+    a rule nobody reads.
+    """
+    peak = measured_peak(getattr(spec, 'name', ''))
+    if peak:
+        return peak[0] > MEM_DEBT_GB
+    return MEMCLASS[memclass_for(spec)] > MEMCLASS[DEFAULT_MEMCLASS]
+
+# ── Measured peaks: the ratchet's input ──────────────────────────────────────
+# Peak RSS in GB of a job's whole process tree, as `tools/memcap.py` measured it
+# — which is the same instrument that enforces the ceiling, so these are the
+# numbers the ceilings are compared against, not a `ps` reading taken after the
+# fact. Read off the run log's `MEMORY:` table.
+#
+# `MEASURED_RUN` names the run they came from, and it is the first line of the
+# table for a reason: a measurement with no run attached is a rumour, and a
+# ratchet built on a rumour is how a 55 GB workload ends up capped at 4 GB. The
+# next full `make gate` replaces this table wholesale, and the floor check in
+# test_suite.py (a class must cover its recorded peak) is what notices if
+# somebody adds a measurement and forgets to move the class.
+MEASURED_RUN = ('the last green full `gate`, 2026-09-30, master 86d862f, '
+                'build/suite.log\'s MEMORY: table')
+
+# `measured`: read off that run for this job.
+# `derived`:  the same command over the same inputs by the same engine, so the
+#             measurement is the same measurement — `stage3`'s fanout is
+#             `stage2`'s argv with a different path prefix, and a per-file
+#             dump cannot cost more than the whole-closure dump of the same
+#             sources. Labelled rather than silently merged, because "derived"
+#             is a weaker claim and a reader is entitled to see which is which.
+MEASURED_PEAK_GB = {
+    'native-dumpfull':             (31.3, 'measured'),
+    'ab-native':                   (20.5, 'measured'),
+    'selfhost':                    (3.7,  'measured'),
+    'mojoc':                       (3.7,  'measured'),
+    'stdlib-syntax':               (1.5,  'measured'),
+    'sqliteruntime':               (1.3,  'measured'),
+    'bootstrap-stage1-transitive': (1.2,  'measured'),
+    'bootstrap-stage2-cc':         (1.2,  'measured'),
+    'bootstrap-stage2-dumps':      (0.5,  'measured'),   # per item
+    'ptrreg':                      (0.4,  'measured'),
+    'runtimediff':                 (0.3,  'measured'),
+    'modcache':                    (0.3,  'measured'),
+    'stdlib-dylib':                (0.2,  'measured'),
+    'bootstrap-stage1-dumps':      (1.2,  'derived'),    # from stage1-transitive
+    'bootstrap-stage2-transitive': (1.2,  'derived'),    # from stage1-transitive
+    'bootstrap-stage3-dumps':      (0.5,  'derived'),    # from stage2-dumps
+    'bootstrap-stage3-transitive': (1.2,  'derived'),    # from stage1-transitive
+}
+
+# How much room above a measured peak a class must leave. 1.5x, and the reason
+# it is not 1.0x: a ceiling is also the answer to "how much can this job grow
+# before it is killed", and a machine's memory use is not a constant. It is not
+# 2x either, and the ladder is the reason: 2x moves exactly one job
+# (`native-dumpfull`, 31.3 → 62.6 GB, the only class that covers it), and the
+# whole point of the ratchet is that `stage` should have no members at all.
+# A headroom that pushed work up a rung would be a smaller ratchet with more
+# steps in it.
+PEAK_HEADROOM = 1.5
+
+# A class this many times the measured peak is not covering a measurement, it is
+# reserving the machine for one. Reported, not fatal: some jobs have a reason to
+# be over (and say so in `memwhy`), and the list is the thing that has to be
+# empty for the everyday jobs.
+OVER_PROVISIONED_FACTOR = 8
+
+
+def class_for_peak(peak_gb: float, classes=None) -> str:
+    """The smallest class whose ceiling covers `peak_gb` with headroom.
+
+    The ratchet, as code, so the numbers in the registry are checkable against
+    the rule that justifies them instead of against the intention of whoever
+    typed them. Ties go to the smaller ceiling, and an unknown peak is a
+    `ValueError` rather than a guess: "assign a class from a measurement" has
+    no meaning for a job with no measurement, and the honest answer for those
+    is `unmeasured` — keep what it has.
+    """
+    if peak_gb is None or peak_gb <= 0:
+        raise ValueError(f'no peak to size a class from ({peak_gb!r})')
+    need = peak_gb * PEAK_HEADROOM
+    for name, gb in sorted((classes or MEMCLASS).items(), key=lambda kv: kv[1]):
+        if gb >= need:
+            return name
+    raise ValueError(f'no class covers {peak_gb} GB with {PEAK_HEADROOM}x '
+                     f'headroom ({need:.1f} GB needed)')
 
 # The class a `cmd` or `make` job runs under when it names none. This is the
 # structural half of the coverage: before it, "is this job capped" was a
@@ -221,12 +389,13 @@ MEMCLASS = {
 # what the job IS rather than for the worst thing the runner has ever seen.
 #
 # The alternative reading — keep it at 24 until every job has a measured peak —
-# was rejected for a reason that is not only about speed: 8 GB is still 4x the
-# largest peak actually observed on this tree, and the three checks in
-# test_suite.py that would notice a job that outgrew the class are the ones
-# that fire when it does. So the guess is bounded rather than hidden, and
-# every job's peak is recorded (`report`'s peak table) so the next real gate
-# replaces this paragraph with measurements.
+# was rejected for a reason that is not only about speed: 8 GB is 2.2x the
+# largest peak actually measured anywhere in this registry (`selfhost`/`mojoc`,
+# 3.7 GB — see MEASURED_PEAK_GB), and the checks in test_suite.py that would
+# notice a job that outgrew the class are the ones that fire when it does. So
+# the guess is bounded rather than hidden, and every job's peak is recorded
+# (`report`'s peak table) so the next real gate replaces the 57 rows of this
+# table's absence with measurements and drops the default.
 DEFAULT_MEMCLASS = 'small'
 
 
@@ -259,36 +428,69 @@ def memclass_for(spec) -> str:
 # ── Admission: memory is ALLOCATED to a job before it starts ─────────────────
 # A per-job ceiling bounds ONE process tree. It says nothing about how many
 # trees may run at once, so on its own it is not a bound on the machine at all:
-# the three `bootstrap-stage*-dumps` fanouts are 47 items each at the `module`
-# class, and `-j18` of them is 18 x 24 GB = 432 GB of ALLOWED ceiling on a
-# 128 GB box. That is not hypothetical — on 2026-09-29 those fanouts ran about
-# thirty items at once, each observed between 30 and 43 GB, until the machine
-# collapsed and a human killed them by hand. Every individual process was
-# inside its own cap the whole time, which is exactly the point: a per-process
-# ceiling cannot be defeated by width unless something bounds the SUM.
+# the three `bootstrap-stage*-dumps` fanouts are 47 items each, and `-j18` of
+# them at the `module` class it used to be was 18 x 24 GB = 432 GB of ALLOWED
+# ceiling on a 128 GB box. That is not hypothetical — on 2026-09-29 those
+# fanouts ran about thirty items at once, each OBSERVED between 30 and 43 GB,
+# until the machine collapsed and a human killed them by hand. Every individual
+# process was inside its own cap the whole time, which is exactly the point: a
+# per-process ceiling cannot be defeated by width unless something bounds the
+# SUM.
+#
+# That 30-43 GB figure is NOT reproducible as a summed-RSS peak and the two
+# things said about it here used to contradict each other: the same per-file
+# `--dump` measures 0.5 GB and the same sources as one closure dump measure
+# 1.1-1.2 GB, through this same wrapper. Either the observation was a footprint
+# reading rather than RSS, or it was the python side on a tree state that
+# carried the self-hosting pre-pass (15-30 GB per call, BLOW.md §0), or it
+# summed shared pages. bugs/MEMCAP_module_class_under_the_stage_dumps_peak.md
+# has the three candidates and the command that settles it; what is not in
+# doubt is the SHAPE of the failure, which is why the reservation below exists
+# regardless of which number was right.
 #
 # So the ceiling is also a RESERVATION, taken out of one machine-wide budget
 # before the job is spawned (`tools/memslot.py`, the ledger in
 # ~/.gmojo/memslot). A 55 GB job takes 55 of the 96 GB budget, so a second one
-# waits instead of running beside it; a 24 GB fanout item runs four at a time
-# rather than eighteen. MEMSLOT_BUDGET_GB is the whole-machine number (default
+# waits instead of running beside it; a 4 GB fanout item runs 24 at a time
+# rather than four. MEMSLOT_BUDGET_GB is the whole-machine number (default
 # 96, memslot's own default: it leaves ~30 GB of a 128 GB box for the OS).
 #
-# `excl` is the same mechanism, carried across to the whole machine. In the
-# runner it has always meant "nothing else IN THIS RUN starts while one runs",
-# which bounds a gate and not a box: the other twenty-nine worktrees' hand-run
-# `make mojoc` and the developer's own terminal were never in that set. So an
-# exclusive job takes the WHOLE budget rather than its class, and a 55 GB
-# `excl` job does not merely run alone in this run — it holds the ledger, so
-# nothing anywhere on the machine is admitted until it finishes. `excl` and
-# the reservation are the same statement, made once in each place it applies.
+# `excl` used to be the same mechanism carried one step further: an exclusive
+# job reserved the WHOLE budget rather than its class, so it held the ledger
+# and nothing anywhere on the machine was admitted while it ran. That conflated
+# two different claims, and the conflation cost more than it bought.
 #
-# An earlier attempt at this lived here as `MEMBUDGET_GB`, a sum-of-ceilings
-# the runner compared before launching. It was never wired to anything, and
-# even wired it would have been the wrong tool: it bounds concurrency inside
-# one runner and knows nothing about the other twenty-nine worktrees, which is
-# where a hand-run `make mojoc` lives. One machine-wide ledger, not a second
-# budget that only one process honours.
+#   * What `excl` is FOR, in this registry, is interference between jobs in
+#     ONE run: all four exclusive jobs write a shared artifact another job
+#     reads or links — `./mojoc`, `fire.ci`, `build/libmojostdlib.<arch>.dylib`
+#     — and two of them racing on one name is a wrong answer, not a slow one.
+#     That is a scheduling statement, and `execute()` already enforces it: an
+#     exclusive job drains the pool first and nothing starts until it is done.
+#
+#   * What the whole-budget reservation added was a claim about the whole
+#     MACHINE, sized by nothing. `mojoc` was marked exclusive while measuring
+#     3.7 GB (MEASURED_PEAK_GB), so a 3.7 GB job held 96 of the machine's 96
+#     GB and every other job on the box — every other worktree's gate, every
+#     `smoke`, the developer's own test run — waited behind it. That is the
+#     reservation version of the same mistake this whole table was corrected
+#     for: a class is a claim, and a claim nobody measured is a queue.
+#
+# So `excl` now reserves its CLASS, like every other job, and says what it
+# actually says: nothing else in this run starts while it runs. The machine-wide
+# property is not lost, it is arithmetic: the ledger admits no set of jobs whose
+# reservations sum past the budget, and the classes are now measured, so two
+# jobs that together could hurt the machine still cannot both be admitted —
+# 55 + 55 > 96 for the two `program` jobs, which is the case that mattered when
+# `excl` was taking the whole ledger. A job that genuinely needs the machine to
+# itself is a job whose class is more than half the budget, and that is
+# expressed by its class rather than by a flag on top of it.
+#
+# An earlier attempt at a second bound lived here as `MEMBUDGET_GB`, a
+# sum-of-ceilings the runner compared before launching. It was never wired to
+# anything, and even wired it would have been the wrong tool: it bounds
+# concurrency inside one runner and knows nothing about the other worktrees,
+# which is where a hand-run `make mojoc` lives. One machine-wide ledger, not a
+# second budget that only one process honours.
 def memslot_budget() -> float:
     """The machine-wide reservation budget in GB, honouring MEMSLOT_BUDGET_GB.
 
@@ -299,28 +501,229 @@ def memslot_budget() -> float:
     return memslot.budget_gb()
 
 
-def reserved_gb(job, spec) -> float:
-    """The gigabytes `job` takes out of the machine-wide budget before it starts.
+def reserved_gb(spec) -> float:
+    """The gigabytes a job takes out of the machine-wide budget before it starts.
 
-    Its memclass, except in two cases, both of which exist because a
-    reservation is a PROMISE and the promise has to be the one the ceiling
-    keeps:
+    Its memclass — the same number the ceiling keeps, because a reservation is a
+    PROMISE and the promise has to be the one the ceiling keeps, in both
+    directions: the scheduler never admits more than the budget, and no
+    admitted job may take more than it was given.
 
-      * 0 for a job with no ceiling. `MEMLIMIT_GB=0` is the run-wide "no
-        memory bound anywhere" switch; reserving nothing for it is the honest
-        reading, and reserving a token's worth would be a queue that admits
-        everything, which is the collapse with extra steps.
+    Not the whole budget for an `excl` job, which is the one behaviour that
+    changed when the classes were assigned from measured peaks: `excl` is a
+    scheduling statement (nothing else in this run starts, enforced in
+    `execute`), and the machine-wide bound is the ledger's arithmetic over
+    classes that are now measured. See the note above `memslot_budget`.
 
-      * the WHOLE budget for an `excl` job, whatever its class. `excl` means
-        the machine to itself, and the ledger is the only thing in the room
-        that can say so to the other worktrees.
+    0 for a job with no ceiling, too. `MEMLIMIT_GB=0` is the run-wide "no
+    memory bound anywhere" switch; reserving nothing for it is the honest
+    reading, and reserving a token's worth would be a queue that admits
+    everything, which is the collapse with extra steps.
     """
     ceiling = memlimit(memclass_for(spec))
-    if ceiling <= 0:
-        return 0.0
-    if job.excl:
-        return memslot_budget()
-    return ceiling
+    return 0.0 if ceiling <= 0 else ceiling
+
+
+def measured_peak(name: str):
+    """`(peak_gb, provenance)` for a job, or None when there is no measurement.
+
+    None is a real answer and not a failure: 57 of the registered jobs have no
+    measured peak, they keep the class they have, and `memclass_report_lines`
+    lists them as unmeasured so "we do not know" is visible rather than
+    indistinguishable from "we checked".
+    """
+    return MEASURED_PEAK_GB.get(name)
+
+
+def memclass_ratios():
+    """`(name, peak, how, cls, ceiling, factor, want)` for every measured job.
+
+    `want` is what the ratchet says the class should be (`class_for_peak`), so
+    a class that has drifted away from its measurement is a COMPARABLE value and
+    not a judgement call in a comment: `class_mismatches` is a one-liner over
+    this table, and the report prints both columns side by side.
+
+    Sorted by the factor — how much of the class the job actually used —
+    biggest first, because that column is the one a reader is looking for: a
+    factor near 1 is a class sized to a measurement, and a factor in the tens
+    is a reservation.
+    """
+    rows = []
+    for name, (peak, how) in MEASURED_PEAK_GB.items():
+        spec = REGISTRY.get(name)
+        cls = memclass_for(spec) if spec is not None else None
+        ceiling = MEMCLASS.get(cls) if cls else None
+        rows.append((name, peak, how, cls, ceiling,
+                     ceiling / peak if peak and ceiling else None,
+                     class_for_peak(peak)))
+    return sorted(rows, key=lambda r: (-(r[5] or 0), r[0]))
+
+
+def class_mismatches():
+    """Measured jobs whose class is not the one the ratchet assigns.
+
+    The one thing that must be true of the whole table, and deliberately a
+    function rather than a comment on each registration: a class that has
+    drifted from its measurement is invisible in a run — nothing fails, the
+    machine is just slower or the job is killed for no visible reason — so it
+    is checked in one place, by a test, with both numbers in the message.
+    """
+    return [(n, c, w) for n, _p, _h, c, _g, _f, w in memclass_ratios()
+            if c != w]
+
+
+def is_over_provisioned(peak_gb, ceiling, floor=None) -> bool:
+    """Is a class of `ceiling` GB over-provisioned for a `peak_gb` GB peak?
+
+    The warning rule, as a function of two numbers rather than of the table, so
+    it can be checked on cases whose answer is computable by hand. `floor` is
+    the smallest class in the ladder, and the exception it buys is the point
+    rather than a loophole: a 0.3 GB job in the 4 GB floor class is 13x its
+    peak, but the ladder has nothing below it, so the alternative is not a
+    smaller reservation, it is a new rung. Those are counted separately, by
+    `at_floor`, so "the class is too big" and "the ladder is too coarse" are two
+    different findings and only the first is a job's fault.
+    """
+    floor = min(MEMCLASS.values()) if floor is None else floor
+    return (bool(peak_gb) and peak_gb > 0 and ceiling > floor
+            and ceiling / peak_gb > OVER_PROVISIONED_FACTOR)
+
+
+def over_provisioned():
+    """The measured jobs whose class is more than OVER_PROVISIONED_FACTOR their peak.
+
+    A warning list, not a failure: a job with a recorded reason in `memwhy` is
+    allowed to be over-provisioned on purpose, and the everyday jobs are not.
+    It is the shape a regression takes when a class is left at a historical
+    number — invisible in the run, since nothing fails, and visible here.
+    """
+    return [(n, p, c, g / p) for n, p, _h, c, g, _f, _w in memclass_ratios()
+            if is_over_provisioned(p, g)]
+
+
+def at_floor():
+    """The measured jobs whose class is the smallest one there is."""
+    floor = min(MEMCLASS.values())
+    return [(n, p, f) for n, p, _h, _c, g, f, _w in memclass_ratios()
+            if g == floor]
+
+
+def unmeasured_jobs():
+    """Registered jobs with no recorded peak, sorted: they keep their class."""
+    return sorted(n for n in REGISTRY if n not in MEASURED_PEAK_GB)
+
+
+def class_shortfalls(peaks):
+    """`(name, peak, class, ceiling)` for every job whose class cannot cover `peak`.
+
+    The floor, as a function of a `{name: peak_gb}` mapping, so the same check
+    runs against a run's own measurements and against the peaks in a log left
+    by an earlier run. Empty is the healthy answer and is the whole point: a
+    job whose class has stopped covering its workload is a job memcap kills at
+    its ceiling and the runner reports as RESOURCE — a verdict that says
+    nothing about the output, which is exactly why it is worth catching in a
+    test first, from a number, rather than on a machine mid-gate.
+    """
+    out = []
+    for name, peak in sorted((peaks or {}).items()):
+        spec = REGISTRY.get(name.split(':')[0])
+        if spec is None or peak is None:
+            continue
+        cls = memclass_for(spec)
+        ceiling = memlimit(cls)
+        if ceiling > 0 and peak > ceiling:
+            out.append((name, peak, cls, ceiling))
+    return out
+
+
+# The per-job line `report` writes, read back. Parsed here rather than in
+# test_suite.py because the format is this module's own: a second copy of it is
+# a second thing to forget to update when the line changes, and a parser that
+# silently matches nothing is worse than no parser.
+_JOB_LINE = re.compile(r'^\[\s*\d+/\d+\]\s+\S+\s+(\S+)\s+[0-9.]+s\s+'
+                        r'\(\d+ running\)(?:\s+\[([^\]]*)\])?')
+_PEAK_IN_TAIL = re.compile(r'peak ([\d.]+) GB')
+
+
+def peaks_from_log(path):
+    """`{job key: peak_gb}` for every job a run log recorded a peak for.
+
+    Per job, the LARGEST peak seen — a fanout's 45 items are 45 lines with the
+    same test name, and the class has to cover the worst of them, not the one
+    that happened to finish first. Cached replays have no peak (they start no
+    process), which is why a log is not a complete record of what a job needs:
+    it is a record of what the jobs that actually ran needed.
+    """
+    peaks = {}
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            for line in f:
+                m = _JOB_LINE.match(line)
+                if not m:
+                    continue
+                key, tail = m.group(1), m.group(2) or ''
+                p = _PEAK_IN_TAIL.search(tail)
+                if p:
+                    peaks[key] = max(peaks.get(key, 0.0), float(p.group(1)))
+    except OSError:
+        return {}
+    return peaks
+
+
+def peak_drift(measured):
+    """`(name, this run, recorded)` for jobs whose measurement has moved.
+
+    The table is a snapshot of one run, and a snapshot goes stale silently:
+    a workload that grows keeps fitting its class until it does not, and one
+    that shrinks keeps reserving 20x what it needs until someone notices. Both
+    directions are reported, because both are how this file becomes a lie, and
+    "the number in the table is from a run, and this is a newer one" is the
+    only thing that keeps it honest.
+    """
+    out = []
+    for key, peak in sorted((measured or {}).items()):
+        name = key.split(':')[0]
+        recorded = MEASURED_PEAK_GB.get(name)
+        if recorded is None or peak <= 0:
+            continue
+        old = recorded[0]
+        if peak > old * (1 + PEAK_HEADROOM) or peak < old / (1 + PEAK_HEADROOM):
+            out.append((name, peak, old))
+    return out
+
+
+def memclass_report_lines():
+    """The memclass table, measured where it can be — for `--list` and the log.
+
+    One implementation, three readers: `--list` is what a reviewer checks a new
+    registration against, the run log is where a reader looks up why a job
+    reserved what it reserved, and test_suite.py asserts against the same
+    numbers. A table printed in one place and asserted in another is a table
+    that drifts.
+    """
+    out = [f'measured peaks: {MEASURED_RUN}',
+           f'  assigned: the smallest class covering {PEAK_HEADROOM:g}x the '
+           f'measured peak; over {OVER_PROVISIONED_FACTOR}x is reported, not fatal']
+    for name, peak, how, cls, ceiling, factor, want in memclass_ratios():
+        out.append(f'  {name:<30} {peak:6.1f} GB {how:<8} -> {cls:<7} '
+                   f'{ceiling:>5.0f} GB  {factor:5.1f}x'
+                   + ('   MISMATCH: the ratchet assigns '
+                      f'{want}' if cls != want else ''))
+    over = over_provisioned()
+    floor_jobs = at_floor()
+    unmeasured = unmeasured_jobs()
+    out.append(f'  {len(over)} over-provisioned (>'
+               f'{OVER_PROVISIONED_FACTOR}x, and not already at the smallest '
+               f'class): '
+               + (', '.join(f'{n} {f:.0f}x' for n, _p, _c, f in over) or 'none'))
+    out.append(f'  {len(floor_jobs)} at the floor class '
+               f'({min(MEMCLASS.values()):g} GB; the ladder has nothing smaller, '
+               f'so their ratio is the ladder\'s, not their fault): '
+               + ', '.join(f'{n} {f:.0f}x' for n, _p, f in floor_jobs))
+    out.append(f'  {len(unmeasured)} unmeasured (keep their class): '
+               + ', '.join(unmeasured))
+    return out
+
 
 # ── Registry ─────────────────────────────────────────────────────────────────
 class Spec:
@@ -333,11 +736,20 @@ class Spec:
             job's ceiling is deliberate" and a deliberate nothing is a
             contradiction; a `cmd` job that inherits the default is not
             saying nothing, it is saying "like everything else".
+    memwhy  one line saying why this job needs the class it names, REQUIRED
+            above MEM_DEBT_GB — see the table's own comment. Not enforced at
+            registration (a synthetic spec in test_suite.py should not have to
+            explain itself), enforced by the estate check that reads the real
+            registry, and printed by `--list` next to the number it justifies.
     deps    test names that must pass first
     extra   files whose content affects the outcome (feeds checked_run's key)
     cache   wrap in checked_run.py so an unchanged input replays its result
     j       forward `-j <slots>` to a command that has its own -j
-    excl    needs the machine to itself
+    excl    nothing else in THIS RUN may start while it runs. A scheduling
+            statement about shared artifacts, not a memory claim: the
+            reservation is the class, like every other job's, and a job that
+            really needs the machine is one whose class is over half the
+            budget. See `reserved_gb`.
     reject  fail if this pattern appears in the output even on exit 0
     cwd    run in this repo-relative directory
     env     extra environment for this test's process
@@ -345,14 +757,14 @@ class Spec:
               inputs (see ArtifactCache); `inputs` are the files, on top of the
               self-host closure, that its key folds in
     """
-    __slots__ = ('name', 'cmd', 'driver', 'mem', 'deps', 'extra', 'cache',
-                 'j', 'excl', 'reject', 'timeout', 'cwd', 'env', 'desc',
-                 'artifact', 'inputs', 'expect')
+    __slots__ = ('name', 'cmd', 'driver', 'mem', 'memwhy', 'deps', 'extra',
+                 'cache', 'j', 'excl', 'reject', 'timeout', 'cwd', 'env',
+                 'desc', 'artifact', 'inputs', 'expect')
 
-    def __init__(self, name, cmd, driver='cmd', mem=None, deps=(), extra=(),
-                 cache=False, j=False, excl=False, reject=None, timeout=None,
-                 cwd=None, env=None, desc='', artifact=None, inputs=(),
-                 expect=''):
+    def __init__(self, name, cmd, driver='cmd', mem=None, memwhy='', deps=(),
+                 extra=(), cache=False, j=False, excl=False, reject=None,
+                 timeout=None, cwd=None, env=None, desc='', artifact=None,
+                 inputs=(), expect=''):
         self.name, self.cmd, self.driver, self.mem = name, cmd, driver, mem
         self.deps, self.extra, self.cache = tuple(deps), tuple(extra), cache
         self.j, self.excl, self.reject = j, excl, reject
@@ -360,6 +772,7 @@ class Spec:
         self.env, self.desc = dict(env or {}), desc
         self.artifact, self.inputs = artifact, tuple(inputs)
         self.expect = expect
+        self.memwhy = memwhy
         if driver not in ('cmd', 'mem', 'make'):
             raise ValueError(f"{name}: unknown driver {driver!r}")
         if driver == 'mem' and mem is None:
@@ -384,18 +797,19 @@ class Fanout:
     Never cached: the artifact a fanout produces *is* its output, so replaying
     a cached result would leave the artifact missing.
     """
-    __slots__ = ('name', 'cmd', 'items', 'cwd', 'env', 'mem', 'deps', 'excl',
-                 'reject', 'timeout', 'desc', 'expect')
+    __slots__ = ('name', 'cmd', 'items', 'cwd', 'env', 'mem', 'memwhy',
+                 'deps', 'excl', 'reject', 'timeout', 'desc', 'expect')
 
     def __init__(self, name, cmd, items, cwd=None, env=None, mem=None,
-                 deps=(), excl=False, reject=None, timeout=None, desc='',
-                 expect=''):
+                 memwhy='', deps=(), excl=False, reject=None, timeout=None,
+                 desc='', expect=''):
         self.name, self.cmd = name, list(cmd)
         self.items = list(items) if not callable(items) else items
         self.cwd, self.env, self.mem = cwd, dict(env or {}), mem
         self.deps, self.excl, self.reject = tuple(deps), excl, reject
         self.timeout, self.desc = timeout, desc
         self.expect = expect
+        self.memwhy = memwhy
 
         if mem is None:
             raise ValueError(f"{name}: a fanout runs the compiler per item; "
@@ -440,15 +854,15 @@ test('runner', [PY, 'test_runner.py'], cache=True,
      extra=['test_runner.py', 'myinterpreter.py', 'fire.py', 'fire_main.py',
             RUNTIME_SRC, RUNTIME_HDR],
      desc='compile-and-execute runner over a hand-written corpus')
-# `mem='module'`, named rather than inherited, and the reason is the one the
-# estate check in test_suite.py exists to catch: it looks at a test file's CODE
-# and finds `fire.build_executable(...)`, which is the whole-closure build's
-# entry point. Here the closures are two- and three-file toy projects, not the
-# compiler's own, so `small` would probably do — but the test reaches the
-# workload from inside a file the registry cannot read, and a job that can
-# reach a compiler without saying so is exactly what the class is for. `module`
-# is the one-source-file's-worth class, which is what these are.
-test('modcache', [PY, 'test_module_cache.py'], mem='module', cache=True,
+# `mem='tiny'` (4 GB), down from `module` (24): measured peak 0.3 GB, so the
+# ratchet assigns 0.3 x 1.5 = 0.45 GB and the smallest class that covers it is
+# the new floor. The reason it NAMED a class at all is unchanged and is the one
+# the estate check in test_suite.py exists to catch: it looks at a test file's
+# CODE and finds `fire.build_executable(...)`, which is the whole-closure
+# build's entry point. Here the closures are two- and three-file toy projects,
+# so the class is not about this test's size — it is the statement that the
+# class was chosen from a measurement rather than inherited.
+test('modcache', [PY, 'test_module_cache.py'], mem='tiny', cache=True,
      extra=GIMPLE_SOURCES + ['test_module_cache.py', 'myinterpreter.py',
                              'fire.py', 'fire_main.py'],
      desc='module cache end-to-end stages')
@@ -461,7 +875,7 @@ test('modcache', [PY, 'test_module_cache.py'], mem='module', cache=True,
 # was advertising 260 of its own 459 runtime entry points — a C client
 # resolving `mojo_c_getenv` through reflection was told the symbol did not
 # exist. On the gimple path, and predating FORMAL.md.
-test('ptrreg', [PY, 'test_ptr_registry.py'], cache=True,
+test('ptrreg', [PY, 'test_ptr_registry.py'], mem='tiny', cache=True,
      extra=['test_ptr_registry.py', RUNTIME_SRC, RUNTIME_HDR],
      desc='runtime unit test: pointer-registry table + inline-buffer lists (-O0/-O2/ASan)')
 # The two instruments from the previous round, which existed and ran by nothing
@@ -489,21 +903,41 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], cache=True,
             'runtime/fire_ssl.h', 'runtime/fire_ncurses.h',
             'runtime/fire_python.h'],
      desc='runtime header export scan sees every declaration')
-# `mem='stage'`, and named rather than left on the `cmd` default, for a reason
-# the default cannot express: `test_selfhost.py` calls
-# `fire.build_executable(fire.py)`, which is the same whole-closure
-# self-compile plus `gcc -O2 -fgimple` plus a link that `make mojoc` runs — the
-# 55.8 GB healthy-peak workload, reached from inside a test file rather than
-# from a command line the registry can read. This is the everyday `check`
-# bucket's one job that can reach tens of GB, and it was uncapped until now.
-test('selfhost', [PY, 'test_selfhost.py'], mem='stage', cache=True,
+# `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
+# the ratchet, and the reason it needed a measurement to be safe.
+# `test_selfhost.py` calls `fire.build_executable(fire.py)`, which is the
+# whole-closure self-compile plus `gcc -O2 -fgimple` plus a link, so this job
+# used to take the class documented on the 55.8 GB self-compile and reserve 96
+# of the machine's 96 GB: the everyday `check` bucket serialised behind a job
+# measured at 3.7 GB, twelve times a second, on every other worker's runs too.
+# Measured peak 3.7 GB, so the ratchet assigns 5.55 and the smallest class that
+# covers it is `small`. What replaced the 55.8 GB figure is
+# MEASURED_PEAK_GB, read off a run's log by the same wrapper that enforces the
+# ceiling — and note that the same measurement taken on 2026-09-29 for
+# `bootstrap-stage1-transitive` (the same python closure dump) reads 1.1 GB, so
+# the 55.8/96 numbers are not this workload's RSS on this tree. A build that
+# genuinely needs more says so: MEMLIMIT_GB=96.
+test('selfhost', [PY, 'test_selfhost.py'], mem='small', cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'fire_main.py', 'test_selfhost.py'],
      desc='the compiler compiles itself to a linked binary, cleanly')
-test('runtimediff', [PY, 'test_runtime_diff.py'], cache=True,
+test('runtimediff', [PY, 'test_runtime_diff.py'], mem='tiny', cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'test_runtime_diff.py'],
      desc='interpreter vs JIT: identical stdout and exit code')
+test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True,
+     extra=GIMPLE_SOURCES + ['test_metal_codegen.py',
+                             'mojo/middle/metal_ops.py',
+                             'mojo/backend_gimple/device_select.py',
+                             'mojo/backend_gimple/emit_metal.py'],
+     desc='Metal codegen: op tables, device-region selection, MSL emission, '
+          'and the generated MSL compiled by Apple\'s real compiler and run '
+          'on the GPU against a CPU reference')
+test('md2html', [PY, 'test_md2html.py'], cache=True,
+     extra=['tools/md2html.py', 'test_md2html.py',
+            'doc/GPU_OFFLOAD_PLAN.html', 'doc/METAL.html'],
+     desc='the docs\' HTML generator keeps every word of its Markdown, and '
+          'the committed HTML is not stale')
 test('linkmode', [PY, 'test_link_mode.py'], cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'driver.py', 'test_link_mode.py'],
@@ -638,8 +1072,11 @@ test('ownership-destruct', [PY, 'test_ownership_destruct.py'],
      desc='an owned value is destructed exactly once')
 test('x86-containers', [PY, 'test_x86_64_containers.py'],
      deps=['preflight'],
-     expect='bugs/CODEGEN_nested_comprehension.md — red on nested-comprehension',
-     desc='bugs/CODEGEN_nested_comprehension.md — red on nested-comprehension')
+     expect='nested-comprehension exits nondeterministically (58, or SIGSEGV, '
+            'want 100) in the FORMAL backend, not the gimple path — which gets '
+            'this case right and stably. See '
+            'bugs/FORMAL_nested_comprehension_nondeterministic_exit.md',
+     desc='nested-comprehension nondeterministic in the formal backend')
 test('mutable-async-capture', [PY, 'test_mutable_async_capture.py'],
      deps=['preflight'],
      expect='async capture of a mutable binding — behaviour gap, not registered before this',
@@ -768,32 +1205,49 @@ SELFHOST_TOKENIZE_BLOWUP = (
     'no longer segfaults, but the self-hosting bootstrap pre-pass this '
     'corpus legitimately triggers costs ~15-30 GB / ~15-25s per call — see '
     'BLOW.md §0 "NOT closed" for the measured repro and root-cause status')
-# `stage`, not `program`: `fire.py build` is the whole-closure self-compile
-# AND the `gcc -O2 -fgimple` over the resulting 40 MB translation unit, and
-# those are the two things `program` (the closure dump, healthy peak 55.8 GB)
-# and `stage` (the closure plus its gcc, the largest footprint ever observed
-# completing a self-compile ~96 GB) were measured on. The peak of a build is
-# the larger of the two phases, not their sum, so the ceiling is `stage`'s.
-# UNMEASURED end to end — see bugs/BUILD_mojoc_ceiling_unmeasured.md, which
-# exists because `make mojoc` was uncapped until now and so no number has ever
-# been recorded for the whole build; the next gate run does, on every job.
-test('mojoc', ['mojoc'], driver='make', mem='stage', excl=True,
+# `small` (8 GB), not `stage` (96): `fire.py build fire.py` is the
+# whole-closure self-compile AND the `gcc -O2 -fgimple` over the resulting
+# 40 MB translation unit, and it used to be given the class documented on the
+# 55.8 GB self-compile, reserving the whole 96 GB machine budget. Measured
+# peak 3.7 GB (MEASURED_PEAK_GB), so the ratchet assigns 3.7 x 1.5 = 5.55 GB
+# and the smallest class covering it is `small`. The Makefile's recipe for this
+# target names the same class, which is not tidiness: a recipe asking for MORE
+# than the job reserved takes a second reservation inside a tree the first one
+# is already accounted for, and that deadlocks rather than failing
+# (tools/memslot.py's `covering`). test_suite.py checks the two cannot drift.
+#
+# `excl` for the artifact, not for the memory: `./mojoc` and `fire.ci` are
+# written in the repo root and another job in this run links against them, so
+# nothing else may start while this runs. The reservation is the class, like
+# every other job's — see `reserved_gb`.
+test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
-# `module`, NOT `small`, and the measurement is why: registered at `small` (8
-# GB) and killed by its own ceiling on 2026-09-29 at a peak of 9.4 GB — a
-# RESOURCE verdict, which is not a verdict on anything, on a test that was
-# already marked expect=. The corpus here is the same A/B one whose per-file
-# `--dump` is documented at ~15-30 GB, so 8 was never going to hold. Under the
-# ledger this matters twice over: the job RESERVES its class, so a class that
-# cannot hold the workload is a job guaranteed to be killed every run.
-test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='module',
+# `program` (55 GB), UP from `module` (24) — the one job the ratchet moves up,
+# and the measurement is why: registered at `small` (8 GB) it was killed by its
+# own ceiling on 2026-09-29 at a peak of 9.4 GB (a RESOURCE verdict, which is
+# not a verdict on anything, on a test already marked expect=), and at `module`
+# (24) the 2026-09-30 measurement is 20.5 GB — 85% of the ceiling, one more
+# corpus file from a guaranteed kill on a test that must run. The ratchet asks
+# for 1.5x, which is 30.75 GB, and the smallest class covering that is
+# `program`. Under the ledger this matters twice over: the job RESERVES its
+# class, so a class that cannot hold the workload is a job guaranteed to be
+# killed every run.
+test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
+     memwhy='measured 20.5 GB: the self-hosting bootstrap pre-pass this corpus '
+            'legitimately triggers (SELFHOST_TOKENIZE_BLOWUP above), and 1.5x '
+            'is 30.75 GB, so `module` (24) was 85% of what it uses. Over the '
+            '4 GB line because the workload is — see ' + MEM_DEBT_DOC,
      deps=['mojoc'], excl=True, cache=True, extra=['test_ab_native.py'],
      expect=SELFHOST_TOKENIZE_BLOWUP,
      desc='python vs native codegen, byte-for-byte, over the A/B corpus')
 test('native-dumpfull', [PY, 'test_native_dumpfull.py'], driver='mem',
-     mem='program', deps=['mojoc'], excl=True, cache=True,
-     extra=['test_native_dumpfull.py'],
+     mem='program',
+     memwhy='measured 31.3 GB — the largest job in the registry that still '
+            'completes, for the same pre-pass (SELFHOST_TOKENIZE_BLOWUP). '
+            '1.5x is 47 GB, so `program` is the class the ratchet assigns; the '
+            'class is already correct and the reason is recorded because it is '
+            'over the 4 GB line — see ' + MEM_DEBT_DOC,
      expect=SELFHOST_TOKENIZE_BLOWUP,
      desc="the native --dump-full ARTIFACT, diffed against the reference")
 
@@ -806,16 +1260,20 @@ test('stdlib-tests', [PY, 'test_stdlib.py'],
 # build/libmojostdlib.<arch>.dylib, not build/libmojostdlib.dylib -- because the
 # architecture is part of the link key, so one file cannot hold both. Exclusive
 # because it deletes and rewrites a shared artifact that other tests link
-# against.
-# `mem='program'`: the whole stdlib — 664 modules — through codegen in ONE
-# python process, which is a whole-program workload wearing a different hat,
-# not the per-file shape the `cmd` default describes. UNMEASURED (it is a gate
-# step, and measuring it means building the dylib); the number is the
-# whole-program class because that is what it is, and the peak is recorded from
-# the next gate run onward, which nothing recorded before.
+# against — an artifact, not a memory claim, so the reservation is the class
+# like any other job's.
+#
+# `mem='tiny'` (4 GB), down from `program` (55): measured peak 0.2 GB, so the
+# ratchet assigns 0.3 GB and the floor covers it. CAVEAT, and it is the reason
+# the number is worth re-measuring rather than trusting: 0.2 GB is the peak of
+# a python process, and a dylib build whose modules all "fell back to source"
+# is cheap by construction — the same skip count CLAUDE.md's gate step 2 tells
+# you not to let grow. If the next gate shows this step at a much higher peak,
+# the measurement changed and the class follows it (test_suite.py fails the
+# moment a recorded peak stops fitting its class).
 test('stdlib-dylib', [PY, '-c',
                       'import build_stdlib_dylib as b; b.build_stdlib()'],
-     mem='program', excl=True, timeout=3600,
+     mem='tiny', excl=True, timeout=3600,
      desc='from-scratch stdlib dylib; reports modules that fell back to source')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],
      deps=['preflight'],
@@ -831,42 +1289,61 @@ test('runtimedylib', [PY, 'test_runtime_dylib.py'],
 # checks passing, both the `link` and `fallback` pipelines, all five
 # test_sqlite3*.mojo sources. No infinite loop reproduces on this tree
 # anymore -- it was the missing link, not the test.
-test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'],
+test('sqliteruntime', [PY, 'test_sqlite3_runtime.py'], mem='tiny',
      deps=['preflight'], timeout=600,
      desc='optional-unit link mechanism: derivation, probe, and every '
           'test_sqlite3*.mojo built+linked+RUN on both pipelines')
 
-# `mem='program'`, and note what that is and is not: the per-file gcc here is
-# small (a snippet-sized translation unit, `-fsyntax-only`), so this ceiling is
-# for the AGGREGATE of `-j18` of them plus the driving process — the same
-# reasoning as the A/B sweep below. A fan-out is bounded by its total, and its
-# per-process bound is `small`/`module` on each child. UNMEASURED here for the
-# same reason as stdlib-dylib.
-test('stdlib-syntax', [PY, 'compile_stdlib.py'], j=True, mem='program',
+# `mem='tiny'` (4 GB), down from `program` (55), and the aggregate is what the
+# ceiling is still for: the per-file gcc here is small (a snippet-sized
+# translation unit, `-fsyntax-only`), so what a ceiling on this job bounds is
+# the AGGREGATE of `-j18` of them plus the driving process — the same reasoning
+# as the A/B sweep below. A fan-out is bounded by its total, and its
+# per-process bound is each child's own. Measured peak 1.5 GB (all 18 at once,
+# on a 96 GB budget), so the ratchet assigns 2.25 GB and the floor covers it.
+test('stdlib-syntax', [PY, 'compile_stdlib.py'], j=True, mem='tiny',
      timeout=7200,
      desc='gcc -fsyntax-only on the generated GIMPLE, whole stdlib tree')
 
 # ── bootstrap: an ordered graph, not one recipe ─────────────────────────────
-# The 192 GB workload lives in here four times over (stage1's, stage2's and
-# stage3's transitive dumps, plus gcc over the closure) and until now none of
-# those four was capped — only check-native-dumpfull's one instance of the
-# same workload was. Every step below that runs a mojoc, or the compiler over
-# a whole closure, names a memclass.
+# Every step below runs a compiler, or the compiler over a whole closure, so
+# every step names a memclass — and every one of them is now `tiny` except the
+# artifacts, because the measurements say so (MEASURED_PEAK_GB: the whole
+# python closure dump 1.2 GB, each per-file dump 0.5 GB, the gcc -O0 over the
+# resulting 40 MB translation unit 1.2 GB). These are the classes the 2026-09-25
+# footprint probe put at 24/55/96, and the ledger turned those numbers into a
+# queue: a `stage` item reserved the whole 96 GB machine budget, and the three
+# fanouts of 45 items each ran four wide.
 test('bootstrap-clean', ['rm', '-rf', 'stage1', 'stage2', 'stage3'],
      desc='wipe the stage trees (see the Makefile note on stale artifacts)')
 
+# `tiny` (4), from `bootstrap-stage1-transitive`'s measured 1.2 GB (a per-file
+# dump cannot cost more than the whole-closure dump of the same sources, which
+# is where the number comes from — MEASURED_PEAK_GB's 'derived' rows are exactly
+# this kind of transfer, and they are labelled so a reader can see which rows
+# are which). 45 items at 4 GB is 180 GB of ALLOWANCE on a 96 GB budget, and
+# the ledger is what makes that safe rather than the other way round: it admits
+# 24 at a time, and each measured at 0.5 GB.
 fanout('bootstrap-stage1-dumps',
        [PY, '../fire.py', '--dump', '../{file}'],
        items=BOOTSTRAP_INPUTS, cwd='stage1',
-       env={'PYTHONPATH': '..'}, mem='module',
+       env={'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-clean'], reject='mojo_unsupported_iter',
        desc='stage1: python dumps every .mojo and core .py source')
 # Must stay AFTER the per-file dumps above: that loop writes fire.ci into
 # stage1/ from fire.py as a single module, and this transitive-closure dump
 # has to be the last writer of that name or stage2 links a skeleton.
+#
+# `tiny` (4), down from `program` (55). This is the step the "55.8 GB
+# whole-closure self-compile" number was written about, and it is the direct
+# measurement of that claim: 1.2 GB in the 2026-09-30 gate, 1.1 GB in the
+# 2026-09-29 one, both through this same wrapper. What the older 55.8/96
+# numbers were measuring (a macOS *footprint* probe, on a tree state weeks
+# older) is not what memcap enforces: a ceiling is applied to summed RSS of
+# the process tree, and that is 1.1-1.2 GB.
 test('bootstrap-stage1-transitive',
      [PY, '../fire.py', '--dump-full', '../' + MOJO_MAIN],
-     driver='mem', mem='program', cwd='stage1', env={'PYTHONPATH': '..'},
+     driver='mem', mem='tiny', cwd='stage1', env={'PYTHONPATH': '..'},
      deps=['bootstrap-stage1-dumps'],
      desc='stage1: the one transitive-closure fire.ci that stage2 compiles')
 
@@ -877,20 +1354,29 @@ test('bootstrap-stage1-transitive',
 # a few minutes, and a wrong hit could not survive its own output being
 # compared by `verify` a few steps later.
 #
-# `mem='stage'`: this IS the gcc-over-the-closure workload `stage` is
-# documented on, and it was the one bootstrap step with no ceiling at all. The
-# Makefile's own `stage2/mojo` rule is capped at the same class, so a hand-run
-# `make stage2/mojo` and this step cannot disagree; the outer ceiling here is
-# the one that records the peak and reports RESOURCE.
-test('bootstrap-stage2-cc', ['stage2/mojo'], driver='make', mem='stage',
+# `mem='tiny'` (4), down from `stage` (96) — the class that used to be
+# documented on exactly this workload, "the largest footprint ever observed
+# completing a self-compile". Measured peak 1.2 GB as the tree stands, so the
+# ratchet assigns 1.8 GB. The Makefile's own `stage2/mojo` rule names the same
+# class, so a hand-run `make stage2/mojo` and this step cannot disagree — and
+# they must not, because a recipe asking for more than the job reserved takes a
+# second reservation inside a tree the first already accounts for, which
+# deadlocks instead of failing.
+test('bootstrap-stage2-cc', ['stage2/mojo'], driver='make', mem='tiny',
      deps=['bootstrap-stage1-transitive'],
      artifact='stage2/mojo', inputs=['stage1/fire.ci', RUNTIME_SRC, RUNTIME_HDR],
      desc='gcc -fgimple + link: stage1/fire.ci -> stage2/mojo')
 
+# `tiny` (4), down from `module` (24): 0.5 GB measured PER ITEM, the only
+# fanout item peak in the table, so the ratchet assigns 0.75 GB. This is the
+# shape bugs/MEMCAP_module_class_under_the_stage_dumps_peak.md was opened for,
+# and the measurement settles it in the other direction from what that doc
+# feared: 24 was never close to the workload, it was 48x it, and the reason
+# that mattered was never the ceiling — it was the reservation.
 fanout('bootstrap-stage2-dumps',
        ['./mojo', '--dump', '../{file}'],
        items=BOOTSTRAP_INPUTS, cwd='stage2',
-       env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='module',
+       env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-stage2-cc'], reject='mojo_unsupported_iter',
        expect=SELFHOST_STAGE2_STALL,
        desc='stage2: the compiled binary dumps every source')
@@ -899,7 +1385,7 @@ fanout('bootstrap-stage2-dumps',
 # `verify` compares a full closure against a skeleton.
 test('bootstrap-stage2-transitive',
      ['./mojo', '--dump-full', '../' + MOJO_MAIN],
-     driver='mem', mem='program', cwd='stage2',
+     driver='mem', mem='tiny', cwd='stage2',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage2-dumps'],
      desc='stage2: the compiled binary compiles itself, transitively')
@@ -907,12 +1393,12 @@ test('bootstrap-stage2-transitive',
 fanout('bootstrap-stage3-dumps',
        ['../stage2/mojo', '--dump', '../{file}'],
        items=BOOTSTRAP_INPUTS, cwd='stage3',
-       env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='module',
+       env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-stage2-transitive'], reject='mojo_unsupported_iter',
        desc='stage3: same binary, fresh dir (idempotency)')
 test('bootstrap-stage3-transitive',
      ['../stage2/mojo', '--dump-full', '../' + MOJO_MAIN],
-     driver='mem', mem='program', cwd='stage3',
+     driver='mem', mem='tiny', cwd='stage3',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage3-dumps'],
      desc='stage3: same binary again (idempotency of the closure)')
@@ -954,21 +1440,28 @@ test('bootstrap-validate', [PY, 'bootstrap-validate.mojo'],
 # makes a repeat run a stat rather than a hash), so a suite-level artifact
 # cache would be a third cache in front of two that already work — and
 # would go stale in a new way when the cas is shared between checkouts.
-# `mem='module'`, and it is the one place the default is knowingly wrong.
-# Every other unnamed job in the registry is a python check over
-# snippet-sized programs, which is what `small` describes; this one hands the
-# job to LEAN, whose 27 MB .olean is a real typechecker's real memory and is
-# the only external tool in the everyday registry that this repo has no
-# measurement for at all. A RESOURCE verdict here is not forgiven by anything
-# (`expect` forgives FAIL and ERROR), and `prooflib` is a `deps` of the whole
-# proofs bucket, so a ceiling that fired would SKIP sixteen proof runs and
-# report a passing gate. `module` is the "we do not know, and it is not
-# snippet-sized" answer; the peak table in the run log is what replaces it.
+# `mem='module'`, and it is the one job the ratchet could not move: there is no
+# measurement for it (it is UNMEASURED, and the peak table in the run log is
+# what would replace this sentence). Every other unnamed job in the registry is
+# a python check over snippet-sized programs, which is what `small` describes;
+# this one hands the job to LEAN, whose 27 MB .olean is a real typechecker's
+# real memory and is the only external tool in the everyday registry that this
+# repo has no measurement for at all. A RESOURCE verdict here is not forgiven by
+# anything (`expect` forgives FAIL and ERROR), and `prooflib` is a `deps` of the
+# whole proofs bucket, so a ceiling that fired would SKIP sixteen proof runs
+# and report a passing gate. `module` is the "we do not know, and it is not
+# snippet-sized" answer — which is why it is the one job here that carries a
+# `memwhy` and no number behind it.
 test('prooflib', [PY, '-c',
                   'import os, formal.lean as L; '
                   'L.ensure_library(L.find_lean(), '
                   'os.path.join(L._default_root(), "lib"))'],
      mem='module', timeout=2400,
+     memwhy='unmeasured: the only job in the registry run by an EXTERNAL tool '
+            '(Lean, a 27 MB .olean), so there is no peak to size a class from '
+            'and `module` is the standing guess. Over the 4 GB line because we '
+            'do not know, not because 24 GB was measured — one `make gate` '
+            'replaces this with a number. See ' + MEM_DEBT_DOC,
      desc='build lib/*.olean once — 27MB, ~80s, and 16-way duplicated '
           'without this step')
 
@@ -1056,16 +1549,32 @@ test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
 # nobody chose, so test_suite.py's coverage check refuses it.
 test('ab-clean', ['ab-clean'], driver='make', mem='small',
      desc='drop aside/ bside/ ab.mk and the per-file locks')
-# `program`, for the AGGREGATE: each of these is a `make -j<N>` over the
-# ~779-file corpus, and the total across N concurrent per-file compiles is what
-# a ceiling on a `make` tree can see. The per-PROCESS bound is the one that
-# matches "no compiler process may exceed 50 GB", and it is applied where the
-# process is started: `tools/ab_run_one.py` wraps every single file's compile
-# in memcap at `module` (24 GB), which is also the class the three
-# `bootstrap-stage*-dumps` fanouts give the identical per-file `--dump`.
+# `program` for the AGGREGATE, and it stays there: each of these is a `make
+# -j<N>` over the ~779-file corpus, and the total across N concurrent per-file
+# compiles is what a ceiling on a `make` tree can see. The per-PROCESS bound is
+# the one that matches "no compiler process may exceed 50 GB", and it is applied
+# where the process is started: `tools/ab_run_one.py` wraps every single file's
+# compile in memcap at `module` (24 GB). That per-file cap is deliberately NOT
+# the fanouts' class — the two bound different things (one process vs one job's
+# whole width), and giving them the same number was how `module` ended up
+# meaning "24 GB, per process" and "24 GB, whole job" at once.
+#
+# UNMEASURED, so the ratchet does not touch them, and they are over the 4 GB
+# line for that reason alone: a 779-file sweep has never been in a `gate` with
+# the peak table, and one measurement of it would replace both numbers.
 test('ab-aside', ['aside'], driver='make', mem='program', deps=['ab-clean'],
+     memwhy='unmeasured: the 779-file A/B sweep has never run in a gate that '
+            'records peaks, so the aggregate class is the standing guess (the '
+            'per-file cap lives in tools/ab_run_one.py, which is a per-process '
+            'bound, not this one). Over the 4 GB line because we do not know — '
+            'see ' + MEM_DEBT_DOC,
      desc='per-file python-reference dumps for the whole A/B corpus')
 test('ab-bside', ['bside'], driver='make', mem='program', deps=['ab-aside'],
+     memwhy='unmeasured, for ab-aside\'s reason; also the one job that runs '
+            '`mojoc`\'s recipe inside its own tree (`bside: ... mojoc ...`), '
+            'so its class has to be at least `mojoc`\'s or that recipe takes a '
+            'second reservation inside a tree the first one accounts for and '
+            'the job deadlocks. See ' + MEM_DEBT_DOC,
      desc='per-file native dumps for the whole A/B corpus')
 test('ab-compare', [PY, 'tools/ab_compare.py'], deps=['ab-bside'],
      desc='diff the two sides, print only the failures')
@@ -1088,7 +1597,9 @@ BUCKETS = {
     # CLAUDE.md's documented quality gate, in full: the everyday gate, plus
     # every step that is slow, memory-hungry, or both. The heavyweight steps
     # are exclusive, so `gate` is safe to leave running on a 128 GB box even
-    # though it will touch it.
+    # though it will touch it — and, since the classes were assigned from
+    # measured peaks, what it touches is bounded by those measurements rather
+    # than by the shape the workloads resemble.
     'gate': ['check', 'coroutine', 'stdlib', 'native', 'bootstrap'],
 
     # The 3-stage self-hosting chain and its verification, as a dependency
@@ -1517,14 +2028,13 @@ def run_job(job: Job, opts, log: Log) -> Result:
     # budget, BEFORE anything of it is spawned. The ceiling (`build_cmd`) and
     # the reservation are the same number on purpose: the runner never admits
     # more than the budget, and an admitted job is never allowed to take more
-    # than it was given. The two exceptions are in `reserved_gb`, and both
-    # exist because a reservation is a promise the ceiling has to keep.
+    # than it was given. The single exception is in `reserved_gb`.
     #
     # After the artifact-cache check on purpose. A cache hit starts no process
-    # and allocates nothing, so making it queue behind a 40-minute wait for a
-    # 96 GB reservation would make `make gate` slower for no reason at all —
-    # the step it is standing in for is already done.
-    need = reserved_gb(job, spec)
+    # and allocates nothing, so making it queue behind a long wait for a large
+    # reservation would make `make gate` slower for no reason at all — the step
+    # it is standing in for is already done.
+    need = reserved_gb(spec)
     if need <= 0:
         # MEMLIMIT_GB=0. There is no number to reserve and no ceiling to keep,
         # so admission is skipped rather than faked with a zero-gigabyte
@@ -1552,8 +2062,8 @@ def run_job(job: Job, opts, log: Log) -> Result:
         log.line(f'  admitted:   reserved {slot.gb:g} GB, '
                  f'{max(0.0, memslot_budget() - slot.gb):g} GB left of '
                  f'{memslot_budget():g} GB'
-                 + ('   [exclusive: the whole machine budget]'
-                    if job.excl else ''))
+                 + ('   [exclusive: nothing else in this run starts until '
+                    'this is done]' if job.excl else ''))
         if slot.covered:
             # An ANCESTOR already holds this reservation, so the ledger was
             # not consulted for it. Real, and not a rare path: a `make` recipe
@@ -1884,7 +2394,8 @@ def execute(jobs, per_test, opts, log: Log):
             for job in launch[:max(0, opts.jobs - len(running))]:
                 del waiting[job.key]
                 log.line(f'  RUN     {job.key}'
-                         + ('   [exclusive: machine to itself]' if job.excl else ''))
+                         + ('   [exclusive: alone in this run]'
+                            if job.excl else ''))
                 if job.excl:
                     log.notice(f'  RUN     {job.key}  (exclusive)')
                 running[pool.submit(run_job, job, opts, log)] = job
@@ -2039,8 +2550,11 @@ def report(names, state, results, wall, peak, opts, log: Log):
     # memclasses are guesses at, and which had no answer at all until every
     # job was wrapped. Without it, choosing a class is a round number.
     #
-    # Log, not screen: it is 20 lines of numbers nobody wants during a failing
-    # run and everybody wants once the run is green.
+    # And it is the INPUT to the next round of choosing: a run whose peak
+    # differs from `MEASURED_PEAK_GB` is a run that says a class is wrong, in
+    # one of the two directions, and the peak line above is where the next
+    # table comes from. Log, not screen: it is 20 lines of numbers nobody
+    # wants during a failing run and everybody wants once the run is green.
     measured = sorted(((r.peak_gb, k) for k, r in results.items()
                        if r.peak_gb is not None), reverse=True)
     if measured:
@@ -2057,6 +2571,21 @@ def report(names, state, results, wall, peak, opts, log: Log):
                      f'ceiling {ceiling:>5.0f} GB  {used} of it')
         worst = measured[0]
         log.line(f'  worst: {worst[1]} at {worst[0]:.1f} GB')
+        # The two things a reader can do with this run's numbers, both of which
+        # used to be impossible: a class that this run's peak does not fit (a
+        # RESOURCE verdict waiting to happen), and a recorded peak this run
+        # contradicts (the table in MEASURED_PEAK_GB is a snapshot, and a
+        # snapshot that nobody compares to the next run is a rumour).
+        short = class_shortfalls({k: p for p, k in measured})
+        drift = peak_drift({k: p for p, k in measured})
+        for name, peak, cls, ceiling in short:
+            log.line(f'  CLASS TOO SMALL: {name} peaked at {peak:.1f} GB and '
+                     f'its {cls} class is {ceiling:.0f} GB — the next run will '
+                     f'be RESOURCE-capped')
+        for name, peak, old in drift:
+            log.line(f'  PEAK DRIFT: {name} measured {peak:.1f} GB here, '
+                     f'{old:.1f} GB in MEASURED_PEAK_GB — update the table (and '
+                     f'the class with it)')
 
     # The test count is in the tail as well as the job count, because those are
     # the two numbers a reader adds up, and the job count alone is what made the
@@ -2163,11 +2692,15 @@ def print_list():
         print(f'  {name:<8} {gb:>4}')
     print(f'  a cmd/make test with no mem= runs under {DEFAULT_MEMCLASS!r}')
     print(f'  one machine-wide budget of {memslot_budget():g} GB '
-          f'(MEMSLOT_BUDGET_GB); every job reserves before it starts, and an '
-          f'EXCLUSIVE job reserves the whole budget')
+          f'(MEMSLOT_BUDGET_GB); every job reserves its class before it starts, '
+          f'and EXCLUSIVE means alone in THIS RUN (a shared-artifact '
+          f'statement) — a class over half the budget already means alone on '
+          f'the machine')
     print(f'  MEMLIMIT_GB=0 removes both the ceiling and the reservation')
     if os.environ.get('MEMLIMIT_GB'):
         print(f'  MEMLIMIT_GB={os.environ["MEMLIMIT_GB"]} overrides all of the above')
+    for line in memclass_report_lines():
+        print(line)
     print('\nTESTS:')
     for name in sorted(REGISTRY):
         spec = REGISTRY[name]
@@ -2177,6 +2710,9 @@ def print_list():
         # whether the number is 24 or an override of 96.
         cap = f'mem={cls}={memlimit(cls):g}GB'
         cap += '*' if not spec.mem else ''          # * = the default class
+        peak = measured_peak(name)
+        if peak:
+            cap += f' peak={peak[0]:g}GB'
         if isinstance(spec, Fanout):
             how = f'fanout x{len(spec.items)} {cap}'
         else:
@@ -2195,6 +2731,9 @@ def print_list():
               f'{",".join(buckets_containing(name))}]')
         if spec.desc:
             print(f'  {"":<30} {spec.desc}')
+        if getattr(spec, 'memwhy', ''):
+            print(f'  {"":<30} mem={cls} is over the {MEM_DEBT_GB:g} GB line: '
+                  f'{spec.memwhy}')
         if getattr(spec, 'expect', ''):
             print(f'  {"":<30} expected to fail: {spec.expect}')
         if spec.deps:
@@ -2308,6 +2847,8 @@ def _run_all(names, opts, log: Log):
     log.line(f'  {"budget":<12} {memslot_budget():g} GB reserved out of one '
              f'machine-wide ledger (MEMSLOT_BUDGET_GB); every job takes its '
              f'class before it starts')
+    for line in memclass_report_lines():
+        log.line('  ' + line)
     log.line('')
 
     if not opts.quiet:

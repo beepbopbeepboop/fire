@@ -127,11 +127,17 @@ Memory: two mechanisms, and the second is the one that bounds the machine.
 
 A **ceiling** is per process tree: every job that runs a `mojoc` binary, or a
 whole-closure compile standing in for one, is capped by `tools/memcap.py` at
-the ceiling its `memclass` names (`small` 8 GB, `module` 24, `program` 55,
-`stage` 96 — see the `MEMCLASS` table in `tools/suite.py` for which is which
-and the measurements behind them). `program` and `stage` are the ones known to
-pass 10 GB. `MEMLIMIT_GB=96` raises every ceiling; `MEMLIMIT_GB=0` removes
-them all and says so loudly.
+the ceiling its `memclass` names (`tiny` 4 GB, `small` 8, `module` 24,
+`program` 55, `stage` 96 — see the `MEMCLASS` table in `tools/suite.py` for
+which is which). **Each class is assigned from the job's MEASURED peak**
+(`MEASURED_PEAK_GB`, read off a real run's log by the same wrapper that does
+the killing), never from the shape of the workload it resembles, and a class
+over 4 GB carries a one-line `memwhy` pointing at
+`bugs/PERF_memory_over_4gb_is_a_bug.md` — over 4 GB is a debt, not a fact.
+`python3 tools/suite.py --list` prints peak, class, ceiling and ratio per job,
+plus the over-provisioned (>8x) and unmeasured lists. `MEMLIMIT_GB=96` raises
+every ceiling and is also the answer to a class that no longer fits;
+`MEMLIMIT_GB=0` removes them all and says so loudly.
 
 A **reservation** is per machine, and it is not optional. A ceiling bounds one
 tree and says nothing about how many may run at once, which is not a bound at
@@ -139,13 +145,18 @@ all: on 2026-09-29 about thirty compiler processes at 30-43 GB each, every one
 of them inside its own ceiling, collapsed the box. So every job takes its
 memclass out of ONE machine-wide budget (`tools/memslot.py`, strict FIFO,
 `~/.gmojo/memslot`, `MEMSLOT_BUDGET_GB`, default 96) *before* it is spawned,
-and gives it back when it exits — so "18 x 24 GB" means four at a time, and
-the count includes the other worktrees and your own terminal. An `excl` job
-reserves the WHOLE budget, so exclusivity now means the machine rather than
-one run. A reservation covers the tree it admitted, which is why the
+and gives it back when it exits — so "18 x 4 GB" means 24 at a time, and
+the count includes the other worktrees and your own terminal. That is also why
+the classes are measured: a class is a claim on the machine, so one that is 20x
+the job's peak is not a margin, it is twenty other jobs that cannot run. An
+`excl` job reserves its class like any other and is additionally alone in ITS
+run — `excl` is about jobs racing on a shared artifact, not about memory, and
+a class over half the budget already means alone on the machine by arithmetic.
+A reservation covers the tree it admitted, which is why the
 `$(call memslot,…)` recipe in the Makefile does not deadlock against the
 runner's own admission of that recipe (`MEMSLOT_HELD`, and
-`memslot.covering`).
+`memslot.covering`) — and why a recipe's class may never exceed the class of
+the job that runs it, which `test_suite.py` checks.
 
 A job's TIMEOUT starts after admission, never during the queue wait: a `stage`
 job can wait a long time for 96 GB on a busy machine, and a timeout that

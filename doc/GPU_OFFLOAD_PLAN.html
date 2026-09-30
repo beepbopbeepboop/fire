@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPU offload: where the transform hooks in</title>
+<style>
+  body { max-width: 56em; margin: 0 auto; padding: 2em;
+         font-family: system-ui, sans-serif; line-height: 1.6; color: #1a1a1a; }
+  h1 { border-bottom: 2px solid #222; padding-bottom: .3em; }
+  h2 { margin-top: 2.5em; border-bottom: 1px solid #ccc; padding-bottom: .2em; }
+  h3 { margin-top: 1.8em; }
+  h1, h2, h3, h4 { line-height: 1.25; }
+  code, pre { font-family: "SF Mono", "Fira Code", monospace; font-size: 92%; }
+  code { background: #f0f0f0; padding: .1em .3em; border-radius: 3px; }
+  pre { background: #f5f5f5; padding: .8em 1em; border-radius: 4px;
+        overflow-x: auto; line-height: 1.45; }
+  pre code { background: none; padding: 0; font-size: 100%; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid #ccc; padding: .4em .7em; text-align: left;
+           vertical-align: top; }
+  th { background: #eee; }
+  li { margin: .3em 0; }
+  blockquote { background: #f7f7f7; border-left: 4px solid #b9b9b9;
+               margin: 1em 0; padding: .6em 1em; color: #444; }
+  blockquote p { margin: 0; }
+  li > p { margin: .3em 0; }
+  .banner { background: #fffbe6; border-left: 4px solid #d4a017;
+            padding: .6em 1em; margin: 0 0 2em 0; font-size: 92%; color: #555; }
+  .banner code { background: #f5edd0; }
+  em { color: #444; }
+</style>
+</head>
+<body>
+
+<p class="banner">Rendered from Markdown by <code>tools/md2html.py</code>. This HTML is the document; edit it directly.</p>
+
+<h1>GPU offload: where the transform hooks in</h1>
+<p>Companion to <code>doc/METAL.html</code>, which holds the idea. This document is the answer to a narrower question: <strong>given the tree as it actually is, which seams do we cut, in what order, and what is the first runnable increment.</strong> <code>METAL.html</code> is a parking lot; this is the plan.</p>
+<h2>The one thing that changes the plan</h2>
+<p><code>METAL.html</code> assumes the offline toolchain: emit MSL/AIR, run <code>xcrun metal</code>, then <code>xcrun metallib</code>, ship a <code>.metallib</code>, load it at run time.</p>
+<p><strong>We do not need any of that.</strong> <code>test_llm/metal.m</code> already compiles MSL at run time with <code>-[MTLDevice newLibraryWithSource:options:error:]</code>, and <code>test_llm/kernels.metal.inc</code> already carries the MSL <em>as a C string</em> precisely so a single generated C file is self-contained. That is a different, better deal:</p>
+<table>
+<thead><tr>
+<th></th>
+<th>offline <code>.metallib</code> (METAL.html)</th>
+<th>runtime <code>newLibraryWithSource:</code> (proven)</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>build wiring</td>
+<td><code>xcrun metal</code> + <code>metallib</code> in the build, per-arch caching</td>
+<td>none — it is a C string in the <code>.ci</code></td>
+</tr>
+<tr>
+<td>artifact</td>
+<td>a second file to ship and cache-key</td>
+<td>the <code>.ci</code> alone is the whole program</td>
+</tr>
+<tr>
+<td>portability</td>
+<td>re-compile per GPU family</td>
+<td>the same source, JIT'd by the driver for the GPU actually present</td>
+</tr>
+<tr>
+<td>debuggability</td>
+<td>need the MSL file to hand anyway</td>
+<td>the MSL is a literal in the <code>.ci</code> you already read</td>
+</tr>
+</tbody></table>
+<p>So the MSL becomes a <strong>sidecar string emitted by the compiler</strong>, not a separate compiled object. That removes the entire "how does this get built and cached" question, and it is the reason this is worth doing now rather than after the CPU path is solid.</p>
+<p>What we still take from <code>METAL.html</code>: the host/device split, <code>external_call</code> as the handoff, and the table-driven lowering discipline.</p>
+<h2>The three seams</h2>
+<p>They are at three different granularities, which is why none of them can do the other's job.</p>
+<h3>Seam 1 — device region selection (function level, <em>before</em> emission)</h3>
+<p>A pass that partitions the module's <code>FunctionDef</code>s into host and device. It cannot live in the emitter, because "emit this function to MSL instead of C" has to be decided before the emitter starts that function.</p>
+<p>New: <code>mojo/backend_gimple/device_select.py</code>.</p>
+<p>Selection, in priority order — explicit beats inferred, always:</p>
+<ol>
+<li><p><strong>Explicit marker.</strong> <code>'gpu' in fdef.decorators</code>. <code>FunctionDef.decorators</code> is already a list of strings and <code>module_gen.py:3631</code> already reads it for <code>'export'</code>, so this costs nothing and is the thing you write when you mean it.</p></li>
+<li><p><strong>Stdlib reachability.</strong> A function referenced as the callee of <code>DeviceContext.compile_function[...]</code> / <code>enqueue_function</code> is a kernel. This is the <em>upstream</em> shape, and it is what makes the hand-written stdlib GPU code work without editing it: see <code>stdlib/test/asyncrt/test_device_pointer_kernel.mojo:34-72</code>, where <code>vec_add</code> is an ordinary <code>def</code> and the test hands it to <code>ctx.compile_function[vec_add]()</code>. The compiler has to recognise the <em>call</em>, because the function itself carries no marker.</p></li>
+<li><p><strong>Inferred loop nests.</strong> A recognised parallel loop nest over contiguous numeric containers. This is increment 3, and it is deliberately last: inference is the part that can be wrong, and it should be built on a path that is already proven correct when explicitly asked for.</p></li>
+</ol>
+<p>Rule 2 is the one that answers "transform the hand-written speciality code as well as normal Python" — the stdlib kernels are unmarked, so reachability is the only honest way to find them.</p>
+<h3>Seam 2 — MSL emission (statement/op level)</h3>
+<p>A second emitter, parallel to <code>mojo/backend_gimple/emit_exprs.py</code>, selected by a target flag on the gen object (<code>gen.target</code>, <code>'c'</code> today, <code>'metal'</code> for a device function). This is the "two-target codegen shape" <code>METAL.html</code> already names: same AST, same walk discipline, different sink.</p>
+<p>New: <code>mojo/backend_gimple/emit_metal.py</code>, and its op table <code>mojo/middle/metal_ops.py</code>.</p>
+<p><strong><code>mlir.py</code> is the right model for the table, and the right place for the GPU ops</strong> — its own docstring says so: <em>"adding a newly-met op is one row here, not new backend control flow."</em> It already classifies the entire GPU op surface and defers it (<code>mlir.py:207-211</code>):</p>
+<pre><code class="language-python">_DEFERRED_PREFIXES = {
+    'nvvm.':  'GPU (NVIDIA) — see METAL.html / CUDA path',
+    'rocdl.': 'GPU (AMD)   — see METAL.html / ROCm path',
+}</code></pre>
+<p>with <code>pop.call_llvm_intrinsic</code> and <code>pop.inline_asm</code> deferred alongside. So every one of the ~100 <code>llvm_intrinsic[...]</code> sites and ~141 <code>inlined_assembly</code> sites in <code>std/gpu/</code> is <em>already classified</em> — the classifier works, the lowering does not exist. Building the lowering is therefore table work against an existing index, not new plumbing.</p>
+<p>The <code>mlir.*</code> family splits by vendor, and this is a Metal target, so the split is:</p>
+<ul>
+<li><code>llvm.air.*</code> / <code>llvm.agx3.*</code> → <strong>MSL</strong> (this target)</li>
+<li><code>llvm.nvvm.*</code> → PTX (a different target, same table shape)</li>
+<li><code>llvm.amdgcn.*</code> → ROCm (ditto)</li>
+</ul>
+<p>The one hard fact to design around: <code>mlir.py:71-77</code> collapses every address space to a plain C pointer (<code>!llvm.ptr&lt;1&gt;</code> global, <code>&lt;3&gt;</code> shared, <code>&lt;7&gt;</code> shared-cluster all become <code>void *</code>). For the host that is right. For a device it is <strong>wrong in a way that matters</strong> — <code>threadgroup</code> is not <code>device</code>, and the barrier semantics differ. So a device emitter must <em>break</em> that collapse, not inherit it. This is the one place the device target genuinely diverges from the host's type model, and it is where the first increment will hit.</p>
+<h3>Seam 3 — the artifact channel (module level)</h3>
+<p>The C backend returns one string (<code>module_gen.gen_module_impl</code>). A device region produces a <em>second</em> artifact. Rather than change that return type (the single-TU <code>--dump</code> path and the JIT both consume one string), the device emitter fills side buffers on the gen object:</p>
+<ul>
+<li><p><code>gen.device_source</code> — the MSL text, which <code>gen_module_impl</code> embeds as a C string literal (the <code>kernels.metal.inc</code> trick)</p></li>
+<li><code>gen.device_glue</code> — host-side C declarations for the dispatch shims</li>
+</ul>
+<p>and the function-emission loop at <code>module_gen.py:8808</code> routes a device <code>fdef</code> to the MSL emitter instead of the C one.</p>
+<p><strong>Landed.</strong> <code>mojo/backend_gimple/device_glue.py</code> emits the whole channel as pure C appended to the module, and the C API it calls lives in <code>runtime/fire_metal.h</code> / <code>fire_metal.m</code>. Pure C is a hard constraint, not a preference: the <code>.ci</code> is compiled <code>gcc -fgimple -x c</code>, and gimple is a C front end, so <code>@autoreleasepool</code> and <code>id&lt;MTLLibrary&gt;</code> do not survive it. <code>fire_metal.m</code> is therefore the only file in the tree that touches Metal, it is Objective-C, and the registry row that links it (<code>build_config._OPTIONAL_RUNTIME_UNITS</code>) carries the per-unit <code>clang</code> + <code>-fobjc-arc</code> that the build-wide gcc cannot provide.</p>
+<p>Four things this cost that the plan did not foresee, each of which failed silently rather than loudly:</p>
+<ul>
+<li><p><strong>The scalar ABI.</strong> MSL declares a scalar kernel parameter as <code>constant T &amp;</code>, and the device reads exactly the bytes bound at that index. Binding a host <code>double</code> for a Mojo <code>Int</code> (MSL <code>int</code>, 4 bytes) delivered the low 4 bytes of a float's mantissa, so <code>len=1024</code> arrived as <code>0</code>: every thread took the bounds guard, the kernel wrote nothing, and the program exited 0 with plausible arrays and no output. The widths now travel from the emitter (which chose the MSL type) to the wrapper (which narrows the value) to the runtime, which binds that many bytes.</p></li>
+<li><p><strong>The grid.</strong> Under-dispatching leaves the tail of the output uninitialised and over-dispatching is safe because kernels guard on <code>len</code>, so the runtime covers the largest buffer exactly.</p></li>
+<li><p><strong>Copy-back needs a length, and a <code>float *</code> has none.</strong> The contract is the kernel's first <code>Int</code>/<code>Int64</code> parameter, which every hand-written kernel here already has, and it is <em>checked</em> rather than guessed: a kernel with no length raises at compile time, because silently copying back nothing produces a program that runs and is wrong.</p></li>
+<li><p><strong>The optional-unit probe.</strong> A code generator that emits C from Python string templates has those templates in its own source, and compiling the compiler inlines them as <code>_slit_N</code> initializers — so the emitted <code>_mg_have_device = (int64_t) mojo_metal_init(...)</code> text made every build that imports <code>build_config</code> link Metal. Fixed in the probe (<code>build_config._strip_c_literals_and_comments</code>), which also removes the "followed by <code>(</code> and not preceded by a quote" heuristic's real blind spot, not by renaming anything around it.</p></li>
+</ul>
+<p><strong>Lists reach the GPU.</strong> The first version of this ended by claiming that nothing computes on the GPU from Mojo source, because <code>MojoList</code> is boxed and there seemed to be no way to obtain the contiguous <code>float *</code> a kernel takes. That was wrong, and wrong in the direction of under-claiming: <code>UnsafePointer[Float32].alloc(n)</code> already produced a real <code>float *</code>, so the representational gap was narrower than it looked. The real gap was the <em>conversion</em>, and it was the more dangerous half:</p>
+<ul>
+<li><p>Passing a list where a <code>T *</code> is declared used to emit <code>(T *)list</code>, and a <code>MojoList</code> is a struct whose <strong>first field is a data pointer</strong> — so the callee read <code>data</code>/<code>len</code>/<code>cap</code>/the inline buffer as the array's contents. It compiles, links, runs, and returns garbage at exit 0. Measured on <code>sumf([1.0, 2.0, 3.0], 3)</code>: the interpreter printed <code>6.0</code>, the compiled path printed <code>2.45e+26</code>.</p></li>
+<li><p>A list argument at a kernel call site now goes pack → dispatch → write-back → free, and so does one at an ordinary function call (<code>emit_infra._emit_call</code>, the single chokepoint every call path funnels through).</p></li>
+</ul>
+<p>The write-back covers <em>every</em> list-typed pointer argument, not only the ones the callee writes. A <code>T *</code> parameter does not say whether it is read-only, and the two ways to be wrong are not symmetric: skipping a write-back that was needed drops the result, while writing back an argument the callee never touched restores values it already held. So the rule is the safe one.</p>
+<p>The pack helpers are emitted per element type, only for a module that needs them, and only for a <strong>closed set</strong> of scalar types. <code>char *</code>, <code>void *</code> and struct pointers all end in <code> *</code> too; packing a list into one would compile, run, and be wrong in a way nothing in the tree would notice, so the gate is a list of names rather than a suffix test.</p>
+<p>So ordinary Python lists now offload:</p>
+<pre><code class="language-python">a = [0.0, 1.0, 2.0, 3.0]
+b = [2.0, 2.0, 2.0, 2.0]
+o = [-999.0, -999.0, -999.0, -999.0]   # poisoned, so a no-op cannot look right
+vec_add(a, b, o, 4)                    # -&gt; [2.0, 3.0, 4.0, 5.0] from the GPU</code></pre>
+<p><code>TestListsReachTheGpu</code> runs exactly that through <code>fire.py --jit</code>, so it covers the whole chain including the link step. <strong>Still open:</strong> the <em>automatic</em> offload — nothing yet decides on its own to move a loop to the device, and a packed/unpacked round trip per dispatch is not yet cheaper than the CPU for small inputs. Both are the next two items on this plan, not gaps in the mechanism.</p>
+<h2>Order of work</h2>
+<p><strong>Increment 1 — prove the path with one explicit kernel.</strong> <code>@gpu def matvec(...)</code> → MSL → embedded string → host dispatch → numbers match CPython. Every seam is exercised; nothing after this is architecturally new. If the MSL emitter, the sidecar, and the dispatch are right here, they are right for everything else.</p>
+<p><strong>Increment 2 — the hand-written speciality code.</strong> With a device emitter that exists, make the stdlib's device primitives lower into it: <code>llvm.air.*</code> → <code>threadgroup_barrier</code> / simdgroup ops, <code>pop.call_llvm_intrinsic</code> and <code>pop.inline_asm</code> → real MSL instead of the <code>0</code> stubs at <code>emit_calls.py:1135</code>. <code>std/gpu/primitives/id.mojo</code>'s <code>global_idx</code> and friends start returning real values. This is the half of the request that is about <em>existing</em> code, and it is table work plus a barrier/address-space model.</p>
+<p><strong>Increment 3 — auto-offload for ordinary Python.</strong> Recognise a parallel loop nest, synthesise a kernel, replace the host loop with a dispatch. This is the "simple Python in" half and the one that is genuinely new analysis.</p>
+<p>Increment 3 also has a hard prerequisite that is <em>not</em> GPU work: kernel arguments must be <strong>contiguous device memory</strong>, and today a Python list is a <code>MojoList</code> of boxed slots accessed through <code>mojo_list_get_double</code>. The measured cost of that is the ~19× residual between the compiler's <code>-O2</code> output and hand-written C on the same loop. Making numeric containers contiguous helps the CPU target too, so it is worth doing on its own merits and should not be buried inside the GPU work.</p>
+<h2>What is deliberately not in the plan</h2>
+<ul>
+<li><p><strong>No <code>xcrun metal</code>/<code>metallib</code> build wiring.</strong> Superseded by runtime compilation (table above).</p></li>
+<li><p><strong>No <code>MTL4</code> / Metal 4.</strong> <code>newLibraryWithSource:</code> is enough and is proven here.</p></li>
+<li><strong>No PTX/ROCm.</strong> Same table shape, different target; not now.</li>
+<li><p><strong>No claim about the whole stdlib.</strong> <code>std/gpu/</code> is 41k lines; increment 2 is scoped to the primitives a first kernel actually needs, not to making all of it compile.</p></li>
+</ul>
+<h2>Open questions this plan does not settle yet</h2>
+<ul>
+<li><p><strong>Argument marshalling.</strong> A <code>MojoList</code> cannot cross to the GPU, so the ABI question ("what is a kernel argument?") is really the contiguity question above. Resolved by fixing contiguity first, not by inventing an ABI.</p></li>
+<li><p><strong>Grid sizing.</strong> Infer from the loop trip count, or require the marker to carry it. Inference is what increment 3 needs anyway.</p></li>
+<li><p><strong>When the runtime-compiled library is rebuilt.</strong> Per process, per distinct MSL text — the same content-addressing the JIT already does for binaries.</p></li>
+</ul>
+
+</body>
+</html>

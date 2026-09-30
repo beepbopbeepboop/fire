@@ -203,9 +203,12 @@ def _signature_ctypes(gen, params, node, self_struct=None, sentinel='...') -> li
             if pt is None and self_struct and hasattr(gen, '_inferred_param_types'):
                 _msig_ct = gen._inferred_param_types.get(
                     f"{self_struct}_{node.name}", {}).get(pn)
-            out.append(_msig_ct if _msig_ct is not None
-                       else gen._param_ctype(pn, pt, node))
+            if _msig_ct is not None:
+                out.append(_msig_ct)
+            else:
+                out.append(gen._param_ctype(pn, pt, node))
     return out
+
 
 def _note_vararg_trailing_param_types(gen, s) -> None:
     """Called immediately after `self.func_param_types[s.name] =
@@ -300,7 +303,7 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         # annotation still takes precedence (ptype is not None there).
         ctype = 'MojoBytes *'
     elif (ptype is None and ctype == 'int64_t'
-          and isinstance(_pdflt, DictExpr)):
+          and isinstance(_pdflt, (DictExpr, TupleExpr, ListExpr, SetExpr))):
         # The CONTAINER-literal half of the rule the two branches above
         # state for strings: an unannotated parameter whose declared
         # default is a `{}` / `[]` / `set()` literal IS a container
@@ -317,11 +320,30 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         # `mojo_dict_union(env_defaults | os.environ | updates)` as
         # argument 2, an `int64_t` where a `MojoDict *` is expected.
         #
+        # A tuple/list default is a MojoList, so it must NOT take this
+        # branch's MojoDict answer. `('gen', 'self')` is the case that
+        # mattered: `_selfhost_fn_reassigns_method(_fn, _pnames=('gen',
+        # 'self'))` kept the int64_t box, the call site padded the omitted
+        # default as a real `(MojoList *)0`, and gcc rejected the self-host
+        # closure with "passing argument 2 ... makes integer from pointer
+        # without a cast". `GimpleGen.__init__(..., no_mangle=(), ...)` is
+        # the same bug with a worse outcome: the definition inferred
+        # `MojoList *` from `set(no_mangle)` while the declaration said
+        # `int64_t`, and gcc's "conflicting types" took out
+        # bootstrap-stage2-cc, selfhost, mojoc, silentnoop and
+        # stdlib-syntax together.
+        #
         # Fires ONLY on the unresolved generic box (`ctype ==
         # 'int64_t'`), so an explicit annotation and any usage- or
         # cross-call-inferred type keep their existing precedence --
         # same guard the `StringLiteral` branch above uses.
-        ctype = 'MojoDict *'
+        _pdflt_name = type(_pdflt).__name__
+        if _pdflt_name in ('TupleExpr', 'ListExpr'):
+            ctype = 'MojoList *'
+        elif _pdflt_name == 'SetExpr':
+            ctype = 'MojoSet *'
+        else:
+            ctype = 'MojoDict *'
     # Compile-time string types (StaticString, StringLiteral, StringRef,
     # StringSlice) are REAL strings in this codegen — a NUL-terminated
     # `char *`. The general resolver boxes them as opaque int64_t handles
