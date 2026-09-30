@@ -796,7 +796,8 @@ class Spec:
               markers are not combinable, and `disabled` is the one to reach
               for when running the test would cost more than its verdict is
               worth — a 20 GB, minutes-long run to learn something already
-              written down. See "Expected failures, and disabled tests" below.
+              written down. See "Disabled tests" below, and CLAUDE.md,
+              "Known failures: expect= or disabled=, decided by cost".
     artifact  a binary this step produces, cached by the content of its real
               inputs (see ArtifactCache); `inputs` are the files, on top of the
               self-host closure, that its key folds in
@@ -1233,11 +1234,11 @@ SELFHOST_STAGE2_STALL = (
 # `_selfhost_*` seed passes within one process; degenerate-hashing check on
 # the tokenizer's `MojoSet` usage).
 #
-# `native-dumpfull` still carries this as an `expect=` marker, and that is the
-# right marker for it BY THE LETTER of the rule below: it is the corpus whose
-# divergence the blowup directly causes, its own doc is already the switch, and
-# running it is how the blowup's numbers get re-measured at all.
-# `ab-native`, the same blowup, does NOT: see the registration below.
+# `native-dumpfull` carries this same reason and is LEFT on `expect=`: the two
+# are the same blowup, the call is the owner's, and
+# bugs/CODEGEN_ab_native_fails.md §4 tables it with the recommendation to
+# disable it as well (31.3 GB, 55 GB reserved, for a known red). Only
+# `ab-native` is switched here.
 SELFHOST_TOKENIZE_BLOWUP = (
     'no longer segfaults, but the self-hosting bootstrap pre-pass this '
     'corpus legitimately triggers costs ~15-30 GB / ~15-25s per call — see '
