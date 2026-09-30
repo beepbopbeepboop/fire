@@ -430,6 +430,12 @@ def _gen_stmt_VarDecl(gen, node):
         # exactly, including the `type_ann is None` guard.
         if node.type_ann is None and v in gen._struct_slot_kinds:
             gen._struct_slot_kinds[node.name] = gen._struct_slot_kinds[v]
+        # And the companion marker for the reads the per-slot kinds cannot
+        # answer — iteration and a computed subscript — which need the
+        # runtime's own record on the value. Same guard, same reason: it is
+        # the local name the read is keyed on, not the unpack temp.
+        if node.type_ann is None and v in gen._maybe_kinds_vals:
+            gen._maybe_kinds_vals.add(node.name)
         # Same propagation for a `struct.Struct(...)` handle's format string,
         # which is what lets `var s = struct.Struct('<if')` then
         # `s.unpack(buf)` recover the per-slot kinds. Same shape, same

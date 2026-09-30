@@ -1,10 +1,19 @@
 # HARD BUG: `struct` keyword arguments are silently dropped, and the inline mixed int+float unpack still returns raw bits
 
-**State: item 1 CLOSED, item 2 CLOSED for every statically-indexed read, with
-named residue below.** Both items' headline repros are fixed; what is left is
-the set of reads with no compile-time slot index, which is an architectural
-limit rather than an oversight, and one genuinely separate bug found on the
-way (`f"{list}"`/`str(list)`), which has its own doc.
+**State: CLOSED 2026-09-29. No live residue in this doc.** Both headline
+items were closed 2026-09-26; the residue recorded under item 2 on
+2026-09-27 (reads with no compile-time slot index, copies of a mixed
+result, and a class attribute's `Struct` handle) is fixed too, and the
+"Residue" section below says exactly what landed and what each measurement
+was before. **This doc is kept, not deleted, for two reasons and no more:**
+ten live cross-references point at it (a `git rm` would orphan every one —
+the exact rot this directory's README catalogues), and one recorded
+divergence of the new mechanism belongs here rather than nowhere. The one
+genuinely open bug this work uncovered is a DIFFERENT one, filed at
+`bugs/CODEGEN_list_return_via_local_types_the_return_int64_t.md`: a
+function that returns a `MojoList *` it built in a LOCAL is typed `int64_t`
+by return-type inference, so the caller print()s the pointer's address and
+iterating it SEGFAULTS — pre-existing, and independent of `struct`.
 
 Found 2026-09-26 by re-testing the claims in the now-removed
 `CODEGEN_struct_module.md`. That doc was correctly closed for the mechanisms
@@ -139,26 +148,100 @@ constant, now consult `_struct_slot_kinds`:
 `Struct` reached through a class ATTRIBUTE (`self.FMT.unpack(data)`) still has
 no format: the receiver is a struct field read, not a tracked value name.
 
-### Residue, with the reason it is residue
+### Residue — CLOSED 2026-09-29, in two parts
 
-A `MojoList` slot holds no type tag, so a read whose slot index is not known at
-compile time needs ONE static C type for a read that has no single right
-answer. That is not specific to `struct` — a heterogeneous `[1, 2.5]` literal
-prints `1.0` and iterates as `1.0, 2.5` for the same reason. Fixing it means
-either boxing the elements or a per-slot tag in the container, which is a
-container-architecture change, not a `struct` fix. So, still wrong, with the
-reason recorded so nobody re-derives it:
+The residue above was real, and the reason it was hard is a single design
+decision: the per-slot kinds lived in a **codegen-side table keyed by the C
+value name** the unpack was assigned to. Every derivation of that value
+lost them, and a read with no compile-time slot index had nowhere to put a
+value with no single right C type. Both halves are now fixed.
 
-- `for x in struct.unpack('<if', b):` — the loop variable has one C type.
-- `struct.unpack('<if', b)[i]` with a computed `i`.
-- `list(struct.unpack('<if', b))` / any copy — `mojo_list_copy` and
-  `mojo_list_slice` build a fresh list, which has no kinds and no format to
-  recover them from.
-- `self.FMT.unpack(data)` where `FMT` is a class attribute (see above).
+**Part 1 — the kinds travel with the VALUE.** `mojo_list_set_kinds`
+(`runtime/fire_runtime.c`) records one byte per slot against the live
+`MojoList` address, in a payload-carrying open-addressed side table beside
+the existing `_PtrReg` registries — deliberately not a field on `MojoList`,
+which would move every stack-declared list in every generated program plus
+the C++ backend's own copy of the container. The format compiler already
+builds the per-op list, so the kinds cannot disagree with the values
+`_struct_unpack_at` stores; a UNIFORM format records nothing at all
+(`MojoStructFmt.kinds` stays NULL), which is why `struct.unpack('<HH', buf)`
+pays exactly zero for this. Every list->list copy hands them along, and
+every list repr defers to a value's own kinds before reading it through one
+accessor — so the answer is right whichever helper the codegen picked,
+which is what a derived value (whose compile-time element type is a guess)
+needs.
+
+**Part 2 — a read with no compile-time index is boxed.** The kind has to
+leave the slot next to the value, because the C type cannot carry it:
+`mojo_list_get_boxed` returns the raw word for every slot that is not a
+float, and the address of a 16-byte box for a float slot. `mojo_is_boxed`
+is the one predicate a consumer needs (same registry shape as
+`mojo_is_registered_list`), `mojo_boxed_is_str` excludes a box so it is
+never handed to `strlen`, and `print`/`str` resolve it in one call via
+`mojo_repr_boxed`. Boxes are cached per (list, slot) rather than per read.
+
+A class attribute's `Struct` handle — the fourth residue bullet, which is a
+*tracking* gap and not a container one — is fixed separately: the
+declaration's format is recovered and keyed by (owning struct, attribute),
+so two classes declaring the same name with DIFFERENT formats both come out
+right instead of one of them being guessed at.
+
+Measured against CPython 3.14 on the same program, all of these were wrong
+before and are right now:
+
+    for x in struct.unpack('<if', struct.pack('<if', 1, 1.0)): print(x)
+      was  1 / 4607182418800017408        now  1 / 1.0
+    print(struct.unpack('<if', b)[i])      was  4607182418800017408  now  1.0
+    print(list(struct.unpack('<if', b)))   was  [1, 4607182418800017408]
+                                           now  [1, 1.0]
+    print(struct.unpack('>dhh', ...)[:])   was  [4607182418800017408, 2, 1]
+                                           now  (1.0, 2, 1)
+    struct A: var F = struct.Struct('<if')  then  A.F.unpack(b)[1]
+      was  4612811918334230528            now  2.5
+    print([1, 2.5])                        was  [1.0, 2.5]           now  [1, 2.5]
+    for y in [1, 2.5]: print(y)            was  1.0 / 2.5            now  1 / 2.5
 
 Uniform formats (`<2f`, `<3i`, `<4s`, and also `>dhh`, `<Bd`, `<fd`) are
 correct through the subscript AND the whole-result repr, and are covered by
 both spellings in `test_gimple_runner.py` so they cannot regress silently.
+An ordinary int-list subscript still emits the `mojo_list_get_int` it
+always did: the boxed read is chosen by a compile-time marker
+(`gen._maybe_kinds_vals`), not by changing the general case.
+
+Seven new regression tests in `test_gimple_runner.py`:
+`gimple_struct_mixed_reads_survive_a_derivation`,
+`gimple_struct_mixed_reads_without_a_static_index`,
+`gimple_struct_mixed_reads_survive_a_function_boundary`,
+`gimple_heterogeneous_list_literal_keeps_each_slot`,
+`gimple_struct_class_attribute_handle_format_known`,
+`gimple_heterogeneous_element_arithmetic_unboxes`, and the extended
+`gimple_struct_uniform_formats_still_uniform`.
+
+### The one divergence this bought, and why it is the right way round
+
+Arithmetic on a boxed element is taken apart as a DOUBLE, always: a box
+only ever holds a float, and in Python a float operand makes the whole
+operation a float one. So a boxed read whose runtime slot turns out to be
+an **int** (`t[k] + 1` with `k` a computed 0) is promoted, and the result
+is float-typed — the same number, printed `2.0` where CPython prints `2`.
+Choosing per slot would need a runtime branch around the whole operand
+dispatch, and a wrong value traded for a wrong format is the right way
+round. A read with a *compile-time* index takes no box at all, so `t[0] + 1`
+is exact. Asserted (both halves) in `test_gimple_runner.py`'s
+`gimple_heterogeneous_element_arithmetic_unboxes` so it cannot rot
+unnoticed.
+
+### What is still missing, and where it is written down
+
+A mixed unpack result that crosses a function boundary **through a local**
+(`var t = struct.unpack(...); return t`) never becomes a `MojoList *` in the
+first place, so it is a return-TYPE inference bug, not a per-slot-kinds one:
+the caller print()s the pointer's address and `for y in f()` segfaults —
+on the base commit too, and for an ordinary `return [1, 2, 3]` as well.
+Filed as `bugs/CODEGEN_list_return_via_local_types_the_return_int64_t.md`
+with the two gaps in the seed and the blast radius to check. The
+cross-function half that IS this mechanism (`def f(): return
+struct.unpack(...)`) is fixed and tested.
 
 ## 3. Genuinely closed, and worth keeping in mind as done
 
@@ -172,45 +255,87 @@ Verified correct, for the record, so nobody re-opens them:
 
 ## 4. Found while fixing the above, and NOT this doc's bug
 
-**FIXED 2026-09-27, doc deleted.** `f"{a_list}"` and `str(a_list)` emitted
-`mojo_str((void *)list)` instead of the list repr, printing the container
-header as raw bytes — not `struct`-specific and not mixed-format-specific.
-`_stringify_value` (`mojo/backend_gimple/emit_infra.py`) gained the
-`MojoList *`/`MojoSet *`/`MojoDict *` branches `print`'s dispatch already
-had (reusing `_list_repr_call`/`_mojo_repr_set`/`_mojo_repr_dict`), plus the
-same boxed-container re-typing check (`_get_actual_type`) `print` does
-before its own branches, so a call result boxed into `int64_t`/`void *`
-resolves too. Regression: `test_gimple_runner.py`'s
-`gimple_fstring_and_str_of_containers`.
+**FIXED 2026-09-27, doc deleted. Re-verified 2026-09-29, still fixed:**
+`print(f"{a_list}")`, `print(str(a_list))` and `print(f"{a_set}")` /
+`f"{a_dict}"` all give the container's repr, matching CPython, on the
+current tree. `_stringify_value` (`mojo/backend_gimple/emit_infra.py`) had
+gained the `MojoList *`/`MojoSet *`/`MojoDict *` branches `print`'s dispatch
+already had (reusing `_list_repr_call`/`_mojo_repr_set`/`_mojo_repr_dict`),
+plus the same boxed-container re-typing check (`_get_actual_type`) `print`
+does before its own branches, so a call result boxed into
+`int64_t`/`void *` resolves too. Regression: `test_gimple_runner.py`'s
+`gimple_fstring_and_str_of_containers`. It has no doc left in `bugs/` to
+re-open, which is why the task's "file one if there isn't one" does not
+apply — there is nothing left to file.
 
-## A claim in the removed doc that did NOT reproduce
+## A claim in the removed doc that did NOT reproduce — AND IS NOW STALE ITSELF
 
 It claimed no interpreter `struct` module exists, so a comptime-evaluated
 `struct.Struct(...)` default still `NameError`s. Both shapes were reported as
-working through `fire.py run` in the doc that replaced it. In THIS checkout
-`fire.py run` on any `struct.*` call raises
-`NameError: name 'struct' is not defined` — there is no interpreter `struct`
-support at all, so the compiled path is strictly ahead of it and there is no
-interpreter/compiled parity to hold. Reported, not fixed: the interpreter is
-not where this doc's work belongs.
+working through `fire.py run` in the doc that replaced it. On 2026-09-26 the
+interpreter really did have no `struct` at all (`fire.py run` on any
+`struct.*` call raised `NameError: name 'struct' is not defined`), which is
+what this section said.
+
+**Re-measured 2026-09-29, that is no longer true, in either spelling:**
+
+    fire.py run, 'import struct; print(struct.unpack("<if", struct.pack("<if", 1, 1.0)))'
+      -> (1, 1.0)          (CPython agrees)
+    fire.py run, 'from struct import unpack, pack; print(unpack("<if", pack("<if", 1, 1.0)))'
+      -> (1, 1.0)          (CPython agrees)
+
+So the interpreter grew a `struct` module in the meantime, and there is now
+real interpreter/compiled parity to hold rather than the compiled path being
+"strictly ahead". Recorded because this section is the kind of claim that
+goes stale silently: it was written as a measurement, and it stopped being
+one.
 
 ## Where
 
 - `mojo/backend_gimple/emit_methods.py` — `_STRUCT_CALL_SIGS`,
   `_struct_kwarg_rejection`, `_struct_missing_required`, `_struct_bind_args`,
   `_struct_bind_or_raise`, and the two lowerings that call them;
-  `_struct_slot_kinds` / `_struct_elem_ctype` docstrings.
+  `_struct_slot_kinds` / `_struct_elem_ctype` docstrings;
+  `_struct_tag_unpack_result`'s `_maybe_kinds_vals` mark;
+  `_struct_attr_format` (the class-attribute lookup);
+  `_struct_value_codes` (now a thin delegate).
 - `mojo/backend_gimple/emit_infra.py` — `_list_repr_fn`'s kinds branch,
-  `_struct_slot_kind_bytes`, `_list_repr_call`.
-- `mojo/middle/loops_shared.py` — `_tuple_elem_value`.
+  `_struct_slot_kind_bytes`, `_list_repr_call`; the `mojo_repr_boxed` arms
+  in `_gen_print` and `_stringify_value`.
+- `mojo/backend_gimple/emit_calls.py` — the boxed subscript in the
+  `MojoList *` branch of `_lower_subscript`; `list(x)`'s kinds inheritance
+  in `_lower_ctor_from_iterable`; the return-boundary mark in
+  `_lower_named_call`.
+- `mojo/backend_gimple/emit_exprs.py` — `_lower_list_literal`'s per-element
+  append for a numeric mix, and `_list_literal_slot_kind`.
+- `mojo/backend_gimple/emit_loops.py` — `_gen_for_list`'s boxed read and
+  the loop target's `int64_t` declaration for a kinds-carrying list.
 - `mojo/backend_gimple/emit_stmts.py` — the `var` propagation of a
-  `struct.Struct` handle's format.
-- `gimple_codegen.py` — `_struct_formats`, the `_list_repr_call` delegate.
-- `runtime/fire_runtime.c/.h` — `mojo_repr_list_kinds`.
+  `struct.Struct` handle's format, of the per-slot kinds, and of the
+  kinds-carrying marker.
+- `mojo/backend_gimple/module_gen.py` — the class-attribute format table
+  in `gen_module_impl`; `_returns_kinds_valued` /
+  `_infer_return_maybe_kinds` and the single pass over them.
+- `mojo/middle/types.py` — `_struct_ctor_format`, `_struct_format_codes`,
+  `_struct_format_is_mixed`.
+- `mojo/middle/loops_shared.py` — `_tuple_elem_value`.
+- `gimple_codegen.py` — `_struct_formats`, `_struct_attr_formats` /
+  `_struct_attr_formats_scoped`, `_maybe_kinds_vals`, `_boxed_vals`,
+  `_return_maybe_kinds`, the `_list_repr_call` delegate, and the
+  `mojo_repr_boxed` / `mojo_list_get_boxed` / `mojo_list_inherit_kinds`
+  runtime signatures.
+- `runtime/fire_runtime.c/.h` — `mojo_repr_list_kinds`; the kinds side table
+  (`mojo_list_set_kinds` / `_get_kinds` / `mojo_list_slot_kind` /
+  `mojo_list_inherit_kinds`) and its uses in the list->list derivations;
+  `MojoStructFmt.kinds` and `_struct_op_kind`; the box
+  (`mojo_list_get_boxed`, `mojo_is_boxed`, `mojo_box_double`,
+  `mojo_box_int`, `mojo_repr_boxed`) and the `mojo_boxed_is_str` exclusion.
+- `mojo/backend_gimple/module_gen.py` — the one emitted `_mojo_repr_list`
+  guard that consults a value's own kinds.
 - Tests: `test_gimple_runner.py`'s `gimple_struct_mixed_int_float_formats`
   (extended: it previously wrote ONLY the `var m = ...` spelling, so it
   structurally could not see this item), `gimple_struct_uniform_formats_still_uniform`
-  (extended with the whole-result repr), and the new
-  `gimple_struct_keyword_arguments`, which compares all thirteen
-  keyword-reachable failure messages against CPython's text.
+  (extended with the whole-result repr), `gimple_struct_keyword_arguments`
+  (all thirteen keyword-reachable failure messages compared against
+  CPython's text), and the five new ones named under "Residue".
 

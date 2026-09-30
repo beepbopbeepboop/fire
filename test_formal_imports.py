@@ -578,13 +578,31 @@ def test_guarded_imports_stay_inert(tmpdir, _shared):
           f"so is the __future__ directive — only `os` is a dependency")
     root = os.path.join(tmpdir, "guarded")
     os.makedirs(root)
+    # The probe is the program's OUTPUT, and it prints from `main` — which the
+    # module body calls, because that is what a real file of this shape does.
+    #
+    # The exit code used to be the probe, and it was measuring the wrong thing
+    # twice over. It was 13 because the formal entry point called `main` for a
+    # module whose body did not: `formal/build.py:_module_body_function` now
+    # runs the body, and a body that does not call `main` does not run it, so
+    # the process exits 0 — which is what CPython does for the same file
+    # (`main()` at file level returns into nothing). That shift is
+    # `bugs/FORMAL_toplevel_statements_dropped.md` being fixed, not a
+    # regression, and asserting 13 would have pinned the silent drop back in
+    # place. What this test is actually about is INERTNESS: the guarded import
+    # must not become a dependency, so the build has to succeed at all and the
+    # body has to have run. Both are visible in what the program prints.
     write_tree(root, {"prog.mojo":
                       "if False:\n  import nonexistent_guard_false\n"
-                      "def main():\n  return 13\n"})
+                      "def main():\n  printf(\"guarded-import-inert\\n\")\n"
+                      "main()\n"})
     fresh_cas()
     _result, out = build(root, "prog.aout")
-    code, err = run(out)
-    check(code == 13, f"returned {code}, expected 13; stderr: {err}")
+    code, out_text = run(out)
+    check("guarded-import-inert" in out_text,
+          f"the guarded import was not inert: the body did not run "
+          f"(exit {code}, output {out_text!r}). A non-inert resolver would "
+          f"have failed the build on `nonexistent_guard_false` instead.")
 
 
 def test_repository_sibling_resolves(tmpdir, _shared):

@@ -1,1 +1,2 @@
-Hello from Mojo!\nThis is a test.\n
+Hello from Mojo!
+This is a test.

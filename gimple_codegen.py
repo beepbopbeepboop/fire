@@ -1835,6 +1835,48 @@ class GimpleGen:
         # `s.unpack(struct.pack('<if', 1, 1.0))` degraded exactly like the
         # module-function spelling used to.
         self._struct_formats: dict[str, str] = {}
+        # Attribute/field name -> the const-folded format of the
+        # `struct.Struct('<fmt>')` it was declared with, or None for a name
+        # two classes declare with DIFFERENT formats. Consulted only when a
+        # `Struct` handle's own value key missed: the format of a handle
+        # reached through a field or class attribute (`self.F.unpack(buf)`)
+        # has no local name for `_struct_formats` to be keyed on, and without
+        # it a mixed format's float slot came back as raw IEEE-754 bits on
+        # every statically-indexed read. See gen_module_impl's class-attr
+        # scan, which fills this in, and _struct_ctor_format in
+        # mojo/middle/types.py, which decides what counts.
+        self._struct_attr_formats: dict[str, str | None] = {}
+        # The same, keyed by (owning struct, attribute). Consulted FIRST, and
+        # the only table that can answer when the name-only one above is
+        # ambiguous — two classes with a `var F = struct.Struct(...)` of
+        # DIFFERENT formats is ordinary, and the owning type is recoverable
+        # at the read site for `self.F`, `Cls.F` and a local of a known
+        # struct type.
+        self._struct_attr_formats_scoped: dict[tuple, str] = {}
+        # C values that are `MojoList *`s which MAY carry their own per-slot
+        # element kinds at runtime (runtime/fire_runtime.c's
+        # mojo_list_set_kinds): a `struct.unpack` result for a format that
+        # mixes kinds, and anything the codegen itself derived from one.
+        # Only a value in this set is read through `mojo_list_get_boxed`, so
+        # an ordinary int-list subscript keeps emitting the plain
+        # `mojo_list_get_int` it always did — the cost of the mechanism is
+        # confined to the lists that can actually need it.
+        self._maybe_kinds_vals: set = set()
+        # C values produced by `mojo_list_get_boxed`, and so may be a BOX
+        # (a heap cell carrying a float that has no int64_t spelling) rather
+        # than the value itself. Consulted by the two places that stringify
+        # an `int64_t` — `print` and f-string/`str()` — so only a value that
+        # could be a box pays for finding out. See mojo_repr_boxed.
+        self._boxed_vals: set = set()
+        # Function name -> True when some `return` in its body hands back a
+        # value whose per-slot kinds are recorded on the VALUE (a
+        # `struct.unpack` of a format that mixes kinds). Read back at the
+        # call site so a derived list crossing a function boundary is still
+        # lowered as a boxed read. Filled by Pass 2c's whole-program scan,
+        # beside `_return_elem_types`, which is the same shape for the same
+        # reason — see _infer_return_maybe_kinds in
+        # mojo/backend_gimple/module_gen.py.
+        self._return_maybe_kinds: set = set()
         self._nested_elem_types: dict[str, str] = {}
         self._param_struct_types: dict[str, str] = {}
         self._dict_val_types: dict[str, str] = {}
@@ -2436,6 +2478,11 @@ class GimpleGen:
         'mojo_repr_list_bools':      ('char *',    ['MojoList *']),
         'mojo_repr_list_bytes':      ('char *',    ['MojoList *']),
         'mojo_repr_list_kinds':      ('char *',    ['MojoList *', 'const char *']),
+        'mojo_repr_boxed':           ('char *',    ['int64_t']),
+        'mojo_list_get_boxed':       ('int64_t',   ['MojoList *', 'int64_t']),
+        'mojo_box_double':           ('double',    ['int64_t']),
+        'mojo_box_int':              ('int64_t',   ['int64_t']),
+        'mojo_list_set_kinds':       ('void',      ['MojoList *', 'const char *']),
         '_mojo_repr_dict':           ('char *',    ['MojoDict *']),
         # Python binding layer (mojo_python.h)
         'mojo_python_init':      ('void',       []),
@@ -2746,6 +2793,10 @@ class GimpleGen:
         'mojo_list_all':         ('int',        ['MojoList *']),
         'mojo_list_any':         ('int',        ['MojoList *']),
         'mojo_list_copy':        ('MojoList *', ['MojoList *']),
+        'mojo_list_inherit_kinds': ('void',     ['MojoList *', 'MojoList *']),
+        'mojo_list_get_kinds':     ('const char *', ['MojoList *']),
+        'mojo_list_slot_kind':     ('char',     ['MojoList *', 'int64_t']),
+        'mojo_is_boxed':           ('int',      ['int64_t']),
         'mojo_cstr_reverse':     ('char *',     ['char *']),
         'mojo_bytes_reverse':    ('MojoBytes *', ['MojoBytes *']),
         'mojo_list_extend':      ('void',       ['MojoList *', 'MojoList *']),

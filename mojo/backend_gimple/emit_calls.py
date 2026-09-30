@@ -3320,13 +3320,41 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
         # `var_types` lowers straight back to itself with this ctype.
         gen.var_types[_av] = _at
         _arg0 = gimple_ctypes.IdentExpr(_av, node.line, node.col)
+    # `list(<a list>)` is a slot-for-slot copy, so the result describes its
+    # slots exactly as the source does — and for a list that carries its own
+    # per-slot kinds (a `struct.unpack` of a mixed format, a heterogeneous
+    # literal) that description is the only thing standing between a copy and
+    # raw IEEE-754 bit patterns. The comprehension below emits the copy as an
+    # explicit append loop, which loses the kinds by itself, so hand them
+    # over once it has run. Done at RUNTIME lookup rather than from the
+    # codegen's own table on purpose: the source is reached through a value
+    # the codegen may have no kinds for (a copy of a copy, a list returned
+    # from a function) while the runtime does. Only for `list` — a `set`
+    # re-reads its elements through the set's own per-slot accessors and
+    # genuinely produces a different container.
+    _copy_src = None
+    if kind == 'list':
+        _lt, _lv = gen.lower_expr(_arg0)
+        if _lt == 'MojoList *':
+            # Same anti-double-side-effect discipline as the set branch
+            # above: re-use the value we just lowered, do not lower the
+            # argument expression a second time.
+            gen.var_types[_lv] = _lt
+            _arg0 = gimple_ctypes.IdentExpr(_lv, node.line, node.col)
+            _copy_src = _lv
     gen.temp_counter += 1
     var = f"_ctor_elem{gen.temp_counter}"
     synth_gen = gimple_ctypes.Generator(target=var, iterable=_arg0, conditions=[],
                      line=node.line, col=node.col)
     compr = gimple_ctypes.Comprehension(kind=kind, element=gimple_ctypes.IdentExpr(var, node.line, node.col),
                            generators=[synth_gen], line=node.line, col=node.col)
-    return gen._lower_comprehension(compr)
+    _rt, _rv = gen._lower_comprehension(compr)
+    if _copy_src is not None and _copy_src != _rv:
+        gen._emit_call('void', '', 'mojo_list_inherit_kinds',
+                       [('MojoList *', _rv), ('MojoList *', _copy_src)])
+        if _copy_src in gen._maybe_kinds_vals:
+            gen._maybe_kinds_vals.add(_rv)
+    return _rt, _rv
 
 
 def _lower_builtin_set(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -5341,6 +5369,18 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         _gf = gen._fn_returns_generator.get(fname_raw)
         if _gf is not None and _gf in gen._generator_api:
             gen._generator_var_api[t] = gen._generator_api[_gf]
+    # A callee that RETURNS a kinds-carrying value: the result is still
+    # described, but the compile-time NAME the per-slot kinds were recorded
+    # against died with the callee's frame. Mark it so a read with no
+    # compile-time index (iteration, a computed subscript) is lowered as a
+    # BOXED read — `f = make_tuple(); f[0]`, `for x in make_tuple():`.
+    # Inferred by the same whole-program scan that fills `_return_elem_types`
+    # (see _infer_return_maybe_kinds in module_gen.py), so it is keyed by
+    # the same bare callee name. A callee NOT in the set keeps the plain
+    # accessor, which is what every other list-returning function has always
+    # emitted.
+    if ret_type == 'MojoList *' and fname_raw in getattr(gen, '_return_maybe_kinds', ()):
+        gen._maybe_kinds_vals.add(t)
     return ret_type, t
 
 
@@ -5890,6 +5930,23 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
                     'int64_t', f"mojo_list_get_int ({ov}, {idx64})")
         suf  = gimple_ctypes.TypeLattice.list_suffix(elem)
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
+        # A list that records its OWN per-slot kinds, read at an index that is
+        # not a compile-time constant, is the one read with no static answer:
+        # the loop variable of `for x in struct.unpack('<if', buf)` and the
+        # value of `struct.unpack('<if', buf)[i]` both used to come out of
+        # one accessor, which hands back a float slot's raw IEEE-754 bits.
+        # The runtime knows the kind, so read it there and let the box carry
+        # it out of the slot; the consumer resolves it (see gen._boxed_vals).
+        # Checked BEFORE the uniform-suffix branches, because a heterogeneous
+        # list's tracked element type is its PROMOTED one — 'double' for
+        # `[1, 2.5]` — which is exactly the answer that is wrong for its int
+        # slot. A list with no kinds of its own is unaffected: a set
+        # membership test at compile time, and the identical accessor
+        # otherwise.
+        if ov in getattr(gen, '_maybe_kinds_vals', ()):
+            t = gen._new_val('int64_t', f"mojo_list_get_boxed ({ov}, {idx64})")
+            gen._boxed_vals.add(t)
+            return 'int64_t', t
         if suf == 'double':
             t = gen._new_val('double', f"mojo_list_get_double ({ov}, {idx64})")
             return 'double', t
