@@ -117,6 +117,12 @@ class Sandbox:
         return False
 
 
+# Backfill (tools/memslot.py) lets a SMALL request sneak in on the machine's measured free memory, which is
+# right for real runs and wrong for the admission cases below: they need a budget that is really full to mean
+# "this job must wait". Backfill is therefore off for every synthetic run in this file.
+os.environ["MEMSLOT_SNEAK_MAX_GB"] = "0"
+
+
 class _SandboxEnv:
     """Set environment variables for a synthetic run, and put them back.
 
