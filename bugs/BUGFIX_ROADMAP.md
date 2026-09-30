@@ -117,9 +117,18 @@ landed, all with regression coverage in `test_generators.py` (interpreter),
 - `CODEGEN_all_any_dict_set_miscompile.md` — fixed.
 - `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` — item 0, partially landed 2026-09-26 (signedness + the loop-contract parameterisation); the doc keeps ownership of the loop-model gap.
 - `CODEGEN_boxed_method_name_list_set_ambiguity.md` — fixed.
-- `CODEGEN_container_free_registry_dangling_entries.md` — resolved.
-- `CODEGEN_container_no_deallocation_unbounded_growth.md` — resolved.
-- `CODEGEN_large_dict_accumulation_exit_crash.md` — no longer reproduces.
+- `CODEGEN_container_free_registry_dangling_entries.md`,
+  `CODEGEN_container_no_deallocation_unbounded_growth.md`,
+  `CODEGEN_call_result_container_never_freed.md` and
+  `CODEGEN_large_dict_accumulation_exit_crash.md` — all fixed and
+  regression-tested; their docs deleted 2026-09-30 per the
+  fully-fixed-is-deleted rule. The registry doc's own subject grew two
+  members while it was open and both are now closed too: the per-slot
+  KINDS side table, whose delete left a probe gap that stripped the
+  element kinds off every OTHER live list sharing the cluster (a
+  heterogeneous list read with no kinds hands a double's IEEE-754 bit
+  pattern to `strlen`), and the bound-method registry, which had no free
+  at all until the closure-env work needed one.
 - the `struct` module and the `bytes` value type — both landed, and their
   hard-bug reports have since been removed per the fully-fixed-is-deleted
   rule. `hard/CODEGEN_struct_kwargs_and_inline_unpack.md` had both its items

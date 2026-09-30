@@ -1,17 +1,17 @@
 # CODEGEN: a heterogeneous list bound from a CALL RESULT reads every element as a string — SIGSEGV on a float slot
 
 Found 2026-09-30 while writing the regression test for the per-slot kinds
-table (`CODEGEN_container_free_registry_dangling_entries.md`), on the way to
-proving the fix. It is the MIRROR of
+side table that same work repaired, on the way to proving that fix. It is the MIRROR of
 `CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee.md` — that one is
 a `List[String]` whose element reads back as an INT, this is an unannotated
 `List` whose element reads back as a STRING — and it is not the same root
 cause in the direction that matters, so it is filed separately rather than
 folded in.
 
-## Status (2026-09-30 — OPEN, reproduced on current master, NOT caused by the
-kinds-table fix; the repro below segfaults identically with the pre-fix
-`runtime/fire_runtime.c`)
+## Status (2026-09-30 — OPEN, reproduced on current master, NOT caused by any
+of the memory-ownership work of 2026-09-30; the repro below segfaults
+identically with the pre-fix `runtime/fire_runtime.c` AND with every ownership
+rule in doc/MEMORY.html §3 disabled)
 
 ## The bug
 

@@ -12,7 +12,8 @@ runtime is built on (doc/MEMORY.html sections 10 and 3.A):
     but carrying a payload, against the same kind of model. Its delete used
     to clear the slot instead of closing the probe gap, so one list's free
     silently stripped the kinds off every other LIVE list sharing its probe
-    cluster — see bugs/CODEGEN_container_free_registry_dangling_entries.md.
+    cluster — the same shape the container registries' own `_destroy`
+    helpers avoid, and the one this table had too (2026-09-30).
   * integer dict keys: canonical-decimal detection, int/string equivalence in both directions, strings that only
     look numeric staying separate, bytes keys staying separate, the `_kw` entry points against a reference model;
   * the Int-key path's fast itoa + block pool and the dict's resize (moves keys, keeps
