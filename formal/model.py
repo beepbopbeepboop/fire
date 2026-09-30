@@ -5335,6 +5335,25 @@ def dylib_export_lookup(by_name: dict, by_module: dict, callee: str):
     return by_name.get(callee)
 
 
+def is_import_alias(callee: str, aliases: dict) -> bool:
+    """Whether `callee` is bound by an `as` in an import, rather than by its
+    defining name.
+
+    The distinction decides which refusal applies when the name cannot be bound.
+    A plain `from m import f` that cannot be resolved is the long-standing
+    "nothing on this link line provides it" case, reported by the bind audit,
+    and it is still reported there — re-deriving it here would give a second
+    message for one condition. Only a genuine ALIAS is this function's business,
+    because the flat `{bare: symbol}` map is keyed by the defining name and so
+    cannot say anything about the local one at all.
+
+    `from m import f as f` is not an alias: it binds the same name, and the flat
+    map answers it exactly as it answers the unaliased spelling.
+    """
+    target = (aliases or {}).get(callee)
+    return bool(target) and target[1] != callee
+
+
 def dylib_aliased_export(by_name: dict, by_module: dict, callee: str,
                          aliases: dict):
     """The export a bare callee reaches THROUGH an import alias, or None.

@@ -400,7 +400,7 @@ class X86_64Codegen:
     def __init__(self, test_input: int = 10, extern_style: str = "stub",
                  dylib_syms: dict = None, comptime_hook=None,
                  module_source: str = "", dylib_exports: list = None,
-                 import_aliases: dict = None):
+                 import_aliases: dict = None, extern_decls: dict = None):
         """test_input: the value the startup stub passes to the entry.
 
         extern_style: how a call to an unbound symbol is emitted.
@@ -462,6 +462,15 @@ class X86_64Codegen:
         # resolved against the MODULE's export table, never the flat one. See
         # `model.dylib_aliased_export`, which both backends read.
         self._import_aliases: dict = dict(import_aliases or {})
+        # `{export symbol: FunctionDef}` — the callee's OWN declaration, read
+        # from the source each linked library was compiled from
+        # (`formal/imports.py`'s `external_declarations`). Keyed by the symbol
+        # the call binds, not by the name it is spelled, so a name collision
+        # between two libraries cannot hand a call the wrong signature. Without
+        # it an extern call passed `list(e.args)` and nothing more, and a
+        # parameter the caller omitted kept whatever the caller last put in that
+        # register. Same table and the same reason as the arm64 backend's.
+        self._extern_decls: dict = dict(extern_decls or {})
         self._comptime_hook = comptime_hook
         self._module_source = module_source
         self.asm = Assembler()
@@ -4581,10 +4590,13 @@ class X86_64Codegen:
             entry = self._aliased_export(name)
             if entry is not None:
                 return entry.get("symbol") or name
-            if name in self._import_aliases:
-                # An alias whose module does not export the name it stands for.
+            if M.is_import_alias(name, self._import_aliases):
+                # An ALIAS whose module does not export the name it stands for.
                 # Falling back to the flat map would bind `g` itself, and the
                 # bind audit would report an unbound symbol with no idea why.
+                # A plain `from m import f` is NOT this case and keeps the
+                # audit's own message, which is the one that was always right
+                # for it.
                 raise CodegenError(M.dylib_aliased_export_refusal(
                     name, self._import_aliases, self._dylib_by_module))
             return self._dylib_syms.get(name, name)
@@ -4844,7 +4856,13 @@ class X86_64Codegen:
         # call, so an extern call passes positionals only; those kwargs are
         # almost always literals like `flush=True`. A known callee gets them
         # bound to their parameters' registers.
-        args = list(e.args) if is_extern else self._bind_call_args(name, e)
+        # An extern callee whose DECLARATION is known goes through the same
+        # binder as a local one — that is the whole fix for a default argument
+        # that arrives as a stack address — and one whose declaration is not
+        # known keeps the old positional-only behaviour.
+        args = (list(e.args)
+                if is_extern and self._callee_decl(name) is None
+                else self._bind_call_args(name, e))
 
         if len(args) > len(ARG_REGS):
             raise CodegenError(
@@ -4875,6 +4893,35 @@ class X86_64Codegen:
             self.asm.emit_label_rel32(name, here_offset=-4)
 
 
+    def _extern_decl_for(self, name: str):
+        """The declaration of an IMPORTED callee `name`, or None.
+
+        Keyed by the SYMBOL the call binds, and the entry is found by the same
+        two steps in the same order as `_extern_symbol` — the plain export
+        lookup, then the import alias — so the declaration handed to
+        `bind_call_arguments` is always the one whose parameter list the call
+        is actually being checked against. Asking by bare name instead would be
+        a way to hand a call the signature of a same-named function in a
+        different library.
+        """
+        entry = M.dylib_export_lookup(self._dylib_by_name,
+                                      self._dylib_by_module, name)
+        if entry is None:
+            entry = self._aliased_export(name)
+        if entry is None:
+            return None
+        return self._extern_decls.get(entry.get("symbol"))
+
+    def _callee_decl(self, name: str):
+        """The FunctionDef a callee `name` was declared by, or None.
+
+        This module's own functions first — a local definition always wins —
+        and then the linked libraries', read from their own source. None means
+        the callee is not a function this image can see a declaration for, and
+        the caller falls back to passing the arguments as written."""
+        fn = self._functions.get(name)
+        return fn if fn is not None else self._extern_decl_for(name)
+
     def _bind_call_args(self, name: str, e: F.CallExpr) -> list:
         """`e`'s arguments in positional form, for a known callee.
 
@@ -4882,8 +4929,20 @@ class X86_64Codegen:
         and the reason the two backends cannot disagree about which argument
         lands on which parameter.  This was a second copy of the rule whose
         `if not e.kwargs: return list(e.args)` skipped the arity check
-        entirely for a call with no keywords."""
-        fdef = self._functions.get(name)
+        entirely for a call with no keywords.
+
+        `fdef` is the callee's declaration, and it is looked up in BOTH
+        registries — this module's own functions first, then the declarations
+        read from the source each linked library was compiled from
+        (`self._extern_decls`, keyed by the export symbol the call binds).
+        That second lookup is what makes a call into another image obey the
+        SAME contract as a call inside one: its arguments are bound to the
+        callee's real parameter list, so a defaulted parameter is materialized
+        and an argument count below the arity with nothing to fill it is a
+        refusal naming the callee. It used to pass `list(e.args)` and nothing
+        more, which made an omitted register hold a stale value. Same table and
+        the same reason as the arm64 backend's."""
+        fdef = self._callee_decl(name)
         if fdef is None:
             if e.kwargs:
                 raise CodegenError(

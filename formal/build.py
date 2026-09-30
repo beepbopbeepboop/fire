@@ -695,7 +695,8 @@ def _extract_functions(stmts: list, synthetic: bool = True,
 
 def _make_codegen(arch: str, fmt: str, test_input: int,
                   dylib_syms: dict = None, comptime_hook=None,
-                  dylib_exports: list = None, import_aliases: dict = None):
+                  dylib_exports: list = None, import_aliases: dict = None,
+                  extern_decls: dict = None):
     """The codegen for `arch`, configured for the `fmt` binary it feeds.
 
     The only format-dependent choice is how an unbound symbol is called:
@@ -717,13 +718,21 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
     local name `from m import f as g` binds, and where it came from. Without
     it the emitters can only look a bare callee up by its DEFINING name, so `g`
     found nothing and the image bound a symbol no library defines. See
-    `model.dylib_aliased_export`."""
+    `model.dylib_aliased_export`.
+
+    `extern_decls` is `formal/imports.py`'s `external_declarations` table:
+    `{export symbol: FunctionDef}`, the callee's own declaration read from the
+    source the linked library was compiled from. It is what lets a call ACROSS
+    a dylib boundary bind its arguments the way a call inside one image does,
+    so a defaulted parameter is materialized instead of arriving as whatever
+    the caller last left in the register."""
     if arch == "arm64":
         return ARM64Codegen(test_input=test_input,
                             dylib_syms=dylib_syms,
                             comptime_hook=comptime_hook,
                             dylib_exports=dylib_exports,
-                            import_aliases=import_aliases)
+                            import_aliases=import_aliases,
+                            extern_decls=extern_decls)
     if arch == "x86_64":
         from formal.x86_64_codegen import X86_64Codegen
         return X86_64Codegen(test_input=test_input,
@@ -731,7 +740,8 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
                              dylib_syms=dylib_syms,
                              comptime_hook=comptime_hook,
                              dylib_exports=dylib_exports,
-                             import_aliases=import_aliases)
+                             import_aliases=import_aliases,
+                             extern_decls=extern_decls)
     raise FormalBuildError(
         f"unknown arch {arch!r} (expected one of {', '.join(ARCHES)})")
 
@@ -807,7 +817,7 @@ def _unaccounted_report(source_path: str, unaccounted: list, where: str) -> str:
 def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
                       dylibs: list = None, comptime_hook=None,
                       structs: list = None, source_path: str = None,
-                      import_aliases: dict = None):
+                      import_aliases: dict = None, extern_decls: dict = None):
     """Compile `ordered` for `arch` and wrap it in its binary container.
 
     Returns (code, info, external_syms, binary). Mach-O needs two passes: the
@@ -825,7 +835,11 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     `import_aliases` is `formal/imports.py`'s `import_bindings` table, passed
     straight through to the codegen: a call site spells the name AS WRITTEN, so
     `from m import f as g` has to reach `f`'s export rather than miss the flat
-    map and bind `g`."""
+    map and bind `g`.
+
+    `extern_decls` is `formal/imports.py`'s `external_declarations`, for the
+    same reason read from the other end: a callee in another image has a
+    parameter list this build cannot see unless it is handed over."""
     dylibs = list(dylibs or [])
     dylib_syms = {}
     for d in dylibs:
@@ -841,7 +855,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
         from formal.elf import (DEFAULT_BASE, DEFAULT_LIBC, build_elf,
                                  compute_got_addrs)
         codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
-                                comptime_hook, dylib_exports, import_aliases)
+                                comptime_hook, dylib_exports, import_aliases,
+                                extern_decls)
         try:
             code, info = codegen.compile(ordered, base_addr=DEFAULT_BASE,
                                          structs=structs)
@@ -872,7 +887,7 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
         [d["install_name"] for d in dylibs])
     base_noextern = TEXT_BASE + NOEXTERN_ENTRYOFF
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms, comptime_hook,
-                            dylib_exports, import_aliases)
+                            dylib_exports, import_aliases, extern_decls)
     try:
         code, info = codegen.compile(ordered, base_addr=base_noextern,
                                      structs=structs)
@@ -882,7 +897,7 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
             # every address the code computed off its own base).
             codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                                     comptime_hook, dylib_exports,
-                                    import_aliases)
+                                    import_aliases, extern_decls)
             code, info = codegen.compile(ordered, base_addr=base_extern,
                                          structs=structs)
             external_syms = info.get("external_syms") or []
@@ -930,6 +945,19 @@ def _import_aliases(stmts: list) -> dict:
     `formal/imports.py`'s `import_bindings`."""
     from formal.imports import import_bindings
     return import_bindings(stmts)
+
+
+def _external_declarations(linked: list) -> dict:
+    """`{export symbol: FunctionDef}` for the linked libraries' function exports.
+
+    Read from each library's own source — the path its manifest records — so a
+    call ACROSS a dylib boundary binds its arguments from the callee's real
+    parameter list instead of passing whatever the caller wrote and letting an
+    omitted register hold a stale value. Without it a defaulted parameter
+    arrived as a stack address, which is a silently wrong argument rather than a
+    missing feature. See `formal/imports.py`'s `external_declarations`."""
+    from formal.imports import external_declarations
+    return external_declarations(linked)
 
 
 def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
@@ -1163,7 +1191,8 @@ def compile_formal(source_path: str, output: str = None,
         arch, fmt, ordered, test_input, dylibs=linked,
         comptime_hook=comptime_hook,
         structs=structs, source_path=source_path,
-        import_aliases=_import_aliases(stmts))
+        import_aliases=_import_aliases(stmts),
+        extern_decls=_external_declarations(linked))
 
     if output is None:
         stem = os.path.splitext(os.path.basename(source_path))[0] or "a.out"
@@ -4168,7 +4197,7 @@ def dylib_manifest_path(dylib_path: str) -> str:
 
 
 def write_dylib_manifest(dylib_path: str, install_name: str,
-                         exports: list) -> str:
+                         exports: list, source: str = None) -> str:
     """Record what a formal dylib exports, next to the dylib.
 
     An executable that links this library has to rewrite each call site's
@@ -4177,7 +4206,17 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
     callee is just a bare name. The build that *made* the library is the only
     place the mapping exists, so it leaves it behind. JSON because the
     executable build has to read it without importing this module's
-    compile-time dependencies."""
+    compile-time dependencies.
+
+    `source` is the module's own source path, recorded for the same reason and
+    read back by `formal/imports.py`'s `external_declarations`: an export entry
+    carries an ARITY and a signature, and neither is enough to bind a call whose
+    arguments are short of the arity — a DEFAULT is part of the function's
+    contract, and materializing it at the call site needs the default's own
+    expression, which only the DECLARATION has. Reading it from the path
+    recorded here is what makes the two sides unable to disagree: it is the
+    exact file this library was compiled from, not a module name resolved again
+    by whoever is reading."""
     import json
     path = dylib_manifest_path(dylib_path)
     payload = {
@@ -4187,6 +4226,11 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
         # id is `@rpath/...`, which a dependent can only resolve with an
         # LC_RPATH of its own, so a dependent links the real location.
         "load_path": os.path.abspath(dylib_path),
+        # The module's own source, when this library was built from one. Absent
+        # for a library with no source of its own (the runtime dylib, written by
+        # `runtime_manifest`), which is exactly what "there is no declaration to
+        # read" looks like, so a reader can tell the two apart.
+        "source": os.path.abspath(source) if source else None,
         # The reflection payload, in the shape doc/ABI.md's table carries: the
         # boundary symbol, its signature, and the module that owns it, so a
         # client can bind a call without ever reading the module's source.
@@ -4205,11 +4249,11 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
 def load_dylib_manifests(dylib_paths: list) -> list:
     """Read the manifests of the libraries an executable links against.
 
-    Each entry is `{"install_name", "map": {bare callee -> exported symbol},
-    "exports"}`. A library whose manifest is missing is an error rather than a
-    silently ignored dependency: the executable would emit calls to symbols
-    nothing defines and produce an image that dies in dyld at launch — which
-    is exactly the failure this mechanism exists to prevent.
+    Each entry is `{"install_name", "source", "map": {bare callee -> exported
+    symbol}, "exports"}`. A library whose manifest is missing is an error rather
+    than a silently ignored dependency: the executable would emit calls to
+    symbols nothing defines and produce an image that dies in dyld at launch —
+    which is exactly the failure this mechanism exists to prevent.
 
     The `map` is keyed by the BARE name and only by the bare name, and that is
     the whole contract: it is what a BARE callee resolves through, first
@@ -4251,6 +4295,7 @@ def load_dylib_manifests(dylib_paths: list) -> list:
             amap.setdefault(e["name"], e["symbol"])
         out.append({
             "install_name": payload.get("load_path") or payload["dylib"],
+            "source": payload.get("source"),
             "map": amap,
             "exports": exports,
         })
@@ -5241,7 +5286,7 @@ def _record_link_deps(manifest_path: str, linked: list) -> None:
 
 def _namespace_library(output: str, install_name: str, arch: str,
                        reexports: dict, dylib_syms: dict, dep_install: list,
-                       linked: list) -> dict:
+                       linked: list, source: str = None) -> dict:
     """A dylib for a module whose whole API is RE-EXPORTED — a package
     `__init__.mojo`.
 
@@ -5310,7 +5355,7 @@ def _namespace_library(output: str, install_name: str, arch: str,
         f.write(binary)
     os.chmod(output, 0o755)
     _ad_hoc_sign(output)
-    manifest_path = write_dylib_manifest(output, install_name, [])
+    manifest_path = write_dylib_manifest(output, install_name, [], source=source)
     _record_namespace(manifest_path, reexports, dylib_syms)
     if linked:
         _record_link_deps(manifest_path, linked)
@@ -5483,7 +5528,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
                 f"{', '.join(sorted({v[0] for v in reexports.values()})[:4])}"
                 f", whose libraries are on this one's link line.")
         return _namespace_library(output, install_name, arch, reexports,
-                                  dylib_syms, dep_install, linked)
+                                  dylib_syms, dep_install, linked,
+                                  source=source_paths[0])
 
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                             dylib_exports=dylib_exports)
@@ -5544,7 +5590,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         f.write(binary)
     os.chmod(output, 0o755)
     _ad_hoc_sign(output)
-    manifest_path = write_dylib_manifest(output, install_name, exports)
+    manifest_path = write_dylib_manifest(output, install_name, exports,
+                                         source=source_paths[0])
     if linked:
         _record_link_deps(manifest_path, linked)
 
