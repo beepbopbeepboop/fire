@@ -4259,15 +4259,31 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # identifier it roots, so by the time the identifier is here its entry is
         # already recorded.
         bracketed = {}
+        answered_roots = set()
         first_mlir = None
         for sub in M.iter_nodes(fn.body):
             if isinstance(sub, F.IdentExpr):
-                if first_mlir is None \
+                # `answered_roots` is the OTHER half of the rule the arm below
+                # states, and skipping it here would be reading one node two
+                # ways inside one loop: an identifier that roots a template the
+                # build ANSWERED is not a use of anything, so it is not an MLIR
+                # dialect construct either. `_fold_target_queries` has normally
+                # replaced those templates with literals before this runs, so the
+                # set is empty in practice — and it is written down rather than
+                # left to that, because the failure it prevents is a REFUSAL of
+                # a construct this build answers, which is the worse of the two
+                # mistakes available here.
+                if first_mlir is None and id(sub) not in answered_roots \
                         and sub.name.startswith(M.MLIR_DIALECT_PREFIX):
                     first_mlir = bracketed.get(id(sub)) \
                         or M.mlir_dialect_refusal(sub.name)
                 continue
             if not isinstance(sub, (F.SubscriptExpr, F.MemberExpr)):
+                continue
+            root_ident = sub.obj
+            while isinstance(root_ident, (F.MemberExpr, F.SubscriptExpr)):
+                root_ident = root_ident.obj
+            if not isinstance(root_ident, F.IdentExpr):
                 continue
             if M.template_is_answered(sub) or id(sub) in xc_type_args:
                 # Answered at build time, so nothing is left to refuse about it
@@ -4282,11 +4298,10 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # argument, which is compile-time by construction and has the
                 # same consequence by a different route: nothing was written
                 # that reads a value, so there is nothing here to place.
-                continue
-            root_ident = sub.obj
-            while isinstance(root_ident, (F.MemberExpr, F.SubscriptExpr)):
-                root_ident = root_ident.obj
-            if not isinstance(root_ident, F.IdentExpr):
+                #
+                # The root is recorded because the IdentExpr arm above asks
+                # about it, and it is reached first in source order.
+                answered_roots.add(id(root_ident))
                 continue
             why = M.mlir_template_refusal(sub)
             if why is None and isinstance(sub, F.SubscriptExpr):
