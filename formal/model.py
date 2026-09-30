@@ -5335,6 +5335,86 @@ def dylib_export_lookup(by_name: dict, by_module: dict, callee: str):
     return by_name.get(callee)
 
 
+def dylib_aliased_export(by_name: dict, by_module: dict, callee: str,
+                         aliases: dict):
+    """The export a bare callee reaches THROUGH an import alias, or None.
+
+    `aliases` is `formal/imports.py`'s `import_bindings` table: `{local name:
+    (module as spelled, defining name)}`, so `from os.path import exists as
+    pe` is `{"pe": ("os.path", "exists")}`.
+
+    Two questions, and they are asked in this order because the second is the
+    weaker one:
+
+      1. **Does the module the name was imported FROM export it?** That module's
+         export table, not the flat one: the flat table cannot say which module
+         owns a name, so a local alias that happened to collide with another
+         library's export would bind that other library's function. The alias is
+         a statement about where `pe` came from, so it is resolved against that
+         module and nowhere else.
+
+      2. **Does ANY library on the line export the DEFINING name?** This is the
+         re-export case, and it is the same name-based dispatch `from m import
+         f` — with no alias at all — already uses: a package `__init__` is a
+         namespace library with an EMPTY export table (`_namespace_library`),
+         so `from pkg import bump` has to be answered by the submodule's
+         library under `bump`. Asking it by the DEFINING name and not by the
+         local one is what keeps it from being a hole: `bump` is a real export
+         somewhere on the line, where `b` is a name only this file ever used.
+
+    `None` means neither can bind it, which is the caller's cue to raise
+    `dylib_aliased_export_refusal`. Falling back to the LOCAL spelling — what
+    the code did before any of this — is what produced a BL against a symbol
+    nothing defines.
+    """
+    target = (aliases or {}).get(callee)
+    if not target:
+        return None
+    module, defined = target
+    entry = dylib_export_module(by_module, module).get(defined)
+    if entry is not None:
+        return entry
+    if "." in defined:
+        return dylib_export_lookup(by_name, by_module, defined)
+    return by_name.get(defined)
+
+
+def dylib_aliased_export_refusal(callee: str, aliases: dict,
+                                 by_module: dict) -> str:
+    """Why an aliased callee has no symbol to bind, or "" if that is not it.
+
+    Three answers and three different facts, one of which is an error in the
+    PROGRAM rather than in the module, so they cannot share a message:
+
+      * the module is LINKED and exports the defining name — the lookup found
+        it, "" is returned, and the caller uses it;
+      * the module is LINKED but exports neither the defining name nor anything
+        by that bare name anywhere on the line — `doc/ABI.md`'s export rule
+        excluded it, which is a fact about the module and is reported as one,
+        exactly like the dotted-callee case;
+      * the module is NOT on the link line at all — the import did not resolve
+        to anything this image carries, and saying "it exports no such name"
+        would send the reader to a module that is not even here.
+    """
+    module, defined = (aliases or {}).get(callee, ("", callee))
+    if not dylib_export_module(by_module, module):
+        return (
+            f"{callee}(): it is bound by an import from {module!r}, but no "
+            f"library for that module is on this image's link line, so the "
+            f"name it refers to cannot be bound. An import is a DEPENDENCY: "
+            f"if the module has no source this backend can compile, the build "
+            f"reports that at the import itself rather than here.")
+    return (
+        f"{callee}(): it is bound by `from {module} import … as {callee}`, and "
+        f"neither `{module}` nor any other library on this image's link line "
+        f"exports `{defined}`, so the call has no symbol to bind. A name "
+        f"`doc/ABI.md`'s export rule excludes (a leading `_`, a generic "
+        f"template, an overload, or a C library symbol such as `exit` or "
+        f"`write`) is not advertised — and an alias does not make a name "
+        f"exposable that was not already, since the alias is a property of "
+        f"this file and not of the library.")
+
+
 def _target_names(target):
     from mojo.middle.boundnames import _lbn_target_names
     return _lbn_target_names(target) if isinstance(target, str) else []
@@ -9364,8 +9444,30 @@ def _folded_node(folded, template):
                         col=getattr(template, "col", 0) or 0, raw="")
 
 
-def _imported_names(stmt) -> list:
-    """`[(bound name, module)]` for one module-level import statement."""
+def import_bindings(stmt) -> list:
+    """`[(local name, module as spelled, name defined there)]` for one import.
+
+    THE reader of what an import binds in this file, and the three pieces are
+    all of them load-bearing somewhere:
+
+      * the LOCAL name, which is what every read and every call site spells —
+        `from m import f as g` binds `g`, and a compiler that resolves `g` by
+        itself produces a BL against a symbol nothing defines;
+      * the MODULE AS SPELLED, because that is the key the linked library's
+        manifest is filed under. `model.dylib_export_module` falls back to
+        `abi_module_name(spelling)`, so `os.path`, `._syscalls` and
+        `.._syscalls` each reach the one library that was built for them —
+        including the relative spellings, whose manifests are keyed by the dot
+        flattened (`__syscalls`);
+      * the DEFINING name, which is only ever different from the local one when
+        there is an `as`, and which is the name the export table is keyed by.
+
+    A module binding (`import m`, `import m as n`) has no function to define,
+    so its "defined name" is the module name itself: `n.f` is spelled
+    `n.f` and reaches `f` of the module, which is `dylib_export_lookup`'s
+    question and not this one's. `import a.b` binds `a`, which is why the
+    bound name is the FIRST dotted component.
+    """
     kind = type(stmt).__name__
     if kind == "ImportStmt":
         mod = getattr(stmt, "module", None) or getattr(stmt, "name", None)
@@ -9374,18 +9476,17 @@ def _imported_names(stmt) -> list:
             part = part.strip()
             if not part:
                 continue
-            out.append((part.split(".")[0], part.split(".")[0]))
+            out.append((part.split(".")[0], part, part))
             # `import a.b` binds `a`, and `a.b` is a module the dylib resolver
             # owns; the alias `as` form binds the alias.
             alias = getattr(stmt, "asname", None)
             if alias:
-                out.append((alias, part))
+                out.append((alias, part, part))
         return out
     if kind == "FromImportStmt":
         mod = getattr(stmt, "module", None) or getattr(stmt, "name", None)
-        names = getattr(stmt, "names", None) or []
         out = []
-        for pair in names:
+        for pair in (getattr(stmt, "names", None) or []):
             if isinstance(pair, (tuple, list)):
                 orig = pair[0]
                 alias = pair[1] if len(pair) > 1 else None
@@ -9393,9 +9494,14 @@ def _imported_names(stmt) -> list:
                 orig, alias = pair, None
             if not isinstance(orig, str):
                 continue
-            out.append((alias or orig, str(mod)))
+            out.append((alias or orig, str(mod), orig))
         return out
     return []
+
+
+def _imported_names(stmt) -> list:
+    """`[(bound name, module)]` for one module-level import statement."""
+    return [(bound, module) for bound, module, _defined in import_bindings(stmt)]
 
 
 # The dunders and module attributes a bare read may legitimately name. Small on

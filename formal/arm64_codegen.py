@@ -508,7 +508,7 @@ class ARM64Codegen:
 
     def __init__(self, test_input: int = 10, dylib_syms: dict = None,
                  comptime_hook=None, module_source: str = "",
-                 dylib_exports: list = None):
+                 dylib_exports: list = None, import_aliases: dict = None):
         self.test_input = test_input
         self.asm = Assembler()
         self._functions = {}
@@ -618,6 +618,16 @@ class ARM64Codegen:
                 owner = self._dylib_by_module.setdefault(
                     entry.get("module") or "", {})
                 owner.setdefault(entry.get("name"), entry)
+        # `{local name: (module as spelled, defining name)}` — what
+        # `from m import f as g` binds. The flat map above is keyed by the
+        # DEFINING name and a call site spells the LOCAL one, so without this
+        # an aliased call found nothing and the image bound a symbol no library
+        # defines. Consulted only for a bare callee that is an alias, and
+        # resolved against the MODULE's export table, never the flat one: the
+        # alias says where the name came from, and a name that happens to
+        # collide with another library's export must still bind the module it
+        # was imported from. See `model.dylib_aliased_export`.
+        self._import_aliases: dict = dict(import_aliases or {})
         # Compile-time evaluator for `comptime f(...)`: a (name, args) -> int
         # hook that RUNS the callee with this backend (formal/
         # comptime_runner.py). Keeping it out here is what lets the folding
@@ -2511,15 +2521,27 @@ class ARM64Codegen:
         return (ann, M.declared_type_kind(ann, TYPE_NAMES, STRING_TYPE_NAMES,
                                           self._structs))
 
+    def _aliased_export(self, name: str):
+        """The manifest export a bare callee reaches THROUGH an import alias."""
+        return M.dylib_aliased_export(self._dylib_by_name,
+                                      self._dylib_by_module, name,
+                                      self._import_aliases)
+
     def _extern_symbol(self, name: str) -> str:
         """The boundary symbol an unbound callee `name` is emitted against.
 
-        Two spellings, and the second is why this is a function rather than a
-        `dict.get`:
+        Three spellings, and the second and third are why this is a function
+        rather than a `dict.get`:
 
           * a BARE name — what `from mod import f` binds — is answered by the
             flat `{name: symbol}` map, first library on the line winning, which
             is `load_dylib_manifests`'s own precedence and stays it;
+          * a bare name that is an IMPORT ALIAS — what `from mod import f as g`
+            binds — is answered by the export table of the module the alias
+            came from, never by the flat map. The flat map is keyed by the
+            DEFINING name, so `g` misses it, and the fallback used to bind `g`
+            itself: an image that builds, fails the link audit, and says so.
+            See `_aliased_export`;
           * a DOTTED name — what `import mod` binds, spelled `mod.f` — is
             answered ONLY by the export table of the library built for `mod`.
             Falling back to the flat map for a dotted name would let
@@ -2536,9 +2558,20 @@ class ARM64Codegen:
         that a manifest keys a package submodule by its ABI prefix
         (`os.path` → `os_path`) — which is what makes `os.path.join(...)`, the
         spelling 532 measured call sites in this tree are written with, resolve
-        at all. The x86-64 emitter asks the same question the same way.
+        at all, and which is why the same call answers an alias whose module was
+        spelled RELATIVELY (`._syscalls` is filed as `__syscalls`). The x86-64
+        emitter asks the same question the same way.
         """
         if "." not in name:
+            entry = self._aliased_export(name)
+            if entry is not None:
+                return entry.get("symbol") or name
+            if name in self._import_aliases:
+                # An alias whose module does not export the name it stands for.
+                # Falling back to the flat map would bind `g` itself, and the
+                # bind audit would report an unbound symbol with no idea why.
+                raise CodegenError(M.dylib_aliased_export_refusal(
+                    name, self._import_aliases, self._dylib_by_module))
             return self._dylib_syms.get(name, name)
         entry = M.dylib_export_lookup(self._dylib_by_name,
                                       self._dylib_by_module, name)
@@ -2561,6 +2594,9 @@ class ARM64Codegen:
                 f"publish mutable state rather than functions is a different "
                 f"gap, written down in "
                 f"bugs/FORMAL_module_state_no_storage.md")
+        aliased = self._aliased_export(name)
+        if aliased is not None:
+            return aliased.get("symbol") or name
         return self._dylib_syms.get(name, name)
 
     def _callee_kind(self, name, stack):
@@ -2576,7 +2612,8 @@ class ARM64Codegen:
             # 4335747904 where it meant to print `darwin`.
             return M.dylib_export_return_kind(
                 M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name))
+                                      self._dylib_by_module, name)
+                or self._aliased_export(name))
         vk = self._vkinds_for(name, fn, stack)
         ann = getattr(fn, "return_type", None)
         if ann in STRING_TYPE_NAMES:
@@ -5068,7 +5105,8 @@ class ARM64Codegen:
         # What is left is decided by the runtime's ABI rather than by the name
         # (`model.gimple_runtime_callable`): a call is answerable when every
         # type crossing the boundary is one 64-bit word — which is what a value
-        # IS here — AND the symbol is on the link line, which `_dylib_syms` is.
+        # IS here — AND the symbol is on the link line, which `_dylib_syms` is
+        # (and `_aliased_export` is for a name bound by `from m import f as g`).
         # Note the two are independent and both are needed. A `MojoList *`
         # argument is a box no link line can answer, so it is refused EVEN IF a
         # dylib provides the symbol; and `mojo_print`, whose every type is a
@@ -5076,7 +5114,8 @@ class ARM64Codegen:
         # prefix got the first case right by accident and could not tell the
         # second from it.
         if is_extern and not M.gimple_runtime_callable(
-                name, name in self._dylib_syms):
+                name, name in self._dylib_syms
+                or self._aliased_export(name) is not None):
             raise CodegenError(M.gimple_runtime_refusal(name))
         if is_extern:
             # Unknown signature: AAPCS has no place for Python kwargs on a

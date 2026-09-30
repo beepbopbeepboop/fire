@@ -695,7 +695,7 @@ def _extract_functions(stmts: list, synthetic: bool = True,
 
 def _make_codegen(arch: str, fmt: str, test_input: int,
                   dylib_syms: dict = None, comptime_hook=None,
-                  dylib_exports: list = None):
+                  dylib_exports: list = None, import_aliases: dict = None):
     """The codegen for `arch`, configured for the `fmt` binary it feeds.
 
     The only format-dependent choice is how an unbound symbol is called:
@@ -711,19 +711,27 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
     module that owns each export (which is what makes `mod.f()` resolvable
     without ever consulting a bare name) and the declared signature (which is
     what says whether a call's result is a string). See
-    `model.dylib_export_lookup`."""
+    `model.dylib_export_lookup`.
+
+    `import_aliases` is `formal/imports.py`'s `import_bindings` table: the
+    local name `from m import f as g` binds, and where it came from. Without
+    it the emitters can only look a bare callee up by its DEFINING name, so `g`
+    found nothing and the image bound a symbol no library defines. See
+    `model.dylib_aliased_export`."""
     if arch == "arm64":
         return ARM64Codegen(test_input=test_input,
                             dylib_syms=dylib_syms,
                             comptime_hook=comptime_hook,
-                            dylib_exports=dylib_exports)
+                            dylib_exports=dylib_exports,
+                            import_aliases=import_aliases)
     if arch == "x86_64":
         from formal.x86_64_codegen import X86_64Codegen
         return X86_64Codegen(test_input=test_input,
                              extern_style="got" if fmt == "elf" else "stub",
                              dylib_syms=dylib_syms,
                              comptime_hook=comptime_hook,
-                             dylib_exports=dylib_exports)
+                             dylib_exports=dylib_exports,
+                             import_aliases=import_aliases)
     raise FormalBuildError(
         f"unknown arch {arch!r} (expected one of {', '.join(ARCHES)})")
 
@@ -798,7 +806,8 @@ def _unaccounted_report(source_path: str, unaccounted: list, where: str) -> str:
 
 def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
                       dylibs: list = None, comptime_hook=None,
-                      structs: list = None, source_path: str = None):
+                      structs: list = None, source_path: str = None,
+                      import_aliases: dict = None):
     """Compile `ordered` for `arch` and wrap it in its binary container.
 
     Returns (code, info, external_syms, binary). Mach-O needs two passes: the
@@ -811,7 +820,12 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     entry's symbols are callee names the codegen must mangle to that library's
     exported spelling, and each adds a load command — which moves the entry
     point, so the second pass has to be emitted for the offset the *same*
-    dylib list implies."""
+    dylib list implies.
+
+    `import_aliases` is `formal/imports.py`'s `import_bindings` table, passed
+    straight through to the codegen: a call site spells the name AS WRITTEN, so
+    `from m import f as g` has to reach `f`'s export rather than miss the flat
+    map and bind `g`."""
     dylibs = list(dylibs or [])
     dylib_syms = {}
     for d in dylibs:
@@ -827,7 +841,7 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
         from formal.elf import (DEFAULT_BASE, DEFAULT_LIBC, build_elf,
                                  compute_got_addrs)
         codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
-                                comptime_hook, dylib_exports)
+                                comptime_hook, dylib_exports, import_aliases)
         try:
             code, info = codegen.compile(ordered, base_addr=DEFAULT_BASE,
                                          structs=structs)
@@ -858,7 +872,7 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
         [d["install_name"] for d in dylibs])
     base_noextern = TEXT_BASE + NOEXTERN_ENTRYOFF
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms, comptime_hook,
-                            dylib_exports)
+                            dylib_exports, import_aliases)
     try:
         code, info = codegen.compile(ordered, base_addr=base_noextern,
                                      structs=structs)
@@ -867,7 +881,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
             # Re-emit at the extern entry base (the layout differs, and so do
             # every address the code computed off its own base).
             codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
-                                    comptime_hook, dylib_exports)
+                                    comptime_hook, dylib_exports,
+                                    import_aliases)
             code, info = codegen.compile(ordered, base_addr=base_extern,
                                          structs=structs)
             external_syms = info.get("external_syms") or []
@@ -903,6 +918,18 @@ def _imported_structs(source_path: str, stmts: list, arch: str) -> list:
         return []
     from formal.imports import imported_struct_defs
     return imported_struct_defs(source_path, stmts, project_root=source_path)
+
+
+def _import_aliases(stmts: list) -> dict:
+    """`{local name: (module as spelled, defining name)}` for this file's imports.
+
+    Read here, from the statements this build already parsed, and handed to the
+    emitters — a call site spells the name AS WRITTEN, so `from m import f as g`
+    needs the mapping from `g` back to `m`'s `f` and no amount of looking up the
+    bare name in the libraries' export tables can produce it. See
+    `formal/imports.py`'s `import_bindings`."""
+    from formal.imports import import_bindings
+    return import_bindings(stmts)
 
 
 def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
@@ -1135,7 +1162,8 @@ def compile_formal(source_path: str, output: str = None,
     code, info, external_syms, binary = _codegen_and_link(
         arch, fmt, ordered, test_input, dylibs=linked,
         comptime_hook=comptime_hook,
-        structs=structs, source_path=source_path)
+        structs=structs, source_path=source_path,
+        import_aliases=_import_aliases(stmts))
 
     if output is None:
         stem = os.path.splitext(os.path.basename(source_path))[0] or "a.out"

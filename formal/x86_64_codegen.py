@@ -399,7 +399,8 @@ class X86_64Codegen:
 
     def __init__(self, test_input: int = 10, extern_style: str = "stub",
                  dylib_syms: dict = None, comptime_hook=None,
-                 module_source: str = "", dylib_exports: list = None):
+                 module_source: str = "", dylib_exports: list = None,
+                 import_aliases: dict = None):
         """test_input: the value the startup stub passes to the entry.
 
         extern_style: how a call to an unbound symbol is emitted.
@@ -453,6 +454,14 @@ class X86_64Codegen:
                 _owner = self._dylib_by_module.setdefault(
                     _entry.get("module") or "", {})
                 _owner.setdefault(_entry.get("name"), _entry)
+        # `{local name: (module as spelled, defining name)}` — what
+        # `from m import f as g` binds. The flat map above is keyed by the
+        # DEFINING name and a call site spells the LOCAL one, so without this
+        # an aliased call found nothing and the image bound a symbol no library
+        # defines. Consulted only for a bare callee that is an alias, and
+        # resolved against the MODULE's export table, never the flat one. See
+        # `model.dylib_aliased_export`, which both backends read.
+        self._import_aliases: dict = dict(import_aliases or {})
         self._comptime_hook = comptime_hook
         self._module_source = module_source
         self.asm = Assembler()
@@ -4539,25 +4548,45 @@ class X86_64Codegen:
         return (ann, M.declared_type_kind(ann, TYPE_NAMES, STRING_TYPE_NAMES,
                                           self._structs))
 
+    def _aliased_export(self, name: str):
+        """The manifest export a bare callee reaches THROUGH an import alias."""
+        return M.dylib_aliased_export(self._dylib_by_name,
+                                      self._dylib_by_module, name,
+                                      self._import_aliases)
+
     def _extern_symbol(self, name: str) -> str:
         """The boundary symbol an unbound callee `name` is emitted against.
 
         A BARE name — what `from mod import f` binds — is answered by the flat
-        `{name: symbol}` map, first library on the line winning. A DOTTED name
-        — what `import mod` binds, spelled `mod.f` — is answered ONLY by the
-        export table of the library built for `mod`, so `mod.f` can never bind
-        some other library's `f`; and a dotted name whose module IS linked but
-        which that module does not export is refused here, naming both halves,
-        rather than emitted as a BL against a symbol nothing defines. Same
-        decision and the same words as the arm64 backend's `_extern_symbol`.
+        `{name: symbol}` map, first library on the line winning. A bare name
+        that is an IMPORT ALIAS — what `from mod import f as g` binds — is
+        answered by the export table of the module it came from, because the
+        flat map is keyed by the DEFINING name and `g` misses it; see
+        `_aliased_export`. A DOTTED name — what `import mod` binds, spelled
+        `mod.f` — is answered ONLY by the export table of the library built for
+        `mod`, so `mod.f` can never bind some other library's `f`; and a dotted
+        name whose module IS linked but which that module does not export is
+        refused here, naming both halves, rather than emitted as a BL against a
+        symbol nothing defines. Same decision and the same words as the arm64
+        backend's `_extern_symbol`.
 
         The module is identified by `model.dylib_export_module`, which knows
         that a manifest keys a package submodule by its ABI prefix
         (`os.path` → `os_path`) — which is what makes `os.path.join(...)`, the
         spelling 532 measured call sites in this tree are written with, resolve
-        at all.
+        at all — and which is why the same call answers an alias whose module
+        was spelled RELATIVELY (`._syscalls` is filed as `__syscalls`).
         """
         if "." not in name:
+            entry = self._aliased_export(name)
+            if entry is not None:
+                return entry.get("symbol") or name
+            if name in self._import_aliases:
+                # An alias whose module does not export the name it stands for.
+                # Falling back to the flat map would bind `g` itself, and the
+                # bind audit would report an unbound symbol with no idea why.
+                raise CodegenError(M.dylib_aliased_export_refusal(
+                    name, self._import_aliases, self._dylib_by_module))
             return self._dylib_syms.get(name, name)
         entry = M.dylib_export_lookup(self._dylib_by_name,
                                       self._dylib_by_module, name)
@@ -4580,6 +4609,9 @@ class X86_64Codegen:
                 f"publish mutable state rather than functions is a different "
                 f"gap, written down in "
                 f"bugs/FORMAL_module_state_no_storage.md")
+        aliased = self._aliased_export(name)
+        if aliased is not None:
+            return aliased.get("symbol") or name
         return self._dylib_syms.get(name, name)
 
     def _callee_kind(self, name, stack):
@@ -4594,7 +4626,8 @@ class X86_64Codegen:
             # an integer — the pointer's own value.
             return M.dylib_export_return_kind(
                 M.dylib_export_lookup(self._dylib_by_name,
-                                      self._dylib_by_module, name))
+                                      self._dylib_by_module, name)
+                or self._aliased_export(name))
         vk = self._vkinds_for(name, fn, stack)
         ann = getattr(fn, "return_type", None)
         if ann in STRING_TYPE_NAMES:
@@ -4794,12 +4827,15 @@ class X86_64Codegen:
         # architectures cannot come to different verdicts about one construct:
         # a call is answerable when every type crossing the boundary is one
         # 64-bit word — which is what a value IS here — AND the symbol is on the
-        # link line. A `MojoList *` argument is a box no link line can answer
+        # link line, which `_dylib_syms` is and `_aliased_export` is for a name
+        # bound by `from m import f as g`. A `MojoList *` argument is a box no
+        # link line can answer
         # and is refused even when a dylib provides the symbol; `mojo_print`,
         # whose every type is a word, is refused only because nothing here
         # provides it. Same decision, same words, from the one place.
         if is_extern and not M.gimple_runtime_callable(
-                name, name in self._dylib_syms):
+                name, name in self._dylib_syms
+                or self._aliased_export(name) is not None):
             raise CodegenError(M.gimple_runtime_refusal(name))
         # A callee that a linked formal dylib provides is emitted against the
         # spelling that dylib exports, not the name the source used.

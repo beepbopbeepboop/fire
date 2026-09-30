@@ -345,6 +345,54 @@ def imported_modules(stmts) -> list:
     return out
 
 
+def import_bindings(stmts) -> dict:
+    """`{local name: (module as spelled, defining name)}` for this file.
+
+    THE missing half of `imported_modules`. That function answers "which
+    modules have to be on the link line", which is a question about DEPENDENCIES
+    and is deliberately blind to the alias and to the imported names — the same
+    answer for `from m import f` and `from m import f as g`. This one answers
+    "which name in THIS file means which export of which module", which is the
+    question a call site asks, and the two are different questions about the
+    same statements.
+
+    It exists because the answer was being reconstructed at the call site, from
+    a name that could not carry it. `ARM64Codegen._extern_symbol` looks a bare
+    callee up in the flat `{bare name: exported symbol}` map built from the
+    libraries' manifests, which is keyed by the DEFINING name, and the callee
+    it is given is the name AS SPELLED at the call site. For `from m import f as
+    g` those differ, the lookup misses, and the fallback binds `g` itself —
+    which the link audit then refuses, because nothing defines `g`:
+
+        build: osp3.mojo: the image would bind 2 symbol(s) that nothing
+        provides, so it could not be loaded: os_exists, os_isdir.
+
+    The information was already in hand at import time and was simply not
+    carried to the call site; this is where it is read off the same statements
+    `imported_modules` reads, so the two cannot disagree about which file
+    imported what.
+
+    The module is kept AS SPELLED, which is what `model.dylib_export_module`
+    needs: it falls back to `abi_module_name(spelling)`, and a relative
+    spelling's manifest is keyed by the dot flattened (`._syscalls` builds and
+    is filed as `__syscalls`). A local name that also DEFINES something in
+    this file is left out — that is a local definition and it wins, which is
+    the same precedence `reexported_names` states for a re-export.
+    """
+    defined = {st.name for st in (stmts or [])
+               if isinstance(st, (F.FunctionDef, F.StructDef))}
+    out: dict = {}
+    for st in stmts or []:
+        if not isinstance(st, (F.ImportStmt, F.FromImportStmt)):
+            continue
+        for bound, module, name in _model.import_bindings(st):
+            if (bound in defined or bound in out or not isinstance(bound, str)
+                    or not bound or not isinstance(name, str) or not name):
+                continue
+            out[bound] = (module, name)
+    return out
+
+
 def _search_roots(relative_to: str, project_root: str) -> list:
     """Directories a module name is looked for in, nearest first.
 
