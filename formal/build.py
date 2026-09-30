@@ -1105,6 +1105,7 @@ def compile_formal(source_path: str, output: str = None,
         check_frame_field_blob_premises(structs)
         check_frame_subscript_escapes(functions)
         check_frame_holder_rebinds(functions)
+        check_construction_mismatches(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
         check_module_symbols(
             functions, {st.name: st for st in structs},
@@ -1262,6 +1263,7 @@ def _formal_module_functions(source_path: str,
         check_frame_field_blob_premises(structs)
         check_frame_subscript_escapes(functions)
         check_frame_holder_rebinds(functions)
+        check_construction_mismatches(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
         # The third of the three, and HERE for the reason the other two are:
         # a name the build cannot place is a codegen finding about THIS file,
@@ -1758,7 +1760,8 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
             for recv in M.struct_receivers(owner):
                 holders[fn.name].add(recv)
                 hstruct[fn.name][recv] = [owner]
-        for name, sts in _constructor_bindings(fn, framed).items():
+        for name, sts in _constructor_bindings(
+                fn, framed, [f.name for f in functions]).items():
             holders[fn.name].add(name)
             hstruct[fn.name].setdefault(name, []).extend(sts)
     for _round in range(_HOLDER_FIXPOINT_ROUNDS):
@@ -2137,7 +2140,9 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
         # function can see.  `params_of` is complete before the fixpoint runs,
         # so it is complete here.
         _check_frame_escapes(fn, hs, by_name, param0, owners, structs_by_name,
-                             set(_constructor_bindings(fn, framed)), rets,
+                             set(_constructor_bindings(
+                                 fn, framed,
+                                 [f.name for f in functions])), rets,
                              holders, hstruct, params_of)
         _check_method_receiver_types(fn, hs, by_name, owners, structs_by_name)
         fn._frame_holders = hs
@@ -2175,6 +2180,97 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
     # skipped — see `_check_holder_agreements` for the program that measures it.
     _check_holder_agreements(functions, holders, hstruct, params_of)
     _collect_holder_rebinds(functions, holders, hstruct, structs_by_name)
+    _park_construction_mismatches(functions, framed)
+
+
+def _park_construction_mismatches(functions, framed) -> None:
+    """PARK a `C(...)` the EMITTERS lower as a type conversion but which names a
+    local FRAMED struct — provided the name is then used as a receiver.
+
+    This is the other half of `_constructor_bindings`' guard.  The guard stops
+    the analysis claiming a frame for a call the emitters do not lower as one;
+    this says WHY, by name, because the alternative is a diagnostic that is
+    false.  The emitter's own `model.field_access_refusal` answers `a.f` with
+    "'a' is bound here as a parameter", and for a local bound from a conversion
+    that is not what happened: `a` holds the address of an interned `char *`.
+    A refusal whose stated reason is entirely false is the worst outcome on this
+    path (`bugs/FORMAL_frame_receiver_handoff.md` §4), and the analysis is the
+    only place that knows the difference, so it is the analysis that has to say
+    it.
+
+    **Only when the name is used as a RECEIVER.**  `var s = String()` on its own
+    is a `char *` and is correct on this path — that is the whole of
+    `bugs/FORMAL_string_value_model.md`'s decision, and a program that builds one
+    of those and never writes a field through it must keep building.  So the
+    finding needs a `MemberExpr` rooted at the name, which is the use that has no
+    reading.
+
+    The reproducer, which is the stdlib's own three-field `String` verbatim:
+
+    ```
+    struct String:
+        var _ptr_or_data: Pointer[UInt8]
+        var _len_or_data: Int
+        var _capacity_or_data: Int
+        def size(self) -> Int: return self._len_or_data
+    def main(n: Int) -> Int:
+        var a = String()
+        a._len_or_data = 5
+        return a.size()
+    ```
+
+    Before the guard, on both architectures: SIGBUS, exit 138, in read-only
+    `__TEXT` — the emitter produced the address of the interned empty string and
+    the analysis turned the field store into a store through it.
+    """
+    fns = [f.name for f in functions]
+    for fn in functions:
+        used_as_receiver = set()
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, F.MemberExpr):
+                continue
+            r = _root_ident(node)
+            if r is not None and r[1] >= 1:
+                used_as_receiver.add(r[0])
+        if not used_as_receiver:
+            continue
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            target = value = None
+            if isinstance(node, F.VarDecl):
+                target, value = node.name, node.value
+            elif isinstance(node, F.AssignStmt) and isinstance(node.target,
+                                                              F.IdentExpr):
+                target, value = node.target.name, node.value
+            if not target or not isinstance(value, F.CallExpr) \
+                    or not isinstance(value.func, F.IdentExpr):
+                continue
+            callee = value.func.name
+            if callee not in framed or target not in used_as_receiver:
+                continue
+            if M.call_lowers_as_framed_construction(
+                    callee, framed, len(value.args or [])
+                    + len(value.kwargs or []), fns):
+                continue
+            fn._construction_mismatch = (target, callee,
+                                         M.struct_field_summary(framed[callee]))
+            return
+
+
+def check_construction_mismatches(functions) -> None:
+    """Raise the construction/analysis disagreement
+    `_park_construction_mismatches` parked.
+
+    The fifth late frame check, at the entry points for the reason the other
+    four are: `_prepare_functions` runs before `_resolve_imports`, so a refusal
+    from inside it preempts the import diagnosis.  One finding is enough — a
+    program with two is one defect with two lines."""
+    for fn in functions:
+        finding = getattr(fn, "_construction_mismatch", None)
+        if finding is None:
+            continue
+        target, callee, summary = finding
+        raise CodegenError(M.construction_mismatch_refusal(
+            target, callee, summary, fn.name))
 
 
 def _value_may_be_a_frame(value, structs_by_name, holders, alias=None) -> bool:
@@ -3007,7 +3103,7 @@ def _describe_value(value) -> str:
     return f"a {type(value).__name__}"
 
 
-def _constructor_bindings(fn, framed) -> dict:
+def _constructor_bindings(fn, framed, functions=()) -> dict:
     """`{name: [struct, …]}` for locals bound from a framed struct's constructor.
 
     A LIST per name, and that is the fix for a miscompile rather than a
@@ -3019,7 +3115,39 @@ def _constructor_bindings(fn, framed) -> dict:
 
     The empty list is meaningful and not an oversight: a name bound from a
     constructor this path does NOT frame holds a plain word, and remembering
-    that is what stops a later `x.f` from being read as a frame slot."""
+    that is what stops a later `x.f` from being read as a frame slot.
+
+    **`model.call_lowers_as_framed_construction`, and that is the guard that
+    makes this list agree with the emitters.**  Being in `framed` is necessary
+    and not sufficient: a call to a name the emitters route to a type
+    CONVERSION before they reach `_emit_struct_constructor` produces a plain
+    word, and recording it as a construction binding would make the name a
+    three-slot frame HOLDER anyway — so `x.f = v` becomes a store at
+    `[word + 8·slot]`.  Measured, both architectures, from a green build:
+
+    ```
+    struct String:                        # three fields, exactly as the stdlib has it
+        var _ptr_or_data: Pointer[UInt8]
+        var _len_or_data: Int
+        var _capacity_or_data: Int
+        def size(self) -> Int: return self._len_or_data
+    def main(n: Int) -> Int:
+        var a = String()
+        a._len_or_data = 5
+        return a.size()
+    ```
+
+    → SIGBUS, exit 138, in read-only `__TEXT`, because the store's base is the
+    address of an interned `""`.  With the guard the name is a plain word, and
+    `a._len_or_data = 5` is `model.field_access_refusal` — a build error naming
+    the field and the name, which is the answer this backend owes rather than a
+    fault at an address it did not mean to touch.
+
+    `functions` is the image's compiled function names, which the predicate reads
+    for the one case where a name is both a function and a struct: the emitters
+    skip the type-constructor interception for a name they compiled, so the call
+    IS a construction there, and a pass that disagreed on that would refuse a
+    program that builds."""
     out = {}
     for node in M.iter_nodes(fn.body):
         target = value = None
@@ -3031,6 +3159,10 @@ def _constructor_bindings(fn, framed) -> dict:
         if not target or not isinstance(value, F.CallExpr):
             continue
         if isinstance(value.func, F.IdentExpr) and value.func.name in framed:
+            if not M.call_lowers_as_framed_construction(
+                    value.func.name, framed, len(value.args or [])
+                    + len(value.kwargs or []), functions):
+                continue
             # De-duplicated, order kept: `x = A()` twice on two paths is ONE
             # candidate, and a refusal that printed "a A, A receiver" because it
             # counted a binding twice would be reporting the walk rather than

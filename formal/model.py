@@ -5469,6 +5469,55 @@ def type_constructor_kind(callee_name: str):
     return None
 
 
+def call_lowers_as_framed_construction(callee: str, structs: dict, nargs: int,
+                                       functions=()) -> bool:
+    """Whether a call to `callee` reaches `_emit_struct_constructor` on EITHER
+    backend.
+
+    The emitters route a call in one order and it is worth writing the order down
+    once, here, because the build pass has to answer the SAME question the
+    emitter answers and the two disagreeing about it is the collision in
+    `bugs/FORMAL_string_constructor_collision`:
+
+    ```
+    if name not in functions and not type_constructor_prefers_local_struct(…)
+       and type_constructor_kind(name) is not None:   # a type CONVERSION
+    if name in structs:                                # a struct CONSTRUCTION
+    ```
+
+    So the answer is "a struct construction" exactly when the name is a local
+    declaration AND the type-constructor interception did not take it first.  A
+    file that declares `struct String` and calls `String()` is the case the whole
+    function exists for: `String` is in the STRING and IDENTITY tables, the
+    interception is not overridden for those two (deliberately — see
+    `type_constructor_prefers_local_struct`'s second bullet), so the emitter
+    produces the address of an interned `char *` while the build pass's
+    `_constructor_bindings` sees a call to a name in `framed_struct_names` and
+    makes the target a three-slot frame HOLDER.  The store then lands in
+    read-only text and the program dies with SIGBUS, exit 138, on both
+    architectures.
+
+    `functions` is the image's compiled function names, and it is the one input
+    the emitter reads that is not a table: a name that is BOTH a function and a
+    struct skips the interception and falls through to the construction branch.
+    It is a parameter rather than a module global because the same predicate is
+    asked by the build pass (which has the function list) and by nobody else,
+    and a module-level table for one caller's list would be a second thing to
+    keep in step.
+
+    A name that is not a local declaration is `False` and not a refusal here: a
+    call to a type this module does not declare is not a construction of
+    anything, and the emitter's own answer about it is unchanged.
+    """
+    if (structs or {}).get(callee) is None:
+        return False
+    if callee in (functions or ()):
+        return True
+    if type_constructor_prefers_local_struct(callee, structs, nargs):
+        return True
+    return type_constructor_kind(callee) is None
+
+
 def type_constructor_prefers_local_struct(callee_name: str, structs: dict,
                                           nargs: int) -> bool:
     """Whether THIS MODULE's own `struct N` beats `N`'s place in
@@ -6712,6 +6761,54 @@ def holder_rebound_from_a_word_refusal(fn_name: str, name: str,
         f"of a framed struct (`{name} = S(...)`), a COPY of another holder "
         f"(`{name} = other`), or a parameter of a method of a framed struct. Use "
         f"a different name for the word, or copy the value out of {name} first")
+
+
+def construction_mismatch_refusal(target: str, callee: str, summary: str,
+                                  fn_name: str) -> str:
+    """Why `{target} = {callee}(…)` and `{target}.<field>` are two answers to one
+    name, and which of them the emitters picked.
+
+    The stdlib's own `String` is the case this exists for, and its own comment
+    says why the name is ambiguous: `std/collections/string/string.mojo` declares
+    three fields AND lowers its methods under the `char *` reading, with a flag
+    in the top of the capacity field choosing between the two forms at run time.
+    So both readings are in force in one file, and a program that writes a field
+    through the name is asking a question this path has one answer for.
+
+    WHICH answer the emitters pick is the load-bearing half and it is the
+    counterintuitive one: the string and identity tables win.  `String()` is
+    intercepted as a string CONVERSION before `_emit_struct_constructor` is
+    reached — `type_constructor_prefers_local_struct` deliberately does not
+    override those two tables, because for `Pointer` the identity conversion is
+    the one hand-off in the family that is correct — so the value is the address
+    of an interned NUL-terminated `char *`, and `{target}.<field> = v` would be
+    a store at `[interned_address + 8·slot]` in read-only `__TEXT`.  Measured on
+    both architectures, before this refusal existed: SIGBUS, exit 138, from a
+    green build, on a fourteen-line program with no imports.
+
+    The message says both answers, names the emitters' choice, and gives the two
+    things the source can do: give the local a different name, or do not write a
+    field through a value this path is holding as text.
+    """
+    return (
+        f"{target} = {callee}(...) binds {target} to a value this path holds as "
+        f"TEXT, and {target}.<field> asks for a frame: {callee} is declared "
+        f"here as a struct of {summary}, so the field has a slot, and {callee} "
+        f"is also a type this path lowers as a conversion, so the call is a "
+        f"conversion and {target} is the address of a NUL-terminated `char *`. "
+        f"The emitters pick the conversion — {callee}() is intercepted before "
+        f"any struct construction is reached, because the identity and string "
+        f"tables are deliberately not overridden by a local declaration (see "
+        f"`model.type_constructor_prefers_local_struct`) — and the two readings "
+        f"of the name are then in force at once: the field store is emitted at "
+        f"the interned address plus 8·slot, which is read-only text. Measured, "
+        f"on both architectures before this check existed: the program builds, "
+        f"runs, and "
+        f"dies with SIGBUS (exit 138), on the fourteen lines of {fn_name}() and "
+        f"no imports. Give the local a name of its own that is not {callee}'s, "
+        f"or keep the value as text and do not write a field through it — a "
+        f"`{callee}` local is a three-slot frame OR a `char *` on this path and "
+        f"never both at once")
 
 
 # ── A field's DECLARED type: agree, or refuse ─────────────────────────────

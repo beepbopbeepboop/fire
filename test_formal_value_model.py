@@ -308,6 +308,30 @@ TUPLE_STORE_CASES = [
      "a=1 b=2 c=3"),
 ]
 
+# ── the GUARD for a refusal that is about a name, not about a construct ──
+#
+# `String()` on its own IS correct on this path — it is the address of an
+# interned empty `char *`, and `printf("[%s]", a)` prints `[]` — so only a name
+# that is ALSO used as a receiver can be refused.  A check that fired on the
+# construction alone would refuse 11 stdlib files for binding a `char *`.
+#
+# **No CPython oracle for this one, and the reason is the point**: `String` is a
+# builtin this path defines and CPython does not, so the oracle program is a
+# different program.  That is why the expected value is pinned instead — the
+# assertion is "this builds and prints the empty string", which is a fact about
+# the REPRESENTATION and not about the language, and there is no CPython run that
+# could confirm it.  It is a separate group rather than a `want_stdout` on an
+# oracle case so the difference is visible in the file rather than hidden in a
+# flag.
+FIXED_CASES = [
+    ("a_conversion_is_fine_until_something_writes_a_field_through_it",
+     "def main(n):\n"
+     "    var a = String()\n"
+     "    printf(\"[%s]\", a)\n"
+     "    return 0\n",
+     "[]"),
+]
+
 # ── what a holder MAY be assigned, which is what the refusal above is about ──
 #
 # The check exists because a name that holds a frame address is never removed
@@ -444,6 +468,26 @@ REFUSALS = [
      "    printf(\"a=%d\", r.a)\n"
      "    return 0\n",
      "r is assigned 5 in main()"),
+    # A NAME THAT IS BOTH A LOCAL FRAMED STRUCT AND A TYPE CONVERSION.  The
+    # emitters intercept `String()` as a string CONVERSION before
+    # `_emit_struct_constructor` is reached, so the value is the address of an
+    # interned `char *`, while the build pass's constructor-binding recognition
+    # saw a call to a name in `framed_struct_names` and made the local a
+    # three-slot frame HOLDER — and the field store landed in read-only `__TEXT`.
+    # Measured before the fix on both architectures: SIGBUS, exit 138, from a
+    # green build, on the stdlib's own three-field `String` verbatim.
+    ("a_name_that_is_both_a_struct_and_a_conversion_is_refused",
+     "struct String:\n"
+     "    var _ptr_or_data: Pointer[UInt8]\n"
+     "    var _len_or_data: Int\n"
+     "    var _capacity_or_data: Int\n"
+     "    def size(self) -> Int:\n"
+     "        return self._len_or_data\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = String()\n"
+     "    a._len_or_data = 5\n"
+     "    return a.size()\n",
+     "a = String(...) binds a to a value this path holds as TEXT"),
 ]
 
 
@@ -496,6 +540,32 @@ def run_case(name, source, want_stdout, tmpdir, verbose):
     return True, ""
 
 
+def run_fixed_case(name, source, want_stdout, tmpdir, verbose):
+    """Build and run both architectures, against a PINNED expectation.
+
+    The only difference from `run_case` is that there is no oracle, and the only
+    member of FIXED_CASES that needs one is there because the program uses a
+    builtin this path defines and CPython does not.  Everything else — the
+    comparison, the exit status, the refusal-is-a-failure rule — is identical,
+    so a second code path would be a second thing to keep right."""
+    src = os.path.join(tmpdir, name + ".mojo")
+    with open(src, "w") as f:
+        f.write(source)
+    for backend in ("arm64", "x86_64"):
+        exe = os.path.join(tmpdir, f"{name}.{backend}")
+        rc, text = build_formal(src, exe, backend)
+        if rc != 0:
+            return False, f"--backend={backend} refused: {text.strip()[-300:]}"
+        proc = subprocess.run([exe], capture_output=True, text=True,
+                              timeout=RUN_TIMEOUT)
+        if proc.stdout != want_stdout:
+            return False, (f"--backend={backend} answered {proc.stdout!r} "
+                           f"where this case pins {want_stdout!r}")
+        if verbose:
+            print(f"      {backend}: {proc.stdout!r}")
+    return True, ""
+
+
 def run_refusal(name, source, needle, tmpdir, verbose):
     src = os.path.join(tmpdir, name + ".mojo")
     with open(src, "w") as f:
@@ -531,6 +601,7 @@ def main():
     everything = ([(c, False) for c in CASES]
                   + [(c, False) for c in TUPLE_STORE_CASES]
                   + [(c, False) for c in HOLDER_ASSIGN_CASES]
+                  + [(c, "fixed") for c in FIXED_CASES]
                   + [(c, True) for c in REFUSALS])
     selected = [c for c in everything if not args.cases or c[0][0] in args.cases]
     known = {c[0][0] for c in everything}
@@ -541,9 +612,12 @@ def main():
 
     passed = failed = 0
     with tempfile.TemporaryDirectory() as tmpdir:
-        for entry, is_refusal in selected:
+        for entry, kind in selected:
             try:
-                if is_refusal:
+                if kind == "fixed":
+                    ok, detail = run_fixed_case(entry[0], entry[1], entry[2],
+                                                tmpdir, args.verbose)
+                elif kind:
                     ok, detail = run_refusal(entry[0], entry[1], entry[2],
                                              tmpdir, args.verbose)
                 else:
