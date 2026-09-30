@@ -128,7 +128,21 @@ so compiler-binary optimization is not the lever. Measure first:
 2. Profile by phase; establish whether peak is in the *transitive* dump.
 3. **Cheapest and most valuable: distinguish live-set from fragmentation** — an
    allocation-count probe, or `leaks`/`vmmap`. Answers whether the memory is
-   reachable objects or a leak. Do this one first.
+   reachable objects or a leak. Do this first.
+
+Two causes now measured, both fixed at their call sites or worked around, and
+both worth knowing before the next bisect because they produce the same
+"it got slower and bigger" symptom by different means:
+
+- `CODEGEN_selfhost_tokenize_region_eq_quadratic.md` — the self-hosted
+  tokenizer's own closing-triple-quote scan is quadratic in each string
+  literal (a runtime length check rescans from byte 0 on every character):
+  0.05 s under python3, 2.5 minutes self-hosted, for `myinterpreter.py`,
+  before a single statement is compiled.
+- `CODEGEN_container_eq_is_pointer_identity.md` — `==` between two containers
+  is a pointer comparison, so any fixed-point loop written on one never
+  terminates; with C2's never-freed allocator each round's fresh set is also
+  permanent. Measured: a two-line program past 8 GB.
 
 ### C2. The self-hosted runtime's never-frees allocator — **high**
 
