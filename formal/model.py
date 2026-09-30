@@ -3088,8 +3088,20 @@ def _offset_scale(fn, expr, width, seen=()):
 
 
 def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
-                         structs_by_name: dict = None):
+                         structs_by_name: dict = None, index_scaled: bool = False):
     """`("load", width, signed)` | ("frame", struct) | None — with a refusal.
+
+    `index_scaled=True` says the CALLER scales the index it supplies, so
+    `_offset_scale` must judge the base address alone. It is the flag for a
+    SUBSCRIPT (`subscript_base_lowering` below) and it exists because the two
+    callers ask different questions about the same arithmetic: `p.value()` reads
+    at whatever address `p` already holds, so a `p + k` in that address has to
+    have been scaled by whoever wrote it, while `p[i]` reads at `p + i*width` and
+    the multiply is this path's own — asking `_offset_scale` to account for the
+    index would refuse every `q[0]` on a `Pointer[Int32]` for the sake of an
+    offset the emitter adds itself. Measured: without the flag,
+    `var q: Pointer[Int32] = malloc(16); q[0]` is refused with "the address is
+    the result of a call", which is true of `q` and irrelevant to `q[0]`.
 
     THE pointer value model's decision, and the one function both backends call
     in place of `DEREFERENCE_METHODS` for a receiver that is a pointer.  A
@@ -3124,9 +3136,10 @@ def dereference_lowering(fn, expr, decls: dict, functions: dict = None,
         return (None, f"the pointee is {inner}, and {POINTEES_REFUSED[inner]}")
     if inner in POINTEE_WIDTHS:
         width, signed = POINTEE_WIDTHS[inner]
-        scaled, scale_why = _offset_scale(fn, expr, width)
-        if not scaled:
-            return (None, scale_why)
+        if not index_scaled:
+            scaled, scale_why = _offset_scale(fn, expr, width)
+            if not scaled:
+                return (None, scale_why)
         return (("load", width, signed), why)
     if inner in ("SIMD", "Scalar"):
         args = pointee_args(_rhs_declared_text(fn, expr, decls, functions) or "")
@@ -3430,6 +3443,86 @@ def receiver_declared_is_pointer(fn, expr, decls: dict) -> bool | None:
     if base is None:
         return None
     return base in POINTER_TYPE_CTORS
+
+
+def subscript_base_lowering(fn, obj, decls: dict, functions: dict = None,
+                            structs_by_name: dict = None):
+    """`(shape, width, signed, why)` — `(None, None, None, why)` to refuse.
+
+    WHAT `obj[i]` READS, for a base that is not a string and not a dict key —
+    the single decision `formal/arm64_codegen.py:_emit_subscript_addr` and its
+    x86-64 twin used to each get wrong in the same way.
+
+    Two spellings of one question, and only one of them was routed. `p.value()`
+    asked `dereference_lowering` and got a load at the pointee's width, which is
+    right; `p[i]` asked nothing and fell through to the BLOB walk, whose first
+    word of the base is a COUNT. For a `Pointer[UInt8]` that count is the byte
+    at offset 0, the bounds check then passes or fails on it, and the element
+    address is `base + 8 + 8*count`:
+
+        byteat("ab")   -1879048144   0x9002_2E68 — "ab" plus whatever follows
+                                         it in __TEXT, read as a little-endian
+                                         word. `0x68` is `h`; the answer is 97.
+        malloc(64)     exit 1, no output — the count is 0, the check fails, and
+                                         the Darwin exit(1) has no message.
+
+    Both are a silent wrong answer, and one spelling of them is silent in a way
+    nothing downstream can detect. See
+    bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md.
+
+    The three shapes, and the same arity for all of them so the caller reads one
+    unpack:
+
+      * `("load", width, signed, why)` — the base is a pointer whose pointee this
+        module established a width for. The caller emits `base + i*width` and a
+        load of `width` bytes, which is the same instruction pair
+        `_emit_dereference` emits for `p.value()` — the SAME width rule, from
+        the SAME reader, so the two spellings cannot disagree about what a
+        `Pointer[UInt8]` holds.
+      * `("blob", 8, False, None)` — nothing here says the base is a pointer, so the
+        container reading stands, and a container element is a word. This is the
+        answer for a list/tuple/dict base and for the many bases whose kind no
+        declaration in this image establishes.
+      * `(None, None, None, why)` — the base is DECLARED a pointer and the
+        pointee is not established, or it is established but has no width. A
+        bounds check against whatever word is at offset 0 of an address is never
+        the answer, so this is a diagnostic rather than a number.
+
+    What is deliberately NOT refused: a base whose kind nothing establishes. The
+    blob reading is a guess there, and it is a guess the corpus depends on — an
+    unannotated parameter is a word, and a word is an integer on this path, so
+    "refuse every unestablished base" would refuse every `p[i]` where `p` came
+    from a caller. Measured over the 395 `.mojo` files of the sweep corpus that
+    is ~2 200 sites whose base is a word, most of them `List`/`Fence`/SIMD
+    type-parameter subscripts that are refused further down the same path
+    anyway. The remaining wrong-number case — a base that IS an address and
+    says nothing — is recorded, with the number, in that bug doc.
+    """
+    how, why = dereference_lowering(fn, obj, decls, functions, structs_by_name,
+                                    index_scaled=True)
+    if how is not None:
+        _shape, width, signed = how
+        if _shape != "load":
+            return (None, None, None,
+                    f"the base is a pointer to a STRUCT, and a struct's value "
+                    f"on this path is the address of its frame, so `{spelled(obj)}"
+                    f"[i]` would need to know the field at offset i*8 — a layout "
+                    f"no declaration in this image states. {_sentence(why)}")
+        return ("load", width, signed, why)
+    if receiver_declared_is_pointer(fn, obj, decls) is True:
+        return (None, None, None,
+                f"`{spelled(obj)}[i]` reads through a POINTER, and the width of "
+                f"the read is the pointee's — {_sentence(why)} Refused rather "
+                f"than read as a container: a container base is "
+                f"`[count][element]…`, so the count would come from offset 0 of "
+                f"the address itself, the bounds check would be against whatever "
+                f"byte is there, and the element address would be `base + 8 + "
+                f"8*count`. Measured, on a pointer to a string: -1879048144, "
+                f"which is the first four characters of the string read as a "
+                f"little-endian word, and 97 is the byte. Declaring the pointee "
+                f"— `var p: Pointer[UInt8]`, or a parameter annotated "
+                f"`Pointer[Int32]` — is what makes it answerable")
+    return ("blob", 8, False, None)
 
 
 def dereference_refusal(method: str, why: str, is_pointer_receiver) -> str:

@@ -269,6 +269,24 @@ def encode_mov_rm64_r64(base: Reg, disp: int, src: Reg) -> bytes:
     return bytes([rex, 0x89, modrm]) + extra
 
 
+def encode_mov_rm8_r8(base: Reg, disp: int, src: Reg) -> bytes:
+    """mov [base + disp], src8 — 88 /r, the low BYTE of `src`.
+
+    The store counterpart of `encode_movzx_r64_r8`, and it exists because the
+    64-bit form was the only one: a one-byte element written through
+    `encode_mov_rm64_r64` overwrites the seven bytes after it, which is a
+    silent corruption of a `malloc`'d buffer rather than anything that traps.
+    No REX.W — the operand is a byte, so the prefix that would say "64-bit" is
+    the wrong one; a REX prefix is still needed when either register is r8-r15,
+    because that is what extends the register field, and `_rex` emits exactly
+    that. Verified against clang: `mov %sil, (%rax)` = `40 88 30`.
+    """
+    modrm, extra = _mem_modrm(base, disp, src)
+    rex = _rex(r=1 if src.value >= 8 else 0,
+               b=1 if base.value >= 8 else 0)
+    return bytes([rex, 0x88, modrm]) + extra
+
+
 def encode_mov_r32_r32(dst: Reg, src: Reg) -> bytes:
     """mov dst32, src32 (zero-extends into the full 64-bit register)."""
     rex = _rex(r=1 if src.value >= 8 else 0, b=1 if dst.value >= 8 else 0)
@@ -361,6 +379,30 @@ def encode_imul_r64_r64(dst: Reg, src: Reg) -> bytes:
     rex = _rex(w=1, r=1 if dst.value >= 8 else 0,
                b=1 if src.value >= 8 else 0)
     return bytes([rex, 0x0F, 0xAF, _modrm(3, dst.value & 7, src.value & 7)])
+
+
+def encode_imul_r64_r64_imm(dst: Reg, src: Reg, imm: int) -> bytes:
+    """imul dst, src, imm8 — REX.W 6B /r ib, a signed 8-bit immediate.
+
+    The three-operand form, and it exists for a pointer subscript's element
+    scale: `p[i]` on a `Pointer[Int32]` is `p + i*4`, and the immediate is the
+    pointee's width. `imul r, r, imm` is signed on both operands, which is what
+    a negative index wants — a C subscript moves the address backwards for one.
+
+    Opcode `6B` and not `69`: `69` is the imm32 form, and using it with a one-byte
+    scale reads the following THREE instructions as the immediate. That is not a
+    theoretical mistake — it is what this encoder emitted first, and
+    `p[0]` on a `Pointer[Int32]` then multiplied the index by 0xD8014C04 (the
+    imm32 `04` plus the next twelve bytes of the function) and dereferenced the
+    result: SIGSEGV, on an image whose own disassembly agreed with the wrong
+    reading. Byte-for-byte against clang's assembler:
+    `imulq $4, %rax, %rcx` = `48 6b c8 04`.
+    """
+    assert -128 <= imm <= 127, f"imul immediate out of imm8 range: {imm}"
+    rex = _rex(w=1, r=1 if dst.value >= 8 else 0,
+               b=1 if src.value >= 8 else 0)
+    return bytes([rex, 0x6B, _modrm(3, dst.value & 7, src.value & 7),
+                  imm & 0xFF])
 
 
 # ── ALU: reg/imm32 ───────────────────────────────────────────────────

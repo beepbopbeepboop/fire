@@ -632,6 +632,14 @@ class ARM64Codegen:
         self._comptime_list_asts: dict = {}
         # Unique-label counter for subscript bounds-check exit paths.
         self._sub_counter = 0
+        # The element width the subscript being emitted reads at, in bytes.
+        # `_emit_subscript_addr` sets it on every path (a container element and
+        # a dict value are 8, a string byte is 1, a declared pointee is its
+        # own) and the caller that emits the load or the store reads it, so
+        # the address computation and the instruction that uses it cannot
+        # disagree. Defaulted here because a stale value from a previous
+        # subscript in the same function would silently pick a width.
+        self._sub_width = 8
         # {function name: model.ValueKinds}, for the whole module. `_functions`
         # is fixed for a compile, so a callee's answer is the same at every
         # call site and there is no reason to re-derive it per function.
@@ -2703,15 +2711,30 @@ class ARM64Codegen:
         return False
 
     def _is_string_subscript(self, obj) -> bool:
-        """True when `obj` is known to hold a char* (byte index path)."""
+        """True when `obj` is known to hold a char* (byte index path).
+
+        One question, asked through the one authority that answers it:
+        `_expr_str_kind`, so the flow-sensitive `_string_vars` map still wins
+        where the two disagree and this cannot contradict the three call sites
+        (`len`, `print`, a string method receiver) that were already right.
+
+        The FALLBACK is the whole of a fixed silent wrong answer. A parameter is
+        bound by the signature, so `_note_binding` never sees it and it was not
+        in `_string_vars` — while the whole-function `ValueKinds` IS seeded from
+        the parameter's annotation. Asking only the flow-sensitive set therefore
+        gave one name two answers on this path: a `char *` to `len`/`print`, a
+        LIST BLOB to this one. Falling through to the blob path is what made it
+        silent AND wrong-shaped rather than a crash — a blob is
+        `[count:i64][elem0]…`, so `s[0]` read the first eight CHARACTERS of the
+        string as the element count and loaded `base + 8 + 8*count`, which for
+        `"AB"` walks off the string and returns a text-section address. Measured
+        before the fallback: `f(s: String): return s[0]` on `f("AB")` printed
+        -8070450326089498624, where 65 is the answer. See
+        bugs/CODEGEN_string_parameter_subscript_reads_count_field.md.
+        """
         if isinstance(obj, F.StringLiteral):
             return True
-        if isinstance(obj, F.IdentExpr):
-            return obj.name in self._string_vars
-        if isinstance(obj, F.MemberExpr):
-            key = _member_slot_key(obj)
-            return key is not None and key in self._string_vars
-        return False
+        return self._expr_str_kind(obj) == M.STR_KIND
 
     def _emit_subscript(self, e: F.SubscriptExpr) -> None:
         """`obj[index]` → element/byte value in X0.
@@ -2719,7 +2742,8 @@ class ARM64Codegen:
         List/tuple blobs: `[count:i64][e0…]`, unsigned bounds-checked
         (negative indices wrap like Python, then bounds-check); OOB →
         Darwin exit(1). String pointers (literal or tracked var): raw
-        byte load, no header.
+        byte load, no header. A declared POINTER: a load of the pointee's
+        width, which `_emit_subscript_addr` recorded in `_sub_width`.
 
         Every refusal lives in `_emit_subscript_addr`, which this calls: a
         read, a store and an augmented assignment all go through it, and a
@@ -2731,10 +2755,23 @@ class ARM64Codegen:
             self._emit_slice_parts(e.obj, sl.start, sl.stop, sl.step)
             return
         self._emit_subscript_addr(e)
-        if self._is_string_subscript(e.obj):
-            self.asm.emit(encode_ldrb_wd_wn(0, 0, 0))
+        self._emit_subscript_load(0, 0)
+
+    def _emit_subscript_load(self, reg: int, base: int) -> None:
+        """Load one element through X{base} into X{reg}, at `_sub_width`.
+
+        ONE place, because the read, the store's own read-modify and the
+        augmented assignment each used to spell this choice separately and the
+        pointer route made a third width possible. A one-byte element is
+        zero-extended by `LDRB`, which is what a `UInt8` read is; anything
+        wider is the full 64-bit load, and the sub-word widths the pointee
+        table can return (2 and 4) are the same two instructions
+        `_emit_dereference` uses for them.
+        """
+        if self._sub_width == 1:
+            self.asm.emit(encode_ldrb_wd_wn(reg, base, 0))
         else:
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 0, 0))
+            self.asm.emit(encode_ldr_xt_xn_imm(reg, base, 0))
 
     def _emit_dict(self, expr: F.DictExpr) -> None:
         """Stack-allocate a dict pair-blob: [count_pairs][k0][v0][k1][v1]…
@@ -2968,6 +3005,12 @@ class ARM64Codegen:
         contract for) and the second emitted a store through a computed
         address. Both now say no."""
         self._refuse_frame_container_operand("a subscript", e.obj)
+        # The element width this subscript reads at, for the caller that emits
+        # the load. A container element and a dict value are a word, a string
+        # byte and a declared pointee are whatever the pointee is, and the
+        # default here is the word because it is the answer for the two that
+        # reach their own branch and set it before returning.
+        self._sub_width = 8
         if e.attrs is not None:
             raise CodegenError(
                 "type-parameter subscript [...] is not supported on the "
@@ -2994,6 +3037,7 @@ class ARM64Codegen:
                 M.spelled(e.index))
             if ireason is not None:
                 raise CodegenError(ireason)
+            self._sub_width = 1
             self._emit_expr(e.obj)
             self.asm.emit(encode_stp_sp_pre(0, 2))
             self._emit_expr_to(e.index, "X1")
@@ -3002,6 +3046,38 @@ class ARM64Codegen:
             self.asm.emit(encode_mov_zr_xn(2, 0))
             self.asm.emit(encode_ldp_sp_post(0, 31))
             self.asm.emit(encode_mov_zr_xn(0, 2))
+            return
+        shape, width, _signed, sub_why = M.subscript_base_lowering(
+            self._cur_fn, e.obj, self._structs, self._functions, self._structs)
+        if shape is None:
+            raise CodegenError(sub_why)
+        if shape == "load":
+            # A POINTER subscript is `base + index*width` and a load of `width`
+            # bytes — `p[i]` and `p.value()` are the same question, and this is
+            # the half of the pair that used to fall through to the blob walk
+            # and read the element COUNT out of the pointer itself. Measured
+            # before the route existed: `p[0]` on a `Pointer[UInt8]` holding
+            # "ab" returned -1879048144 (0x9002_2E68 = "ab" plus the next two
+            # bytes of __TEXT) and the same spelling on a `malloc`'d buffer
+            # exited 1 with no message, because the count there is 0. See
+            # bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md and
+            # `model.subscript_base_lowering`, which owns the decision.
+            self._sub_width = width
+            self._emit_expr(e.obj)                    # X0 = the address
+            self.asm.emit(encode_stp_sp_pre(0, 2))    # save it
+            self._emit_expr_to(e.index, "X1")         # X1 = index
+            self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))   # X9 = base
+            if width != 1:
+                # The scale is emitted, not assumed: `base + i` is right for a
+                # one-byte element and is the SECOND element for any other
+                # width, which is the same trap `_offset_scale` refuses rather
+                # than guesses on the dereference path.
+                self.asm.emit(encode_movz_xd_imm(2, width))
+                self.asm.emit(encode_mul_xd_xn_xm(1, 1, 2))
+            self.asm.emit(encode_add_xd_xn_xm(9, 9, 1))  # X9 = &elem
+            self.asm.emit(encode_mov_zr_xn(0, 9))
+            self.asm.emit(encode_ldp_sp_post(0, 31))  # restore SP (clobbers X0)
+            self.asm.emit(encode_mov_zr_xn(0, 9))
             return
         obj_ok = type(e.obj) in (F.IdentExpr, F.CallExpr, F.ListExpr,
                                  F.TupleExpr, F.MemberExpr, F.SubscriptExpr)
@@ -3080,7 +3156,7 @@ class ARM64Codegen:
         # nothing is emitted between the load and the store. The value is at
         # [sp+16]: the addr pair pushed just above took [sp+0] and [sp+8].
         self.asm.emit(encode_ldr_xt_xn_imm(5, 31, 16))  # X5 = value
-        if self._is_string_subscript(target.obj):
+        if self._sub_width == 1:
             self.asm.emit(encode_strb_wd_wn(5, 9, 0))
         else:
             self.asm.emit(encode_str_xt_xn_imm(5, 9, 0))
@@ -3104,14 +3180,10 @@ class ARM64Codegen:
                 f"unsupported augmented operator {stmt.op!r} "
                 f"(formal arm64 path supports + - * & | ^ << >>)")
         target = stmt.target
-        is_str = self._is_string_subscript(target.obj)
         self._emit_subscript_addr(target)
         self.asm.emit(encode_stp_sp_pre(0, 31))   # push addr (X0, XZR)
         self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))  # X9 = addr
-        if is_str:
-            self.asm.emit(encode_ldrb_wd_wn(0, 9, 0))
-        else:
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 9, 0))  # X0 = old
+        self._emit_subscript_load(0, 9)           # X0 = old, at the element's width
         self.asm.emit(encode_stp_sp_pre(0, 31))   # push old (stack: old, addr)
         self._emit_expr_to(stmt.value, "X1")      # X1 = value
         self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))  # X0 = old (re-load)
@@ -3122,7 +3194,7 @@ class ARM64Codegen:
             self.asm.emit(ops[op](0, 0, 1))       # X0 = old op value
         # addr is at [SP+16] after the two pushes.
         self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 16))
-        if is_str:
+        if self._sub_width == 1:
             self.asm.emit(encode_strb_wd_wn(0, 9, 0))
         else:
             self.asm.emit(encode_str_xt_xn_imm(0, 9, 0))
