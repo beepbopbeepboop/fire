@@ -92,6 +92,6 @@ comments resolve is the wrong trade.
   beside `test_every_test_file_is_registered`, or a pre-commit check on
   `git rm bugs/*.md`). This doc is the argument for landing one of those two:
   the mechanism is now demonstrated twice, on one merge.
-- `TOOLS_the_test_estate_check_has_been_red_since_eight_formal_suites_landed.md`
+- `TOOLS_the_test_estate_check_is_red_and_nothing_reads_its_answer.md`
   — the other direction of the same gap, and the reason a `test_suite.py` check
   would not run under the gate until its step 2 is done.

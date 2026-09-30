@@ -51,8 +51,8 @@ table below is the reproducible one, and the 99/116/117 above supersedes it.)
 
 
 The `test_suite.py` line is the neighbouring half of the same hole and is
-already filed: `TOOLS_the_test_estate_check_has_been_red_since_eight_formal_
-suites_landed`. It checks that every `test_*.py` is run or excused. There is no
+already filed: `TOOLS_the_test_estate_check_is_red_and_nothing_reads_its_
+answer`. It checks that every `test_*.py` is run or excused. There is no
 such check for the other direction — that every `bugs/*.md` a file CITES still
 exists — and `tools/suite.py` has none either.
 
@@ -117,7 +117,7 @@ Two shapes of check would do it, and the cheap one is enough:
 1. **A check in `test_suite.py`**, beside `test_every_test_file_is_registered`,
    walking the same file set for `bugs/<name>.md` and asserting each resolves.
    It runs in the `smoke` bucket, so per
-   `TOOLS_the_test_estate_check_has_been_red_since_eight_formal_suites_landed`
+   `TOOLS_the_test_estate_check_is_red_and_nothing_reads_its_answer`
    §"Why nobody noticed" it will not be run by the gate until that doc's step 2
    is done — so this fix should land in the same commit as the bucket move, or
    at least be written to be run by `python3 test_suite.py` directly, which is

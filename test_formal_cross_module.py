@@ -55,8 +55,9 @@ filed rather than fixed are what is left OPEN in this area, and all three start
     extend with them are written out there; nothing in THIS file changes if
     they land, which is why it is a doc and not a case.
 
-A fourth doc this branch filed, `TOOLS_the_test_estate_check_has_been_red_since_
-eight_formal_suites_landed`, is not about this area: it is about the registry
+A fourth doc this branch filed,
+`TOOLS_the_test_estate_check_is_red_and_nothing_reads_its_answer`, is not
+about this area: it is about the registry
 that would have to run this file, and it is why the `UNREGISTERED` entry in
 `test_suite.py` names the one-line spec that belongs to this suite.
 
