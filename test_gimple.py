@@ -6487,6 +6487,194 @@ print("%r" % p)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_dedup_variadic_externs_cache_is_a_faithful_parse():
+        """`_dedup_variadic_externs`'s memo must never change what it
+        answers — including the entries it DERIVES for the text it returns
+        (emit_infra's `_record_output_parse`: the parse of `'\n'.join(parts)`
+        taken from the parts' own entries, so the parent level, which inlines
+        exactly that text, does not rescan it).
+
+        The failure mode this guards is invisible in the compiled output
+        until it isn't: a derived entry that is a SUPERSET of the text's real
+        parse makes the next level drop a variadic declaration it should have
+        kept, i.e. a wrong artifact, not a slow one. So the invariant checked
+        is on the CACHE, not on speed: for every text the function has ever
+        published, the entry must equal an independent, uncached parse of that
+        same text.
+
+        `parts` is driven through the shape that makes the derivation
+        observable at all — each level's parts CONTAIN the previous level's
+        output blob — over hand-built edge shapes (a part whose trailing
+        fragment merges with the next part's leading one, in every extern
+        flavor) plus a randomized corpus that leaves ~half its parts
+        unterminated on purpose. The reference implementation here is a
+        verbatim transcription of the pre-derivation body with a private
+        memo, so it cannot drift with the code under test the way a
+        hand-written expectation list would."""
+        global _PASS, _FAIL
+        name = "dedup_variadic_externs_cache_is_a_faithful_parse"
+        import mojo.backend_gimple.emit_infra as ginf
+        import random
+
+        ref_cache: dict = {}
+
+        def _ref_is_extern_decl(stmt):
+            for line in stmt.split('\n'):
+                line = line.strip()
+                if line == 'extern' or line.startswith('extern ') \
+                        or line.startswith('extern"'):
+                    return True
+            return False
+
+        def _ref_parse(part):
+            concrete, variadic = [], []
+            for stmt in part.split(';'):
+                if not _ref_is_extern_decl(stmt):
+                    continue
+                paren = stmt.find('(')
+                if paren < 0:
+                    continue
+                close = stmt.rfind(')')
+                if close < paren:
+                    continue
+                params = stmt[paren + 1:close].strip()
+                head_toks = stmt[:paren].strip().split()
+                if not head_toks:
+                    continue
+                cname = head_toks[-1].lstrip('*')
+                if params == '...':
+                    variadic.append(cname)
+                elif params != '':
+                    concrete.append(cname)
+            return concrete, variadic
+
+        def _ref_dedup(parts):
+            concrete, variadic_by_part = set(), []
+            for p in parts:
+                entry = ref_cache.get(p)
+                if entry is None:
+                    entry = _ref_parse(p)
+                    ref_cache[p] = entry
+                for cname in entry[0]:
+                    concrete.add(cname)
+                variadic_by_part.append(entry[1])
+            if not concrete:
+                return '\n'.join(parts)
+            kept = []
+            for i in range(len(parts)):
+                drop = False
+                for vname in variadic_by_part[i]:
+                    if vname in concrete:
+                        drop = True
+                        break
+                if not drop:
+                    kept.append(parts[i])
+            return '\n'.join(kept)
+
+        edges = [
+            'extern int foo (int);', 'extern int foo (...);',
+            'extern', 'extern "C" int64_t bar (int64_t);',
+            'extern "C" int64_t bar (...);', 'extern int * baz (char *, int);',
+            'extern int unbalanced (int;', 'extern int tail_no_semi (int)',
+            'extern int no_paren_decl', '', '   ', '\n',
+            'static int helper (int x) { return x; }',
+            '#line 3 "Lib/test/ffi/test_external_call.mojo"\nextern int only_here (...);',
+            '#line 9 "somewhere/test_external_call.mojo"\nstd_testing___init___assert_false (_t5);',
+            'extern int dup (int);\nextern int dup (...);',
+            'extern int multi\n  (\n  int\n)\n;', 'extern void void_ret ();',
+            'extern int ml_variadic (...)\n;', 'extern char * ppp (char ***);',
+            # the merge shapes: two adjacent parts whose trailing/leading
+            # fragments join into one `;`-delimited fragment
+            'extern int a (int', 'extern int a (...)', 'extern int b (int)',
+            'extern int b (...)', '\nextern (int)', 'extern struct X y',
+        ]
+        frags = [
+            'int f{i} (int a);', 'int f{i} (...);', 'char * g{i} (char *);',
+            'void h{i} (void);', 'extern int f{i} (int a);',
+            'extern int f{i} (...);',
+            'extern "C" int64_t k{i} (int64_t, int64_t);',
+            'extern "C" int64_t k{i} (...);',
+            'static int local{i} (int x) {{ return x + {i}; }}', '',
+        ]
+
+        def _rand_part(rng, i):
+            r = rng.random()
+            if r < 0.08:
+                return rng.choice(['', ' ', '\n', ';\n', '  \n'])
+            body = frags and rng.choice(frags).format(i=i * 10)
+            for j in range(rng.randint(0, 2)):
+                body += rng.choice([';', ';\n', ';  ', ' ']) \
+                    + rng.choice(frags).format(i=i * 10 + j + 1)
+            if rng.random() < 0.5:
+                body += rng.choice([';', ';\n', '; ', ' ', ''])
+            if rng.random() < 0.25:
+                # deliberately unterminated trailing fragment: the shape that
+                # can merge with the NEXT part's leading fragment
+                body += rng.choice(['extern int late (int', 'extern int late (...)',
+                                    'trailing text', 'f (int x) {'])
+            return body
+
+        ref_cache.clear()
+        ginf._DEDUP_EXTERN_PARTS_CACHE.clear()
+
+        def _compare(tag, parts):
+            want = _ref_dedup(list(parts))
+            got = ginf._dedup_variadic_externs(list(parts))
+            if want != got:
+                print(f"FAIL  {name} [{tag}]: dedup answer changed\n"
+                      f"  parts={parts!r}\n  reference={want!r}\n"
+                      f"  actual={got!r}")
+                return False
+            if ginf._dedup_variadic_externs(list(parts)) != want:
+                print(f"FAIL  {name} [{tag}]: a WARM cache changed the answer "
+                      f"(memo must not be order- or call-count-dependent)")
+                return False
+            return True
+
+        # hand-built arrangements, every adjacent pair (the merge shape is a
+        # pair property), and the whole corpus
+        ok = _compare('edges-all', edges)
+        for i in range(len(edges) - 1):
+            ok &= _compare(f'pair-{i}', [edges[i], edges[i + 1]])
+            ok &= _compare(f'pair-rev-{i}', [edges[i + 1], edges[i]])
+        ok &= _compare('triple-merge', ['extern int a (int', 'extern int b (int)',
+                                        'extern int c (...);'])
+        ok &= _compare('triple-merge2', ['extern int a (int', 'extern int a (...);'])
+        ok &= _compare('empty-corpus', [])
+        if not ok:
+            _FAIL += 1
+            return
+
+        # multi-level: level k's parts contain level k-1's output, which is
+        # the only shape in which a wrong derived entry is observable
+        rng = random.Random(20260930)
+        for trial in range(120):
+            r2 = random.Random(trial)
+            blobs = []
+            for lvl in range(rng.randint(2, 6)):
+                parts = list(blobs) + [_rand_part(r2, lvl * 100 + j)
+                                       for j in range(r2.randint(1, 6))]
+                want = _ref_dedup(list(parts))
+                got = ginf._dedup_variadic_externs(list(parts))
+                if want != got:
+                    print(f"FAIL  {name} [trial {trial} level {lvl}]: "
+                          f"dedup answer changed once a derived entry was in "
+                          f"play\n  parts={parts!r}")
+                    _FAIL += 1
+                    return
+                blobs.append(got)
+            for key, entry in ginf._DEDUP_EXTERN_PARTS_CACHE.items():
+                ref_entry = _ref_parse(key)
+                if set(ref_entry[0]) != set(entry[0]) \
+                        or list(ref_entry[1]) != list(entry[1]):
+                    print(f"FAIL  {name} [trial {trial}]: published entry is "
+                          f"not the text's real parse\n  text={key[:300]!r}\n"
+                          f"  reference={ref_entry!r}\n  actual={entry!r}")
+                    _FAIL += 1
+                    return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     test_ctor_arg_container_literal_field_is_container_typed()
     test_ctor_arg_dict_and_set_literal_fields_are_container_typed()
     test_ctor_arg_mixed_container_and_scalar_stays_int64()
@@ -6499,6 +6687,7 @@ print("%r" % p)
     test_generator_mixed_bool_and_int_yields_widen_to_int()
     test_user_defined_dunder_repr_is_called()
     test_user_defined_dunder_repr_value()
+    test_dedup_variadic_externs_cache_is_a_faithful_parse()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

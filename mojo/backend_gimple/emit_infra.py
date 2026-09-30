@@ -3728,6 +3728,21 @@ def _split_top_level_comma(s: str) -> list[str]:
 # holds the SAME str objects across levels (they are appended, never
 # re-joined), so a repeat level pays a hash-cache hit per part and nothing
 # more.
+#
+# Phase 8 (2026-09-30) added the SECOND half of the fix, the one Phase 7's
+# own "What is left, precisely" section said was the only remaining way to
+# go: the entry for a part's own OUTPUT TEXT is now DERIVED from the entries
+# of the parts that produced it (`_record_output_parse`), instead of being
+# re-parsed byte by byte the first time the parent level lays hands on it.
+# Before, the corpus was scanned once per distinct TEXT, and one of those
+# texts is every module's whole output blob — whose parse is exactly the
+# union of its own parts' parses — so half of all parse volume was spent
+# re-deriving, from scratch, something the child had just derived. Phase 7's
+# cache could not absorb it (every blob is a distinct text the moment it is
+# born) and a shared running `concrete` set cannot replace it (a superset of
+# any one level's corpus; see below). The derivation is guarded by a
+# `_record_output_parse`-local boundary check and is the ONLY thing in this
+# file that writes an entry it did not parse itself.
 _DEDUP_EXTERN_PARTS_CACHE: dict = {}
 
 def _dedup_variadic_externs(parts: list) -> str:
@@ -3736,6 +3751,12 @@ def _dedup_variadic_externs(parts: list) -> str:
     (e.g. an elaborated instantiation forward-declares `get_defined_int (void)`
     while the import-decl pass emits `(...)`, which GCC reports as conflicting
     types). The concrete prototype wins.
+
+    Per-part parse results are memoized process-globally
+    (`_DEDUP_EXTERN_PARTS_CACHE`), and the entry for the text this function
+    RETURNS is published there too (`_record_output_parse`), so the parent
+    level — which inlines exactly this text as one of its own parts — reads
+    the child's parse instead of rescanning the child's whole output blob.
 
     Deliberately plain string scanning (`.split`/`.find`/`.rfind`), NOT
     regex `.finditer()`/`.findall()` — this codegen has no lowering for
@@ -3759,11 +3780,57 @@ def _dedup_variadic_externs(parts: list) -> str:
         # ("implicit declaration of function" once compiled). Real
         # regression, found via compile_stdlib.py's
         # test/ffi/test_external_call.mojo.
+        #
+        # Necessary-condition short-circuit FIRST: all three accepted line
+        # shapes below contain the substring `extern`, so a fragment
+        # without it cannot satisfy any of them. Proves equivalent, and
+        # skips the `.split('\n')` + per-line strip/compare for the
+        # overwhelming majority of fragments (every statement of every
+        # emitted function body). `not in` on a str is lowered on the
+        # self-hosted path (cpp_async.py's `',' not in stmt.name`).
+        if 'extern' not in stmt:
+            return False
         for line in stmt.split('\n'):
             line = line.strip()
             if line == 'extern' or line.startswith('extern ') or line.startswith('extern"'):
                 return True
         return False
+
+    def _fragment_names(stmt: str) -> tuple:
+        """The extern name ONE `;`-delimited fragment contributes, as
+        `(concrete_name, variadic_name)` — either may be None, and a
+        fragment never contributes both (they are disjoint by construction).
+
+        A name is `concrete` when its parameter list is neither `...` nor
+        empty, and `variadic` when it is exactly `...` — the two lists are
+        disjoint by construction, and an empty parameter list is in neither
+        (the old first pass skipped it via `params not in ('...', '')`; the
+        old second pass skipped it via `params != '...'`, so it never
+        decided anything either way).
+
+        Factored out of `_parse_part` (which applies it to each fragment of
+        a part) because `_boundaries_preserve_parse` needs to compare a
+        MERGED fragment's contribution against the two it replaced — same
+        per-fragment reading, one function, so the two cannot drift.
+        """
+        if not _is_extern_decl(stmt):
+            return (None, None)
+        paren = stmt.find('(')
+        if paren < 0:
+            return (None, None)
+        close = stmt.rfind(')')
+        if close < paren:
+            return (None, None)
+        params = stmt[paren + 1:close].strip()
+        head_toks = stmt[:paren].strip().split()
+        if not head_toks:
+            return (None, None)
+        name = head_toks[-1].lstrip('*')
+        if params == '...':
+            return (None, name)
+        if params != '':
+            return (name, None)
+        return (None, None)
 
     def _parse_part(part: str) -> tuple:
         """One part's extern declarations, as (concrete, variadic) name lists.
@@ -3776,34 +3843,158 @@ def _dedup_variadic_externs(parts: list) -> str:
         level per pass; see that dict's own comment for why the repetition
         across levels was the expensive part.
 
-        A name is `concrete` when its parameter list is neither `...` nor
-        empty, and `variadic` when it is exactly `...` — the two lists are
-        disjoint by construction, and an empty parameter list is in neither
-        (the old first pass skipped it via `params not in ('...', '')`; the
-        old second pass skipped it via `params != '...'`, so it never
-        decided anything either way).
+        Whole-part short-circuit: a part with no `extern` substring at all
+        can contribute no name (every accepted fragment shape contains it —
+        see `_is_extern_decl`), so the `.split(';')` — which materializes
+        one new str per statement, tens of thousands of them for a
+        multi-megabyte imported-module blob — is skipped entirely. Same
+        reasoning, one level up.
         """
+        if 'extern' not in part:
+            return ([], [])
         concrete = []
         variadic = []
         for stmt in part.split(';'):
-            if not _is_extern_decl(stmt):
-                continue
-            paren = stmt.find('(')
-            if paren < 0:
-                continue
-            close = stmt.rfind(')')
-            if close < paren:
-                continue
-            params = stmt[paren + 1:close].strip()
-            head_toks = stmt[:paren].strip().split()
-            if not head_toks:
-                continue
-            name = head_toks[-1].lstrip('*')
-            if params == '...':
-                variadic.append(name)
-            elif params != '':
-                concrete.append(name)
+            c_name, v_name = _fragment_names(stmt)
+            if c_name is not None:
+                concrete.append(c_name)
+            if v_name is not None:
+                variadic.append(v_name)
         return concrete, variadic
+
+    def _boundaries_preserve_parse(joined: list) -> bool:
+        """Does `'\\n'.join(joined)` parse as the concatenation of the parts'
+        own parses?
+
+        The join changes exactly one thing: where a `;`-delimited fragment
+        of the joined text SPANS parts. A fragment that starts in part `i`'s
+        trailing text (`fa`, i.e. after its last `;`) runs on until the next
+        `;` anywhere in the joined text — which is in the first following
+        part that has one at all, so a run can straddle three or more parts,
+        and an EMPTY part does NOT end it (it has no `;` either; the join's
+        own newline passes straight through). Everything else parses
+        exactly as it did in its own part.
+
+        For each such run the merged fragment is read with the same
+        `_fragment_names` the parts themselves were parsed with, and it must
+        carry exactly the names the run's pieces carried separately. That is
+        a direct comparison on the only thing the parse feeds (a name set),
+        not a hand-derived argument about paren/`rfind` positions — which is
+        the point, because the shapes that break the derivation are not
+        guessable: `extern int late (int` names nothing on its own (no
+        closing paren) yet completes into a concrete `late` when the next
+        part supplies the `)`, and two pieces each naming a different
+        function cannot both survive, since a fragment carries at most one
+        concrete and one variadic name.
+
+        Cheap skip first, provably free: a run whose pieces contain no
+        `extern` substring at all. The merged fragment's lines are the
+        pieces' lines, so it cannot be an extern declaration and names
+        nothing at all (see `_is_extern_decl`) — same reasoning
+        `_parse_part` uses to skip a whole part. A part that ends in `;`
+        starts no run: its trailing fragment is a whole fragment of the
+        joined text.
+        """
+        n = len(joined)
+        i = 0
+        while i < n:
+            a = joined[i]
+            fa = a[a.rfind(';') + 1:]
+            if fa == '' or i == n - 1:
+                i += 1
+                continue
+            frags = [fa]
+            j = i + 1
+            while j < n:
+                b = joined[j]
+                fb_end = b.find(';')
+                if fb_end < 0:
+                    frags.append(b)
+                    j += 1
+                    continue
+                frags.append(b[:fb_end])
+                break
+            sides_c = []
+            sides_v = []
+            any_extern = False
+            for frag in frags:
+                if 'extern' not in frag:
+                    continue
+                any_extern = True
+                c_name, v_name = _fragment_names(frag)
+                if c_name is not None:
+                    sides_c.append(c_name)
+                if v_name is not None:
+                    sides_v.append(v_name)
+            if any_extern:
+                merged = frags[0]
+                for k in range(1, len(frags)):
+                    merged = merged + '\n' + frags[k]
+                m_c, m_v = _fragment_names(merged)
+                # EVERY piece's name must be exactly the merged
+                # fragment's, and a merged fragment with no name must have
+                # had none. Checking the first piece alone is not enough:
+                # `extern int a (int)` + `extern int a (int)` +
+                # `extern "C" ... b (...)` (no `;` anywhere) is ONE
+                # fragment whose `find('(')`/`rfind(')')` span all three,
+                # naming `a` and swallowing `b` — equal to the first piece,
+                # different from the union.
+                if m_c is None:
+                    if len(sides_c) > 0:
+                        return False
+                elif len(sides_c) == 0:
+                    return False
+                else:
+                    for k in range(len(sides_c)):
+                        if sides_c[k] != m_c:
+                            return False
+                if m_v is None:
+                    if len(sides_v) > 0:
+                        return False
+                elif len(sides_v) == 0:
+                    return False
+                else:
+                    for k in range(len(sides_v)):
+                        if sides_v[k] != m_v:
+                            return False
+            i = j
+        return True
+
+    def _record_output_parse(out: str, out_parts: list,
+                             exact_concrete, variadic_by_out_part: list) -> None:
+        """Publish         `_DEDUP_EXTERN_PARTS_CACHE[out]`.  `out` is `'\n'.join(out_parts)`,
+        so the parse of `out` is the concatenation of the parses of
+        `out_parts` — whose entries the caller has just read — exactly when
+        no join boundary merges two name-carrying fragments, which is what
+        `_boundaries_preserve_parse` decides by direct comparison.
+
+        The condition is checked rather than assumed, and when it fails
+        nothing is published (the parent level then parses the text itself,
+        exactly as it did before this existed).
+
+
+        `exact_concrete` is the caller's already-computed set when it is
+        provably the exact name set of `out` (nothing was dropped) — passed
+        BY REFERENCE, so the common case allocates nothing; `None` asks for
+        it to be rebuilt from the parts. Every part of `out_parts` is already
+        in the cache by the time this runs (the caller read or filled its
+        entry in the main pass), so `entry` below is never absent; a missing
+        one would be a programming error here, not a case to paper over.
+        """
+        if not _boundaries_preserve_parse(out_parts):
+            return
+        if exact_concrete is None:
+            exact_concrete = set()
+            for p in out_parts:
+                entry = _DEDUP_EXTERN_PARTS_CACHE.get(p)
+                for name in entry[0]:
+                    exact_concrete.add(name)
+        out_variadic = []
+        for vl in variadic_by_out_part:
+            for name in vl:
+                out_variadic.append(name)
+        _DEDUP_EXTERN_PARTS_CACHE[out] = (exact_concrete, out_variadic)
+
 
     # ONE pass over `parts`, not two. The old shape scanned every fragment
     # twice — once to build `concrete`, once to decide each part's fate —
@@ -3815,6 +4006,17 @@ def _dedup_variadic_externs(parts: list) -> str:
     # shared instead of repeated. Same predicate, same inputs, same
     # decision: a part is dropped iff one of its variadic names is in the
     # tree-wide `concrete` set.
+    #
+    # A part's entry is read from `_DEDUP_EXTERN_PARTS_CACHE` — including,
+    # now, the entry `_record_output_parse` published for a CHILD module's
+    # whole output blob when this level is that blob's first reader, which
+    # is why the per-level parse volume is the bytes THIS level added rather
+    # than the cumulative corpus. What is NOT done here is a process-wide
+    # running `concrete` set across levels: it is a strict SUPERSET of any
+    # one level's corpus (a sibling's names, and a dropped part's names,
+    # live in it but not in this level's `parts`), and a superset drops
+    # parts the per-level computation keeps — a silent output change. The
+    # same reasoning rejected it on 2026-09-26.
     concrete = set()
     variadic_by_part = []
     for p in parts:
@@ -3827,8 +4029,12 @@ def _dedup_variadic_externs(parts: list) -> str:
             concrete.add(name)
         variadic_by_part.append(part_variadic)
     if not concrete:
-        return '\n'.join(parts)
+        out = '\n'.join(parts)
+        _record_output_parse(out, parts, concrete, variadic_by_part)
+        return out
     kept = []
+    kept_variadic = []
+    dropped = False
     for i in range(len(parts)):
         drop = False
         for name in variadic_by_part[i]:
@@ -3837,7 +4043,14 @@ def _dedup_variadic_externs(parts: list) -> str:
                 break
         if not drop:
             kept.append(parts[i])
-    return '\n'.join(kept)
+            kept_variadic.append(variadic_by_part[i])
+        else:
+            dropped = True
+    out = '\n'.join(kept)
+    # Nothing dropped ⇒ the set just built IS the output's exact name set,
+    # so hand the same object over rather than rebuilding it.
+    _record_output_parse(out, kept, None if dropped else concrete, kept_variadic)
+    return out
 
 
 # ── Phase 3 (doc/OWNERSHIP_MODEL.md) codegen wiring — TODO item 1 ──────────
