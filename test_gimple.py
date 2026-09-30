@@ -6584,9 +6584,15 @@ print("%r" % p)
                 with open(fp, 'w') as fh:
                     fh.write(body)
             entry = os.path.join(td, 'p', 'main.py')
-            # cwd=td so `import p` / `import other` resolve for CPython.
+            # PYTHONPATH=td, not just cwd: running a script puts the
+            # SCRIPT'S OWN directory (`td/p`) on sys.path, and this program
+            # imports `p` and `other` as siblings of that directory — so
+            # CPython would fail with ModuleNotFoundError and the test
+            # would report "the test program itself is wrong" for a
+            # harness mistake.
             py = subprocess.run([sys.executable, entry], capture_output=True,
-                                text=True, cwd=td, timeout=60)
+                                text=True, cwd=td, timeout=60,
+                                env=dict(os.environ, PYTHONPATH=td))
             if py.returncode != 0 or not py.stdout:
                 print(f"FAIL  {name}: CPython on the same program exited "
                       f"{py.returncode} printing {py.stdout!r} "
@@ -6623,6 +6629,95 @@ print("%r" % p)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_dotted_import_two_hop_attribute_call():
+        """`import a.b` binds `a`, so `a.b.f(...)` is a TWO-hop attribute
+        call whose receiver is the SUBMODULE — Python's own
+        `os.path.join` / `xml.etree.ElementTree.parse` are this shape.
+
+        The compiled pipeline's `mod.f(...)` dispatch only matched a plain
+        `IdentExpr` receiver, so `a` lowered as an undeclared identifier to
+        a literal `0` and `_mojo_dispatch_getattr(0, "b")` raised at
+        RUNTIME. What made this one worth chasing rather than writing off:
+        the program compiled and linked cleanly first and then died with
+        `Unhandled exception: AttributeError: b`, exit 1 and NO stdout —
+        a non-zero exit with no diagnostic pointing at the import, in an
+        area where every other failure is exit 0 with a wrong or noisy
+        value (bugs/CODEGEN_import_dotted_name_two_hop_attribute_call_
+        exits_1.md).
+
+        CPython on the same files is the expectation, and BOTH pipelines are
+        exercised because they are separate codegen paths.
+
+        Skipped, loudly and with the reason, when this harness's temporary
+        directory lands inside the compiler's own source tree: the
+        module-qualified-call fallback is deliberately disabled there
+        (`_lower_method_call`'s `_mgc_is_selfhost` check — `_func_qualifier`
+        returns an unqualified bare symbol while compiling the compiler's
+        own sources), so such a run would measure that pre-existing,
+        separate self-host limitation rather than the import resolution
+        under test.
+        """
+        global _PASS, _FAIL
+        name = "dotted_import_two_hop_attribute_call"
+        files = {
+            'q/__init__.py': '',
+            'q/sub.py': 'def tri(x):\n    return x * 3\n',
+            'q/main.py': 'import q.sub\n\nprint(q.sub.tri(14))\n',
+        }
+        with tempfile.TemporaryDirectory() as td:
+            _selfhost = gimple_codegen._SELFHOST_DIR
+            if os.path.abspath(td) == _selfhost or \
+                    os.path.abspath(td).startswith(_selfhost + os.sep):
+                print(f"SKIP  {name}: TMPDIR puts the scratch package inside "
+                      f"the compiler's own source tree ({td}), where the "
+                      f"module-qualified-call fallback is disabled by "
+                      f"design — set TMPDIR outside the checkout to run it")
+                return
+            for rel, body in files.items():
+                fp = os.path.join(td, rel)
+                os.makedirs(os.path.dirname(fp), exist_ok=True)
+                with open(fp, 'w') as fh:
+                    fh.write(body)
+            entry = os.path.join(td, 'q', 'main.py')
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60,
+                                env=dict(os.environ, PYTHONPATH=td))
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:400]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            for mode in ('single-TU', 'link-mode'):
+                c_src = gimple_codegen._run_pipeline(
+                    files['q/main.py'], filename=entry,
+                    **({'do_imports': True} if mode == 'single-TU'
+                       else {'link_mode': True}))[0]
+                c_file = os.path.join(td, f'twohop_{mode}.c')
+                exe = os.path.join(td, f'twohop_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          f"{cc.stderr[:1200]}")
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                if run.stdout != want:
+                    print(f"FAIL  {name} [{mode}]: printed {run.stdout!r}, "
+                          f"CPython printed {want!r}")
+                    _FAIL += 1
+                    return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     test_ctor_arg_container_literal_field_is_container_typed()
     test_ctor_arg_dict_and_set_literal_fields_are_container_typed()
     test_ctor_arg_mixed_container_and_scalar_stays_int64()
@@ -6636,6 +6731,7 @@ print("%r" % p)
     test_user_defined_dunder_repr_is_called()
     test_user_defined_dunder_repr_value()
     test_aliased_and_reexported_imports_resolve_to_the_defining_module()
+    test_dotted_import_two_hop_attribute_call()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
