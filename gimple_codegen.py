@@ -220,6 +220,19 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_str_to_int':            'int64_t',
     'mojo_str_to_float':          'double',
     # bytes
+    # `sys.stdout.write(s)` & friends. The ast_rewriter rules for those
+    # (`sys_stdout_write` / `sys_stderr_write` / `sys_stdin_write`) lower
+    # to this one call, because `sys.<stream>` is a POSIX fd boxed as an
+    # opaque handle and there is no file-object model to dispatch a
+    # `.write()` against. See the runtime function's own comment.
+    'mojo_stream_write':         'void',
+    # GPU offload introspection (see mojo/backend_gimple/device_glue.py).
+    # Registered so a call from compiled Mojo resolves to the sidecar's real
+    # definition instead of colliding with a weak auto-stub.
+    '_mojo_gpu_kernel_count':   'int64_t',
+    '_mojo_gpu_have_device':    'int64_t',
+    '_mojo_gpu_dispatch_count': 'int64_t',
+    '_mojo_gpu_failure_count':  'int64_t',
     'mojo_bytes_new_lit':         'MojoBytes *',
     'mojo_bytes_empty':           'MojoBytes *',
     'mojo_bytes_zeros':           'MojoBytes *',
@@ -371,6 +384,7 @@ from mojo.middle.types import (
     _method_overload_id, demangle_overload, _COMMON_METHOD_NAMES, _C_KEYWORDS,
     _CPP_KEYWORD_FIELDS, _C_PARAM_EXTRA_KEYWORDS, _C_MACRO_NAMES,
     _PSEUDO_DUNDER_ATTRS, _safe_field, _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED,
+    _LIBM_FN_RETVALS,
     _safe_name, _stub_guard_name, _c_field_name, _import_targets, _c_escape,
     _str_literal_value_is_fstring, _extract_init_expr, _module_toplevel_name,
     _module_init_name, _used_idents_node, _CPP_CALLABLE_CTYPE,
@@ -627,6 +641,22 @@ import mojo.backend_gimple.emit_resolve as grsl
 class GimpleGen:
     # Map Python builtin names to their C/runtime equivalents when used as values
     BUILTIN_VALUE_MAP: dict[str, str] = {
+        # The libm entries (`sqrt`, `exp`, `log`, ...) are generated from
+        # the KEYS of mojo.middle.types._LIBM_FN_RETVALS — the single place
+        # that says which math functions this compiler supports. The value
+        # is the identity because the C symbol and the Python name are the
+        # same string for all of them; the RETURN TYPE lives in that table
+        # and is read separately at the call site. (Putting the return type
+        # here instead is a real trap: BUILTIN_VALUE_MAP's value is a
+        # symbol, so `sqrt` mapped to `double` and the auto-stub pass
+        # emitted `int64_t double(...);`.)
+        #
+        # `math` is not a resolvable module in this project (module_loader's
+        # `can_resolve_module_path('math')` is False), so without these the
+        # name fell through `_safe_name` to a `mojo_<name>` stub nothing
+        # defines. See that table for the exact scope and for what is
+        # deliberately excluded.
+        **{_k: _k for _k in _LIBM_FN_RETVALS},
         'print': 'mojo_print',
         'len': 'mojo_len',
         'range': 'mojo_range',
@@ -1292,6 +1322,35 @@ class GimpleGen:
         self._global_dict_val_types: dict[str, str] = {}
         self._struct_field_owners: dict[str, list[tuple[str, str]]] = {}
         self._return_elem_types: dict[str, str] = {}
+        # Function name -> per-slot C types of a MULTI-VALUE return's
+        # tuple handle (`return cfg, Model(cfg)`). Deliberately module
+        # scope, NOT re-created per function the way the value-keyed
+        # `_tuple_slot_types` is: the whole point is to carry a callee's
+        # slot types to a call site EMITTED LATER, which a per-function
+        # reset would erase between the two.
+        self._return_slot_types: dict[str, list] = {}
+        # Device kernels this module offloaded, and their MSL. Filled by
+        # gen_module_impl's Seam-3 pass and read by the sidecar emitter at
+        # the very end of the module; module scope because the MSL is only
+        # final once every function has been walked.
+        # A translation-unit-monotonic counter for self-shadowing loop
+        # targets (`for tail in tail:`). Deliberately NOT reset with the
+        # per-function state in emit_infra's function prologue, and held in a
+        # one-element BOX rather than a bare int so every per-module
+        # temp_gen shares it by reference the way the dicts/sets above do --
+        # a bare int would restart at 0 in each throwaway GimpleGen and
+        # reproduce the very collision this fixes. See emit_infra's mint site.
+        self._shadow_seq_box = [0]
+        self._device_kernels: dict[str, bool] = {}
+        self._device_parts: list[str] = []
+        self._device_launch_args: dict = {}
+        self._device_launch_count: dict = {}
+        # Element C types needing a _mg_pack_/_mg_unpack_ helper pair. A
+        # MojoList handed to a `T *` parameter cannot be cast (the cast points
+        # at the struct header), so the call is routed through an explicit
+        # pack/call/unpack/free instead. Emitted once per element type, and
+        # only for a module that actually does it.
+        self._list_marshalling_needed: set[str] = set()
         # dict.items()/values() result temp -> the dict's VALUE type. The
         # runtime stores item pairs as [char* key, boxed value] (append_str +
         # append_int — see mojo_dict_items), so the for-loop tuple branch needs

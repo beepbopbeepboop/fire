@@ -290,6 +290,39 @@ BUILTIN_PROGRAMS = {
                 total = total + x
             print(total)
     """),
+    # A comprehension with MORE THAN ONE `for` clause. `_lower_comprehension`
+    # binds only `node.generators[0]` and every `_compr_*_loop` helper takes a
+    # single generator, so the extra clauses were silently dropped -- exit 0,
+    # wrong answer. `for i in range(5) for j in range(5)` gave a 5-element
+    # list summing to 10 where the correct 25-element list sums to 100, and
+    # the inner target behaved as 0 throughout. Covers all three observable
+    # surfaces, because each was separately wrong at different times: the
+    # value (`f(5)`), the length, and the repr when the comprehension is
+    # printed in place (the outer result's element type must be carried over
+    # from the inner one, or element 0 -- an int 0 -- reads back as a NULL
+    # `char *` and prints as `None`).
+    "comprehension_two_clauses": textwrap.dedent("""\
+        def two(n):
+            xs = [i + j for i in range(n) for j in range(n)]
+            total = 0
+            for x in xs:
+                total = total + x
+            return total
+
+        def main():
+            print(two(5))
+            print(len([i + j for i in range(3) for j in range(3)]))
+            print([i + j for i in range(3) for j in range(3)])
+            print(sum(i + j for i in range(3) for j in range(3)))
+    """),
+    # Three clauses, and a filter attached to the SECOND one: `[x for x in a
+    # if p for y in b if q]` filters at each clause's own depth, which is what
+    # makes the recursive lowering correct rather than merely nested.
+    "comprehension_three_clauses_with_filters": textwrap.dedent("""\
+        def main():
+            print([i * 100 + j * 10 + k for i in range(2) for j in range(2) for k in range(2)])
+            print([i * j for i in range(4) for j in range(4) if j > i])
+    """),
     "global_var": textwrap.dedent("""\
         var counter: Int = 0
 

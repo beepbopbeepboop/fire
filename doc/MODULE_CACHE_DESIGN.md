@@ -3,7 +3,7 @@
 > Status: **design of record.** Implementation is staged (see the bottom of this
 > file). This document exists so collaborators understand *what* we're building
 > and, more importantly, *why* it is fast and efficient. Companion docs:
-> `ABI.md` (the boundary contract), `METAL.md` (GPU offload), `IMPL.md` (what's
+> `ABI.md` (the boundary contract), `METAL.html` (GPU offload), `IMPL.md` (what's
 > implemented today).
 
 ## The problem

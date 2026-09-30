@@ -16,6 +16,7 @@ import ast_rewriter
 import mlir
 import regex_compile
 from mojo.middle.types import *  # noqa: F401,F403
+from mojo.middle.types import _BUILTIN_RET_CTYPES  # underscore name: `import *` won't carry it
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
 # Closure-scan leaf helpers live in mojo/middle.closures (formal + gimple
@@ -701,6 +702,24 @@ def _gmi_container_ctype(v):
     if isinstance(v, Comprehension):
         return {'list': 'MojoList *', 'set': 'MojoSet *',
                 'dict': 'MojoDict *'}.get(v.kind)
+    # `self.buf = [0.0] * n` / `self.xs = xs * 2` — a REPEAT of a container
+    # literal is that container, at runtime and in the emitted C
+    # (mojo_list_repeat / mojo_bytes_repeat). Without this the field fell
+    # through to _UNKNOWN_FIELD_CTYPE, and because a field read with an
+    # unknown ctype is iterated down the DICT dual-dispatch arm, a plain
+    # `for g in self.buf:` over a repeated float list emitted
+    # mojo_dict_iter_key + `char * g` and then `(char*)*(char*)` — an
+    # internal compiler error in gcc (build2/tree.cc), i.e. a hard ICE
+    # rather than the "refuse rather than guess" diagnostic this codegen
+    # prefers. Answering MojoList * here is a proof, not a guess: the
+    # operand's container kind is syntactic.
+    if isinstance(v, BinaryOp) and v.op == '*':
+        _rep_l = _gmi_container_ctype(v.left)
+        _rep_r = _gmi_container_ctype(v.right)
+        if _rep_l is not None:
+            return _rep_l
+        if _rep_r is not None:
+            return _rep_r
     return None
 
 
@@ -731,6 +750,18 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
                     ft = param_types.get(v.name, 'int64_t')
                 elif isinstance(v, IntLiteral):
                     ft = 'int64_t'
+                elif isinstance(v, FloatLiteral):
+                    # `self.v = 0.0` in __init__ — a float-initialised
+                    # scalar field. Without this it fell through to
+                    # _UNKNOWN_FIELD_CTYPE (int64_t), so the field stored
+                    # an int64_t: `self.v += x * x` over double x's
+                    # truncated on every store (6.75 read back as 6, and
+                    # 0.0 + 0.0 stayed 0 so a pure-fraction accumulator
+                    # never moved at all) — silently wrong, exit 0. The
+                    # arith above still runs in double and only the STORE
+                    # was lossy, which is exactly why it reads as a
+                    # rounding bug rather than an obvious type error.
+                    ft = 'double'
                 elif isinstance(v, StringLiteral):
                     # `self._buf = b''` in __init__ (or any bytes
                     # literal) -> a real bytes value field, so a
@@ -786,19 +817,55 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
                         # int64_t handle (gap 2). The .set()/.wait()/
                         # .done() lowering keys off the int64_t recv.
                         ft = 'int64_t'
-                    elif cn in ('list', 'DynamicVector', 'mojo_list_new'):
-                        ft = 'MojoList *'
-                    elif cn in ('dict', 'Dict', 'mojo_dict_new'):
-                        ft = 'MojoDict *'
-                    elif cn in ('set', 'Set', 'frozenset', 'mojo_set_new'):
-                        ft = 'MojoSet *'
-                    elif cn in ('bytes', 'bytearray'):
-                        ft = 'MojoBytes *'
+                    elif cn in _BUILTIN_RET_CTYPES:
+                        # The shared builtin-return table
+                        # (mojo/middle/types.py), so this stays in step with
+                        # `_quick_type`'s view of the same names instead of
+                        # being a second, shorter list. See that table's
+                        # docstring for what the divergence cost:
+                        # `self.itos = sorted(set(text))` typed the field
+                        # int64_t and every later read of it lost its
+                        # element type.
+                        ft = _BUILTIN_RET_CTYPES[cn]
                     elif cn.startswith('_alloc_'):
                         sname = cn[len('_alloc_'):]
                         ft = sname + ' *'
                     elif cn in self.struct_field_types:
                         ft = cn + ' *'
+                    elif (isinstance(cfn, MemberExpr)
+                          and isinstance(cfn.obj, CallExpr)):
+                        # `self.w = Tensor(...).fill(rng, scale)` -- a
+                        # CONSTRUCTOR call immediately followed by one of
+                        # its own methods. The value is still a Tensor; the
+                        # pre-pass just cannot see through the chain, so the
+                        # field fell to int64_t and EVERY later
+                        # `self.w.<anything>` became a stubbed int64_t call
+                        # ("int64_t.row() stubbed"), which then poisons
+                        # everything downstream that reads the field.
+                        _ctor = _gmi_as_str(getattr(cfn.obj.func, 'name', ''))
+                        if _ctor in self.struct_field_types:
+                            ft = _ctor + ' *'
+                        else:
+                            # The `else` this branch was missing. Without it
+                            # `ft` kept whatever the previous iteration left
+                            # in it, and on the FIRST field that reached here
+                            # it was never assigned at all -- so
+                            # `found[fn] = ft` three lines below raised
+                            # `UnboundLocalError: cannot access local
+                            # variable 'ft'`, which aborted the whole module.
+                            #
+                            # Measured: 5 stdlib files died on it
+                            # (std/collections/{list,_swisstable}.mojo,
+                            # std/memory/{arc_pointer,owned_pointer}.mojo,
+                            # std/python/_cpython.mojo) plus every module that
+                            # imports them.
+                            #
+                            # `_UNKNOWN_FIELD_CTYPE` is the right default and
+                            # not merely a safe one: it is exactly what the
+                            # sibling branches above and below use for "the
+                            # pre-pass cannot see through this", and it never
+                            # asserts a pointer type the code has not earned.
+                            ft = _UNKNOWN_FIELD_CTYPE
                     elif (isinstance(cfn, MemberExpr)
                           and cfn.member in _STR_RETURNING_METHODS):
                         ft = 'char *'

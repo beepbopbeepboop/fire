@@ -15,6 +15,7 @@ import mlir
 import ownership_destruct
 from ownership_check import _block_terminates
 from mojo.middle.types import *  # noqa: F401,F403
+from mojo.middle.types import _struct_value_codes  # underscore name: `import *` won't carry it
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
 import gimple_codegen  # constants used by some extracted helpers
@@ -306,6 +307,21 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # every method name out of the accessed-field struct match.
     DICT_ONLY_METHODS = {'items', 'keys', 'values', 'setdefault', 'get'}
 
+    # Builtins that ITERATE their arguments. A param handed to one of these
+    # is a container, and that is as much evidence as `for x in param:` or
+    # `param[i]`. `len` is deliberately absent: it takes any sized object
+    # (str/list/dict/set/tuple), so it identifies no particular container --
+    # the same reason it is excluded from BUILTIN_PARAM_TYPES below. `map`
+    # is here because its arguments are lazy iterables rather than
+    # containers in every call, but in the shape this fires on (a numeric
+    # kernel) they are being consumed element-wise and the caller passes a
+    # real list.
+    _ITERABLE_CONSUMING_BUILTINS = {
+        'map', 'zip', 'enumerate', 'sorted', 'reversed', 'iter', 'next',
+        'list', 'tuple', 'set', 'frozenset', 'sum', 'any', 'all',
+        'min', 'max', 'divmod', 'round',
+    }
+
     # Methods that exist ONLY on Python `bytes` (never on str/list/dict/set):
     # `.decode()` turns bytes into str, `.hex()` renders bytes as an ASCII
     # hex string. Neither name is shared with any str/list method this
@@ -454,6 +470,19 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             if isinstance(e, gimple_ctypes.UnaryOp):
                 return _expr_mentions_param(e.operand)
             return False
+
+        def _const_fold_str(e):
+            """The literal text of `e` when it is plainly a string literal.
+
+            Deliberately not a real constant folder: this pre-pass has no
+            value table, and every use here (a struct format string) is a
+            literal in practice. Returns None rather than guessing, so a
+            computed format simply contributes no evidence instead of
+            wrong evidence.
+            """
+            if isinstance(e, gimple_ctypes.StringLiteral) and not e.is_bytes:
+                return e.value
+            return None
 
         def _expr_is_stringish(e):
             if isinstance(e, gimple_ctypes.StringLiteral):
@@ -650,7 +679,48 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         if (isinstance(arg, gimple_ctypes.IdentExpr)
                                 and _as_ident_node(arg).name == param_name):
                             function_calls.append(_as_str(func_name) + _FC_SEP + str(i))
+                            # Passing the param to one of the builtins that
+                            # CONSUME an iterable is iteration evidence, the
+                            # same class of signal as a for-loop target or a
+                            # subscript. Without it a param used only as
+                            # `sum(map(mul, w, x))` has no signal at all and
+                            # falls to the int64_t default, so a caller
+                            # passing a real list hits "invalid operands to
+                            # binary *" (real: a Linear-layer forward whose
+                            # input vector reached it only through map()).
+                            if func_name in _ITERABLE_CONSUMING_BUILTINS:
+                                _F['is_iterated'] = True
                 elif isinstance(expr.func, gimple_ctypes.MemberExpr):
+                    # `struct.pack("<f", x)`: a statically-known format code
+                    # of 'f'/'d' at the param's own position says the param
+                    # IS a float, which is the only float evidence some
+                    # functions have. `bf16(x)` is exactly that case: its
+                    # body compares x only against float CONSTANTS
+                    # (`x > FP32_MAX`, `x == INF`) and never does float
+                    # arithmetic on it, so the param had no signal at all
+                    # and fell to int64_t — the caller then passed a double
+                    # through an int64_t parameter and the rounding loop
+                    # lost its input. The code comes from the same
+                    # centralized format analysis the unpack side uses
+                    # (mojo/middle/types.py), so pack and unpack cannot
+                    # disagree about what a format means.
+                    _sf = _as_member_node(expr.func)
+                    if (_sf.obj is not None
+                            and isinstance(_sf.obj, gimple_ctypes.IdentExpr)
+                            and _as_ident_node(_sf.obj).name == 'struct'
+                            and _sf.member in ('pack', 'pack_into')
+                            and expr.args):
+                        _sfcodes = _struct_value_codes(
+                            _const_fold_str(expr.args[0]))
+                        if _sfcodes:
+                            _sfoff = 1 if _sf.member == 'pack' else 3
+                            for _si in range(_sfoff, len(expr.args)):
+                                _sarg = expr.args[_si]
+                                if (isinstance(_sarg, gimple_ctypes.IdentExpr)
+                                        and _as_ident_node(_sarg).name == param_name
+                                        and (_si - _sfoff) < len(_sfcodes)
+                                        and _sfcodes[_si - _sfoff] in 'fd'):
+                                    _F['is_float_arg'] = True
                     # `_as_member_node`: `expr.func` is a chained expr, which
                     # the self-hosted backend does not narrow through
                     # `isinstance`, so every `.obj`/`.member` read below would
@@ -928,10 +998,11 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
         is_str_key_subscripted = bool(_F.get('is_str_key_subscripted'))
         is_nondict_key_subscripted = bool(_F.get('is_nondict_key_subscripted'))
         is_bytes_method = bool(_F.get('is_bytes_method'))
+        is_float_arg = bool(_F.get('is_float_arg'))
         return (accessed_fields, function_calls, is_subscripted, is_string_method,
                 is_iterated, is_char_compared, is_str_key_subscripted,
                 is_nondict_key_subscripted, called_methods, is_dict_method,
-                aug_member_targets, is_bytes_method)
+                aug_member_targets, is_bytes_method, is_float_arg)
 
     _bytes_locals = _collect_bytes_locals(func.body, gen.func_return_types, set())
     # A @classmethod's FIRST parameter is bound to the class object, not to
@@ -992,18 +1063,19 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 (fields_accessed, function_calls, is_subscripted, is_string_method,
                  is_iterated, is_char_compared, is_str_key_subscripted,
                  is_nondict_key_subscripted, called_methods, is_dict_method,
-                 aug_member_targets, is_bytes_method) = _pu_cached
+                 aug_member_targets, is_bytes_method,
+                 is_float_arg) = _pu_cached
             else:
                 (fields_accessed, function_calls, is_subscripted, is_string_method,
                  is_iterated, is_char_compared, is_str_key_subscripted,
                  is_nondict_key_subscripted, called_methods, is_dict_method,
-                 aug_member_targets, is_bytes_method
+                 aug_member_targets, is_bytes_method, is_float_arg
                  ) = analyze_param_usage(func.body, pname)
                 gen._param_usage_scan_cache[_pu_key] = (
                     fields_accessed, function_calls, is_subscripted, is_string_method,
                     is_iterated, is_char_compared, is_str_key_subscripted,
                     is_nondict_key_subscripted, called_methods, is_dict_method,
-                    aug_member_targets, is_bytes_method)
+                    aug_member_targets, is_bytes_method, is_float_arg)
             # The SET slots round-trip through the return tuple as int64_t on
             # the self-hosted path (packed/unpacked with the int accessor) —
             # re-view them as `MojoSet *` so the struct-evidence set
@@ -1056,6 +1128,43 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             if is_bytes_method:
                 inferred[pname] = 'MojoBytes *'
                 continue
+
+            # `struct.pack("<f", param)` / `struct.pack_into(f, buf, 0, param)`
+            # with a statically-known 'f' or 'd' code at this param's own
+            # position: the format says the value IS a float. Definitive and
+            # unconditional, so it is answered before the container signals
+            # below — a float and a container are not both possible, and the
+            # format code is the stronger of the two claims.
+            if is_float_arg:
+                inferred[pname] = 'double'
+                continue
+
+            # Passing the param to a user function whose own parameter at
+            # that position was inferred as a CONTAINER is iteration
+            # evidence: `dot(self.w.row(i), x)` says x is a list because
+            # `dot`'s `a` is one (it is subscripted in dot's own body). This
+            # is the argument-direction twin of `_callable_return_elem_type`
+            # and it is what a helper-function call otherwise loses: with no
+            # subscript and no for-loop over the param in this body, the
+            # signal was empty, the param fell to the int64_t default, and
+            # the caller passing a genuine list produced "invalid operands to
+            # binary *" inside the callee.
+            #
+            # Strictly a lookup: a callee not yet inferred contributes
+            # nothing, so this can only add evidence, never contradict.
+            for _fc2 in function_calls:
+                _fcp2 = _as_str(_fc2).split(_FC_SEP)
+                _names2 = getattr(gen, '_func_param_names', {}).get(_fcp2[0])
+                if not _names2:
+                    continue
+                try:
+                    _pname2 = _names2[int(_fcp2[1])]
+                except (ValueError, IndexError):
+                    continue
+                _pt2 = gen._inferred_param_types.get(_fcp2[0], {}).get(_pname2)
+                if _pt2 in ('MojoList *', 'MojoSet *', 'MojoDict *'):
+                    is_iterated = True
+                    break
 
             # If parameter is subscripted OR iterated (for x in param:), it's
             # indexable (list/dict/etc.) — UNLESS it's also called with a
@@ -1421,6 +1530,80 @@ def _container_literal_locals(body: list) -> dict:
     walk(body)
     return out
 
+def _dict_value_locals(gen, body: list) -> dict:
+    """`{dict name: ctype}` for every dict in `body` that is STORE-INTO with
+    a value of a known type, so a later `return <that dict>[k]` can be typed.
+
+    The companion to `_container_literal_locals`, for the subscript case: a
+    container literal bound to a NAME is found by the former, but a
+    `d[k] = v` store gives the type of `d`'s VALUES, and
+    `return d[k]` reads one.
+
+    `gen._dict_val_types` already carries this information, but it is EMPTY by
+    the time return inference runs: `resolve_shared.py`'s pre-pass does
+    `gen._dict_val_types = {}` while rebuilding `var_types`. So the scan is
+    redone here for the body under inference and overlaid in the same
+    save/restore window `_container_literal_locals` already uses.
+
+    A container literal store is mapped through `_CONTAINER_LITERAL_CTYPES`
+    (a tuple is a real `MojoList`), because `_quick_type` has no body context
+    and answers the int64_t box for all four -- which is why a dict populated
+    with tuples recorded nothing at all.
+
+    First-store-wins, matching the declaration-time first-binding rule, and
+    only values whose type is a real pointer or a known scalar are recorded:
+    an unknown store must not pin the dict to the box and suppress a later,
+    better-evidenced one.
+    """
+    out: dict = {}
+
+    def note(n):
+        if not isinstance(n, gimple_ctypes.AssignStmt):
+            return
+        t = n.target
+        if not (isinstance(t, gimple_ctypes.SubscriptExpr)
+                and isinstance(t.obj, gimple_ctypes.IdentExpr)):
+            return
+        name = _as_str(t.obj.name)
+        if name in out:
+            return                       # first store wins
+        vt = gen._quick_type(n.value)
+        if vt == 'int64_t':
+            lit = _CONTAINER_LITERAL_CTYPES.get(type(n.value).__name__)
+            if lit is not None:
+                vt = lit
+        if vt and (vt in ('char *', 'double', 'MojoDict *', 'MojoList *',
+                          'MojoSet *', 'MojoBytes *')
+                   or vt.endswith(' *')):
+            out[name] = vt
+
+    def walk(stmts):
+        for n in (stmts or []):
+            note(n)
+            if isinstance(n, gimple_ctypes.FunctionDef):
+                continue
+            if isinstance(n, gimple_ctypes.IfStmt):
+                walk(n.then_body)
+                if isinstance(getattr(n, 'else_body', None), list):
+                    walk(n.else_body)
+            elif isinstance(n, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
+                walk(n.body)
+                if getattr(n, 'else_body', None):
+                    walk(n.else_body)
+            elif isinstance(n, gimple_ctypes.WithStmt):
+                walk(n.body)
+            elif isinstance(n, gimple_ctypes.TryStmt):
+                walk(n.body)
+                for h in (getattr(n, 'handlers', None) or []):
+                    walk(getattr(h, 'body', None))
+                if n.else_body:
+                    walk(n.else_body)
+                if getattr(n, 'finally_body', None):
+                    walk(n.finally_body)
+    walk(body)
+    return out
+
+
 def _infer_return_type_with_locals(gen, body: list) -> str:
     """`_infer_return_type`, but with the body's own container-literal
     locals visible to it.
@@ -1443,7 +1626,8 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
     The overlay is temporary and additive: a name already in `var_types`
     keeps the type an earlier pass decided for it."""
     _locals = _container_literal_locals(body)
-    if not _locals:
+    _dict_vals = _dict_value_locals(gen, body)
+    if not _locals and not _dict_vals:
         return _infer_return_type_core(gen, body)
     _saved = gen.var_types
     _merged = dict(_saved)
@@ -1451,10 +1635,20 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
         if _n not in _merged:
             _merged[_n] = _t
     gen.var_types = _merged
+    # Same window, second table: `_quick_type`'s SubscriptExpr case reads
+    # `_dict_val_types` to type a `return d[k]`. Additive, and a name already
+    # in the table keeps the type an earlier pass decided for it.
+    _saved_dv = getattr(gen, '_dict_val_types', None)
+    _merged_dv = dict(_saved_dv or {})
+    for _n, _t in _dict_vals.items():
+        if _n not in _merged_dv:
+            _merged_dv[_n] = _t
+    gen._dict_val_types = _merged_dv
     try:
         return _infer_return_type_core(gen, body)
     finally:
         gen.var_types = _saved
+        gen._dict_val_types = _saved_dv
 
 
 def _infer_return_type(gen, body: list) -> str:
@@ -1538,6 +1732,15 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                 v, val = n.target.name, n.value
                 if isinstance(val, gimple_ctypes.ListExpr):
                     note_list_literal(v, val)
+                elif (isinstance(val, gimple_ctypes.BinaryOp) and val.op == '*'
+                        and isinstance(val.left, gimple_ctypes.ListExpr)):
+                    # `gx = [0.0] * n` — a REPEAT is the literal's element
+                    # type (the runtime's mojo_list_repeat copies the
+                    # elements verbatim). Without this the local stayed
+                    # untyped, so the cross-call contract below could not
+                    # hand the callee an element type for it and the
+                    # callee read a list of doubles as int64 bits.
+                    note_list_literal(v, val.left)
                 elif isinstance(val, gimple_ctypes.IdentExpr) and val.name in elem:
                     elem[v] = elem[val.name]
                     if val.name in nested:
@@ -1549,6 +1752,18 @@ def _scan_container_elems(gen, body: list) -> tuple[dict, dict, dict]:
                 if vt and (vt in ('char *', 'double', 'MojoDict *', 'MojoList *', 'MojoSet *')
                            or vt.endswith(' *')):
                     dict_val.setdefault(v, vt)
+                    # `lst[i] = <float>` is a LIST store when the key is
+                    # not a string literal, and it is the only evidence
+                    # there is for a list this codegen built by writing
+                    # slots in a loop rather than by a literal or an
+                    # append (`gq[j] = ...` in a per-index pass). Without
+                    # it the list stays untyped, the cross-call contract
+                    # has nothing to hand a callee, and the callee reads
+                    # the doubles back as int64 bits. setdefault, so a
+                    # literal/append's own stronger answer still wins.
+                    _nkey = n.target.index
+                    if not isinstance(_nkey, gimple_ctypes.StringLiteral):
+                        elem.setdefault(v, vt)
             elif isinstance(n, gimple_ctypes.ExprStmt) and isinstance(n.value, gimple_ctypes.CallExpr):
                 c = n.value
                 if (isinstance(c.func, gimple_ctypes.MemberExpr) and c.func.member == 'append'

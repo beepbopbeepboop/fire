@@ -518,6 +518,12 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # symbol always agree (log_match c52cbf-vs-7a6366 family).
                 temp_gen._home_def_param_types = gen._home_def_param_types
                 temp_gen._emitted_ptr_helpers = gen._emitted_ptr_helpers
+                # share by reference: the self-shadowing-temp counter must be
+                # monotonic across the WHOLE closure, or two modules mint the
+                # same `_shadowN_<name>` and -- since every module's decls land
+                # in one translation unit -- the second inherits the first's
+                # declared type. A bare int would not survive this copy.
+                temp_gen._shadow_seq_box = gen._shadow_seq_box
                 # share: a builtin-as-bare-value static (`_funcptr_mojo_make_dict`
                 # etc.) must be declared at most once across the WHOLE transitive
                 # closure, not once per submodule's own throwaway GimpleGen — see
@@ -2437,7 +2443,14 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     identical index-loop shape, just over mojo_strlen/_mojo_at_char
     instead of mojo_str_len/mojo_str_char_at."""
     _iv = _as_str(it_val)   # see _compr_list_loop
-    gen._declare_var(gen0.target, 'char')
+    # A comprehension over a str yields 1-char STRINGS, same rule as
+    # _gen_for_cstr (see its comment for why `char` was wrong and what it
+    # broke). This is the path `set(s)` / `sorted(s)` / `list(s)` all take,
+    # since _lower_ctor_from_iterable rewrites them into comprehensions —
+    # so with the target typed `char` they produced a set of character
+    # CODES, and `sorted(set("hello world"))` came back as
+    # [32, 100, 101, ...] instead of [' ', 'd', 'e', ...].
+    gen._declare_var(gen0.target, 'char *')
     len64 = gen._new_val('int64_t', f'mojo_strlen ({_iv})')
     idx64 = gen._new_val('int64_t', '(int64_t)0')
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
@@ -2448,8 +2461,19 @@ def _compr_cstr_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
     gen._ptr_helpers_needed.add('char')
-    addr = gen._new_val('char *', f"_mojo_at_char ({_iv}, {idx64})")
-    gen._emit(f"  {gen._cname(gen0.target)} = *{addr};")
+    # `mojo_cstr_slice` rather than a `char`-taking helper: gimple
+    # rejects a `char` argument ("invalid argument to gimple call"), since
+    # a char is promoted to int64_t non-trivially. See _gen_for_cstr.
+# `1LL`, not `(int64_t)1`: a C-style cast is not a legal gimple
+    # operand. `_t = _i + (int64_t)1` is rejected at gimplification
+    # with "expected expression before '(' token" -- a HARD error
+    # under `gcc -fgimple`, so it takes out the whole self-host
+    # closure, not just this subscript. The `LL` suffix is the
+    # tree's existing idiom for a width-correct int64_t literal
+    # (`0LL` appears throughout the generated C) and needs no cast.
+    _one_cs = gen._new_val('int64_t', "1LL")
+    _end_cs = gen._new_val('int64_t', f"{idx64} + {_one_cs}")
+    gen._emit(f"  {gen._cname(gen0.target)} = mojo_cstr_slice ({_iv}, {idx64}, {_end_cs});")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
@@ -2484,6 +2508,67 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
             gen._emit(f"  if ({cv}) goto {bb_next}; else goto {bb_skip};")
             gen._emit_label(bb_next)
         gen._emit_label(bb_append)
+
+    # A comprehension with MORE THAN ONE `for` clause. Python evaluates it as
+    # nested loops, but every `_compr_*_loop` helper takes a single generator
+    # and `_lower_comprehension` binds only `node.generators[0]`, so the extra
+    # clauses were silently DROPPED -- exit 0, wrong answer.
+    #
+    # Real, measured: `xs = [i + j for i in range(n) for j in range(n)]` with
+    # n=5 returned a 5-element list summing to 10 where Python's 25-element
+    # list sums to 100 (the inner `j` behaved as 0 throughout). That is
+    # `x86-containers`' `nested-comprehension` case, marked expected-failure
+    # with a reason pointing at a bug doc that no longer existed.
+    #
+    # The fix needs no change to the seven loop helpers, because they all
+    # funnel the loop body through THIS function. When `_lower_comprehension`
+    # sees a second clause it parks the remainder here; the clause-0 loop
+    # still runs, and instead of appending one element per iteration this
+    # lowers the remainder (recursively, so any depth works) and extends the
+    # result with it. `for i in A for j in B` is then exactly
+    # `extend([elt for j in B] for each i in A)`.
+    #
+    # The remainder is built WITHOUT conditions of its own because
+    # `_gen_compr_append` already applied `gen0.conditions` above -- a filter
+    # belongs to its own clause, and `node.generators[1:]` still carries its
+    # own per-generator conditions, so `[x for x in a if p for y in b if q]`
+    # filters at the right depth.
+    _inner = getattr(gen, '_compr_pending_inner', None)
+    if _inner is not None and node.kind in ('list', 'generator'):
+        # Clear BEFORE lowering, so the recursive `_lower_comprehension` call
+        # for the remainder installs its own pending inner instead of finding
+        # this one still set and extending with itself forever.
+        gen._compr_pending_inner = None
+        _ir = gen.lower_expr(_inner)
+        _it = _as_str(_ir[0])
+        _iv_raw = _as_str(_ir[1])
+        _iv = _iv_raw
+        if _it.endswith(' *') and _it != 'MojoList *':
+            _iv = gen._new_val('MojoList *', f'(MojoList *){_iv_raw}')
+        gen._emit(f"  mojo_list_extend ({res}, {_iv});")
+        # Carry the inner result's ELEMENT TYPE onto the outer one. The
+        # single-clause path ends with `gen._elem_types[res] = et`, and
+        # returning early here without the equivalent left the outer list's
+        # element type untracked: `len`, indexing and a `for`-loop sum were
+        # all right, but printing the list in place read element 0 through
+        # the wrong accessor, and an int 0 read as a `char *` is NULL --
+        # so `[i + j for i in range(3) for j in range(3)]` printed
+        # `[None, 1, 2, 1, 2, 3, 2, 3, 4]`. Keyed on the pre-cast name,
+        # which is what `lower_expr` registered.
+        if _iv_raw in gen._elem_types:
+            gen._elem_types[res] = gen._elem_types[_iv_raw]
+        if _iv_raw in gen._nested_elem_types:
+            gen._nested_elem_types[res] = gen._nested_elem_types[_iv_raw]
+        # ...and the TUPLE per-slot types, which are a THIRD map and not part
+        # of the other two. Missing this one is what made
+        # `[[i, j] for i in range(2) for j in range(2)]` print
+        # `[(0, None), (0, 1), (1, None), (1, 1)]`: each slot defaulted to the
+        # `char *` accessor, and an int 0 read as a `char *` is NULL, so every
+        # zero-valued slot rendered as `None` while non-zero ones happened to
+        # print. Same keying as the single-clause tuple branch below.
+        if _iv_raw in gen._tuple_slot_types:
+            gen._tuple_slot_types[res] = gen._tuple_slot_types[_iv_raw]
+        return
 
     if node.kind == 'list' or node.kind == 'generator':
         # `_lower_comprehension` initializes a 'generator' comprehension
@@ -2539,6 +2624,18 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         else:
             ev64 = gen._to_int64(et, ev)
             gen._emit_call('void', '', 'mojo_set_add_int', [('MojoSet *', res), ('int64_t', ev64)])
+        # Record the element type, exactly as the list branch just above
+        # does for its own result. Without it the set is correct but
+        # UNDESCRIBABLE: `sorted(set(text))` reads the set's element type
+        # to type its result (`_lower_builtin_sorted`'s MojoSet branch),
+        # found nothing, and the sorted list came back untyped — so
+        # `sorted(set(s))` yielded raw char* DECIMALS
+        # (4358361792, 4358361408, ...) instead of one-character strings.
+        # The append above already dispatches on `et`, so the information
+        # was available; it just was not written down where the consumer
+        # looks for it.
+        if et and et != 'int64_t':
+            gen._elem_types[res] = et
     elif node.kind == 'dict':
         kt, kv = gen.lower_expr(node.element)   # element = key expression in dict compr
         vt, vv = gen.lower_expr(node.key)        # key field holds the value expression

@@ -925,6 +925,19 @@ test('runtimediff', [PY, 'test_runtime_diff.py'], mem='tiny', cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'test_runtime_diff.py'],
      desc='interpreter vs JIT: identical stdout and exit code')
+test('metalgpu', [PY, 'test_metal_codegen.py'], cache=True,
+     extra=GIMPLE_SOURCES + ['test_metal_codegen.py',
+                             'mojo/middle/metal_ops.py',
+                             'mojo/backend_gimple/device_select.py',
+                             'mojo/backend_gimple/emit_metal.py'],
+     desc='Metal codegen: op tables, device-region selection, MSL emission, '
+          'and the generated MSL compiled by Apple\'s real compiler and run '
+          'on the GPU against a CPU reference')
+test('md2html', [PY, 'test_md2html.py'], cache=True,
+     extra=['tools/md2html.py', 'test_md2html.py',
+            'doc/GPU_OFFLOAD_PLAN.html', 'doc/METAL.html'],
+     desc='the docs\' HTML generator keeps every word of its Markdown, and '
+          'the committed HTML is not stale')
 test('linkmode', [PY, 'test_link_mode.py'], cache=True,
      extra=GIMPLE_SOURCES + ['fire_compiler.py', 'myinterpreter.py', 'fire.py',
                              'driver.py', 'test_link_mode.py'],
@@ -1059,8 +1072,11 @@ test('ownership-destruct', [PY, 'test_ownership_destruct.py'],
      desc='an owned value is destructed exactly once')
 test('x86-containers', [PY, 'test_x86_64_containers.py'],
      deps=['preflight'],
-     expect='bugs/CODEGEN_nested_comprehension.md — red on nested-comprehension',
-     desc='bugs/CODEGEN_nested_comprehension.md — red on nested-comprehension')
+     expect='nested-comprehension exits nondeterministically (58, or SIGSEGV, '
+            'want 100) in the FORMAL backend, not the gimple path — which gets '
+            'this case right and stably. See '
+            'bugs/FORMAL_nested_comprehension_nondeterministic_exit.md',
+     desc='nested-comprehension nondeterministic in the formal backend')
 test('mutable-async-capture', [PY, 'test_mutable_async_capture.py'],
      deps=['preflight'],
      expect='async capture of a mutable binding — behaviour gap, not registered before this',

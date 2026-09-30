@@ -722,7 +722,10 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
             gen._emit(f"  {zero} = (int64_t)0;")
             gen._emit(f"  {t} = {ip} == {zero};")
         elif ot == 'int64_t':
-            zero = gen._new_val('int64_t', "(int64_t)0")
+            # `0LL`, not `(int64_t)0`: it becomes a COMPARISON OPERAND below,
+            # and a C-style cast is not a legal gimple operand. See
+            # emit_infra.py's range()-bound note for the full rationale.
+            zero = gen._new_val('int64_t', "0LL")
             gen._emit(f"  {t} = {ov} == {zero};")
         elif ot == '_Bool':
             # GIMPLE: both operands of comparison must have same type
@@ -1253,7 +1256,19 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             if _cattrs and node.member in _cattrs:
                 gname = _cattrs[node.member]
                 gtype = gen._global_var_types.get(gname, 'int64_t')
-                return gtype, gen._new_val(gtype, f'{gname}')
+                _gv = gen._new_val(gtype, f'{gname}')
+                # Carry the attribute's recorded ELEMENT type onto the read
+                # value, so iterating or subscripting it downstream uses
+                # the right accessor. A class-level container is stored as
+                # one `_classattr_<Cls>__<name>` global; without this the
+                # element type recorded against that global (seeded in
+                # module_gen, and by the first `.append()` through
+                # `_lower_list_method`) stayed invisible to every reader.
+                _ge = gen._elem_types.get(gname)
+                if _ge and _ge != 'int64_t':
+                    gen._elem_types[_gv] = _ge
+                    gen._actual_types[_gv] = 'MojoList *'
+                return gtype, _gv
             # Not a comptime alias — a genuine class-level access this
             # compiler doesn't yet resolve statically (unimplemented,
             # not merely unreached); stub with a clearly-marked value.
@@ -2781,6 +2796,23 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     if op == '*' and lt == 'MojoList *' and rt in ('int', 'int64_t', 'uint64_t'):
         cnt = gen._new_val('int64_t', f"(int64_t){rv}")
         t = gen._call_expr('MojoList *', 'mojo_list_repeat', [('MojoList *', lv), ('int64_t', cnt)])
+        # The repeat copies the source's ELEMENTS, so the result's element
+        # type is the source's — but the result is a FRESH temp, and every
+        # consumer keys element type off the value name. Without this copy
+        # `[0.0] * n` produced an untyped list: a field assigned that
+        # recorded no element type (emit_stmts' self.<f> = <list>
+        # propagation keys on `_elem_types[v]`), so a later
+        # `for g in self.field:` bound `g` as int64_t and read the doubles'
+        # raw IEEE-754 bits as integers — silently wrong, exit 0 (real:
+        # g*g in an accumulator over such a field). It is also what makes
+        # `mojo_list_get_double` vs `mojo_list_get_int` pick correctly on
+        # every later subscript/iteration of the repeated list.
+        if lv in gen._elem_types:
+            gen._elem_types[t] = gen._elem_types[lv]
+        if lv in gen._nested_elem_types:
+            gen._nested_elem_types[t] = gen._nested_elem_types[lv]
+        if lv in gen._dict_val_types:
+            gen._dict_val_types[t] = gen._dict_val_types[lv]
         return 'MojoList *', t
 
     # MojoBytes + MojoBytes → concat ; MojoBytes * int → repeat
@@ -4470,7 +4502,16 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     # e.g. (Float64, Span*) both look like non-str, but list_suffix maps
     # Float64 -> 'double' and Span* -> 'int' (its generic pointer bucket), so a
     # single list-wide suffix would append-cast the pointer as a double.
-    per_element = len(scalar_sufs) > 1
+    # Two DISTINCT slot ctypes also need per-slot recording even when both
+    # slots use the same accessor: `(cfg, model)` appends both as plain
+    # ints, so `scalar_sufs` is a single 'int' and `per_element` was False —
+    # yet each slot's real type (`Config *` vs `Model *`) is exactly what
+    # the caller's destructuring needs to read them back as. Keyed on the
+    # CTYPES, not the accessor, which is the same question asked properly.
+    _slot_cts = [_as_str(_slt[1]) for _slt in lowered
+                 if not (isinstance(_slt[0], gimple_ctypes.UnaryOp)
+                         and _slt[0].op in ('*', '**'))]
+    per_element = len(scalar_sufs) > 1 or len(set(_slot_cts)) > 1
     # Record per-slot element types when elements are stored by their own
     # type — a later `for a, b in <list of these tuples>:` needs each
     # slot's real accessor (get_str vs get_int). The joined `elem` is
@@ -4632,6 +4673,21 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
                 gen._generator_var_api[it_val] = gen._generator_var_api[_old_it_val]
         it_type = _resolved_type
 
+    # Park the remaining `for` clauses for `_gen_compr_append` to consume from
+    # inside the clause-0 loop body. See its comment there for why the extra
+    # clauses used to vanish and why extending is the right lowering.
+    # Only list/generator: both are list-backed ('generator' is initialised
+    # "as a list for simplicity", per `_gen_compr_append`), so they share
+    # `mojo_list_extend`. A set/dict comprehension with 2+ clauses is still
+    # dropped -- those need per-kind insert/merge, not a list extend, and
+    # guessing at it is how this bug got in.
+    if len(node.generators) > 1 and node.kind in ('list', 'generator'):
+        gen._compr_pending_inner = gimple_ctypes.Comprehension(
+            kind=node.kind, element=node.element, key=node.key,
+            generators=list(node.generators[1:]))
+    else:
+        gen._compr_pending_inner = None
+
     if is_range:
         gen._compr_range_loop(node, gen0, res, res_type)
     elif it_type == 'MojoList *':
@@ -4649,6 +4705,10 @@ def _lower_comprehension(gen, node: gimple_ctypes.Comprehension) -> tuple[str, s
     else:
         gen._emit(f"  /* TODO: comprehension over {it_type} */")
 
+    # Nothing below may inherit this: the loop body consumed it (above), and
+    # leaving it set would make the NEXT comprehension in the same function
+    # extend with a stale remainder.
+    gen._compr_pending_inner = None
     gen._note_fresh_result(res)
     return res_type, res
 

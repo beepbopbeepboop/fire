@@ -1,0 +1,793 @@
+"""Tests for the Metal/GPU codegen path.
+
+Three layers, cheapest first, because they fail for different reasons and
+the expensive one is the one that actually proves anything:
+
+- the pure tables (``mojo/middle/metal_ops.py``) -- no device needed
+- device-region selection (``mojo/backend_gimple/device_select.py``) --
+  no device needed
+- the MSL emitter (``mojo/backend_gimple/emit_metal.py``) -- text only
+- and then, if a Metal device is present, the generated MSL is compiled by
+  Apple's real compiler, dispatched, and checked against a CPU reference.
+
+The last one is the only test that can catch a kernel which compiles and
+computes the wrong answer, which is the failure mode this whole path is
+built to avoid. It is skipped rather than failed when there is no device,
+because "no GPU" is a property of the machine and not a defect in the
+compiler.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+import gimple_codegen as gctypes
+from build_config import find_gcc as _find_gcc
+
+_GCC = _find_gcc()
+import mojo.backend_gimple.device_select as dsel
+import mojo.backend_gimple.device_glue as dglue
+import mojo.backend_gimple.emit_metal as eml
+import mojo.middle.metal_ops as mops
+
+
+def parse(src: str):
+    return gctypes.Parser(gctypes.py_tokenize(src)).parse_module()
+
+
+class TestMetalOpsTables(unittest.TestCase):
+    """The tables are pure, so these need no device and no emitter."""
+
+    def test_double_becomes_float(self):
+        # MSL has no double. This is a precision REDUCTION, and it is the
+        # single most important thing in the table: a silent double/float
+        # mixup is a wrong number on the device that the host's fp64
+        # reference will expose, but only if the comparison is run.
+        self.assertEqual(mops.msl_type('double'), 'float')
+        self.assertEqual(mops.msl_type('float'), 'float')
+
+    def test_pointer_indirection_is_preserved(self):
+        self.assertEqual(mops.msl_type('float *'), 'float *')
+        self.assertEqual(mops.msl_type('int64_t *'), 'long *')
+        self.assertEqual(mops.msl_type('int64_t **'), 'long **')
+
+    def test_host_containers_are_refused_not_guessed(self):
+        # A MojoList is a heap object with a host header; it cannot cross
+        # to a device. Refusing here is what surfaces the contiguity
+        # constraint as a build error instead of a garbage read.
+        for t in ('MojoList *', 'MojoDict *', 'MojoSet *', 'MojoBytes *'):
+            self.assertIsNone(mops.msl_type(t), t)
+            self.assertIsNone(mops.kernel_arg_type(t), t)
+
+    def test_unknown_type_is_refused(self):
+        self.assertIsNone(mops.msl_type('struct Foo *'))
+        self.assertIsNone(mops.msl_type('MojoStructFmt *'))
+
+    def test_kernel_arg_narrows_to_what_msl_accepts(self):
+        # MSL rejects a 64-bit kernel input outright. The stdlib's `len: Int`
+        # resolves to int64_t, so the narrowing is what makes the stdlib's
+        # own kernels expressible.
+        self.assertEqual(mops.kernel_arg_type('int64_t'), 'int')
+        self.assertEqual(mops.kernel_arg_type('uint64_t'), 'uint')
+        self.assertEqual(mops.kernel_arg_type('float'), 'float')
+
+    def test_address_spaces_stay_distinct(self):
+        # mlir.py collapses every LLVM address space to `void *`, which is
+        # right for C and wrong here: `threadgroup` is not `device`, and
+        # conflating them reads garbage rather than trapping.
+        self.assertEqual(mops.address_space(0), 'device')
+        self.assertEqual(mops.address_space(1), 'constant')
+        self.assertEqual(mops.address_space(3), 'threadgroup')
+        self.assertNotEqual(mops.address_space(3), mops.address_space(0))
+
+    def test_threadgroup_is_not_a_kernel_argument_space(self):
+        self.assertNotIn('threadgroup', mops.ARG_ALLOWED_ADDRESS_SPACES)
+        self.assertIn('device', mops.ARG_ALLOWED_ADDRESS_SPACES)
+
+    def test_intrinsics_are_namespaced_but_builtins_are_not(self):
+        # A blanket `metal::` prefix on the builtins is a link error at best
+        # and wrong overload resolution at worst.
+        self.assertEqual(mops.intrinsic('sqrt'), 'metal::sqrt')
+        self.assertEqual(mops.intrinsic('abs'), 'abs')
+        self.assertEqual(mops.intrinsic('min'), 'min')
+        self.assertIsNone(mops.intrinsic('no_such_function'))
+
+    def test_index_vars_map_to_generated_parameters(self):
+        # global_idx is not a Metal builtin; it is a generated index
+        # parameter. This is the "transform the hand-written speciality
+        # code" mapping, and it is what std/gpu/primitives/id.mojo needs.
+        self.assertEqual(mops.index_var('global_idx'), '__gid')
+        self.assertEqual(mops.index_var('thread_idx'), '__lid')
+        self.assertEqual(mops.index_var('block_idx'), '__tgid')
+        self.assertIsNone(mops.index_var('not_an_index'))
+
+    def test_index_param_names_match_their_declarations(self):
+        # They diverged once and the symptom was MSL reporting an
+        # undeclared identifier. Cheap to check, so it is checked.
+        for key, decl in mops.INDEX_PARAMS:
+            self.assertIn(key, decl, f'{key!r} not spelled in its own declaration {decl!r}')
+
+    def test_every_index_param_declares_its_own_name(self):
+        names = [d.split()[1] for _k, d in mops.INDEX_PARAMS]
+        self.assertEqual(len(names), len(set(names)), 'duplicate index parameter name')
+
+
+class TestDeviceSelect(unittest.TestCase):
+    """Which functions become MSL instead of C."""
+
+    def test_explicit_gpu_decorator(self):
+        m = parse('@gpu\ndef k(x):\n    return x\n\ndef h(y):\n    return y\n')
+        self.assertEqual(dsel.classify_functions(m),
+                         {'k': dsel.DEVICE, 'h': dsel.HOST})
+
+    def test_kernel_decorator_alias(self):
+        m = parse('@kernel\ndef k(x):\n    return x\n')
+        self.assertEqual(dsel.classify_functions(m)['k'], dsel.DEVICE)
+
+    def test_stdlib_registrar_shape_finds_an_unmarked_kernel(self):
+        # This is the rule that makes the HAND-WRITTEN stdlib GPU code work
+        # without editing it: upstream's `vec_add` is an ordinary `def` with
+        # no marker, and the only signal is the call that hands it to
+        # compile_function. Reproduces the shape of
+        # stdlib/test/asyncrt/test_device_pointer_kernel.mojo.
+        m = parse('''
+def vec_add(a, b, out, n):
+    return 0
+
+def main():
+    ctx = DeviceContext()
+    kernel = ctx.compile_function[vec_add]()
+    ctx.enqueue_function(kernel, grid_dim=(1,), block_dim=64)
+    return 0
+''')
+        got = dsel.classify_functions(m)
+        self.assertEqual(got['vec_add'], dsel.DEVICE)
+        self.assertEqual(got['main'], dsel.HOST)
+
+    def test_registration_nested_in_a_function_is_still_found(self):
+        # A registration can sit inside any statement, so a depth-limited
+        # walk would miss real ones.
+        m = parse('''
+def kern(x):
+    return 0
+
+def helper():
+    if True:
+        ctx = DeviceContext()
+        return ctx.compile_function[kern]()
+    return 0
+''')
+        self.assertIn('kern', dsel.device_functions(m))
+
+    def test_unrelated_call_shaped_like_a_registrar_is_not_a_kernel(self):
+        m = parse('''
+def notakernel(x):
+    return 0
+
+def main():
+    obj = Thing()
+    obj.compile_something[notakernel]()
+    return 0
+''')
+        self.assertEqual(dsel.classify_functions(m)['notakernel'], dsel.HOST)
+
+    def test_a_parameter_shadowing_the_name_is_not_a_registrar(self):
+        m = parse('''
+def kern(x):
+    return 0
+
+def main():
+    compile_function = 5
+    return compile_function
+''')
+        self.assertEqual(dsel.classify_functions(m)['kern'], dsel.HOST)
+
+    def test_method_with_the_marker_is_device(self):
+        m = parse('''
+class K:
+    def __init__(self):
+        self.n = 1
+
+    @gpu
+    def step(self):
+        return self.n
+''')
+        got = dsel.classify_functions(m)
+        self.assertEqual(got['K_step'], dsel.DEVICE)
+        self.assertEqual(got['K___init__'], dsel.HOST)
+
+
+class TestMetalEmitter(unittest.TestCase):
+    """MSL text generation. No device required."""
+
+    def emit(self, src: str, name: str | None = None) -> str:
+        mod = parse(src)
+        fdef = mod[0]
+        if name:
+            fdef.name = name
+        return eml.emit_kernel(fdef)
+
+    def test_stdlib_vec_add_shape(self):
+        msl = self.emit('''
+def vec_add(in0: UnsafePointer[Float32, MutAnyOrigin],
+            in1: UnsafePointer[Float32, MutAnyOrigin],
+            output: UnsafePointer[Float32, MutAnyOrigin], len: Int):
+    tid = global_idx.x
+    if tid >= len:
+        return
+    output[tid] = in0[tid] + in1[tid]
+''')
+        self.assertIn('kernel void vec_add(', msl)
+        self.assertIn('#include <metal_stdlib>', msl)
+        self.assertIn('using namespace metal;', msl)
+        # buffers carry an address space AND a buffer index
+        self.assertIn('device float * in0 [[buffer(0)]]', msl)
+        # a scalar is constant-by-reference; MSL rejects the by-value form
+        self.assertIn('constant int &len', msl)
+        # global_idx becomes a generated index parameter
+        self.assertIn('__gid [[thread_position_in_grid]]', msl)
+        self.assertIn('tid = __gid;', msl)
+        # the index is an int, not a float
+        self.assertIn('int tid;', msl)
+
+    def test_index_infers_as_int_not_float(self):
+        # A float index silently loses precision past 2^24, so the type is
+        # load-bearing rather than cosmetic.
+        msl = self.emit('''
+def k(out: UnsafePointer[Float32, MutAnyOrigin], n: Int):
+    i = global_idx.x
+    out[i] = 1.0
+''')
+        self.assertIn('int i;', msl)
+        self.assertNotIn('float i;', msl)
+
+    def test_for_loop_index_is_int(self):
+        msl = self.emit('''
+def k(out: UnsafePointer[Float32, MutAnyOrigin], n: Int):
+    for i in range(n):
+        out[i] = 2.0
+''')
+        self.assertIn('for (i = 0; i < n; i += 1)', msl)
+        self.assertIn('int i;', msl)
+
+    def test_range_with_start_and_step(self):
+        msl = self.emit('''
+def k(out: UnsafePointer[Float32, MutAnyOrigin], n: Int):
+    for i in range(1, n, 2):
+        out[i] = 3.0
+''')
+        self.assertIn('for (i = 1; i < n; i += 2)', msl)
+
+    def test_math_intrinsic_is_namespaced(self):
+        msl = self.emit('''
+def k(out: UnsafePointer[Float32, MutAnyOrigin], x: Float32):
+    out[0] = sqrt(x) + exp(x)
+''')
+        self.assertIn('metal::sqrt(', msl)
+        self.assertIn('metal::exp(', msl)
+
+    def test_while_and_break_continue(self):
+        msl = self.emit('''
+def k(out: UnsafePointer[Float32, MutAnyOrigin], n: Int):
+    i = 0
+    while i < n:
+        i = i + 1
+        if i > 3:
+            break
+        continue
+    out[0] = 1.0
+''')
+        self.assertIn('while (', msl)
+        self.assertIn('break;', msl)
+        self.assertIn('continue;', msl)
+
+    def test_chained_comparison_is_and_not_nested(self):
+        # Python's `a < b < c` means `(a<b) and (b<c)`; MSL has no chained
+        # comparison, so emitting it as a nested `&&` is the only correct
+        # reading and it is what a reader would otherwise have to guess.
+        msl = self.emit('''
+def k(out: UnsafePointer[Float32, MutAnyOrigin], a: Int, b: Int, c: Int):
+    if a < b < c:
+        out[0] = 1.0
+''')
+        self.assertIn('&&', msl)
+
+    # ---- refusals. Each of these must RAISE, not emit something plausible.
+
+    def test_refuses_a_host_container_parameter(self):
+        with self.assertRaises(eml.MetalUnsupported) as cm:
+            self.emit('''
+def k(xs: List[Float32]):
+    return 0
+''')
+        self.assertIn('cannot be passed to a GPU', str(cm.exception))
+
+    def test_refuses_a_globals_read(self):
+        # A device function has no globals. `constant` is an argument, not a
+        # module variable, so there is nothing to read.
+        with self.assertRaises(eml.MetalUnsupported) as cm:
+            self.emit('''
+def k(out: UnsafePointer[Float32, MutAnyOrigin]):
+    out[0] = SOME_GLOBAL
+''')
+        self.assertIn('not a parameter', str(cm.exception))
+
+    def test_refuses_a_general_iterable_loop(self):
+        # On a GPU the index space IS the parallelism, so a general
+        # iterable loop would be sequential work on thousands of threads.
+        with self.assertRaises(eml.MetalUnsupported) as cm:
+            self.emit('''
+def k(out: UnsafePointer[Float32, MutAnyOrigin], xs):
+    for v in xs:
+        out[0] = v
+''')
+        self.assertIn('range', str(cm.exception))
+
+    def test_refuses_a_kernel_returning_a_value(self):
+        with self.assertRaises(eml.MetalUnsupported):
+            self.emit('''
+def k(out: UnsafePointer[Float32, MutAnyOrigin]):
+    return 1.0
+''')
+
+    def test_refuses_an_unknown_call(self):
+        with self.assertRaises(eml.MetalUnsupported) as cm:
+            self.emit('''
+def k(out: UnsafePointer[Float32, MutAnyOrigin]):
+    out[0] = some_user_function(1.0)
+''')
+        self.assertIn('no MSL lowering', str(cm.exception))
+
+    def test_refuses_an_unknown_statement(self):
+        with self.assertRaises(eml.MetalUnsupported):
+            self.emit('''
+def k(out: UnsafePointer[Float32, MutAnyOrigin]):
+    with open("f") as f:
+        out[0] = 1.0
+''')
+
+    def test_refuses_a_non_scalar_index_component(self):
+        with self.assertRaises(eml.MetalUnsupported) as cm:
+            self.emit('''
+def k(out: UnsafePointer[Float32, MutAnyOrigin]):
+    out[0] = global_idx.w
+''')
+        self.assertIn('x, y and z', str(cm.exception))
+
+
+# ---------------------------------------------------------------------------
+# The expensive one: generated MSL, real Metal compiler, real GPU.
+# ---------------------------------------------------------------------------
+
+_HARNESS = r'''
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+
+static const char *kMsl = @MSL@;
+
+int main(void) {
+    @autoreleasepool {
+        id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+        if (!dev) { printf("NO_DEVICE\n"); return 2; }
+        NSError *err = nil;
+        MTLCompileOptions *co = [[MTLCompileOptions alloc] init];
+        co.languageVersion = MTLLanguageVersion3_2;
+        id<MTLLibrary> lib = [dev newLibraryWithSource:[NSString stringWithUTF8String:kMsl]
+                                               options:co error:&err];
+        if (!lib) { printf("MSL_FAIL: %s\n", err.description.UTF8String); return 3; }
+        id<MTLFunction> fn = [lib newFunctionWithName:@"@FNAME@"];
+        if (!fn) { printf("NO_FN\n"); return 3; }
+        id<MTLComputePipelineState> ps =
+            [dev newComputePipelineStateWithFunction:fn error:&err];
+        if (!ps) { printf("NO_PIPE: %s\n", err.description.UTF8String); return 3; }
+
+        const int N = @N@;
+        float *a = malloc(N * sizeof(float));
+        float *b = malloc(N * sizeof(float));
+        float *got = malloc(N * sizeof(float));
+        float *ref = malloc(N * sizeof(float));
+        for (int i = 0; i < N; i++) {
+            a[i] = (float)i * 0.5f;
+            b[i] = (float)(i % 7) - 3.0f;
+            ref[i] = a[i] + b[i];
+            got[i] = -12345.0f;
+        }
+        id<MTLBuffer> ba = [dev newBufferWithBytes:a length:N*sizeof(float)
+                            options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bb = [dev newBufferWithBytes:b length:N*sizeof(float)
+                            options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bo = [dev newBufferWithBytes:got length:N*sizeof(float)
+                            options:MTLResourceStorageModeShared];
+        id<MTLCommandQueue> q = [dev newCommandQueue];
+        id<MTLCommandBuffer> cb = [q commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        [e setComputePipelineState:ps];
+        [e setBuffer:ba offset:0 atIndex:0];
+        [e setBuffer:bb offset:0 atIndex:1];
+        [e setBuffer:bo offset:0 atIndex:2];
+        [e setBytes:&N length:sizeof(int) atIndex:3];
+        NSUInteger w = ps.threadExecutionWidth, tmax = ps.maxTotalThreadsPerThreadgroup;
+        NSUInteger tg = tmax / w;
+        [e dispatchThreadgroups:MTLSizeMake((N + tg - 1) / tg, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(w, 1, 1)];
+        [e endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        memcpy(got, [bo contents], N * sizeof(float));
+
+        double maxdiff = 0.0; int bad = 0;
+        for (int i = 0; i < N; i++) {
+            double d = fabs((double)got[i] - (double)ref[i]);
+            if (d > maxdiff) maxdiff = d;
+            if (d > 0) bad++;
+        }
+        printf("MAXDIFF %.3e BAD %d\n", maxdiff, bad);
+        return bad == 0 ? 0 : 1;
+    }
+}
+'''
+
+
+def _c_string_literal(text: str) -> str:
+    esc = (text.replace('\\', '\\\\').replace('"', '\\"')
+               .replace('\n', '\\n').replace('\t', '\\t'))
+    return '"' + esc + '"'
+
+
+def run_on_gpu(msl: str, fname: str, n: int = 4096):
+    """Compile `msl` with Apple's real compiler, dispatch, compare to a CPU
+    reference. Returns (status, stdout). status: 'ok' | 'no_device' |
+    'compile_fail' | 'mismatch'."""
+    if sys.platform != 'darwin':
+        return 'no_device', ''
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, 'h.m')
+        exe = os.path.join(td, 'h')
+        # Substituted, not %-formatted: the harness is C, so its own printf
+        # specifiers would all have to be escaped, and getting that wrong
+        # fails as "not enough arguments for format string" rather than
+        # pointing at the real problem.
+        body = (_HARNESS.replace('@MSL@', _c_string_literal(msl))
+                       .replace('@FNAME@', fname)
+                       .replace('@N@', str(n)))
+        with open(src, 'w') as f:
+            f.write(body)
+        cc = subprocess.run(['clang', '-fobjc-arc', '-O1', '-framework',
+                             'Foundation', '-framework', 'Metal', '-o', exe, src],
+                            capture_output=True, text=True)
+        if cc.returncode != 0:
+            return 'compile_fail', cc.stderr[:400]
+        run = subprocess.run([exe], capture_output=True, text=True, timeout=300)
+        out = run.stdout
+        if 'NO_DEVICE' in out:
+            return 'no_device', out
+        if 'MSL_FAIL' in out or 'NO_FN' in out or 'NO_PIPE' in out:
+            return 'compile_fail', out
+        if run.returncode != 0 or 'MAXDIFF 0.000e+00 BAD 0' not in out:
+            return 'mismatch', out
+        return 'ok', out
+
+
+@unittest.skipUnless(sys.platform == 'darwin', 'Metal is macOS-only')
+class TestGeneratedMslRunsOnGpu(unittest.TestCase):
+    """The test that can catch a kernel which compiles and computes the
+    wrong answer. Everything above it checks TEXT; this checks BEHAVIOUR."""
+
+    KERNEL = '''
+def vec_add(in0: UnsafePointer[Float32, MutAnyOrigin],
+            in1: UnsafePointer[Float32, MutAnyOrigin],
+            output: UnsafePointer[Float32, MutAnyOrigin], len: Int):
+    tid = global_idx.x
+    if tid >= len:
+        return
+    output[tid] = in0[tid] + in1[tid]
+'''
+
+    def test_stdlib_vec_add_matches_cpu_exactly(self):
+        mod = parse(self.KERNEL)
+        msl = eml.emit_kernel(mod[0])
+        status, out = run_on_gpu(msl, 'vec_add')
+        if status == 'no_device':
+            self.skipTest('no Metal device on this machine')
+        self.assertEqual(status, 'ok', f'status={status}\n{out}\n--- msl ---\n{msl}')
+
+
+# ---------------------------------------------------------------------------
+# Seam 3: the module sidecar -- MSL embedded in the generated C, the host
+# launch wrappers, and a real dispatch through runtime/fire_metal.h.
+# ---------------------------------------------------------------------------
+
+KERNEL_AND_CALLER = '''
+@gpu
+def vec_add(in0: UnsafePointer[Float32, MutAnyOrigin],
+            in1: UnsafePointer[Float32, MutAnyOrigin],
+            output: UnsafePointer[Float32, MutAnyOrigin], len: Int):
+    tid = global_idx.x
+    if tid >= len:
+        return
+    output[tid] = in0[tid] + in1[tid]
+
+
+def run(n: Int):
+    vec_add(n, n, n, 8)
+
+
+def main():
+    print(_mojo_gpu_kernel_count())
+'''
+
+
+class TestLaunchArgTypes(unittest.TestCase):
+    """The host wrapper's signature, derived off the AST.
+
+    A DEVICE function never reaches gen_func, so there is no inferred C
+    signature to read back -- these are what stand in for it, and a wrong
+    answer here is a wrong pointer width at the dispatch.
+    """
+
+    def test_pointer_params_are_buffers_and_scalars_are_not(self):
+        mod = parse(KERNEL_AND_CALLER)
+        types, count = dglue.launch_arg_types(mod[0].params)
+        self.assertEqual(
+            [(n, isb) for n, _t, isb, _w in types],
+            [('in0', True), ('in1', True), ('output', True), ('len', False)])
+        self.assertEqual(count, 3)
+
+    def test_int_scalar_narrows_to_the_width_the_msl_declares(self):
+        """`Int` lowers to MSL `int`, so the host must hand over 4 bytes.
+
+        This is not a style choice. The device reads exactly the bytes bound
+        at that constant index; a host double there delivered the low 4 bytes
+        of the mantissa, and a length of 1024 arrived as 0 -- the kernel took
+        its bounds guard on every thread, wrote nothing, and exited 0.
+        """
+        mod = parse(KERNEL_AND_CALLER)
+        types, _ = dglue.launch_arg_types(mod[0].params)
+        self.assertEqual(types[3][1], 'int32_t')
+        self.assertEqual(types[3][3], 4)
+
+    def test_element_count_index_rejects_a_kernel_with_no_length(self):
+        """A `float *` carries no length, so without one the host cannot copy
+        results back. Silently copying back nothing would produce a program
+        that runs and prints plausible numbers and is wrong."""
+        with self.assertRaises(dglue.LaunchError) as cm:
+            dglue.element_count_index('k', -1)
+        self.assertIn('no Int/Int64 parameter', str(cm.exception))
+
+    def test_c_string_literal_escapes_trigraphs(self):
+        """MSL is full of `?:`, and a C preprocessor that eats trigraphs turns
+        the ternary into a digraph. Escaping `?` is what stops the emitted
+        string from being re-read differently than it was written."""
+        lit = dglue.c_string_literal('a ?: b')
+        self.assertIn(r'\?', lit)
+        self.assertNotIn('?', lit.replace(r'\?', ''))
+
+
+class TestDeviceSidecarEmission(unittest.TestCase):
+    """What the module generator actually puts in the .ci."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ci = gctypes.compile_to_gimple(KERNEL_AND_CALLER, False,
+                                            'sidecar_test.py')
+
+    def test_msl_is_embedded_as_a_c_string(self):
+        self.assertIn('_mg_msl_source', self.ci)
+        # The kernel text survives escaping, so look for a distinctive
+        # fragment rather than the whole (chunked, escaped) literal.
+        self.assertIn('kernel void vec_add', self.ci.replace('\\n', '\n'))
+
+    def test_runtime_header_is_included_only_when_offloading(self):
+        self.assertIn('#include <fire_metal.h>', self.ci)
+        plain = gctypes.compile_to_gimple('def main():\n    print(1)\n', False, 'p.py')
+        self.assertNotIn('fire_metal.h', plain,
+                         'a module with no kernels must not acquire a Metal '
+                         'dependency')
+
+    def test_launch_wrapper_is_generated_with_the_kernels_own_signature(self):
+        self.assertIn(
+            'void _mg_launch_vec_add(float * in0, float * in1, '
+            'float * output, int32_t len)', self.ci)
+
+    def test_wrapper_precedes_its_call_site_so_the_call_typechecks(self):
+        """The wrapper is defined in the tail sidecar but called from a
+        function body emitted much earlier, so the prototype in the preamble is
+        load-bearing: without it the call is an implicit declaration and gcc
+        reports "conflicting types" against the real definition."""
+        proto = self.ci.find('void _mg_launch_vec_add(float * in0')
+        call = self.ci.find('_mg_launch_vec_add(_t')
+        self.assertGreater(proto, 0, 'no prototype emitted')
+        self.assertGreater(call, 0, 'the Mojo call site was not routed')
+        self.assertLess(proto, call)
+
+    def test_mojo_call_site_routes_to_the_launch_wrapper(self):
+        """A call to a device function must become a dispatch, not a call to a
+        C function that does not exist. This is the assertion that would have
+        caught the stub: the generated code referenced `vec_add_<oid>` with a
+        weak stub, which linked and then did nothing."""
+        self.assertIn('_mg_launch_vec_add(', self.ci)
+        # No C definition of the kernel itself may survive.
+        self.assertNotIn('_MOJO_STUB_vec_add', self.ci)
+
+    def test_scalar_is_narrowed_before_it_reaches_the_runtime(self):
+        self.assertIn('int32_t _mg_sc0 = (int32_t)len;', self.ci)
+        self.assertIn('_mg_widths[] = {4}', self.ci)
+
+    def test_introspection_entry_points_are_registered(self):
+        """They are called from compiled Mojo, so they must be real registered
+        runtime functions -- otherwise the C backend mints a weak stub that
+        collides with the sidecar's definition."""
+        for n in ('_mojo_gpu_kernel_count', '_mojo_gpu_have_device',
+                  '_mojo_gpu_dispatch_count', '_mojo_gpu_failure_count'):
+            self.assertIn(f'int64_t {n}(void);', self.ci)
+            # The definition line is column-aligned in the emitter, so match
+            # on the name and the body rather than on exact spacing.
+            self.assertRegex(
+                self.ci,
+                r'int64_t ' + re.escape(n) + r'\(void\)\s*\{')
+
+
+# The C driver for the end-to-end dispatch. It calls the GENERATED wrapper
+# (not the runtime directly) because the wrapper is where the buffer table,
+# the narrowing and the width table live -- a test that skipped it would pass
+# with all of that deleted.
+_SIDECAR_DRIVER = r'''
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+#include <stdint.h>
+void _mg_launch_vec_add(float *a, float *b, float *o, int32_t n);
+int64_t _mojo_gpu_kernel_count(void);
+int64_t _mojo_gpu_have_device(void);
+int64_t _mojo_gpu_dispatch_count(void);
+int64_t _mojo_gpu_failure_count(void);
+int main(void) {
+    int64_t n = 1024;
+    float *a = malloc(n * 4), *b = malloc(n * 4), *o = malloc(n * 4);
+    for (int64_t i = 0; i < n; i++) { a[i] = (float)i * 0.5f;
+                                       b[i] = (float)i * 2.0f;
+                                       o[i] = -1.0f; }
+    if (_mojo_gpu_kernel_count() != 1) { printf("KCOUNT\n"); return 3; }
+    if (!_mojo_gpu_have_device()) { printf("NO_DEVICE\n"); return 2; }
+    _mg_launch_vec_add(a, b, o, (int32_t)n);
+    double worst = 0.0; int64_t bad = 0;
+    for (int64_t i = 0; i < n; i++) {
+        double d = fabs((double)a[i] + (double)b[i] - (double)o[i]);
+        if (d > worst) worst = d;
+        if (d > 0.0) bad++;
+    }
+    printf("DISPATCHES %lld FAILURES %lld MAXDIFF %.3e BAD %lld\n",
+           (long long)_mojo_gpu_dispatch_count(),
+           (long long)_mojo_gpu_failure_count(), worst, (long long)bad);
+    return 0;
+}
+'''
+
+
+@unittest.skipUnless(sys.platform == 'darwin', 'Metal is macOS-only')
+class TestSidecarDispatchesOnRealGpu(unittest.TestCase):
+    """Python -> MSL -> C string -> real Metal compiler -> real GPU, through
+    the generated host wrapper. The one test that can catch a marshalling bug
+    -- a wrong scalar width, a short grid, a missing copy-back -- because every
+    one of those produces a wrong answer at exit 0 rather than an error."""
+
+    def test_generated_wrapper_computes_the_right_answer(self):
+        ci = gctypes.compile_to_gimple(KERNEL_AND_CALLER, False, 'sidecar_gpu.py')
+        rt = os.path.join(HERE, 'runtime')
+        metal_m = os.path.join(rt, 'fire_metal.m')
+        if not os.path.exists(metal_m):
+            self.skipTest('runtime/fire_metal.m missing')
+        with tempfile.TemporaryDirectory() as wd:
+            ci_f = os.path.join(wd, 'm.ci')
+            drv_f = os.path.join(wd, 'drv.c')
+            with open(ci_f, 'w') as f:
+                f.write(ci)
+            with open(drv_f, 'w') as f:
+                f.write(_SIDECAR_DRIVER)
+            # The module's own `main` is renamed so the driver owns the entry
+            # point; everything else, including the sidecar, is untouched.
+            compile_r = subprocess.run(
+                [_GCC, '-O0', '-fgimple', '-fPIC', f'-I{rt}',
+                 '-Dmain=mojo_module_main', '-c', '-o',
+                 os.path.join(wd, 'm.o'), '-x', 'c', ci_f],
+                capture_output=True, text=True)
+            if compile_r.returncode != 0:
+                self.skipTest(f'gimple compile failed:\n{compile_r.stderr[:2000]}')
+            metal_r = subprocess.run(
+                ['clang', '-O0', '-fobjc-arc', f'-I{rt}', '-c', '-o',
+                 os.path.join(wd, 'fm.o'), metal_m],
+                capture_output=True, text=True)
+            if metal_r.returncode != 0:
+                self.skipTest(f'clang compile failed:\n{metal_r.stderr[:2000]}')
+            exe = os.path.join(wd, 'a.out')
+            link_r = subprocess.run(
+                [_GCC, '-O0', '-o', exe, drv_f, os.path.join(wd, 'm.o'),
+                 os.path.join(wd, 'fm.o'), os.path.join(rt, 'fire_runtime.c'),
+                 f'-I{rt}', '-framework', 'Foundation', '-framework', 'Metal',
+                 '-lm'], capture_output=True, text=True)
+            if link_r.returncode != 0:
+                self.fail(f'link failed:\n{link_r.stderr[:2000]}')
+            run = subprocess.run([exe], capture_output=True, text=True, timeout=300)
+            out = run.stdout
+            if 'NO_DEVICE' in out:
+                self.skipTest('no Metal device on this machine')
+            if 'KCOUNT' in out:
+                self.fail(f'sidecar registered the wrong kernel count\n{out}')
+            self.assertIn('MAXDIFF 0.000e+00 BAD 0', out,
+                          f'wrong answer on the GPU\n{out}')
+            self.assertIn('DISPATCHES 1', out)
+            self.assertIn('FAILURES 0', out)
+
+
+@unittest.skipUnless(sys.platform == 'darwin', 'Metal is macOS-only')
+class TestListsReachTheGpu(unittest.TestCase):
+    """Ordinary Python lists, offloaded.
+
+    This is the case the whole exercise exists for. A `MojoList` is a struct
+    whose first field is a data pointer, so the obvious lowering -- cast it to
+    `float *` -- points at the struct HEADER and the kernel reads data/len/cap/
+    the inline buffer as the array. It runs, and it is wrong. Lists are
+    therefore packed into real contiguous buffers for the dispatch and written
+    back afterwards.
+
+    Driven through `fire.py --jit`, so it also covers the whole link path: the
+    generated .ci, the sidecar, the Objective-C runtime, and the frameworks
+    being added to the link line only because this module references them.
+    """
+
+    PROG = '''\
+@gpu
+def vec_add(in0: UnsafePointer[Float32, MutAnyOrigin],
+            in1: UnsafePointer[Float32, MutAnyOrigin],
+            output: UnsafePointer[Float32, MutAnyOrigin], len: Int):
+    tid = global_idx.x
+    if tid >= len:
+        return
+    output[tid] = in0[tid] + in1[tid]
+
+
+def main():
+    a = [0.0, 1.0, 2.0, 3.0]
+    b = [2.0, 2.0, 2.0, 2.0]
+    # Poisoned, so a dispatch that silently did nothing cannot look correct.
+    o = [-999.0, -999.0, -999.0, -999.0]
+    vec_add(a, b, o, 4)
+    for v in o:
+        print(v)
+    print("d", _mojo_gpu_dispatch_count())
+    print("f", _mojo_gpu_failure_count())
+'''
+
+    def test_plain_lists_dispatch_and_return_the_right_answer(self):
+        with tempfile.TemporaryDirectory() as wd:
+            path = os.path.join(wd, 'lists.mojo')
+            with open(path, 'w') as f:
+                f.write(self.PROG)
+            r = subprocess.run(
+                [sys.executable, os.path.join(HERE, 'fire.py'), '--jit', path],
+                capture_output=True, text=True, timeout=900, cwd=HERE)
+            out = r.stdout.strip().splitlines()
+            if r.returncode != 0:
+                self.skipTest(f'no JIT build here: {r.stderr[-400:]}')
+            if 'd 0' in ' '.join(out) and 'f 1' in ' '.join(out):
+                self.skipTest('no Metal device on this machine')
+            self.assertEqual(out[:4], ['2.0', '3.0', '4.0', '5.0'],
+                             f'wrong answer on the GPU\n{r.stdout}\n{r.stderr[-800:]}')
+            self.assertIn('d 1', out, f'no dispatch happened\n{r.stdout}')
+            self.assertIn('f 0', out, f'a dispatch failed\n{r.stdout}')
+
+
+if __name__ == '__main__':
+    unittest.main()
