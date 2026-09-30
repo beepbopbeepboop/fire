@@ -389,6 +389,36 @@ def cmd_guard(a):
         time.sleep(a.interval)
 
 
+def cmd_memtrim(a):
+    """Right-size the memory ledger to what holders actually use, so waiting jobs are admitted.
+
+    A reservation is an upper bound (a 96 GB holder may really use 4). Backfill in tools/memslot.py lets small
+    requests sneak in on measured free memory, but that logic runs inside each WAITING client, and every
+    worker's worktree carries its own (older) copy of memslot.py. The ledger is the one thing they all share, so
+    this lowers each holder's entry to `max(--floor, 1.6 x its tree's RSS + 1)`, never above what it reserved
+    (`gb_orig`), and raises it again as the job grows. Old clients then see room and admit themselves. The job's
+    own memcap ceiling is untouched (it is still killed at what it asked for); what is relaxed is only the
+    scheduler's worst-case assumption."""
+    sys.path.insert(0, os.path.join(MAIN, "tools"))
+    import memslot, procrun
+    GB = 1024 ** 3
+    while True:
+        ppid, rss = procrun.ps_table()
+        with memslot.Ledger() as L:
+            for h in L.data["holders"]:
+                job = h.get("job") or 0
+                if h.get("sneak") or not job:
+                    continue
+                orig = h.setdefault("gb_orig", h["gb"])
+                b, n = procrun.tree_rss(job, ppid, rss)
+                if not n:
+                    continue
+                h["gb"] = round(min(orig, max(a.floor, b / GB * 1.6 + 1.0)), 2)
+        if a.once:
+            return
+        time.sleep(a.interval)
+
+
 def cmd_reap(a):
     """Kill processes still running with their cwd inside the worktree of a task whose worker has exited.
 
@@ -456,6 +486,8 @@ def main():
     s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=8); s.set_defaults(f=cmd_refill)
     s = sub.add_parser("priority"); s.add_argument("names", nargs="*"); s.set_defaults(f=cmd_priority)
     sub.add_parser("queue").set_defaults(f=cmd_queue)
+    s = sub.add_parser("memtrim"); s.add_argument("--floor", type=float, default=4.0)
+    s.add_argument("--interval", type=float, default=3.0); s.add_argument("--once", action="store_true"); s.set_defaults(f=cmd_memtrim)
     sub.add_parser("ps").set_defaults(f=cmd_ps)
     s = sub.add_parser("reap"); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_reap)
     sub.add_parser("report").set_defaults(f=cmd_report)

@@ -96,27 +96,26 @@ def main():
         cands = sorted(I.pick_candidates(quiet=True), key=C.priority_key)
         if not cands:
             log("nothing new to integrate")
-        # Phase 1: SCREEN every finished branch alone through the quick tier (minutes each; never lands anything).
+        # In PRIORITY order, one branch at a time: screen it alone through the quick tier; if it passes, LAND it
+        # (full gate) before looking at the next, so the most important branch is never kept waiting behind the
+        # screening of less important ones. A branch that fails its screen is skipped here and handed to a fixer below.
         for name in cands:
-            head = head_sha(name)
-            if screen.get(name, {}).get("head") == head:
-                continue
-            log("screening %s alone (quick tier)" % name)
-            rc, out = run_integrate("--only", name, "--jobs", *I.QUICK)
-            if "another integrator" in out:
-                log("integrator busy; retry next interval"); break
-            if "--jobs run finished" not in out:      # it conflicted (a fixer was queued) or nothing merged
-                log("%s: did not reach the quick tier: %s" % (name, " | ".join(l for l in out.splitlines() if "CONFLICT" in l)[:200]))
-                continue
-            ok = rc == 0
-            screen[name] = {"head": head, "pass": ok, "why": "" if ok else failed_jobs(os.path.join(I.INTEG, "gate.log")), "t": time.time()}
-            json.dump(st, open(STATE, "w"))
-            log("%s: quick tier %s" % (name, "PASS" if ok else "FAIL: " + screen[name]["why"].replace("\n", " ")[:160]))
-        # Phase 2: LAND the passers first, in priority order, each through the full gate before the next.
-        cands = sorted(I.pick_candidates(quiet=True), key=C.priority_key)
-        passers = [n for n in cands if screen.get(n, {}).get("pass") and screen[n]["head"] == head_sha(n)]
-        for name in passers:
             if name not in I.pick_candidates(quiet=True):
+                continue                                  # superseded or integrated under us
+            head = head_sha(name)
+            if screen.get(name, {}).get("head") != head:
+                log("screening %s alone (quick tier)" % name)
+                rc, out = run_integrate("--only", name, "--jobs", *I.QUICK)
+                if "another integrator" in out:
+                    log("integrator busy; retry next interval"); break
+                if "--jobs run finished" not in out:     # it conflicted (a fixer was queued) or nothing merged
+                    log("%s: did not reach the quick tier: %s" % (name, " | ".join(l for l in out.splitlines() if "CONFLICT" in l)[:200]))
+                    continue
+                ok = rc == 0
+                screen[name] = {"head": head, "pass": ok, "why": "" if ok else failed_jobs(os.path.join(I.INTEG, "gate.log")), "t": time.time()}
+                json.dump(st, open(STATE, "w"))
+                log("%s: quick tier %s" % (name, "PASS" if ok else "FAIL: " + screen[name]["why"].replace("\n", " ")[:160]))
+            if not (screen.get(name, {}).get("pass") and screen[name]["head"] == head_sha(name)):
                 continue
             log("LANDING %s (passed the quick tier; full gate now)" % name)
             rc, out = run_integrate("--only", name)
