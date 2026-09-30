@@ -3870,22 +3870,29 @@ CONSTRUCTION_CASES = [
      "    if last_v != 9:\n"
      "        return 50 + last_v\n"
      "    return 7\n", 7, None),
-]
 
-CONSTRUCTION_REFUSALS = [
-    # ── a declared `__init__`, which makes `S(...)` a CALL ──
-    # The refusal that had to come BEFORE the arity one, because the arity
-    # message's claim — "a struct's fields are filled in DECLARATION ORDER and
-    # there is no other form" — is false for this struct. `Slice` declares TWO
-    # `__init__` overloads and the corpus writes `Slice(6, len(lst))` against
-    # its three fields, so `Slice(a, b)` is a call to the two-parameter
-    # constructor and not a two-field construction of a three-field struct.
+    # ── a DECLARED `__init__`: `S(a, b)` is a CALL, and the call is INLINED ──
     #
-    # It is also the first blocking fact for twenty stdlib files, which is how
-    # it was found: the arity message was replacing a correct deeper message
-    # with a false one. The needle is the OVERLOAD, because that is the fact a
-    # reader needs and the one that says the shape is real.
-    ("constr_refuse_a_declared_init_overload",
+    # This whole block is `bugs/FORMAL_struct_construction_shapes.md`'s one
+    # remaining refusal, closed.  `Slice` — the case that found it — declares
+    # TWO `__init__` overloads against three fields and the corpus writes all
+    # three counts, so `Slice(a, b)` is a call to the two-parameter constructor
+    # and NOT a two-field construction of a three-field struct.  What used to
+    # be a blanket refusal is now the language's own rule: the argument COUNT
+    # selects the overload, and the selected overload's body becomes the stores
+    # at the construction site.
+    #
+    # The expected value of every case below is what CPython returns for the
+    # same program written as a class with the same two `__init__` overloads —
+    # the translation is one-to-one (`struct S:` → `class S:`, `out self` →
+    # `self`, `var` dropped), and `python3` has run each of them, so the answer
+    # is the language's and not the emitter's.
+    #
+    # The four rows together are what makes the block a test of the SELECTION
+    # rather than of the stores: a program that filled `step` with the third
+    # argument on every call, or with a constant, or that ignored the count
+    # entirely, would pass one row and fail another.
+    ("constr_init_arity_selects_the_overload",
      "struct Slice3:\n"
      "    var start: Int\n"
      "    var end: Int\n"
@@ -3901,17 +3908,455 @@ CONSTRUCTION_REFUSALS = [
      "        self.end = end\n"
      "        self.step = step\n"
      "\n"
+     "    def get(self, i: Int) -> Int:\n"
+     "        if i == 0:\n"
+     "            return self.start\n"
+     "        if i == 1:\n"
+     "            return self.end\n"
+     "        return self.step\n"
+     "\n"
      "def main(n: Int) -> Int:\n"
-     "    var s = Slice3(1, 9)\n"
-     "    return s.start\n",
-     "refuse:is a call to a user-defined `__init__`, not a field-filling construction",
+     "    var a = Slice3(1, 9)\n"
+     "    var b = Slice3(2, 8, 5)\n"
+     "    if a.get(0) != 1:\n"
+     "        return 10 + a.get(0)\n"
+     "    if a.get(1) != 9:\n"
+     "        return 20 + a.get(1)\n"
+     "    if a.get(2) != 1:\n"
+     "        return 30 + a.get(2)\n"
+     "    if b.get(0) != 2:\n"
+     "        return 40 + b.get(0)\n"
+     "    if b.get(1) != 8:\n"
+     "        return 50 + b.get(1)\n"
+     "    if b.get(2) != 5:\n"
+     "        return 60 + b.get(2)\n"
+     "    return 7\n", 7, None),
+    # The corpus's own spelling, verbatim: `Slice`'s two-parameter constructor
+    # ends in `self.step = None`, and `None` is a NAME, not a parameter and not
+    # a local of the body.  Without the singleton case the inline refuses here,
+    # and with a wrong answer for `None` the field would read as a random word
+    # — so the assertion is that `step` is 0, twice, for both constructions.
+    #
+    # The second half is the fourth-parameter marker: `__slice_literal__` is
+    # DEFAULTED and never read, and a defaulted parameter the caller omits and
+    # the body ignores must not cost anything.  If the selection counted
+    # parameters rather than required ones, the three-argument call below would
+    # not match anything and would be refused.
+    ("constr_init_none_and_a_defaulted_unread_parameter",
+     "struct Sl:\n"
+     "    var start: Int\n"
+     "    var end: Int\n"
+     "    var step: Int\n"
+     "\n"
+     "    def __init__(out self, start: Int, end: Int):\n"
+     "        self.start = start\n"
+     "        self.end = end\n"
+     "        self.step = None\n"
+     "\n"
+     "    def __init__(out self, start: Int, end: Int, step: Int, lit: Int = 0):\n"
+     "        self.start = start\n"
+     "        self.end = end\n"
+     "        self.step = step\n"
+     "\n"
+     "    def get(self, i: Int) -> Int:\n"
+     "        if i == 0:\n"
+     "            return self.start\n"
+     "        if i == 1:\n"
+     "            return self.end\n"
+     "        return self.step\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var a = Sl(0, 4)\n"
+     "    var b = Sl(1, 5, 2)\n"
+     "    if a.get(0) != 0:\n"
+     "        return 10 + a.get(0)\n"
+     "    if a.get(1) != 4:\n"
+     "        return 20 + a.get(1)\n"
+     "    if a.get(2) != 0:\n"
+     "        return 30 + a.get(2)\n"
+     "    if b.get(2) != 2:\n"
+     "        return 40 + b.get(2)\n"
+     "    return 5\n", 5, None),
+    # A DEFAULTED parameter the body DOES store, called both with and without
+    # it.  10 is the default's whole job here: a program that always read the
+    # caller's third argument would pass the second check and fail the first,
+    # and one that always stored the default would do the reverse.
+    ("constr_init_a_defaulted_parameter_the_body_stores",
+     "struct Dflt:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int, b: Int = 7):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "\n"
+     "    def get(self, i: Int) -> Int:\n"
+     "        if i == 0:\n"
+     "            return self.a\n"
+     "        return self.b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = Dflt(1)\n"
+     "    var y = Dflt(2, 5)\n"
+     "    if x.get(0) != 1:\n"
+     "        return 10 + x.get(0)\n"
+     "    if x.get(1) != 7:\n"
+     "        return 20 + x.get(1)\n"
+     "    if y.get(1) != 5:\n"
+     "        return 30 + y.get(1)\n"
+     "    return 3\n", 3, None),
+    # A field the constructor does NOT assign.  The language default-
+    # initializes the object BEFORE the constructor runs, so `b` keeps its
+    # class-level 11 — and that is only true if the bring-up still happens
+    # underneath the inlined stores.  A lowering that emitted the constructor's
+    # stores alone would leave `b` at whatever the block held, which is a
+    # plausible-looking number nobody wrote: the case is here for that.
+    ("constr_init_an_unassigned_field_keeps_its_class_default",
+     "struct Part:\n"
+     "    var a: Int\n"
+     "    var b: Int = 11\n"
+     "    var c: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int, c: Int):\n"
+     "        self.a = a\n"
+     "        self.c = c\n"
+     "\n"
+     "    def get(self, i: Int) -> Int:\n"
+     "        if i == 0:\n"
+     "            return self.a\n"
+     "        if i == 1:\n"
+     "            return self.b\n"
+     "        return self.c\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = Part(1, 3)\n"
+     "    if p.get(0) != 1:\n"
+     "        return 10 + p.get(0)\n"
+     "    if p.get(1) != 11:\n"
+     "        return 20 + p.get(1)\n"
+     "    if p.get(2) != 3:\n"
+     "        return 30 + p.get(2)\n"
+     "    return 4\n", 4, None),
+    # A ONE-FIELD struct, where the receiver IS the field and there is nothing
+    # to store into.  The constructor's body is still what decides the value, so
+    # the LAST store is the whole result — the same word, for the same reason
+    # a positional argument on a one-field struct is the result.
+    ("constr_init_a_one_field_struct_is_the_last_store",
+     "struct One1:\n"
+     "    var n: Int\n"
+     "\n"
+     "    def __init__(out self, n: Int):\n"
+     "        self.n = n\n"
+     "\n"
+     "    def get(self) -> Int:\n"
+     "        return self.n\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var w = One1(42)\n"
+     "    if w.get() != 42:\n"
+     "        return 20 + w.get()\n"
+     "    return 6\n", 6, None),
+    # A constructor inside a LOOP, which is the per-SITE block discipline with
+    # stores in it.  The values checked are the THIRD iteration's, so a
+    # per-iteration block and a per-site one both pass and only a store that
+    # survived from iteration one — the failure mode of a bring-up that ran once
+    # — would not.
+    ("constr_init_in_a_loop_reuses_its_site_block",
+     "struct Acc2:\n"
+     "    var k: Int\n"
+     "    var v: Int\n"
+     "\n"
+     "    def __init__(out self, k: Int, v: Int):\n"
+     "        self.k = k\n"
+     "        self.v = v\n"
+     "\n"
+     "    def get(self, i: Int) -> Int:\n"
+     "        if i == 0:\n"
+     "            return self.k\n"
+     "        return self.v\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var last_k = 0\n"
+     "    var last_v = 0\n"
+     "    for i in range(1, 4):\n"
+     "        var a = Acc2(i, i * i)\n"
+     "        if a.get(0) != i:\n"
+     "            return 20 + a.get(0)\n"
+     "        if a.get(1) != i * i:\n"
+     "            return 30 + a.get(1)\n"
+     "        last_k = a.get(0)\n"
+     "        last_v = a.get(1)\n"
+     "    if last_k != 3:\n"
+     "        return 40 + last_k\n"
+     "    if last_v != 9:\n"
+     "        return 50 + last_v\n"
+     "    return 7\n", 7, None),
+    # GUARD, and the one that says the change did not OVERREACH: `S()` on a
+    # struct that declares an `__init__` still brings every field up at its
+    # class-level default and does NOT run the body, because there are no
+    # arguments for the argument count to select an overload with.  A lowering
+    # that ran the constructor here would have to pick a zero-required overload
+    # by something other than the count, and 8 + 9 is what a reader would be
+    # entitled to expect if it did.  The sibling refusal
+    # `constr_zero_arg_still_ignores_a_declared_init` pins the same fact from
+    # the other side (a constructor that takes arguments).
+    ("constr_init_a_zero_argument_construction_still_ignores_the_body",
+     "struct Z:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int = 8, b: Int = 9):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "\n"
+     "    def get(self, i: Int) -> Int:\n"
+     "        if i == 0:\n"
+     "            return self.a\n"
+     "        return self.b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var z = Z()\n"
+     "    if z.get(0) != 0 or z.get(1) != 0:\n"
+     "        return 20 + z.get(0)\n"
+     "    return 7\n", 7, None),
+]
+
+CONSTRUCTION_REFUSALS = [
+    # ── a declared `__init__`, which makes `S(...)` a CALL ──
+    #
+    # This used to be ONE refusal for every construction of a struct that
+    # declares a constructor, and the reason it existed was a good one: with a
+    # declared `__init__`, `S(a, b)` is a CALL to it, so the arity message's
+    # claim — "a struct's fields are filled in DECLARATION ORDER and there is
+    # no other form" — is FALSE for such a struct, and a message that is false
+    # about the program in front of the reader is worse than no message.
+    # `Slice` is what made it concrete and it was twenty stdlib files' first
+    # blocking fact.
+    #
+    # What is left here is the part of that refusal which is still true, split
+    # by what is actually wrong.  A call does not have to be EMITTED to be RUN:
+    # a constructor body that is a straight line of `self.<field> = <expr>`
+    # stores is the same program as the construction followed by those stores,
+    # and that is a shape this path already emits — so the argument count now
+    # selects the overload and the selected body becomes the stores
+    # (`CASES`, "a DECLARED `__init__`").  What the inline cannot supply is an
+    # overload the count does not pick out of one, and a body that is not only
+    # those stores.  Each of the five cases below is one of those, and each
+    # names its own cause.
+    #
+    # (1) No declared arity admits the count.  `Slice` admits 2, 3 and 4
+    # positionals, and `A(1)` is not one of them — an error the language reports
+    # at the call, and the fix is on the caller's side, so the message spells
+    # the declared shapes.  The needle is the SHAPES, because a count alone
+    # leaves the reader to work out which arity was wrong.
+    ("constr_refuse_an_init_count_no_overload_takes",
+     "struct A1:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int, b: Int):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = A1(1)\n"
+     "    return x.a\n",
+     "refuse:and none of them takes that count: A1 declares 1 `__init__` overload (2 required (a, b))",
      None),
-    # And the guard on the other side of the same line: a ZERO-argument `S()`
-    # on a struct that declares `__init__` is NOT this refusal. It is premise
-    # (B2) — the constructor does not run, every field comes up at its default
-    # — and it is the shape nearly every container in the corpus is written in.
-    # If this case ever starts refusing, the overload check has leaked above
-    # the `not args` early return.
+    # (2) TWO overloads admit the count.  This path resolves nothing by type —
+    # a call site carries the argument count and the arguments, never their
+    # types — so it cannot say which constructor the source named, and picking
+    # either would be running a constructor the program did not choose.  The
+    # needle is the AMBIGUITY, because "it is refused" and "it is refused
+    # because two would have done" have different fixes and a reader who is sent
+    # to the class body can only find that out by reading both.
+    ("constr_refuse_two_inits_admitting_the_same_count",
+     "struct A2:\n"
+     "    var a: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int):\n"
+     "        self.a = a\n"
+     "\n"
+     "    def __init__(out self, a: Int, b: Int = 2):\n"
+     "        self.a = a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = A2(1)\n"
+     "    return x.a\n",
+     "refuse:and TWO of them admit that count", None),
+    # (3) A BRANCH in the body.  The body is not a sequence of stores, and a
+    # branch means the value in a field depends on a condition this path would
+    # have to reproduce at the construction site rather than copy.  The needle
+    # is the STATEMENT, because "this constructor is not lowered" without it
+    # sends the reader back to the class body to work out which of its lines
+    # mattered.
+    ("constr_refuse_an_init_body_with_a_branch",
+     "struct A3:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int, b: Int):\n"
+     "        self.a = a\n"
+     "        if b > 0:\n"
+     "            self.b = b\n"
+     "        else:\n"
+     "            self.b = 0 - b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = A3(1, 2)\n"
+     "    return x.a\n",
+     "refuse:whose body this path does not inline: a `if` statement", None),
+    # (4) A LOCAL of the body.  This is the asymmetry with running the body in
+    # place, and it is why the accepted set is a set: the body is INLINED into
+    # the calling function, where a name it binds does not exist.  The needle is
+    # the ASSIGNMENT, so the reader is told which line rather than which class.
+    ("constr_refuse_an_init_body_that_binds_a_local",
+     "struct A4:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int, b: Int):\n"
+     "        t = a + b\n"
+     "        self.a = t\n"
+     "        self.b = b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = A4(1, 2)\n"
+     "    return x.a\n",
+     "refuse:whose body this path does not inline: a local assignment (`t = …`)",
+     None),
+    # (5) A READ OF THE RECEIVER, which is the case a bare-parameter check
+    # misses and the one that would be a wrong ANSWER rather than a refusal:
+    # `self.a = a` is fine because `a` is the caller's own expression, and
+    # `self.a = 1 + a` is not, because the arithmetic names a word the calling
+    # function does not have.  The needle is the READ, and the parameter row
+    # below is its twin from the other side.
+    ("constr_refuse_an_init_body_that_reads_the_receiver",
+     "struct A5:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int, b: Int):\n"
+     "        self.a = a\n"
+     "        self.b = self.a + b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = A5(1, 2)\n"
+     "    return x.b\n",
+     "refuse:whose body this path does not inline: a read of 'self' in the right-hand side",
+     None),
+    # (6) The same refusal for a PARAMETER, which is the one that is easy to
+    # get wrong in the accepting direction: a program that inlined this would
+    # read a word out of whatever register the CALLING function left in it, and
+    # the caller is `main`, whose first argument is the test input.
+    ("constr_refuse_an_init_body_that_reads_a_parameter_in_an_expression",
+     "struct A6:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int, b: Int):\n"
+     "        self.a = a + 1\n"
+     "        self.b = b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = A6(1, 2)\n"
+     "    return x.a\n",
+     "refuse:whose body this path does not inline: a read of 'a' in the right-hand side",
+     None),
+    # (6b) An AUGMENTED assignment.  It is a read AND a write, so the value it
+    # stores depends on what is already in the slot — and the slot holds the
+    # CLASS-LEVEL default at the point the constructor's stores run, not
+    # whatever an earlier statement stored.  Refused rather than answered with
+    # the class default, because that is a different program from the language's
+    # for every statement after the first.  Its own case because the statement
+    # SPELLING is the only thing distinguishing it from a local assignment, and
+    # a reader who saw "a local assignment" for `self.b += b` would go looking
+    # in the wrong place.
+    ("constr_refuse_an_init_body_with_an_augmented_assignment",
+     "struct A6b:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def __init__(out self, a: Int, b: Int):\n"
+     "        self.a = a\n"
+     "        self.b += b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = A6b(1, 2)\n"
+     "    return x.a\n",
+     "refuse:whose body this path does not inline: an augmented assignment to `self.b`",
+     None),
+    # (7) A CONSTRUCTION OF A FRAMED STRUCT inside the body.  Its receiver
+    # block is reserved per call SITE, in the prologue of the function whose
+    # body names the call; a body inlined into a construction elsewhere has no
+    # such site, and emitting the construction anyway would write into a block
+    # nothing reserved.  `StridedSlice.__init__` in `builtin_slice.mojo` is
+    # this shape, which is why the message names the reason rather than the
+    # node class.
+    #
+    # The construction is NESTED in a container literal, and that is the point
+    # rather than decoration: a check on the top-level node alone would let this
+    # through to the emitter, which looks the call up in this function's
+    # reserved sites, does not find it, and refuses with "the frame layout and
+    # the body disagree … which is a compiler bug" — a diagnostic about the
+    # compiler, printed for a program that is merely a shape this path cannot
+    # lower.  The needle is the CONSTRUCTOR, so a reader who lands here knows
+    # which call the inline cannot host.
+    ("constr_refuse_an_init_body_that_constructs_a_framed_struct",
+     "struct In1:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct In2:\n"
+     "    var items: List[Int]\n"
+     "    var g: Int\n"
+     "\n"
+     "    def __init__(out self, g: Int):\n"
+     "        self.items = [In1(1, 2)]\n"
+     "        self.g = g\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = In2(3)\n"
+     "    return x.g\n",
+     "refuse:whose body this path does not inline: `In1(…)`, a construction of a struct whose receiver is a frame",
+     None),
+    # (8) The SAME construction into a field DECLARED with that struct's type,
+    # and the message is a different one — the placement's.  `f` is a field this
+    # constructor brings a nested frame up in, so storing a word over it is what
+    # `construction_nested_slot_refusal` is for, and that is the more useful of
+    # the two: it names the slot and what a read through it would compute.  It
+    # is a separate case because two refusals for one family is exactly what
+    # "the needle is the fact that is wrong" is for, and because the ORDER
+    # matters: the placement check runs after the walk, so a bare-parameter
+    # store into a placed slot is answered by the placement and a computed one
+    # by the walk.
+    ("constr_refuse_an_init_store_over_a_placed_nested_frame",
+     "struct In3:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct In4:\n"
+     "    var f: In3\n"
+     "    var g: Int\n"
+     "\n"
+     "    def __init__(out self, f: In3, g: Int):\n"
+     "        self.f = f\n"
+     "        self.g = g\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var x = In4(In3(1, 2), 3)\n"
+     "    return x.g\n",
+     "refuse:as field 'f' is refused on this path: 'f' is declared as a In3",
+     None),
+    # The guard on the other side of the same line: a ZERO-argument `S()` on a
+    # struct that declares `__init__` is NOT one of the refusals above. There
+    # are no arguments for the count to select an overload with, so it stays
+    # premise (B2) — every field comes up at its class-level default — and that
+    # is the shape nearly every container in the corpus is written in. If this
+    # case ever starts refusing, the init branch has leaked above the `not args`
+    # early return. `constr_init_a_zero_argument_construction_still_ignores_the_body`
+    # in `CASES` is the same fact with all-defaulted parameters, where a
+    # lowering that DID run the body would have produced 8 and 9.
     ("constr_zero_arg_still_ignores_a_declared_init",
      "struct Bag4:\n"
      "    var n: Int\n"

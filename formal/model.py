@@ -23,6 +23,7 @@ leading arguments on BOTH paths, so the caller and callee must agree on that
 order in one place, not twice.
 """
 
+import collections
 import os
 import re
 
@@ -7093,6 +7094,13 @@ def struct_frame_representable(struct_def):
 CONSTRUCTION_DEFAULT = "default"
 CONSTRUCTION_POSITIONAL = "positional"
 CONSTRUCTION_COPY = "copy"
+# The FOURTH shape, and the one that makes the other three exhaustive over what
+# Mojo source can say.  `S(...)` on a struct that declares a user-defined
+# `__init__` is a CALL to it — premise (B2) used to be the reason this path
+# could not lower that, and the resolution is that the constructor need not be
+# CALLED to be RUN: a body this path can express becomes the same stores, at the
+# same construction site, in the same block.  See `init_body_stores`.
+CONSTRUCTION_INIT = "init"
 
 
 def _construction_arg_spelling(arg) -> str:
@@ -7198,8 +7206,18 @@ def construction_frame_in_value_refusal(name: str, field: str, arg,
             f"program with a lifetime this analysis can see")
 
 
-def struct_init_overloads(struct_def) -> list:
-    """`[(required, optional, [names])]` per `__init__` this struct declares.
+InitShape = collections.namedtuple("InitShape",
+                                   "method params positional required optional")
+InitShape.__doc__ = (
+    "One `__init__` this struct declares.  A named tuple and not a bare one "
+    "because the arity window below is arithmetic over four of the five "
+    "fields, and `s.required + s.optional` is legible where `s[3] + s[4]` is "
+    "a puzzle.  Unpacks as a 5-tuple, so the diagnostics that only need the "
+    "shapes are unaffected.")
+
+
+def struct_init_shapes(struct_def) -> list:
+    """`[(method, params, positional, required, optional)]` per declared `__init__`.
 
     The shapes of the struct's user-defined CONSTRUCTORS, which is a different
     question from its field list and the one that decides what `S(a, b)` means
@@ -7211,6 +7229,18 @@ def struct_init_overloads(struct_def) -> list:
     receiver is recognised by `struct_receivers`, so a class spelling it `this`
     is read the same as one spelling it `self`.
 
+    `params` is `[(name, default_expression)]` in DECLARATION ORDER with the
+    receiver removed, and it is the binding order: positional argument `i` is
+    parameter `i`, which is what turns a `__init__` body into stores.  `None` for
+    a default means the parser recorded that the parameter has one without
+    keeping the expression, and `init_body_stores` refuses rather than guessing.
+
+    `positional` is how many of them a POSITIONAL call can reach — the index of
+    the first keyword-only parameter, or all of them.  It is separate from
+    `required + optional` because `def f(a, *, b)` has two parameters and one
+    positional, and a call that binds `b` by position is a different program
+    from one that does not.
+
     Empty when the struct declares no `__init__` at all, and that emptiness is
     the whole of the distinction: with no `__init__`, Mojo's `S(...)` fills the
     fields in declaration order, which is what `struct_frame_slots` describes
@@ -7221,63 +7251,422 @@ def struct_init_overloads(struct_def) -> list:
     for m in struct_methods(struct_def):
         if m.name != "__init__":
             continue
-        names, required, optional = [], 0, 0
+        defaults = getattr(m, "param_defaults", None) or {}
+        has_default = getattr(m, "param_has_default", None) or {}
+        kwonly = set(getattr(m, "kwonly", None) or ())
+        names, params, required, optional = [], [], 0, 0
         for p in (getattr(m, "params", None) or []):
             pname = p[0] if isinstance(p, (tuple, list)) else p
             if pname in receivers:
                 continue
             names.append(pname)
-            if getattr(m, "param_has_default", {}).get(pname):
+            params.append((pname, defaults.get(pname)))
+            if has_default.get(pname):
                 optional += 1
             else:
                 required += 1
-        out.append((required, optional, names))
+        positional = len(params)
+        for i, pname in enumerate(names):
+            if pname in kwonly:
+                positional = i
+                break
+        out.append(InitShape(m, params, positional, required, optional))
     return out
 
 
-def construction_init_overload_refusal(name: str, overloads, got: int) -> str:
-    """`S(a, b)` where `S` declares a user-defined `__init__`.
+def struct_init_overloads(struct_def) -> list:
+    """`[(required, optional, names)]` per `__init__` this struct declares.
 
-    A refusal that has to come BEFORE the arity one, because the arity
-    message's claim — "a struct's fields are filled in DECLARATION ORDER and
-    there is no other form" — is FALSE for this struct, and a message that is
-    false about the program in front of the reader is worse than no message.
-
-    `std/builtin/builtin_slice.mojo`'s `Slice` is the case that makes it
-    concrete and it is twenty stdlib files' first blocking fact: it declares
-    TWO `__init__` overloads, a two-parameter one and a four-parameter one with
-    a defaulted fourth, and the corpus writes `Slice(6, len(lst))`,
-    `Slice(start, end)` and `Slice(start, end, step)`.  So `Slice(6, len(lst))`
-    is not a two-field construction of a three-field struct; it is a call to the
-    two-parameter constructor, which assigns `self.step = None` itself.
-
-    Which is premise (B2) again, and the honest statement of it: this path does
-    not run `__init__`.  `S()` brings every field up at its class-level default
-    and nothing else, so a construction with arguments is a call whose body this
-    backend has not lowered — and the fix is not to make the arity message
-    accommodate it but to say which constructor the source named, so the reader
-    can see that the shape is a real one and that what is missing is `__init__`.
-
-    The overload shapes are spelled because "it has a constructor" is not
-    actionable and `Slice`'s two shapes are.
+    `struct_init_shapes` without the methods and the positional bound, for the
+    diagnostics that only need to SPELL the overloads.  One derivation rather
+    than two: a second walk over the same declarations would eventually
+    disagree with the first about what an arity is, and the disagreement would
+    be a struct that one function can call and the other cannot.
     """
-    shapes = "; ".join(
+    return [(required, optional, [p for p, _d in params])
+            for _m, params, _pos, required, optional
+            in struct_init_shapes(struct_def)]
+
+
+def init_overload_for_arity(shapes, got: int):
+    """`(shape, why)` — the `__init__` a call of `got` positionals names.
+
+    `why` is None on a unique match, `"no_overload"` when no declared arity
+    admits the count, and `"ambiguous"` when two do.
+
+    AMBIGUITY is a refusal and not a choice between the candidates, and the
+    reason is that this path resolves nothing by type: a call site carries the
+    argument COUNT and the arguments themselves, never their types, so two
+    constructors of the same arity are indistinguishable here.  Real Mojo picks
+    by argument type; picking the first would be picking a program the source
+    did not write, and the reader would have no way to see which one was chosen.
+    `Slice`'s two shapes are exactly the case that has to work: `(2 required)`
+    and `(3 required, 1 defaulted)` partition the counts, so `Slice(a, b)` and
+    `Slice(a, b, c)` each have exactly one.
+    """
+    hits = [s for s in shapes
+            if s.required <= got <= s.required + s.optional and got <= s.positional]
+    if len(hits) == 1:
+        return hits[0], None
+    return (None, "ambiguous" if hits else "no_overload")
+
+
+def init_body_stores(struct_def, call, shape, decls: dict, rets=None):
+    """`([(field, slot, value)], refusal)` — an `__init__` body as STORES.
+
+    The lowering of a user-defined constructor, and the whole of what premise
+    (B2) used to be a refusal about.  A `__init__` does not have to be CALLED to
+    be RUN: if its body is a straight line of `self.<field> = <expr>` stores
+    then the construction `S(a, b)` and the construction followed by those
+    stores are the same program, and the second one is what this path already
+    knows how to emit — a fresh block, one store per field, at the SITE.  So the
+    stores are returned for the emitters to emit in that block, in the body's
+    own order, which is the order the language gives them.
+
+    `value` is an AST node to evaluate AT THE SITE, and resolving a
+    right-hand side to one is most of the work:
+
+      * a bare PARAMETER name is the argument that bound to it, or — for a
+        parameter the caller left to its default — the default expression from
+        the signature.  `Slice`'s two-parameter `__init__` ends in
+        `self.step = None`, and `None` is not a parameter of anything: it is a
+        parameter-shaped fact that arrives as a value the construction has to
+        materialize.  Both spellings of it, `None` as a bare name (which is how
+        Python's parser leaves it) and `NoneLiteral`, are the same word and are
+        accepted as the same word.
+      * a bare name that is NOT a parameter is refused, and it has to be: the
+        body runs at a CONSTRUCTION SITE, in the caller's function, where that
+        local does not exist.  Reading it would be reading whatever register
+        held.  This is the one asymmetry with running the body in place, and it
+        is why the accepted set is a set and not "whatever the parser produced".
+      * anything else — a literal, arithmetic over the parameters, a read of one
+        of them, a container display — is emitted by the same `_emit_expr` a
+        positional construction argument already goes through, and is subject to
+        the same per-argument refusals.  The ONE thing that is not is a
+        construction of a FRAMED struct of this module: its receiver block was
+        reserved per call SITE in the prologue of the function whose body names
+        the call, and a body inlined into a construction elsewhere has no such
+        site.  Refused by name, because the alternative is a frame the prologue
+        never reserved.
+
+    A field the body does NOT assign is not an error: the language
+    default-initializes the object before the constructor runs, so such a field
+    keeps its class-level default — which is what the `CONSTRUCTION_INIT` shape
+    leaves in the slot by bringing every slot up first, exactly as `S()` does.
+    The class-level default still has to be materializable, and the emitters
+    check that (`struct_frame_representable`); the arithmetic of "which fields
+    does this constructor leave alone" is deliberately not done here.
+
+    A statement that is not a receiver-field store — a branch, a loop, a call to
+    a method, a write to a local — is refused with that statement spelled out,
+    because a reader who has been told "this constructor is not lowered" needs
+    to know WHICH LINE of it is responsible, and the two questions have
+    different fixes.
+    """
+    method, params, _positional, _required, _optional = shape
+    got = len(list(getattr(call, "args", None) or []))
+    args = list(getattr(call, "args", None) or [])
+    receivers = struct_receivers(struct_def)
+    framed_names = {name for name, s in (decls or {}).items()
+                    if struct_is_framed(s)}
+    stores = []
+    for stmt in (getattr(method, "body", None) or []):
+        if isinstance(stmt, F.PassStmt):
+            continue
+        if isinstance(stmt, F.ExprStmt) and isinstance(stmt.value,
+                                                      F.StringLiteral):
+            # A docstring.  `expr("a string")` is a statement here and has no
+            # effect in the language, so skipping it is the semantics rather
+            # than a convenience.
+            continue
+        target = getattr(stmt, "target", None)
+        if not isinstance(target, F.MemberExpr) \
+                or not isinstance(target.obj, F.IdentExpr) \
+                or target.obj.name not in receivers:
+            return (None, construction_init_body_refusal(
+                struct_def.name, _init_statement_spelling(stmt)))
+        field = target.member
+        slot = struct_frame_slot(struct_def, field)
+        if slot is None:
+            return (None, construction_init_body_refusal(
+                struct_def.name,
+                f"`{spelled(target)}`, which assigns a field "
+                f"({struct_field_summary(struct_def)}) this struct does not "
+                f"have"))
+        if not isinstance(stmt, F.AssignStmt):
+            # An AUGMENTED assignment reaching here: the target is a field of the
+            # receiver, so the statement spelling above is the wrong one and
+            # this is the only remaining kind.  It is a read AND a write, so its
+            # value depends on what is already in the slot — the object under
+            # construction, which the inline does bring up, but only at the
+            # CLASS-LEVEL default rather than at whatever the constructor has
+            # stored so far, so the two are the same program only for the first
+            # such statement and refusing is the honest answer.
+            return (None, construction_init_body_refusal(
+                struct_def.name, _init_statement_spelling(stmt)))
+        value, refusal = _init_store_value(struct_def, stmt.value, params, got,
+                                          args, rets, framed_names)
+        if refusal is not None:
+            return (None, refusal)
+        stores.append((field, slot, value))
+    return (stores, None)
+
+
+def _init_statement_spelling(stmt) -> str:
+    """How a refusal names the `__init__` statement it is about.
+
+    The SHAPE, spelled in the reader's own words, because "an `AssignStmt`" is
+    a class name from the parser and "a local assignment" is the thing they
+    wrote.  A statement can be a long expression and the reader needs to know
+    which of theirs it is, not a reprint of it; the one exception is a local
+    assignment, which is quoted as well as named because `t = a + b` next to
+    "a local assignment" saves a trip to the class body.
+    """
+    if isinstance(stmt, F.AugAssignStmt):
+        return f"an augmented assignment to `{spelled(getattr(stmt, 'target', None))}`"
+    if isinstance(stmt, (F.VarDecl, F.AssignStmt)):
+        target = getattr(stmt, "target", None) or getattr(stmt, "name", None)
+        return f"a local assignment (`{spelled(target)} = …`)"
+    if isinstance(stmt, (F.IfStmt, F.WhileStmt, F.ForStmt, F.TryStmt,
+                         F.WithStmt, F.MatchStmt, F.ReturnStmt, F.RaiseStmt,
+                         F.AssertStmt)):
+        return f"a `{type(stmt).__name__[:-4].lower()}` statement"
+    if isinstance(stmt, F.ExprStmt):
+        return f"`{spelled(getattr(stmt, 'value', None))}`"
+    return f"a `{type(stmt).__name__}` statement"
+
+
+# The three Python singletons, as a NAME.  `None` parses as a bare `IdentExpr`
+# and `is`/`is not` and a comptime fold can produce the same for `True` and
+# `False`, so all three reach a name position in source.  They are not locals
+# of an `__init__` and not parameters of one, which is why the free-name
+# refusal has to let them past deliberately: it is about names the body binds,
+# and these are the language's own.  Both backends already materialize them to
+# a word before `_load_var` is reached (`_UNRESOLVED_NAME_ALLOWED` records that
+# and `arm64_codegen.py` / `x86_64_codegen.py` do it), so passing the name
+# through to `_emit_expr` produces exactly the store either of them would have
+# made — and `Slice`'s two-parameter constructor ends in `self.step = None`, so
+# this is the case that makes the family worth naming at all.
+_INIT_SINGLETON_NAMES = frozenset({"None", "True", "False"})
+
+
+def _init_store_value(struct_def, value, params, got: int, args, rets,
+                      framed_names):
+    """`(value_node, refusal)` — what one `self.<f> = …` stores.
+
+    The parameter case, the free-name refusal and the one expression kind the
+    site cannot host are decided here so `init_body_stores` reads as the walk
+    it is; each of the four is a fact about ONE right-hand side and none of
+    them is about the walk.
+    """
+    if isinstance(value, F.IdentExpr) and value.name in _INIT_SINGLETON_NAMES:
+        return (value, None)
+    if isinstance(value, F.IdentExpr):
+        for i, (pname, default) in enumerate(params):
+            if pname != value.name:
+                continue
+            if i < got:
+                return (args[i], None)
+            if default is None:
+                return (None, construction_init_body_refusal(
+                    struct_def.name,
+                    f"a read of the defaulted parameter {value.name!r}, whose "
+                    f"default expression this compiler did not record"))
+            return (default, None)
+        return (None, construction_init_body_refusal(
+            struct_def.name,
+            f"`{value.name}`, which is a local of the `__init__` and not one of "
+            f"its parameters: this body is inlined at the CONSTRUCTION SITE, in "
+            f"the calling function, where that name does not exist"))
+    if isinstance(value, F.CallExpr) and isinstance(value.func, F.IdentExpr) \
+            and value.func.name in framed_names:
+        return (None, construction_init_body_refusal(
+            struct_def.name,
+            f"`{value.func.name}(…)`, a construction of a struct whose receiver "
+            f"is a frame: its block is reserved per call SITE in the prologue of "
+            f"the function whose body names the call, and a body inlined into a "
+            f"construction elsewhere has no such site"))
+    framed = _init_framed_construction(value, framed_names)
+    if framed is not None:
+        return (None, construction_init_body_refusal(
+            struct_def.name,
+            f"`{framed}(…)`, a construction of a struct whose receiver is a "
+            f"frame: its block is reserved per call SITE in the prologue of the "
+            f"function whose body names the call, and a body inlined into a "
+            f"construction elsewhere has no such site"))
+    free = _init_free_names(struct_def, value)
+    if free is not None:
+        return (None, free)
+    if _construction_arg_is_dead_blob(value, rets):
+        return (None, construction_dead_blob_refusal(
+            struct_def.name, "of this `__init__`", value))
+    return (value, None)
+
+
+def _init_framed_construction(value, framed_names):
+    """The name of a FRAMED struct this right-hand side constructs, or None.
+
+    A walk rather than a top-level test, and the difference is a wrong answer
+    rather than a missed one: `self.x = [Inner(a, b)]` does not mention the
+    construction at the top level, and a top-level test would let it through to
+    `_emit_expr`, which would look the node up in this function's reserved
+    sites, not find it, and refuse with "the frame layout and the body
+    disagree … which is a compiler bug" — a diagnostic about the compiler
+    printed for a program that is merely a shape this path cannot lower.
+    """
+    for node in iter_nodes(value):
+        if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr) \
+                and node.func.name in framed_names:
+            return node.func.name
+    return None
+
+
+def _init_free_names(struct_def, value):
+    """A refusal for a name an inlined `__init__` body cannot bring with it, or None.
+
+    Every name the body reads is either a RECEIVER — `self`, and the object
+    being constructed — or a LOCAL of the body, and at a construction site in
+    the CALLING function neither exists.  The body is inlined, not moved: there
+    is no scope to bring them along in, and reading one would be reading
+    whatever register the calling function happened to leave in it.
+
+    A PARAMETER is the third case and the one that is easy to miss, because a
+    bare `self.x = p` has already been replaced by the caller's own expression
+    for `p` and is fine.  It is `self.x = 1 + p` that is not: the arithmetic
+    names `p`, and `p` is a word the caller's function does not have.  So the
+    check is on the names INSIDE the right-hand side, after the bare-parameter
+    case has been handled, and it is a walk rather than a top-level test for
+    exactly that reason.
+
+    A name that is neither a receiver nor a parameter is the same refusal with
+    a blunter message — a local of the body, or a module constant, which is
+    folded elsewhere in this compiler and not re-derived here.  The three
+    singletons are excluded because they are the language's own and both
+    backends already materialize them (see `_INIT_SINGLETON_NAMES`).
+    """
+    receivers = struct_receivers(struct_def)
+    locals_ = []
+    for node in iter_nodes(value):
+        if not isinstance(node, F.IdentExpr) or node.name in _INIT_SINGLETON_NAMES:
+            continue
+        if node.name in receivers:
+            return construction_init_body_refusal(
+                struct_def.name,
+                f"a read of {node.name!r} in the right-hand side, which is the "
+                f"receiver of the constructor: an inlined body runs at the "
+                f"construction site, in the calling function, where the name "
+                f"{node.name!r} is not bound — a method call on the "
+                f"under-construction object, or a read of another field of it, "
+                f"needs the block's address threaded through as a receiver and "
+                f"this path has no lowering for that")
+        locals_.append(node.name)
+    if not locals_:
+        return None
+    who = ", ".join(repr(n) for n in dict.fromkeys(locals_))
+    return construction_init_body_refusal(
+        struct_def.name,
+        f"a read of {who} in the right-hand side — a name the `__init__` binds "
+        f"or takes, which this body does not substitute for a construction "
+        f"argument. Only a bare parameter can be: only a bare parameter has the "
+        f"caller's own expression standing in for it at the construction site")
+
+
+def _init_overload_spelling(overloads) -> str:
+    """The declared shapes as one clause, for a message about selecting one.
+
+    "it has a constructor" is not actionable, and `Slice`'s two shapes are
+    small enough to print, so the arities and the parameter names both appear.
+    """
+    return "; ".join(
         f"{req} required" + (f" and {opt} defaulted" if opt else "")
         + (f" ({', '.join(names)})" if names else "")
         for req, opt, names in overloads)
+
+
+def construction_init_arity_refusal(name: str, overloads, got: int,
+                                    why: str) -> str:
+    """`S(...)` at a count no declared `__init__` admits, or two of them admit.
+
+    Still a refusal that has to come BEFORE the plain arity one, because that
+    message's claim — "a struct's fields are filled in DECLARATION ORDER and
+    there is no other form" — is FALSE for a struct that declares a
+    constructor, and a message that is false about the program in front of the
+    reader is worse than no message.
+
+    The two reasons are different problems and are stated differently, because
+    they have different fixes:
+
+      * `no_overload` — the count is outside every declared arity.  This is an
+        error the language would report at the call, and the fix is on the
+        caller's side: `Slice` admits 2, 3 and 4 positionals and nothing else.
+      * `ambiguous` — two declared constructors admit the count, and this path
+        resolves nothing by type, so it cannot say which one the source named.
+        The fix is NOT "pick the first": a construction chosen by guess is a
+        program the source did not write.
+
+    `std/builtin/builtin_slice.mojo`'s `Slice` is why this family exists at all:
+    it declares a two-parameter constructor and a four-parameter one with a
+    defaulted fourth, and the corpus writes `Slice(6, len(lst))`,
+    `Slice(start, end)` and `Slice(start, end, step)`.  Those three counts
+    partition cleanly, so all three now lower; what is left here is the counts
+    `Slice` genuinely does not have, and the counts two of its overloads would
+    both claim.
+    """
+    shapes = _init_overload_spelling(overloads)
+    if why == "ambiguous":
+        return (f"constructing {name} with {got} argument(s) is a call to a "
+                f"user-defined `__init__` and TWO of them admit that count: "
+                f"{name} declares {len(overloads)} `__init__` overload"
+                f"{'' if len(overloads) == 1 else 's'} ({shapes}). This path "
+                f"resolves nothing by type — a call site carries the argument "
+                f"count and the arguments, never their types — so it cannot say "
+                f"which of them the source named, and picking either would be "
+                f"running a constructor the program did not choose. Pass the "
+                f"count only one of them takes, or give the two different "
+                f"arities")
     return (f"constructing {name} with {got} argument(s) is a call to a "
-            f"user-defined `__init__`, not a field-filling construction: "
+            f"user-defined `__init__` and none of them takes that count: "
             f"{name} declares {len(overloads)} `__init__` overload"
-            f"{'' if len(overloads) == 1 else 's'} ({shapes}), and in Mojo a "
-            f"declared `__init__` is what `name(...)` calls. This path does NOT "
-            f"run it — {FRAME_FIELD_BLOB_PREMISE_B2} — so every field of a "
-            f"fresh {name} comes up at its class-level default and a "
-            f"construction with arguments names a body nothing here has "
-            f"lowered. That is a real limit and not the same one as a "
-            f"mismatched field count: use `{name}()` and assign the fields, "
-            f"which is the same program with a representation, and see "
-            f"bugs/FORMAL_wide_receiver_by_reference.md for what running "
-            f"`__init__` would cost")
+            f"{'' if len(overloads) == 1 else 's'} ({shapes}). In Mojo a "
+            f"declared `__init__` is what `{name}(...)` calls, and this path "
+            f"lowers that call by inlining the constructor body at the "
+            f"construction site — so the argument count selects the overload "
+            f"and nothing else does. Pass a count one of them takes")
+
+
+def construction_init_body_refusal(name: str, why: str) -> str:
+    """A declared `__init__` this path cannot inline, and WHICH LINE says so.
+
+    The same construction `construction_init_arity_refusal` describes — a
+    declared `__init__` is what `name(...)` calls — narrowed to the one
+    statement that stops the inline, named.
+
+    What is refused is a body this path has no lowering for as a sequence of
+    stores into the fresh block: a branch, a loop, a call to a method, a read
+    of a local of the constructor, a construction of a framed struct whose
+    receiver block no prologue here reserved.  Naming the statement is the
+    whole content, because the two questions a reader arrives with — "which
+    line?" and "what would fix it?" — have different answers per line, and a
+    message that said only "this constructor is not lowered" would send them
+    back to the class to work out which of its lines mattered.
+
+    What is NOT refused, and the reason it is worth stating: the body need not
+    be a call.  A body that is a straight line of `self.<field> = <expr>`
+    stores is the same program as the construction followed by those stores,
+    which is the shape this path has always emitted, so it is inlined rather
+    than refused.  That is what makes `Slice(6, len(lst))` — a call to a
+    two-parameter constructor that assigns `self.step = None` itself — the
+    answer it is instead of a refusal.
+    """
+    return (f"constructing {name} with arguments is a call to a user-defined "
+            f"`__init__` whose body this path does not inline: {why}. This "
+            f"path lowers that call by storing each of the constructor's "
+            f"`self.<field> = …` assignments into the fresh block at the "
+            f"construction site, so what it needs from the body is that it "
+            f"IS a sequence of those — a branch, a loop, a call to a method, or "
+            f"a read of a name the constructor binds locally is a body with an "
+            f"effect this path has not lowered. Use `{name}()` and assign the "
+            f"fields, which is the same program with a representation")
 
 
 def construction_arity_refusal(name: str, got: int, summary: str) -> str:
@@ -7427,13 +7816,17 @@ def struct_construction_plan(struct_def, call, decls: dict,
     |---|---|---|
     | `CONSTRUCTION_DEFAULT` | — | the existing `S()`: every field at its own default, and every placed nested frame brought up |
     | `CONSTRUCTION_POSITIONAL` | `[(field, slot)]` in DECLARATION ORDER, one per argument | evaluate each argument, store it at `base + 8·slot` |
+    | `CONSTRUCTION_INIT` | `[(field, slot, value)]` in the CONSTRUCTOR BODY's order | every field at its default first, then evaluate each `value` and store it at `base + 8·slot` |
     | `CONSTRUCTION_COPY` | the slot count | evaluate the source, then `n`-slot copy into the fresh block |
 
     `slot` is `None` in the positional payload exactly when the struct is a
     one-word VALUE rather than a frame: there the argument is not stored at
     all, it IS the result, which is the same statement as "stored at slot 0 of
     a zero-byte frame" and is the only reading of `S(x)` that does not invent
-    storage.
+    storage.  `CONSTRUCTION_INIT`'s `value` is an AST node to evaluate at the
+    site — a constructor's own parameter, defaulted or bound — and for a
+    one-word struct the LAST such store is the whole value, for the same
+    reason.
 
     The refusals, each with its own message and its own reason, are in the
     functions above; a reader who wants to know which construct is being
@@ -7454,16 +7847,53 @@ def struct_construction_plan(struct_def, call, decls: dict,
         # `struct_frame_representable` / `struct_default_word` and has its own
         # message, and a second copy of the decision is a second thing to keep
         # in step with the first.
+        #
+        # It is ALSO where premise (B2) still lives, and the two are the same
+        # decision: a declared `__init__` is only inlined where the call has
+        # ARGUMENTS to bind to it, so `S()` on a struct whose `__init__` takes
+        # none still brings every field up at its class-level default and does
+        # not run the body.  That is a real, and now the only, way this path
+        # disagrees with the language about a constructor, and it is written
+        # down rather than fixed here because the fix is a behaviour change
+        # with a sweep-sized blast radius and no test would be able to tell a
+        # correct one from a lucky one; see
+        # `bugs/FORMAL_zero_arg_init_not_inlined.md`.
         return ((CONSTRUCTION_DEFAULT,), None)
     # A DECLARED `__init__` outranks everything below, and it has to: with one,
     # `S(a, b)` is a call to it, so every message underneath — the arity one
     # included — is describing a construct the source does not contain.
     # `Slice(6, len(lst))` against a three-field `Slice` is the case, and it is
     # twenty stdlib files' first blocking fact.
-    overloads = struct_init_overloads(struct_def)
-    if overloads:
-        return (None, construction_init_overload_refusal(
-            name, overloads, len(args) + len(kwargs)))
+    #
+    # It is a CALL, and a call does not have to be emitted to be RUN: a body
+    # that is a straight line of `self.<field> = …` stores is the same program
+    # as the construction followed by those stores, which is a shape this path
+    # already emits, so the stores are the plan.  What is left of the old
+    # blanket refusal is the two facts the inline genuinely needs and cannot
+    # supply — an arity that selects exactly one overload, and a body that is
+    # only those stores.
+    shapes = struct_init_shapes(struct_def)
+    if shapes:
+        shape, why = init_overload_for_arity(shapes, len(args))
+        if why is not None:
+            return (None, construction_init_arity_refusal(
+                name, struct_init_overloads(struct_def), len(args), why))
+        stores, refusal = init_body_stores(struct_def, call, shape, decls, rets)
+        if refusal is not None:
+            return (None, refusal)
+        placed = {field: child.name
+                  for field, _slot, child in struct_nested_frame_fields(
+                      struct_def, decls)}
+        for field, _slot, value in stores:
+            if field in placed:
+                return (None, construction_nested_slot_refusal(
+                    name, field, value, placed[field]))
+        # A field the body does NOT assign keeps its class-level default, and
+        # the language default-initializes before the constructor runs, so the
+        # emitters bring every slot up first exactly as `S()` does.  A default
+        # that cannot be materialized is refused by them, by field, as it is
+        # for `S()`.
+        return ((CONSTRUCTION_INIT, stores), None)
     if not struct_is_framed(struct_def):
         # Zero or one field: the whole value is one word.  Zero fields has
         # nowhere to put an argument at all, which is an arity refusal with
@@ -7677,6 +8107,20 @@ def _frame_source_structs(arg, candidates: dict):
 #     is not something this check can prove, and a check that appeared to
 #     prove it would be the worst kind of check.
 #
+# `S(args)` is the FOURTH door and it is neither premise: a construction with
+# arguments DOES run the constructor, because a constructor does not have to be
+# called to be run — `init_body_stores` inlines the body's stores at the site.
+# That cannot put an unreclaimable word in a slot, and the reason is the
+# confinement argument above rather than (B2): the inlined body runs in the
+# CONSTRUCTING function, whose scratch holds the block it writes into and
+# cannot outlive it, so a container it builds is a container literal, which is
+# the case `construction_dead_blob_refusal` already allows and for the same
+# reason.  What the inline cannot admit is a container that came back from a
+# CALLEE (`_init_store_value` refuses it by the same predicate), and a
+# construction of a framed struct, whose receiver block no prologue here
+# reserved.  So the three doors a blob can enter a slot through are still
+# exactly three, and this is not a fourth one.
+#
 # Lift (B1)'s method half and a `reset()` in any struct is a use-after-free.
 # Lift (B2) and every `__init__` in the corpus becomes one.  Either change turns
 # `self.<container>.<op>()` in every method into appending into reclaimed stack,
@@ -7684,7 +8128,13 @@ def _frame_source_structs(arg, candidates: dict):
 # sees one word per slot either way.
 FRAME_FIELD_BLOB_PREMISE_B1 = \
     "no executed method writes a container into a field"
-FRAME_FIELD_BLOB_PREMISE_B2 = "S() does not run __init__"
+# (B2) is now a statement about the ZERO-ARGUMENT construction only, and the
+# wording says so, because "S() does not run __init__" read as a claim about
+# every construction and stopped being one when `S(args)` began inlining the
+# body.  What the text is FOR is telling a reader which of the two premises a
+# refusal rests on, and a reader who is told the wrong one is sent to look for
+# a violation of a rule that is not what stopped the build.
+FRAME_FIELD_BLOB_PREMISE_B2 = "a zero-argument S() does not run __init__"
 
 
 def _is_container_value(value, containers: set) -> str:
@@ -7888,6 +8338,15 @@ def frame_field_premise_note(struct_def) -> str:
     (refused, premise B1), `__init__`'s write (does not run, premise B2), and
     a construction argument (a literal is confined with the block; a callee's
     container is refused by name).
+
+    A FOURTH reader arrived with the `__init__` inline, and it changed the
+    first sentence rather than adding one: a construction with ARGUMENTS does
+    run a constructor now, so "safe only because S() does not run __init__" is
+    true of the zero-argument construction and false of the other.  The
+    sentence therefore names both reasons, and they are the same reason twice —
+    a container a constructor builds is confined to the function that built it,
+    and a constructor that never runs cannot build one at all.  Naming one of
+    them would send the reader after a premise that is not what is holding.
     """
     receivers = struct_receivers(struct_def)
     found: list = []
@@ -7903,10 +8362,13 @@ def frame_field_premise_note(struct_def) -> str:
         field, spelling = found[0]
         parts.append(
             f"{struct_def.name}.__init__ assigns {spelling} to self.{field}, "
-            f"which is a blob in the constructor's scratch rather than a word; "
-            f"this is safe only because {FRAME_FIELD_BLOB_PREMISE_B2}, so every "
-            f"slot in a fresh {struct_def.name} reads as zero where the "
-            f"language's constructor would have put that container")
+            f"which is a blob in the constructing function's scratch rather than "
+            f"a word; that is safe for one of two reasons and which one applies "
+            f"is decided per construction site — {FRAME_FIELD_BLOB_PREMISE_B2}, "
+            f"so a fresh {struct_def.name} reads as zero where the language's "
+            f"constructor would have put that container, or the body is inlined "
+            f"at the construction site, where the container it builds belongs to "
+            f"the block being filled and cannot outlive it")
     literal = _construction_literal_into_field(struct_def)
     if literal:
         field, arg = literal
