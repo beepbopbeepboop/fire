@@ -2204,6 +2204,96 @@ def _rewrite_nested_method_calls(fn, nested_fields) -> None:
         node.args = [obj] + list(node.args)
 
 
+def _rewrite_identity_intrinsic_calls(functions) -> None:
+    """Erase every `origin_of(x)` in `functions` down to `x`, in place.
+
+    THE REWRITE AND NOT A LOWERING, and the reason is measured rather than
+    stylistic: the escape analysis reads the AST, so a lowering that lives in an
+    emitter leaves `origin_of(s)` standing in the tree the build pass has
+    already walked, and the frame address the call names walks straight through
+    three refusals that are all correct about it and none of which can see it.
+
+    Measured on both architectures, with the identity implemented in the
+    emitters and everything else about this change in place:
+
+    ```
+    struct S:  a, b
+    def main(n): var s = S(); s.a = 3; s.b = 4; return origin_of(s)
+    ```
+    BUILDS, RUNS, and returns the frame's own address modulo 256. `return s` is
+    refused by name (`frame_return_refusal`) and `return origin_of(s)` was not,
+    because by the time the return branch is asked, the node is a call it does
+    not recognise rather than the bare name it refuses. And:
+
+    ```
+    printf("%d\n", origin_of(s))
+    ```
+    builds, runs, prints `1793355120` — the frame's address as a decimal — and
+    exits 0. That is the precise failure `FRAME_C_VALUE_CALLS`'s own message
+    cites as the reason the hand-off is refused ("measured, `printf(\"val=%d\n\",
+    r)` builds, runs, prints the frame's address as a decimal, and exits 0"),
+    reached through a door the fix had opened. So the call is erased HERE, where
+    every consumer downstream — the escape walk, the holder fixpoint, the
+    position rules, both emitters — reads the same tree this rewrite leaves
+    behind, and `origin_of` becomes indistinguishable from the operand it was
+    already the identity of. That is also why nothing else has to be taught
+    about it: no emitter branch, no new refusal, one rewrite.
+
+    WHERE it runs is load-bearing in the same way `_frame_receivers` is: last of
+    the rewrites, and before the frame analysis, so it sees the final function
+    list and so does the analysis that has to see the result. It is called from
+    `_prepare_functions` rather than from inside `_frame_receivers`, because that
+    function returns early for a unit with no framed struct at all, and the
+    identity does not care whether the operand is a frame: `origin_of(n)` on a
+    plain `Int` is the same rewrite, and it is the case that was refused for a
+    DIFFERENT reason — an emitted call to a symbol nothing in this image
+    defines, which the link check reported as an unbound symbol rather than as
+    anything to do with the construct.
+    """
+    for fn in functions:
+        _erase_identity_intrinsics(getattr(fn, "body", None))
+
+
+def _erase_identity_intrinsics(node):
+    """`node` with every identity-intrinsic call in it replaced by its operand.
+
+    Returns the node to USE in its place, which is `node` itself unless it was
+    one of those calls. Functional rather than in-place, because the children of
+    a statement tree live in LISTS (`args`, `kwargs`, `elements`, `pairs`) and
+    `body` is itself a list: replacing an element of one in place means knowing
+    every field name that holds a list, and this rebuilds whatever it is handed
+    and puts it back through `setattr` instead, so a new child list shape is
+    not a place this can be wrong.
+
+    A nested `FunctionDef` is rewritten too, which is deliberate and matches
+    `model.iter_nodes`: the escape walk descends into one, so a call this
+    rewrite erased from inside it has to be erased before the escape walk asks.
+    Running over the flattened function list as well is harmless — the second
+    pass finds nothing to do.
+    """
+    if isinstance(node, tuple):
+        return tuple(_erase_identity_intrinsics(x) for x in node)
+    if isinstance(node, list):
+        return [_erase_identity_intrinsics(x) for x in node]
+    operand = None
+    if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr):
+        operand = M.identity_call_operand(node.func.name, node)
+    if operand is not None:
+        # Recurse INTO the operand rather than returning it whole, so
+        # `origin_of(origin_of(s))` erases both and not just the outer one.
+        return _erase_identity_intrinsics(operand)
+    for fname in getattr(node, "__dataclass_fields__", ()):
+        if fname in ("line", "col"):
+            continue
+        value = getattr(node, fname, None)
+        if value is None or isinstance(value, (int, float, str, bool)):
+            continue
+        replaced = _erase_identity_intrinsics(value)
+        if replaced is not value:
+            setattr(node, fname, replaced)
+    return node
+
+
 def _rewrite_len_on_frame_receivers(functions, holders, hstruct) -> None:
     """`len(h)` → `Struct___len__(h)`, for every `h` that holds a frame.
 
@@ -4397,6 +4487,14 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # the function's OWN name.
     _substitute_module_constants(functions)
     _materialize_entry_dunder_name(functions)
+    # A COMPILE-TIME IDENTITY becomes its operand before anything downstream
+    # reads the tree, and immediately before `_frame_receivers` for the reason
+    # that function's own call site is last: the frame analysis and the escape
+    # walk that follows it are the checks this rewrite exists to keep seeing the
+    # operand, so it has to be the last thing to touch the code they read.
+    # `_rewrite_identity_intrinsic_calls`'s docstring has the two programs that
+    # say what the ordering is worth.
+    _rewrite_identity_intrinsic_calls(functions)
     # LAST, on the FINAL function list: which local names hold a frame
     # address is a property of the code that survives every rewrite above, and
     # a lifted lambda or a flattened closure is a function with its own locals
