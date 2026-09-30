@@ -9716,6 +9716,43 @@ def comptime_fold_refusal(name: str) -> str:
         f"`var` and read it at run time")
 
 
+def imported_callee_refusal(name: str, sym, fn_name: str) -> str:
+    """The diagnostic for a CALL to a name the defining module does not export.
+
+    Distinct from `module_global_refusal` because the two are different facts,
+    and the generic one is FALSE about this one. `f[x](...)` roots at a name,
+    `check_module_symbols` sees a bare `IdentExpr` that is not a local, and the
+    imported case answered "a module-level name is not exported as a word —
+    there is no storage for it" about what is a call: a call needs a SYMBOL, and
+    the question is whether the library has one, not whether a value has a home.
+    A reader sent by the old wording to look for storage finds a `_`-prefixed
+    generic with no storage question at all.
+
+    What it says instead is the reason the export set excludes the name, which
+    is `reflect.collect_exports_src`'s rule and is the same rule the dylib
+    build's own `no_public_api_reason` reports by: a leading `_`, a generic
+    template (each instantiation is its own symbol, and this path has no
+    monomorphization — `bugs/FORMAL_known_limits.md` §1.2), an overload (no one
+    symbol denotes it) or a C library name. `_get_kgen_string` in
+    `std/sys/_assembly.mojo` is the first two at once, and it is the terminal
+    construct for nineteen swept files."""
+    who = f"{fn_name}: " if fn_name else ""
+    mod = getattr(sym, "module", None)
+    return (f"{who}`{name}` is called, and it is imported from `{mod}`, so the "
+            f"call has to bind a symbol `{mod}` exports. That module does not "
+            f"export it, and the reason is `doc/ABI.md`'s export rule rather "
+            f"than anything about this call: a name with a leading `_` is "
+            f"private, a generic template is not one symbol but one per "
+            f"instantiation (`_get_kgen_string[asm]()` is the measured case — "
+            f"both at once), an overload has no single symbol, and a C library "
+            f"name like `exit` or `write` is provided by libSystem. The "
+            f"exclusion is measured and settled in "
+            f"bugs/FORMAL_known_limits.md §1.1, and the generic case in §1.2. "
+            f"Write the operation in this module, or call a public function "
+            f"that does it — which is the same program with a definition this "
+            f"image can bind")
+
+
 def module_global_refusal(name: str, sym, fn_name: str) -> str:
     """The one-line diagnostic for a module-level name this path cannot read.
 

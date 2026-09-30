@@ -3921,6 +3921,31 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         break
             if why is not None:
                 bracketed[id(root_ident)] = why
+        # A BRACKETED CALLEE, `f[x](...)`, is a comptime SPECIALIZATION of `f`
+        # and so a call, as much as a bare `f(...)` is — and the bare form is
+        # already exempt above, which is why this shape was left out of that
+        # set and reached the module-global refusal below. It is NOT added to
+        # `callees` here, and that is deliberate: a name this module's export
+        # rule keeps off the boundary (a leading `_`, a generic template — the
+        # two together are `std/sys/_assembly.mojo`'s
+        # `_get_kgen_string[asm]()`, nineteen swept files' worth) has no symbol
+        # for the call to bind however the name check treats it, so the honest
+        # answer is a refusal that says THAT, not one that lets the call
+        # through to a dangling `BL` and a link-audit message about a symbol
+        # the reader has to go and look up. The two construct refusals above
+        # are asked first, so an MLIR template in callee position is still
+        # refused by name — the message here is about the EXPORT, and a
+        # template that is not exported is two different facts.
+        bracket_callees = set()
+        for c in M.iter_nodes(fn.body):
+            if not isinstance(c, F.CallExpr) \
+                    or not isinstance(c.func, F.SubscriptExpr):
+                continue
+            root = c.func
+            while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
+                root = root.obj
+            if isinstance(root, F.IdentExpr) and id(root) not in bracketed:
+                bracket_callees.add(id(root))
         for node in M.iter_nodes(fn.body):
             if not isinstance(node, F.IdentExpr) or id(node) in callees:
                 continue
@@ -3943,6 +3968,14 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 raise CodegenError(f"{fn.name}: {why}" if fn.name else why)
             sym = M.module_symbol(name)
             if sym is not None:
+                if id(node) in bracket_callees \
+                        and getattr(sym, "site", None) == "imported":
+                    # A CALL to a name this module does not export, which is a
+                    # fact about the boundary and not about storage — see the
+                    # `bracket_callees` note above for why this is refused here
+                    # rather than allowed to reach a dangling `BL`.
+                    raise CodegenError(M.imported_callee_refusal(
+                        name, sym, fn.name))
                 # A module-level name, refused for the reason a module-level
                 # name is refused: it has no storage with a lifetime longer
                 # than a frame's.  `model.module_global_refusal` says which of
@@ -5593,13 +5626,16 @@ def _namespace_library(output: str, install_name: str, arch: str,
     """
     functions = {n: v for n, v in reexports.items() if v[1] != "type"}
     # A re-exported name is missing only if NO module this one imports provides
-    # it — by SYMBOL or, for a constant, by value. A constant has no symbol to
+    # it — by SYMBOL or, for a constant, by VALUE. A constant has no symbol to
     # forward, so counting it missing refused every package that re-exports one
     # (`from .limits import NAME`), and the message pointed at a missing
     # definition where the value was sitting in a manifest on the same link
-    # line.
-    provided = set(dylib_syms) | set(
-        M.dylib_module_constants(dylib_export_lists(linked)))
+    # line. The constants table is keyed by MODULE, so the names are its
+    # values' keys — asking it for the modules instead would make every
+    # re-exported constant look missing again, which is the bug.
+    dep_constants = M.dylib_module_constants(dylib_export_lists(linked))
+    provided = set(dylib_syms) | {name for table in dep_constants.values()
+                                  for name in table}
     missing = sorted(n for n in functions if n not in provided)
     if missing:
         listed = ", ".join(missing[:8])
