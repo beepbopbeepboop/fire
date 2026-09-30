@@ -1629,10 +1629,13 @@ def test_a_disabled_test_is_registered_but_never_runs():
 
     The dependent matters as much as the disabled test, and in the direction
     that is easy to get wrong: a disabled test has no verdict, so nothing
-    propagates from it. A dependent that waited would wait forever for a
-    verdict that is never coming, and skipping on it would silently stop work
-    that has nothing to do with the bug being tracked. So `needs` runs and
-    passes.
+    propagates from it. A dependent that treated DISABLED as a failure would be
+    SKIPPED behind a verdict that is never coming, silently stopping work that
+    has nothing to do with the bug being tracked. So `needs` runs and passes.
+
+    Which job ran is read from the log's own per-job line, not from its output
+    and not from a grep for the command: the runner logs every job's argv, so a
+    substring of the command is in the log whether or not the command ran.
     """
     ran = os.path.join(HERE, 'build', 'test-suite-disabled.ran')
     log = os.path.join(HERE, 'build', 'test-suite-disabled.log')
@@ -1667,9 +1670,10 @@ def test_a_disabled_test_is_registered_but_never_runs():
           f'reserved {reserved} GB of a {ceiling} GB class — a class that is '
           f'only a record must not be a claim on the machine')
     check('disabled: a dependent is NOT skipped by it',
-          'dependency did not pass' not in text and 'ran anyway' in text,
+          re.search(r'(?m)^\[\s*\d+/\d+\]\s+ok\s+needs\b', text) is not None
+          and 'dependency did not pass' not in text,
           'a disabled dep made its dependent skip: the dependent would have '
-          'waited forever for a verdict that is not coming')
+          'been skipped behind a verdict that is never coming')
     check('disabled: it is in the tally as its own status',
           '1 disabled' in out, f'expected a disabled counter: {out!r}')
     check('disabled: ...and it is listed with the doc, in its own section',
@@ -1681,7 +1685,7 @@ def test_a_disabled_test_is_registered_but_never_runs():
     check('disabled: ...and the run still exits 0', rc == 0, f'rc={rc}')
     check('disabled: the log records what it cost instead',
           'DISABLED, 0 job(s), not run' in text
-          and f'reserved 0 GB now' in text,
+          and 'reserved 0 GB now' in text,
           'the run log must say the job was skipped on purpose, and that its '
           f'class is a record: {[l for l in text.splitlines() if "plan: off" in l]}')
 
