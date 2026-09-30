@@ -48,6 +48,47 @@ def encode_ldr_xt_xn_imm(xt: int, xn: int, imm: int) -> bytes:
     return struct.pack('<I', insn)
 
 
+def encode_ldr_xt_xn_xm(xt: int, xn: int, xm: int) -> bytes:
+    """LDR Xt, [Xn, Xm] — unsigned offset REGISTER form, 64-bit, no shift.
+
+    The escape from `encode_ldr_xt_xn_imm`'s 12-bit scaled offset, which reaches
+    only 32760 bytes. A list blob's element `i` lives at byte `8*(i+1)`, so
+    element 4095 is the first one the immediate form cannot name, and a list
+    literal that long used to die inside the encoder's own `assert` rather than
+    in a diagnostic. Here the offset is a register, so the reachable distance is
+    the whole 64-bit address space and the limit becomes the frame size, which
+    is a limit the build can state.
+
+    Encoding: 1111100100 10 1 Rm 011 0 10 Rn Rt (0xF8606800 base). Verified
+    against clang -target aarch64-apple-darwin, `otool -s __TEXT __text`:
+    ldr x0,[x9,x10] = f86a6920, ldr x0,[x9,x15] = f86f6920,
+    ldr x10,[x9,x0] = f860692a.
+    """
+    assert 0 <= xt <= 30
+    assert 0 <= xn <= 31
+    assert 0 <= xm <= 31
+    insn = 0xF8606800 | (xm << 16) | (xn << 5) | xt
+    return struct.pack('<I', insn)
+
+
+def encode_str_xt_xn_xm(xt: int, xn: int, xm: int) -> bytes:
+    """STR Xt, [Xn, Xm] — unsigned offset REGISTER form, 64-bit, no shift.
+
+    The store-side twin of `encode_ldr_xt_xn_xm`, and for the same reason: this
+    is the form a blob element past 32760 bytes has to use, and the list
+    literal's element loop is where that store happens.
+
+    Encoding: 1111100100 00 1 Rm 011 0 10 Rn Rt (0xF8206800 base). Verified
+    against clang -target aarch64-apple-darwin, `otool -s __TEXT __text`:
+    str x0,[x9,x10] = f82a6920, str x0,[x9,x15] = f82f6920.
+    """
+    assert 0 <= xt <= 30
+    assert 0 <= xn <= 31
+    assert 0 <= xm <= 31
+    insn = 0xF8206800 | (xm << 16) | (xn << 5) | xt
+    return struct.pack('<I', insn)
+
+
 def encode_ldrb_wd_wn(wd: int, wn: int, imm: int = 0) -> bytes:
     """LDRB Wd, [Xn, #imm]. Byte load, zero-extends into Xd.
 

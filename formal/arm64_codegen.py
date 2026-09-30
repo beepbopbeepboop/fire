@@ -1548,7 +1548,7 @@ class ARM64Codegen:
         self.asm.label(ok_label)
         # Push e0..e(n-1); pop assigns last target first.
         for i in range(n_t):
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 9, 8 * (i + 1)))
+            self._emit_blob_load(9, 8 * (i + 1))
             self.asm.emit(encode_stp_sp_pre(0, 31))
         for i in range(n_t - 1, -1, -1):
             self.asm.emit(encode_ldp_sp_post(0, 31))
@@ -1585,7 +1585,7 @@ class ARM64Codegen:
             els = list(elements)
         self.asm.emit(encode_mov_zr_xn(9, reg))
         for i, el in enumerate(els):
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 9, 8 * (i + 1)))
+            self._emit_blob_load(9, 8 * (i + 1))
             if isinstance(el, F.IdentExpr):
                 self._store_var(el.name, 0)
             elif isinstance(el, F.MemberExpr):
@@ -1910,7 +1910,7 @@ class ARM64Codegen:
             if isinstance(child, str) and child.startswith("*"):
                 self._emit_for_unpack_star_rest(child[1:], tag)
                 continue
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 9, 8 * (i + 1)))
+            self._emit_blob_load(9, 8 * (i + 1))
             self._emit_for_unpack(child, tag)
 
     def _emit_for_unpack_star_rest(self, name: str, tag: str) -> None:
@@ -1922,9 +1922,9 @@ class ARM64Codegen:
         rest_cap = 64
         nbytes = 8 + 8 * rest_cap
         if self._list_cursor + nbytes > self._blob_cap:
-            raise CodegenError(
-                f"for-star rest exceeds the formal frame "
-                f"({self._list_cursor + nbytes} > {self._blob_cap} bytes)")
+            raise CodegenError(M.frame_blob_refusal(
+                "a for-star unpacking buffer", self._list_cursor + nbytes,
+                self._blob_cap))
         offset = self._list_cursor
         self._list_cursor += nbytes
 
@@ -2761,9 +2761,8 @@ class ARM64Codegen:
         n = len(static_pairs)
         size = 8 * (1 + 2 * n)
         if self._list_cursor + size > self._blob_cap:
-            raise CodegenError(
-                f"dict literal exceeds the formal frame "
-                f"({self._list_cursor + size} > {self._blob_cap} bytes)")
+            raise CodegenError(M.frame_blob_refusal(
+                "a dict literal", self._list_cursor + size, self._blob_cap))
         offset = self._list_cursor
         self._list_cursor += size
 
@@ -3966,6 +3965,56 @@ class ARM64Codegen:
         total = _SCRATCH + 16 * self._npairs - offset
         _emit_sub_imm(self.asm, 9, 29, total)
 
+    # ── Reading and writing one element of a blob, at any distance ──
+    #
+    # A blob element `i` is at byte `8*(i+1)` from the blob's base, and the
+    # immediate-offset LDR/STR reach 12 bits SCALED by the access size: 4095
+    # words, 32760 bytes. Element 4095 is the first one past it. A list literal
+    # or a `range()` literal that long used to die inside
+    # `encode_str_xt_xn_imm`'s own `assert 0 <= imm12 < 0x1000`, three frames
+    # below anything that could name the limit — a bare AssertionError out of
+    # the encoder, on a program whose only problem is that it is large.
+    #
+    # So the offset goes in a REGISTER past the immediate's reach and the
+    # register-offset form is used, and the limit that remains is the frame's,
+    # which `_reserve_blob`-style checks already state. The immediate form is
+    # still used below the threshold because it is one instruction instead of
+    # three, and every list anyone writes is below it.
+    #
+    # X15 is the offset register: locals live in X19..X28 and the temps this
+    # emitter uses are X0..X14 and X16..X18, so X15 is dead here. It is written
+    # AFTER the value is in place and read by the very next instruction, so it
+    # does not have to survive the element's own emission either.
+    _BLOB_IMM_MAX = 0x1000 * 8 - 8      # last byte the scaled imm12 names
+    _BLOB_OFFSET_REG = 15
+
+    def _emit_blob_store(self, base: int, byte_off: int, val: int) -> None:
+        """STR X{val}, [X{base}, #byte_off] — or the register-offset form.
+
+        `base` is the blob's base register (X9, the convention every blob site
+        in this file uses) and `byte_off` is a compile-time byte offset into it.
+        See `_BLOB_IMM_MAX` for why the second form exists."""
+        if byte_off <= self._BLOB_IMM_MAX:
+            self.asm.emit(encode_str_xt_xn_imm(val, base, byte_off))
+            return
+        self._emit_mov_imm(f"X{self._BLOB_OFFSET_REG}", byte_off)
+        self.asm.emit(encode_str_xt_xn_xm(
+            val, base, self._BLOB_OFFSET_REG))
+
+    def _emit_blob_load(self, base: int, byte_off: int, val: int = 0) -> None:
+        """LDR X{val}, [X{base}, #byte_off] — or the register-offset form.
+
+        The load-side twin of `_emit_blob_store`, and for the same reason: the
+        tuple-unpack sites index a blob with the same `8*(i+1)` shape and would
+        otherwise keep the assert alive one path over from the fix.
+        """
+        if byte_off <= self._BLOB_IMM_MAX:
+            self.asm.emit(encode_ldr_xt_xn_imm(val, base, byte_off))
+            return
+        self._emit_mov_imm(f"X{self._BLOB_OFFSET_REG}", byte_off)
+        self.asm.emit(encode_ldr_xt_xn_xm(
+            val, base, self._BLOB_OFFSET_REG))
+
     def _emit_list(self, expr: F.ListExpr) -> None:
         """Stack-allocate a list blob: [count:i64][elem0]...[elemN-1].
 
@@ -3988,9 +4037,8 @@ class ARM64Codegen:
         cap = max(n, self._list_caps.get(id(expr), n))
         size = 8 * (1 + cap)
         if self._list_cursor + size > self._blob_cap:
-            raise CodegenError(
-                f"list literals exceed the formal frame "
-                f"({self._list_cursor + size} > {self._blob_cap} bytes)")
+            raise CodegenError(M.frame_blob_refusal(
+                "a list literal", self._list_cursor + size, self._blob_cap))
         offset = self._list_cursor
         self._list_cursor += size
 
@@ -4001,7 +4049,7 @@ class ARM64Codegen:
             self._emit_expr(el)
             # Recompute base: element emission (calls, ADRP, …) clobbers X9.
             self._emit_list_base(offset)
-            self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * (i + 1)))
+            self._emit_blob_store(9, 8 * (i + 1), 0)
         if n == 0:
             self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
@@ -6662,9 +6710,9 @@ class ARM64Codegen:
             n = len(vals)
             size = 8 * (1 + n)
             if self._list_cursor + size > self._blob_cap:
-                raise CodegenError(
-                    f"range() literal exceeds the formal frame "
-                    f"({self._list_cursor + size} > {self._blob_cap} bytes)")
+                raise CodegenError(M.frame_blob_refusal(
+                    "a range() literal", self._list_cursor + size,
+                    self._blob_cap))
             offset = self._list_cursor
             self._list_cursor += size
             self._emit_list_base(offset)
@@ -6673,7 +6721,7 @@ class ARM64Codegen:
             for i, val in enumerate(vals):
                 self._emit_mov_imm("X0", val)
                 self._emit_list_base(offset)
-                self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * (i + 1)))
+                self._emit_blob_store(9, 8 * (i + 1), 0)
             self.asm.emit(encode_mov_zr_xn(0, 9))
             return
         # Dynamic: evaluate start/stop/step onto stack, loop, append.

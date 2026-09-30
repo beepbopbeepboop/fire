@@ -6204,6 +6204,67 @@ WAVE7_G2_CASES = [
      "def main(k: Int) -> Int:\n"
      "    return f(0) * 1000 / 10 + f(7) * 100 / 10 + f(9) * 10 / 10 + f(100) / 100\n",
      123, None),
+    # ── a list literal longer than one instruction's immediate offset ──
+    #
+    # A blob element `i` is at byte `8*(i+1)` from the blob's base, and
+    # `encode_str_xt_xn_imm`'s offset field is 12 bits SCALED by 8, so element
+    # 4095 is the first one the STR-immediate form cannot name. A list literal
+    # that long used to die inside that function's own
+    # `assert 0 <= imm12 < 0x1000` — a bare AssertionError out of an encoder
+    # three frames below anything that could name a limit, on a program whose
+    # only problem is that it is large. The offset now goes in a REGISTER past
+    # the immediate's reach (`_emit_blob_store`), and the limit that remains is
+    # the frame's, which is stated in a message.
+    #
+    # 5000 is past the old assert and inside arm64's frame, so it is the row
+    # that would have crashed. The `a[-1]` / `a[0]` pair is deliberate: a fix
+    # that moved the far stores but not the far LOADS would build this, run it,
+    # and read the wrong word back — the same function both ways, so the two
+    # halves of the fix cannot be separated. Both expected values are taken
+    # mod 256, which is what a POSIX exit status can carry.
+    ("list_literal_past_the_immediate_offset",
+     "def main(k: Int) -> Int:\n"
+     "    var a = [" + ", ".join(str(i % 97) for i in range(5000)) + "]\n"
+     "    return (a[0] + a[4999]) % 256\n",
+     (0 + 4999 % 97) % 256, None),
+    # GUARD for the same fix on the READ side, and the only way to tell "the
+    # far stores landed" from "the far stores landed AND the far loads read
+    # them": every element summed, through a subscript, on a 16000-element
+    # blob. 16000 is 87% of arm64's frame budget, so it also pins that the
+    # frame reservation and the element loop agree about the size.
+    ("every_element_of_a_16000_element_list_reads_back",
+     "def main(k: Int) -> Int:\n"
+     "    var a = [" + ", ".join(str(i % 97) for i in range(16000)) + "]\n"
+     "    var s: Int = 0\n"
+     "    var i: Int = 0\n"
+     "    while i < 16000:\n"
+     "        s = s + a[i]\n"
+     "        i = i + 1\n"
+     "    return s % 251\n",
+     sum(i % 97 for i in range(16000)) % 251, None),
+    # The `range()` literal goes through the SAME element loop (the static
+    # `range(0, n)` path materialises `n` words and stores them the same way),
+    # so it had the same assert at the same element. This is the realistic way
+    # to reach the limit — nobody writes a 4096-element list literal by hand —
+    # and `a[4095]` is the far read.
+    ("range_literal_past_the_immediate_offset",
+     "def main(k: Int) -> Int:\n"
+     "    var a = range(0, 6000)\n"
+     "    return (a[0] + a[5999]) % 256\n",
+     5999 % 256, None),
+    # And the limit itself, which is the other half of the bug: "a stated limit
+    # reported as a crash". 20000 words is 160008 bytes against a 131072-byte
+    # frame, so this must be a `CodegenError` naming the budget — and BOTH
+    # backends must produce the same shape, since the two have different
+    # budgets (arm64 128 KB of scratch, x86-64 a 16 KB blob region) and a reader
+    # comparing the two needs to see that the difference is the budget and not
+    # the message. `refuse:` checks both, and the needle is the sentence the two
+    # now share.
+    ("refuse_list_literal_over_the_frame_budget",
+     "def main(k: Int) -> Int:\n"
+     "    var a = [" + ", ".join(["1"] * 20000) + "]\n"
+     "    return len(a)\n",
+     "refuse:does not fit in the frame: it needs", None),
 
     # ── (4) the C-library hand-off sets, audited by PROTOTYPE ──
     # `open(const char *, int, ...)` takes a path and a flag word; it does not

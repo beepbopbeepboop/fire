@@ -1352,6 +1352,47 @@ def _string_operand_refusal(op: str, spelled_op, left_kind,
         "string_concat_refusal for the `+` half of this table")
 
 
+def frame_blob_refusal(what: str, wanted: int, available: int) -> str:
+    """The ONE message for "this container does not fit in the frame", for both
+    backends and every container shape.
+
+    Containers on this path are frame-allocated: a list, tuple, dict or string
+    blob is a run of 8-byte slots below the frame pointer, out of a budget the
+    function's whole body shares, and a literal reserves its whole blob before
+    any element is evaluated (so a nested container lands above its parent
+    rather than inside the region the parent is still filling). The limit is
+    therefore real and architectural, and the two backends have DIFFERENT
+    budgets — arm64's scratch is 128 KB, x86-64's blob region is 16 KB — which
+    is exactly why the number has to be computed and printed by one place
+    instead of formatted at each call site.
+
+    What each backend used to print was the two sides of its own comparison, and
+    on x86-64 those are negative FRAME OFFSETS, not sizes: a 4095-element list
+    literal read "list literals exceed the formal frame (16368 > -16 bytes)",
+    which is a true statement about two numbers and no help at all to a reader.
+    So the callers pass SIZES, and this prints sizes, plus the one number a
+    caller can act on: how many elements would fit, derived from the budget the
+    same way the emitters derive the blob size (a word-element blob is
+    `[count][element...]`, so eight bytes of the budget are the count).
+
+    The remedy sentence names the two things that actually work, because the
+    obvious one does not: the frame is not something a caller can enlarge from
+    the source, and a per-element store loop would still need the blob to exist.
+    Splitting the literal across two functions gives each its own budget;
+    building the container at run time (appending to a list literal sized for
+    what the program needs) does not put the whole thing in the frame at once.
+    """
+    words = max(0, (available - 8) // 8) if available > 8 else 0
+    return (f"{what} does not fit in the frame: it needs {wanted} bytes and "
+            f"this function has {available} left for containers. A blob of "
+            f"8-byte elements is [count][element...], so at most {words} "
+            f"element(s) fit in what is left here — and the budget is shared "
+            f"with every other list, dict, string and receiver frame in the same "
+            f"body. Build the container at run time (append into a list literal "
+            f"sized for what the program needs), or split it across two "
+            f"functions so each gets its own budget.")
+
+
 def string_binary_refusal(op: str, left_kind, right_kind,
                           spelled_op: str | None = None) -> str | None:
     """The ONE place a binary operator with a string operand is decided not to
