@@ -6418,6 +6418,23 @@ EQ_DISPATCH_CASES = [
      "    printf(\"r=%d\\n\", 1 if v == v else 0)\n"
      "    return 0\n",
      "refuse:compares two FRAME ADDRESSES", None),
+    # A NAME THAT STOPS BEING A FRAME.  The holder set is additive, so
+    # `r = 5` after `r = R()` leaves every `r.<field>` lowered as a load at
+    # `[5 + 8·slot]`; measured on both architectures from a green build, SIGSEGV
+    # exit 139 where the source says 5.  The refusal names the binding that
+    # disagrees, because "r is a frame" and "r is a word" are the whole
+    # disagreement and the reader has to be told which line settles it.
+    ("holder_rebound_from_a_word_is_refused",
+     "class R:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "def main(n):\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r = 5\n"
+     "    return r.a\n",
+     "refuse:r is assigned 5 in main()", None),
 ]
 
 

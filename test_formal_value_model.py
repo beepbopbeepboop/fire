@@ -308,6 +308,46 @@ TUPLE_STORE_CASES = [
      "a=1 b=2 c=3"),
 ]
 
+# ── what a holder MAY be assigned, which is what the refusal above is about ──
+#
+# The check exists because a name that holds a frame address is never removed
+# from the holder set, so a later store of a plain word leaves every field access
+# through it reading `[word + 8·slot]`.  These three are the shapes that must
+# keep working, and each is one of the three the refusal names: a CONSTRUCTION
+# under a branch (a frame the analysis cannot see the path to, so it must be
+# accepted on both paths), a COPY under a different name, and a field write
+# through a method's own `self` — which is a `self.x` store and not a rebinding
+# of `self`, and is the shape a too-eager check would break first.
+HOLDER_ASSIGN_CASES = [
+    ("holder_may_be_construction_copy_and_self_write",
+     "class R:\n"
+     "    def __init__(self, v):\n"
+     "        self.a = v\n"
+     "        self.b = 0\n"
+     "    def get(self):\n"
+     "        return self.a\n"
+     "    def swap(self, other):\n"
+     "        self.a = other.a\n"
+     "        self.b = other.b\n"
+     "    def total(self):\n"
+     "        return self.a + self.b\n"
+     "\n"
+     "def pick(r, n):\n"
+     "    if n:\n"
+     "        var r2 = R(9)\n"
+     "        return r2.get()\n"
+     "    return r.get()\n"
+     "\n"
+     "def main(n):\n"
+     "    var r = R(7)\n"
+     "    var s = R(3)\n"
+     "    t = s\n"
+     "    r.swap(s)\n"
+     "    printf(\"a=%d b=%d c=%d\", pick(r, n), t.get(), r.total())\n"
+     "    return 0\n",
+     "a=9 b=3 c=3"),
+]
+
 # (name, source, needle the refusal must contain)
 #
 # AGREE-OR-REFUSE, and both of these are the shape the rule exists for: the
@@ -370,6 +410,40 @@ REFUSALS = [
      "    printf(\"r=%d\", 1 if a == b else 0)\n"
      "    return 0\n",
      "does not settle it"),
+    # A NAME THAT STOPS BEING A FRAME.  The holder set is additive — nothing
+    # ever removes a name from it — so `r = 5` after `r = R()` leaves every
+    # `r.<field>` lowered as a load at `[5 + 8·slot]`.  Measured on both
+    # architectures from a green build: SIGSEGV, exit 139, where the source says
+    # 5.  Refused, by name, with the binding that disagrees in the message.
+    #
+    # The CONDITIONAL form is in the same case on purpose: `if n: r = 5` is the
+    # same finding, because the analysis has no path sensitivity and the whole
+    # refusal family rests on that rather than on it.
+    ("holder_rebound_from_a_word_is_refused",
+     "class R:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "def main(n):\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r = 5\n"
+     "    printf(\"a=%d\", r.a)\n"
+     "    return 0\n",
+     "r is assigned 5 in main()"),
+    ("holder_rebound_under_a_condition_is_refused",
+     "class R:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "def main(n):\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    if n:\n"
+     "        r = 5\n"
+     "    printf(\"a=%d\", r.a)\n"
+     "    return 0\n",
+     "r is assigned 5 in main()"),
 ]
 
 
@@ -456,6 +530,7 @@ def main():
 
     everything = ([(c, False) for c in CASES]
                   + [(c, False) for c in TUPLE_STORE_CASES]
+                  + [(c, False) for c in HOLDER_ASSIGN_CASES]
                   + [(c, True) for c in REFUSALS])
     selected = [c for c in everything if not args.cases or c[0][0] in args.cases]
     known = {c[0][0] for c in everything}

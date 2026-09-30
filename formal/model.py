@@ -6673,6 +6673,47 @@ def frame_len_refusal(spelled: str, struct_names) -> str:
         f"method of the receiver's own struct is a call this backend makes")
 
 
+def holder_rebound_from_a_word_refusal(fn_name: str, name: str,
+                                       value_spelling: str,
+                                       frame_spelling: str,
+                                       structs) -> str:
+    """Why a name that holds a frame address cannot also hold a plain word.
+
+    One message for both backends and for the build pass, because the defect is
+    a property of the ANALYSIS and not of an instruction: a name enters the
+    holder set and nothing ever removes it, so every field access through it is
+    still lowered as `base + 8·slot` after a binding that left a word there.
+    `r = R(); r.a = 7; r = 5; return r.a` therefore loads from address 5 —
+    measured, SIGSEGV exit 139 on arm64 and on x86-64, from a green build.
+
+    The two spellings go in the message because the reader has to be told WHICH
+    line settles it, and the two readings — "`r` is a frame" and "`r` is a word"
+    — are the whole disagreement.  `frame_spelling` is the binding that made the
+    name a holder, which is the one that also settles what every OTHER access
+    through the name is lowered as, so naming it tells the reader what the
+    conflicting store is about to invalidate.
+
+    The three allowed values are named too, because "why is THIS one refused"
+    is the question a reader has after reading a list of other assignments in
+    the same function that were not.
+    """
+    who = ", ".join(sorted({st.name for st in (structs or ())})) or "a struct"
+    return (
+        f"{name} is assigned {value_spelling} in {fn_name}(), and {name} also "
+        f"holds the address of a {who} frame — {frame_spelling} binds it to one, "
+        f"and this path has no way to say that a later binding changes what the "
+        f"name is. Every field access through {name} is already lowered as a load "
+        f"at `[base + 8·slot]` on the strength of the first binding, so after "
+        f"this store the load reads address `{value_spelling} + 8·slot`: "
+        f"measured, the program builds, runs, and dies with SIGSEGV (exit 139) "
+        f"on both architectures, which is a fault rather than a wrong number only "
+        f"because the word happened not to be mapped. A value that may be a "
+        f"frame is one of three things and this is not any of them: a CONSTRUCTION "
+        f"of a framed struct (`{name} = S(...)`), a COPY of another holder "
+        f"(`{name} = other`), or a parameter of a method of a framed struct. Use "
+        f"a different name for the word, or copy the value out of {name} first")
+
+
 # ── A field's DECLARED type: agree, or refuse ─────────────────────────────
 #
 # `struct_frame_slot_candidates` above settles WHERE a field lives, from the

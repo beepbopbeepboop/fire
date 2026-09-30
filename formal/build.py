@@ -1104,6 +1104,7 @@ def compile_formal(source_path: str, output: str = None,
         M.publish_module_symbols(symbols)
         check_frame_field_blob_premises(structs)
         check_frame_subscript_escapes(functions)
+        check_frame_holder_rebinds(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
         check_module_symbols(
             functions, {st.name: st for st in structs},
@@ -1260,6 +1261,7 @@ def _formal_module_functions(source_path: str,
         M.publish_module_symbols(symbols)
         check_frame_field_blob_premises(structs)
         check_frame_subscript_escapes(functions)
+        check_frame_holder_rebinds(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
         # The third of the three, and HERE for the reason the other two are:
         # a name the build cannot place is a codegen finding about THIS file,
@@ -2172,6 +2174,172 @@ def _frame_receivers(functions: list, structs_by_name: dict) -> None:
     # the call site that disagrees with it can be in a function the loop above
     # skipped — see `_check_holder_agreements` for the program that measures it.
     _check_holder_agreements(functions, holders, hstruct, params_of)
+    _collect_holder_rebinds(functions, holders, hstruct, structs_by_name)
+
+
+def _value_may_be_a_frame(value, structs_by_name, holders, alias=None) -> bool:
+    """Whether `value` is one of the three things that can put a FRAME in a name.
+
+    The list is the recognition's own, and it is short because the recognition
+    is: `formal/build.py`'s `_frame_receivers` makes a name a holder from a
+    method receiver of a framed struct, a construction of a framed struct, a
+    copy of another holder, and a callee parameter some call site reaches with a
+    frame address.  Three of those four are ASSIGNMENTS with a value, and they
+    are the two spellings below plus a constructor call:
+
+      * `S(...)` where `S` is a framed struct this module declares — the
+        construction, whose result IS the address of a fresh block;
+      * another holder's name — a copy, which copies the address;
+      * (a method's receiver is a PARAMETER, so it is not a value at all.)
+
+    `alias` is the struct the enclosing method is a method of, under the name
+    `Self`, because `self = Self(...)` is how a Mojo constructor rebinds its own
+    receiver and is in real stdlib code (`memory/alloc.mojo`,
+    `runtime/tracing.mojo`) — so `Self(...)` is a construction, and without the
+    alias every one of those files would be refused for rebinding a name to a
+    fresh frame of its own type.
+
+    A call to one of this module's own FUNCTIONS is deliberately NOT on the
+    list.  It looks like the frame-returning case, and there is no evidence for
+    it: the function's own return is whatever its body returns, and a frame that
+    outlived the function that built it is the use-after-free the escape checks
+    exist for.  Allowing every call here would make the check silent for the
+    shape it is most needed for.
+    """
+    if isinstance(value, F.IdentExpr):
+        return value.name in holders
+    if isinstance(value, F.CallExpr) and isinstance(value.func, F.IdentExpr):
+        name = value.func.name
+        if alias is not None and name == "Self":
+            return M.struct_is_framed(alias)
+        st = (structs_by_name or {}).get(name)
+        return st is not None and M.struct_is_framed(st) \
+            and M.type_constructor_kind(name) is None
+    return False
+
+
+def _collect_holder_rebinds(functions, holders, hstruct, structs_by_name) -> None:
+    """PARK every name this function holds a frame for and also assigns a word to.
+
+    The mirror image of the one-name-two-shapes defect wave 3 fixed, and
+    invisible to that fix by construction: `model.struct_frame_slot_candidates`
+    asks whether two FRAME layouts agree on a slot, and there is only one layout
+    here.  The second binding is not a frame at all, so the candidate set is
+    `[R]` and nothing contradicts it — there is simply a second binding whose
+    value is a word.  Measured, both architectures, from a green build:
+
+    ```
+    class R:
+        def __init__(self):
+            self.a = 0
+            self.b = 0
+    def main(n):
+        r = R()
+        r.a = 7
+        r = 5
+        return r.a
+    ```
+
+    → SIGSEGV, exit 139, where the source says 5.
+
+    **Parked, not raised, and that is the whole design.**  A refusal raised from
+    here would come from inside `_prepare_functions`, which runs BEFORE
+    `_resolve_imports`, so it would be reported in place of the import diagnosis
+    — the defect `check_frame_field_blob_premises` and
+    `check_construction_shapes` are placed outside that window to avoid, measured
+    at 67 and 14 files of this repository respectively, and `mojo/middle/
+    closures.py` moved from `not-answerable/host-import` to `codegen` when a new
+    channel was added there.  So the finding lands on `fn._frame_holder_rebinds`
+    and `check_frame_holder_rebinds` raises it from the entry points, beside
+    those two.
+
+    The finding is `(name, value spelling, the spelling that made it a holder)`,
+    because the message has to name the binding that DISAGREES: the two readings
+    are "`r` is a frame" and "`r` is a word", and the reader has to be told which
+    line settles it rather than being handed the conclusion.
+
+    `r = 5` inside a CONDITIONAL is the same finding, and is not special-cased:
+    the analysis has no path sensitivity, which is the same statement
+    `struct_dunder_dispatch_candidates` and `struct_frame_slot_candidates` make
+    when they refuse rather than pick, and it is why a store to a name that only
+    one path binds as a frame is refused here too.
+
+    **The method's own receiver is EXCLUDED, and it has to be.**  `self = Self(…)`
+    is how a Mojo constructor rebinds its own receiver, and it is in real stdlib
+    code — five occurrences across `memory/alloc.mojo` and
+    `runtime/tracing.mojo` alone — so a check that flagged it would refuse nine
+    stdlib files for rebinding a name to a fresh frame of its own type, which is
+    the opposite of the defect.  `self = <a word>` is a different thing again
+    (the caller's slot still points at the old frame, so the method's effect
+    does not reach its caller) and it is not this check's to decide; the escape
+    checks are where a receiver that stops being the caller's object belongs.
+    The exclusion is by NAME from `model.struct_receivers`, so `out self` and
+    `inout self` are covered by the same rule rather than by a second one.
+    """
+    owners = M.method_owner_names(list((structs_by_name or {}).values()))
+    for fn in functions:
+        hs = holders.get(fn.name) or ()
+        if not hs:
+            continue
+        by_name = hstruct.get(fn.name) or {}
+        owner = owners.get(fn.name)
+        receivers = set(M.struct_receivers(owner)) if owner is not None else set()
+        findings = []
+        for node in M.iter_nodes(getattr(fn, "body", None)):
+            if isinstance(node, F.AssignStmt):
+                if isinstance(node.target, F.IdentExpr):
+                    targets = [node.target]
+                elif isinstance(node.target, (F.TupleExpr, F.ListExpr)):
+                    targets = list(node.target.elements)
+                else:
+                    targets = []
+                values = (list(node.value.elements)
+                          if isinstance(node.value, (F.TupleExpr, F.ListExpr))
+                          else [node.value])
+            elif isinstance(node, F.VarDecl):
+                if node.value is None:
+                    continue
+                targets, values = [node.name], [node.value]
+            else:
+                continue
+            if not targets or len(targets) != len(values):
+                # A target/value arity this path does not pair up (a starred
+                # element, a group) is the tuple-store pass's question, not this
+                # one's; saying "one name is rebound" about a pairing that does
+                # not exist would be a claim about a construct it did not read.
+                continue
+            for target, value in zip(targets, values):
+                if not isinstance(target, F.IdentExpr) or target.name not in hs:
+                    continue
+                if target.name in receivers:
+                    continue
+                if _value_may_be_a_frame(value, structs_by_name, hs, owner):
+                    continue
+                cands = by_name.get(target.name) or ()
+                findings.append((
+                    target.name, _expr_spelling(value),
+                    ", ".join(f"{st.name}()" for st in cands)
+                    or "a frame this function was given",
+                    tuple(cands)))
+        if findings:
+            fn._frame_holder_rebinds = findings
+
+
+def check_frame_holder_rebinds(functions) -> None:
+    """Raise the name-rebound-from-a-word findings `_collect_holder_rebinds` parked.
+
+    The fourth late frame check, and it is at the entry points for the measured
+    reason the other three are: `_prepare_functions` runs before the imports
+    resolve, so a refusal raised from inside it preempts the import diagnosis,
+    which is the answer that says whether the file is reachable at all.  One
+    finding is raised rather than all of them, because a program with three of
+    them has one defect with three lines and the first is enough to act on."""
+    for fn in functions:
+        for name, value_spelling, frame_spelling, cands in (
+                getattr(fn, "_frame_holder_rebinds", ()) or ()):
+            raise CodegenError(M.holder_rebound_from_a_word_refusal(
+                fn.name, name, value_spelling, frame_spelling,
+                cands))
 
 
 def _rewrite_nested_method_calls(fn, nested_fields) -> None:
