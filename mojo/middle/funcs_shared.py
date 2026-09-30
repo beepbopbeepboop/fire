@@ -545,11 +545,21 @@ def _module_defines_symbol(gen, module: str, name: str, kind: str) -> bool:
             return True
     return False
 
-def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int = 0):
+def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int = 0,
+                              want_abs: bool = False):
     """The module ref whose own source DIRECTLY defines top-level `name`,
     starting from `module` and following its `from X import name` statements
     transitively (re-export chains). None if no reachable module defines it
     — an honest "not found", never a guess. `kind` is 'fn' or 'struct'.
+
+    `want_abs` selects the ABSOLUTIZED spelling of the same answer (`.sub`
+    -> `p.sub`) instead of the one as written (`.sub`), for the callers
+    that need to OPEN the file rather than to spell its C symbol prefix.
+    Both spellings name the same module; which one is correct depends
+    entirely on the question, so both are first-class here instead of each
+    caller absolutizing for itself and getting the base wrong (a relative
+    ref resolved against the IMPORTING module is a different file whenever
+    the hop chain is more than one level deep).
 
     Why this exists: the module a client imports a symbol FROM and the
     module that DEFINES it are two different modules whenever the former
@@ -607,6 +617,8 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
     # would never hit and every call would re-walk the whole chain (the
     # same trap `_find_generic_source`'s docstring records for its own key).
     key = kind + '\x1f' + module + '\x1f' + name
+    if want_abs:
+        key = key + '\x1fabs'
     if key in cache:
         return cache[key]
     cache[key] = None
@@ -626,7 +638,8 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
             if (alias or nm) != name:
                 continue
             sub = gen._abs_module(st.module, module) if st.module.startswith('.') else st.module
-            r = _find_symbol_home_module(gen, sub, nm, kind, depth + 1)
+            r = _find_symbol_home_module(gen, sub, nm, kind, depth + 1,
+                                         want_abs=want_abs)
             if r:
                 # `r` is the spelling the NEXT hop used to reach the
                 # definition, which for a relative hop is absolute
@@ -634,8 +647,10 @@ def _find_symbol_home_module(gen, module: str, name: str, kind: str, depth: int 
                 # compiles under is `st.module` — the spelling THIS
                 # statement used — so re-derive it for the case where they
                 # differ. `r == sub` (the non-relative, therefore identical
-                # case) is by far the common one and is left untouched.
-                _raw = st.module if st.module.startswith('.') else r
+                # case) is by far the common one and is left untouched. With
+                # `want_abs` the caller asked for the parseable spelling, so
+                # `r` is already the answer.
+                _raw = r if want_abs else (st.module if st.module.startswith('.') else r)
                 cache[key] = _raw
                 return _raw
     return None

@@ -3690,8 +3690,10 @@ class GimpleGen:
         return gfn._find_imported_struct(self, module, name)
     def _find_struct_home_module(self, module: str, name: str, depth: int = 0) -> str | None:
         return gfn._find_struct_home_module(self, module, name, depth=depth)
-    def _find_symbol_home_module(self, module: str, name: str, kind: str, depth: int = 0):
-        return gfn._find_symbol_home_module(self, module, name, kind, depth=depth)
+    def _find_symbol_home_module(self, module: str, name: str, kind: str,
+                                 depth: int = 0, want_abs: bool = False):
+        return gfn._find_symbol_home_module(self, module, name, kind,
+                                           depth=depth, want_abs=want_abs)
     def _resolve_test_relative_module(self, module: str) -> str | None:
         return gfn._resolve_test_relative_module(self, module)
     def _parsed_import(self, module: str):

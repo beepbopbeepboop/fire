@@ -439,24 +439,57 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
     # defines the symbol, not the one it was re-exported through, or each
     # of them looks the answer up under a key nothing ever wrote.
     _eff_mod = s.module
-    if not sym_info and not s.wildcard:
+    # Gated on the bail this is rescuing, NOT on `not sym_info` alone. An
+    # import that DID resolve is already registered correctly by the pass
+    # that owns it (`_emit_stdlib_import_externs` for a stdlib/test module),
+    # and re-pointing its recorded module changes the emitted symbol's
+    # spelling and whether it is overload-mangled at all — measured: with
+    # the wider gate, `from std.memory import alloc` stopped being the bare
+    # `extern int64_t alloc (...)` the stdlib dylib's own export table
+    # advertises and became a mangled `std_memory_alloc_alloc_9f63a2
+    # (int64_t layout)`, and four stdlib modules then failed with
+    # `implicit declaration of function 'mojo_memset'` (32 sites) plus a
+    # spurious `unsafe_memcpy: unavailable in compiled mode` weak stub.
+    # The narrower gate below can only ever REPLACE an abandoned import
+    # with a resolved one, so it cannot demote a name that already worked.
+    if _sib_qualifier and not sym_info and not s.wildcard:
         _home_fn = self._find_symbol_home_module(s.module, orig_name, 'fn')
         if _home_fn and _home_fn != s.module:
-            _eff_mod = _home_fn
+            # The ABSOLUTIZED ref for opening the file: a relative spelling
+            # (`.alloc`, from a re-exporting `__init__.py`) resolved
+            # against THIS importing module is a different file as soon as
+            # the chain is more than one level deep, and the export lookup
+            # would then silently consult the wrong module's source.
+            _home_abs = self._find_symbol_home_module(s.module, orig_name, 'fn',
+                                                      want_abs=True) or _home_fn
             _hexp = None
             _hqual = None
             try:
-                _hexp, _hqual = self._local_sibling_module_exports(_eff_mod)
+                _hexp, _hqual = self._local_sibling_module_exports(_home_abs)
             except Exception:
                 _hexp = None
             if _hexp is None:
                 try:
                     import module_loader as _mlmod_reexp
-                    if _mlmod_reexp.can_resolve_module_path(_eff_mod):
-                        _hexp = load_module(_eff_mod)
+                    if _mlmod_reexp.can_resolve_module_path(_home_abs):
+                        _hexp = load_module(_home_abs)
                 except Exception:
                     _hexp = None
-            if _hexp:
+            _hinfo = _hexp.get(orig_name) if _hexp else None
+            if _hinfo:
+                # Adopt the defining module ONLY now, when its own exports
+                # really have this name. Adopting it on the strength of the
+                # hop alone (with those exports still empty) also adopted
+                # `_hqual`, and that flipped the `_sib_qualifier and not
+                # sym_info` bail below ON for names that used to fall
+                # through to `_emit_stdlib_import_externs`' stdlib
+                # registration — so the symbol lost its `extern` entirely
+                # and its call site emitted a call to nothing. Measured
+                # across the stdlib dylib build: `implicit declaration of
+                # function 'mojo_memset'`, 32 sites in 4 modules, plus a
+                # spurious `unsafe_memcpy: unavailable in compiled mode`
+                # weak stub that had not been emitted before.
+                _eff_mod = _home_fn
                 # Through the DEFINING module's own parsed signature, not
                 # the text scan's: this entry is re-emitted as an `extern`
                 # for a symbol this translation unit does not define (the
@@ -466,9 +499,9 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
                 # in the file and reject its own call site. See
                 # `_resolved_export_entry`.
                 sym_info = _resolved_export_entry(self, _eff_mod, orig_name,
-                                                 _hexp.get(orig_name, sym_info))
-            if _hqual:
-                _sib_qualifier = _hqual
+                                                  _hinfo)
+                if _hqual:
+                    _sib_qualifier = _hqual
     if _sib_qualifier and not sym_info:
         if not s.wildcard:
             self._unresolved_import_aliases.add(_sk)

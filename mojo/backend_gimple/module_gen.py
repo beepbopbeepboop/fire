@@ -1722,10 +1722,21 @@ def gen_module_impl(self, stmts):
                 # `_find_symbol_home_module` exists for; a None answer (no
                 # reachable module defines the name, e.g. the call is not a
                 # struct constructor at all) leaves `_xf_mod` untouched.
+                # TWO spellings of the defining module, for two different
+                # jobs: `_xf_struct_init_params` has to OPEN the module, and
+                # the hint KEY below has to spell it the way the defining
+                # gen spells itself. See `_find_symbol_home_module`'s own
+                # docstring for why a relative spelling resolved against
+                # this importing module is the wrong file.
                 _xf_home = self._find_symbol_home_module(_xf_mod, _xf_orig, 'struct')
                 if _xf_home:
+                    _xf_home_abs = self._find_symbol_home_module(
+                        _xf_mod, _xf_orig, 'struct', want_abs=True) or _xf_home
                     _xf_mod = _xf_home
-                _xf_pnames = _xf_struct_init_params(_xf_mod, _xf_orig)
+                    _xf_open = _xf_home_abs
+                else:
+                    _xf_open = _xf_mod
+                _xf_pnames = _xf_struct_init_params(_xf_open, _xf_orig)
                 if not _xf_pnames:
                     continue  # not a known struct constructor in that module
                 # `lstrip('.')` on the qualifier half, matching

@@ -415,20 +415,27 @@ def _gen_stmt_FromImportStmt(gen, node):
         if not _fi_info and not getattr(node, 'wildcard', False):
             _fi_home = gen._find_symbol_home_module(node.module, name, 'fn')
             if _fi_home and _fi_home != node.module:
-                _fi_eff_mod = _fi_home
+                # ABSOLUTIZED ref for opening the file, as-spelled ref for
+                # the C symbol prefix — see the module-scope twin in
+                # `_register_sym` and `_find_symbol_home_module`'s own
+                # docstring for why both spellings are first-class.
+                _fi_home_abs = gen._find_symbol_home_module(
+                    node.module, name, 'fn', want_abs=True) or _fi_home
                 try:
-                    _fi_hexp, _fi_hqual = gen._local_sibling_module_exports(_fi_home)
+                    _fi_hexp, _fi_hqual = gen._local_sibling_module_exports(_fi_home_abs)
                 except Exception:
                     _fi_hexp = None
                     _fi_hqual = None
-                if _fi_hexp:
+                _fi_hinfo = _fi_hexp.get(name) if _fi_hexp else None
+                if _fi_hinfo:
+                    _fi_eff_mod = _fi_home
                     # The DEFINING module's parsed signature, not the text
                     # scan's — same reason as the module-scope twin in
                     # `_register_sym`, and see `_resolved_export_entry`.
                     _fi_info = _resolved_export_entry(gen, _fi_home, name,
-                                                     _fi_hexp.get(name))
-                if _fi_hqual:
-                    _fi_qual = _fi_hqual
+                                                     _fi_hinfo)
+                    if _fi_hqual:
+                        _fi_qual = _fi_hqual
         if isinstance(_fi_info, dict) and _fi_info.get('signature'):
             if not (isinstance(gen.imported_symbols.get(symbol_name), dict)
                     and 'signature' in gen.imported_symbols[symbol_name]):
