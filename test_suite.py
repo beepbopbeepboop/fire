@@ -1528,6 +1528,68 @@ def test_fanout_enumeration_ignores_untracked_scratch():
           f'enumerated but absent: {missing}')
 
 
+def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
+    """The WRITER half of the round-6 flake, executed rather than described.
+
+    `test_fanout_enumeration_ignores_untracked_scratch` above pins the
+    enumeration: a transient in the repo root is not an item. That is only half
+    the fix, and the half that is cheap. The other half is that
+    `test_ab_native.py` no longer PUTS one there — it writes each case's source
+    into a private per-process directory under `.tmp/` and tags every name with
+    its pid, so a concurrent fan-out has nothing to enumerate and two concurrent
+    runs cannot collide.
+
+    It is checked HERE, and not left to `ab-native`, because `ab-native` cannot
+    check it: that spec needs the self-hosted binary, is capped at 55 GB, and is
+    `expect=`-marked red because the binary segfaults on any input. So the code
+    that decides where this test writes had no executing coverage at all — the
+    exact hole `coro` sat in after the `mojo_*` rename, one level down. The
+    self-test is pure Python and needs no compiler, so it runs in a tenth of a
+    second here, in the `smoke` bucket, on every run.
+
+    The invariant asserted is the whole directory, not the files this happened
+    to write: a check that only looked for its own leftovers would pass on a
+    version that leaked under a different name.
+    """
+    p = subprocess.run([PY, os.path.join(HERE, 'test_ab_native.py'),
+                        '--scratch-selftest'],
+                       capture_output=True, text=True, timeout=120, cwd=HERE)
+    out = p.stdout + p.stderr
+    check('ab-native scratch: the self-test runs and passes', p.returncode == 0,
+          out.strip()[-400:])
+    m = re.search(r'scratch isolation: (\d+) passed, (\d+) failed', out)
+    check('ab-native scratch: it reported a real count, not an empty run',
+          m is not None and int(m.group(1)) > 15,
+          f'no count line, or too few checks to mean anything: {out.strip()[-200:]}')
+    # The two properties the flake turned on, read out of the module rather
+    # than trusted, because they are what a future edit could undo silently.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'ab_native_scratch', os.path.join(HERE, 'test_ab_native.py'))
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)          # runs the atexit registration
+    except SystemExit:                        # pragma: no cover
+        pass
+    tagged = mod._tagged('abfulltest_leaf.mojo')
+    check('ab-native scratch: a source name is tagged, so two runs differ',
+          tagged.startswith(mod.SRC_PREFIX) and tagged.endswith('.mojo'),
+          tagged)
+    check('ab-native scratch: the scratch root is under .tmp/, not the root',
+          os.path.abspath(mod.SCRATCH_ROOT)
+          == os.path.join(HERE, '.tmp'),
+          mod.SCRATCH_ROOT)
+    check('ab-native scratch: a bare stem gets exactly one .mojo',
+          mod._tagged('minimal_main').count('.mojo') == 1,
+          mod._tagged('minimal_main'))
+    # And the module left the directory as it found it — the property that
+    # makes the self-test safe to run from a gate at all.
+    stray = [n for n in os.listdir(HERE)
+             if n.startswith(mod.SRC_PREFIX) or n.startswith('abt999999_')]
+    check('ab-native scratch: the self-test left nothing in the repo root',
+          not stray, f'{stray}')
+
+
 def test_missing_fanout_item_is_a_named_failure():
     """A missing item file is a FAIL naming that item — not a skipped chain.
 
@@ -2598,6 +2660,7 @@ def main():
                test_make_driver, test_j_forwarded,                test_deps_order_and_skip,
                test_exclusive_is_alone, test_fanout_aggregates,
                test_fanout_enumeration_ignores_untracked_scratch,
+               test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root,
                test_missing_fanout_item_is_a_named_failure,
                test_timeout_is_a_failure_not_a_vanished_job,
                test_tally_accounts_for_every_test,

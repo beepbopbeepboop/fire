@@ -767,11 +767,29 @@ def corpus_patterns():
 
     DISCOVERED, and the reason is the same as everywhere else in this tree: a
     hand-kept list is a list of what somebody remembered.
+
+    Returns `(usable, dropped)`, and the second half is load-bearing rather
+    than diagnostic decoration. The walk reads string literals with a regex
+    over the source text, so it does not PARSE Python and a candidate can be a
+    fragment of a larger expression: a pattern built by concatenation reads
+    here as its first piece, which is a truncated `(?:` and not a pattern
+    anything compiles. `test_ab_native.py`'s scratch-artifact regex is the live
+    example (`r'abt(\\d+)_[0-9a-f]{8}_\\w+\\.(?:' + '|'.join(...) + r')'`),
+    and it arrived after this walk was written.
+
+    So a candidate the ORACLE refuses is not a corpus pattern, and the test has
+    no question to ask about it: `want = re.search(p, ...)` is what every
+    assertion below is stated against, and for such a candidate it raises
+    `PatternError` and takes the whole test down. Filtering on `re.compile`
+    is therefore not a weakened check — it is the check's own precondition
+    made explicit. What it must not be is SILENT, because a filter that quietly
+    discards candidates is how a walk stops being a walk: hence `dropped`, and
+    an assertion in the test that says how many were thrown away and why.
     """
     import glob
     pat = re.compile(r"re\.(?:compile|search|match|fullmatch|split|sub|findall)"
                      r"\(\s*r?([rb]*)(['\"])(.*?)\2", re.S)
-    out = {}
+    out, dropped = {}, {}
     for path in sorted(glob.glob(os.path.join(HERE, "*.py")) +
                        glob.glob(os.path.join(HERE, "mojo", "**", "*.py"),
                                  recursive=True)):
@@ -784,8 +802,14 @@ def corpus_patterns():
         for m in pat.finditer(text):
             p = m.group(3)
             if len(p) > 8 and "{" in p and "\\w" in p:
-                out.setdefault(p, os.path.basename(path))
-    return out
+                where = os.path.basename(path)
+                try:
+                    re.compile(p)
+                except re.error as e:
+                    dropped.setdefault(p, (where, str(e)))
+                else:
+                    out.setdefault(p, where)
+    return out, dropped
 
 
 def test_the_corpus_patterns_all_work(tmpdir):
@@ -797,9 +821,24 @@ def test_the_corpus_patterns_all_work(tmpdir):
     what is being checked is that the pattern COMPILES and the call returns a
     status, not that a synthetic subject is the file's own text.
     """
-    found = corpus_patterns()
+    found, dropped = corpus_patterns()
     check(len(found) >= 4,
           "the corpus walk found patterns to check (%d)" % len(found))
+    # The filter `corpus_patterns` applies, asserted rather than trusted: a
+    # candidate is dropped only because CPython's own `re` refuses it, and
+    # every drop is accounted for by name so a candidate that stops being
+    # droppable — a real corpus pattern that regressed into a fragment — is
+    # visible here instead of silently moving a line.
+    for p, (where, why) in sorted(dropped.items()):
+        try:
+            re.compile(p)
+        except re.error as e:
+            check(str(e) == why,
+                  "the dropped candidate from %s is dropped for the reason "
+                  "recorded (%s)" % (where, why), "now: %s" % e)
+        else:                                          # pragma: no cover
+            check(False, "%r from %s compiles now, so the walk should have "
+                  "kept it" % (p, where))
     lines = [PRELUDE, "", "def main(n: Int) -> Int:"]
     pats = sorted(found)
     for i, p in enumerate(pats):

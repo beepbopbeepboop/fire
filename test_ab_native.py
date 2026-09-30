@@ -260,6 +260,139 @@ def _tagged(basename: str) -> str:
     return f'{SRC_PREFIX}{stem}{ext}'
 
 
+# ── the scratch lifecycle, checked without a compiler ───────────────────────
+
+def test_scratch_isolation() -> tuple:
+    """The scratch-dir machinery, with no `mojoc` and no compilation.
+
+    Everything above this line is untested by anything that can run in a
+    normal session, and that is not an accident of the corpus: the only spec
+    that executes this module is `ab-native`, which needs the self-hosted
+    binary, is capped at 55 GB, and is currently `expect=`-marked because that
+    binary segfaults on any input. So the code that decides WHERE this test
+    writes — the part that was changed to stop a fan-out race — had no coverage
+    at all, and the fix is pure Python that needs no compiler to exercise.
+
+    Run standalone with `--scratch-selftest` (which is how `test_suite.py`
+    reaches it, from the `smoke` bucket, in about a tenth of a second). Every
+    assertion is about a property that was measured to matter: a source in the
+    private dir and not the repo root, a per-process tag so two runs cannot
+    collide, the repo-root artifacts still being cleaned, and the dead-run
+    sweep leaving a LIVE run's scratch alone.
+    """
+    ok = bad = 0
+
+    def want(cond, what, detail=''):
+        nonlocal ok, bad
+        if cond:
+            ok += 1
+        else:
+            bad += 1
+            print(f"  FAIL  {what}" + (f": {detail}" if detail else ""))
+
+    root_before = set(os.listdir(HERE))
+
+    # 1. A source lands in the PRIVATE dir, never in the repo root. This is
+    #    the whole point of the change: a `*.mojo` in HERE is enumerated by a
+    #    concurrent bootstrap fan-out and then deleted out from under it.
+    d = scratch_dir()
+    want(os.path.isdir(d), "scratch_dir() creates its directory", d)
+    want(os.path.abspath(d).startswith(os.path.abspath(SCRATCH_ROOT) + os.sep),
+         "the scratch dir is under .tmp/", d)
+    want(os.path.realpath(d) != os.path.realpath(HERE),
+         "the scratch dir is not the repo root", d)
+    src = _scratch_source('abfulltest_leaf.mojo', 'fn leaf() -> Int:\n    return 1\n')
+    want(os.path.isfile(src), "_scratch_source() wrote the file", src)
+    want(os.path.dirname(os.path.abspath(src)) == os.path.abspath(d),
+         "the source is in the private dir", src)
+    want(os.path.basename(os.path.dirname(os.path.abspath(src))) != HERE,
+         "the source's parent is not the repo root", src)
+    want(open(src).read().startswith('fn leaf()'),
+         "the source holds what it was given")
+    # …and the tag: `_tagged` is the single place the filename and the
+    # module-name form are derived, so a case that writes `..._leaf.mojo` and
+    # imports `..._leaf` cannot disagree.
+    want(_tagged('abfulltest_leaf.mojo')
+         == f'{SRC_PREFIX}abfulltest_leaf.mojo',
+         "_tagged keeps the FILENAME form", _tagged('abfulltest_leaf.mojo'))
+    want(_tagged('minimal_main') == f'{SRC_PREFIX}minimal_main.mojo',
+         "_tagged gives a bare stem the .mojo extension",
+         _tagged('minimal_main'))
+    want(os.path.splitext(os.path.basename(src))[0]
+         == os.path.splitext(_tagged('abfulltest_leaf.mojo'))[0],
+         "the file written and the name a driver imports are one string",
+         f"{os.path.basename(src)}")
+    want(not _tagged('minimal_main').endswith('.mojo.mojo'),
+         "a bare stem never gets .mojo twice", _tagged('minimal_main'))
+
+    # 2. The repo-root artifacts. These CANNOT be moved (the compiler writes
+    #    them into its CWD, which has to be HERE), so they are recognised and
+    #    deleted by tag instead — and that recognition is what must not touch
+    #    another run's files.
+    for ext in ARTIFACT_EXTS:
+        open(os.path.join(HERE, f'{os.path.splitext(os.path.basename(src))[0]}.{ext}'),
+             'w').close()
+    found = _our_artifacts_in(HERE)
+    want(len(found) == len(ARTIFACT_EXTS),
+         "_our_artifacts_in finds every artifact this run made",
+         f"{found}")
+    want(all(n.startswith(SRC_PREFIX) for n in found),
+         "and nothing that is not this run's", f"{found}")
+    open(os.path.join(HERE, 'abt999999_deadbeef_other.ci'), 'w').close()
+    try:
+        want('abt999999_deadbeef_other.ci' not in _our_artifacts_in(HERE),
+             "another run's artifact is not claimed by this one")
+    finally:
+        _remove_if_present(os.path.join(HERE, 'abt999999_deadbeef_other.ci'))
+
+    # 3. Cleanup, and its idempotence (it is registered with atexit, so the
+    #    normal path and the backstop both call it).
+    cleanup_scratch()
+    want(not os.path.isdir(d), "cleanup_scratch removed the private dir", d)
+    want(not _our_artifacts_in(HERE),
+         "cleanup_scratch removed this run's repo-root artifacts",
+         f"{_our_artifacts_in(HERE)}")
+    cleanup_scratch()
+    want(True, "cleanup_scratch is idempotent")
+
+    # 4. The dead-run sweep, which is the half no exit path can do for itself:
+    #    `memcap` SIGKILLs this tree and runs no `finally` and no `atexit`.
+    #    A LIVE run's scratch must survive it, or a concurrent run loses its
+    #    sources mid-case.
+    live = tempfile.mkdtemp(prefix=f'ab-native-{os.getpid()}_deadbeef-',
+                            dir=SCRATCH_ROOT)
+    open(os.path.join(live, 'keep.mojo'), 'w').close()
+    dead = tempfile.mkdtemp(prefix='ab-native-999999_deadbeef-', dir=SCRATCH_ROOT)
+    open(os.path.join(dead, 'gone.mojo'), 'w').close()
+    dead_art = os.path.join(HERE, 'abt999999_deadbeef_stale.ci')
+    open(dead_art, 'w').close()
+    want(_SCRATCH_DIR_RE.fullmatch(os.path.basename(dead)) is not None,
+         "a dead run's directory name is recognised as ours",
+         os.path.basename(dead))
+    want(_ARTIFACT_RE.fullmatch('abt999999_deadbeef_stale.ci') is not None,
+         "a dead run's artifact name is recognised as ours")
+    sweep_stale_scratch()
+    want(os.path.isdir(live),
+         "the sweep leaves a LIVE run's scratch alone (our own pid)", live)
+    want(not os.path.isdir(dead), "the sweep removed a DEAD run's directory",
+         dead)
+    want(not os.path.exists(dead_art),
+         "the sweep removed a DEAD run's repo-root artifact", dead_art)
+    shutil.rmtree(live, ignore_errors=True)
+
+    # 5. Liveness, which is what the sweep's safety rests on.
+    want(_pid_alive(os.getpid()), "our own pid is alive")
+    want(not _pid_alive(999999), "a pid nobody has is not alive")
+
+    # 6. The invariant the module exists to keep, checked against the whole
+    #    directory rather than against what this test happened to write.
+    leaked = set(os.listdir(HERE)) - root_before - {'abt999999_deadbeef_stale.ci'}
+    want(not leaked, "nothing this test wrote is left in the repo root",
+         f"{sorted(leaked)}")
+
+    print(f"scratch isolation: {ok} passed, {bad} failed")
+    return ok, bad
+
 
 def _collect_artifacts(src_path: str, out_dir: str) -> str:
     """Move the dump's artifacts out of the repo root into `out_dir`; return
@@ -800,6 +933,13 @@ BUILTIN_TESTS = {
 
 
 def main():
+    # Before the `mojoc` gate, and reachable on its own: `--scratch-selftest`
+    # is the only way to exercise this module's scratch machinery without a
+    # self-hosted binary, which is the whole point of `test_scratch_isolation`.
+    if '--scratch-selftest' in sys.argv[1:]:
+        ok, bad = test_scratch_isolation()
+        sys.exit(0 if bad == 0 else 1)
+
     if not os.path.exists(MOJOC):
         print(f"ERROR: {MOJOC} not found. Build with: python3 fire.py build fire.py -o mojoc", file=sys.stderr)
         sys.exit(1)
