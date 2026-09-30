@@ -900,9 +900,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 # consumer shape for the C++ backend on unrelated grounds
                 # (`async for` is only legal inside an async body), so
                 # this is the stackswitch path's matching honest refusal,
-                # not a new restriction. See
-                # bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md
-                # item 3.
+                # not a new restriction.
                 if (getattr(node, 'is_async', False) and api.get('is_async_gen')
                         and not api.get('no_wd_forward')):
                     raise RuntimeError(

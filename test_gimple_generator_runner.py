@@ -3116,8 +3116,7 @@ main()
 """, "one.txt!\ntwo.txt!\none.txt\ntwo.txt\n2\n")
 
     # ── a nested `async def` capturing an enclosing PARAMETER ───────────
-    # bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md. The
-    # capture-plan producer for a captured PARAMETER built a 2-tuple while
+    # The capture-plan producer for a captured PARAMETER built a 2-tuple while
     # the three consumers in `_apply_nested_async_capture` unpacked
     # 3-tuples, so every annotated-parameter capture raised
     # `ValueError: not enough values to unpack (expected 3, got 2)` out of
@@ -3170,10 +3169,7 @@ def main():
 """, "2 2.0 ab 2\n")
 
     # ── TWO nested asyncs capturing the SAME enclosing local ────────────
-    # Found by re-testing bugs/hard/CODEGEN_coro_captured_param_capture_
-    # crashes.md's own "Verified genuinely fixed" list rather than by
-    # reading code, and the mechanism is the one the doc's item-1 fix
-    # describes without having hit it: `_apply_nested_async_capture` is
+    # The mechanism: `_apply_nested_async_capture` is
     # called ONCE PER nested async, and it rewrites the enclosing local's
     # initializer IN PLACE. So the second nested async's capture plan saw
     # `var n = __mojo_box_new_i64(1)` -- an initializer it could not type
@@ -3500,8 +3496,7 @@ def main():
 """, "yields ['x'], whose call sites do not all pass the same")
 
     # ── `async for` over a compiled async generator, driven by an ORDINARY
-    # function -- bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md
-    # item 3. An async generator is consumed by `async for`, and the
+    # function. An async generator is consumed by `async for`, and the
     # consumer need not be a coroutine itself: real Python lets an ordinary
     # `async def`-less function do it, and the doc's own repro does exactly
     # that. This compiler had no lowering for that consumer at all --

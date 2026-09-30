@@ -1,6 +1,6 @@
 """test_coro_nested_async_capture.py -- real behavioral test for the A3
 stack-switch coroutine backend's mutable closure capture into a nested
-`async def` (bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md).
+`async def`.
 
 Fixed 2026-09-27 and registered in tools/suite.py as `coro-nested-capture`
 (in `check`/`gate`): `_RUNTIME_SRCS` named the pre-rename `mojo_*.c` runtime
@@ -446,10 +446,9 @@ def _cpython_stdout(py_src: str) -> str:
 
 
 def test_nested_async_generator_driven_by_async_for():
-    """bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md item 3, the
-    doc's own §3 repro verbatim: a nested async GENERATOR that mutates a
-    captured enclosing local, consumed by `async for` in that local's OWN
-    enclosing (ordinary, never-suspended) function.
+    """A nested async GENERATOR that mutates a captured enclosing local,
+    consumed by `async for` in that local's OWN enclosing (ordinary,
+    never-suspended) function.
 
     This is the shape the doc proved was neither refused nor correct: it
     built, linked, ran, exited 0, and printed `0` where CPython prints

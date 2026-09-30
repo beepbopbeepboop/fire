@@ -1224,9 +1224,10 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # every later consumer of the value — `async for x in gen():` in the
     # enclosing function above all — found no api in `_generator_var_api`
     # and dropped the loop body with a `mojo_unsupported_iter` warning.
-    # That is exactly bugs/hard/CODEGEN_coro_captured_param_capture_
-    # crashes.md item 3: CPython prints 11, the compiled program printed
-    # 0, exit 0, no error.
+    # That is a real silent miscompile: the shape -- a nested async
+    # GENERATOR consumed by `async for` in its own enclosing function --
+    # prints 0 in the compiled program where CPython prints 11, exit 0,
+    # no error.
     #
     # Keyed on the STRIPPED `_start` name rather than a bare name, so it
     # is exactly the set of NESTED bases (a top-level generator registers

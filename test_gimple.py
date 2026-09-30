@@ -5936,7 +5936,6 @@ def main():
         (`UnsafePointer[T](...)` / `.address`). Before this, a struct
         capture was refused outright, so the async def fell through to the
         C++ path and failed to compile at all.
-        See bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md.
         """
         global _PASS, _FAIL
         name = "nested_async_struct_capture_boxes_pointer"

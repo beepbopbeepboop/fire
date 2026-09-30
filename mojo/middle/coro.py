@@ -1133,11 +1133,10 @@ _STRUCT_NAMES: set = set()
 # (`_called_from_nested_async`). Populated during `_hoist_nested_async` and
 # consulted by the C++ generator emitter (`cpp_async._gen_cpp_generator_
 # unit`), which has no capture model of its own and would otherwise emit a
-# body referencing the captured name where it does not exist. See
-# bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md (item 3), which
-# records the neighbouring shape this guard does NOT cover: the same nested
-# async generator driven by `async for` in its OWN enclosing function, which
-# still builds and prints a wrong value.
+# body referencing the captured name where it does not exist. Populated on
+# BOTH backends by `_scan_unthreadable_nested_async_gens` (see
+# `_nested_async_drive_unthreadable`), and consulted by the C++ GENERATOR
+# and async emitters.
 _UNTHREADABLE_NESTED_ASYNC_GENS: set = set()
 
 
@@ -3471,10 +3470,9 @@ class _Capture:
     `ValueError: not enough values to unpack (expected 3, got 2)` raised out
     of `module_gen.gen_module_impl` into the user's terminal the first time a
     nested `async def` captured an annotated parameter -- and it survived
-    because that branch was, separately, recorded as already-landed (see
-    bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md). With named
-    fields a missing one is a missing attribute at the producer, and the two
-    producers below cannot disagree about the shape at all.
+    because that branch was, separately, recorded as already-landed. With
+    named fields a missing one is a missing attribute at the producer, and
+    the two producers below cannot disagree about the shape at all.
 
       decl        -- the `VarDecl` to wrap in a box-init IN PLACE, or None
                      for a captured PARAMETER: there is no declaration to
@@ -3613,7 +3611,7 @@ def _nested_async_free_vars(inner: N.FunctionDef, outer: N.FunctionDef) -> set:
     # comprehension's target unpack over a `list[tuple[str, str]]` boxes
     # both slots to int64_t self-hosted (this codebase's original,
     # longest-documented instance of this trap class). See
-    # bugs/CODEGEN_selfhost_actual_types_identifier_field.md.
+    # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
     _inner_pnames = set()
     for _pn, _pa in inner.params:
         _inner_pnames.add(_pn)
