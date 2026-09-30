@@ -118,12 +118,19 @@ endif
 # ── Memory: reserved before a job starts, and capped while it runs ──────────
 # `make mojoc` and `make stage2/mojo` are the two recipes in this file that
 # start a whole-closure self-compile: the same workload as
-# bootstrap-stage1-transitive, which has been measured at 55.8 GB healthy and
-# 192 GB when it ran away, plus a `gcc -fgimple` over the resulting 40 MB
+# bootstrap-stage1-transitive plus a `gcc -fgimple` over the resulting 40 MB
 # translation unit. Both used to run with no ceiling at all, which is worse in
 # a Makefile than it is in the test runner: `make mojoc` is the command a
 # developer types by hand when they want the binary, and a runaway there is
 # stopped by a human watching the machine.
+#
+# The class each recipe names is a MEASUREMENT of that recipe's peak, not a
+# shape it resembles (3.7 GB for the build, 1.2 GB for the gcc over the
+# closure; see the comments at the two recipes and tools/suite.py's
+# MEASURED_PEAK_GB). The older numbers in this file — 55.8 GB "healthy", 192 GB
+# "runaway", 96 GB "largest footprint observed" — are kept in git history with
+# the commits that added them; what they were is not what memcap enforces, and
+# a 96 GB RESERVATION is a queue, not a margin.
 #
 # So the wrapper is spelled ONCE, here, and every recipe that starts a
 # compiler uses it. $(call memslot,<label>,<class>) expands to
@@ -206,11 +213,13 @@ wholeprogram-help:
 	@echo "other instead of stacking, which is what 30 processes at 30 GB each"
 	@echo "looks like from the inside."
 	@echo ""
-	@echo "The program/stage classes are also EXCLUSIVE, which now means the"
-	@echo "machine and not just this run: an exclusive job reserves the WHOLE"
-	@echo "machine-wide budget, so nothing is admitted anywhere — not in"
-	@echo "another worktree, not from your own terminal — while it runs."
-	@echo "That is what makes a 55 GB job safe to leave unattended."
+	@echo "EXCLUSIVE is about interference, not memory: an exclusive job (mojoc,"
+	@echo "ab-native, native-dumpfull, stdlib-dylib) is the only thing running"
+	@echo "in ITS run, because each writes a shared artifact another job reads"
+	@echo "or links. Its reservation is its class like every other job's, and"
+	@echo "the machine-wide bound is the ledger's arithmetic over classes that"
+	@echo "are measured — a job that genuinely needs the machine to itself is"
+	@echo "one whose class is over half the budget, and cannot share it."
 	@echo ""
 	@echo "Per-file alternative, bounded and reserved per file:"
 	@echo "    gmake -j20 aside bside && make compare-a-b"
@@ -379,17 +388,25 @@ dump-all-stage3:
 # the compiler's own source contains a generator/async function and which was
 # missing here for the same reason: editing it did not rebuild `mojoc`.
 #
-# `stage` (96 GB) is the class: this recipe is the whole-closure self-compile
-# (healthy peak 55.8 GB, measured) AND the `gcc -O2 -fgimple` over the
-# resulting 40 MB translation unit, and a build's peak is the larger of those
-# two phases rather than their sum. It is the workload `stage` is documented
-# on, read from the same table tools/suite.py applies, so this recipe and the
-# runner's `mojoc` step cannot drift apart. The whole build's peak has never
-# actually been recorded — nothing capped it until now — so this number is the
-# class, not a measurement; see bugs/BUILD_mojoc_ceiling_unmeasured.md.
+# `small` (8 GB) is the class, and it is a MEASUREMENT: 3.7 GB peak RSS of the
+# whole process tree, read off a `make gate` log by the same memcap that
+# enforces the ceiling (tools/suite.py's MEASURED_PEAK_GB). It used to be
+# `stage` (96), on the strength of a "55.8 GB healthy peak" that the runner
+# does not measure on this tree — the same closure dumped by python is 1.1-1.2
+# GB, twice, on two consecutive days — and a 96 GB reservation is a hand-run
+# build queueing behind every other job on the machine, in both directions.
+#
+# It must stay EQUAL to the runner's `mojoc` step's class, and that is not
+# tidiness: the runner admits the job for its class and publishes it in
+# MEMSLOT_HELD, so a recipe asking for MORE takes a second reservation inside a
+# tree the first one already accounts for — which deadlocks rather than fails
+# (tools/memslot.py's `covering`). `bside` depends on this target, so
+# `ab-bside` (`program`) used to run this recipe at `stage` and queue for 96 GB
+# it could never be admitted for. test_suite.py checks the two cannot drift.
+# MEMLIMIT_GB=96 raises it; MEMLIMIT_GB=0 removes the wrapper.
 mojoc: $(SELFHOST_INPUTS) $(CORO_RUNTIME_SRC)
 	@echo "=== Building mojoc from $(MOJO_MAIN) ($(MOJO_OPT)) ==="
-	@$(call memslot,mojoc,stage) $(PYTHON) fire.py build fire.py $(MOJO_OPT) -o mojoc
+	@$(call memslot,mojoc,small) $(PYTHON) fire.py build fire.py $(MOJO_OPT) -o mojoc
 	@echo "✓ mojoc ready"
 
 # stage1/fire.ci is written by the runner's stage1 steps (a whole-closure
@@ -412,16 +429,20 @@ stage1/fire.ci:
 # well-defined (NULL), which the codegen's own `_ptr_slot_in_range` guard
 # already treats as "no known type" and falls back on safely.
 #
-# The gcc -fgimple over the 40 MB closure is the single most memory-hungry step
-# in the chain, and this recipe — the way a developer gets `stage2/mojo` by
-# hand — ran it with no ceiling. `stage` (96 GB) is the class documented for
-# exactly this shape, read from tools/suite.py's MEMCLASS so it cannot drift
-# from the runner's `bootstrap-stage2-cc` step, which names the same class.
-# `MEMLIMIT_GB=96` raises it, `MEMLIMIT_GB=0` removes the wrapper.
+# The gcc -fgimple over the 40 MB closure, and this recipe — the way a developer
+# gets `stage2/mojo` by hand — used to run it with no ceiling at all, then with
+# `stage` (96 GB) on the strength of a footprint probe rather than a
+# measurement. Measured, it is 1.2 GB of summed RSS for the whole tree
+# (`bootstrap-stage2-cc` in tools/suite.py's MEASURED_PEAK_GB), so the class is
+# `tiny` (4 GB) — and it MUST be the same class as the runner's
+# `bootstrap-stage2-cc` step, for the reason spelled out at `mojoc` above: the
+# runner admits that job for its class and a recipe asking for more deadlocks
+# against its own parent. `MEMLIMIT_GB=96` raises it, `MEMLIMIT_GB=0` removes
+# the wrapper.
 stage2/mojo: stage1/fire.ci $(RUNTIME_SRC) $(RUNTIME_HDR) $(CORO_RUNTIME_SRC)
 	@mkdir -p stage2
 	@echo "=== Compiling stage2/mojo from stage1/fire.ci ==="
-	$(call memslot,stage2/mojo,stage) $(BOOTSTRAP_CC) $(BOOTSTRAP_OPT) -fgimple -ftrivial-auto-var-init=zero -I runtime \
+	$(call memslot,stage2/mojo,tiny) $(BOOTSTRAP_CC) $(BOOTSTRAP_OPT) -fgimple -ftrivial-auto-var-init=zero -I runtime \
 	    $(BIG_STACK_LDFLAGS) \
 	    -o stage2/mojo \
 	    -x c stage1/fire.ci \
@@ -448,11 +469,11 @@ stage2/mojo: stage1/fire.ci $(RUNTIME_SRC) $(RUNTIME_HDR) $(CORO_RUNTIME_SRC)
 FORCE:
 
 fire.ci: $(MOJO_MAIN) FORCE
-	$(call memslot,fire.ci,program) env PYTHONPATH=. $(PYTHON) fire.py --dump-full $(MOJO_MAIN) 2>/dev/null
+	$(call memslot,fire.ci,tiny) env PYTHONPATH=. $(PYTHON) fire.py --dump-full $(MOJO_MAIN) 2>/dev/null
 
 build/system.o: fire.ci
 	@mkdir -p build
-	$(call memslot,build/system.o,stage) $(BOOTSTRAP_CC) -fgimple -I runtime -c -o $@ -x c fire.ci
+	$(call memslot,build/system.o,tiny) $(BOOTSTRAP_CC) -fgimple -I runtime -c -o $@ -x c fire.ci
 
 build/fire_runtime.o: $(RUNTIME_SRC) $(RUNTIME_HDR)
 	$(BOOTSTRAP_CC) -I runtime -c -o $@ $(RUNTIME_SRC)
