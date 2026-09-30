@@ -429,18 +429,68 @@ def _struct_value_codes(fmt: str | None):
     ('4h' -> ['h','h','h','h'], 'x' padding dropped, '10s' -> ['s']), or
     None if the format isn't statically known. Used to pick the right
     MojoList append (int vs double vs bytes-pointer) per argument and the
-    element type of an unpack result."""
+    element type of an unpack result.
 
-    # A THIN DELEGATE. The format grammar has exactly ONE implementation,
-    # `_struct_format_codes` above; this name survives as the spelling the
-    # lowering and the static type estimator already use.
-    #
-    # This body used to carry its own copy of the parser loop. The merge with
-    # integ put that copy here beside the canonical one, so `types.py` held
-    # TWO format parsers that could disagree -- exactly the parallel
-    # implementation this tree's rules forbid, and a silent-wrong-output risk
-    # if a future edit fixed one and not the other.
-    return _struct_format_codes(fmt)
+    THE single implementation of the struct-format grammar. Mirrors the
+    runtime's own format compiler (runtime/fire_runtime.c's
+    mojo_struct_compile) code for code, so a codegen answer and a runtime
+    answer cannot disagree; the runtime is the one that has to be right when
+    they do, which is why its per-slot kinds are the ones recorded on the
+    value (mojo_list_set_kinds) and this table is only ever used to decide
+    statically.
+
+    WHY THE BODY LIVES HERE AND NOT IN A DELEGATE. Merging integ (which
+    introduced `_struct_format_codes` as the canonical name) with metal
+    (which had relocated these three helpers into this module) briefly left
+    TWO copies of the parser. Collapsing the duplicate by making THIS name a
+    tail-call delegate to `_struct_format_codes` compiles standalone but
+    breaks the whole-closure `mojoc`/`selfhost` build with
+
+        resolve_shared.py:98: error: assignment to 'int64_t' from 'MojoList *'
+        makes integer from pointer without a cast [-Wint-conversion]
+
+    on `codes = _struct_value_codes(gen._try_const_fold_str(fmt_node))`.
+    The self-hosted return-type inference reads a list LITERAL (`codes = []`
+    below) as direct evidence that the result is a `MojoList *`; a function
+    whose only `return` is a call to another function gives it nothing local
+    to read, the local falls back to the int64_t default, and the assignment
+    then mismatches. So the inference needs the `codes = []` to be in the
+    function whose own return type is being decided -- which is why the
+    duplicate was collapsed in THIS direction rather than the other.
+    `_struct_format_codes` below delegates here, keeping both spellings
+    working for their existing callers (`types.py` internally, and
+    `emit_methods.py`'s shim).
+    """
+    if not isinstance(fmt, str):
+        return None
+    codes = []
+    i, n = 0, len(fmt)
+    if i < n and fmt[i] in '<>=!@':
+        i += 1
+    while i < n:
+        c = fmt[i]
+        if c in ' \t\n':
+            i += 1
+            continue
+        count = None
+        if c.isdigit():
+            count = 0
+            while i < n and fmt[i].isdigit():
+                count = count * 10 + int(fmt[i]); i += 1
+            if i >= n:
+                return None
+            c = fmt[i]
+        i += 1
+        if c not in 'xbBhHiIlLqQfds?c':
+            return None
+        if c in 'sc':
+            codes.append('s')
+        elif c == 'x':
+            continue
+        else:
+            codes.extend([c] * (1 if count is None else count))
+    return codes
+
 
 def _struct_slot_kinds(codes):
     """Per-slot element kind for an unpack format: one of 'int'/'double'/
@@ -596,45 +646,15 @@ def _class_attr_ctype(v) -> str | None:
 def _struct_format_codes(fmt):
     """The per-VALUE format codes of a const-foldable struct format string
     ('4h' -> ['h','h','h','h'], 'x' padding dropped, '10s' -> ['s']), or
-    None if the format isn't statically known. Mirrors the runtime's own
-    format compiler (runtime/fire_runtime.c's mojo_struct_compile) code for
-    code, so a codegen answer and a runtime answer cannot disagree; the
-    runtime is the one that has to be right when they do, which is why its
-    per-slot kinds are the ones recorded on the value
-    (mojo_list_set_kinds) and this table is only ever used to decide
-    statically. Lives here, beside `_struct_ctor_format`, so the
-    struct-format knowledge the low-level middle tier and the backend share
-    has ONE definition."""
-    if not isinstance(fmt, str):
-        return None
-    codes = []
-    i, n = 0, len(fmt)
-    if i < n and fmt[i] in '<>=!@':
-        i += 1
-    while i < n:
-        c = fmt[i]
-        if c in ' \t\n':
-            i += 1
-            continue
-        count = None
-        if c.isdigit():
-            count = 0
-            while i < n and fmt[i].isdigit():
-                count = count * 10 + int(fmt[i]); i += 1
-            if i >= n:
-                return None
-            c = fmt[i]
-        i += 1
-        if c not in 'xbBhHiIlLqQfds?c':
-            return None
-        if c in 'sc':
-            codes.append('s')
-        elif c == 'x':
-            continue
-        else:
-            codes.extend([c] * (1 if count is None else count))
-    return codes
+    None if the format isn't statically known.
 
+    A THIN DELEGATE to `_struct_value_codes` beside it, which holds the one
+    implementation of the grammar. This is the spelling
+    `mojo/backend_gimple/emit_methods.py`'s shim uses; kept so the merge with
+    integ need not touch its call sites, and so the grammar cannot come to
+    exist in two places. See `_struct_value_codes` for why the implementation
+    sits there rather than here."""
+    return _struct_value_codes(fmt)
 
 def _struct_format_is_mixed(fmt) -> bool:
     """True when a const-foldable struct format has values of more than one
