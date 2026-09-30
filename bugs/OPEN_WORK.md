@@ -26,6 +26,7 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 | `FORMAL_string_value_model.md` | what a string IS on the formal path, `len`/`==`/`+` on it, and the `String`-struct collision behind the 16 "a String receiver" refusals |
 | `FORMAL_arm64_instruction_coverage.md`, `FORMAL_arm64_known_proof_gaps.md`, `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` | arm64 work — not duplicated here |
 | `FORMAL_frame_receiver_handoff.md` | who can take a frame address: the cross-module method hand-off (a binding bug, fixed), `Pointer(to=frame)` (an unjustified refusal, fixed), whether the frame layout and the struct's C layout coincide (measured: they do, for 8-byte fields), and the three refusals that named a cause which was not operating |
+| `FORMAL_lean_verdict_cache_publishes_a_timeout.md` | a `lean` wall-clock timeout is published to the proof-verdict CAS as `fail`, so one slow run on a busy box is replayed forever as the proof's verdict — `formal-dylib` is red from it |
 
 ---
 
@@ -101,6 +102,20 @@ failure. Needs induction over the back edge.
 ProofLib breaks every x86-64 proof, and the resulting error names a file the
 x86-64 side never touched. Purely a build-hygiene fix and it removes a
 recurring misdiagnosis.
+
+### A6. A Lean timeout is cached as a proof verdict — **high, cheap, and it is
+red in `check` right now**
+
+`formal/lean.py`'s `_run_lean` returns `False, "lean timed out"` on
+`TimeoutExpired`, and `proof_census` publishes that to the content-addressed
+verdict cache under a key that covers the proof bytes and the `.olean` digests
+but not the machine. So a 1200 s timeout on a loaded box becomes a durable
+`fail` that every later run on every worktree replays — measured: four poisoned
+`.leanverdict` records, the newest 2026-09-29, and `formal-dylib` red with
+`lean timed out` after 0.3 s. `checked_run.py` re-runs a recorded failure, but
+the poison is one layer below it. Full evidence and the fix shape (a third
+"unmeasured" state, which `library_census` already has) in
+`FORMAL_lean_verdict_cache_publishes_a_timeout.md`.
 
 ---
 
