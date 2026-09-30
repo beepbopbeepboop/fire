@@ -30,6 +30,7 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 | `FORMAL_string_value_model.md` | what a string IS on the formal path, `len`/`==`/`+` on it, and the `String`-struct collision behind the 16 "a String receiver" refusals |
 | `FORMAL_arm64_instruction_coverage.md`, `FORMAL_arm64_known_proof_gaps.md`, `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` | arm64 work — not duplicated here |
 | `FORMAL_frame_receiver_handoff.md` | who can take a frame address: the cross-module method hand-off (a binding bug, fixed), `Pointer(to=frame)` (an unjustified refusal, fixed), whether the frame layout and the struct's C layout coincide (measured: they do, for 8-byte fields), and the three refusals that named a cause which was not operating |
+| `FORMAL_x86_64_comptime_specialization_abi.md` | x86-64 refuses `f[T](x)` and the refusal is LOAD-BEARING (its callee reserves a register per comptime parameter and its call site passes none): three lines to port, and until they land the receiver-position family's construct lowers on arm64 only |
 
 ---
 
