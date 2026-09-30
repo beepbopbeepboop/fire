@@ -1280,12 +1280,13 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
 # behind it paid for the answer too.
 #
 # What it was, and what it is now, and nothing else changes: still registered,
-# still in the `native` and `gate` buckets, still carrying its measured peak
-# (MEASURED_PEAK_GB, 20.5 GB) and the class the ratchet assigns that peak
-# (memwhy, `program`) so that the day it is turned back on the numbers are
-# already sized; not run, so no process, no ceiling, no reservation, no wall
-# time. `reserved_gb` returns 0 for it, which is the mechanism, and
-# `tools/suite.py --dry-run native` prints the 0.
+# still in the `native` and `gate` buckets, still `excl`, still carrying its
+# measured peak (MEASURED_PEAK_GB, 20.5 GB) and the class the ratchet assigns
+# that peak (memwhy, `program`) so that the day it is turned back on the
+# numbers are already sized and the artifact is still protected; not run, so no
+# process, no ceiling, no reservation, no wall time. `reserved_gb` returns 0
+# for it, which is the mechanism, and `tools/suite.py --dry-run native` prints
+# the 0.
 #
 # The bug doc IS the switch: bugs/CODEGEN_ab_native_fails.md is what the test
 # is waiting on, the repo's rule is that a fixed bug's doc is DELETED, and
@@ -2593,13 +2594,13 @@ _TAG = {PASS: 'ok', FAIL: 'FAIL', SKIP: 'skip', RESOURCE: 'RESOURCE',
 # ── Disabled tests: registered, not run, and the bug doc is the switch ───────
 # `expect=` above says "this test is known to fail"; it still RUNS it, every
 # gate, to find out. That is the right trade for a cheap test and the wrong one
-# for an expensive one. `ab-native` measured a 20.5 GB peak and reserves the
-# `program` class — 55 of a 96 GB machine-wide budget — to be exclusive in the
-# run while it does it, and it was registered `expect=` on top of a
-# `MOJO_UNSUPPORTED`-class divergence nobody was going to fix that day. So every
-# gate paid 20 GB and minutes to be told the thing its own marker already said,
-# and the jobs queued behind it paid for that too. A known failure must not be
-# run at insane cost.
+# for an expensive one. `ab-native` measured a 20.5 GB peak, held the `program`
+# class — 55 of a 96 GB machine-wide budget — and was exclusive in the run while
+# it did it, and it was registered `expect=` on top of a byte-parity divergence
+# (30/30 identical on 2026-09-21, red since) that nobody was going to fix that
+# day. So every gate paid 20 GB and minutes to be told the thing its own marker
+# already said, and the jobs queued behind it paid for that too. A known failure
+# must not be run at insane cost.
 #
 # `disabled='bugs/<doc>.md'` is the other half of that sentence: the test is
 # REGISTERED (so it is in `--list`, in the plan, in the buckets, and in the
@@ -2619,12 +2620,13 @@ _TAG = {PASS: 'ok', FAIL: 'FAIL', SKIP: 'skip', RESOURCE: 'RESOURCE',
 #
 # A dependency of a disabled test is NOT skipped by it, deliberately. A
 # disabled test produced no verdict, so there is nothing to propagate and
-# nothing to forgive: a dependent that waited for one would wait for a verdict
-# that is never coming, which is the "dependency not selected" hang. It runs
-# on its own merits. The case where that is wrong — a dependent that needs an
-# artifact only a disabled step builds — is a registration error, not a
-# scheduling one, and no such case exists in the registry (the one disabled
-# job, `ab-native`, is a leaf that nothing depends on).
+# nothing to forgive: a dependent that treated DISABLED as a failure would be
+# skipped behind a verdict that is never coming, which is how a decision about
+# one test silently stops work that has nothing to do with it. It runs on its
+# own merits. The case where that is wrong — a dependent that needs an artifact
+# only a disabled step builds — is a registration error, not a scheduling one,
+# and no such case exists in the registry (the one disabled job, `ab-native`,
+# is a leaf that nothing depends on).
 def is_disabled(spec) -> bool:
     """Is this spec registered but not to be run? One definition, read by the
     planner, the ledger, `--list`, `--dry-run` and the estate check, so "is it
@@ -2652,6 +2654,15 @@ def disabled_reason(spec) -> str:
 # lets the estate check in test_suite.py exercise both answers without needing a
 # deleted file to exist on disk. Everything else is a pure function of the
 # registry and a directory.
+#
+# Memoised because the check runs at import, and a repo whose history is long
+# makes `git log -- <path>` a real walk: N disabled jobs would otherwise be N
+# walks on every invocation of the runner, including `--list`. A miss is not
+# re-asked within a process either way, since the answer cannot change while it
+# is running.
+_DOC_HISTORY: dict[tuple[str, str], 'bool | None'] = {}
+
+
 def _doc_in_git_history(path, root) -> bool | None:
     """Did `path` ever exist in this repository's history? None if unknowable.
 
@@ -2659,14 +2670,17 @@ def _doc_in_git_history(path, root) -> bool | None:
     not a fail: the caller reports the weaker message, because "the doc is
     gone" is the finding either way and the typo reading is a refinement of it.
     """
-    try:
-        p = subprocess.run(['git', 'log', '--format=%H', '--', path],
-                           cwd=root, capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if p.returncode != 0:
-        return None
-    return bool(p.stdout.strip())
+    key = (root, path)
+    if key not in _DOC_HISTORY:
+        try:
+            p = subprocess.run(['git', 'log', '--format=%H', '--', path],
+                               cwd=root, capture_output=True, text=True,
+                               timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            p = None
+        _DOC_HISTORY[key] = None if p is None or p.returncode != 0 \
+            else bool(p.stdout.strip())
+    return _DOC_HISTORY[key]
 
 
 def disabled_problems(registry=None, root=None, existed=None) -> list[str]:
