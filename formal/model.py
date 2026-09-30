@@ -5358,9 +5358,9 @@ def dylib_aliased_export(by_name: dict, by_module: dict, callee: str,
                          aliases: dict):
     """The export a bare callee reaches THROUGH an import alias, or None.
 
-    `aliases` is `formal/imports.py`'s `import_bindings` table: `{local name:
-    (module as spelled, defining name)}`, so `from os.path import exists as
-    pe` is `{"pe": ("os.path", "exists")}`.
+    `aliases` is `formal/imports.py`'s `imported_bindings` table, keyed by the
+    local name and valued by `(module as spelled, defining name)`, so
+    `from os.path import exists as pe` is `{"pe": ("os.path", "exists")}`.
 
     Two questions, and they are asked in this order because the second is the
     weaker one:
@@ -9508,6 +9508,11 @@ def import_bindings(stmt) -> list:
     `n.f` and reaches `f` of the module, which is `dylib_export_lookup`'s
     question and not this one's. `import a.b` binds `a`, which is why the
     bound name is the FIRST dotted component.
+
+    One STATEMENT, and a list. `formal/imports.py`'s `imported_bindings` is the
+    per-FILE table built by folding this over a module's top level, and the two
+    are named apart because a reader inside that one calls this one and the
+    return shapes are a list of triples and a dict of pairs.
     """
     kind = type(stmt).__name__
     if kind == "ImportStmt":

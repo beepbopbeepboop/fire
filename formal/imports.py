@@ -350,7 +350,7 @@ def imported_modules(stmts) -> list:
     return out
 
 
-def import_bindings(stmts) -> dict:
+def imported_bindings(stmts) -> dict:
     """`{local name: (module as spelled, defining name)}` for this file.
 
     THE missing half of `imported_modules`. That function answers "which
@@ -359,7 +359,15 @@ def import_bindings(stmts) -> dict:
     answer for `from m import f` and `from m import f as g`. This one answers
     "which name in THIS file means which export of which module", which is the
     question a call site asks, and the two are different questions about the
-    same statements.
+    same statements. The names are parallel on purpose: one is which MODULES,
+    this is which NAMES.
+
+    NOT `model.import_bindings`, which is the per-STATEMENT reader this one
+    folds — `(bound, module, defined)` triples for one `import` line, a list
+    rather than a table, and a function of one statement rather than of a
+    file's. They were the same name for a while, which is one letter apart and
+    two different return shapes, and a reader inside this very body could have
+    swapped them without the type checker saying anything.
 
     It exists because the answer was being reconstructed at the call site, from
     a name that could not carry it. `ARM64Codegen._extern_symbol` looks a bare

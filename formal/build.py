@@ -714,7 +714,7 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
     what says whether a call's result is a string). See
     `model.dylib_export_lookup`.
 
-    `import_aliases` is `formal/imports.py`'s `import_bindings` table: the
+    `import_aliases` is `formal/imports.py`'s `imported_bindings` table: the
     local name `from m import f as g` binds, and where it came from. Without
     it the emitters can only look a bare callee up by its DEFINING name, so `g`
     found nothing and the image bound a symbol no library defines. See
@@ -832,7 +832,7 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     point, so the second pass has to be emitted for the offset the *same*
     dylib list implies.
 
-    `import_aliases` is `formal/imports.py`'s `import_bindings` table, passed
+    `import_aliases` is `formal/imports.py`'s `imported_bindings` table, passed
     straight through to the codegen: a call site spells the name AS WRITTEN, so
     `from m import f as g` has to reach `f`'s export rather than miss the flat
     map and bind `g`.
@@ -967,9 +967,9 @@ def _import_aliases(stmts: list) -> dict:
     emitters — a call site spells the name AS WRITTEN, so `from m import f as g`
     needs the mapping from `g` back to `m`'s `f` and no amount of looking up the
     bare name in the libraries' export tables can produce it. See
-    `formal/imports.py`'s `import_bindings`."""
-    from formal.imports import import_bindings
-    return import_bindings(stmts)
+    `formal/imports.py`'s `imported_bindings`."""
+    from formal.imports import imported_bindings
+    return imported_bindings(stmts)
 
 
 def _external_declarations(linked: list) -> dict:
