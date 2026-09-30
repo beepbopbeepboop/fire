@@ -10142,23 +10142,13 @@ def method_owner_names(structs: list) -> dict:
 # below is that statement list, read once, published, and consulted by both
 # backends' local collection.
 #
-# WHY A GLOBAL IS FOLDED RATHER THAN STORED. A global needs storage with
-# STATIC STORAGE DURATION — a location that outlives every frame. This path has
-# no such location: every value a formal program can name lives in a function's
-# own stack scratch (`_SCRATCH`, the receiver frames and the list/dict blobs
-# that share it), and that scratch is reclaimed when the function returns. This
-# is the same lifetime argument that makes a frame address in a field a
-# use-after-free, and it is why there is no `__DATA` block to put a mutable
-# global in.
+# WHY A GLOBAL IS FOLDED RATHER THAN STORED, AND WHEN IT IS STORED. A global
+# that is only ever READ needs no storage, because nothing ever stores it:
 #
-# But "no storage" is not the same answer for every global, and the difference
-# is the whole of the design. A module-level name that the build can FOLD to a
-# value needs no storage, because nothing ever stores it:
-#
-#   * a function body cannot change it. `G = 7` inside a function binds a LOCAL
-#     `G` in Python and in Mojo, and a local shadows the module's — so a
-#     function that writes the name never writes the global, and a function
-#     that does not is reading the one value the module-level sequence gave it;
+#   * a function body that assigns the name binds a LOCAL `G` (in Python and in
+#     Mojo), and a local shadows the module's — so a function that writes `G`
+#     never writes the global, and one that does not is reading the one value
+#     the module-level sequence gave it;
 #   * the module-level sequence is the only writer, and the build walks it in
 #     order, so the build knows the final value;
 #   * a folded value has no free names, so it is the same at every read site in
@@ -10166,11 +10156,32 @@ def method_owner_names(structs: list) -> dict:
 #     `literal_default_word`/`class_constant_word` already rely on for a
 #     class-level constant on this path.
 #
-# So a folded module constant is SUBSTITUTED at every read site — not cached,
-# not materialized, substituted — and a module-level name the build cannot fold
-# is a real mutable-or-computed global with nowhere to live, and is REFUSED BY
-# NAME. That is the two-way answer, and it is decided by the table rather than
-# by a guess that a name "looks local".
+# So a READ-ONLY module constant is SUBSTITUTED at every read site — not
+# cached, not materialized, substituted.
+#
+# THE OTHER HALF, WHICH THE ORIGINAL NOTE SAID DID NOT EXIST: `global NAME`
+# inside a function body is a statement this path used to treat as a no-op, so
+# the following `NAME = ...` bound a LOCAL and the write was lost. That is a
+# SILENT WRONG ANSWER, and it is measurable: `G = 5` at module level with
+# `def bump(): global G; G = G + 1` printed `G=5` where CPython prints `G=7`
+# (measured on this tree, 2026-09-29) — the read was the substituted 5 and the
+# write went into a register nothing else names.
+#
+# A name that a function WRITES needs storage with STATIC STORAGE DURATION — a
+# location that outlives every frame, because the writer and the reader are
+# different functions and only one of them is on the stack at a time. So the
+# image carries a `__DATA` segment with one 8-byte slot per such name, the
+# module-level sequence's final value is the slot's static initializer, a read
+# is a load from the slot and a write is a store to it. That is the same
+# two-way answer as before, with the second half stated: FOLD when the name is
+# read-only, STORE when some function writes it.
+#
+# What storage does NOT buy, and this is the boundary the rest of this section
+# is about: a frame address still outlives nothing, so a global may not hold a
+# pointer into a frame. A module-level CONTAINER is fine (its blob is built
+# once, before any function runs, and goes in `__DATA` beside the slots); a
+# container BUILT INSIDE A FUNCTION and stored into a global is a use-after-free
+# and is refused by `global_value_refusal` below.
 
 
 class GlobalSymbol:
@@ -10863,6 +10874,505 @@ def module_global_refusal(name: str, sym, fn_name: str) -> str:
             f"the program runs. Make the module-level binding a literal (or "
             f"literal-only arithmetic on literals), or move the computation "
             f"into a function and pass the result in")
+
+
+# ── MODULE-GLOBAL STORAGE: the `__DATA` slots ─────────────────────────────
+#
+# A module-level name that some function WRITES (via `global NAME`) needs a
+# location that outlives every frame, because the writer and the reader are
+# different functions and only one of them is on the stack at a time. That
+# location is a `__DATA` slot: eight bytes, one per written name, carrying the
+# module-level sequence's final value as its static initializer.
+#
+# Everything about the LAYOUT is here rather than in either backend, for the
+# reason the rest of this file exists: the two architectures must not be able to
+# disagree about WHICH names have a slot or WHERE one is, because the bytes the
+# linker writes into `__DATA` and the address a backend loads from are two halves
+# of one fact. A backend that computed the offset itself would agree with the
+# linker only by coincidence — the class of bug this file was written to stop
+# (arm64 reading X19 where x86-64 read 0, for one program and one name).
+#
+# ONE WORD PER SLOT, and that is the value model rather than a simplification.
+# A formal value is one 64-bit word, so a slot is one word: an int, a bool, or a
+# pointer to a container blob that ALSO lives in `__DATA`. What it cannot hold
+# is a pointer into a frame, because a frame is reclaimed when its function
+# returns — which is why `collect_global_slots` accepts a module-level container
+# literal (its blob is built once, statically, and has the lifetime a global
+# needs) and `global_value_refusal` is where a value that does not fit is said.
+
+
+GLOBAL_SLOT_BYTES = 8
+"""Bytes per module-global slot. One word, because a formal value is one word.
+
+Not 4 and not 16: the value model decides it, and the value model is also why a
+container global needs a BLOB beside the slot rather than more words here."""
+
+
+class GlobalSlot:
+    """One module-level name's `__DATA` slot.
+
+    `index` is the slot's ordinal in the image's slot table. The linker places it
+    at `GLOBAL_SLOT_BYTES * index` into `__DATA` and a backend loads from that
+    same address, so the two agree by construction rather than by both being
+    right — `build_data_image` below is where the offset becomes bytes, and both
+    sides read their number from here.
+
+    `init` is the static initializer, one of
+
+      * `("int", n)`    — a literal integer, already a signed 64-bit word
+      * `("blob", w)`   — the address of a container blob `w`, also in `__DATA`
+      * `("str", text)` — the address of NUL-terminated `text`, also in `__DATA`
+      * `("unknown", _)`— no initializer the build can compute; see below
+
+    The two address forms carry an ADDRESS, and an address written into a data
+    segment has to be REBASED by the dynamic linker, because the image is mapped
+    at a slide: measured on this tree, the same string label is linked at
+    0x100000398 and runs at 0x104da4398. `build_data_image` returns the fixup
+    list beside the bytes so each linker emits a relocation for exactly the
+    address words and not for the integers beside them.
+    """
+
+    __slots__ = ("name", "index", "init", "site")
+
+    def __init__(self, name: str, index: int, init, site=None):
+        self.name = name
+        self.index = index
+        self.init = init
+        self.site = site
+
+    @property
+    def is_address(self) -> bool:
+        """True when this slot's initializer is an ADDRESS, not a value.
+
+        The one question the linker asks about a slot, and asking it here is
+        what keeps the two containers from disagreeing: Mach-O answers it with a
+        dyld rebase opcode and ELF with an `R_X86_64_RELATIVE`, and both are
+        correct only for the words this property selects."""
+        return self.init[0] in ("blob", "str")
+
+    def __repr__(self):
+        return (f"GlobalSlot({self.name!r}, index={self.index}, "
+                f"init={self.init!r})")
+
+
+class GlobalDataImage:
+    """The whole data image for one unit, plus where its fixups go.
+
+    `blob` is the bytes, laid out slot-first, then the container blobs and string
+    bytes the address-valued slots point at, and `fixups` is `[(offset, target)]`
+    — for each address-valued slot word, the offset WITHIN `blob` of the thing it
+    points at. Both are expressed as OFFSETS rather than addresses precisely
+    because the linker knows the segment's base address and the backend does not
+    need it: one number, added to a base each side already has, instead of two
+    independently-computed absolutes that can disagree.
+
+    `init_flag_offset` is the word that says "this unit's globals have been
+    filled in", and it is PART of the image rather than a module-level name: it is
+    the backend's own bookkeeping, it has no source spelling a program could
+    collide with, and it has to exist in a dylib as much as in an executable.
+    See `initialization_is_lazy` for why the filling is deferred at all."""
+
+    __slots__ = ("blob", "fixups", "init_flag_offset")
+
+    def __init__(self, blob: bytes, fixups: list, init_flag_offset: int = 0):
+        self.blob = blob
+        self.fixups = fixups
+        self.init_flag_offset = init_flag_offset
+
+    def __len__(self):
+        return len(self.blob)
+
+    def __bool__(self):
+        return bool(self.blob)
+
+
+# WHY THE INITIALIZER IS LAZY, and why it is not the startup stub.
+#
+# The obvious place to fill an address-valued slot is the executable's startup
+# stub, which runs before `main` and is free to emit as much setup as it likes.
+# That works — it is the first thing this did, and it is verified — but it does
+# not work for a DYLIB, and a dylib is half of where module state lives: a
+# module compiled into a library has `emit_startup=False` precisely because a
+# library has no entry point, so a stub that runs once per process does not
+# exist for it to run in. Two answers (a stub in one container kind, a refusal in
+# the other) is the shape this codebase treats as a bug, so there is ONE:
+# a function that touches a global checks a flag word and runs the initializer if
+# the flag is clear.
+#
+# It is correct for the reason the rest of this backend's model is correct: a
+# formal program is single-threaded (coroutines lower as plain functions, see
+# `arm64_codegen.compile`), so "check the flag, then fill" cannot interleave.
+# And it costs one load and one branch in each function that reads a global,
+# which is the same order as the access itself.
+
+
+def function_touches_globals(fn) -> bool:
+    """True when `fn` reads or writes any module global.
+
+    Asked per function, and the answer decides whether the lazy-init prologue is
+    emitted at all: a function that cannot observe a global cannot need its
+    value filled in, and paying a branch there would be a cost on every call for
+    nothing."""
+    table = module_slots()
+    if not table:
+        return False
+    for node in iter_nodes(getattr(fn, "body", None) or []):
+        if isinstance(node, F.IdentExpr) and node.name in table:
+            return True
+    return False
+
+
+def functions_writing_globals(functions) -> dict:
+    """`{name: [functions that write it]}` for every `global NAME` in the module.
+
+    The DECLARATION is what makes a write a write: a function body that assigns
+    a name it has not declared global binds a LOCAL of that name, which shadows
+    the module's — the rule the folding path above already depends on. So this
+    reads `GlobalStmt` and not the assignment targets, and the difference is the
+    whole of the answer. A module with `G = 5` and a function that assigns `G`
+    locally is a READ-ONLY global and is still folded; the same module with
+    `global G` above that assignment has a real slot.
+
+    The whole body is walked rather than the top-level statements because
+    `global G` inside an `if` is still a declaration for the rest of the
+    function, and a `try` around the declaration is not a reason to call the
+    name local. Mojo's own rule is the same: `global` is a compile-time
+    declaration of the name's scope, not a runtime statement."""
+    out = {}
+    for fn in (functions or []):
+        for node in iter_nodes(getattr(fn, "body", None) or []):
+            if not isinstance(node, F.GlobalStmt):
+                continue
+            for name in (node.names or []):
+                out.setdefault(name, []).append(fn)
+    return out
+
+
+def global_names_bound_in(fn) -> set:
+    """The names `fn` declares `global`, which are therefore NOT its locals.
+
+    Read by both backends' local collection. A `global G` name must not be given
+    a register or a spill slot in the declaring function: the register would be
+    a SECOND home for a word that already has one in `__DATA`, and the read would
+    pick whichever the emitter consulted first. That is not a theoretical
+    disagreement — it is the exact shape of the X19/zero fall-through this file
+    exists to prevent, reintroduced through the allocator instead of the
+    emitter."""
+    return {n for n in functions_writing_globals([fn])} or set()
+
+
+def collect_global_slots(stmts: list, functions: list) -> dict:
+    """`{name: GlobalSlot}` for every module-level name that needs STORAGE.
+
+    The question is one — "can the build FOLD this name?" — with two answers,
+    and the storage table is what serves the "no" for both of them:
+
+      * **a function WRITES it.** `global G; G = G + 1` changes G's value while
+        the program runs, so there is no one value to substitute at the reads.
+        This is the case the folding path was already correct to refuse, and it
+        was refused by NAME rather than by a mechanism. Measured before this
+        existed: `G = 5` with `bump()` called twice printed `G=5` where CPython
+        prints `G=7` — a silently wrong answer, because the read was the folded
+        5 and the write went into a register nothing else named.
+      * **its value is a CONTAINER literal.** `[1,2,3]` is not a value the
+        substitution path can express at all — there is no literal to put at the
+        read — but it IS static data: the blob is a flat run of words whose first
+        word is the count, so the linker can place it in `__DATA` and the slot
+        can hold its address. `NUMS = [10,20,30]` read from a function is the
+        case `bugs/FORMAL_module_state_no_storage.md` §1 measured as the first
+        one, and it builds and runs correctly now.
+
+    Anything else is still folded and still needs no storage: an int, a bool or a
+    string whose value is a literal, with nothing writing it. A name in NEITHER
+    set is not in the table, and `module_global_refusal` is what says why.
+
+    Reads the module's own statement list for the INITIALIZER and the function
+    bodies for the WRITES, because the two live in different places: the value is
+    stated once, at module level, and the writes are stated inside the bodies.
+
+    ORDER is the order the names are first declared at module level, so the
+    layout is a function of the source rather than of dictionary iteration and
+    two builds of the same file produce the same image."""
+    written = functions_writing_globals(functions)
+    finals: dict = {}
+    order: list = []
+    for stmt in (stmts or []):
+        if isinstance(stmt, (F.ImportStmt, F.FromImportStmt)):
+            continue
+        name = _module_binding_name(stmt)
+        if name is None:
+            continue
+        value = getattr(stmt, "value", None)
+        if name not in written and not _is_container_literal(value):
+            continue
+        if name not in finals:
+            order.append(name)
+        finals[name] = stmt
+    slots = {}
+    for index, name in enumerate(order):
+        stmt = finals[name]
+        slots[name] = GlobalSlot(name, index, _static_initializer(
+            getattr(stmt, "value", None)), site=stmt)
+    return slots
+
+
+def _is_container_literal(value) -> bool:
+    """True for a container literal, which is a blob rather than a foldable value.
+
+    A `dict` counts: its blob is `[npairs][k0][v0]…`, the same flat-word shape a
+    list's is (`arm64_codegen._emit_dict`), so it is storage-shaped too. Whether
+    this particular literal's ELEMENTS are static is a separate question, asked
+    by `_static_container_words` — this only asks whether the shape is one a
+    `__DATA` slot can point at."""
+    return isinstance(value, (F.ListExpr, F.TupleExpr, F.SetExpr, F.DictExpr))
+
+
+def _static_initializer(value):
+    """The `init` tuple for a module-level binding's value, or `("unknown", _)`.
+
+    Deliberately exhaustive over what a `__DATA` word can hold and honest about
+    the rest. A value that lands on `("unknown", …)` gets a slot with no
+    initializer, and `check_module_symbols` refuses to READ it by name — because
+    a zero there would be a plausible-looking wrong number rather than a
+    refusal, and this backend's whole discipline is that the second is the
+    honest answer."""
+    blob = _static_container_words(value)
+    if blob is not None:
+        return ("blob", blob)
+    if isinstance(value, F.StringLiteral) and not getattr(value, "is_bytes", 0):
+        return ("str", value.value)
+    if isinstance(value, F.BoolLiteral):
+        return ("int", 1 if value.value else 0)
+    if isinstance(value, F.IntLiteral):
+        n = _int_literal_value(value)
+        if n is not None:
+            return ("int", n)
+    if isinstance(value, F.UnaryOp) and value.op in ("-", "+"):
+        n = _static_word(value.operand)
+        if n is not None:
+            return ("int", -n if value.op == "-" else n)
+    return ("unknown", None)
+
+
+def _int_literal_value(node):
+    """The int an `IntLiteral` carries, or None if it is not one."""
+    try:
+        return int(node.value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _static_container_words(value):
+    """The blob words a module-level container literal is, or None if not one.
+
+    A container on this path is a flat blob of 8-byte words whose FIRST word is
+    the count (`[count][e0][e1]…`; `[npairs][k0][v0]…` for a dict — see
+    `arm64_codegen._emit_list` / `_emit_dict`, and `x86_64_codegen`'s twins for
+    the same layout). So a module-level container literal whose elements are all
+    INTEGERS is a byte string the linker can place in `__DATA` directly, and the
+    slot holds its address: the blob then has STATIC STORAGE DURATION, which is
+    exactly what a frame blob does not have and exactly what a global needs.
+
+    A string ELEMENT is the one case not handled, and it is refused rather than
+    half-done: a string element is a pointer to NUL-terminated bytes, so the
+    blob would need those bytes in `__DATA` with a relocation per element. That
+    is a real extension and it is recorded as one — with the failing program and
+    the next step — in `bugs/FORMAL_module_global_string_elements.md`, rather
+    than smuggled in here where it would be a SECOND answer to "what is a word",
+    the question this file exists to keep single."""
+    if not isinstance(value, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return None
+    elements = list(value.elements or [])
+    words = [len(elements)]
+    for el in elements:
+        n = _static_word(el)
+        if n is None:
+            return None
+        words.append(n)
+    return words
+
+
+def _static_word(node):
+    """The integer a container ELEMENT (or a unary sign of one) is, else None."""
+    if isinstance(node, F.BoolLiteral):
+        return 1 if node.value else 0
+    if isinstance(node, F.IntLiteral):
+        return _int_literal_value(node)
+    if isinstance(node, F.UnaryOp) and node.op in ("-", "+"):
+        n = _static_word(node.operand)
+        return None if n is None else (-n if node.op == "-" else n)
+    return None
+
+
+def static_initializer_refusal_reason(slot) -> str:
+    """Why this slot has no initializer the build can compute, or None.
+
+    A slot can always EXIST — the storage is the easy half — but a slot with no
+    initializer would read as zero, and zero is a plausible-looking wrong answer
+    rather than a refusal. So this names which of the two shapes landed on
+    `("unknown", …)`, because the two have different repairs."""
+    if slot is None or slot.init[0] != "unknown":
+        return None
+    node = getattr(slot.site, "value", None)
+    if isinstance(node, (F.DictExpr, F.SetExpr)) and _container_has_string(node):
+        return "string_element"
+    if isinstance(node, F.CallExpr):
+        return "computed"
+    if isinstance(node, (F.ListExpr, F.TupleExpr, F.SetExpr)):
+        return "string_element"
+    if isinstance(node, (F.ImportStmt, F.FromImportStmt)):
+        return "imported"
+    return "unknown"
+
+
+def _container_has_string(node) -> bool:
+    """True when any element/pair of a container literal is a string.
+
+    A dict is a different shape from a list (pairs, not elements) and asking one
+    accessor for the other is a silent wrong answer, so each is read with its
+    own."""
+    if isinstance(node, F.DictExpr):
+        items = [x for pair in (node.pairs or []) for x in pair if x is not None]
+    else:
+        items = list(getattr(node, "elements", None) or [])
+    return any(isinstance(x, F.StringLiteral) and
+               not getattr(x, "is_bytes", 0) for x in items)
+
+
+def global_value_refusal(name: str, fn_name: str, why: str) -> str:
+    """The refusal for a module-level value this path cannot give an initializer.
+
+    Reached only for a name that HAS a `__DATA` slot — so the message says the
+    storage is there, because that is the fact that changed and the fact a reader
+    needs. The previous wording claimed every module-level name had nowhere to
+    live, which was true of none of them: `G = 5` with `global G` in one function
+    now has exactly the storage it needs, and a reader sent to look for a data
+    section that already exists would not find the thing that actually blocks
+    their program."""
+    who = f"{fn_name}: " if fn_name else ""
+    detail = {
+        "string_element": (
+            "a container element is a string, and a string is a pointer to "
+            "NUL-terminated bytes, so the blob would need those bytes in "
+            "`__DATA` with a relocation per element. The container itself is "
+            "stored; only the string inside it is not — "
+            "bugs/FORMAL_module_global_string_elements.md"),
+        "computed": (
+            "its module-level value is computed by a call, and a call's result "
+            "is not known before the program runs. The storage is there and is "
+            "the right storage; what is missing is the module-level sequence "
+            "that would fill it, which is a separate capability — "
+            "bugs/FORMAL_toplevel_statements_dropped.md"),
+        "imported": (
+            "the name is imported from another module, so its value lives in "
+            "that module's dylib. A slot in THIS image cannot hold it; what a "
+            "cross-module global needs is the other module's slot exported as a "
+            "symbol, which this path does not do yet — "
+            "bugs/FORMAL_module_state_no_storage.md"),
+        "unknown": (
+            "the build cannot compute it from the module-level statement, and "
+            "a value it cannot compute has no initializer to write into the "
+            "slot"),
+    }.get(why, "")
+    return (f"{who}{name!r} has storage here — it is one of the module-global "
+            f"slots in this image's `__DATA`, because a function writes it "
+            f"through `global {name}` — but that storage has no initializer: "
+            f"{detail}. A slot is eight bytes of static storage, so its value "
+            f"has to be known before the program runs; one that is not would "
+            f"read as the zero an unwritten slot gives, which is a plausible "
+            f"wrong number rather than a refusal")
+
+
+def build_data_image(table: dict, base: int) -> GlobalDataImage:
+    """The `__DATA` bytes for a slot table, and the fixups that go with them.
+
+    `base` is the address the image's data segment will be MAPPED at — the
+    Mach-O and ELF constants, which differ. It is a REQUIRED argument rather
+    than an offset-relative default, and the reason is a bug this signature is
+    shaped to make impossible: both linkers' relocation machinery ADDS the load
+    slide to whatever the file already holds (dyld's REBASE opcodes, and
+    `R_X86_64_RELATIVE`'s addend). So a slot word must contain the link-time
+    ADDRESS. An earlier version wrote the bare offset, which is off by the base
+    — and it failed as a SEGFAULT on the first read of a container global rather
+    than as anything that named the missing base, which is the worst way for it
+    to fail.
+
+    Layout, in this order and for a reason: every SLOT first, in `index` order,
+    so a backend that computes `GLOBAL_SLOT_BYTES * slot.index` addresses the
+    right word whatever else the module has; then the container blobs and string
+    bytes the address-valued slots point at, each 8-byte aligned so a blob word
+    is a word at the address the slot holds.
+
+    A slot's own word is `base + offset-of-what-it-points-at`, and the fixup
+    records where that word is so the linker can emit one relocation for it."""
+    if not table:
+        return GlobalDataImage(b"", [])
+    count = max(s.index for s in table.values()) + 1
+    # The initializer flag occupies the word immediately after the slots, so it
+    # is at a fixed offset from the slot table and both backends and the linker
+    # can name it without another table.
+    flag_offset = count * GLOBAL_SLOT_BYTES
+    blob = bytearray(flag_offset + GLOBAL_SLOT_BYTES)
+    fixups = []
+    # The trailing area starts after the flag, so a slot's address never depends
+    # on how many trailing items there are.
+    tail = bytearray()
+    for slot in sorted(table.values(), key=lambda s: s.index):
+        kind = slot.init[0]
+        at = slot.index * GLOBAL_SLOT_BYTES
+        if kind == "int":
+            blob[at:at + GLOBAL_SLOT_BYTES] = int(slot.init[1]).to_bytes(
+                GLOBAL_SLOT_BYTES, "little", signed=True)
+        elif kind in ("blob", "str"):
+            while len(tail) % GLOBAL_SLOT_BYTES:
+                tail.append(0)
+            offset = flag_offset + GLOBAL_SLOT_BYTES + len(tail)
+            if kind == "blob":
+                for w in slot.init[1]:
+                    tail.extend(int(w).to_bytes(GLOBAL_SLOT_BYTES, "little",
+                                                signed=True))
+            else:
+                tail.extend(slot.init[1].encode("utf-8") + b"\x00")
+            blob[at:at + GLOBAL_SLOT_BYTES] = (base + offset).to_bytes(
+                GLOBAL_SLOT_BYTES, "little", signed=True)
+            fixups.append((at, offset))
+        # `("unknown", …)` writes eight zero bytes, and the read is refused by
+        # name before anything can observe the zero.
+    # The flag starts CLEAR: zero means "not yet filled in".
+    return GlobalDataImage(bytes(blob) + bytes(tail), fixups, flag_offset)
+
+
+# Published for the same reason `_MODULE_SYMBOLS` is: the consumers are a
+# per-function read inside a backend and the linker, and neither has the module
+# statements in hand. `None` before a publish, and every consumer treats that as
+# "this unit has no globals", so a dylib build cannot read the executable's slots.
+_MODULE_SLOTS: dict = {}
+
+
+def publish_global_slots(table: dict) -> None:
+    """Install `table` as the current unit's `__DATA` slot table.
+
+    Replaces, never merges, for the reason `publish_module_symbols` does: two
+    units compiled in one process must not accumulate each other's slots, and a
+    merged table would silently give one module's name the other's address."""
+    global _MODULE_SLOTS
+    _MODULE_SLOTS = dict(table or {})
+
+
+def module_slots() -> dict:
+    """The published `{name: GlobalSlot}` table. Empty before a publish."""
+    return _MODULE_SLOTS
+
+
+def module_slot(name: str):
+    """The `GlobalSlot` for a written module-level `name`, or None."""
+    return _MODULE_SLOTS.get(name)
+
+
+def global_slot_bytes(table: dict, base: int) -> bytes:
+    """The whole data image as bytes. `build_data_image` is the real reader;
+    this is the same bytes for a caller that has no use for the fixup list."""
+    return build_data_image(table, base).blob
 
 
 def unresolved_name_refusal(name: str, fn_name: str, why: str) -> str:
