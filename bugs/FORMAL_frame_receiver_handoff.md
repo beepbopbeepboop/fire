@@ -1082,10 +1082,153 @@ file and produce a silently wrong image.
 | the callee name, for both bare-name spellings | `formal/model.py` `call_callee_name`, next to `incoming_args` |
 | the three readers that must agree | `formal/build.py` `_frame_receivers`, `_check_frame_escapes`, `_check_holder_agreements` |
 | the refusal that remains, and what it says | `formal/model.py` `frame_opaque_position_refusal`, new `callee_shape` |
-| the spelling, through one function | `formal/build.py` `_expr_spelling` → `_subscript_chain`; `_call_spelling` |
+| the spelling, through one function | `formal/model.py` `expr_spelling` → `subscript_chain_text`; `formal/build.py` `_expr_spelling` and `_subscript_chain` are aliases of them, and `_call_spelling` composes |
 | the cases | `test_formal_receiver_position.py` — 6 differential cases (2 labelled GUARD), 5 refusals checked on BOTH backends, 1 x86-64 ABI case |
 
 The 12 cases, and which nine fail before the change: the four differential
 construct cases were **refused**; the five refusals were refused with *different
 words* (three of them the false method sentence). The three that pass before and
 after are the two labelled GUARDs and the x86-64 ABI refusal.
+
+---
+
+# Wave 6 (F4): the second evidence source for a field's type — and the store it must not read
+
+<!-- Appended at the END of this document rather than in wave order: it was
+     written against a tree whose last wave here was 8, and renumbering the
+     waves would have renumbered every `##` section between them. Its own
+     `##` numbering continues from 22, so nothing in the file has two numbers.
+     See `bugs/OPEN_WORK.md` for the current state of each row. -->
+
+D2's rule is *a field's **declared** type, and only when every binding
+agrees*. Ten files in the repo sweep were sitting on the other half of that
+sentence, and the refusal named the gap itself:
+
+```
+interpreter.scope.define() hands the word in the slot interpreter.scope to
+Scope.define(), whose receiver is the ADDRESS of a frame of 8-byte slots …
+The declared type of 'scope' is the only thing here that could say so, and it
+does not: Interpreter: Interpreter does not declare 'scope', so nothing here
+says what the slot holds — a class that assigns its fields in __init__ and
+declares none, and a field named only by __slots__ or only by a method's read
+of self.scope, are both that shape
+```
+
+**The refusal listed the unblocking shape among its own reasons for not
+knowing.** `myinterpreter.py`'s `Interpreter.__init__` assigns
+`self.scope = Scope()`; `formal/arm64_codegen.py`'s `__init__` assigns
+`self.asm = Assembler()`. The fields exist — `struct_field_names` already
+counts a `self.<name>` read, which is why both classes measure as multi-field
+framed structs at all — and the constructor is the only place the source
+NAMES the type.
+
+## 23. `struct_field_assigned_type`, and why premise (B2) is what makes it evidence
+
+`model.struct_field_type` is the one function that combines the two sources,
+so the decision (`frame_field_type_candidates`), the placement
+(`struct_nested_frame_fields`) and the diagnostic (`field_type_disagreement`)
+read one table. Three rules, each load-bearing:
+
+* **A declaration still wins**, and not by preference. `S()` does not run
+  `__init__` on this path (`FRAME_FIELD_BLOB_PREMISE_B2`), so the word in the
+  slot is the constructor's; the declaration is the better evidence about
+  that word, and cross-checking the two would refuse correct code. Measured
+  in `assigned_type_a_declaration_still_wins`: `var in1: Inner` with
+  `self.in1 = Other()` builds and computes **128 on both architectures**,
+  which is what CPython computes for the same program with `Inner()` in the
+  `__init__`.
+* **`decls` is a gate, not a hint.** The inference names a struct only when
+  `decls` holds it, so a call to anything else cannot turn an unknown name
+  into `field_type_is_value`'s dangerous "provably a plain value" direction.
+  `self._fd_vars = set()` and `self._vkinds = self._scan_value_kinds(f)` are
+  the two shapes the sweep still reports, and both are honestly untyped.
+* **Only `__init__` is read.** A store in another method *does* execute, so it
+  is a write rather than evidence — and `struct_fields_written_outside_init`
+  already turns such a field into `_REASSIGNED`, which is the better
+  diagnosis: the type is known, what is not is WHOSE frame the slot holds.
+  `byref_refuse_assigned_field_written_by_a_method` pins that.
+
+## 24. The store the inference must not read, found by reading a type out of one
+
+`self.a, self.b = A(), B()` is the shape `tools/procrun.py` writes.  Read as
+evidence, it **built, ran, and answered 123 where the source says 128** — a
+tuple store to a *field* is refused by name on x86-64 and ACCEPTED-AND-DROPPED
+on arm64, where `self.p, self.q, self.r = 3, 4, 7` in an `__init__` computes
+0. So the shape is RECOGNISED (otherwise the message says "its `__init__` does
+not assign it" about a field it assigns on the line above) and NOT used as
+evidence, and the refusal names the store.  `bugs/FORMAL_tuple_store_to_a_field.md`
+carries the codegen bug.
+
+**The generalisation, and it is the one worth keeping:** on a path whose whole
+value is that a store is a store, *any* new inference that reads a field's
+value has to ask the emitter whether the store happens.  A declaration is a
+declaration and cannot be dropped silently; `__init__`'s right-hand side is an
+instruction.
+
+## 25. The sweep, before and after, and where the dependents landed
+
+`python3 tools/formal_sweep.py --no-stdlib -t 300`, both runs, 304 files:
+
+| | before | after |
+|---|---|---|
+| `PASS` | 84 | **84** |
+| `codegen` (the finding) | 41 | **38** |
+| `not-answerable/host-import` | 174 | 176 |
+| `codegen coverage` | 84/125 = 67.2% | **84/122 = 68.9%** |
+| `codegen by family`: *field slot holds a frame address* | **x10** | **x2** |
+
+**Zero files gained a PASS and zero lost one.** The rate rose 1.7 points
+**because the denominator shrank by 3**, and 2 of those 3 are files that left
+the codegen class for a *target* fact — `test_myinterpreter.py` and
+`test_myinterpreter_simple.py` import `sys`. That is the direction of drift
+that flatters a number, called out here rather than left in a table. The
+third is `formal/arm64_codegen.py`, which needs ~4.5 min and times out at
+`-t 300`.
+
+**The timeout, because it is a finding the sweep was hiding.** At `-t 300` it
+is one of the 5 `tool` rows; at `-t 600` it builds long enough to refuse, and
+lands on `self._fd_vars = set()` — honestly untyped, and the family is **x3**
+rather than x2 with the whole run at 39 codegen findings and 84/123 = 68.3%.
+So two separate measurements of the same tree, and the honest one is the
+longer: a 30-second sweep timeout was reporting "no verdict" for a file that
+has a verdict, which is `tools/formal_sweep.py`'s own warning about `-t`
+being the usual cause, confirmed.
+
+**Where the 8 that left the family landed**, which is the part the task asks
+for and the part a count cannot say:
+
+| file | landed on |
+|---|---|
+| `scripts/stage2_mojo_interpreter.mojo` | `a Interpreter receiver is returned from the function that created it` — `load_interpreter_with_full_pipeline` returns it |
+| `test_myinterpreter_validation.py`, `test_phase2_parser_simple.py` | the same return refusal |
+| `test_phase2_parser.py`, `test_phase3_codegen_simple.py` | `a Interpreter receiver is stored in a container` |
+| `test_myinterpreter.py`, `test_myinterpreter_simple.py` | `not-answerable/host-import` — they import `sys` |
+| `formal/x86_64_codegen.py` | `self._vkinds = self._scan_value_kinds(f)`: assigned from a method call, not a construction |
+| `tools/procrun.py` | §15: the tuple store, by name |
+| `mojo/middle/solvers.py`, `test_formal_sweep.py` | still a field of a field, and now for an accurate reason: `DispatchSolver.compilability` is assigned in a method other than `__init__`, and `TestDyldProbe._tmp` has no `__init__` at all |
+
+So the family closed almost entirely, and **8 of the 10 moved to a refusal
+that is about a different construct** — five of them to the frame-ESCAPE
+family, which is a lifetime question rather than a layout one.
+
+## 26. A neighbour found on the way, and not closed
+
+`bugs/FORMAL_class_level_default_flips_a_nested_frames_width.md`: a nested
+struct whose *every* field is a class-level literal default has two of them
+demoted to constants by `_split_declaration`'s clause 6, so
+`struct_is_framed` flips to `False` and `o.in1.a` is refused with
+`field_access_refusal`'s `holder=True` message — which means a bug in *this
+compiler*, not a limit of the construct.  Four-line reproducer; the same
+program with two of the three fields undefaulted builds and returns 8.  Not
+this lane's file, and the choice between the two repairs is a design
+decision rather than a patch.
+
+## 27. Where the code is
+
+| what | where |
+|---|---|
+| the two sources, combined | `formal/model.py` `struct_field_type` |
+| the constructor half | `formal/model.py` `struct_field_assigned_type` (`_assigned_value_for` for the store shapes) |
+| the only gate on the constructor half | `formal/model.py` `_constructed_struct_name` |
+| the four-way answer, and the emitter that acts on it | `formal/build.py` `_typed_nested_frame`, `model.struct_nested_frame_fields` |
+| the spelling the diagnostics share | `formal/model.py` `member_chain_text` / `subscript_chain_text` / `expr_spelling` — which is where `formal/build.py`'s three private copies went; `build.py` keeps the names as aliases so its two call sites read the same |

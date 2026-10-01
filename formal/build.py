@@ -1500,53 +1500,26 @@ def _frame_argument_slots(call, params):
     return out
 
 
-def _member_chain(node) -> str:
-    """`a.b.c` for a MemberExpr chain, spelled the way the source spells it.
-
-    `_root_ident` reports a chain's root and depth and nothing else, which is
-    the right answer for a lookup and the wrong one for a MESSAGE: the old
-    field-of-a-field diagnostic printed `base.member`, so a refusal about
-    `self.asm.emit` read as though the source said `self.emit`, and the reader
-    went looking for a field of the wrong name. Every refusal that talks about a
-    chain now spells the chain."""
-    parts = []
-    while isinstance(node, F.MemberExpr):
-        parts.append(node.member)
-        node = node.obj
-    parts.append(node.name if isinstance(node, F.IdentExpr) else "?")
-    parts.reverse()
-    return ".".join(parts)
+# `a.b.c` for a MemberExpr chain, spelled the way the source spells it:
+# `model.member_chain_text`, the one chain spelling in the tree.
+#
+# It used to be spelled here as well, and it was here because the messages
+# wanted it: `_root_ident` reports a chain's root and depth and nothing else,
+# which is the right answer for a lookup and the wrong one for a MESSAGE.  The
+# old field-of-a-field diagnostic printed `base.member`, so a refusal about
+# `self.asm.emit` read as though the source said `self.emit`, and the reader
+# went looking for a field of the wrong name. Every refusal that talks about a
+# chain spells the chain, and one function does the spelling.
+_member_chain = M.member_chain_text
 
 
-def _subscript_chain(node) -> str:
-    """`q[0]`, `REGISTRY[s.name]`, spelled the way the source spells it.
-
-    A separate function from `_member_chain` rather than a branch of it, for
-    the reason that function's docstring gives: the diagnostic is read by
-    someone looking for the source they wrote, and `q.?` is not it.
-
-    Which is a thing that was got wrong here and is worth recording: the first
-    version printed `str(index)`, and a MemberExpr index has no `__str__`, so
-    `REGISTRY[s.name] = spec` was reported as
-
-        is stored through "REGISTRY[MemberExpr(obj=IdentExpr(name='s', line=255, ..."
-
-    which is the AST.  A reader sent to a repr has to go and find the source to
-    work out what the compiler was looking at, which is the whole cost the
-    spelling exists to remove.  `_expr_spelling` is the one spelling function
-    and this delegates to it, so a shape neither of them has a short name for
-    degrades to the same honest placeholder rather than to a repr."""
-    base = node.obj if isinstance(node, F.SubscriptExpr) else node
-    idx = node.index if isinstance(node, F.SubscriptExpr) else None
-    if isinstance(idx, (F.TupleExpr, F.ListExpr)):
-        inner = ", ".join(_expr_spelling(e) for e in (idx.elements or []))
-    else:
-        inner = _expr_spelling(idx)
-    if isinstance(base, F.IdentExpr):
-        return f"{base.name}[{inner}]"
-    if isinstance(base, F.MemberExpr):
-        return f"{_member_chain(base)}[{inner}]"
-    return f"[{inner}]"
+# `q[0]`, `REGISTRY[s.name]`. The implementation is the model's
+# (`model.subscript_chain_text`) for the reason `expr_spelling` below is an
+# alias: the model owns the one spelling of an expression, and a second copy
+# here is a second convention for a diagnostic a reader has to learn.  This
+# local name is kept because two call sites in this file read better with it
+# than with the model's, and renaming them would be churn.
+_subscript_chain = M.subscript_chain_text
 
 
 def _callee_wants_a_value(callee: str) -> bool:
@@ -1823,31 +1796,12 @@ def _check_declared_parameter(functions, callee, position, pname, want,
             sites))
 
 
-def _expr_spelling(node) -> str:
-    """The source's own spelling of an expression, as far as a name needs one.
-
-    A refusal that quotes `CallExpr` where the source wrote `mid(1)` sends the
-    reader to the AST to find the call, which is the opposite of what a
-    diagnostic quoting a call site is for.  A shape with no short spelling is
-    named by its type, which is at least a true statement and is obviously a
-    placeholder to anyone who reads it."""
-    if isinstance(node, F.IdentExpr):
-        return node.name
-    if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr):
-        return f"{node.func.name}({', '.join(_expr_spelling(a) for a in (node.args or []))})"
-    if isinstance(node, F.MemberExpr):
-        return _member_chain(node)
-    if isinstance(node, F.SubscriptExpr):
-        # `f[1]`, through the one function that spells a subscript — the same
-        # reason `_member_chain` exists. Without it a diagnostic about a
-        # comptime specialization prints `SubscriptExpr(r, 1)`, which is the AST
-        # and not the source, and the reader has to go and find the call.
-        return _subscript_chain(node)
-    for attr in ("value", "name"):
-        v = getattr(node, attr, None)
-        if isinstance(v, (str, int, float, bool)):
-            return str(v)
-    return type(node).__name__
+# The source's own spelling of an expression, and of a `.member` chain, are
+# `model.expr_spelling` / `model.member_chain_text`.  Both used to be spelled
+# here as well; `model.py` needs them for its own refusals and a model function
+# must not reach up into the build pass for a string, so the model owns the one
+# implementation and this file calls it.
+_expr_spelling = M.expr_spelling
 
 
 def _call_spelling(call, arg, position, pname) -> str:
@@ -2290,25 +2244,27 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                         nested = _typed_nested_frame(
                             base, outer, cands, structs_by_name, ost)
                         if nested is _NOT_TYPED:
-                            # No single declared type, so the slot's contents
-                            # are unknown — which is what the old message said,
-                            # and now it also says WHICH candidate disagreed.
+                            # No single type, so the slot's contents are unknown
+                            # — which is what the old message said, and now it
+                            # also says WHICH candidate disagreed and where each
+                            # one got its answer from.
                             raise CodegenError(
                                 f"{chain}() hands the word in the slot "
                                 f"{base}.{outer} to "
                                 f"{ost.name}.{node.member}(), whose receiver is "
                                 f"the ADDRESS of a frame of 8-byte slots — so "
                                 f"the slot would have to hold a frame address. "
-                                f"The declared type of {outer!r} is the only "
-                                f"thing here that could say so, and it does "
-                                f"not: {M.field_type_disagreement(cands, outer, _type_rows(cands, outer))}"
+                                f"Only a type for {outer!r} could say so — a "
+                                f"declaration in the class body, or a "
+                                f"construction its __init__ assigns — and there "
+                                f"is no single one: {M.field_type_disagreement(cands, outer, _type_rows(cands, outer, structs_by_name))}"
                                 f". Until every binding of the name agrees on "
                                 f"one type there is no frame to place here"
                             )
                         if nested is _REASSIGNED:
                             raise CodegenError(
-                                f"{base}.{outer} is declared as a "
-                                f"{M.annotation_base_name(_field_annotation(cands, outer))}"
+                                f"{base}.{outer} is a "
+                                f"{M.annotation_base_name(_field_annotation(cands, outer, structs_by_name))}"
                                 f", a struct of this module whose receiver is a "
                                 f"frame of 8-byte slots, so the slot does hold a "
                                 f"frame address — but a method of "
@@ -2380,21 +2336,21 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                         f"in the slot {base}.{outer_field} is a value, not a "
                         f"struct, so there is no second layout to read through. "
                         f"Two things would make it representable and neither is a "
-                        f"change to this function: an ANNOTATION on "
+                        f"change to this function: a TYPE for "
                         f"{outer_field!r} that EVERY binding of the name agrees "
-                        f"on and that names a struct declared here (a struct "
-                        f"declared here would then be a nested frame, placed in "
-                        f"the outer object's own block), or a builtin method on "
-                        f"the value — which is {node.member!r}() as a call, not "
-                        f"a field read. The declared type of {outer_field!r} does "
-                        f"not settle it: "
-                        f"{M.field_type_disagreement(cands, outer_field, _type_rows(cands, outer_field))}"
+                        f"on and that names a struct declared here — a declaration "
+                        f"in the class body, or a construction its __init__ "
+                        f"assigns — which would then be a nested frame, placed in "
+                        f"the outer object's own block, or a builtin method on "
+                        f"the value, which is {node.member!r}() as a call, not "
+                        f"a field read. Nothing types {outer_field!r} here: "
+                        f"{M.field_type_disagreement(cands, outer_field, _type_rows(cands, outer_field, structs_by_name))}"
                     )
                 if nested is _REASSIGNED:
                     raise CodegenError(
                         f"{chain} reads through {base}.{outer_field}, which is "
-                        f"declared as a "
-                        f"{M.annotation_base_name(_field_annotation(cands, outer_field))}"
+                        f"a "
+                        f"{M.annotation_base_name(_field_annotation(cands, outer_field, structs_by_name))}"
                         f" — a struct of this module whose receiver is a frame — "
                         f"but a method of "
                         f"{', '.join(sorted({st.name for st in cands}))} ASSIGNS "
@@ -2425,7 +2381,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                         f"read {chain} has no first load: "
                         + ("the candidate layouts disagree — "
                            + M.field_type_disagreement(
-                               cands, outer_field, _type_rows(cands, outer_field))
+                               cands, outer_field,
+                               _type_rows(cands, outer_field, structs_by_name))
                            if odis else
                            f"no candidate declares it as a field of a frame")
                     )
@@ -2745,31 +2702,36 @@ _NOT_TYPED = object()
 _REASSIGNED = object()
 
 
-def _field_annotation(cands, name):
-    """The declared type of `name` as a candidate spells it, for a message.
+def _field_annotation(cands, name, decls=None):
+    """The type of `name` as a candidate spells it, for a message.
 
     The first candidate's answer, and only ever used to NAME a type in a
     diagnostic — the decision itself is `frame_field_type_candidates`, which
     requires unanimity.  A reader is better served by the spelling one
     candidate used than by no type at all, and the message says "is declared as"
     rather than asserting it is the type.
+
+    `decls` is the same table the decision was made from, so the spelling is
+    the DECLARATION's when there is one and the constructor assignment's when
+    there is not; a message that printed "is declared as" for the second would
+    send the reader to a declaration the class does not have.
     """
     for st in cands:
-        _base, ann = M.struct_field_declared_type(st, name)
+        _base, ann, _ev, _why = M.struct_field_type(st, name, decls)
         if ann is not None:
             return ann
     return None
 
 
-def _type_rows(cands, name):
-    """The declared-type evidence for a field, for a refusal to quote.
+def _type_rows(cands, name, decls=None):
+    """The type evidence for a field, for a refusal to quote.
 
     A function rather than a call at each use site because the refusal has to
     quote the SAME table the decision was made from; recomputing it at the raise
     would be a second walk of the same candidates that could disagree with the
     first, and a refusal that misreports why it fired is worse than one that
     does not report at all."""
-    return M.field_type_rows(cands, name)
+    return M.field_type_rows(cands, name, decls)
 
 
 def _typed_nested_frame(base, field, cands, structs_by_name, method_owner):
