@@ -179,6 +179,55 @@ def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=25):
     return False
 
 
+def merge_conflicts(M, X, timeout_min=45):
+    """Conflicts BETWEEN branches belong in ONE place: an agent on the merged tree merges the branches that conflicted, one after
+    another, so each resolution sees the ones before it. (Resolving each against master separately, one fixer per branch, makes
+    results that conflict with each other all over again: 25 fixers for 25 conflicts, none of them able to land.)"""
+    import argparse as _ap
+    ts = int(time.time() % 1000000)
+    base = "batchmerge-%d" % ts
+    C.git("branch", "-f", base, "HEAD", cwd=I.INTEG)             # master + every branch that merged cleanly
+    tasks = C.load()
+    name = base
+    lines = "\n".join("  %s   (branch %s; its task: %s)" % (n, tasks[n]["branch"], tasks[n]["summary"][:90]) for n in X)
+    task = ("You start on branch %s: master plus %d finished branches that merged cleanly (the integrator merged them all in one batch). "
+            "These %d branches CONFLICTED when merged onto that tree. Merge each of them into your branch, ONE AT A TIME, in this order, "
+            "with `git merge <branch>`:\n%s\n\nResolve every conflict by reading BOTH sides and keeping both sides' intent: never take "
+            "one side wholesale, never drop a test, a doc a branch git rm'd because its bug is fixed stays removed with its row removed "
+            "from index tables, a set/table edited by several branches (HOST_MODELLED, registries, estate lists) keeps every branch's "
+            "edit. After each merge make the tree COHERENT, not just textually merged: two branches fixing one thing two ways -> "
+            "consolidate to one (CLAUDE.md); a helper renamed by one and called by the old name from another -> fix the call. After each "
+            "merge run the narrow tests for the files involved (under python3 tools/memslot.py --gb 8 --label x --); commit. A branch whose "
+            "conflict is bigger than ~100 lines or that you cannot reconcile: skip it (git merge --abort), say which and why, and go on. "
+            "Never use git stash. At the end run python3 test_suite.py, python3 test_memslot.py and python3 tools/suite.py smoke -j2 and "
+            "report. Finish with the REPORT block and CONTROL-STATUS: DONE (or PARTIAL naming what you skipped)."
+            % (base, len(M), len(X), lines))
+    ns = _ap.Namespace(name=name, claim=["task:" + name], task=task, task_file=None, file=[], base=base, model=None)
+    try:
+        C.cmd_spawn(ns)
+    except SystemExit as e:
+        log("could not start the conflict merger: %s" % e); return None
+    log("CONFLICT-MERGE: %s started on the merged tree to merge %d conflicting branches: %s" % (name, len(X), ", ".join(X)[:200]))
+    t0 = time.time()
+    while time.time() - t0 < timeout_min * 60:
+        time.sleep(20)
+        tasks = C.load()
+        family = [n for n in tasks if n == name or n.startswith(name + "-r")]
+        if not any(C.state_of(tasks[n]) == "running" for n in family):
+            break
+    tasks = C.load()
+    family = sorted((n for n in tasks if n == name or n.startswith(name + "-r")), key=lambda n: tasks[n]["slot"])
+    for n in family:
+        if C.state_of(tasks[n]) == "running":
+            try: os.killpg(tasks[n]["pid"], 15)
+            except OSError: pass
+    done = [n for n in family if C.ahead(tasks[n]) > 0]
+    if not done:
+        log("CONFLICT-MERGE produced no commits"); return None
+    log("CONFLICT-MERGE finished: %s (%d commits)" % (done[-1], C.ahead(tasks[done[-1]])))
+    return done[-1]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--interval-min", type=float, default=3, help="sleep only when there is nothing to do or the integrator is busy")
@@ -204,8 +253,30 @@ def main():
             if batch:
                 did = True
                 log("BATCH: all %d finished branches merged, one gate: %s" % (len(batch), ", ".join(batch)[:300]))
-                rc, out = run_integrate("--only", *batch)
-                merged, failed = parse(out, "MERGED"), parse(out, "FAILED_JOBS")
+                # 1. merge them all (no side effects) to learn which merge cleanly (M) and which conflict (X)
+                rc, out = run_integrate("--only", *batch, "--no-fixers", "--dry-run")
+                if "another integrator" in out:
+                    busy = True
+                    merged, failed, rc, out = [], [], 1, out
+                else:
+                    M = parse(out, "MERGED")
+                    X = [l.split()[1].rstrip(":") for l in out.splitlines() if l.startswith("(probe) ") and "conflicts" in l]
+                    target = list(M)
+                    if X and M:
+                        # 2. the conflicts are resolved in ONE place: an agent on the merged tree merges them in turn
+                        B = merge_conflicts(M, X)
+                        if B:
+                            target = [B]
+                    elif X and not M:
+                        target = []
+                    if not target:
+                        log("nothing mergeable this round (all conflicted, no merger result)")
+                        for n in X: red[n] = head_sha(n)
+                        json.dump(st, open(STATE, "w"))
+                        rc, out, merged, failed = 0, "", [], []
+                    else:
+                        rc, out = run_integrate("--only", *target)
+                        merged, failed = (parse(out, "MERGED"), parse(out, "FAILED_JOBS"))
                 tail = [l for l in out.splitlines() if l.startswith(("GREEN", "RED", "CONFLICT", "the red did NOT"))]
                 log("batch result rc=%d merged=%d failed jobs=%s %s" % (rc, len(merged), failed or "-", " | ".join(tail)[:200]))
                 if "another integrator" in out:
