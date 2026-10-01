@@ -5393,7 +5393,44 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 A(f"{IND}  simp +decide only [h8, {_vsimps}]")
                 A(f"{IND}  all_goals rfl")
             else:
-                A(f"{IND}  simp only [{', '.join(list(defs_acc) + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition', 'Arm64State.init'])}]")
+                # A `B.cond` forced branch.  The step lemma leaves the branch
+                # as `if <flag test> then <taken> else <fall>`, and deciding
+                # it is a VALUE-FLOW obligation, not arithmetic: the state has
+                # to be folded back down the block chain to the entry state,
+                # the flags have to be bridged to the comparison that set
+                # them (`_COND_LEMMA` for this branch's raw condition field),
+                # and only then does the contract's own hypothesis decide it --
+                # `x0 = 0` in the base case, `x0 = arg` with `arg ≠ 0` in the
+                # step case.  The old script here unfolded the flags and
+                # stopped: with no `hsid` in the simp set `s_n` never became
+                # `st`, so the `if` could not be resolved and the obligation
+                # fell to a `sorry` in EVERY recursion contract -- 5 of the 7
+                # holes the arm64 census reported (count, fact, pow2, sqsum,
+                # sum), all of them the same two leaves.
+                _flag = _COND_LEMMA.get(_cset_cond(block, words))
+                A(f"{IND}  have h8 : (8 : UInt64) = UInt64.ofNat 8 := rfl")
+                _hne = None
+                if ctx.get("cbz_force") == "taken":
+                    _hne = f"hne_{n}"
+                    A(f"{IND}  have {_hne} : arg ≠ 0 := by "
+                      f"intro h; rw [h] at hk; simp at hk")
+                _fset = (", ".join(list(hsids_acc) + list(defs_acc)
+                                   + ['arm64_reg', 'arm64_set_reg', _VSP,
+                                      'u64_sub_zero']
+                                   + ([_flag] if _flag else []) + ['hx0']
+                                   + ([_hne] if _hne else [])))
+                A(f"{IND}  all_goals try (simp +decide only [h8, {_fset}])")
+                if _hne:
+                    # The condition came out of the bridge as a Prop, and a
+                    # `simp only` set that happens to contain the fact does not
+                    # rewrite the `ite`; say which side was proved.
+                    A(f"{IND}  all_goals try rw [if_pos {_hne}]")
+                A(f"{IND}  all_goals try rfl")
+                # Unchanged fallback, so a condition the value flow does not
+                # reach still reports itself as a hole rather than a failure.
+                # `all_goals`-guarded because the value flow may already have
+                # closed the goal, and a bare tactic on no goals is an error.
+                A(f"{IND}  all_goals try (simp only [{', '.join(list(defs_acc) + ['arm64_reg', 'arm64_set_reg', 'arm64_subs_flags', 'arm64_matches_condition', 'Arm64State.init'])}])")
                 A(f"{IND}  all_goals try rfl")
                 A(f"{IND}  all_goals try grind")
                 A(f"{IND}  all_goals (first | done | sorry)")
@@ -6576,7 +6613,18 @@ def generate_arm64_proof(prog, code, info) -> str:
         conds = _collect_conds(fn, param, env)
         by_cases = " ".join(f"by_cases h{i} : {c} <;>" for i, c in enumerate(conds))
         hs = ", ".join(f"h{i}" for i in range(len(conds)))
-        simp_lems = (f"{hs}, " if hs else "") + f"mojo, {func_name}_go, ast, evalFunc, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo"
+        # `sKey` is ProofLib's sign-flip, i.e. how `evalExpr` renders a signed
+        # comparison, and it has to be in the simp set or the `by_cases`
+        # hypothesis is not the goal's `if` test: `_cmp_go` spells the
+        # condition as the expanded `(l ^^^ 0x8000…) < (r ^^^ 0x8000…)` while
+        # `evalExpr` (lib/ProofLib.lean) writes `sKey l < sKey r`.  Two
+        # renderings of one comparison never meet definitionally, so the `if`
+        # inside the AST evaluation cannot be discharged by the hypothesis
+        # that decided it, and every `if n > 0:`-shaped body was unprovable
+        # (10 of the 45 examples: absval, bigconst, condassign, condassign2,
+        # deepif, elif3, ifonly, ifonly2, ifparam, twoifs).  The x86-64
+        # generator has had `sKey` in this set for the same reason.
+        simp_lems = (f"{hs}, " if hs else "") + f"mojo, {func_name}_go, ast, evalFunc, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo, sKey"
         if len(conds) == 0:
             eval_eq_mojo_proof = f"simp +decide [{simp_lems}]"
         else:
