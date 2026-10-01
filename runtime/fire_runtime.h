@@ -1510,6 +1510,12 @@ void   *mojo_unavailable_callable_ptr(void);
 /* An int64_t used as a C string: itself when it is a boxed char*, else its
    decimal string (see mojo_cstr_or_int_str's comment in the .c). */
 char *mojo_cstr_or_int_str(int64_t v);
+/* The SAME conversion for a caller that already knows `v` is an integer, so
+   the runtime is not asked to guess: mojo_boxed_is_str is a range test and
+   misclassifies every positive int64 in [2^31, 2^47) as a pointer, which is
+   what turned `d[3000000000] = 1` into a `strcmp` of address 3000000000.
+   Transient block, same ownership and same release rule as the entry above. */
+char *mojo_int_str_transient(int64_t v);
 void mojo_cstr_or_int_release(int64_t orig, char *s);
 void *mojo_sorted(void *iterable);
 /* sorted(x, key=f[, reverse]) — `keys` is the caller's per-element key list. */

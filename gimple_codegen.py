@@ -2296,6 +2296,20 @@ class GimpleGen:
         self._owned_stack_allocated: set = set()
         self._cstr_key_src: dict[str, str] = {}  # see _char_to_cstr(transient=)
         self._kw_key_src: dict[str, str] = {}    # see _char_to_cstr(word_ok=)
+        # Value names this codegen has POSITIVELY established hold a plain
+        # Python integer -- the exact complement of `_actual_types`, which
+        # records the opposite (a real pointer seen through an int64_t slot).
+        # `_actual_types` being silent is NOT evidence either way: a lambda
+        # parameter, an erased dict value and a getattr result all arrive as
+        # an untracked int64_t that may hold a string, which is why the
+        # dict-key `_kw` entry points exist at all. But where the codegen
+        # does KNOW, it must say so instead of leaving the runtime to guess:
+        # `mojo_boxed_is_str` is a RANGE test, so it calls every positive
+        # int64 in [2^31, 2^47) a pointer and hands it to `strcmp` --
+        # `d[3000000000] = 1` was a SIGSEGV. See
+        # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md and
+        # `_char_to_cstr`'s word_ok branch, the one consumer.
+        self._int_word_vals: set = set()
         self._fresh_str_tmps: set = set()  # see emit_infra._emit_str_cat
         self._fresh_vals: set = set()  # see emit_infra.is_fresh_container_operand
         # Names bound to a bool, keyed by NAME across functions (see
@@ -2922,6 +2936,7 @@ class GimpleGen:
         'mojo_div_float':        ('float',     ['float', 'float']),
         'mojo_str_from_int':     ('char *',    ['int64_t']),
         'mojo_cstr_or_int_str':  ('char *',    ['int64_t']),
+        'mojo_int_str_transient': ('char *',   ['int64_t']),
         'mojo_cstr_or_int_release': ('void',   ['int64_t', 'char *']),
         'mojo_dict_new':         ('MojoDict *', []),
         'mojo_dict_set_str': ('void',      ['MojoDict *', 'char *', 'char *']),

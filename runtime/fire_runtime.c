@@ -8844,6 +8844,36 @@ char *mojo_cstr_or_int_str(int64_t v) {
     return _int_str_transient(v);
 }
 
+/* `mojo_cstr_or_int_str` for the caller that already KNOWS the word is an
+   integer, so the question does not have to be asked at all.
+
+   That is not a hypothetical caller. `mojo_boxed_is_str` is a RANGE test (see
+   its own docstring), so it cannot tell an integer from a `char *`: every
+   positive int64 in [2^31, 2^47) is pointer-shaped to it, and
+   `d[3000000000] = 1` was handed to `mojo_dict_set_int(d, (char *)3000000000, 1)`,
+   which `strcmp`ed address 3000000000 and died — SIGSEGV on the runtime unit
+   test, at -O0, -O2 and under AddressSanitizer alike. The ambiguity is
+   information-theoretic in this compiler's scalar body model (a `char *` and
+   an `int64_t` are the same 64 bits with no tag), so the answer has to come
+   from the codegen, which does know it: the emitted call site hands this
+   function the raw integer instead of a word for the runtime to classify.
+
+   Same block, same ownership, same release protocol as
+   `mojo_cstr_or_int_str`'s own int half -- it IS that half, published under
+   a name that states the answer the caller already has. The distinction is
+   that this one never guesses, so it is also right for the integers
+   `mojo_boxed_is_str` cannot see (anything in the 2 GiB .. 2^47 window,
+   which is where every large-but-plausible int -- a nanosecond-ish id, a
+   millisecond timestamp, a 2**40 token count -- lands).
+
+   The DECIMAL, not a pointer round-trip: the dict re-normalises it through
+   `_canon_int`, so `d[5]` and `d["5"]` stay the one integer slot they have
+   always been (see `_canon_int`'s comment), and `d[3000000000] = 1` then
+   `d[3000000000]` finds what it stored. */
+char *mojo_int_str_transient(int64_t v) {
+    return _int_str_transient(v);
+}
+
 /* The other half of mojo_cstr_or_int_str's contract: the result is OWNED by
    the caller exactly when it is not `v` itself. A boxed string comes back as
    the very same address (borrowed -- someone else owns it, never free it);

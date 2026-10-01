@@ -5126,11 +5126,12 @@ main()
     # own discriminator (`mojo_cstr_or_int_str`) rather than a cast, and that
     # must still hand a genuine boxed `char *` back as the same address.
     #
-    # NOT here: an int64 in [2^31, 2^47), which the runtime's shape-only
-    # discriminator cannot tell from a pointer — the same window
-    # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md covers on
-    # the dict-key path, and which reaches this one through the very same
-    # predicate. `echo(3000000001)` belongs with that fix, not this one.
+    # The two large values are the ones the discriminator gets WRONG: it is a
+    # range test, so it calls every positive int64 in [2^31, 2^47) a pointer.
+    # They are here because the codegen PROVABLY knows an integer literal is
+    # an integer, and supplies the answer rather than asking (see
+    # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md, whose
+    # dict-key spelling has its own test below).
     test_gimple_stdout("gimple_annotated_str_param_given_a_non_str", """\
 class Dialog:
     def __init__(self, widgetName: str):
@@ -5148,8 +5149,45 @@ def main():
     n = 7
     echo(n)
     echo("hello")
+    echo(3000000001)
+    big = 1099511627776
+    echo(big)
 main()
-""", "5\n5\n7\nhello\n")
+""", "5\n5\n7\nhello\n3000000001\n1099511627776\n")
+
+    # A large integer as a dict key. `mojo_boxed_is_str` — the runtime's
+    # str-vs-container discriminator, and what the dict's `_kw` entry points
+    # ask — is a RANGE test (`_mojo_ptr_shaped`: below 2 GiB, below 2^47), so
+    # it calls every positive int64 in [2^31, 2^47) a pointer, and
+    # `mojo_dict_set_int_kw(d, 3000000000, 1)` became
+    # `mojo_dict_set_int(d, (char *)3000000000, 1)` — a `strcmp` of address
+    # 3000000000. SIGSEGV, at -O0, -O2 and under AddressSanitizer alike.
+    #
+    # The fix is the codegen SUPPLYING the answer, not a better range: an
+    # integer literal cannot be a pointer at any magnitude, so the call site
+    # knows, and a literal or a local bound from one now renders its decimal
+    # and uses the ordinary dict entry point (which re-normalises the text
+    # through `_canon_int`, so it is the same integer slot). The `lambda`
+    # line is the other half of the contract: a value the codegen genuinely
+    # cannot type still goes through the `_kw` twin, and a string passed
+    # through one must still be found.
+    test_gimple_stdout("gimple_dict_key_above_2gb_is_an_integer", """\
+def main():
+    d = {}
+    d[3000000000] = 1
+    print(d[3000000000])
+    k = 3000000002
+    d[k] = 2
+    print(d[k])
+    print(3000000000 in d)
+    print(1099511627776 in d)
+    s = {}
+    s["a"] = 7
+    f = lambda q: s[q]
+    print(f("a"))
+    print(s["a"])
+main()
+""", "1\n2\nTrue\nFalse\n7\n7\n")
 
     # The `var` spelling of a class-body field. To Python this is the SAME
     # declaration as the bare `NAME = ...` above — `var` only suppresses a
