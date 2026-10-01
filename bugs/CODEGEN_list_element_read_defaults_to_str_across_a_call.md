@@ -99,3 +99,52 @@ a `String` slot as an int; both are one bug ("the element type of a list is
 recorded where the list is built, and never travels with the value to the
 subscript") seen from two ends, and fixing the read path for both is
 probably less work than two directional fixes.
+
+## Status update (2026-10-01, work/bugs-lambdas-with): the shape is WIDER than
+## recorded above, and it is what makes a runner test red
+
+Found while running `test_gimple_runner.py` as a regression check for an
+unrelated fix. **Confirmed on this tree and unchanged by that work** — verified
+by reverting the three files it touched to their pre-branch content and
+re-running: identical failure both ways.
+
+`test_gimple_runner.py`'s `gimple_kinds_survive_a_sibling_list_being_freed` is
+RED, and this doc is its mechanism. That test's own comment says the shape needs
+a `drop_one()` sibling-list dance; it does not. The minimal repro is smaller
+than the one above in two ways:
+
+1. **A LITERAL index segfaults too**, not only a computed one. The doc's repro
+   uses `var p = 0; print(a[p])`; `print(b[0])` on its own is enough:
+
+       fn mixed(x: Float64, s: String) -> List:
+           return [x, 1, s]
+
+       fn main():
+           var b = mixed(9.5, "zz")
+           print(b[0])          # compiled: SIGSEGV, no output at all
+
+   So the "the call site types the callee's parameters before lowering the call,
+   which is what makes the computed-index read go through `mojo_list_get_boxed`"
+   note above explains the computed case and not this one — the literal-index
+   read has no parameter typing to blame.
+
+2. **No sibling list and no callee boundary beyond the one call.** The
+   `drop_one()` that frees `first` and returns `kept`, and the whole
+   probe-cluster collision the test's comment describes, are not required:
+
+       fn mk(x, s):
+           return [x, s]
+
+       fn main():
+           var b = mk(9.5, "zz")
+           print(b[0])          # compiled: SIGSEGV
+
+   Which also means the kinds table's home function cannot be the thing that
+   regressed here, since there is nothing to collide with.
+
+What is NOT affected, measured, and worth keeping: the whole-value `repr` is
+correct on every one of these (`print(b)` gives `[9.5, 1, 'zz']`), `b[2]` gives
+`zz`, and an all-double `[x, 2.5]`, an all-int `[x, 1]` and a single-string
+`[s]` are all correct — so it is specifically the mixed list's `str`-typed
+element read across the call, exactly as the doc says, and the repr/kinds
+machinery is not what is broken.
