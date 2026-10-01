@@ -275,8 +275,20 @@ def _quick_type(gen, node) -> str:
         # mechanism, see its docstring.
         if fname in _BUILTIN_SCALARS and not gen._locally_binds_name(fname):
             return _BUILTIN_SCALARS[fname]
-        if fname in gen.struct_field_types:
-            return f'{fname} *'
+        # `struct_field_types` is keyed by the struct's own bare name as
+        # written in its DEFINING module, so a `from M import Class as
+        # Alias` call site misses it and falls through to the int64_t
+        # default — which then propagates: `def f(): ...; return Alias("s")`
+        # inferred `int64_t`, and the caller read the struct through an
+        # integer ("assignment to 'char *' from 'int64_t' ... makes pointer
+        # from integer without a cast"). Map the alias back through
+        # `_struct_import_aliases` first, exactly as the constructor
+        # dispatch in emit_calls.py does, so this estimator and the real
+        # lowering cannot disagree about what a call returns.
+        _fname_ctor = (getattr(gen, '_struct_import_aliases', None)
+                       or {}).get(fname, fname)
+        if _fname_ctor in gen.struct_field_types:
+            return f'{_fname_ctor} *'
         # A bare call to a KNOWN COMPILED GENERATOR function (Milestone
         # B/C, self._generator_api) returns an opaque MojoGenerator* —
         # calling the generator function only CONSTRUCTS the coroutine,
