@@ -524,7 +524,12 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # its value and every module would emit its own copy.
                 temp_gen._mg_introspection_emitted = (
                     gen._mg_introspection_emitted)
+                # By reference, not by value: these are per-TRANSLATION-UNIT
+                # sets, and assigning a set copies it, which silently restores
+                # the per-module scope that produced duplicate definitions.
                 temp_gen._emitted_ptr_helpers = gen._emitted_ptr_helpers
+                temp_gen._emitted_list_marshalling = (
+                    gen._emitted_list_marshalling)
                 # share by reference: the self-shadowing-temp counter must be
                 # monotonic across the WHOLE closure, or two modules mint the
                 # same `_shadowN_<name>` and -- since every module's decls land

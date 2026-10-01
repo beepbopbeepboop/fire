@@ -359,14 +359,35 @@ def emit_launch_prototypes(kernels: dict) -> str:
     return '\n'.join(lines)
 
 
+def c_suffix(module_name: str) -> str:
+    """A C-identifier suffix distinguishing one module's device state from
+    another's in a SINGLE translation unit.
+
+    The MSL string, its init flag and its device flag are per MODULE and
+    cannot be shared the way the pack/unpack helpers are: each module carries
+    its own MSL, so one shared `_mg_msl_source` would compile the wrong
+    kernels. And `static` does not rescue them -- `static` is internal
+    linkage, so two `static int64_t _mg_init_state` in one FILE are still a
+    redefinition. Measured, from a two-module program: six of them
+    (`_mg_pack_float`, `_mg_msl_source`, `_mg_init_state`, ...).
+    """
+    out = ''.join(ch if (ch.isalnum() or ch == '_') else '_'
+                  for ch in module_name)
+    if not out:
+        return ''
+    return ('_' + out) if not out[0].isdigit() else ('_m' + out)
+
+
 def emit_device_sidecar(parts: list[str], kernel_names: list[str],
-                        kernels: dict | None = None) -> str:
+                        kernels: dict | None = None,
+                        module_name: str = '') -> str:
     """The whole device sidecar as C text, ready to append to the module.
 
     `parts` and `kernel_names` are in the SAME order -- `module_gen` builds
     both in one pass over the functions -- so they pair positionally rather
     than by re-parsing the MSL to recover which kernel is which.
     """
+    sfx = c_suffix(module_name)
     lines: list[str] = []
     lines.append('/* ── GPU device code ──')
     lines.append('   The MSL below is the compiler\'s output for this module\'s')
@@ -374,32 +395,36 @@ def emit_device_sidecar(parts: list[str], kernel_names: list[str],
     lines.append('   compiles it at load time for the GPU actually present, so')
     lines.append('   this file stays self-contained: no .metallib, no second')
     lines.append('   artifact, and nothing to wire into the build. */')
-    lines.append('static const char *_mg_msl_source =')
+    lines.append('static const char *_mg_msl_source{sfx} =')
     lines.append(c_string_literal(msl_module(parts), indent='    '))
     lines.append(';')
     lines.append('')
     lines.append('/* Lazily initialised on FIRST DISPATCH, not at load. A module with a')
     lines.append('   kernel that is never called must not compile any MSL, and a')
     lines.append('   machine with no GPU must still load and run. */')
-    lines.append('static int64_t _mg_init_state = 0;   /* 0 uninit, 1 done */')
-    lines.append('static int64_t _mg_have_device = 0;')
-    lines.append('static int64_t _mg_dispatches = 0;')
-    lines.append('static int64_t _mg_failures = 0;')
+    lines.append('static int64_t _mg_init_state{sfx} = 0;   /* 0 uninit, 1 done */')
+    lines.append('static int64_t _mg_have_device{sfx} = 0;')
+    # The DISPATCH and FAILURE counters are NOT here. They were `static int64_t`
+    # per-unit, so a program that dispatched in one module and asked in
+    # another read the asker's zero. They are process-wide in the runtime now.
     lines.append('')
-    lines.append('static void _mg_init(void) {')
-    lines.append('    if (_mg_init_state) return;')
-    lines.append('    _mg_init_state = 1;')
-    lines.append('    _mg_have_device = (int64_t) mojo_metal_init(_mg_msl_source);')
+    lines.append('')
+    lines.append('static void _mg_init{sfx}(void) {')
+    lines.append('    if (_mg_init_state{sfx}) return;')
+    lines.append('    _mg_init_state{sfx} = 1;')
+    lines.append('    _mg_have_device{sfx} = (int64_t) mojo_metal_init(_mg_msl_source{sfx});')
     lines.append('}')
     lines.append('')
-    lines.append('static int64_t _mg_run(const char *name, int64_t n_bufs,')
+    lines.append('static int64_t _mg_run{sfx}(const char *name, int64_t n_bufs,')
     lines.append('                          void *const *bufs, const int64_t *sizes,')
     lines.append('                          int64_t n_scalars, void *const *scalars,')
     lines.append('                          const uint8_t *widths,')
     lines.append('                          int64_t nthreads, int64_t ngroups) {')
-    lines.append('    _mg_init();')
-    lines.append('    if (!_mg_have_device) {')
-    lines.append('        _mg_failures++;')
+    lines.append('    _mg_init{sfx}();')
+    lines.append('    if (!_mg_have_device{sfx}) {')
+    # No counter bump here: mojo_metal_dispatch counts BOTH outcomes, and this
+    # branch never reaches it -- it is the "no device at all" case, which
+    # _mojo_gpu_have_device already reports. See the note in fire_metal.m.
     # Each C string literal is on ONE source line. An earlier version
     # wrapped these as Python implicit concatenation across several physical
     # lines, which emitted a C string split across source lines -- an
@@ -412,7 +437,6 @@ def emit_device_sidecar(parts: list[str], kernel_names: list[str],
     lines.append('            "machine with a GPU.\\n", name);')
     lines.append('        return 0;')
     lines.append('    }')
-    lines.append('    _mg_dispatches++;')
     lines.append('    return (int64_t) mojo_metal_dispatch(name, n_bufs, bufs, sizes,')
     lines.append('                                    n_scalars, scalars, widths,')
     lines.append('                                    nthreads, ngroups);')
@@ -442,11 +466,15 @@ def emit_device_sidecar(parts: list[str], kernel_names: list[str],
     # There is deliberately no `_mojo_gpu_kernel_name`: returning a name
     # would mean handing back a pointer into static storage as an int64_t,
     # and a caller would have no way to read it.
-    lines.append('int64_t _mojo_gpu_kernel_count(void)   { return %d; }' % len(kernel_names))
-    lines.append('int64_t _mojo_gpu_have_device(void)  { _mg_init(); return _mg_have_device; }')
-    lines.append('int64_t _mojo_gpu_dispatch_count(void) { return _mg_dispatches; }')
-    lines.append('int64_t _mojo_gpu_failure_count(void)  { return _mg_failures; }')
-    return '\n'.join(lines)
+    lines.append('__attribute__((weak)) int64_t _mojo_gpu_kernel_count(void)'
+                 '   { return %d; }' % len(kernel_names))
+    lines.append('__attribute__((weak)) int64_t _mojo_gpu_have_device(void)'
+                 '  { _mg_init{sfx}(); return _mg_have_device{sfx}; }')
+    lines.append('__attribute__((weak)) int64_t _mojo_gpu_dispatch_count(void)'
+                 ' { return mojo_metal_dispatch_count(); }')
+    lines.append('__attribute__((weak)) int64_t _mojo_gpu_failure_count(void)'
+                 '  { return mojo_metal_failure_count(); }')
+    return '\n'.join(lines).replace('{sfx}', sfx)
 
 
 #: The introspection entry points, for a module with NO device code at all.
@@ -468,10 +496,10 @@ EMPTY_SIDECAR = """\
    introspection entry points still exist so a program can ASK whether the
    device path was taken -- which is the question --no-gpu makes worth asking
    -- and get an honest 0. See device_glue.EMPTY_SIDECAR. */
-int64_t _mojo_gpu_kernel_count(void)    { return 0; }
-int64_t _mojo_gpu_have_device(void)     { return 0; }
-int64_t _mojo_gpu_dispatch_count(void)  { return 0; }
-int64_t _mojo_gpu_failure_count(void)   { return 0; }
+__attribute__((weak)) int64_t _mojo_gpu_kernel_count(void)    { return 0; }
+__attribute__((weak)) int64_t _mojo_gpu_have_device(void)     { return 0; }
+__attribute__((weak)) int64_t _mojo_gpu_dispatch_count(void)  { return 0; }
+__attribute__((weak)) int64_t _mojo_gpu_failure_count(void)   { return 0; }
 """
 
 

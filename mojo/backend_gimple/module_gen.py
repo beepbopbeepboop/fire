@@ -7892,7 +7892,13 @@ def gen_module_impl(self, stmts):
         _lm_s = _as_str(_lm)
         if _lm_s and _lm_s not in _lmn:
             _lmn.append(_lm_s)
-    _emitted_list_marshalling: set = set()
+    # SHARED, like _emitted_ptr_helpers: a pack/unpack pair is per-TU (one
+    # definition serves every module and every kernel), so a LOCAL set here
+    # emitted one per module and two GPU modules in one translation unit
+    # collided -- `redefinition of '_mg_pack_float'`, six such errors, from a
+    # two-module program. Same wrong-scope mistake as the introspection
+    # sidecar: state whose scope is the translation unit, tracked per module.
+    _emitted_list_marshalling = self._emitted_list_marshalling
     for _lm_s in sorted(_lmn):
         if _lm_s in _emitted_list_marshalling:
             continue
@@ -10066,7 +10072,8 @@ def gen_module_impl(self, stmts):
         # declaration of `float *` vs `int64_t` is a "conflicting types"
         # error reported against the wrong line.
         parts.append(_gmi_device_glue.emit_device_sidecar(
-            _device_parts, sorted(self._device_kernels), _device_kernels_meta))
+            _device_parts, sorted(self._device_kernels), _device_kernels_meta,
+            module_name=_as_str(self.module_name)))
         # The full sidecar defines the same four introspection entry points
         # as EMPTY_SIDECAR does, so mark them here too -- otherwise a
         # kernel-free module later in the closure emits EMPTY_SIDECAR and the

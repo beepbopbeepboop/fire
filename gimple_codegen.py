@@ -1647,6 +1647,13 @@ class GimpleGen:
         self._renamed_builtin_calls: dict = {}  # renamed C-reserved builtin -> ret type (see _lower_call)
         self._ptr_helpers_needed: set[str] = set()   # elem C types needing _mojo_at_ helpers
         self._emitted_ptr_helpers: set[str] = set()  # elem C types already emitted (shared)
+        # Same, for the device-side pack/unpack pairs. Initialised HERE, not
+        # lazily, because `emit_resolve` reads it off the parent gen to share
+        # it with each temp_gen -- a lazily-created attribute does not exist on
+        # the parent yet, and that read raised
+        # "'GimpleGen' object has no attribute '_emitted_list_marshalling'"
+        # on every module that had no GPU kernel to create it first.
+        self._emitted_list_marshalling: set[str] = set()
         self.func_param_types: dict[str, list[str]] = {}  # func_name → [param_ctype, ...]
         self._global_inline_defs: set[str] = set()   # all func names with inline definitions (shared)
         self._struct_allocs_needed: set[str] = set() # struct names needing _alloc_ helpers
