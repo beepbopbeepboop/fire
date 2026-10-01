@@ -13854,6 +13854,43 @@ def frame_return_candidates_refusal(owner, rows) -> str:
             f"with one width per name")
 
 
+def frame_return_overloads_disagree_refusal(name, rows) -> str:
+    """An OVERLOADED name whose definitions disagree about returning a frame.
+
+    The same question `frame_return_mixed_refusal` asks, one level out: there the
+    two answers were two paths of ONE body, and here they are two definitions of
+    ONE name — which is what a Mojo overload is, and it is ordinary (`reversed`
+    is declared eight times in `std/builtin/reversed.mojo`). A call site carries
+    a name and nothing else, so "does `f(...)` hand back a frame address, and
+    whose" has to be one answer for the whole image, and here it is not one.
+
+    Both wrong answers are silent, which is why this is a refusal and not a
+    choice:
+
+      * answer "frame" for every call, and the definition that returns a word
+        leaves the caller's reserved block unwritten — the caller then reads
+        whatever the scratch held;
+      * answer "word", and the definition that returns a frame writes through a
+        block address its caller never reserved.
+
+    Every row is spelled out, because the reader's next question is which
+    definition to change and the file's own text is the only thing that can
+    answer it.
+    """
+    parts = []
+    for spelling, answer in rows:
+        parts.append(f"`{spelling}` returns {answer}")
+    return (f"{name} is declared more than once in this module and its "
+            f"definitions disagree about whether they return a frame address: "
+            f"{'; '.join(parts)}. A call `{name}(...)` names both, so this "
+            f"path cannot tell whether to reserve a block for the result — "
+            f"reserve one and the word-returning definition leaves it "
+            f"unwritten, do not and the frame-returning one copies through a "
+            f"block address its caller never passed. Give the overloads one "
+            f"return convention (return a field from both, or the frame from "
+            f"both), or give the disagreeing ones different names")
+
+
 def entry_frame_return_refusal(entry) -> str:
     """The ENTRY function returning a frame.
 
