@@ -288,9 +288,17 @@ def main(n):
     {"a": "[hAllZ]"},
 ))
 
-# x86-64 REFUSES an augmented assignment through a subscript outright
-# (`augmented assignment target must be a plain name`), which is an honest
-# refusal rather than a wrong answer and is not what this case is about.
+# An augmented assignment THROUGH A SUBSCRIPT — the read-modify-write, which is
+# a separate emitter from the plain-name one because the address has to be
+# computed once and kept across the evaluation of both the element and the
+# right-hand side. x86-64 used to REFUSE this outright
+# (`augmented assignment target must be a plain name`), which made this case
+# arm64-only and left the construct unpinned on one architecture;
+# `formal/x86_64_codegen.py` now lowers it as `_emit_subscript_aug`, arm64's
+# twin, so the `archs=["arm64"]` that documented the refusal is gone. The wider
+# coverage of the construct — every operator, a byte element, a list element, an
+# index that is a call — is in `test_formal_x86_64_parity.py`, which checks both
+# architectures against CPython rather than against a constant written here.
 CASES.append(Case(
     "pointer_subscript_augmented",
     '''\
@@ -305,11 +313,6 @@ def main(n):
     return 0
 ''',
     {"a": "15", "b": "21"},
-    archs=["arm64"],
-    archs_reason="the x86-64 backend REFUSES an augmented assignment "
-                 "through a subscript (`augmented assignment target must be a "
-                 "plain name on the formal x86-64 path`), which is the honest "
-                 "refusal the comment above this case describes",
 ))
 
 # A NEGATIVE index moves the address backwards, which is C's subscript and is

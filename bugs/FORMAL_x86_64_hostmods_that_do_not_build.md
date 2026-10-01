@@ -63,7 +63,18 @@ will replace this message with failure 2. Measured by counting parameters, NOT b
 building: the import refusal happens first, so `re.mojo`'s own x86-64 build has
 never been reached.
 
-## Failure 2 — 7 parameters, 6 argument registers (1 row) — NEW
+## Failure 2 — 7 parameters, 6 argument registers (1 row) — OPEN, now filed properly
+
+> **Re-measured 2026-10-01 and moved out to
+> `bugs/FORMAL_x86_64_argument_registers.md`,** which owns it. Two things that
+> census did not have: the MARGINAL effect, measured against the arm64 log rather
+> than counted — of the 51 x86-64 files carrying this message, **2 would become
+> `pass`** (`re.mojo` and `hashlib.mojo`); 39 are `not-answerable/host-import`
+> on arm64 too and 7 have a refusal of their own, so 49 are a chained-refusal
+> artifact and no rate moves. And the fix is a real stack-argument convention on
+> BOTH ABIs rather than the annotation this section suggests, because SysV and
+> AAPCS64 both put the surplus on the stack and the emitters model an ABI
+> smaller than either.
 
     build: b2_g: 7 parameters exceeds the 6 the formal x86-64 ABI passes in registers
 
