@@ -5541,19 +5541,31 @@ def frame_declared_parameter_refusal(callee, position, param, struct_name,
 
 
 def frame_return_refusal(owner, received: bool, struct_names) -> str:
-    """A frame address RETURNED.  `owner` is the struct whose method the
-    returning function is, or None for a plain function; `received` says the
-    frame was NOT built here.
+    """A frame address RETURNED, in a function the convention does not cover.
+
+    **The convention covers the ordinary case and this is what is left of it.**
+    `formal/build.py`'s `_frame_return_status` decides, for the whole image,
+    whether a function returns a frame; when it does, the callee copies the
+    block into one the caller reserved (`struct_returned_frame_sites`,
+    `returned_frame_convention_refusal`) and this message is not reached. The
+    residual is a return of a name the analysis holds as a frame but could not
+    decide the width of — a candidate set with no struct in it, so the copy has
+    no `n` — and it is kept rather than deleted because that is a
+    representation the guard should refuse and not compute, and because the
+    sweep's family classifier (`tools/formal_sweep.py`) and
+    `test_refusal_taxonomy.py` both key on this text.
+
+    `owner` is the struct whose method the returning function is, or None for a
+    plain function; `received` says the frame was NOT built here.
 
     "Returned from the function that created it" is true for a frame a function
     built and false for one that arrived as a PARAMETER, and the second is the
     larger half of this family: the holder fixpoint makes a callee's parameter a
     holder — in every position since the position rule was split out of this
     one — so `def fwd(r): return r` in a program whose object was made by `main`
-    was reported as a return from the creator. The refusal is right — nothing
-    here establishes that the creator is still on the stack — and the sentence
-    was naming the wrong function, which sends the reader to look at `fwd` for a
-    construction that is in `main`.
+    was reported as a return from the creator. The refusal was right, the
+    sentence named the wrong function, and it sent the reader to look at `fwd`
+    for a construction that is in `main`.
 
     Which is why nothing here says "first parameter" any more.  It said that
     because the fixpoint only followed index 0, and it became false the moment
@@ -5561,12 +5573,13 @@ def frame_return_refusal(owner, received: bool, struct_names) -> str:
     the frame as its SECOND parameter, and a message naming the first one
     points the reader at a parameter the source does not use.
 
-    The hazard is measured, not asserted, and it is a use-after-free rather than
-    a wrong number in the shape that matters: with the creator one frame
+    The hazard is measured, not asserted, and it is a use-after-free rather
+    than a wrong number in the shape that matters: with the creator one frame
     deeper, `def stash(x, y): return y` called as `outer(1)`, the program built,
     ran, and returned **10 on arm64 and 0 on x86-64** where the source says 7 —
     the bytes the address names had been reused, and the two architectures
     disagreed about what was in them."""
+
     who = ", ".join(struct_names) if struct_names else "this struct"
     tail = (f" Returning the address hands the caller a pointer into a frame "
             f"whose lifetime this pass cannot follow, and the failure is a "
@@ -10492,23 +10505,51 @@ def struct_constructor_sites(fn, structs_by_name) -> dict:
         st = framed.get(node.func.name)
         if st is None:
             continue
-        block = struct_frame_block_bytes(st, structs_by_name)
-        nested, inner = [], offset + struct_frame_bytes(st)
-        for fname, slot, child in struct_nested_frame_fields(st, structs_by_name):
-            nested.append((fname, slot, child, inner))
-            inner += struct_frame_block_bytes(child, structs_by_name)
-        out[id(node)] = (st, offset, nested)
+        nested, block = struct_frame_block_layout(st, structs_by_name)
+        out[id(node)] = (st, offset, [(f, s, c, o + offset)
+                                     for f, s, c, o in nested])
         offset += block
     return out
+
+
+def struct_frame_block_layout(struct_def, decls: dict, depth=None):
+    """`(nested, total_bytes)` — one BLOCK's internal layout.
+
+    `nested` is `[(field_name, slot, struct, offset_from_block_base)]`: the
+    frames this struct's typed-nested fields get inside the SAME block, each
+    with its own offset measured from the block's own base, in declaration
+    order, immediately above the object's own slots.  `total_bytes` is the
+    block's whole size, which is what a caller has to reserve for it.
+
+    ONE function for the layout, and both of its consumers read it: the
+    constructor sites (which turn the relative offsets into absolute ones by
+    adding the site's base) and the returned-frame COPY (which uses the
+    relative offsets directly, because the destination block is reserved by
+    `struct_returned_frame_sites` with the same rules and therefore has the same
+    internal layout).  Two walks of the nested-field list would agree until the
+    day one of them was edited, and a returned frame copied with a stale layout
+    stores one struct's nested address in another struct's slot — which is the
+    silent wrong number, not a crash.
+    """
+    depth = MAX_NESTED_FRAME_DEPTH if depth is None else depth
+    nested, inner = [], struct_frame_bytes(struct_def)
+    total = struct_frame_bytes(struct_def)
+    if depth > 0:
+        for fname, slot, child in struct_nested_frame_fields(struct_def, decls,
+                                                             depth):
+            nested.append((fname, slot, child, inner))
+            inner += struct_frame_block_bytes(child, decls, depth - 1)
+    total = inner
+    return nested, total
 
 
 # ── A frame that OUTLIVES the function that built it ─────────────────────
 #
 # `struct_constructor_sites` above is the whole of a frame's placement today,
 # and it is the whole of the problem: every block belongs to the function that
-# reserved it, and that function's scratch is reclaimed when it returns. So
-# `return <frame>` hands the caller a pointer into dead memory, and the 18 arm64
-# findings that name it are all one shape.
+# reserved it, and that function's scratch is reclaimed when the function
+# returns. So `return <frame>` hands the caller a pointer into dead memory, and
+# the 18 arm64 findings that name it are all one shape.
 #
 # The fix is a COPY, and the copy has to land somewhere the CALLER owns. The
 # destination is a block in the CALLER's own scratch, laid out by exactly the
@@ -10516,29 +10557,27 @@ def struct_constructor_sites(fn, structs_by_name) -> dict:
 # prologue, so a call in a loop reuses its site and the stack cannot grow
 # without bound.
 #
-# What makes this a layout question rather than a copy question is WHERE. Three
-# regions already have to be kept apart in one scratch, and a fourth cannot be
-# allowed to overlap any of them:
+# WHERE the block goes, and the argument is one line: a returned block has
+# exactly the LIFETIME a local constructor block has, and nothing else. Both
+# live in the creating function's scratch, both die with it, and both are
+# written only by the function that owns them (the callee writes the returned
+# one only during the call, while the caller's own frame is still live). So the
+# returned blocks sit in the same region as the constructor frames, at the
+# BOTTOM of the reserved scratch, and the blob cursor starts above the lot. The
+# alternative considered — a separate region between the blobs and the spill
+# slots — buys nothing that this does not already have, and costs a fourth
+# region in a layout that has to be computed twice. The one thing that does
+# have to be true is that the two never overlap, and that is a property of the
+# cursor, not of the choice of region.
 #
-#   * receiver frames, at the bottom, so a callee's frames and blobs are below
-#     every frame the CALLER owns (`Frame.frameWrite_read_above_sp`);
-#   * list/dict blobs, growing up from above the frames;
-#   * spill slots, at the top, below the saved-pair area.
-#
-# The returned-frame blocks go BETWEEN the blobs and the spill slots. Above the
-# blobs, because a blob growing upward would otherwise run into one; below the
-# spill slots, because those are at the top and are already spoken for. That
-# ordering is the whole of the placement argument and it is why this is a
-# function in the shared model rather than an offset written twice: a scratch
-# laid out one way by arm64 and another by x86-64 is a returned frame that is
-# correct on one machine and a use-after-free on the other.
+# It is in the shared model rather than written twice in the backends because a
+# scratch laid out one way by arm64 and another by x86-64 is a returned frame
+# that is correct on one machine and a use-after-free on the other.
 #
 # The other half of the fix — telling the CALLEE where the caller's block is —
-# is a calling-convention question and is NOT here; see
-# `returned_frame_convention_refusal` for the three candidates, why two of them
-# cannot work, and what the third costs.
-
-RET_FRAME_REGION_ABOVE_BLOBS = True
+# is a calling-convention question, and the decision is in
+# `returned_frame_convention_refusal`: the caller passes the block's address
+# as one hidden TRAILING argument, the callee copies into it and returns it.
 
 
 def struct_returned_frame_sites(fn, structs_by_name, returns_frame) -> dict:
@@ -10551,57 +10590,73 @@ def struct_returned_frame_sites(fn, structs_by_name, returns_frame) -> dict:
 
     `returns_frame` is a predicate over a callee NAME — "this callee returns a
     frame address" — supplied by the caller rather than recomputed here. The
-    build pass already knows it (it is what `frame_return_refusal` keys on,
-    and it runs the holder fixpoint to a fixed point across the module), and
-    two answers to "does callee F return a frame" is precisely the disagreement
-    that produces a wrong number rather than a refusal: a caller that reserved
-    a block and a callee that did not copy into it builds, runs, and returns
-    whatever the caller's uninitialised scratch held.
+    build pass already knows it (it is the fixpoint that decides which
+    functions return a frame, and it runs to a fixed point across the module),
+    and two answers to "does callee F return a frame" is precisely the
+    disagreement that produces a wrong number rather than a refusal: a caller
+    that reserved a block and a callee that did not copy into it builds, runs,
+    and returns whatever the caller's uninitialised scratch held.
 
-    Only DIRECT results are here. `f(g())` needs a block for `g`'s result in
-    `f` as well, and `f` is not the statement whose target binds it — that is a
-    nested-argument case, and it is left out deliberately rather than
-    half-handled: a block reserved for a call that turns out not to need one is
-    harmless (scratch is reserved by a constant), but a call that needs one and
-    does not get it is the silent wrong answer, so the predicate above is
-    deliberately conservative."""
-    framed = framed_struct_names(list(structs_by_name.values()))
-    if not framed:
+    EVERY call site of such a callee gets a block, not only the ones that bind
+    the result to a name.  The landed version walked assignments, which left
+    three ordinary shapes without a block: `return make()`, `make().size()`,
+    and `f(make())` — and each of them is a frame the CALLER dereferences
+    immediately, which is exactly the lifetime this block is sound for.  The
+    cost of covering them is reserved scratch for a result nobody keeps, and
+    the cost of not covering them is a callee that copies into a register it
+    was handed by accident.  `q: Point = make()` and `q = make()` are the same
+    binding — an annotated target is still an `AssignStmt`, with the annotation
+    in `node.annotation` (fire_compiler.py:474) — and a `MultiAssignStmt`
+    target is deliberately not followed, because it binds a tuple and a frame
+    holder in a tuple position is a different question (and a refusal)."""
+    if not returns_frame:
         return {}
     out, offset = {}, 0
     for node in iter_nodes(getattr(fn, "body", None)):
-        # `q = make()` and the annotated `q: Point = make()` are the same
-        # binding; an annotated target is still an AssignStmt, with the
-        # annotation in `node.annotation` (fire_compiler.py:474). A
-        # MultiAssignStmt binds a tuple and is deliberately not followed —
-        # see `_as_ident_name`.
-        if not isinstance(node, F.AssignStmt) or node.value is None:
+        if not isinstance(node, F.CallExpr) \
+                or not isinstance(node.func, F.IdentExpr):
             continue
-        name = _as_ident_name(node.target)
-        if name is None:
-            continue
-        value = node.value
-        if not isinstance(value, F.CallExpr) or not isinstance(value.func, F.IdentExpr):
-            continue
-        st = returns_frame(value.func.name, name)
+        st = returns_frame(node.func.name)
         if st is None:
             continue
         block = struct_frame_block_bytes(st, structs_by_name)
-        out[id(value)] = (st, offset, block)
+        out[id(node)] = (st, offset, block)
         offset += block
     return out
 
 
-def _as_ident_name(node):
-    """The bare name an assignment TARGET binds, or None.
+def returns_on_every_path(stmts) -> bool:
+    """Whether every path through `stmts` ends in a `return`.
 
-    `_split_top_level_comma`-style unpacking targets are deliberately not
-    followed: `a, b = f()` binds a 2-tuple, and a frame holder in a tuple
-    position is a different question (and a refusal) rather than a block to
-    reserve here."""
-    if isinstance(node, F.IdentExpr):
-        return node.name
-    return None
+    Deliberately the STRICT answer — the last statement of the list must be a
+    return, and an `if` counts only when every branch ends in one — because the
+    question it decides is "may a caller treat this function's result as a
+    frame?".  A function that returns a frame on one path and falls off the end
+    on another leaves the caller's block holding whatever the scratch had, and
+    the honest answer to that is a refusal rather than a default-constructed
+    struct.  Both backends already have a `_always_returns` for the unrelated
+    question "does this body need an implicit `return 0`", and the two are not
+    the same function and do not agree (x86-64's returns True for a return
+    ANYWHERE in the list, arm64's walks to the end); this one is the only one
+    consulted for the returned-frame decision, and it is the stricter of the
+    two on purpose."""
+    if not stmts:
+        return False
+    st, rest = stmts[0], stmts[1:]
+    if isinstance(st, F.ReturnStmt):
+        return True
+    if isinstance(st, F.RaiseStmt):
+        return True
+    if isinstance(st, F.IfStmt):
+        if not returns_on_every_path(st.then_body):
+            return False
+        for _cond, body in (st.elifs or []):
+            if not returns_on_every_path(body):
+                return False
+        if st.else_body is None:
+            return False
+        return returns_on_every_path(st.else_body)
+    return returns_on_every_path(rest)
 
 
 def returned_frame_convention_refusal(callee, n_source_args: int) -> str:
@@ -10611,11 +10666,11 @@ def returned_frame_convention_refusal(callee, n_source_args: int) -> str:
     the callee is the whole of the remaining design question, and the three
     candidates were costed rather than guessed.
 
-    1. **A ninth argument register.** Ruled out by measurement, not taste.
-       AAPCS has X0..X7, and X16/X17 are IP0/IP1, which `BL` destroys — so
-       there is no ninth register to use. A variadic argument count is
-       already refused by name on this path for the same reason
-       (`model.variadic_call_refusal`).
+    1. **An argument register past the ones there are.** Ruled out by
+       measurement, not taste. arm64 has X0..X7 and X16/X17 are IP0/IP1, which
+       `BL` destroys; x86-64 has only SIX (`RDI, RSI, RDX, RCX, R8, R9`).
+       A variadic argument count is already refused by name on this path for
+       the same reason (`model.variadic_call_refusal`).
     2. **The callee computes the caller's block itself.** This is the
        attractive one and it is arithmetically possible: the prologue's
        `SUB SP, SP, #_SCRATCH` and the epilogue's matching `ADD` are
@@ -10640,22 +10695,157 @@ def returned_frame_convention_refusal(callee, n_source_args: int) -> str:
        for, and it is why this is a codegen change rather than an ABI one.
 
        The cost is a limit this has to refuse rather than approximate: the
-       hidden word is a ninth argument, and this path passes at most eight
-       (`_emit_call` drops the rest for compile-only fidelity). A callee that
-       already takes eight arguments cannot be given the word, and a program
-       that does that is refused HERE, by name, instead of being handed a
-       dropped argument and a frame copied into scratch nobody reserved."""
-    if n_source_args >= 8:
+       hidden word is one more argument, and the SMALLER of the two argument
+       budgets is the one that binds.  Six, not eight, and the reason is
+       x86-64's six integer argument registers rather than anything about the
+       copy — arm64 could carry one more.  A threshold of eight would make the
+       two machines answer differently about one source file, which is the one
+       thing this pair of backends is not allowed to do, so the shared number
+       is the smaller one and the refusal says which budget it is."""
+    if n_source_args >= RETURNED_FRAME_MAX_ARGS:
         return (
             f"{callee} returns a frame address, so it needs one hidden word "
             f"for the caller's block — and it already takes {n_source_args} "
-            f"argument(s), which is this path's whole argument budget (AAPCS "
-            f"X0..X7, and this backend already drops arguments past eight for "
-            f"compile-only fidelity). Copy the struct's fields out instead of "
-            f"returning the object, which is the same program with a "
-            f"lifetime this analysis can follow, or reduce the callee's "
+            f"argument(s), which is this path's whole argument budget on the "
+            f"machine with the smaller one: x86-64 passes integer arguments in "
+            f"RDI, RSI, RDX, RCX, R8 and R9 and no more, and the hidden word "
+            f"has to be in a register like every other argument. (arm64's "
+            f"X0..X7 could carry one more, and a limit of eight would let the "
+            f"two machines disagree about the same program, which is worse "
+            f"than refusing a few correct ones.) Copy the struct's fields out "
+            f"instead of returning the object, which is the same program with "
+            f"a lifetime this analysis can follow, or reduce the callee's "
             f"parameter count")
     return ''
+
+
+# How many source arguments a frame-returning callee may take. Six, because
+# that is what the SMALLER of the two ABIs on this path passes in registers
+# (see `returned_frame_convention_refusal`), and the hidden word is one of
+# them. Named rather than written at each use because the two backends have to
+# apply the same number: a build that answers "8 is fine" on arm64 and
+# "8 is not fine" on x86-64 is a two-backend disagreement about one program.
+RETURNED_FRAME_MAX_ARGS = 6
+
+
+def frame_return_mixed_refusal(owner, frame_spelling, word_spelling,
+                               falls_off_end) -> str:
+    """A function that returns a frame on one path and not on another.
+
+    Which is NOT a missing lowering but a program the convention cannot
+    describe, and the reason is the CALLER rather than the callee: the caller
+    has to reserve a block for this function's result before it calls, and to
+    read the result out of that block afterwards, so "what does this function
+    return" has to be ONE answer for the whole image.  A function that returns
+    a frame and a word on different paths has two, and either choice is a wrong
+    answer rather than a rough edge:
+
+      * treated as frame-returning, the word a caller receives is the ADDRESS
+        of a block the callee never wrote — a stack address where the source
+        says a value;
+      * treated as word-returning, a frame address is handed to callers that
+        read fields through it, and the read lands in whatever the callee's
+        reclaimed scratch held.
+
+    `falls_off_end` names the other half of the same question: a body that
+    returns a frame on one path and simply ends on another.  The caller's
+    block is uninitialised on that path, and the one thing this path must never
+    invent is a struct's contents.
+    """
+    if falls_off_end:
+        return (f"{owner} returns a frame address on one path and falls off "
+                f"the end of its body on another, so a caller that reserved a "
+                f"block for the result would read a block nobody wrote: the "
+                f"bytes are whatever the scratch held. Every path that leaves "
+                f"the function must return a frame address, so that the "
+                f"caller's one reservation is the right one — give the last "
+                f"branch a `return {frame_spelling}` as well, or copy a field "
+                f"out instead of returning the object")
+    return (f"{owner} returns {frame_spelling} on one path and "
+            f"{word_spelling} on another, and one function cannot have two "
+            f"return conventions in one image: a caller has to decide BEFORE "
+            f"the call whether to reserve a block for the result, and it can "
+            f"only decide that if the answer is the same on every path. "
+            f"Treating this function as frame-returning hands callers the "
+            f"ADDRESS of a block the callee never wrote where the source says "
+            f"a value; treating it as word-returning hands them a frame "
+            f"address to read fields through, out of scratch that has already "
+            f"been reclaimed. Return a field on both paths, or build the "
+            f"object and return a copy of one of its fields")
+
+
+def frame_return_candidates_refusal(owner, rows) -> str:
+    """`return <frame>` where the name's candidate layouts disagree.
+
+    The copy is `n` slots wide and it has to be the same `n` the CALLER
+    reserved, or the caller reads past the end of a block sized for the other
+    struct — a wrong number on one machine and a segfault on the other
+    depending on which side got the wider count.  The one name, two layouts
+    shape is already refused at every field access by
+    `struct_frame_slot_candidates`; this is the same disagreement arriving
+    through the RETURN, where there is no field access to catch it, and every
+    candidate is spelled so the reader can see which one wanted which count."""
+    parts = []
+    for sn, slots in rows:
+        parts.append(f"{sn} has {slots} slot(s)" if slots is not None
+                     else f"{sn} is not a frame of this module")
+    return (f"returning this name copies out a frame, and the copy's width is "
+            f"the number of slots — but the name holds a frame address in more "
+            f"than one shape here: {'; '.join(parts)}. Which one applies "
+            f"depends on the path taken and this analysis has none, so the "
+            f"caller would reserve a block sized for the other struct. Bind "
+            f"the two constructions to two names, which is the same program "
+            f"with one width per name")
+
+
+def entry_frame_return_refusal(entry) -> str:
+    """The ENTRY function returning a frame.
+
+    The convention is "the caller reserves a block and passes its address", and
+    the entry function's caller is the C runtime, which passes nothing.  So
+    there is no block to copy into, and the only word this function could
+    return would be an address into a frame that dies with it — which is the
+    use-after-free this whole convention exists to remove, one level up.  Named
+    as its own message because "a String receiver is returned from the function
+    that created it" is a statement about a lifetime rule the reader would
+    spend time re-deriving, when the fact here is simpler: there is no caller to
+    hand a block to."""
+    return (f"{entry} returns a frame address, and the returned-frame "
+            f"convention needs a caller to reserve a block and pass its "
+            f"address — and {entry} is this image's ENTRY, so its caller is the "
+            f"C runtime, which passes no such word. There is nowhere for the "
+            f"copy to land, and the address it would return names a frame that "
+            f"dies with this function. Return a field, or a copy of one, which "
+            f"is the same program with a lifetime this analysis can follow")
+
+
+def dylib_frame_return_refusal(module, names) -> str:
+    """A frame-returning function offered at a module boundary.
+
+    The hidden word is part of THIS image's calling convention, and a module
+    boundary is where that convention stops being knowable: the importer
+    compiled the module's source with a different `_frame_receivers` pass, has
+    no table saying which of the library's functions take the extra word, and
+    passes arguments the way the SOURCE spells them.  So exporting one hands
+    the importer a function that copies its caller's block into whatever the
+    seventh argument register happened to hold.
+
+    Refused rather than dropped from the export table, and the reason is a
+    measured one: `formal/build.py`'s `_method_exports` used to filter wide
+    receivers out of the export set, the importer's call had nothing to bind
+    to, and the symptom was reported as a layout problem (see
+    `bugs/FORMAL_frame_receiver_handoff.md` §1).  Silently changing a module's
+    public API is the same defect with a different spelling."""
+    return (f"module {module} exports {' and '.join(names)}, which "
+            f"{'return' if len(names) == 1 else 'return'} a frame address, and "
+            f"the returned-frame convention is a property of ONE image: the "
+            f"hidden word that names the caller's block is part of this "
+            f"image's calling convention, and an importer has no way to know a "
+            f"particular export takes one. Exporting it would hand the "
+            f"importer a function that copies into whatever its seventh "
+            f"argument register held. Return a field, or a copy of one; that "
+            f"is the same program across a boundary with a lifetime both ends "
+            f"can see")
 
 
 # What a FRESH one-word value has to hold, and whether this path can produce it.

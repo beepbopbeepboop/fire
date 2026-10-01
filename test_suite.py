@@ -2335,6 +2335,20 @@ UNREGISTERED = {
         'are emitted at all, which the differential test above cannot tell from '
         'an instruction emitted where a different one should be.',
 
+    # ── the returned-frame convention, both machines, against CPython ──
+    #
+    # Unregistered on purpose rather than by omission, and the reason is in
+    # tools/suite.py's own terms: it builds and RUNS fourteen images (seven per
+    # architecture) and asks CPython for each answer, so a run of it is a
+    # measured cost on every invocation and nothing in the gate wants that
+    # shape. It is listed rather than left out because the estate check below
+    # exists to make an unaccounted-for test file impossible, and a file that is
+    # unaccounted-for is the state this is avoiding.
+    'test_formal_returned_frame.py': 'The returned-frame convention: builds, '
+        'runs and compares with CPython on arm64 AND x86-64. Runs beside '
+        'test_formal_run.py rather than inside it, because the convention is '
+        'one construct and the suite that hosts it is already the longest.',
+
     # ── the interpreter, which is the oracle everything else is compared to ──
     'test_myinterpreter.py': 'Runs a real .mojo file end to end through '
         'myinterpreter.mojo, which is the reference every compiled-path answer '

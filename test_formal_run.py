@@ -2362,24 +2362,116 @@ BYREF_CASES = [
      "    return p.get_x() + p.get_y()\n", 1, None),
 ]
 
+# `return <frame>`: the block is copied into one the CALLER reserved and passes
+# the address of, so the frame outlives its creator by construction. Every case
+# here was a `refuse:` case in BYREF_REFUSALS until the returned-frame
+# convention landed, and each is kept in the same SHAPE it had as a refusal so
+# the arithmetic cannot quietly change: the reader can see the program the old
+# message was about, and the value it now has to produce.
+#
+# Every one of them BUILDS AND RUNS on both architectures. A refusal lifted
+# without a value to check is a claim, and this is the half that makes it a
+# fact — the use-after-free these replaced is invisible without an intervening
+# call, which is why the first case has one.
+RETURNED_FRAME_CASES = [
+    # The plain shape, and the reason the old refusal was right: with the
+    # creator one frame deeper and a call in between, the address named
+    # reclaimed stack. Measured with the refusal removed: 10 on arm64 and 0 on
+    # x86-64 where the source says 78.
+    ("ret_frame_survives_its_creator",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "    fn total(self) -> Int:\n"
+     "        return self.a * 10 + self.b\n\n"
+     "def mk() -> P:\n"
+     "    var p = P()\n"
+     "    p.a = 7\n"
+     "    p.b = 8\n"
+     "    return p\n\n"
+     "def clobber(k: Int) -> Int:\n"
+     "    var q = P()\n"
+     "    var r = P()\n"
+     "    q.a = 111\n"
+     "    r.a = 222\n"
+     "    return k + q.a + r.a\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = mk()\n"
+     "    var k = clobber(0)\n"
+     "    return s.total()\n", 78, None),
+    # A frame that arrived as a PARAMETER and is handed straight back. The
+    # creator is the caller, so the copy happens while the caller's frame is
+    # still live; the destination is the block the caller reserved for the
+    # result, which is the whole of what makes it sound.
+    ("ret_frame_forwarded_from_a_parameter",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def fwd(r: Int) -> Int:\n"
+     "    return r\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r.b = 8\n"
+     "    return fwd(r).a * 10 + fwd(r).b\n", 78, None),
+    # …and a METHOD's receiver handed back, which is the same copy with the
+    # address arriving in the receiver's home.
+    ("ret_frame_from_a_method_receiver",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    fn give(self) -> Int:\n"
+     "        return self\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r.b = 8\n"
+     "    return r.give().a * 10 + r.give().b\n", 78, None),
+    # Through a NON-FIRST parameter, and returned to a caller one level above
+    # the creator. Three levels of block ownership in one program, which is
+    # what a fixed "one block per function" convention would get wrong.
+    ("ret_frame_through_a_nonfirst_parameter",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def stash(x: Int, y: Int) -> Int:\n"
+     "    return y\n\n"
+     "def outer(n: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r.b = 8\n"
+     "    return stash(1, r)\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = outer(1)\n"
+     "    return p.a * 10 + p.b\n", 78, None),
+    # A frame read straight off the call, with nothing bound to a name. The
+    # result is a value the caller consumes immediately, which is exactly the
+    # lifetime the reserved block has.
+    ("ret_frame_field_read_off_the_call",
+     "struct R:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def take(x: Int, y: Int) -> Int:\n"
+     "    return y\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    r.a = 7\n"
+     "    r.b = 8\n"
+     "    return take(1, r).a\n", 7, None),
+]
+
 # Constructs a frame ADDRESS may not take part in. Each is a `refuse:` case
 # because the alternative is a program that builds, runs, and reads a frame
 # after the function that created it has returned — the one outcome this
 # backend may not produce. They are here so that a future change which
 # "helpfully" lowers them is caught.
+#
+# `return <frame>` was the first of them and is not any more: the convention
+# above gives it a destination the CALLER owns. What is left is the set of
+# channels with no such destination — a container, a field, a subscript, a
+# position whose meaning this path cannot see — and each is a different hole in
+# the same lifetime argument.
 BYREF_REFUSALS = [
-    # Returned: the frame dies with the function that made it.
-    ("byref_refuse_returned",
-     "struct P:\n"
-     "    var a: Int\n"
-     "    var b: Int\n\n"
-     "def mk():\n"
-     "    var p = P()\n"
-     "    return p\n\n"
-     "def main(n) -> Int:\n"
-     "    var q = mk()\n"
-     "    return 0\n",
-     "refuse:is returned from the function that created it", None),
     # Into a container: a list blob has no layout for a frame address.
     ("byref_refuse_stored_in_a_list",
      "struct P:\n"
@@ -2627,27 +2719,15 @@ BYREF_HANDOFF_REFUSALS = [
     # to compile. Its real content was one level down, and the level down now
     # has a lowering.
     #
-    # A NON-FIRST argument position. "A position whose meaning this path cannot
-    # see" was a statement about the analysis in a message a reader takes to be a
-    # statement about the program, and it was standing in for three different
-    # things. Wave 5 split them, and this case is the one that MOVED: the
-    # position is now followed (see `byref_nonfirst_holder_reads_correctly` in
-    # the wave-5 block), so what is left to refuse in this program is the
-    # RETURN — `take()` hands back a frame address it did not create, which is
-    # the return family and says so.
-    ("byref_refuse_nonfirst_position_names_it",
-     "struct R:\n"
-     "    var a: Int\n"
-     "    var b: Int\n\n"
-     "def take(x: Int, y: Int) -> Int:\n"
-     "    return y\n"
-     "\n"
-     "def main(n: Int) -> Int:\n"
-     "    var r = R()\n"
-     "    r.a = 7\n"
-     "    r.b = 8\n"
-     "    return take(1, r).a",
-     "refuse:returned from a function that did not create it", None),
+    #
+    # A NON-FIRST argument position, whose source used to sit here as a
+    # refusal. "A position whose meaning this path cannot see" was a statement
+    # about the analysis in a message a reader takes to be a statement about
+    # the program, and it was standing in for three different things. Wave 5
+    # split them and the position became a load; the returned-frame convention
+    # then gave the last shape a destination, so the whole program computes.
+    # It is `ret_frame_field_read_off_the_call` in RETURNED_FRAME_CASES now,
+    # with the arithmetic that says which 7.
     # …and the C half of it, which is a wrong CATEGORY of argument and not a
     # position question at all. `printf` was falling through to "no definition
     # in hand", which is false — it is libSystem's and it binds — and the
@@ -2670,39 +2750,15 @@ BYREF_HANDOFF_REFUSALS = [
      "    return 0",
      "refuse:the argument is VARIADIC, so whatever conversion the format "
      "string names", None),
-    # A frame address RETURNED by a function that did not create it. The holder
-    # fixpoint makes a callee's first parameter a holder, so this is the larger
-    # half of the return family, and the old sentence named THIS function as the
-    # creator — sending the reader to `fwd` for a construction that is in
-    # `main`. The refusal is right; the creator is the caller and nothing here
-    # establishes the caller is still on the stack.
-    ("byref_refuse_returned_from_a_receiver",
-     "struct R:\n"
-     "    var a: Int\n"
-     "    var b: Int\n\n"
-     "def fwd(r: Int) -> Int:\n"
-     "    return r\n"
-     "\n"
-     "def main(n: Int) -> Int:\n"
-     "    var r = R()\n"
-     "    r.a = 7\n"
-     "    r.b = 8\n"
-     "    return fwd(r).a\n",
-     "refuse:returned from a function that did not create it", None),
-    # …and the method half, where the sentence is the same lie with a struct's
-    # name attached.
-    ("byref_refuse_returned_from_a_method_receiver",
-     "struct R:\n"
-     "    var a: Int\n"
-     "    var b: Int\n"
-     "    fn give(self) -> Int:\n"
-     "        return self\n"
-     "\n"
-     "def main(n: Int) -> Int:\n"
-     "    var r = R()\n"
-     "    r.a = 7\n"
-     "    return r.give().a\n",
-     "refuse:returned from a method of R", None),
+    # The RETURNED half of the receiver family — a frame handed back by a
+    # function that RECEIVED it, and the same through a method's receiver —
+    # was refused here until the returned-frame convention gave it a
+    # destination.  Both are now `ret_frame_forwarded_from_a_parameter` and
+    # `ret_frame_from_a_method_receiver` in RETURNED_FRAME_CASES.  What the old
+    # sentence got right is worth keeping in mind anyway: the creator is the
+    # CALLER, not the function doing the returning, and the copy is sound
+    # precisely because it happens while the caller's frame is still live.
+
     # A name the model KNOWS and cannot represent. `Error` is a real type, so
     # "which this module does not compile" was false a third time over: it is
     # neither a function this module compiles nor a function at all, and the
@@ -2895,28 +2951,16 @@ WAVE5_POSITION_CASES = [
     # address back means the caller dereferences a pointer whose creator may be
     # gone. With the creator one frame deeper that is not a maybe.
     #
-    # Before this change: with the position check lifted, this built and
-    # returned 10 on arm64 and 0 on x86-64 where the source says 7 — a
-    # use-after-free, and the two architectures disagreeing about the reused
-    # bytes. Now it is refused, and the refusal names the RETURN rather than
-    # the position, which is the whole of the split.
-    ("byref_refuse_a_received_frame_address_returned",
-     "struct R:\n"
-     "    var a: Int\n"
-     "    var b: Int\n\n"
-     "def stash(x: Int, y: Int) -> Int:\n"
-     "    return y\n"
-     "\n"
-     "def outer(n: Int) -> Int:\n"
-     "    var r = R()\n"
-     "    r.a = 7\n"
-     "    r.b = 8\n"
-     "    return stash(1, r)\n"
-     "\n"
-     "def main(n: Int) -> Int:\n"
-     "    var p = outer(1)\n"
-     "    return p.a\n",
-     "refuse:returned from a function that did not create it", None),
+    # Before wave 5, with the position check lifted, this built and returned
+    # 10 on arm64 and 0 on x86-64 where the source says 7 — a use-after-free,
+    # and the two architectures disagreeing about the reused bytes.  It was
+    # then REFUSED, naming the return rather than the position, which is the
+    # whole of the split; and it is now a positive case,
+    # `ret_frame_through_a_nonfirst_parameter` in RETURNED_FRAME_CASES, because
+    # the returned-frame convention gives the address a home in a block the
+    # CALLER owns.  The guard did its job: it is what made the shape visible
+    # long enough for the copy to be designed for it.
+
     # The same word parked in a CONTAINER by the callee that received it. The
     # fixpoint is what makes this visible at all: before it, `y` was not a
     # holder in `stash`, so the container check had nothing to fire on and the
@@ -6874,6 +6918,7 @@ def main():
         return 0
 
     everything = (CASES + RECVKIND_CASES + FD_CASES + BYREF_CASES
+                  + RETURNED_FRAME_CASES
                   + BYREF_REFUSALS + WIDE_OFF_CASES
                   + SUBSCRIPT_CASES + DECLARED_TYPE_CASES
                   + DECLARED_TYPE_REFUSALS

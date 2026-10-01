@@ -1182,6 +1182,11 @@ def compile_formal(source_path: str, output: str = None,
         check_frame_subscript_escapes(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
         check_dataclass_constructs(stmts, functions)
+        # …and the fifth of the late checks, HERE for the same reason: a
+        # function whose return shape this backend cannot represent is a fact
+        # about the FILE rather than about the image, so a file whose import is
+        # the more fundamental problem should say that first.
+        check_frame_return_shapes(functions)
         check_module_symbols(
             functions, {st.name: st for st in structs},
             imported_module_names=(imported_modules(stmts)
@@ -1344,6 +1349,10 @@ def _formal_module_functions(source_path: str,
         # is a fact about the FILE rather than about the image, so a file whose
         # import is the more fundamental problem should say that first.
         check_dataclass_constructs(stmts, functions)
+        # …and the fifth, for the same reason: a function whose return shape
+        # this backend cannot represent is a fact about the file, not about
+        # this image, and a file whose import is broken should say that first.
+        check_frame_return_shapes(functions)
         # The third of the three, and HERE for the reason the other two are:
         # a name the build cannot place is a codegen finding about THIS file,
         # and a file that imports a host module has a more fundamental fact
@@ -1989,6 +1998,16 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # "no call site agrees", which is a refusal the pre-existing rule does not
     # make.
     declared_holders = {fn.name: {} for fn in functions}
+    # `{function name: struct}` — the functions that RETURN a frame address, and
+    # the struct whose layout that frame has.  It is the other half of the
+    # holder fixpoint below and is computed inside the same loop, because the
+    # two feed each other: a call to one of these functions binds a holder, and
+    # which functions are in the table is read out of the holder table.  It is
+    # a property of the WHOLE IMAGE for the same reason a parameter's being a
+    # holder is (`model.frame_holder_disagreement_refusal`): the caller has to
+    # reserve a block BEFORE the call and read the result out of it afterwards,
+    # so one call site's answer is not enough.
+    returns_frame: dict = {}
     for fn in functions:
         owner = owners.get(fn.name)
         if owner is not None and owner.name in framed:
@@ -2037,6 +2056,34 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                     hs.add(target)
                     hstruct[fn.name][target] = list(hstruct[fn.name][value.name])
                     changed = True
+                # A call to a function that RETURNS A FRAME binds a frame
+                # address, and this is the edge that makes the returned-frame
+                # convention a whole-image property rather than a per-file one:
+                # `q = make()` puts a frame address in `q`, so `q.x` is a frame
+                # read and `q` has to be in the holder table for the codegen to
+                # emit a load instead of a register move.
+                #
+                # It is inside the fixpoint rather than after it because it
+                # DEPENDS on what the fixpoint decides: which functions return
+                # a frame is itself read out of the holder table, so the two
+                # questions have to be asked together until neither answer
+                # moves.  It is keyed on the BINDING node — a `VarDecl` or an
+                # `AssignStmt` — and not on the `CallExpr`, because those are
+                # two different nodes in this walk and the binding is the one
+                # that says the address outlives the call.
+                #
+                # `M.call_callee_name` and NOT `value.func.name`, for the same
+                # reason the edge below uses it: a comptime specialization
+                # `make[T]()` names the same function `make` does, and reading
+                # the name off the node would make this edge blind to every
+                # generic frame-returning constructor.
+                if target and isinstance(value, F.CallExpr):
+                    frame_fn = M.call_callee_name(value.func)
+                    st = returns_frame.get(frame_fn) if frame_fn else None
+                    if st is not None and target not in hs:
+                        hs.add(target)
+                        hstruct[fn.name].setdefault(target, []).append(st)
+                        changed = True
                 if not isinstance(node, F.CallExpr):
                     continue
                 # `model.call_callee_name`, and NOT `node.func.name`: a
@@ -2049,9 +2096,16 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                 # edge here is the SILENT direction: had the escape check been
                 # lifted without this, `f`'s parameter would have read as an
                 # ordinary word and `r.a` a load eight bytes from wherever it
-                # pointed.  One recogniser, three readers (`_check_frame_escapes`
-                # and `_check_holder_agreements` as well), because the three
+                # pointed.  One recogniser, four readers
+                # (`_check_frame_escapes` and `_check_holder_agreements` as
+                # well, and the returned-frame edge above), because the four
                 # have to agree about which function a call is.
+                #
+                # It subsumes the `or not isinstance(node.func, F.IdentExpr)`
+                # guard this edge used to carry: `call_callee_name` answers
+                # None for a callee that is not a plain or generic name, which
+                # is the same set, and ONE recogniser for "which function is
+                # this call" is the property the comment above is about.
                 target_fn = M.call_callee_name(node.func)
                 if target_fn is None:
                     continue
@@ -2102,6 +2156,34 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                     hstruct[target_fn][callee] = \
                         list(hstruct[fn.name][r[0]])
                     changed = True
+        # The OTHER half of the same fixpoint: which functions RETURN a frame.
+        # It has to be here and not after the loop because the edge above reads
+        # it — `q = make()` is a holder only if `make` is known to return a
+        # frame — and because it reads the holder table the same loop is still
+        # growing.  The two questions therefore have to be asked together until
+        # neither answer moves, which terminates because frame-ness only ever
+        # GROWS: a return value is a frame either because a name holds one (the
+        # holder table, monotone) or because it is a call to a function already
+        # known to return one (also monotone).
+        for fn in functions:
+            status, st = _frame_return_status(fn, holders[fn.name],
+                                              hstruct[fn.name], returns_frame)
+            fn._frame_return_status = status
+            if status == _RETURN_FRAME and returns_frame.get(fn.name) is not st:
+                changed = True
+            if status == _RETURN_FRAME:
+                returns_frame[fn.name] = st
+            elif returns_frame.pop(fn.name, None) is not None:
+                changed = True
+    # The whole image's table, published on every function, and the reason it
+    # is published rather than passed: the CALLER of a frame-returning function
+    # is a different function from the one that returns it, and the emitters
+    # ask the question per call site with no unit in hand — the same reason
+    # `_frame_candidates` is published rather than threaded.
+    for fn in functions:
+        fn._image_returns_frame = dict(returns_frame)
+    _check_returned_frame_budget(functions, returns_frame, params_of)
+
     # AFTER the fixpoint and BEFORE the per-function loop below, and both of
     # those positions are load-bearing rather than tidy:
     #
@@ -2962,6 +3044,143 @@ def _describe_value(value) -> str:
     return f"a {type(value).__name__}"
 
 
+# The three answers `_frame_return_status` gives, and why there are three and
+# not two.  `_RETURN_FRAME` is the only one that compiles, and it is a property
+# of the whole image: a caller reserves a block for this function's result and
+# reads it out of that block afterwards, so the answer cannot be per-path.
+_RETURN_FRAME = "frame"
+_RETURN_WORD = "word"
+_RETURN_UNSOUND = "unsound"
+
+
+def _frame_return_status(fn, holders, by_name, returns_frame):
+    """`(status, struct_or_None)` — what `fn` gives back to its callers.
+
+    The decision the returned-frame convention turns on, and it is asked of
+    every `return` in the body rather than of the first one, because the
+    convention is a property of the FUNCTION: a caller has to decide, before
+    the call, whether to reserve a block for the result, and it can only do
+    that if the answer is the same on every path.
+
+      * `_RETURN_FRAME` — every path returns a frame address, all of them of
+        one struct, and the body cannot fall off the end.  The struct is the
+        one the copy is laid out for.
+      * `_RETURN_WORD` — no path returns a frame address.  The ordinary case,
+        and everything that compiled before the convention existed.
+      * `_RETURN_UNSOUND` — a frame on one path and something else on another,
+        or a frame and a fall-off-the-end, or two frames of different widths.
+        The caller is PARKED a refusal for (`check_frame_return_shapes`)
+        rather than refused here, for the reason every other frame refusal in
+        this file is parked: `_prepare_functions` runs before the imports
+        resolve, and a refusal raised from inside it is reported in place of
+        the import diagnosis.
+
+    A value is frame-valued in exactly two ways, and they are the two the
+    holder analysis can recognise: a bare name that holds a frame address, and
+    a call to a function already known to return one.  Anything else is a
+    word — including a field read (`self.x` is a VALUE read out of the frame,
+    not the frame) and a copy construction, which is a frame in THIS function's
+    own scratch and is copied out by the same convention when it is returned.
+    """
+    frames, words = [], []
+    for node in M.iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.ReturnStmt) or node.value is None:
+            continue
+        value = node.value
+        if isinstance(value, F.IdentExpr) and value.name in holders:
+            cands = by_name.get(value.name) or []
+            if cands:
+                frames.append((cands, value.name))
+                continue
+        if isinstance(value, F.CallExpr) and isinstance(value.func, F.IdentExpr):
+            st = returns_frame.get(value.func.name)
+            if st is not None:
+                frames.append(([st], f"{value.func.name}()"))
+                continue
+        words.append(_expr_spelling(value))
+    if not frames:
+        return _RETURN_WORD, None
+    if words:
+        _park_frame_return(fn, M.frame_return_mixed_refusal(
+            fn.name, _frame_return_spelling(frames[0][1]),
+            f"the value {words[0]!r}", False))
+        return _RETURN_UNSOUND, None
+    if not M.returns_on_every_path(getattr(fn, "body", None)):
+        _park_frame_return(fn, M.frame_return_mixed_refusal(
+            fn.name, _frame_return_spelling(frames[0][1]), None, True))
+        return _RETURN_UNSOUND, None
+    # Every path returns a frame, so the only question left is WHICH frame, and
+    # the answer has to be one struct: the copy is `n` slots wide and the
+    # caller reserved a block sized for the struct this returns.
+    shapes = []
+    for cands, _spelling in frames:
+        for st in cands:
+            if st not in shapes:
+                shapes.append(st)
+    if len(shapes) > 1:
+        rows = [(st.name, len(M.struct_frame_slots(st))) for st in shapes]
+        _park_frame_return(fn, M.frame_return_candidates_refusal(fn.name, rows))
+        return _RETURN_UNSOUND, None
+    return _RETURN_FRAME, shapes[0]
+
+
+def _frame_return_spelling(value) -> str:
+    """How a refusal names the value a `return` gives a frame address."""
+    if isinstance(value, F.IdentExpr):
+        return f"the frame in {value.name!r}"
+    return f"the frame in {value!r}"
+
+
+def _park_frame_return(fn, message) -> None:
+    """Record a returned-frame refusal for `check_frame_return_shapes` to raise.
+
+    Parked, never raised, for the reason the subscript escape is parked
+    (`_defer_subscript_escape`): this pass runs inside `_prepare_functions`,
+    which is BEFORE the imports resolve, so a refusal raised from here is
+    reported in place of the import diagnosis — and a file that imports `os` is
+    out of this backend's reach whatever its codegen says, which is the more
+    useful of the two answers."""
+    fn._frame_return_problems = list(
+        getattr(fn, "_frame_return_problems", ())) + [message]
+
+
+def check_frame_return_shapes(functions) -> None:
+    """Raise the returned-frame refusals `_frame_receivers` parked.
+
+    The fourth of the late frame checks and the same reason as the other three:
+    a refusal raised before the imports resolve is reported in place of the
+    import diagnosis.  A returned frame that is unsound on one path is a real
+    finding and a late one — the import is the more fundamental fact, and this
+    one only matters if the imports resolve."""
+    for fn in functions or ():
+        for message in (getattr(fn, "_frame_return_problems", ()) or ()):
+            raise CodegenError(message)
+
+
+def _check_returned_frame_budget(functions, returns_frame, params_of) -> None:
+    """Refuse a frame-returning callee with no argument register left.
+
+    The hidden word is one more argument, and this path passes arguments in
+    registers: arm64 has X0..X7 and x86-64 has six.  A callee that already
+    takes the whole budget cannot be given the word, and the alternative is not
+    a rough edge — `_emit_call` drops arguments past the budget for
+    compile-only fidelity, so the word would be dropped and the callee would
+    copy the frame into whatever the register held.  That is the silent wrong
+    answer, and `model.returned_frame_convention_refusal` is the message for
+    it.  Counted from the DECLARED parameter list rather than from a call site,
+    because the callee is compiled once and every call site has to agree."""
+    for fn in functions or ():
+        if fn.name not in returns_frame:
+            continue
+        names = params_of.get(fn.name) or []
+        n = len(M.incoming_args(fn))
+        if n < len(names):
+            n = len(names)
+        message = M.returned_frame_convention_refusal(fn.name, n)
+        if message:
+            _park_frame_return(fn, message)
+
+
 def _constructor_bindings(fn, framed) -> dict:
     """`{name: [struct, …]}` for locals bound from a framed struct's constructor.
 
@@ -3127,14 +3346,35 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
 
     for node in M.iter_nodes(fn.body):
         if isinstance(node, F.ReturnStmt) and node.value is not None:
-            # Whether the returning function CREATED the frame is not a thing
-            # this walk knows: a holder may have arrived as one of its
-            # parameters, in which case the creator is up the call chain.
-            # `owners` says which case this is, and the message says so,
+            # `return <frame>` used to be refused here, and the refusal was
+            # CORRECT: the block belongs to the function that reserved it and
+            # that function's scratch dies with it, so the address the caller
+            # would dereference names reclaimed stack. It is not the answer
+            # any more, because the answer exists: `_frame_receivers` has
+            # decided whether this function returns a frame, and when it does
+            # the CONVENTION puts the copy in a block in the CALLER's own
+            # scratch (`model.struct_returned_frame_sites`) with the caller's
+            # block address passed as one hidden trailing word. So the emitter
+            # copies and there is nothing left for this pass to object to.
+            #
+            # `_frame_return_status` is three-valued and the third value is why
+            # this branch is a branch at all: `_RETURN_UNSOUND` means the
+            # function returns a frame on one path and not on another, which
+            # is a real refusal — parked for
+            # `check_frame_return_shapes` to raise from the entry points,
+            # because a refusal raised from inside `_prepare_functions` is
+            # reported in place of the import diagnosis. It is NOT this
+            # message: the mechanism operating there is the two return
+            # conventions, not a frame escaping a frame.
+            #
+            # `owners` says which case the received frame is, and the message
+            # for a function that really does return a word still says so,
             # because "returned from the function that created it" is false for
-            # the second and sends the reader to the wrong function looking for
-            # it.
+            # a frame that arrived as a PARAMETER and sends the reader to the
+            # wrong function looking for it.
             owner = (owners or {}).get(fn.name)
+            if getattr(fn, "_frame_return_status", _RETURN_WORD) != _RETURN_WORD:
+                continue
             if isinstance(node.value, F.IdentExpr) \
                     and node.value.name in holders:
                 raise CodegenError(M.frame_return_refusal(
@@ -6156,6 +6396,24 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
     exported = _export_entries(source_paths, prefixes)
     out = []
     emitted = set()
+    # A function that RETURNS A FRAME ADDRESS is not exportable, and the
+    # refusal is here rather than in the emitter because the emitter has no
+    # idea the function is being offered at a boundary.  The reason is the
+    # hidden word: the returned-frame convention is "the caller reserves a
+    # block and passes its address as one trailing argument", and that is a
+    # property of ONE image's calling convention.  An importer compiled the
+    # module's source with its own `_frame_receivers` pass, has no table saying
+    # which of this library's functions take the extra word, and passes
+    # arguments the way the source spells them — so an exported one copies its
+    # caller's block into whatever the seventh argument register held.
+    frame_returns = [fn.name for fn in ordered
+                     if getattr(fn, "_frame_return_status", None) == _RETURN_FRAME]
+    offered = [n for n in frame_returns
+               if n in exported or n in (methods or {})]
+    if offered:
+        raise CodegenError(M.dylib_frame_return_refusal(
+            source_paths[0] if source_paths else "this module",
+            sorted(offered)))
     for fn in ordered:
         # An overload was renamed to `<name>__ovN` above, so it no longer
         # matches — which is what keeps a name that reflect *did* export from
