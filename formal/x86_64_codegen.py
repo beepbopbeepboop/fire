@@ -1691,6 +1691,24 @@ class X86_64Codegen:
         self._emit_extern_call("exit")
 
     def _emit_aug_assign(self, stmt) -> None:
+        op = stmt.op[:-1] if stmt.op.endswith("=") and stmt.op != "==" \
+            else stmt.op
+        # A SUBSCRIPT target is a read-modify-write through a computed address,
+        # and it needs the address computed ONCE: the index expression can
+        # contain calls, so evaluating it for the read and again for the write
+        # would read and write two different elements of a list that a call in
+        # between grew. That is the whole of the shape, and arm64 has had it
+        # (`_emit_subscript_aug`) while this backend refused it — a two-backend
+        # disagreement about whether `q[0] += 5` is a program
+        # (bugs/FORMAL_x86_64_augmented_assignment_through_a_subscript_is_refused.md).
+        # It delegates rather than growing a second copy of the operator table:
+        # `_emit_subscript_aug` reuses this backend's own `_ALU_RR` and
+        # `_emit_shift_reg`, so which operators a read-modify-write supports is
+        # decided in one place per architecture, exactly as `_emit_binop`
+        # decides it for the binary form.
+        if isinstance(stmt.target, F.SubscriptExpr):
+            self._emit_subscript_aug(stmt, op)
+            return
         if isinstance(stmt.target, F.IdentExpr):
             name = stmt.target.name
         elif isinstance(stmt.target, F.MemberExpr) \
@@ -1705,8 +1723,6 @@ class X86_64Codegen:
             raise CodegenError(
                 "augmented assignment target must be a plain name on the "
                 f"formal x86-64 path (got {type(stmt.target).__name__})")
-        op = stmt.op[:-1] if stmt.op.endswith("=") and stmt.op != "==" \
-            else stmt.op
         # The same refusal `_emit_binop` makes, asked HERE because an augmented
         # assignment is a separate emitter that never went through it. That is
         # not a hypothetical: `s += t` built, ran, and printed `[]` on arm64
@@ -4574,6 +4590,91 @@ class X86_64Codegen:
             self.asm.emit(encode_mov_rm8_r8(Reg.RAX, 0, Reg.R11))
         else:
             self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R11))
+
+    def _emit_subscript_aug(self, stmt, op: str) -> None:
+        """`obj[index] <op>= value` — one address, one read, one write.
+
+        arm64's `_emit_subscript_aug` is the same algorithm; what differs is
+        the register discipline, and it is the same discipline the rest of this
+        backend already uses rather than a second one. Two 16-byte slots, in
+        this order:
+
+            [rsp]      old element, at the element's width
+            [rsp+16]   the address
+
+        The address is computed FIRST and survives the evaluation of both the
+        element load and the right-hand side in slot 2. It has to: the index
+        expression can contain a call, and an index re-evaluated after that
+        call would name a different element of a list the call may have grown
+        — a read-modify-write through a different address than it read.
+
+        The element is loaded at the WIDTH `_emit_subscript_addr` established
+        for this base (`_sub_width`), through the same pair of instructions
+        `_emit_subscript` uses — including the byte load, because a `UInt8`
+        element is a byte and a formal value is one 64-bit word, so `200` has
+        to read back as 200 and not as the low byte of a neighbour.
+
+        The operators are THIS backend's `_ALU_RR` and `_emit_shift_reg`, the
+        same two tables `_emit_binop` and the plain-name `_emit_aug_assign`
+        dispatch through. There is deliberately no operator list here: a second
+        one is how `q[0] += 5` and `q[0] = q[0] + 5` come to answer differently
+        about the same source.
+        """
+        reason = M.string_binary_refusal(
+            op, self._expr_str_kind(stmt.target),
+            self._expr_str_kind(stmt.value), spelled_op=stmt.op)
+        if reason is not None:
+            # A `char *` base has no element type to add to, and the store at
+            # the end would write into the literal's own bytes: measured on both
+            # architectures, `s[0] += 1` over a string literal built and died on
+            # SIGBUS writing a read-only __TEXT page. arm64's subscript-aug path
+            # asked no such question and so built the crash, which is why the
+            # same refusal now sits on both sides of the pair rather than only
+            # on this one.
+            raise CodegenError(reason)
+        target = stmt.target
+        self._emit_subscript_addr(target)             # RAX = address
+        self._push_slot(Reg.RAX)                      # [rsp] = address
+        self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RAX, 0))   # old element
+        if self._sub_width == 1:
+            self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
+        self._push_slot(Reg.RAX)                      # [rsp] = old, [rsp+16] = addr
+        self._emit_expr(stmt.value)                   # RAX = value
+        self._pop_slot(Reg.R11)                       # R11 = old
+        if op in _ALU_RR:
+            # R11 is written as the LEFT operand so the operation reads in
+            # source order — for `-` and `>>` the old value is the left one and
+            # the assigned expression the right, and RAX is holding the right.
+            self.asm.emit(_ALU_RR[op](Reg.R11, Reg.RAX))   # R11 = old op value
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R11))
+        elif op in ("<<", ">>"):
+            # The count has to be in CL and the value in RAX, which is what
+            # `_emit_shift_reg` takes. The signedness is the ELEMENT's own —
+            # `model.shift_signedness` on the target, the same rule the
+            # plain-name case uses on its name and `_emit_shift` uses on the
+            # binary form, so `p[0] >>= n` and `p[0] = p[0] >> n` cannot
+            # disagree about whether the result is signed.
+            self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.RAX))
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R11))
+            self._emit_shift_reg(op, cmp_signed(
+                M.shift_signedness(self._ttype(target))))
+        else:
+            raise CodegenError(
+                f"unsupported augmented operator {stmt.op!r} on the formal "
+                f"x86-64 path (supports + - * & | ^ << >>)")
+        self._emit_trunc(common_type(self._ttype(target),
+                                     self._ttype(stmt.value)))
+        # The ADDRESS goes into a register that is not the one holding the
+        # result. `mov [rax], rax` — the shape this had for one revision — is a
+        # store of the element's own address into the element, and it is
+        # invisible in every test that does not read the element back: the write
+        # happens, the function returns, and the damage only shows up as a
+        # number that is a pointer. arm64's twin uses X9 for the same reason.
+        self._pop_slot(Reg.R10)                       # R10 = address
+        if self._sub_width == 1:
+            self.asm.emit(encode_mov_rm8_r8(Reg.R10, 0, Reg.RAX))
+        else:
+            self.asm.emit(encode_mov_rm64_r64(Reg.R10, 0, Reg.RAX))
 
     def _emit_slice_store(self, target: F.SliceExpr, value) -> None:
         raise CodegenError(

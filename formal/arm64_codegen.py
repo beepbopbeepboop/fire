@@ -3666,6 +3666,21 @@ class ARM64Codegen:
                 f"unsupported augmented operator {stmt.op!r} "
                 f"(formal arm64 path supports + - * & | ^ << >>)")
         target = stmt.target
+        # A `char *` base has no element type to add a number to, and the store
+        # at the end of this routine writes THROUGH the base — so over a string
+        # literal, which lives in a read-only __TEXT page, `s[0] += 1` built an
+        # image that died on SIGBUS on the assignment. Measured on this tree
+        # before the check existed. The plain-name path above already asked
+        # `model.string_binary_refusal` for exactly this question and this one
+        # did not, which is the same "a second emitter that never went through
+        # the check" shape `s += t` was; x86-64's twin asks it as well, so the
+        # two architectures now refuse the same source for the same stated
+        # reason instead of one crashing and one declining.
+        reason = M.string_binary_refusal(
+            op, self._expr_str_kind(target),
+            self._expr_str_kind(stmt.value), spelled_op=stmt.op)
+        if reason is not None:
+            raise CodegenError(reason)
         self._emit_subscript_addr(target)
         self.asm.emit(encode_stp_sp_pre(0, 31))   # push addr (X0, XZR)
         self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))  # X9 = addr
