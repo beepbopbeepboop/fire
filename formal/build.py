@@ -6553,12 +6553,33 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 if (base_name not in _callee_defs(functions)
                         and not M.empty_blob_constructor(base_name)
                         and not base_name.startswith(M.MLIR_DIALECT_PREFIX)
-                        and not M.is_external_call_template(sub)):
+                        and not M.is_external_call_template(sub)
+                        and not M.debug_assert_callee(sub)):
                     why = (M.ambiguous_method_specialization_refusal(
                         M.member_chain_text(sub.obj), sub.obj.member,
                         _ambiguous_method_owners(sub.obj, structs_by_name))
                         if _ambiguous_method_owners(sub.obj, structs_by_name)
                         else M.specialization_call_refusal(base_name))
+                elif M.debug_assert_callee(sub):
+                    # The FOURTH bracketed callee this tree has a better answer
+                    # for, and it is a different KIND of answer from the three
+                    # above rather than a fourth spelling. `debug_assert` is a
+                    # builtin of the LANGUAGE, so its declaration is a fact
+                    # about the language rather than something this image has to
+                    # compile — which is exactly the premise
+                    # `specialization_call_refusal` states and then says there
+                    # is none in hand. Left in, it refused all 28 bracketed
+                    # `debug_assert` call sites in the new-modular stdlib with
+                    # a message about generics and monomorphization, none of
+                    # which is what those call sites are.
+                    #
+                    # Asked through `M.debug_assert_bracket_refusal`, the ONE
+                    # reader both backends ask, so a bracket this path cannot
+                    # account for is still refused rather than dropped here and
+                    # answered there — a dropped bracket is the
+                    # `plain[3](5)` → `plain(5)` image this whole scan exists
+                    # to prevent.
+                    why = M.debug_assert_bracket_refusal(sub)
             if why is not None:
                 bracketed[id(root_ident)] = why
         # A BRACKETED CALLEE, `f[x](...)`, is a comptime SPECIALIZATION of `f`
