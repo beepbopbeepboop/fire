@@ -917,6 +917,19 @@ class GimpleGen:
         # extern "C" resume/value/destroy functions to call without having
         # to re-derive it from the (long gone, by then) original CallExpr.
         self._generator_var_api: dict[str, dict] = {}
+        # A3 stack-switch lowered BODY function name -> `{param: generator
+        # api}` for the SOURCE parameters whose declared default names one
+        # of this module's generators (`def walk_tree(root, *,
+        # walk=_walk_tree)`). Populated by
+        # `mojo.middle.coro.register`'s second pass; read by `gen_func`,
+        # which copies the entry into the per-function
+        # `_callable_param_gen_api` that `_lower_fnptr_call_value` consults
+        # so a call through such a parameter is driven as the generator it
+        # defaults to. Keyed by BODY name (not the source name) because the
+        # stack-switch lowering moves every source parameter into a
+        # `var p = __mojo_gen_arg(...)` local, so the body FunctionDef the
+        # ordinary codegen emits is what `gen_func` actually sees.
+        self._coro_body_callable_param_apis: dict[str, dict] = {}
         # Step I (create_task/Task/TaskGroup/RaisingTask project): mirrors
         # self._generator_var_api exactly, but for a `MojoAsync *` value
         # produced by `create_task(...)`/`create_raising_task(...)` and held
@@ -1580,6 +1593,44 @@ class GimpleGen:
         # from a fresh, empty "have I seen this name" view and merge its own
         # fields in regardless of what an earlier temp_gen already decided.
         self._struct_name_owner: dict = {}
+        # id(StructDef) -> the C-level identity ("cname") this struct is
+        # emitted under, and the whole-program maps derived from it. The C
+        # IDENTITY of a struct is the single string every consumer keys on:
+        # `struct_field_types`, `_class_attrs`, the `typedef struct X` name,
+        # the `_alloc_X`/`_mojo_repr_X` helper names, and the `{cname}_
+        # {method}` C symbols. Historically that string was just
+        # `StructDef.name`, so two same-bare-named classes in different
+        # modules collided on it (see
+        # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md
+        # — the loser's field table, its `self->field` accesses and its
+        # `__init__` call sites all resolved against the WINNER's, so a `str`
+        # field was silently stored into the winner's `int64_t` slot). These
+        # maps ARE that identity, made explicit:
+        #   _struct_cname_by_id     id(StructDef) -> cname
+        #   _struct_cname_of_name   bare name -> the OWNER's cname (the
+        #                          first-wins struct, so a name that never
+        #                          collided resolves to the bare name and
+        #                          every non-colliding struct's output is
+        #                          byte-identical to what it was before)
+        #   _struct_cname_by_home   "home_module::Name" -> cname, the
+        #                          MODULE-QUALIFIED lookup a construction /
+        #                          field-access site uses to tell two
+        #                          same-named classes apart
+        #   _struct_qualified_cnames  the cnames that are NOT some struct's
+        #                          own bare name; they already carry their
+        #                          module prefix, so `_struct_method_qualifier`
+        #                          must answer '' for them
+        #   _struct_home_by_id      id(StructDef) -> the module that module's
+        #                          own gen_module call compiled it in. The
+        #                          collision TEST: two same-named StructDefs
+        #                          collide only when their homes DIFFER (same
+        #                          home is one file redefining a class, which
+        #                          the bare-name first-wins already models).
+        self._struct_cname_by_id: dict = {}
+        self._struct_cname_of_name: dict = {}
+        self._struct_cname_by_home: dict = {}
+        self._struct_qualified_cnames: set = set()
+        self._struct_home_by_id: dict = {}
         # struct name -> [base class names]; populated per gen_module call
         # (see the struct-bases scan below). Default empty here so any method
         # lookup that runs before that scan (or on a GimpleGen instance that
@@ -1771,6 +1822,13 @@ class GimpleGen:
         # not final filtered results.
         self._field_scan_var_cache: dict = {}
         self._field_scan_member_cache: dict = {}
+        # A THIRD field-scan cache, for `_scan_stmt_member_assigns` (the
+        # `o.m = <value>` evidence the phantom-field mint types a field
+        # from). Separate dict, not a second entry in the one above: the
+        # cache is keyed by `id(stmt)` alone, so two different walks of the
+        # same statement would collide and whichever ran second would read
+        # the other's candidates back.
+        self._field_scan_assign_cache: dict = {}
         # Phase 3 (same doc, same pattern): per-function/method memoization
         # of `_infer_param_types`'s own expensive per-parameter AST scan
         # (`analyze_param_usage`, gen_module's Pass 1.3 unannotated-parameter
@@ -1826,6 +1884,12 @@ class GimpleGen:
         self._param_generator_api: dict = {}
         self._all_async_fn_names: set = set()
         self._bound_method_ret_types: dict = {}
+        # Any callable VALUE -> that callee's real return type; see
+        # emit_infra._reset_func's `_callable_ret_types` entry.
+        self._callable_ret_types: dict = {}
+        # dict value -> set of callable return types stored into it; see
+        # emit_infra._reset_func's `_dict_callable_ret` entry.
+        self._dict_callable_ret: dict = {}
         self._module_int_consts_cache: dict = {}
         self._seen_generator_base_names: dict = {}
         self._cpp_module_fn_asts: dict = {}
@@ -1987,6 +2051,20 @@ class GimpleGen:
         # Lib/importlib/metadata/__init__.py's `def distributions(**kwargs):`
         # called as plain `distributions()`.
         self._func_kwargs_has_vararg: dict[str, bool] = {}
+        # free-fn name (both mangled and plain) -> (n_fixed, kind) for a
+        # function that DECLARES a `*args`/`**kwargs`, exactly the pair
+        # `_lower_LambdaExpr` records for a variadic lambda. Used ONLY when
+        # the function is taken as a VALUE (`f = g`), where its real C
+        # signature (packed `MojoList *`/`MojoDict *` parameters) no longer
+        # matches the arity-based `mojo_fnptr_call_N` convention: `def f(*a)`
+        # called through `f` passed loose scalars where a `MojoList *` was
+        # wanted, and the callee dereferenced the integer 1 — a SIGSEGV.
+        # Materializing such a value as a `MojoVarargFn` (see
+        # runtime/fire_runtime.h's "Variadic callables") makes every holder
+        # of it — local, argument, container, struct field, `sorted(key=)` —
+        # pack correctly. A DIRECT call by name is unaffected and keeps going
+        # through `_lower_named_call`'s own `...`-sentinel packing.
+        self._variadic_func_shape: dict[str, tuple] = {}
         # A free function's own sentinel-preserving param C-type list, for
         # the `(fixed, *args, trailing_kwonly=default, ...)` shape (no
         # `**kwargs`) — populated ONCE at registration time so a call site
@@ -2133,6 +2211,18 @@ class GimpleGen:
         self._kw_key_src: dict[str, str] = {}    # see _char_to_cstr(word_ok=)
         self._fresh_str_tmps: set = set()  # see emit_infra._emit_str_cat
         self._fresh_vals: set = set()  # see emit_infra.is_fresh_container_operand
+        # Names bound to a bool, keyed by NAME across functions (see
+        # emit_stmts._record_bool_valued). Declared HERE, not created lazily
+        # behind `if not hasattr(gen, '_bool_valued')`: self-hosted, the field
+        # exists in GimpleGen's struct from the start, so `hasattr` answered
+        # True, the lazy `set()` never ran, and the first `add` went through
+        # a NULL set -- the SIGSEGV that ended every `mojoc --dump-full
+        # fire.py` in `mojo_set_add_str`.
+        self._bool_valued: set = set()
+        # Pool of reusable scratch dicts for the hermetic type scans, handed out
+        # in stack order: see resolve_shared._scan_scratch_dict.
+        self._scan_scratch: list = []
+        self._scan_scratch_top: int = 0
         # Block-scoped destruction state — see emit_infra's block-scope section.
         self._analysis_funcs: dict = {}   # see infra_infer._build_analysis_funcs
         self._fresh_returning: set = set()   # names whose calls return a fresh container
@@ -2501,6 +2591,49 @@ class GimpleGen:
         'mojo_bound_method_call_3': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_bound_method_call_4': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_is_bound_method':     ('int', ['void *']),
+        # Variadic callables (see runtime/fire_runtime.h's "Variadic
+        # callables" comment): a value whose real callee wants its
+        # arguments packed into a MojoList/MojoDict rather than passed
+        # positionally. Registered in its own runtime registry so
+        # mojo_fnptr_call_N / mojo_maybe_bound_call_N can tell it apart
+        # from a bare function pointer at a dynamically-dispatched call.
+        'mojo_vararg_fn_new':  ('MojoVarargFn *', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_is_vararg_fn':   ('int', ['void *']),
+        'mojo_vararg_call_0':  ('int64_t', ['void *', 'void *']),
+        'mojo_vararg_call_1':  ('int64_t', ['void *', 'void *', 'int64_t']),
+        'mojo_vararg_call_2':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t']),
+        'mojo_vararg_call_3':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_vararg_call_4':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_kw_0':  ('int64_t', ['void *', 'void *']),
+        'mojo_fnptr_call_kw_1':  ('int64_t', ['void *', 'void *', 'int64_t']),
+        'mojo_fnptr_call_kw_2':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_kw_3':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_kw_4':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_kw_0': ('int64_t', ['void *', 'void *']),
+        'mojo_maybe_bound_call_kw_1': ('int64_t', ['void *', 'void *', 'int64_t']),
+        'mojo_maybe_bound_call_kw_2': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_kw_3': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_kw_4': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_vararg_call_5':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_5':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_kw_5':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_5': ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_kw_5': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_vararg_call_6':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_6':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_kw_6':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_6': ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_kw_6': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_vararg_call_7':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_7':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_kw_7':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_7': ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_kw_7': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_vararg_call_8':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_8':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_kw_8':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_8': ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_kw_8': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_maybe_bound_call_0':  ('int64_t', ['void *']),
         'mojo_maybe_bound_call_1':  ('int64_t', ['void *', 'int64_t']),
         'mojo_maybe_bound_call_2':  ('int64_t', ['void *', 'int64_t', 'int64_t']),
@@ -2797,6 +2930,10 @@ class GimpleGen:
         'mojo_dict_items_int':   ('MojoList *', ['MojoDict *']),
         'mojo_sorted':           ('MojoList *', ['void *']),
         'mojo_list_sorted_str':  ('MojoList *', ['MojoList *']),
+        # `l.sort()`: the kind byte is a MOJO_KIND_* alphabet constant and
+        # `keys` is NULL unless a `key=` built one, so the two are passed as
+        # plain C text rather than as a coerced temp.
+        'mojo_list_sort':        ('void', ['MojoList *', 'int', 'int', 'MojoList *']),
         'mojo_set_sorted':       ('MojoList *', ['MojoSet *']),
         'mojo_set_to_list':      ('MojoList *', ['MojoSet *']),
         'mojo_dict_sorted_keys': ('MojoList *', ['MojoDict *']),
@@ -3484,8 +3621,9 @@ class GimpleGen:
         return gmp._lower_method_call(self, node)
     def _lower_dict_method(self, ov: str, method: str, args: list) -> tuple:
         return gmp._lower_dict_method(self, ov, method, args)
-    def _lower_list_method(self, ov: str, method: str, args: list) -> tuple:
-        return gmp._lower_list_method(self, ov, method, args)
+    def _lower_list_method(self, ov: str, method: str, args: list,
+                           kwargs: list = None) -> tuple:
+        return gmp._lower_list_method(self, ov, method, args, kwargs)
     def _lower_set_method(self, ov: str, method: str, args: list) -> tuple:
         return gmp._lower_set_method(self, ov, method, args)
     def _lower_pointer_method(self, ov: str, ot: str, method: str, args: list) -> tuple:
@@ -3605,8 +3743,8 @@ class GimpleGen:
     def _lower_fnptr_call_value(self, fp_type: str, fp_raw: str, node: CallExpr, ret_type: str='int64_t') -> tuple[str, str]:
         return ggc._lower_fnptr_call_value(self, fp_type, fp_raw, node, ret_type)
 
-    def _default_expr_to_pair(self, _dflt) -> tuple:
-        return ggc._default_expr_to_pair(self, _dflt)
+    def _default_expr_to_pair(self, _dflt, cxx: bool = False) -> tuple:
+        return ggc._default_expr_to_pair(self, _dflt, cxx=cxx)
 
     def _pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread=False):
         return ggc._pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)
@@ -4294,8 +4432,8 @@ class GimpleGen:
         return ginf._list_repr_fn(self, rav)
     def _list_repr_call(self, key: str, lst: str | None = None) -> tuple[str, list]:
         return ginf._list_repr_call(self, key, lst)
-    def _stringify_value(self, et: str, ev: str) -> str:
-        return ginf._stringify_value(self, et, ev)
+    def _stringify_value(self, et: str, ev: str, enode=None) -> str:
+        return ginf._stringify_value(self, et, ev, enode)
     def _apply_fstring_spec(self, part_val: str, spec: str) -> str:
         return ginf._apply_fstring_spec(self, part_val, spec)
     def _subst_in_value(self, v, mapping: dict):
@@ -4332,6 +4470,8 @@ class GimpleGen:
         return ginf._compr_set_loop(self, node, gen0, res, res_type, it_val)
     def _gen_print(self, args: list, kwargs: list=None):
         return ginf._gen_print(self, args, kwargs)
+    def _note_dict_callable_ret(self, dict_val: str, value_text: str) -> None:
+        return ginf.note_dict_callable_ret(self, dict_val, value_text)
     def _eval_const_int(self, node) -> int | None:
         return ginf._eval_const_int(self, node)
     def _eval_const_bool(self, node) -> bool | None:
@@ -4358,6 +4498,8 @@ class GimpleGen:
         return grsl._new_temp(self, ctype)
     def _new_val(self, ctype: str, rhs: str) -> str:
         return grsl._new_val(self, ctype, rhs)
+    def _inc_val(self, base: str) -> str:
+        return grsl._inc_val(self, base)
     def _call_expr(self, ret_type: str, fname: str, arg_pairs: list) -> str:
         return grsl._call_expr(self, ret_type, fname, arg_pairs)
     def _void_call(self, fname: str, arg_pairs: list) -> tuple:
@@ -4392,6 +4534,9 @@ class GimpleGen:
                                 _base_var_types=None) -> str | None:
         return grsl._infer_return_elem_type(self, body, func_def=func_def,
                                             _base_var_types=_base_var_types)
+    def _scratch_dict_copy(self, src: dict) -> dict:
+        return grsl._scratch_dict_copy(self, src)
+
     def _infer_local_var_types(self, func: FunctionDef) -> dict[str, str]:
         return grsl._infer_local_var_types(self, func)
     def _collect_calls(self, expr, out):
@@ -4402,8 +4547,8 @@ class GimpleGen:
         return grsl._split_expr_format(src)
     def _parse_fstring_parts(self, inner: str) -> list[tuple[str, str, str, str]]:
         return grsl._parse_fstring_parts(self, inner)
-    def _repr_value(self, rat: str, rav: str) -> str:
-        return grsl._repr_value(self, rat, rav)
+    def _repr_value(self, rat: str, rav: str, enode=None) -> str:
+        return grsl._repr_value(self, rat, rav, enode)
     def _decode_str_literal_text(self, val: str) -> tuple[str, str]:
         return grsl._decode_str_literal_text(self, val)
     def _stub_result(self, ctype: str, value: str, note: str) -> tuple[str, str]:
@@ -4414,8 +4559,9 @@ class GimpleGen:
         return grsl._str_literal_to_slit(self, str_literal)
     def _subst_idents(self, expr, mapping: dict):
         return grsl._subst_idents(self, expr, mapping)
-    def _format_percent_spec(self, full_spec: str, conv: str, et: str, ev: str) -> str:
-        return grsl._format_percent_spec(self, full_spec, conv, et, ev)
+    def _format_percent_spec(self, full_spec: str, conv: str, et: str, ev: str,
+                             enode=None) -> str:
+        return grsl._format_percent_spec(self, full_spec, conv, et, ev, enode)
     def _cast_for_list(self, elem_type: str, val: str, suf: str) -> str:
         return grsl._cast_for_list(self, elem_type, val, suf)
     def _type_expr_to_ann(self, node) -> str:
@@ -4896,6 +5042,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # here, while still deduping correctly *within* one call across every
     # nested GimpleGen instance recursive import-inlining creates (shared
     # by reference — see `_compile_imported_module`'s sharing block).
+    gfn._selfhost_begin_compile()
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)

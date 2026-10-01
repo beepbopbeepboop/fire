@@ -1,5 +1,45 @@
 # COMPILE_FAIL: Lib/importlib/metadata/__init__.py
 
+## Status (2026-09-30, branch work/compile-fail-stdlib-misc — NOT REPRODUCED and NOT CLEARED: killed for memory before any verdict)
+
+The one attempt this session was **not a verdict in either direction**, and
+recording it as one would be the worst thing this doc could do:
+
+```
+python3 tools/memslot.py --gb 8 --label metadata -- \
+  python3 fire.py build -o .tmp/out/metadata \
+  /Users/mrs/net/Python-3.14.6/Lib/importlib/metadata/__init__.py
+memcap: BREACH 9.3 GB > 8.0 GB ceiling (115%), 1 procs -- killing metadata
+real 367s
+```
+
+A RESOURCE failure: the process was killed for memory before it finished,
+so whether this file now compiles is unknown. Before the kill it had
+emitted 17 module-level soft fallbacks for OTHER modules and **zero** for
+`importlib/metadata/__init__.py` itself — but "zero before the kill" is
+not a result, it is the absence of one.
+
+This is the same whole-program RAM growth the 2026-08-24/26 entries
+describe for `ctypes/util.py`, except that `ctypes/util.py` — a bigger
+closure — now completes in 1.7 GB on this tree (see that doc's 2026-09-30
+entry). So the growth is specific to something in THIS closure, and
+`bugs/CODEGEN_bootstrap_resource_blowup.md` /
+`bugs/PERF_memory_over_4gb_is_a_bug.md` are the right places for it.
+
+**Next step for whoever picks this up**: re-run with the ceiling raised
+(`MEMLIMIT_GB=96` for the suite runner, or `--gb 24` for a direct
+`memslot.py` call) so the build is allowed to finish, then read the
+verdict. The 2026-09-03 entry's specific claim — that
+`_convert_egg_info_reqs_to_simple_reqs`'s nested helpers `url_req_space`
+/ `quoted_marker` / `make_condition` cannot have their parameters typed
+because `sections`' element type is not threaded into them — is still the
+right hypothesis to check first, and is unchanged by anything this branch
+did (both fixes this branch landed are in the closure's OTHER modules:
+`zipfile`, `shutil`, `tempfile`, `json/decoder`, `email/_parseaddr`,
+`importlib/resources/*`).
+
+Doc kept open. **Explicitly not a re-verification.**
+
 ## Status (2026-09-03 — nested non-capturing sync-helper coroutine codegen LANDED; this file still refused)
 
 Implemented real compilation of nested NON-capturing sync `def`s

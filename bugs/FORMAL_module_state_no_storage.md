@@ -321,7 +321,7 @@ CAS (see `bugs/FORMAL_sweep_cache_ignores_imports.md` for why that matters),
 
 | file | class before | class after | what stops it now |
 |---|---|---|---|
-| `t1.mojo` | not-answerable/host-import (`sys`) | **pass** | nothing — but the pass is hollow, see `FORMAL_toplevel_statements_dropped.md`: its body is top-level, so it exits 0 where it says `sys.exit(3)` |
+| `t1.mojo` | not-answerable/host-import (`sys`) | **pass** | nothing — but the pass WAS hollow: its body is top-level, so it exited 0 where it says `sys.exit(3)`. Fixed since, by `formal/build.py`'s `module_body`/`entry_function` |
 | `t_argv.mojo` | not-answerable/host-import (`sys`) | **codegen** | this document: `sys.argv` |
 | `tools/ci_line.py` | not-answerable/host-import (`sys`) | **codegen** | `f.readlines()` — a value method the path does not lower |
 | `unescape_c.py` | not-answerable/host-import (`sys`) | **codegen** | `len(s)` where `s` classifies as an int |

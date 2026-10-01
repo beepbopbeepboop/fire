@@ -1018,12 +1018,13 @@ class ARM64Codegen:
                                   resolve(parse_type_name(ptype)
                                           or DEFAULT_INT_TYPE))
                 continue
-            # Past the 10 callee-saved registers a parameter's home is a spill
-            # slot, and the incoming register is written there now or its first
-            # read in the body would load whatever the slot happened to hold.
-            # Unreachable until the returned-frame hidden word made an
-            # eleventh local possible; see `_load_home_from_reg` for the bug
-            # that was waiting there.
+            # An incoming argument register becomes this local's home — a
+            # callee-saved register when one was left, a spill slot otherwise,
+            # and the store is what makes the body read the caller's value
+            # rather than whatever the slot held. ONE routine for the write,
+            # because the returned-frame hidden word below has the same
+            # requirement and is not a parameter: it is an address, so it must
+            # not be narrowed to a declared width.
             self._load_home_from_reg(pname, i, ptype)
         # The RETURNED-FRAME hidden word, moved from the register the caller
         # passed it in to its home, in the same place and for the same reason
@@ -1033,7 +1034,7 @@ class ARM64Codegen:
         # narrowing it would be a pointer into the low half of a stack.
         if self._returns_frame is not None:
             sret_arg = len(incoming)
-            if sret_arg >= 8:
+            if sret_arg >= _ABI_ARG_REGS:
                 raise CodegenError(
                     M.returned_frame_convention_refusal(f.name, sret_arg)
                     or f"{f.name} needs one hidden word for the caller's block "
@@ -1927,7 +1928,7 @@ class ARM64Codegen:
         self.asm.label(ok_label)
         # Push e0..e(n-1); pop assigns last target first.
         for i in range(n_t):
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 9, 8 * (i + 1)))
+            self._emit_blob_load(9, 8 * (i + 1))
             self.asm.emit(encode_stp_sp_pre(0, 31))
         for i in range(n_t - 1, -1, -1):
             self.asm.emit(encode_ldp_sp_post(0, 31))
@@ -1964,7 +1965,7 @@ class ARM64Codegen:
             els = list(elements)
         self.asm.emit(encode_mov_zr_xn(9, reg))
         for i, el in enumerate(els):
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 9, 8 * (i + 1)))
+            self._emit_blob_load(9, 8 * (i + 1))
             if isinstance(el, F.IdentExpr):
                 self._store_var(el.name, 0)
             elif isinstance(el, F.MemberExpr):
@@ -2137,6 +2138,7 @@ class ARM64Codegen:
             # iterates the struct's fields.  Measured on both architectures:
             # summing a four-field struct gave 99 on arm64 and 53 on x86-64.
             self._refuse_frame_container_operand("a for-in iteration", it)
+            self._refuse_string_iteration("a for-in iteration", it)
             tnames = _lbn_target_names(stmt.target) if isinstance(
                 stmt.target, str) else []
             if not tnames or any(not n.isidentifier() for n in tnames):
@@ -2289,7 +2291,7 @@ class ARM64Codegen:
             if isinstance(child, str) and child.startswith("*"):
                 self._emit_for_unpack_star_rest(child[1:], tag)
                 continue
-            self.asm.emit(encode_ldr_xt_xn_imm(0, 9, 8 * (i + 1)))
+            self._emit_blob_load(9, 8 * (i + 1))
             self._emit_for_unpack(child, tag)
 
     def _emit_for_unpack_star_rest(self, name: str, tag: str) -> None:
@@ -2301,9 +2303,9 @@ class ARM64Codegen:
         rest_cap = 64
         nbytes = 8 + 8 * rest_cap
         if self._list_cursor + nbytes > self._blob_cap:
-            raise CodegenError(
-                f"for-star rest exceeds the formal frame "
-                f"({self._list_cursor + nbytes} > {self._blob_cap} bytes)")
+            raise CodegenError(M.frame_blob_refusal(
+                "a for-star unpacking buffer", self._list_cursor + nbytes,
+                self._blob_cap))
         offset = self._list_cursor
         self._list_cursor += nbytes
 
@@ -3096,8 +3098,11 @@ class ARM64Codegen:
             self._fd_vars.add(name)
         else:
             self._fd_vars.discard(name)
-        if isinstance(value, F.DictExpr) or (
-                isinstance(value, F.Comprehension) and value.kind == "dict"):
+        # `M.is_dict_expr` is the shared spelling of this rule (a dict
+        # literal OR a dict comprehension); it used to be written out here
+        # and in x86_64_codegen separately, and x86-64's copy was missing
+        # the comprehension half.
+        if M.is_dict_expr(value):
             self._dict_vars.add(name)
             self._string_vars.discard(name)
         elif isinstance(value, F.SetExpr) or (
@@ -3112,7 +3117,12 @@ class ARM64Codegen:
             if value.name in self._dict_vars:
                 self._dict_vars.add(name)
                 self._string_vars.discard(name)
-            elif value.name in self._string_vars:
+            elif self._expr_str_kind(value) == M.STR_KIND:
+                # `value.name in self._string_vars` OR a `comptime` binding
+                # whose folded value is the text: `var t = OS` binds exactly the
+                # `char *` `t = s` binds, and asking `_expr_str_kind` rather
+                # than re-deriving the test here is what keeps the two paths
+                # from disagreeing about the same read.
                 self._string_vars.add(name)
                 self._dict_vars.discard(name)
             else:
@@ -3142,7 +3152,11 @@ class ARM64Codegen:
         if isinstance(obj, F.MemberExpr):
             key = _member_slot_key(obj)
             return key is not None and key in self._dict_vars
-        if isinstance(obj, F.DictExpr):
+        # `M.is_dict_expr` and not `isinstance(obj, F.DictExpr)`: a dict
+        # COMPREHENSION is a `Comprehension` with kind='dict', and asking
+        # only about literals sent `d[k]` down the index path. See
+        # `M.is_dict_expr`.
+        if M.is_dict_expr(obj):
             return True
         return False
 
@@ -3234,9 +3248,8 @@ class ARM64Codegen:
         n = len(static_pairs)
         size = 8 * (1 + 2 * n)
         if self._list_cursor + size > self._blob_cap:
-            raise CodegenError(
-                f"dict literal exceeds the formal frame "
-                f"({self._list_cursor + size} > {self._blob_cap} bytes)")
+            raise CodegenError(M.frame_blob_refusal(
+                "a dict literal", self._list_cursor + size, self._blob_cap))
         offset = self._list_cursor
         self._list_cursor += size
 
@@ -3403,6 +3416,21 @@ class ARM64Codegen:
         against another. It built, it ran, and it disagreed with x86-64."""
         return self._is_dict_subscript(e.obj)
 
+    def _refuse_string_iteration(self, op: str, obj) -> None:
+        """Refuse to ITERATE a `char *` as a container.
+
+        The sibling of `_refuse_frame_container_operand`, and the same
+        failure: the blob walk reads offset 0 of the operand and calls it a
+        COUNT, and a string's first eight bytes are text. `M.
+        string_iteration_refusal` owns the wording and the measurements (see
+        there for what both architectures returned before this), and both
+        backends ask it through their own `_is_string_subscript`, which is
+        the one place that knows whether an expression holds a `char *`.
+        """
+        if self._is_string_subscript(obj):
+            raise CodegenError(M.string_iteration_refusal(
+                op, self.func_name or "<module>"))
+
     def _refuse_frame_container_operand(self, op: str, obj) -> None:
         """Raise if `obj` is a BARE NAME holding a frame address.
 
@@ -3468,8 +3496,8 @@ class ARM64Codegen:
         # case on the BASE name rather than on a comma list — see its
         # docstring. A single-element `__mlir_type[x]` used to skip this call
         # entirely and fabricate a word.
-        why = M.multi_index_refusal_for(
-            e, self._is_dict_subscript(e.obj), self._functions)
+        why = M.multi_index_refusal_for(e, self._is_dict_subscript(e.obj),
+                                        self._functions, self._structs)
         if why is not None:
             raise CodegenError(why)
         if self._is_dict_key_subscript(e):
@@ -3528,8 +3556,17 @@ class ARM64Codegen:
             self.asm.emit(encode_ldp_sp_post(0, 31))  # restore SP (clobbers X0)
             self.asm.emit(encode_mov_zr_xn(0, 9))
             return
+        # A COMPREHENSION is in this list for the same reason the container
+        # literals are: it produces a blob of exactly the shape the walk below
+        # reads (`[count][e0…]`, reserved before any generator runs). Without
+        # it, `[i * 2 for i in [1, 2, 3]][2]` was REFUSED here and computed on
+        # x86-64 — the two backends disagreeing about one program, which is
+        # the one thing this pair may not do. A string base is not here
+        # because it never reaches this gate: `_is_string_subscript` above
+        # takes it as a byte load.
         obj_ok = type(e.obj) in (F.IdentExpr, F.CallExpr, F.ListExpr,
-                                 F.TupleExpr, F.MemberExpr, F.SubscriptExpr)
+                                 F.TupleExpr, F.Comprehension, F.MemberExpr,
+                                 F.SubscriptExpr)
         if not obj_ok:
             raise CodegenError(
                 "subscript base must be a list/tuple name or literal on "
@@ -3718,12 +3755,19 @@ class ARM64Codegen:
     def _expr_str_kind(self, expr):
         """What `expr` holds: "str", "int", or None if undecidable.
 
-        Two sources, and `_string_vars` WINS where they disagree. It is
+        Three sources, and `_string_vars` WINS where they disagree. It is
         flow-sensitive and tracks what the emission of this very function has
         bound so far, so it is strictly better informed than the whole-function
         `ValueKinds`; the whole-function map is what covers the shapes
         `_note_binding` does not see (a parameter's annotation, a function's
-        return type, a subscript's element kind).
+        return type, a subscript's element kind). A `comptime` binding is the
+        third source and it is neither: `ValueKinds` never scans a
+        `comptime NAME = …` statement, so a folded binding reached this as an
+        unclassified read — and a STRING one, which `_emit_comptime_read`
+        materializes as the interned literal, was then emitted as an INTEGER,
+        differently on each architecture. The binding is a compile-time
+        constant the emission already holds, so what it holds is known rather
+        than guessed; `model.comptime_val_kind` is the one reader of it.
 
         Named for what it answers rather than for the first caller: `print`,
         the method-receiver guard and `_note_binding` all need the same
@@ -3733,8 +3777,12 @@ class ARM64Codegen:
             key = _member_slot_key(expr)
             if key is not None and key in self._string_vars:
                 return M.STR_KIND
-        elif isinstance(expr, F.IdentExpr) and expr.name in self._string_vars:
-            return M.STR_KIND
+        elif isinstance(expr, F.IdentExpr):
+            if expr.name in self._string_vars:
+                return M.STR_KIND
+            bound = M.comptime_val_kind(self._comptime_vals, expr.name)
+            if bound is not None:
+                return bound
         return self._vkinds.kind_of(expr)
 
     def _expr_is_fd(self, expr) -> bool:
@@ -4524,6 +4572,56 @@ class ARM64Codegen:
         self.asm.emit(encode_str_xt_xn_imm(10, 9, 0))
         self.asm.emit(encode_mov_zr_xn(0, 9))
 
+    # ── Reading and writing one element of a blob, at any distance ──
+    #
+    # A blob element `i` is at byte `8*(i+1)` from the blob's base, and the
+    # immediate-offset LDR/STR reach 12 bits SCALED by the access size: 4095
+    # words, 32760 bytes. Element 4095 is the first one past it. A list literal
+    # or a `range()` literal that long used to die inside
+    # `encode_str_xt_xn_imm`'s own `assert 0 <= imm12 < 0x1000`, three frames
+    # below anything that could name the limit — a bare AssertionError out of
+    # the encoder, on a program whose only problem is that it is large.
+    #
+    # So the offset goes in a REGISTER past the immediate's reach and the
+    # register-offset form is used, and the limit that remains is the frame's,
+    # which `_reserve_blob`-style checks already state. The immediate form is
+    # still used below the threshold because it is one instruction instead of
+    # three, and every list anyone writes is below it.
+    #
+    # X15 is the offset register: locals live in X19..X28 and the temps this
+    # emitter uses are X0..X14 and X16..X18, so X15 is dead here. It is written
+    # AFTER the value is in place and read by the very next instruction, so it
+    # does not have to survive the element's own emission either.
+    _BLOB_IMM_MAX = 0x1000 * 8 - 8      # last byte the scaled imm12 names
+    _BLOB_OFFSET_REG = 15
+
+    def _emit_blob_store(self, base: int, byte_off: int, val: int) -> None:
+        """STR X{val}, [X{base}, #byte_off] — or the register-offset form.
+
+        `base` is the blob's base register (X9, the convention every blob site
+        in this file uses) and `byte_off` is a compile-time byte offset into it.
+        See `_BLOB_IMM_MAX` for why the second form exists."""
+        if byte_off <= self._BLOB_IMM_MAX:
+            self.asm.emit(encode_str_xt_xn_imm(val, base, byte_off))
+            return
+        self._emit_mov_imm(f"X{self._BLOB_OFFSET_REG}", byte_off)
+        self.asm.emit(encode_str_xt_xn_xm(
+            val, base, self._BLOB_OFFSET_REG))
+
+    def _emit_blob_load(self, base: int, byte_off: int, val: int = 0) -> None:
+        """LDR X{val}, [X{base}, #byte_off] — or the register-offset form.
+
+        The load-side twin of `_emit_blob_store`, and for the same reason: the
+        tuple-unpack sites index a blob with the same `8*(i+1)` shape and would
+        otherwise keep the assert alive one path over from the fix.
+        """
+        if byte_off <= self._BLOB_IMM_MAX:
+            self.asm.emit(encode_ldr_xt_xn_imm(val, base, byte_off))
+            return
+        self._emit_mov_imm(f"X{self._BLOB_OFFSET_REG}", byte_off)
+        self.asm.emit(encode_ldr_xt_xn_xm(
+            val, base, self._BLOB_OFFSET_REG))
+
     def _emit_list(self, expr: F.ListExpr) -> None:
         """Stack-allocate a list blob: [count:i64][elem0]...[elemN-1].
 
@@ -4546,9 +4644,8 @@ class ARM64Codegen:
         cap = max(n, self._list_caps.get(id(expr), n))
         size = 8 * (1 + cap)
         if self._list_cursor + size > self._blob_cap:
-            raise CodegenError(
-                f"list literals exceed the formal frame "
-                f"({self._list_cursor + size} > {self._blob_cap} bytes)")
+            raise CodegenError(M.frame_blob_refusal(
+                "a list literal", self._list_cursor + size, self._blob_cap))
         offset = self._list_cursor
         self._list_cursor += size
 
@@ -4559,7 +4656,7 @@ class ARM64Codegen:
             self._emit_expr(el)
             # Recompute base: element emission (calls, ADRP, …) clobbers X9.
             self._emit_list_base(offset)
-            self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * (i + 1)))
+            self._emit_blob_store(9, 8 * (i + 1), 0)
         if n == 0:
             self._emit_list_base(offset)
         self.asm.emit(encode_mov_zr_xn(0, 9))
@@ -5848,7 +5945,6 @@ class ARM64Codegen:
             raise CodegenError(
                 f"call {name}(): {nargs} arguments exceeds the "
                 f"{_ABI_ARG_REGS} the formal arm64 ABI passes in registers")
-
         # AAPCS: pass up to 8 integer args in X0..X7. Evaluate left-to-right,
         # spilling each result so nested evaluations (which clobber X0/X1/X2)
         # don't destroy earlier arguments. Pop in reverse so arg0 lands in X0.
@@ -6046,6 +6142,11 @@ class ARM64Codegen:
         false_label = f"{fn}_cg{wid}_false"
         end_label = f"{fn}_cg{wid}_end"
 
+        # Same walk as a for-in, so the same operand it refuses: a `char *`
+        # has no count word at offset 0, and one here is read as a count of
+        # its own first bytes (measured: SIGBUS walking past the string).
+        self._refuse_string_iteration("a comprehension iterable",
+                                      gen.iterable)
         self._emit_expr(gen.iterable)
         self._store_var(cb_name, 0)
         self.asm.emit(encode_movz_xd_imm(0, 0))
@@ -6145,14 +6246,23 @@ class ARM64Codegen:
 
     def _compr_append_pair(self, res_offset: int, cap: int) -> None:
         """Append (X0=key, X1=value) to dict result; exit(1) past cap."""
-        # Two pushes, and the offsets below depend on the order: the SECOND
-        # stp lands lower, so [sp+0] is the value pushed second and [sp+8] is
-        # the key. They were read the other way round, so every dict
-        # comprehension stored its key in the value slot and vice versa —
-        # which is why the right keys and the right len sat next to values
-        # that were somebody else's.
-        self.asm.emit(encode_stp_sp_pre(0, 1))  # push key, value
-        self.asm.emit(encode_stp_sp_pre(1, 31))  # push value again (lower)
+        # ONE 16-byte frame slot, with the key at [sp+0] and the value at
+        # [sp+8], and both loads reading back exactly those offsets.
+        #
+        # This used to be two STP pairs — `stp x0, x1` then `stp x1, x31` —
+        # which the comment above it read back as "the second stp lands lower,
+        # so [sp+0] is the value and [sp+8] is the key". It does not: STP
+        # Xrt1, Xrt2 stores Xrt1 at [SP] and Xrt2 at [SP+8], so after those
+        # two pushes [sp+8] holds **X31**, a scratch register, and the key was
+        # sitting unused at [sp+16]. Every dict comprehension therefore
+        # stored a garbage key and the right value: the first pair read 0 out
+        # of X31 by luck, so `{i: 100 + i for i in range(3)}[0]` was right and
+        # [1] and [2] were a miss (exit 1). The value needed a second slot
+        # only because the count load below clobbers X1; a plain STR into the
+        # slot the STP already reserved is that, without moving the frame
+        # twice or putting the key somewhere the loads cannot see.
+        self.asm.emit(encode_stp_sp_pre(0, 31))            # key at [sp+0]
+        self.asm.emit(encode_str_xt_xn_imm(1, 31, 8))     # value at [sp+8]
         self._emit_list_base(res_offset)
         self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
         self._emit_mov_imm("X2", cap)
@@ -6165,13 +6275,12 @@ class ARM64Codegen:
         self.asm.emit_label_rel(oob, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
         self.asm.emit(encode_add_xd_xn_xm_lsl4(4, 4, 1))
-        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))   # [sp+8] = key
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))   # [sp+0] = key
         self.asm.emit(encode_str_xt_xn_imm(0, 4, 0))
-        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))   # [sp+0] = value
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))   # [sp+8] = value
         self.asm.emit(encode_str_xt_xn_imm(0, 4, 8))
         self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
         self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
-        self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self._emit_b_to(ok)
         self.asm.label(oob)
@@ -7493,9 +7602,9 @@ class ARM64Codegen:
             n = len(vals)
             size = 8 * (1 + n)
             if self._list_cursor + size > self._blob_cap:
-                raise CodegenError(
-                    f"range() literal exceeds the formal frame "
-                    f"({self._list_cursor + size} > {self._blob_cap} bytes)")
+                raise CodegenError(M.frame_blob_refusal(
+                    "a range() literal", self._list_cursor + size,
+                    self._blob_cap))
             offset = self._list_cursor
             self._list_cursor += size
             self._emit_list_base(offset)
@@ -7504,7 +7613,7 @@ class ARM64Codegen:
             for i, val in enumerate(vals):
                 self._emit_mov_imm("X0", val)
                 self._emit_list_base(offset)
-                self.asm.emit(encode_str_xt_xn_imm(0, 9, 8 * (i + 1)))
+                self._emit_blob_store(9, 8 * (i + 1), 0)
             self.asm.emit(encode_mov_zr_xn(0, 9))
             return
         # Dynamic: evaluate start/stop/step onto stack, loop, append.
@@ -7635,7 +7744,7 @@ class ARM64Codegen:
                     or M.is_mlir_template(target)):
                 why = M.multi_index_refusal_for(
                     target, self._is_dict_subscript(target.obj),
-                    self._functions)
+                    self._functions, self._structs)
                 raise CodegenError(
                     f"del {why}" if why is not None else
                     "del on a subscript with a tuple index is not supported "

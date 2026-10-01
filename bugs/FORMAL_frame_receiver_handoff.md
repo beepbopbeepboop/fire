@@ -383,8 +383,21 @@ justification. The arity refusal stays for a genuine mismatch.
   intrinsic with no representation on this path. The new message says "a name
   with no definition in hand", which is true and unhelpful; the useful message
   would name it as a compile-time intrinsic, which is a model change.
+  **DONE** — `formal/model.py`'s `frame_undefined_callee_refusal` names it (and
+  says where the MLIR it yields would have gone), because the sweep's one
+  sentence for that branch was standing for five different facts and this was
+  one of them. Measured with it, and with the sibling arms: 41 files over the
+  repo, `std/` and `test/`, 26 of which are an IMPORTED free function whose
+  "no definition in hand" was false twice over. See
+  `FORMAL_callee_no_def_ceiling_zero.md`.
 * **`getattr`/`setattr` and the other host builtins** reach the same "no
-  definition in hand" branch. Correct, and the same fix as above.
+  definition in hand" branch. Correct, and the same fix as above — except that
+  for these the old sentence IS true (nothing in the image defines `getattr`,
+  and no import names it), so they were deliberately left on it rather than
+  given a fifth variant of a sentence that would fit. A program that reaches
+  one of them is a program with a Python builtin this backend does not
+  implement, which is a fact about the backend's surface rather than about the
+  image, and naming it needs a table of what the backend DOES implement.
 
 ## Verification
 

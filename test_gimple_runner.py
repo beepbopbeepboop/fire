@@ -226,6 +226,53 @@ def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
                 pass
 
 
+def test_gimple_diagnostic(name: str, mojo_src: str, expected_stderr: str,
+                           expected_stdout: str = None, expected_return: int = 0):
+    """Assert the compiled program prints `expected_stderr` on stderr and,
+    optionally, exactly `expected_stdout` with exit `expected_return`.
+
+    The shape of a LOUD-BUT-CONTINUING refusal — the compiled path's
+    established alternative to a signal or to a silent wrong value, the same
+    one `mojo_unsupported_iter` and the `_unsupported_generator_names` weak
+    stubs use (see those comments for why abort() is worse: no Mojo-level
+    try/except can catch SIGABRT, so it takes down the whole process). It
+    needs its own helper because `test_gimple_runtime_error` asserts a
+    NON-ZERO exit, which is the opposite convention: there the program fails
+    as CPython would, here it says what it cannot do and carries on with the
+    behaviour the gap already produced. Asserting only the stderr substring
+    would be weak, so the stdout and exit code are pinned too where the test
+    has an opinion."""
+    global _PASS, _FAIL, _TIMEOUT
+    exe_path = None
+    try:
+        exe_path = compile_mojo_to_gimple_exe(mojo_src)
+        result = subprocess.run([exe_path], capture_output=True, timeout=10)
+        err = result.stderr.decode('utf-8', errors='replace')
+        out = result.stdout.decode('utf-8', errors='replace')
+        if (expected_stderr in err and result.returncode == expected_return
+                and (expected_stdout is None or out == expected_stdout)):
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected {expected_stderr!r} on stderr with "
+                  f"exit {expected_return}"
+                  + (f' and stdout {expected_stdout!r}' if expected_stdout is not None else '')
+                  + f', got exit {result.returncode} err={err[-300:]!r} out={out[-200:]!r}')
+            _FAIL += 1
+    except subprocess.TimeoutExpired as e:
+        print(f"TIMEOUT {name}: {e}")
+        _TIMEOUT += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+    finally:
+        if exe_path:
+            try:
+                os.unlink(exe_path)
+            except:
+                pass
+
+
 def test_gimple_bounded_memory(name: str, mojo_src: str, expected_stdout: str, limit_mb: int):
     """The program prints exactly `expected_stdout` AND its peak RSS stays
     under `limit_mb`. A leak in a loop shows up as RSS proportional to the
@@ -474,6 +521,54 @@ fn main():
     tk.run(0)
 """, "42\n7\n")
 
+    # A CALLABLE-VALUED PARAMETER, keyword-only and positional-with-default
+    # alike. Both used to be padded with `calls_shared._default_expr_to_pair`'s
+    # `('int', '0')` fallback -- i.e. a NULL function pointer -- because that
+    # helper had no case for a default that IS a function, so the body called
+    # address 0 and the process died with SIGSEGV (exit 139, nothing on
+    # stdout). The generator instance of the same shape is
+    # `Tools/c-analyzer/c_common/fsutil.py`'s `walk_tree(root, *,
+    # walk=_walk_tree)`, tracked in
+    # bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md; this is the
+    # ordinary-path twin, which that doc did not mention. Expected text is
+    # CPython's for the same source.
+    test_gimple_stdout("gimple_callable_valued_parameter_default", """\
+def twice(x):
+    return x + x
+
+def kw_only(x, *, f=twice):
+    return f(x)
+
+def positional(x, f=twice):
+    return f(x)
+
+def main():
+    print(kw_only(3))
+    print(kw_only(4, f=twice))
+    print(positional(5))
+    print(positional(6, twice))
+
+main()
+""", "6\n8\n10\n12\n")
+
+    # The same value read out of a parameter and handed on, which is the
+    # other half of the fix (`_lower_IdentExpr`'s function-value arm): a
+    # function passed as an ARGUMENT must arrive as its real address, not
+    # as the `(int64_t)0` placeholder the unknown-identifier fallback
+    # emitted.
+    test_gimple_stdout("gimple_function_passed_as_argument", """\
+def twice(x):
+    return x + x
+
+def via_param(x, f):
+    return f(x)
+
+def main():
+    print(via_param(7, twice))
+
+main()
+""", "14\n")
+
     # A CAPTURING lambda: `n` lives in the enclosing function, but a lifted
     # lambda is a top-level C function that does not contain it, so the read
     # stubbed to 0 — silently, exit 0. When the lambda's local is called
@@ -516,6 +611,171 @@ fn main():
     var e = lambda x: n + x
     print(apply(e, 1))
 """, "8\n")
+
+    # A VARIADIC lambda. The lifted definition was always correct — its
+    # parameters are the PACKED forms (`MojoList *` for `*args`, `MojoDict *`
+    # for `**kwargs`) — but the lambda's VALUE was a bare function pointer,
+    # and `mojo_fnptr_call_N` is arity-based: it casts the callee to
+    # `int64_t(*)(int64_t, ...)` and passes the arguments written at the call
+    # positionally. So `e(4, 5)` handed the callee `a = 4` where a
+    # `MojoList *` was wanted, and the body dereferenced address 4 — every one
+    # of these SIGSEGV'd before the fix, whatever the lambda captured.
+    # `_lower_LambdaExpr` now materializes a `MojoVarargFn` (callee, env,
+    # leading-parameter count, and which of the three shapes it has), and the
+    # runtime dispatch helpers pack. See
+    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
+    test_gimple_stdout("gimple_variadic_lambda_positional_args_packed", """\
+def add(a, b):
+    return a + b
+
+def main():
+    e = lambda *a: add(a[0], a[1])
+    print(e(4, 5))
+""", "9\n")
+
+    # A variadic lambda's `*args` really is a sequence: len(), iteration and
+    # indexing all read the packed list, and the ZERO-argument call packs an
+    # empty one rather than passing a stray scalar.
+    test_gimple_stdout("gimple_variadic_lambda_args_is_a_sequence", """\
+def main():
+    e = lambda *a: len(a) * 10 + a[0]
+    print(e())
+    print(e(1, 2, 3))
+""", "0\n31\n")
+
+    # CAPTURING + variadic: the closure env leads the packed parameters, and
+    # the capture is read through it. This is the corpus shape
+    # `Lib/importlib/util.py`'s LazyLoader factory has
+    # (`lambda *args, **kwargs: cls(loader(*args, **kwargs))`).
+    test_gimple_stdout("gimple_variadic_lambda_captures_env", """\
+def add(a, b):
+    return a + b
+
+def main():
+    n = 7
+    e = lambda *args, **kwargs: add(n, args[0])
+    print(e(1))
+    m = 2
+    f = lambda *args, **kwargs: m * 100 + len(args) + len(kwargs)
+    print(f(1, 2, z=3))
+""", "8\n203\n")
+
+    # Keyword arguments at the call site reach a `**kwargs` callee, packed
+    # into the MojoDict the lifted body reads. A call with none must still
+    # hand the callee a real (empty) dict, never NULL: `len(k)` and `k['x']`
+    # are ordinary spellings and NULL segfaults on the second.
+    test_gimple_stdout("gimple_variadic_lambda_kwargs_reach_the_callee", """\
+def main():
+    e = lambda *a, **k: len(a) * 100 + len(k)
+    print(e(1, 2))
+    print(e(1, 2, z=9))
+    only = lambda **k: len(k)
+    print(only(a=1, b=2, c=3))
+    print(only())
+""", "200\n201\n3\n0\n")
+
+    # ORDINARY leading parameters ahead of the `*args` stay POSITIONAL — the
+    # callee declares them before its `*args`, so they must not be packed —
+    # and everything after them is what `*args` collects. This shape did not
+    # compile at all before the fix: the forward declaration built for the
+    # lambda silently dropped its `*`-prefixed parameters, so GCC rejected
+    # `int64_t f(int64_t)` against a definition of `int64_t f(int64_t,
+    # MojoList *)` as conflicting types.
+    test_gimple_stdout("gimple_variadic_lambda_fixed_prefix_stays_positional", """\
+def main():
+    two = lambda f, g, *a: f * g + len(a)
+    print(two(3, 4, 1, 2))
+    four = lambda a, b, c, d, *rest: a + b + c + d + len(rest)
+    print(four(1, 2, 3, 4, 5, 6))
+""", "14\n12\n")
+
+    # Because the packing happens at the RUNTIME dispatch point rather than
+    # at each call site, every way of holding the value works at once: passed
+    # as an argument, returned, stored in a dict, stored in a struct field,
+    # rebound across branches, and used as a `sorted(key=)` / `map` / `filter`
+    # callable. The `Lib/doctest.py` shape this bug doc names is the struct
+    # field one (`_colorize.can_colorize = lambda *args, **kwargs: False`).
+    test_gimple_stdout("gimple_variadic_lambda_works_through_every_holder", """\
+def apply(f, v):
+    return f(v, v)
+
+def mk():
+    return lambda *a: a[0] * 2
+
+class Box:
+    def __init__(self):
+        self.fn = None
+
+def main():
+    print(apply(lambda *a: a[0] + a[1], 3))
+    print(mk()(21))
+    d = {}
+    d['k'] = lambda *a: a[0] + a[1]
+    from_dict = d['k']
+    print(from_dict(2, 3))
+    b = Box()
+    b.fn = lambda *a: a[0] + 1
+    print(b.fn(41))
+    if 1:
+        r = lambda *a: a[0]
+    else:
+        r = lambda *a: a[1]
+    print(r(7, 8))
+    print(sorted([1, 2, 3], key=lambda *a: -a[0]))
+    print(list(map(lambda *a: a[0] * 10, [1, 2])))
+""", "6\n42\n5\n42\n7\n[3, 2, 1]\n[10, 20]\n")
+
+    # More than four arguments. `mojo_fnptr_call_N` used to stop at four and
+    # silently drop the rest — for a `*args` callee that means losing
+    # elements, so the helpers now go to eight. (The truncation was a silent
+    # wrong value for every five-or-more-argument indirect call, not only
+    # this one.)
+    test_gimple_stdout("gimple_fnptr_call_carries_more_than_four_args", """\
+def main():
+    f = lambda *a: len(a)
+    print(f(1, 2, 3, 4, 5, 6, 7))
+""", "7\n")
+
+    # `lambda *a, **k: <expr>` forwarding its own arguments on, which is what
+    # every one of the three real corpus occurrences does.
+    test_gimple_stdout("gimple_variadic_lambda_forwards_its_arguments", """\
+def add3(a, b, c):
+    return a + b + c
+
+def walk(*a, **k):
+    return len(a) * 10 + len(k)
+
+def main():
+    unpack = lambda *a: add3(*a)
+    print(unpack(1, 2, 3))
+    both = lambda *a, **k: walk(*a, **k)
+    print(both(1, 2, 3))
+    print(both(1, z=5))
+""", "6\n30\n11\n")
+
+    # The SAME defect for a NAMED function taken as a value, which is the
+    # same packing with no lambda involved: `def m(*a)` really does take a
+    # `MojoList *`, so `r = m; r(1, 2, 3)` handed the callee the integer 1
+    # where a list pointer was wanted and it dereferenced address 1 — a
+    # SIGSEGV. A DIRECT call by name is untouched and still goes through
+    # `_lower_named_call`'s own packing; only the value form changes, and it
+    # changes to the same `MojoVarargFn` a variadic lambda gets.
+    test_gimple_stdout("gimple_variadic_named_function_through_a_value", """\
+def m(*a):
+    return len(a)
+
+def both(*a, **k):
+    return len(a) * 100 + len(k)
+
+def main():
+    r = m
+    print(r(1, 2, 3))
+    s = both
+    print(s(1, 2, z=3))
+    print(s(1, 2))
+    print(m(1, 2, 3))
+    print(both(1, 2, z=3))
+""", "3\n201\n200\n3\n201\n")
 
     # 10a3. Heterogeneous stack drained with .pop(), each popped value
     # discriminated with `isinstance(top, tuple)`. `isinstance(x, tuple)`
@@ -609,6 +869,36 @@ def g(a, b):
 y = g("a", "b")
 print(y)
 """, "ab\n")
+
+    # `print(<unannotated param>)` typed the parameter `char *` (the
+    # BUILTIN_PARAM_TYPES entry for `print`, since `print` accepts a value of
+    # ANY type in Python and so says nothing about its argument's type), and
+    # the call site then passed the integer as a pointer:
+    #
+    #   void g (char * x) { mojo_print (x); ... }
+    #   _t1 = (void *)1; g ((char *)_t1);
+    #
+    # so `g(1)` strlen'd address 1 and died with SIGSEGV, and `g(1.5)` did
+    # not even compile. Every OTHER use of the same parameter was already
+    # right (`print("v=", x)`, `print(str(x))`, `print(x + 1)`,
+    # `return x`), which is why the trigger is so narrow. The sibling
+    # `gimple_untyped_param_string_passthrough` above is the case that must
+    # keep working, and the string call site is the third: all three in one
+    # test so removing the inference cannot quietly trade a crash for a wrong
+    # string.
+    test_gimple_stdout("gimple_print_of_untyped_param_is_not_a_pointer", """\
+def gi(x):
+    print(x)
+
+def gs(x):
+    print(x)
+
+def gf(x):
+    print(x)
+gi(1)
+gf(1.5)
+gs("s")
+""", "1\n1.5\ns\n")
 
     # 15. Same two-param concat shape, but the result is read back through an
     # f-string interpolation (`{y}`) rather than a plain print(y) — the exact
@@ -725,6 +1015,228 @@ print(sorted(["ccc", "a", "bb"], key=len))
 print(sorted([1, 3, 2], reverse=True))
 print(sorted(["b", "a", "c"], reverse=True))
 """, "[3, 2, 1]\n['c', 'b', 'a']\n")
+
+    # `l.sort()` — the METHOD — used to be a no-op stub in the runtime
+    # (`void mojo_list_sort(MojoList *l) { (void)l; }`), so it returned the
+    # list in its original order with exit 0 and said nothing: the worst
+    # shape, because `sorted(l)` was right and `l.sort(); x = l` was silently
+    # wrong, so the two spellings of one operation disagreed.
+    # A lambda inside a nested `def` was lifted and its address taken but
+    # never DEFINED, because `_lower_LambdaExpr` puts the body in the
+    # `gen._lambda_parts` side table and the nested-closure emission path
+    # flushed nothing — so this was a hard `Undefined symbols
+    # ...: "__make_make_lambda_1"` LINK failure. A lambda at the same
+    # nesting depth in a TOP-LEVEL function does get its definition, which is
+    # what made the shape look supported. The shape-independent guard (every
+    # `_funcptr_X` initializer has a matching definition) is
+    # `every_funcptr_initializer_has_a_definition` in test_gimple.py; this
+    # is the end-to-end run beside CPython.
+    test_gimple_stdout("gimple_lambda_in_nested_def_is_emitted", """\
+def _make():
+    def make():
+        return lambda x: x + 1
+    return make
+
+def main():
+    f = _make()()
+    print(f(1))
+main()
+""", "2\n")
+
+    # The two-deep nest is a separate path — a second `gen._gen_lifted_closure`
+    # level, so its `_lambda_parts` flush has to happen at each one — and is
+    # here rather than assumed to follow from the single-level case.
+    # (`*args` is deliberately NOT here: a variadic lambda segfaults on this
+    # tree at every nesting depth including top level, which is
+    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md's already-fixed
+    # variadic work sitting in an unlanded branch, not this path.)
+    test_gimple_stdout("gimple_lambda_two_deep_nested_def", """\
+def a():
+    def b():
+        def c():
+            return lambda: 5
+        return c
+    return b
+
+def main():
+    print(a()()()())
+main()
+""", "5\n")
+
+    # A callable VALUE's real return type used to be lost at the call,
+    # because `mojo_fnptr_call_N` is the homogenized `int64_t` convention —
+    # the RIGHT thing for the box it hands back, but the CALLEE is the one
+    # that knows the type. So `lambda: False` printed `0` (the bug doc's
+    # symptom), `lambda: "hi"` printed its own pointer decimal, and
+    # `lambda: 1.5` printed `2.1393696074e-314`: a `double` cannot even ride
+    # the `int64_t` return, which reads a general-purpose register the value
+    # is not in, so the fix for THAT one is a `double`-returning twin of the
+    # helper family rather than a reinterpretation.
+    #
+    # An ordinary `def` returning the same value is in the same test because
+    # it was already right — it is what proves the loss is in the callable
+    # VALUE path and not in the return-type inference.
+    # `d['k'](2, 3)` — a callable value held in a dict subscript, a
+    # name-keyed dispatch table — was stubbed to 0, exit 0, silently wrong.
+    # It was lumped in with the ONE other SubscriptExpr callee that is not a
+    # runtime value read (`Scalar[x.dtype](...)`, a comptime bracket
+    # argument), which `_static_generic_return_ctype` tells apart and which
+    # still keeps the stub.
+    #
+    # The `f = d['k']` line is in the same test because the doc records it as
+    # ALREADY working (`print(f(2, 3))` printed 5) — so it is the control
+    # that proves the loss is in the subscript-callee dispatch and not in the
+    # value representation.
+    test_gimple_stdout("gimple_call_through_subscript_callee", """\
+def main():
+    d = {}
+    d['k'] = lambda a, b: a + b
+    print(d['k'](2, 3))
+    f = d['k']
+    print(f(4, 5))
+    e = {"j": lambda: "hi"}
+    print(e["j"]())
+main()
+""", "5\n9\nhi\n")
+
+    test_gimple_stdout("gimple_callable_value_keeps_its_return_type", """\
+def plain():
+    return False
+
+def main():
+    a = lambda: True
+    print(a())
+    b = lambda: False
+    print(b())
+    c = lambda x: x > 1
+    print(c(5))
+    print(c(0))
+    d = lambda: 1.5
+    print(d())
+    e = lambda: "hi"
+    print(e())
+    print(plain())
+main()
+""", "True\nFalse\nTrue\nFalse\n1.5\nhi\nFalse\n")
+
+    test_gimple_stdout("gimple_list_sort_method_in_place", """\
+def main():
+    l = [3, 1, 2]
+    l.sort()
+    print(l)
+    m = ['c', 'a', 'b']
+    m.sort()
+    print(m)
+    n = [3, 1, 2]
+    print(sorted(n))
+main()
+""", "[1, 2, 3]\n['a', 'b', 'c']\n[1, 2, 3]\n")
+
+    # Every element kind the sort has to tell apart. A MojoList slot is a raw
+    # int64_t, so a double is its IEEE bits and a str is a pointer: ordering
+    # the slots as integers sorts floats by SIGN and strings by ADDRESS. The
+    # kind byte the call site passes (gen._elem_of -> TypeLattice.slot_kind_byte)
+    # is what makes each of these right. `bool` is an int subclass in Python,
+    # so False sorts before True.
+    test_gimple_stdout("gimple_list_sort_every_element_kind", """\
+def main():
+    f = [3.5, -1.25, 2.0]
+    f.sort()
+    print(f)
+    b = [True, False, True]
+    b.sort()
+    print(b)
+    d = ['b', 'a', 'c']
+    d.sort()
+    print(d)
+    n = [[2], [1]]
+    n.sort()
+    print(n)
+main()
+""", "[-1.25, 2.0, 3.5]\n[False, True, True]\n['a', 'b', 'c']\n[[1], [2]]\n")
+
+    # `key=` and `reverse=` on the METHOD, which used to be dropped on the
+    # floor exactly as they were on `sorted()` before its own fix.
+    test_gimple_stdout("gimple_list_sort_key_and_reverse", """\
+def main():
+    l = [1, 3, 2]
+    l.sort(key=lambda v: -v)
+    print(l)
+    m = [1, 3, 2]
+    m.sort(reverse=True)
+    print(m)
+    w = ['ccc', 'a', 'bb']
+    w.sort(key=len)
+    print(w)
+main()
+""", "[3, 2, 1]\n[3, 2, 1]\n['a', 'bb', 'ccc']\n")
+
+    # A list of lists sorts ELEMENTWISE (Python's ordering, shorter first) —
+    # the one total order a MojoList-of-MojoList has. Past
+    # MOJO_SORT_MAX_DEPTH nesting the two compare equal rather than risking
+    # unbounded recursion on a self-referential list.
+    test_gimple_stdout("gimple_list_sort_nested_shorter_first", """\
+def main():
+    l = [[1, 2], [1], [1, 2, 3], []]
+    l.sort()
+    print(l)
+main()
+""", "[[], [1], [1, 2], [1, 2, 3]]\n")
+
+    # What Python REFUSES to sort must be refused here too, and loudly. The
+    # silent no-op this replaced was indistinguishable from a sort that
+    # happened to leave the list alone; a heterogeneous list's only correct
+    # answer is the TypeError, so that is what this must be — verified by
+    # stderr text because the compiled binary's exit code alone cannot tell a
+    # TypeError from an unrelated failure (and the signal it replaced was
+    # exit 0 with a wrong list).
+    # A callable-valued parameter default naming an IMPORTED module's function
+    # (`def probe(x, *, g=os.walk)`) was padded with 0, so `g` arrived as
+    # address 0 and the callee called through a null pointer: SIGSEGV, exit
+    # 139, no output. Whether `os.walk` was compiled into this translation
+    # unit at all is a property of the whole import closure, not of the
+    # expression, so "0" is the one answer that is always available and
+    # always wrong.
+    #
+    # The honest answer follows `mojo_unsupported_iter`: say so, loudly, and
+    # carry on. `n > 0` printing False is what the null pointer WOULD have
+    # printed had it survived — the loop's own "unsupported iterable"
+    # diagnostic says the body runs zero times, which is pre-existing
+    # behaviour, not something this change introduced.
+    test_gimple_diagnostic("gimple_imported_callable_default_is_diagnosed", """\
+def probe(x, *, g=os.walk):
+    return g(x)
+
+def main():
+    r = probe(".")
+    n = 0
+    for a, b, c in r:
+        n = n + 1
+    print(n > 0)
+main()
+""", "mojo_unavailable_callable: 'os.walk'", "False\n")
+
+    # The same default in a callee that NEVER CALLS the parameter must be
+    # completely unaffected: the diagnostic lives inside the stub, so it fires
+    # on a call, not on a padding. Without this the fix would trade a crash
+    # for a spurious message in every program that merely mentions a callable
+    # default.
+    test_gimple_stdout("gimple_uncalled_imported_callable_default_is_silent", """\
+def probe(x, *, g=os.walk):
+    return x
+
+def main():
+    print(probe("hello"))
+main()
+""", "hello\n")
+
+    test_gimple_runtime_error("gimple_list_sort_mixed_types_is_a_typeerror", """\
+def main():
+    l = [1, 'a', 2.5]
+    l.sort()
+    print(l)
+main()
+""", "TypeError: list.sort()")
 
     # reverse=True composes with key= (the sort is by key, then flipped) —
     # sorting by -v descending puts the original order back.
@@ -1625,6 +2137,244 @@ def main():
     print(total)
 """, "33\n75\n8\n242\n3200000\n")
 
+    # ── A capturing lambda's value, and the environment it captured, are ONE
+    # allocation unit (doc/MEMORY.html §3.B): a `malloc(sizeof env)` plus a
+    # `malloc(sizeof MojoBoundMethod)` plus a `_reg_bound_method` entry per
+    # creation, ~74 B/iteration, now flat at 100k and 400k. Four consumers of
+    # that ownership are in one program: a lambda in a LOOP BODY (freed at the
+    # end of the body and on every `break`/`continue` that leaves it), a
+    # function-level one, a non-capturing one (a bare static function pointer,
+    # which allocates nothing and must NOT be freed), and one raised past by an
+    # exception (freed by the cleanup thunk the declaration pushed, not by the
+    # skipped free). The second program is the fail-closed half: a closure
+    # stored in a list, captured by another lambda, or aliased must stay alive.
+    test_gimple_bounded_memory("gimple_owned_closure_env_is_freed", """\
+def work(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var f = lambda x: x + i
+        t += f(1)
+        if i == 2:
+            continue
+        if i == 4:
+            break
+    return t
+
+def once() -> Int:
+    var g = lambda x: x * 3
+    return g(5)
+
+def boom(n: Int) -> Int:
+    var f = lambda x: x + n
+    if n > 2:
+        raise ValueError("no")
+    return f(10)
+
+def main():
+    print(work(3))
+    print(work(9))
+    print(once())
+    var total = 0
+    for r in range(300000):
+        total += work(6) % 1000 + once()
+    print(total)
+    var hits = 0
+    for r in range(20000):
+        try:
+            hits += boom(9)
+        except ValueError as e:
+            hits += 1
+    print(hits)
+""", "6\n15\n15\n9000000\n20000\n", 40)
+
+    test_gimple_stdout("gimple_closure_that_escapes_is_not_freed", """\
+def escape_list(kept: List, base: Int) -> Int:
+    var t = 0
+    for i in range(4):
+        var f = lambda x: x + base
+        kept.append(f)
+        t += f(1)
+    return t
+
+def escape_rebind() -> Int:
+    var f = lambda x: x + 1
+    var g = f
+    return g(2)
+
+def capture_chain() -> Int:
+    var f = lambda x: x + 1
+    var h = lambda y: f(y) + 1
+    return h(3)
+
+def main():
+    var kept: List = []
+    print(escape_list(kept, 10))
+    print(len(kept))
+    # CALL each stored closure AFTER escape_list returned: freeing it with its
+    # scope would dispatch through a freed pointer here, and the base is a
+    # PARAMETER precisely so that every stored closure answers the same number
+    # and the two engines' answers can be compared.
+    var seen = 0
+    for k in range(len(kept)):
+        var fv = kept[k]
+        seen += fv(1)
+    print(seen)
+    print(escape_rebind())
+    print(capture_chain())
+    var acc = 0
+    for r in range(20000):
+        var kk: List = []
+        acc += escape_list(kk, 10) % 1000 + escape_rebind() + capture_chain()
+    print(acc)
+""", "44\n4\n44\n3\n5\n1040000\n")
+
+    # ── A callee that provably returns a FRESH STRING hands ownership to its
+    # caller, exactly as one returning a fresh container always has
+    # (analyze_returns_fresh, which until now accepted only a container
+    # display). The three shapes are the ones the analysis reads off the
+    # lowering rather than infers from a type: a `+` (mojo_str_cat always
+    # copies), a local bound to a `+`, and a slice (mojo_cstr_slice). Both
+    # consumers of that ownership are in the same program: bound to a local and
+    # freed at scope exit, and consumed on the spot by `len` (which reads the
+    # length and nothing else). The second program is the other side of the
+    # rule: a callee that returns its own ARGUMENT, or a plain literal it never
+    # owned anything of, must NOT be freed — `str(s)` is the identity for a
+    # string, so freeing a returned `str(s)` is a crash. The runner scribbles
+    # freed memory, so a wrong free makes the comparisons (printed 3rd) fail
+    # rather than usually pass.
+    test_gimple_bounded_memory("gimple_fresh_returning_string_functions_are_owned", """\
+def mk(i: Int) -> String:
+    return "n" + String(i)
+
+def via_local(i: Int) -> String:
+    var s = "m" + String(i)
+    return s
+
+def via_slice(i: Int) -> String:
+    return ("abcdef")[1:3]
+
+def main():
+    print(mk(3))
+    print(via_local(9))
+    print(via_slice(0))
+    var total = 0
+    for r in range(600000):
+        total += len(mk(r % 100)) + len(via_local(r % 100)) + len(via_slice(0))
+    var bound = 0
+    for r in range(600000):
+        var a = mk(r % 100)
+        var b = via_local(r % 100)
+        var c = via_slice(0)
+        bound += len(a) + len(b) + len(c)
+    print(total)
+    print(bound)
+""", "n3\nm9\nbc\n4680000\n4680000\n", 40)
+
+    test_gimple_stdout("gimple_returned_string_that_is_not_fresh_is_not_freed", """\
+def alias(s: String) -> String:
+    return s
+
+def identity(s: String) -> String:
+    return str(s)
+
+def make() -> String:
+    return "kept-by-caller"
+
+def work(kept: List[String]) -> Int:
+    var t = 0
+    for i in range(4):
+        kept.append(alias("zz"))
+        kept.append(identity("yy"))
+        kept.append(make())
+        var c = String("q=") + String(i)
+        t += len(c)
+    return t
+
+def main():
+    var kept: List[String] = []
+    print(work(kept))
+    print(len(kept))
+    var hits = 0
+    for k in range(len(kept)):
+        if kept[k] == "zz":
+            hits += 1
+        if kept[k] == "yy":
+            hits += 10
+        if kept[k] == "kept-by-caller":
+            hits += 100
+    print(hits)
+""", "12\n12\n444\n")
+
+    # ── A list that owns its own string ELEMENTS (doc/MEMORY.html §3.B). A
+    # `split()` result's elements are fresh allocations made by the runtime
+    # function that built the list and by nothing else, but
+    # `mojo_list_append_str` stores the pointer it is given, so
+    # `mojo_list_free` released the container and left every string behind —
+    # ~48 B/iteration, measured over 100k and 400k iterations and now flat.
+    # The second program is the fail-closed half: `parts[0]` appended to a
+    # list the caller keeps hands an element pointer out of the list, and
+    # freeing the elements would dangle it, so the analysis
+    # (ownership_destruct.list_elements_owned) must refuse the element free
+    # there. The runner scribbles freed memory, so a wrong free shows up as
+    # the comparisons (printed 4th) failing rather than usually passing.
+    test_gimple_bounded_memory("gimple_split_result_element_strings_are_owned", """\
+def work(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var parts = String("a b c").split(" ")
+        t += len(parts)
+        if i == 2:
+            continue
+        if i == 4:
+            break
+    return t
+
+def lines(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var parts = String("x\\ny\\nz").splitlines()
+        t += len(parts)
+    return t
+
+def main():
+    print(work(3))
+    print(work(9))
+    print(lines(6))
+    var total = 0
+    for r in range(300000):
+        total += work(6) % 1000 + lines(4)
+    print(total)
+""", "9\n15\n18\n8100000\n", 40)
+
+    test_gimple_stdout("gimple_split_elements_that_escape_are_not_freed", """\
+def work(kept: List[String]) -> Int:
+    var t = 0
+    for i in range(4):
+        var parts = String("a b c").split(" ")
+        t += len(parts)
+        kept.append(parts[0])
+        var one = parts[1]
+        kept.append(one)
+    return t
+
+def main():
+    var kept: List[String] = []
+    print(work(kept))
+    print(len(kept))
+    var hits = 0
+    for k in range(len(kept)):
+        if kept[k] == "a":
+            hits += 1
+        if kept[k] == "b":
+            hits += 10
+    print(hits)
+    var total = 0
+    for r in range(20000):
+        var kk: List[String] = []
+        total += work(kk) % 1000
+    print(total)
+""", "12\n8\n44\n240000\n")
+
     # ── Strings bound to locals (doc/MEMORY.html section 3.B). A local bound
     # to a provably FRESH string (a `+` result, `String(i)`, a slice) is owned and
     # freed at scope exit, but only when every use is a read: `len`, a comparison,
@@ -1694,6 +2444,67 @@ def main():
         total += work(6) % 1000
     print(total)
 """, "36\n208\n51600000\n", 40)
+
+    # The shape of this compiler's own tokenizer: a scan over a string, one
+    # character at a time, asking `c in ('(', '[', '{')` and `c == "x"`. Every
+    # step used to malloc a one-character string (mojo_char_to_str) plus a fresh
+    # list for each tuple literal, and free neither: ~150 bytes per character,
+    # i.e. gigabytes for the self-hosted compiler over its own source
+    # (bugs/PERF_selfhost_memory_leak_hunt.md). The characters are now shared
+    # immortal strings and a display used only as the right side of `in` is freed
+    # after the test. 16M characters here; the leak, if back, is gigabytes.
+    test_gimple_bounded_memory("gimple_char_scan_allocates_nothing_per_character", """\
+def scan(s: String) -> Int:
+    var depth = 0
+    var seen = 0
+    var i = 0
+    while i < len(s):
+        var c = s[i]
+        if c in ('(', '[', '{'):
+            depth += 1
+        elif c in (')', ']', '}'):
+            depth -= 1
+        if c == "x":
+            seen += 1
+        i += 1
+    return depth * 1000 + seen
+
+def main():
+    var line = "(x[x{}x]) " * 8
+    var total = 0
+    for r in range(200000):
+        total += scan(line)
+    print(total)
+""", "4800000\n", 60)
+
+    # Rebuilding a string from its characters must still be right now that the
+    # character strings are shared and never freed: `out + ch` frees its own
+    # conversion temp only for a number, never for a character (a free of a
+    # shared character string would corrupt the heap; the runner scribbles freed
+    # memory, so a wrong free changes the output or crashes).
+    test_gimple_bounded_memory("gimple_char_concat_never_frees_shared_character", """\
+def rebuild(text: String) -> String:
+    var out = String("")
+    for i in range(len(text)):
+        var ch = text[i]
+        out = out + ch
+    return out
+
+def main():
+    var t = String("(x[x{}x]) tokens")
+    var hits = 0
+    for r in range(100000):
+        var u = rebuild(t)
+        if u == t:
+            hits += 1
+    print(hits)
+    print(rebuild(t))
+    var seen = ""
+    for c in "abcabc":
+        if c in ["a", "c"]:
+            seen = seen + c
+    print(seen)
+""", "100000\n(x[x{}x]) tokens\nacac\n", 60)
 
     test_gimple_stdout("gimple_string_local_aliased_by_strip_or_str_is_not_freed", """\
 def work(n: Int, kept: List[String]) -> Int:
@@ -1816,7 +2627,133 @@ def main():
     print(d)
 """, "6000000000\n6000000000\n1099511627776\n5000000000\n")
 
+    # `var s: Set[Int] = {}` — an empty `{}` is a dict DISPLAY, so resolving
+    # the binding from the initializer alone declared `s` a `MojoDict` and
+    # stack-allocated dict storage for it. `s.add(i)` then dispatched against
+    # a dict header and silently did nothing, `i in s` was False and `len(s)`
+    # was 0, all with exit 0; where the body needed the set's real kind the
+    # same program instead hard-refused ("cannot coerce MojoDict * to
+    # MojoSet *") depending on what else it contained. An empty literal is
+    # evidence for no container kind at all, so the annotation decides —
+    # through all three places that used to answer from the display alone
+    # (the owned-local storage decision, the declaration's ctype, and the
+    # coercion). The three spellings are `var s: Set[Int] = {}` (VarDecl),
+    # the bare annotated `s: Set[Int] = {}` (an AssignStmt carrying the
+    # annotation), and the same with strings.
+    test_gimple_stdout("gimple_annotated_set_from_empty_braces", """\
+def main():
+    var s: Set[Int] = {}
+    var acc = 0
+    for i in range(10):
+        s.add(i % 5)
+    for i in range(10):
+        if (i % 7) in s:
+            acc += 1
+    print(acc)
+    print(s)
+    print(len(s))
+    print(0 in s)
+    print(9 in s)
+
+main()
+""", "8\n{0, 1, 2, 3, 4}\n5\nTrue\nFalse\n")
+
+    test_gimple_stdout("gimple_annotated_set_from_empty_braces_unannotated_spelling", """\
+def main():
+    s: Set[String] = {}
+    s.add("a")
+    print(s)
+    print(len(s))
+    print("a" in s)
+    print("b" in s)
+    var t: Set[Int] = Set[Int]()
+    t.add(3)
+    print(t)
+    print(3 in t)
+    d: Dict[String, Int] = {}
+    d["k"] = 1
+    print(d)
+
+main()
+""", "{'a'}\n1\nTrue\nFalse\n{3}\nTrue\n{'k': 1}\n")
+
+    # A `List[String]` filled only from a CALLEE read back as ints: the
+    # element type of a list is otherwise recorded by its `append` sites,
+    # and a caller that only sees the list through a call has none — so
+    # `kept[0]` was typed int64_t, `len(kept[0])` read the string pointer's
+    # bits as a header (6581285), `print(kept[0])` formatted the pointer
+    # with %ld, and only the comparison still worked because it dispatched
+    # on the string-literal side. The declaration's own annotation is real
+    # evidence and is now honoured on all three paths that can consume a
+    # binding statement: the two ordinary statement paths, and the
+    # owned-local stack allocation that swallows `kept: List[String] = []`
+    # whole (which is the shape this very program takes, because `[]` is an
+    # empty constructor) and which had no element-type seeding at all.
+    # `other` is the control that stays broken and is NOT asserted as
+    # correct: an unannotated `other = []` genuinely has no static evidence
+    # anywhere, which is what the cross-call element-type contract is for.
+    test_gimple_stdout("gimple_annotated_list_string_filled_in_a_callee", """\
+def fill(kept):
+    kept.append("cde")
+
+def main():
+    kept: List[String] = []
+    fill(kept)
+    print(len(kept[0]))
+    print(kept[0])
+    print(kept[0] == "cde")
+    for k in kept:
+        print(k)
+        print(len(k))
+    ints: List[Int] = []
+    ints.append(7)
+    print(ints[0] + 1)
+    print(f"{kept[0]}")
+
+main()
+""", "3\ncde\nTrue\ncde\n3\n8\ncde\n")
+
+    # A dynamically-set attribute whose value is a STRING, read back through
+    # every spelling. The struct declared no such field, so the field-scan
+    # pass minted a phantom one — and minted it `int`, because that is the
+    # "nothing is known about this member" answer and a read-only phantom is
+    # the case it is right for. A member that IS assigned is not read-only,
+    # and storing a `char *` through a 4-byte `int` field truncates it: the
+    # read printed the low 32 bits of the string's address as a decimal, and
+    # `len(o.x)` then dereferenced that truncated value and SEGFAULTED. The
+    # minted field's type now comes from the value assigned to it (pointer-
+    # shaped and floating answers only, so a member assigned an ordinary
+    # integer keeps exactly the declaration it always had). `o.n` is that
+    # control. `getattr` is the same read by a different spelling, and it
+    # needed its own fix: the value was already in the field (the generated
+    # `_mojo_getattr_C` reads it) and only the call site's cast was missing,
+    # which is gated on the self-hosted source because a bare by-NAME field
+    # lookup is unsound for an arbitrary receiver. The receiver's OWN
+    # declared field is sound, and is what `o.x` already used, so the two
+    # spellings now agree by construction.
+    test_gimple_stdout("gimple_dynamic_attribute_string_keeps_its_type", """\
+class C:
+    pass
+
+def main():
+    o = C()
+    o.x = "hello"
+    o.n = 5
+    print(o.x)
+    print(len(o.x))
+    print(f"{o.x}")
+    print(str(o.x))
+    print("%s" % o.x)
+    print(o.x == "hello")
+    print(o.n)
+    print(o.n + 1)
+    print(getattr(o, "x", ""))
+
+main()
+""", "hello\n5\nhello\nhello\nhello\nTrue\n5\n6\nhello\n")
+
     # ── Struct methods get the same ownership treatment as plain functions, and the typed
+
     # empty constructors `List[T]()` / `Dict[K, V]()` / `Set[T]()` are containers like `[]`/`{}`:
     # stack-homed when they do not escape, freed at scope exit when they must live on the heap.
     # A method that stores a local into `self` (or returns it) must NOT free it.
@@ -2715,6 +3652,169 @@ fn main():
     print(b'a=b'.partition(b''))
 """, "ValueError: empty separator")
 
+    # The doc's item 6a residue: `partition`'s container TYPE. The doc
+    # concluded it was unfixable for want of a tuple type; re-tested, that
+    # premise is STALE. A tuple type has existed for some time — a
+    # `mojo_mark_as_tuple` marker on the MojoList (see that function's own
+    # doc comment) — but only repr and `isinstance(x, tuple)` read it, so a
+    # "tuple" was a list that merely PRINTED like one. The fix makes the
+    # marker load-bearing, and these four cases pin each way it is now
+    # observable: the mutation refusals, the value comparison, the
+    # cross-type inequality, and the type predicates.
+    test_gimple_runtime_error("gimple_tuple_append_raises", """\
+fn main():
+    print('before')
+    t = b'a=b'.partition(b'=')
+    t.append(b'z')
+""", "'tuple' object has no attribute 'append'")
+
+    # The two item forms are a TypeError with CPython's exact wording, and
+    # are NOT the same operation as `.pop` even though all three remove an
+    # element — which is why `del t[i]` got its own runtime entry point
+    # (mojo_list_delitem) rather than sharing mojo_list_pop_at's.
+    test_gimple_runtime_error("gimple_tuple_setitem_raises", """\
+fn main():
+    print('before')
+    t = (1, 2, 3)
+    t[0] = 9
+""", "'tuple' object does not support item assignment")
+
+    test_gimple_runtime_error("gimple_tuple_delitem_raises", """\
+fn main():
+    print('before')
+    t = (1, 2, 3)
+    del t[0]
+""", "'tuple' object doesn't support item deletion")
+
+    # The refusals must be TYPED and CATCHABLE, not a print-and-exit: real
+    # code distinguishes AttributeError from TypeError here, and a
+    # program that guards `if not isinstance(p, list): p.append(...)`
+    # depends on being able to catch and continue. Pinned because "raises
+    # the right text" and "raises catchably with the right type" are
+    # different properties and only the second one is load-bearing.
+    test_gimple_stdout("gimple_tuple_mutation_refusals_are_catchable", """\
+fn main():
+    t = (1, 2, 3)
+    try:
+        t.append(9)
+    except AttributeError:
+        print('caught AttributeError')
+    try:
+        t[0] = 9
+    except TypeError:
+        print('caught TypeError set')
+    try:
+        del t[0]
+    except TypeError:
+        print('caught TypeError del')
+    try:
+        t.pop()
+    except AttributeError:
+        print('caught AttributeError pop')
+    try:
+        t.extend([4])
+    except AttributeError:
+        print('caught AttributeError extend')
+    try:
+        t.insert(0, 4)
+    except AttributeError:
+        print('caught AttributeError insert')
+    try:
+        t.remove(1)
+    except AttributeError:
+        print('caught AttributeError remove')
+    try:
+        t.clear()
+    except AttributeError:
+        print('caught AttributeError clear')
+    try:
+        t.reverse()
+    except AttributeError:
+        print('caught AttributeError reverse')
+    try:
+        t.sort()
+    except AttributeError:
+        print('caught AttributeError sort')
+    print(t)
+    # A REAL list is unaffected by any of that.
+    l = [1, 2, 3]
+    l.append(4); l.extend([5]); l.insert(0, 0); l.pop()
+    l.remove(0); l.reverse(); l.clear()
+    print(l, len(l))
+    l = [1, 2, 3]
+    l[0] = 9; del l[0]; l[0:1] = [7, 8]; del l[0:1]
+    print(l)
+""", "caught AttributeError\ncaught TypeError set\ncaught TypeError del\n"
+     "caught AttributeError pop\ncaught AttributeError extend\n"
+     "caught AttributeError insert\ncaught AttributeError remove\n"
+     "caught AttributeError clear\ncaught AttributeError reverse\n"
+     "caught AttributeError sort\n(1, 2, 3)\n[] 0\n[8, 3]\n")
+
+    # The remaining half of the container TYPE: what the marker decides
+    # about the value, not just about mutation. `==` was a raw C POINTER
+    # comparison, so two equal containers compared unequal — including two
+    # equal tuples, and (the other direction) a tuple equalling a list.
+    test_gimple_stdout("gimple_container_value_equality", """\
+fn main():
+    t = (1, 2)
+    u = (1, 2)
+    print(t == u, t == (1, 2), u == t, t != u, t == (1, 3))
+    l = [1, 2]
+    m = [1, 2]
+    print(l == m, l == [1, 2], m == l, l != m, l == [1, 3])
+    # a tuple is never equal to a list, in either order
+    print(t == l, l == t)
+    s = b'ab'.split(b'b')
+    print(s == [b'a', b''], s != [b'a', b'z'])
+    st = (b'a', b'')
+    print(st == (b'a', b''), st == s)
+    # strings compare by content, not by address
+    print(['a', 'b'] == ['a', 'b'], ['a'] == ['b'])
+    # floats stored as raw bits
+    print([1.5, 2.5] == [1.5, 2.5], [1.5] == [2.5])
+    # different lengths
+    print([1, 2] == [1, 2, 3], [] == [], () == ())
+""", "True True True False False\nTrue True True False False\n"
+     "False False\nTrue True\nTrue False\nTrue False\nTrue False\n"
+     "False True True\n")
+
+    # `count` counts OCCURRENCES; `x in l` only asks whether there is one.
+    # There was no `count` case at all for a list, so every `l.count(v)`
+    # fell to the dummy 0-stub and answered 0 for a list that plainly
+    # contained the value — a silent wrong value, not an error.
+    test_gimple_stdout("gimple_list_count_counts_occurrences", """\
+fn main():
+    l = [1, 2, 1]
+    print(l.count(1), l.count(2), l.count(9))
+    m = ['a', 'b', 'a']
+    print(m.count('a'), m.count('b'), m.count('z'))
+    s = b'ab'.split(b'a')
+    print(s.count(b'a'), s.count(b'b'), s.count(b'z'))
+    t = (1, 2, 1)
+    print(t.count(1), t.count(2))
+    print([] .count(1), [1].count(1))
+""", "2 1 0\n2 1 0\n0 1 0\n2 1\n0 1\n")
+
+    # The rest of what the marker decides, beyond mutation and equality:
+    # the operations that PRESERVE a container's type and the two that do
+    # not. `mojo_list_copy` deliberately does NOT propagate the marker
+    # (`list(t)` is a list), while slice/concat/repeat do.
+    test_gimple_stdout("gimple_tuple_type_preserved_by_ops", """\
+fn main():
+    t = (1, 2)
+    l = [1, 2]
+    print(t + (3,), t * 2, t[:], t[:1])
+    print(l + [3], l * 2, l[:], l[:1])
+    print(list(t), tuple(l), list(l))
+    print(isinstance(t, tuple), isinstance(t, list))
+    print(isinstance(l, tuple), isinstance(l, list))
+    print(isinstance(b'a=b'.partition(b'='), tuple))
+    print(isinstance(b'a=b'.partition(b'='), list))
+    print(isinstance((1, 2), (int, str)))
+    print(isinstance((1, 2), (list, str)))
+""", "(1, 2, 3) (1, 2, 1, 2) (1, 2) (1,)\n[1, 2, 3] [1, 2, 1, 2] [1, 2] [1]\n"
+     "[1, 2] (1, 2) [1, 2]\nTrue False\nFalse True\nTrue\nFalse\nFalse\nFalse\n")
+
     test_gimple_stdout("gimple_bytes_fromhex_maketrans_translate", """\
 fn main():
     print(bytes.fromhex('68656c6c6f'))
@@ -2724,6 +3824,321 @@ fn main():
     print(b'abc'.translate(bytes.maketrans(b'a', b'b', b'c')))
     print(b'abc'.translate(bytes(range(256))))
 """, "b'hello'\nb'hel'\nb'\\xde\\xad\\xbe\\xef'\nb'bbc'\nb'bbc'\nb'abc'\n")
+
+    # Found by a differential sweep of the bytes surface against CPython
+    # (one expression per line, run on both engines, diffed). Each of these
+    # answered a PLAUSIBLE wrong value with exit 0, or a raw int 0.
+    #
+    # `startswith`/`endswith` took [start[, end]] and silently DROPPED it —
+    # the call site passed only (bytes, prefix), so the comparison ran over
+    # the whole string and `b'abc'.startswith(b'a', 1, 2)` said True.
+    test_gimple_stdout("gimple_bytes_startswith_endswith_window", """\
+fn main():
+    print(b'abc'.startswith(b'a', 1, 2))
+    print(b'abc'.startswith(b'b', 1, 2))
+    print(b'abc'.endswith(b'c', 0, 2))
+    print(b'abc'.endswith(b'b', 0, 2))
+    print(b'abc'.startswith(b'abc', 0, 3))
+    print(b'abc'.endswith(b'abc', 0, 3))
+    print(b'abc'.startswith(b'a', -1))
+    print(b'abc'.endswith(b'c', -1))
+    print(b'abc'.startswith(b'a', 10))
+    print(b'abc'.endswith(b'c', 10))
+    print(b'abc'.startswith(b'a', 2, 1))
+    print(b'abc'.startswith(b'a'))
+    print(b'abc'.endswith(b'c'))
+    print(b'abc'.startswith(b''))
+    print(b''.startswith(b''))
+    print(b'abc'.endswith(b''))
+""", "False\nTrue\nFalse\nTrue\nTrue\nTrue\nFalse\nTrue\nFalse\nFalse\n"
+     "False\nTrue\nTrue\nTrue\nTrue\nTrue\n")
+
+    # `expandtabs` had NO bytes implementation at all: every spelling fell to
+    # the generic unknown-method stub and answered a raw int 0. The
+    # non-positive-tabsize row is here because CPython REMOVES the tab
+    # there (`b'a\\tb\\tc'.expandtabs(0)` is `b'abc'`) rather than leaving it.
+    test_gimple_stdout("gimple_bytes_expandtabs", """\
+fn main():
+    print(b'abc'.expandtabs())
+    print(b'a\\tb'.expandtabs(4))
+    print(b'\\t'.expandtabs())
+    print(b'a\\tb\\tc'.expandtabs(0))
+    print(b'a\\tb\\tc'.expandtabs(-1))
+    print(b'\\ta\\tb'.expandtabs(1))
+    print(b''.expandtabs(0))
+    print(b''.expandtabs(4))
+    print(b'a\\rb\\tc'.expandtabs(4))
+    print(b'a\\t\\f\\tx'.expandtabs(4))
+    print(b'a\\tb\\tc'.expandtabs(tabsize=2))
+""", "b'abc'\nb'a   b'\nb'        '\nb'abc'\nb'abc'\nb' a b'\nb''\nb''\n"
+     "b'a\\rb   c'\nb'a   \\x0c   x'\nb'a b c'\n")
+
+    # `b.translate(table, delete)` dropped the DELETE set entirely, so
+    # `b'hello'.translate(None, b'l')` came back unchanged. A table of the
+    # wrong length is a ValueError in CPython; a short one used to be
+    # partially applied instead.
+    test_gimple_stdout("gimple_bytes_translate_delete_set", """\
+fn main():
+    print(b'hello'.translate(None, b'l'))
+    print(b'hello'.translate(None, b'l'))
+    print(b'hello'.translate(bytes(range(256)), b'l'))
+    print(b'hello'.translate(None, b'lxo'))
+    print(b'hello'.translate(None, b''))
+    print(b'hello'.translate(bytes(range(256))))
+    print(b'abc'.translate(bytes.maketrans(b'a', b'b')))
+""", "b'heo'\nb'heo'\nb'heo'\nb'he'\nb'hello'\nb'hello'\nb'bbc'\n")
+
+    test_gimple_runtime_error("gimple_bytes_translate_short_table_raises", """\
+fn main():
+    print(b'hello'.translate(b'xyz', b'l'))
+""", "ValueError: translation table must be 256 characters long")
+
+    # `b.replace(b'', x)` is a real CPython spelling, not a no-op: the empty
+    # pattern matches before every character and after the last. It
+    # answered the string UNCHANGED, because the loop advances by the
+    # pattern length and so never matched at all.
+    test_gimple_stdout("gimple_bytes_replace_empty_pattern", """\
+fn main():
+    print(b'aaa'.replace(b'', b'-'))
+    print(b''.replace(b'', b'-'))
+    print(b'ab'.replace(b'', b'--'))
+    print(b'aaa'.replace(b'', b'-', 2))
+    print(b'aaa'.replace(b'', b'-', 0))
+    print(b'aaa'.replace(b'a', b'b'))
+    print(b'aaa'.replace(b'a', b'b', 2))
+    print(b'aaa'.replace(b'a', b'b', 0))
+    print(b'hello'.replace(b'l', b'L'))
+""", "b'-a-a-a-'\nb'-'\nb'--a--b--'\nb'-a-aa'\nb'aaa'\nb'bbb'\nb'bba'\n"
+     "b'aaa'\nb'heLLo'\n")
+
+    # `b.count(b'')` counts len+1 non-overlapping empty matches, not 0. The
+    # counting loop advances by needle->len, which is 0, so it could not
+    # produce that answer and answered 0 for every input.
+    test_gimple_stdout("gimple_bytes_count_empty_needle", """\
+fn main():
+    print(b'abc'.count(b''))
+    print(b''.count(b''))
+    print(b'abc'.count(b'b'))
+    print(b'aaa'.count(b'a'))
+    print(b'aaa'.count(b'a', 1))
+    print(b'abc'.count(b'b', 1, 3))
+    print(b'abc'.count(97))
+    print(b'abc'.count(98, 0, 2))
+""", "4\n1\n1\n3\n2\n1\n1\n1\n")
+
+    # `split(b'')` is a ValueError, and it was conflated with the genuinely
+    # absent separator (`split()`, which IS a whitespace split) because both
+    # arrive as a NULL-or-empty `sep`. So `split(b'')` silently
+    # whitespace-split instead of raising.
+    test_gimple_runtime_error("gimple_bytes_split_empty_sep_raises", """\
+fn main():
+    print(b'ab'.split(b''))
+""", "ValueError: empty separator")
+
+    test_gimple_runtime_error("gimple_bytes_rsplit_empty_sep_raises", """\
+fn main():
+    print(b'ab'.rsplit(b''))
+""", "ValueError: empty separator")
+
+    test_gimple_stdout("gimple_bytes_split_no_sep_is_whitespace", """\
+fn main():
+    print(b'a b'.split())
+    print(b'a b'.split(None))
+    print(b'  a  b '.split())
+    print(b'a,,b'.split(b','))
+    print(b'a-b-c'.rsplit(b'-', 1))
+    print(b'a-b-c'.rsplit(b'-'))
+    print(b''.split(b','))
+    print(b'a,b'.split(b',', 1))
+    print(b'a b c'.split(maxsplit=1))
+""", "[b'a', b'b']\n[b'a', b'b']\n[b'a', b'b']\n[b'a', b'', b'b']\n"
+     "[b'a-b', b'c']\n[b'a', b'b', b'c']\n[b'']\n[b'a', b'b']\n[b'a', b'b c']\n")
+
+    # `index`/`rindex` RAISE when the subsection is absent; `find`/`rfind`
+    # answer -1. All four were one function, so both halves were wrong:
+    # `index` printed -1, and the byte-value form of `find` raised.
+    test_gimple_runtime_error("gimple_bytes_index_missing_raises", """\
+fn main():
+    print(b'abc'.index(b'z'))
+""", "ValueError: subsection not found")
+
+    test_gimple_runtime_error("gimple_bytes_rindex_missing_raises", """\
+fn main():
+    print(b'abc'.rindex(b'z'))
+""", "ValueError: subsection not found")
+
+    test_gimple_stdout("gimple_bytes_find_rfind_still_return_minus_one", """\
+fn main():
+    print(b'abc'.find(b'z'))
+    print(b'abc'.rfind(b'z'))
+    print(b'abc'.find(300 - 203))
+    print(b'abc'.rfind(300 - 203))
+    print(b'abc'.find(b'b'))
+    print(b'abc'.rfind(b'b'))
+    print(b'abc'.find(98))
+    print(b'abc'.rfind(98))
+    print(b'abc'.index(b'c'))
+    print(b'abc'.rindex(b'a'))
+    print(b'abc'.index(b'c', 2))
+    print(b'abc'.rindex(b'a', 0, 2))
+""", "-1\n-1\n0\n0\n1\n1\n1\n1\n2\n0\n2\n0\n")
+
+    # A byte VALUE outside 0-255 is a ValueError, not a silently wrapped
+    # one: `& 0xFF` turned 300 into 44, so `count(300)` counted 'c'.
+    test_gimple_runtime_error("gimple_bytes_count_out_of_range_raises", """\
+fn main():
+    print(b'abc'.count(300))
+""", "ValueError: byte must be in range(0, 256)")
+
+    # `b[i]` at an explicit subscript RAISES out of range. It answered 0,
+    # and 0 is not a neutral value here: it is a real byte value, so
+    # `if b[i] == 0:` on a short buffer silently took the true branch.
+    test_gimple_runtime_error("gimple_bytes_index_out_of_range_raises", """\
+fn main():
+    print(b'abc'[10])
+""", "IndexError: index out of range")
+
+    test_gimple_runtime_error("gimple_bytes_negative_index_out_of_range_raises", """\
+fn main():
+    print(b'abc'[-10])
+""", "IndexError: index out of range")
+
+    test_gimple_runtime_error("gimple_empty_bytes_index_raises", """\
+fn main():
+    print(b''[0])
+""", "IndexError: index out of range")
+
+    test_gimple_stdout("gimple_bytes_in_range_index_still_works", """\
+fn main():
+    print(b'abc'[0], b'abc'[1], b'abc'[2], b'abc'[-1], b'abc'[-3])
+    print(b'ab'[0], b'ab'[-1])
+    total = 0
+    for b in b'abc':
+        total = total + b
+    print(total)
+""", "97 98 99 99 97\n97 98\n294\n")
+
+    # Iterating `bytes` yields its INTEGERS. all/any/sum/max/min over a
+    # bytes object were either the codegen's constant stub or a reinterpret
+    # of the MojoBytes header as a list — so `sum(b'abc')` printed a
+    # heap-pointer decimal and `max(b'abc')` printed an address.
+    test_gimple_stdout("gimple_bytes_builtins_iterate_as_ints", """\
+fn main():
+    print(all(b'abc'))
+    print(all(b''))
+    print(all(b'a0b'))
+    print(any(b'abc'))
+    print(any(b''))
+    print(sum(b'abc'))
+    print(sum(b''))
+    print(max(b'abc'))
+    print(min(b'abc'))
+    print(max(b'cba'))
+    print(min(b'cba'))
+    print(max(b'\\x00\\x7f'))
+    print(min(b'\\x00\\x7f'))
+""", "True\nTrue\nTrue\nTrue\nFalse\n294\n0\n99\n97\n99\n97\n127\n0\n")
+
+    # `any` asks whether any ELEMENT is truthy, and an element of a bytes
+    # object is an int where 0 is falsy — so this is not "is the container
+    # non-empty", and `any(b'\\x00')` is False in CPython.
+    test_gimple_stdout("gimple_bytes_any_tests_elements", """\
+fn main():
+    print(any(b'\\x00'))
+    print(any(b'\\x00\\x00'))
+    print(any(b'\\x00a'))
+    print(all(b'\\x00\\x00'))
+    print(any(b''))
+""", "False\nFalse\nTrue\nTrue\nFalse\n")
+
+    # `list(reversed(b))` and `sorted(b)` had no bytes route: the first
+    # produced an EMPTY list (the comprehension cannot iterate a reversed()
+    # call) and the second SEGFAULTED, reading the MojoBytes header as a
+    # list's data pointer and length.
+    test_gimple_stdout("gimple_bytes_reversed_and_sorted", """\
+fn main():
+    print(list(reversed(b'abc')))
+    print(list(reversed(b'')))
+    print(bytes(reversed(b'abc')))
+    print(sorted(b'cba'))
+    print(sorted(b''))
+    print(sorted(b'cab'))
+    for x in sorted(b'ba'):
+        print(x)
+""", "[99, 98, 97]\n[]\nb'cba'\n[97, 98, 99]\n[]\n[97, 98, 99]\n97\n98\n")
+
+    # `casefold` exists on str and NOT on bytes; `hex` exists on bytes and
+    # NOT on str, and takes no arguments. Each pair used to answer a raw
+    # int 0 from the generic unknown-method stub — `str.hex` resolving to
+    # the runtime's integer formatter, and `bytes.hex` dropping its
+    # argument.
+    test_gimple_runtime_error("gimple_bytes_casefold_raises", """\
+fn main():
+    print(b'abc'.casefold())
+""", "AttributeError: 'bytes' object has no attribute 'casefold'")
+
+    test_gimple_runtime_error("gimple_str_hex_raises", """\
+fn main():
+    print('abc'.hex())
+""", "AttributeError: 'str' object has no attribute 'hex'")
+
+    test_gimple_runtime_error("gimple_bytes_hex_takes_no_args_raises", """\
+fn main():
+    print(b'abc'.hex(2))
+""", "TypeError: hex() takes no arguments")
+
+    # str.casefold / swapcase / title / capitalize: all four were missing
+    # from the str lowering and answered the unknown-method stub's 0.
+    test_gimple_stdout("gimple_str_case_methods", """\
+fn main():
+    print('aBc'.swapcase())
+    print('hello world'.title())
+    print('aBC'.capitalize())
+    print('abc'.capitalize())
+    print('ABC'.casefold())
+    print('Hello World'.casefold())
+    print('aBc dEf'.swapcase())
+    print('a1b c'.title())
+    print('hello WORLD'.title())
+    print(''.title())
+    print(''.capitalize())
+    print(''.swapcase())
+    print('  lead'.capitalize())
+""", "AbC\nHello World\nAbc\nAbc\nabc\nhello world\nAbC DeF\nA1B C\n"
+     "Hello World\n\n\n\n  lead\n")
+
+    # A bytes literal did not decode \\a, \\b, \\f or \\v, so b"\\f" was TWO
+    # characters (backslash, f) rather than one (0x0c) — a silent wrong
+    # value in every bytes literal using them, and an inconsistency with
+    # the str path, which decoded all four correctly.
+    test_gimple_stdout("gimple_bytes_literal_escapes", """\
+fn main():
+    print(b'\\f')
+    print(b'\\v')
+    print(b'\\a')
+    print(b'\\b')
+    print(b'\\x0c')
+    print(b'\\f\\v\\a\\b\\n\\t\\r\\0\\\\')
+    print(b'a\\fb\\vc')
+    print(b'\\q')
+    print(rb'\\f')
+    print(len(b'\\f'), len(b'\\n'), len(b'\\x41'))
+""", "b'\\x0c'\nb'\\x0b'\nb'\\x07'\nb'\\x08'\nb'\\x0c'\n"
+     "b'\\x0c\\x0b\\x07\\x08\\n\\t\\r\\x00\\\\'\nb'a\\x0cb\\x0bc'\nb'\\\\q'\n"
+     "b'\\\\f'\n1 1 1\n")
+
+    # `x[a:b:0]` is a ValueError in CPython — a zero step is a
+    # contradiction, not an empty range. Every slice helper treated step 0
+    # as "step 1", so the compiled path answered the WHOLE sequence.
+    test_gimple_runtime_error("gimple_bytes_slice_zero_step_raises", """\
+fn main():
+    print(b'abc'[1:2:0])
+""", "ValueError: slice step cannot be zero")
+
+    test_gimple_runtime_error("gimple_list_slice_zero_step_raises", """\
+fn main():
+    print([1,2,3][0:3:0])
+""", "ValueError: slice step cannot be zero")
 
     test_gimple_stdout("gimple_bytes_membership_in_containers", """\
 fn main():
@@ -2876,6 +4291,60 @@ fn main():
     ba[0] = 90
     print(memoryview(ba).readonly)
 """, "4 1 B\nb'abcd'\nTrue True\n4\nFalse True\nTrue False\nTrue True\nFalse\n")
+
+    # The rest of the memoryview descriptor surface, found by the same
+    # differential sweep. None of these had a lowering at either the member
+    # read or the call form, so each fell to the generic unknown-member path
+    # and printed ITS OWN HEAP ADDRESS as a decimal: `mv.shape` printed
+    # 4341225952 where CPython prints `(4,)`. That is a silent wrong value
+    # twice over — it is not a shape, and it changes every run, so a program
+    # comparing it against anything took a branch decided by the allocator.
+    test_gimple_stdout("gimple_memoryview_shape_descriptors", """\
+fn main():
+    var mv = memoryview(b'abcd')
+    print(mv.shape)
+    print(mv.strides)
+    print(mv.suboffsets)
+    print(mv.ndim)
+    print(mv.c_contiguous, mv.f_contiguous, mv.contiguous)
+    print(memoryview(b'').shape)
+    print(memoryview(bytearray(b'abc')).shape)
+    print(mv[1:3].shape)
+    # The CALL form must agree with the member read, or a program that
+    # writes `mv.shape` and one that writes `mv.__getattribute__('shape')`
+    # would not.
+    print(len(str(mv.shape)))
+""", "(4,)\n(1,)\n()\n1\nTrue True True\n(0,)\n(3,)\n(2,)\n4\n")
+
+    test_gimple_stdout("gimple_memoryview_tolist", """\
+fn main():
+    print(memoryview(b'abcd').tolist())
+    print(memoryview(bytearray(b'abc')).tolist())
+    print(memoryview(b'').tolist())
+    print(memoryview(b'abcd')[1:3].tolist())
+    for x in memoryview(b'ab').tolist():
+        print(x)
+""", "[97, 98, 99, 100]\n[97, 98, 99]\n[]\n[98, 99]\n97\n98\n")
+
+    # An out-of-range memoryview read raises a real, CATCHABLE IndexError.
+    # It was a print-and-exit, so a program guarding an optional read
+    # (`try: v = mv[n] except IndexError: v = None`) died instead of
+    # taking the fallback.
+    test_gimple_stdout("gimple_memoryview_index_error_is_catchable", """\
+fn main():
+    var mv = memoryview(b'abcd')
+    print(mv[0], mv[3], mv[-1], mv[-4])
+    try:
+        print(mv[10])
+    except IndexError:
+        print('caught IndexError')
+    try:
+        print(mv[-10])
+    except IndexError:
+        print('caught IndexError neg')
+    print(bytes(mv[1:100]), bytes(mv[1:3]))
+""", "97 100 100 97\ncaught IndexError\ncaught IndexError neg\n"
+     "b'bcd' b'bc'\n")
 
     # ── constructor-call-site inference reaches METHOD bodies and
     # MemberExpr/BinaryOp arguments ───────────────────────────────────────
@@ -3137,6 +4606,38 @@ fn main():
         print(x + 1)
 """, "1.5\n2.5\n3.0\n1.5\n1.5\n2.0\n2\n2.0\n3.5\n")
 
+    # The SAME case one level down, in the spelling that is not `var`:
+    # `b = [1, 2.5]` / `t = struct.unpack(...)` is an `AssignStmt`, and the
+    # per-slot-kind side tables were carried across only by the VarDecl path,
+    # so every read of the assigned name used the container's PROMOTED
+    # element type ('double') — `b[0]` printed `5e-324`, the int slot's bit
+    # pattern read as a denormal double, and the loop printed `5e-324` too.
+    # Exit 0, no diagnostic, and the identical `var` spelling one line away
+    # was right. `c` is the control: a homogeneous list is untouched, and
+    # `t`'s two reads are the static-index and computed-index cases of the
+    # same value. (The trailing `2.0` is the documented promotion above, not
+    # a defect: a boxed read whose slot turns out to be an int is computed
+    # in double.)
+    test_gimple_stdout("gimple_heterogeneous_reads_survive_a_plain_assignment", """\
+fn main():
+    b = [1, 2.5]
+    print(b)
+    print(b[0])
+    var i = 0
+    print(b[i])
+    for y in b:
+        print(y)
+    t = struct.unpack('<if', struct.pack('<if', 1, 1.5))
+    print(t[0])
+    var j = 1
+    print(t[j])
+    for z in t:
+        print(z)
+    c = [1, 2, 3]
+    for w in c:
+        print(w)
+""", "[1, 2.5]\n1\n1\n1\n2.5\n1\n1.5\n1\n1.5\n1\n2\n3\n")
+
     # The same limit one level lower, without `struct` at all: a
     # HETEROGENEOUS LITERAL. `[1, 2.5]` used to append the int through the
     # list-wide 'double' suffix, so the literal printed `[1.0, 2.5]` and
@@ -3235,6 +4736,45 @@ fn main():
     print(v[0])
     print(v[1])
 """, "(7, 0.5)\n7\n0.5\n7\n0.5\n0.5\n[7, 0.5]\n(4, 5)\n4\n5\n")
+
+    # The per-slot kinds travel with the VALUE, keyed by the live list's
+    # address in a runtime side table — and that table's DELETE was clearing
+    # the slot outright instead of closing the probe gap, so freeing one list
+    # stripped the kinds off every other live list that shared its probe
+    # cluster. Heap MojoLists are 64 bytes apart (sizeof is 56, malloc's
+    # size class rounds up), so a bare `addr & mask` home function put EVERY
+    # kinds row in one cluster and the collision was the norm, not a
+    # coincidence: `pick()` below frees its first local on return, and the
+    # list it RETURNS is allocated 64 bytes later, so its repr came back
+    # through the no-kinds fallback — which reads each slot with
+    # mojo_list_get_int and hands a double's IEEE-754 bit pattern to
+    # strlen. It segfaulted. Both halves are pinned here: the printed repr
+    # and element reads (which go through mojo_list_get_boxed, so they need
+    # the row), and the survival of a second, longer-lived list in the same
+    # function (the direct-collision shape, without a callee boundary).
+    test_gimple_stdout("gimple_kinds_survive_a_sibling_list_being_freed", """\
+fn mixed(x: Float64, s: String) -> List:
+    return [x, 1, s]
+
+fn drop_one() -> List:
+    var first = mixed(1.5, "aa")
+    var kept = mixed(9.5, "zz")
+    return kept
+
+fn main():
+    var b = drop_one()
+    print(b)
+    var i = 0
+    print(b[i])
+    var j = 1
+    print(b[j])
+    print(b[2] == "zz")
+    var a = mixed(2.5, "yy")
+    var c = mixed(3.5, "xx")
+    print(a)
+    print(c)
+    print(list(a), list(c))
+""", "[9.5, 1, 'zz']\n9.5\n1\nTrue\n[2.5, 1, 'yy']\n[3.5, 1, 'xx']\n[2.5, 1, 'yy'] [3.5, 1, 'xx']\n")
 
     test_gimple_stdout("gimple_struct_uniform_formats_still_uniform", """\
 fn main():
@@ -3716,12 +5256,171 @@ def f():
 print(f())
 """, "abc\n")
 
+    # The same class of gap one step further on: a function whose only
+    # `return` is a METHOD CALL on a local it just constructed. The call
+    # site was already exactly right — the right method, the right mangled
+    # symbol, `char *` into a `char *` temp — but the enclosing function's
+    # declared return type was `int64_t`, because return-type inference
+    # types each `return` expression with `_quick_type`, whose
+    # struct-receiver arm looks the receiver's C type up in `var_types`, and
+    # at return-inference time that table does not yet hold this function's
+    # own locals. One wrong declaration turned the value into a pointer
+    # decimal by the time `print` saw it. `h` (a `repr(...)` call, which
+    # returns an explicit typed pair) and `k` (a field read) were already
+    # right, so the difference is the expression kind, not the method.
+    # `m` and `n` are the alias and non-dunder-method forms of the same
+    # case.
+    test_gimple_stdout("gimple_return_type_from_a_method_call_on_a_local", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+    def twice(self):
+        return self.x + self.x
+
+def g():
+    p = P("a")
+    return p.__repr__()
+
+def h():
+    p = P("a")
+    return repr(p)
+
+def k():
+    p = P("a")
+    return p.x
+
+def m():
+    p = P("a")
+    q = p
+    return q.__repr__()
+
+def n():
+    p = P("a")
+    return p.twice()
+
+def mk():
+    return P("a")
+
+def mk2(x):
+    return P(x)
+
+def f1():
+    p = mk()
+    return p.__repr__()
+
+def f2():
+    p = mk2("b")
+    return p.__repr__()
+
+print(g())
+print(h())
+print(k())
+print(m())
+print(n())
+print(f1())
+print(f2())
+""", "R<a>\nR<a>\na\nR<a>\naa\nR<a>\nR<b>\n")
+
+    # A user-defined `__str__`, consulted by `str()` and by `"%s" %` — a
+    # SECOND, entirely separate route from the `repr()` one. Both lower to
+    # `_stringify_value`, which had no dunder awareness at all: a struct
+    # pointer fell to the generic `mojo_str`, i.e. the generated field dump
+    # with an empty field list, which is where the bare type name `P` came
+    # from. `__str__` is preferred and `__repr__` is the fallback, which is
+    # CPython's own order for `str` — so `Q`, which defines only
+    # `__repr__`, stringifies as its repr rather than as its type name.
+    # A struct with NEITHER is deliberately not asserted here: it keeps the
+    # pre-existing lowering, which prints the bare type name where CPython
+    # prints `<R object at 0x...>`. That is a real, separate gap — a
+    # struct-allocated local carries no runtime type tag for the field-dump
+    # dispatch to find, the same missing tag as the container rows left open
+    # in bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_
+    # container_spellings.md — and freezing the wrong answer here would make
+    # it invisible. The `%r` / `repr()` spellings are the controls:
+    # unchanged by this, because CPython's fallback there is `__str__` and
+    # taking it would change the repr of every struct in the tree that
+    # defines `__str__` alone.
+    test_gimple_stdout("gimple_user_defined_dunder_consulted_by_str_and_percent_s", """\
+class P:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "R<" + self.x + ">"
+    def __str__(self):
+        return "S<" + self.x + ">"
+
+class Q:
+    def __init__(self, x):
+        self.x = x
+    def __repr__(self):
+        return "Q<" + self.x + ">"
+
+p = P("a")
+q = Q("b")
+print(str(p))
+print("%s" % p)
+print(f"{p}")
+print(str(q))
+print("%s" % q)
+print(repr(p))
+print("%r" % p)
+print(repr(q))
+print(1)
+print("x")
+print([1, 2])
+print({"a": 1})
+""", "S<a>\nS<a>\nS<a>\nQ<b>\nQ<b>\nR<a>\nR<a>\nQ<b>\n1\nx\n[1, 2]\n{'a': 1}\n")
+
     # §4.2a: print([True, False]) printed [1, None] -- the generic list repr
     # both formats a bool slot with %d instead of True/False AND treats a
     # False (0) slot as the None sentinel.
     test_gimple_stdout("gimple_print_bool_list", """\
 print([True, False])
 """, "[True, False]\n")
+
+    # repr() of a bool printed `1`/`0` — the right VALUE, the wrong type.
+    # print() was already right (`_gen_print`'s `_Bool` arm calls
+    # mojo_repr_bool) and so were `%s` and `f'{x}'`, which is exactly what let
+    # this survive: the obvious smoke test passes and the spellings that ship
+    # are the wrong ones. `_repr_value` had no `_Bool` arm at all, so a
+    # `_Bool` fell through to the int64_t one — the ordering trap being that
+    # the new arm has to come before the `endswith(' *')` test.
+    #
+    # `%d` and `%i` are in the same test deliberately: they are RIGHT (Python
+    # formats a bool as an int there), and a fix that made them print
+    # True/False would pass every other assertion in this file.
+    test_gimple_stdout("gimple_repr_of_a_bool_is_true_false", """\
+x = 1 == 1
+print(repr(x))
+print(repr(x == 2))
+print('%r' % (x,))
+print(f'{x!r}')
+print('%d' % (x,))
+print('%i' % (x == 2,))
+print('%s' % (x,))
+print(f'{x}')
+print(str(x))
+""", "True\nFalse\nTrue\nTrue\n1\n0\nTrue\nTrue\nTrue\n")
+
+    # A bool stored as a dict VALUE is a plain `int` slot by the time it is
+    # stored, so the dict is MARKED (mojo_mark_dict_bool_values) and
+    # mojo_is_bool_dict picks the bool formatter for its whole repr. The mark
+    # used to require a literal RHS, so every other bool expression — a name
+    # holding a bool, a comparison — printed `{'k': 1}` while print() on the
+    # same value said True. `{'k': 1}` (a genuine int) is in the same test so
+    # the mark cannot turn into a blanket "this dict holds 0/1".
+    test_gimple_stdout("gimple_dict_of_bool_values", """\
+b = True
+print({'k': b})
+print({'k': 1 == 1})
+print({'k': 1 == 2})
+print({'k': 1})
+d = {}
+d['a'] = b
+print(d)
+""", "{'k': True}\n{'k': True}\n{'k': False}\n{'k': 1}\n{'a': True}\n")
 
     # §4.2b: print({1, 2}) printed the set's own ADDRESS -- print had no
     # MojoSet * dispatch branch at all (len()/iteration on the same value
@@ -4030,6 +5729,164 @@ def main():
             _FAIL += 1
 
     test_qualified_module_struct_construction()
+
+    # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md:
+    # two REAL classes sharing a bare name across two modules. The single
+    # string this codegen used as a struct's C identity was the bare
+    # `StructDef.name`, so whichever module was processed first owned the
+    # field table and the second one's `self.<field>` accesses, field types
+    # and `__init__` call sites all resolved against the winner's. The
+    # helpers below compile 2 or 3 sibling files with do_imports=True, run
+    # the result, AND run the same source under CPython, and require the two
+    # stdouts to agree — so every assertion here is anchored to what Python
+    # actually answers, never to a value this compiler happens to produce.
+    def _compile_n_files_and_run(files: dict, entry: str, timeout=60):
+        """Write `files` ({name: source}), compile `entry` with
+        do_imports=True (the single-TU inline path), build with gcc -fgimple,
+        run, return (compiled_stdout, cpython_stdout). Raises on any
+        failure with the stage that failed in the message."""
+        with tempfile.TemporaryDirectory() as wd:
+            for name, src in files.items():
+                open(os.path.join(wd, name), 'w').write(src)
+            ep = os.path.join(wd, entry)
+            from gimple_codegen import compile_to_gimple
+            c_code = compile_to_gimple(files[entry], do_imports=True,
+                                       filename=ep)
+            # CPython's own answer for the identical program text, so the
+            # expectation is never a hardcoded string this repo chose. Taken
+            # INSIDE the `with`, while the source files still exist.
+            cp = subprocess.run([sys.executable, ep], capture_output=True,
+                                text=True, timeout=timeout, cwd=wd)
+            cp_out = cp.stdout
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.c',
+                                         delete=False) as f:
+            f.write(c_code)
+            c_file = f.name
+        exe_file = c_file.replace('.c', '.exe')
+        try:
+            runtime_dir = os.path.join(HERE, 'runtime')
+            result = subprocess.run(
+                [find_gcc(), '-fgimple', f'-I{runtime_dir}', '-o', exe_file,
+                 c_file, os.path.join(runtime_dir, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=timeout)
+            if result.returncode != 0:
+                raise RuntimeError(f"gcc -fgimple failed: {result.stderr[:400]}")
+            return run_executable_stdout(exe_file), cp_out
+        finally:
+            for p in (c_file, exe_file):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+    def _check_agrees_with_cpython(name, files, entry, timeout=60):
+        """Run `files` both ways; PASS only if compiled == CPython."""
+        global _PASS, _FAIL, _TIMEOUT
+        try:
+            got, want = _compile_n_files_and_run(files, entry, timeout)
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if got == want:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: compiled {got!r} != CPython {want!r}")
+            _FAIL += 1
+
+    # The two shapes the bug doc calls out as the LIVE residues, both
+    # re-measured on this tree before the fix: (a) a `str` field sharing a
+    # NAME with the winner's `int64_t` field was stored as a raw pointer
+    # into the winner's int slot, so reading it back printed a heap address
+    # (ASLR-varying, exit 0, no diagnostic) where CPython printed the
+    # string; (b) a 0-arg `mod_b.Dialog()` called the winner's 1-arg
+    # `__init__`, a hard gcc "too few arguments" compile error.
+    _check_agrees_with_cpython("same_bare_name_struct_shared_field_cname", {
+        'colln_mod_a.py': "class Dialog:\n"
+                          "    def __init__(self, n):\n"
+                          "        self.n = n\n",
+        'colln_mod_b.py': "class Dialog:\n"
+                          "    def __init__(self, unused):\n"
+                          "        self.n = 'hello'\n",
+        'colln_main.py': "import colln_mod_a, colln_mod_b\n"
+                         "def main():\n"
+                         "    a = colln_mod_a.Dialog(5)\n"
+                         "    b = colln_mod_b.Dialog(0)\n"
+                         "    print(a.n)\n"
+                         "    print(b.n)\n"
+                         "main()\n",
+    }, 'colln_main.py')
+
+    _check_agrees_with_cpython("same_bare_name_struct_ctor_arity", {
+        'colln2_mod_a.py': "class Dialog:\n"
+                           "    def __init__(self, n):\n"
+                           "        self.n = n\n",
+        'colln2_mod_b.py': "class Dialog:\n"
+                           "    def __init__(self):\n"
+                           "        self.n = 'hello'\n",
+        'colln2_main.py': "import colln2_mod_a, colln2_mod_b\n"
+                          "def main():\n"
+                          "    a = colln2_mod_a.Dialog(5)\n"
+                          "    b = colln2_mod_b.Dialog()\n"
+                          "    print(a.n)\n"
+                          "    print(b.n)\n"
+                          "main()\n",
+    }, 'colln2_main.py')
+
+    # The doc's §3 shape: the two classes share NO field name, so before the
+    # fix the loser's access degraded to a runtime AttributeError rather
+    # than a wrong value. Method dispatch has to reach the right class too:
+    # both `show` methods are same-named, and the loser's call site used to
+    # resolve to the winner's body.
+    _check_agrees_with_cpython("same_bare_name_struct_methods_and_fields", {
+        'colln3_mod_a.py': "class Dialog:\n"
+                           "    def __init__(self, widgetName: str):\n"
+                           "        self.widgetName = widgetName\n"
+                           "    def show(self):\n"
+                           "        return self.widgetName\n",
+        'colln3_mod_b.py': "class Dialog:\n"
+                           "    def __init__(self, result: str):\n"
+                           "        self.result = result\n"
+                           "    def show(self):\n"
+                           "        return self.result\n",
+        'colln3_main.py': "import colln3_mod_a, colln3_mod_b\n"
+                          "def main():\n"
+                          "    x = colln3_mod_a.Dialog('a')\n"
+                          "    y = colln3_mod_b.Dialog('b')\n"
+                          "    print(x.widgetName)\n"
+                          "    print(y.result)\n"
+                          "    print(x.show())\n"
+                          "    print(y.show())\n"
+                          "main()\n",
+    }, 'colln3_main.py')
+
+    # A `from mod import Dialog as X` binding must not change which class a
+    # module-qualified construction picks, and the two classes must stay
+    # independent when BOTH are constructed in one program (the shape where
+    # a single shared field table is most visible).
+    _check_agrees_with_cpython("same_bare_name_struct_from_import_alias", {
+        'colln4_mod_a.py': "class Dialog:\n"
+                           "    def __init__(self, n):\n"
+                           "        self.n = n\n",
+        'colln4_mod_b.py': "class Dialog:\n"
+                           "    def __init__(self, s: str):\n"
+                           "        self.s = s\n"
+                           "        self.n = 42\n",
+        'colln4_main.py': "from colln4_mod_a import Dialog\n"
+                          "import colln4_mod_b\n"
+                          "def main():\n"
+                          "    a = Dialog(3)\n"
+                          "    b = colln4_mod_b.Dialog('hi')\n"
+                          "    print(a.n)\n"
+                          "    print(b.s)\n"
+                          "    print(b.n)\n"
+                          "main()\n",
+    }, 'colln4_main.py')
 
     # bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md: f"{container}"
     # and str(container) read the container's raw header bytes as a C

@@ -96,6 +96,69 @@ typedef struct { void *fn; void *self; } MojoBoundMethod;
  * self.m; f()`). */
 MojoBoundMethod *mojo_bound_method_new(void *fn, void *self);
 int mojo_is_bound_method(void *p);
+
+/* ── Variadic callables ───────────────────────────────────────────────────
+ * A `lambda *a, **k: ...` (or any function whose real C signature is
+ * `(MojoList *, MojoDict *)` rather than N scalars) cannot be called
+ * through mojo_fnptr_call_N: that helper is ARITY-based — it casts the
+ * callee to `int64_t(*)(int64_t, ...)` and passes the arguments written
+ * at the call site positionally. A variadic callee expects them PACKED
+ * into a MojoList/MojoDict pair, so the first argument arrives as the
+ * integer 4 where a `MojoList *` is wanted and the callee dereferences
+ * address 4 — a hard SIGSEGV, not a wrong value.
+ *
+ * So a variadic callable's VALUE is not a bare function pointer but one
+ * of these, which records the signature the call site cannot see. The
+ * packing itself stays here in the runtime, which is the only place that
+ * knows both the call's arity and the callee's real parameter list — the
+ * same reason mojo_fnptr_call_N dispatches on MojoBoundMethod above
+ * rather than at each call site.
+ *
+ *   kind   0 = `*args` only            -> fn(void *self, MojoList *a)
+ *          1 = `*args, **kwargs`       -> fn(void *self, MojoList *a, MojoDict *k)
+ *          2 = `**kwargs` only         -> fn(void *self, MojoDict *k)
+ *   n_fixed  number of ORDINARY leading parameters declared before the
+ *           `*args`. Those stay positional (the callee really does take
+ *           them as scalars) and are passed straight through; the rest of
+ *           the call's arguments are what gets packed into the list.
+ *   self    the closure env, or NULL for a non-capturing variadic lambda.
+ *   has_env whether the lifted callee actually DECLARES that leading
+ *           `self` parameter. It does only when it captures something:
+ *           passing `self` to a callee that has no such parameter would
+ *           shift every real parameter one slot left, which is a silent
+ *           wrong value (a `MojoList *a` parameter receiving the NULL env).
+ */
+typedef struct { void *fn; void *self; int64_t n_fixed; int64_t kind; int64_t has_env; } MojoVarargFn;
+
+MojoVarargFn *mojo_vararg_fn_new(void *fn, void *self, int64_t n_fixed, int64_t kind,
+                                 int64_t has_env);
+int mojo_is_vararg_fn(void *p);
+/* Packing entry points. `kw` is the call site's keyword arguments already
+ * packed into a MojoDict (NULL when the call site passed none); it is
+ * IGNORED unless the callee declares `**kwargs`, so an ordinary call site
+ * can use the same helper unconditionally. Real (not inline) because they
+ * build the MojoList/MojoDict and dispatch on a runtime-recorded kind —
+ * fire_runtime.c is the one TU that has all of those declared. */
+int64_t mojo_vararg_call_0(void *fp, void *kw);
+int64_t mojo_vararg_call_1(void *fp, void *kw, int64_t a);
+int64_t mojo_vararg_call_2(void *fp, void *kw, int64_t a, int64_t b);
+int64_t mojo_vararg_call_3(void *fp, void *kw, int64_t a, int64_t b, int64_t c);
+int64_t mojo_vararg_call_4(void *fp, void *kw, int64_t a, int64_t b, int64_t c, int64_t d);
+int64_t mojo_vararg_call_5(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4);
+int64_t mojo_vararg_call_6(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5);
+int64_t mojo_vararg_call_7(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6);
+int64_t mojo_vararg_call_8(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6, int64_t _a7);
+
+/* The two frees for the two things a bound method can be — `self` belongs to
+ * only one of them, so they cannot be one function. `mojo_bound_method_free`
+ * is a METHOD taken as a value: the receiver is not ours, only the wrapper,
+ * and its `_reg_bound_method` entry MUST be discarded or a later allocation
+ * at the same address is dispatched as a bound method (a dangling registry
+ * entry, the same shape as the container registries' `_destroy` helpers).
+ * `mojo_closure_free` is a CAPTURING LAMBDA, whose `self` is the environment
+ * the constructor allocated with it. */
+void mojo_bound_method_free(MojoBoundMethod *bm);
+void mojo_closure_free(void *bm);
 static inline int64_t mojo_bound_method_call_0(MojoBoundMethod *bm) {
     return ((int64_t (*)(void *))bm->fn)(bm->self);
 }
@@ -112,26 +175,181 @@ static inline int64_t mojo_bound_method_call_4(MojoBoundMethod *bm, int64_t a, i
     return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, a, b, c, d);
 }
 
+static inline int64_t mojo_bound_method_call_5(MojoBoundMethod *bm, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4) {
+    return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, _a0, _a1, _a2, _a3, _a4);
+}
+
+static inline int64_t mojo_bound_method_call_6(MojoBoundMethod *bm, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5) {
+    return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, _a0, _a1, _a2, _a3, _a4, _a5);
+}
+
+static inline int64_t mojo_bound_method_call_7(MojoBoundMethod *bm, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6) {
+    return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+}
+
+static inline int64_t mojo_bound_method_call_8(MojoBoundMethod *bm, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6, int64_t _a7) {
+    return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))bm->fn)(bm->self, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+}
+
+
+
+
+
+
+
+
+
 
 static inline int64_t mojo_fnptr_call_0(void *fp) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_0(fp, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_0((MojoBoundMethod *)fp);
     return ((int64_t (*)(void))fp)();
 }
 static inline int64_t mojo_fnptr_call_1(void *fp, int64_t a) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_1(fp, 0, a);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_1((MojoBoundMethod *)fp, a);
     return ((int64_t (*)(int64_t))fp)(a);
 }
 static inline int64_t mojo_fnptr_call_2(void *fp, int64_t a, int64_t b) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_2(fp, 0, a, b);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_2((MojoBoundMethod *)fp, a, b);
     return ((int64_t (*)(int64_t, int64_t))fp)(a, b);
 }
 static inline int64_t mojo_fnptr_call_3(void *fp, int64_t a, int64_t b, int64_t c) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_3(fp, 0, a, b, c);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_3((MojoBoundMethod *)fp, a, b, c);
     return ((int64_t (*)(int64_t, int64_t, int64_t))fp)(a, b, c);
 }
 static inline int64_t mojo_fnptr_call_4(void *fp, int64_t a, int64_t b, int64_t c, int64_t d) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_4(fp, 0, a, b, c, d);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_4((MojoBoundMethod *)fp, a, b, c, d);
     return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
+}
+
+static inline int64_t mojo_fnptr_call_5(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_5(fp, 0, _a0, _a1, _a2, _a3, _a4);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_5((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4);
+}
+
+static inline int64_t mojo_fnptr_call_6(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_6(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_6((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4, _a5);
+}
+
+static inline int64_t mojo_fnptr_call_7(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_7(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_7((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4, _a5, _a6);
+}
+
+static inline int64_t mojo_fnptr_call_8(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6, int64_t _a7) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_8(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_8((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+}
+
+
+
+
+
+
+
+
+
+/* The same dispatch, for a call site that PASSES KEYWORD ARGUMENTS. A
+ * callee that declares no `**kwargs` must not see them (real Python binds
+ * them to named parameters, which needs a signature this value does not
+ * carry — see the mojo_vararg_call_N comment), so the packed dict is
+ * handed to the vararg path and dropped by the bound-method / bare-fnptr
+ * paths, exactly as the pre-keyword helpers dropped it. */
+static inline int64_t mojo_fnptr_call_kw_0(void *fp, void *kw) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_0(fp, kw);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_0((MojoBoundMethod *)fp);
+    return ((int64_t (*)(void))fp)();
+}
+static inline int64_t mojo_fnptr_call_kw_1(void *fp, void *kw, int64_t a) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_1(fp, kw, a);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_1((MojoBoundMethod *)fp, a);
+    return ((int64_t (*)(int64_t))fp)(a);
+}
+static inline int64_t mojo_fnptr_call_kw_2(void *fp, void *kw, int64_t a, int64_t b) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_2(fp, kw, a, b);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_2((MojoBoundMethod *)fp, a, b);
+    return ((int64_t (*)(int64_t, int64_t))fp)(a, b);
+}
+static inline int64_t mojo_fnptr_call_kw_3(void *fp, void *kw, int64_t a, int64_t b, int64_t c) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_3(fp, kw, a, b, c);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_3((MojoBoundMethod *)fp, a, b, c);
+    return ((int64_t (*)(int64_t, int64_t, int64_t))fp)(a, b, c);
+}
+static inline int64_t mojo_fnptr_call_kw_4(void *fp, void *kw, int64_t a, int64_t b, int64_t c, int64_t d) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_4(fp, kw, a, b, c, d);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_4((MojoBoundMethod *)fp, a, b, c, d);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
+}
+
+static inline int64_t mojo_fnptr_call_kw_5(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_5(fp, kw, _a0, _a1, _a2, _a3, _a4);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_5((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4);
+}
+
+static inline int64_t mojo_fnptr_call_kw_6(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_6(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_6((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4, _a5);
+}
+
+static inline int64_t mojo_fnptr_call_kw_7(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_7(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_7((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4, _a5, _a6);
+}
+
+static inline int64_t mojo_fnptr_call_kw_8(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6, int64_t _a7) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_8(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_8((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+    return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+}
+
+
+
+
+
+
+
+
+
+/* The `double`-returning twin of each helper above. A callee whose real
+ * return type is `double` cannot be called through an `int64_t (*)(...)`
+ * cast and have the value survive: it comes back in an SSE register, not
+ * the general-purpose one the `int64_t` return reads, so the bits are
+ * whatever the ABI happened to leave there (measured: `d = lambda: 1.5;
+ * print(d())` printed 2.1393696074e-314). These are the same helpers with
+ * the real return type, so the call is well-typed and the value arrives.
+ * The codegen picks them only when it knows the callee returns a double —
+ * see `_lower_fnptr_call_value`. */
+static inline double mojo_fnptr_call_d0(void *fp) {
+    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_0((MojoBoundMethod *)fp);
+    return ((double (*)(void))fp)();
+}
+static inline double mojo_fnptr_call_d1(void *fp, int64_t a) {
+    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_1((MojoBoundMethod *)fp, a);
+    return ((double (*)(int64_t))fp)(a);
+}
+static inline double mojo_fnptr_call_d2(void *fp, int64_t a, int64_t b) {
+    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_2((MojoBoundMethod *)fp, a, b);
+    return ((double (*)(int64_t, int64_t))fp)(a, b);
+}
+static inline double mojo_fnptr_call_d3(void *fp, int64_t a, int64_t b, int64_t c) {
+    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_3((MojoBoundMethod *)fp, a, b, c);
+    return ((double (*)(int64_t, int64_t, int64_t))fp)(a, b, c);
+}
+static inline double mojo_fnptr_call_d4(void *fp, int64_t a, int64_t b, int64_t c, int64_t d) {
+    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_4((MojoBoundMethod *)fp, a, b, c, d);
+    return ((double (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
 }
 
 /* Dynamic dispatch through a value that may be EITHER a MojoBoundMethod*
@@ -140,25 +358,125 @@ static inline int64_t mojo_fnptr_call_4(void *fp, int64_t a, int64_t b, int64_t 
  * `self.method` value). A registered bound method re-supplies its
  * receiver via mojo_bound_method_call_N; anything else is a bare fnptr. */
 static inline int64_t mojo_maybe_bound_call_0(void *f) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_0(f, 0);
     if (mojo_is_bound_method(f)) return mojo_bound_method_call_0((MojoBoundMethod *)f);
     return mojo_fnptr_call_0(f);
 }
 static inline int64_t mojo_maybe_bound_call_1(void *f, int64_t a) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_1(f, 0, a);
     if (mojo_is_bound_method(f)) return mojo_bound_method_call_1((MojoBoundMethod *)f, a);
     return mojo_fnptr_call_1(f, a);
 }
 static inline int64_t mojo_maybe_bound_call_2(void *f, int64_t a, int64_t b) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_2(f, 0, a, b);
     if (mojo_is_bound_method(f)) return mojo_bound_method_call_2((MojoBoundMethod *)f, a, b);
     return mojo_fnptr_call_2(f, a, b);
 }
 static inline int64_t mojo_maybe_bound_call_3(void *f, int64_t a, int64_t b, int64_t c) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_3(f, 0, a, b, c);
     if (mojo_is_bound_method(f)) return mojo_bound_method_call_3((MojoBoundMethod *)f, a, b, c);
     return mojo_fnptr_call_3(f, a, b, c);
 }
 static inline int64_t mojo_maybe_bound_call_4(void *f, int64_t a, int64_t b, int64_t c, int64_t d) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_4(f, 0, a, b, c, d);
     if (mojo_is_bound_method(f)) return mojo_bound_method_call_4((MojoBoundMethod *)f, a, b, c, d);
     return mojo_fnptr_call_4(f, a, b, c, d);
 }
+
+static inline int64_t mojo_maybe_bound_call_5(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_5(fp, 0, _a0, _a1, _a2, _a3, _a4);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_5((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4);
+    return mojo_fnptr_call_5(fp, _a0, _a1, _a2, _a3, _a4);
+}
+
+static inline int64_t mojo_maybe_bound_call_6(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_6(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_6((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5);
+    return mojo_fnptr_call_6(fp, _a0, _a1, _a2, _a3, _a4, _a5);
+}
+
+static inline int64_t mojo_maybe_bound_call_7(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_7(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_7((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    return mojo_fnptr_call_7(fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+}
+
+static inline int64_t mojo_maybe_bound_call_8(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6, int64_t _a7) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_8(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_8((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+    return mojo_fnptr_call_8(fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+}
+
+
+
+
+
+
+
+
+
+/* Keyword-argument twin of the mojo_maybe_bound_call_N family, for a local
+ * branch-joined from a variadic lambda and something else that is called
+ * WITH keywords. Same rule as mojo_fnptr_call_kw_N: the packed dict reaches
+ * the vararg path (whose callee declares `**kwargs`) and is dropped by the
+ * bound-method / bare-fnptr paths. */
+static inline int64_t mojo_maybe_bound_call_kw_0(void *f, void *kw) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_0(f, kw);
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_0((MojoBoundMethod *)f);
+    return mojo_fnptr_call_kw_0(f, kw);
+}
+static inline int64_t mojo_maybe_bound_call_kw_1(void *f, void *kw, int64_t a) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_1(f, kw, a);
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_1((MojoBoundMethod *)f, a);
+    return mojo_fnptr_call_kw_1(f, kw, a);
+}
+static inline int64_t mojo_maybe_bound_call_kw_2(void *f, void *kw, int64_t a, int64_t b) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_2(f, kw, a, b);
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_2((MojoBoundMethod *)f, a, b);
+    return mojo_fnptr_call_kw_2(f, kw, a, b);
+}
+static inline int64_t mojo_maybe_bound_call_kw_3(void *f, void *kw, int64_t a, int64_t b, int64_t c) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_3(f, kw, a, b, c);
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_3((MojoBoundMethod *)f, a, b, c);
+    return mojo_fnptr_call_kw_3(f, kw, a, b, c);
+}
+static inline int64_t mojo_maybe_bound_call_kw_4(void *f, void *kw, int64_t a, int64_t b, int64_t c, int64_t d) {
+    if (mojo_is_vararg_fn(f)) return mojo_vararg_call_4(f, kw, a, b, c, d);
+    if (mojo_is_bound_method(f)) return mojo_bound_method_call_4((MojoBoundMethod *)f, a, b, c, d);
+    return mojo_fnptr_call_kw_4(f, kw, a, b, c, d);
+}
+
+static inline int64_t mojo_maybe_bound_call_kw_5(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_5(fp, kw, _a0, _a1, _a2, _a3, _a4);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_5((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4);
+    return mojo_fnptr_call_kw_5(fp, kw, _a0, _a1, _a2, _a3, _a4);
+}
+
+static inline int64_t mojo_maybe_bound_call_kw_6(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_6(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_6((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5);
+    return mojo_fnptr_call_kw_6(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5);
+}
+
+static inline int64_t mojo_maybe_bound_call_kw_7(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_7(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_7((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    return mojo_fnptr_call_kw_7(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+}
+
+static inline int64_t mojo_maybe_bound_call_kw_8(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6, int64_t _a7) {
+    if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_8(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+    if (mojo_is_bound_method(fp)) return mojo_bound_method_call_8((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+    return mojo_fnptr_call_kw_8(fp, kw, _a0, _a1, _a2, _a3, _a4, _a5, _a6, _a7);
+}
+
+
+
+
+
+
+
+
 
 
 /* ── Exception stack (for try/except/raise) ──────────────────────────────
@@ -211,6 +529,14 @@ void mojo_cleanup_push_dict_stack(void *p);
 void mojo_cleanup_push_list_stack(void *p);
 void mojo_cleanup_push_set_stack(void *p);
 void mojo_cleanup_push_ptr(void *p);   /* a struct instance: unwinding free()s the block */
+/* A list that SOLELY owns its string elements (every one freshly allocated by
+ * the runtime function that built it) — see mojo_list_free_owned_strs. A
+ * list of strings is usually BORROWED, so this is chosen by the owner, never
+ * inferred from the list's element type. */
+void mojo_cleanup_push_list_strs(void *p);
+/* A closure's bound method and its environment are one allocation unit; this
+ * is the unwind thunk that frees both (see mojo_closure_free). */
+void mojo_cleanup_push_closure(void *p);
 /* Pop the `n` most-recently-pushed thunks WITHOUT invoking them -- call
  * immediately at a point that is itself about to (or just did) free those
  * same `n` locals inline. */
@@ -302,6 +628,20 @@ void        mojo_list_set_kinds(MojoList *l, const char *kinds);
 const char *mojo_list_get_kinds(MojoList *l);
 char        mojo_list_slot_kind(MojoList *l, int64_t i);
 void        mojo_list_inherit_kinds(MojoList *dst, MojoList *src);
+/* The per-slot kind alphabet, as named constants. A MojoList slot is a raw
+ * int64_t, so anything that ORDERS a list (mojo_list_sort) or READS one has
+ * to be told what a slot holds — comparing the slots as integers orders a
+ * list of strings by ADDRESS, which is non-deterministic across runs and
+ * different from Python's alphabetical order. The call site passes what its
+ * own element-type inference knows; the constants are here so the generated
+ * C reads `mojo_list_sort (l, MOJO_KIND_STR, 0, 0)` instead of a bare
+ * `'p'`, and so a new kind has one definition. */
+#define MOJO_KIND_INT     'i'   /* int64_t (and bool, and None) */
+#define MOJO_KIND_DOUBLE  'd'
+#define MOJO_KIND_BYTES   's'
+#define MOJO_KIND_STR     'p'
+#define MOJO_KIND_LIST    'l'   /* nested container: not totally ordered */
+#define MOJO_KIND_NONE    'n'
 /* A read whose slot index is not known at compile time (`for x in
  * struct.unpack('<if', buf)`, `t[i]`) has to land in ONE C type, and for a
  * heterogeneous list no single accessor is right for every slot. This
@@ -318,6 +658,12 @@ double      mojo_box_double(int64_t v);
 int64_t     mojo_box_int(int64_t v);
 char       *mojo_repr_boxed(int64_t v);
 void      mojo_list_free(MojoList *l);
+/* A list that SOLELY owns its string elements: frees every element as a
+ * `char *` and then the list. NOT the default free for a list of strings —
+ * `mojo_list_append_str` borrows, so the elements of a list built by
+ * `extend`, or read out of a dict, are somebody else's. Only the owner may
+ * choose this; see mojo/backend_gimple/emit_infra.py's `_OWNS_STR_ELEMS`. */
+void      mojo_list_free_owned_strs(MojoList *l);
 /* mojo_list_init/mojo_list_destroy: the in-place halves of mojo_list_new/
  * mojo_list_free, for a stack-declared MojoList (doc/OWNERSHIP_MODEL.md
  * Phase 6) -- init/destroy never touch the MojoList* itself with
@@ -332,11 +678,24 @@ void    mojo_list_append_str(MojoList *l, const char *v);
 int64_t mojo_list_get_int(MojoList *l, int64_t i);
 double  mojo_list_get_double(MojoList *l, int64_t i);
 
+/* A double travels as its IEEE-754 BITS inside an int64_t — a list slot, a
+ * box, or the int64_t the homogenized `mojo_fnptr_call_N` helpers return for
+ * a callable value. The one definition of the conversion in each direction.
+ * `mojo_double_from_bits` must not be written as a C cast: `(double)bits` is
+ * the bits' NUMERIC value, not the double they encode. */
+double  mojo_double_from_bits(int64_t bits);
+int64_t mojo_double_to_bits(double v);
+
 int64_t mojo_list_len(MojoList *l);
 
 int mojo_list_contains_int(MojoList *l, int64_t v);
 int mojo_list_contains_double(MojoList *l, double v);
 int mojo_list_contains_str(MojoList *l, char *v);
+/* `l.count(x)` — occurrence COUNT, not membership; see each definition.
+ * The bytes needle is declared down at the MojoBytes block, which is where
+ * that type is first defined. */
+int64_t   mojo_list_count_int(MojoList *l, int64_t v);
+int64_t   mojo_list_count_str(MojoList *l, char *v);
 
 /* Item mutation and extra accessors */
 void     mojo_list_set_int(MojoList *l, int64_t i, int64_t v);
@@ -354,7 +713,6 @@ void     mojo_list_assign_step(MojoList *l, int has_start, int64_t start,
                                MojoList *repl);
 MojoList*mojo_list_concat(MojoList *a, MojoList *b);
 MojoList*mojo_list_repeat(MojoList *l, int64_t n);
-
 void mojo_list_print(MojoList *l);
 
 /* ── String ───────────────────────────────────────────────────────────────*/
@@ -466,6 +824,7 @@ MojoBytes *mojo_bytes_new_lit(const char *data, int64_t len); /* copies `len` by
 /* `x in <list of bytes>`: elements are boxed MojoBytes * pointers, so plain
  * mojo_list_contains_int would compare POINTER identity instead of `==`. */
 int          mojo_list_contains_bytes(MojoList *l, MojoBytes *v);
+int64_t      mojo_list_count_bytes(MojoList *l, MojoBytes *v);
 MojoBytes *mojo_bytes_empty(void);
 MojoBytes *mojo_bytes_zeros(int64_t n);
 MojoBytes *mojo_bytes_from_list(MojoList *l);      /* list of ints 0-255 */
@@ -473,6 +832,10 @@ MojoBytes *mojo_bytes_from_str(char *s, char *encoding); /* 'utf-8'/'ascii' */
 MojoBytes *mojo_bytes_from_cstr(const char *s);   /* NUL-terminated copy */
 int64_t    mojo_bytes_len(MojoBytes *b);
 int64_t    mojo_bytes_get(MojoBytes *b, int64_t i); /* -> int 0-255, neg idx ok */
+/* `b[i]` at an explicit subscript: same read, but an out-of-range index
+ * RAISES IndexError rather than answering 0. The lenient form above is
+ * kept for the iteration loop, which bounds its own index. */
+int64_t    mojo_bytes_get_checked(MojoBytes *b, int64_t i);
 int        mojo_bytes_eq(MojoBytes *a, MojoBytes *b);
 int        mojo_bytes_truthy(MojoBytes *b);
 char      *mojo_bytes_repr(MojoBytes *b);
@@ -489,6 +852,14 @@ int64_t    mojo_bytes_rfind(MojoBytes *hay, MojoBytes *needle);
 int64_t    mojo_bytes_find_from(MojoBytes *hay, MojoBytes *needle, int64_t start, int64_t stop);
 int64_t    mojo_bytes_rfind_from(MojoBytes *hay, MojoBytes *needle, int64_t start, int64_t stop);
 /* index/count of a single byte VALUE (bytes/bytearray `.index(0xNN)`). */
+/* find/rfind over a byte VALUE answer -1 when absent; index/rindex are the
+ * same search that RAISES ValueError instead. They were one function, which
+ * made `b'abc'.index(b'z')` answer -1 with exit 0. */
+/* `index`/`rindex`'s failure mode over a BYTES needle: -1 becomes a
+ * ValueError, since the search itself is shared with find/rfind. */
+int64_t    _mojo_bytes_index_or_raise(int64_t at);
+int64_t    mojo_bytes_find_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop);
+int64_t    mojo_bytes_rfind_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop);
 int64_t    mojo_bytes_index_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop);
 int64_t    mojo_bytes_rindex_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop);
 int64_t    mojo_bytes_count_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop);
@@ -524,6 +895,15 @@ MojoBytes *mojo_bytes_fromhex(char *s);
 char      *mojo_bytes_cstr_key(MojoBytes *b);
 MojoBytes *mojo_bytes_maketrans(MojoBytes *from, MojoBytes *to);
 MojoBytes *mojo_bytes_translate(MojoBytes *b, MojoBytes *table);
+/* `b.translate(table, delete)` — `delete` was silently dropped without it. */
+MojoBytes *mojo_bytes_translate_del(MojoBytes *b, MojoBytes *table, MojoBytes *delbytes);
+/* `b.expandtabs([tabsize])` — the bytes twin of mojo_str_expandtabs; this
+ * had no bytes implementation and answered a raw int 0. */
+MojoBytes *mojo_bytes_expandtabs(MojoBytes *b, int64_t tabsize);
+/* startswith/endswith WITH the optional [start[, end]] window, which was
+ * silently ignored when only the prefix/suffix was passed. */
+int        mojo_bytes_startswith_from(MojoBytes *b, MojoBytes *p, int64_t start, int64_t stop);
+int        mojo_bytes_endswith_from(MojoBytes *b, MojoBytes *p, int64_t start, int64_t stop);
 /* The bytes.isX() predicates, selected by `kind` (the MOJO_IS_* codes in
  * fire_runtime.c). `kind` is deliberately restricted to the eight
  * predicates CPython actually defines on `bytes` — isalnum isalpha
@@ -596,6 +976,18 @@ int             mojo_memoryview_eq(MojoMemoryView *m, MojoBytes *b);
 char           *mojo_memoryview_hex(MojoMemoryView *m);
 MojoMemoryView *mojo_memoryview_cast(MojoMemoryView *m, char *fmt);
 char           *mojo_memoryview_repr(MojoMemoryView *m);
+/* The descriptive shape attributes. Exact for this representation, which is
+ * always 1-D and contiguous; they previously had no lowering at all and
+ * printed their own heap address as a decimal. The tuple-valued ones return
+ * the SPELLING string, since there is no 1-tuple shape on this side. */
+char           *mojo_memoryview_shape_str(MojoMemoryView *m);
+char           *mojo_memoryview_strides_str(MojoMemoryView *m);
+char           *mojo_memoryview_suboffsets_str(void);
+int64_t         mojo_memoryview_ndim(MojoMemoryView *m);
+int             mojo_memoryview_c_contiguous(MojoMemoryView *m);
+int             mojo_memoryview_f_contiguous(MojoMemoryView *m);
+int             mojo_memoryview_contiguous(MojoMemoryView *m);
+MojoList       *mojo_memoryview_tolist(MojoMemoryView *m);
 int64_t         mojo_memoryview_itemsize(MojoMemoryView *m);
 int64_t         mojo_memoryview_nbytes(MojoMemoryView *m);
 char           *mojo_memoryview_format(MojoMemoryView *m, char *fmt);
@@ -761,10 +1153,28 @@ MojoDict   *mojo_dict_from_pairs(MojoList *pairs);  /* dict(list_of_pairs) */
 MojoList   *mojo_list_copy(MojoList *l);
 int         mojo_list_all(MojoList *l);
 int         mojo_list_any(MojoList *l);
+/* The same four over a `bytes` object, whose iteration yields INTEGERS.
+ * Without these every such call answered the codegen's constant stub. */
+int         mojo_bytes_all(MojoBytes *b);
+int         mojo_bytes_any(MojoBytes *b);
+int64_t     mojo_bytes_sum(MojoBytes *b);
+MojoList   *mojo_bytes_reversed_list(MojoBytes *b);
+MojoList   *mojo_bytes_sorted_list(MojoBytes *b);
+int         mojo_bytes_max(MojoBytes *b);
+int         mojo_bytes_min(MojoBytes *b);
 int64_t     mojo_list_pop(MojoList *l);
 int64_t     mojo_list_pop_at(MojoList *l, int64_t idx);
+/* `del lst[i]` — same removal as mojo_list_pop_at, but a different Python
+ * operation with a different refusal on a tuple (see its definition). */
+int64_t     mojo_list_delitem(MojoList *l, int64_t idx);
 void        mojo_list_extend(MojoList *dst, MojoList *src);
-void        mojo_list_sort(MojoList *l);
+/* `l.sort()` in place. `kind` is a MOJO_KIND_* byte for the elements (or for
+ * the KEYS, when `keys` is given), or 0 to let the runtime decide from the
+ * per-slot kinds and then its own discriminator. `keys` is the parallel key
+ * list codegen built for a `key=` call, or NULL. A list with no order (mixed
+ * or nested-container elements) is a TypeError here exactly as it is in
+ * Python — never a silent no-op, which is what this used to be. */
+void        mojo_list_sort(MojoList *l, int kind, int reverse, MojoList *keys);
 void        mojo_list_reverse(MojoList *l);
 void        mojo_list_clear(MojoList *l);
 void        mojo_list_remove_str(MojoList *l, const char *v);
@@ -818,6 +1228,7 @@ void        mojo_raise_type_error(char *detail);
  * operation rejects its ARGUMENT rather than failing to find something
  * (mojo_bytes_partition's empty separator). */
 void        mojo_raise_value_error(char *detail);
+void        mojo_raise_index_error(char *detail);
 /* Runtime %-style string formatting with a DYNAMIC (non-literal) template:
  *
  *   char *out = mojo_str_format_dict("usage: %(prog)s v%(ver)d", d);
@@ -1086,6 +1497,16 @@ double  mojo_min_double(void *args);
 double mojo_sum_double(void *args);
 /* Python bool repr: "True"/"False", not 1/0. */
 char *mojo_repr_bool(int b);
+
+/* A callable-valued parameter default naming an IMPORTED module's function
+ * (`def probe(x, *, g=os.walk)`) — see the block comment on
+ * mojo_unavailable_callable in fire_runtime.c for why padding it with 0 was a
+ * SIGSEGV and why ONE no-parameter function is the right stub for every
+ * arity. `mojo_set_unavailable_callable_name` arms the name the diagnostic
+ * prints; the codegen emits it immediately before the call it belongs to. */
+void    mojo_set_unavailable_callable_name(const char *name);
+int64_t mojo_unavailable_callable(void);
+void   *mojo_unavailable_callable_ptr(void);
 /* An int64_t used as a C string: itself when it is a boxed char*, else its
    decimal string (see mojo_cstr_or_int_str's comment in the .c). */
 char *mojo_cstr_or_int_str(int64_t v);
@@ -1173,6 +1594,12 @@ char *input(char *prompt);       /* weak in the runtime; stdlib's overrides it *
 char *string_strip(char *str);         /* Strip whitespace */
 char *string_lower(char *str);         /* Convert to lowercase */
 char *string_upper(char *str);         /* Convert to uppercase */
+/* str.casefold / swapcase / title / capitalize — had no lowering at all
+ * and answered the unknown-method stub's raw int 0. */
+char *mojo_str_casefold(char *str);
+char *mojo_str_swapcase(char *str);
+char *mojo_str_title(char *str);
+char *mojo_str_capitalize(char *str);
 char *mojo_str_lstrip(char *str);
 char *mojo_str_rstrip(char *str);
 char *mojo_str_rstrip_chars(char *str, char *chars);

@@ -58,7 +58,7 @@ from mojo.middle.funcs_shared import (
     _SELFHOST_EXTRA_FIELD_CACHE, _as_dict, _as_funcdef_node, _as_str, _as_structdef_node, _find_generic_source,
     _find_imported_struct, _find_symbol_home_module, _from_import_name_is_submodule, _resolved_export_entry, _imported_field_ctype, _local_sibling_module_exports, _note_struct_import_alias, _note_vararg_trailing_param_types, _pair_key,
     _param_ctype, _parsed_import, _resolve_import_module_qualifier, _resolve_reexported_closure_func, _resolve_test_relative_module, _ris_base,
-    _ris_collect, _scan_from_imports_flat, _selfhost_extracted_fn_index, _selfhost_gen_self_param_ctype, _sgfs_resolve_ann, _signature_ctypes,
+    _ris_collect, _scan_from_imports_flat, _selfhost_begin_compile, _selfhost_extracted_fn_index, _selfhost_files_key, _selfhost_gen_self_param_ctype, _selfhost_parsed_source, _sgfs_resolve_ann, _signature_ctypes,
     _struct_method_overload_ids, _struct_method_qualifier
 )
 
@@ -1064,24 +1064,20 @@ def _selfhost_scan_gimplegen_extra_fields(_src_dir=None) -> dict[str, str]:
         if _cand_files:
             _files = _cand_files
             break
-    _key = tuple((f, gimple_ctypes.os.path.getmtime(f)) for f in _files)
-    _hit = _SELFHOST_EXTRA_FIELD_CACHE.get('k')
-    if _hit is not None and _hit[0] == _key:
-        return _hit[1]
+    _key = 'k#' + _selfhost_files_key(_files)
+    _hit = _SELFHOST_EXTRA_FIELD_CACHE.get(_key)
+    if _hit is not None:
+        return _hit
     _fields: dict[str, str] = {}
     for _f in _files:
-        try:
-            _mod: list = ast_rewriter.rewrite(
-                Parser(py_tokenize(open(_f).read())).with_filename(_f).parse_module())
-        except Exception:
-            continue
+        _mod: list = _selfhost_parsed_source(_f)
         for _fn in _mod:
             if not (isinstance(_fn, FunctionDef) and _fn.params
                     and _fn.params[0][0].lstrip('*') in ('gen', 'self')):
                 continue
             _p0 = _fn.params[0][0].lstrip('*')
             _selfhost_walk_stmts_for_assign_targets(_fn.body, _p0, _fields)
-    _SELFHOST_EXTRA_FIELD_CACHE['k'] = (_key, _fields)
+    _SELFHOST_EXTRA_FIELD_CACHE[_key] = _fields
     return _fields
 
 
@@ -2307,6 +2303,24 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # — a lifted closure resets too, and clearing there would wipe the
     # enclosing function's entries mid-body.
     gen._inlined_lambdas = {}
+    # This function's higher-order parameters whose default names a
+    # compiled generator of this compile, so a call through one can be
+    # typed and driven like a direct generator call. An ordinary function
+    # answers from its own `param_defaults` (the parser records defaults
+    # for keyword-only parameters too, in the same dict); an A3
+    # stack-switch BODY answers from `_coro_body_callable_param_apis`,
+    # because `_lower_one` moved every source parameter into a
+    # `var p = __mojo_gen_arg(...)` local and the body therefore carries
+    # none of the source's `param_defaults` — see
+    # `mojo.middle.coro.register`'s second pass for where that map is
+    # filled, and `calls_shared._callable_param_generator_apis` for what
+    # the resulting typing is and is allowed to assume.
+    if _is_coro_body:
+        gen._callable_param_gen_api = dict(
+            (getattr(gen, '_coro_body_callable_param_apis', None) or {})
+            .get(node.name, {}))
+    else:
+        gen._callable_param_gen_api = ggc._callable_param_generator_apis(gen, node)
     # BUG-2026-016's allow-list: locals whose DECLARATION carries an
     # explicit NUMERIC/boolean annotation (`hin_id: UInt64 = 0`). Such a
     # variable can never legitimately hold a pointer, so when one is

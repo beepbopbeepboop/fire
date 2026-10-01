@@ -173,10 +173,16 @@ MULTI_INDEX_DATA = "data-multi-index"
 # The MLIR spelling forms, which take a bracketed TEMPLATE rather than an
 # index: the elements are backtick-quoted literal fragments interleaved with
 # compile-time sub-expressions, and the whole thing denotes a dialect
-# attribute. `__mlir_op` is absent on purpose — it is a real side-effecting
-# op, lowered as a call (see fire_compiler's statement parser), and its
+# attribute. `__mlir_op` is absent on purpose and is NOT a gap left by that:
+# it is a real side-effecting op, lowered as a call (see fire_compiler's
+# statement parser), so calling it a template would misdescribe it, and its
 # bracket list is MLIR op attributes with `attrs` set, which is a different
-# (already separately refused) node.
+# node again. It is refused by the OTHER rule — `mlir_dialect_refusal`, asked
+# for any `__mlir_*` name no template rule covers, which is why the two
+# refusals are different sentences rather than one: the template reader can
+# quote the fragments the reader has to look for, and the dialect reader
+# cannot. Both are arch-free and both are asked through the one reader each
+# backend uses.
 MLIR_TEMPLATE_NAMES = frozenset((
     "__mlir_attr",
     "__mlir_deferred_attr",
@@ -1080,8 +1086,73 @@ def refuse_module_level_mlir_templates(stmts) -> None:
     return None
 
 
+def subscript_index_is_a_comptime_parameter_list(e, structs_by_name=None,
+                                                 callee_defs=None) -> bool:
+    """True when `e`'s bracketed comma list is a COMPILE-TIME PARAMETER list.
+
+    `x[a, b]` and `Foo[A, B]` are ONE node shape and not the same construct,
+    and the difference is not cosmetic: the first stores two words in a
+    container at run time and the second stores nothing anywhere, because the
+    brackets select an instantiation. So every consumer that would otherwise
+    read a bracket list as a container has to ask this before it does, and the
+    two answers in this file that were false about the second kind are what
+    cost it: the escape check's container branch in `formal/build.py`, and
+    `multi_index_kind` below, which answered "a subscript whose index is a
+    tuple" about a type application. Both are measured before and after in
+    `bugs/FORMAL_frame_by_value_ceiling_zero.md`.
+
+    THE ONE ANSWER, for the same reason `multi_index_refusal_for` is the one
+    reader of the multi-index question: two functions deciding "is this bracket
+    list a comptime parameter list" would be two chances to disagree, and the
+    disagreement is silent — one of them skips a check the other still runs.
+
+    **Only a base this image can CLASSIFY gets a yes**, and all three classes
+    are facts the model already holds rather than readings of the spelling:
+
+      * a bare name in one of the type-constructor tables —
+        `type_constructor_kind(name) is not None`, which is `Pointer`,
+        `UnsafePointer`, `List`, `Dict`, `Tuple`, `Set`, `Optional`, `SIMD`,
+        `Int` and the rest — or in `POINTER_TYPE_CTORS`. These are the
+        composite types, and every one of them is spelled with brackets;
+      * a bare name `structs_by_name` says THIS MODULE declares. A struct has
+        no runtime container representation on this path at all, so a
+        subscript on its name cannot be a lookup into one — and this is the
+        half that covers a module's OWN generics, which the tables above do not
+        name (`_DequeIter[Self.ElementType, origin_of(self), False]` in
+        `std/collections/deque.mojo`, `Pair[A, B]`);
+      * a bare name `callee_defs` holds a GENERIC `FunctionDef` for, which is
+        `multi_index_kind`'s own `generic_callee` test, kept here as well
+        because the escape check has no `generic_callee` and would otherwise
+        have to re-ask this question without it (`tag[Self.T, origin_of(self)]`).
+
+    Everything else answers **no**, and the caller keeps today's behaviour.
+    That includes every dotted base — `Self.IteratorType[origin_of(self)]` is
+    a comptime parameter list, and it is also the case that cannot be decided
+    from this unit alone because deciding it needs the IMPORTED module's
+    declarations, which is `formal/imports.py`'s question. Guessing it is the
+    one direction that could turn a refusal into a wrong image, so it stays
+    refused. It costs nothing here: `Self.IteratorType[…]` has a SINGLE index,
+    so the container check never sees a bracket list to mistake.
+
+    A single-element index answers no as well, and that is not a gap: a
+    one-element bracket is never a container literal, so there is nothing for
+    a caller to confuse it with. The multi-element gate lives in
+    `is_multi_index` and both callers honour it."""
+    if not isinstance(e, F.SubscriptExpr) or not is_multi_index(e.index):
+        return False
+    name = _base_name(e.obj)
+    if name is None:
+        return False
+    if (type_constructor_kind(name) is not None or name in POINTER_TYPE_CTORS
+            or ((callee_defs or {}).get(name) is not None
+                and is_generic(callee_defs[name]))):
+        return True
+    return bool(structs_by_name) and name in structs_by_name
+
+
 def multi_index_kind(e, base_is_dict: bool = False,
-                     generic_callee=None) -> str:
+                     generic_callee=None, structs_by_name=None,
+                     callee_defs=None) -> str:
     """What a multi-element subscript index means here. See the section note.
 
     `e` is the whole `SubscriptExpr`, so the base is available and the answer
@@ -1092,6 +1163,17 @@ def multi_index_kind(e, base_is_dict: bool = False,
     one in hand and it is a generic; that is what separates a comptime
     parameter list from a value subscript, and it is a fact the backend can
     check rather than a guess from the spelling.
+    `structs_by_name` is the same fact for the base being a TYPE rather than a
+    function: a generic FUNCTION's bracket list is a comptime parameter list
+    (`pick[1, 2]`), and so is a subscript on a type constructor or on a struct
+    this module declares (`Pointer[T, origin]`, `_DequeIter[T, origin, False]`).
+    The second half was missing, so `Pointer[Int, origin_of(self)]` — four of
+    the stdlib's largest container modules — was refused with the tuple-index
+    sentence, which is about a container lookup that never happens. Both halves
+    answer the same question and are asked through
+    `subscript_index_is_a_comptime_parameter_list`, which is the single answer
+    for it; both are refusals, so no program that built before this does, and
+    the only thing that changes is which true sentence names the construct.
 
     A LOWERED `external_call["sym", RetType]` never reaches this function: it
     is answered in `multi_index_refusal_for` above, which returns None for the
@@ -1104,6 +1186,9 @@ def multi_index_kind(e, base_is_dict: bool = False,
     if is_mlir_template(e):
         return MULTI_INDEX_MLIR_TEMPLATE
     if generic_callee is not None and is_generic(generic_callee):
+        return MULTI_INDEX_COMPTIME_PARAMS
+    if subscript_index_is_a_comptime_parameter_list(e, structs_by_name,
+                                                   callee_defs):
         return MULTI_INDEX_COMPTIME_PARAMS
     return MULTI_INDEX_DATA
 
@@ -1185,7 +1270,8 @@ def multi_index_refusal(kind: str, spelled: str) -> str:
     )
 
 
-def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None):
+def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None,
+                            structs_by_name=None):
     """The refusal text for `e`, or None when it is the lowered dict-key case.
 
     This is the ONE place either backend asks, so the two architectures
@@ -1195,8 +1281,12 @@ def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None):
     index, so `s[i, j]` segfaulted on one architecture and returned a
     different wrong answer on the other. `callee_defs` is the backend's
     `{name: FunctionDef}` table, consulted only to recognise a generic's
-    explicit-parameter list; a base it does not know falls through to the
-    tuple-index refusal, which is still true of it.
+    explicit-parameter list; `structs_by_name` is the same table's TYPE half,
+    for a bracket list on a type rather than on a function — see
+    `multi_index_kind`, which is where both are decided, and
+    `subscript_index_is_a_comptime_parameter_list` for why a base this image
+    cannot classify falls through to the tuple-index refusal, which is still
+    true of it.
 
     Called from the address computation, not from the read: that is the one
     place a read, a store and an augmented assignment all pass through, and the
@@ -1236,7 +1326,10 @@ def multi_index_refusal_for(e, base_is_dict: bool, callee_defs: dict = None):
             return None
         return external_call_refusal(external_call_spelling(e), xc_why)
     kind = multi_index_kind(e, base_is_dict=base_is_dict,
-                            generic_callee=callee_defs.get(_base_name(e.obj)))
+                            generic_callee=(
+                                (callee_defs or {}).get(_base_name(e.obj))),
+                            structs_by_name=structs_by_name,
+                            callee_defs=callee_defs)
     if kind is None:
         return None
     return multi_index_refusal(kind, multi_index_spelling(e))
@@ -2926,6 +3019,42 @@ def frame_container_operand_refusal(op: str, spelled: str, struct_names):
         f"it is the only reading there is")
 
 
+def string_iteration_refusal(where: str, function: str) -> str:
+    """Why ITERATING a `char *` is refused. Always a refusal.
+
+    The sibling of `frame_container_operand_refusal`, and the same mistake:
+    the blob walk reads eight bytes at offset 0 of its operand and calls the
+    result a COUNT, and a NUL-terminated string has no header word — the
+    "count" is the first eight bytes of text. The bounds check then passes on
+    those bytes and the element walk reads `base + 8 + 8k`, which is the
+    middle of the string and then whatever the text section puts after it.
+
+    Measured on the real binaries, on `for c in "abc"` (three iterations):
+
+        x86-64   returns 97      -- 'a', the first byte, read as the count
+        arm64    SIGBUS (-10)   -- and the two architectures disagree
+
+    and on `[a + b for a in "abc" for b in "de"]` both exit 1, from the
+    comprehension's capacity guard catching a count of 0x61626361-ish.
+
+    There is no kind under which this is right, and it is not a case where a
+    refusal loses a program that worked: `len(s)` answers (4, on both), and
+    `s[i]` is a byte load on both. Iterating a string needs a LENGTH this
+    representation does not carry, so the honest answer is to say so at build
+    time rather than to return a number nobody wrote — or, on arm64, to die
+    on a signal.
+    """
+    return (
+        f"iterating a string is a CONTAINER operation on a char *, and a char "
+        f"* has no count. This lowering reads eight bytes at offset 0 of the "
+        f"iterable and calls the result the element COUNT — that is a blob's "
+        f"header word, and a string's first eight bytes are TEXT: measured on "
+        f"both architectures, `for c in \"abc\"` returned 97 on x86-64 ('a' as "
+        f"the count) and died of SIGBUS on arm64. `len(s)` and `s[i]` both work "
+        f"and are unaffected; to walk the characters, build a list of them "
+        f"first ([c for c in <a list>]) or iterate that list")
+
+
 def string_operand_is_string(kind) -> bool:
     """True when `kind` says the value is a `char *` to NUL-terminated bytes.
 
@@ -3288,6 +3417,47 @@ def string_compare_number_refusal(op: str, left_kind, right_kind,
         f"character argument to a C library call is an `int` there), or the "
         f"string's content, `str_at({spelled(txt)}, 0, \".\")` or "
         f"`{spelled(txt)}.startswith(\".\")`")
+
+
+def frame_blob_refusal(what: str, wanted: int, available: int) -> str:
+    """The ONE message for "this container does not fit in the frame", for both
+    backends and every container shape.
+
+    Containers on this path are frame-allocated: a list, tuple, dict or string
+    blob is a run of 8-byte slots below the frame pointer, out of a budget the
+    function's whole body shares, and a literal reserves its whole blob before
+    any element is evaluated (so a nested container lands above its parent
+    rather than inside the region the parent is still filling). The limit is
+    therefore real and architectural, and the two backends have DIFFERENT
+    budgets — arm64's scratch is 128 KB, x86-64's blob region is 16 KB — which
+    is exactly why the number has to be computed and printed by one place
+    instead of formatted at each call site.
+
+    What each backend used to print was the two sides of its own comparison, and
+    on x86-64 those are negative FRAME OFFSETS, not sizes: a 4095-element list
+    literal read "list literals exceed the formal frame (16368 > -16 bytes)",
+    which is a true statement about two numbers and no help at all to a reader.
+    So the callers pass SIZES, and this prints sizes, plus the one number a
+    caller can act on: how many elements would fit, derived from the budget the
+    same way the emitters derive the blob size (a word-element blob is
+    `[count][element...]`, so eight bytes of the budget are the count).
+
+    The remedy sentence names the two things that actually work, because the
+    obvious one does not: the frame is not something a caller can enlarge from
+    the source, and a per-element store loop would still need the blob to exist.
+    Splitting the literal across two functions gives each its own budget;
+    building the container at run time (appending to a list literal sized for
+    what the program needs) does not put the whole thing in the frame at once.
+    """
+    words = max(0, (available - 8) // 8) if available > 8 else 0
+    return (f"{what} does not fit in the frame: it needs {wanted} bytes and "
+            f"this function has {available} left for containers. A blob of "
+            f"8-byte elements is [count][element...], so at most {words} "
+            f"element(s) fit in what is left here — and the budget is shared "
+            f"with every other list, dict, string and receiver frame in the same "
+            f"body. Build the container at run time (append into a list literal "
+            f"sized for what the program needs), or split it across two "
+            f"functions so each gets its own budget.")
 
 
 def string_binary_refusal(op: str, left_kind, right_kind,
@@ -6121,8 +6291,49 @@ FRAME_C_VALUE_CALLS = {
     "malloc", "calloc", "realloc", "free", "memset", "qsort", "abs", "labs",
 }
 
+# Builtins of the LANGUAGE that this backend compiles, and that are VARIADIC over
+# conversions — so what they are handed is FORMATTED, and a word is a perfectly
+# good thing to format.
+#
+# `print` is here and NOT in `FRAME_C_VALUE_CALLS`, and the reason is the same
+# one that put `abs` in two sets: the sentence for that set says "a C library
+# entry point", and `print` is Mojo's builtin lowered through `_emit_print` in
+# each backend's call emitter, not a C symbol.  A reader sent to `printf`'s
+# prototype would be looking for a function this program never names.  The
+# CONSEQUENCE is the one measured on `printf`, and it is the reason this set
+# exists rather than a comment: with the refusal lifted, `print(p)` builds,
+# runs, exits 0, and prints the frame's ADDRESS as a decimal — 6102330608 on
+# arm64 and 13027830976 on x86-64 for the same source, and a different number
+# on every run because the address moves.  A silently wrong answer, which is
+# the outcome this whole family exists to prevent.
+#
+# THE MESSAGE SAYS "frame address is passed to" — lowercase, and not "receiver
+# is passed to" — and that is load-bearing in the same way the fifth branch's
+# opening clause is.  Those two are the sweep's markers for row 7 and for the
+# position family, and this refusal is about the argument's CATEGORY (row 7),
+# not about there being no callee.  Written as "receiver", the one stdlib file
+# that reaches it (`test/builtin/test_default_writable_compile_fail.mojo`) was
+# counted in the position family; written as "frame ADDRESS", it fell into
+# `other refusal`, which is the bucket this taxonomy exists to empty.  Both were
+# numbers in the wrong column, with no test failing either time, so the marker is
+# quoted in the comment above rather than left to be rediscovered.
+#
+# ONE name, and deliberately a set rather than a general rule: a builtin the
+# backend does not compile must NOT be answered from here, and the only honest
+# test for "the backend compiles this" today is a name someone wrote down after
+# measuring it.  Every emitter has its own hard-coded branch (`arm64_codegen.py`
+# and `x86_64_codegen.py` each spell `if name == "print"`), so a table here is
+# the second place that fact lives — see
+# `bugs/FORMAL_callee_no_def_ceiling_zero.md` §5 for what would retire it.
+FRAME_VARIADIC_BUILTIN_CALLS = {
+    "print",
+}
 
-def frame_receiver_escape_refusal(callee: str, struct_names) -> str | None:
+
+def frame_receiver_escape_refusal(callee: str, struct_names,
+                                  imported_from: str = None,
+                                  comptime_param_of: str = None,
+                                  star_imported_from: str = None) -> str | None:
     """Why handing a frame ADDRESS to `callee()` is wrong, or None if it is not.
 
     `struct_names` is what the receiver's frame could be — one name, or several
@@ -6149,7 +6360,20 @@ def frame_receiver_escape_refusal(callee: str, struct_names) -> str | None:
        different thing again from "a function this module does not compile" and
        used to be reported as it;
     4. a name lowered as an operation on a VALUE;
-    5. everything else, which really is a name with no definition in hand."""
+    5. everything else, which is a name this build compiles nowhere — and which
+       is `frame_undefined_callee_refusal`, FOUR sentences rather than one,
+       because "no definition in hand" is a true statement about only one of
+       the four things a callee can be when it is not a function of this image
+       (an imported one IS compiled, elsewhere; a compile-time parameter never
+       will be).
+
+    `imported_from` and `comptime_param_of` are the two facts that pick between
+    those four, and both are the CALLER's to supply — an import table and an
+    enclosing `def[…]`'s parameter list, neither of which this module has. They
+    default to None, which is the generic fifth-branch text: the other caller
+    (`_callee_wants_a_value`'s, and `_check_frame_escapes`'s
+    `_callee_wants_a_value` path) reaches case 5 for a callee it has already
+    classified as wanting a value, so case 5 is unreachable from there."""
     who = ", ".join(struct_names) if struct_names else "this struct"
     if callee in FRAME_ADDRESS_CTORS:
         # Measured, not assumed: see FRAME_ADDRESS_CTORS. Returning None here
@@ -6163,6 +6387,26 @@ def frame_receiver_escape_refusal(callee: str, struct_names) -> str | None:
         # this branch the call fell through to the value-only set and was
         # refused for a dereference `origin_of()` does not perform.
         return None
+
+    if callee in FRAME_VARIADIC_BUILTIN_CALLS:
+        # Between the ADDRESS constructor and the C entry points, because it is
+        # neither: this name IS compiled, so it cannot fall through to case 5
+        # ("no definition in hand"), and it is not a C symbol, so the C
+        # sentences are false of it.  Measured consequence in the set's comment.
+        return (f"a {who} frame address is passed to {callee}(), which is a "
+                f"builtin of the language rather than a C entry point, and it is "
+                f"VARIADIC over conversions: whatever it is handed, it formats. "
+                f"A frame address is a word, so what it formats is the ADDRESS, "
+                f"and a decimal rendering of it is indistinguishable from a "
+                f"number the program meant to print. Measured with this refusal "
+                f"lifted, on both architectures: the image builds, runs, exits "
+                f"0, and prints the frame's address — 6102330608 on arm64 and "
+                f"13027830976 on x86-64 for the same source, and a different "
+                f"number on every run, because the address moves. Not a missing "
+                f"layout and not a missing callee: a wrong CATEGORY of "
+                f"argument, the one {callee} shares with `printf` in a "
+                f"different wrapper. Read a field out first "
+                f"(`{callee}(p.a)`)")
     if callee in FRAME_C_LIBRARY_CALLS:
         return (f"a {who} frame address is passed to {callee}(), which is a C "
                 f"library entry point and reads the struct's BYTES, and the "
@@ -6211,12 +6455,182 @@ def frame_receiver_escape_refusal(callee: str, struct_names) -> str | None:
                 f"dereference as one. Not a missing layout: a wrong category "
                 f"of argument. Give it a field (`{callee}(self.n)`) or copy "
                 f"the value out first")
+    return frame_undefined_callee_refusal(callee, struct_names,
+                                          imported_from, comptime_param_of,
+                                          star_imported_from)
+
+
+# Names that are not functions at all, and the one that reaches this branch from
+# the standard library five times over.
+#
+# `__get_mvalue_as_litref` is a compile-time REFLECTION INTRINSIC of the
+# compiler: it is handed a value and hands back an MLIR reference to it, so
+# there is nothing at all for a receiver to be handed TO — the reference it
+# would produce does not exist on a path with no MLIR. Named here rather than
+# left to the generic sentence because the generic sentence sends the reader
+# looking for a missing export, and this name has never been an export of
+# anything: it is 5 of the 12 files the sweep reports under "callee has no
+# definition on this path", and 48 of its 50 spellings in the standard library
+# are the operand of an `__mlir_op.…` build, which is the construct this path
+# refuses one level up (the `__mlir_*` family, `mlir_dialect_refusal`).
+#
+# A SET and not a prefix rule, deliberately: `MLIR_DIALECT_PREFIX` is a
+# different construct with its own refusal and its own owner, and a `__mlir_`
+# prefix test here would swallow names this path already answers elsewhere.
+COMPTIME_REFLECTION_INTRINSICS = frozenset((
+    "__get_mvalue_as_litref",
+))
+
+
+def frame_undefined_callee_refusal(callee: str, struct_names,
+                                   imported_from: str = None,
+                                   comptime_param_of: str = None,
+                                   star_imported_from: str = None) -> str:
+    """Why a callee no image in this build COMPILES cannot take a frame address.
+
+    This is `frame_receiver_escape_refusal`'s fifth case, split — it was one
+    sentence over five different facts, and four of the five were false of the
+    program in front of the reader.  Measured on the 12 files the sweep files
+    under it (`bugs/FORMAL_sweep_work_map_2026-09-30.md` row 8), and on the 41
+    over all roots (`bugs/FORMAL_callee_no_def_ceiling_zero.md`):
+
+      * `_b64encode`, `discover_closures` — the callee is IMPORTED, so it IS
+        compiled, into another module's library.  "this module's own functions
+        are the only ones in this image" and "there is no such callee here to be
+        compiled" are both false of those two, and a reader who believed either
+        went looking for a missing export that is not missing.
+      * `ElementFn`, `Fn` — the callee is a COMPILE-TIME PARAMETER of the
+        enclosing `def`, so there is no callee to compile and never will be
+        until something instantiates it.  Nothing is missing.
+      * `__get_mvalue_as_litref` — a compiler intrinsic that yields MLIR.
+      * a name reachable only through `from M import *` — the star import binds
+        whatever M EXPORTS, which is a fact about a library this pass has not
+        built, so "nothing binds it" would be false wherever M does export it
+        (22 files of the standard library write one).
+      * the rest — genuinely unbound, which is what the old sentence said and
+        is the only one of the five it was true of.
+
+    The order is the order the question is decided in: a name that is not a
+    function, then a name that is a parameter, then a name from another module
+    by name, then a name that could only come from a star import, then nothing.
+    Each returns a refusal, because the hand-off is unsound in all five: what
+    differs is only WHICH fact makes it unsound, and a message that names the
+    wrong one is a message that sends the reader after a non-bug — which is the
+    defect this family exists to stop.  The cross-module METHOD case already
+    answered the second question (see `frame_opaque_position_refusal`'s `why=`
+    for `cross_module`), and this is the FREE-FUNCTION half of it: `owners` is
+    the imported-METHOD table, so a plain imported function was never in it and
+    fell through to here.
+
+    `imported_from` is the module the name is imported from, as the source
+    spells it (`._b64encode`); `comptime_param_of` is the name of the function
+    whose `def[…]` declares the callee; `star_imported_from` is the module of a
+    `from … import *` in this file.  All three are facts the CALLER has:
+    `formal.imports.imported_bound_names` and `star_imported_modules` read the
+    import statements without resolving them (this pass runs before
+    `_resolve_imports`), and `FunctionDef.comptime_params` is the declaration
+    itself.
+
+    **EVERY arm opens with the clause `which is a name with no definition in
+    hand`, and that is load-bearing rather than a courtesy.**  Two taxonomies key
+    on that exact substring — `tools/formal_sweep.py`'s `_FRAME_ESCAPES` and
+    `tools/formal_sweep_causes.py`'s `callee has no definition on this path` —
+    and it is what keeps this family out of the `receiver passed as an argument`
+    bucket that its own message begins with.  An arm that reworded the opening
+    would not fail here: it would drop every file it names out of the family
+    they are counted in, into whichever family matches next, with no test
+    failing and a wrong number in a table a planner acts on.  Measured after
+    this split: 41 files, all 41 still classified `callee has no definition on
+    this path` by both tools, 41 messages changed and nothing else did."""
+    who = ", ".join(struct_names) if struct_names else "this struct"
+    if callee in COMPTIME_REFLECTION_INTRINSICS:
+        return (
+            f"a {who} receiver is passed to {callee}(), which is a name with no "
+            f"definition in hand in this image, and the reason is not a missing "
+            f"export: {callee} is not a function at all. It is a compile-time "
+            f"REFLECTION INTRINSIC of the compiler, which is handed a value and "
+            f"hands back an MLIR reference to it. There is no MLIR on this path "
+            f"— an attribute, a type or an operation has no representation in a "
+            f"model whose every value is one 64-bit word — so the reference it "
+            f"would produce does not exist here at any stage of the compilation "
+            f"and there is nothing compiled to hand an address to. In the "
+            f"standard library it is the operand of an `__mlir_op.…` build (48 "
+            f"of its 50 spellings), and that construct is what this path "
+            f"refuses; this name is its operand rather than a call of its own. "
+            f"Nothing about the receiver's layout is at fault here")
+    if comptime_param_of:
+        return (
+            f"a {who} receiver is passed to {callee}(), which is a name with no "
+            f"definition in hand in this image, and none of the kind that could "
+            f"be added to it: {callee} is a compile-time PARAMETER of "
+            f"{comptime_param_of}, declared in its "
+            f"`def {comptime_param_of}[… {callee} …]`, and calling one means "
+            f"MONOMORPHISING it. The body comes from the argument at each call "
+            f"site and is instantiated against that argument's own struct, so "
+            f"the callee's field list is a property of the call rather than of "
+            f"any declaration in hand. This path does not instantiate type "
+            f"parameters, so there is nothing here that was compiled against a "
+            f"field list, and an address handed to it would point at a layout "
+            f"the callee never learned. Measured: `def drive[Fn: def(mut W)]` "
+            f"calling `Fn(w)` on a `W` frame reaches here and the image cannot "
+            f"be built. Nothing is missing — the callee does not exist until a "
+            f"call site creates it, and nothing here creates one")
+    if imported_from:
+        return (
+            f"a {who} receiver is passed to {callee}(), which is a name with no "
+            f"definition in hand IN THIS IMAGE and not because this module "
+            f"lacks one: it imports {callee} (`from {imported_from} import "
+            f"{callee}`), so {callee} IS compiled — by {imported_from}, into a "
+            f"library of its own, when that module builds at all. That is "
+            f"not by itself a reason to "
+            f"refuse — a frame address is exactly what a method of the "
+            f"receiver's own struct wants, and the cross-module METHOD case is "
+            f"followed across the boundary — but the fact that decides it is a "
+            f"fact about THAT compilation: whether it made the parameter this "
+            f"argument lands in a frame holder against this struct's field "
+            f"list. A module is compiled with its own call sites and this one "
+            f"is not among them, so this pass cannot know, and a wrong answer "
+            f"here is a wrong answer in the callee rather than a crash here. "
+            f"Measured in the smallest program with the shape: the same "
+            f"`def take_it(p: Pair)` beside its caller builds, runs and returns "
+            f"7, and split across two modules the callee module cannot be "
+            f"built at all — there `p` is a parameter with no call site to "
+            f"establish it and `p.a` is refused as a field access through a "
+            f"base nothing establishes. So the hand-off needs the callee's "
+            f"per-parameter contract — which parameters are frame holders, and "
+            f"of which struct — to travel in that module's manifest, which "
+            f"carries exported SYMBOL names and nothing else. "
+            f"bugs/FORMAL_wide_receiver_by_reference.md records the design and "
+            f"what is still open about it")
+    if star_imported_from:
+        return (
+            f"a {who} receiver is passed to {callee}(), which is a name with no "
+            f"definition in hand in this image, and this module neither defines "
+            f"{callee} nor names it in any `from … import …`. The one "
+            f"thing that can bind a name like that here is a "
+            f"`from {star_imported_from} import *`, and what such a statement "
+            f"binds is {star_imported_from}'s EXPORT SET — which is not a fact "
+            f"about this file at all: it is a library this pass has not built, "
+            f"because `_resolve_imports` compiles the modules and the frame "
+            f"analysis runs first, from the statements alone. So two questions "
+            f"are open and neither is answerable from here: whether "
+            f"{star_imported_from} exports {callee} at all, and whether its "
+            f"compilation made the parameter this argument lands in a frame "
+            f"holder against this struct's field list. The second is the one "
+            f"that decides the hand-off, and it is the same question "
+            f"`formal.imports`' manifest cannot answer today: it records "
+            f"exported SYMBOL names and no parameter contract. "
+            f"bugs/FORMAL_callee_no_def_ceiling_zero.md has the measurement")
     return (f"a {who} receiver is passed to {callee}(), which is a name with no "
-            f"definition in hand: this module's own functions are the only ones "
-            f"in this image, and the symbol is unbound before the receiver's "
-            f"layout is a question. A frame address would be meaningful to a "
-            f"callee compiled against the same field list, but there is no such "
-            f"callee here to be compiled. "
+            f"definition in hand in this image: this module defines no FUNCTION "
+            f"of that name — a method declared here is reached as "
+            f"`recv.{callee}(…)` or under its lifted `<Struct>_<method>` name, "
+            f"and a bare `{callee}(recv)` is a spelling this path does not "
+            f"lower — and no `from … import …` in it binds the name either. So "
+            f"the symbol is unbound before the receiver's layout is a question. "
+            f"A frame address would be meaningful to a callee compiled against "
+            f"the same field list, but there is no such callee here to be "
+            f"compiled. "
             f"bugs/FORMAL_wide_receiver_by_reference.md records the design and "
             f"what is still open about it")
 
@@ -7098,6 +7512,55 @@ def variadic_named_args(symbol: str):
 # That only works if "is this operand a string or a number" is decided before
 # anything is emitted, which is the question the next section answers.
 
+
+def comptime_val_kind(vals: dict, name: str):
+    """What the `comptime` binding `name` holds — `STR_KIND`, `INT_KIND`, or
+    None when this says nothing.
+
+    ONE reader, asked by both backends from the two places that must decide
+    what a read holds: the read itself (`print`, truthiness, `len`, a string
+    `==`) and the store that COPIES it into a local (`var t = OS`). Two copies
+    of this is two chances for one of them to keep treating a word as something
+    it is not, which is the shape of the bug this closes:
+
+        def main():
+            comptime OS = "darwin"
+            var t = OS
+            print("t=", t)
+
+    printed a NUMBER — a different one on each architecture (measured 4378772376
+    on arm64, 4308386740 on x86-64) — because `_emit_comptime_read` materializes
+    the interned literal (so the WORD in the register really is a `char *`) and
+    every kind-deciding path then classified the read as an integer.
+
+    It is not a guess, and the reason is what is absent from the table rather
+    than what is in it. `_comptime_vals` holds a name ONLY when
+    `comptime_eval.resolve_var` folded its initializer, so every entry here is a
+    compile-time constant, and the materialization for it is already written:
+    a `str` becomes the interned literal and anything else becomes an immediate
+    (`_emit_comptime_read`). Classifying the folded value IS classifying the
+    word. Nothing here widens "unclassified" into a guess — a `comptime` LIST
+    binding is kept in `_comptime_list_asts` instead, a subscript of it stays
+    unclassified, and a name that is in neither table answers None and reaches
+    the refusal that exists for it.
+
+    The integer half matters as much as the string half and for a different
+    reason: it is what makes the two routes to the same value agree. A
+    MODULE-level `comptime` is substituted at its read as a literal AST node
+    (`_substitute_module_constants`), so `print(PW)` classifies; a
+    FUNCTION-LOCAL one is not, so `print(PW)` used to refuse while
+    `var t = PW; print(t)` answered — the same value, two verdicts, decided by
+    which route reached it."""
+    val = (vals or {}).get(name)
+    if isinstance(val, str):
+        return STR_KIND
+    if isinstance(val, bool):
+        return INT_KIND
+    if isinstance(val, int):
+        return INT_KIND
+    return None
+
+
 def print_literal(text: str) -> str:
     """`text` as a fragment of a `print` format string.
 
@@ -7183,6 +7646,31 @@ def list_elem_kind(kind):
 def is_list_kind(kind) -> bool:
     """True when `kind` names a list/tuple/set blob of any element kind."""
     return isinstance(kind, str) and kind.startswith(LIST_PREFIX)
+
+
+def is_dict_expr(e) -> bool:
+    """True when `e` builds a dict PAIR blob: a dict literal or a dict
+    COMPREHENSION.
+
+    One predicate, because the two backends each had this question twice and
+    each spelled it `isinstance(e, F.DictExpr)` — which the comprehension
+    half silently fails: `{k: v for ...}` parses as a `Comprehension` with
+    `kind == "dict"`, not a `DictExpr`. So a name bound to one was recorded
+    as holding a plain blob, its subscript took the INDEX path, and
+    `{i: 100 + i for i in range(3)}[2]` read the second KEY as if it were
+    the value under it: right key count, right keys, wrong answers, exit 0.
+
+    The emitters are NOT routed through here — `_emit_dict` takes a literal's
+    `pairs` and there is nothing to hand a comprehension instead, so a
+    comprehension still goes through `_emit_expr`'s own dispatch. This is the
+    DICT-NESS question (does a subscript mean "look this key up"), not the
+    "which emitter" one.
+    """
+    import fire_compiler as F
+    if isinstance(e, F.DictExpr):
+        return True
+    return (isinstance(e, F.Comprehension)
+            and getattr(e, "kind", "list") == "dict")
 
 
 def _unify(a, b):
@@ -13157,6 +13645,39 @@ DEFAULT_INT = "int"
 DEFAULT_STRING = "string"      # a formal string is a bare `char *`: one word
 DEFAULT_OPAQUE = "opaque"      # a real default this path cannot bring up
 
+# ── `None`, and the word it is ──────────────────────────────────────────────
+#
+# `None` is a NAME on this front end, not a literal:
+#
+#     Parser(py_tokenize("b: int = None")).parse_module()[0]
+#     AssignStmt(target=IdentExpr(name='b'), value=IdentExpr(name='None'), …)
+#
+# so neither `fold_literal_expr` nor `literal_default_word` had an arm for it,
+# and the single most common class-level default in this repository's own
+# dataclasses (`Type.bit_width: Optional[int] = None`, and nine more on the same
+# class) was refused as "not a literal" — a message that sends a reader looking
+# for a call, where there is no call.
+#
+# It is a value this target represents exactly: the word 0, which is what an
+# unwritten frame slot already is. Folding it is the representation, not an
+# approximation, and because both backends and `formal/build.py` read these two
+# functions it is one edit rather than three.
+#
+# What it is NOT is the integer 0, and the one-word model cannot tell them
+# apart. `None == 0` is False in Python and True here. So the fold is confined
+# to MATERIALIZING a value, and the one construct that can observe the
+# difference — a comparison against a folded `None` — is refused by name in
+# `refuse_none_comparisons` rather than answered. A distinguishable null is not
+# available and is not attempted: the model is one untagged word, so there is
+# nowhere for a second bit of "this zero is a None" to live.
+NONE_NAME = "None"
+NONE_WORD = 0
+
+
+def is_none_expr(node) -> bool:
+    """True when `node` is the NAME `None` (see the note above)."""
+    return isinstance(node, F.IdentExpr) and node.name == NONE_NAME
+
 
 def struct_default_word(struct_def) -> tuple:
     """`(kind, payload)` — what `S()` must leave in the word for this struct.
@@ -13204,6 +13725,12 @@ def literal_default_word(value) -> tuple:
     defaults are representable."""
     if value is None:
         return (DEFAULT_NONE, None)
+    if is_none_expr(value):
+        # `None` is the word 0 on this target (see NONE_WORD). Folded here, not
+        # refused: `x: T = None` is the default for an optional field and is the
+        # single most common class-level default in this repository's own
+        # dataclasses, and both backends materialize an int word exactly.
+        return (DEFAULT_INT, NONE_WORD)
     if isinstance(value, F.IntLiteral):
         return (DEFAULT_INT, int(value.value))
     if isinstance(value, F.BoolLiteral):
@@ -13474,17 +14001,26 @@ class GlobalSymbol:
     spelling for a diagnostic ("assigned at module level", "re-bound at module
     level", "declared at module level with no value", "imported from `m`"),
     because the four are different mistakes with different repairs and one
-    generic message sends the reader to the wrong line."""
+    generic message sends the reader to the wrong line.
 
-    __slots__ = ("name", "literal", "site", "module", "line")
+    `none_valued` says the folded word is the word `None` is spelled as, which
+    `literal` cannot: the fold represents `None` as `IntLiteral(0)` (NONE_WORD),
+    so the fact that this zero is a `None` and not the integer 0 is gone by the
+    time the node exists. It is kept here rather than re-derived at each use
+    site because the one construct that can observe the difference is a
+    comparison, and a comparison that answered "0 == 0 is True" for a `None`
+    would be a wrong answer rather than a refusal."""
+
+    __slots__ = ("name", "literal", "site", "module", "line", "none_valued")
 
     def __init__(self, name, literal=None, site="assigned", module=None,
-                 line=0):
+                 line=0, none_valued=False):
         self.name = name
         self.literal = literal
         self.site = site
         self.module = module
         self.line = line
+        self.none_valued = none_valued
 
     def __repr__(self):
         return (f"GlobalSymbol({self.name!r}, literal="
@@ -13547,12 +14083,19 @@ def fold_literal_expr(node):
 
     None means "the build does not know this", which is a refusal and not a
     zero — the distinction `literal_default_word` already draws, and the reason
-    this returns None rather than 0 for an opaque expression."""
+    this returns None rather than 0 for an opaque expression.
+
+    `None` folds to the word 0, which is the representation rather than an
+    approximation (see NONE_WORD), and it is the one folded value that is not
+    interchangeable with the integer 0 it is spelled as —
+    `refuse_none_comparisons` is what keeps the two apart."""
     if isinstance(node, F.IntLiteral):
         try:
             return int(node.value)
         except (TypeError, ValueError):
             return None
+    if is_none_expr(node):
+        return NONE_WORD
     if isinstance(node, F.BoolLiteral):
         return 1 if node.value else 0
     if isinstance(node, F.StringLiteral) and not getattr(node, "is_bytes", 0) \
@@ -13692,7 +14235,8 @@ def collect_module_symbols(stmts: list) -> dict:
             continue
         table[name] = GlobalSymbol(name, folded_literal_node(folded, value),
                                    "assigned", None,
-                                   getattr(stmt, "line", 0) or 0)
+                                   getattr(stmt, "line", 0) or 0,
+                                   is_none_expr(value))
     return table
 
 
@@ -14094,6 +14638,95 @@ def name_resolves_without_a_local(name: str) -> bool:
     whole point: the arm64 X19 fall-through and the x86-64 zero fall-through
     were the two architectures' answers to a question neither of them had."""
     return name in _UNRESOLVED_NAME_ALLOWED
+
+
+def is_type_name(name: str) -> bool:
+    """True when `name` spells a TYPE on this path — not a value.
+
+    The union of the four tables that already know type names, and the union is
+    the point: each answers a different question, so a name in only one of them
+    is still a type.
+
+      * `POINTEE_WIDTHS` — types with a known width, and the only table
+        `NoneType` is in;
+      * `INT_TYPE_CTORS` / `IDENTITY_TYPE_CTORS` — what a bare call `T(x)`
+        means, read through `type_constructor_kind`;
+      * `UNREPRESENTABLE_TYPE_CTORS` — real types this path cannot build a
+        value of (`DType`, `Optional`, `SIMD`, …), which is a statement about
+        the VALUE and not about whether the name is a type;
+      * `Self`, which is a type and appears in no table.
+
+    A struct this unit compiles is deliberately NOT here: `check_module_symbols`
+    already places those names, and its own docstring says why — "a struct is
+    not a value and has no register" — which is the same fact stated for the
+    case that reaches it.
+
+    Read this only to decide which WORD a refusal uses. It must never be used to
+    answer "can this name be read", because the answer to that is always no, and
+    `name_resolves_without_a_local` is the list of the ones that can."""
+    if name == "Self":
+        return True
+    if name in POINTEE_WIDTHS or name in UNREPRESENTABLE_TYPE_CTORS:
+        return True
+    return type_constructor_kind(name) is not None
+
+
+def type_as_value_refusal(name: str, fn_name: str) -> str:
+    """A TYPE read where a value is required.
+
+    `unresolved_name_refusal` enumerates the four places a NAME can live on this
+    path — a register, a spill slot, a receiver field's frame, a folded
+    module-level constant. That enumeration is right for a value and it is
+    wrong here in a way worth naming: a type is in none of the four because a
+    type is not a value and never was. The reader is sent to the register
+    allocator for a fact about the language.
+
+    The measured cost of that: `check_module_symbols` over the 664 stdlib
+    `.mojo` files reported 93 files as "'<name>' has no home", and 52 of those
+    names are types — `NoneType`, `DType`, `Int`, `Self`, `String`, `Byte`,
+    `UInt8`, `UInt64`. The other 41 are unchanged and correct: they name values
+    (`debug_assert`, `rebind`, `__is_run_in_comptime_interpreter`, …) that
+    really are read where there is no storage, and for those the storage
+    enumeration is the right story. `std/sys/_assembly.mojo:94`'s
+    `comptime if result_type == NoneType:` is one of the 52.
+
+    A COMPARISON of two types is the common shape, and it is the one this
+    message is really about: `t == NoneType` with `t` a `comptime` type
+    parameter compares two types, which needs a type to BE a value — a tag per
+    type, interned, and the SAME on both sides of a dylib boundary, so it
+    cannot be a per-unit small integer. That is reflection-table work and it
+    belongs to whoever owns the type table; this message says so rather than
+    implying the reader could fix it by naming a variable differently.
+
+    What a caller CAN do is branch on something the one-word model can
+    distinguish, and the message says that too, because a refusal with no
+    repair is the other half of a useless diagnostic.
+    """
+    return type_as_value_fact(name, fn_name)
+
+
+def type_as_value_fact(name: str, fn_name: str = "") -> str:
+    """The type-is-not-a-value SENTENCE, on its own.
+
+    Split from `type_as_value_refusal` because a name can be a type AND have a
+    more specific story — a module symbol imported from another module, whose
+    message `tools/formal_sweep.py` parses — and in that case the two facts are
+    both true and both worth saying. `fn_name` is optional here because this
+    half is also appended to a message that already carries it."""
+    who = f"{fn_name}: " if fn_name else ""
+    return (f"{who}{name!r} is a TYPE, and a type is not a value on this path: "
+            f"a value here is one 64-bit word, and a type is not one thing a "
+            f"word can hold. So there is no register, spill slot, frame field "
+            f"or folded constant this could live in — the question those four "
+            f"places answer is the wrong question for a type. Comparing a "
+            f"`comptime` type parameter against a type name (`t == {name}`), "
+            f"testing one with `is`, or passing one as an argument all need "
+            f"types to be values: an interned tag per type, identical on both "
+            f"sides of a dylib boundary, which is reflection-table work this "
+            f"path does not have. Branch on something the word model can tell "
+            f"apart — a flag or an extra parameter the caller passes, a "
+            f"separate function per case, or a property of the value itself "
+            f"rather than of its type.")
 
 
 def comptime_fold_refusal(name: str) -> str:

@@ -1,5 +1,43 @@
 # COMPILE_FAIL: Lib/collections/__init__.py
 
+## Status (2026-09-30, branch work/compile-fail-stdlib-misc — down to TWO own-file errors, and neither is one of the clusters below)
+
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/collections/__init__.py`
+(17 s, peak 0.1 GB, exit 1). **9 `error:` lines total, 2 of them in
+`collections/__init__.py`:**
+
+```
+collections/__init__.py:515:11: error: too many arguments to function 'mojo_type'; expected 1, have 3
+collections/__init__.py:1192:33: error: passing argument 2 of 'mojo_dict_union' makes pointer from integer without a cast [-Wint-conversion]
+```
+
+- **515** is `namedtuple`'s `result = type(typename, (tuple,), class_namespace)`
+  — the 3-argument `type()` form, which this codegen lowers to a 1-arg
+  `mojo_type`. A real feature gap (dynamic class construction), not narrow.
+- **1192** is `UserDict.__ior__`'s `self.data |= other`, i.e. `|=` on a dict
+  with a second operand whose type is not statically a `MojoDict *`.
+  `mojo_dict_union`'s own dict-`|`-dict branch in
+  `_lower_binary_tail` handles the typed case; the untyped-`other` case is
+  the "cannot coerce" refusal surface one level down.
+
+The other 7 errors are `Lib/keyword.py` ×4 (a `MojoList` passed where a
+pointer is expected — `makes pointer from integer without a cast`) and
+`Lib/reprlib.py` ×3 (`char *` assigned into an `int64_t` local, plus the
+two `conflicting types` for `operator_eq_2dbb98` /
+`reprlib_recursive_repr_d719e0`).
+
+**Everything the historical entries below track as this file's blocker is
+gone.** The tuple-valued-`yield` / `reversed(...)` cluster, the
+`_tuplegetter` redefinition, the `OrderedDict.__new__` / `__func__` /
+`__doc__` dynamic-attribute instances, and the `Counter`
+incompatible-types class all no longer appear at all — none of the
+generator `cannot compile module` refusals in those entries is raised.
+Two further module-level soft fallbacks appear in the closure
+(`_collections_abc`'s `generator .close()` and `typing`'s
+`MojoDict *`→`MojoList *` coercion), both of which other docs own.
+
+Doc kept open on the two errors above.
+
 ## Status (2026-09-06 — Stage-4 optional tail LANDED: `.get()/.keys()/.values()/.items()/.update()/.pop()/.setdefault()/.clear()` + `for k in d` delegation on a dict-subclass instance)
 
 Inherited container METHODS on a builtin-`dict`-subclass instance now

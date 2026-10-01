@@ -1,10 +1,215 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
-**State: PARTIAL, and the previous audit of it was wrong.** The real file still does not compile, but for
-one reason the 2026-09-26 entry mis-attributed: the blocker is **calling a keyword-only callable-valued
-parameter**, not "a generator call". Four of the six shapes it recorded as fixed are still refused on the
-real file, and its Shape-5 mapping onto the `value_ctype` bug is withdrawn (that refusal fires first, so
-the miscompile is unreachable there).
+**State: PARTIAL, and better than the entry below it, but the file still
+does not build.** The blocker this doc's previous pass identified as "the
+real blocker" — **calling a keyword-only callable-valued parameter** — is
+FIXED for the same-module case: two of the file's four such generators
+(`walk_tree`, `iter_files_by_suffix`) now compile and run, and the
+underlying representation bug underneath them (a callable-valued parameter
+defaulting to a NULL function pointer, so calling it SIGSEGVed) is fixed
+everywhere, including in an ordinary `def`. The file remains unbuildable
+for three reasons that are NOT this bug: the two remaining
+same-import-spelling generators (`_walk_tree`, `glob_tree`), whose
+callable defaults name an **imported** module's function and so are still
+refused; `iter_files`'s variadic lambda; and `process_filenames`'s
+`Exception(...)`-as-a-value.
+
+## Status (2026-09-29 — the kw-only-callable blocker is fixed for the same-module case; the file still does not build)
+
+Re-derived against the CURRENT tree with the real file at
+`/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/fsutil.py`, with
+CPython alongside for every probe. Six generators refused before; **four
+now, and the two that cleared are precisely the two the previous entry
+called the blocker.**
+
+```
+$ MOJO_DEBUG=1 python3 fire.py build -o fsutil fsutil.py
+Error building: cannot compile module: function(s) _walk_tree, glob_tree,
+iter_files, process_filenames ...
+Unsupported shape(s):
+  _walk_tree:           unsupported for-loop iterable type: CallExpr
+  glob_tree:            unsupported for-loop iterable type: CallExpr
+  iter_files:           a `lambda` with more than one parameter, a
+                        `*`/`**`-forwarding parameter, or a parameter default
+  process_filenames:    call to unresolved callee 'Exception(...)'
+```
+
+Before this change the same command listed SIX — the two above plus
+`iter_files_by_suffix: call to unresolved callee '_iter_files(...)'` and
+`walk_tree: unsupported for-loop iterable type: CallExpr`. Those two are
+the ones this change fixed.
+
+### Corpus impact — measured, not assumed
+
+Because this change is deliberately NOT behaviour-preserving, the usual
+"byte-identical C" bar does not apply; but the *silent*-regression bar
+does, so: `python3 fire.py --dump-full fire_compiler.py` (the whole
+compiler closure, ~1.2 M lines of generated C, run from one directory
+before and after) has an **unchanged generator/refusal profile** —
+`__mgco_` (A3 stack-switch) 185/185, `_mojogen_` (C++20 path) 15/15,
+`mojo_unsupported_iter` 124/124. Nothing in the corpus moved between
+"compiled", "refused", and "zero-iterated". The rest of that diff is the
+two new `GimpleGen` fields, the new `_default_expr_to_pair` parameter, and
+temp renumbering inside the compiler's own functions.
+
+### What was actually wrong
+
+The previous entry's diagnosis was right about the shape and wrong about
+where the refusal came from, in a way that matters: it read
+`stackswitch refuses at 'kwonly params (v0)'` as the blocker. That gate
+was real, but it was not the *shape* being refused — it was a blanket
+refusal of ANY generator with a keyword-only parameter, so it hid the
+real one. Underneath it were two separate defects, both of which turned a
+callable-valued parameter into a NULL pointer:
+
+1. **A callable-valued parameter default lowered to `0`.**
+   `calls_shared._default_expr_to_pair` ends in `return ('int', '0')`
+   after handling literals and `None`/`True`/`False`. A default that *is*
+   a function — `walk=_walk_tree` — therefore padded address 0 into the
+   omitted argument, and the body called it. Measured on the ordinary
+   (non-generator) path, which is the case neither this doc nor its
+   sibling mentioned:
+
+   ```
+   $ <p2b: def leaf(root): return root + "/a"
+           def apply_it(x, *, f=leaf): return f(x)
+           print(apply_it("q")); main()>
+   CPython   q/a                      # correct
+   compiled  Segmentation fault: 11   # exit 139, nothing on stdout
+   ```
+
+2. **A generator used as a bare value lowered to `0`.**
+   `_lower_IdentExpr`'s "C function name used as a value" arm tests
+   `name in gen.func_return_types`, and for a generator that dict holds
+   only `__mgco_<g>_start`/`_resume`/`_value`/`_destroy` — never the
+   generator's own name. So `consume("/r", leaf)` passed 0 and the callee
+   called address 0.
+
+Both are now answered by one place, `calls_shared._callable_value_symbol`
+("what C symbol does a function used as a value mean"), which emits the
+real address through the `_funcptr_<sym>` static this codegen already uses
+for every other function-as-a-value site — `module_gen`'s `_funcptr_
+target` redirects a generator's bare csym to `<base>_start`, which is
+exactly right, since calling a generator FUNCTION is what constructs the
+object.
+
+### The two backend changes that clear `walk_tree` and `iter_files_by_suffix`
+
+* **The kwonly eligibility gate** (`mojo/middle/coro.py`'s `_eligible`)
+  was `if fn.kwonly: return False, 'kwonly params (v0)'`. A keyword-only
+  parameter is just a parameter no call site may fill positionally, and
+  the stack-switch lowering already carries every one of them (`_lower_one`
+  builds `<base>_start` over `fn.params`, which the parser records
+  keyword-only names in, with `meta['defaults']` from the same
+  `param_defaults` dict the call-site padding reads). The gate is now the
+  question that actually decides anything: **is every keyword-only
+  default faithfully lowerable to a C value?** (`_unrepresentable_kwonly` /
+  `_default_is_faithful_literal`.) It is deliberately stricter than
+  `_default_expr_to_pair`, which pads anything it cannot represent with a
+  typed `0` — admitting a list literal here would trade today's
+  whole-module fallback (always correct) for a compiled NULL container
+  pointer.
+
+* **Driving the result.** `for f in walk(root):` and
+  `yield from walk(root)` used to reach the ordinary path's
+  `mojo_unsupported_iter` zero-iteration stub, because nothing knew what
+  `walk(root)` returns. `_lower_one` now records
+  `callable_param_generators` on the generator's meta (the lowered
+  `__mgco_<g>_body` has moved every source parameter into a
+  `var p = __mojo_gen_arg(...)` local and so carries none of the source's
+  `param_defaults`, which is why the information has to travel on the
+  meta), `register`'s second pass resolves those names against
+  `_generator_api` AFTER every generator is registered — so a callee
+  declared later in the module still works — and `gen_func` hands the
+  result to `_lower_fnptr_call_value`, which types the call result as
+  `MojoGenerator *` and records the api on the temp exactly as a direct
+  generator call does. The loop target's and the `yield from`'s value kind
+  come from the same default (`_sibling_gen_kind` / `_delegated` /
+  `_delegated_yield_kind`, each given the enclosing `fn`), so the yield
+  slot stops defaulting to `int64_t` and printing a string as its own
+  pointer.
+
+### Verified — CPython's text, not just "no crash"
+
+| probe | CPython | before | after |
+|---|---|---|---|
+| `def leaf(root): yield root+"/a"; yield root+"/b"` / `def consume(root, *, walk=leaf): for f in walk(root): yield f` | `/r/a`, `/r/b` | SIGSEGV | `/r/a`, `/r/b` |
+| same, `yield from walk(root)` | `/r/a`, `/r/b` | SIGSEGV | `/r/a`, `/r/b` |
+| same, caller overrides `walk=other` | `/r/a`, `/r/X` | SIGSEGV | `/r/a`, `/r/X` |
+| positional-with-default `walk=leaf` (not keyword-only) | `/r/a` | SIGSEGV | `/r/a` |
+| ordinary path: `def apply_it(x, *, f=twice): return f(x)` | `6 8 10 12` | SIGSEGV | `6 8 10 12` |
+| ordinary path: `def via_param(x, f): return f(x)`, called `via_param(7, twice)` | `14` | SIGSEGV | `14` |
+
+Regression tests: `run_callable_param_tests` in
+`test_gimple_generator_runner.py` (6 cases, incl. the two A3-gate NO
+answers and one positive) and `gimple_callable_valued_parameter_default` /
+`gimple_function_passed_as_argument` in `test_gimple_runner.py`. Both
+files ARE in the `check`/`gate` bucket (`gimplegenerators` /
+`gimplerunner`) — `bugs/hard/README.md`'s note that they run in no bucket
+is stale for these two; see the report.
+
+### What is NOT fixed, precisely
+
+1. **`_walk_tree(root, *, _walk=os.walk)` and
+   `glob_tree(root, *, suffix=None, _glob=glob.iglob)`** — still refused
+   `unsupported for-loop iterable type: CallExpr`. Same mechanism, one
+   step further out: the default is a `module.attr` reference, and A3's
+   `_eligible` runs in `lower()`, before any `GimpleGen` exists, so it
+   cannot know whether the imported function will be resolved by the time
+   the default is padded. It WILL be under `do_imports=True` when the
+   module's own source is translated, and will NOT under `do_imports=False`
+   (where imports are deliberately not inlined). Guessing "resolved"
+   would compile the generator and then pad NULL — trading a refusal for a
+   crash — so the gate says no. **Exact next step:** either make the
+   decision after the closure is known (gen_module's per-generator
+   eligibility loop at `module_gen.py`'s `_generator_quick_eligible` runs
+   after imports are compiled and is the natural home), or make
+   `_lower_one` able to un-lower. The second of the two is cheap and
+   worth checking first.
+2. **The NULL-pointer crash behind (1) still exists on the ordinary
+   path.** `def probe(x, *, g=os.walk): return g(x)` pads 0 and takes
+   SIGSEGV — `os` is an imported-symbol marker but its `walk` is never in
+   `func_return_types` at all (measured: zero entries containing
+   `"walk"`). Filed separately, with the repro and the two design options:
+   `bugs/CODEGEN_unresolved_imported_callable_default_null_pointer.md`.
+   This is the exact case `_walk_tree`/`glob_tree` would hit if their
+   eligibility gate were simply relaxed, which is why it is not.
+3. **`iter_files`' `lambda *a, **k: _walk(*a, walk=_files, **k)`** — the
+   variadic forwarding lambda. Correctly still refused, correctly still
+   another worker's claim (`CODEGEN_generator_lambda_expr_unsupported.md`).
+4. **`process_filenames`' `onempty = Exception('no filenames provided')`** —
+   a call to an exception CONSTRUCTOR used as a value. A distinct shape,
+   unrelated to callable-valued parameters.
+
+`gen_module`'s whole-module escalation means the file stays unbuildable
+until all four clear. Items 3 and 4 are outside this bug.
+
+### Residue in the fix itself, stated rather than hidden
+
+The result of `walk(root)` is typed from the parameter's DECLARED DEFAULT
+— that is the only callee identity a signature can carry. A caller that
+overrides the parameter with a differently-typed generator would get the
+default's `value_ctype`. The override case is pinned by a test (it runs
+and produces each callee's own values), and this is the same residual
+`fn_returns_generator` already carries for a first-class generator value
+and the same one the existing `_generator_var_api` has for a reassigned
+local — a default names exactly ONE callable where a returned value can
+come from any of several. It is smaller than either, not absent.
+
+Also not fixed, and adjacent: **a call through a callable-valued
+parameter still returns the `int64_t` default type**, so
+`def apply_it(x, *, f=twice): return f(x)` called with a string argument
+prints the returned pointer's decimal rather than the string. That is a
+separate inference gap (the callee's return type is genuinely unknown at
+the call site), it predates this change, and it was previously masked by
+the SIGSEGV. Left alone deliberately: narrowing the returned box to the
+default's return C type would turn a wrong *number* into a wrong
+*pointer* on an override, which is the worse of the two.
+
+
+---
+
+## History (superseded entries, kept for the per-shape table and the `set()`/tuple-yield confirmations)
 
 ## Status (2026-09-26 second pass — built the REAL file; the "5 of 6 fixed" conclusion is withdrawn)
 

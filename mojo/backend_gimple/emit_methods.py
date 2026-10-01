@@ -72,6 +72,11 @@ from mojo.middle.methods_shared import *  # noqa: F401,F403
 from mojo.middle.methods_shared import (
     _SELFHOST_SIBLING_MODULE_PREFIXES, _as_str, _gmm_callexpr_node, _is_selfhost_sibling_alias, _is_selfhost_source_file, _sms_key
 )
+# Module-qualified struct identity — the construction-site resolution for the
+# same-bare-name collision fix. See the qualified-constructor case in
+# `_lower_method_call` below and `_struct_cname_by_id` in
+# GimpleGen.__init__.
+from mojo.middle.funcs_shared import _ctor_cname_via_module, _resolve_struct_cname
 
 # Sentinel for "this api entry has no `receiver` key at all", so a
 # missing key is distinguishable from a recorded empty string (which is a
@@ -356,7 +361,7 @@ def _lower_builtin_bound_method_call(gen, fname_raw: str,
     return types all match the direct-call spelling exactly."""
     recv_ct, recv_v, method = gen._builtin_method_values[fname_raw]
     if recv_ct == 'MojoList *':
-        return gen._lower_list_method(recv_v, method, node.args)
+        return gen._lower_list_method(recv_v, method, node.args, node.kwargs)
     if recv_ct == 'MojoDict *':
         return gen._lower_dict_method(recv_v, method, node.args)
     if recv_ct == 'MojoBytes *':
@@ -514,10 +519,23 @@ def _lower_maybe_bound_call(gen, fname_raw: str,
         at, av = gen.lower_expr(a)
         widened.append(av if at == 'int64_t' else gen._new_val('int64_t', f'(int64_t){av}'))
     n = len(widened)
-    helper = f'mojo_maybe_bound_call_{min(n, 4)}'
+    # A call that WRITES KEYWORD ARGUMENTS goes through the `_kw_` twin, which
+    # threads the packed MojoDict through to a callee that declares
+    # `**kwargs` (a variadic lambda — see runtime/fire_runtime.h's "Variadic
+    # callables"). This local is branch-joined from a lambda and something
+    # else, so the call site cannot know which; the `_kw_` helpers are
+    # identical to their twins for every other kind of callee.
+    _kwargs = getattr(node, 'kwargs', None) or []
+    if _kwargs:
+        _kw = gen._pack_kwargs_dict({kn: gen.lower_expr(kv) for kn, kv in _kwargs})
+        helper = f'mojo_maybe_bound_call_kw_{min(n, 8)}'
+        lead = [('void *', fp_void), ('void *', _kw)]
+    else:
+        helper = f'mojo_maybe_bound_call_{min(n, 8)}'
+        lead = [('void *', fp_void)]
     ret_type = gen._bound_method_ret_types.get(fname_raw, 'int64_t')
-    raw_t = gen._call_expr('int64_t', helper, [('void *', fp_void)] +
-                             [('int64_t', w) for w in widened[:4]])
+    raw_t = gen._call_expr('int64_t', helper, lead +
+                             [('int64_t', w) for w in widened[:8]])
     if ret_type in ('int64_t', 'int'):
         return ret_type, raw_t
     if ret_type == 'void':
@@ -546,9 +564,15 @@ def _lower_bound_method_call_value(gen, bm: str, node: gimple_ctypes.CallExpr,
         at, av = gen.lower_expr(a)
         widened.append(av if at == 'int64_t' else gen._new_val('int64_t', f'(int64_t){av}'))
     n = len(widened)
-    helper = f'mojo_bound_method_call_{min(n, 4)}'
+    # Arity 8, matching the sibling `_lower_fnptr_call_value` /
+    # `_lower_maybe_bound_call` paths (which the variadic-callable work
+    # widened from 4). This one still capped at 4, so a five-or-more-argument
+    # call through a `MojoBoundMethod *` value dropped its tail — the same
+    # silent wrong value, and a reader would rightly ask why the three
+    # sibling paths disagreed.
+    helper = f'mojo_bound_method_call_{min(n, 8)}'
     raw_t = gen._call_expr('int64_t', helper, [('MojoBoundMethod *', bm)] +
-                             [('int64_t', w) for w in widened[:4]])
+                             [('int64_t', w) for w in widened[:8]])
     if ret_type in ('int64_t', 'int'):
         return ret_type, raw_t
     if ret_type == 'void':
@@ -1091,12 +1115,21 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # later `x.widgetName` raised a genuine runtime `AttributeError`. See
     # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md
     # §4 ("module.Class(...) construction is unresolved on every path").
+    #
+    # The receiver is the disambiguating signal for a same-bare-named class:
+    # resolve the member through the MODULE it was reached through, so
+    # `mod_b.Dialog(...)` constructs mod_b's `Dialog` and not whichever of two
+    # same-named classes won the bare-name race. With nothing colliding this
+    # returns the bare name verbatim, i.e. the pre-existing behaviour exactly
+    # (bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md).
     if (isinstance(func.obj, gimple_ctypes.IdentExpr)
             and func.obj.name in gen.imported_symbols
             and func.obj.name not in gen.struct_field_types
             and func.member in gen.struct_field_types
             and func.member not in gen.var_types):
-        return gen._lower_struct_constructor(func.member, node.args, node.kwargs)
+        return gen._lower_struct_constructor(
+            _ctor_cname_via_module(gen, func.obj.name, func.member),
+            node.args, node.kwargs)
 
     # `g.send(v)` — resuming a compiled generator with a value for the
     # `yield` it is suspended on: the rest of Python's generator protocol
@@ -3217,7 +3250,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # `_lower_set_method`, which has no 'remove' case at all and
         # silently no-op'd instead of removing the element. Runtime-
         # dispatch via the kind registries instead (DESIGN.html R5). See
-        # bugs/CODEGEN_boxed_method_name_list_set_ambiguity.md.
+        # bugs/CODEGEN_boxed_method_name_list_set_ambiguity.md, closed and
+        # removed with the runtime kind registries.
         ip = gen._new_temp('int64_t')
         ov_local = gen._ensure_local(ot, ov)
         if ot == 'int64_t':
@@ -3392,7 +3426,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if ot == 'MojoDict *':
         return gen._lower_dict_method(ov, method, node.args)
     if ot == 'MojoList *':
-        return gen._lower_list_method(ov, method, node.args)
+        return gen._lower_list_method(ov, method, node.args, node.kwargs)
     if ot == 'MojoSet *':
         return gen._lower_set_method(ov, method, node.args)
     if ot == 'MojoBytes *':
@@ -3656,7 +3690,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if ot.endswith(' *'):
         _sn = gimple_exprtypes._struct_name_of(ot)
     if _sn == 'MojoList':
-        return gen._lower_list_method(ov, method, node.args)
+        return gen._lower_list_method(ov, method, node.args, node.kwargs)
     if _sn == 'MojoDict':
         return gen._lower_dict_method(ov, method, node.args)
     if _sn == 'MojoSet':
@@ -3980,7 +4014,8 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
     return 'int64_t', gen._new_val('int64_t', '0')
 
 
-def _lower_list_method(gen, ov: str, method: str, args: list) -> tuple:
+def _lower_list_method(gen, ov: str, method: str, args: list,
+                       kwargs: list = None) -> tuple:
     """Lower MojoList * method calls."""
     # list.insert(i, v) (BUG-2026-023 residual, box.3d/game's
     # FileSystem.current_dir_path): previously UNHANDLED — the unknown-method
@@ -4136,7 +4171,67 @@ def _lower_list_method(gen, ov: str, method: str, args: list) -> tuple:
             t = gen._new_val('char *', f"(char *){raw}")
             return 'char *', t
         return 'int64_t', raw
-    if method in ('sort', 'reverse', 'clear'):
+    if method == 'sort':
+        # Was `mojo_list_sort(ov)` — and THAT was a no-op stub in the runtime
+        # (`{ (void)l; }`), so `l.sort()` returned the list in its original
+        # order with exit 0 and said nothing. The two spellings of one
+        # operation disagreed: `sorted(l)` was right, `l.sort(); x = l` was
+        # silently wrong.
+        #
+        # A MojoList slot is a raw int64_t, so the runtime cannot tell a
+        # number from a pointer and needs to be TOLD: `gen._elem_of(ov)` is
+        # this backend's element-type inference for the receiver, and
+        # TypeLattice.slot_kind_byte turns it into the one byte-per-slot
+        # alphabet mojo_list_set_kinds already uses. It is threaded through as
+        # an argument rather than left to the runtime's guess, exactly as
+        # _lower_builtin_sorted picks mojo_list_sorted_str over mojo_sorted for
+        # the same reason. 0 (`MOJO_KIND_INT` is 'i', so pass 0) means "I do
+        # not know", and the runtime then consults the per-slot kinds side
+        # table and its own discriminator before deciding.
+        _skind = '0'
+        _elem = gen._elem_of(ov)
+        if _elem != 'int64_t' or gen._elem_types.get(ov):
+            # A recorded element type — including a recorded `int64_t`, which
+            # is a real answer for a list of ints. `TypeLattice.slot_kind_byte`
+            # is the shared element-type -> alphabet-byte mapping (the same one
+            # a list literal's per-slot kinds are built from).
+            _b = gimple_ctypes.TypeLattice.slot_kind_byte(_elem)
+            _skind = f'MOJO_KIND_{gimple_ctypes.TypeLattice.SLOT_KIND_CONST[_b]}'
+        # else: nothing recorded at all, and `_elem_of`'s 'int64_t' is its
+        # ABSENCE answer rather than a fact. Pass 0 — "I do not know" — and
+        # let the runtime consult the per-slot kinds side table and its own
+        # discriminator before deciding, rather than committing this call site
+        # to a type it has no evidence for.
+        # `key=` / `reverse=` are real Python ordering options that used to be
+        # dropped on the floor here too (`l.sort(key=f)` sorted as if neither
+        # were given). The key list is built by the SAME builder sorted()'s
+        # lowering uses, and the runtime orders by it in place.
+        _key_expr = None
+        _reverse = False
+        for _k, _v in (kwargs or []):
+            if _k == 'key':
+                _key_expr = _v
+            elif _k == 'reverse':
+                _reverse = not (isinstance(_v, gimple_ctypes.BoolLiteral)
+                                and not _v.value)
+        _keys_val = 'NULL'
+        if _key_expr is not None:
+            _keys_val = ggc._build_sort_keys(gen, ov, _elem, _key_expr)
+            # The KEYS are what get compared, so the kind argument describes
+            # them, not the elements (the same split mojo_sorted_by_keys
+            # makes). Its own recorded type is the one the builder just
+            # appended with.
+            _kb = gimple_ctypes.TypeLattice.slot_kind_byte(
+                gen._elem_of(_keys_val))
+            _skind = f'MOJO_KIND_{gimple_ctypes.TypeLattice.SLOT_KIND_CONST[_kb]}'
+        gen._emit_call('void', '', 'mojo_list_sort',
+                       [('MojoList *', ov), ('int', _skind),
+                        ('int', '1' if _reverse else '0'),
+                        ('MojoList *', _keys_val)])
+        # Python's list.sort() returns None; the compiled path's convention for
+        # a mutator's value is int 0 (shared with append/extend/reverse).
+        return 'int', gen._new_val('int', '0')
+    if method in ('reverse', 'clear'):
         gen._emit(f"  mojo_list_{method} ({ov});")
         return 'int', gen._new_val('int', '0')
     if method == 'copy':
@@ -4151,6 +4246,22 @@ def _lower_list_method(gen, ov: str, method: str, args: list) -> tuple:
         if at == 'char *':
             return 'int64_t', gen._call_expr('int64_t', 'mojo_list_index_str', [('MojoList *', ov), ('char *', av)])
         return 'int64_t', gen._call_expr('int64_t', 'mojo_list_index_int', [('MojoList *', ov), ('int64_t', av)])
+    if method == 'count' and args:
+        # `l.count(x)` counts OCCURRENCES; `x in l` only asks whether there
+        # is one, and the two share no runtime helper. This case did not
+        # exist at all, so every `list.count(...)` fell to the dummy 0-stub
+        # below and answered 0 for a list that plainly contained the value:
+        # `[1,2,1].count(1)` was 0 where CPython says 2 — a silent wrong
+        # value, not an error. `mojo_list_count_int` / `_str` / `_bytes`
+        # count slots; the bytes one is needed because a bytes needle is a
+        # boxed pointer, and comparing that as a raw slot would compare
+        # addresses (see mojo_list_contains_bytes's own comment).
+        at, av = gen.lower_expr(args[0])
+        if at == 'char *':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_list_count_str', [('MojoList *', ov), ('char *', av)])
+        if at == 'MojoBytes *':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_list_count_bytes', [('MojoList *', ov), ('MojoBytes *', av)])
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_list_count_int', [('MojoList *', ov), ('int64_t', av)])
     if method == '__len__':
         # The builtin `len(x)` call form already lowers to mojo_list_len
         # (see the len() handling in _lower_call), but the dunder-method
@@ -4338,6 +4449,17 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
         cstr_ov = ov
     if method == '__len__':
         return 'int64_t', gen._new_val('int64_t', f'mojo_strlen ({cstr_ov})')
+    if method == 'hex':
+        # `str` has NO `hex` in Python — `'abc'.hex()` is an AttributeError.
+        # This compiler had a `mojo_hex` for it (an INTEGER formatter, used
+        # by the `%x` printf path), so the name resolved to a stub that
+        # answered a raw int 0: `'abc'.hex()` printed 0, and `'ab'.hex(' ')`
+        # printed 0 too. Raise the real AttributeError, the same shape
+        # _BYTES_STR_ONLY_PREDICATES uses on the bytes side.
+        gen._emit_call(
+            'void', '', 'mojo_raise_attribute_error',
+            [('char *', gen._intern_string("'str' object has no attribute 'hex'"))])
+        return 'char *', gen._new_temp('char *')
     if method == 'group':
         return 'char *', cstr_ov
     if method in ('as_c_string_slice', 'unsafe_cstr_ptr', 'unsafe_ptr', 'data'):
@@ -4349,6 +4471,22 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
         'strip': 'string_strip',
         'lstrip': 'mojo_str_lstrip', 'rstrip': 'mojo_str_rstrip',
     }
+    if method == 'expandtabs':
+        tabsize = arg_vals[0] if arg_vals else '8'
+        return 'char *', gen._new_val('char *', f"mojo_str_expandtabs ({cstr_ov}, {tabsize})")
+    # casefold / swapcase / title / capitalize. None of these had a case
+    # here, so each fell to the generic unknown-method stub and answered a
+    # raw int 0 — printed as `0`, which is neither the string nor even a
+    # plausible-looking false. `casefold` is additionally in
+    # _BYTES_STR_ONLY_PREDICATES, because `b'a'.casefold()` is an
+    # AttributeError: the method exists on str and not on bytes.
+    _CSTR_CASE_METHODS: dict[str, str] = {
+        'casefold': 'mojo_str_casefold', 'swapcase': 'mojo_str_swapcase',
+        'title': 'mojo_str_title', 'capitalize': 'mojo_str_capitalize',
+    }
+    if method in _CSTR_CASE_METHODS:
+        return 'char *', gen._new_val(
+            'char *', f"{_CSTR_CASE_METHODS[method]} ({cstr_ov})")
     if method in _CSTR_METHODS:
         # `str.rstrip(chars)` / `str.lstrip(chars)` with a chars argument:
         # the plain mojo_str_rstrip/lstrip only strip whitespace and IGNORE
@@ -4363,9 +4501,6 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
                 _a0v = gen._coerce_to_type(_a0t, 'char *', _a0v)
             return 'char *', gen._new_val('char *', f"{fn} ({cstr_ov}, {_a0v})")
         return 'char *', gen._new_val('char *', f"{_CSTR_METHODS[method]} ({cstr_ov})")
-    if method == 'expandtabs':
-        tabsize = arg_vals[0] if arg_vals else '8'
-        return 'char *', gen._new_val('char *', f"mojo_str_expandtabs ({cstr_ov}, {tabsize})")
     if method == 'join':
         if arg_vals:
             iter_val = arg_vals[0]
@@ -4583,7 +4718,13 @@ def _bytes_is_kind(method: str) -> int | None:
 # value that disagrees with CPython on the only inputs that reach it) and
 # dropping them (the generic unknown-method stub, a silent int 0 that also
 # happens to be `False` for two of the ten and not for the rest).
-_BYTES_STR_ONLY_PREDICATES = ('isprintable', 'isnumeric')
+#
+# `casefold` is here for a different reason but the same answer: it is not a
+# `str`-only method, it is a str-ONLY method (`'abc'.casefold()` is real), so
+# `b'abc'.casefold()` is an AttributeError in CPython. It answered a silent
+# int 0 here — the generic unknown-method stub, printed as `0` rather than
+# even a plausible-looking False.
+_BYTES_STR_ONLY_PREDICATES = ('isprintable', 'isnumeric', 'casefold')
 
 
 def _raise_bytes_str_only_predicate(gen, method: str) -> None:
@@ -4718,14 +4859,30 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
     if method == 'hexdigest':
         return 'char *', gen._call_expr('char *', 'mojo_bytes_hash_hexdigest', [('MojoBytes *', ov)])
     if method == 'hex':
-        # `bytes.hex()` takes NO arguments in Python (unlike `str.hex(sep)`
-        # and unlike `binascii.hexlify`, which is a different function).
+        # `bytes.hex()` takes NO arguments in Python (unlike `str.hex` —
+        # and `str` has no `hex` at all, see the str case below). The
+        # comment claiming that used to be the whole implementation: the
+        # argument was dropped on the floor, so `b'abc'.hex(2)` answered the
+        # same string as `b'abc'.hex()` where CPython raises TypeError.
+        if arg_pairs or kwargs:
+            gen._emit_call(
+                'void', '', 'mojo_raise_type_error',
+                [('char *', gen._intern_string("hex() takes no arguments"))])
         return 'char *', gen._call_expr('char *', 'mojo_bytes_hex', [('MojoBytes *', ov)])
 
     if method in ('startswith', 'endswith') and arg_pairs:
         pv = _coerce_to_bytes(gen, *arg_pairs[0])
-        fn = 'mojo_bytes_startswith' if method == 'startswith' else 'mojo_bytes_endswith'
-        t = gen._call_expr('int', fn, [('MojoBytes *', ov), ('MojoBytes *', pv)])
+        # The optional [start[, end]] window. It was silently DROPPED: the
+        # call site passed only (bytes, prefix), so the comparison ran over
+        # the whole string and `b'abc'.startswith(b'a', 1, 2)` answered True
+        # where CPython says False. `_range_opts` is the same resolver the
+        # find/index/count family below already uses, and the `_from`
+        # variants clamp the window the same way.
+        st, sp = _range_opts(gen, args, kwargs, 1)
+        fn = ('mojo_bytes_startswith_from' if method == 'startswith'
+              else 'mojo_bytes_endswith_from')
+        t = gen._call_expr('int', fn, [('MojoBytes *', ov), ('MojoBytes *', pv),
+                                       ('int64_t', st), ('int64_t', sp)])
         return '_Bool', gen._new_val('_Bool', f'{t} != 0')
 
     # find/index/rindex/rfind/count. The needle is EITHER a bytes value or a
@@ -4741,12 +4898,15 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
             v = gen._to_int64(*arg_pairs[0])
             if method == 'count':
                 fn = 'mojo_bytes_count_int'
-            elif method in ('index', 'rindex'):
-                fn = 'mojo_bytes_rindex_int' if backward else 'mojo_bytes_index_int'
+            elif backward:
+                # find/rfind answer -1 when absent; index/rindex RAISE.
+                # All four used to route to the raising pair, so
+                # `b'abc'.find(b'z')` raised where CPython returns -1 —
+                # the same conflation in the other direction that made
+                # `index` answer -1.
+                fn = 'mojo_bytes_rindex_int' if method == 'rindex' else 'mojo_bytes_rfind_int'
             else:
-                # find/rfind over a byte VALUE is find_of a 1-byte needle;
-                # express it through the int indexer, which is exact.
-                fn = 'mojo_bytes_rindex_int' if backward else 'mojo_bytes_index_int'
+                fn = 'mojo_bytes_index_int' if method == 'index' else 'mojo_bytes_find_int'
             return 'int64_t', gen._call_expr('int64_t', fn,
                                              [('MojoBytes *', ov), ('int64_t', v),
                                               ('int64_t', st), ('int64_t', sp)])
@@ -4763,9 +4923,16 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
             return 'int64_t', gen._call_expr('int64_t', fn,
                                              [('MojoBytes *', ov), ('MojoBytes *', sv)])
         fn = 'mojo_bytes_rfind_from' if backward else 'mojo_bytes_find_from'
-        return 'int64_t', gen._call_expr('int64_t', fn,
-                                         [('MojoBytes *', ov), ('MojoBytes *', sv),
-                                          ('int64_t', st), ('int64_t', sp)])
+        at = gen._call_expr('int64_t', fn,
+                            [('MojoBytes *', ov), ('MojoBytes *', sv),
+                             ('int64_t', st), ('int64_t', sp)])
+        if method in ('index', 'rindex'):
+            # `index`/`rindex` over a BYTES needle are the same search as
+            # over a byte value, with the same difference in failure: -1 for
+            # find/rfind, ValueError for index/rindex. Without this,
+            # `b'abc'.index(b'z')` printed -1 with exit 0.
+            return 'int64_t', gen._new_val('int64_t', f'_mojo_bytes_index_or_raise ({at})')
+        return 'int64_t', at
 
     if method in ('split', 'rsplit'):
         sep = 'NULL'
@@ -4896,9 +5063,37 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
                                              [('MojoBytes *', ov), ('MojoBytes *', pv)])
 
     if method == 'translate' and arg_pairs:
-        tbl = _coerce_to_bytes(gen, *arg_pairs[0])
-        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_translate',
-                                             [('MojoBytes *', ov), ('MojoBytes *', tbl)])
+        # `b.translate(table, delete)` — the SECOND argument (a delete set)
+        # was silently dropped, so `b'hello'.translate(None, b'l')` came
+        # back unchanged where CPython answers `b'heo'`. `None` for either
+        # argument is CPython's own spelling and lowers to a NULL table /
+        # NULL delete, which the runtime distinguishes correctly.
+        tbl = ('NULL' if arg_pairs[0][0] in ('void', 'void *')
+               else _coerce_to_bytes(gen, *arg_pairs[0]))
+        dele = 'NULL'
+        for k, v in (kwargs or []):
+            if k == 'delete':
+                dele = _coerce_to_bytes(gen, *gen.lower_expr(v))
+        if len(arg_pairs) > 1:
+            dele = ('NULL' if arg_pairs[1][0] in ('void', 'void *')
+                    else _coerce_to_bytes(gen, *arg_pairs[1]))
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_translate_del',
+                                             [('MojoBytes *', ov), ('MojoBytes *', tbl),
+                                              ('MojoBytes *', dele)])
+
+    if method == 'expandtabs':
+        # `tabsize` is a named parameter, so `b.expandtabs(tabsize=4)` is
+        # legal Python: the keyword wins, then the first positional, and
+        # omitting both means CPython's default of 8. There was no bytes
+        # case at all, so every spelling answered a raw int 0.
+        tabsize = None
+        for k, v in (kwargs or []):
+            if k == 'tabsize':
+                tabsize = gen._to_int64(*gen.lower_expr(v))
+        if tabsize is None:
+            tabsize = gen._to_int64(*arg_pairs[0]) if arg_pairs else '8'
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_expandtabs',
+                                             [('MojoBytes *', ov), ('int64_t', tabsize)])
 
     _is_kind = _bytes_is_kind(method)
     if _is_kind is not None:
@@ -4992,10 +5187,35 @@ def _lower_memoryview_method(gen, ov: str, method: str, args: list, kwargs=None)
         t = gen._call_expr('int', 'mojo_memoryview_readonly', [('MojoMemoryView *', ov)])
         return '_Bool', gen._new_val('_Bool', f'{t} != 0')
     if method in ('c_contiguous', 'f_contiguous', 'contiguous'):
-        # Genuinely constant: a 1-D byte window over contiguous memory is
-        # C-contiguous by construction, and `f_contiguous`/`contiguous` are
-        # the same fact under this representation.
-        return '_Bool', gen._new_val('_Bool', '1')
+        # A 1-D byte window over contiguous memory is C-contiguous by
+        # construction, and `f_contiguous`/`contiguous` are the same fact
+        # under this representation. Asked of the runtime rather than
+        # folded here, so all three come from ONE place (the other memoryview
+        # attributes are queries) instead of this call site being the only
+        # one that knows the rule.
+        fn = 'mojo_memoryview_' + method
+        t = gen._call_expr('int', fn, [('MojoMemoryView *', ov)])
+        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
+    if method in ('shape', 'strides', 'suboffsets'):
+        # Tuple-valued descriptors. They have no lowering at all, so each
+        # fell to the unknown-member stub and printed its own heap ADDRESS as
+        # a decimal: `mv.shape` printed 4340423136 where CPython prints
+        # `(4,)`. The runtime returns the spelling string, which is exact for
+        # this always-1-D representation.
+        if method == 'suboffsets':
+            return 'char *', gen._call_expr(
+                'char *', 'mojo_memoryview_suboffsets_str', [])
+        t = gen._call_expr('char *', 'mojo_memoryview_' + method + '_str',
+                           [('MojoMemoryView *', ov)])
+        return 'char *', t
+    if method == 'ndim':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_ndim',
+                                         [('MojoMemoryView *', ov)])
+    if method == 'tolist':
+        # The view's elements as a real list of ints; this answered a raw
+        # int 0 from the unknown-member stub.
+        return 'MojoList *', gen._call_expr('MojoList *', 'mojo_memoryview_tolist',
+                                            [('MojoMemoryView *', ov)])
     if method in ('release', '__enter__', '__exit__'):
         # No refcount model — context-manager / release is a no-op that
         # yields the view itself (so `with memoryview(x) as m:` binds m).

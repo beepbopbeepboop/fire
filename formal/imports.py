@@ -867,6 +867,95 @@ def declared_kinds(path: str) -> dict:
     return out
 
 
+def _from_import_bindings(stmts) -> list:
+    """[(bound_name, original_name, module_as_spelled)] per imported name.
+
+    The primitive both readers of a `from … import …` share, so the two cannot
+    come to disagree about what the statement says. TWO names and not one,
+    because `x as y` is two facts and the two readers want different ones: this
+    file binds `y`, while the module being re-exported is whatever DEFINED `x`,
+    and only a table keyed on the definition's own name can be matched against
+    a library's export set later. The module is recorded AS SPELLED (`.sub`,
+    `pkg.sub`) because nothing has resolved it here and a qualified spelling is
+    a different question from a bound name."""
+    out = []
+    for st in stmts or []:
+        if not isinstance(st, F.FromImportStmt):
+            continue
+        for pair in (st.names or []):
+            if isinstance(pair, (tuple, list)):
+                original = pair[0] if pair else None
+                bound = pair[1] if len(pair) > 1 and pair[1] else original
+            else:
+                original = bound = pair
+            if isinstance(original, str) and original:
+                out.append((bound, original, st.module))
+    return out
+
+
+def _defined_names(stmts) -> set:
+    """The names this module DEFINES — a function or a struct's name."""
+    return {st.name for st in (stmts or [])
+            if isinstance(st, (F.FunctionDef, F.StructDef))}
+
+
+def imported_bound_names(stmts) -> dict:
+    """{bound_name: module} for every name a `from … import …` BINDS here.
+
+    Every one of them, including the private ones, which is the whole difference
+    from `reexported_names`: that table answers "what does this module publish
+    under its own name", and a leading underscore is exactly what stops a name
+    being published. This one answers "which names in this file come from
+    somewhere else", and `from ._b64encode import _b64encode` binds
+    `_b64encode` here whatever it is allowed to export. The two readers used to
+    be the same loop with a different filter, which is the pair that agrees
+    until somebody changes one of them.
+
+    A name this module also DEFINES is not in it, for the reason
+    `reexported_names` gives and not for the export's sake: a bare call resolves
+    by name, so `def take_it` here is what a call of `take_it` reaches, and the
+    submodule's same-named symbol is irrelevant to it.
+
+    Read from the AST alone, so it needs no resolution and no file: the caller
+    is a pass that runs BEFORE `_resolve_imports` (`_prepare_functions`), and
+    the question it asks — is this bare callee a name from another module? — is
+    answerable from the import statements themselves. Whether that module
+    actually builds is a different question, asked later and by someone else;
+    this table does not claim it does.
+
+    `import a.b` binds the MODULE and not a name, so it contributes nothing,
+    here or in `reexported_names`."""
+    defined = _defined_names(stmts)
+    out: dict = {}
+    for bound, _original, module in _from_import_bindings(stmts):
+        if bound and bound not in defined:
+            out.setdefault(bound, module)
+    return out
+
+
+def star_imported_modules(stmts) -> tuple:
+    """The modules this file writes `from … import *` for, in source order.
+
+    The complement of `imported_bound_names`, and it exists because that table
+    CANNOT answer the question a star import raises.  `from lib import *` parses
+    to a `FromImportStmt` with an EMPTY `names` list — there is nothing in the
+    AST to enumerate — so the set of names it binds is `lib`'s EXPORT SET,
+    which is a fact about another module's compilation and about a library that
+    `_resolve_imports` has not built yet.  22 files of the standard library
+    write one.
+
+    A caller that wants to say "this callee is not defined here and not named by
+    any import" has to say what this returns in the same breath, or it is
+    claiming nothing binds the name when a star import may well bind it."""
+    out = []
+    for st in stmts or []:
+        if isinstance(st, F.FromImportStmt) and not (st.names or []) \
+                and st.module:
+            if st.module not in out:
+                out.append(st.module)
+    return tuple(out)
+
+
 def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
     """{name: (module, kind)} for the names this module binds by RE-EXPORT.
 
@@ -892,22 +981,37 @@ def reexported_names(stmts, kinds_by_module: dict = None) -> dict:
     through a genuinely missing function.
 
     `import a.b` binds the MODULE, not a name, so it contributes nothing here;
-    only `from ... import ...` does."""
-    defined = {st.name for st in (stmts or [])
-               if isinstance(st, (F.FunctionDef, F.StructDef))}
+    only `from ... import ...` does. The loop is `_from_import_bindings`, shared
+    with `imported_bound_names`, and the three filters below are what make this
+    table a PUBLICATION list rather than a binding list: a name this module
+    defines, one `_is_inert_module` accepts, and a private name. The second of
+    those is applied to the imported NAME and not to the module the statement
+    names, which is what it has always been applied to and is not what its own
+    name suggests — so `from __future__ import annotations` is still listed
+    here, inert module or not. Pre-existing, harmless (a manifest entry no
+    consumer asks for), and not this reader's to change while it is rewriting
+    the loop underneath.
+
+    KEYED ON THE DEFINITION'S OWN NAME, not on the alias — `from x import f as
+    g` is recorded as `f` — which is what this table has always done and is
+    deliberate in one direction and a known gap in the other. Deliberate: an
+    export is matched against a library's export set by the name the DEFINING
+    module gave it. A gap: the name this file actually binds is `g`, so an
+    aliased re-export is published under a spelling no consumer of this module
+    can ask for. `imported_bound_names` records `g` for exactly that reason, and
+    fixing this table to match would change what every dylib manifest already
+    on disk claims its module exports — a manifest-content change for callers to
+    re-derive, which is not this reader's to make silently."""
+    defined = _defined_names(stmts)
     kinds_by_module = kinds_by_module or {}
     out: dict = {}
-    for st in stmts or []:
-        if not isinstance(st, F.FromImportStmt):
+    for _bound, name, module in _from_import_bindings(stmts):
+        if (name in defined or _is_inert_module(name)
+                or name.startswith("_")):
             continue
-        for pair in (st.names or []):
-            name = pair[0] if isinstance(pair, (tuple, list)) else pair
-            if (isinstance(name, str) and name and name not in defined
-                    and not _is_inert_module(name)
-                    and not name.startswith("_")):
-                out.setdefault(name, (st.module,
-                                      kinds_by_module.get(st.module, {})
-                                      .get(name, "unknown")))
+        out.setdefault(name, (module,
+                              kinds_by_module.get(module, {})
+                              .get(name, "unknown")))
     return out
 
 

@@ -5975,7 +5975,6 @@ def main():
         (`UnsafePointer[T](...)` / `.address`). Before this, a struct
         capture was refused outright, so the async def fell through to the
         C++ path and failed to compile at all.
-        See bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md.
         """
         global _PASS, _FAIL
         name = "nested_async_struct_capture_boxes_pointer"
@@ -6039,6 +6038,107 @@ def outer():
     t.wait()
 """,
         "capture box cannot be threaded into a driven consumer")
+
+    # The SAME shape on the C++ backend (`MOJO_CORO=cpp`, the escape
+    # hatch), which the assertion above does not reach: the guard it
+    # exercises -- `_UNTHREADABLE_NESTED_ASYNC_GENS` -- used to be filled
+    # ONLY by the stack-switch lowering pass, so on the C++ backend the set
+    # was always empty, the guard never fired, and the program generated a
+    # .cpp referring to a name that does not exist in that scope. Measured
+    # through a real `fire.py build`:
+    #
+    #     x4_gen.cpp:136:5: error: 'acc' was not declared in this scope
+    #     x4_gen.cpp:136:5: note: did you mean 'acct'?
+    #
+    # i.e. exactly the class of error the set was introduced to replace
+    # with an honest message, present on one backend and absent on the
+    # other. So the assertion is made against the C++ backend explicitly,
+    # and it is a REFUSAL at codegen time rather than a codegen that later
+    # fails to compile -- the difference that made the original a bug.
+    def test_nested_async_gen_drive_refused_on_cpp_backend():
+        global _PASS, _FAIL
+        import gimple_codegen
+        name = "nested_async_gen_drive_refused_on_cpp_backend"
+        src = """\
+def outer():
+    var acc = 0
+    async def gen():
+        acc = acc + 1
+        yield 10
+    async def consume():
+        async for x in gen():
+            acc = acc + x
+    var t = create_task(consume())
+    t.wait()
+"""
+        try:
+            with _force_cpp_coro():
+                gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            if "capture box cannot be threaded into a driven consumer" in str(e):
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}: wrong error: {e}")
+                _FAIL += 1
+            return
+        print(f"FAIL  {name}: the C++ backend generated a unit for a nested "
+              f"async generator it has no capture model for, instead of "
+              f"refusing it")
+        _FAIL += 1
+
+    test_nested_async_gen_drive_refused_on_cpp_backend()
+
+    # ... and the capture-LESS neighbour of the same shape, which must keep
+    # COMPILING on the C++ backend. This is the boundary the fix must not
+    # overshoot: `_UNTHREADABLE_NESTED_ASYNC_GENS` is about the C++
+    # emitter's missing capture MODEL, and a nested async generator that
+    # closes over nothing needs no model. It is also the only member of this
+    # family that runs correctly on the C++ backend today, so refusing it
+    # would trade a working program for a message. Asserted on the
+    # generated C++ COMPILING (g++ -fsyntax-only), which is the assertion
+    # that would have caught the bug above had it been written here.
+    def test_nested_async_gen_no_capture_drive_compiles_on_cpp_backend():
+        global _PASS, _FAIL
+        import gimple_codegen
+        from build_config import find_gxx
+        name = "nested_async_gen_no_capture_drive_compiles_on_cpp_backend"
+        src = """\
+def outer():
+    var acc = 0
+    async def gen():
+        yield 1
+        yield 2
+    async def consume():
+        async for x in gen():
+            acc = acc + x
+    var t = create_task(consume())
+    t.wait()
+"""
+        try:
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: wrongly refused a capture-less nested async "
+                  f"generator: {e}")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src)
+            cpp_path = f.name
+        r_cpp = subprocess.run(
+            [find_gxx(), '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+            capture_output=True, text=True)
+        if r_cpp.returncode == 0:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: generated .cpp does not compile")
+            for line in r_cpp.stderr.splitlines():
+                print(f"      {line}")
+            _FAIL += 1
+
+    test_nested_async_gen_no_capture_drive_compiles_on_cpp_backend()
 
     # ------------------------------------------------------------------
     # A container-typed constructor argument. bugs/hard/
@@ -6450,6 +6550,107 @@ def main():
             _FAIL += 1
             return
         print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_every_funcptr_initializer_has_a_definition():
+        """Every `_funcptr_X = (void *)X` initializer in the output must have a
+        matching `X` DEFINITION in the same file.
+
+        Shape-independent, and it is the check the nested-`def`-lambda bug
+        asked for and did not have: `_lower_LambdaExpr` lifts a lambda's C
+        body into `gen._lambda_parts` and only `gen_module` flushes that side
+        table, and the nested-closure emission path flushed nothing — so a
+        lambda inside a nested `def` was declared and had its address taken
+        and never defined, which is an `Undefined symbols` LINK failure:
+
+            Undefined symbols for architecture arm64:
+              "__make_make_lambda_1", referenced from:
+                  __funcptr__make_make_lambda_1 in ...o
+
+        Asserted over a spread of shapes (lambda at top level, in a plain
+        `def`, in a nested `def`, in a struct method, a nested `def` inside a
+        struct method, and a two-deep nest), because the
+        flush points are per-path and a single shape only pins one of them.
+        """
+        global _PASS, _FAIL
+        name = "every_funcptr_initializer_has_a_definition"
+        cases = {
+            "top_level_lambda": """\
+d = {}
+d['k'] = lambda a, b: a + b
+print(d['k'](1, 2))
+""",
+            "def_body_lambda": """\
+def f(x):
+    return lambda y: y + x
+print(f(1)(2))
+""",
+            "nested_def_lambda": """\
+def _make():
+    def make():
+        return lambda x: x + 1
+    return make
+
+def main():
+    print(_make()()(1))
+main()
+""",
+            "struct_method_lambda": """\
+class K:
+    def __init__(self, n):
+        self.n = n
+    def get(self):
+        return lambda: self.n
+
+def main():
+    print(K(7).get()())
+main()
+""",
+            "nested_def_in_struct_method": """\
+class K:
+    def __init__(self, n):
+        self.n = n
+    def outer(self):
+        def inner():
+            return lambda: self.n
+        return inner()
+
+def main():
+    print(K(9).outer()())
+main()
+""",
+            "two_deep_nested_def_lambda": """\
+def a():
+    def b():
+        def c():
+            return lambda: 5
+        return c
+    return b
+
+def main():
+    print(a()()()())
+main()
+""",
+        }
+        import re as _re
+        for label, src in cases.items():
+            c = compile_to_gimple(src)
+            init = set(_re.findall(r'_funcptr_([A-Za-z0-9_]+)\s*=\s*\(void\s*\*\)\s*'
+                                   r'([A-Za-z0-9_]+)', c))
+            missing = []
+            for var, sym in sorted(init):
+                # A definition is the symbol appearing at the start of a
+                # line as a return type + name + '(' — a declaration ends in
+                # ';' and a definition's body opens with '{'.
+                if not _re.search(r'\b' + _re.escape(sym) + r'\s*\([^;]*\)\s*\{',
+                                  c, _re.S):
+                    missing.append(f'{var} -> {sym}')
+            if missing:
+                print(f"FAIL  {name}[{label}]: funcptr initializer with no "
+                      f"definition in the same file: {', '.join(missing)}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}  ({len(cases)} shapes)")
         _PASS += 1
 
     def test_user_defined_dunder_repr_value():
@@ -6878,6 +7079,382 @@ print("%r" % p)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_dedup_variadic_externs_cache_is_a_faithful_parse():
+        """`_dedup_variadic_externs`'s memo must never change what it
+        answers — including the entries it DERIVES for the text it returns
+        (emit_infra's `_record_output_parse`: the parse of `'\n'.join(parts)`
+        taken from the parts' own entries, so the parent level, which inlines
+        exactly that text, does not rescan it).
+
+        The failure mode this guards is invisible in the compiled output
+        until it isn't: a derived entry that is a SUPERSET of the text's real
+        parse makes the next level drop a variadic declaration it should have
+        kept, i.e. a wrong artifact, not a slow one. So the invariant checked
+        is on the CACHE, not on speed: for every text the function has ever
+        published, the entry must equal an independent, uncached parse of that
+        same text.
+
+        `parts` is driven through the shape that makes the derivation
+        observable at all — each level's parts CONTAIN the previous level's
+        output blob — over hand-built edge shapes (a part whose trailing
+        fragment merges with the next part's leading one, in every extern
+        flavor) plus a randomized corpus that leaves ~half its parts
+        unterminated on purpose. The reference implementation here is a
+        verbatim transcription of the pre-derivation body with a private
+        memo, so it cannot drift with the code under test the way a
+        hand-written expectation list would."""
+        global _PASS, _FAIL
+        name = "dedup_variadic_externs_cache_is_a_faithful_parse"
+        import mojo.backend_gimple.emit_infra as ginf
+        import random
+
+        ref_cache: dict = {}
+
+        def _ref_is_extern_decl(stmt):
+            for line in stmt.split('\n'):
+                line = line.strip()
+                if line == 'extern' or line.startswith('extern ') \
+                        or line.startswith('extern"'):
+                    return True
+            return False
+
+        def _ref_parse(part):
+            concrete, variadic = [], []
+            for stmt in part.split(';'):
+                if not _ref_is_extern_decl(stmt):
+                    continue
+                paren = stmt.find('(')
+                if paren < 0:
+                    continue
+                close = stmt.rfind(')')
+                if close < paren:
+                    continue
+                params = stmt[paren + 1:close].strip()
+                head_toks = stmt[:paren].strip().split()
+                if not head_toks:
+                    continue
+                cname = head_toks[-1].lstrip('*')
+                if params == '...':
+                    variadic.append(cname)
+                elif params != '':
+                    concrete.append(cname)
+            return concrete, variadic
+
+        def _ref_dedup(parts):
+            concrete, variadic_by_part = set(), []
+            for p in parts:
+                entry = ref_cache.get(p)
+                if entry is None:
+                    entry = _ref_parse(p)
+                    ref_cache[p] = entry
+                for cname in entry[0]:
+                    concrete.add(cname)
+                variadic_by_part.append(entry[1])
+            if not concrete:
+                return '\n'.join(parts)
+            kept = []
+            for i in range(len(parts)):
+                drop = False
+                for vname in variadic_by_part[i]:
+                    if vname in concrete:
+                        drop = True
+                        break
+                if not drop:
+                    kept.append(parts[i])
+            return '\n'.join(kept)
+
+        edges = [
+            'extern int foo (int);', 'extern int foo (...);',
+            'extern', 'extern "C" int64_t bar (int64_t);',
+            'extern "C" int64_t bar (...);', 'extern int * baz (char *, int);',
+            'extern int unbalanced (int;', 'extern int tail_no_semi (int)',
+            'extern int no_paren_decl', '', '   ', '\n',
+            'static int helper (int x) { return x; }',
+            '#line 3 "Lib/test/ffi/test_external_call.mojo"\nextern int only_here (...);',
+            '#line 9 "somewhere/test_external_call.mojo"\nstd_testing___init___assert_false (_t5);',
+            'extern int dup (int);\nextern int dup (...);',
+            'extern int multi\n  (\n  int\n)\n;', 'extern void void_ret ();',
+            'extern int ml_variadic (...)\n;', 'extern char * ppp (char ***);',
+            # the merge shapes: two adjacent parts whose trailing/leading
+            # fragments join into one `;`-delimited fragment
+            'extern int a (int', 'extern int a (...)', 'extern int b (int)',
+            'extern int b (...)', '\nextern (int)', 'extern struct X y',
+        ]
+        frags = [
+            'int f{i} (int a);', 'int f{i} (...);', 'char * g{i} (char *);',
+            'void h{i} (void);', 'extern int f{i} (int a);',
+            'extern int f{i} (...);',
+            'extern "C" int64_t k{i} (int64_t, int64_t);',
+            'extern "C" int64_t k{i} (...);',
+            'static int local{i} (int x) {{ return x + {i}; }}', '',
+        ]
+
+        def _rand_part(rng, i):
+            r = rng.random()
+            if r < 0.08:
+                return rng.choice(['', ' ', '\n', ';\n', '  \n'])
+            body = frags and rng.choice(frags).format(i=i * 10)
+            for j in range(rng.randint(0, 2)):
+                body += rng.choice([';', ';\n', ';  ', ' ']) \
+                    + rng.choice(frags).format(i=i * 10 + j + 1)
+            if rng.random() < 0.5:
+                body += rng.choice([';', ';\n', '; ', ' ', ''])
+            if rng.random() < 0.25:
+                # deliberately unterminated trailing fragment: the shape that
+                # can merge with the NEXT part's leading fragment
+                body += rng.choice(['extern int late (int', 'extern int late (...)',
+                                    'trailing text', 'f (int x) {'])
+            return body
+
+        ref_cache.clear()
+        ginf._DEDUP_EXTERN_PARTS_CACHE.clear()
+
+        def _compare(tag, parts):
+            want = _ref_dedup(list(parts))
+            got = ginf._dedup_variadic_externs(list(parts))
+            if want != got:
+                print(f"FAIL  {name} [{tag}]: dedup answer changed\n"
+                      f"  parts={parts!r}\n  reference={want!r}\n"
+                      f"  actual={got!r}")
+                return False
+            if ginf._dedup_variadic_externs(list(parts)) != want:
+                print(f"FAIL  {name} [{tag}]: a WARM cache changed the answer "
+                      f"(memo must not be order- or call-count-dependent)")
+                return False
+            return True
+
+        # hand-built arrangements, every adjacent pair (the merge shape is a
+        # pair property), and the whole corpus
+        ok = _compare('edges-all', edges)
+        for i in range(len(edges) - 1):
+            ok &= _compare(f'pair-{i}', [edges[i], edges[i + 1]])
+            ok &= _compare(f'pair-rev-{i}', [edges[i + 1], edges[i]])
+        ok &= _compare('triple-merge', ['extern int a (int', 'extern int b (int)',
+                                        'extern int c (...);'])
+        ok &= _compare('triple-merge2', ['extern int a (int', 'extern int a (...);'])
+        ok &= _compare('empty-corpus', [])
+        if not ok:
+            _FAIL += 1
+            return
+
+        # multi-level: level k's parts contain level k-1's output, which is
+        # the only shape in which a wrong derived entry is observable
+        rng = random.Random(20260930)
+        for trial in range(120):
+            r2 = random.Random(trial)
+            blobs = []
+            for lvl in range(rng.randint(2, 6)):
+                parts = list(blobs) + [_rand_part(r2, lvl * 100 + j)
+                                       for j in range(r2.randint(1, 6))]
+                want = _ref_dedup(list(parts))
+                got = ginf._dedup_variadic_externs(list(parts))
+                if want != got:
+                    print(f"FAIL  {name} [trial {trial} level {lvl}]: "
+                          f"dedup answer changed once a derived entry was in "
+                          f"play\n  parts={parts!r}")
+                    _FAIL += 1
+                    return
+                blobs.append(got)
+            for key, entry in ginf._DEDUP_EXTERN_PARTS_CACHE.items():
+                ref_entry = _ref_parse(key)
+                if set(ref_entry[0]) != set(entry[0]) \
+                        or list(ref_entry[1]) != list(entry[1]):
+                    print(f"FAIL  {name} [trial {trial}]: published entry is "
+                          f"not the text's real parse\n  text={key[:300]!r}\n"
+                          f"  reference={ref_entry!r}\n  actual={entry!r}")
+                    _FAIL += 1
+                    return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_struct_unpack_computed_format_compiles():
+        """`struct.unpack(fmt, buf)` whose format is a VARIABLE must not
+        crash the compiler.
+
+        `_returns_kinds_valued` (mojo/backend_gimple/module_gen.py) asked
+        `node.args[0].value` — an attribute only a string-literal node has —
+        as soon as it saw a `struct.unpack*` call, so `struct.unpack(fmt,
+        buf)` raised `AttributeError: 'IdentExpr' object has no attribute
+        'value'` and took the WHOLE build down. That is not a rare shape:
+        it is how every module that forwards a caller-supplied format
+        writes it, and it is what refused Lib/zipfile/__init__.py,
+        Lib/shutil.py, Lib/tempfile.py and four Lib/importlib/resources/
+        modules from the readers.py closure (see
+        bugs/COMPILE_FAIL_importlib_resources_readers.md). Its own
+        docstring already said "only literal formats answer"; the code did
+        not.
+
+        Asserts only that the module compiles, because that is the whole of
+        the regression: the answer for a computed format is "no static
+        kinds", which is a compile-time fact and not observable in the
+        output. The literal half of the same branch is covered by
+        `test_struct_unpack_computed_format_keeps_literal_half`."""
+        global _PASS, _FAIL
+        name = "struct_unpack_computed_format_compiles"
+        src = '''\
+import struct
+
+def unpack_it(fmt, buf):
+    return struct.unpack(fmt, buf)
+
+def main():
+    print(unpack_it("<if", b"abcd"))
+
+main()
+'''
+        try:
+            compile_to_gimple(src)
+        except Exception as e:
+            print(f"FAIL  {name}: {type(e).__name__}: {e}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_struct_unpack_computed_format_keeps_literal_half():
+        """The same fix must not have turned the LITERAL half off: a
+        literal mixed format still has to be recognised as kinds-carrying,
+        because that is the answer the per-slot-kinds table exists to
+        record. A guard that simply returned False for every format would
+        satisfy the crash test above and silently disable the feature.
+
+        Both answers come out of ONE expression, so they are asserted on the
+        same source rather than by re-deriving the predicate: the two
+        functions differ ONLY in whether their format argument is a literal
+        or a variable, so a regression that widened the new guard (or a
+        pre-existing bug that narrowed it) cannot pass one and fail the
+        other unnoticed."""
+        global _PASS, _FAIL
+        name = "struct_unpack_computed_format_keeps_literal_half"
+        src = '''\
+import struct
+
+def literal(buf):
+    return struct.unpack("<if", buf)
+
+def computed(fmt, buf):
+    return struct.unpack(fmt, buf)
+'''
+        mg = __import__('mojo.backend_gimple.module_gen', fromlist=['x'])
+        stmts = gimple_codegen.Parser(
+            gimple_codegen.py_tokenize(src)).parse_module()
+        answers = {getattr(st, 'name', None):
+                   mg._infer_return_maybe_kinds(None, st.body)
+                   for st in stmts if getattr(st, 'name', None) in
+                   ('literal', 'computed')}
+        want = {'literal': True, 'computed': False}
+        bad = {k: answers.get(k) for k, v in want.items() if answers.get(k) is not v}
+        if bad:
+            print(f"FAIL  {name}: wrong static-kinds answer(s) {bad} "
+                  f"(want {want}); a computed format must answer False and a "
+                  f"literal mixed format True")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_cursor_advance_has_no_cast_operand_in_gimple():
+        """A `+ 1` advance must not put a C-style cast where gimple wants
+        an operand.
+
+        Five cursor/counter advances (the `next(it)` cursor, the
+        `for x in it:` cursor, the regex finditer and findall scan
+        positions, and the enumerate counter) spelled their increment
+        `cur + (int64_t)1`. A C-style cast is not a legal gimple OPERAND,
+        so inside a `__GIMPLE`-tagged function (a lifted closure, which is
+        what every nested `def` becomes) that is a hard gimplification
+        error, "expected expression before '(' token" — and a gimple PARSE
+        error is not recoverable per function, so it takes the whole
+        translation unit with it. Tools/cases_generator/analyzer.py was
+        refused on exactly this, at every `idx + 1` of its two
+        `enumerate(tokens)` loops.
+
+        `1LL` is the tree's existing width-correct int64_t literal idiom
+        (see `_gen_for_range`'s own `step_v`) and IS a legal operand, so
+        the whole expression becomes valid gimple. Nothing about the
+        VALUE changes — which is the point of asserting CPython's answer
+        on the same program rather than only "it compiles": the fix moves
+        one character class, and a wrong answer there would be exactly
+        the kind of silent wrong value a cast-operand fix can introduce.
+
+        Nested `def`s on purpose: a top-level function's body is ordinary
+        C, which GCC lowers to gimple itself and so tolerates the cast
+        syntax there. Only the `__GIMPLE` bodies reject it, so a
+        top-level version of this program passes on the broken tree and
+        would prove nothing."""
+        global _PASS, _FAIL
+        name = "cursor_advance_has_no_cast_operand_in_gimple"
+        src = '''\
+def outer(items):
+    def take(n):
+        it = iter(items)
+        for _ in range(n):
+            print(next(it))
+    def drain():
+        it = iter(items)
+        for x in it:
+            print(x)
+    take(2)
+    drain()
+
+outer([10, 20, 30])
+'''
+        with tempfile.TemporaryDirectory() as td:
+            entry = os.path.join(td, 'cursor_advance.py')
+            with open(entry, 'w') as fh:
+                fh.write(src)
+            py = subprocess.run([sys.executable, entry], capture_output=True,
+                                text=True, cwd=td, timeout=60)
+            if py.returncode != 0 or not py.stdout:
+                print(f"FAIL  {name}: CPython on the same program exited "
+                      f"{py.returncode} printing {py.stdout!r} "
+                      f"({py.stderr[:300]}) — the test program itself is "
+                      f"wrong, not the compiler")
+                _FAIL += 1
+                return
+            want = py.stdout
+            results = []
+            for mode in ('single-TU', 'link-mode'):
+                try:
+                    c_src = gimple_codegen._run_pipeline(
+                        src, filename=entry,
+                        **({'do_imports': True} if mode == 'single-TU'
+                           else {'link_mode': True}))[0]
+                except Exception as e:
+                    print(f"FAIL  {name} [{mode}]: the compiler raised "
+                          f"{type(e).__name__}: {e}")
+                    _FAIL += 1
+                    return
+                c_file = os.path.join(td, f'cur_{mode}.c')
+                exe = os.path.join(td, f'cur_{mode}.exe')
+                with open(c_file, 'w') as fh:
+                    fh.write(c_src)
+                cc = subprocess.run(
+                    [GCC, '-fgimple', f'-I{_RUNTIME_INC}', '-o', exe, c_file,
+                     os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
+                    capture_output=True, text=True, timeout=300)
+                if cc.returncode != 0:
+                    errs = [ln for ln in cc.stderr.splitlines()
+                            if ' error:' in ln]
+                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                          + "\n".join(errs[:6]))
+                    _FAIL += 1
+                    return
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     timeout=30)
+                results.append((mode, run.stdout))
+            bad = [m for m, out in results if out != want]
+            if bad:
+                print(f"FAIL  {name}: {', '.join(bad)} printed "
+                      f"{dict(results)[bad[0]]!r}, CPython printed {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    test_cursor_advance_has_no_cast_operand_in_gimple()
+    test_struct_unpack_computed_format_compiles()
+    test_struct_unpack_computed_format_keeps_literal_half()
     test_ctor_arg_container_literal_field_is_container_typed()
     test_ctor_arg_dict_and_set_literal_fields_are_container_typed()
     test_ctor_arg_mixed_container_and_scalar_stays_int64()
@@ -6893,6 +7470,8 @@ print("%r" % p)
     test_aliased_and_reexported_imports_resolve_to_the_defining_module()
     test_gen_taking_middle_helper_is_never_reached_by_a_local_import()
     test_dotted_import_two_hop_attribute_call()
+    test_dedup_variadic_externs_cache_is_a_faithful_parse()
+    test_every_funcptr_initializer_has_a_definition()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

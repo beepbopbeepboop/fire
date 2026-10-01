@@ -332,6 +332,45 @@ def test_a_local_specialization_runs_and_matches_cpython(tmpdir):
           f"callee as a leading argument")
 
 
+# ── 4. the OTHER bracketed callee, which is not a specialization ─────────────
+
+def test_an_external_call_template_is_not_refused_as_a_specialization(tmpdir):
+    """The two bracket-that-are-callees do not collide, on either machine.
+
+    `external_call["sym", RetType](args)` and `f[a, b](args)` are the SAME AST
+    shape — a `CallExpr` whose callee is a `SubscriptExpr` — and the refusals
+    that keep them apart are both keyed on that shape alone. So this is a
+    regression test for an interaction rather than for a construct: the
+    specialization refusal was landed without the `is_extern_call` guard, and it
+    then fired on the `external_call` it is supposed to be silent about. It
+    fired on every one of them — 15 of the 29 cases in
+    `test_formal_external_call.py` failed the moment the two landed in one tree,
+    and `std/os/env.mojo`'s 55 files went back to refusing on a construct that
+    lowers.
+
+    The two differ by a question only `M.is_external_call_template` can answer,
+    so that is what decides it, and a CALLEE's brackets are not read as a
+    comptime parameter list. Pinned on BOTH architectures because the guard is
+    written twice and either copy can lose it.
+    """
+    src = ("def main() -> Int32:\n"
+           "    var n = external_call[\"strlen\", Int32](\"abcd\")\n"
+           "    print(n)\n"
+           "    return 0\n")
+    for arch in ARCHES:
+        root = os.path.join(tmpdir, f"xc_{arch}")
+        os.makedirs(root)
+        with open(os.path.join(root, "prog.mojo"), "w") as f:
+            f.write(src)
+        build(root, arch=arch)
+        code, out = run_image(root, arch)
+        check(code == 0,
+              f"[{arch}] the image exited {code}: {out[:300]}")
+        check(out == "4",
+              f"[{arch}] printed {out!r}, not '4' — the C symbol's return "
+              f"value did not reach the program")
+
+
 TESTS = [
     ("a specialization's root is a callee, not a read",
      test_a_specialization_root_is_a_callee_not_a_read),
@@ -345,6 +384,8 @@ TESTS = [
      test_both_architectures_refuse_the_same_construct_the_same_way),
     ("a local specialization lowers and matches CPython",
      test_a_local_specialization_runs_and_matches_cpython),
+    ("an external_call template is not refused as a specialization",
+     test_an_external_call_template_is_not_refused_as_a_specialization),
 ]
 
 

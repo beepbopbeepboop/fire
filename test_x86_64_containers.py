@@ -9,10 +9,21 @@ for-in, unpacking, string subscripts — which is nearly all of the
 that assembles and computes the wrong number is invisible to both.
 
 So: each case is a whole program whose entry function returns a value, the
-expected value is written down here from Python's own answer, and the
-x86-64 binary is executed under Rosetta 2 with the exit status compared.
-`--arch arm64` runs the same cases through the arm64 backend, which is how a
-mismatch between the two is told apart from a bug in both.
+expected value is written down here, and the x86-64 binary is executed under
+Rosetta 2 with the exit status compared. `--arch arm64` runs the same cases
+through the arm64 backend, which is how a mismatch between the two is told
+apart from a bug in both.
+
+Two things about that comparison, both of which have cost a wrong reading:
+
+  * A POSIX wait status is 8 bits wide, so an entry returning 750 exits 238.
+    Every expectation therefore has to be in 0..255, and `main` REPORTS one
+    that is not rather than comparing a truncated status against the real
+    answer (which reads as a codegen bug in the backend rather than as the
+    harness). A case that wants to observe a bigger number has to fold it
+    (`len(xs)`, a comparison, a modulo) before returning.
+  * The expected value is checked against CPython's answer for the same
+    source, so it cannot drift into being a second hand's arithmetic.
 
     python3 test_x86_64_containers.py [--arch x86_64]
 """
@@ -233,6 +244,109 @@ CASES = [
         "    for x in xs:",
         "        t += x",
         "    return t"), 100),         # n=5: 5*10 + 5*10
+    # The shapes that separate "one range() in the function" from "two".
+    # `_emit_range_list`'s `jge` used to target a label every range() in the
+    # function shared, so the FIRST one jumped into the SECOND one's abs
+    # block and continued from ITS `jmp div_label` — the first range's blob
+    # was never built and its base never stored, and the outer generator
+    # looped over a register nothing had written. 2x2 hides it (both ranges
+    # are the same length, so the borrowed block computes the same count);
+    # these do not.
+    ("nested-comprehension-len", _p(
+        "def f(n):",
+        "    xs = [i + j for i in range(n) for j in range(n)]",
+        "    return len(xs)"), 25),    # n=5: 5*5
+    ("nested-comprehension-5x5", _p(
+        "def f(n):",
+        "    xs = [i + j for i in range(n) for j in range(n)]",
+        "    t = 0",
+        "    for x in xs:",
+        "        t += x",
+        "    return t"), 100),        # n=5: 25 elements, 5*10 + 5*10
+    # Three generators put THREE range() calls in one function, which is the
+    # shape the shared label broke worst: the count is the cheap observable
+    # and it is in the exit-status domain (a POSIX status is 8 bits wide, so
+    # the sum 750 is not expressible here — see the module docstring).
+    ("nested-comprehension-three-generators", _p(
+        "def f(n):",
+        "    xs = [i + j + k for i in range(n) for j in range(n)"
+        " for k in range(n)]",
+        "    return len(xs)"), 125),   # n=5: 5*5*5
+    ("nested-comprehension-condition", _p(
+        "def f(n):",
+        "    xs = [i + j for i in range(n) for j in range(n)"
+        " if (i + j) % 2 == 0]",
+        "    t = 0",
+        "    for x in xs:",
+        "        t += x",
+        "    return t"), 52),         # n=5: the even-sum pairs
+    ("nested-comprehension-j-only", _p(
+        "def f(n):",
+        "    xs = [j for i in range(n) for j in range(n)]",
+        "    return len(xs)"), 25),
+    ("two-ranges-one-function", _p(
+        "def f(n):",
+        "    a = range(3)",
+        "    b = range(4)",
+        "    t = 0",
+        "    for x in a:",
+        "        t += x",
+        "    for x in b:",
+        "        t += x",
+        "    return t"), 9),           # 0+1+2 + 0+1+2+3
+    ("nested-comprehension-literal-inner", _p(
+        "def f(n):",
+        "    xs = [i + j for i in range(n) for j in [10, 20]]",
+        "    t = 0",
+        "    for x in xs:",
+        "        t += x",
+        "    return t"), 170),        # n=5: 5*(10+20) + 0+1+2+3+4
+    # A comprehension is a blob of the same shape as a literal, so subscripting
+    # one is a subscript. arm64 refused the base (`subscript base must be a
+    # list/tuple name or literal`) while x86-64 computed it — the two backends
+    # disagreeing about one program.
+    ("comprehension-subscript", _p(
+        "def f(n):",
+        "    return [i * 2 for i in [1, 2, 3]][2]"), 6),
+    # index 15 of a 5x5 is (3, 0) — the index arithmetic is the case's, and
+    # the CPython check below is what says so.
+    ("nested-comprehension-subscript", _p(
+        "def f(n):",
+        "    return [i + j for i in range(n) for j in range(n)][15]"), 3),
+    # A dict comprehension's SUBSCRIPT is a key lookup. Both backends asked
+    # `isinstance(base, DictExpr)`, which a dict comprehension is not (it is a
+    # Comprehension with kind='dict'), so `d` was treated as a plain blob and
+    # `d[k]` indexed the pair array: right len, right keys, the key read as
+    # the value under it.
+    ("dict-comprehension-lookup-first", _p(
+        "def f(n):",
+        "    d = {i: 100 + i for i in range(3)}",
+        "    return d[0]"), 100),
+    ("dict-comprehension-lookup-middle", _p(
+        "def f(n):",
+        "    d = {i: 100 + i for i in range(3)}",
+        "    return d[1]"), 101),
+    ("dict-comprehension-lookup-last", _p(
+        "def f(n):",
+        "    d = {i: 100 + i for i in range(3)}",
+        "    return d[2]"), 102),
+    ("dict-comprehension-len", _p(
+        "def f(n):",
+        "    d = {i: 100 + i for i in range(3)}",
+        "    return len(d)"), 3),
+    # A MISSING key exits 1: this path has no exception runtime to raise
+    # KeyError with, and a miss is the same signal an out-of-range index
+    # gives. Asserted rather than left implicit, because "the value happened
+    # to be 1" and "the lookup missed and exited 1" are otherwise the same
+    # exit status.
+    ("dict-comprehension-missing-key", _p(
+        "def f(n):",
+        "    d = {i: 100 + i for i in range(3)}",
+        "    return d[3]"), 1),
+    ("dict-literal-still-a-lookup", _p(
+        "def f(n):",
+        "    d = {1: 10, 2: 20}",
+        "    return d[2]"), 20),
     ("try-finally-runs", _p(
         "def f():",
         "    out = 0",
@@ -333,27 +447,85 @@ def run_case(name: str, source: str, arch: str):
         return r.returncode, ""
 
 
+def cpython_answer(source: str, test_input: int = 5):
+    """What CPython says this program's entry returns, or None if it cannot
+    be asked (a syntax the host interpreter and this file disagree about).
+
+    Every case here is an ordinary Python program, so the expectation written
+    beside it is a TRANSCRIPT of CPython's answer rather than a second hand's
+    arithmetic — and the wrong-expectation failure mode (a case that passes on
+    both backends because both are wrong in the same way as the note) is then
+    impossible. Checked once per case, so it costs 52 short interpreter runs.
+    """
+    import ast
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    entry = None
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            entry = node
+    if entry is None:
+        return None
+    takes_arg = bool(entry.args.args)
+    driver = ("print(%s(%d))\n" % (entry.name, test_input) if takes_arg
+              else "print(%s())\n" % entry.name)
+    with tempfile.TemporaryDirectory(prefix="formal-x86c-py-") as td:
+        path = os.path.join(td, "case.py")
+        with open(path, "w") as f:
+            f.write(source + driver)
+        r = subprocess.run([sys.executable, path], capture_output=True,
+                           text=True, cwd=td, timeout=60)
+    if r.returncode != 0:
+        return None
+    out = r.stdout.strip()
+    try:
+        return int(out)
+    except ValueError:
+        return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--arch", default="x86_64",
                     choices=("x86_64", "arm64"))
     ap.add_argument("-v", action="store_true")
+    ap.add_argument("--no-cpython", action="store_true",
+                    help="skip the CPython cross-check of the expectations")
     args = ap.parse_args()
 
     failed = passed = 0
     for name, source, want in CASES:
+        # CPython first, and on its own: a wrong EXPECTATION has to be
+        # reported as one even when the backend happens to agree with it,
+        # and it has to be reported even when the backend does not (which is
+        # the case that costs the most time — a note computed at n=4 read by
+        # a harness that runs at n=5 looks exactly like a codegen bug).
+        problems = []
+        cpy = None if args.no_cpython else cpython_answer(source)
+        if cpy is not None and cpy != want:
+            problems.append(f"expectation {want} is not what CPython "
+                            f"answers ({cpy})")
+        if not 0 <= want <= 255:
+            # A wait status cannot carry it, so the comparison below would be
+            # against a truncated value and read as a codegen bug that is not
+            # there. A property of the CASE, so the case is what has to change.
+            problems.append(f"expectation {want} is outside the 8-bit "
+                            f"exit-status domain (0..255)")
         got, detail = run_case(name, source, args.arch)
         if got is None:
-            status, note = "FAIL", detail
-            failed += 1
+            problems.append(detail)
         elif got != want:
-            status, note = "FAIL", f"returned {got}, want {want}"
+            problems.append(f"returned {got}, want {want}")
+        if problems:
             failed += 1
+            status, note = "FAIL", "; ".join(problems)
         else:
-            status, note = "PASS", f"= {got}"
             passed += 1
+            status, note = "PASS", f"= {got}"
         if status != "PASS" or args.v:
-            print(f"{status:4} {name:26} {note}")
+            print(f"{status:4} {name:34} {note}")
     print(f"[{args.arch}] PASS={passed} FAIL={failed} of {len(CASES)}")
     return 1 if failed else 0
 

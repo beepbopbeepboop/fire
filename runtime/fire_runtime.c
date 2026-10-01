@@ -53,7 +53,9 @@ void mojo_exc_pop(void)
  * stack address — undefined behavior, corrupting the heap allocator). */
 typedef enum { MOJO_CLEANUP_DICT, MOJO_CLEANUP_LIST, MOJO_CLEANUP_SET,
                MOJO_CLEANUP_DICT_STACK, MOJO_CLEANUP_LIST_STACK, MOJO_CLEANUP_SET_STACK,
-               MOJO_CLEANUP_PTR   /* a plain malloc/calloc block: a struct instance */
+               MOJO_CLEANUP_PTR,   /* a plain malloc/calloc block: a struct instance */
+               MOJO_CLEANUP_LIST_STRS, /* a list that owns its string elements */
+               MOJO_CLEANUP_CLOSURE   /* a bound method plus the env it owns */
              } mojo_cleanup_kind_t;
 #define MOJO_CLEANUP_STACK_MAX 8192
 static mojo_cleanup_kind_t _mojo_cleanup_kind[MOJO_CLEANUP_STACK_MAX];
@@ -87,6 +89,8 @@ void mojo_cleanup_push_dict_stack(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_DIC
 void mojo_cleanup_push_list_stack(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_LIST_STACK, p); }
 void mojo_cleanup_push_set_stack(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_SET_STACK, p); }
 void mojo_cleanup_push_ptr(void *p)        { _mojo_cleanup_push(MOJO_CLEANUP_PTR, p); }
+void mojo_cleanup_push_list_strs(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_LIST_STRS, p); }
+void mojo_cleanup_push_closure(void *p)    { _mojo_cleanup_push(MOJO_CLEANUP_CLOSURE, p); }
 
 void mojo_cleanup_cancel_n(int64_t n)
 {
@@ -124,6 +128,8 @@ static void _mojo_cleanup_unwind_to(int chk)
             case MOJO_CLEANUP_LIST_STACK: mojo_list_destroy((MojoList *)ptr); break;
             case MOJO_CLEANUP_SET_STACK:  mojo_set_destroy((MojoSet *)ptr);  break;
             case MOJO_CLEANUP_PTR:        free(ptr);                         break;
+            case MOJO_CLEANUP_LIST_STRS:  mojo_list_free_owned_strs((MojoList *)ptr); break;
+            case MOJO_CLEANUP_CLOSURE:    mojo_closure_free(ptr);            break;
         }
     }
 }
@@ -277,8 +283,16 @@ void mojo_print_init(void) {
 #endif
 
 void mojo_print(char *str) {
-    /* Use printf directly (no Python dependency) */
-    printf("%s", str);
+    /* Use printf directly (no Python dependency).
+     *
+     * A NULL `char *` prints "None", not whatever printf does with a NULL
+     * `%s` (glibc and Darwin both print the parenthesised "(null)", which is
+     * a string no source wrote). On this path a NULL string IS `None`: the
+     * container misses return NULL — `mojo_dict_get_str` on an absent key is
+     * what `d.get(k)` lowers to — so `print(d.get("MISSING"))` has to say
+     * `None` the way CPython does. Printing "(null)" for it made the value
+     * recognisable as wrong only if you already knew it was wrong. */
+    printf("%s", str ? str : "None");
     fflush(stdout);
 }
 
@@ -289,7 +303,9 @@ void mojo_print(char *str) {
  * shape at compile time and picks mojo_print vs this, so no FILE* value
  * ever needs to flow through the generated code at all. */
 void mojo_print_stderr(char *str) {
-    fprintf(stderr, "%s", str);
+    /* The same NULL-means-None rule as `mojo_print` above, for the same
+     * reason: the two are the same statement with a different FILE*. */
+    fprintf(stderr, "%s", str ? str : "None");
     fflush(stderr);
 }
 
@@ -663,7 +679,20 @@ static struct {
     _KindRow *rows;
     uint64_t  cap;    /* power of two, 0 until first add */
     uint64_t  used;
+    int       shift;  /* 64 - log2(cap), as in _PtrReg */
 } _reg_kinds;
+
+/* Home slot for `addr`. The one-multiply hash and the high-bit shift are
+ * `_PtrReg`'s (_pr_home) for the same reason: a BARE `addr & mask` — which
+ * is what this table used — gives every pair of heap MojoLists the same home
+ * slot, because `sizeof(MojoList)` is 56 and malloc hands out 64-byte
+ * blocks, so consecutive allocations are 64 apart and congruent mod any
+ * power-of-two table size. Every live kinds row therefore sat in one probe
+ * cluster, which is both a linear-time probe and — the bug this fixes — a
+ * table whose DELETION could strand its neighbours (see _kinds_forget). */
+static inline uint64_t _kinds_home(uint64_t addr) {
+    return ((addr >> 3) * 0x9E3779B97F4A7C15ULL) >> _reg_kinds.shift;
+}
 
 static void _kinds_grow(void)
 {
@@ -672,10 +701,12 @@ static void _kinds_grow(void)
     uint64_t ocap = _reg_kinds.cap;
     _reg_kinds.rows = (_KindRow *)calloc((size_t)ncap, sizeof(_KindRow));
     _reg_kinds.cap  = ncap;
+    _reg_kinds.shift = 64;
+    for (uint64_t c = ncap; c > 1; c >>= 1) _reg_kinds.shift--;
     _reg_kinds.used = 0;
     for (uint64_t i = 0; i < ocap; i++) {
         if (!old[i].addr) continue;
-        uint64_t j = old[i].addr & (ncap - 1);
+        uint64_t j = _kinds_home(old[i].addr);
         while (_reg_kinds.rows[j].addr) j = (j + 1) & (ncap - 1);
         _reg_kinds.rows[j] = old[i];
         _reg_kinds.used++;
@@ -688,7 +719,7 @@ static _KindRow *_kinds_row(uint64_t addr)
 {
     if (!_reg_kinds.cap || !addr) return NULL;
     uint64_t mask = _reg_kinds.cap - 1;
-    uint64_t i = addr & mask;
+    uint64_t i = _kinds_home(addr);
     for (;;) {
         if (!_reg_kinds.rows[i].addr) return NULL;
         if (_reg_kinds.rows[i].addr == addr) return &_reg_kinds.rows[i];
@@ -707,7 +738,7 @@ static _KindRow *_kinds_row_for_write(uint64_t addr, int *fresh)
         *fresh = 1;
     }
     uint64_t mask = _reg_kinds.cap - 1;
-    uint64_t i = addr & mask;
+    uint64_t i = _kinds_home(addr);
     while (_reg_kinds.rows[i].addr) {
         if (_reg_kinds.rows[i].addr == addr) return &_reg_kinds.rows[i];
         i = (i + 1) & mask;
@@ -760,12 +791,36 @@ void mojo_list_inherit_kinds(MojoList *dst, MojoList *src)
 
 static void _kinds_forget(uint64_t addr)
 {
-    _KindRow *r = _kinds_row(addr);
-    if (!r) return;
-    free(r->boxes);
-    r->addr = 0;
-    r->kinds = NULL;
-    r->boxes = NULL;
+    if (!_reg_kinds.used) return;
+    uint64_t mask = _reg_kinds.cap - 1;
+    uint64_t i = _kinds_home(addr);
+    while (_reg_kinds.rows[i].addr != addr) {
+        if (!_reg_kinds.rows[i].addr) return;    /* not registered */
+        i = (i + 1) & mask;
+    }
+    free(_reg_kinds.rows[i].boxes);
+    /* Backward-shift deletion, the same algorithm (and the same reason) as
+     * _pr_del: clearing the slot outright would leave a hole that every
+     * LATER member of this probe cluster can no longer be found through, so
+     * one list's free would silently strip the element kinds off every other
+     * live list whose home slot it shared — and a heterogeneous list read
+     * with no kinds reads a double's IEEE-754 bit pattern as an int64_t,
+     * which the repr path then hands to strlen. Real, measured, and the
+     * shape of the dangling-registry bug this table was written without. */
+    uint64_t j = i;
+    for (;;) {
+        j = (j + 1) & mask;
+        if (!_reg_kinds.rows[j].addr) break;
+        uint64_t k = _kinds_home(_reg_kinds.rows[j].addr);
+        int in_range = (i <= j) ? (i < k && k <= j) : (i < k || k <= j);
+        if (!in_range) {
+            _reg_kinds.rows[i] = _reg_kinds.rows[j];
+            i = j;
+        }
+    }
+    _reg_kinds.rows[i].addr = 0;
+    _reg_kinds.rows[i].kinds = NULL;
+    _reg_kinds.rows[i].boxes = NULL;
     _reg_kinds.used--;
 }
 
@@ -840,6 +895,26 @@ int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
     return (int64_t)(uintptr_t)r->boxes[i];
 }
 
+/* A double travels as its IEEE-754 BITS inside an int64_t — in a list slot
+   (mojo_list_get_double), in a box (mojo_box_double below), and in the
+   int64_t the homogenized `mojo_fnptr_call_N` helpers return for a callable
+   value. This is the ONE definition of that conversion in each direction, so
+   a consumer recovering a double from a word cannot get the direction wrong.
+   `mojo_double_from_bits` must MEMCPY, never a C cast: `(double)bits` is the
+   bits' NUMERIC value — 4611686018427387904.0 for the bit pattern of the
+   literal 1.5 — which is exactly the wrong answer this exists to prevent. */
+double mojo_double_from_bits(int64_t bits) {
+    double v;
+    memcpy(&v, &bits, sizeof(v));
+    return v;
+}
+
+int64_t mojo_double_to_bits(double v) {
+    int64_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    return bits;
+}
+
 /* The box read as a double. A value that is NOT a box comes back as its own
  * numeric value, not 0: the codegen marks a whole READ SITE as possibly
  * boxed (the runtime decides per slot), so a call here must be correct for
@@ -848,9 +923,7 @@ int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
 double mojo_box_double(int64_t v)
 {
     if (!mojo_is_boxed(v)) return (double)v;
-    double d;
-    __builtin_memcpy(&d, &((MojoBox *)(intptr_t)v)->bits, 8);
-    return d;
+    return mojo_double_from_bits(((MojoBox *)(intptr_t)v)->bits);
 }
 
 /* The box read as an integer: Python's own conversion (truncation toward
@@ -985,11 +1058,13 @@ int mojo_boxed_is_str(int64_t v) {
 }
 
 /* A Python tuple literal lowers to the exact same MojoList as a list literal
- * (see _lower_tuple_literal in gimple_codegen.py) — there is no runtime
- * distinction between the two, so generic repr() always printed a tuple's
- * contents with list brackets `[...]` instead of `(...)`. Marked explicitly
- * by _lower_tuple_literal's emitted call to mojo_mark_as_tuple() right after
- * mojo_list_new(); checked by _mojo_repr_list to choose the right brackets. */
+ * (see _lower_tuple_literal in gimple_codegen.py) — there is no separate
+ * container struct — so the tuple marker below is the ONLY thing that
+ * distinguishes a tuple from a list at runtime. It is consulted by repr (to
+ * choose `(...)` over `[...]`), by isinstance (mojo_isinstance type_id 8),
+ * and — since 2026-09-29 — by every MUTATING list operation below, which
+ * refuse a marked list the way CPython refuses to mutate a tuple. See
+ * mojo_require_mutable_list's own comment for why that had to be added. */
 static _PtrReg _reg_tuple;
 
 void mojo_mark_as_tuple(MojoList *l) {
@@ -1000,6 +1075,40 @@ void mojo_mark_as_tuple(MojoList *l) {
 int mojo_is_tuple(MojoList *l) {
     if (!l) return 0;
     return _pr_has(&_reg_tuple, (uint64_t)(uintptr_t)l);
+}
+
+/* Every mutating MojoList entry point calls this first, so a tuple-marked
+ * list behaves like a tuple rather than like a list that merely PRINTS like
+ * one.
+ *
+ * The marker used to be purely decorative: `b'a=b'.partition(b'=')` carried
+ * it, so `print(p)` was `(b'a', b'=', b'b')` and `isinstance(p, tuple)` was
+ * True — but `p.append(b'z')` silently succeeded and `p[0] = b'x'` silently
+ * overwrote, because the marker was read by repr and nothing else. That is
+ * the whole content of the bug doc's item 6a: the doc concluded the residue
+ * was unfixable for want of a tuple TYPE, but the type was already there and
+ * simply was not load-bearing. CPython's answers, which this reproduces:
+ *
+ *   t.append(x)   -> AttributeError: 'tuple' object has no attribute 'append'
+ *   t[0] = x      -> TypeError: 'tuple' object does not support item assignment
+ *   del t[0]      -> TypeError: 'tuple' object doesn't support item deletion
+ *
+ * The distinction between the two exception TYPES is not cosmetic: the
+ * method forms are an attribute lookup that fails, while the two item forms
+ * are a container refusing the operation, and CPython's own `except` clauses
+ * distinguish them. `attr` is the METHOD name for the attribute case, or NULL
+ * for the item cases, which the two item messages below spell out.
+ *
+ * Forward-declared because the raise helpers are defined ~5000 lines below
+ * (next to the other typed-exception raisers); the header declares all three
+ * for generated code, but a definition is still needed here. */
+static void mojo_raise_tuple_no_attr(const char *attr);
+static void mojo_raise_tuple_item_error(const char *verb);
+
+static void mojo_require_mutable_list(MojoList *l, const char *attr) {
+    if (!mojo_is_tuple(l)) return;
+    if (attr) mojo_raise_tuple_no_attr(attr);
+    mojo_raise_tuple_item_error(NULL);
 }
 
 /* Bound-method registry — the runtime counterpart of _reg_list
@@ -1022,6 +1131,207 @@ int mojo_is_bound_method(void *p) {
     int64_t v = (int64_t)(intptr_t)p;
     if (v < 65536) return 0;
     return _pr_has(&_reg_bound_method, (uint64_t)v);
+}
+
+/* ── Variadic callables ──────────────────────────────────────────────────
+ * A sibling of the bound-method registry above, for the same reason and
+ * with the same shape: a variadic callable's VALUE is not a bare function
+ * pointer, so a dynamically-dispatched call site has to be able to tell
+ * it apart from one. What the callee really wants is its arguments
+ * PACKED — `*args` into a MojoList, `**kwargs` into a MojoDict — and the
+ * packed form is built here rather than at the call site because the call
+ * site is the only place that knows the arity, while this is the only
+ * place that knows the callee's real parameter list.
+ *
+ * The `v < 65536` guard is _mojo_ptr_shaped's, for the reason spelled out
+ * on mojo_is_bound_method above. */
+static _PtrReg _reg_vararg_fn;
+
+MojoVarargFn *mojo_vararg_fn_new(void *fn, void *self, int64_t n_fixed, int64_t kind,
+                                 int64_t has_env) {
+    MojoVarargFn *vf = (MojoVarargFn *)malloc(sizeof(MojoVarargFn));
+    vf->fn = fn;
+    vf->self = self;
+    vf->n_fixed = n_fixed;
+    vf->kind = kind;
+    vf->has_env = has_env;
+    _pr_add(&_reg_vararg_fn, (uint64_t)(uintptr_t)vf);
+    return vf;
+}
+
+int mojo_is_vararg_fn(void *p) {
+    int64_t v = (int64_t)(intptr_t)p;
+    if (v < 65536) return 0;
+    return _pr_has(&_reg_vararg_fn, (uint64_t)v);
+}
+
+/* One packing routine, five arity wrappers. `a`/`n` are the arguments the
+ * call site wrote, `kw` its already-packed keyword dict (NULL when it
+ * passed none).
+ *
+ * The first `n_fixed` of them are ORDINARY leading parameters — the callee
+ * declares them before its `*args`, so they stay positional and are passed
+ * straight through as scalars. Everything after them is what `*args`
+ * collects, packed into a fresh MojoList.
+ *
+ * `n_fixed` is bounded to 4 by the wrappers below (the call site has at
+ * most 4 arguments to give), so the leading-parameter count can never
+ * exceed the arity, and a callee wanting more fixed parameters than the
+ * call site supplied is a call with too few arguments — real Python raises
+ * TypeError for that; the extra slots read as 0 here, matching how every
+ * other too-few-arguments call in this runtime behaves rather than
+ * dereferencing past the end of `a`.
+ */
+static int64_t _mojo_vararg_invoke(MojoVarargFn *vf, const int64_t *a, int64_t n, MojoDict *kw) {
+    int64_t nf = vf->n_fixed;
+    if (nf < 0) nf = 0;
+    if (nf > n) nf = n;
+    /* `*args` collects everything past the fixed leading parameters. */
+    MojoList *packed = 0;
+    if (vf->kind != 2) {
+        packed = mojo_list_new();
+        for (int64_t i = nf; i < n; i++)
+            mojo_list_append_int(packed, a[i]);
+    }
+    /* A `**kwargs` callee must never see NULL: `k['x']` on a NULL dict is a
+     * segfault, and `len(k)` is a legitimate spelling. An empty dict is
+     * the correct answer for a call that passed no keywords. */
+    MojoDict *k = kw;
+    if (vf->kind >= 1 && !k) k = mojo_dict_new();
+    if (vf->kind == 0) k = 0;
+    if (!vf->has_env) {
+        /* No captures: the lifted callee has NO leading `self` parameter,
+         * so passing one would shift every real parameter a slot left. */
+        switch (nf) {
+        case 0:
+            if (vf->kind == 0) return ((int64_t (*)(MojoList *))vf->fn)(packed);
+            if (vf->kind == 1) return ((int64_t (*)(MojoList *, MojoDict *))vf->fn)(packed, k);
+            return ((int64_t (*)(MojoDict *))vf->fn)(k);
+        case 1:
+            if (vf->kind == 0) return ((int64_t (*)(int64_t, MojoList *))vf->fn)(a[0], packed);
+            if (vf->kind == 1) return ((int64_t (*)(int64_t, MojoList *, MojoDict *))vf->fn)(a[0], packed, k);
+            return ((int64_t (*)(int64_t, MojoDict *))vf->fn)(a[0], k);
+        case 2:
+            if (vf->kind == 0) return ((int64_t (*)(int64_t, int64_t, MojoList *))vf->fn)(a[0], a[1], packed);
+            if (vf->kind == 1) return ((int64_t (*)(int64_t, int64_t, MojoList *, MojoDict *))vf->fn)(a[0], a[1], packed, k);
+            return ((int64_t (*)(int64_t, int64_t, MojoDict *))vf->fn)(a[0], a[1], k);
+        case 3:
+            if (vf->kind == 0) return ((int64_t (*)(int64_t, int64_t, int64_t, MojoList *))vf->fn)(a[0], a[1], a[2], packed);
+            if (vf->kind == 1) return ((int64_t (*)(int64_t, int64_t, int64_t, MojoList *, MojoDict *))vf->fn)(a[0], a[1], a[2], packed, k);
+            return ((int64_t (*)(int64_t, int64_t, int64_t, MojoDict *))vf->fn)(a[0], a[1], a[2], k);
+        default:
+            if (vf->kind == 0) return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, MojoList *))vf->fn)(a[0], a[1], a[2], a[3], packed);
+            if (vf->kind == 1) return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, MojoList *, MojoDict *))vf->fn)(a[0], a[1], a[2], a[3], packed, k);
+            return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, MojoDict *))vf->fn)(a[0], a[1], a[2], a[3], k);
+        }
+    }
+    switch (nf) {
+    case 0:
+        if (vf->kind == 0) return ((int64_t (*)(void *, MojoList *))vf->fn)(vf->self, packed);
+        if (vf->kind == 1) return ((int64_t (*)(void *, MojoList *, MojoDict *))vf->fn)(vf->self, packed, k);
+        return ((int64_t (*)(void *, MojoDict *))vf->fn)(vf->self, k);
+    case 1:
+        if (vf->kind == 0) return ((int64_t (*)(void *, int64_t, MojoList *))vf->fn)(vf->self, a[0], packed);
+        if (vf->kind == 1) return ((int64_t (*)(void *, int64_t, MojoList *, MojoDict *))vf->fn)(vf->self, a[0], packed, k);
+        return ((int64_t (*)(void *, int64_t, MojoDict *))vf->fn)(vf->self, a[0], k);
+    case 2:
+        if (vf->kind == 0) return ((int64_t (*)(void *, int64_t, int64_t, MojoList *))vf->fn)(vf->self, a[0], a[1], packed);
+        if (vf->kind == 1) return ((int64_t (*)(void *, int64_t, int64_t, MojoList *, MojoDict *))vf->fn)(vf->self, a[0], a[1], packed, k);
+        return ((int64_t (*)(void *, int64_t, int64_t, MojoDict *))vf->fn)(vf->self, a[0], a[1], k);
+    case 3:
+        if (vf->kind == 0) return ((int64_t (*)(void *, int64_t, int64_t, int64_t, MojoList *))vf->fn)(vf->self, a[0], a[1], a[2], packed);
+        if (vf->kind == 1) return ((int64_t (*)(void *, int64_t, int64_t, int64_t, MojoList *, MojoDict *))vf->fn)(vf->self, a[0], a[1], a[2], packed, k);
+        return ((int64_t (*)(void *, int64_t, int64_t, int64_t, MojoDict *))vf->fn)(vf->self, a[0], a[1], a[2], k);
+    default:
+        if (vf->kind == 0) return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, MojoList *))vf->fn)(vf->self, a[0], a[1], a[2], a[3], packed);
+        if (vf->kind == 1) return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, MojoList *, MojoDict *))vf->fn)(vf->self, a[0], a[1], a[2], a[3], packed, k);
+        return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, MojoDict *))vf->fn)(vf->self, a[0], a[1], a[2], a[3], k);
+    }
+}
+
+int64_t mojo_vararg_call_0(void *fp, void *kw) {
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, 0, 0, (MojoDict *)kw);
+}
+int64_t mojo_vararg_call_1(void *fp, void *kw, int64_t a) {
+    int64_t v[1]; v[0] = a;
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, v, 1, (MojoDict *)kw);
+}
+int64_t mojo_vararg_call_2(void *fp, void *kw, int64_t a, int64_t b) {
+    int64_t v[2]; v[0] = a; v[1] = b;
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, v, 2, (MojoDict *)kw);
+}
+int64_t mojo_vararg_call_3(void *fp, void *kw, int64_t a, int64_t b, int64_t c) {
+    int64_t v[3]; v[0] = a; v[1] = b; v[2] = c;
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, v, 3, (MojoDict *)kw);
+}
+int64_t mojo_vararg_call_4(void *fp, void *kw, int64_t a, int64_t b, int64_t c, int64_t d) {
+    int64_t v[4]; v[0] = a; v[1] = b; v[2] = c; v[3] = d;
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, v, 4, (MojoDict *)kw);
+}
+
+int64_t mojo_vararg_call_5(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4) {
+    int64_t v[5]; v[0] = _a0; v[1] = _a1; v[2] = _a2; v[3] = _a3; v[4] = _a4;
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, v, 5, (MojoDict *)kw);
+}
+
+int64_t mojo_vararg_call_6(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5) {
+    int64_t v[6]; v[0] = _a0; v[1] = _a1; v[2] = _a2; v[3] = _a3; v[4] = _a4; v[5] = _a5;
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, v, 6, (MojoDict *)kw);
+}
+
+int64_t mojo_vararg_call_7(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6) {
+    int64_t v[7]; v[0] = _a0; v[1] = _a1; v[2] = _a2; v[3] = _a3; v[4] = _a4; v[5] = _a5; v[6] = _a6;
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, v, 7, (MojoDict *)kw);
+}
+
+int64_t mojo_vararg_call_8(void *fp, void *kw, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6, int64_t _a7) {
+    int64_t v[8]; v[0] = _a0; v[1] = _a1; v[2] = _a2; v[3] = _a3; v[4] = _a4; v[5] = _a5; v[6] = _a6; v[7] = _a7;
+    return _mojo_vararg_invoke((MojoVarargFn *)fp, v, 8, (MojoDict *)kw);
+}
+
+
+
+
+
+
+/* Two frees for the two things a `MojoBoundMethod` can be, because `self`
+ * belongs to only one of them:
+ *
+ *  - `mojo_bound_method_free` — a METHOD taken as a value (`f = self.m`,
+ *    `readline.set_completer(self.complete)`). `self` is the receiver object,
+ *    owned by whoever holds it; only the wrapper is ours. Its REGISTRY entry is
+ *    discarded here, which is the whole reason this function exists and is
+ *    what the container registries already do in their `_destroy` helpers: an
+ *    address left in `_reg_bound_method` outlives its object, `malloc` hands
+ *    that address straight back out for something else, and
+ *    `mojo_is_bound_method` then reports a plain function pointer as a
+ *    bound method — so `mojo_fnptr_call_N` dispatches through a
+ *    `((int64_t (*)(void *))bm->fn)(bm->self)` on two words of whatever the
+ *    new object is. That is the dangling-registry shape of
+ *    bugs/CODEGEN_container_free_registry_dangling_entries.md, and it is what
+ *    makes freeing a bound method safe to do at all.
+ *  - `mojo_closure_free` — a CAPTURING LAMBDA. There `self` is the
+ *    `malloc(sizeof(env))` emit_calls' closure constructor allocated one
+ *    instruction earlier and filled with the captured values, and nothing
+ *    else holds either half, so the pair is one allocation unit.
+ *
+ * Neither is `mojo_bound_method_new`'s default free: a bound method that
+ * escapes (handed to a callee that stores it, returned, appended) must stay
+ * alive, and codegen only reaches these for a value it has proven cannot.
+ */
+void mojo_bound_method_free(MojoBoundMethod *bm)
+{
+    if (!bm) return;
+    _pr_del(&_reg_bound_method, (uint64_t)(uintptr_t)bm);
+    free(bm);
+}
+
+void mojo_closure_free(void *bmv)
+{
+    MojoBoundMethod *bm = (MojoBoundMethod *)bmv;
+    if (!bm) return;
+    free(bm->self);
+    mojo_bound_method_free(bm);
 }
 
 /* mojo_list_init/mojo_list_destroy: see mojo_set_init/mojo_set_destroy's
@@ -1055,6 +1365,31 @@ void mojo_list_free(MojoList *l)
     free(l);
 }
 
+/* A list of STRINGS that the list SOLELY owns — every element freshly
+ * allocated by the function that built the list, and by nothing else.
+ * `mojo_list_append_str` stores the pointer it is given and never copies it
+ * (see its definition above), so a plain `mojo_list_free` on such a list
+ * releases the container and leaves every element behind: that is the
+ * ~48 B/iteration of `String("a b c").split(" ")` in
+ * bugs/CODEGEN_call_result_container_never_freed.md, where the list itself
+ * was already being freed and only the strings inside it were not.
+ *
+ * The counterpart rule is what makes this safe: a list of strings is USUALLY
+ * borrowed (string literals, `d[k]` read back out of a dict, the elements of
+ * a list built by `extend`), and freeing those is a crash. So this is never
+ * the default free for a `MojoList *` — codegen picks it only for a value it
+ * has matched to one of the runtime functions in `_OWNS_STR_ELEMS`
+ * (mojo/backend_gimple/emit_infra.py), each of which was read to allocate
+ * every element it appends and to append nothing it did not allocate.
+ * `mojo_str_rsplit` is deliberately NOT in that set: it hands its result the
+ * very same pointers its own intermediate list holds. */
+void mojo_list_free_owned_strs(MojoList *l)
+{
+    if (!l) return;
+    for (int64_t i = 0; i < l->len; i++) free((void *)(intptr_t)l->data[i]);
+    mojo_list_free(l);
+}
+
 static void _list_grow(MojoList *l)
 {
     int64_t nc = l->cap * 2;
@@ -1072,6 +1407,7 @@ static void _list_grow(MojoList *l)
 
 void mojo_list_append_int(MojoList *l, int64_t v)
 {
+    mojo_require_mutable_list(l, "append");
     if (l->len == l->cap) _list_grow(l);
     l->data[l->len++] = v;
 }
@@ -1102,10 +1438,9 @@ int64_t mojo_list_get_int(MojoList *l, int64_t i)   { if (!l || l->len == 0) ret
 
 double mojo_list_get_double(MojoList *l, int64_t i)
 {
-    double v;
-    memcpy(&v, &l->data[_norm_idx(l, i)], sizeof(v));
-    return v;
+    return mojo_double_from_bits(l->data[_norm_idx(l, i)]);
 }
+
 
 int64_t mojo_list_len(MojoList *l) { return l ? l->len : 0; }
 
@@ -1153,10 +1488,47 @@ int mojo_list_contains_str(MojoList *l, char *v)
     return 0;
 }
 
-void mojo_list_set_int(MojoList *l, int64_t i, int64_t v)   { l->data[_norm_idx(l, i)] = v; }
+/* `l.count(x)` — how many SLOTS equal x, the counting sibling of the
+ * `x in l` predicates above. Distinct because those answer a yes/no from the
+ * first hit and stop; these must visit every slot. Each takes the needle in
+ * the domain its slot is stored in, for the same reason the membership
+ * predicates do (a bytes/str element is a boxed pointer, and comparing that
+ * as a raw int64_t slot would compare addresses). */
+int64_t mojo_list_count_int(MojoList *l, int64_t v)
+{
+    int64_t n = 0;
+    for (int64_t i = 0; i < l->len; i++) if (l->data[i] == v) n++;
+    return n;
+}
+
+int64_t mojo_list_count_str(MojoList *l, char *v)
+{
+    int64_t n = 0;
+    for (int64_t i = 0; i < l->len; i++) {
+        char *s = (char *)(uintptr_t)l->data[i];
+        if (v == NULL) { if (s == NULL) n++; }
+        else if (s && strcmp(s, v) == 0) n++;
+    }
+    return n;
+}
+
+int64_t mojo_list_count_bytes(MojoList *l, MojoBytes *v)
+{
+    int64_t n = 0;
+    for (int64_t i = 0; i < l->len; i++)
+        if (mojo_bytes_eq((MojoBytes *)(uintptr_t)l->data[i], v)) n++;
+    return n;
+}
+
+void mojo_list_set_int(MojoList *l, int64_t i, int64_t v)
+{
+    mojo_require_mutable_list(l, NULL);
+    l->data[_norm_idx(l, i)] = v;
+}
 
 void mojo_list_set_double(MojoList *l, int64_t i, double v)
 {
+    mojo_require_mutable_list(l, NULL);
     int64_t bits;
     memcpy(&bits, &v, sizeof(bits));
     l->data[_norm_idx(l, i)] = bits;
@@ -1164,6 +1536,7 @@ void mojo_list_set_double(MojoList *l, int64_t i, double v)
 
 void mojo_list_set_str(MojoList *l, int64_t i, char *v)
 {
+    mojo_require_mutable_list(l, NULL);
     l->data[_norm_idx(l, i)] = (int64_t)(uintptr_t)v;
 }
 
@@ -1190,11 +1563,13 @@ static void _mojo_list_insert_slot(MojoList *l, int64_t i, int64_t v)
 
 void mojo_list_insert_int(MojoList *l, int64_t i, int64_t v)
 {
+    mojo_require_mutable_list(l, "insert");
     _mojo_list_insert_slot(l, i, v);
 }
 
 void mojo_list_insert_double(MojoList *l, int64_t i, double v)
 {
+    mojo_require_mutable_list(l, "insert");
     int64_t bits;
     memcpy(&bits, &v, sizeof(bits));
     _mojo_list_insert_slot(l, i, bits);
@@ -1202,6 +1577,7 @@ void mojo_list_insert_double(MojoList *l, int64_t i, double v)
 
 void mojo_list_insert_str(MojoList *l, int64_t i, char *v)
 {
+    mojo_require_mutable_list(l, "insert");
     _mojo_list_insert_slot(l, i, (int64_t)(uintptr_t)v);
 }
 
@@ -1226,12 +1602,16 @@ MojoList *mojo_list_slice(MojoList *l, int64_t start, int64_t stop)
     MojoList *r = mojo_list_new();
     for (int64_t i = start; i < stop; i++)
         mojo_list_append_int(r, l->data[i]);
+    /* A slot-for-slot copy of `l`, so the result describes its slots exactly
+     * as `l` does (a `struct.unpack` of a mixed format, a heterogeneous
+     * literal). The comprehension above appends as plain int64_t, which loses
+     * that description. */
     mojo_list_inherit_kinds(r, l);
-    /* A slice of a TUPLE is a tuple (`(1, 2.5)[:]`), and this runtime's
-     * tuple marker is a per-address registry entry rather than a distinct
-     * container type — so without this the slice printed `[1, 2.5]` where
-     * CPython prints `(1, 2.5)`. Every other list->list derivation here
-     * re-derives its own properties for the same reason. */
+    /* `t[:]` is a tuple when `t` is: slicing does not change a container's
+     * type in Python, and the marker is a per-address registry entry rather
+     * than a distinct container type, so without this the slice printed
+     * `[1, 2.5]` where CPython prints `(1, 2.5)`. Same rule as
+     * mojo_list_concat's. */
     if (mojo_is_tuple(l)) mojo_mark_as_tuple(r);
     return r;
 }
@@ -1243,6 +1623,7 @@ MojoList *mojo_list_slice(MojoList *l, int64_t start, int64_t stop)
 void mojo_list_del_slice(MojoList *l, int64_t start, int64_t stop)
 {
     if (!l) return;
+    mojo_require_mutable_list(l, NULL);
     if (stop == MOJO_SLICE_STOP_OMITTED) stop = l->len;
     if (start < 0) start = l->len + start;
     if (stop  < 0) stop  = l->len + stop;
@@ -1267,6 +1648,7 @@ void mojo_list_del_slice(MojoList *l, int64_t start, int64_t stop)
 void mojo_list_splice(MojoList *l, int64_t start, int64_t stop, MojoList *repl)
 {
     if (!l) return;
+    mojo_require_mutable_list(l, NULL);
     int64_t rlen = repl ? repl->len : 0;
     if (stop == MOJO_SLICE_STOP_OMITTED) stop = l->len;
     if (start < 0) start = l->len + start;
@@ -1356,6 +1738,7 @@ void mojo_list_assign_step(MojoList *l,
                            int64_t step,  MojoList *repl)
 {
     if (!l) return;
+    mojo_require_mutable_list(l, NULL);
     if (step == 0) {
         fprintf(stderr, "ValueError: slice step cannot be zero\n");
         exit(1);
@@ -1388,11 +1771,15 @@ MojoList *mojo_list_concat(MojoList *a, MojoList *b)
     MojoList *r = mojo_list_new();
     for (int64_t i = 0; i < a->len; i++) mojo_list_append_int(r, a->data[i]);
     for (int64_t i = 0; i < b->len; i++) mojo_list_append_int(r, b->data[i]);
-    /* `t + t` on a TUPLE is a tuple in Python ((1, 2) + (3, 4) is
-     * (1, 2, 3, 4)), and this runtime's tuple marker is a per-address
-     * registry entry, so the result has to be marked like every other
+    /* `a + b` is a TUPLE if EITHER operand is: CPython's tuple has no
+     * __add__ with a list (so `t + []` is a TypeError there, which this
+     * runtime does not model), but the repr of the result is a tuple's, and
+     * the marker is the only thing that decides it here. Propagating it is
+     * what makes `(1,2) + (3,)` print `(1, 2, 3)` instead of `[1, 2, 3]`.
+     * The marker is a per-address registry entry rather than a distinct
+     * container type, so the result has to be marked like every other
      * derivation of one. */
-    if (mojo_is_tuple(a)) mojo_mark_as_tuple(r);
+    if (mojo_is_tuple(a) || mojo_is_tuple(b)) mojo_mark_as_tuple(r);
     /* `t + t` and `t + []` are described by the source kinds, repeated to
      * cover the result's slots; anything else (two lists whose kinds differ)
      * has ONE slot array and no single correct answer, so nothing is
@@ -1421,8 +1808,7 @@ MojoList *mojo_list_repeat(MojoList *l, int64_t n)
     for (int64_t rep = 0; rep < n; rep++)
         for (int64_t i = 0; i < l->len; i++)
             mojo_list_append_int(r, l->data[i]);
-    /* `t * n` on a tuple is a tuple, for the same reason as the concat
-     * case above. */
+    /* `(1,2) * 2` is a tuple, for the same reason as mojo_list_concat. */
     if (mojo_is_tuple(l)) mojo_mark_as_tuple(r);
     /* Same as mojo_list_concat: the source kinds, repeated n times to cover
      * the result (a fresh string, since the source's is shared). */
@@ -1756,6 +2142,29 @@ int64_t mojo_bytes_get(MojoBytes *b, int64_t i)
     return (int64_t)b->data[i];
 }
 
+/* `b[i]` at an EXPLICIT subscript — the same read, but an out-of-range
+ * index RAISES IndexError instead of answering 0. mojo_bytes_get above
+ * keeps the lenient form on purpose, because the `for b in <bytes>` loop
+ * lowering calls it with an index it has already bounds-checked against
+ * mojo_bytes_len, and a raising helper there would be a raise the program
+ * can never reach.
+ *
+ * Without the split, `b'abc'[10]` and `b''[0]` both printed 0 with exit 0,
+ * where CPython raises IndexError. 0 is not a neutral answer here: it is
+ * a real byte value, so `if b[i] == 0:` on a short buffer silently took
+ * the true branch. */
+int64_t mojo_bytes_get_checked(MojoBytes *b, int64_t i)
+{
+    int64_t n = b ? b->len : 0;
+    int64_t j = i < 0 ? i + n : i;
+    if (j < 0 || j >= n) {
+        char detail[96];
+        snprintf(detail, sizeof detail, "index out of range");
+        mojo_raise_index_error(detail);
+    }
+    return (int64_t)b->data[j];
+}
+
 int mojo_bytes_eq(MojoBytes *a, MojoBytes *b)
 {
     if (a == b) return 1;
@@ -1764,6 +2173,19 @@ int mojo_bytes_eq(MojoBytes *a, MojoBytes *b)
 }
 
 int mojo_bytes_truthy(MojoBytes *b) { return b != NULL && b->len != 0; }
+
+/* The `index`/`rindex` half of the find family over a BYTES needle: the
+ * search itself is mojo_bytes_find / _rfind (which answer -1), and only
+ * the FAILURE differs — CPython raises ValueError("subsection not found")
+ * there. Kept as a wrapper rather than a duplicate search so the two can
+ * never drift on where the match is. */
+int64_t _mojo_bytes_index_or_raise(int64_t at) {
+    if (at >= 0) return at;
+    char detail[96];
+    snprintf(detail, sizeof detail, "subsection not found");
+    mojo_raise_value_error(detail);
+    return -1;  /* unreached */
+}
 
 char *mojo_bytes_repr(MojoBytes *b)
 {
@@ -1864,7 +2286,13 @@ int64_t mojo_bytes_find(MojoBytes *hay, MojoBytes *needle)
 
 int64_t mojo_bytes_count(MojoBytes *hay, MojoBytes *needle)
 {
-    if (!hay || !needle || needle->len == 0) return 0;
+    /* An EMPTY needle is not "never found" — CPython counts len+1 non-
+     * overlapping empty matches, one before every character and one after
+     * the last: `b'abc'.count(b'')` is 4 and `b''.count(b'')` is 1. The
+     * loop below cannot produce either (it advances by needle->len, which
+     * is 0, so it spins), which is why it answered 0 for both. */
+    if (!hay) return 0;
+    if (!needle || needle->len == 0) return hay->len + 1;
     int64_t c = 0;
     for (int64_t i = 0; i + needle->len <= hay->len; ) {
         if (memcmp(hay->data + i, needle->data, (size_t)needle->len) == 0) { c++; i += needle->len; }
@@ -1878,7 +2306,11 @@ int64_t mojo_bytes_count(MojoBytes *hay, MojoBytes *needle)
 int64_t mojo_bytes_count_from(MojoBytes *hay, MojoBytes *needle,
                               int64_t start, int64_t stop)
 {
-    if (!hay || !needle || needle->len == 0) return 0;
+    if (!hay) return 0;
+    if (!needle || needle->len == 0) {
+        mojo_bytes_clamp_range(hay, &start, &stop);
+        return stop - start + 1;
+    }
     mojo_bytes_clamp_range(hay, &start, &stop);
     int64_t c = 0;
     for (int64_t i = start; i + needle->len <= stop; ) {
@@ -1888,18 +2320,43 @@ int64_t mojo_bytes_count_from(MojoBytes *hay, MojoBytes *needle,
     return c;
 }
 
+/* startswith / endswith, WITH the optional [start[, end]] window both take.
+ *
+ * The two-argument spellings `b.startswith(p, 1, 2)` were silently IGNORED:
+ * the call sites passed only (bytes, prefix), so the answer was computed
+ * over the WHOLE string and the window never applied. `b'abc'.startswith(
+ * b'a', 1, 2)` was True where CPython says False, and `b'abc'.endswith(b'c',
+ * 0, 2)` likewise — both plausible, both wrong, exit 0. The window is
+ * sliced out first and the prefix/suffix then compared against that, which
+ * is exactly CPython's own spelling. */
+int mojo_bytes_startswith_from(MojoBytes *b, MojoBytes *p, int64_t start, int64_t stop)
+{
+    if (!b) return p && p->len == 0;
+    mojo_bytes_clamp_range(b, &start, &stop);
+    int64_t n = stop - start;
+    if (!p || p->len == 0) return 1;
+    if (n < p->len) return 0;
+    return memcmp(b->data + start, p->data, (size_t)p->len) == 0;
+}
+
+int mojo_bytes_endswith_from(MojoBytes *b, MojoBytes *p, int64_t start, int64_t stop)
+{
+    if (!b) return p && p->len == 0;
+    mojo_bytes_clamp_range(b, &start, &stop);
+    int64_t n = stop - start;
+    if (!p || p->len == 0) return 1;
+    if (n < p->len) return 0;
+    return memcmp(b->data + stop - p->len, p->data, (size_t)p->len) == 0;
+}
+
 int mojo_bytes_startswith(MojoBytes *b, MojoBytes *p)
 {
-    if (!p || p->len == 0) return 1;
-    if (!b || b->len < p->len) return 0;
-    return memcmp(b->data, p->data, (size_t)p->len) == 0;
+    return mojo_bytes_startswith_from(b, p, 0, MOJO_SLICE_STOP_OMITTED);
 }
 
 int mojo_bytes_endswith(MojoBytes *b, MojoBytes *p)
 {
-    if (!p || p->len == 0) return 1;
-    if (!b || b->len < p->len) return 0;
-    return memcmp(b->data + b->len - p->len, p->data, (size_t)p->len) == 0;
+    return mojo_bytes_endswith_from(b, p, 0, MOJO_SLICE_STOP_OMITTED);
 }
 
 char *mojo_bytes_decode(MojoBytes *b, char *encoding)
@@ -1957,7 +2414,36 @@ MojoBytes *mojo_bytes_replace_n(MojoBytes *b, MojoBytes *from, MojoBytes *to,
                                 int64_t count)
 {
     if (!b) return mojo_bytes_empty();
-    if (!from || from->len == 0) return mojo_bytes_new_lit((const char *)b->data, b->len);
+    if (!from || from->len == 0) {
+        /* An EMPTY pattern is a real CPython spelling, not a no-op: it
+         * matches at every one of the len+1 BOUNDARY positions — before
+         * each character and after the last. `b'aaa'.replace(b'', b'-')`
+         * is `b'-a-a-a-'` and `b''.replace(b'', b'-')` is `b'-'`. This
+         * answered the string UNCHANGED, because the loop below advances
+         * by from->len (0) and so never matched.
+         *
+         * The model, which `count` then bounds: walk the len+1 boundary
+         * positions; at the first `count` of them emit the replacement and
+         * at every one of them emit the character that follows (there is
+         * none after the last). So the loop is over boundaries, not over
+         * characters, and the tail needs no special case — position len is
+         * simply a boundary with no character. */
+        if (count == 0) return mojo_bytes_new_lit((const char *)b->data, b->len);
+        if (count < 0) count = MOJO_SLICE_STOP_OMITTED;
+        int64_t slots = (count == MOJO_SLICE_STOP_OMITTED) ? b->len + 1 : count;
+        if (slots > b->len + 1) slots = b->len + 1;
+        int64_t tn = to ? to->len : 0;
+        MojoBytes *r = mojo_bytes_alloc(b->len + slots * tn);
+        int64_t p = 0;
+        for (int64_t k = 0; k <= b->len; k++) {
+            if (k < slots && tn) memcpy(r->data + p, to->data, (size_t)tn);
+            if (k < slots) p += tn;
+            if (k < b->len) r->data[p++] = b->data[k];
+        }
+        r->len = p;
+        r->data[p] = 0;
+        return r;
+    }
     if (count < 0) count = MOJO_SLICE_STOP_OMITTED;
     if (count == 0) return mojo_bytes_new_lit((const char *)b->data, b->len);
     int64_t total = mojo_bytes_count(b, from);
@@ -2125,28 +2611,71 @@ int64_t mojo_bytes_rfind(MojoBytes *hay, MojoBytes *needle)
  * bytes.index(<int>) — Python accepts an int in 0-255 there). */
 int64_t mojo_bytes_index_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop)
 {
-    if (!b) return -1;
-    mojo_bytes_clamp_range(b, &start, &stop);
-    for (int64_t i = start; i < stop; i++)
-        if ((int64_t)b->data[i] == (v & 0xFF)) return i;
-    return -1;
+    int64_t at = mojo_bytes_find_int(b, v, start, stop);
+    if (at < 0) {
+        char detail[96];
+        snprintf(detail, sizeof detail, "subsection not found");
+        mojo_raise_value_error(detail);
+    }
+    return at;
 }
 
 int64_t mojo_bytes_rindex_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop)
 {
+    int64_t at = mojo_bytes_rfind_int(b, v, start, stop);
+    if (at < 0) {
+        char detail[96];
+        snprintf(detail, sizeof detail, "subsection not found");
+        mojo_raise_value_error(detail);
+    }
+    return at;
+}
+
+/* find / rfind / index / rindex over a single byte VALUE (the `b.index(0x2c)`
+ * spelling). `mojo_bytes_index_int` is the FIND-shaped one: it answers -1
+ * when absent, which is what `find`/`rfind` return. `index`/`rindex` are the
+ * same search with a different failure — they RAISE ValueError — so they get
+ * their own entry points below rather than sharing this one, which is what
+ * made `b'abc'.index(b'z')` answer -1 with exit 0.
+ *
+ * A value outside 0-255 is a ValueError in CPython (`b'abc'.count(300)`), not
+ * a silently wrapped one; `& 0xFF` below is what turned 300 into 44 and made
+ * `count(300)` count the letter 'c'. */
+static void mojo_bytes_check_byte_value(int64_t v) {
+    if (v >= 0 && v <= 255) return;
+    char detail[96];
+    snprintf(detail, sizeof detail,
+             "byte must be in range(0, 256)");
+    mojo_raise_value_error(detail);
+}
+
+int64_t mojo_bytes_find_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop)
+{
+    mojo_bytes_check_byte_value(v);
+    if (!b) return -1;
+    mojo_bytes_clamp_range(b, &start, &stop);
+    for (int64_t i = start; i < stop; i++)
+        if ((int64_t)b->data[i] == v) return i;
+    return -1;
+}
+
+int64_t mojo_bytes_rfind_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop)
+{
+    mojo_bytes_check_byte_value(v);
     if (!b) return -1;
     mojo_bytes_clamp_range(b, &start, &stop);
     for (int64_t i = stop - 1; i >= start; i--)
-        if ((int64_t)b->data[i] == (v & 0xFF)) return i;
+        if ((int64_t)b->data[i] == v) return i;
     return -1;
 }
 
 int64_t mojo_bytes_count_int(MojoBytes *b, int64_t v, int64_t start, int64_t stop)
 {
+    mojo_bytes_check_byte_value(v);
     if (!b) return 0;
     mojo_bytes_clamp_range(b, &start, &stop);
     int64_t c = 0;
-    for (int64_t i = start; i < stop; i++) if ((int64_t)b->data[i] == (v & 0xFF)) c++;
+    for (int64_t i = start; i < stop; i++) if ((int64_t)b->data[i] == v) c++;
     return c;
 }
 
@@ -2386,15 +2915,90 @@ MojoBytes *mojo_bytes_maketrans(MojoBytes *from, MojoBytes *to)
     return t;
 }
 
+/* `b.translate(table, delete)` — the two-argument form. The `delete` SET was
+ * silently dropped: the call site passed only the table, so
+ * `b'hello'.translate(None, b'l')` came back as `b'hello'` where CPython
+ * answers `b'heo'`. `delete` is applied FIRST (a byte in the set is removed
+ * and never translated); `table` is a 256-entry lookup and may be NULL,
+ * which means "keep every surviving byte as itself" — CPython spells that
+ * `b'hello'.translate(None, b'l')`, and None is exactly the no-table case.
+ * `table` of any other length is a ValueError in CPython ("translation
+ * table must be 256 characters long"), and is one here rather than a
+ * partially-applied table, which is what a short table silently produced. */
+MojoBytes *mojo_bytes_translate_del(MojoBytes *b, MojoBytes *table, MojoBytes *delbytes)
+{
+    if (!b) return mojo_bytes_empty();
+    if (table && table->len != 256) {
+        char detail[96];
+        snprintf(detail, sizeof detail,
+                 "translation table must be 256 characters long");
+        mojo_raise_value_error(detail);
+    }
+    MojoBytes *r = mojo_bytes_alloc(b->len);
+    int64_t p = 0;
+    for (int64_t i = 0; i < b->len; i++) {
+        uint8_t c = b->data[i];
+        if (delbytes && memchr(delbytes->data, c, (size_t)delbytes->len)) continue;
+        r->data[p++] = table ? table->data[c] : c;
+    }
+    r->len = p;
+    r->data[p] = 0;
+    return r;
+}
+
 MojoBytes *mojo_bytes_translate(MojoBytes *b, MojoBytes *table)
 {
     if (!b) return mojo_bytes_empty();
+    if (!table) return mojo_bytes_new_lit((const char *)b->data, b->len);
+    if (table->len != 256) {
+        char detail[96];
+        snprintf(detail, sizeof detail,
+                 "translation table must be 256 characters long");
+        mojo_raise_value_error(detail);
+    }
     MojoBytes *r = mojo_bytes_new_lit((const char *)b->data, b->len);
-    if (!table) return r;
     for (int64_t i = 0; i < r->len; i++) {
         uint8_t c = r->data[i];
-        if (c < table->len) r->data[i] = table->data[c];
+        r->data[i] = table->data[c];
     }
+    return r;
+}
+
+/* `bytes.expandtabs([tabsize])` — the bytes twin of mojo_str_expandtabs,
+ * which already existed. This had NO bytes implementation at all, so the
+ * call fell through to the generic unknown-method stub and answered a raw
+ * int `0` (printed as `0`, not even a plausible-looking empty bytes) for
+ * every spelling. `tabsize` defaults to 8, and a non-positive tabsize
+ * REMOVES the tab rather than leaving it alone — CPython's
+ * `b'a\tb\tc'.expandtabs(0)` is `b'abc'`, and this returned the input
+ * unchanged. Column counting resets on `\n` and `\r` only (not on `\f` or
+ * `\v`, which occupy a column), matching both this and mojo_str_expandtabs. */
+MojoBytes *mojo_bytes_expandtabs(MojoBytes *b, int64_t tabsize)
+{
+    int64_t n = b ? b->len : 0;
+    if (tabsize <= 0) {
+        MojoBytes *r = mojo_bytes_alloc(n + 1);
+        int64_t q = 0;
+        for (int64_t i = 0; i < n; i++) if (b->data[i] != '\t') r->data[q++] = b->data[i];
+        r->len = q;
+        r->data[q] = 0;
+        return r;
+    }
+    MojoBytes *r = mojo_bytes_alloc(n * (int64_t)tabsize + 1);
+    int64_t p = 0, col = 0;
+    for (int64_t i = 0; i < n; i++) {
+        uint8_t c = b->data[i];
+        if (c == '\t') {
+            int64_t spaces = tabsize - (col % tabsize);
+            for (int64_t k = 0; k < spaces; k++) r->data[p++] = ' ';
+            col += spaces;
+        } else {
+            r->data[p++] = c;
+            col = (c == '\n' || c == '\r') ? 0 : col + 1;
+        }
+    }
+    r->len = p;
+    r->data[p] = 0;
     return r;
 }
 
@@ -2526,7 +3130,20 @@ MojoList *mojo_bytes_split_max(MojoBytes *b, MojoBytes *sep, int64_t maxsplit, i
     MojoList *l = mojo_list_new();
     if (!b) return l;
     int64_t n = b->len;
-    int64_t sn = (sep && sep->len) ? sep->len : 0;
+    /* An EMPTY separator is a ValueError in CPython — `b'ab'.split(b'')` and
+     * `b'ab'.rsplit(b'')` both raise "empty separator". It was conflated
+     * with the genuinely-absent one (`split()` with no argument, which IS a
+     * whitespace split) because both arrive here as a NULL-or-empty `sep`,
+     * so `split(b'')` silently whitespace-split instead. Only the SPELLING
+     * distinguishes them: an explicit empty separator is a non-NULL,
+     * zero-length value. mojo_bytes_partition already draws this exact
+     * distinction (see mojo_bytes_partition_go's own comment). */
+    if (sep && sep->len == 0) {
+        char detail[96];
+        snprintf(detail, sizeof detail, "empty separator");
+        mojo_raise_value_error(detail);
+    }
+    int64_t sn = sep ? sep->len : 0;
     if (sn == 0) {
         /* whitespace split, no empty pieces, no leading/trailing padding */
         int64_t i = 0;
@@ -2537,7 +3154,15 @@ MojoList *mojo_bytes_split_max(MojoBytes *b, MojoBytes *sep, int64_t maxsplit, i
             while (i < n && !mojo_bytes_isspace_byte(b->data[i])) i++;
             mojo_bytes_list_push(l, b->data + start, i - start);
             if (maxsplit != MOJO_SLICE_STOP_OMITTED && (int64_t)mojo_list_len(l) >= maxsplit) {
-                while (i < n) mojo_bytes_list_push(l, b->data + i, 0), i++;
+                /* The REST of the input is ONE more piece, verbatim. It
+                 * was pushed as a single ZERO-length piece, so
+                 * `b'a b c'.split(maxsplit=1)` came back
+                 * [b'a', b'', b'', b''] — one real piece followed by
+                 * three empty ones, where CPython answers
+                 * [b'a', b' b c']. */
+                int64_t rest = i;
+                while (rest < n && mojo_bytes_isspace_byte(b->data[rest])) rest++;
+                if (rest < n) mojo_bytes_list_push(l, b->data + rest, n - rest);
                 i = n;
             }
         }
@@ -2545,6 +3170,14 @@ MojoList *mojo_bytes_split_max(MojoBytes *b, MojoBytes *sep, int64_t maxsplit, i
     }
     if (!from_right) {
         int64_t start = 0, done = 0;
+        /* An EMPTY subject splits to exactly one piece — the empty string —
+         * not to none. `[].join`ing over an empty result and iterating it
+         * are both wrong for `b''.split(b',')`, and the loop below never
+         * ran at all (no separator to find), so the answer was []. */
+        if (n == 0) {
+            mojo_bytes_list_push(l, b->data, 0);
+            return l;
+        }
         for (int64_t i = 0; i + sn <= n; ) {
             if (memcmp(b->data + i, sep->data, (size_t)sn) == 0) {
                 mojo_bytes_list_push(l, b->data + start, i - start);
@@ -2752,8 +3385,15 @@ int64_t mojo_memoryview_get(MojoMemoryView *m, int64_t i)
     if (!m) return 0;
     if (i < 0) i += m->len;
     if (i < 0 || i >= m->len) {
-        fprintf(stderr, "IndexError: index out of bounds on memoryview\n");
-        exit(1);
+        /* A real, catchable IndexError, not a print-and-exit. The
+         * print-and-exit could not be caught, so a program guarding an
+         * optional read (`try: v = mv[n] except IndexError: v = None`)
+         * died instead of taking the fallback — and the plain
+         * `mv[n]` for n past the end still raises, just one that behaves
+         * like every other raise in this runtime. */
+        char detail[96];
+        snprintf(detail, sizeof detail, "index out of bounds on memoryview");
+        mojo_raise_index_error(detail);
     }
     return (int64_t)m->data[i];
 }
@@ -2815,6 +3455,54 @@ char *mojo_memoryview_format(MojoMemoryView *m, char *fmt)
 MojoBytes *mojo_memoryview_obj(MojoMemoryView *m)
 {
     return mojo_bytes_new_lit(m ? (const char *)m->data : "", m ? m->len : 0);
+}
+
+/* The DESCRIPTIVE shape attributes. All four are exact for this
+ * representation, which is always a 1-D, C-contiguous, non-strided view of
+ * `len` elements — that is not an approximation of a general memoryview, it
+ * is what a `MojoMemoryView` IS here. None of them existed, so each fell to
+ * the generic unknown-member stub and printed its own heap address as a
+ * decimal: `mv.shape` printed 4340423136, `mv.ndim` printed 4340426608, and
+ * a program testing `mv.ndim == 1` silently took the false branch.
+ *
+ * The tuples are returned as STRINGS (the "(4,)" spelling) rather than as
+ * MojoLists because there is no caller-side shape for a 1-tuple here and the
+ * repr of a boxed list would be `[4]`, not `(4,)`. Printing the string
+ * gives CPython's exact text. */
+char *mojo_memoryview_shape_str(MojoMemoryView *m)
+{
+    char buf[32];
+    snprintf(buf, sizeof buf, "(%lld,)", (long long)(m ? m->len : 0));
+    return strdup(buf);
+}
+
+char *mojo_memoryview_strides_str(MojoMemoryView *m)
+{
+    /* Stride is the distance between consecutive elements, in BYTES. */
+    char buf[32];
+    snprintf(buf, sizeof buf, "(%lld,)", (long long)(m ? m->itemsize : 0));
+    return strdup(buf);
+}
+
+char *mojo_memoryview_suboffsets_str(void) { return strdup("()"); }
+
+int64_t mojo_memoryview_ndim(MojoMemoryView *m) { (void)m; return 1; }
+
+/* Contiguity: a 1-D window over `len` bytes with no gaps is C-contiguous,
+ * which for 1 dimension is also F-contiguous and simply "contiguous". */
+int mojo_memoryview_c_contiguous(MojoMemoryView *m) { (void)m; return 1; }
+int mojo_memoryview_f_contiguous(MojoMemoryView *m) { (void)m; return 1; }
+int mojo_memoryview_contiguous(MojoMemoryView *m) { (void)m; return 1; }
+
+/* `mv.tolist()` — the view's elements as a real list of ints. This
+ * answered a raw int 0 from the unknown-member stub. */
+MojoList *mojo_memoryview_tolist(MojoMemoryView *m)
+{
+    MojoList *out = mojo_list_new();
+    if (!m) return out;
+    for (int64_t i = 0; i < m->len; i++)
+        mojo_list_append_int(out, (int64_t)m->data[i]);
+    return out;
 }
 
 char *mojo_memoryview_repr(MojoMemoryView *m)
@@ -3139,9 +3827,17 @@ void mojo_struct_pack_into(const char *fmt, MojoBytes *buf, int64_t offset, Mojo
  * used elsewhere for containers of strings) produces a garbage address
  * (e.g. 0x22 for '"'). Build a real 1-char C string instead. */
 char *mojo_char_to_str(char c) {
-    char *s = malloc(2);
+    /* The 256 possible one-character strings are IMMORTAL and shared: this is
+     * called once per character by every scan over a string (`c = s[i]`,
+     * `c == "\\"`, `buf.append(c)`, `c in ('(', '[')`), and a fresh malloc each
+     * time is a leak with no owner (a list of str never frees its elements). The
+     * result is therefore NOT the caller's to free -- it is deliberately absent
+     * from the codegen's _FRESH_STRING_RETURNS -- and is never written to. The
+     * store below is idempotent (a slot only ever holds its own character), so
+     * there is no init step to race or forget. */
+    static char tbl[256][2];
+    char *s = tbl[(unsigned char)c];
     s[0] = c;
-    s[1] = '\0';
     return s;
 }
 
@@ -3607,6 +4303,7 @@ MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit) {
     int64_t n = mojo_list_len(all);
     if (maxsplit < 0 || maxsplit >= n - 1) {
         for (int64_t i = 0; i < n; i++) mojo_list_append_str(l, mojo_list_get_str(all, i));
+        mojo_list_free(all);      /* the strings moved to `l`; the list did not */
         return l;
     }
     /* Merge the leftmost (n - maxsplit) tokens back together with sep
@@ -3632,6 +4329,11 @@ MojoList *mojo_str_rsplit(char *s, char *sep, int64_t maxsplit) {
      * struct method's forward-declared parameter list. */
     mojo_list_append_str(l, merged);
     for (int64_t i = n_keep; i < n; i++) mojo_list_append_str(l, mojo_list_get_str(all, i));
+    /* `all` is a scratch list whose ELEMENTS `l` now shares (the merge above
+     * copies them into `merged`; the tail is moved by pointer), so only the
+     * list's own struct and buffer are released here — the strings belong to
+     * `l`, which is the returned value. */
+    mojo_list_free(all);
     return l;
 }
 
@@ -4049,12 +4751,25 @@ static int _cmp_seqidx(const void *a, const void *b) {
 int64_t *mojo_dict_order_indices(MojoDict *d)
 {
     if (!d || d->used == 0) return NULL;
-    int64_t (*tmp)[2] = malloc(sizeof(int64_t) * 2 * (size_t)d->used);
+    /* Size the scratch and result arrays from what is actually in the slot
+     * table, not from `used` alone. A well-formed dict has exactly `used`
+     * occupied slots, but a value the compiled backend typed as a dict that is
+     * really another container (a list of pairs was iterated as a dict:
+     * bugs/CODEGEN_list_of_pairs_iterated_as_dict.md) has no such guarantee,
+     * and trusting `used` wrote past the end of the malloc block and corrupted
+     * the allocator's free list, crashing much later inside malloc. The result
+     * is padded to at least `used` entries because MojoDictIter walks
+     * `pos < dict->used`. */
+    int64_t occ = 0;
+    for (int64_t i = 0; i < d->cap; i++)
+        if (d->slots[i].key) occ++;
+    int64_t (*tmp)[2] = malloc(sizeof(int64_t) * 2 * (size_t)(occ ? occ : 1));
     int64_t n = 0;
     for (int64_t i = 0; i < d->cap; i++)
         if (d->slots[i].key) { tmp[n][0] = d->slots[i].seq; tmp[n][1] = i; n++; }
     qsort(tmp, (size_t)n, sizeof(int64_t) * 2, _cmp_seqidx);
-    int64_t *out = malloc(sizeof(int64_t) * (size_t)n);
+    int64_t total = n > d->used ? n : d->used;
+    int64_t *out = calloc((size_t)total, sizeof(int64_t));
     for (int64_t i = 0; i < n; i++) out[i] = tmp[i][1];
     free(tmp);
     return out;
@@ -4966,12 +5681,18 @@ struct MojoSetIter {
 int64_t *mojo_set_order_indices(MojoSet *s)
 {
     if (!s || s->used == 0) return NULL;
-    int64_t (*tmp)[2] = malloc(sizeof(int64_t) * 2 * (size_t)s->used);
+    /* Sized from the slot table, padded to `used` (the iterator's bound): see
+     * mojo_dict_order_indices for why `used` alone cannot be trusted. */
+    int64_t occ = 0;
+    for (int64_t i = 0; i < s->cap; i++)
+        if (s->slots[i].tag != -1) occ++;
+    int64_t (*tmp)[2] = malloc(sizeof(int64_t) * 2 * (size_t)(occ ? occ : 1));
     int64_t n = 0;
     for (int64_t i = 0; i < s->cap; i++)
         if (s->slots[i].tag != -1) { tmp[n][0] = s->slots[i].seq; tmp[n][1] = i; n++; }
     qsort(tmp, (size_t)n, sizeof(int64_t) * 2, _cmp_seqidx);
-    int64_t *out = malloc(sizeof(int64_t) * (size_t)n);
+    int64_t total = n > s->used ? n : s->used;
+    int64_t *out = calloc((size_t)total, sizeof(int64_t));
     for (int64_t i = 0; i < n; i++) out[i] = tmp[i][1];
     free(tmp);
     return out;
@@ -6366,6 +7087,73 @@ char *string_upper(char *str) {
     return upper;
 }
 
+/* `str.casefold()` — the Unicode caseless-folding form of `lower()`. Over
+ * ASCII, which is all this representation carries (a `str` is a bare
+ * `char *`), it is exactly `lower()`: every ASCII letter maps to its
+ * lowercase counterpart and nothing else changes. The non-ASCII cases
+ * (e.g. 'ß' -> 'ss', 'İ' -> 'i̇') are outside the representation and are
+ * recorded as such on the str-side predicate tests rather than guessed at.
+ * This existed because the method had no lowering at all and fell to the
+ * generic unknown-method stub, printing a raw int 0. */
+char *mojo_str_casefold(char *str) { return string_lower(str); }
+
+char *mojo_str_swapcase(char *str) {
+    if (!str) return str;
+    size_t len = strlen(str);
+    char *out = malloc(len + 1);
+    if (!out) return str;
+    for (size_t i = 0; i < len; i++) {
+        char c = str[i];
+        if (c >= 'a' && c <= 'z')      out[i] = (char)(c - 32);
+        else if (c >= 'A' && c <= 'Z') out[i] = (char)(c + 32);
+        else out[i] = c;
+    }
+    out[len] = '\0';
+    return out;
+}
+
+/* `str.title()` — first character of each WORD upper, the rest lower. A
+ * word boundary is here what CPython means: any character that is not
+ * cased. That makes 'a1b'.title() == 'A1B' and 'a b'.title() == 'A B',
+ * which is the rule `str.istitle()` (already implemented, via the shared
+ * mojo_is_kind kernel) checks in the other direction. */
+char *mojo_str_title(char *str) {
+    if (!str) return str;
+    size_t len = strlen(str);
+    char *out = malloc(len + 1);
+    if (!out) return str;
+    int prev_uncased = 1;   /* the start of the string is a word boundary */
+    for (size_t i = 0; i < len; i++) {
+        char c = str[i];
+        int cased = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        if (prev_uncased && c >= 'a' && c <= 'z')      out[i] = (char)(c - 32);
+        else if (prev_uncased && c >= 'A' && c <= 'Z') out[i] = c;
+        else if (c >= 'A' && c <= 'Z')                 out[i] = (char)(c + 32);
+        else if (c >= 'a' && c <= 'z')                 out[i] = c;
+        else out[i] = c;
+        prev_uncased = !cased;
+    }
+    out[len] = '\0';
+    return out;
+}
+
+/* `str.capitalize()` — first character upper, ALL THE REST lower. Distinct
+ * from title() in exactly that: 'aBC'.capitalize() is 'Abc'. */
+char *mojo_str_capitalize(char *str) {
+    if (!str) return str;
+    size_t len = strlen(str);
+    char *out = malloc(len + 1);
+    if (!out) return str;
+    for (size_t i = 0; i < len; i++) {
+        char c = str[i];
+        if (i == 0 && c >= 'a' && c <= 'z') out[i] = (char)(c - 32);
+        else if (i > 0 && c >= 'A' && c <= 'Z') out[i] = (char)(c + 32);
+        else out[i] = c;
+    }
+    out[len] = '\0';
+    return out;
+}
+
 /* Real `hash(x)` builtin. `hash` was previously only a bare, never-defined
  * forward declaration in gimple_codegen.py's preamble (`_util_pairs`) —
  * compiled fine but failed to LINK ("undefined symbols: _hash") the moment
@@ -6527,6 +7315,60 @@ void mojo_raise_value_error(char *detail) {
     mojo_raise();
 }
 
+/* `IndexError: <detail>` — the fifth typed raiser, same mechanism and same
+ * hardcoded-tag derivation as the four above. Needed because an
+ * out-of-range read used to answer a VALUE: `b'abc'[10]` and `b''[0]`
+ * printed 0 with exit 0, and 0 is a real byte value, so
+ * `if b[i] == 0:` on a short buffer silently took the true branch. */
+#define _MOJO_EXC_TAG_INDEXERROR 635713773
+
+void mojo_raise_index_error(char *detail) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "IndexError: %s", detail ? detail : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_INDEXERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
+/* The two ways a tuple refuses to be mutated, as CPython words them. Both
+ * share mojo_require_mutable_list's typed-exception mechanism and the same
+ * hardcoded-tag derivation as the four raisers above; they live here rather
+ * than next to that call because their TEXT is a property of the tuple
+ * marker, and the marker is declared ~5000 lines earlier (its definition is
+ * forward-declared there for exactly this reason).
+ *
+ * `attr` non-NULL is the method form — `'tuple' object has no attribute
+ * 'append'`, an AttributeError, because in CPython the failure is the
+ * attribute lookup itself. NULL is the item form, a TypeError, and the two
+ * halves of it are disambiguated by `verb`: assignment and deletion are
+ * separate messages in CPython and a `try/except` in real code can tell
+ * them apart. */
+static void mojo_raise_tuple_no_attr(const char *attr) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "'tuple' object has no attribute '%s'",
+             attr ? attr : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_ATTRIBUTEERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
+static void mojo_raise_tuple_item_error(const char *verb) {
+    char msg[160];
+    if (verb)
+        snprintf(msg, sizeof msg, "'tuple' object %s", verb);
+    else
+        snprintf(msg, sizeof msg, "'tuple' object does not support item assignment");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_TYPEERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
 /* Reads a dynamically-set attribute from `obj`'s own per-object dict (see
  * above). No matching struct-field tag AND no dynamic attribute of this
  * name ever set on this exact object -> a real AttributeError, matching
@@ -6591,6 +7433,58 @@ int64_t mojo_obj_getattr(void *obj, char *attr) {
  * worse regression than the silent-empty-loop it replaces. So: print
  * loudly (visible, greppable), but let execution continue with the same
  * zero-iterations behavior as before. */
+/* A CALLABLE-VALUED parameter default naming an IMPORTED module's function
+   (`def probe(x, *, g=os.walk): return g(x)`). `_callable_value_symbol`
+   answers "what C symbol does a function used as a value mean" for a BARE
+   NAME this compile lowered; it cannot answer for a `module.attr` reference,
+   because whether `os.walk` was compiled into this translation unit at all is
+   a property of the whole import closure, not of the expression. The old
+   answer was the `('int', '0')` fallback in `_default_expr_to_pair`, so `g`
+   arrived as address 0 and `mojo_fnptr_call_1((void *)0, ...)` called through
+   a null pointer: SIGSEGV, exit 139, no output.
+
+   This is that case's honest answer, and it follows
+   `mojo_unsupported_iter`'s convention exactly: print loudly, and let
+   execution continue with the same behaviour the null pointer would have
+   produced had it survived — so a program that never CALLS the parameter is
+   completely unaffected, and one that does gets a greppable diagnostic
+   instead of a signal.
+
+   ONE function, not a family per arity, because the call reaches it through
+   `mojo_fnptr_call_N`'s `int64_t (*)(int64_t...)` cast: a callee that
+   declares no parameters simply does not read the arguments the caller
+   passes, on every ABI this runtime targets. So `int64_t
+   mojo_unavailable_callable(void)` is a correct target for arities 0 through
+   4 alike, and returns a real 0 for the boxed result.
+
+   The name is armed by the call site immediately before the call, which is
+   why it is a separate setter rather than an argument: a `void (*)(void)`
+   target cannot be passed one, and the alternative — one weak stub per
+   referenced name — is the machinery the existing
+   `_unsupported_generator_names` weak stubs already provide, which this is
+   deliberately not duplicating. */
+static const char *_unavailable_callable_name = "?";
+static int _unavailable_callable_reported = 0;
+
+void mojo_set_unavailable_callable_name(const char *name) {
+    _unavailable_callable_name = name ? name : "?";
+    _unavailable_callable_reported = 0;
+}
+
+int64_t mojo_unavailable_callable(void) {
+    if (!_unavailable_callable_reported) {
+        _unavailable_callable_reported = 1;
+        fprintf(stderr, "mojo_unavailable_callable: '%s' is a callable that is "
+                         "not available in compiled mode (it names an imported "
+                         "module's function, which this translation unit may "
+                         "not contain); calling it returns 0\n",
+                _unavailable_callable_name);
+    }
+    return 0;
+}
+
+void *mojo_unavailable_callable_ptr(void) { return (void *)mojo_unavailable_callable; }
+
 void mojo_unsupported_iter(const char *type_name) {
     fprintf(stderr, "mojo_unsupported_iter: 'for' loop over unsupported iterable "
                      "type %s (codegen has no lowering for this container/iterator "
@@ -6884,7 +7778,16 @@ MojoList *mojo_list_copy(MojoList *l) {
     if (!l) return out;
     for (int64_t i = 0; i < l->len; i++)
         mojo_list_append_int(out, l->data[i]);
+    /* A slot-for-slot copy, so the result describes its slots exactly as
+     * `l` does — see mojo_list_inherit_kinds. */
     mojo_list_inherit_kinds(out, l);
+    /* The tuple marker is deliberately NOT propagated: `t.copy()` does not
+     * exist on a Python tuple (it is an AttributeError there), and
+     * `list.copy()` on a real list yields a list. This helper backs BOTH —
+     * `list(t)` goes through _lower_builtin_list's copy branch — so
+     * propagating would make `list((1,2))` print `(1, 2)`. The opposite of
+     * mojo_list_slice / mojo_list_concat / mojo_list_repeat, which preserve
+     * it. */
     return out;
 }
 
@@ -6902,6 +7805,90 @@ int mojo_list_any(MojoList *l) {
     return 0;
 }
 
+/* all()/any()/sum() over a `bytes` (or `bytearray`) object. Iterating bytes
+ * yields its INTEGERS, not one-character strings and not the object itself,
+ * so these cannot go through the list helpers above: a bytes value is a
+ * `MojoBytes *` and its elements are `b->data[i]`.
+ *
+ * These existed because every such call fell to the codegen's constant stub
+ * instead — `all(b'abc')` answered 0 (CPython: True) and `sum(b'abc')`
+ * answered a heap-pointer decimal (CPython: 294), both with exit 0. A
+ * wrong ANSWER, not an error, and a plausible-looking one: the 0 is what
+ * `all` of an empty iterable is, and the decimal is what an int prints. */
+int mojo_bytes_all(MojoBytes *b) {
+    /* Every element of a bytes object is a non-empty one, so a bytes
+     * object is truthy-valued throughout: all(b'') is True (the empty
+     * iterable) and all(b'\x00...') is True (0 is not None/False here). */
+    (void)b;
+    return 1;
+}
+
+int mojo_bytes_any(MojoBytes *b) {
+    /* any() asks whether ANY ELEMENT is truthy, and an element of a bytes
+     * object is an int in 0-255 — where 0 IS falsy. So this is not
+     * "is the container non-empty": `any(b'\x00')` is False in CPython and
+     * answered True here. (b'' is a separate case and agrees either way:
+     * an empty iterable has no truthy element.) */
+    for (int64_t i = 0; i < b->len; i++) if (b->data[i]) return 1;
+    return 0;
+}
+
+int64_t mojo_bytes_sum(MojoBytes *b) {
+    int64_t s = 0;
+    for (int64_t i = 0; i < b->len; i++) s += b->data[i];
+    return s;
+}
+
+/* `reversed(b)` — the iterator's elements, as a list of ints, matching
+ * `list(reversed(b'abc'))` == [99, 98, 97]. Was `[]`: the reversed() path
+ * only knew MojoList, so a bytes argument produced an empty list. */
+MojoList *mojo_bytes_reversed_list(MojoBytes *b) {
+    MojoList *out = mojo_list_new();
+    if (!b) return out;
+    for (int64_t i = b->len - 1; i >= 0; i--)
+        mojo_list_append_int(out, (int64_t)b->data[i]);
+    return out;
+}
+
+/* `sorted(b)` — the bytes' values in ascending order (CPython returns a
+ * list of ints). Was a crash for a bytes argument (the sort path read the
+ * object as a MojoList header). */
+MojoList *mojo_bytes_sorted_list(MojoBytes *b) {
+    MojoList *out = mojo_bytes_reversed_list(b);
+    /* An insertion sort over int64_t slots: a MojoList carries no per-slot
+     * comparator, and the values here are plain bytes, so the simplest
+     * correct ordering is also the cheapest to be right about. */
+    for (int64_t i = 1; i < out->len; i++) {
+        int64_t key = out->data[i];
+        int64_t j = i - 1;
+        while (j >= 0 && out->data[j] > key) { out->data[j + 1] = out->data[j]; j--; }
+        out->data[j + 1] = key;
+    }
+    return out;
+}
+
+int mojo_bytes_max(MojoBytes *b) {
+    if (!b || b->len == 0) {
+        char detail[96];
+        snprintf(detail, sizeof detail, "max() arg is an empty sequence");
+        mojo_raise_value_error(detail);
+    }
+    uint8_t m = b->data[0];
+    for (int64_t i = 1; i < b->len; i++) if (b->data[i] > m) m = b->data[i];
+    return (int)m;
+}
+
+int mojo_bytes_min(MojoBytes *b) {
+    if (!b || b->len == 0) {
+        char detail[96];
+        snprintf(detail, sizeof detail, "min() arg is an empty sequence");
+        mojo_raise_value_error(detail);
+    }
+    uint8_t m = b->data[0];
+    for (int64_t i = 1; i < b->len; i++) if (b->data[i] < m) m = b->data[i];
+    return (int)m;
+}
+
 /* Python list.pop(index=-1): removes and returns the element at `idx`
  * (negative indices count from the end), shifting later elements down.
  * mojo_list_pop(l) (no index) used to be the only implementation, always
@@ -6910,6 +7897,7 @@ int mojo_list_any(MojoList *l) {
  * last one) silently popped the wrong element instead. */
 int64_t mojo_list_pop_at(MojoList *l, int64_t idx) {
     if (!l || l->len == 0) return 0;
+    mojo_require_mutable_list(l, "pop");
     idx = _norm_idx(l, idx);
     if (idx < 0 || idx >= l->len) return 0;
     int64_t val = l->data[idx];
@@ -6922,22 +7910,280 @@ int64_t mojo_list_pop(MojoList *l) {
     return mojo_list_pop_at(l, -1);
 }
 
+/* `del lst[i]` — the ITEM DELETION spelling, distinct from `lst.pop(i)`
+ * even though both remove an element. They are one C operation
+ * (mojo_list_pop_at) but two different Python operations, and CPython's
+ * answers differ in both exception TYPE and text:
+ *
+ *   del (1,2)[0]  -> TypeError: 'tuple' object doesn't support item deletion
+ *   (1,2).pop(0)  -> AttributeError: 'tuple' object has no attribute 'pop'
+ *
+ * so the deletion guard cannot live in mojo_list_pop_at (whose 'pop' is
+ * right for the method form and wrong here). This is the deletion entry
+ * point the `del` lowering calls instead. */
+int64_t mojo_list_delitem(MojoList *l, int64_t idx) {
+    if (!l || l->len == 0) return 0;
+    if (mojo_is_tuple(l)) mojo_raise_tuple_item_error("doesn't support item deletion");
+    return mojo_list_pop_at(l, idx);
+}
+
 void mojo_list_extend(MojoList *dst, MojoList *src) {
     if (!dst || !src) return;
+    /* Checked here rather than left to mojo_list_append_int below: an EMPTY
+     * src would otherwise append nothing and return without ever reaching
+     * the guard, so `t.extend([])` on a tuple would succeed. */
+    mojo_require_mutable_list(dst, "extend");
     for (int64_t i = 0; i < src->len; i++)
         mojo_list_append_int(dst, src->data[i]);
 }
 
-void mojo_list_sort(MojoList *l) { (void)l; /* stub */ }
+/* ── list.sort() / sorted(): ONE ordering primitive ───────────────────────
+ *
+ * Everything that orders a list in this file goes through _mojo_permute_by
+ * below — mojo_list_sort (`l.sort()`), mojo_sorted (`sorted(x)`), 
+ * mojo_list_sorted_str (`sorted(<strings>)`) and mojo_sorted_by_keys
+ * (`sorted(x, key=f)`).  They used to be four hand-written loops over the same
+ * question, which is how `l.sort()` came to be the one that was a STUB:
+ * void mojo_list_sort(MojoList *l) { (void)l; } returned the list in its
+ * original order, exit 0, saying nothing.  A program that sorted and then read
+ * the list back got silently wrong data.
+ *
+ * `kind` is one byte of the mojo_list_set_kinds alphabet (MOJO_KIND_* in
+ * fire_runtime.h): what a slot HOLDS.  A MojoList slot is a raw int64_t, so
+ * ordering the slots as integers orders a list of strings by ADDRESS — which
+ * is both non-deterministic across runs and different from Python's
+ * alphabetical order.  The kind is therefore passed in: the call site knows it
+ * (see _lower_list_method's gen._elem_of), and where it does not, the side
+ * table and then the runtime's own discriminator decide (see _mojo_sort_kind).
+ */
+
+/* Range-safe string compare: a `sorted(<list of char*>)` whose codegen
+   source (a name set, dict keys, ...) contains a NULL / erased-to-0 element
+   — or, on the self-hosted path, an int slot holding pure garbage that was
+   never a real pointer (`0xb343c47860b33ba0` &c) — must not segfault the
+   whole sort in `strcmp`. Only a value inside the plausible userspace
+   pointer window [0x1000, 2^47) is dereferenced; anything else sorts first
+   (deterministically), and callers' per-element `_ptr_slot_in_range` guards
+   then skip it in the loop body. */
+static int _mojo_sorted_str_ok(int64_t raw) {
+    uint64_t v = (uint64_t)raw;
+    return v >= 0x1000ULL && v < 0x0000800000000000ULL;
+}
+static int _mojo_sorted_str_cmp(int64_t a_raw, int64_t b_raw) {
+    int a_ok = _mojo_sorted_str_ok(a_raw);
+    int b_ok = _mojo_sorted_str_ok(b_raw);
+    if (!a_ok && !b_ok) return 0;
+    if (!a_ok) return -1;
+    if (!b_ok) return 1;
+    return strcmp((const char *)(uintptr_t)a_raw, (const char *)(uintptr_t)b_raw);
+}
+
+/* The ONE comparator. `kind` is a MOJO_KIND_* byte; the default arm is the
+   int64_t compare, which is also right for MOJO_KIND_NONE (every such slot is
+   the same value, so any order of them is correct) and for any kind this
+   file's alphabet does not give a total order to. */
+static int _mojo_sort_cmp(int64_t a, int64_t b, int kind);
+
+/* How deep the nested-container compare below will go. Python compares
+   elementwise to any depth; a compiled MojoList cannot, because a
+   self-referential list (`a = []; a.append(a)`) has no finite elementwise
+   order at all. Past the bound the two compare EQUAL, which is a total order
+   (it never claims one element is less than another) and, with the stable
+   ordering below, leaves such elements in their original relative order. */
+#define MOJO_SORT_MAX_DEPTH 16
+
+static int _mojo_sort_cmp_at(int64_t a, int64_t b, int kind, int depth)
+{
+    if (kind != MOJO_KIND_LIST || depth >= MOJO_SORT_MAX_DEPTH)
+        return _mojo_sort_cmp(a, b, kind);
+    /* Python's list ordering: shorter first, then elementwise. */
+    MojoList *x = (MojoList *)(intptr_t)a;
+    MojoList *y = (MojoList *)(intptr_t)b;
+    if (x == y) return 0;
+    if (!x) return -1;
+    if (!y) return 1;
+    if (x->len != y->len) return x->len < y->len ? -1 : 1;
+    for (int64_t i = 0; i < x->len; i++) {
+        /* The inner element's kind, by the same two sources _mojo_sort_kind
+         * uses: the per-slot side table when the inner list recorded one,
+         * else the runtime's own discriminator. */
+        const char *kx = mojo_list_get_kinds(x);
+        const char *ky = mojo_list_get_kinds(y);
+        int k = MOJO_KIND_INT;
+        if (kx && kx[i]) k = kx[i];
+        else if (ky && ky[i]) k = ky[i];
+        else k = mojo_boxed_is_str(x->data[i]) ? MOJO_KIND_STR : MOJO_KIND_INT;
+        int c = _mojo_sort_cmp_at(x->data[i], y->data[i], k, depth + 1);
+        if (c) return c;
+    }
+    return 0;
+}
+
+static int _mojo_sort_cmp(int64_t a, int64_t b, int kind)
+
+{
+    switch (kind) {
+    case MOJO_KIND_DOUBLE: {
+        /* A list stores a double as its IEEE-754 bits in the slot (see the
+           MojoList comment in fire_runtime.h), so the compare is on the
+           reinterpreted value — comparing the bit patterns as integers
+           would order every positive double after every negative one. */
+        double x, y;
+        __builtin_memcpy(&x, &a, 8);
+        __builtin_memcpy(&y, &b, 8);
+        if (x < y) return -1;
+        if (x > y) return 1;
+        return 0;
+    }
+    case MOJO_KIND_STR:
+        return _mojo_sorted_str_cmp(a, b);
+    case MOJO_KIND_BYTES: {
+        const MojoBytes *x = (const MojoBytes *)(intptr_t)a;
+        const MojoBytes *y = (const MojoBytes *)(intptr_t)b;
+        if (!x || !y) return x == y ? 0 : (x ? 1 : -1);
+        int64_t n = x->len < y->len ? x->len : y->len;
+        int c = n > 0 ? memcmp(x->data, y->data, (size_t)n) : 0;
+        if (c) return c < 0 ? -1 : 1;
+        if (x->len < y->len) return -1;
+        if (x->len > y->len) return 1;
+        return 0;
+    }
+    default:
+        return a < b ? -1 : (a > b ? 1 : 0);
+    }
+}
+
+/* The kind to order `l` by, or 0 for "this list has no order" — which is
+   mojo_list_sort's TypeError, not a silent no-op.
+ *
+ * The per-slot side table comes FIRST, ahead of what codegen knew: it is one
+ * byte PER SLOT, so it is strictly more informative than the call site's
+ * single element type, and a heterogeneous list literal
+ * (`[1, 'a', 2.5]`) is recorded as exactly that while `_elem_of` reports only
+ * the first/lowered type.  Trusting the call site there would order the list
+ * by raw slot — strings by ADDRESS — and leave the side table describing
+ * slots that have since moved.
+ *
+ * Then the call site's answer (a real static fact, from gen._elem_of), and
+ * finally the runtime's own discriminator mojo_boxed_is_str, decided ONCE for
+ * the whole list.  That last one is a genuine guess, and it is the same
+ * discriminator mojo_cstr_or_int_str and mojo_sorted_by_keys already use for
+ * "an untracked int64_t that may be a boxed char *"; the residual ambiguity (a
+ * list of integers large enough to be pointer-shaped) is shared with those,
+ * not introduced here.
+ *
+ * Either way the answer must be UNIFORM.  Python's sort compares every pair of
+ * elements and raises TypeError on a mixed-type list, so "the slots disagree"
+ * is the one answer that must be reported rather than guessed at. */
+static int _mojo_sort_kind(MojoList *l, int kind)
+{
+    const char *k = mojo_list_get_kinds(l);
+    if (k && l->len > 0) {
+        char first = k[0] ? k[0] : MOJO_KIND_INT;
+        for (int64_t i = 1; i < l->len; i++) {
+            char c = k[i] ? k[i] : MOJO_KIND_INT;
+            if (c != first) return 0;
+        }
+        return first;
+    }
+    if (kind) return kind;
+    if (l->len < 1) return MOJO_KIND_INT;
+    int s0 = mojo_boxed_is_str(l->data[0]);
+    for (int64_t i = 1; i < l->len; i++)
+        if (mojo_boxed_is_str(l->data[i]) != s0) return 0;
+    return s0 ? MOJO_KIND_STR : MOJO_KIND_INT;
+}
+
+/* The one ordering loop: selection sort, permuting `l` in place and — when
+   `keys` is given — the parallel key list with it, so the two stay aligned
+   (that is why mojo_sorted_by_keys has always permuted both).
+ *
+ * Keys MOVED the slots, so a recorded per-slot kind string no longer
+ * describes them; drop it, which is exactly what mojo_sorted_by_keys did for
+ * the `sorted(x, key=f)` copy.  A KEYLESS sort needs no such step: it reaches
+ * the loop with a recorded kinds string only when every slot agreed on one
+ * kind (_mojo_sort_kind), and permuting identical kinds leaves it correct. */
+static void _mojo_permute_by(MojoList *l, MojoList *keys, int kind, int reverse)
+{
+    int64_t n = l->len;
+    if (keys && keys->len < n) n = keys->len;
+    if (n < 2) return;
+    if (keys) mojo_list_set_kinds(l, NULL);
+    for (int64_t i = 0; i < n; i++) {
+        for (int64_t j = i + 1; j < n; j++) {
+            int64_t ki = keys ? mojo_list_get_int(keys, i) : l->data[i];
+            int64_t kj = keys ? mojo_list_get_int(keys, j) : l->data[j];
+            int c = _mojo_sort_cmp_at(ki, kj, kind, 0);
+            int swap = reverse ? (c < 0) : (c > 0);
+            if (!swap) continue;
+            int64_t t = l->data[i]; l->data[i] = l->data[j]; l->data[j] = t;
+            if (keys) {
+                int64_t tk = mojo_list_get_int(keys, i);
+                mojo_list_set_int(keys, i, mojo_list_get_int(keys, j));
+                mojo_list_set_int(keys, j, tk);
+            }
+        }
+    }
+}
+
+/* `l.sort()`, in place.  `kind` is the ELEMENT kind codegen knew at the call
+   site (a MOJO_KIND_* byte), 0 for "it did not know" — see _mojo_sort_kind.
+   With a `key=`, `keys` is the parallel key list codegen built by calling the
+   key once per element (the compiled path has no per-element callback in the
+   runtime, so _lower_builtin_sorted_keyed's builder is shared with this call
+   site too), and then `kind` describes the KEY rather than the element. */
+void mojo_list_sort(MojoList *l, int kind, int reverse, MojoList *keys)
+{
+    /* A tuple is not sortable in Python either, and this runtime has no
+     * distinct container type for it — only the marker — so the guard is the
+     * same `mojo_require_mutable_list` every other mutating entry point
+     * calls. `l.sort()` on a tuple-marked list therefore refuses as CPython
+     * refuses instead of silently reordering a list that prints like a
+     * tuple. */
+    mojo_require_mutable_list(l, "sort");
+    if (!l || l->len < 2) return;
+    if (!keys) {
+        kind = _mojo_sort_kind(l, kind);
+        if (!kind) {
+            fprintf(stderr,
+                    "TypeError: list.sort() cannot order a list whose elements "
+                    "are not all of one orderable type (Python raises here "
+                    "too); the list is left unchanged\n");
+            exit(1);
+        }
+    }
+    _mojo_permute_by(l, keys, kind, reverse);
+}
 void mojo_list_reverse(MojoList *l) {
+    mojo_require_mutable_list(l, "reverse");
     if (!l || l->len < 2) return;
     for (int64_t i = 0, j = l->len-1; i < j; i++, j--) {
         int64_t tmp = l->data[i]; l->data[i] = l->data[j]; l->data[j] = tmp;
     }
+    /* The slots moved, so a recorded per-slot kind string now describes the
+     * wrong ones — same fix mojo_list_reversed makes for `sorted(x,
+     * reverse=True)`.  A fresh string rather than an in-place reversal: the
+     * recorded one is SHARED with every copy and slice taken from this list
+     * (mojo_list_inherit_kinds hands over the same pointer). */
+    const char *k = mojo_list_get_kinds(l);
+    if (k) {
+        int64_t n = l->len;
+        char *rk = (char *)malloc((size_t)n + 1);
+        if (rk) {
+            for (int64_t i = 0; i < n; i++) rk[i] = k[n - 1 - i];
+            rk[n] = '\0';
+            mojo_list_set_kinds(l, rk);
+        }
+    }
 }
-void mojo_list_clear(MojoList *l) { if (l) l->len = 0; }
+void mojo_list_clear(MojoList *l) {
+    if (!l) return;
+    mojo_require_mutable_list(l, "clear");
+    l->len = 0;
+}
 void mojo_list_remove_str(MojoList *l, const char *v) {
     if (!l || !v) return;
+    mojo_require_mutable_list(l, "remove");
     for (int64_t i = 0; i < l->len; i++) {
         char *s = (char *)l->data[i];
         if (s && strcmp(s, v) == 0) {
@@ -6950,6 +8196,7 @@ void mojo_list_remove_str(MojoList *l, const char *v) {
 }
 void mojo_list_remove_int(MojoList *l, int64_t v) {
     if (!l) return;
+    mojo_require_mutable_list(l, "remove");
     for (int64_t i = 0; i < l->len; i++) {
         if (l->data[i] == v) {
             for (int64_t j = i; j < l->len - 1; j++)
@@ -7790,57 +9037,28 @@ MojoList *mojo_list_reversed(MojoList *l) {
    list), decided ONCE for the whole sort so the ordering stays consistent. */
 MojoList *mojo_sorted_by_keys(MojoList *items, MojoList *keys, int reverse) {
     MojoList *dst = mojo_list_copy(items);
-    /* Same reason as mojo_list_sorted_str: the sort permutes the slots, so
-     * the copied per-slot kinds would end up describing the wrong ones. */
-    mojo_list_set_kinds(dst, NULL);
     if (!keys) return dst;
-    int64_t n = dst->len;
-    if (keys->len < n) n = keys->len;
-    int use_str = 0;
+    int kind = MOJO_KIND_INT;
     if (keys->len > 0) {
-        use_str = mojo_boxed_is_str(mojo_list_get_int(keys, 0));
-        if (keys->len > 1 && !use_str) {
-            use_str = mojo_boxed_is_str(mojo_list_get_int(keys, 1));
+        if (mojo_boxed_is_str(mojo_list_get_int(keys, 0))) {
+            kind = MOJO_KIND_STR;
+        } else if (keys->len > 1
+                   && mojo_boxed_is_str(mojo_list_get_int(keys, 1))) {
+            kind = MOJO_KIND_STR;
         }
     }
-    for (int64_t i = 0; i < n; i++) {
-        for (int64_t j = i + 1; j < n; j++) {
-            int64_t ki = mojo_list_get_int(keys, i);
-            int64_t kj = mojo_list_get_int(keys, j);
-            int swap;
-            if (use_str) {
-                const char *si = (const char *)(intptr_t)ki;
-                const char *sj = (const char *)(intptr_t)kj;
-                int c = strcmp(si ? si : "", sj ? sj : "");
-                swap = reverse ? (c < 0) : (c > 0);
-            } else {
-                swap = reverse ? (ki < kj) : (ki > kj);
-            }
-            if (swap) {
-                int64_t t = dst->data[i]; dst->data[i] = dst->data[j]; dst->data[j] = t;
-                int64_t tk = mojo_list_get_int(keys, i);
-                mojo_list_set_int(keys, i, mojo_list_get_int(keys, j));
-                mojo_list_set_int(keys, j, tk);
-            }
-        }
-    }
+    _mojo_permute_by(dst, keys, kind, reverse);
     return dst;
 }
 
 void *mojo_sorted(void *iterable) {
     MojoList *src = (MojoList *)iterable;
+    /* The generic int64-payload sort. Correct for int lists, and wrong for a
+     * list whose elements are char* — see mojo_list_sorted_str below for why
+     * the codegen dispatches around this one. */
     MojoList *dst = mojo_list_copy(src);
-    /* Bubble sort on stored int64_t values */
-    for (int64_t i = 0; i < dst->len; i++) {
-        for (int64_t j = i + 1; j < dst->len; j++) {
-            if (mojo_list_get_int(dst, i) > mojo_list_get_int(dst, j)) {
-                int64_t tmp = dst->data[i];
-                dst->data[i] = dst->data[j];
-                dst->data[j] = tmp;
-            }
-        }
-    }
-    return dst;
+    _mojo_permute_by(dst, NULL, MOJO_KIND_INT, 0);
+    return (void *)dst;
 }
 
 /* String-aware `sorted()` variants. The generic mojo_sorted above compares
@@ -7850,27 +9068,6 @@ void *mojo_sorted(void *iterable) {
  * different from Python's alphabetical `sorted(...)`. The codegen picks these
  * by its own knowledge of the element type (see _lower_builtin_sorted), so the
  * runtime never has to guess. */
-/* Range-safe string compare: a `sorted(<list of char*>)` whose codegen
- * source (a name set, dict keys, ...) contains a NULL / erased-to-0 element
- * — or, on the self-hosted path, an int slot holding pure garbage that was
- * never a real pointer (`0xb343c47860b33ba0` &c) — must not segfault the
- * whole sort in `strcmp`. Only a value inside the plausible userspace
- * pointer window [0x1000, 2^47) is dereferenced; anything else sorts first
- * (deterministically), and callers' per-element `_ptr_slot_in_range` guards
- * then skip it in the loop body. */
-static int _mojo_sorted_str_ok(int64_t raw) {
-    uint64_t v = (uint64_t)raw;
-    return v >= 0x1000ULL && v < 0x0000800000000000ULL;
-}
-static int _mojo_sorted_str_cmp(int64_t a_raw, int64_t b_raw) {
-    int a_ok = _mojo_sorted_str_ok(a_raw);
-    int b_ok = _mojo_sorted_str_ok(b_raw);
-    if (!a_ok && !b_ok) return 0;
-    if (!a_ok) return -1;
-    if (!b_ok) return 1;
-    return strcmp((const char *)(uintptr_t)a_raw, (const char *)(uintptr_t)b_raw);
-}
-
 MojoList *mojo_list_sorted_str(MojoList *src) {
     MojoList *dst = mojo_list_copy(src);
     /* Sorting PERMUTES the slots, so the per-slot kinds copied along no
@@ -7879,15 +9076,7 @@ MojoList *mojo_list_sorted_str(MojoList *src) {
      * sort a mixed-type sequence at all, so nothing that reaches here is a
      * case where a correct answer exists.) */
     mojo_list_set_kinds(dst, NULL);
-    for (int64_t i = 0; i < dst->len; i++) {
-        for (int64_t j = i + 1; j < dst->len; j++) {
-            if (_mojo_sorted_str_cmp(dst->data[i], dst->data[j]) > 0) {
-                int64_t tmp = dst->data[i];
-                dst->data[i] = dst->data[j];
-                dst->data[j] = tmp;
-            }
-        }
-    }
+    _mojo_permute_by(dst, NULL, MOJO_KIND_STR, 0);
     return dst;
 }
 

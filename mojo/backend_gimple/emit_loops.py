@@ -386,7 +386,7 @@ def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
     gen._emit_label(bb_post)
     # pos = (mend > pos) ? mend : pos + 1 — advance past the match, or by
     # one char on a zero-width match, exactly like Python's finditer.
-    pos_plus1 = gen._new_val('int64_t', f'{pos_var} + (int64_t)1')
+    pos_plus1 = gen._inc_val(pos_var)
     cmp_t = gen._new_val('_Bool', f'{mend_var} > {pos_var}')
     next_pos = gen._new_val('int64_t', f'{cmp_t} ? {mend_var} : {pos_plus1}')
     gen._emit(f'  {pos_var} = {next_pos};')
@@ -465,7 +465,7 @@ def _close_regex_scan(gen, pieces) -> None:
     gen._emit_label(bb_post)
     # pos = (mend > pos) ? mend : pos + 1 — advance past the match, or by
     # one char on a zero-width match, exactly like Python's finditer/findall.
-    pos_plus1 = gen._new_val('int64_t', f'{pos} + (int64_t)1')
+    pos_plus1 = gen._inc_val(pos)
     cmp_t = gen._new_val('_Bool', f'{mend} > {pos}')
     next_pos = gen._new_val('int64_t', f'{cmp_t} ? {mend} : {pos_plus1}')
     gen._emit(f'  {pos} = {next_pos};')
@@ -566,8 +566,6 @@ def _gen_for_findall_loop(gen, node: gimple_ctypes.ForStmt) -> None:
         # `for a, b in ...` then unpacks as N pairs of (group, null) —
         # twice the iterations and a null second slot.)
         _tup = gen._call_expr('MojoList *', 'mojo_list_new', []) if ngroups >= 2 else None
-        if _tup is not None:
-            gen._void_call('mojo_mark_as_tuple', [('MojoList *', _tup)])
         for _gi in range(ngroups):
             _gi64 = gen._new_val('int64_t', f'(int64_t){_gi + 1}')
             _gsp = gen._new_val('int64_t *', f'_mojo_at_int64_t ({gstart}, {_gi64})')
@@ -600,6 +598,12 @@ def _gen_for_findall_loop(gen, node: gimple_ctypes.ForStmt) -> None:
             # the same way.
             _boxed = gen._new_val('int64_t', f'(int64_t)(intptr_t){_tup}')
             gen._void_call('mojo_list_append_int', [('MojoList *', res), ('int64_t', _boxed)])
+            # Marked AFTER the group slots are appended, not before: a
+            # marked list is refused by every mutating MojoList entry
+            # point (mojo_require_mutable_list's own comment), so marking
+            # first made `re.findall` with 2+ groups raise out of its own
+            # construction. Same ordering rule as _lower_tuple_literal.
+            gen._void_call('mojo_mark_as_tuple', [('MojoList *', _tup)])
     _close_regex_scan(gen, pieces)
     if ngroups >= 2:
         gen._elem_types[res] = 'MojoList *'
@@ -880,6 +884,44 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             # nonexistent MojoGenerator___has_next__/__next__).
             api = gen._generator_var_api.get(it_val)
             if api is not None:
+                # `async for x in gen():` in an ORDINARY (never-suspended)
+                # function -- the one place an async generator can be
+                # consumed by a consumer with no yield channel of its own,
+                # so it is also the one place `_gen_for_generator_iter`'s
+                # resume/value pair below is not automatically right: this
+                # coroutine's channel carries a wait-descriptor (is_wd=1)
+                # for every parking `await` and a real value (is_wd=0) for
+                # every `yield`, and an ordinary C function has no `__c` to
+                # forward a descriptor on. Binding it as the loop variable
+                # is real silent garbage, not merely a wrong answer to the
+                # loop count -- measured, a generator awaiting
+                # `asyncio.sleep(0)` printed a heap ADDRESS instead of its
+                # yield value. So drive it only when the coroutine is
+                # proven never to produce a descriptor, and refuse it
+                # otherwise. The analysis is coro.py's
+                # `_compute_no_wd_forward` fixpoint, carried on the api as
+                # `no_wd_forward`; `_cpp_async_for_stmt` refuses the same
+                # consumer shape for the C++ backend on unrelated grounds
+                # (`async for` is only legal inside an async body), so
+                # this is the stackswitch path's matching honest refusal,
+                # not a new restriction.
+                #
+                # Deliberately NOT gated on `node.is_async`: a plain
+                # `for x in gen()` over an async generator is a TypeError in
+                # CPython, so there is no correct behaviour to preserve
+                # here -- only the silent-garbage one to remove. A clean
+                # async generator keeps its existing lowering on that
+                # spelling.
+                if api.get('is_async_gen') and not api.get('no_wd_forward'):
+                    raise RuntimeError(
+                        "cannot compile module: `async for` over async "
+                        f"generator {api.get('base') or it_val!r} in an "
+                        "ordinary function — that generator's body can "
+                        "suspend (it has an `await` that may park), so its "
+                        "yield channel carries a wait-descriptor the "
+                        "enclosing function has no channel of its own to "
+                        "forward; drive it from an `async def` body "
+                        "(`await asyncio.run(...)`) instead")
                 # Only auto-destroy the coroutine when this `for` loop's
                 # iterable expression IS the generator construction call
                 # itself (`for x in counter(3):`) — that value has no
@@ -2742,7 +2784,7 @@ def _gen_for_list_iter_cursor(gen, node, var: str) -> None:
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
-    nc = gen._new_val('int64_t', f"{cur} + (int64_t)1")
+    nc = gen._inc_val(cur)
     gen._emit(f"  {cur} = {nc};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
@@ -2789,7 +2831,7 @@ def _gen_for_enumerate_generator(gen, node, gen_val: str, api: dict,
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
-    nc = gen._new_val('int64_t', f"{ctr} + (int64_t)1")
+    nc = gen._inc_val(ctr)
     gen._emit(f"  {ctr} = {nc};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_check_exc)

@@ -45,7 +45,8 @@ cache in front of the runner rather than the runner:
                bucket rests on and NOTHING executed it: `checked_run.py` had no
                test importing it, so its behaviour was trusted, not checked.
   the estate   every `test_*.py` in the repo is named by a registered spec, or
-               is in a list that says why not. 50 of 81 were named by nothing.
+               is in a list that says why not. 50 of 81 were named by nothing
+              when this was written; 38 excuses over 118 files remain.
 
 Run:  python3 test_suite.py         (or `make check-suite`, part of `smoke`)
 """
@@ -1054,6 +1055,139 @@ def test_an_expect_marker_points_at_a_doc_that_exists():
           f'is fixed, so the row outlives its own next step: {dangling}')
 
 
+# A Markdown table row that is unmistakably a status inventory: a pipe, a
+# backticked name, and a status word. Deliberately narrow, because the whole
+# value of this check is that it has no exemptions and no false positives —
+# a rule that needs an exception list is the excuse table
+# `bugs/TEST_registered_tests_in_no_bucket_never_run.md` argues against, and it
+# would rot the same way.
+_STATUS_ROW = re.compile(
+    r'^\s*\|(?P<cells>.*)\|\s*$')
+_CELL_NAME = re.compile(r'^`(?P<name>[\w.-]+)`$')
+# A status word is a MARKER, so the token is the one the registry spells: the
+# `expect=`/`disabled=` of a registration, or the EXPECTED/DISABLED the runner
+# reports. Bare "red" or "broken" is prose, not an inventory, and matching it
+# would flag every bug doc in the tree. The boundaries are spelled with
+# lookarounds rather than `\b`, because `\b` after `expect=` requires a word
+# character and the token is nearly always followed by a backtick — `\b` there
+# is false, which silently matched none of the rows in CLAUDE.md.
+_STATUS_WORD = re.compile(
+    r'(?<![\w-])(?:expect=|disabled=)'
+    r'|(?<![\w-])(?:EXPECTED-FAIL|EXPECTED|DISABLED)(?![\w-])')
+
+
+def _stated_statuses(text, name):
+    """The status a Markdown table row asserts for `name`, or None.
+
+    A row is read as an assertion, and this is the whole rule:
+
+      * it is a TABLE row — the line starts with `|`, not `> |`. A quoted line
+        is someone showing you an example, including the quoted stale row in
+        `bugs/DOCS_stated_test_statuses_the_registry_no_longer_has.md`, which
+        is the bug this check was written from and must not itself trip;
+      * one of its cells is EXACTLY the backticked name, so a cell that also
+        narrates is not being read as the name;
+      * the row states exactly ONE status word.
+
+    The last clause is what removes the need for an exemption list, and it is
+    worth being explicit that the alternative was tried and abandoned: a
+    `_HISTORICAL` word list (was/formerly/no longer) was the first
+    implementation, and it exempts a row on the strength of one ordinary
+    English word, which any future doc can use to escape the check. A row
+    naming TWO statuses is not making a claim the registry can falsify — it is
+    describing a change ("was EXPECTED, now DISABLED") or quoting a marker and
+    its replacement — and that is a fact about the row's shape rather than
+    about a vocabulary, so it does not rot into a loophole.
+    """
+    for line in text.splitlines():
+        m = _STATUS_ROW.match(line)
+        if not m:
+            continue
+        cells = [c.strip() for c in m.group('cells').split('|')]
+        if not any(_CELL_NAME.match(c) and _CELL_NAME.match(c).group('name')
+                   == name for c in cells):
+            continue
+        words = _STATUS_WORD.findall(m.group('cells'))
+        said = {'expect' if w.lower().startswith('expect') else 'disabled'
+                for w in words}
+        if len(said) == 1:
+            return said.pop()
+    return None
+
+
+def test_a_doc_that_states_a_tests_status_agrees_with_the_registry():
+    """A Markdown table row naming a marked test must name the mark it has.
+
+    The other two checks in this file read the REGISTRY and the filesystem: an
+    `expect=` reason that cites a doc which is gone, a `memwhy` over the debt
+    line with no reason. This one reads the other direction, and it exists
+    because of what happened twice while merging this work: a file stated
+    `| ab-native | EXPECTED |` after `ab-native` had been moved to `disabled=`,
+    and a second doc listed "13 expect= tests" after a commit made in none of
+    them registered three more. Neither was a defect — nothing computes a
+    verdict from either string — and both are exactly what a reader of the
+    queue is told to believe. `bugs/DOCS_stated_test_statuses_the_registry_no_
+    longer_has.md` is the write-up.
+
+    The rule is only about STATUS, and only in a table row, for the reason
+    `_stated_statuses` spells out: a check that had to be exempted from every
+    bug doc in the tree would be a second inventory to keep in sync, which is
+    the failure it was written to catch. A test with no marker has no status to
+    state, so an unmarked name in a table row is not this check's business —
+    whether it is in a bucket is `bugs/TEST_registered_tests_in_no_bucket_never_
+    run.md`'s subject, and that one is not machine-checkable without the
+    exception list this rule avoids.
+    """
+    marked = {n: ('disabled' if getattr(s, 'disabled', '')
+                  else 'expect')
+              for n, s in suite.REGISTRY.items()
+              if getattr(s, 'expect', '') or getattr(s, 'disabled', '')}
+
+    # Every Markdown file in the repo that is not under a derived directory.
+    # The walk is the same one the estate check below uses, and the reason for
+    # reusing `checked_run.is_derived_dir` rather than a second skip list is the
+    # one that function's docstring gives: two lists are two answers to "what is
+    # a file in this repo", which is the disagreement this check exists to
+    # prevent. A scan of a FIXED list of files is exactly the list that goes
+    # stale — the first version of this rule read CLAUDE.md and bugs/ only, and
+    # reported green on the tree with `CRASH.md`'s `| ab-native | EXPECTED |`
+    # still in it, which is the one file the bug doc is about. The root and
+    # `bugs/` are the whole Markdown tree here (245 files), so nothing is
+    # excluded by accident.
+    import checked_run
+    docs = []
+    for dirpath, dirnames, filenames in os.walk(HERE):
+        dirnames[:] = [d for d in dirnames if not checked_run.is_derived_dir(d)]
+        docs += [os.path.join(dirpath, f) for f in sorted(filenames)
+                 if f.endswith('.md')]
+
+    stated, wrong = {}, []
+    for path in docs:
+        try:
+            text = open(path, encoding='utf-8', errors='replace').read()
+        except OSError:
+            continue
+        for name, want in sorted(marked.items()):
+            said = _stated_statuses(text, name)
+            if said is None:
+                continue
+            stated.setdefault(name, []).append(os.path.relpath(path, HERE))
+            if said != want:
+                wrong.append(f'{os.path.relpath(path, HERE)}: {name} says '
+                             f'{said!r}, registry says {want!r}')
+
+    check('doc status: the rule is not vacuous — a doc states a marked status',
+          len(stated) >= 3,
+          f'only {len(stated)} marked tests are stated in any table row '
+          f'({sorted(stated)}); a rule that matches nothing reports green '
+          f'forever, which is the one thing it must not be able to do')
+    check('doc status: every table row agrees with the registry',
+          not wrong,
+          'a doc that states a status the registry does not have is a reader '
+          'being told something false, and it is how the 2026-09-29 and the '
+          f'2026-09-30 censuses both went stale: {wrong}')
+
+
 def _makefile_target_closure(start):
     """Every make target reachable from `start` through prerequisites.
 
@@ -1600,12 +1734,17 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
     runs cannot collide.
 
     It is checked HERE, and not left to `ab-native`, because `ab-native` cannot
-    check it: that spec needs the self-hosted binary, is capped at 55 GB, and is
-    `expect=`-marked red because the binary segfaults on any input. So the code
-    that decides where this test writes had no executing coverage at all — the
-    exact hole `coro` sat in after the `mojo_*` rename, one level down. The
-    self-test is pure Python and needs no compiler, so it runs in a tenth of a
-    second here, in the `smoke` bucket, on every run.
+    check it: that spec needs the self-hosted binary, measured 20.5 GB, and is
+    `disabled=`-marked against bugs/CODEGEN_ab_native_fails.md — registered,
+    not run, because a known red bought at 55 GB of a 96 GB machine budget,
+    exclusive, every gate, is the machine paying twice. (Its marker is no
+    longer "the binary segfaults on any input" either: that was measured false
+    on 2026-09-27, and the two halves of the flake — the enumeration above and
+    the writer here — are why.) So the code that decides where this test writes
+    had no executing coverage at all — the exact hole `coro` sat in after the
+    `mojo_*` rename, one level down. The self-test is pure Python and needs no
+    compiler, so it runs in a tenth of a second here, in the `smoke` bucket, on
+    every run.
 
     The invariant asserted is the whole directory, not the files this happened
     to write: a check that only looked for its own leftovers would pass on a
@@ -1782,15 +1921,16 @@ def test_tally_accounts_for_every_test():
         return rc, buf.getvalue()
 
     check('tally: every status the runner can produce has a counter',
-          set(suite.TALLY_ROW) == set(suite._RANK) | {suite.EXPECTED},
-          f'runner: {sorted(set(suite._RANK) | {suite.EXPECTED})}, '
+          set(suite.TALLY_ROW) == suite.PRODUCIBLE,
+          f'runner: {sorted(suite.PRODUCIBLE)}, '
           f'tally: {sorted(suite.TALLY_ROW)}')
     check('tally: and no status is counted twice',
           len(suite.TALLY_ROW) == sum(len(r.statuses) for r in suite.TALLY),
           'a status listed in two rows would be counted in both')
 
-    # All seven statuses at once: the counters must still add up, and the ones
-    # that are not a counter's plain reading must be tagged in the listing.
+    # All statuses at once (there are eight now, and DISABLED is one of them):
+    # the counters must still add up, and the ones that are not a counter's
+    # plain reading must be tagged in the listing.
     every = sorted(suite.TALLY_ROW)
     names = [f'{s}-test' for s in every]
     state = dict(zip(names, every))
@@ -1809,6 +1949,18 @@ def test_tally_accounts_for_every_test():
     check('tally: an ERROR is not confused with a FAIL either',
           re.search(r'^\s+error-test\s+\([\d.]+s\)\s+\[ERROR\]', out, re.M)
           is not None, f'expected ERROR tagged: {out}')
+    # The disabled row has to be a ROW, not an absence: a registered test that
+    # was not run is a decision a reader has to see, and "the counters sum to
+    # N" is only true of this run because a status nobody counted did not
+    # exist. Two things a synthetic `state` can get wrong and a real run
+    # cannot: printing a duration for something that never ran, and printing it
+    # as a section member without saying so.
+    check('tally: a disabled test is listed as "not run", not as "(0s)"',
+          re.search(r'^\s+disabled-test\s+\(not run\)', out, re.M) is not None,
+          f'expected the disabled member to say it did not run: {out}')
+    check('tally: ...and the section header says the same',
+          'DISABLED (not run: expected to fail, turns on when its bug is '
+          'fixed)' in out, f'expected the DISABLED section header: {out}')
 
     # All green: nothing unaccounted, nothing failing, so exit 0. Without this
     # the previous case would pass a runner that simply always exits 1.
@@ -1866,6 +2018,247 @@ def test_a_status_with_no_counter_stops_the_runner():
         rc, msg = 1, str(e)
     check('tally: a status with no counter stops the runner at import', rc == 1
           and 'banana' in msg, f'rc={rc} msg={msg!r}')
+
+
+# ── disabled tests: registered, not run, and the bug doc is the switch ────────
+# The shape being pinned is `disabled='bugs/<doc>.md'`: a known failure whose
+# test is too expensive to run. `ab-native` was the live case — 20.5 GB
+# measured, the `program` class (55 of a 96 GB machine-wide budget), and
+# `excl`, so it held the machine alone in every run to be told the thing its own
+# marker said. The properties below are the mechanism; the estate check after
+# them is the anti-rot.
+
+def test_a_disabled_test_is_registered_but_never_runs():
+    """Not run means NOT RUN: no process, no reservation, no time, and a tally
+    that still counts it.
+
+    The observation is a side-effect counter file, not the output, for the
+    reason `test_checked_run_replays_a_pass_and_reruns_a_failure` spells out: a
+    cached replay reproduces stdout byte for byte, so anything that greps the
+    output for evidence the command ran proves nothing. This job is not even
+    cached, but the counter is what answers "did it start" rather than "what
+    did it say".
+
+    The dependent matters as much as the disabled test, and in the direction
+    that is easy to get wrong: a disabled test has no verdict, so nothing
+    propagates from it. A dependent that treated DISABLED as a failure would be
+    SKIPPED behind a verdict that is never coming, silently stopping work that
+    has nothing to do with the bug being tracked. So `needs` runs and passes.
+
+    Which job ran is read from the log's own per-job line, not from its output
+    and not from a grep for the command: the runner logs every job's argv, so a
+    substring of the command is in the log whether or not the command ran.
+    """
+    ran = os.path.join(HERE, 'build', 'test-suite-disabled.ran')
+    log = os.path.join(HERE, 'build', 'test-suite-disabled.log')
+    if os.path.exists(ran):
+        os.unlink(ran)
+    os.makedirs(os.path.dirname(ran), exist_ok=True)
+    # A doc that really exists, so the case is the shipped shape and not a
+    # marker that only the checker under test would accept.
+    with Sandbox(off=dict(cmd=ok_cmd(f'open({ran!r}, "a").write("x")'),
+                          mem='program', disabled=suite.MEM_DEBT_DOC),
+                 needs=dict(cmd=ok_cmd('print("ran anyway")'),
+                            deps=['off']),
+                 on=dict(cmd=ok_cmd('print("unrelated")'))):
+        rc, out = run(['off', 'needs', 'on'], jobs=3, log=log, quiet=False)
+        jobs, per_test = suite.plan_for(['off', 'needs', 'on'], _FakeOpts())
+        # The reservation, on the synthetic spec: `reserved_gb` is what the
+        # scheduler asks the ledger for, and a disabled job that returned its
+        # class would hold 55 GB of a 96 GB budget for a process it never
+        # spawns. The class is 55 on purpose, so "0" cannot be confused with
+        # "it had nothing to reserve anyway".
+        reserved = suite.reserved_gb(suite.REGISTRY['off'])
+        ceiling = suite.memlimit(suite.memclass_for(suite.REGISTRY['off']))
+        text = open(log).read() if os.path.exists(log) else ''
+
+    check('disabled: the job never started', not os.path.exists(ran),
+          'the disabled test ran: this is the whole point of the field')
+    check('disabled: it is planned as zero jobs', per_test['off'] == 0
+          and [j.spec.name for j in jobs] == ['needs', 'on'],
+          f'{per_test} / {[j.spec.name for j in jobs]}')
+    check('disabled: it reserves NOTHING from the ledger, not even its class',
+          reserved == 0 and ceiling == 55,
+          f'reserved {reserved} GB of a {ceiling} GB class — a class that is '
+          f'only a record must not be a claim on the machine')
+    check('disabled: a dependent is NOT skipped by it',
+          re.search(r'(?m)^\[\s*\d+/\d+\]\s+ok\s+needs\b', text) is not None
+          and 'dependency did not pass' not in text,
+          'a disabled dep made its dependent skip: the dependent would have '
+          'been skipped behind a verdict that is never coming')
+    check('disabled: it is in the tally as its own status',
+          '1 disabled' in out, f'expected a disabled counter: {out!r}')
+    check('disabled: ...and it is listed with the doc, in its own section',
+          'DISABLED (not run' in out and suite.MEM_DEBT_DOC in out,
+          f'expected the DISABLED section naming the doc: {out!r}')
+    check('disabled: ...and not as a duration it never spent',
+          re.search(r'^\s+off\s+\(not run\)', out, re.M) is not None,
+          f'expected "off (not run)": {out!r}')
+    check('disabled: ...and the run still exits 0', rc == 0, f'rc={rc}')
+    check('disabled: the log records what it cost instead',
+          'DISABLED, 0 job(s), not run' in text
+          and 'reserved 0 GB now' in text,
+          'the run log must say the job was skipped on purpose, and that its '
+          f'class is a record: {[l for l in text.splitlines() if "plan: off" in l]}')
+
+    # The same property on the real registry entry rather than a synthetic one,
+    # where the class is the one the job will actually be given back.
+    real = suite.REGISTRY['ab-native']
+    check('disabled: the registry\'s own disabled job reserves 0, not its class',
+          suite.is_disabled(real) and suite.reserved_gb(real) == 0
+          and suite.memlimit(suite.memclass_for(real)) > 0,
+          f'reserved {suite.reserved_gb(real)} GB; its class is '
+          f'{suite.memclass_for(real)} '
+          f'({suite.memlimit(suite.memclass_for(real)):g} GB) — a class that is '
+          f'only a record must not be a claim on the machine')
+
+    # --list and --dry-run, because a decision a reader cannot see is not a
+    # decision: both have to say DISABLED, and the plan has to say the
+    # reservation is 0 rather than leaving the reader to infer it from a
+    # missing line.
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        suite.print_list()
+    listing = buf.getvalue()
+    check('disabled: --list shows it, with the doc',
+          re.search(r'^  ab-native\b.*DISABLED', listing, re.M) is not None
+          and suite.MEM_DEBT_DOC in listing
+          and 'bugs/CODEGEN_ab_native_fails.md' in listing,
+          'ab-native is not marked DISABLED in --list, or its doc is not shown')
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        suite.print_plan(['ab-native'], _FakeOpts())
+    plan = buf.getvalue()
+    check('disabled: --dry-run plans it as disabled and reserves 0',
+          'DISABLED: not run' in plan and 'reserves 0 GB' in plan
+          and '0 jobs' in plan,
+          f'expected a disabled line with no jobs and no reservation: {plan!r}')
+
+
+def test_the_disabled_markers_in_the_registry_are_honest():
+    """The anti-rot, and the two ways to get a marker wrong, on synthetic
+    registries — plus the real one.
+
+    Three rules, each with its own case, because they fail differently and a
+    guard that only sees one of them is a guard that reports green for the
+    other two:
+
+      * the doc is GONE (it existed; the repo's rule deletes a fixed bug's doc)
+        — so the bug is fixed, and the test has to be turned back on. This is
+        the anti-rot, and it is the one that matters: without it a fix leaves a
+        test nobody runs and a doc nobody reads, forever.
+      * the doc NEVER EXISTED — a typo in the marker, which must not be
+        mistaken for the above: sending the next reader to "re-enable a test
+        whose bug was never filed" is how a typo becomes permanent.
+      * both markers on one job — `expect=` runs the test, `disabled=` does
+        not, and a job that both runs and does not is unreadable.
+
+    The history question is injected rather than reached for, because the two
+    answers need two different worlds (a file that used to exist and one that
+    never did) and manufacturing the second one in a working tree is not
+    something a test should do to the repository it runs in. The shipped
+    `git`-backed default is exercised separately, below, on a path that has
+    never existed in this repository.
+    """
+    good = suite.Spec(name='good', cmd=ok_cmd('pass'),
+                      disabled=suite.MEM_DEBT_DOC)
+    clean = {'good': good}
+    check('disabled markers: a marker with a real doc is not a problem',
+          suite.disabled_problems(clean, root=HERE) == [],
+          f'{suite.disabled_problems(clean, root=HERE)}')
+
+    problems = suite.disabled_problems(
+        {'gone': suite.Spec(name='gone', cmd=ok_cmd('pass'),
+                            disabled='bugs/DELETED_ONCE.md')},
+        root=HERE, existed=lambda p: True)
+    check('disabled markers: a doc that was deleted stops the registry',
+          len(problems) == 1 and 'is gone' in problems[0]
+          and 'DELETED_ONCE.md' in problems[0]
+          and 'turn the test back on' in problems[0],
+          f'{problems}')
+
+    problems = suite.disabled_problems(
+        {'typo': suite.Spec(name='typo', cmd=ok_cmd('pass'),
+                            disabled='bugs/NEVER_WRITTEN.md')},
+        root=HERE, existed=lambda p: False)
+    check('disabled markers: a doc that never existed is a typo, not a fix',
+          len(problems) == 1 and 'never has' in problems[0]
+          and 'typo' in problems[0],
+          f'{problems}')
+
+    problems = suite.disabled_problems(
+        {'both': suite.Spec(name='both', cmd=ok_cmd('pass'), expect='a reason',
+                            disabled=suite.MEM_DEBT_DOC)},
+        root=HERE, existed=lambda p: True)
+    check('disabled markers: expect= and disabled= on one job is refused',
+          len(problems) == 1 and 'BOTH' in problems[0],
+          f'{problems}')
+
+    problems = suite.disabled_problems(
+        {'outside': suite.Spec(name='outside', cmd=ok_cmd('pass'),
+                               disabled='../elsewhere/bug.md')}, root=HERE)
+    check('disabled markers: a path outside the repo is refused',
+          len(problems) == 1 and 'repo-relative' in problems[0],
+          f'{problems}')
+
+    # The shipped `git`-backed history check, on a path that has never existed
+    # in this repository. Without this the two synthetic cases above would pass
+    # on a `existed` that the runner never calls.
+    problems = suite.disabled_problems(
+        {'typo': suite.Spec(name='typo', cmd=ok_cmd('pass'),
+                            disabled='bugs/NEVER_WRITTEN_REAL.md')}, root=HERE)
+    check('disabled markers: git agrees the path never existed (real call)',
+          len(problems) == 1 and 'never has' in problems[0],
+          f'{problems}')
+
+    # The real registry, which is the estate check proper: the marker in it
+    # points at a doc that is in the tree.
+    real = [n for n, s in suite.REGISTRY.items() if suite.is_disabled(s)]
+    check('disabled markers: the real registry has no stale or wrong marker',
+          not suite.disabled_problems(),
+          f'{suite.disabled_problems()}')
+    check('disabled markers: ...and it is not vacuous: a job is disabled',
+          len(real) >= 1, f'no registered job is disabled: {sorted(real)}')
+    for name in real:
+        spec = suite.REGISTRY[name]
+        check(f'disabled markers: {name} names a doc that is in the tree',
+              os.path.exists(os.path.join(HERE, spec.disabled)),
+              f'{spec.disabled} is missing — which is the anti-rot, and the '
+              f'registry would already have refused to import')
+        check(f'disabled markers: {name} is not also marked expect=',
+              not (getattr(spec, 'expect', '') or ''),
+              'the two markers say opposite things about whether it runs')
+
+    # And the loudest half: the runner REFUSES TO START, rather than warning.
+    # The bug-doc check is the one place in this mechanism where "loudly" is
+    # the whole requirement — a warning in a log nobody reads is how a disabled
+    # test stays off for years — so the guard is executed, not inspected.
+    path = os.path.join(HERE, 'tools', 'suite.py')
+    with open(path) as f:
+        src = f.read()
+    # Line-anchored on purpose: the module docstring and the section comment
+    # both spell `disabled='bugs/<doc>.md'` as PROSE, and a pattern that
+    # matched those would rewrite a comment and leave the registry alone — the
+    # guard below would then pass on a file whose marker is perfectly fine.
+    # `(?m)^\s*disabled='` matches the registration line and nothing else.
+    doctored, n = re.subn(
+        r"(?m)^(\s*)disabled='bugs/[A-Za-z0-9_./-]+\.md'",
+        r"\1disabled='bugs/NO_SUCH_DOC_ANYWHERE.md'", src, count=1)
+    check('disabled markers: the guard test still recognises the marker it '
+          'rewrites', n == 1
+          and 'disabled=\'bugs/CODEGEN_ab_native_fails.md\'' in src,
+          'tools/suite.py no longer spells the ab-native disabled= the way this '
+          'test rewrites it, so the guard below would pass on an unpatched file')
+    ns = {'__name__': 'suite_doctored_disabled', '__file__': path}
+    try:
+        exec(compile(doctored, 'suite.py(doctored)', 'exec'), ns)
+        rc, msg = 0, ''
+    except SystemExit as e:
+        rc, msg = 1, str(e)
+    check('disabled markers: a stale marker stops the runner at import',
+          rc == 1 and 'NO_SUCH_DOC_ANYWHERE.md' in msg
+          and 'ab-native' in msg,
+          f'rc={rc} msg={msg!r}')
 
 
 # ── selection ────────────────────────────────────────────────────────────────
@@ -2489,9 +2882,12 @@ def test_checked_run_replays_a_pass_and_reruns_a_failure():
 # below are what keep it honest in the other direction, so an entry cannot
 # outlive the file it excuses or the registration that supersedes it.
 #
-# This IS the inventory from `bugs/UNTESTED.md`, in a form that runs. The
-# measured shape: 50 of 81, and 5 of those 50 are RED today, so the tree carries
-# 25 known-failing assertions that no gate, tally or coverage number reports.
+# This IS the inventory from `bugs/UNTESTED.md`, in a form that runs. The shape
+# when the check was written: 50 of 81 test files named by nothing, 5 of those
+# RED, so 25 known-failing assertions no gate, tally or coverage number
+# reported. What is left after the registrations that have since landed is 38
+# excuses over 118 files — the count moves as tests get registered, which is
+# the point: every removal below is a test something now runs.
 UNREGISTERED = {
     # ── RED today: exit non-zero, and no gate, tally or coverage number
     #    reports any of it. The count is a re-run of every entry, not a
@@ -2518,7 +2914,23 @@ UNREGISTERED = {
         'test_formal_run.py rather than inside it, because the convention is '
         'one construct and the suite that hosts it is already the longest.',
 
-    # ── the interpreter, which is the oracle everything else is compared to ──
+    'test_string_literal_lexing.py': 'The LEXER: escapes, the line model, tab '
+        'expansion, CR, an unterminated literal, and a backslash line '
+        'continuation inside a raw literal \u2014 build-and-run against CPython '
+        'where the case has an oracle. Two front-end bugs that changed what a '
+        'program MEANS rather than what it prints.',
+    'test_formal_comptime_string.py': 'A comptime string MATERIALIZED: a '
+        'module-level `comptime` bound to a string reaches the image as the '
+        'bytes it is, on both architectures, with the escapes decoded rather '
+        'than printed back (bugs/FORMAL_string_literal_escape_is_not_'
+        'decoded.md). Build-and-RUN, because a substitution that is wrong in '
+        'the last byte is indistinguishable from a right one in a refusal.',
+    'test_formal_mlir_precedence.py': 'WHICH of the two MLIR refusals answers a '
+        'template, and that the answer is the same on both backends: seven '
+        'cases, each asserted to refuse on BOTH architectures with the same '
+        'sentence (bugs/FORMAL_mlir_refusal_preemption.md). Build-only, but '
+        'twice per case, because a backend that answers differently about one '
+        'construct is the defect this file exists for.',
     'test_myinterpreter.py': 'Runs a real .mojo file end to end through '
         'myinterpreter.mojo, which is the reference every compiled-path answer '
         'is measured against.',
@@ -2714,10 +3126,13 @@ def test_every_test_file_is_registered():
     file run at all, and until this check nothing noticed when one did not
     happen.
 
-    Measured before it existed: 50 of 81, of which 5 are RED. The 50 are
-    declared below with a reason each, because a check that failed 50 times on
-    its first day is a check nobody runs — and the declarations are the
-    inventory from `bugs/UNTESTED.md`, in a form that executes.
+    Measured before it existed: 50 of 81, of which 5 are RED. They were
+    declared with a reason each rather than left failing, because a check that
+    failed 50 times on its first day is a check nobody runs — and the
+    declarations are the inventory from `bugs/UNTESTED.md`, in a form that
+    executes. The declarations SHRINK as tests get registered (a registration
+    supersedes an excuse, and the anti-rot assertion below says so), so the
+    count here is the residue, not the original measurement.
     """
     excused = _unregistered_reason_table()
     on_disk = set(_test_files_in_repo())
@@ -3039,8 +3454,11 @@ def main():
                test_timeout_is_a_failure_not_a_vanished_job,
                test_tally_accounts_for_every_test,
                test_a_status_with_no_counter_stops_the_runner,
-               test_artifact_cache,                test_selfhost_key_is_complete,
+               test_artifact_cache,
+               test_selfhost_key_is_complete,
                test_the_compiler_imports_from_every_real_entry_point,
+               test_a_disabled_test_is_registered_but_never_runs,
+               test_the_disabled_markers_in_the_registry_are_honest,
                test_bucket_dedup, test_missing_dep_is_reported,
                test_named_test_brings_its_deps,
                test_log_has_passes_screen_does_not,
@@ -3073,6 +3491,7 @@ def main():
                test_over_provisioned_classes_are_reported_not_silently_kept,
                test_every_job_over_the_debt_line_says_why,
                test_an_expect_marker_points_at_a_doc_that_exists,
+               test_a_doc_that_states_a_tests_status_agrees_with_the_registry,
                test_a_make_recipe_never_asks_for_more_than_its_job_reserved):
         fn()
     print()

@@ -154,8 +154,10 @@ it.
   caller in a loop pays that per call; it is measured at well under a
   millisecond for the 200KB files in the corpus.
 - **Three backend defects shaped the code and are filed where they belong**, not
-  worked around silently: an `elif` arm or a module-constant read on this path
-  is refused by the register allocator
+  worked around silently: a module-constant read inside an `elif` arm on this
+  path is refused by the register allocator — the OTHER half of that same doc,
+  a constant as an assignment's right-hand side, was fixed 2026-09-30, so only
+  the `elif` shape still constrains this module
   (`CODEGEN_elif_arm_reading_a_module_constant_has_no_home.md`), a shift by more
   than 31 is miscompiled on arm64
   (`CODEGEN_shift_amount_above_31_is_wrong_on_arm64.md`), and a triple-quoted

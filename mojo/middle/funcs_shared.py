@@ -1055,6 +1055,16 @@ def _struct_method_qualifier(gen, struct_name: str) -> str:
     exempt by never going through struct-method mangling at all."""
     if struct_name == 'Span':
         return ''
+    # An already-QUALIFIED struct cname (a same-bare-name collision loser's;
+    # see `_struct_cname_by_id` in GimpleGen.__init__) carries its own module
+    # prefix, so it must compose to `{cname}_{method}` with NOTHING prepended.
+    # Prefixing again would name the symbol `mod_b_mod_b_Dialog___init__`,
+    # which nothing defines — and answering '' is exactly what keeps such a
+    # struct's method symbols byte-identical to what this codegen emitted for
+    # it before the collision fix, since the pre-fix spelling was already
+    # `{qualifier}_{Name}_{method}`.
+    if struct_name in getattr(gen, '_struct_qualified_cnames', ()):
+        return ''
     # GimpleGen: same shape of exemption as Span just above, for a
     # different reason. GimpleGen genuinely DOES have a real home module
     # (gimple_codegen.py) and a normal per-file compile of THAT file
@@ -1189,6 +1199,72 @@ def _struct_method_qualifier(gen, struct_name: str) -> str:
     if home and struct_name in home:
         return _sanitize_qualifier(home[struct_name])
     return ''
+
+
+# ---------------------------------------------------------------------------
+# Module-qualified struct IDENTITY (same-bare-name collisions across modules)
+# ---------------------------------------------------------------------------
+
+def _sanitize_cname_qualifier(q):
+    """The C-identifier form of a module qualifier. Deliberately the same
+    transformation as `_struct_method_qualifier`'s own `_sanitize_qualifier`
+    just above, so a qualified struct cname and a qualified method symbol of
+    the same struct always agree: `{cname}_{method}` and
+    `{qualifier}_{Name}_{method}` are the same string."""
+    return q.lstrip('.').replace('.', '_').replace('-', '_') if q else q
+
+
+def _resolve_struct_cname(gen, name: str, home: str = '') -> str:
+    """The C identity (`cname`) a reference to the class spelled `name`
+    resolves to, optionally disambiguated by the MODULE it was reached
+    through.
+
+    With no `home`, this is the historical answer: the bare name for every
+    struct that never collided, and the WINNER's cname for one that did
+    (`_struct_cname_of_name`). With a `home` module qualifier, a class owned
+    by THAT module resolves to its own cname instead — the whole point:
+    `mod_b.Dialog(...)` must construct mod_b's `Dialog`, not whichever of two
+    same-named classes won the bare-name race.
+
+    Returns the bare `name` unchanged when nothing is registered for it, so
+    this is safe to call on any name (a builtin, a local, a not-yet-scanned
+    struct) and degrades exactly to the pre-existing behaviour."""
+    if not name:
+        return name
+    if home:
+        _q = _sanitize_cname_qualifier(home)
+        if _q:
+            _hit = getattr(gen, '_struct_cname_by_home', None)
+            if _hit:
+                _v = _hit.get(_q + '::' + name)
+                if _v:
+                    return _v
+    _owner = getattr(gen, '_struct_cname_of_name', None)
+    if _owner:
+        _v2 = _owner.get(name)
+        if _v2:
+            return _v2
+    return name
+
+
+def _ctor_cname_via_module(gen, binding: str, name: str) -> str:
+    """`_resolve_struct_cname` keyed by the module a qualified-constructor
+    receiver (`mod_b.Dialog(...)`) actually names.
+
+    `binding` is the SOURCE-LEVEL spelling of the receiver, which is a LOCAL
+    alias, not necessarily the module's own name (`import mod_b as mb` binds
+    `mb`). `imported_symbols[binding]['module']` resolves the alias back to
+    the real module — the key `_struct_cname_by_home` was registered under. A
+    binding with no recorded module (a builtin, a local name) resolves to the
+    bare name, the historical answer."""
+    _info = getattr(gen, 'imported_symbols', None)
+    if _info:
+        _e = _info.get(binding)
+        if isinstance(_e, dict):
+            _m = _e.get('module')
+            if _m:
+                return _resolve_struct_cname(gen, name, _m)
+    return _resolve_struct_cname(gen, name)
 
 
 # ---------------------------------------------------------------------------
@@ -1367,29 +1443,106 @@ def _selfhost_extracted_fn_index() -> dict:
     `mojo/middle` + `mojo/backend_gimple`) — the extracted helper that a
     `class GimpleGen` delegate method `return <alias>.<fn>(self, ...)`
     forwards to. Cached with the field scanner's cache key."""
-    _hit = _SELFHOST_EXTRA_FIELD_CACHE.get('fnidx')
+    # Validated once per top-level compile (see `_selfhost_begin_compile`), not
+    # on every call: this is asked once per function parameter, and each
+    # validation listed the source directories and stat'ed ~60 files, building
+    # a fresh path list and key string that nothing freed (~1.3 GB on
+    # `--dump-full fire.py`).
+    _validated = _SELFHOST_FNIDX_VALIDATED.get('idx')
+    if _validated is not None:
+        return _validated
     _sd = gimple_codegen._SELFHOST_DIR
     _files = sorted(_selfhost_impl_py_files(_sd))
-    _key = tuple((f, gimple_ctypes.os.path.getmtime(f)) for f in _files)
-    if _hit is not None and _hit[0] == _key:
-        return _hit[1]
+    _key = 'fnidx#' + _selfhost_files_key(_files)
+    _hit = _SELFHOST_EXTRA_FIELD_CACHE.get(_key)
+    if _hit is not None:
+        _SELFHOST_FNIDX_VALIDATED['idx'] = _hit
+        return _hit
     _idx: dict = {}
     for _f in _files:
-        try:
-            _mod: list = ast_rewriter.rewrite(
-                Parser(py_tokenize(open(_f).read())).with_filename(_f).parse_module())
-        except Exception:
-            continue
+        _mod: list = _selfhost_parsed_source(_f)
         for _fn in _mod:
             if (isinstance(_fn, FunctionDef) and _fn.params
                     and _fn.params[0][0].lstrip('*') in ('gen', 'self')
                     and _fn.name not in _idx):
                 _idx[_fn.name] = _fn
-    _SELFHOST_EXTRA_FIELD_CACHE['fnidx'] = (_key, _idx)
+    _SELFHOST_EXTRA_FIELD_CACHE[_key] = _idx
+    _SELFHOST_FNIDX_VALIDATED['idx'] = _idx
     return _idx
 
 
+# The fn-index answer already checked against the source files' mtimes during
+# this compile; emptied by `_selfhost_begin_compile` so the next top-level
+# compile re-validates (an edited source file is still picked up).
+_SELFHOST_FNIDX_VALIDATED: dict = {}
+
+
+def _selfhost_begin_compile() -> None:
+    """Start of one top-level compile: forget which source-file-derived answers
+    were validated, so they are checked once more (and only once)."""
+    _SELFHOST_FNIDX_VALIDATED.clear()
+
+
+# --- the compiler's own sources, parsed ONCE per process ------------------
+#
+# Three passes need the parsed compiler sources: `_selfhost_parsed_modules`
+# (module_shared.py), `_selfhost_extracted_fn_index` above, and
+# emit_funcs._selfhost_scan_gimplegen_extra_fields. Each used to run its own
+# `py_tokenize` + `parse_module` + `ast_rewriter.rewrite` over the same ~60
+# files and keep its own copy. All of them now read this one cache.
+#
+# The cache key is a STRING, `path@mtime`. Both a tuple `(path, mtime)` and a
+# tuple-of-tuples file-list fingerprint compared with `==` look right and are
+# right under CPython, but a self-hosted tuple hashes/compares by the tuple
+# object's ADDRESS, so every lookup missed and every pass re-tokenized and
+# re-parsed the whole compiler on every call, per imported module, retaining
+# each copy: ~16 GB of tokenizer garbage in `mojoc --dump-full fire.py`
+# (bugs/PERF_selfhost_memory_leak_hunt.md; the general defect is
+# bugs/CODEGEN_tuple_dict_key_hashed_by_address.md).
+#
+# `{ path + '@' + str(mtime): stmts }`, plus the distinguished `_PARSE_FAILED`
+# entry recording a file that failed to parse (not re-attempted on every
+# pass). A module-level sentinel rather than `None`: a parse can legitimately
+# produce `None`, and `None` as a cache value would be indistinguishable from
+# a miss.
+_SELFHOST_PARSE_CACHE: dict = {}
+_PARSE_FAILED = object()
+
+
+def _selfhost_parsed_source(_f: str) -> list:
+    """The rewritten statement list of the compiler source `_f`, tokenized,
+    parsed and rewritten exactly once per (path, mtime). `[]` when the file
+    is unreadable or does not parse: every caller treats a failed file as
+    contributing nothing, and an empty statement list contributes nothing."""
+    _mtime = gimple_ctypes.os.path.getmtime(_f)
+    _ck = _f + '@' + str(_mtime)
+    if _ck in _SELFHOST_PARSE_CACHE:
+        _entry = _SELFHOST_PARSE_CACHE[_ck]
+    else:
+        _entry = _PARSE_FAILED
+        try:
+            with open(_f) as _fh:
+                _src = _fh.read()
+            _entry = ast_rewriter.rewrite(
+                Parser(py_tokenize(_src)).with_filename(_f).parse_module())
+        except Exception:
+            _entry = _PARSE_FAILED
+        _SELFHOST_PARSE_CACHE[_ck] = _entry
+    if _entry is _PARSE_FAILED:
+        return []
+    return _entry
+
+
+def _selfhost_files_key(_files: list) -> str:
+    """Content-hashable fingerprint of a source-file list: every path with
+    its mtime, as ONE string (see the tuple-key note above)."""
+    _parts: list = []
+    for _f in _files:
+        _parts.append(_f + '@' + str(gimple_ctypes.os.path.getmtime(_f)))
+    return '\n'.join(_parts)
+
 
 # --- dependency _SELFHOST_EXTRA_FIELD_CACHE (from gimple_gen_funcs.py) ---
+# Result cache for the passes above, keyed `<pass>#<files fingerprint>`.
 _SELFHOST_EXTRA_FIELD_CACHE: dict = {}
 

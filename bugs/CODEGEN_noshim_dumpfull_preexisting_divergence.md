@@ -1,5 +1,75 @@
 # CODEGEN_noshim_dumpfull_preexisting_divergence: check-native-dumpfull fails on b00955c itself
 
+## Status (2026-09-30 entry — the divergence was NOT re-measured here, and
+## this branch's compiled-path changes move the reference side of it)
+
+**What I could not do, and why it is worth saying first:** this doc's subject is
+a native-vs-reference `.ci` comparison, and the native side needs `./mojoc`,
+which needs a self-host build (`python3 fire.py build fire.py`). As a light
+worker I am not permitted to run one, so **no number in this file was
+re-measured** and the "still open" list below (616 CI-DIFF etc.) is the
+2026-09-24 measurement, unchanged. `test_ab_native.py` refuses without
+`./mojoc` (`ERROR: mojoc not found. Build with: python3 fire.py build fire.py
+-o mojoc`), which is the cheap gate for exactly this and needs the same thing.
+
+**What this branch changed that this doc's integrator jobs must check.** Three
+changes touch `mojo/middle/` and `mojo/backend_gimple/`, which is the code that
+BOTH sides of this comparison run, so the question is whether the reference and
+the self-hosted binary now agree where they previously both produced the same
+wrong answer:
+
+1. **`mojo/middle/infra_infer.py` — a method call's result type reaches the
+   enclosing return type.** `_infer_return_type_with_locals` now overlays a
+   third class of the body's own locals: one bound to a registered struct's
+   constructor (`p = P("a")` -> `'P *'`). So for every such function the
+   reference now declares `char *` where it declared `int64_t`:
+
+       int64_t g (void);   ->   char * g (void);
+
+   with the body already emitting the right call and assignment
+   (`_t = <callee> (_t); return _t;` with `_t` a `char *`). **The native side
+   reads the same `func_return_types` table, so it should make the same
+   change** — but that is an inference, and this doc is where it belongs if it
+   is wrong. The observable if it went wrong is a stage1-vs-stage2 signature
+   diff (`int64_t` vs `char *` on one function), which is exactly the class
+   this file's `verify` failures are made of.
+
+2. **`mojo/backend_gimple/emit_exprs.py` — `x == None` against a `char *` is a
+   NULL-pointer test** instead of `mojo_char_to_str((char)0)`, and
+   **`runtime/fire_runtime.c` — `mojo_print`/`mojo_print_stderr` print `None`
+   for a NULL string.** Both are self-hosted paths too: `_is_none_literal` is a
+   plain `isinstance`/`name == 'None'` (the shape the self-hosted binary has
+   always managed), and the runtime change is in C shared by every build. The
+   `emit_exprs` one is the one to watch, because `mojo_maybe_emit`/the emitted
+   comparison helper set is where this compiler's own generated code differs
+   from the reference most often.
+
+3. **`formal/*` (not this file's subject, listed so it is not re-discovered):**
+   `_emit_range_list`'s shared `_rabs` label, the dict-comprehension
+   dict-ness and arm64's pair-append key slot. Proof-oriented backends, no
+   self-host involvement.
+
+**Jobs for the integrator, in the order they can answer something:**
+
+| job | answers |
+|---|---|
+| `mojoc` | builds the native binary at all; nothing in this file can be measured without it |
+| `ab-native` | the A/B native-vs-reference corpus — the cheapest CI-DIFF signal. It is **`disabled=`**, not `expect=`: it measures 20.5 GB and is exclusive, which is a machine-sized reservation spent to be told what its own marker already says. `bugs/CODEGEN_ab_native_fails.md` is the doc, and deleting it is what turns the job back on |
+| `native-dumpfull` | the whole-program `--dump-full` artifact vs the reference |
+| `bootstrap-stage2-cc` | the stage1/stage2/stage3 byte-identity this file is ultimately about |
+
+And the anti-rot note, **updated 2026-10-01**: `ab-native` has moved from
+`expect=` to `disabled=` (it costs 20.5 GB and is exclusive, so running it every
+gate to learn nothing is the expensive form of the same information), which
+means its anti-rot is now MECHANICAL — the runner refuses to load while the
+`disabled=` doc is missing, so `bugs/CODEGEN_ab_native_fails.md` being deleted
+is what re-enables the job. `native-dumpfull` and `bootstrap-stage2-dumps` are
+still `expect=`-marked, for ONE
+root cause (the self-hosted binary segfaults on any input, exit 139). If the
+leak hunt fixed that, all three will now report "marked expect= but it PASSES",
+which the suite treats as a FAILURE — that is the signal to retire them, and
+it is `tools/suite.py`'s to act on (another worker holds that file).
+
 ## Status (2026-09-24, tenth entry — AST/TOK-DIFF and SELFHOST-CRASHED both driven to ZERO; 11 root causes fixed + one pulled-in build blocker unblocked; the whole remaining backlog is CI-DIFF)
 
 Session started from the two `formal/` sweep commits (`219e88c`, `089ceb3`)

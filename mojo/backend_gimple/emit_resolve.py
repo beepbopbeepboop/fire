@@ -55,10 +55,11 @@ from mojo.middle.resolve_shared import *  # noqa: F401,F403
 from mojo.middle.resolve_shared import (
     _as_assignstmt_node, _as_multiassignstmt_node, _as_str, _as_vardecl_node, _calls_in_stmts, _closure_value_locals,
     _collect_calls_in_stmt, _collect_local_container_elems, _collect_return_elems, _decode_str_literal_text, _dtrace, _eval_const,
-    _infer_list_elem_type, _infer_local_var_types, _infer_return_elem_type, _is_none_literal, _is_sys_stderr, _lbn_target_names,
+    _infer_list_elem_type, _infer_local_var_types, _infer_return_elem_type, _scratch_dict_copy, _is_none_literal, _is_sys_stderr, _lbn_target_names,
     _lbn_walk, _module_const_int, _parse_fstring_parts, _prepass_callee_key, _quick_type, _record_closure_alias,
     _refine_generic_return_type, _sms_key, _str_literal_to_slit, _subst_idents, _type_expr_to_ann
 )
+from mojo.middle.calls_shared import user_dunder_repr_call
 # gimple_gen_coro is reached via `gimple_codegen.gimple_gen_coro` below,
 # not a separate import of its own here -- see gimple_codegen.py's own
 # module-level `import gimple_gen_coro` and its comment on why a
@@ -580,6 +581,17 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen.struct_boxed_fields = gen.struct_boxed_fields
                 temp_gen.struct_bool_fields = gen.struct_bool_fields
                 temp_gen._struct_name_owner = gen._struct_name_owner  # share: cross-module same-name collision guard
+                # The module-qualified struct IDENTITY that guard feeds: which
+                # C name each colliding StructDef is emitted under, and which
+                # module owns it. Shared for the same reason — a sibling
+                # module's temp_gen must classify the SAME StructDef node
+                # identically, or the two halves of one class would disagree
+                # about its own name. See GimpleGen._struct_cname_by_id.
+                temp_gen._struct_cname_by_id = gen._struct_cname_by_id
+                temp_gen._struct_cname_of_name = gen._struct_cname_of_name
+                temp_gen._struct_cname_by_home = gen._struct_cname_by_home
+                temp_gen._struct_qualified_cnames = gen._struct_qualified_cnames
+                temp_gen._struct_home_by_id = gen._struct_home_by_id
                 temp_gen._global_var_types = gen._global_var_types
                 temp_gen._global_c_decl_types = gen._global_c_decl_types
                 # share: definition-side free-function signature truth —
@@ -1740,6 +1752,28 @@ def _new_val(gen, ctype: str, rhs: str) -> str:
     return t
 
 
+def _inc_val(gen, base: str) -> str:
+    """`base + 1` as its own int64_t temp — the ONE way to spell a
+    one-step advance in generated GIMPLE.
+
+    A C-style cast is not a legal gimple OPERAND, so the obvious
+    `f'{base} + (int64_t)1'` is a hard gimplification error
+    ("expected expression before '(' token") that takes out the whole
+    translation unit. `1LL` is the tree's existing width-correct int64_t
+    literal idiom (see `_gen_for_range`'s own `step_v`), needs no cast,
+    and IS a legal operand, so the whole expression is valid GIMPLE.
+
+    Every counter/pos/cursor advance in the codegen goes through here
+    rather than each spelling the cast itself: the five sites this
+    replaced (the list-iterator cursor advance in `next(it)` and in
+    `for x in it:`, the regex finditer/findall scan advance, and the
+    enumerate-counter advance) were all still carrying the cast, and
+    Tools/cases_generator/analyzer.py failed to compile on it — the
+    module-level refusal is `cannot compile module` for the whole file
+    because a GIMPLE parse error is not recoverable per-function."""
+    return gen._new_val('int64_t', f'{base} + 1LL')
+
+
 def _call_expr(gen, ret_type: str, fname: str, arg_pairs: list) -> str:
     """Emit a call and return the result temp."""
     t = gen._new_temp(ret_type)
@@ -2078,10 +2112,28 @@ def _split_expr_format(src: str) -> str:
 
 
 
-def _repr_value(gen, rat: str, rav: str) -> str:
+def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     """Convert an already-lowered (type, value) pair into a `char *` per
-    Python `repr()` semantics. Shared by the `repr()` builtin and `%r`
-    string-formatting."""
+    Python `repr()` semantics. Shared by the `repr()` builtin, `%r` and an
+    f-string's `!r` conversion.
+
+    `enode` is the operand's AST node when the caller has it, and is the ONLY
+    way a bool is distinguishable from the integer 1/0 it shares a slot with:
+    a bool's C type here is a plain `int` (see `is_python_bool_expr`)."""
+    # `_Bool` FIRST, before every other arm: Python's repr of a bool is
+    # `True`/`False`, and with no arm for it a `_Bool` fell all the way to
+    # the int64_t one and printed `1`/`0` — the right value, the wrong type.
+    # `print()` was already right (`_gen_print`'s `_Bool` arm) and so was
+    # `%s` and `f'{x}'`, which is exactly what let this survive: the obvious
+    # smoke test passes, and the spellings that ship (`repr(x)`, `'%r' % (x,)`,
+    # `f'{x!r}'`, a dict's repr) are the ones that are wrong.
+    # `mojo_repr_bool` takes an `int`, not a `_Bool`, on purpose — this header
+    # is included from the C++20 backend's translation units, where `_Bool`
+    # does not exist — so the cast is the same one the print path makes.
+    if rat == '_Bool' or (enode is not None and rat in ('int', 'int64_t')
+                          and gimple_exprtypes.is_python_bool_expr(gen, enode)):
+        return gen._call_expr('char *', 'mojo_repr_bool',
+                              [('int', gen._new_val('int', f'(int){rav}'))])
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':
@@ -2107,25 +2159,20 @@ def _repr_value(gen, rat: str, rav: str) -> str:
         # which its `repr(p)` spelling reached through an import but which
         # is NOT an import bug.
         #
-        # Deliberately CONSERVATIVE: each condition below is one "we know
-        # this is right", and anything unproven falls through to the
-        # pre-existing lowering, so this can only ever replace a wrong
-        # answer with a right one, never introduce a new shape.
+        # The lookup itself is `user_dunder_repr_call` in
+        # mojo/middle/calls_shared.py, SHARED with `_stringify_value` (the
+        # `str()` / `%s` / f-string route) so the two spellings cannot
+        # disagree about which dunder a struct answers. `repr()` passes
+        # `('__repr__',)` only: CPython's own fallback here is `__str__`, and
+        # taking it would silently change the repr of every struct in the
+        # tree that defines `__str__` without `__repr__` — a wide behaviour
+        # change, recorded rather than smuggled in here.
         _rsn = rat[:-2].strip() if rat.endswith(' *') else ''
-        if _rsn and '__repr__' in (gen._struct_method_names.get(_rsn) or ()):
-            _rcs = gen._struct_method_csym(_rsn, '__repr__', '')
-            if gen.func_return_types.get(_rcs) == 'char *':
-                _rcall = gen._call_expr('char *', _rcs, [(rat, rav_local)])
-                # Same null semantics the generated field-dump has: a NULL
-                # object reprs as "None" rather than crashing. Interned
-                # through `_intern_string` because a bare `"None"` literal is
-                # not a GIMPLE r-value (see its own docstring), and bound to
-                # a local first rather than nested in the f-string so the
-                # expression uses no quote nesting at all — this file is
-                # compiled by the compiler it implements.
-                _none_slit = gen._intern_string('None')
-                return gen._new_val(
-                    'char *', f'({rav_local} ? {_rcall} : {_none_slit})')
+        if _rsn:
+            _rcall = user_dunder_repr_call(gen, _rsn, rat, rav_local,
+                                           ('__repr__',))
+            if _rcall is not None:
+                return _rcall
         # Dispatch through the per-struct field-by-field reprs generated
         # in gen_module (see reflect_structs) when the runtime type tag
         # is one this program actually allocates — falls back to the
@@ -2176,17 +2223,23 @@ def _intern_string(gen, escaped: str) -> str:
 
 
 
-def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str) -> str:
+def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str,
+                         enode=None) -> str:
     """Render one %-spec's operand to `char *`, applying any width or
     precision in `full_spec` via a real C sprintf (see _sprintf_one)
-    rather than reimplementing printf-style padding by hand."""
+    rather than reimplementing printf-style padding by hand.
+
+    `enode` is the operand's AST node when the caller has it. It carries the
+    only thing that distinguishes a bool from an int 0/1 — a bool's lowered C
+    type is a plain `int` — so `'%r' % (b,)` has no other way to print True
+    (see `is_python_bool_expr` and `_repr_value`)."""
     if conv == 's':
-        sval = gen._stringify_value(et, ev)
+        sval = gen._stringify_value(et, ev, enode)
         if full_spec == '%s':
             return sval
         return gen._sprintf_one(full_spec[:-1] + 's', sval)
     if conv == 'r':
-        rval = gen._repr_value(et, ev)
+        rval = gen._repr_value(et, ev, enode)
         if full_spec == '%r':
             return rval
         return gen._sprintf_one(full_spec[:-1] + 's', rval)
@@ -2959,8 +3012,9 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         else:
             # See the dict-literal case's identical comment: vt alone
             # can't distinguish a real bool literal from a genuine int.
-            if isinstance(node.key, gimple_ctypes.BoolLiteral):
+            if gimple_exprtypes.is_python_bool_expr(gen, node.key):
                 gen._emit(f"  mojo_mark_dict_bool_values ({res});")
+            gen._note_dict_callable_ret(res, vv)
             vv64 = gen._to_int64(vt, vv)
             gen._emit(f"  mojo_dict_set_int ({res}, {kv}, {vv64});")
 

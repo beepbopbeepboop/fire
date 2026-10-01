@@ -133,20 +133,37 @@ Falls through to the generic single-string-arg "opaque constructor"
 fallback, so `ADialog("a")` silently becomes the string `"a"`.
 
 ### 2.5 Yield-kind and capture residue
-- `bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md` — items 2/3: a
-  cross-closure `async for` neighbour shape that is neither refused nor
-  correct, and a nested async generator driven by `async for` in its own
-  enclosing function (prints `0` where CPython prints `11`, with only a
-  `mojo_unsupported_iter` warning).
+- ~~`bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md`~~ — **closed
+  2026-09-29, doc removed.** Items 2 and 3 are fixed: the orphaned
+  regression file is registered (`coro-nested-capture`) and 10/10, and the
+  capture-independent `async for`-over-a-generator gap (which printed `0`
+  where CPython prints `11`, with only a `mojo_unsupported_iter` warning)
+  now drives the generator for real. Re-testing that doc's own
+  "Verified genuinely fixed" list also surfaced and fixed three more: a
+  wait-descriptor bound as the `async for` loop variable (a heap address,
+  exit 0 — now a compile-time refusal), two nested `async def`s sharing one
+  captured local (a generated-code argument-count error), and Increment D's
+  honest refusal not existing on the `MOJO_CORO=cpp` backend at all.
 - `bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md` — case 8, which
   was **reclassified**: the same wrong output appears with no generator at all
   (`def show(data): for r in data: print(r)` called with `[1.5, 2.5]`), so it
   is the ordinary loop lowering not knowing a list *parameter's* element type.
   A different subsystem, behind its own gate.
-- `bugs/hard/CODEGEN_bytes_silent_wrong_values.md` — `partition` returns a
+- ~~`bugs/hard/CODEGEN_bytes_silent_wrong_values.md` — `partition` returns a
   `MojoList *` rather than a tuple, because **this runtime has no tuple type
   at all**: a tuple *literal* lowers to a plain `MojoList *` distinguished
-  only by a marker. Not a bytes fix; the repr is already correct.
+  only by a marker. Not a bytes fix; the repr is already correct.~~
+  **RESOLVED 2026-09-29 — and the stated reason was false.** A tuple type
+  has existed for some time, as the `mojo_mark_as_tuple` marker, used at
+  eight construction sites and already read by `isinstance(x, tuple)`. The
+  marker was not *load-bearing*: `repr` read it and nothing else, so a tuple
+  was a list that merely printed like one. Making it load-bearing closed the
+  doc's residue (mutating a tuple now raises with CPython's exact exception
+  type and text) and the doc is removed. Two silent wrong values the doc did
+  not have fell out of the same helper family: `l == m` was a raw C POINTER
+  comparison, and `list.count(x)` had no lowering at all and answered 0.
+  This is the second time in this directory that a residue's stated reason
+  for existing was stale rather than the residue itself.
 - `bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md` — a read with no
   compile-time slot index needs one C type for a heterogeneous value. That is
   the runtime's missing container tag (boxing), not a struct bug.

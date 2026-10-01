@@ -1147,8 +1147,17 @@ CASES = [
     # arm64, 0 on x86-64, for the same source; a module-level
     # `comptime X = __mlir_type[…]` is never walked at all, which is why
     # std/builtin/type_aliases.mojo is a false PASS in the sweep baseline;
-    # `__mlir_op.`…`[n]` builds and segfaults; and `String()` (zero operands)
-    # is refused as if it were a two-operand conversion.
+    # and `String()` (zero operands) is refused as if it were a two-operand
+    # conversion.
+    #
+    # A fifth entry was here until 2026-09-30 — `__mlir_op.`…`[n]` "builds and
+    # segfaults" — and it was TRUE when written (bugs/FORMAL_known_limits.md
+    # §2.2 measured exit 139 on both architectures) and stopped being true
+    # before this note was corrected. It is now refused by
+    # `model.mlir_dialect_refusal` on both, and is pinned where the refusal
+    # itself is what is under test:
+    # `a_bare_dialect_operation_is_refused_rather_than_built` in
+    # test_formal_mlir_precedence.py.
 
     # An MLIR attribute template is not a subscript. The elements are
     # backtick-quoted literal fragments interleaved with compile-time
@@ -2535,6 +2544,10 @@ BYREF_REFUSALS = [
      "    return 0\n",
      "refuse:reads a field of a field", None),
     # A callee this module does not compile cannot know the frame's layout.
+    # This is the ONE shape left of four (see the two cases below and the
+    # cross-module one in CROSS_MODULE_CASES): `mojo_print` is defined nowhere
+    # in this image and imported from nowhere, which is what "no definition in
+    # hand" has always meant and the only one of the four it was true of.
     ("byref_refuse_invisible_callee",
      "struct P:\n"
      "    var a: Int\n"
@@ -2543,6 +2556,91 @@ BYREF_REFUSALS = [
      "    var p = P()\n"
      "    return mojo_print(p)\n",
      "refuse:no definition in hand", None),
+    # A COMPILE-TIME PARAMETER called as a function. `Fn` is not a function
+    # this image fails to find — it is a name with no body at all, because
+    # calling one means monomorphising it from the argument, and this path does
+    # not instantiate type parameters. It reached the same sentence as
+    # `mojo_print` above, which is the sentence that tells a reader to go
+    # looking for a missing export; there is no missing export and there never
+    # will be. The needle is the phrase that names what `Fn` is.
+    ("byref_refuse_compile_time_parameter",
+     "struct W:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def drive[\n"
+     "    Fn: def(mut W)\n"
+     "](mut w: W):\n"
+     "    Fn(w)\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var w = W()\n"
+     "    w.a = 1\n"
+     "    w.b = 2\n"
+     "    drive(w)\n"
+     "    return n\n",
+     "refuse:Fn is a compile-time PARAMETER of drive", None),
+    # A COMPILER INTRINSIC rather than a function: `__get_mvalue_as_litref`
+    # hands back an MLIR reference to the value it is given, and there is no
+    # MLIR here, so the thing a receiver would be handed to does not exist at
+    # any stage. Five of the twelve files the sweep files under this construct
+    # are this one call, and every one of them is really an MLIR file whose
+    # operand is refused one level down — a reader sent to a missing export
+    # would not find one.
+    ("byref_refuse_reflection_intrinsic",
+     "struct Q:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var q = Q()\n"
+     "    var lit = __get_mvalue_as_litref(q)\n"
+     "    return n\n",
+     "refuse:__get_mvalue_as_litref is not a function at all", None),
+    # A bare call of a METHOD name with the receiver as the first argument. The
+    # module declares `get` — as a method of `S` — so "this module does not
+    # define it" would have been false, and the message now says the sharper
+    # thing: there is no FUNCTION of that name, and a method here is reached as
+    # `recv.get()` or under the lifted `S_get`.
+    #
+    # It is a GUARD on a spelling rather than a demonstration of a gap. Measured:
+    # the same spelling with a VALUE receiver (`get(3)`) is not refused by this
+    # pass at all — it lowers to a call of a symbol nothing defines and is caught
+    # later by the bind audit, with "the image would bind 1 symbol(s) that
+    # nothing provides". So bare method calls are unsupported here either way, and
+    # this case pins which of the two diagnostics a frame receiver reaches. If a
+    # future change makes the spelling legal, this case is the one to update.
+    ("byref_refuse_bare_method_name",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    fn get(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 7\n"
+     "    s.b = 8\n"
+     "    return get(s) + n\n",
+     "refuse:defines no FUNCTION of that name", None),
+    # `print` is a builtin this path COMPILES (`print("hi")` builds, runs and
+    # prints), so a frame address handed to it could not be reported as a name
+    # with "no definition in hand" — that is false of it. It could not go in
+    # `FRAME_C_VALUE_CALLS` either, because that set's sentence says "a C
+    # library entry point" and `print` is Mojo's builtin lowered through
+    # `_emit_print`. The needle is the clause that names what it is; the
+    # measured consequence (the image prints the frame's ADDRESS as a decimal,
+    # differently on each machine and on each run) is in the message.
+    ("byref_refuse_print_of_a_frame",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P()\n"
+     "    p.a = 3\n"
+     "    p.b = 4\n"
+     "    print(p)\n"
+     "    return n\n",
+     "refuse:is a builtin of the language rather than a C entry point", None),
     # ── wave 3 (C5) ──
     #
     # A frame address PARKED IN A FIELD. `o.inner = i` looks like an ordinary
@@ -2889,6 +2987,62 @@ CROSS_MODULE_CASES = [
               "    var t = T()\n"
               "    t.a = 7\n"
               "    return t.get()\n"}, 70, None),
+    # A frame address handed to an IMPORTED FREE FUNCTION — the third shape a
+    # "callee this image does not compile" can be, and the one whose refusal was
+    # false. `take_it` IS defined (in `byref_xmod`, which builds: it exports
+    # `take_it` and this case's own module does not fail), so "this module's own
+    # functions are the only ones in this image" was false of it and sent the
+    # reader looking for an export that is exported.
+    #
+    # The module deliberately never reads `p`, so the callee module itself is
+    # clean and the refusal cannot be confused with the dependency's: what is
+    # being asserted is WHICH question stops this program. The answer has to be
+    # the cross-image one — whether THAT compilation made the parameter a frame
+    # holder is a fact about a module compiled without this call site — and not
+    # "there is no such callee", because there is one.
+    #
+    # It stays a REFUSAL. Following the address is what the message now says
+    # would be needed (a per-parameter frame-holder contract in the manifest),
+    # and until that exists the address would land in a slot `take_it` compiled
+    # as a plain word.
+    ("byref_refuse_imported_free_function",
+     {"mod": "struct P:\n"
+             "    var a: Int\n"
+             "    var b: Int\n"
+             "\n"
+             "def take_it(p: P) -> Int:\n"
+             "    return 1\n",
+      "main": "from byref_xmod import P, take_it\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var p = P()\n"
+              "    p.a = 3\n"
+              "    p.b = 4\n"
+              "    return take_it(p) + n\n"},
+     "refuse:it imports take_it (`from byref_xmod import take_it`)", None),
+    # The same hand-off reached through a STAR import, which is the shape where
+    # "this module's own functions are the only ones in this image" is at its
+    # least true: `from byref_xmod import *` binds whatever that module
+    # EXPORTS, so `take_it` may well be bound — and the export set is a library
+    # this pass has not built, because `_resolve_imports` compiles the modules
+    # and the frame analysis runs first. 22 files of the standard library write
+    # one. The refusal has to name THAT as the open question rather than assert
+    # that nothing binds the name.
+    ("byref_refuse_star_imported_free_function",
+     {"mod": "struct P:\n"
+             "    var a: Int\n"
+             "    var b: Int\n"
+             "\n"
+             "def take_it(p: P) -> Int:\n"
+             "    return 1\n",
+      "main": "from byref_xmod import *\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var p = P()\n"
+              "    p.a = 3\n"
+              "    p.b = 4\n"
+              "    return take_it(p) + n\n"},
+     "refuse:can bind a name like that here is a `from byref_xmod import *`", None),
 ]
 
 # ── wave 5 (E3): a frame address in a NON-FIRST parameter position ──────────
@@ -6961,18 +7115,339 @@ WAVE7_G2_CASES = [
     # default is a different program (the slot holds 0) and is the refusal
     # above, so this pair is what stops "every declared field is answered"
     # from being a way of making that one print 0.
-    ("int_literal_default_field_prints_its_value",
+     ("int_literal_default_field_prints_its_value",
+      "struct R:\n"
+      "    var n: Int = 7\n"
+      "    var m: Int\n"
+      "    def show(self) -> Int:\n"
+      "        printf(\"%d\\n\", self.n)\n"
+      "        return 0\n"
+      "def main(k: Int) -> Int:\n"
+      "    var r = R()\n"
+      "    r.show()\n"
+      "    return 0\n",
+      0, "7"),
+    # ── `None` as a value: the word 0, and the one comparison it cannot answer ──
+    #
+    # `x: T = None` is the default for an optional field and is the single most
+    # common class-level default in this repository's own dataclasses
+    # (`type_system.py`'s `Type` has ten of them on one class). It was REFUSED
+    # as "not a literal", because `None` parses to a bare `IdentExpr` on this
+    # front end and neither `fold_literal_expr` nor `literal_default_word` had
+    # an arm for it — a message that sends a reader looking for a call, where
+    # there is no call. It is a value this target represents exactly: the word
+    # 0, which is what an unwritten frame slot already is.
+    #
+    # There is deliberately no CPython comparison for this case. `printf("%d",
+    # None)` is a TypeError there, so the oracle does not exist; what the image
+    # must produce is the REPRESENTATION, and the two rows below pin it from
+    # both sides — a class-level constant, materialized at the read, and a
+    # module-level one, folded at the read. Both were refusals before.
+    ("none_class_default_is_the_word_zero",
      "struct R:\n"
-     "    var n: Int = 7\n"
-     "    var m: Int\n"
+     "    var a: Int = 1\n"
+     "    var b: Int = None\n"
      "    def show(self) -> Int:\n"
-     "        printf(\"%d\\n\", self.n)\n"
+     "        printf(\"a=%d b=%d\\n\", self.a, self.b)\n"
      "        return 0\n"
      "def main(k: Int) -> Int:\n"
      "    var r = R()\n"
      "    r.show()\n"
      "    return 0\n",
-     0, "7"),
+     0, "a=1 b=0"),
+    ("none_module_constant_is_the_word_zero",
+     "G = None\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    printf(\"g=%d\", G)\n"
+     "    return 0\n",
+     0, "g=0"),
+    # …and arithmetic on it is arithmetic on the word, which is the other half
+    # of "representable": the fold is not confined to being printed.
+    ("none_module_constant_arithmetics_as_zero",
+     "G = None\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    return G + 5\n",
+     5, None),
+    # THE LIMIT, and the reason this is a refusal and not a wrong answer.
+    # `None` is the word 0 and the model is ONE UNTAGGED WORD, so after the
+    # fold `p.b == 0` and `p.b is None` are the same expression — and CPython
+    # says one is False and the other True. Answering either from the folded
+    # word is the outcome this backend exists to prevent, so the comparison is
+    # refused BY NAME and the message says which construct and why. Checked on
+    # both backends by the `refuse:` machinery, because a wrong answer here is
+    # the shape where the two architectures would each be confidently wrong.
+    #
+    # Before the fold landed these three built and answered: the class-level
+    # one returned 7 for a `None`, where CPython returns 0.
+    ("refuse_none_compared_with_a_class_constant",
+     "struct R:\n"
+     "    var b: Int = None\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    if r.b == 0:\n"
+     "        return 7\n"
+     "    return 0\n",
+     "refuse:is class-level constant holding `None`", None),
+    ("refuse_none_compared_as_the_class_itself",
+     "struct R:\n"
+     "    var b: Int = None\n"
+     "def main(k: Int) -> Int:\n"
+     "    if R.b != 0:\n"
+     "        return 7\n"
+     "    return 0\n",
+     "refuse:is class-level constant holding `None`", None),
+    ("refuse_none_compared_as_a_module_constant",
+     "G = None\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    if G == 0:\n"
+     "        return 7\n"
+     "    return 0\n",
+     "refuse:is module-level name holding `None`", None),
+    # GUARD (passes before and after, and it is here because it is the case
+    # that would catch an over-correction in the other direction): an INTEGER
+    # class-level constant compared with a literal is ordinary, representable
+    # code and must keep building. If the refusal above were written as "any
+    # comparison against a constant", this row is what it would break.
+    ("int_class_constant_comparison_still_builds",
+     "struct R:\n"
+     "    var b: Int = 3\n"
+     "def main(k: Int) -> Int:\n"
+     "    var r = R()\n"
+     "    if r.b == 3:\n"
+     "        return 7\n"
+     "    return 0\n",
+     7, None),
+    # ── a module-level constant read in an `elif` ARM ──
+    #
+    # `elif x == K:` was REFUSED with "'K' has no home: the register allocator
+    # collected no home for it" on BOTH architectures, while `if x == K:` in the
+    # same function built. The message blamed the emitter's phi/web slot, and
+    # the emitter was innocent: `IfStmt.elifs` is a list of `(condition, body)`
+    # pairs, and the module-constant substitution walked lists but not tuples, so
+    # an `elif` condition was the one expression position in the tree the walk
+    # never reached. The unsubstituted `IdentExpr` then reached the emitter as a
+    # name with no home.
+    #
+    # Every answer must be 2, and each is 2 for a different reason — the
+    # `if` arm falling through, the `elif` arm matching, and neither matching —
+    # so a wrong answer cannot pass by landing on a neighbouring arm.
+    ("elif_arm_reads_a_module_constant",
+     "K = 7\n"
+     "\n"
+     "def f(x: Int) -> Int:\n"
+     "    if x == 0:\n"
+     "        return 1\n"
+     "    elif x == K:\n"
+     "        return 2\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    return f(7)\n",
+     2, None),
+    # …and the same shape when only SOME of the arms name the constant, which is
+    # what makes it a per-position bug rather than "elif is unsupported": a walk
+    # that skipped elif conditions would substitute arm 1 and leave arm 2, so
+    # the first call is right and the second is not. 4 arms here (3 elifs) also
+    # covers the label chain at its longest.
+    ("elif_chain_with_one_named_arm",
+     "K = 7\n"
+     "J = 9\n"
+     "\n"
+     "def f(x: Int) -> Int:\n"
+     "    if x == 0:\n"
+     "        return 1\n"
+     "    elif x == K:\n"
+     "        return 2\n"
+     "    elif x == J:\n"
+     "        return 3\n"
+     "    elif x == 100:\n"
+     "        return 4\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    # 2 and 3 name a constant; 1 and 4 do not. 1234 needs all four arms.\n"
+     "    return f(0) * 1000 / 10 + f(7) * 100 / 10 + f(9) * 10 / 10 + f(100) / 100\n",
+     123, None),
+    # The class-constant rewrite is the SECOND walk with the same shape, and it
+    # had the same one-position gap, so both spellings are here: through the
+    # class's own name, and through a local aliased from its constructor (which
+    # is how ordinary code reads one).
+    ("elif_arm_reads_a_class_constant",
+     "struct C:\n"
+     "    var B: Int = 5\n"
+     "\n"
+     "def f(x: Int) -> Int:\n"
+     "    if x == 0:\n"
+     "        return 1\n"
+     "    elif x == C.B:\n"
+     "        return 2\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    return f(5)\n",
+     2, None),
+    ("elif_arm_reads_an_aliased_class_constant",
+     "struct C:\n"
+     "    var B: Int = 5\n"
+     "\n"
+     "def f(x: Int) -> Int:\n"
+     "    var c = C()\n"
+     "    if x == 0:\n"
+     "        return 1\n"
+     "    elif x == c.B:\n"
+     "        return 2\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    return f(5)\n",
+     2, None),
+    # GUARD (passed before the change, and it is the case that says the fix is a
+    # POSITION fix and not "elif got more permissive"): an `elif` chain over
+    # plain literals was already correct, and 1234 is every arm. A fix that
+    # rewrote the arm chain would break this row.
+    ("elif_chain_of_literals_is_unchanged",
+     "def f(x: Int) -> Int:\n"
+     "    if x == 0:\n"
+     "        return 1\n"
+     "    elif x == 7:\n"
+     "        return 2\n"
+     "    elif x == 9:\n"
+     "        return 3\n"
+     "    elif x == 100:\n"
+     "        return 4\n"
+     "    return 0\n"
+     "\n"
+     "def main(k: Int) -> Int:\n"
+     "    return f(0) * 1000 / 10 + f(7) * 100 / 10 + f(9) * 10 / 10 + f(100) / 100\n",
+     123, None),
+    # ── a list literal longer than one instruction's immediate offset ──
+    #
+    # A blob element `i` is at byte `8*(i+1)` from the blob's base, and
+    # `encode_str_xt_xn_imm`'s offset field is 12 bits SCALED by 8, so element
+    # 4095 is the first one the STR-immediate form cannot name. A list literal
+    # that long used to die inside that function's own
+    # `assert 0 <= imm12 < 0x1000` — a bare AssertionError out of an encoder
+    # three frames below anything that could name a limit, on a program whose
+    # only problem is that it is large. The offset now goes in a REGISTER past
+    # the immediate's reach (`_emit_blob_store`), and the limit that remains is
+    # the frame's, which is stated in a message.
+    #
+    # 5000 is past the old assert and inside arm64's frame, so it is the row
+    # that would have crashed. The `a[-1]` / `a[0]` pair is deliberate: a fix
+    # that moved the far stores but not the far LOADS would build this, run it,
+    # and read the wrong word back — the same function both ways, so the two
+    # halves of the fix cannot be separated. Both expected values are taken
+    # mod 256, which is what a POSIX exit status can carry.
+    ("list_literal_past_the_immediate_offset",
+     "def main(k: Int) -> Int:\n"
+     "    var a = [" + ", ".join(str(i % 97) for i in range(5000)) + "]\n"
+     "    return (a[0] + a[4999]) % 256\n",
+     (0 + 4999 % 97) % 256, None),
+    # GUARD for the same fix on the READ side, and the only way to tell "the
+    # far stores landed" from "the far stores landed AND the far loads read
+    # them": every element summed, through a subscript, on a 16000-element
+    # blob. 16000 is 87% of arm64's frame budget, so it also pins that the
+    # frame reservation and the element loop agree about the size.
+    ("every_element_of_a_16000_element_list_reads_back",
+     "def main(k: Int) -> Int:\n"
+     "    var a = [" + ", ".join(str(i % 97) for i in range(16000)) + "]\n"
+     "    var s: Int = 0\n"
+     "    var i: Int = 0\n"
+     "    while i < 16000:\n"
+     "        s = s + a[i]\n"
+     "        i = i + 1\n"
+     "    return s % 251\n",
+     sum(i % 97 for i in range(16000)) % 251, None),
+    # The `range()` literal goes through the SAME element loop (the static
+    # `range(0, n)` path materialises `n` words and stores them the same way),
+    # so it had the same assert at the same element. This is the realistic way
+    # to reach the limit — nobody writes a 4096-element list literal by hand —
+    # and `a[4095]` is the far read.
+    ("range_literal_past_the_immediate_offset",
+     "def main(k: Int) -> Int:\n"
+     "    var a = range(0, 6000)\n"
+     "    return (a[0] + a[5999]) % 256\n",
+     5999 % 256, None),
+    # And the limit itself, which is the other half of the bug: "a stated limit
+    # reported as a crash". 20000 words is 160008 bytes against a 131072-byte
+    # frame, so this must be a `CodegenError` naming the budget — and BOTH
+    # backends must produce the same shape, since the two have different
+    # budgets (arm64 128 KB of scratch, x86-64 a 16 KB blob region) and a reader
+    # comparing the two needs to see that the difference is the budget and not
+    # the message. `refuse:` checks both, and the needle is the sentence the two
+    # now share.
+    ("refuse_list_literal_over_the_frame_budget",
+     "def main(k: Int) -> Int:\n"
+     "    var a = [" + ", ".join(["1"] * 20000) + "]\n"
+     "    return len(a)\n",
+     "refuse:does not fit in the frame: it needs", None),
+    # ── a TYPE read where a value is required ──
+    #
+    # `t == NoneType` with `t` a `comptime` type parameter was refused as
+    # "'NoneType' has no home: the register allocator collected no home for it …
+    # This path places a name in a register or a spill slot allocated for THIS
+    # function, a receiver field's frame, or a module-level constant the build
+    # folded". That sentence is false about the file: a type is in none of those
+    # four places because a type is not a value, and the reader was sent to the
+    # register allocator for a fact about the language. The refusal itself is
+    # right and stays — every one of these files is refused either way, so this
+    # is a message-accuracy change and not a coverage one (measured: 32 of 664
+    # stdlib files move off the false diagnosis, and the sweep's own class
+    # counts are byte-identical before and after).
+    # SUPERSEDED 2026-10-01, and converted rather than deleted.  These two
+    # asserted the refusal `model.type_as_value_refusal` gave a type name read
+    # as a value, which was the right answer while a type was not a value on
+    # this path.  `formal-type-as-value` then made it one: a type is a word and
+    # the word is a TAG (`model.type_tag`), so `t == NoneType` is an integer
+    # comparison and a bare type read is that same tag.  Both programs are
+    # therefore ANSWERABLE now, and a case left asserting the refusal would be a
+    # test asserting the opposite of the truth — so each keeps its program and
+    # its name and now pins the answer, against CPython running the same text.
+    ("type_compared_with_a_comptime_parameter_compares",
+     "def pick[t: DType](v: Int32) -> Int32:\n"
+     "    if t == NoneType:\n"
+     "        return 0\n"
+     "    return v\n"
+     "\n"
+     "def main(n: Int32) -> Int32:\n"
+     "    return pick[Int32](7)\n",
+     7, None),
+    # The other shape, with no comparison — the one a `from typing import List`
+    # file reaches.  Compared against ITSELF rather than against a typed
+    # constant, because that is the question a bare read can answer without a
+    # hand-written constant: the word the bare read produced is the word the
+    # comparison reads.
+    ("a_bare_type_name_read_is_the_same_word_a_comparison_reads",
+     "def main(n: Int) -> Int:\n"
+     "    x = NoneType\n"
+     "    if x == NoneType:\n"
+     "        return 1\n"
+     "    return 0\n",
+     1, None),
+    # GUARD (passes before and after, and it is the case that would catch the
+    # over-correction): a type used as a CALLEE is a construction, which this
+    # path lowers — `Int32(5)` is ordinary representable code. The new rule is
+    # asked about a bare READ, and a callee is not a read (the same exclusion
+    # `check_module_symbols` already makes for MLIR roots), so this must keep
+    # building. A rule written as "any appearance of a type name" breaks it.
+    ("type_as_a_callee_is_still_a_construction",
+     "def main(n: Int32) -> Int32:\n"
+     "    var x = Int32(5)\n"
+     "    return x + 1\n",
+     6, None),
+    # GUARD (passes before and after): a genuinely unplaced VALUE keeps the
+    # storage enumeration, because for a value that enumeration is the right
+    # story. 41 of the 664 stdlib files are in exactly this position and they
+    # are correct as they are; a rule that swallowed them into the type message
+    # would be the over-correction in the other direction.
+    ("refuse_an_unplaced_value_keeps_the_storage_story",
+     "def main(n: Int) -> Int:\n"
+     "    return rebind\n",
+     "refuse:has no home: the module-level symbol table is empty", None),
+
     # ── (4) the C-library hand-off sets, audited by PROTOTYPE ──
     # `open(const char *, int, ...)` takes a path and a flag word; it does not
     # read the struct's storage, and it never mentions a struct.  This set used
@@ -7764,13 +8239,15 @@ ORIGIN_OF_REFUSALS = [
      "    printf(\"%d\\n\", origin_of(s))\n"
      "    return 0\n",
      "refuse:passed to printf()", None),
-    # A CONTAINER. `origin_of(s)` erased to `s` inside a subscript's argument
-    # list is refused as a container store, which is the right ANSWER for the
-    # wrong reason — an index list is not a container — and that imprecision has
-    # its own bug doc (`FORMAL_type_argument_read_as_a_container.md`) with the
-    # one-line reproducer that has no `origin_of` in it at all. The row is here
-    # so the answer is pinned as a refusal: whatever the index list is, a frame
-    # address in it does not become a store the analysis can see through.
+    # A CONTAINER, and a GENUINE one — `[s, 1]` is a list literal, not a
+    # subscript's argument list, so this row is the control for
+    # `TYPE_ARGUMENT_LIST_CASES` below and the reason that group's escape-check
+    # skip could not have caught this one. It used to be mislabelled: the
+    # comment here called the list "a subscript's argument list", so it drew a
+    # complaint about the wrong reason and it is what made the REAL defect
+    # (`Box[Int, s]`, which has no `origin_of` in it at all) look like this
+    # row. The answer was right and the reasoning was not; both fixed in
+    # `30e5e2e9`.
     ("origin_of_refuse_a_frame_in_a_container",
      "struct S:\n"
      "    var a: Int\n"
@@ -7781,6 +8258,164 @@ ORIGIN_OF_REFUSALS = [
      "    s.b = 4\n"
      "    return [origin_of(s), 1][0]\n",
      "refuse:is stored in a container", None),
+]
+
+
+# `Foo[A, frame]` — a bracket list that is a TYPE ARGUMENT list and not a
+# container, and the two false sentences it used to draw.
+#
+# It arrived as the SAME `TupleExpr` as `[s, 1]`, and `formal/build.py`'s
+# escape check refused it as "is stored in a container, which has no layout for
+# a frame address" — a sentence about a lifetime the program does not have,
+# which is the false diagnosis that cost the most because it sends the reader
+# to look for an escape that is not there. Four stdlib files drew it
+# (`std/builtin/tuple.mojo`, `std/collections/{deque,linked_list,set}.mojo`;
+# measured in `bugs/FORMAL_frame_by_value_ceiling_zero.md`).
+#
+# Every row here is a REFUSAL, and that is not a gap in the fix: a type
+# application is a compile-time construct this backend still cannot lower, and
+# the honest answer for it is the model's own — "a compile-time
+# explicit-parameter list on a generic, not a subscript", from
+# `model.multi_index_kind`'s `MULTI_INDEX_COMPTIME_PARAMS`. What changed is
+# WHICH sentence, so `refuse_without:` is the load-bearing prefix here: a fix
+# that merely appended the true one would leave both rows passing.
+#
+# Four stdlib files land on four OTHER causes and 0 reach `pass` — the ceiling
+# of map row 7 is measured at 0 and this change does not move it.
+TYPE_ARGUMENT_LIST_CASES = [
+    # The corpus's own base: a TYPE CONSTRUCTOR. `Pointer` is in
+    # `IDENTITY_TYPE_CTORS`, so `type_constructor_kind("Pointer")` answers
+    # before any table of this module's own declarations is consulted — which is
+    # the half of the decision that needs nothing but the name.
+    #
+    # `var m = …` binds a name to the application, so it is also a check that
+    # the classification does not depend on the subscript being in CALLEE
+    # position. Refused on both architectures before this change, with the
+    # container sentence.
+    ("type_argument_list_on_a_type_constructor",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 3\n"
+     "    s.b = 4\n"
+     "    var m = Pointer[Int, s]\n"
+     "    return s.a\n", "refuse:compile-time explicit-parameter list", None),
+    # The other half, and the one no name table can answer: a struct THIS MODULE
+    # declares. `_DequeIter[Self.ElementType, origin_of(self), False]` in
+    # `std/collections/deque.mojo` is this shape, and it is here because
+    # `structs_by_name` is the only thing that settles it — a declared struct
+    # has no runtime container representation at all, so a subscript on its name
+    # cannot be a lookup into one.
+    ("type_argument_list_on_a_struct_this_unit_declares",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "struct Triple[A: AnyType, B: AnyType, C: AnyType]:\n"
+     "    var v: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 3\n"
+     "    s.b = 4\n"
+     "    var m = Triple[Int, s, False](5)\n"
+     "    return m.v + s.a\n", "refuse:compile-time explicit-parameter list", None),
+    # NO FRAME ANYWHERE, which is what pins the change as being about the
+    # CONSTRUCT rather than about the escape check. Every row above could be
+    # satisfied by a fix that only reworded the frame-address refusal; this one
+    # has no frame address to reword. `Box[Int, Int]` is the case the stdlib
+    # writes, and it drew "is a subscript whose index is a tuple — it is one of
+    # two things: a lookup keyed by the tuple … or a two-dimensional index",
+    # which is about a container lookup that cannot happen when the base is a
+    # type.
+    ("type_argument_list_without_any_frame",
+     "struct Box[T: AnyType, U: AnyType]:\n"
+     "    var v: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var m = Box[Int, Int](7)\n"
+     "    return m.v\n", "refuse:compile-time explicit-parameter list", None),
+    # THE COUNTER-CASES, and they are the whole reason the change is a narrow
+    # skip rather than a deletion of the container branch. Every escape the
+    # branch exists for has a base that is a DICT or a LIST, and no type name is
+    # either, so all four keep the sentence they had. Without these rows a fix
+    # that read every bracket list as a type application would pass the three
+    # above and silently accept a program that parks a frame address in a dict's
+    # storage.
+    ("a_dict_key_tuple_holding_a_frame_is_still_a_store",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 3\n"
+     "    s.b = 4\n"
+     "    var d = {1: 0, 2: 0}\n"
+     "    d[s, 1] = 5\n"
+     "    return d[1, 1]\n", "refuse:is stored in a container", None),
+    ("a_list_index_tuple_holding_a_frame_is_still_a_store",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 3\n"
+     "    s.b = 4\n"
+     "    var l = [0, 1, 2, 3]\n"
+     "    var k = l[s, 1]\n"
+     "    return k\n", "refuse:is stored in a container", None),
+    # A bracket list over a base this unit CANNOT classify — the limit the fix
+    # deliberately does not cross. `Self.IteratorType[origin_of(self)]` is the
+    # corpus's shape and it IS a comptime parameter list, but deciding it needs
+    # the IMPORTED module's declarations, which is `formal/imports.py`'s
+    # question. This row pins that such a base is still refused, and NOT that
+    # the wording improves: `_base_name` answers None for anything but a bare
+    # `IdentExpr`, so a dotted base is not asked the question at all.
+    ("a_bracket_list_over_a_dotted_base_is_still_refused",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "struct Alias:\n"
+     "    var tag: Int\n"
+     "    var v: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 3\n"
+     "    s.b = 4\n"
+     "    var h = Alias()\n"
+     "    h.tag = 1\n"
+     "    h.v = 2\n"
+     "    var m = h.tag[Int, s]\n"
+     "    return s.a\n",
+     "refuse:is stored in a container", None),
+]
+
+# THE FALSE SENTENCES, as assertions of their ABSENCE. `refuse_without:` exists
+# for exactly this class — a fix that appends a correct clause beside an
+# incorrect one leaves every `refuse:` above green while the reader is still
+# sent to a non-bug, and that is how "a formal value is one 64-bit word, and
+# DType is not one thing" survived beside a corrected first clause. Two
+# sentences are pinned here because two were false about the same construct.
+TYPE_ARGUMENT_LIST_ABSENT_CASES = [
+    ("no_container_store_sentence_about_a_type_argument_list",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 3\n"
+     "    s.b = 4\n"
+     "    var m = Pointer[Int, s]\n"
+     "    return s.a\n",
+     "refuse_without:compile-time explicit-parameter list:is stored in a container",
+     None),
+    ("no_tuple_index_sentence_about_a_type_argument_list",
+     "struct Box[T: AnyType, U: AnyType]:\n"
+     "    var v: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var m = Box[Int, Int](7)\n"
+     "    return m.v\n",
+     "refuse_without:compile-time explicit-parameter list:whose index is a tuple",
+     None),
 ]
 
 
@@ -8347,6 +8982,8 @@ def main():
                   + TYPE_VALUE_TAG_CASES + ORIGIN_OF_CASES \
                   + ORIGIN_OF_REFUSALS
                   + EQ_DISPATCH_CASES
+                  + TYPE_ARGUMENT_LIST_CASES
+                  + TYPE_ARGUMENT_LIST_ABSENT_CASES
                   + [X86_ONLY_1SLOT_BUG_CASE])
     # The CPython-pair group is a DIFFERENT SHAPE (three columns: name, Mojo
     # text, CPython text), so it is selected and dispatched separately rather

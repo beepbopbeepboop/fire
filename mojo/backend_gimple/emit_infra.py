@@ -59,11 +59,17 @@ from ownership_check import _block_terminates
 from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
-    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
+    _as_str, _block_terminates, _closure_info_for_ident, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
     _pair_key, _prepass_list_elem, _ptr_slot_in_range, _resolve_member_expr_type, _resolve_type, _scan_container_elems,
     _seed_addressed_locals, _type_of
 )
+# `user_dunder_repr_call` is the SHARED dunder lookup behind both the
+# `repr()` route (`_repr_value`, in emit_resolve.py) and the `str()`/`%s`/
+# f-string route (`_stringify_value`, below), so the two spellings of "ask
+# this object to describe itself" cannot disagree about which dunder wins.
+from mojo.middle.calls_shared import user_dunder_repr_call
+from mojo.middle.stmts_shared import _annotation_container_elem_type
 
 # Separator for `function_calls`' `name<sep>index` composite strings — see
 # `analyze_param_usage`. U+001F (ASCII Unit Separator): never appears in a
@@ -164,9 +170,35 @@ def _reset_func(gen, body: list = None, params: list = None,
             gimple_lambdareduce.reducible_lambdas(gen)
     gen.bb_counter   = 2
     gen.temp_counter = 0
+    # The TEMP tables are reset HERE rather than left to the feature-level
+    # resets because `temp_counter` is: temp names repeat across functions, so
+    # an entry a previous function left behind is read as THIS function's, and
+    # an entry that says "this value is fresh and nobody else can name it" is
+    # what makes a consumer FREE it — a stale one is a wrong free, not a
+    # missed one. The one table that was already reset per function
+    # (`_cstr_key_src`) says so in its own comment; these are the same shape.
+    #
+    # A LIFTED CLOSURE runs this too, in the middle of its parent, so this
+    # also drops the parent's not-yet-consumed temps. That loses frees (the
+    # safe direction) and cannot add one. The per-FUNCTION ownership state
+    # (`_owned_free_candidates`, `_scope_*`, and the element/closure tables in
+    # `_reset_scope_state`) is deliberately NOT touched here, because the
+    # parent's has to survive the closure's lowering intact.
+    gen._fresh_vals = set()
+    gen._fresh_str_tmps = set()
     gen.decls:       list[str]         = []
     gen.body_lines:  list[str]         = []
     gen.var_types:   dict[str, str]    = {}
+    # This function's higher-order parameters whose declared default names
+    # a compiled generator of this compile — `{param: generator api}`.
+    # Per-FUNCTION, like every other map here (and reset HERE, not left to
+    # `gen_func`, because a lifted closure's body runs `_reset_func` too and
+    # would otherwise read the enclosing function's entries for a parameter
+    # name that means something else here). `_lower_fnptr_call` reads it to
+    # type the result of `walk(root)`; `gen_func` seeds it right after this
+    # call, once `param_defaults` is in hand. See
+    # `calls_shared._callable_param_generator_apis`.
+    gen._callable_param_gen_api: dict[str, dict] = {}
     # `{mut}`-capture-spec preloaded pointer temps (see _gen_lifted_
     # closure) -- reset per function so a stale entry from a
     # previously-compiled closure can never leak into an unrelated
@@ -240,14 +272,41 @@ def _reset_func(gen, body: list = None, params: list = None,
     # `_emit_call` frees it right after the one call that consumes it. Temp
     # names repeat across functions, so this MUST reset per function (a stale
     # entry would free a temp that never owned anything). See doc/MEMORY.html.
-    gen._cstr_key_src: dict[str, str] = {}
-    gen._kw_key_src: dict[str, str] = {}
-    gen._fresh_vals: set = set()   # per function: temp names repeat across functions
+    # Emptied IN PLACE, not rebound to a new container (the four below exist
+    # from GimpleGen.__init__): a dropped container is only garbage under
+    # CPython; self-hosted, each function leaked its old set/dict and every
+    # temp-name string in it (2.7M strings on `--dump-full fire.py`).
+    gen._cstr_key_src.clear()
+    gen._kw_key_src.clear()
+    gen._fresh_vals.clear()   # per function: temp names repeat across functions
+    # The four the ownership work added are ASSIGNED here rather than cleared,
+    # and the difference is not a style choice: they are not in
+    # `GimpleGen.__init__`, so this is where they come into existence, and a
+    # `.clear()` on an attribute that does not exist yet raises.  The three
+    # above are cleared instead because `__init__` creates them and a rebind
+    # there is a leak on the self-hosted path (see the note above).
+    #
+    # The subset of `_fresh_vals` whose value is a list that owns its own
+    # string elements (see `_OWNS_STR_ELEMS`). A temporary that gets freed by
+    # its consumer uses the same distinction, so it lives here rather than
+    # being re-derived. A stale entry would make an unrelated list of
+    # BORROWED strings be freed as if it owned them.
+    gen._owned_str_elem_vals: set = set()
+    # The NAMES (not temps) of owned locals whose value owns its string
+    # elements; the free is emitted for the name at the scope exit.
+    gen._owned_str_elem_names: set = set()
+    # The values (not names) that are a CLOSURE — a bound method whose `self`
+    # is the malloc'd environment emit_calls' constructor paired with it, so
+    # both are one allocation unit and one free.
+    gen._closure_vals: set = set()
+    # The NAMES of owned locals bound to a closure; the free is emitted for the
+    # name at the scope exit.
+    gen._owned_closure_names: set = set()
     # Temps holding a heap string THIS function's own concatenation lowering
     # just built (`_emit_str_cat`) and that nothing else can hold yet. The
     # parent concatenation that consumes one as a direct operand frees it.
     # Same per-function reset requirement as `_cstr_key_src`.
-    gen._fresh_str_tmps: set = set()
+    gen._fresh_str_tmps.clear()
     gen.loop_stack:  list[tuple[str,str]] = []
     gen.exc_depth    = 0
     # Entry `len(loop_stack)` of each currently-open `try` body. A
@@ -390,6 +449,30 @@ def _reset_func(gen, body: list = None, params: list = None,
     # Reset per function for the same reason _actual_types is: temp
     # names (_tN) recycle across functions. See _lower_bound_method_value.
     gen._bound_method_ret_types: dict[str, str] = {}
+    # Any callable VALUE (a lambda's `_funcptr_X` static, a bound-method
+    # handle, a struct method taken as a value) -> that callee's real return
+    # type. The `mojo_fnptr_call_N` / `mojo_maybe_bound_call_N` helpers are
+    # the homogenized `int64_t` convention — the RIGHT thing for the box they
+    # hand back — but the CALLEE is the one that knows the type, so a `_Bool`,
+    # a `double` or a `char *` came back widened: `e = lambda: False;
+    # print(e())` printed `0` and `e = lambda: "hi"; print(e())` printed its
+    # own pointer decimal. Recorded where the value is materialized (see
+    # `_lower_LambdaExpr`) and read by `_lower_fnptr_call_value`.
+    # Reset per function for the same reason _bound_method_ret_types is: temp
+    # names (_tN) recycle across functions.
+    gen._callable_ret_types: dict[str, str] = {}
+    # A DICT's lowered value -> the SET of callable return types stored into
+    # it. A dict is the one container whose value type is a single slot, so a
+    # per-key table does not exist; a set of what was stored is enough,
+    # because the consumer (a `d[k](...)` call site) only uses the answer
+    # when it is UNANIMOUS. A dict holding callables of different return
+    # types then keeps the old int64_t answer, which is the pre-existing
+    # behaviour — never a new wrong one. Without any of this, `d['k'] =
+    # lambda: False; print(d['k']())` printed `0`: the callable's return type
+    # was lost at the store, exactly as it was at the call before
+    # `_callable_ret_types` existed.
+    # Reset per function for the same reason as the maps above.
+    gen._dict_callable_ret: dict[str, set] = {}
     # Builtin-container method bound as a first-class VALUE (`append =
     # l.append`, the classic accumulator-aliasing idiom) — key: the C
     # name of the temp/var holding the boxed value; value: (receiver
@@ -957,6 +1040,26 @@ _FRESH_CONTAINER_RETURNS = frozenset([
 ])
 
 
+# The subset of `_FRESH_CONTAINER_RETURNS` whose result is a list that SOLELY
+# owns its string ELEMENTS — every one freshly allocated by that function, and
+# nothing else holding a pointer to any of them. Those elements are invisible
+# to `mojo_list_free`, which releases the container and leaves them behind
+# (`mojo_list_append_str` stores the pointer it is given and never copies it),
+# so an owned list built by one of these is torn down with
+# `mojo_list_free_owned_strs` instead. Membership is read off each function's
+# source, not inferred from its result type; a function not named here keeps
+# the plain free, which is the safe direction (a missed free leaks, a wrong
+# one frees a string literal).
+#
+# `mojo_str_rsplit` is deliberately absent: it hands its result the very same
+# pointers its own scratch list holds (see its comment in fire_runtime.c), so
+# it is not a sole owner. Neither is any list built by `extend` or by reading
+# a key back out of a dict, which is the common case and is borrowed.
+_OWNS_STR_ELEMS = frozenset([
+    'mojo_str_split', 'mojo_str_splitlines',
+])
+
+
 # Runtime functions that ALWAYS return a string they just allocated. Unlike the
 # container list this one is EARNED, not assumed: a mechanical pass over every
 # `char *`-returning function in runtime/fire_runtime.c kept only those whose every
@@ -966,8 +1069,11 @@ _FRESH_CONTAINER_RETURNS = frozenset([
 # string_strip, mojo_str_rstrip, mojo_str_lstrip_chars, mojo_str_expandtabs,
 # _str_pad, mojo_str_join (returns "" for an empty list), mojo_repr_float
 # ("nan"/"inf"). mojo_repr_int is absent too (its comment says it reuses a buffer).
+# mojo_char_to_str is absent on purpose: it returns one of 256 shared IMMORTAL
+# one-character strings (a malloc per character of every string scan was the
+# bulk of the self-hosted tokenizer's memory), so a free() of it would crash.
 _FRESH_STRING_RETURNS = frozenset([
-    'mojo_str_cat', 'mojo_str_from_int', 'mojo_char_to_str', 'mojo_cstr_slice',
+    'mojo_str_cat', 'mojo_str_from_int', 'mojo_cstr_slice',
     'mojo_cstr_repeat', 'mojo_cstr_reverse', 'mojo_repr_str',
     'mojo_hex', 'mojo_oct', 'mojo_bin',
     # The str methods: each returns a copy the caller owns, never its receiver
@@ -988,11 +1094,11 @@ def note_fresh_result(gen, t: str) -> None:
 
 def is_fresh_container_operand(gen, node, val: str) -> bool:
     """True iff `val`, the lowered value of operand expression `node`, is a
-    container that NOTHING else can reference, so the code that consumes it may
-    free it. Two conditions, both required:
+    value NOTHING else can reference — a container or a string — so the code
+    that consumes it may free it. Two conditions, both required:
       - `node` is a kind of expression that produces a value (a display, a
         call, a slice, a `+`) — never an identifier or a field read, which
-        merely name a container somebody else owns; and
+        merely name a value somebody else owns; and
       - `val` is a value a fresh-producing action created and that no consumer
         has claimed yet (`_fresh_vals`). A temp is never bound to a name or
         stored by the code that produces it, and a consumer removes it from the
@@ -1006,13 +1112,44 @@ def is_fresh_container_operand(gen, node, val: str) -> bool:
                              TstringLiteral))
 
 
+def owned_free_fn_for(gen, val: str, ctype: str) -> str:
+    """The free for ONE value, not for one type: a list built by a function in
+    `_OWNS_STR_ELEMS` also owns the strings in it, and they are invisible to
+    `mojo_list_free`; and a fresh STRING is a plain malloc block, so the
+    container table's blank answer for `char *` is not "nothing to free".
+    Every place that emits a free for a specific lowered value goes through
+    here so the choice is made in exactly one spot."""
+    if ctype == 'MojoList *' and val in gen._owned_str_elem_vals:
+        return 'mojo_list_free_owned_strs'
+    if ctype == 'char *':
+        # Every producer that puts a `char *` in `_fresh_vals` allocates it:
+        # `_FRESH_STRING_RETURNS` (each read off the runtime's own source), a
+        # module function `analyze_returns_fresh` proved returns a fresh
+        # string, and `_char_replace_impl` (always a copy). None of them can
+        # return its own argument, which is the case a `free` would crash on,
+        # and none of them is a string LITERAL (those are in `_slit_N` and
+        # never reach here — a literal is not the lowered value of a call).
+        return 'free'
+    return _owned_free_runtime_fn(ctype)
+
+
+def owned_push_fn_for(gen, val: str, ctype: str) -> str:
+    """The cleanup thunk that matches `owned_free_fn_for` — the two must name
+    the same teardown or an exception would unwind a value differently from the
+    normal path."""
+    if ctype == 'MojoList *' and val in gen._owned_str_elem_vals:
+        return 'mojo_cleanup_push_list_strs'
+    return _owned_push_runtime_fn(ctype)
+
+
 def free_fresh_container(gen, val: str, ctype: str) -> None:
     """Free a fresh container operand after its consumer has read it, and
     forget it so it can never be freed twice."""
-    fn = _owned_free_runtime_fn(ctype)
+    fn = owned_free_fn_for(gen, val, ctype)
     if fn != '':
         gen._emit(f"  {fn} ({val});")
         gen._fresh_vals.discard(val)
+        gen._owned_str_elem_vals.discard(val)
 
 
 def claim_loop_iterable_temp(gen, node, val: str, ctype: str) -> None:
@@ -1025,13 +1162,14 @@ def claim_loop_iterable_temp(gen, node, val: str, ctype: str) -> None:
     leaking it."""
     if not is_fresh_container_operand(gen, node, val):
         return
-    push_fn = _owned_push_runtime_fn(ctype)
-    free_fn = _owned_free_runtime_fn(ctype)
+    push_fn = owned_push_fn_for(gen, val, ctype)
+    free_fn = owned_free_fn_for(gen, val, ctype)
     if push_fn == '' or free_fn == '':
         return
     gen._emit(f"  {push_fn} ({val});")
     _scope_register(gen, val, free_fn)
     gen._fresh_vals.discard(val)
+    gen._owned_str_elem_vals.discard(val)
 
 
 def emit_statement_temp_frees(gen, mark: int) -> None:
@@ -1061,6 +1199,8 @@ def _emit(gen, line: str):
         if _pi > 0 and (_rest[:_pi] in _FRESH_CONTAINER_RETURNS
                         or _rest[:_pi] in _FRESH_STRING_RETURNS):
             gen._fresh_vals.add(line[:_fi].strip())
+            if _rest[:_pi] in _OWNS_STR_ELEMS:
+                gen._owned_str_elem_vals.add(line[:_fi].strip())
     # Track whether this is a terminal statement (can't have code after it)
     stripped = line.strip()
     if stripped.startswith('return ') or stripped.startswith('goto ') or stripped == 'return;':
@@ -2523,7 +2663,8 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
     handle (int64_t/void*/other pointer — the real kind isn't statically
     known), guard with the runtime kind registries
     (`mojo_is_registered_dict`/`_set`) instead of blindly assuming list —
-    the exact gap bugs/CODEGEN_all_any_dict_set_miscompile.md documented.
+    the exact gap bugs/CODEGEN_all_any_dict_set_miscompile.md documented
+    (that doc is gone, closed by this change).
     Fixing it here, once, closes it for all 5 call sites at once."""
     if src_type == 'MojoList *':
         return value
@@ -2786,13 +2927,25 @@ def _list_repr_call(gen, key: str, lst: str | None = None) -> tuple[str, list]:
     return fn, args
 
 
-def _stringify_value(gen, et: str, ev: str) -> str:
+def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
     """Convert an already-lowered (type, value) pair into a `char *` per
-    Python `str()` semantics. Shared by f-string interpolation and `%`
-    string-formatting's `%s` conversion — both need "stringify this typed
-    value" and previously only f-strings had it inline."""
+    Python `str()` semantics. Shared by f-string interpolation, `%`
+    string-formatting's `%s` conversion and the `str()` builtin — all three
+    need "stringify this typed value" and previously only f-strings had it
+    inline.
+
+    `enode` is the operand's AST node when the caller has it, and is the only
+    way to tell a bool from the int 0/1 it shares a slot with: a bool's
+    lowered C type is a plain `int` here, so `'%s' % (b,)`, `f'{b}'` and
+    `str(b)` all printed `1` for a `b = True` at module scope while the same
+    value inside a `def` (where the name's inferred type IS `_Bool`) printed
+    `True`. See `is_python_bool_expr`."""
     if et == 'char *':
         return ev
+    if enode is not None and et in ('int', 'int64_t') \
+            and gimple_exprtypes.is_python_bool_expr(gen, enode):
+        return gen._call_expr('char *', 'mojo_bool_to_str',
+                              [('int', gen._new_val('int', f'(int){ev}'))])
     # A boxed char* (a string pointer stored in an int64_t var, e.g. a
     # tuple-loop var read via get_str and boxed) — stringify as the string
     # it points to, not its decimal address. Without this, f-strings /
@@ -2850,6 +3003,27 @@ def _stringify_value(gen, et: str, ev: str) -> str:
     if et in ('double', 'float'):
         fv = ev if et == 'double' else gen._new_val('double', f'(double){ev}')
         return gen._call_expr('char *', 'mojo_repr_float', [('double', fv)])
+    if et.endswith(' *') and et != 'void *':
+        # A struct value: consult the receiver's OWN dunder, `__str__`
+        # first and `__repr__` second, which is CPython's order for
+        # `str(x)` and is what makes `str(p)` stop printing the bare type
+        # name the generated field dump produces for an empty field list.
+        # This arm did not exist at all, so `str(obj)` and `"%s" % obj` —
+        # a SECOND, entirely separate route from the `repr()` one — ran the
+        # generated field dump, with the user's `__str__` compiled, exported
+        # and never called from anywhere. Same shape as the `repr()` half
+        # (bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_
+        # container_spellings.md), one spelling over.
+        #
+        # The lookup is `user_dunder_repr_call`, SHARED with `_repr_value`
+        # so the two routes cannot drift apart. No dunder → the generic
+        # `mojo_str` fallback below, exactly as before.
+        _rsn = et[:-2].strip()
+        if _rsn:
+            _rcall = user_dunder_repr_call(gen, _rsn, et, ev,
+                                           ('__str__', '__repr__'))
+            if _rcall is not None:
+                return _rcall
     return gen._call_expr('char *', 'mojo_str', [(et, ev)])
 
 
@@ -3642,6 +3816,22 @@ def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  mojo_set_iter_free ({iter_t});")
 
 
+def note_dict_callable_ret(gen, dict_val: str, value_text: str) -> None:
+    """A callable stored into a dict keeps its return type for a later
+    `d[k](...)` call, which is the one place a dict subscript can be a
+    CALLEE. Called from every dict store of an int64 slot; a non-callable
+    value has no entry in `_callable_ret_types` and is a no-op, which is
+    what keeps this off the hot path."""
+    _rt = gen._callable_ret_types.get(value_text)
+    if not _rt:
+        return
+    _set = gen._dict_callable_ret.get(dict_val)
+    if _set is None:
+        _set = set()
+        gen._dict_callable_ret[dict_val] = _set
+    _set.add(_rt)
+
+
 def _gen_print(gen, args: list, kwargs: list = None):
     # print(..., file=sys.stderr): kwargs used to be silently dropped
     # entirely (the file= expression was never even inspected), so every
@@ -3770,11 +3960,12 @@ def _gen_print(gen, args: list, kwargs: list = None):
         _stat = arg_static[i] if i < len(arg_static) else ''
         # A name recorded as holding a bool (`b = True`): its own static type
         # is the `int` that BoolLiteral lowers to, so the check above cannot
-        # see it. Only `print` consults this set.
+        # see it. Only `print` consults this set — through the one shared
+        # predicate, which a dict store now uses too, so the two cannot
+        # disagree about the same value (they did: `print(b)` said True while
+        # `{'k': b}` printed `{'k': 1}`).
         if _stat != '_Bool' and args and i < len(args):
-            _an = args[i]
-            if (isinstance(_an, gimple_ctypes.IdentExpr)
-                    and _an.name in getattr(gen, '_bool_valued', ())):
+            if gimple_exprtypes.is_python_bool_expr(gen, args[i]):
                 _stat = '_Bool'
         if atype == 'char *':
             gen._emit(f'  {print_fn} ({aval});')
@@ -3951,6 +4142,21 @@ def _split_top_level_comma(s: str) -> list[str]:
 # holds the SAME str objects across levels (they are appended, never
 # re-joined), so a repeat level pays a hash-cache hit per part and nothing
 # more.
+#
+# Phase 8 (2026-09-30) added the SECOND half of the fix, the one Phase 7's
+# own "What is left, precisely" section said was the only remaining way to
+# go: the entry for a part's own OUTPUT TEXT is now DERIVED from the entries
+# of the parts that produced it (`_record_output_parse`), instead of being
+# re-parsed byte by byte the first time the parent level lays hands on it.
+# Before, the corpus was scanned once per distinct TEXT, and one of those
+# texts is every module's whole output blob — whose parse is exactly the
+# union of its own parts' parses — so half of all parse volume was spent
+# re-deriving, from scratch, something the child had just derived. Phase 7's
+# cache could not absorb it (every blob is a distinct text the moment it is
+# born) and a shared running `concrete` set cannot replace it (a superset of
+# any one level's corpus; see below). The derivation is guarded by a
+# `_record_output_parse`-local boundary check and is the ONLY thing in this
+# file that writes an entry it did not parse itself.
 _DEDUP_EXTERN_PARTS_CACHE: dict = {}
 
 def _dedup_variadic_externs(parts: list) -> str:
@@ -3959,6 +4165,12 @@ def _dedup_variadic_externs(parts: list) -> str:
     (e.g. an elaborated instantiation forward-declares `get_defined_int (void)`
     while the import-decl pass emits `(...)`, which GCC reports as conflicting
     types). The concrete prototype wins.
+
+    Per-part parse results are memoized process-globally
+    (`_DEDUP_EXTERN_PARTS_CACHE`), and the entry for the text this function
+    RETURNS is published there too (`_record_output_parse`), so the parent
+    level — which inlines exactly this text as one of its own parts — reads
+    the child's parse instead of rescanning the child's whole output blob.
 
     Deliberately plain string scanning (`.split`/`.find`/`.rfind`), NOT
     regex `.finditer()`/`.findall()` — this codegen has no lowering for
@@ -3982,11 +4194,57 @@ def _dedup_variadic_externs(parts: list) -> str:
         # ("implicit declaration of function" once compiled). Real
         # regression, found via compile_stdlib.py's
         # test/ffi/test_external_call.mojo.
+        #
+        # Necessary-condition short-circuit FIRST: all three accepted line
+        # shapes below contain the substring `extern`, so a fragment
+        # without it cannot satisfy any of them. Proves equivalent, and
+        # skips the `.split('\n')` + per-line strip/compare for the
+        # overwhelming majority of fragments (every statement of every
+        # emitted function body). `not in` on a str is lowered on the
+        # self-hosted path (cpp_async.py's `',' not in stmt.name`).
+        if 'extern' not in stmt:
+            return False
         for line in stmt.split('\n'):
             line = line.strip()
             if line == 'extern' or line.startswith('extern ') or line.startswith('extern"'):
                 return True
         return False
+
+    def _fragment_names(stmt: str) -> tuple:
+        """The extern name ONE `;`-delimited fragment contributes, as
+        `(concrete_name, variadic_name)` — either may be None, and a
+        fragment never contributes both (they are disjoint by construction).
+
+        A name is `concrete` when its parameter list is neither `...` nor
+        empty, and `variadic` when it is exactly `...` — the two lists are
+        disjoint by construction, and an empty parameter list is in neither
+        (the old first pass skipped it via `params not in ('...', '')`; the
+        old second pass skipped it via `params != '...'`, so it never
+        decided anything either way).
+
+        Factored out of `_parse_part` (which applies it to each fragment of
+        a part) because `_boundaries_preserve_parse` needs to compare a
+        MERGED fragment's contribution against the two it replaced — same
+        per-fragment reading, one function, so the two cannot drift.
+        """
+        if not _is_extern_decl(stmt):
+            return (None, None)
+        paren = stmt.find('(')
+        if paren < 0:
+            return (None, None)
+        close = stmt.rfind(')')
+        if close < paren:
+            return (None, None)
+        params = stmt[paren + 1:close].strip()
+        head_toks = stmt[:paren].strip().split()
+        if not head_toks:
+            return (None, None)
+        name = head_toks[-1].lstrip('*')
+        if params == '...':
+            return (None, name)
+        if params != '':
+            return (name, None)
+        return (None, None)
 
     def _parse_part(part: str) -> tuple:
         """One part's extern declarations, as (concrete, variadic) name lists.
@@ -3999,34 +4257,160 @@ def _dedup_variadic_externs(parts: list) -> str:
         level per pass; see that dict's own comment for why the repetition
         across levels was the expensive part.
 
-        A name is `concrete` when its parameter list is neither `...` nor
-        empty, and `variadic` when it is exactly `...` — the two lists are
-        disjoint by construction, and an empty parameter list is in neither
-        (the old first pass skipped it via `params not in ('...', '')`; the
-        old second pass skipped it via `params != '...'`, so it never
-        decided anything either way).
+        Whole-part short-circuit: a part with no `extern` substring at all
+        can contribute no name (every accepted fragment shape contains it —
+        see `_is_extern_decl`), so the `.split(';')` — which materializes
+        one new str per statement, tens of thousands of them for a
+        multi-megabyte imported-module blob — is skipped entirely. Same
+        reasoning, one level up.
         """
+        if 'extern' not in part:
+            return ([], [])
         concrete = []
         variadic = []
         for stmt in part.split(';'):
-            if not _is_extern_decl(stmt):
-                continue
-            paren = stmt.find('(')
-            if paren < 0:
-                continue
-            close = stmt.rfind(')')
-            if close < paren:
-                continue
-            params = stmt[paren + 1:close].strip()
-            head_toks = stmt[:paren].strip().split()
-            if not head_toks:
-                continue
-            name = head_toks[-1].lstrip('*')
-            if params == '...':
-                variadic.append(name)
-            elif params != '':
-                concrete.append(name)
+            c_name, v_name = _fragment_names(stmt)
+            if c_name is not None:
+                concrete.append(c_name)
+            if v_name is not None:
+                variadic.append(v_name)
         return concrete, variadic
+
+    def _boundaries_preserve_parse(joined: list) -> bool:
+        """Does `'\\n'.join(joined)` parse as the concatenation of the parts'
+        own parses?
+
+        The join changes exactly one thing: where a `;`-delimited fragment
+        of the joined text SPANS parts. A fragment that starts in part `i`'s
+        trailing text (`fa`, i.e. after its last `;`) runs on until the next
+        `;` anywhere in the joined text — which is in the first following
+        part that has one at all, so a run can straddle three or more parts,
+        and an EMPTY part does NOT end it (it has no `;` either; the join's
+        own newline passes straight through). Everything else parses
+        exactly as it did in its own part.
+
+        For each such run the merged fragment is read with the same
+        `_fragment_names` the parts themselves were parsed with, and it must
+        carry exactly the names the run's pieces carried separately. That is
+        a direct comparison on the only thing the parse feeds (a name set),
+        not a hand-derived argument about paren/`rfind` positions — which is
+        the point, because the shapes that break the derivation are not
+        guessable: `extern int late (int` names nothing on its own (no
+        closing paren) yet completes into a concrete `late` when the next
+        part supplies the `)`, and two pieces each naming a different
+        function cannot both survive, since a fragment carries at most one
+        concrete and one variadic name.
+
+        Cheap skip first, provably free: a run whose pieces contain no
+        `extern` substring at all. The merged fragment's lines are the
+        pieces' lines, so it cannot be an extern declaration and names
+        nothing at all (see `_is_extern_decl`) — same reasoning
+        `_parse_part` uses to skip a whole part. A part that ends in `;`
+        starts no run: its trailing fragment is a whole fragment of the
+        joined text.
+        """
+        n = len(joined)
+        i = 0
+        while i < n:
+            a = joined[i]
+            fa = a[a.rfind(';') + 1:]
+            if fa == '' or i == n - 1:
+                i += 1
+                continue
+            frags = [fa]
+            j = i + 1
+            while j < n:
+                b = joined[j]
+                fb_end = b.find(';')
+                if fb_end < 0:
+                    frags.append(b)
+                    j += 1
+                    continue
+                frags.append(b[:fb_end])
+                break
+            sides_c = []
+            sides_v = []
+            any_extern = False
+            for frag in frags:
+                if 'extern' not in frag:
+                    continue
+                any_extern = True
+                c_name, v_name = _fragment_names(frag)
+                if c_name is not None:
+                    sides_c.append(c_name)
+                if v_name is not None:
+                    sides_v.append(v_name)
+            if any_extern:
+                merged = frags[0]
+                for k in range(1, len(frags)):
+                    merged = merged + '\n' + frags[k]
+                m_c, m_v = _fragment_names(merged)
+                # EVERY piece's name must be exactly the merged
+                # fragment's, and a merged fragment with no name must have
+                # had none. Checking the first piece alone is not enough:
+                # `extern int a (int)` + `extern int a (int)` +
+                # `extern "C" ... b (...)` (no `;` anywhere) is ONE
+                # fragment whose `find('(')`/`rfind(')')` span all three,
+                # naming `a` and swallowing `b` — equal to the first piece,
+                # different from the union.
+                if m_c is None:
+                    if len(sides_c) > 0:
+                        return False
+                elif len(sides_c) == 0:
+                    return False
+                else:
+                    for k in range(len(sides_c)):
+                        if sides_c[k] != m_c:
+                            return False
+                if m_v is None:
+                    if len(sides_v) > 0:
+                        return False
+                elif len(sides_v) == 0:
+                    return False
+                else:
+                    for k in range(len(sides_v)):
+                        if sides_v[k] != m_v:
+                            return False
+            i = j
+        return True
+
+    def _record_output_parse(out: str, out_parts: list,
+                             exact_concrete, variadic_by_out_part: list) -> None:
+        """Publish `_DEDUP_EXTERN_PARTS_CACHE[out]` for the text JUST
+        returned, with the parse its parts' own entries imply.
+
+        `out` is `'\n'.join(out_parts)`, so the parse of `out` is the
+        concatenation of the parses of `out_parts` — whose entries the caller
+        has just read — exactly when no run of parts merges into one
+        `;`-delimited fragment that changes what it names, which is what
+        `_boundaries_preserve_parse` decides by direct comparison.
+
+        The condition is checked rather than assumed, and when it fails
+        nothing is published (the parent level then parses the text itself,
+        exactly as it did before this existed).
+
+        `exact_concrete` is the caller's already-computed set when it is
+        provably the exact name set of `out` (nothing was dropped) — passed
+        BY REFERENCE, so the common case allocates nothing; `None` asks for
+        it to be rebuilt from the parts. Every part of `out_parts` is already
+        in the cache by the time this runs (the caller read or filled its
+        entry in the main pass), so `entry` below is never absent; a missing
+        one would be a programming error here, not a case to paper over.
+        """
+        if not _boundaries_preserve_parse(out_parts):
+            return
+        if exact_concrete is None:
+            exact_concrete = set()
+            for p in out_parts:
+                entry = _DEDUP_EXTERN_PARTS_CACHE.get(p)
+                for name in entry[0]:
+                    exact_concrete.add(name)
+        out_variadic = []
+        for vl in variadic_by_out_part:
+            for name in vl:
+                out_variadic.append(name)
+        _DEDUP_EXTERN_PARTS_CACHE[out] = (exact_concrete, out_variadic)
+
 
     # ONE pass over `parts`, not two. The old shape scanned every fragment
     # twice — once to build `concrete`, once to decide each part's fate —
@@ -4038,6 +4422,17 @@ def _dedup_variadic_externs(parts: list) -> str:
     # shared instead of repeated. Same predicate, same inputs, same
     # decision: a part is dropped iff one of its variadic names is in the
     # tree-wide `concrete` set.
+    #
+    # A part's entry is read from `_DEDUP_EXTERN_PARTS_CACHE` — including,
+    # now, the entry `_record_output_parse` published for a CHILD module's
+    # whole output blob when this level is that blob's first reader, which
+    # is why the per-level parse volume is the bytes THIS level added rather
+    # than the cumulative corpus. What is NOT done here is a process-wide
+    # running `concrete` set across levels: it is a strict SUPERSET of any
+    # one level's corpus (a sibling's names, and a dropped part's names,
+    # live in it but not in this level's `parts`), and a superset drops
+    # parts the per-level computation keeps — a silent output change. The
+    # same reasoning rejected it on 2026-09-26.
     concrete = set()
     variadic_by_part = []
     for p in parts:
@@ -4050,8 +4445,12 @@ def _dedup_variadic_externs(parts: list) -> str:
             concrete.add(name)
         variadic_by_part.append(part_variadic)
     if not concrete:
-        return '\n'.join(parts)
+        out = '\n'.join(parts)
+        _record_output_parse(out, parts, concrete, variadic_by_part)
+        return out
     kept = []
+    kept_variadic = []
+    dropped = False
     for i in range(len(parts)):
         drop = False
         for name in variadic_by_part[i]:
@@ -4060,7 +4459,14 @@ def _dedup_variadic_externs(parts: list) -> str:
                 break
         if not drop:
             kept.append(parts[i])
-    return '\n'.join(kept)
+            kept_variadic.append(variadic_by_part[i])
+        else:
+            dropped = True
+    out = '\n'.join(kept)
+    # Nothing dropped ⇒ the set just built IS the output's exact name set,
+    # so hand the same object over rather than rebuilding it.
+    _record_output_parse(out, kept, None if dropped else concrete, kept_variadic)
+    return out
 
 
 # ── Phase 3 (doc/OWNERSHIP_MODEL.md) codegen wiring — TODO item 1 ──────────
@@ -4250,6 +4656,23 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
     pushed = gen._owned_free_pushed
     if name in pushed:
         return
+    # A CAPTURING LAMBDA bound to this name: the value is a `MojoBoundMethod`
+    # plus the environment its constructor allocated with it, and the two are
+    # one allocation unit. It is not a container, so it does not go through the
+    # freshness/`var_types` machinery below — `_closure_vals` is the record
+    # that the value really is one (the non-capturing lambda case, which is a
+    # bare static function pointer and allocates nothing, never appears there).
+    if gen._decl_rhs_val != '' and gen._decl_rhs_val in gen._closure_vals:
+        gen._closure_vals.discard(gen._decl_rhs_val)
+        if not _lambda_owned(gen._own_fn_body, name):
+            _drop_owned_candidate(gen, name)
+            return
+        gen._owned_closure_names.add(name)
+        gen._emit(f"  mojo_cleanup_push_closure ({name});")
+        pushed.add(name)
+        if name in gen._scope_armed:
+            _scope_register(gen, name, 'mojo_closure_free')
+        return
     # A declaration whose value is not a container display (a call, a slice, a
     # comprehension, a `+`) only MAY have built a fresh container — the
     # analysis credited the name on that "maybe". Ownership is kept only when
@@ -4258,17 +4681,35 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
     # Anything else (a call returning a stored container, an alias) means the
     # name does not own its value, so it stops being a candidate at this
     # declaration and nothing about it is ever freed.
+    # A declaration whose value is a container the runtime built and that
+    # SOLELY owns its string elements (see `_OWNS_STR_ELEMS`); decided once,
+    # here, where the value is still the temp the producing call returned.
+    owns_str_elems = False
     if value is not None and not _is_ctor_display(value):
         rhs = gen._decl_rhs_val
         if rhs == '' or not is_fresh_container_operand(gen, value, rhs):
             candidates.discard(name)
             return
         gen._fresh_vals.discard(rhs)
+        # The NAME inherits the property, because the free is emitted for the
+        # name at the scope exit, long after the temp is gone.
+        if rhs in gen._owned_str_elem_vals:
+            gen._owned_str_elem_vals.discard(rhs)
+            if not _list_elements_ok(gen._own_fn_body, name):
+                # The list owns its strings, but the program may hand an
+                # element pointer out (`kept.append(parts[0])`), and the
+                # element free would then dangle. Fail closed to the plain
+                # `mojo_list_free`: a few bytes leak instead.
+                owns_str_elems = False
+            else:
+                owns_str_elems = True
+                gen._owned_str_elem_names.add(name)
         # A fresh STRING is owned only if no method call on it can hand back
         # the receiver itself (`t = s.strip()` may alias `s`): see
         # ownership_destruct.receiver_results_consumed.
         if gen.var_types.get(name) == 'char *' and not _string_uses_ok(gen._own_fn_body, name):
             candidates.discard(name)
+            gen._owned_str_elem_names.discard(name)
             return
     ctype = gen.var_types.get(name)
     if not _container_keys_safe(gen, name, ctype):
@@ -4295,8 +4736,12 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
             if name in gen._scope_armed:
                 _scope_register(gen, name, '')
     else:
-        push_fn = _owned_push_runtime_fn(ctype)
-        free_fn = _owned_free_runtime_fn(ctype)
+        if owns_str_elems and ctype == 'MojoList *':
+            push_fn = 'mojo_cleanup_push_list_strs'
+            free_fn = 'mojo_list_free_owned_strs'
+        else:
+            push_fn = _owned_push_runtime_fn(ctype)
+            free_fn = _owned_free_runtime_fn(ctype)
         if push_fn == '' and ctype is not None and ctype.endswith(' *'):
             # A struct instance (a constructor call of a vetted struct): a plain
             # heap block, torn down with free() and, on an exception, by a PTR
@@ -4363,6 +4808,16 @@ def _emit_owned_local_frees(gen):
         # this file's "Phase 6" section.
         if name in stack_allocated:
             runtime_fn = _owned_destroy_runtime_fn(ctype)
+        elif name in gen._owned_closure_names:
+            # A bound method and the environment it owns (see mojo_closure_free).
+            runtime_fn = 'mojo_closure_free'
+        elif name in gen._owned_str_elem_names and ctype == 'MojoList *':
+            # Decided at the DECLARATION, where the value was still the temp a
+            # `_OWNS_STR_ELEMS` function returned; re-derived here from
+            # `var_types` it would be indistinguishable from any other list,
+            # and the wrong free either leaks the strings or frees borrowed
+            # ones.
+            runtime_fn = 'mojo_list_free_owned_strs'
         else:
             runtime_fn = _owned_free_runtime_fn(ctype)
             if runtime_fn == '' and _struct_ptr_owned(gen, name, ctype):
@@ -4432,6 +4887,15 @@ def _reset_scope_state(gen) -> None:
     gen._scope_live = []
     gen._scope_live_depth = []
     gen._scope_live_fn = []
+    # Per-FUNCTION ownership state, reset here and NOT in `_reset_func`:
+    # a lifted closure runs `_reset_func` in the middle of its parent, and the
+    # parent's entries have to survive that intact (they are what the parent's
+    # own scope exit frees). `_owned_str_elem_vals` is a table of temps but
+    # belongs to the same decision as `_owned_str_elem_names` — a push and its
+    # cancel must not disagree — so it moves with it.
+    gen._owned_str_elem_names = set()
+    gen._owned_str_elem_vals = set()
+    gen._owned_closure_names = set()
     # See `begin_function`'s note: self-hosting cannot infer a set/list
     # field's element type from an assignment, only from this table.
     _fet = gen._field_elem_types.setdefault('GimpleGen', {})
@@ -4439,6 +4903,11 @@ def _reset_scope_state(gen) -> None:
     _fet['_scope_armed'] = 'char *'
     _fet['_scope_live'] = 'char *'
     _fet['_scope_live_fn'] = 'char *'
+    _fet['_owned_str_elem_names'] = 'char *'
+    _fet['_owned_str_elem_vals'] = 'char *'
+    _fet['_owned_closure_names'] = 'char *'
+    _fet['_fresh_vals'] = 'char *'
+    _fet['_fresh_str_tmps'] = 'char *'
 
 
 def _scope_register(gen, name: str, fn: str) -> None:
@@ -4573,6 +5042,35 @@ _OWNED_STACK_KIND = {
     'MojoSet *':  ('mojo_set_init',  'MojoSet'),
 }
 
+def ann_container_ctype(gen, ann):
+    """The container ctype a binding statement's OWN annotation names, when
+    it names one of the three owned-stack container kinds; else None.
+
+    `var s: Set[Int] = {}` — the annotation is the ground truth about what
+    `s` is, and an EMPTY `{}` is evidence for no kind at all (an empty dict,
+    list and set are equally "nothing"), so the destination's declared kind
+    is what both the storage decision (`maybe_stack_alloc_owned_ctor` below)
+    and the coercion (`gimple_ctypes.reify_empty_container_literal`) have to
+    build. Resolving the annotation to `MojoDict *` because the literal's own
+    default lowering is a dict is what made `s.add(i)` a silent no-op on a
+    `MojoDict` header and the variable print `{}` forever. A non-container
+    annotation, or one this codegen cannot resolve, answers None and leaves
+    every existing decision exactly as it was.
+
+    Lives here, beside the `_OWNED_STACK_KIND` table whose keys it is
+    restricted to, because that table is the whole answer: the question is
+    only ever "is this annotation one of the three container kinds this
+    feature stack-allocates?", and both consumers (the storage decision and
+    the `AssignStmt` ctype override) ask it from different modules."""
+    if not isinstance(ann, str) or not ann:
+        return None
+    try:
+        _ct = gen._resolve_type(ann)
+    except Exception:
+        return None
+    return _ct if _ct in _OWNED_STACK_KIND else None
+
+
 _OWNED_DESTROY_RUNTIME_FN = {
     'MojoDict *': 'mojo_dict_destroy',
     'MojoList *': 'mojo_list_destroy',
@@ -4614,7 +5112,7 @@ def _vetted_struct_ctor_name(gen, value) -> str:
     return ''
 
 
-def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
+def maybe_stack_alloc_owned_ctor(gen, name: str, value, ann=None) -> bool:
     """Call from gimple_gen_stmts.py's central `gen_stmt` dispatcher
     BEFORE lowering a `VarDecl`/single-target `AssignStmt` normally (a
     plain identifier `name` bound to `value`) — returns True if it fully
@@ -4622,7 +5120,31 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
     caller must SKIP its own normal lowering of this statement entirely;
     False means "not applicable, lower it normally" (not a candidate, not
     an empty-constructor shape, or — belt-and-suspenders — already
-    handled, which single static assignment should make impossible)."""
+    handled, which single static assignment should make impossible).
+
+    `ann` is the binding statement's OWN type annotation, and BOTH of the
+    things this path decides from it exist because this path handles the
+    statement WHOLE: the two ordinary statement paths in
+    gimple_gen_stmts.py never see a binding this function claims.
+
+    * The CONTAINER KIND. `_empty_ctor_ctype` answers `MojoDict *` for every
+      `{}` because `{}` is a dict DISPLAY — the right answer for a display,
+      the wrong one for `var s: Set[Int] = {}`, where the storage allocated
+      here, the C type the variable is declared with, and the runtime
+      push/destroy pair all followed the display: `s.add(i)` became a no-op
+      against a `MojoDict` header and `print(s)` said `{}` no matter what
+      was added. An empty literal is evidence for NO kind, so the
+      declaration's own annotation decides (`ann_container_ctype` above) —
+      the same premise `reify_empty_container_literal` is built on for the
+      non-stack-allocated path.
+
+    * The ELEMENT TYPE (`_annotation_container_elem_type` in
+      mojo/middle/stmts_shared.py). So `kept: List[String] = []` — the shape
+      that IS stack-allocated, because `[]` is an empty constructor — lost
+      the one piece of type information its own annotation carried, and a
+      list filled only from a callee read back as ints
+      (bugs/CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee.md,
+      closed and removed with the annotation-seeding fix)."""
     # Direct attribute access — see `maybe_push_owned_local`'s note.
     candidates = gen._owned_free_candidates
     if name not in candidates and name not in gen._scope_armed:
@@ -4631,6 +5153,9 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
     if name in pushed:
         return False
     ctype = _empty_ctor_ctype(value)
+    _ann_ct = ann_container_ctype(gen, ann) if ctype is not None else None
+    if _ann_ct is not None:
+        ctype = _ann_ct
     _kind = ctype if ctype is not None else _literal_ctor_ctype(value)
     if _kind is not None and not _container_keys_safe(gen, name, _kind):
         _drop_owned_candidate(gen, name)
@@ -4668,7 +5193,8 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
     storage = f'_owned_storage{gen.temp_counter}_{name}'
     gen.decls.append(f"  {struct_name} {storage};")
     gen._emit(f"  {init_fn} (&{storage});")
-    gen._declare_var(name, ctype)
+    gen._declare_var(name, ctype,
+                     _annotation_container_elem_type(gen, ann, ctype))
     gen._emit(f"  {gen._write_dest(name)} = &{storage};")
     push_fn = _OWNED_STACK_PUSH_RUNTIME_FN[ctype]
     gen._emit(f"  {push_fn} ({gen._cname(name)});")
@@ -4724,7 +5250,8 @@ def begin_function(gen, fn) -> None:
     just triggered manually instead of automatically at the one
     assignment site automatic propagation can't reach — is correct
     permanently, not a one-off workaround for today's specific bug."""
-    gen._owned_free_candidates = _compute_owned_free_candidates(fn, gen._analysis_funcs, gen._analysis_structs)
+    gen._owned_free_candidates = (_compute_owned_free_candidates(fn, gen._analysis_funcs, gen._analysis_structs)
+                                  | _compute_closure_candidates(fn))
     gen._field_elem_types.setdefault('GimpleGen', {})['_owned_free_candidates'] = 'char *'
     gen._owned_free_pushed = set()
     gen._owned_stack_allocated = set()
@@ -4732,6 +5259,13 @@ def begin_function(gen, fn) -> None:
     gen._own_fn_body = fn.body
     gen._int_keyed_dicts = _compute_int_keyed_dicts(fn)
     gen._scoped_free_candidates = _compute_scoped_free_candidates(fn, gen._owned_free_candidates, gen._analysis_funcs, gen._analysis_structs)
+    # A lambda local declared in a LOOP BODY is owned by the body, on the same
+    # terms as a container local there (`analyze_scoped_locals`' credit: its one
+    # binding is a direct child statement of the body and the name is mentioned
+    # nowhere outside it), so the same arming and the same three exit points
+    # apply. Computed from the same body, so the two sets cannot disagree.
+    gen._scoped_free_candidates = (gen._scoped_free_candidates
+                                   | _compute_scoped_closure_candidates(fn, gen._owned_free_candidates))
 
 
 def reset_no_candidates(gen) -> None:

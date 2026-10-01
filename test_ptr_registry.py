@@ -8,6 +8,12 @@ runtime is built on (doc/MEMORY.html sections 10 and 3.A):
     into a dedicated open-addressing table with backward-shift deletion; this
     checks it against a reference model, including forced collisions and the
     LIFO add/remove of ONE address that a stack-homed container produces.
+  * the per-slot element-KINDS side table (`_reg_kinds`), keyed the same way
+    but carrying a payload, against the same kind of model. Its delete used
+    to clear the slot instead of closing the probe gap, so one list's free
+    silently stripped the kinds off every other LIVE list sharing its probe
+    cluster — the same shape the container registries' own `_destroy`
+    helpers avoid, and the one this table had too (2026-09-30).
   * integer dict keys: canonical-decimal detection, int/string equivalence in both directions, strings that only
     look numeric staying separate, bytes keys staying separate, the `_kw` entry points against a reference model;
   * the Int-key path's fast itoa + block pool and the dict's resize (moves keys, keeps
@@ -104,6 +110,105 @@ static void test_ptrreg(void) {
     _pr_add(&m, 0); assert(m.used == 1 && !_pr_has(&m, 0));
 }
 
+/* The per-slot ELEMENT-KINDS side table (`_reg_kinds`), keyed by the live
+ * MojoList address like the _PtrReg tables but with a payload. Two of its
+ * own properties, both measured: its home function used to be a bare
+ * `addr & mask`, and heap MojoLists are 64 bytes apart (sizeof is 56,
+ * malloc's size class rounds up), so EVERY row shared one probe cluster;
+ * and its delete cleared the slot instead of closing the probe gap, so one
+ * list's free made every later member of the cluster unfindable — a live
+ * list silently losing the element kinds that describe it. Checked here
+ * against a reference model over forced collisions, plus the exact shape
+ * that broke (two colliding lists, one destroyed, the survivor intact). */
+static void test_kinds_table(void) {
+    enum { M = 512 };
+    static uint64_t live[M]; static int present[M];
+    static char ktag[M][4];
+    for (int i = 0; i < M; i++) { live[i] = addr(i) + (i * 64);   /* 64-byte stride */
+                                  ktag[i][0] = "dipnsl"[i % 6]; ktag[i][1] = 0; }
+    srand(4242);
+    int nlive = 0;
+    for (int round = 0; round < 400000; round++) {
+        int i = rand() % M;
+        if (rand() % 3 == 0) {
+            _KindRow *r = _kinds_row(live[i]);
+            assert((r != NULL) == present[i]);
+            if (r) { assert(r->addr == live[i]); assert(r->kinds == ktag[i]); }
+        } else if (present[i]) {
+            _kinds_forget(live[i]); present[i] = 0; nlive--;
+        } else {
+            int fresh = 0;
+            _KindRow *r = _kinds_row_for_write(live[i], &fresh);
+            assert(fresh); assert(r->addr == live[i]); r->kinds = ktag[i];
+            present[i] = 1; nlive++;
+        }
+        if (round % 50000 == 0) {
+            for (int k = 0; k < M; k++) {
+                _KindRow *r = _kinds_row(live[k]);
+                assert((r != NULL) == present[k]);
+                if (r) assert(r->kinds == ktag[k]);
+            }
+            assert((int)_reg_kinds.used == nlive);
+        }
+    }
+    for (int k = 0; k < M; k++) if (present[k]) { _kinds_forget(live[k]); present[k] = 0; nlive--; }
+    assert(_reg_kinds.used == 0 && nlive == 0);
+
+    /* The delete, forced. The home function is a multiplicative hash, so two
+     * real heap lists no longer collide by construction (that WAS the bug:
+     * a bare `addr & mask` put every row in one cluster because malloc hands
+     * out 64-byte blocks and sizeof(MojoList) is 56). So the deletion rule
+     * cannot be pinned by hoping for a collision — find an address that
+     * genuinely shares a home slot with a live row, and require that
+     * deleting the FIRST leaves the second findable. With the clear-the-slot
+     * delete this asserts and the process aborts; with backward-shift it
+     * holds. That is the half of the fix the heap-pair shape above can no
+     * longer reach, and it is the half that protects any future home
+     * function. */
+    /* The table is empty here, so a row sits exactly at its home slot and
+     * the first address whose home matches lands immediately after it in the
+     * same cluster — which is precisely the layout a clear-the-slot delete
+     * strands. */
+    assert(_reg_kinds.used == 0 && _reg_kinds.cap >= 64);
+    MojoList *p1 = mojo_list_new();
+    mojo_list_set_kinds(p1, "dp");
+    uint64_t a1 = (uint64_t)(uintptr_t)p1;
+    uint64_t a2 = 0;
+    for (uint64_t cand = a1 + 8; cand < a1 + (1ULL << 20); cand += 8) {
+        if (_kinds_home(cand) == _kinds_home(a1)) { a2 = cand; break; }
+    }
+    assert(a2 != 0);
+    int fresh = 0;
+    _kinds_row_for_write(a2, &fresh)->kinds = "nn";
+    assert(_reg_kinds.rows[_kinds_home(a1)].addr == a1);
+    assert(_reg_kinds.rows[(_kinds_home(a1) + 1) & (_reg_kinds.cap - 1)].addr == a2);
+    _kinds_forget(a1);
+    _KindRow *after = _kinds_row(a2);
+    assert(after != NULL && after->kinds == "nn");
+    _kinds_forget(a2);
+    mojo_list_free(p1);
+
+    /* The exact failing shape: two colliding lists with kinds, the first
+     * destroyed, the second still live and still described. */
+    MojoList *x = mojo_list_new(), *y = mojo_list_new();
+    mojo_list_append_double(x, 1.5); mojo_list_append_str(x, "aa");
+    mojo_list_append_double(y, 9.5); mojo_list_append_str(y, "zz");
+    mojo_list_set_kinds(x, "dp"); mojo_list_set_kinds(y, "dp");
+    mojo_list_free(x);
+    assert(mojo_list_get_kinds(y) && strcmp(mojo_list_get_kinds(y), "dp") == 0);
+    assert(mojo_list_slot_kind(y, 0) == 'd' && mojo_list_slot_kind(y, 1) == 'p');
+    /* a boxed read of the survivor's float slot really does box */
+    int64_t bx = mojo_list_get_boxed(y, 0);
+    assert(mojo_is_boxed(bx) && mojo_box_double(bx) == 9.5);
+    mojo_list_free(y);
+    /* and the row is really gone afterwards, so a reused address starts clean */
+    MojoList *z = mojo_list_new();
+    assert(mojo_list_get_kinds(z) == NULL);
+    mojo_list_set_kinds(z, "ii");
+    assert(mojo_list_get_kinds(z) && strcmp(mojo_list_get_kinds(z), "ii") == 0);
+    mojo_list_free(z);
+}
+
 static void test_list_inline(void) {
     for (int n = 0; n <= 40; n++) {
         MojoList st; mojo_list_init(&st);
@@ -128,18 +233,54 @@ static void test_dict_and_itoa(void) {
      * is an ordinary malloc'd string; the TRANSIENT one (mojo_cstr_or_int_str)
      * is a pool block and is the only thing mojo_cstr_or_int_release accepts.
      *
-     * 4294967296 was in this list and is NOT any more: it is the value that
-     * exposed a live pre-existing crash, and it now lives in its own group
-     * (`boxedstr`, see test_boxed_str_discrimination) so that this group stays
-     * green and the crash is reported by name instead of taking the whole
-     * harness down with it. `d[3000000000] = 1` segfaults. */
-    int64_t vals[] = {0,1,-1,9,10,-10,99,100,12345,-98765,2147483647LL,-2147483648LL,
+     * The two halves are checked over DIFFERENT value sets, and that is not
+     * bookkeeping. `mojo_cstr_or_int_str(v)` returns `v` ITSELF — the caller
+     * hands it back unchanged and it is never pooled — for any `v` the
+     * runtime's boxed-string test claims, which is the [2GiB, 2^47) window
+     * (`_mojo_ptr_shaped`: a char* and an int64_t are the same width here, so
+     * a value in that window is a pointer until proven otherwise). 2^32 and
+     * INT64_MAX are in it, so `strcmp(t, "4294967296")` on the raw return
+     * dereferences the integer 4294967296 as a `char *` and segfaults — the
+     * correct behaviour being asserted, tested wrongly. `mojo_str_from_int`
+     * has no such test and is checked over the full range, extremes
+     * included; the transient one is checked over everything OUTSIDE the
+     * window, and the in-window entries are asserted to come back
+     * unchanged, which is the documented contract. (This harness ran with
+     * `-DNDEBUG` for its whole life — see `_flags` — so these `strcmp`s were
+     * never executed and the segfault below them was never reached.)
+     *
+     * What SHOULD hold for an in-window value is spelled out in its own
+     * group instead: `boxedstr` (test_boxed_str_discrimination) asserts that
+     * an ordinary large integer is rendered as its decimal rather than
+     * dereferenced, and that is the registered expect-marked `ptrreg-boxed-str`
+     * test. So both directions are covered: this group pins the contract the
+     * runtime actually has, and `boxedstr` is red about the one it should
+     * have. See bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md. */
+    int64_t vals[] = {0,1,-1,9,10,-10,99,100,12345,-98765,2147483647LL,-2147483648LL,4294967296LL,
                       9223372036854775807LL, (int64_t)(-9223372036854775807LL-1)};
     for (unsigned i = 0; i < sizeof vals / sizeof *vals; i++) {
         char ref[32]; snprintf(ref, sizeof ref, "%lld", (long long)vals[i]);
         char *kept = mojo_str_from_int(vals[i]); assert(strcmp(kept, ref) == 0); free(kept);
-        char *t = mojo_cstr_or_int_str(vals[i]); assert(strcmp(t, ref) == 0);
+        uint64_t u = (uint64_t)vals[i];
+        int boxed = (u >= 0x80000000ULL && u < 0x0000800000000000ULL);
+        char *t = mojo_cstr_or_int_str(vals[i]);
+        if (boxed) assert(t == (char *)(intptr_t)vals[i]);
+        else assert(strcmp(t, ref) == 0);
         mojo_cstr_or_int_release(vals[i], t);
+    }
+    /* below the window's floor, and outside it, both spell a decimal */
+    for (int64_t v = 0; v < 65536; v += 4093) {
+        char ref[32]; snprintf(ref, sizeof ref, "%lld", (long long)v);
+        char *t = mojo_cstr_or_int_str(v); assert(strcmp(t, ref) == 0);
+        mojo_cstr_or_int_release(v, t);
+    }
+    /* above its ceiling, likewise. Doubling UP from the boundary, because
+     * walking down from it walks straight back into the window these values
+     * are excluded from (2^45 is inside [2^31, 2^47)). */
+    for (int64_t v = (int64_t)0x0000800000000000ULL; v > 0 && v <= (int64_t)0x4000000000000000LL; v *= 2) {
+        char ref[32]; snprintf(ref, sizeof ref, "%lld", (long long)v);
+        char *t = mojo_cstr_or_int_str(v); assert(strcmp(t, ref) == 0);
+        mojo_cstr_or_int_release(v, t);
     }
     /* a released transient block is the next one handed out */
     char *a = mojo_cstr_or_int_str(42); mojo_cstr_or_int_release(42, a);
@@ -242,9 +383,12 @@ static void test_dict_int_keys(void) {
         if (u >= 0x80000000ULL && u < 0x0000800000000000ULL) keyv[i] = -(int64_t)i - 1;
     }
     /* The model indexes val[]/present[] by index and the dict keys by value, so
-     * the key set MUST be injective. Check it rather than trusting the
-     * generator: the duplicate this catches cost a full debugging round to
-     * attribute, and it presented as a dict bug. */
+     * the key set MUST be injective — and it was not: `i % 7 == 0` gave index 0
+     * the key 0, which `keyv[3] = 0` also claims, so the two positions shared
+     * one entry and the model reported a phantom key at round 752 of 400,000
+     * (`contains(0)` true where the model said absent). Asserted here rather
+     * than fixed quietly, because a model with duplicate keys is wrong in a
+     * way that reads as a runtime bug. */
     for (int i = 0; i < M; i++)
         for (int j = i + 1; j < M; j++)
             assert(keyv[i] != keyv[j]);
@@ -473,6 +617,7 @@ int main(int argc, char **argv) {
     int ran = 0;
 #define GROUP(id, fn) if (!only || strcmp(only, id) == 0) { fn(); ran = 1; }
     GROUP("ptrreg", test_ptrreg)
+    GROUP("kinds_table", test_kinds_table)
     GROUP("list_inline", test_list_inline)
     GROUP("dict_and_itoa", test_dict_and_itoa)
     GROUP("dict_int_keys", test_dict_int_keys)
@@ -488,22 +633,41 @@ int main(int argc, char **argv) {
 
 
 def _flags():
+    """`python3-config`'s include/link flags, MINUS the ones that silently
+    disable or neuter this test.
+
+    `python3-config --cflags` on a Homebrew CPython 3.14 emits
+    `-fno-strict-overflow -Wsign-compare -Wunreachable-code -fno-common
+     -dynamic -DNDEBUG -g -O3 -Wall`. Four of those are load-bearing bugs for
+     a harness whose entire verification IS its asserts:
+
+      - `-DNDEBUG` compiles every `assert(...)` in the harness out of
+        existence. The test then passed for every build, including a
+        deliberately broken `_kinds_forget` (measured: the assert fires and
+        aborts without it, and the test reported `PASS 3 passed` with it).
+      - `-O3` comes AFTER the variant's own `-O0`/`-O2` on the command line
+        and so overrode it, making the two optimisation-level variants the
+        same build — the point of having them.
+      - the same is true of any second `-O` flag python might emit, and of
+        `-g` in the ASan variant (which supplies its own), so those go too.
+
+    They are dropped from BOTH the compile and the link flag lists (python's
+    `--ldflags` carries the same `-DNDEBUG`) rather than worked around, and
+    `_asserts_live` below checks the result at run time, so a future flag
+    change cannot quietly re-disable the harness.
+    """
     def cfg(*a):
         return subprocess.run(["python3-config", *a], capture_output=True, text=True).stdout.split()
-    cflags, ldflags = cfg("--cflags"), cfg("--ldflags", "--embed")
-    # Drop -DNDEBUG. `python3-config --cflags` emits it, and this harness is
-    # written entirely in `assert`, so on a stock macOS python the whole file
-    # compiled to `((void)0)` per statement: every case body vanished, the
-    # helpers under test were never CALLED, and the run printed "ok" and exited
-    # 0. `ptrreg` had been reporting a green pass for a test that did not
-    # execute, on every macOS checkout, for as long as it existed -- the
-    # pointer-registry reference model, the Int-key itoa, the inline dict/set
-    # and the block pool were all untested here. Nothing in the harness can
-    # catch that on its own, because the failure mode is the ABSENCE of the
-    # checks, so the fix is here: make sure they are compiled in, and assert it
-    # by running the harness with a tripwire in `main` (see _asserts_live).
-    assert_live = [f for f in cflags if f not in ("-DNDEBUG", "-O3")]
-    return assert_live, ldflags
+    drop = ("-DNDEBUG", "-O3", "-O2", "-O1", "-O0", "-g")
+    cflags = [f for f in cfg("--cflags") if f not in drop]
+    ldflags = [f for f in cfg("--ldflags", "--embed") if f not in drop]
+    return cflags, ldflags
+
+
+# The harness's entry point (`HARNESS` above), named here because the assert
+# tripwire substitutes into it and a substitution that silently matched nothing
+# would turn "the asserts are compiled out" into a vacuous PASS.
+MAIN_HEAD = "int main(int argc, char **argv) {"
 
 
 def _asserts_live(tmp, cc):
@@ -511,17 +675,26 @@ def _asserts_live(tmp, cc):
 
     A test that silently compiles itself away is worse than no test: it reports
     PASS forever. Rather than trust the flag munging above, inject
-    `assert(0 && ...)` into main and require a non-zero exit. If this ever
-    returns "disabled" the whole harness is reporting nothing and `ptrreg`
-    should fail loudly rather than pass.
+    `assert(0 && ...)` into the HARNESS's own `main` and require a non-zero
+    exit — the harness itself, compiled with the same flags, is the thing that
+    has to be checked. If this ever returns "disabled" the whole harness is
+    reporting nothing and `ptrreg` should fail loudly rather than pass.
+
+    The injection is keyed on `MAIN_HEAD`, and a harness that no longer contains
+    it is reported rather than passed over: "the tripwire did not build" and
+    "the tripwire fired" are different answers, and only the second one means
+    the asserts are live.
     """
     src = os.path.join(tmp, "harness.c")
     with open(src) as f:
         body = f.read()
+    if MAIN_HEAD not in body:
+        return (f"the harness has no `{MAIN_HEAD}` to inject the tripwire into, "
+                "so nothing was measured")
     trip = os.path.join(tmp, "tripwire.c")
     with open(trip, "w") as f:
-        f.write(body.replace("int main(int argc, char **argv) {",
-                             'int main(int argc, char **argv) { assert(0 && "tripwire");'))
+        f.write(body.replace(MAIN_HEAD,
+                             MAIN_HEAD + ' assert(0 && "tripwire");'))
     cflags, ldflags = _flags()
     exe = os.path.join(tmp, "tripwire")
     b = subprocess.run([cc, "-O0", "-w", "-I", os.path.join(REPO, "runtime"),
@@ -554,8 +727,8 @@ def _build_and_run(tmp, cc, opt, extra=(), group=None):
 # `boxedstr` is the only known-failing one and it is a SEPARATE registered test
 # carrying an `expect=` with a reason and a bug-doc link, so a fix for it turns
 # into a FAILURE of that marker (drop the marker) instead of a silent no-op.
-GREEN_GROUPS = ("ptrreg", "list_inline", "dict_and_itoa", "dict_int_keys",
-                "dict_set_inline", "dict_float_keys")
+GREEN_GROUPS = ("ptrreg", "kinds_table", "list_inline", "dict_and_itoa",
+                "dict_int_keys", "dict_set_inline", "dict_float_keys")
 KNOWN_BAD_GROUPS = ("boxedstr",)
 
 

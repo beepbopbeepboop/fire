@@ -697,7 +697,7 @@ class X86_64Codegen:
         self._cur_fn = f
         # This function's LOCAL names, which is what decides whether a bare
         # name is served from `__DATA` or from a register — see
-        # `_module_global`. Built from the same shared allocation order the
+        # `model.module_slot_for`. Built from the same shared allocation order
         # registers come from, so the two cannot disagree.
         self._fn_local_names = set(_collect_var_names(f))
         self.asm.label(f.name)
@@ -967,7 +967,7 @@ class X86_64Codegen:
             self._load_var(name.rsplit(".", 1)[0], Reg.R11)
             self.asm.emit(encode_mov_r64_rm64(dst, Reg.R11, 8 * slot))
             return
-        gslot = self._module_global(name)
+        gslot = M.module_slot_for(name, self._fn_local_names)
         if gslot is not None:
             self._emit_global_load(gslot, dst)
             return
@@ -1199,7 +1199,7 @@ class X86_64Codegen:
             self._load_var(name.rsplit(".", 1)[0], Reg.R11)
             self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * nested, src))
             return
-        gslot = self._module_global(name)
+        gslot = M.module_slot_for(name, self._fn_local_names)
         if gslot is not None:
             self._emit_global_store(gslot, src)
             return
@@ -2027,16 +2027,34 @@ class X86_64Codegen:
     # byte for byte, so a value produced by either backend describes the same
     # thing and a future proof model only has to learn it once.
 
+    def _blob_available(self) -> int:
+        """Bytes of container area this function has, as a SIZE.
+
+        The region is fixed at compile time — `_BLOB_BYTES` below the saved
+        registers — and the receiver frames a constructor call reserves sit at
+        its BOTTOM (see where `_list_cursor` is initialized), so what a literal
+        can use is the region minus them. Stated as a size because that is what
+        a reader needs: `self._blob_cap` is the region's top as a negative
+        frame OFFSET, and printing that next to a byte count is how the old
+        message came to say "16368 > -16 bytes"."""
+        return _BLOB_BYTES - self._frame_recv_bytes
+
+    def _blob_used(self) -> int:
+        """Bytes of container area already reserved, as a SIZE.
+
+        The cursor is an offset that starts at the bottom of the region and
+        grows up, so the bytes spent are its distance from where it started."""
+        return self._list_cursor - (self._blob_base + self._frame_recv_bytes)
+
     def _reserve_blob(self, nbytes: int, what: str) -> int:
         """Reserve `nbytes` of blob area, returning its RBP-relative offset.
 
         The whole blob is reserved BEFORE any element is evaluated, so a
         nested container lands above its parent rather than inside the region
         the parent is still filling."""
-        if self._list_cursor + nbytes > self._blob_cap:
-            raise CodegenError(
-                f"{what} exceed the formal frame "
-                f"({self._list_cursor + nbytes} > {self._blob_cap} bytes)")
+        if nbytes > self._blob_available() - self._blob_used():
+            raise CodegenError(M.frame_blob_refusal(
+                what, nbytes, self._blob_available() - self._blob_used()))
         offset = self._list_cursor
         self._list_cursor += nbytes
         return offset
@@ -2112,7 +2130,7 @@ class X86_64Codegen:
             flat.append(el)
         n = len(flat)
         cap = max(n, self._list_caps.get(id(expr), n))
-        offset = self._reserve_blob(8 * (1 + cap), "list literals")
+        offset = self._reserve_blob(8 * (1 + cap), "a list literal")
         self._emit_blob_base(offset, Reg.R11)
         self._emit_mov_imm(Reg.R10, n)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
@@ -2196,12 +2214,19 @@ class X86_64Codegen:
     def _expr_str_kind(self, expr):
         """What `expr` holds: "str", "int", or None if undecidable.
 
-        Two sources, and `_string_vars` WINS where they disagree: it is
+        Three sources, and `_string_vars` WINS where they disagree: it is
         flow-sensitive and tracks what the emission of this very function has
         bound so far, so it is strictly better informed than the
         whole-function `ValueKinds`, which is what covers the shapes
         `_note_binding` does not see (a parameter's annotation, a function's
-        return type, a subscript's element kind).
+        return type, a subscript's element kind). A `comptime` binding is the
+        third source: `ValueKinds` never scans a `comptime NAME = …` statement,
+        so a folded binding reached this as an unclassified read — and a STRING
+        one, which `_emit_comptime_read` materializes as the interned literal,
+        was then emitted as an INTEGER, differently on each architecture. The
+        binding is a compile-time constant the emission already holds, so what
+        it holds is known rather than guessed; `model.comptime_val_kind` is the
+        one reader of it.
 
         Named for what it answers rather than for the first caller: `print`,
         the method-receiver guard and `_note_binding` all need the same
@@ -2211,8 +2236,12 @@ class X86_64Codegen:
             key = _member_slot_key(expr)
             if key is not None and key in self._string_vars:
                 return M.STR_KIND
-        elif isinstance(expr, F.IdentExpr) and expr.name in self._string_vars:
-            return M.STR_KIND
+        elif isinstance(expr, F.IdentExpr):
+            if expr.name in self._string_vars:
+                return M.STR_KIND
+            bound = M.comptime_val_kind(self._comptime_vals, expr.name)
+            if bound is not None:
+                return bound
         return self._vkinds.kind_of(expr)
 
     def _expr_is_fd(self, expr) -> bool:
@@ -3033,7 +3062,7 @@ class X86_64Codegen:
             span = (stop - start) if step > 0 else (start - stop)
             exact = max(0, (span + abs(step) - 1) // abs(step))
         cap = exact if exact is not None else 64
-        offset = self._reserve_blob(8 + 8 * cap, "range() lists")
+        offset = self._reserve_blob(8 + 8 * cap, "a range() literal")
 
         # R10 = start, R11 = step; count goes in R9.
         self._emit_expr(start_e)
@@ -3067,7 +3096,15 @@ class X86_64Codegen:
         self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.RAX))
         self.asm.emit(encode_mov_r64_r64(Reg.R8, Reg.R11))
         self.asm.emit(encode_test_r64_r64(Reg.R8, Reg.R8))
-        abs_label = f"{self.func_name}_rabs"
+        # The rid-suffixed `abs_label` above, and NOT a bare `_rabs`: the
+        # label table keeps one address per NAME, so a shared name silently
+        # re-points every earlier `jge` at the LAST range()'s block — and that
+        # block ends in `jmp <that range's div_label>`, so the earlier range's
+        # control flow continues into the later one's materialization. Its blob
+        # is then never built, its base never stored, and the loop that meant
+        # to walk it walks a register nothing wrote. Two `range()` calls in one
+        # function is what it takes: a nested comprehension whose inner
+        # iterable is a range() is the shape that has both.
         self._emit_jcc(COND_GE, abs_label)
         self.asm.emit(encode_neg_r64(Reg.R8))
         self.asm.label(abs_label)
@@ -3184,8 +3221,8 @@ class X86_64Codegen:
         # case on the BASE name rather than on a comma list — see its
         # docstring. A single-element `__mlir_type[x]` used to skip this call
         # entirely and fabricate a word.
-        why = M.multi_index_refusal_for(
-            e, self._is_dict_subscript(e.obj), self._functions)
+        why = M.multi_index_refusal_for(e, self._is_dict_subscript(e.obj),
+                                        self._functions, self._structs)
         if why is not None:
             raise CodegenError(why)
         if self._is_dict_subscript(e.obj):
@@ -3365,11 +3402,10 @@ class X86_64Codegen:
         R8/R9 the two counts, RCX a walking destination pointer, RAX the
         element, R11 the index."""
         est = max(1, self._blob_est(left) + self._blob_est(right))
-        avail = self._blob_cap - self._list_cursor
+        avail = self._blob_available() - self._blob_used()
         if avail < 16:
-            raise CodegenError(
-                f"list concat exceeds the formal frame "
-                f"({self._list_cursor} > {self._blob_cap} bytes)")
+            raise CodegenError(M.frame_blob_refusal(
+                "a list concatenation", 16, avail))
         cap = min(est, (avail - 8) // 8)
 
         self._emit_expr(left)
@@ -3381,13 +3417,12 @@ class X86_64Codegen:
 
         # A nested emit above advanced the cursor; re-clamp against what is
         # actually left.
-        avail = self._blob_cap - self._list_cursor
+        avail = self._blob_available() - self._blob_used()
         if avail < 16:
-            raise CodegenError(
-                f"list concat exceeds the formal frame "
-                f"({self._list_cursor} > {self._blob_cap} bytes)")
+            raise CodegenError(M.frame_blob_refusal(
+                "a list concatenation", 16, avail))
         cap = min(est, (avail - 8) // 8)
-        offset = self._reserve_blob(8 + 8 * cap, "list concatenation")
+        offset = self._reserve_blob(8 + 8 * cap, "a list concatenation")
 
         self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSI, 0))   # nL
         self.asm.emit(encode_mov_r64_rm64(Reg.R9, Reg.RDX, 0))   # nR
@@ -3540,6 +3575,7 @@ class X86_64Codegen:
             # iterates the struct's fields.  Measured on both architectures:
             # summing a four-field struct gave 99 on arm64 and 53 on x86-64.
             self._refuse_frame_container_operand("a for-in iteration", it)
+            self._refuse_string_iteration("a for-in iteration", it)
             from mojo.middle.boundnames import _lbn_target_names
             tnames = _lbn_target_names(stmt.target) \
                 if isinstance(stmt.target, str) else []
@@ -3624,7 +3660,7 @@ class X86_64Codegen:
                 continue
             pairs.append((k, v))
         n = len(pairs)
-        offset = self._reserve_blob(8 + 16 * n, "dict literals")
+        offset = self._reserve_blob(8 + 16 * n, "a dict literal")
         self._emit_blob_base(offset, Reg.R11)
         self._emit_mov_imm(Reg.R10, n)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
@@ -3643,11 +3679,30 @@ class X86_64Codegen:
     def _is_dict_subscript(self, obj) -> bool:
         """True when `obj` is known to hold a dict pair-blob pointer, so a
         subscript is a key lookup rather than an index."""
-        if isinstance(obj, F.DictExpr):
+        # `M.is_dict_expr` and not `isinstance(obj, F.DictExpr)`: a dict
+        # COMPREHENSION is a `Comprehension` with kind='dict', and asking
+        # only about literals sent `d[k]` down the index path, which reads
+        # the key as the value. See `M.is_dict_expr`.
+        if M.is_dict_expr(obj):
             return True
         if isinstance(obj, F.IdentExpr):
             return obj.name in self._dict_vars
         return False
+
+    def _refuse_string_iteration(self, op: str, obj) -> None:
+        """Refuse to ITERATE a `char *` as a container.
+
+        The sibling of `_refuse_frame_container_operand`, and the same
+        failure: the blob walk reads offset 0 of the operand and calls it a
+        COUNT, and a string's first eight bytes are text. `M.
+        string_iteration_refusal` owns the wording and the measurements (see
+        there for what both architectures returned before this), and both
+        backends ask it through their own `_is_string_subscript`, which is
+        the one place that knows whether an expression holds a `char *`.
+        """
+        if self._is_string_subscript(obj):
+            raise CodegenError(M.string_iteration_refusal(
+                op, self.func_name or "<module>"))
 
     def _emit_dict_lookup_addr(self, e: F.SubscriptExpr) -> None:
         """RAX = the ADDRESS of the value stored under `e`'s key.
@@ -4637,7 +4692,7 @@ class X86_64Codegen:
         static_len = self._static_int(stop)
         if static_len is not None and static_len > 0:
             cap = static_len
-        offset = self._reserve_blob(8 + 8 * cap, "slice views")
+        offset = self._reserve_blob(8 + 8 * cap, "a slice view")
         self._pop_slot(Reg.RSI)                    # source
         self.asm.emit(encode_mov_r64_rm64(Reg.R8, Reg.RSI, 0))   # n
 
@@ -4750,7 +4805,7 @@ class X86_64Codegen:
         gens = expr.generators or []
         elem_size = 16 if is_dict else 8
         if not gens:
-            offset = self._reserve_blob(8, "comprehension")
+            offset = self._reserve_blob(8, "a comprehension")
             self._emit_blob_base(offset, Reg.RAX)
             self._emit_mov_imm(Reg.R11, 0)
             self.asm.emit(encode_mov_rm64_r64(Reg.RAX, 0, Reg.R11))
@@ -4758,14 +4813,13 @@ class X86_64Codegen:
             return
 
         cap = self._compr_cap(expr)
-        avail = self._blob_cap - self._list_cursor
+        avail = self._blob_available() - self._blob_used()
         if avail < 8:
-            raise CodegenError(
-                f"comprehension exceeds the formal frame "
-                f"({self._list_cursor} > {self._blob_cap} bytes)")
+            raise CodegenError(M.frame_blob_refusal(
+                "a comprehension", 8, avail))
         max_cap = (avail - 8) // elem_size
         cap = max(0, min(cap, max_cap))
-        offset = self._reserve_blob(8 + elem_size * cap, "comprehension")
+        offset = self._reserve_blob(8 + elem_size * cap, "a comprehension")
         self._emit_blob_base(offset, Reg.R11)
         self._emit_mov_imm(Reg.R10, 0)
         self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
@@ -4805,6 +4859,11 @@ class X86_64Codegen:
         false_label = f"{fn}_cg{wid}_false"
         end_label = f"{fn}_cg{wid}_end"
 
+        # Same walk as a for-in, so the same two operands it refuses: a
+        # `char *` has no count word to read at offset 0, and one here exits
+        # 1 from the capacity guard instead of walking the text.
+        self._refuse_string_iteration("a comprehension iterable",
+                                      gen.iterable)
         # Under container context so a BinaryOp `+` iterable means concat.
         self._container_ctx += 1
         try:
@@ -5258,7 +5317,7 @@ class X86_64Codegen:
             self._fd_vars.add(name)          # an alias keeps it: `g = f`
         else:
             self._fd_vars.discard(name)
-        if isinstance(value, F.DictExpr) or (
+        if M.is_dict_expr(value) or (
                 isinstance(value, F.IdentExpr)
                 and value.name in self._dict_vars):
             self._dict_vars.add(name)
@@ -5268,7 +5327,12 @@ class X86_64Codegen:
             self._blob_vars.add(name)
         elif isinstance(value, F.StringLiteral) or (
                 isinstance(value, F.IdentExpr)
-                and value.name in self._string_vars):
+                and self._expr_str_kind(value) == M.STR_KIND):
+            # `value.name in self._string_vars` OR a `comptime` binding whose
+            # folded value is the text: `var t = OS` binds exactly the `char *`
+            # `t = s` binds, and asking `_expr_str_kind` rather than
+            # re-deriving the test here is what keeps the two paths from
+            # disagreeing about the same read.
             self._string_vars.add(name)
         elif isinstance(value, F.CallExpr) and M.string_method_yields_string(
                 value, self._expr_str_kind(
@@ -5478,6 +5542,17 @@ class X86_64Codegen:
             # `external_call["sym", T](…)` as a specialization, naming the C
             # symbol — and the two architectures would then differ on the very
             # construct this shared text exists to keep them agreeing about.
+            #
+            # `not is_extern_call` is load-bearing, and it is the merge of two
+            # constructs that both spell a callee with a bracket. An
+            # `external_call["sym", RetType](…)` IS a `SubscriptExpr` callee
+            # and IS lowered, above, by this very path — so without the guard
+            # the refusal would eat it and every `std/os/env.mojo` in the tree
+            # would go back to failing on a construct that lowers. A template
+            # that was already answered or already refused has returned by the
+            # time execution reaches here, so `is_extern_call` False is the
+            # statement that the bracket is a specialization's comptime
+            # parameters rather than a C symbol and a return type.
             raise CodegenError(M.specialization_call_refusal(name))
 
         if len(args) > len(ARG_REGS):

@@ -1,5 +1,35 @@
 # COMPILE_FAIL: Lib/ctypes/util.py
 
+## Status (2026-09-30, branch work/compile-fail-stdlib-misc — no longer RSS-bound; 45 `error:` lines, 3 of them this file's, all one cross-module-`tempfile` class)
+
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`
+(321 s, **peak 1.7 GB** — the whole-program RSS runaway every entry below
+describes is gone under the current tree, so this file is finally
+runnable to a verdict inside a light worker's budget). Exit 1, 45
+`error:` lines, 3 of them attributed to this file:
+
+```
+ctypes/util.py:228:10: error: implicit declaration of function 'tempfile_NamedTemporaryFile_100b86'
+ctypes/util.py:228:8:  error: assignment to '_TemporaryFileWrapper *' from 'int' makes pointer from integer without a cast
+ctypes/util.py:246:3:  error: implicit declaration of function 'tempfile__TemporaryFileWrapper_mojo_close'
+```
+
+All three are ONE defect, not three: `ctypes/util.py` reaches
+`_TemporaryFileWrapper` / `NamedTemporaryFile` through `tempfile`, and
+neither the free function nor the struct-method symbol for it is declared
+in this translation unit, so the calls become implicit declarations
+returning `int`. `_TemporaryFileWrapper` is a `tempfile`-defined CLASS, so
+this is a cross-module struct-method + free-function visibility gap in
+the same shape as the `_itertools_only` hash mismatch documented in
+`bugs/COMPILE_FAIL_importlib_resources_readers.md`.
+
+**Gaps #1/#2/#3 from the 2026-08-24/26 entries are all confirmed fixed and
+not re-attempted:** no `util.py`-attributed coercion/`declared void` error
+anywhere, bare `import ctypes` package resolution works, and there is no
+`cdll` / `LibraryLoader` phantom-field error at all.
+
+Doc kept open on the `tempfile` symbol-visibility gap.
+
 Source file: `/Users/mrs/net/Python-3.14.6/Lib/ctypes/util.py`
 
 ## Status (re-verified 2026-08-26, wtOpencode_genlib3): consistent with the entry below; still not closed — whole-program build still watcher-bound, zero util.py-attributed errors

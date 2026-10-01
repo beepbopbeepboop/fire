@@ -1,7 +1,9 @@
 # FORMAL_imported_generic_reported_as_a_module_level_name: `module_global_refusal`'s `imported` branch names the wrong thing
 
 **Found 2026-09-29 while landing the target-query evaluator; not fixed, because
-it is in the export/dylib machinery and not in `construct:comptime-mlir-attr`.**
+it is in the export/dylib machinery and not in `construct:comptime-mlir-attr`.
+Re-measured 2026-09-30, and two of the three claims below needed correcting —
+read the note at the end before starting.**
 The class it belongs to is the one `FORMAL_known_limits.md` exists to enforce: a
 refusal that is *false about the file it is reported against* sends the reader
 looking for a construct that is not there.
@@ -94,3 +96,59 @@ by elaborating the callee into the caller (which is what ELABORATION.md
 describes, and which `formal/comptime_runner.py` is arguably half of already).
 That is a much larger question than the message and is deliberately not claimed
 here.
+
+## Re-measured 2026-09-30, and what a next worker should measure first
+
+Two of the three statements above no longer hold, and the second one changes
+what the next step is.
+
+**1. The quoted output does not reproduce for `std/sys/_assembly.mojo`.** That
+file's own body is now refused for `__mlir_op` before the name walk runs
+(`FORMAL_mlir_refusal_preemption.md`), so the sentence this doc is about is not
+the one a reader sees there any more. The defect it describes is unchanged, and
+the file is still the one that heads 17 of family 1's 30 — but the 30 seconds it
+costs have moved to a message about inline assembly, which is the better answer
+for that file and a worse one for a reader who wanted to know about the import.
+
+**2. The `imported` branch is not what an imported GENERIC hits, so the fix as
+written here would not fire on the case this doc is about.** Measured on this
+tree with the minimal two-file case the doc does not have:
+
+```mojo
+# mylib/__init__.mojo
+def widen[T: Intable](v: T) -> T:
+    return v
+def helper(x: Int) -> Int:
+    return x + 1
+
+# prog.mojo
+from mylib import widen
+def main() -> Int32:
+    var v = widen(5)
+    print("v=", v)
+    return 0
+```
+```
+build: prog.mojo: the image would bind 1 symbol(s) that nothing provides, so it
+could not be loaded: widen. Nothing on this link line defines them: not the C
+library, and not any library this program linked.
+```
+
+That is `_audit_bound_symbols`, not `module_global_refusal`. The export set
+really is empty for a generic — that half of this doc is right, and
+`test_formal_imports.py`'s `test_a_generic_template_is_not_exported_under_its_base_name`
+pins it — but an empty export set surfaces as a name the LINK cannot bind rather
+than as a `module_symbols` entry with `site == "imported"`, so the fifth branch
+proposed above would be dead code for the very case that motivated it. Whoever
+takes this on should decide which of the two diagnostics is the one worth
+fixing, because they are reached from different places and fixing the wrong one
+is a week of work that changes no message anybody reads.
+
+**What is left of this doc, then:** the advice in the `imported` branch is a
+no-op for a generic callee, and the message a reader actually gets for an
+imported generic names a link line rather than genericity. Both name a cause the
+reader cannot act on, and both are answered by the SAME fact —
+`reflect.export_exclusions` already returns `EXCL_GENERIC` for these names, and
+`reflect.py` already enumerates the sibling reasons a name has no single symbol
+(`EXCL_OVERLOADED`, `EXCL_CLIB`) — so one piece of plumbing would serve both
+messages, and the decision is only WHICH of the two to reach first.

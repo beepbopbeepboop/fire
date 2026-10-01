@@ -91,6 +91,28 @@ rather than deleted:
    and the sweep is a heavy run (see rule 2 of the worker task — a light
    worker does not run it, the integrator does).
 
+## A second attempt, and the same answer (2026-10-01)
+
+Batch 2 re-attempted this merge on the tree that now carries
+`formal-string-return` (master plus thirteen other branches), and aborted it
+again, for the same reason and with the same evidence: 22 conflict regions over
+8 files, `model.struct_returned_frame_sites`'s third argument wanted as a
+one-argument predicate on this side and a two-argument one on the branch's, the
+two backends' per-function state variables share no name across the designs,
+and reconciling means picking a table shape and a mechanism rather than merging
+text. The two doc conflicts are the only part that is purely textual.
+
+What the second attempt did establish, and the first did not, is that the two
+branches are now on *different* trees in a way that matters: this tree has ten
+more merged branches, so the branch's `formal/build.py` and `formal/imports.py`
+no longer merge even mechanically — their stage-1 blob is a snapshot of an old
+conflicted merge (the history is criss-cross, with ten merge bases), so `git`
+emits NESTED `<<<<<<<<< Temporary merge branch 1` markers inside its own
+diff3 output and the result is not a merge anyone should read. A future attempt
+should re-derive the merge with `git merge-file` against the real merge base
+(`git merge-base HEAD work/formal-frame-escape`) and resolve from
+`{fn: (holder, struct)}` plus write-through, per steps 1-4 below.
+
 ## The exact next step
 
 Take `work/formal-frame-escape` forward on a branch that starts from

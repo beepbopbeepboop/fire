@@ -970,15 +970,18 @@ def _put(out, slot: int, kind: int) -> int:
     """`out[slot] = kind`, and 0. Always 0; the value is the assignment.
 
     Every kind code this module records goes through here, and the indirection
-    is load-bearing rather than decorative. On this path a module-level
-    constant is REFUSED as the bare right-hand side of an assignment —
-    `out[0] = K` builds the dylib and then fails the link audit with "K has no
-    home: the register allocator collected no home for it" — while `out[0] =
-    K + 0`, a call, and a constant passed in as an argument all lower. Both
-    measured, on five-line reproducers, and filed as
-    `bugs/CODEGEN_elif_arm_reading_a_module_constant_has_no_home.md`. So the
-    code is passed as an ARGUMENT and the numbers are written once, here and at
-    the constants.
+    is load-bearing rather than decorative. It was written when a module-level
+    constant was REFUSED as the bare right-hand side of an assignment —
+    `out[0] = K` built the dylib and then failed the link audit with "K has no
+    home: the register allocator collected no home for it" — and that half is
+    FIXED (2026-09-30; it was the build's constant substitution, not the
+    emitter). It is left as it is because `out[0] = K` is not the only thing
+    that was refused, and the other half is still open: a module-level constant
+    read inside an `elif` arm. Both measured, on five-line reproducers, and both
+    in `bugs/CODEGEN_elif_arm_reading_a_module_constant_has_no_home.md`, whose
+    Status now says which is which. Passing the code as an ARGUMENT sidesteps
+    both at once, which is why it is written this way; the numbers are written
+    once, here and at the constants.
     """
     out[slot] = kind
     return 0
@@ -1017,11 +1020,16 @@ def _pack_name(src: str, p: int, n: int, m: int, quotes: str, out) -> int:
     documented direction.
 
     The kind codes are written into `out[0]` and never bound to a local, and
-    every arm RETURNS. Neither is taste: on this path a module-level constant
-    read into a local that is then written is refused ("'K' has no home: the
-    register allocator collected no home for it"), and so is one read inside an
-    `elif` arm. Both are measured, on five-line reproducers, and both are filed
-    as `bugs/CODEGEN_elif_arm_reading_a_module_constant_has_no_home.md`.
+    every arm RETURNS. Neither is taste, but only ONE of the two reasons is
+    still live: a module-level constant read inside an `elif` arm is refused on
+    this path ("'K' has no home: the register allocator collected no home for
+    it") and always was, because an `elif` is lowered as a branch on a SAVED
+    condition value and that place has no folded-constant case. So the arms are
+    sequential `if`s with an early return and never an `elif`; see
+    `bugs/CODEGEN_elif_arm_reading_a_module_constant_has_no_home.md`, whose
+    Status section records this as the half that is still open. (The other half
+    that file reported — a constant as an assignment's right-hand side — was
+    fixed on 2026-09-30 and no longer constrains this module.)
     """
     var e = p + m
     # 0 not a prefix, 1 a plain string, 2 an f-string, 3 a t-string.

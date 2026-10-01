@@ -241,8 +241,8 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
 
     # Map builtin/common functions to their first parameter type
     # `len` deliberately excluded: passing a param to `len()` means it's
-    # a SIZED CONTAINER (str/list/dict/set/tuple — no single correct C
-    # type to default to), not that the param's own type IS `int` —
+    # a SIZED CONTAINER (str/list/dict/set/tuple — no single correct C type
+    # to default to), not that the param's own type IS `int` —
     # that's len()'s RETURN type, not its argument's type. This entry
     # used to wrongly infer 'int' for any unannotated parameter whose
     # ONLY usage signal was `len(param)` (no subscript/iteration to
@@ -254,12 +254,29 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # len(args) != 2: ...` (no subscript/for-loop over `args`
     # anywhere in the function, so `len(args)` was the only signal,
     # and this entry silently won).
+    #
+    # `print` removed for the IDENTICAL defect with the roles swapped, and it
+    # was the worse of the two: `print(x)` says NOTHING about x's type —
+    # print accepts a value of any type — so inferring `char *` from it
+    # produced
+    #
+    #   void g (char * x) { mojo_print (x); ... }   /   g ((char *)((void *)1))
+    #
+    # and `g(1)` strlen'd address 1 and died with SIGSEGV (exit 139), while
+    # `g(1.5)` did not even compile. The trigger is narrow because every
+    # OTHER spelling of the same body was already right (`print("v=", x)`,
+    # `print(str(x))`, `print(x + 1)`, `return x`): the parameter's ONLY use
+    # being a bare `print` argument. The string call site is unaffected
+    # because a `char *` parameter is still reached by the call-site
+    # unanimity contract (Pass 1.3d in module_gen.py) and by the
+    # string-only-evidence rules below, so removing the entry trades a crash
+    # for nothing at all.
     BUILTIN_PARAM_TYPES = {
         'open': 'char *',
         'mojo_open_file': 'char *',
-        'print': 'char *',
         'str': 'int',
     }
+
 
     # Methods that exist ONLY on Python str (never on list/dict/set), so a
     # `param.method(...)` call using one of these unambiguously identifies
@@ -1468,11 +1485,52 @@ _CONTAINER_LITERAL_CTYPES: dict = {
     'TupleExpr': 'MojoList *',   # a tuple lowers to a real MojoList
 }
 
-def _container_literal_locals(body: list) -> dict:
+def _each_binding(body: list):
+    """Every statement in `body` that can BIND a local, recursing through
+    control flow and never into a nested `FunctionDef` (which has its own
+    locals and its own return inference -- the same boundary
+    `mutated_free_names` uses).
+
+    ONE walker for the three local-type overlays below. Each of them used to
+    carry its own copy, and they had already drifted: the container copy
+    walked `elif` bodies and the dict copy did not. The unified walk takes
+    the superset (every branch that can bind is walked), which for the dict
+    overlay is strictly more evidence of the same kind -- it exists to give
+    `_quick_type` a better type for a local, and a binding inside an `elif`
+    is exactly as real as one inside the `else`.
+    """
+    def walk(stmts):
+        for s in (stmts or []):
+            if isinstance(s, gimple_ctypes.FunctionDef):
+                continue
+            yield s
+            if isinstance(s, gimple_ctypes.IfStmt):
+                yield from walk(s.then_body)
+                yield from walk(getattr(s, 'else_body', None))
+                for _cond, eb in (getattr(s, 'elifs', None) or []):
+                    yield from walk(eb)
+            elif isinstance(s, (gimple_ctypes.WhileStmt,
+                                gimple_ctypes.ForStmt)):
+                yield from walk(getattr(s, 'body', None))
+                yield from walk(getattr(s, 'else_body', None))
+            elif isinstance(s, gimple_ctypes.WithStmt):
+                yield from walk(s.body)
+            elif isinstance(s, gimple_ctypes.TryStmt):
+                yield from walk(s.body)
+                for h in (getattr(s, 'handlers', None) or []):
+                    yield from walk(getattr(h, 'body', None))
+                yield from walk(getattr(s, 'else_body', None))
+                yield from walk(getattr(s, 'finally_body', None))
+    yield from walk(body)
+
+
+
+def _prebound_local_ctypes(gen, body: list) -> dict:
     """`{local name: ctype}` for every local in `body` whose FIRST binding
-    is a container literal, recursing through control flow but never into
-    a nested `FunctionDef` (which has its own locals and its own return
-    inference -- the same boundary `mutated_free_names` uses).
+    is already POINTER-SHAPED evidence about the value, recursing through
+    control flow but never into a nested `FunctionDef` (which has its own
+    locals and its own return inference -- the same boundary
+    `mutated_free_names` uses).
 
     First-binding-wins, matching this codegen's `_declare_var`
     first-decl-wins rule. A later rebinding to a DIFFERENT kind therefore
@@ -1502,39 +1560,63 @@ def _container_literal_locals(body: list) -> dict:
         t = _CONTAINER_LITERAL_CTYPES.get(type(n.value).__name__)
         if t:
             out[name] = t
-    def walk(stmts):
-        for s in (stmts or []):
-            if isinstance(s, gimple_ctypes.FunctionDef):
-                continue
-            note(s)
-            if isinstance(s, gimple_ctypes.IfStmt):
-                walk(s.then_body)
-                if s.else_body:
-                    walk(s.else_body)
-                for _cond, _eb in (getattr(s, 'elifs', None) or []):
-                    walk(_eb)
-            elif isinstance(s, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
-                walk(s.body)
-                if getattr(s, 'else_body', None):
-                    walk(s.else_body)
-            elif isinstance(s, gimple_ctypes.WithStmt):
-                walk(s.body)
-            elif isinstance(s, gimple_ctypes.TryStmt):
-                walk(s.body)
-                for h in (getattr(s, 'handlers', None) or []):
-                    walk(getattr(h, 'body', None))
-                if s.else_body:
-                    walk(s.else_body)
-                if getattr(s, 'finally_body', None):
-                    walk(s.finally_body)
-    walk(body)
+            return
+        # A local bound from a call whose RESULT is a struct THIS compile
+        # knows: `p = P("a")` (a constructor) and `p = mk()` (a factory)
+        # are both a real `P *` pointer, as much evidence as the literals
+        # above. Restricted to a struct this compile registered, so an
+        # opaque imported class — whose constructor/factory this codegen
+        # does not inline — keeps the int64_t default exactly as before,
+        # and no scalar, container or `char *` answer is touched.
+        #
+        # This is what makes a METHOD CALL on a local resolvable: the
+        # return-type inference types `p.__repr__()` by looking the
+        # receiver's C type up in `gen.var_types` and finding the callee's
+        # registered return type under its mangled name
+        # (`_quick_type`'s `CallExpr`/`MemberExpr` struct-receiver arm) —
+        # and at return-inference time `var_types` does not yet hold this
+        # function's locals, so the receiver read as an unknown, the
+        # enclosing function was declared `int64_t`, and the caller's
+        # `print` formatted the returned `char *` as a decimal address.
+        # See bugs/CODEGEN_return_type_not_inferred_from_a_method_call_
+        # result.md. `_quick_type` is the SAME estimator that call site
+        # uses, so the two agree by construction rather than by a second
+        # hand-written rule.
+        _v = n.value
+        if isinstance(_v, gimple_ctypes.CallExpr):
+            _vt = gen._quick_type(_v)
+            if _vt.endswith(' *') and _vt[:-2].strip() in gen.struct_field_types:
+                out[name] = _vt
+                return
+        # `q = p` — a local bound from ANOTHER local this map already knows,
+        # which is the same value under a second name (`p = P("a"); q = p;
+        # return q.__repr__()`). One extra round of the walk below is what
+        # makes the order irrelevant; the first-binding-wins guard above
+        # keeps a real first binding authoritative. Two hops is the same
+        # bound `_infer_return_maybe_kinds` documents for the identical
+        # one-hop propagation, and for the same reason: over-approximating
+        # here would only cost precision, while missing a case is a wrong
+        # signature.
+        if isinstance(_v, gimple_ctypes.IdentExpr):
+            _src = _as_str(_v.name)
+            if _src in out and _src != name:
+                out[name] = out[_src]
+    for _n in _each_binding(body):
+        note(_n)
+    # One more round, so `q = p` binds even when the alias is visited before
+    # the statement that gives `p` its type (a branch visited first, or a
+    # `for` body). `note` is idempotent — a name already recorded is left
+    # alone — so this only ever adds what the first pass could not resolve.
+    for _n in _each_binding(body):
+        note(_n)
     return out
+
 
 def _dict_value_locals(gen, body: list) -> dict:
     """`{dict name: ctype}` for every dict in `body` that is STORE-INTO with
     a value of a known type, so a later `return <that dict>[k]` can be typed.
 
-    The companion to `_container_literal_locals`, for the subscript case: a
+    The companion to `_prebound_local_ctypes`, for the subscript case: a
     container literal bound to a NAME is found by the former, but a
     `d[k] = v` store gives the type of `d`'s VALUES, and
     `return d[k]` reads one.
@@ -1543,7 +1625,7 @@ def _dict_value_locals(gen, body: list) -> dict:
     the time return inference runs: `resolve_shared.py`'s pre-pass does
     `gen._dict_val_types = {}` while rebuilding `var_types`. So the scan is
     redone here for the body under inference and overlaid in the same
-    save/restore window `_container_literal_locals` already uses.
+    save/restore window `_prebound_local_ctypes` already uses.
 
     A container literal store is mapped through `_CONTAINER_LITERAL_CTYPES`
     (a tuple is a real `MojoList`), because `_quick_type` has no body context
@@ -1577,36 +1659,14 @@ def _dict_value_locals(gen, body: list) -> dict:
                    or vt.endswith(' *')):
             out[name] = vt
 
-    def walk(stmts):
-        for n in (stmts or []):
-            note(n)
-            if isinstance(n, gimple_ctypes.FunctionDef):
-                continue
-            if isinstance(n, gimple_ctypes.IfStmt):
-                walk(n.then_body)
-                if isinstance(getattr(n, 'else_body', None), list):
-                    walk(n.else_body)
-            elif isinstance(n, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
-                walk(n.body)
-                if getattr(n, 'else_body', None):
-                    walk(n.else_body)
-            elif isinstance(n, gimple_ctypes.WithStmt):
-                walk(n.body)
-            elif isinstance(n, gimple_ctypes.TryStmt):
-                walk(n.body)
-                for h in (getattr(n, 'handlers', None) or []):
-                    walk(getattr(h, 'body', None))
-                if n.else_body:
-                    walk(n.else_body)
-                if getattr(n, 'finally_body', None):
-                    walk(n.finally_body)
-    walk(body)
+    for n in _each_binding(body):
+        note(n)
     return out
 
 
 def _infer_return_type_with_locals(gen, body: list) -> str:
-    """`_infer_return_type`, but with the body's own container-literal
-    locals visible to it.
+    """`_infer_return_type`, but with the body's own pointer-valued locals
+    visible to it (see `_prebound_local_ctypes`).
 
     Needed because `_collect_return_types` types each `return` expression
     with `_quick_type`, which resolves a bare `IdentExpr` through
@@ -1625,21 +1685,25 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
 
     The overlay is temporary and additive: a name already in `var_types`
     keeps the type an earlier pass decided for it."""
-    _locals = _container_literal_locals(body)
+    _locals = _prebound_local_ctypes(gen, body)
     _dict_vals = _dict_value_locals(gen, body)
     if not _locals and not _dict_vals:
         return _infer_return_type_core(gen, body)
     _saved = gen.var_types
-    _merged = dict(_saved)
+    _scratch_mark_ml: int = gen._scan_scratch_top
+    _merged: dict = gen._scratch_dict_copy(_saved)
     for _n, _t in _locals.items():
         if _n not in _merged:
             _merged[_n] = _t
     gen.var_types = _merged
     # Same window, second table: `_quick_type`'s SubscriptExpr case reads
     # `_dict_val_types` to type a `return d[k]`. Additive, and a name already
-    # in the table keeps the type an earlier pass decided for it.
+    # in the table keeps the type an earlier pass decided for it. Pooled like
+    # `var_types` above, for the same reason and with the same mark: a fresh
+    # `dict(...)` per call is a leak on the self-hosted binary (no collector),
+    # and this runs once per function per nesting level.
     _saved_dv = getattr(gen, '_dict_val_types', None)
-    _merged_dv = dict(_saved_dv or {})
+    _merged_dv: dict = gen._scratch_dict_copy(_saved_dv if _saved_dv else {})
     for _n, _t in _dict_vals.items():
         if _n not in _merged_dv:
             _merged_dv[_n] = _t
@@ -1648,12 +1712,13 @@ def _infer_return_type_with_locals(gen, body: list) -> str:
         return _infer_return_type_core(gen, body)
     finally:
         gen.var_types = _saved
+        gen._scan_scratch_top = _scratch_mark_ml
         gen._dict_val_types = _saved_dv
 
 
 def _infer_return_type(gen, body: list) -> str:
     """`gen`'s public return-type inference: the core scan, with the
-    body's own container-literal locals made visible to it. Every consumer
+    body's own pointer-valued locals made visible to it. Every consumer
     (free functions, struct methods, lifted closures, lambdas) goes
     through this one entry point, so the fix cannot be half-applied."""
     return _infer_return_type_with_locals(gen, body)
@@ -2134,6 +2199,131 @@ def _key_views_ok(body, name: str) -> bool:
     except Exception:
         return False
 
+def _compute_closure_candidates(fn) -> set:
+    """The locals of `fn` bound to a CAPTURING LAMBDA that this function alone
+    can free (ownership_destruct.lambda_value_owned).
+
+    Deliberately NOT routed through `_is_free_eligible_function`, which
+    refuses any function containing a `lambda` — the rule it guards is about
+    CONTAINERS, and inside a closure the receiver rules that make `d[k]`,
+    `d.x`, `d[a:b]` and `for x in d` safe are not safe (that lifting is a
+    separate piece of work, and this rule asks nothing about containers). Same
+    fail-open-to-"free nothing" contract as its siblings: a bug in this optional
+    analysis must never fail a build."""
+    if getattr(fn, 'is_async', False) or getattr(fn, 'is_generator', False):
+        return set()
+    try:
+        in_loop = _lambda_names_in_loop_bodies(fn)
+        return {nm for nm in _lambda_bindings(fn)
+                if nm not in in_loop and _lambda_owned(fn.body, nm)}
+    except Exception:
+        return set()
+
+def _lambda_names_in_loop_bodies(fn) -> set:
+    """The names bound to a lambda by a DIRECT child statement of a loop body.
+    Those are owned by the BODY, not the function: a declaration inside a loop
+    is simply not there on the path that reaches the function's fallthrough
+    before the first iteration, so the function-level free would run on an
+    uninitialised pointer. `_compute_scoped_closure_candidates` credits them
+    instead, and the two are disjoint by construction."""
+    out = set()
+    bodies = []
+    ownership_destruct._collect_loop_bodies(fn.body, bodies)
+    for body in bodies:
+        for st in body:
+            if isinstance(getattr(st, 'value', None), LambdaExpr):
+                nm = ownership_destruct._decl_name(st)
+                if nm != '':
+                    out.add(nm)
+    return out
+
+def _compute_scoped_closure_candidates(fn, whole: set) -> set:
+    """`fn`'s lambda locals owned by a LOOP BODY rather than the whole function,
+    on `analyze_scoped_locals`' terms (one direct-child declaration per body,
+    no `else:`, mentioned nowhere outside). The two ownership levels are
+    mutually exclusive by `whole`, so a name is freed at exactly one."""
+    if getattr(fn, 'is_async', False) or getattr(fn, 'is_generator', False):
+        return set()
+    try:
+        out = set()
+        bodies = []
+        ownership_destruct._collect_loop_bodies(fn.body, bodies)
+        for nm in sorted(_lambda_bindings(fn)):
+            if nm in whole:
+                continue
+            if not _lambda_owned(fn.body, nm):
+                continue
+            decls = 0
+            region = 0
+            ok = True
+            for body in bodies:
+                first = -1
+                in_body = 0
+                for idx in range(len(body)):
+                    if (ownership_destruct._decl_name(body[idx]) == nm
+                            and isinstance(getattr(body[idx], 'value', None), LambdaExpr)):
+                        in_body += 1
+                        if first < 0:
+                            first = idx
+                if in_body > 1:
+                    ok = False
+                if first >= 0:
+                    decls += 1
+                    for j in range(first, len(body)):
+                        region += ownership_destruct._count_name(body[j], nm)
+            if ok and decls >= 1 and _lambda_binding_count(fn, nm) == decls \
+                    and ownership_destruct._count_name(fn.body, nm) == region:
+                out.add(nm)
+        return out
+    except Exception:
+        return set()
+
+def _lambda_bindings(fn) -> set:
+    """Every name `fn` binds to a `lambda` expression, however deeply — the
+    whole-program node walk `exprtypes._walk_ast` already provides, not a
+    second generic walker."""
+    names = set()
+    for n in gimple_exprtypes._walk_ast(fn.body):
+        if isinstance(n, VarDecl) and isinstance(n.value, LambdaExpr):
+            names.add(ownership_destruct._as_str(n.name))
+        elif (isinstance(n, AssignStmt) and isinstance(n.target, IdentExpr)
+                and isinstance(n.value, LambdaExpr)):
+            names.add(ownership_destruct._as_str(n.target.name))
+    return names
+
+def _lambda_binding_count(fn, name: str) -> int:
+    """How many statements in `fn` bind `name` to a lambda, whole function."""
+    n = 0
+    for x in gimple_exprtypes._walk_ast(fn.body):
+        if isinstance(x, VarDecl) and isinstance(x.value, LambdaExpr) \
+                and ownership_destruct._as_str(x.name) == name:
+            n += 1
+        elif (isinstance(x, AssignStmt) and isinstance(x.target, IdentExpr)
+                and isinstance(x.value, LambdaExpr)
+                and ownership_destruct._as_str(x.target.name) == name):
+            n += 1
+    return n
+
+def _lambda_owned(body, name: str) -> bool:
+    """A capturing-lambda local may be freed with its environment only if the
+    only mention of it after the binding is the call it is written for (see
+    ownership_destruct.lambda_value_owned). A failure inside the check answers
+    False, so an unanalysable body keeps the value alive."""
+    try:
+        return ownership_destruct.lambda_value_owned(body, name)
+    except Exception:
+        return False
+
+def _list_elements_ok(body, name: str) -> bool:
+    """A list local that owns its own string elements (a `split()` result) may
+    be freed WITH them only if no element of it is ever named — see
+    ownership_destruct.list_elements_owned. A failure inside the check answers
+    False, so an unanalysable body keeps the plain `mojo_list_free`."""
+    try:
+        return ownership_destruct.list_elements_owned(body, name)
+    except Exception:
+        return False
+
 def _string_uses_ok(body, name: str) -> bool:
     """Every method call on `name` in `body` has its result consumed at once
     (ownership_destruct.receiver_results_consumed), so a string local cannot be
@@ -2173,17 +2363,6 @@ def _empty_ctor_ctype(node) -> str | None:
             and not node.args and len(node.kwargs or []) == 0):
         return {'Dict': 'MojoDict *', 'List': 'MojoList *', 'Set': 'MojoSet *'}.get(node.func.obj.name)
     return None
-
-
-# ---------------------------------------------------------------------------
-# Dependencies extracted with the shared API (originally gimple_gen_infra.py)
-# ---------------------------------------------------------------------------
-
-# --- dependency _FC_SEP (from gimple_gen_infra.py) ---
-_FC_SEP = '\x1f'
-
-# --- dependency _POINTER_CTOR_NAMES (from gimple_gen_infra.py) ---
-_POINTER_CTOR_NAMES = frozenset({'UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'})
 
 
 # ---------------------------------------------------------------------------

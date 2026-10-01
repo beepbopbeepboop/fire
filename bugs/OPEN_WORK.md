@@ -21,8 +21,7 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 | `FORMAL_x86_64_end_to_end_proof.md` | B1–B23, the proof work, the per-form ledger |
 | `CODEGEN_bootstrap_resource_blowup.md` | the ~192 GB runaway, the 55 GB ceiling, attribution |
 | `CODEGEN_noshim_dumpfull_preexisting_divergence.md` | native-vs-reference `.ci` divergence |
-| `CODEGEN_nested_comprehension.md` | the `gimple`-path part, which is FIXED: a 2+ clause comprehension silently dropped every clause after the first (see the commit that lands `_compr_pending_inner`). Read it for the dropped-clause mechanism; the OPEN remainder is `FORMAL_nested_comprehension_nondeterministic_exit.md` |
-| `FORMAL_nested_comprehension_nondeterministic_exit.md` | the OPEN remainder of the case above: the same shape in the SEPARATE proof-oriented backend, which exits 58 or SIGSEGV at random and is not reachable from a `mojo/backend_gimple/` fix |
+| *(deleted 2026-09-30)* | the nested-comprehension cluster is CLOSED on both the compiled and the formal backends: a 2+ clause comprehension no longer drops clauses (`_compr_pending_inner`), and the formal backends no longer exit 58/SIGSEGV at random — `_emit_range_list` gave every `range()` in a function one shared `_rabs` label, so the first range branched into the second's block and left through the second's `jmp div_label`. See the two commits on `work/codegen-old-divergences` and the cases in `test_x86_64_containers.py` |
 | `TEST_expect_marked_tests_in_no_bucket_never_run.md` | 11 of the 16 `expect`-marked tests have NO bucket, so no gate runs them and their anti-rot "marked expect= but it PASSES" check can never fire — ~69 failing cases, mostly the compiled-path async/await cluster |
 | `CODEGEN_set_dict_comprehension_multi_clause_dropped.md` | the list/generator half of the multi-clause comprehension fix is in; `set` and `dict` still drop every clause after the first (silent, exit 0) |
 | `CODEGEN_range_comprehension_tuple_slot_type_lost.md` | a comprehension over `range()` whose element is a tuple/list drops the per-slot element types, so a 0 in a non-first slot reads as NULL and prints `None` — silent, exit 0, and pre-existing (reproduces on a single clause) |
@@ -33,8 +32,11 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 | `FORMAL_method_call_on_a_subscripted_receiver.md` | the 17 of row 4's 25 files whose receiver's STRUCT is not established, so `_rewrite_method_calls` cannot lift the call: the four shapes of receiver, where each one's type would come from, and the 4 whose diagnostic is measurably wrong (a LINK diagnosis for a CODEGEN problem). Needs receiver-type inference — `construct:formal-value-model-gaps` |
 | `FORMAL_x86_64_comptime_specialization_abi.md` | x86-64 refuses `f[T](x)` and the refusal is LOAD-BEARING (its callee reserves a register per comptime parameter and its call site passes none): three lines to port, and until they land the receiver-position family's construct lowers on arm64 only |
 | `FORMAL_frame_receiver_handoff.md` | who can take a frame address: the cross-module method hand-off (a binding bug, fixed), `Pointer(to=frame)` (an unjustified refusal, fixed), `origin_of` (the same mistake again — a compile-time intrinsic with no body, so no dereference for the sentence to describe; fixed), whether the frame layout and the struct's C layout coincide (measured: they do, for 8-byte fields), the three refusals that named a cause which was not operating, and the constructor-assigned field type that closed the `field slot holds a frame address` family (10 files → 2) |
-| `FORMAL_frame_by_value_ceiling_zero.md` | map rows 7 and 8 of the sweep work map, **measured at a ceiling of 0**: 26 files, both refusals lifted behind a temporary guard, not one reaches `pass`, and 10 of the 26 land in a chain whose end is a documented permanent limit. Carries the per-file landing table, which is the deliverable |
-| `FORMAL_type_argument_read_as_a_container.md` | a subscript's INDEX tuple is a type argument list, not a container store, and four stdlib files are refused for a store that never happens. Not an artefact of the `origin_of` work — `Box[Int, s]` reproduces it with no `origin_of` in it |
+| `FORMAL_frame_by_value_ceiling_zero.md` | map rows 7 and 8 of the sweep work map, **measured at a ceiling of 0**: 26 files, both refusals lifted behind a temporary guard, not one reaches `pass`, and 10 of the 26 land in a chain whose end is a documented permanent limit. Carries the per-file landing table, which is the deliverable. Two of the row-7 sub-shapes are now FIXED and the landing table is measured after both: `origin_of` (`14a2e42d`) and a subscript's argument list (`30e5e2e9`) — 4 of the 7 files move to a true refusal, 0 reach `pass` |
+| `FORMAL_dotted_base_bracket_list_is_not_classified.md` | the remainder of the closed `FORMAL_type_argument_read_as_a_container.md`: a subscript over a name this unit cannot classify (`external_call["sym", T]`'s 55-file half belongs to `formal-extcall-tuple`) keeps its refusal, because deciding it needs the imported module's declarations and `formal/imports.py` owns those. 0 swept files today |
+| `FORMAL_callee_no_def_ceiling_zero.md` | the work map's row 8, "callee has no definition on this path": ceiling **0 of 12** (six of the twelve are behind an import diagnosis), and the row's one sentence was standing for five facts — an imported free function (26 files over `std/`+`test/`), a compile-time parameter, an MLIR-yielding intrinsic, a star-imported name, and genuinely unbound. The five sentences have landed; the cross-image per-parameter contract that would allow the hand-off has not |
+| `FORMAL_frame_refusal_preempts_the_import_diagnosis.md` | every frame refusal is raised before `_resolve_imports`, so a file that both trips a frame clause and imports something is reported as a `codegen` gap in itself — 80 in-scope files, 6 of 12 measured to change class. Fixing it re-numbers six rows of the map at once |
+| `FORMAL_aliased_reexport_publishes_the_wrong_name.md` | `from leaf import base as aliased` in a package `__init__` publishes `base`; a consumer's `aliased(21)` cannot bind |
 
 ---
 
@@ -165,7 +167,21 @@ so compiler-binary optimization is not the lever. Measure first:
 2. Profile by phase; establish whether peak is in the *transitive* dump.
 3. **Cheapest and most valuable: distinguish live-set from fragmentation** — an
    allocation-count probe, or `leaks`/`vmmap`. Answers whether the memory is
-   reachable objects or a leak. Do this one first.
+   reachable objects or a leak. Do this first.
+
+Two causes now measured, both fixed at their call sites or worked around, and
+both worth knowing before the next bisect because they produce the same
+"it got slower and bigger" symptom by different means:
+
+- `CODEGEN_selfhost_tokenize_region_eq_quadratic.md` — the self-hosted
+  tokenizer's own closing-triple-quote scan is quadratic in each string
+  literal (a runtime length check rescans from byte 0 on every character):
+  0.05 s under python3, 2.5 minutes self-hosted, for `myinterpreter.py`,
+  before a single statement is compiled.
+- `CODEGEN_container_eq_is_pointer_identity.md` — `==` between two containers
+  is a pointer comparison, so any fixed-point loop written on one never
+  terminates; with C2's never-freed allocator each round's fresh set is also
+  permanent. Measured: a two-line program past 8 GB.
 
 ### C2. The self-hosted runtime's never-frees allocator — **high**
 

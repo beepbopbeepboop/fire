@@ -311,7 +311,7 @@ def _cpp_pad_struct_method_call_args(gen, sym: str, bare: str,
             if dv is None:
                 out.append('0')
             else:
-                _dt, dval = gen._default_expr_to_pair(dv)
+                _dt, dval = gen._default_expr_to_pair(dv, cxx=True)
                 out.append(dval)
     # Cast every supplied argument to its positional parameter's real C
     # type (the SAME registry `expected` comes from — slot 0 is the
@@ -435,7 +435,7 @@ def _cpp_try_kwargs_forward_call(gen, e):
     call_args = list(given_vals)
     for i in range(len(gap_defaults)):
         pname, dflt_ast = gap_defaults[i]
-        _dt, dval = gen._default_expr_to_pair(dflt_ast)
+        _dt, dval = gen._default_expr_to_pair(dflt_ast, cxx=True)
         gap_var = f"_kwgap{uid}_{i}"
         if gap_ctypes[i] == 'char *':
             lines.append(
@@ -1121,7 +1121,7 @@ def _cpp_emit_generator_start_expr(gen, call, api):
                 f"call to compiled generator '{api['base']}': expected "
                 f"{len(sub_params)} argument(s), got {len(arg_exprs)} "
                 f"(no default at slot {len(arg_exprs)})")
-        arg_exprs.append(gen._default_expr_to_pair(_dv)[1])
+        arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
     if len(arg_exprs) > len(sub_params):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"call to compiled generator '{api['base']}': expected "
@@ -3971,8 +3971,11 @@ def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list
     consumer side actually trusts for its own accessor choice."""
     tvar = gen._cpp_fresh_name('_mg_tup')
     self_fields = getattr(gen, '_cpp_gen_self_fields', None)
-    lines = [f"{indent}MojoList *{tvar} = mojo_list_new();",
-             f"{indent}mojo_mark_as_tuple({tvar});"]
+    # Built unmarked and marked at the END (just before the yield), because a
+    # marked list is refused by every mutating MojoList entry point — marking
+    # first made every `yield (a, b)` raise out of its own construction. Same
+    # ordering rule as _lower_tuple_literal's identical literal.
+    lines = [f"{indent}MojoList *{tvar} = mojo_list_new();"]
     for el in tup.elements:
         ectype = gimple_exprtypes._infer_simple_expr_ctype(el, declared, self_fields, gen._async_api) or 'int64_t'
         ev = gen._cpp_expr(el)
@@ -3993,6 +3996,7 @@ def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list
                 lines.append(f"{indent}mojo_list_append_str({tvar}, (char *)\"\");")
             else:
                 lines.append(f"{indent}mojo_list_append_int({tvar}, 0);")
+    lines.append(f"{indent}mojo_mark_as_tuple({tvar});")
     lines.append(f"{indent}co_yield {tvar};")
     return lines
 
@@ -5460,7 +5464,7 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                 f"`for ... in {sub_name}(...)`: expected "
                 f"{len(sub_params) - len(receiver_exprs)} argument(s), "
                 f"got {len(call.args)}")
-        arg_exprs.append(gen._default_expr_to_pair(_dv)[1])
+        arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
     if len(arg_exprs) > len(sub_params):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"`for ... in {sub_name}(...)`: expected "
@@ -7393,7 +7397,7 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
                 f"`yield from {sub_name}(...)`: expected "
                 f"{len(sub_params) - len(receiver_exprs)} argument(s), "
                 f"got {len(call.args)}")
-        arg_exprs.append(gen._default_expr_to_pair(_dv)[1])
+        arg_exprs.append(gen._default_expr_to_pair(_dv, cxx=True)[1])
     if len(arg_exprs) > len(sub_params):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"`yield from {sub_name}(...)`: expected {len(sub_params)} "
