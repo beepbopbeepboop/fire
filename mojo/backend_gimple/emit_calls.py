@@ -1327,16 +1327,26 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 return gen._lower_bound_method_call_value(_callee_v, node)
             if _callee_t == 'void *' or _callee_t in ('int', 'int64_t', '_Bool'):
                 # A dict's own value type is a single slot, so what the
-                # callables stored in it were recorded as is a SET — usable
-                # only when it is UNANIMOUS, which is the same
-                # "unanimity or nothing" rule every other inference in this
-                # file follows. A dict holding callables of different return
-                # types then keeps the int64_t answer, i.e. exactly the
-                # behaviour before this existed.
-                _seen = gen._dict_callable_ret.get(node.func.obj.name)
-                _vt = 'int64_t'
-                if _seen is not None and len(_seen) == 1:
-                    _vt = next(iter(_seen))
+                # callables stored in it were recorded as is usable only when
+                # it is UNANIMOUS, which is the same "unanimity or nothing"
+                # rule every other inference in this file follows — and it is
+                # enforced at the store (see `note_dict_callable_ret`), which
+                # records '' once a second distinct return type appears. A
+                # dict holding callables of different return types therefore
+                # keeps the int64_t answer, i.e. exactly the behaviour before
+                # any of this existed.
+                #
+                # `or 'int64_t'` also covers a dict that was never recorded
+                # at all. It used to be `next(iter(_seen))` over a set of
+                # every stored type, and THAT is what the self-host closure
+                # could not compile: `gen._dict_callable_ret` is set by
+                # attribute assignment, so it has no StructDef `type_ann`,
+                # its `.get()` came back `int64_t` rather than `MojoSet *`,
+                # and `next(...)` matched no lowering at all — it emitted a
+                # call to a `next` symbol that does not exist, so
+                # `fire.py --dump-full` compiled clean and then failed at
+                # `ld: undefined _next` out of this very function.
+                _vt = gen._dict_callable_ret.get(node.func.obj.name) or 'int64_t'
                 return gen._lower_fnptr_call_value(_callee_t, _callee_v, node, _vt)
         gimple_ctypes._debug_note('indirect call stubbed', type(node.func).__name__)
         t = gen._new_temp('int64_t')
@@ -1521,6 +1531,25 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and isinstance(node.args[0], gimple_ctypes.Comprehension)
             and not gen._locally_binds_name('next')):
         return _lower_next_over_comprehension(gen, node)
+    # `next(iter(x))` — the ordinary Python spelling of "some element of x",
+    # over a set or a list. See _lower_next_iter_container. The container is
+    # typed from the TABLES by name, never by `gen.lower_expr`-ing it here:
+    # lowering has side effects (it emits statements and allocates temps), so
+    # probing with it and then falling through would emit the same code twice
+    # — the hazard the SubscriptExpr-callee branch's own comment spells out.
+    if (fname_raw == 'next' and 1 <= len(node.args) <= 2
+            and isinstance(node.args[0], gimple_ctypes.CallExpr)
+            and isinstance(node.args[0].func, gimple_ctypes.IdentExpr)
+            and node.args[0].func.name == 'iter'
+            and len(node.args[0].args) == 1
+            and isinstance(node.args[0].args[0], gimple_ctypes.IdentExpr)
+            and not gen._locally_binds_name('next')):
+        _it_name = node.args[0].args[0].name
+        _it_at = (gen.var_types.get(_it_name)
+                  or getattr(gen, '_global_var_types', {}).get(_it_name)
+                  or getattr(gen, '_actual_types', {}).get(_it_name) or '')
+        if _it_at in ('MojoSet *', 'MojoList *'):
+            return _lower_next_iter_container(gen, node)
     # `next(it)` / `next(it, default)` on a resumable list-iterator local
     # (bound earlier by `it = iter(<list>)`, tracked in `_list_iter_cursor`).
     # Reads the element at the shared cursor and advances it; exhaustion
@@ -1575,6 +1604,74 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 gen._emit(f"  goto {bb_merge};")
                 gen._emit_label(bb_merge)
                 return vct, result
+    # `next(obj)` / `next(obj, default)` where `obj` is a USER-DEFINED STRUCT
+    # carrying the iterator protocol — Python's `next()` on any object is
+    # `type(obj).__next__(obj)`, and Mojo spells that method `__next__`. The
+    # `for`-loop lowering already speaks this protocol (`emit_loops`
+    # `_gen_for_struct_iter`), so this is that same call, once, instead of a
+    # loop.
+    #
+    # The receiver is LOWERED exactly once and its value reused: `lower_expr`
+    # emits statements and allocates temps, so a probe whose result is then
+    # thrown away (because no `__next__` matched) would emit the same code
+    # twice — the hazard the SubscriptExpr-callee branch's own comment spells
+    # out. So this branch is entered only when the fall-through below would
+    # REFUSE (never lower), which is the only case where a wasted probe could
+    # double-emit: a locally-bound or imported `next` skips both.
+    _next_is_builtin = (not gen._locally_binds_name('next')
+                        and fname_raw not in gen.imported_symbols)
+    if fname_raw == 'next' and len(node.args) >= 1 and _next_is_builtin:
+        _recv_t, _recv_v = gen.lower_expr(node.args[0])
+        _recv_t = gen._get_actual_type(_recv_t, _recv_v)
+        _rbase = gimple_exprtypes._struct_name_of(_recv_t or '')
+        if _rbase:
+            _rnext = f"{_rbase}___next__"
+            # `__iter__` may hand back a DIFFERENT iterator type; the
+            # for-loop path resolves that, so this must too, or `next()` and
+            # `for` would advance different objects.
+            _ritr = f"{_rbase}___iter__"
+            if _ritr in gen.func_return_types:
+                _rit = gen.func_return_types[_ritr]
+                if gimple_exprtypes._struct_name_of(_rit or ''):
+                    _rnext = f"{gimple_exprtypes._struct_name_of(_rit)}___next__"
+            if _rnext in gen.func_return_types:
+                return _lower_next_struct_iter(
+                    gen, node, _recv_t, _recv_v, _rnext)
+    # A `next(...)` that reached here matched none of the forms above, so it
+    # would fall through to `_lower_named_call` and emit a call to the
+    # always-DECLARED-but-never-DEFINED variadic `next(...)` extern
+    # (`module_gen.py`'s FIXME entry). That is not a compile error — it is an
+    # `undefined symbol: _next` at LINK, attributed to whatever function
+    # happens to contain the call, thousands of lines from the mistake. That
+    # is how this compiler's own `next(iter(_seen))` in
+    # `_lower_call` surfaced: `fire.py --dump-full` compiled clean and then
+    # `ld: undefined _next` out of `_mojo_backend_gimple_emit_calls__lower_call`.
+    # Refuse instead, so the module falls back to source with a message that
+    # names the shape — the same rule `_verify_desugared_genexps` and the
+    # whole-module generator refusal already follow for the same failure mode.
+    #
+    # NOT a silent regression for the stdlib, though: the 21 stdlib files this
+    # started refusing (`test/iter/*`, `test/itertools/*`,
+    # `std/itertools/itertools.mojo`, `std/collections/string/iterators.mojo`,
+    # `test/collections/test_set.mojo`, ...) each compiled at HEAD into a call
+    # to that same undefined `next` — `compile_stdlib.py` is a SYNTAX check,
+    # so it never noticed, and nothing else links the `test/` tree. The
+    # struct-protocol branch above is what makes them honest.
+    if (fname_raw == 'next' and 1 <= len(node.args) <= 2
+            and _next_is_builtin):
+        _shape = 'next(%s)' % (
+            type(node.args[0]).__name__
+            if len(node.args) == 1
+            else '%s, default' % (type(node.args[0]).__name__,))
+        raise RuntimeError(
+            f"cannot compile module: `next(...)` on {_shape} has no lowering "
+            f"in this codegen — every fall-through here emitted a call to a "
+            f"`next` symbol that does not exist, which fails at LINK rather "
+            f"than here. Supported: next(<MojoGenerator*>), "
+            f"next(<list-iterator local>), next(<generator expression>), "
+            f"next(iter(<set|list>)), and the 2-arg `<default>` form of each. "
+            f"Iterate the value with a `for` loop, or pass an explicit "
+            f"default.")
     # A local variable of a callable struct type, invoked like a function:
     # obj(args) → obj.__call__(args).
     if (fname_raw in gen.var_types and fname_raw not in gen.func_return_types
@@ -2625,12 +2722,43 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
             # a NULL is not a tuple either, so both agree there and the
             # order is only about keeping this one visible.
             if obj_type == 'MojoList *' and type_name == 'list':
+                # Every step below is one GIMPLE operation with no
+                # parenthesised sub-expression, because a `__GIMPLE`
+                # function's body must ALREADY be valid GIMPLE — GCC
+                # parses it with the raw GIMPLE parser rather than
+                # parsing C and gimplifying it. That grammar has no `!`
+                # ("'!' not valid in GIMPLE"), no `&&`
+                # ("'&&' not valid in GIMPLE"), and no cast in a call
+                # ARGUMENT ("invalid argument to gimple call"), and it
+                # rejects a parenthesised RHS outright ("expected
+                # expression before '(' token"). So: `not x` becomes
+                # `x == 0`, `a && b` becomes `a * b` over two
+                # already-normalised 0/1 temps, and the `mojo_is_tuple`
+                # cast is applied by `_call_expr`'s own argument
+                # coercion (which routes a differing type through a temp)
+                # instead of being written into the call text.
+                #
+                # This used to be written as
+                #     _t = !mojo_is_tuple ((MojoList *)v);
+                #     _b = (_a != 0) && (_t != 0);
+                # which is fine C and rejected GIMPLE — it compiled for
+                # every NON-`__GIMPLE` body, so the failure only appeared
+                # where this isinstance() sits inside a closure-lifted
+                # nested function (which IS `__GIMPLE`): 4 errors in
+                # `_scan_container_elems_walk` alone, in
+                # `mojo/middle/infra_infer.py`'s recursive `walk`, and
+                # the same lowering breaks 3 more `__GIMPLE` closure
+                # bodies later in the file.
                 iv = gen._new_val('int64_t', f'(int64_t){obj_val}')
-                isl = gen._call_expr('int', 'mojo_is_registered_list', [('int64_t', iv)])
-                notup = gen._new_val('int', f'!mojo_is_tuple (({obj_type}){obj_val})')
-                both = gen._new_temp('_Bool')
-                gen._emit(f'  {both} = ({isl} != 0) && ({notup} != 0);')
-                return both
+                isl = gen._call_expr('int', 'mojo_is_registered_list',
+                                     [('int64_t', iv)])
+                tup = gen._call_expr('int', 'mojo_is_tuple',
+                                     [('MojoList *', obj_val)])
+                isl_b = gen._new_val('_Bool', f'{isl} != 0')
+                notup_b = gen._new_val('_Bool', f'{tup} == 0')
+                # `*` on two temps each normalised to strict 0/1 above is
+                # exactly `&&`, and is a single GIMPLE binary operation.
+                return gen._new_val('_Bool', f'{isl_b} * {notup_b}')
             if obj_type.endswith(' *'):
                 # A NULL pointer here means None (e.g. the "default"
                 # branch of a dynamic getattr(obj, attr, None) on a
@@ -2814,6 +2942,109 @@ def _lower_next_over_comprehension(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     gen._emit(f"  goto {bb_done};")
     gen._emit_label(bb_done)
     return elem, result
+
+
+def _lower_next_iter_container(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    """`next(iter(x))` / `next(iter(x), default)` where `x` is a `MojoSet *`
+    or a `MojoList *` — the ordinary Python spelling of "some element of this
+    container", and the one this compiler's own source uses
+    (`emit_calls._lower_call`'s `next(iter(_seen))` over the set of return
+    ctypes recorded for a name-keyed dispatch table).
+
+    `iter(x)` is the identity on both of these representations — the set's own
+    iterator (`mojo_set_iter_new`) and the list's index cursor are both just
+    "walk the elements in order" — so the honest lowering is the FIRST element
+    of `x`, with the container's own element type. A set goes through
+    `mojo_set_to_list` (insertion order, the same order its `for`-loop
+    lowering walks), which is also how `sorted(set)`-shaped code already reads
+    one; a list is read in place.
+
+    Exhaustion is a real tagged `StopIteration` (1-arg) or the `default`
+    (2-arg), exactly as in `_lower_next_over_comprehension` and the
+    `MojoGenerator *` paths, so an enclosing `except StopIteration:` catches
+    it.
+
+    Before this, this shape matched NONE of the `next(...)` forms in
+    `_lower_call` and fell through to the always-declared-but-never-defined
+    variadic `next(...)` extern (`module_gen.py`'s FIXME entry), which is not
+    a compile error — it is an undefined `_next` symbol at LINK time,
+    thousands of lines from the call that caused it. That is how
+    `fire.py --dump-full` of this compiler reached `ld: undefined _next` from
+    `_mojo_backend_gimple_emit_calls__lower_call`."""
+    _it = node.args[0]
+    _inner = _it.args[0] if getattr(_it, 'args', None) else None
+    at, av = gen.lower_expr(_inner)
+    elem = gen._elem_of(av) or 'int64_t'
+    suf = gimple_ctypes.TypeLattice.list_suffix(elem)
+    if at == 'MojoSet *':
+        src = gen._new_val('MojoList *', f"mojo_set_to_list ({av})")
+    else:
+        src = av
+    result = gen._new_temp(elem)
+    n_t = gen._new_val('int64_t', f"mojo_list_len ({src})")
+    zero = gen._new_val('int64_t', "(int64_t)0")
+    have = gen._new_val('_Bool', f"{n_t} > {zero}")
+    bb_have = gen._new_bb(); bb_empty = gen._new_bb(); bb_done = gen._new_bb()
+    gen._emit(f"  if ({have}) goto {bb_have}; else goto {bb_empty};")
+    gen._emit_label(bb_have)
+    if suf == 'str':
+        first = gen._new_val('char *', f"mojo_list_get_str ({src}, {zero})")
+    elif suf == 'double':
+        first = gen._new_val('double', f"mojo_list_get_double ({src}, {zero})")
+    else:
+        first = gen._new_val('int64_t', f"mojo_list_get_int ({src}, {zero})")
+    gen._safe_coerce_emit(suf, elem, first, result)
+    gen._emit(f"  goto {bb_done};")
+    gen._emit_label(bb_empty)
+    if len(node.args) == 2:
+        dt, dv = gen.lower_expr(node.args[1])
+        gen._safe_coerce_emit(dt, elem, dv, result)
+    else:
+        gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
+        gen._emit("  mojo_raise ();")
+        # mojo_raise() does not return, but the merge block still needs
+        # `result` definitely-assigned on every incoming edge for GIMPLE's
+        # own SSA construction -- same reason _lower_next_over_comprehension
+        # keeps its dead store.
+        gen._safe_coerce_emit('int64_t', elem, zero, result)
+    gen._emit(f"  goto {bb_done};")
+    gen._emit_label(bb_done)
+    return elem, result
+
+
+def _lower_next_struct_iter(gen, node: gimple_ctypes.CallExpr, recv_t: str,
+                            recv_v: str, next_fn: str) -> tuple[str, str]:
+    """`next(obj)` for a user-defined iterator struct: one
+    `{Struct}___next__(obj)` call.
+
+    `__next__` carries its own exhaustion behaviour — Mojo's is
+    `raises StopIteration`, and a struct that declares it that way raises
+    through the callee's own setjmp machinery — so there is nothing to test
+    here and no separate raise to emit: the `for`-loop protocol this mirrors
+    (`emit_loops._gen_for_struct_iter`) takes exactly the same view, calling
+    `__next__` unconditionally and letting `__has_next__` decide.
+
+    `recv_t`/`recv_v` are the receiver's ALREADY-LOWERED type and value, not
+    something to lower again: `_lower_call` has lowered this statement's
+    argument once to decide the shape, and lowering emits statements.
+
+    The 2-arg `next(obj, default)` form is refused, deliberately: its
+    `default` exists to replace the StopIteration the call raises, and a
+    raised exception cannot currently be recovered into a local value here.
+    Say so rather than emit a `default` no `next()` can ever reach."""
+    if len(node.args) == 2:
+        raise RuntimeError(
+            "`next(<struct>, default)` — the two-argument form on a "
+            f"user-defined iterator struct ({next_fn}) — is not implemented "
+            f"in this codegen. Its `default` would have to replace the "
+            f"StopIteration the call raises, and a raised exception cannot "
+            f"currently be recovered into a local value here. Use the "
+            f"one-argument form inside a `with assert_raises()` / "
+            f"try-except, or a `for` loop.")
+    vct = gen.func_return_types.get(next_fn, 'int64_t')
+    if vct == 'void':
+        vct = 'int64_t'
+    return vct, gen._call_expr(vct, next_fn, [(recv_t, recv_v)])
 
 
 def _lower_builtin_all_any(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:

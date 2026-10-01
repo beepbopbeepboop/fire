@@ -7437,29 +7437,20 @@ def gen_module_impl(self, stmts):
     # in func_return_types/imported_symbols (the defining module owns those),
     # so _emit_call's argument coercion would leave temps as int64_t,
     # causing -Wint-conversion errors (e.g. int64_t -> char * / Parser *).
+    # Seeded from gimple_codegen._selfhost_syms(), the same table the
+    # forward-declaration strings further down are emitted from: the two used
+    # to be independent hand-written copies (plus a return-type-only dict in
+    # gimple_codegen.py and emit_calls.py consulting that), and they
+    # disagreed — `Parser__parse_expr` was `int64_t` in all of them while the
+    # definition the codegen infers is `UnaryOp *`, which broke every
+    # `--dump-full` self-host closure with "conflicting types" plus a
+    # -Wint-conversion error per call site.
     if _is_selfhost_file:
-        _sh_ret = {
-            'fire_compiler_Parser_parse_module': 'MojoList *',
-            'fire_compiler_Parser___init__': 'void',
-            'fire_compiler_Parser_with_filename': 'Parser *',
-            'fire_compiler_Parser__parse_expr': 'int64_t',
-            'myinterpreter_Interpreter___init__': 'void',
-            'myinterpreter_Interpreter_execute': 'int64_t',
-        }
-        _sh_params = {
-            'fire_compiler_Parser_parse_module': ['Parser *'],
-            'fire_compiler_Parser___init__': ['Parser *', 'MojoList *'],
-            'fire_compiler_Parser_with_filename': ['Parser *', 'char *'],
-            'fire_compiler_Parser__parse_expr': ['Parser *', 'int64_t'],
-            'myinterpreter_Interpreter___init__': ['Interpreter *', 'char *', 'MojoList *'],
-            'myinterpreter_Interpreter_execute': ['Interpreter *', 'int64_t'],
-        }
-        for _shn, _shr in _sh_ret.items():
+        for _shn, _shr, _shp in gimple_codegen._selfhost_syms():
             if _shn not in self.func_return_types:
                 self.func_return_types[_shn] = _shr
-        for _shn, _shp in _sh_params.items():
             if _shn not in self.func_param_types:
-                self.func_param_types[_shn] = _shp
+                self.func_param_types[_shn] = list(_shp)
 
     # ── GPU offload, Seam 1 + Seam 3 ──────────────────────────────────────
     # Which functions are DEVICE is decided ONCE, here, before any body is
@@ -9881,39 +9872,22 @@ def gen_module_impl(self, stmts):
         # depends on the CURRENT module knowing the struct (via
         # _local_struct_names or _imported_struct_home) — many self-host
         # files don't import Parser/Interpreter, so that lookup returns
-        # '' (bare) here. Use _struct_method_csym_static with the known
-        # DEFINING module name instead.
-        _parser_init = _ggf_dup._struct_method_csym_static(
-            'fire_compiler', 'Parser', '__init__', '')
-        _parser_parse = _ggf_dup._struct_method_csym_static(
-            'fire_compiler', 'Parser', 'parse_module', '')
-        _parser_with_fn = _ggf_dup._struct_method_csym_static(
-            'fire_compiler', 'Parser', 'with_filename', '')
-        _parser_parse_expr = _ggf_dup._struct_method_csym_static(
-            'fire_compiler', 'Parser', '_parse_expr', '')
-        _interp_init = _ggf_dup._struct_method_csym_static(
-            'myinterpreter', 'Interpreter', '__init__', '')
-        _interp_exec = _ggf_dup._struct_method_csym_static(
-            'myinterpreter', 'Interpreter', 'execute', '')
-        parts.append(f"MojoList * {_parser_parse} (Parser *);")
-        parts.append(f"void {_parser_init} (Parser *, MojoList *);")
-        parts.append(f"Parser * {_parser_with_fn} (Parser *, char *);")
-        parts.append(f"int64_t {_parser_parse_expr} (Parser *, int64_t);")
-        # gimple_module_gen.py's `from gimple_codegen import ...` of these two
-        # unannotated single-def helpers (see _NO_OVERLOAD_MANGLE). Their sole
-        # `all_struct_defs` param is a list — usage-inferred `MojoList *` on
-        # the definition side, and the call passes a real list too.
-        parts.append("void _merge_struct_inheritance (MojoList *);")
-        parts.append("int64_t _compute_exc_descendants (MojoList *);")
-        parts.append(f"void {_interp_init} (Interpreter *, char *, MojoList *);")
-        parts.append(f"int64_t {_interp_exec} (Interpreter *, int64_t);")
-        # Arity AND width must match fire.jit's definition, or the closure gets
-        # "conflicting types for 'jit_compile_and_execute'". `auto_gpu` is the
-        # 6th parameter, and the self-host lowers a DEFAULTED parameter to
-        # int64_t, not int -- measured: declaring it `int` gave
-        # "have '_Bool(char *, char *, int64_t, int64_t, int64_t, int64_t)'"
-        # against the declaration's `int`.
-        parts.append("_Bool jit_compile_and_execute (char *, char *, int64_t, int64_t, int64_t, int64_t);  /* from fire.py */")
+        # '' (bare) here. `_selfhost_syms()` uses each entry's known
+        # DEFINING module name instead, and is the SAME table the
+        # func_return_types/func_param_types seeding above is derived from,
+        # so a declaration and the call-site coercion it exists to satisfy
+        # cannot disagree (they did once: `Parser__parse_expr` was `int64_t`
+        # in the seeding and in gimple_codegen's return-type dict while the
+        # definition is `UnaryOp *`, and the mismatch only surfaced as a
+        # wall of GCC errors after a full self-host compile). Each entry's
+        # own history and rationale lives on `_SELFHOST_SIGS` in
+        # gimple_codegen.py.
+        for _shn, _shr, _shp in gimple_codegen._selfhost_syms():
+            _shparams = ', '.join(_shp)
+            if _shn == 'jit_compile_and_execute':
+                parts.append(f"{_shr} {_shn} ({_shparams});  /* from fire.py */")
+            else:
+                parts.append(f"{_shr} {_shn} ({_shparams});")
     parts.append("static int64_t _mojo_dispatch_getattr (void *, char *);")
     parts.append("static void _mojo_dispatch_setattr (void *, char *, int64_t);")
     parts.append("static MojoList * _mojo_dispatch_fields (void *);")

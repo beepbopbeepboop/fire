@@ -186,6 +186,28 @@ def _reset_func(gen, body: list = None, params: list = None,
     # parent's has to survive the closure's lowering intact.
     gen._fresh_vals = set()
     gen._fresh_str_tmps = set()
+    # `_boxed_vals` is this same shape — a set of TEMP NAMES — and was
+    # missing from the reset list above, which is exactly the bug the list's
+    # own comment describes: `temp_counter` restarts at 0 for every
+    # function, so a name an earlier function registered as "this int64_t
+    # may be a box, resolve it with mojo_box_int/mojo_box_double first" is
+    # the SAME SPELLING as an unrelated temp this function is about to
+    # allocate, and the stale entry is read as this function's.
+    # `_to_int64`'s `val in gen._boxed_vals` branch is where it bites, and
+    # it bites hardest when the collided temp is not even an int64_t:
+    # `mojo_box_int (int64_t)` then received a `MojoList *` /
+    # `mojo_box_double` a `char *`, four `-Werror=int-conversion` failures
+    # in the self-host closure (`_generator_to_list`,
+    # `_apply_fstring_spec`, `_maybe_lower_mlir_op`, `_gen_for_dict` —
+    # each reading a name `mojo_backend_gimple_emit_infra__emit_call`
+    # had boxed, or `gen_for_enumerate` before it).
+    #
+    # Every writer and every reader of this set is inside ONE function's
+    # lowering (`_boxed_vals.add` in emit_calls' subscript accessor and in
+    # emit_loops' for-target; the reads in emit_exprs/emit_infra), so
+    # per-function is not merely safe, it is the only scope in which the
+    # name means anything.
+    gen._boxed_vals = set()
     gen.decls:       list[str]         = []
     gen.body_lines:  list[str]         = []
     gen.var_types:   dict[str, str]    = {}
@@ -461,18 +483,38 @@ def _reset_func(gen, body: list = None, params: list = None,
     # Reset per function for the same reason _bound_method_ret_types is: temp
     # names (_tN) recycle across functions.
     gen._callable_ret_types: dict[str, str] = {}
-    # A DICT's lowered value -> the SET of callable return types stored into
-    # it. A dict is the one container whose value type is a single slot, so a
-    # per-key table does not exist; a set of what was stored is enough,
-    # because the consumer (a `d[k](...)` call site) only uses the answer
-    # when it is UNANIMOUS. A dict holding callables of different return
-    # types then keeps the old int64_t answer, which is the pre-existing
-    # behaviour — never a new wrong one. Without any of this, `d['k'] =
-    # lambda: False; print(d['k']())` printed `0`: the callable's return type
-    # was lost at the store, exactly as it was at the call before
-    # `_callable_ret_types` existed.
+    # A DICT's lowered value -> the SINGLE callable return type stored into
+    # it, or '' for "more than one distinct type, so no answer". The rule is
+    # the same unanimity-or-nothing rule every other inference in this file
+    # follows, and it is applied HERE, at the store, where the store site
+    # actually knows what it just stored — so the consumer (the one
+    # `d[k](...)` call site) is a plain `or 'int64_t'`. A dict is the one
+    # container whose value type is a single slot, so a per-key table does not
+    # exist; the single agreed return ctype is enough, because the consumer
+    # only uses the answer when it is UNANIMOUS. A dict holding callables of different return
+    # types records '' (ambiguous) and the consumer keeps the old int64_t
+    # answer, which is the pre-existing behaviour — never a new wrong one.
+    # Without any of this, `d['k'] = lambda: False; print(d['k']())` printed
+    # `0`: the callable's return type was lost at the store, exactly as it
+    # was at the call before `_callable_ret_types` existed.
+    #
+    # The value type is `str`, not `set`. This used to be a set of every
+    # ctype stored, with the consumer doing `next(iter(_seen))` when the set
+    # had one element — and that spelled two defects the self-host closure
+    # then failed on. (a) A struct field set by attribute assignment has no
+    # StructDef `type_ann` for `_annotation_dict_val_type` to read, so
+    # `.get()` on this field came back `int64_t`, not `MojoSet *`: `len()`
+    # then guessed "a list", the for-loop guessed "a dict", and `next()`
+    # matched no lowering at all and emitted a call to a `next` symbol that
+    # does not exist — `fire.py --dump-full` compiled clean and then died at
+    # `ld: undefined _next`, out of `_lower_call`. (b) A `dict[str, str]`
+    # field DOES have a working accessor (`_callable_ret_types` right above
+    # is read with `mojo_dict_get_str`), so keeping the agreed type as the
+    # value removes the inference gap instead of working around it. The
+    # unanimity rule is unchanged and is now enforced where the value is
+    # stored, where the store site actually knows.
     # Reset per function for the same reason as the maps above.
-    gen._dict_callable_ret: dict[str, set] = {}
+    gen._dict_callable_ret: dict[str, str] = {}
     # Builtin-container method bound as a first-class VALUE (`append =
     # l.append`, the classic accumulator-aliasing idiom) — key: the C
     # name of the temp/var holding the boxed value; value: (receiver
@@ -3825,11 +3867,15 @@ def note_dict_callable_ret(gen, dict_val: str, value_text: str) -> None:
     _rt = gen._callable_ret_types.get(value_text)
     if not _rt:
         return
-    _set = gen._dict_callable_ret.get(dict_val)
-    if _set is None:
-        _set = set()
-        gen._dict_callable_ret[dict_val] = _set
-    _set.add(_rt)
+    _cur = gen._dict_callable_ret.get(dict_val)
+    if _cur is None:
+        gen._dict_callable_ret[dict_val] = _rt
+    elif _cur and _cur != _rt:
+        # A second, DIFFERENT return type for the same dict: ambiguous from
+        # here on, and it must STAY ambiguous -- a third store of the first
+        # type must not un-poison it, so the '' is sticky (`_cur and ...`
+        # above never re-enters this branch once poisoned).
+        gen._dict_callable_ret[dict_val] = ''
 
 
 def _gen_print(gen, args: list, kwargs: list = None):
@@ -4159,6 +4205,36 @@ def _split_top_level_comma(s: str) -> list[str]:
 # file that writes an entry it did not parse itself.
 _DEDUP_EXTERN_PARTS_CACHE: dict = {}
 
+def _text_after_last(s: str, sep: str) -> str:
+    """`s[s.rfind(sep) + 1:]` — the text after the last `sep`, or all of `s`
+    when there is none.
+
+    Exists because that slice, written inline on a value this codegen had
+    typed `int64_t`, did not survive self-compilation: `str.rfind` lowers to
+    `mojo_str_rfind` only for a `char *` RECEIVER (`emit_methods.py`'s
+    str-method table keys on the resolved receiver ctype), so on an
+    `int64_t` one it fell through to the declared-but-unimplemented extern and
+    the emitted assignment handed back the RECEIVER POINTER where an index
+    belonged. `a[a.rfind(';') + 1:]` then became `a + (a + 1)`, and the
+    self-hosted compiler, reading its own `extern`-declaration parts with
+    that, walked off into unmapped memory on the very first `--dump-full`:
+    SIGBUS inside `_dedup_variadic_externs__boundaries_preserve_parse`, exit
+    -10, a zero-byte `.ci`. The one thing that made it findable at all is
+    that `_parse_part(part: str)` — the SAME scanning one level up — has a
+    `str`-annotated parameter and therefore lowers; this helper is that same
+    mechanism, applied to the one caller that had no annotation to use. (The
+    marker GCC's stub emits is deliberately not quoted verbatim here: it ends
+    up in this docstring's own string literal, where a later grep for
+    unimplemented calls in generated C would find it.)
+
+    The `i < 0` branch is the `rfind == -1` case Python's slice already
+    handles (`s[-1 + 1:]` is all of `s`), stated rather than relied on.
+    """
+    i = s.rfind(sep)
+    if i < 0:
+        return s
+    return s[i + 1:]
+
 def _dedup_variadic_externs(parts: list) -> str:
     """Join the preamble, dropping a variadic `extern T name (...);` import
     declaration when a CONCRETE prototype for the same function is also present
@@ -4313,7 +4389,12 @@ def _dedup_variadic_externs(parts: list) -> str:
         i = 0
         while i < n:
             a = joined[i]
-            fa = a[a.rfind(';') + 1:]
+            # `_text_after_last`, not the inline slice: `a` comes out of an
+            # unannotated `list`, so it is `int64_t`, and `str.rfind` has no
+            # lowering for an `int64_t` receiver — the inline form compiled
+            # itself into a stubbed call that returned the pointer and made
+            # the whole self-hosted compiler SIGBUS. See the helper.
+            fa = _text_after_last(a, ';')
             if fa == '' or i == n - 1:
                 i += 1
                 continue
@@ -4908,6 +4989,7 @@ def _reset_scope_state(gen) -> None:
     _fet['_owned_closure_names'] = 'char *'
     _fet['_fresh_vals'] = 'char *'
     _fet['_fresh_str_tmps'] = 'char *'
+    _fet['_boxed_vals'] = 'char *'
 
 
 def _scope_register(gen, name: str, fn: str) -> None:

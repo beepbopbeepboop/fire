@@ -1675,8 +1675,14 @@ int64_t _char_replace_impl(int64_t s, int64_t old_s, int64_t new_s);
 /* eval() stub — Python's eval() cannot run in C bootstrap; returns first arg unchanged */
 int mojo_eval(int expr, MojoDict *globals, MojoDict *locals);
 
-/* Module functions that are imported */
-MojoList *py_tokenize(char *source);                /* lexer.tokenize -> list[Token] */
+/* Module functions that are imported.
+ * `py_tokenize`'s arity must match fire_compiler.py's definition
+ * (`py_tokenize(src: str, filename: str = "")`) or every --dump-full
+ * self-host closure fails with "too many arguments to function
+ * 'py_tokenize'; expected 1, have 2" at each of its ~20 call sites. A
+ * defaulted parameter still occupies a parameter slot in the lowered C
+ * signature; test_selfhost_sigs.py checks this line against the source. */
+MojoList *py_tokenize(char *source, char *filename);  /* lexer.tokenize -> list[Token] */
 /* Parser is defined as a struct in generated code; no function stub needed */
 char *gimple_codegen_compile_to_gimple(char *source, int do_imports, char *filename);  /* compile_to_gimple function */
 

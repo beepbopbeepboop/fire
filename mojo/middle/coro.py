@@ -1036,17 +1036,44 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
     if getattr(fn, 'comptime_params', None):
         return False, 'comptime params'
     _decos = getattr(fn, 'decorators', None) or []
-    # v0: a @classmethod generator METHOD is accepted (its `cls` receiver
-    # is an opaque, never-read int64_t placeholder slot -- the same ABI
-    # the cpp path used and the call-site machinery in
-    # gimple_gen_methods.py already resolves, both for `Cls.gen(...)` and
-    # `cls.gen(...)`). A @staticmethod generator METHOD is accepted for the
-    # mirror-image reason: it has NO receiver slot at all, so there is
-    # nothing about it this backend cannot already express, and `_lower_one`
-    # reads the same `N.method_receiver_kind` verdict to leave the leading
-    # parameter alone. Any other decorator, or either of these on a plain
-    # (non-method) generator, still falls through.
-    if _decos:
+    # `@contextlib.contextmanager` (dotted or bare) is the ONE decorator a
+    # generator may carry without changing what this backend has to emit, so
+    # it does not fall into the `decorated` refusal below. Not a special case
+    # invented for one caller: the compiled `with` lowering
+    # (emit_stmts' `_gen_stmt_WithStmt`, the `MojoGenerator *` branch) ALREADY
+    # implements contextlib.contextmanager, and implements it by driving the
+    # generator handle directly — resume to the first yield is `__enter__`,
+    # the second resume is `__exit__`, `<base>_value` is what `as` binds — and
+    # it does that by asking `_generator_var_api` what the handle IS, never by
+    # reading the decorator. So the decorator is a no-op on the emitted code
+    # whichever backend produced the handle, which is exactly the property
+    # that makes accepting it here sound rather than a widening of what this
+    # backend can express.
+    #
+    # It has to be accepted HERE, on the stack-switch path, and not left to the
+    # C++20 companion, because the companion's definitions only exist in the
+    # `.cpp` that `compile_to_gimple_with_cpp` returns — and the C-only,
+    # single-`.ci` pipelines that the compiler is BUILT by (`--dump-full` for
+    # gcc's `fire1`, and bootstrap's stage1 `gcc -O0` compile of fire.ci) call
+    # plain `compile_to_gimple`, which has a pinned 1-string return signature
+    # and therefore has nowhere to put them. A `@contextmanager` generator in
+    # this compiler's own closure was refused here and silently routed to the
+    # companion, whose symbols nothing defined: `make fire` failed at LINK with
+    # `__mojogen_build_stdlib_dylib__output_lock_{start,resume}` undefined,
+    # from build_stdlib_dylib.py's `_output_lock`. Every other decorator still
+    # refuses, because those really do change what the function IS (a
+    # @property result is not a generator you can drive; @deco wraps it).
+    if _decos and _decos not in (['contextlib.contextmanager'], ['contextmanager']):
+        # v0: a @classmethod generator METHOD is accepted (its `cls` receiver
+        # is an opaque, never-read int64_t placeholder slot -- the same ABI
+        # the cpp path used and the call-site machinery in
+        # gimple_gen_methods.py already resolves, both for `Cls.gen(...)` and
+        # `cls.gen(...)`). A @staticmethod generator METHOD is accepted for the
+        # mirror-image reason: it has NO receiver slot at all, so there is
+        # nothing about it this backend cannot already express, and `_lower_one`
+        # reads the same `N.method_receiver_kind` verdict to leave the leading
+        # parameter alone. Any other decorator, or either of these on a plain
+        # (non-method) generator, still falls through.
         if struct_name is not None and _decos in (['classmethod'], ['staticmethod']):
             if any(isinstance(n, (N.IdentExpr, N.MemberExpr))
                    and getattr(n, 'name', None) == 'cls'

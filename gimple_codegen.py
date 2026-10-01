@@ -440,45 +440,132 @@ def _selfhost_impl_py_files(sd: str) -> list[str]:
     return out
 
 
-# Function/method C symbols that the self-host forward-decl block
-# (gen_module's `_is_selfhost_file` gate) declares explicitly with concrete
-# signatures. The lazy auto-stub path (`_lower_named_call`'s `_is_unknown`
-# fallback) must NOT also emit a conflicting variadic `(...)` declaration for
-# these — two declarations of one symbol in one translation unit is a hard
-# GCC "conflicting types" error (confirmed via `make check-selfhost` /
-# `make check-runner`: the concrete decl comes from this block, the variadic
-# stub from the auto-stub path, and they collide). Keeping this list in sync
-# with the `_is_selfhost_file` block below is required for `make check`.
-_SELFHOST_HARDCODED_FUNCS = frozenset({
-    'Parser_parse_module',
-    'Parser___init__',
-    'Parser_with_filename',
-    'Parser__parse_expr',
-    'Interpreter___init__',
-    'Interpreter_execute',
-    'jit_compile_and_execute',
-    '_merge_struct_inheritance',
-    '_compute_exc_descendants',
-})
-
-# Return types for self-host hardcoded functions, keyed by the bare
-# (unqualified) name as used in `_SELFHOST_HARDCODED_FUNCS`.  When a call
-# site in a self-host file (that does not directly import the defining
-# module) invokes one of these, the codegen needs to know the real return
-# type so it declares the result temp with the correct C type — the
-# `int64_t` default would silently truncate/pointer-widen (e.g.
-# `Parser *` -> `int64_t` on arm64).
-_SELFHOST_FUNC_RETURN_TYPES = {
-    'Parser_parse_module': 'MojoList *',
-    'Parser___init__': 'void',
-    'Parser_with_filename': 'Parser *',
-    'Parser__parse_expr': 'int64_t',
-    'Interpreter___init__': 'void',
-    'Interpreter_execute': 'int64_t',
-    'jit_compile_and_execute': 'int64_t',
-    '_merge_struct_inheritance': 'void',
-    '_compute_exc_descendants': 'int64_t',
+# ── THE self-host forward-declaration table ──────────────────────────────
+# Every C symbol the self-host forward-decl block (gen_module's
+# `_is_selfhost_file` gate) declares with a CONCRETE signature, and the ONE
+# place that signature is written down. Key: the bare (unqualified) name —
+# `Struct_method` for a method, the plain name for a free function, matching
+# `_struct_method_csym_static`'s `f"{struct}_{safe_name(method)}"`.
+# Value: (return ctype, [param ctypes], defining module or None for a free
+# function). The third field is what turns a bare key into the QUALIFIED C
+# symbol the definition is actually emitted under
+# (`f"{module}_{bare}"`), which is why gen_module needs it: many self-host
+# files never import Parser/Interpreter, so its own
+# `_imported_struct_home` lookup returns '' (bare) and would declare a name
+# that disagrees with the definition at link time.
+#
+# There used to be FOUR hand-maintained copies of these facts — this
+# frozenset of names, a return-type-only dict, gen_module's
+# `_is_selfhost_file` `_sh_ret`/`_sh_params` seeding pair, and the
+# literal `parts.append(f"...")` forward-declaration strings — and nothing
+# checked any of them against each other or against the definitions the
+# codegen actually infers. They drifted, and the drift cost a full
+# `fire.py fire --dump-full` self-host compile (~30 min) to discover:
+# `Parser__parse_expr` returned an AST node pointer, so the definition is
+# emitted `UnaryOp *`, while all four copies said `int64_t`. The result
+# was "conflicting types for 'fire_compiler_Parser__parse_expr'" plus a
+# dozen `-Wint-conversion` errors at every `_parse_expr` call site (both
+# across modules, because the bogus decl was emitted per-importer, and
+# inside fire_compiler.py itself, because emit_calls.py consults
+# `_SELFHOST_FUNC_RETURN_TYPES` unconditionally and so overrode even a
+# correctly inferred type). `jit_compile_and_execute` had already drifted
+# the same way and silently: its return type was `int64_t` here against
+# `_Bool` in the emitted decl.
+#
+# All four consumers derive from this table now, so they cannot disagree
+# with each other. They still CAN drift from the codegen's own inferred
+# definition types — that is inherent to declaring a sibling module's
+# symbol before that module has been inlined — which is what
+# `test_selfhost_sigs.py` checks, in `make check` rather than in a
+# 30-minute bootstrap.
+_SELFHOST_SIGS = {
+    # Parser (fire_compiler.py)
+    'Parser_parse_module': (
+        'MojoList *', ['Parser *'], 'fire_compiler'),
+    'Parser___init__': (
+        'void', ['Parser *', 'MojoList *'], 'fire_compiler'),
+    'Parser_with_filename': (
+        'Parser *', ['Parser *', 'char *'], 'fire_compiler'),
+    # Returns an AST node pointer, NOT int64_t: every branch of the
+    # Pratt loop returns some expression node, and the codegen infers
+    # `UnaryOp *` for the definition. Declaring it `int64_t` truncates
+    # the pointer on every call.
+    'Parser__parse_expr': (
+        'UnaryOp *', ['Parser *', 'int64_t'], 'fire_compiler'),
+    # Unannotated single-definition helpers imported by
+    # gimple_module_gen.py's `from gimple_codegen import ...` — see
+    # _NO_OVERLOAD_MANGLE for why the bare name is pinned. Their sole
+    # `all_struct_defs` param is a list, usage-inferred `MojoList *` on
+    # the definition side, and every call passes a real list.
+    '_merge_struct_inheritance': (
+        'void', ['MojoList *'], None),
+    '_compute_exc_descendants': (
+        'int64_t', ['MojoList *'], None),
+    # Interpreter (myinterpreter.py)
+    'Interpreter___init__': (
+        'void', ['Interpreter *', 'char *', 'MojoList *'], 'myinterpreter'),
+    'Interpreter_execute': (
+        'int64_t', ['Interpreter *', 'int64_t'], 'myinterpreter'),
+    # Arity AND width must match fire.jit's definition or the closure
+    # gets "conflicting types for 'jit_compile_and_execute'".
+    # `auto_gpu` is the 6th parameter, and the self-host lowers a
+    # DEFAULTED parameter to int64_t, not int — measured: declaring it
+    # `int` gave "have '_Bool(char *, char *, int64_t, int64_t,
+    # int64_t, int64_t)'" against the declaration's `int`. The return is
+    # `_Bool`, not the int64_t this table used to claim.
+    'jit_compile_and_execute': (
+        '_Bool', ['char *', 'char *', 'int64_t', 'int64_t', 'int64_t',
+                  'int64_t'], None),
 }
+
+# Name set only. The lazy auto-stub path (`_lower_named_call`'s
+# `_is_unknown` fallback) must NOT also emit a conflicting variadic
+# `(...)` declaration for these — two declarations of one symbol in one
+# translation unit is a hard GCC "conflicting types" error (confirmed via
+# `make check-selfhost` / `make check-runner`: the concrete decl comes from
+# the forward-decl block, the variadic stub from the auto-stub path, and
+# they collide).
+_SELFHOST_HARDCODED_FUNCS = frozenset(_SELFHOST_SIGS.keys())
+
+# Return types keyed by the bare name. When a call site in a self-host file
+# (that does not directly import the defining module) invokes one of these,
+# the codegen needs to know the real return type so it declares the result
+# temp with the correct C type — the `int64_t` default would silently
+# truncate/pointer-widen (e.g. `Parser *` -> `int64_t` on arm64).
+_SELFHOST_FUNC_RETURN_TYPES = {}
+for _shs_name in _SELFHOST_SIGS:
+    _SELFHOST_FUNC_RETURN_TYPES[_shs_name] = _SELFHOST_SIGS[_shs_name][0]
+
+# Parameter ctypes keyed by the same bare name. gen_module seeds these into
+# `func_param_types` so the argument coercion at a cross-module call site
+# matches the definition's own parameter list.
+_SELFHOST_PARAM_TYPES = {}
+for _shs_name in _SELFHOST_SIGS:
+    _SELFHOST_PARAM_TYPES[_shs_name] = list(_SELFHOST_SIGS[_shs_name][1])
+
+
+def _selfhost_syms():
+    """`[(qualified C symbol, return ctype, [param ctypes])]` for every
+    `_SELFHOST_SIGS` entry, in a DETERMINISTIC order.
+
+    The qualified name is what the definition is emitted under:
+    `f"{module}_{bare}"` for a method, the bare name for a free function.
+    That is deliberately not `_struct_method_csym_static` — it is the same
+    `f"{qualifier}_{struct}_{safe_name(method)}"` string, spelled once here
+    so gen_module cannot derive a different symbol than the table's own
+    `defining module` field says.
+
+    Sorted through an explicit list rather than `sorted(<dict>)`: on the
+    self-hosted path iterating a container is address order, and
+    `sorted(<set>)` is too (see the `all_modules_to_declare` comment), so
+    an explicit list is the form that is deterministic in both engines."""
+    _out = []
+    for _bare in _SELFHOST_SIGS:
+        _ret, _params, _mod = _SELFHOST_SIGS[_bare]
+        _sym = f"{_mod}_{_bare}" if _mod else _bare
+        _out.append((_sym, _ret, _params))
+    _out.sort()
+    return _out
 
 
 # Sentinel stored in GimpleGen._own_imported_func_home when a bare free-
@@ -1887,8 +1974,8 @@ class GimpleGen:
         # Any callable VALUE -> that callee's real return type; see
         # emit_infra._reset_func's `_callable_ret_types` entry.
         self._callable_ret_types: dict = {}
-        # dict value -> set of callable return types stored into it; see
-        # emit_infra._reset_func's `_dict_callable_ret` entry.
+        # dict value -> the single callable return type stored into it ('' when
+        # ambiguous); see emit_infra._reset_func's `_dict_callable_ret` entry.
         self._dict_callable_ret: dict = {}
         self._module_int_consts_cache: dict = {}
         self._seen_generator_base_names: dict = {}
@@ -3010,7 +3097,7 @@ class GimpleGen:
         'Scope_get':             ('int',        ['Scope *', 'char *']),
         'Scope_set':             ('void',       ['Scope *', 'char *', 'int']),
         'Scope___init__':        ('void',       ['Scope *', 'Scope *']),
-        'py_tokenize':              ('MojoList *', ['char *']),
+        'py_tokenize':              ('MojoList *', ['char *', 'char *']),
         'Parser_parse_module':   ('MojoList *', ['Parser *']),
         'mojo_eval':             ('int',         ['int', 'MojoDict *', 'MojoDict *']),
         'interpret_and_execute': ('void',        ['char *', 'int']),
@@ -5348,7 +5435,56 @@ def compile_to_gimple(mojo_src: str, do_imports: bool = False, filename: str = "
     # GimpleGen instance recursive import-inlining creates.
     result, _gen = _run_pipeline(mojo_src, do_imports=do_imports, filename=filename,
                                  auto_gpu=auto_gpu)
+    _refuse_dropped_companion(result, _gen)
     return result
+
+
+def _refuse_dropped_companion(code: str, gen) -> None:
+    """Raise if `compile_to_gimple` is about to return a `.ci` that
+    references `__mojogen_*` symbols whose ONLY definitions live in the
+    companion `.cpp` this entry point has just discarded.
+
+    The pipeline always builds the companion when it compiles a generator on
+    the C++20 path (`_gen_cpp_generator_unit` runs inside `gen_module`); the
+    difference between the entry points is purely whether the CALLER gets to
+    see it. `compile_to_gimple_with_cpp` returns it and its build paths compile
+    and link it; `compile_to_gimple` cannot — its 3-arg-in/1-str-out signature
+    is the pinned self-host ABI and `compile_to_gimple_cached` stores exactly
+    one `.ci` blob per key, so there is nowhere to put a second artifact.
+
+    That made the discard SILENT, and the cost was a link error tens of
+    thousands of lines away from the cause: gcc's own `fire1` build
+    (`fire/fire/Make-lang.in`'s `fire.o` recipe, fed by
+    `fire.py --dump-full`) and bootstrap's stage1 `gcc -O0` compile are both
+    C-only single-`.ci` pipelines, so any generator in this compiler's own
+    closure that the stack-switch path refuses and the C++ path accepts left
+    `_mojogen_<mod>_<fn>_{start,resume,value,destroy}` referenced by the `.ci`
+    and defined nowhere — `make fire` died with
+    `__mojogen_build_stdlib_dylib__output_lock_{start,resume}` undefined,
+    attributed to `_build_stdlib_dylib_build`, thousands of lines from the
+    generator that caused it.
+
+    Refusing HERE, at the one place that knows both halves, turns that into a
+    message naming the actual problem, and it cannot rot: the check is on the
+    generated text (`__mojogen_`), not on a hand-maintained list of which
+    shapes take which backend. `_verify_desugared_genexps` already guards the
+    sibling failure mode (a synthesized generator expression claimed by
+    NEITHER path) for the same reason."""
+    cpp = getattr(gen, 'generated_cpp', '') or ''
+    if not cpp or '__mojogen_' not in code:
+        return
+    _syms = sorted(set(re.findall(
+        r'__mojogen_[A-Za-z0-9_]+_(?:start|resume|value|destroy)\b', code)))
+    raise RuntimeError(
+        "cannot compile this module to a single .ci: it uses "
+        f"{len(_syms)} C++20-coroutine generator symbol(s) "
+        f"({', '.join(_syms[:6])}{'...' if len(_syms) > 6 else ''}) whose "
+        "definitions are in a companion .cpp that compile_to_gimple cannot "
+        "return. Use compile_to_gimple_with_cpp (which returns and links that "
+        "companion), or make the generator stack-switch-eligible so it needs "
+        "no companion at all — the compiled `with` lowering already implements "
+        "@contextlib.contextmanager by driving the handle directly, so that "
+        "decorator is the usual reason a generator lands here.")
 
 
 def compile_to_gimple_with_cpp(mojo_src: str, do_imports: bool = False,
