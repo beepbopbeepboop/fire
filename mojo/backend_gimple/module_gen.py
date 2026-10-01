@@ -1145,6 +1145,17 @@ def gen_module_impl(self, stmts):
         _device_kinds = _gmi_device_select.classify_functions(stmts)
 
     _device_parts: list[str] = []
+    # A shared SET, not a bool, because this has to be shared by REFERENCE
+    # with every temp_gen the closure creates -- exactly like
+    # `_emitted_ptr_helpers` and `_module_stmts` (see the share block in
+    # emit_resolve._compile_imported_module, which is where the flag has to be
+    # wired in). A bool assigned across would copy its value, so an inner
+    # module's "I emitted it" would not reach the outer one and every module
+    # would emit its own copy -- which is the bug this fixes: a single-TU
+    # closure carries ~160 modules, and 18 redefinitions of
+    # `_mojo_gpu_kernel_count` failed `mojoc` and `selfhost` outright.
+    _mg_introspected = self.__dict__.setdefault(
+        '_mg_introspection_emitted', set())
     _device_names = sorted(n for n, k in _device_kinds.items()
                            if k == _gmi_device_select.DEVICE)
     # The host-side marshalling signature of every device kernel, computed
@@ -7694,7 +7705,11 @@ def gen_module_impl(self, stmts):
         '',
         '',
         'char *gimple_codegen_compile_to_gimple(char *src, int do_imports, char *filename);',
-        'char *compile_to_gimple(char *mojo_src, int do_imports, char *filename);',
+        # The self-host forward declaration must match the definition's
+        # arity or the closure fails with "conflicting types for
+        # 'compile_to_gimple'". `auto_gpu` is keyword-with-default at every
+        # call site, but a 4th PARAMETER still changes the type.
+        'char *compile_to_gimple(char *mojo_src, int do_imports, char *filename, int auto_gpu);',
         'int64_t mojo_open_file(char *path);',
         *([] if ('open' in self.func_return_types or 'open' in self.imported_symbols) else ['void *mojo_open(char *filename, char *mode);']),
         'int64_t int_write (int64_t, char *);',
@@ -9439,7 +9454,13 @@ def gen_module_impl(self, stmts):
         parts.append("int64_t _compute_exc_descendants (MojoList *);")
         parts.append(f"void {_interp_init} (Interpreter *, char *, MojoList *);")
         parts.append(f"int64_t {_interp_exec} (Interpreter *, int64_t);")
-        parts.append("_Bool jit_compile_and_execute (char *, char *, int64_t, int64_t, int64_t);  /* from fire.py */")
+        # Arity AND width must match fire.jit's definition, or the closure gets
+        # "conflicting types for 'jit_compile_and_execute'". `auto_gpu` is the
+        # 6th parameter, and the self-host lowers a DEFAULTED parameter to
+        # int64_t, not int -- measured: declaring it `int` gave
+        # "have '_Bool(char *, char *, int64_t, int64_t, int64_t, int64_t)'"
+        # against the declaration's `int`.
+        parts.append("_Bool jit_compile_and_execute (char *, char *, int64_t, int64_t, int64_t, int64_t);  /* from fire.py */")
     parts.append("static int64_t _mojo_dispatch_getattr (void *, char *);")
     parts.append("static void _mojo_dispatch_setattr (void *, char *, int64_t);")
     parts.append("static MojoList * _mojo_dispatch_fields (void *);")
@@ -10046,7 +10067,12 @@ def gen_module_impl(self, stmts):
         # error reported against the wrong line.
         parts.append(_gmi_device_glue.emit_device_sidecar(
             _device_parts, sorted(self._device_kernels), _device_kernels_meta))
-    else:
+        # The full sidecar defines the same four introspection entry points
+        # as EMPTY_SIDECAR does, so mark them here too -- otherwise a
+        # kernel-free module later in the closure emits EMPTY_SIDECAR and the
+        # two collide. Measured: 2 definitions, `mojoc` and `selfhost` red.
+        _mg_introspected.add('definitions')
+    elif not _mg_introspected:
         # No device code in this module -- an ordinary module, or one compiled
         # with `--no-gpu` and no marked kernels. Emit the introspection entry
         # points anyway, reporting 0. Without them a program that ASKS whether
@@ -10054,6 +10080,9 @@ def gen_module_impl(self, stmts):
         # unaskable exactly where it is most worth asking. No Metal include and
         # no device initialisation, so a kernel-free module still does not
         # depend on the GPU runtime and still runs on a machine without one.
+        # ONCE PER TRANSLATION UNIT, not once per module -- see the flag's own
+        # note at its initialisation above.
+        _mg_introspected.add('definitions')
         parts.append(_gmi_device_glue.EMPTY_SIDECAR)
 
     return self._dedup_variadic_externs(parts)

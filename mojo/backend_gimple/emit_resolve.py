@@ -517,6 +517,13 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # mangled call-site suffix, so both halves of one mangled
                 # symbol always agree (log_match c52cbf-vs-7a6366 family).
                 temp_gen._home_def_param_types = gen._home_def_param_types
+                # Once per TRANSLATION UNIT, not once per module: a
+                # single-TU closure carries ~160 modules and the GPU
+                # introspection definitions are program-wide. Shared by
+                # reference like the sets around it -- a bool would copy
+                # its value and every module would emit its own copy.
+                temp_gen._mg_introspection_emitted = (
+                    gen._mg_introspection_emitted)
                 temp_gen._emitted_ptr_helpers = gen._emitted_ptr_helpers
                 # share by reference: the self-shadowing-temp counter must be
                 # monotonic across the WHOLE closure, or two modules mint the
