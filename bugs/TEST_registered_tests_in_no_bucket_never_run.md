@@ -2,9 +2,11 @@
 
 ## Status
 
-OPEN for two of the nineteen. The other seventeen are accounted for below: five
-were measured and given a bucket by the change that wrote this, eleven belong to
-another doc, and one is deliberate.
+OPEN for two of fourteen. The count was nineteen when this doc was written and
+is **fourteen** on the merged tree, because the same commit that wrote this doc
+also moved five of them into a bucket (`cli-usage-text`, `md2html`,
+`ownership-destruct`, `arm64-encoders` in `check`, `x86-decode` in `x86`).
+Eleven of the remaining fourteen belong to another doc, and one is deliberate.
 
 ## What is believed
 
@@ -39,9 +41,11 @@ They fall into three groups, and only one of them is a mistake.
         it is in no bucket on purpose so `make check`/`make gate` do not pay for
         it. Naming it here so the count reconciles and nobody "fixes" it.
 
-     7  registered, NOT expect-marked, and ungated — the actual gap:
-        metalgpu, x86-examples, cli-usage-text, md2html, arm64-encoders,
-        ownership-destruct, x86-decode
+     2  registered, NOT expect-marked, and ungated — the actual gap: metalgpu
+        and x86-examples. The other five of the seven that were ungated when
+        this was written have since been given a bucket; they are named above
+        and in the Status section, and they are left out of the list here so it
+        is the census rather than a history.
 
 ## What was run, and what it showed
 
@@ -67,7 +71,16 @@ Five of the six were therefore measured, given `mem='tiny'` (which is what the
 ratchet assigns at those peaks), and NAMED in a bucket: `cli-usage-text`,
 `ownership-destruct`, `md2html` and `arm64-encoders` in `check`, `x86-decode` in
 `x86`. That is the fix, and it is why this doc's status is OPEN for two rather
-than six.
+than seven.
+
+Re-run on the merged tree after those five landed, to confirm the census the
+Status section quotes:
+
+    $ python3 tools/suite.py --list | grep '\[\]$' | awk '{print $1}' | sort | tr '\n' ' '
+    async-runtime-scaffold async-void-return async-with-lock-guard coro-detached-async
+    coro-future-await gimple-async-runner metalgpu mutable-async-capture nested-async-generic
+    prooflib taskgroup transitive-closure-capture x86-containers x86-examples
+    # 14, and 11 + 1 + 2 is 14
 
 ## The two that are left, and why
 
@@ -105,9 +118,13 @@ to notice.
    subject that really is broken.
 2. Run `x86-examples` the way `formal-x86` runs (or add it to the `x86` bucket
    and let the bucket report it), then bucket it on the result.
-3. Not this: sweeping the twelve `expect=`-marked ones in from here. That is
-   `tools/suite.py:disabled-status`, and the argument for it — a marker nobody
-   can observe going stale — is written down in the doc that owns it.
+3. Not this: sweeping the eleven `expect=`-marked ones in from here. That group
+   is `bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md`, and the
+   argument for it — a marker nobody can observe going stale — is written down
+   there and in CLAUDE.md, "Known-failing tests". Sweeping them in is also not
+   free: eight of them are `mem=small` and `gimple-async-runner` alone declares
+   36 failing cases, so it is a measured change to what the gate does, not a
+   bookkeeping one.
 
 ## Related
 

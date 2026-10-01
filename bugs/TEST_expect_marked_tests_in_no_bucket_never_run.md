@@ -7,13 +7,18 @@ empty bucket list**, so `make check`, `make gate` and every other bucket pass
 straight over them. They are registered, they carry a mandatory reason, and
 nothing executes them.
 
-Measured, from `python3 tools/suite.py --list`:
+Measured, from `python3 tools/suite.py --list` (re-measured on the merged tree,
+2026-09-30, after `formal-struct`/`formal-toplevel`/`formal-module-attr` were
+registered `expect=` in `proofs` on master and `ab-native` moved to `disabled=`):
 
 | test | buckets | declared failures |
 |---|---|---|
-| `ab-native` | `gate,native` | (bootstrap pre-pass blowup) |
+| `ab-native` | `gate,native` | **not `expect=` any more** — `disabled=bugs/CODEGEN_ab_native_fails.md`, registered and not run, for being 20.5 GB and exclusive every gate. Listed here only because it was in the earlier census; it is not one of the eleven. |
 | `bootstrap-stage2-dumps` | `gate,bootstrap` | (dump divergence) |
 | `native-dumpfull` | `gate,native` | (bootstrap pre-pass blowup) |
+| `formal-struct` | `gate,proofs` | 2 of 148 (`struct.pack` over 8 register arguments) |
+| `formal-toplevel` | `gate,proofs` | 2 of 70 (a case that now builds where it asserted a refusal) |
+| `formal-module-attr` | `gate,proofs` | 1 of 11 (a bracketed private call refused as a dangling symbol) |
 | `async-runtime-scaffold` | **none** | 1 of 2 |
 | `async-void-return` | **none** | 3 |
 | `async-with-lock-guard` | **none** | 2 |
@@ -28,6 +33,15 @@ Measured, from `python3 tools/suite.py --list`:
 
 That is **~69 failing cases** across 11 tests that no gate reports on. The
 compiled-path async/await cluster is the bulk of it and is entirely ungated.
+
+The six rows that DO reach a bucket are here so the count of 16 reconciles, not
+because they are the subject: `ab-native` is `disabled=` rather than `expect=`
+(see CLAUDE.md, "Known failures: `expect=` or `disabled=`, decided by cost"),
+and the three `formal-*` rows are gated `expect=` jobs that arrived on master
+after this doc was written. The wider census — 19 registered tests in no bucket
+at all, of which these 11 are the `expect=`-marked group — is
+`bugs/TEST_registered_tests_in_no_bucket_never_run.md`, which owns the
+unmarked ones and explicitly leaves this group here.
 
 ## Why this is worse than an ordinary gap
 

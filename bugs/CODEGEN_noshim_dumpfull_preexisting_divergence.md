@@ -54,12 +54,17 @@ wrong answer:
 | job | answers |
 |---|---|
 | `mojoc` | builds the native binary at all; nothing in this file can be measured without it |
-| `ab-native` | the A/B native-vs-reference corpus — the cheapest CI-DIFF signal, and it is `expect=`-marked today for the segfault root cause |
+| `ab-native` | the A/B native-vs-reference corpus — the cheapest CI-DIFF signal. It is **`disabled=`**, not `expect=`: it measures 20.5 GB and is exclusive, which is a machine-sized reservation spent to be told what its own marker already says. `bugs/CODEGEN_ab_native_fails.md` is the doc, and deleting it is what turns the job back on |
 | `native-dumpfull` | the whole-program `--dump-full` artifact vs the reference |
 | `bootstrap-stage2-cc` | the stage1/stage2/stage3 byte-identity this file is ultimately about |
 
-And the anti-rot note: `ab-native`, `native-dumpfull` and
-`bootstrap-stage2-dumps` are all `expect=`-marked in `tools/suite.py` for ONE
+And the anti-rot note, **updated 2026-10-01**: `ab-native` has moved from
+`expect=` to `disabled=` (it costs 20.5 GB and is exclusive, so running it every
+gate to learn nothing is the expensive form of the same information), which
+means its anti-rot is now MECHANICAL — the runner refuses to load while the
+`disabled=` doc is missing, so `bugs/CODEGEN_ab_native_fails.md` being deleted
+is what re-enables the job. `native-dumpfull` and `bootstrap-stage2-dumps` are
+still `expect=`-marked, for ONE
 root cause (the self-hosted binary segfaults on any input, exit 139). If the
 leak hunt fixed that, all three will now report "marked expect= but it PASSES",
 which the suite treats as a FAILURE — that is the signal to retire them, and

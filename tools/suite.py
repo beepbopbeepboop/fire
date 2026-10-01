@@ -128,6 +128,29 @@ remember not to start two at once. It is not a machine-wide claim: an
 exclusive job reserves its class like any other, and a job that really needs
 the machine to itself is one whose class is over half the budget, which the
 ledger's arithmetic already enforces.
+
+Disabled tests
+--------------
+A test can be REGISTERED AND NOT RUN. `test('x', ..., disabled='bugs/Y.md')` is
+in `--list`, in its buckets, in the plan and in the tally, and it spawns
+nothing: no process, no memory ceiling, no reservation, no wall time, no peak.
+It reports as its own status, `DISABLED`, with the doc, and does not fail the
+run.
+
+It is for a known failure whose test is more expensive than its verdict is
+worth — a job that measures 20.5 GB, takes the `program` class (55 of a 96 GB
+machine budget) and is exclusive in the run, to be told what its own marker
+already says. Its cheap sibling is `expect=`, which still RUNS the test so its
+anti-rot (an expected-fail that starts passing is a FAILURE) keeps working; the
+two are not combinable and the registry refuses to load if a job carries both.
+
+The anti-rot is mechanical rather than a matter of remembering: the bug doc IS
+the switch, because a fixed bug's doc is DELETED (CLAUDE.md's bug-doc policy),
+so the doc disappearing is exactly the event "the bug is fixed". A disabled test
+whose doc is gone stops the runner, by name, with the fix spelled out — so a fix
+cannot land without re-enabling its test, and a disabled test cannot stay off
+forever. A doc that never existed is a typo and fails the same way, with its
+own message.
 """
 
 from __future__ import annotations
@@ -631,7 +654,17 @@ def reserved_gb(spec) -> float:
     memory bound anywhere" switch; reserving nothing for it is the honest
     reading, and reserving a token's worth would be a queue that admits
     everything, which is the collapse with extra steps.
+
+    And 0 for a DISABLED job, which is the whole point of the marker: it
+    reserves nothing because it runs nothing. A disabled job's memclass and
+    measured peak are still recorded (they are what the job will cost the day
+    it is turned back on, and they are what `--list` and the peak table read),
+    but a class that is only a record must not be a claim on the machine — a
+    55 GB reservation for a test that will never be spawned is the exact
+    failure this field exists to stop.
     """
+    if is_disabled(spec):
+        return 0.0
     ceiling = memlimit(memclass_for(spec))
     return 0.0 if ceiling <= 0 else ceiling
 
@@ -879,18 +912,31 @@ class Spec:
     reject  fail if this pattern appears in the output even on exit 0
     cwd    run in this repo-relative directory
     env     extra environment for this test's process
+    expect  this test is KNOWN to fail, and here is why; it is run, and a
+            verdict of FAIL/ERROR is reported as EXPECTED instead
+    disabled  this test is NOT RUN AT ALL, and `bugs/<doc>.md` is the switch:
+              the doc is the marker, so deleting the doc (which is what a fix
+              does — see the bug-doc policy) is what turns the test back on,
+              and the registry refuses to load while a disabled test's doc is
+              gone. Costs nothing: no process, no reservation. The two
+              markers are not combinable, and `disabled` is the one to reach
+              for when running the test would cost more than its verdict is
+              worth — a 20 GB, minutes-long run to learn something already
+              written down. See "Disabled tests" below, and CLAUDE.md,
+              "Known failures: expect= or disabled=, decided by cost".
     artifact  a binary this step produces, cached by the content of its real
               inputs (see ArtifactCache); `inputs` are the files, on top of the
               self-host closure, that its key folds in
     """
     __slots__ = ('name', 'cmd', 'driver', 'mem', 'memwhy', 'deps', 'extra',
-                 'extraglob', 'cache', 'j', 'excl', 'reject', 'timeout', 'cwd',
-                 'env', 'desc', 'artifact', 'inputs', 'expect')
+                 'extraglob', 'cache', 'j', 'excl', 'reject', 'timeout',
+                 'cwd', 'env', 'desc', 'artifact', 'inputs', 'expect',
+                 'disabled')
 
     def __init__(self, name, cmd, driver='cmd', mem=None, memwhy='', deps=(),
                  extra=(), extraglob=(), cache=False, j=False, excl=False,
                  reject=None, timeout=None, cwd=None, env=None, desc='',
-                 artifact=None, inputs=(), expect=''):
+                 artifact=None, inputs=(), expect='', disabled=''):
         self.name, self.cmd, self.driver, self.mem = name, cmd, driver, mem
         self.deps, self.extra, self.cache = tuple(deps), tuple(extra), cache
         self.extraglob = tuple(extraglob)
@@ -899,6 +945,7 @@ class Spec:
         self.env, self.desc = dict(env or {}), desc
         self.artifact, self.inputs = artifact, tuple(inputs)
         self.expect = expect
+        self.disabled = disabled
         self.memwhy = memwhy
         if driver not in ('cmd', 'mem', 'make'):
             raise ValueError(f"{name}: unknown driver {driver!r}")
@@ -932,17 +979,18 @@ class Fanout:
     """
     __slots__ = ('name', 'cmd', 'items', 'cwd', 'env', 'mem', 'memwhy',
                  'deps', 'excl', 'reject', 'timeout', 'desc', 'expect',
-                 'items_are_files')
+                 'disabled', 'items_are_files')
 
     def __init__(self, name, cmd, items, cwd=None, env=None, mem=None,
                  memwhy='', deps=(), excl=False, reject=None, timeout=None,
-                 desc='', expect='', items_are_files=False):
+                 desc='', expect='', disabled='', items_are_files=False):
         self.name, self.cmd = name, list(cmd)
         self.items = list(items) if not callable(items) else items
         self.cwd, self.env, self.mem = cwd, dict(env or {}), mem
         self.deps, self.excl, self.reject = tuple(deps), excl, reject
         self.timeout, self.desc = timeout, desc
         self.expect = expect
+        self.disabled = disabled
         self.memwhy = memwhy
         self.items_are_files = items_are_files
 
@@ -1214,11 +1262,15 @@ test('ownership-destruct', [PY, 'test_ownership_destruct.py'], mem='tiny',
      desc='an owned value is destructed exactly once')
 test('x86-containers', [PY, 'test_x86_64_containers.py'],
      deps=['preflight'],
-     expect='nested-comprehension exits nondeterministically (58, or SIGSEGV, '
-            'want 100) in the FORMAL backend, not the gimple path — which gets '
-            'this case right and stably. See '
-            'bugs/FORMAL_nested_comprehension_nondeterministic_exit.md',
-     desc='nested-comprehension nondeterministic in the formal backend')
+     expect="the `with-statement` case is refused by the FORMAL backend's "
+            "read-before-store rule: `with 7 as y: x = y` binds y, and the "
+            "refusal says 'y is read at line 4 before anything in this "
+            "function stores it'. Pre-existing in the batch-1 tree (the rule "
+            "and its call site are byte-identical to b13a01b2), and NOT this "
+            "job's construct — the nested-comprehension cluster this marker "
+            "originally named is closed and its doc deleted. See "
+            "bugs/FORMAL_a_local_read_before_its_first_assignment.md",
+     desc='`with ... as` is refused by the read-before-store rule')
 test('mutable-async-capture', [PY, 'test_mutable_async_capture.py'],
      deps=['preflight'],
      expect='async capture of a mutable binding — behaviour gap, not registered before this',
@@ -1359,9 +1411,11 @@ SELFHOST_STAGE2_STALL = (
 # `ab-native`/`native-dumpfull` no longer segfault (verified 2026-09-27,
 # BLOW.md §0) but are STILL red for a different, real reason: their corpora
 # legitimately trigger this compiler's self-hosting bootstrap pre-pass
-# (a genuine, do_imports=True sibling-import compile with files placed at
-# the repo root on purpose — see test_ab_native.py's DUMP_FULL_TESTS
-# docstring), and that pre-pass itself is extremely expensive per call
+# (a genuine, do_imports=True sibling-import compile whose sources live in a
+# per-run scratch directory under the worktree — see test_ab_native.py's
+# module docstring; they used to be placed in the repo root on purpose, which
+# is what raced the fan-out enumeration and is no longer the case), and that
+# pre-pass itself is extremely expensive per call
 # (~15-30 GB, ~15-25s — see BLOW.md §0's "NOT closed" addendum for the
 # measured repro and hot-stack profile: mojo_cstr_region_eq/
 # mojo_set_add_int/_set_grow dominating, the same signature as the original
@@ -1371,6 +1425,12 @@ SELFHOST_STAGE2_STALL = (
 # specific next-step suggestions (cross-call caching across the three
 # `_selfhost_*` seed passes within one process; degenerate-hashing check on
 # the tokenizer's `MojoSet` usage).
+#
+# `native-dumpfull` carries this same reason and is LEFT on `expect=`; see its
+# registration below for why that one is not switched too. This constant is
+# also the whole of §4's subject matter: bugs/CODEGEN_ab_native_fails.md tables
+# every `expect=` job in the registry with its measured peak, its class and its
+# reservation, and a recommendation each.
 SELFHOST_TOKENIZE_BLOWUP = (
     'no longer segfaults, but the self-hosting bootstrap pre-pass this '
     'corpus legitimately triggers costs ~15-30 GB / ~15-25s per call — see '
@@ -1398,19 +1458,54 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
 # own ceiling on 2026-09-29 at a peak of 9.4 GB (a RESOURCE verdict, which is
 # not a verdict on anything, on a test already marked expect=), and at `module`
 # (24) the 2026-09-30 measurement is 20.5 GB — 85% of the ceiling, one more
-# corpus file from a guaranteed kill on a test that must run. The ratchet asks
-# for 1.5x, which is 30.75 GB, and the smallest class covering that is
-# `program`. Under the ledger this matters twice over: the job RESERVES its
-# class, so a class that cannot hold the workload is a job guaranteed to be
-# killed every run.
+# corpus file from a guaranteed kill. The ratchet asks for 1.5x, which is
+# 30.75 GB, and the smallest class covering that is `program`.
+#
+# DISABLED, not `expect=` (was SELFHOST_TOKENIZE_BLOWUP, 2026-09-30), and the
+# distinction is the whole point of the change. With `expect=` this job ran in
+# full every gate: 20.5 GB measured, a `program` class reserving 55 of the
+# machine's 96 GB, and `excl=True` so nothing else in the run started while it
+# did — to be told the thing the marker already said, since its corpus was
+# 30/30 byte-identical on 2026-09-21 and the divergence since then is
+# downstream of the same pre-pass blowup. That is a known outcome bought at a
+# machine-sized price, on the one heavy consumer's time, and everything queued
+# behind it paid for the answer too.
+#
+# What it was, and what it is now, and nothing else changes: still registered,
+# still in the `native` and `gate` buckets, still `excl`, still carrying its
+# measured peak (MEASURED_PEAK_GB, 20.5 GB) and the class the ratchet assigns
+# that peak (memwhy, `program`) so that the day it is turned back on the
+# numbers are already sized and the artifact is still protected; not run, so no
+# process, no ceiling, no reservation, no wall time. `reserved_gb` returns 0
+# for it, which is the mechanism, and `tools/suite.py --dry-run native` prints
+# the 0.
+#
+# The bug doc IS the switch: bugs/CODEGEN_ab_native_fails.md is what the test
+# is waiting on, the repo's rule is that a fixed bug's doc is DELETED, and
+# `disabled_problems` refuses to load this registry the moment that doc is
+# gone — naming the job and saying to turn the test back on. So the test cannot
+# stay off forever and a fix cannot land without re-enabling it. The
+# alternative marker (`expect=`) is still right for the cheap ones; see
+# CLAUDE.md, "Known-failing tests".
 test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
-     memwhy='measured 20.5 GB: the self-hosting bootstrap pre-pass this corpus '
-            'legitimately triggers (SELFHOST_TOKENIZE_BLOWUP above), and 1.5x '
-            'is 30.75 GB, so `module` (24) was 85% of what it uses. Over the '
-            '4 GB line because the workload is — see ' + MEM_DEBT_DOC,
+     memwhy='measured 20.5 GB when it last ran: the self-hosting bootstrap '
+            'pre-pass this corpus legitimately triggers (see '
+            'bugs/CODEGEN_ab_native_fails.md), and 1.5x is 30.75 GB, so '
+            '`module` (24) was 85% of what it uses. Recorded, not charged: the '
+            'job is disabled, so this class is what it will cost the day it is '
+            'turned back on, and it reserves 0 meanwhile. Over the 4 GB line '
+            'because the workload is — see ' + MEM_DEBT_DOC,
      deps=['mojoc'], excl=True, cache=True, extra=['test_ab_native.py'],
-     expect=SELFHOST_TOKENIZE_BLOWUP,
+     disabled='bugs/CODEGEN_ab_native_fails.md',
      desc='python vs native codegen, byte-for-byte, over the A/B corpus')
+# NOT switched, deliberately, and the reason is per job rather than per
+# principle: `native-dumpfull` and `bootstrap-stage2-dumps` carry the same
+# blowup in their `expect=` reason and are the owner's call, because both are
+# also the jobs whose runs produce the measurements the blowup work is steered
+# by — a marker that cannot be observed going green is weak, and this is the
+# case for not weakening it. §4 of bugs/CODEGEN_ab_native_fails.md tables both
+# with their peak, class and reservation and a recommendation each, so the
+# choice is a line rather than an investigation.
 test('native-dumpfull', [PY, 'test_native_dumpfull.py'], driver='mem',
      mem='program',
      memwhy='measured 31.3 GB — the largest job in the registry that still '
@@ -1430,6 +1525,14 @@ test('selfhost-memory', [PY, 'test_selfhost_memory.py', 'snippet'], driver='mem'
      desc='peak RSS of one self-hosted --dump-full (fixed cost), under budget')
 test('selfhost-memory-fire', [PY, 'test_selfhost_memory.py', 'fire'], driver='mem',
      mem='module', deps=['mojoc'], excl=True, extra=['test_selfhost_memory.py'],
+     memwhy='measured 12.2 GB when it last ran (doc/MEMORY.html section 11: '
+            'the type-scan scratch pool and the shared one-character strings '
+            'took the self-hosted compiler compiling fire.py from 34-47 GB to '
+            '12.2 GB), so `module` (24) is the smallest class that covers it and '
+            '1.5x is 36 GB. Over the 4 GB line and therefore a debt rather than '
+            'a fact — see bugs/PERF_memory_over_4gb_is_a_bug.md. It is `excl` '
+            'because at this size it is alone on the machine by arithmetic, not '
+            'by choice.',
      desc='peak RSS of the self-hosted compiler compiling fire.py, under budget')
 
 # ── stdlib ───────────────────────────────────────────────────────────────────
@@ -2246,11 +2349,15 @@ class Job:
         return self.spec.excl
 
 
-PASS, FAIL, SKIP, RESOURCE, TIMEOUT, ERROR, EXPECTED = (
-    'pass', 'fail', 'skip', 'resource', 'timeout', 'error', 'expected')
+PASS, FAIL, SKIP, RESOURCE, TIMEOUT, ERROR, EXPECTED, DISABLED = (
+    'pass', 'fail', 'skip', 'resource', 'timeout', 'error', 'expected',
+    'disabled')
 # Worst-first, so one bad job decides a multi-job test's verdict. A plain FAIL
 # outranks a RESOURCE one: a wrong answer is a more actionable report than a
-# process that ran out of memory.
+# process that ran out of memory. DISABLED is deliberately NOT in here: it is
+# not a verdict ON a job (no job ran), so there is nothing for a fanout's
+# cumulative fold to rank it against, and it is seeded into `state` by
+# `execute` rather than settled by a worker thread.
 _RANK = {PASS: 0, SKIP: 1, RESOURCE: 2, TIMEOUT: 3, ERROR: 4, FAIL: 5}
 
 
@@ -2275,8 +2382,9 @@ _RANK = {PASS: 0, SKIP: 1, RESOURCE: 2, TIMEOUT: 3, ERROR: 4, FAIL: 5}
 #
 #   count   wording in the summary line. The three primary verdicts are printed
 #           at zero, because "0 failed" is the number a reader looks for; the
-#           exceptions — a resource breach, a known failure, a hang — print only
-#           when non-zero, because their absence is the normal case.
+#           exceptions — a resource breach, a known failure, a hang, a disabled
+#           test — print only when non-zero, because their absence is the
+#           normal case.
 #   statuses  the statuses this counter counts. The FIRST is the plain reading
 #           of the section; a member in any other one is tagged with its status
 #           in the listing, so a hang sitting among the failures is named as a
@@ -2292,6 +2400,15 @@ _RANK = {PASS: 0, SKIP: 1, RESOURCE: 2, TIMEOUT: 3, ERROR: 4, FAIL: 5}
 # would hide which one a fix has to address; a failure, because a job killed at
 # its timeout has reported nothing at all, so a run that hangs a test and exits
 # 0 has silently not run the thing it was asked to run).
+#
+# The two `fails=False, zero=False` rows at the end — `expected-failure` and
+# `disabled` — are both "we know, and the knowing is recorded". `expected` is
+# the verdict of a test that RAN and failed; `disabled` is the state of a test
+# that did not run at all, and it exists as a row rather than as an absence
+# precisely so a registered-but-not-run test is still counted: a test that
+# vanishes from the summary is how the 2026-09-29 TIMEOUT became invisible,
+# and "we chose not to run this" is a decision a reader has to see, not a
+# number that quietly goes missing.
 class Verdict:
     __slots__ = ('count', 'statuses', 'header', 'fails', 'zero')
 
@@ -2310,6 +2427,9 @@ TALLY = (
     Verdict('expected-failure', (EXPECTED,),
             'EXPECTED (known-broken, tracked not hidden)', fails=False,
             zero=False),
+    Verdict('disabled', (DISABLED,),
+            'DISABLED (not run: expected to fail, turns on when its bug is '
+            'fixed)', fails=False, zero=False),
 )
 
 # Every status the runner can produce is counted by exactly one row, and every
@@ -2318,14 +2438,20 @@ TALLY = (
 # defect above, and refusing to start is the strongest form of "counted" — the
 # runner cannot be used, `--list` included, in a state where it cannot account
 # for one of its own verdicts.
+#
+# `PRODUCIBLE` is the one list, and it is spelled out rather than derived from
+# `_RANK` because two of the statuses are not per-job verdicts at all: EXPECTED
+# is a post-run fold over a job's verdict (`_apply_expectations`) and DISABLED
+# is the absence of a job. A test reads this name instead of re-deriving the
+# set, which is how the tally invariant ends up with two spellings.
+PRODUCIBLE = set(_RANK) | {EXPECTED, DISABLED}
 TALLY_ROW = {s: row for row in TALLY for s in row.statuses}
-_producible = set(_RANK) | {EXPECTED}
-_mismatch = sorted(_producible ^ set(TALLY_ROW))
+_mismatch = sorted(PRODUCIBLE ^ set(TALLY_ROW))
 if _mismatch or len(TALLY_ROW) != sum(len(r.statuses) for r in TALLY):
     raise SystemExit(
         f"suite.py: the tally and the runner disagree about these statuses: "
         f"{_mismatch or '(a status is listed in two rows)'}\n"
-        f"  the runner can produce: {sorted(_producible)}\n"
+        f"  the runner can produce: {sorted(PRODUCIBLE)}\n"
         f"  the tally counts:      {sorted(TALLY_ROW)}\n"
         f"  Every status needs exactly one Verdict row in TALLY.")
 
@@ -2755,6 +2881,15 @@ def plan_for(names, opts):
     jobs, per_test = [], {}
     for name in names:
         spec = REGISTRY[name]
+        if is_disabled(spec):
+            # No job, so nothing is spawned, nothing is capped and nothing is
+            # reserved — and `per_test` still carries the name with 0 jobs, which
+            # is what `execute` reads to seed the DISABLED status and what keeps
+            # the name in `report`'s counters. A fanout is the same case with 45
+            # jobs' worth of `items` to not expand: expansion is skipped wholesale
+            # rather than per item.
+            per_test[name] = 0
+            continue
         if isinstance(spec, Fanout):
             items = list(spec.items() if callable(spec.items) else spec.items)
             if not items:
@@ -2797,11 +2932,20 @@ def plan_for(names, opts):
 # per job is exactly the noise that makes people scroll past the one FAIL.
 HEARTBEAT_SECONDS = 30
 
+# The dep statuses a job may proceed on. PASS is the ordinary case; DISABLED is
+# in here because a disabled test was never run, so it has no verdict to hand
+# on — see "Disabled tests" for why its dependents run rather than skip.
+DEP_SATISFIED = (PASS, DISABLED)
+
 
 def execute(jobs, per_test, opts, log: Log):
     """Run the plan. Returns (state, results, wall, peak_gb)."""
     order = {j.key: i for i, j in enumerate(jobs)}
-    state: dict[str, str] = {}
+    # A disabled test has no job, so nothing will ever `settle` it: its status
+    # is seeded here, BEFORE the scheduler starts, which is also what makes a
+    # job depending on one eligible instead of waiting for a verdict that is
+    # never coming (see "Disabled tests" for why a dependent is not skipped).
+    state: dict[str, str] = {n: DISABLED for n, k in per_test.items() if k == 0}
     resolved = dict.fromkeys(per_test, 0)
     results: dict[str, Result] = {}
     waiting = {j.key: j for j in jobs}
@@ -2846,16 +2990,20 @@ def execute(jobs, per_test, opts, log: Log):
                 job = waiting[key]
                 if any(d not in state for d in job.spec.deps):
                     continue                     # a dep is still running
-                if all(state[d] == PASS for d in job.spec.deps):
+                if all(state[d] in DEP_SATISFIED for d in job.spec.deps):
                     ready.append(job)
                 else:
                     blocked.append(job)
             # A test whose dep failed never runs — make's behaviour, and the
             # reason a broken stage1 does not produce six confusing stage2
-            # errors instead of one.
+            # errors instead of one. DISABLED is in DEP_SATISFIED, not here:
+            # a disabled dep produced no verdict to propagate, and skipping on
+            # it would silently stop work that has nothing to do with the bug
+            # the doc is tracking.
             for job in blocked:
                 del waiting[job.key]
-                failed = [d for d in job.spec.deps if state[d] != PASS]
+                failed = [d for d in job.spec.deps
+                          if state[d] not in DEP_SATISFIED]
                 res = Result(SKIP, detail='dependency did not pass: '
                              + ', '.join(f'{d}={state[d]}' for d in failed))
                 with lock:
@@ -2980,7 +3128,162 @@ def _announce(log: Log, job: Job, res: Result, opts):
 
 
 _TAG = {PASS: 'ok', FAIL: 'FAIL', SKIP: 'skip', RESOURCE: 'RESOURCE',
-        TIMEOUT: 'TIMEOUT', ERROR: 'ERROR', EXPECTED: 'EXPECTED'}
+        TIMEOUT: 'TIMEOUT', ERROR: 'ERROR', EXPECTED: 'EXPECTED',
+        DISABLED: 'DISABLED'}
+
+
+# ── Disabled tests: registered, not run, and the bug doc is the switch ───────
+# `expect=` above says "this test is known to fail"; it still RUNS it, every
+# gate, to find out. That is the right trade for a cheap test and the wrong one
+# for an expensive one. `ab-native` measured a 20.5 GB peak, held the `program`
+# class — 55 of a 96 GB machine-wide budget — and was exclusive in the run while
+# it did it, and it was registered `expect=` on top of a byte-parity divergence
+# (30/30 identical on 2026-09-21, red since) that nobody was going to fix that
+# day. So every gate paid 20 GB and minutes to be told the thing its own marker
+# already said, and the jobs queued behind it paid for that too. A known failure
+# must not be run at insane cost.
+#
+# `disabled='bugs/<doc>.md'` is the other half of that sentence: the test is
+# REGISTERED (so it is in `--list`, in the plan, in the buckets, and in the
+# tally) and NOT RUN (no process, no reservation, no wall time, no peak). It
+# reports as its own status, DISABLED, with the doc, and it does not fail the
+# run.
+#
+# The anti-rot is the part that makes this safe, and it is deliberately
+# mechanical: the doc IS the switch. The repo's rule is that a fully fixed bug's
+# doc is DELETED (CLAUDE.md, "Bug docs"), so the disappearance of the doc is
+# exactly the event "the bug is fixed". `disabled_problems` turns that into a
+# refusal to load the registry, with the fix spelled out — so a fix cannot land
+# without turning the test back on, and a disabled test cannot stay off forever
+# because nobody remembers it. A doc that never existed is the same missing file
+# with the opposite meaning (a typo in the marker), so the two are told apart by
+# asking git, and both fail.
+#
+# A dependency of a disabled test is NOT skipped by it, deliberately. A
+# disabled test produced no verdict, so there is nothing to propagate and
+# nothing to forgive: a dependent that treated DISABLED as a failure would be
+# skipped behind a verdict that is never coming, which is how a decision about
+# one test silently stops work that has nothing to do with it. It runs on its
+# own merits. The case where that is wrong — a dependent that needs an artifact
+# only a disabled step builds — is a registration error, not a scheduling one,
+# and no such case exists in the registry (the one disabled job, `ab-native`,
+# is a leaf that nothing depends on).
+def is_disabled(spec) -> bool:
+    """Is this spec registered but not to be run? One definition, read by the
+    planner, the ledger, `--list`, `--dry-run` and the estate check, so "is it
+    disabled" cannot have five answers."""
+    return bool(getattr(spec, 'disabled', '') or '')
+
+
+def disabled_reason(spec) -> str:
+    """The one-line explanation a screen/section line carries for a disabled
+    test. Its shape mirrors `expect`: a marker without a reason is a silenced
+    test, and this one names both the cost saved and the switch. Tolerates a
+    spec that is not in the registry (a synthetic name in a report test), so it
+    degrades to the part that does not need the path rather than to a sentence
+    with a hole in it."""
+    doc = (getattr(spec, 'disabled', '') or '').strip()
+    return (f'not run: known to fail'
+            + (f' while {doc} is open' if doc else '')
+            + ' — the doc is the switch, so deleting it (what a fix does) '
+              'turns this test back on')
+
+
+# `existed` is a parameter, not a global, and for one reason: telling "the doc
+# was deleted because the bug was fixed" from "this path was never a file" is
+# the only step here that has to leave the filesystem, and a seam for it is what
+# lets the estate check in test_suite.py exercise both answers without needing a
+# deleted file to exist on disk. Everything else is a pure function of the
+# registry and a directory.
+#
+# Memoised because the check runs at import, and a repo whose history is long
+# makes `git log -- <path>` a real walk: N disabled jobs would otherwise be N
+# walks on every invocation of the runner, including `--list`. A miss is not
+# re-asked within a process either way, since the answer cannot change while it
+# is running.
+_DOC_HISTORY: dict[tuple[str, str], 'bool | None'] = {}
+
+
+def _doc_in_git_history(path, root) -> bool | None:
+    """Did `path` ever exist in this repository's history? None if unknowable.
+
+    None (git missing, not a repository, or the call failed) is not a pass and
+    not a fail: the caller reports the weaker message, because "the doc is
+    gone" is the finding either way and the typo reading is a refinement of it.
+    """
+    key = (root, path)
+    if key not in _DOC_HISTORY:
+        try:
+            p = subprocess.run(['git', 'log', '--format=%H', '--', path],
+                               cwd=root, capture_output=True, text=True,
+                               timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            p = None
+        _DOC_HISTORY[key] = None if p is None or p.returncode != 0 \
+            else bool(p.stdout.strip())
+    return _DOC_HISTORY[key]
+
+
+def disabled_problems(registry=None, root=None, existed=None) -> list[str]:
+    """Every reason a `disabled=` marker in the registry is wrong, as text.
+
+    All three rules in one function, called at import (so a stale marker stops
+    the runner outright — the loudest form of the check, the same one the tally
+    invariant uses) and asserted in test_suite.py against synthetic registries
+    for each rule.
+
+      1. a disabled test whose doc no longer EXISTS: the bug is fixed, so the
+         test must be turned back on. This is the anti-rot, and it is the
+         failure mode that would otherwise be invisible: a fixed bug leaves a
+         doc nobody reads and a test nobody runs.
+      2. a disabled test naming a doc that NEVER existed: the path is a typo,
+         and a typo that reads as rule 1 would send the next reader to
+         "re-enable a test whose bug was never filed".
+      3. a job with BOTH `expect=` and `disabled=`: the two say opposite things
+         about whether it runs, and a job that both runs and does not is a
+         registration nobody can read. Pick one — `expect` for a cheap known
+         failure (its anti-rot works), `disabled` for one too expensive to run.
+    """
+    registry = REGISTRY if registry is None else registry
+    root = REPO if root is None else root
+    if existed is None:
+        existed = lambda p: _doc_in_git_history(p, root)        # noqa: E731
+    out = []
+    for name, spec in sorted(registry.items()):
+        doc = (getattr(spec, 'disabled', '') or '').strip()
+        if not doc:
+            continue
+        if (getattr(spec, 'expect', '') or '').strip():
+            out.append(f'{name}: has BOTH expect= and disabled=; pick one — '
+                       f'expect runs the test and forgives FAIL/ERROR, '
+                       f'disabled does not run it at all')
+            continue
+        if os.path.isabs(doc) or doc.startswith('..'):
+            out.append(f'{name}: disabled={doc!r} is not a repo-relative path '
+                       f'pointing into bugs/')
+            continue
+        if os.path.exists(os.path.join(root, doc)):
+            continue
+        ever = existed(doc)
+        if ever is False:
+            out.append(f'disabled test {name}: its bug doc {doc} does not '
+                       f'exist and never has — that is a typo in the marker, '
+                       f'and a test disabled against a doc nobody wrote is a '
+                       f'test nobody is tracking')
+        else:
+            out.append(f'disabled test {name}: its bug doc {doc} is gone, so '
+                       f'the bug is fixed: turn the test back on (drop the '
+                       f'disabled=, and expect= if it is red again)')
+    return out
+
+
+_disabled_problems = disabled_problems()
+if _disabled_problems:
+    raise SystemExit(
+        'suite.py: the registry\'s `disabled=` markers are wrong:\n'
+        + ''.join(f'  - {p}\n' for p in _disabled_problems)
+        + '  A disabled test is one thing the bug doc is the switch for; see\n'
+          '  "Disabled tests" above and CLAUDE.md, "Known-failing tests".')
 
 
 def _line(job, res, done, total, active):
@@ -3037,6 +3340,12 @@ def report(names, state, results, wall, peak, opts, log: Log):
         rows = sorted((k, r) for k, r in results.items() if k.split(':')[0] == name)
         log.line(f'  {_TAG.get(state.get(name), "?"):<8} {name:<32} '
                  f'{len(rows)} job(s)')
+        spec = REGISTRY.get(name)
+        if state.get(name) == DISABLED:
+            # No rows and no jobs, and that is the finding, not a gap: say so
+            # here rather than printing an empty "0 job(s)" line that reads like
+            # a test whose jobs all vanished.
+            log.line(f'      {DISABLED:<8} not run — {disabled_reason(spec)}')
         for key, r in rows:
             extra = []
             if r.cached:
@@ -3122,9 +3431,15 @@ def report(names, state, results, wall, peak, opts, log: Log):
                 continue
             print(f'{row.header}:')
             for name in members:
-                why = getattr(REGISTRY.get(name), 'expect', '') or ''
+                spec = REGISTRY.get(name)
+                why = (getattr(spec, 'expect', '') or ''
+                       or (disabled_reason(spec) if is_disabled(spec) else ''))
                 status = state[name]
-                print(f'  {name}  ({secs[name]:.0f}s)'
+                # A disabled test has no duration and no peak, and printing
+                # "(0s)" for it would be a claim it ran in no time at all.
+                # "not run" is the truth and the reason is on the same line.
+                how = '(not run)' if status == DISABLED else f'({secs[name]:.0f}s)'
+                print(f'  {name}  {how}'
                       + (f'  [{_TAG.get(status, "?")}]'
                          if status != row.statuses[0] else '')
                       + (f'  — {why}' if why else ''))
@@ -3235,6 +3550,11 @@ def print_list():
             how += f' artifact={spec.artifact}'
         if getattr(spec, 'expect', ''):
             how += ' EXPECTED-FAIL'
+        if is_disabled(spec):
+            # The class and peak stay on the line above: they are what the job
+            # will cost the day it is turned back on. What it costs TODAY is
+            # this, and it is the reason the marker exists.
+            how += ' DISABLED reserves 0'
         print(f'  {name:<30} {how:<34} ['
               f'{",".join(buckets_containing(name))}]')
         if spec.desc:
@@ -3244,6 +3564,8 @@ def print_list():
                   f'{spec.memwhy}')
         if getattr(spec, 'expect', ''):
             print(f'  {"":<30} expected to fail: {spec.expect}')
+        if is_disabled(spec):
+            print(f'  {"":<30} DISABLED: {disabled_reason(spec)}')
         if spec.deps:
             print(f'  {"":<30} after: {", ".join(spec.deps)}')
     print('\nBUCKETS (a bucket may contain other buckets; each test runs once):')
@@ -3283,7 +3605,15 @@ def print_plan(names, opts):
     print(f'{len(per_test)} tests, {len(jobs)} jobs, -j{opts.jobs}\n')
     for n in names:
         k = per_test[n]
-        mark = '  [exclusive]' if REGISTRY[n].excl else ''
+        spec = REGISTRY[n]
+        if is_disabled(spec):
+            # Planned, and explicitly not run: a name in the plan with no jobs
+            # under it would read as an accident, and the reservation it does
+            # NOT take is the thing a reader of this output needs to see.
+            print(f'{"  " * d(n)}{n}  (DISABLED: not run, 0 jobs, reserves '
+                  f'{reserved_gb(spec):g} GB)  — {disabled_reason(spec)}')
+            continue
+        mark = '  [exclusive]' if spec.excl else ''
         print(f'{"  " * d(n)}{n}  ({k} job{"s" if k != 1 else ""}){mark}')
     return 0
 
@@ -3380,6 +3710,16 @@ def _run_all(names, opts, log: Log):
     for name in names:
         spec = REGISTRY[name]
         cls = memclass_for(spec)
+        if is_disabled(spec):
+            # The memclass and the peak still go in the log, and the
+            # reservation is recorded as the 0 it is: a disabled job is a
+            # record of what a job will cost, and the log is where a reader
+            # looks up why this run was cheaper than the registry suggests.
+            log.line(f'plan: {name}: DISABLED, 0 job(s), not run '
+                     f'(bug doc {spec.disabled} is the switch) '
+                     f'mem={cls}={memlimit(cls):g}GB when turned on, '
+                     f'reserved {reserved_gb(spec):g} GB now')
+            continue
         log.line(f'plan: {name}: {per_test[name]} job(s), driver='
                  f'{getattr(spec, "driver", "fanout")}'
                  + f' mem={cls}={memlimit(cls):g}GB'
