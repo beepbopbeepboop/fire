@@ -6447,11 +6447,20 @@ static char *_mojo_repr_pairlist(MojoList *l, int _kind) {
    the inner lists through the None-sentinel heuristic, so an inner 0 printed
    as `None` (`[[None, 7], [1, 8]]`). The codegen knows statically that the
    inner lists hold plain ints (that is exactly what routes this helper), so
-   read every inner slot as an int. */
-char *mojo_repr_list_intlists(MojoList *l) {
-    if (!l) return "[]";
+   read every inner slot as an int.
+
+   The outer value and every inner value each pick their own brackets from
+   `mojo_is_tuple`, the same way every other repr helper here does. That is not
+   cosmetic: `[(5, j) for j in range(3)]` and `[[5, j] for j in range(3)]`
+   are the same comprehension with a tuple or a list element, both route here
+   (both elements are int lists, so both carry the same nested element type),
+   and the tuple one printed as `[[5, 0], [5, 1], [5, 2]]`. Hardcoding `[`
+   here also misreported a tuple of int lists. */
+static char *_mojo_repr_intlists(MojoList *l) {
+    int _is_tup = l && mojo_is_tuple(l);
+    if (!l) return _is_tup ? "()" : "[]";
     int64_t _n = mojo_list_len(l);
-    char *_buf = strdup("[");
+    char *_buf = strdup(_is_tup ? "(" : "[");
     for (int64_t _i = 0; _i < _n; _i++) {
         if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
         int64_t _p = mojo_list_get_int(l, _i);
@@ -6461,19 +6470,59 @@ char *mojo_repr_list_intlists(MojoList *l) {
         }
         MojoList *_in = (MojoList *)(intptr_t)_p;
         int64_t _m = mojo_list_len(_in);
-        _buf = mojo_str_cat(_buf, "[");
+        int _in_tup = mojo_is_tuple(_in);
+        _buf = mojo_str_cat(_buf, _in_tup ? "(" : "[");
         for (int64_t _j = 0; _j < _m; _j++) {
             if (_j > 0) _buf = mojo_str_cat(_buf, ", ");
             _buf = mojo_str_cat(_buf, mojo_repr_int(mojo_list_get_int(_in, _j)));
         }
-        _buf = mojo_str_cat(_buf, "]");
+        if (_in_tup && _m == 1) _buf = mojo_str_cat(_buf, ",");
+        _buf = mojo_str_cat(_buf, _in_tup ? ")" : "]");
     }
-    return mojo_str_cat(_buf, "]");
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
 }
+
+char *mojo_repr_list_intlists(MojoList *l) { return _mojo_repr_intlists(l); }
 
 char *mojo_repr_list_pairs(MojoList *l) { return _mojo_repr_pairlist(l, 0); }
 char *mojo_repr_list_pairs_s(MojoList *l) { return _mojo_repr_pairlist(l, 1); }
 char *mojo_repr_list_pairs_d(MojoList *l) { return _mojo_repr_pairlist(l, 2); }
+
+/* A list whose elements are inner lists/tuples that ALL share one per-slot
+   kind pattern — `[(1.5, 2)]`, `[('a', 0, 1) for i in range(2)]`,
+   `[(cfg, model), (cfg, model)]`. `kinds` is that pattern, one byte per
+   INNER slot, in mojo_repr_list_kinds' own alphabet; the inner brackets, the
+   single-element trailing comma and the per-slot value reading are all that
+   function's, so this is the same reader applied one level up — which is why
+   it delegates rather than repeating the switch.
+
+   Without it the generic walker read each inner slot through the
+   None-sentinel heuristic, so every int 0 in a non-zero slot printed as
+   `None` (`[('a', 0, 1)]` → `[('a', None, 1)]`) and a double read as an int
+   printed its raw IEEE-754 bits — or, when those bits looked like a heap
+   address, faulted inside mojo_read_type_tag_safe (`[(1.5, 2)]` SIGSEGV'd).
+   The codegen has the pattern statically (`_tuple_slot_types`, recorded for
+   every tuple literal whose slots are not all one type), which is what routes
+   here. */
+char *mojo_repr_list_slotkinds(MojoList *l, const char *kinds) {
+    int _is_tup = l && mojo_is_tuple(l);
+    if (!l) return _is_tup ? "()" : "[]";
+    int64_t _n = mojo_list_len(l);
+    char *_buf = strdup(_is_tup ? "(" : "[");
+    for (int64_t _i = 0; _i < _n; _i++) {
+        if (_i > 0) _buf = mojo_str_cat(_buf, ", ");
+        int64_t _p = mojo_list_get_int(l, _i);
+        if (!mojo_is_registered_list(_p)) {
+            _buf = mojo_str_cat(_buf, mojo_repr_obj(_p));
+            continue;
+        }
+        _buf = mojo_str_cat(_buf,
+            mojo_repr_list_kinds((MojoList *)(intptr_t)_p, kinds));
+    }
+    if (_is_tup && _n == 1) _buf = mojo_str_cat(_buf, ",");
+    return mojo_str_cat(_buf, _is_tup ? ")" : "]");
+}
 
 char *mojo_repr_list_bytes(MojoList *l) {
     /* A list that brought its own per-slot kinds is described by them

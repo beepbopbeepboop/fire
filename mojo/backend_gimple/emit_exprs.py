@@ -4943,6 +4943,21 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
             temp = gen._new_val('char *', f'{ev_cast}')
             ev_cast = temp
         gen._emit(f"  mojo_list_append_{use} ({t}, {ev_cast});")
+        # A tuple whose elements are themselves LISTS (`([0, 7], [1, 8])`)
+        # needs the same two maps `_lower_list_literal` records for
+        # `[[0, 7], [1, 8]]` — `_nested_elem_types` (what the inner lists
+        # hold) and `_tuple_slot_types` (each inner slot's own ctype) — and
+        # recorded neither, the result was describable only as "a tuple of
+        # lists". `_list_repr_fn` then had no nested entry to pick
+        # `mojo_repr_list_intlists` with, the generic walker recursed through
+        # its None-sentinel heuristic, and the tuple printed as
+        # `((0, 7), (1, 8))` — the inner LISTS in tuple brackets. Same
+        # carry, same reason, on the tuple path; the two lowerings differ
+        # only in the `mojo_mark_as_tuple` at the end.
+        if et == 'MojoList *' and ev in gen._elem_types:
+            gen._nested_elem_types.setdefault(t, gen._elem_types[ev])
+            if ev in gen._tuple_slot_types:
+                gen._tuple_slot_types[t] = gen._tuple_slot_types[ev]
     # Mark as a tuple AFTER the elements are in, not before. The mark is
     # what makes this value a tuple rather than a list (see
     # mojo_mark_as_tuple's doc comment in runtime/fire_runtime.c), and since

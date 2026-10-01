@@ -2955,6 +2955,18 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         gen._emit(f"  mojo_list_append_{suf} ({res}, {ev_cast});")
         # Track element type so downstream for-loops use the right accessor
         gen._elem_types[res] = et
+        # An element that is ITSELF a list/tuple (`[[5, j] for j in range(3)]`)
+        # carries a SECOND map, `_nested_elem_types`: what the inner containers
+        # hold. The single-clause path recorded only `_elem_types` here, so the
+        # result was describable as "a list of lists" and nothing more —
+        # `_list_repr_fn`'s `mojo_repr_list_intlists` branch needs the nested
+        # entry to pick the accessor that reads an inner slot as an int, and
+        # without it the generic walker read slot 0 of the first inner list
+        # through its None-sentinel heuristic, so the int 0 of `[5, 0]` printed
+        # as `None`. Mirrors _lower_list_literal's per-element carry (the same
+        # two lines, for the same reason, on the literal path).
+        if et == 'MojoList *' and ev in gen._elem_types:
+            gen._nested_elem_types.setdefault(res, gen._elem_types[ev])
         # A comprehension of TUPLES (`[(n, f) for n, f in funcs]`) — carry
         # the heterogeneous tuple's per-slot types so a later
         # `for n, f in test_funcs:` reads each slot with the right accessor.

@@ -2943,6 +2943,17 @@ def _list_repr_fn(gen, rav: str) -> str:
     # different shape from the enumerate/zip pairs handled above.
     if gen._elem_types.get(rav) == 'MojoList *' and nested == 'int64_t':
         return 'mojo_repr_list_intlists'
+    # A list of inner lists/tuples whose slots are NOT all one kind —
+    # `[(1.5, 2)]`, `[('a', 0, 1) for i in range(2)]` — goes before the
+    # branches below for the same reason `mojo_repr_list_kinds` does: the one
+    # container-wide ctype says nothing about what is inside, and the uniform
+    # helpers read every inner slot through a single accessor. So an int 0 in a
+    # non-first slot printed as `None` and a double printed its raw IEEE-754
+    # bits (or faulted in mojo_read_type_tag_safe when those bits looked like a
+    # heap address). `_tuple_slot_types` records the pattern per inner slot, so
+    # hand it to the one helper that reads each inner slot by its own kind.
+    if gen._elem_types.get(rav) == 'MojoList *' and _tuple_slot_kind_bytes(gen, rav):
+        return 'mojo_repr_list_slotkinds'
     # A `struct.unpack` result whose format MIXES kinds goes FIRST, before the
     # uniform branches below: its one container ctype is the degraded
     # 'int64_t' _struct_elem_ctype returns for any non-uniform format, so the
@@ -2975,12 +2986,49 @@ def _list_repr_fn(gen, rav: str) -> str:
 # The bytes are from a fixed alphabet, so the pooled string needs no C escaping.
 _STRUCT_KIND_BYTE = {'int': 'i', 'double': 'd', 'bytes': 's'}
 
+# The same alphabet for a list of inner lists/tuples that share one per-slot
+# pattern — `[(1.5, 2)]`, `[('a', 0, 1) for i in range(2)]`. Keyed on the CTYPE
+# `_tuple_slot_types` records, so it accepts every spelling that map does
+# ('int64_t'/'int'/'char' all mean the int accessor) rather than only the three
+# a `struct` format string can produce.
+_TUPLE_SLOT_KIND_BYTE = {'int': 'i', 'int64_t': 'i', 'char': 'i', '_Bool': 'i',
+                         'double': 'd', 'char *': 'p', 'MojoStr *': 'p',
+                         'MojoBytes *': 's', 'MojoList *': 'l',
+                         'MojoDict *': 'l', 'MojoSet *': 'l'}
+
 
 def _struct_slot_kind_bytes(gen, rav: str) -> str | None:
     kinds = gen._struct_slot_kinds.get(rav)
     if not kinds or len(set(kinds)) == 1:
         return None
     return ''.join(_STRUCT_KIND_BYTE[k] for k in kinds)
+
+
+def _tuple_slot_kind_bytes(gen, rav: str) -> str | None:
+    """The per-slot kind string for a list of inner lists/tuples that all share
+    one pattern, or None when it has no recorded per-slot types or the pattern
+    is uniform (uniform is the `mojo_repr_list_intlists` / `mojo_repr_list_doubles`
+    / `mojo_repr_list_kinds` cases, which take one accessor for the whole list
+    and must not be shadowed by this one).
+
+    An unrecognised slot ctype returns None rather than guessing an 'i': the
+    generic walker it falls back to can still be wrong, but it fails by
+    printing a pointer decimal, whereas claiming 'i' would hand a struct pointer
+    to an int accessor and call it exact.
+    """
+    slots = gen._tuple_slot_types.get(rav)
+    if not slots:
+        return None
+    out = []
+    for ct in slots:
+        b = _TUPLE_SLOT_KIND_BYTE.get(_as_str(ct))
+        if b is None:
+            return None
+        out.append(b)
+    kinds = ''.join(out)
+    if len(set(kinds)) == 1:
+        return None
+    return kinds
 
 
 def _list_repr_call(gen, key: str, lst: str | None = None) -> tuple[str, list]:
@@ -2999,6 +3047,8 @@ def _list_repr_call(gen, key: str, lst: str | None = None) -> tuple[str, list]:
     args = [('MojoList *', lst if lst is not None else key)]
     if fn == 'mojo_repr_list_kinds':
         args.append(('const char *', gen._intern_string(_struct_slot_kind_bytes(gen, key))))
+    elif fn == 'mojo_repr_list_slotkinds':
+        args.append(('const char *', gen._intern_string(_tuple_slot_kind_bytes(gen, key))))
     return fn, args
 
 

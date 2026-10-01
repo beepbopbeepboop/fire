@@ -411,6 +411,31 @@ BUILTIN_PROGRAMS = {
             print([i * 100 + j * 10 + k for i in range(2) for j in range(2) for k in range(2)])
             print([i * j for i in range(4) for j in range(4) if j > i])
     """),
+    # A comprehension whose ELEMENT is itself a list or a tuple. The result is
+    # a list of containers, which needs a SECOND type map (`_nested_elem_types`
+    # — what the inner containers hold) on top of `_elem_types` ("they are
+    # lists"); the single-clause path recorded only the first, so the repr
+    # helper that reads an inner slot as an int was never selected and the
+    # generic walker's None-sentinel heuristic rendered the first element's int
+    # 0 as `None`: `[[5, j] for j in range(3)]` printed `[(5, None), (5, 1),
+    # (5, 2)]`. Both the list and the tuple element, and both iterable kinds,
+    # because the two maps are recorded per ELEMENT and per RESULT, not per
+    # iterable — so the shape of the comprehension does not matter, only that
+    # its element is a container.
+    "comprehension_of_tuples_and_lists": textwrap.dedent("""\
+        def main():
+            print([[5, j] for j in range(3)])
+            print([(5, j) for j in range(3)])
+            ys = [7, 8, 9]
+            print([[5, y] for y in ys])
+            print([(5, y) for y in ys])
+            print([[i, j] for i in range(2) for j in range(2)])
+            print([(i, j) for i in range(2) for j in range(2)])
+            print([[0, 7], [1, 8]])
+            print([(0, 7), (1, 8)])
+            print(([0, 7], [1, 8]))
+            print(([0, 7],))
+    """),
     "global_var": textwrap.dedent("""\
         var counter: Int = 0
 
