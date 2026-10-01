@@ -2612,6 +2612,36 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         fn._image_returns_frame = dict(returns_frame)
     _check_returned_frame_budget(functions, returns_frame, params_of)
 
+    # A class-level constant read through a HOLDER — `shape.is_flat`, where
+    # `shape` arrived as a parameter and this fixpoint is what settled that it is
+    # a `Coord` — is the third spelling of the same read, and it can only be
+    # recognized HERE: until the fixpoint has run, "which struct does this name
+    # hold" has no answer at all, which is the first bullet of the comment below
+    # for a different rewrite and is the reason this one is not in
+    # `_prepare_functions` with the other two. After the fixpoint and before the
+    # per-function loop, so the loop never sees the read — which is what it would
+    # otherwise refuse, by `model.member_read_without_a_field`, with a message
+    # that is false about a class constant ("Coord has no field 'is_flat'") and
+    # adds that in Python it is an AttributeError, which for a `comptime` member
+    # it is not.
+    #
+    # The `None`-comparison refusal is asked first and separately, for the reason
+    # `refuse_none_comparisons` gives about its own ordering: the fold destroys
+    # the fact the check is about, so a spelling the fold reaches and the check
+    # does not is a spelling that silently answers `None == 0`. It is a second
+    # call rather than a moved one because the first call, in
+    # `_prepare_functions`, is the only one that can see a method's own receiver
+    # read before `_rewrite_self_fields` rewrites it.
+    def _holder_bases(fn):
+        return _holder_class_constant_bases(hstruct.get(_fn_key(fn)) or {},
+                                            structs_by_name)
+
+    refuse_none_comparisons(functions, structs_by_name, _holder_bases)
+    for fn in functions:
+        if not hstruct.get(_fn_key(fn)):
+            continue
+        _rewrite_class_constants(fn.body, structs_by_name, _holder_bases(fn))
+
     # AFTER the fixpoint and BEFORE the per-function loop below, and both of
     # those positions are load-bearing rather than tidy:
     #
@@ -5194,20 +5224,44 @@ def _rewrite_self_fields(node, mapping: dict):
     return node
 
 
-def _constant_read_sites(body, structs_by_name: dict) -> dict:
+def _constant_read_sites(body, structs_by_name: dict,
+                         receiver_structs: dict = None) -> dict:
     """{access path: struct} for every read of a class-level constant.
 
-    The two spellings that are provably a read of the CLASS's own value:
-    `S.NAME`, where `S` is the struct's name, and `x.NAME` where `x` is a local
-    initialised from `S()`. A read through any other object is deliberately not
-    in here: without types, `o.NAME` might be an instance of `S` (a constant) or
-    of some other struct with a real field of the same name (a field), and
-    guessing is the error this whole rule is arranged to avoid.
+    Three spellings, and what makes each of them a read of the CLASS's own value
+    rather than of a field:
 
-    A receiver spelling (`self.NAME`) is not here either, and cannot be: the
-    model counts any name a method reaches that way as a FIELD, precisely so
-    this decision never has to be made."""
-    aliases = {}
+      * `S.NAME`, where `S` is the struct's name. Unambiguous: the name is the
+        class's own.
+      * `x.NAME`, where `x` is a local initialised from `S()` in THIS body. The
+        binding is the evidence, and it is per-function for the same reason the
+        rest of the frame analysis is: `x = S()` is a fact about one body. A
+        local bound to two different structs on two paths is NOT in here at all
+        (see below), because which one `x.NAME` means depends on the path and
+        there is no path sensitivity here to answer it.
+      * `receiver.NAME` for every base in `receiver_structs` — `{name: struct}`
+        for the bases this body may read a class value through. Two things put a
+        base in that map and both are evidence rather than inference:
+        `_method_class_constant_bases` (the receiver of a method of the struct
+        that DECLARES the constant, and `Self`) and
+        `_holder_class_constant_bases` (a local or parameter whose every binding
+        this image's holder analysis has settled on one struct). Without types,
+        `o.NAME` through any other object might be an instance of `S` (a
+        constant) or of some other struct with a real field of the same name (a
+        field), and guessing is the error this whole rule is arranged to avoid
+        — so a base that is not in the map is left to the frame pass, which
+        refuses it.
+
+    The receiver spelling used to be impossible here rather than merely absent,
+    and the reason is worth keeping: the model counted any name a method reached
+    that way as a FIELD, precisely so this decision would not have to be made.
+    That was sound for a class-level `LIMIT = 10` — the receiver word really is
+    storage, and `struct_default_word` fills it — and unsound for a
+    `comptime LIMIT = 10`, which is in no field list at all, so `self.LIMIT` read
+    a slot nothing ever writes. `model.struct_comptime_aliases` is the note on
+    that, and `struct_class_constants` now classifies the alias, which is what
+    makes this function able to answer for it."""
+    aliases, out = {}, {}
     for node in M.iter_nodes(body):
         target = value = None
         if isinstance(node, F.VarDecl):
@@ -5218,14 +5272,93 @@ def _constant_read_sites(body, structs_by_name: dict) -> dict:
         if target and isinstance(value, F.CallExpr) \
                 and isinstance(value.func, F.IdentExpr) \
                 and value.func.name in structs_by_name:
-            aliases[target] = value.func.name
-    out = {}
+            # A SET, and a local bound to two structs leaves the map empty
+            # rather than taking the last one: `x = A(); x = B(); return x.N` is
+            # ordinary code, and reading `A`'s `N` on the `B` path is a wrong
+            # answer rather than a refusal. One dict per name, and the value is
+            # the set of every struct this body built it from.
+            aliases.setdefault(target, set()).add(value.func.name)
     for st in structs_by_name.values():
         for name, _default in M.struct_class_constants(st):
             out[f"{st.name}.{name}"] = st
-    for local, struct_name in aliases.items():
+    for local, struct_names in aliases.items():
+        if len(struct_names) != 1:
+            continue
+        struct_name = next(iter(struct_names))
         for key in [k for k in out if k.startswith(struct_name + ".")]:
             out[f"{local}.{key.split('.', 1)[1]}"] = out[key]
+    for base, st in (receiver_structs or {}).items():
+        for name, _default in M.struct_class_constants(st):
+            path = f"{base}.{name}"
+            # A name the struct also declares as a METHOD is not in here. The
+            # two tables are consulted in opposite orders by the reference
+            # engine — a read through the CLASS prefers the alias, a read
+            # through an INSTANCE prefers the method (`myinterpreter`'s member
+            # read checks `methods` before `comptime_aliases`) — and a value
+            # whose meaning depends on which one you asked is a value this path
+            # cannot answer, so the method wins and the read is left alone.
+            if any(m.name == name for m in M.struct_methods(st)):
+                continue
+            if out.setdefault(path, st) is not st:
+                # The receiver reading and the local-alias reading disagree
+                # about what this base is. Same rule as above: agree or refuse.
+                del out[path]
+    return out
+
+
+def _method_class_constant_bases(fn, owner) -> dict:
+    """`{base name: owner}` for the class values `fn` may read through its receiver.
+
+    `owner` is the struct whose method `fn` is (`method_owner_names`), or None
+    for a free function, which has no receiver and no `Self`.
+
+    Two bases, and the soundness argument is the same for both:
+
+      * the method's own receiver. A method of `S` is called with an `S` — that
+        is what a receiver IS on this path, and it is the premise every frame
+        layout here rests on — and a `comptime` binding's value does not depend
+        on the instance, so `self.NAME` inside a method of `S` is the same value
+        as `S.NAME`. Not "probably the same": there is no instance in the
+        expression the value was computed from, because the interpreter evaluates
+        it once at struct-definition time in the class body's own scope.
+      * `Self`, which names that same type rather than an instance of it.
+
+    This is why the receiver spelling needs no binding census and the general
+    `o.NAME` does: here the base's type is not inferred, it is what the
+    declaration says the method is."""
+    if owner is None:
+        return {}
+    out = {"Self": owner}
+    recv = M.method_receiver_name(fn)
+    if recv is not None:
+        out[recv] = owner
+    return out
+
+
+def _holder_class_constant_bases(by_name: dict, structs_by_name: dict) -> dict:
+    """`{base name: struct}` for a holder this function's analysis agrees on.
+
+    `by_name` is one function's `hstruct` row: `{name: [candidate structs]}`,
+    which the holder fixpoint builds out of the BINDINGS it can see — a
+    construction, a method call's receiver argument, a parameter every call site
+    passes the same way. So a single candidate is the same statement the rest of
+    the frame analysis makes about that name: every binding of it is that struct.
+    Two or more is the disagreement `struct_frame_slot_candidates` refuses on,
+    and it is refused here for the same reason and in the same direction — an
+    empty or multi-valued list contributes no base, so the read falls through to
+    the frame pass, which refuses it by name. It is a narrowing of what the frame
+    pass can answer, never a widening: a base it accepts is one whose every
+    visible binding is one struct.
+
+    An EMPTY candidate list means the name holds a plain word rather than a frame
+    address, which is a different fact and not a disagreement."""
+    out = {}
+    for name, cands in (by_name or {}).items():
+        if not cands:
+            continue
+        first = cands[0]
+        if all(c is first for c in cands[1:]):
+            out[name] = first
     return out
 
 
@@ -5247,7 +5380,8 @@ def _constant_literal(struct_def, name: str):
     return None
 
 
-def _rewrite_class_constants(node, structs_by_name: dict):
+def _rewrite_class_constants(node, structs_by_name: dict,
+                             receiver_structs: dict = None):
     """`S.NAME` -> the literal `NAME` holds, in place, over a statement tree.
 
     A class-level constant is not part of any value: it is one value for every
@@ -5260,6 +5394,9 @@ def _rewrite_class_constants(node, structs_by_name: dict):
         nothing ever writes, and the constant becomes whatever the register
         held. A class of nothing but literal constants, with a method adding
         two of them, then built, ran, and returned 31 where the source says 12.
+        The same defect with a `comptime` member and a RECEIVER read is a
+        one-word struct whose method returns `self.LIMIT + self.n` and prints 0
+        where the source says 13, measured on both architectures.
       * refuse everything. Then a class whose constants are all literals — the
         case this path can represent exactly — would be refused for a
         representable program.
@@ -5268,11 +5405,15 @@ def _rewrite_class_constants(node, structs_by_name: dict):
     the same at every read site in every function), and anything else is
     refused by name: there is no module-global storage on this path for a
     non-literal to live in, and a container constant read as 0 is a
-    plausible-looking wrong number rather than a crash."""
+    plausible-looking wrong number rather than a crash.
+
+    `receiver_structs` is `_constant_read_sites`'s third spelling; see there for
+    what puts a base in it and why that is evidence rather than a guess."""
     if not structs_by_name:
         return node
     return _apply_constant_sites(node,
-                                 _constant_read_sites(node, structs_by_name))
+                                 _constant_read_sites(node, structs_by_name,
+                                                      receiver_structs))
 
 
 # ── A module-level NAME, and where its value lives ─────────────────────────
@@ -6982,19 +7123,20 @@ def _apply_constant_sites(node, sites: dict):
         node[:] = items
         return node
     if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr):
-        st = sites.get(f"{node.obj.name}.{node.member}")
+        path = f"{node.obj.name}.{node.member}"
+        st = sites.get(path)
         if st is not None:
             literal = _constant_literal(st, node.member)
             if literal is None:
                 raise CodegenError(
-                    f"{st.name}.{node.member} is a class-level constant, and a "
+                    f"{path} is a class-level constant of {st.name}, and a "
                     f"formal value is one 64-bit word with nowhere to keep a "
                     f"non-literal one: this path has no module-global storage, "
-                    f"so reading {st.name}.{node.member} can only be answered by "
-                    f"the value it is written with, and that value is not a "
-                    f"literal. Write the value at the use site (a literal, or "
-                    f"an assignment the compiler can see), which is the same "
-                    f"program with a representation")
+                    f"so reading {path} can only be answered by the value it is "
+                    f"written with, and that value is not a literal. Write the "
+                    f"value at the use site (a literal, or an assignment the "
+                    f"compiler can see), which is the same program with a "
+                    f"representation")
             return literal
     for name in getattr(node, "__dataclass_fields__", {}):
         setattr(node, name, _apply_constant_sites(getattr(node, name), sites))
@@ -7004,15 +7146,16 @@ def _apply_constant_sites(node, sites: dict):
 def _constant_read_spelling(node) -> str:
     """The `S.NAME` access path `node` spells, or None.
 
-    The two spellings `_constant_read_sites` recognizes as a read of a CLASS's
-    own value, and nothing else — the same restriction, so this cannot name a
+    The spellings `_constant_read_sites` recognizes as a read of a CLASS's own
+    value, and nothing else — the same restriction, so this cannot name a
     path that table does not have an answer for."""
     if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr):
         return f"{node.obj.name}.{node.member}"
     return None
 
 
-def refuse_none_comparisons(functions: list, structs_by_name: dict) -> None:
+def refuse_none_comparisons(functions: list, structs_by_name: dict,
+                            receiver_bases=None) -> None:
     """Refuse `==` / `!=` whose operand is a read of a `None`-valued constant.
 
     Asked BEFORE either substitution, and that ordering is the whole reason this
@@ -7030,15 +7173,27 @@ def refuse_none_comparisons(functions: list, structs_by_name: dict) -> None:
     is nowhere for a second bit of "this zero is a None" to live, which is the
     same limit `model.pointer_value_model` records for pointers.
 
-    Both spellings of a read are covered, and each is covered by asking the
+    All three spellings of a read are covered, and each is covered by asking the
     question the substitution would have answered:
       * a CLASS-level constant (`S.NONE_FIELD`, or a local aliased from `S()`),
         via the same `_constant_read_sites` census the rewrite uses;
+      * the same constant through a RECEIVER — `self.NONE_FIELD`,
+        `shape.NONE_FIELD` — whose bases `receiver_bases(fn, structs_by_name)`
+        supplies. It has to be asked for those too, and the reason is this
+        function's own premise: the check exists because the fold destroys a
+        fact, so a spelling the fold reaches and this check does not is a
+        spelling that silently answers `None == 0`.
       * a MODULE-level `G = None`, via the published symbol table's
         `none_valued` — which is the fact the folded `IntLiteral(0)` no longer
         carries.
     A function that BINDS the name shadows it, so a read of a local called `G`
-    is not this check's business, exactly as in `_substitute_module_constants`."""
+    is not this check's business, exactly as in `_substitute_module_constants`.
+
+    `receiver_bases` is the callable that answers "which bases may this function
+    read a class value through", because the answer is not the same before and
+    after the frame analysis has run: before it, only a method's own receiver is
+    known; after, a settled holder is known too. Both calls are made, each
+    immediately before the substitution whose reads it has to see."""
     none_names = {name for name, sym in M.module_symbols().items()
                   if getattr(sym, "none_valued", False)}
     none_consts = {(st.name, cname)
@@ -7052,7 +7207,8 @@ def refuse_none_comparisons(functions: list, structs_by_name: dict) -> None:
         # about one body: `p.b` is a read of the class's own value in the
         # function that wrote that `p` and not in any other.
         none_paths = {path for path, st in _constant_read_sites(
-            fn.body, structs_by_name).items()
+            fn.body, structs_by_name,
+            receiver_bases(fn) if receiver_bases else None).items()
             if (st.name, path.partition(".")[2]) in none_consts}
         if not none_names and not none_paths:
             continue
@@ -7277,14 +7433,32 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # bound a name with no home.  The call rewriting below skips the receiver
     # for exactly those, which is the language's rule and not a special case.
     receiverless = _receiverless_methods(owners, structs_by_name)
+    # The class values a function may read through its OWN receiver, per
+    # function, and read here rather than at the substitution because both of
+    # the consumers below need the same answer and neither has the other's
+    # context: the `None`-comparison refusal has to see the read before the fold
+    # erases it, and the substitution has to run BEFORE `_rewrite_self_fields`
+    # — a one-word struct's `self.<sole field>` is rewritten to plain `self`
+    # there, which for a `comptime` member means rewriting the read of a class
+    # value into a read of the receiver word. Measured: a one-word struct whose
+    # method returns `self.LIMIT` printed 0 where the source says 10, on both
+    # architectures, and the one-word mapping is what turned it into that.
+    def _method_receiver_bases(fn):
+        return _method_class_constant_bases(fn, method_owners.get(fn.name))
+
     # A comparison against a `None`-valued constant is refused HERE, before the
     # two rewrites below materialize the value: after them the fact is gone,
     # because `None` is folded to the word 0 and the fold cannot say that this
     # zero was a `None`. See `refuse_none_comparisons` for why the fold stands
     # and only the comparison is refused.
-    refuse_none_comparisons(functions, structs_by_name)
+    refuse_none_comparisons(functions, structs_by_name, _method_receiver_bases)
     for fn in functions:
         _rewrite_method_calls(fn.body, owners, wide, receiverless)
+        # A class-level CONSTANT read through a RECEIVER is the same read, and
+        # goes before `_rewrite_self_fields` for the reason the comment above
+        # gives. Everything else about it is `_rewrite_class_constants`.
+        _rewrite_class_constants(fn.body, structs_by_name,
+                                 _method_receiver_bases(fn))
         # A method's `self` IS the field; a local initialised from a one-word
         # constructor holds that struct's only field directly.
         mapping = _one_word_field_map(fn, structs_by_name,
@@ -7298,7 +7472,10 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # this a struct of nothing but constants — which the width rule now
         # correctly calls one word, or zero — reads its own table as the zero
         # an unwritten slot gives, and a program that builds and runs returns
-        # a number nobody wrote.
+        # a number nobody wrote. The receiver spelling was already handled
+        # above, where the one-word mapping could not yet have eaten it; this
+        # pass sees what is left, which is the class name and a local built
+        # from a constructor.
         _rewrite_class_constants(fn.body, structs_by_name)
     ctx = FormalClosureCtx()
     discover_closures(ctx, stmts)

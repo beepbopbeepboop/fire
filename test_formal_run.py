@@ -697,6 +697,150 @@ CASES = [
      "def main(n):\n"
      "    return Table.first()\n",
      "refuse:Table.NAMES is a class-level constant", None),
+    # ── the `comptime` SPELLING of a class constant ────────────────────────
+    #
+    # Everything above writes the constant as a class-level assignment
+    # (`A = 1`). Mojo has a second spelling for the same thing —
+    # `comptime A = 1` in the struct body — and it is not the same thing to a
+    # compiler: the parser files it under `StructDef.comptime_aliases` and NOT
+    # under `StructDef.fields`, because a `ComptimeVarStmt` is neither a
+    # `VarDecl` nor an `AssignStmt`. So it was a class value in no table on this
+    # path at all, and a method that read one through its receiver read the slot
+    # nothing ever writes. `C` below is one field wide (`n`), the method returns
+    # `self.LIMIT + self.n`, and the image printed 0 where the source says 13 —
+    # on BOTH architectures, because the zero was the layout's, not a register's
+    # leftover. These four cases are the four spellings that now read as the
+    # value; the CPython-pair group below runs each against CPython rather than
+    # against a number written here.
+    ("comptime_alias_through_receiver_is_the_value",
+     "struct C:\n"
+     "    comptime LIMIT = 10\n"
+     "    var n: Int\n"
+     "\n"
+     "    def scaled(self) -> Int:\n"
+     "        return self.LIMIT + self.n\n"
+     "\n"
+     "def main(n):\n"
+     "    c = C(0)\n"
+     "    c.n = 3\n"
+     "    return c.scaled()\n", 13, None),
+    # The same read spelled through the class's OWN name from inside one of its
+    # methods. Before, this did not even reach a constant: `C` was read as a
+    # value, and a struct name is not a value — the refusal was "'C' is read at
+    # line N before anything in this function stores it", which is a statement
+    # about a NAME and says nothing about the attribute that was being read.
+    ("comptime_alias_through_the_class_name",
+     "struct C:\n"
+     "    comptime LIMIT = 10\n"
+     "    var n: Int\n"
+     "\n"
+     "    def scaled(self) -> Int:\n"
+     "        return C.LIMIT + self.n\n"
+     "\n"
+     "def main(n):\n"
+     "    c = C(0)\n"
+     "    c.n = 3\n"
+     "    return c.scaled()\n", 13, None),
+    # `Self`, which names the method's own type rather than an instance of it,
+    # and so is the same read. It was refused as a field access through a base
+    # bound as a parameter — a true statement about the BINDING and no answer at
+    # all about the name, which is not a field of anything.
+    ("comptime_alias_through_Self",
+     "struct C:\n"
+     "    comptime LIMIT = 10\n"
+     "    var n: Int\n"
+     "\n"
+     "    def scaled(self) -> Int:\n"
+     "        return Self.LIMIT + self.n\n"
+     "\n"
+     "def main(n):\n"
+     "    c = C(0)\n"
+     "    c.n = 3\n"
+     "    return c.scaled()\n", 13, None),
+    # Through a base that is NOT a method receiver: `limit_of` takes the frame
+    # as an argument, so nothing about the DECLARATION says what it holds. What
+    # says it is the holder analysis — every binding of `c` this image can see
+    # is a `C` — which is the same "agree or refuse" evidence the slot lookup
+    # uses, and a name bound to two structs on two paths is simply not
+    # substituted. This is the shape the stdlib's own `shape.is_flat` has.
+    ("comptime_alias_through_a_holder_argument",
+     "struct C:\n"
+     "    comptime LIMIT = 10\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def limit_of(c) -> Int:\n"
+     "    return c.LIMIT\n"
+     "\n"
+     "def main(n):\n"
+     "    c = C(0, 0)\n"
+     "    c.a = 1\n"
+     "    c.b = 2\n"
+     "    return c.a * 100 + c.b * 10 + limit_of(c)\n", 130, None),
+    # 130 is 1, 2 and 10: the two fields and the class value, each in its own
+    # decimal place, so a read of the constant that came back 0 would give 120
+    # and one that picked up a neighbouring slot would give something else
+    # again. Written out rather than left to the reader.
+    # …and the TIE-BREAK, which is the other direction of the same rule and the
+    # one that keeps it from being a wrong answer: a `comptime` name the program
+    # WRITES through an object is per-instance state, and the write wins. 7 + 3,
+    # not the declared 10. The plain-constant spelling of this rule is
+    # `pyclass_name_read_bare_and_written` above; it is repeated for `comptime`
+    # because the two spellings reach it through different code — the write
+    # census is what vetoes the substitution, and for the plain spelling the
+    # same veto is what stops the demotion.
+    ("comptime_alias_the_program_overwrites_is_storage",
+     "struct C:\n"
+     "    comptime LIMIT = 10\n"
+     "    var n: Int\n"
+     "\n"
+     "    def read(self) -> Int:\n"
+     "        return self.LIMIT\n"
+     "\n"
+     "def main(n):\n"
+     "    c = C()\n"
+     "    c.n = 3\n"
+     "    c.LIMIT = 7\n"
+     "    return c.read() * 10 + c.n\n", 73, None),
+    # A class constant whose VALUE is not a literal has nowhere to live: there
+    # is no module-global storage, so the read can only be answered by the value
+    # it is written with, and `3 + 4` is not a value this path materializes.
+    # This is `Coord.is_flat` (`Self.rank == Self.flat_rank`) and
+    # `_ZipIterator._InjectedValues` (`Tuple[*Self.Ts]`) reduced to the smallest
+    # program that reaches the same line, and the refusal is the CORRECT verdict
+    # for both. Checked on both backends: the pre-change message was a
+    # different one that was false about the file ("has no field 'is_flat' …
+    # in Python this is an AttributeError at run time", for a name the class
+    # declares 20 lines above the read).
+    ("comptime_alias_nonliteral_value_refused",
+     "struct C:\n"
+     "    comptime LIMIT = 3 + 4\n"
+     "    var n: Int\n"
+     "\n"
+     "def get() -> Int:\n"
+     "    return C.LIMIT\n"
+     "\n"
+     "def main(n):\n"
+     "    return get()\n",
+     "refuse:C.LIMIT is a class-level constant of C", None),
+    # The anti-rot direction for the corrected message: the old text claimed a
+    # missing attribute is an AttributeError the program is "very likely already
+    # raising" on. For a `comptime` member that is false in the strong sense —
+    # the attribute exists, so the program does not raise. The needle is the
+    # corrected half, the forbidden substring is the false half.
+    ("comptime_alias_refusal_does_not_claim_an_attribute_error",
+     "struct C:\n"
+     "    comptime LIMIT = 3 + 4\n"
+     "    var n: Int\n"
+     "\n"
+     "    def read(self) -> Int:\n"
+     "        return self.LIMIT\n"
+     "\n"
+     "def main(n):\n"
+     "    c = C(0)\n"
+     "    return c.read()\n",
+     "refuse_without:self.LIMIT is a class-level constant of C:"
+     "In Python this is an AttributeError at run time", None),
 
     # ── methods on a string ──────────────────────────────────────────────
     #
@@ -9344,6 +9488,107 @@ if _TYPE_VALUE_TAG_COLLISIONS:
         f"{_TYPE_VALUE_TAG_COLLISIONS}")
 
 
+# ── the field census, asked of the model directly ────────────────────────────
+#
+# Everything above this point is a build and a run, which is the only kind of
+# evidence that settles whether a program computes the right number — and the
+# slowest kind. The census underneath it is a pure function of a parsed class
+# body, so its four answers are asserted here, once, against the model, with no
+# compiler in the loop: a `comptime` member is a class CONSTANT and not a field,
+# it is not counted again when a method reaches it through the receiver, a name
+# the unit WRITES through an object is a field again (so the write has a slot),
+# and a struct with no evidence attached is left entirely alone.
+#
+# The last of those is the one that decides how far the fix reaches, so it is
+# here rather than in a comment: it is why a `comptime` member declared in an
+# IMPORTED module is still not substitutable, which is the remaining half of
+# `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md`.
+_CENSUS_PROBES = [
+    # (name, source, expected field names, expected constant names)
+    ("a comptime member with no receiver read is a constant",
+     "struct C:\n"
+     "    comptime LIMIT = 10\n"
+     "    var n: Int\n"
+     "\n"
+     "def get() -> Int:\n"
+     "    return C.LIMIT\n",
+     ["n"], ["LIMIT"]),
+    ("a receiver read does not make it a field again",
+     "struct C:\n"
+     "    comptime LIMIT = 10\n"
+     "    var n: Int\n"
+     "\n"
+     "    def scaled(self) -> Int:\n"
+     "        return self.LIMIT + self.n\n",
+     ["n"], ["LIMIT"]),
+    ("a name the unit writes through an object is storage again",
+     "struct C:\n"
+     "    comptime LIMIT = 10\n"
+     "    var n: Int\n"
+     "\n"
+     "def main():\n"
+     "    c = C(0)\n"
+     "    c.LIMIT = 7\n"
+     "    return c.n\n",
+     ["n", "LIMIT"], []),
+    ("a unit with a write nobody can name demotes nothing",
+     "struct C:\n"
+     "    comptime LIMIT = 10\n"
+     "    var n: Int\n"
+     "\n"
+     "def main(k):\n"
+     "    c = C(0)\n"
+     "    setattr(c, k, 1)\n"
+     "    return c.n\n",
+     ["n", "LIMIT"], []),
+    ("without evidence every declared name stays a field",
+     "struct C:\n"
+     "    comptime LIMIT = 10\n"
+     "    var n: Int\n",
+     ["n"], []),
+]
+
+
+def check_comptime_alias_census(verbose=False):
+    """The four census answers above, against `formal.model` and nothing else.
+
+    Returns `(passed, failures)`. The evidence is attached for the first four
+    rows and deliberately NOT for the last, which is the whole content of that
+    row: `attach_field_evidence` is the pipeline's job and a caller that has not
+    done it gets the pre-rule answer, counting every class-level name as a
+    field. That is the conservative direction and it is the reason the same
+    class can measure differently in the module that declares it and in one that
+    imports it."""
+    build = __import__("formal.build", fromlist=["build"])
+    passed, failures = 0, []
+    for name, source, want_fields, want_consts in _CENSUS_PROBES:
+        attach = name != "without evidence every declared name stays a field"
+        stmts = build.parse_module(source, "<census>")
+        if not attach:
+            # Undo the attachment `parse_module` just made, which is the state
+            # an imported module's parse is in (`formal/imports.py` parses
+            # imported sources directly rather than through `parse_module`).
+            for st in _TYPE_VALUE_MODEL.iter_struct_defs(stmts):
+                if hasattr(st, "_field_evidence"):
+                    delattr(st, "_field_evidence")
+        structs = list(_TYPE_VALUE_MODEL.iter_struct_defs(stmts))
+        if len(structs) != 1:
+            failures.append(f"{name}: parsed {len(structs)} structs, expected 1")
+            continue
+        st = structs[0]
+        got_fields = _TYPE_VALUE_MODEL.struct_field_names(st)
+        got_consts = [c for c, _v in _TYPE_VALUE_MODEL.struct_class_constants(st)]
+        if got_fields != want_fields or got_consts != want_consts:
+            failures.append(
+                f"{name}: fields {got_fields} (want {want_fields}), "
+                f"constants {got_consts} (want {want_consts})")
+            continue
+        passed += 1
+        if verbose:
+            print(f"  PASS  census: {name}")
+    return passed, failures
+
+
 def _every_type_tag_is_distinct_source(chunk: int = 26) -> str:
     """A program that returns 1 if any two admitted type names share a tag."""
     import itertools
@@ -9367,6 +9612,189 @@ TYPE_VALUE_TAG_CASES = [
     ("every_type_tag_is_distinct",
      _every_type_tag_is_distinct_source(),
      0, "distinct"),
+]
+
+
+# ── a `comptime` class member, diffed against CPython rather than pinned ─────
+#
+# The four `comptime_alias_*` cases in `CASES` above pin this construct to
+# numbers. A number is an assertion about a lowering made by the same person who
+# wrote the lowering, so these four re-ask the same questions with CPython as the
+# oracle: each program is written twice, once as Mojo and once as the Python it
+# is a superset of, and the two must print the same bytes on BOTH architectures.
+# That is the only form in which "the value is the constant" is evidence rather
+# than a restatement — the defect being pinned is a program that builds, runs,
+# and returns a number nobody wrote, and a hand-written expectation of `13`
+# would have been written by the same reasoning that produced the 0.
+#
+# The Python text cannot be derived from the Mojo text the way
+# `test_formal_value_model.py` derives it, because `comptime LIMIT = 10` has no
+# Python spelling: it is the class attribute `LIMIT = 10`. The two texts are
+# therefore written out, and the case is the assertion that they mean the same
+# thing.
+COMPTIME_ALIAS_PAIR_CASES = [
+    # Through the receiver, with real instance state beside it — the shape the
+    # stdlib's own `std/python/numpy.mojo` has (`comptime assert shape.is_flat`)
+    # and the one that read 0 before.
+    ("comptime_alias_receiver_matches_cpython",
+     "struct Coord:\n"
+     "    comptime IS_FLAT = True\n"
+     "    var rank: Int\n"
+     "    var product: Int\n"
+     "\n"
+     "    def scaled(self) -> Int:\n"
+     "        return self.product * 100 + self.rank * 10\n"
+     "\n"
+     "def is_flat(s) -> Int:\n"
+     "    if s.IS_FLAT:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "\n"
+     "def main():\n"
+     "    var s = Coord(0, 0)\n"
+     "    s.rank = 2\n"
+     "    s.product = 7\n"
+     "    printf(\"is_flat=%d scaled=%d\", is_flat(s), s.scaled())\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Coord:\n"
+     "    IS_FLAT = True\n"
+     "    def __init__(self, rank, product):\n"
+     "        self.rank = rank\n"
+     "        self.product = product\n"
+     "    def scaled(self):\n"
+     "        return self.product * 100 + self.rank * 10\n"
+     "def is_flat(s):\n"
+     "    if s.IS_FLAT:\n"
+     "        return 1\n"
+     "    return 0\n"
+     "def main():\n"
+     "    s = Coord(0, 0)\n"
+     "    s.rank = 2\n"
+     "    s.product = 7\n"
+     "    sys.stdout.write(\"is_flat=%d scaled=%d\" % (is_flat(s), s.scaled()))\n"),
+    # The same value read four ways in ONE program, so the four spellings cannot
+    # be right by accident in a way the single-case rows would not catch: the
+    # class name from inside a method, `Self` from inside a method, the receiver
+    # from inside a method, and a base that is a frame argument. 40 + 20 + 13 +
+    # 5 = 78, and 78 is not reachable from any subset of {0, 10} plus the field
+    # reads, so a spelling that quietly read a neighbouring slot or an unwritten
+    # one would not land on it.
+    ("comptime_alias_every_spelling_agrees",
+     "struct C:\n"
+     "    comptime LIMIT = 5\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def by_receiver(self) -> Int:\n"
+     "        return self.LIMIT\n"
+     "\n"
+     "    def by_class_name(self) -> Int:\n"
+     "        return C.LIMIT\n"
+     "\n"
+     "    def by_Self(self) -> Int:\n"
+     "        return Self.LIMIT\n"
+     "\n"
+     "    def state(self) -> Int:\n"
+     "        return self.a * 10 + self.b\n"
+     "\n"
+     "def by_argument(c) -> Int:\n"
+     "    return c.LIMIT\n"
+     "\n"
+     "def main():\n"
+     "    var c = C(0, 0)\n"
+     "    c.a = 4\n"
+     "    c.b = 2\n"
+     "    printf(\"%d %d %d %d %d\", c.by_receiver(), c.by_class_name(),\n"
+     "           c.by_Self(), by_argument(c), c.state())\n"
+     "    return 0\n",
+     "import sys\n"
+     "class C:\n"
+     "    LIMIT = 5\n"
+     "    def __init__(self, a, b):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "    def by_receiver(self):\n"
+     "        return self.LIMIT\n"
+     "    def by_class_name(self):\n"
+     "        return C.LIMIT\n"
+     "    def by_Self(self):\n"
+     "        return C.LIMIT\n"
+     "    def state(self):\n"
+     "        return self.a * 10 + self.b\n"
+     "def by_argument(c):\n"
+     "    return c.LIMIT\n"
+     "def main():\n"
+     "    c = C(0, 0)\n"
+     "    c.a = 4\n"
+     "    c.b = 2\n"
+     "    sys.stdout.write(\"%d %d %d %d %d\" % (c.by_receiver(),\n"
+     "           c.by_class_name(), c.by_Self(), by_argument(c), c.state()))\n"),
+    # A `comptime` member the program OVERWRITES. The oracle is CPython's own
+    # rule — an instance attribute shadows the class one — and it is the case
+    # that keeps the rewrite from being a wrong answer: substituting the
+    # declared 5 here would be a number nobody wrote, and the substitution is
+    # vetoed by the same write census that stops a plain class constant being
+    # demoted.
+    ("comptime_alias_overwritten_matches_cpython",
+     "struct C:\n"
+     "    comptime LIMIT = 5\n"
+     "    var n: Int\n"
+     "\n"
+     "    def read(self) -> Int:\n"
+     "        return self.LIMIT\n"
+     "\n"
+     "def main():\n"
+     "    var c = C()\n"
+     "    c.n = 3\n"
+     "    c.LIMIT = 7\n"
+     "    printf(\"%d %d\", c.read(), c.n)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class C:\n"
+     "    LIMIT = 5\n"
+     "    def __init__(self):\n"
+     "        self.n = 0\n"
+     "    def read(self):\n"
+     "        return self.LIMIT\n"
+     "def main():\n"
+     "    c = C()\n"
+     "    c.n = 3\n"
+     "    c.LIMIT = 7\n"
+     "    sys.stdout.write(\"%d %d\" % (c.read(), c.n))\n"),
+    # A class of nothing but `comptime` members, read through the receiver, and
+    # the class read through the CLASS name. This is the zero-instance-state
+    # shape: the receiver has no slots of its own, so before the census learned
+    # the alias the struct measured one field wide and the read returned the
+    # receiver word. It is the case where the width itself is the bug, and where
+    # `_one_word_field_map`'s "a method's `self` IS the field" rewrite would
+    # otherwise have turned the read of a class value into a read of that word.
+    ("comptime_alias_only_class_reads_through_both",
+     "struct Regs:\n"
+     "    comptime A = 3\n"
+     "    comptime B = 4\n"
+     "\n"
+     "    def span(self) -> Int:\n"
+     "        return self.B - self.A\n"
+     "\n"
+     "    def first(self) -> Int:\n"
+     "        return Regs.A + 1\n"
+     "\n"
+     "def main():\n"
+     "    var r = Regs()\n"
+     "    printf(\"%d %d\", r.span(), r.first())\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Regs:\n"
+     "    A = 3\n"
+     "    B = 4\n"
+     "    def span(self):\n"
+     "        return self.B - self.A\n"
+     "    def first(self):\n"
+     "        return Regs.A + 1\n"
+     "def main():\n"
+     "    r = Regs()\n"
+     "    sys.stdout.write(\"%d %d\" % (r.span(), r.first()))\n"),
 ]
 
 def main():
@@ -9410,9 +9838,11 @@ def main():
     # in would mean a sentinel in the exit-status column and a branch that reads
     # a sentinel as if it were a status — which is how a case ends up asserting
     # nothing.
-    pair_names = {c[0] for c in TYPE_APPLICATION_CASES} | {
-        c[0] for c in OVERLOAD_LAYOUT_CASES}
+    pair_names = ({c[0] for c in TYPE_APPLICATION_CASES}
+                  | {c[0] for c in COMPTIME_ALIAS_PAIR_CASES}
+                  | {c[0] for c in OVERLOAD_LAYOUT_CASES})
     wanted_pairs = ([c for c in TYPE_APPLICATION_CASES
+                     + COMPTIME_ALIAS_PAIR_CASES
                      + OVERLOAD_LAYOUT_CASES
                      if not args.cases or c[0] in args.cases])
     # `selected` is the four-column groups, so the pair cases have to be OUT of
@@ -9431,6 +9861,16 @@ def main():
     module_names = {c[0] for c in CROSS_MODULE_CASES}
 
     passed = failed = 0
+    # Before the builds, because it is the only group here that needs no
+    # compiler: a census regression should say so in a second rather than after
+    # a minute of images.
+    census_passed, census_failures = check_comptime_alias_census(args.verbose)
+    for detail in census_failures:
+        print(f"  FAIL  census: {detail}")
+    print(f"formal run: census PASS={census_passed} "
+          f"FAIL={len(census_failures)}")
+    passed += census_passed
+    failed += len(census_failures)
     with tempfile.TemporaryDirectory() as tmpdir:
         for name, source, cpython_source in wanted_pairs:
             src = os.path.join(tmpdir, name + ".mojo")
