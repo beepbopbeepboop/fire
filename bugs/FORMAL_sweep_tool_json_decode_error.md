@@ -4,6 +4,26 @@
 (`bugs/FORMAL_sweep_work_map_2026-09-30.md` §5.1). Not claimed by any live
 task at the time of filing.
 
+**Re-measured the same day, later, on a tree 57 commits further on (`f378280d`):
+1 file, not 3, and not one of the three.** The sweep now reports
+
+```
+TOOL: test_imports.py  (the build driver raised: json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0))
+  tool                            1   no verdict reached: timeout, unreadable file, or an internal exception in the sweep or build driver
+cas: 2 hit / 635 miss / 0 not cached (637 files)
+```
+
+where before it reported `std/gpu/compute/arch/mma_apple.mojo`,
+`mojo/middle/stmts_shared.py` and `test_arm64_emission.py`. **The set moves with
+the machine rather than with the tree**, which is the one thing none of the three
+source files can explain: hypothesis 2 below — the child was killed or its output
+truncated, and an empty stdout is exactly what `char 0` is — is now the leading
+one rather than the second. Both runs were on a box with 18 sweep workers and a
+16 GB ceiling, and this one ran concurrently with three other workers' sweeps.
+
+So the class label is right (nothing was learned about the source) and the
+diagnosis in the heading — "three files" — was a fact about one run.
+
 ## What is wrong
 
 Three of the 628 files in the default arm64 sweep get **no verdict at all**,

@@ -655,7 +655,23 @@ def test_module_body_classification(tmpdir, verbose):
         ("X = 5 + 2 * 3\n", []),                # folds: the folder's closure
         ("comptime X = 5\n", []),               # a compile-time binding
         ("exit(0)\n", ["ExprStmt"]),
-        ("X = [1, 2]\n", ["AssignStmt"]),       # does not fold: module state
+        # A CONTAINER literal does not fold, so it is module STATE — and since
+        # module globals got a `__DATA` slot, that state is in the IMAGE: the
+        # slot's initializer is laid out by the linker before the program
+        # starts. So the store is not body either, and leaving it there was not
+        # merely redundant: `entry_function` picks the body as the entry, so a
+        # module whose whole top level is that binding never called `main` and
+        # the image exited 0 printing nothing. Both architectures, measured; see
+        # `model.module_body`'s `_is_image_initialized`.
+        ('X = [1, 2]\n', []),
+        # …but a container the body REBINDS still needs its store, which is what
+        # `module_body`'s `rebound` re-walk is for and why the exemption is
+        # conditional rather than a blanket "a container is in the image": a
+        # name the body writes has a value the image's initializer does not
+        # describe. (Both of the two stores here is what the rule produces — the
+        # second is a `BinaryOp`, so it is body on its own account.)
+        ('X = [1, 2]\nfor i in range(2):\n    X = [3]\n',
+         ["AssignStmt", "ForStmt"]),
         ("X = 1\nX = 2\n", ["AssignStmt", "AssignStmt"]),
         ("for i in range(3):\n    pass\n", ["ForStmt"]),
         ("if True:\n    pass\n", ["IfStmt"]),

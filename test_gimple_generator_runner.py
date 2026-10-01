@@ -15,6 +15,7 @@ eligible.
 import os
 import platform
 import subprocess
+import sys
 import tempfile
 
 import gimple_codegen
@@ -87,8 +88,18 @@ def _build_generator_program(mojo_src: str) -> str:
     """Compile mojo_src (which must contain a supported generator) directly
     and link it against the A3 stack-switch runtime (or the cpp path, for a
     shape not yet stack-switch-eligible). Returns the exe path."""
-    wd = tempfile.mkdtemp(prefix='mojo_gen_runner_')
     c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(mojo_src)
+    return _build_generator_program_from_code(c_code, cpp_code)
+
+
+def _build_generator_program_from_code(c_code: str, cpp_code: str) -> str:
+    """The half of _build_generator_program that takes ALREADY-generated
+    code. Split out so a test whose source needed extra scaffolding on disk
+    (a package, for a cross-module fixture) can hand in the compile
+    product it produced itself instead of re-generating from a single
+    string — the compile and the link have always been separate concerns and
+    only the single-source convenience had fused them."""
+    wd = tempfile.mkdtemp(prefix='mojo_gen_runner_')
     c_path = os.path.join(wd, 'prog.c')
     with open(c_path, 'w') as f:
         f.write(c_code)
@@ -160,6 +171,151 @@ def _build_generator_program(mojo_src: str) -> str:
         raise RuntimeError(f"link failed: {r.stderr}")
     os.chmod(exe, 0o755)
     return exe
+
+
+# ── A FOREIGN module's A3-lowered generator, consumed from a cpp-path ──────
+#
+# Two halves of one feature, neither observable without the other:
+#
+#   1. `mojo/middle/coro.py`'s `register` used to file a lowered generator
+#      only into the per-bare-name `_generator_api`, never into the
+#      whole-program `_generator_home_api` that
+#      `_cpp_resolve_generator_call_api` searches for its
+#      `<module>.<gen_fn>` shape. So a generator body of ONE module could
+#      not construct a handle to a generator of ANOTHER at all, whenever
+#      that generator happened to be A3-eligible (`publish_a3_generators`,
+#      mojo/backend_gimple/emit_resolve.py). Both backends expose the SAME
+#      four-symbol `{base}_start/_resume/_value/_destroy` ABI, so only the
+#      registry entry was missing.
+#   2. `next(<handle>)` was supported but `for x in <handle>:` was not: it
+#      fell through to a generic C++ range-for over the bare handle text and
+#      g++ rejected it with "'begin' was not declared in this scope"
+#      (`MojoGenerator *` is an opaque runtime handle).
+#
+# Real: c_common/tables.py's `read_table` consuming
+# `strutil._iter_significant_lines(infile)` — see
+# bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
+
+_FOREIGN_PKG_FILES = {
+    '__init__.py': '',
+    # A generator the A3 (stack-switch) backend lowers: no kwonly params, no
+    # decorators, scalar yields. That it lowers via A3 rather than the cpp
+    # path is the point of the fixture.
+    'foreign.py': ("def counter(n):\n"
+                   "    i = 0\n"
+                   "    while i < n:\n"
+                   "        yield i\n"
+                   "        i = i + 1\n"),
+}
+
+
+def _build_foreign_package_run(entry_rel, entry_src, cwd):
+    """Write the package, compile `entry_rel` with do_imports=True, build
+    (C object + C++20 coroutine unit + the A3 runtime objects), run, and
+    return (compiled_stdout, cpython_stdout)."""
+    os.makedirs(os.path.join(cwd, 'fpp'), exist_ok=True)
+    for rel, src in _FOREIGN_PKG_FILES.items():
+        with open(os.path.join(cwd, 'fpp', rel), 'w') as f:
+            f.write(src)
+    entry = os.path.join(cwd, 'fpp', entry_rel)
+    with open(entry, 'w') as f:
+        f.write(entry_src)
+    cp = subprocess.run([sys.executable, '-m', 'fpp.' + entry_rel[:-3]],
+                        cwd=cwd, capture_output=True, text=True, timeout=60)
+    cpython_stdout = cp.stdout
+    c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
+        entry_src, do_imports=True, filename=entry)
+    if not cpp_code:
+        raise RuntimeError(
+            "expected a non-empty generated .cpp — this source's own "
+            "generator should NOT be A3-eligible (the kwonly parameter is "
+            "what forces it down the cpp path)")
+    exe = _build_generator_program_from_code(c_code, cpp_code)
+    out = subprocess.run([exe], capture_output=True, timeout=10).stdout.decode()
+    return out, cpython_stdout
+
+
+def _test_foreign_a3_generator_handle(name, entry_src, want):
+    """Compile+run the package fixture and compare against CPython on the
+    very same files. `want` is asserted against CPython's own output first,
+    so a fixture that drifted from its documented expectation fails as a
+    FIXTURE bug and not as a compiler regression."""
+    global _PASS, _FAIL
+    try:
+        wd = tempfile.mkdtemp(prefix='mojo_gen_fpp_')
+        got, cpy = _build_foreign_package_run('main.py', entry_src, wd)
+    except subprocess.TimeoutExpired as e:
+        print(f"TIMEOUT {name}: {e}")
+        _FAIL += 1
+        return
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+        return
+    if cpy != want:
+        print(f"FAIL  {name}: CPython baseline is not {want!r} (got {cpy!r}) "
+              f"— fixture is wrong, not the compiler")
+        _FAIL += 1
+        return
+    if got == cpy:
+        print(f"PASS  {name}")
+        _PASS += 1
+    else:
+        print(f"FAIL  {name}: compiled stdout {got!r} != CPython {cpy!r}")
+        _FAIL += 1
+
+
+def _foreign_a3_generator_handle_next():
+    # `next()` on a handle built from ANOTHER module's A3-lowered generator.
+    # `consume` is itself a GENERATOR (its kwonly parameter is what keeps IT
+    # off the A3 path, so the cpp C++20-coroutine emitter is what does the
+    # driving) that consumes the foreign handle to exhaustion.
+    # The consumer's own kwonly parameter is what keeps IT off the A3 path
+    # (so it really is the cpp C++20-coroutine emitter doing the driving)
+    # while `foreign.counter` really is A3-lowered — the exact split in
+    # c_common/tables.py's read_table/strutil pair. Before the fix the
+    # module did not compile at all: `a call to unresolved callee
+    # 'next(...)'`, because `_generator_home_api` held no entry for
+    # `foreign.counter`.
+    _test_foreign_a3_generator_handle(
+        "foreign_a3_generator_handle_next",
+        "from . import foreign\n"
+        "\n"
+        "def consume(n, *, start=0):\n"
+        "    g = foreign.counter(n)\n"
+        "    yield next(g)\n"
+        "\n"
+        "def main():\n"
+        "    print(sum(consume(4)))\n"
+        "\n"
+        "main()\n",
+        "0\n")
+
+
+def _foreign_a3_generator_handle_for_loop():
+    # The `for` half of consuming one handle to exhaustion. `next(g)` and
+    # `yield from g` already drove `{base}_resume`/`{base}_value`, but the
+    # loop did not: it fell through to a generic C++ range-for over the bare
+    # `MojoGenerator *` text and g++ rejected it with "'begin' was not
+    # declared in this scope". Asserted on the binary's real output, so a
+    # future regression cannot pass by merely compiling — and the `* 10`
+    # plus the sum exercise the VALUE each resume produced, not just the
+    # iteration count (a loop that ran zero times, or ran once, sums
+    # differently).
+    _test_foreign_a3_generator_handle(
+        "foreign_a3_generator_handle_for_loop",
+        "from . import foreign\n"
+        "\n"
+        "def consume(n, *, start=0):\n"
+        "    g = foreign.counter(n)\n"
+        "    for rest in g:\n"
+        "        yield rest * 10\n"
+        "\n"
+        "def main():\n"
+        "    print(sum(consume(4)))\n"
+        "\n"
+        "main()\n",
+        "60\n")
 
 
 def test_generator_stdout(name: str, mojo_src: str, expected_stdout: str):
@@ -3238,6 +3394,9 @@ def main():
     for r in g(pick(1, 2)):
         print(r)
 """, "yields ['x'], whose call sites do not all pass the same")
+
+    _foreign_a3_generator_handle_next()
+    _foreign_a3_generator_handle_for_loop()
 
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")

@@ -443,6 +443,28 @@ MEASURED_PEAK_GB = {
     'ownership-destruct':  (0.01, 'measured'),   # 0.5 s, 113 fixture cases
     'x86-decode':          (0.01, 'measured'),   # 0.5 s, one round-trip check
     'md2html':             (0.01, 'measured'),   # 0.5 s, 14 unittest cases
+    # The ten the batch merge left unregistered, measured 2026-10-01 on this
+    # tree the same way — one at a time under `tools/memslot.py --gb 8`, arm64,
+    # python 3.14.7 — except that `tools/memcap.py`'s own report rounds to
+    # 0.1 GB and eight of the ten are under it, so the peak here is
+    # `procrun.tree_rss` polled every 50 ms instead: the same instrument memcap
+    # enforces its ceiling with, at a finer interval. Two decimals for the same
+    # reason the rows above carry two.
+    #
+    # `formal-json` is 4.5x every other one of the ten and is still `tiny`, which
+    # is the number worth having written down: a class assigned from "it builds
+    # images like the others" would have been a guess, and a guess here is a
+    # machine-wide reservation.
+    'formal-json':            (0.37, 'measured'),   # 31 s, 10 groups
+    'formal-pathlib':         (0.08, 'measured'),   # 15 s, 7 groups
+    'formal-target-queries':  (0.08, 'measured'),   # 5 s, 25 cases
+    'formal-small-hosts':     (0.08, 'measured'),   # 5 s, 4 groups
+    'formal-specialization':  (0.07, 'measured'),   # 1 s, 6 cases
+    'formal-method-param-field': (0.07, 'measured'),  # 9 s, 14 cases
+    'formal-external-call':   (0.08, 'measured'),   # 3 s, 29 cases
+    'formal-receiver-position': (0.07, 'measured'),  # 2 s, 12 cases
+    'formal-value-model':     (0.07, 'measured'),   # 9 s, 19 cases
+    'formal-x86-dylib':       (0.09, 'measured'),   # 2 s, 9 cases
 }
 
 # How much room above a measured peak a class must leave. 1.5x, and the reason
@@ -1718,6 +1740,18 @@ test('formal', [PY, 'test_formal.py'], j=True,
      desc='every formal/examples/*.mojo typechecks its generated Lean proof')
 test('formal-run', [PY, 'test_formal_run.py'], deps=['preflight'],
      desc='formal arm64 executables that actually build AND run (no lean)')
+# Module-global state. Its own file rather than more rows in `formal-run`
+# because it is the only formal test that runs each case THREE ways — the two
+# backends' images plus the Mojo interpreter — and that is the assertion: a
+# module global's correctness depends on a codegen, a linker and a segment
+# agreeing about one address, and no single-backend run can see a disagreement
+# between two codegens. It was worth its own file that it found three
+# x86-64-only instruction-encoding bugs (`jne rel32` with a spurious ModRM, a
+# `jne` guarding on flags `mov` never set, and the initializer flag stored
+# before its value was in it) — all of which presented as a crash somewhere
+# else entirely.
+test('formal-globals', [PY, 'test_formal_globals.py'], deps=['preflight'],
+     desc='module-global state: image + interpreter agree, on both backends')
 # `deps=['preflight', 'prooflib']` and NOT in `check`: half this file's
 # assertions are "Lean accepts the generated file", and without `prooflib` they
 # SKIP -- which would be a silent coverage hole of exactly the kind `prooflib`
@@ -1751,6 +1785,17 @@ test('formal-dylib', [PY, 'test_formal_dylib.py'],
 test('formal-imports', [PY, 'test_formal_imports.py'],
      deps=['preflight', 'prooflib'],
      desc='formal import surface')
+# The hostmod claim: `ast` left HOST_MODELLED, and this is what says the module
+# behind it is CPython's tokenizer rather than a plausible one — every case run
+# through the built arm64 image AND through this process's `tokenize`, with the
+# known parse gaps PINNED rather than skipped. In `check` and not in `proofs`
+# because it needs no `prooflib` (it asserts without Lean) and costs about four
+# seconds, which is the same class as the other two formal claims in that
+# bucket: `formal-link-accounting` says the NAME left the host set, this says
+# the module that replaced it is right.
+test('formal-ast', [PY, 'test_ast_formal.py'],
+     deps=['preflight'],
+     desc='formal/hostmods/ast.mojo tokenizes and validates like CPython\'s')
 # No j=True: test_formal_sweep.py is a plain unittest.main() and has no -j of
 # its own, so forwarding one makes it exit 2 on "unrecognized arguments".
 # `j` is a claim about the tool, not a request — test_formal.py, which does
@@ -1983,6 +2028,153 @@ test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
             'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='the syscalls under the os host module, through real images')
 
+# ── the ten the batch merge left unregistered ──────────────────────────────
+# `suite-self-test`'s estate check is red with exactly these ten, and every one
+# of them arrived in the batch that the integrator merged in one commit
+# (`0aaf9806`, `git log --merges master..HEAD`) with a merged branch behind it
+# and no registration. That is the same hole
+# `bugs/UNTESTED_estate_check_is_red_and_outside_the_gate.md` was opened for and
+# closed for, walked through again one file at a time — which is what the check
+# is FOR, and this paragraph is the receipt: it fired on the batch rather than
+# on the next reader.
+#
+# Registered, not excused. `UNREGISTERED` in `test_suite.py` exists for a file
+# that genuinely is not run, and every one of these is a build-and-RUN suite
+# against CPython, so declaring ten of them unaccounted-for would be the estate
+# check's own failure mode repeated on purpose. `mem='tiny'` because that is what
+# they measure (0.065-0.373 GB, the table below), and `proofs` rather than
+# `check` because they are not the everyday inner loop: `formal-json` alone is
+# 31 s, and the rest are 1-15 s each.
+#
+# Peaks are MEASURED, not inferred from the shape, because the ratchet in
+# `test_suite.py` compares each class against its recorded peak and a class is
+# also a machine-wide reservation (`tools/memslot.py`). Measured one at a time on
+# 2026-10-01 on this tree, each under `tools/memslot.py --gb 8`, with the peak
+# read by polling `procrun.tree_rss` every 50 ms — the same instrument
+# `tools/memcap.py` enforces its ceiling with, at a finer interval, because
+# memcap's own report rounds to 0.1 GB and eight of these ten are under it.
+
+# `external_call["sym", RetType](...)`: the construct that was the terminal
+# refusal behind the largest single family in the sweep residue. 29 cases, and
+# the needle half of the file is as load-bearing as the answer half: a refusal
+# that stops being made is a wrong program, so both directions are pinned.
+#
+# RED, and registered red rather than excused, for the same reason
+# `formal-struct` above is. 1 of 29: `env_round_trip` declares its `getenv`
+# return type as `_CPointer[UInt8, UntrackedOrigin[mut=False]]`, and the tuple
+# subscript in THAT ANNOTATION is refused as a value subscript before the
+# `external_call` itself is ever read. The construct is right — a two-argument
+# subscript on a type is not a two-dimensional index — and it is being asked the
+# question at the wrong moment; see
+# bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md.
+test('formal-external-call', [PY, 'test_formal_external_call.py'],
+     mem='tiny', deps=['preflight'],
+     expect='bugs/FORMAL_external_call_a_multiparameter_type_in_the_bracket.md '
+            '— 1 of 29: a two-argument type subscript inside the external_call '
+            'bracket is refused as a value subscript',
+     extra=['test_formal_external_call.py', 'formal/build.py',
+            'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+     desc='external_call[sym, RetType]: both the answers and the refusals')
+# `json`: RFC 8259 on the formal backend, every case computed twice — once
+# through `fire.py build --formal` and executed, once through this process's own
+# `json` — because a table of digests is a table that is wrong the moment
+# someone transposes a character, which is the one mistake a byte-oriented
+# module cannot be allowed to make. 10 groups, 31 s, and the largest peak of the
+# ten (0.373 GB, still `tiny`).
+test('formal-json', [PY, 'test_formal_json.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_json.py', 'formal/hostmods/json.mojo',
+            'formal/build.py', 'formal/model.py',
+            'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+     desc='json: RFC 8259 built, run, and diffed against CPython\'s json')
+# `pathlib`, and the `PurePosixPath` half of it: a module whose every answer is
+# short, which is exactly what makes a table of them dangerous — `name`, `stem`
+# and `suffix` differ from each other by one rule each, and a transposed row in
+# a table of expected values looks like a pass.
+test('formal-pathlib', [PY, 'test_formal_pathlib.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_pathlib.py', 'formal/hostmods/pathlib.mojo',
+            'test_formal_json.py', 'formal/build.py',
+            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+     desc='pathlib: the pure half of PurePosixPath, against CPython\'s pathlib')
+# A method parameter's field, established by its DECLARED type and nothing else.
+# A method's other parameters were never seeded as frame holders, so
+# `other.start` in `Slice.__eq__` read a slot nothing had written — and the
+# neighbouring case that must STAY refused, a struct's frame where a one-field
+# struct is declared, is in the same file because the two are one decision.
+test('formal-method-param-field', [PY, 'test_formal_method_param_field.py'],
+     mem='tiny', deps=['preflight'],
+     extra=['test_formal_method_param_field.py', 'formal/build.py',
+            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+     desc='a method parameter\'s field, from its declared type')
+# A frame address at an ARGUMENT position of a comptime-specialized call —
+# `f[T](r)` — which is not a method call at all, so none of the receiver-handoff
+# family covers it.
+#
+# RED, and registered red rather than excused. 2 of 12, and BOTH are the same
+# direction: a construct with no representation now BUILDS instead of being
+# refused, once on the return side and once on a value-only callee reached
+# through a specialization. A built image here is a wrong program (measured: the
+# return case exits 0 where the source's answer is 7, and the callee case exits
+# 8, which is a frame address read as an integer), so this is a real gap and not
+# a stale expectation; see
+# bugs/FORMAL_a_specialization_defeats_the_frame_escape_refusals.md.
+test('formal-receiver-position', [PY, 'test_formal_receiver_position.py'],
+     mem='tiny', deps=['preflight'],
+     expect='bugs/FORMAL_a_specialization_defeats_the_frame_escape_refusals.md '
+            '— 2 of 12: a specialized call with a frame address at an argument '
+            'position bypasses both the returned-frame and the value-only-callee '
+            'refusals and builds',
+     extra=['test_formal_receiver_position.py', 'formal/build.py',
+            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+     desc='a frame address at a specialization\'s argument position, refused')
+# `io` and `typing`: four numeric constants and one function, which is the
+# measurement behind why `typing` is one function — the formal backends ERASE
+# annotations, so `from typing import Optional` resolves as soon as the module
+# EXISTS and the name need not be in its export table at all.
+test('formal-small-hosts', [PY, 'test_formal_small_hosts.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_small_hosts.py', 'test_formal_json.py',
+            'formal/hostmods/io.mojo', 'formal/hostmods/typing.mojo',
+            'formal/build.py', 'formal/model.py'] + FORMAL_BUILD_INPUTS,
+     desc='io and typing, and the 38 names that must stay absent')
+# A comptime SPECIALIZATION, `f[a, b](...)`, on both formal paths. The bracket
+# is spelled like a subscript and both backends resolve it by flattening the
+# callee to its base NAME, which is where everything that goes wrong here goes
+# wrong — so the file also pins the shapes that must stay refused.
+test('formal-specialization', [PY, 'test_formal_specialization.py'],
+     mem='tiny', deps=['preflight'],
+     extra=['test_formal_specialization.py', 'formal/build.py',
+            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+     desc='f[a, b](...): a specialization, and what must stay refused')
+# `#kgen.param.expr<…>`: the family whose meaning is not an MLIR object at all
+# but a QUESTION the build can answer. `std/sys/info.mojo` is built out of them
+# and 35 of the 46 files in that family are blocked behind the construct.
+test('formal-target-queries', [PY, 'test_formal_target_queries.py'],
+     mem='tiny', deps=['preflight'],
+     extra=['test_formal_target_queries.py', 'formal/build.py',
+            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+     desc='#kgen.param.expr<…>: a build-time question, answered and executed')
+# The value model's shapes, measured against CPython rather than pinned. Its
+# `global`-write case is the one worth naming here: it was a REFUSAL until the
+# batch, and it is a differential case now, because `formal-module-globals` gave
+# the name a real `__DATA` slot and the refusal's premise went with it. The case
+# carries that measurement and the two commits.
+test('formal-value-model', [PY, 'test_formal_value_model.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_value_model.py', 'formal/build.py',
+            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+     desc='the value model\'s shapes, against CPython on both backends')
+# An x86-64 MODULE dylib that calls out: it must build, sign, load and RUN.
+# Module dylibs are how every cross-module call reaches its definition on this
+# backend, so a defect here is a whole class of link failures.
+test('formal-x86-dylib', [PY, 'test_formal_x86_64_dylib.py'], mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_x86_64_dylib.py', 'formal/macho_linker.py',
+            'formal/elf.py', 'formal/build.py',
+            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+     desc='an x86-64 module dylib that calls out, built, signed and run')
+
 # ── not the compiler: the CPU reference the Metal path is checked against ───
 # `test_llm/` is a self-contained sub-project: a ~1M-parameter linear-attention
 # character model in pure Python, with hand-written Metal kernels and a bench C
@@ -2054,9 +2246,15 @@ BUCKETS = {
     'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'interporacle', 'examples-parse',
+# `ptrreg-boxed-str` is master's split-out red group of the
+              # pointer-registry harness and `formal-ast` is the batch's
+              # hostmod claim for `ast`; each was added to this bucket on its
+              # own side of the merge and both are named here, so a conflict
+              # resolution that had to pick one would have quietly dropped a
+              # test from the everyday loop.
               'rthdrscan', 'ptrreg', 'ptrreg-boxed-str', 'runtimedylib',
-              'sqliteruntime',
-              'formal-sweep-truth', 'formal-link-accounting', 'silentnoop',
+              'sqliteruntime', 'formal-sweep-truth', 'formal-link-accounting',
+              'formal-ast', 'silentnoop',
               'refusal-taxonomy', 'returned-frame-layout',
               # The suite tests ITSELF, and so does the inventory of what runs.
               # Both were in `smoke`, which is in no bucket, so `make gate`
@@ -2133,7 +2331,7 @@ BUCKETS = {
     'stdlib-corpus': ['stdlib-tests'],
 
     'proofs': ['formal', 'formal-call-proofgen',
-               'formal-run', 'formal-dylib', 'formal-imports',
+               'formal-run', 'formal-globals', 'formal-dylib', 'formal-imports',
                'formal-sweep', 'formal-sweep-truth',
                'formal-link-accounting', 'formal-re', 'formal-runtime-link',
                'refusal-taxonomy', 'comptime-parity',
@@ -2152,7 +2350,17 @@ BUCKETS = {
                # of this list is asking. Expansion schedules each test once per
                # run, so being in `check` too costs nothing.
                'formal-dataclasses', 'formal-module-attr',
-               'formal-os-backing'],
+               'formal-os-backing',
+               # The ten the batch merge left unregistered, so `proofs` is
+               # where the whole formal picture is and these were the ten
+               # missing pieces of it. `formal-value-model` and
+               # `formal-receiver-position` are two of the largest formal
+               # bodies of test in the tree, so the gap was not marginal.
+               'formal-external-call', 'formal-json', 'formal-pathlib',
+               'formal-method-param-field', 'formal-receiver-position',
+               'formal-small-hosts', 'formal-specialization',
+               'formal-target-queries', 'formal-value-model',
+               'formal-x86-dylib'],
     'x86': ['formal-x86', 'formal-x86-endtoend', 'formal-x86-model',
             # The decoder, which is x86-64 coverage with no image in it: half a
             # second and one round-trip check, and registered with no bucket,

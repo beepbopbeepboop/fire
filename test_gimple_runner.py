@@ -3741,6 +3741,59 @@ for x in ['p', 'q']:
     print(x)
 """, "1\n2\np\nq\n")
 
+    # A `for` loop whose target is a bare 1-tuple — `for patterns, in ...:`,
+    # real at c_parser/preprocessor/__init__.py:169
+    # (`for patterns, in _resolve_file_values(filename, file_same.items()):`).
+    # `_parse_unpack_target` cannot tell a TRAILING comma from a separator, so
+    # the parser used to consume the `in` as a second target name and the whole
+    # module failed to parse — `169:17: Expected KW got NAME(...)` — which
+    # took every c-analyzer file whose closure reaches
+    # `c_parser/preprocessor` down with it. The compiled path already
+    # unpacks a one-name parenthesised for-target correctly, so restoring the
+    # parse restores compiled-path/CPython parity for the shape; asserted here
+    # against CPython's own output rather than a hardcoded literal for exactly
+    # that reason.
+    test_gimple_stdout("gimple_for_target_bare_one_tuple", """\
+def main():
+    for a, in [(1,), (2,), (3,)]:
+        print(a)
+    for b, in [('x',), ('y',)]:
+        print(b)
+""", "1\n2\n3\nx\ny\n")
+
+    # The parser invariant the fix rests on: the bare trailing-comma spelling
+    # and the parenthesised one produce the IDENTICAL target representation,
+    # so there is exactly one shape for every downstream consumer (the
+    # interpreter's `_bind_comprehension_target`, both codegen paths'
+    # tuple-target machinery) to learn rather than two spellings. Asserted on
+    # the AST, not on behaviour, because the two Python meanings that share
+    # this spelling are a separate, separately-filed bug — see
+    # bugs/CODEGEN_for_loop_target_one_tuple_vs_paren_single_name.md, whose
+    # subject is `for (a) in b:` (parenthesised NAME, no comma) sharing this
+    # representation with `for (a,) in b:`.
+    def test_for_target_bare_one_tuple_matches_paren_ast():
+        global _PASS, _FAIL
+        name = "gimple_for_target_bare_one_tuple_matches_paren_ast"
+        try:
+            import fire_compiler as _N
+            def _tgt(src):
+                return _N.Parser(_N.py_tokenize(src)).parse_module()[0].target
+            _bare = _tgt("for a, in b:\n    pass\n")
+            _paren = _tgt("for (a,) in b:\n    pass\n")
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if _bare == _paren:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: bare trailing comma parses to {_bare!r}, "
+                  f"`for (a,) in` parses to {_paren!r}")
+            _FAIL += 1
+
+    test_for_target_bare_one_tuple_matches_paren_ast()
+
     # bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md: a
     # cross-module constructor call whose only field-type evidence is an
     # unannotated scalar/container LITERAL argument (`Parameter('v', 7)`,
@@ -3786,6 +3839,123 @@ for x in ['p', 'q']:
                     os.unlink(exe_file)
                 except Exception:
                     pass
+
+    def _compile_package_and_run(pkg_name, files, entry_relpath, timeout=60):
+        """Write `files` ({relpath: src}) into a temp PACKAGE directory,
+        compile `entry_relpath` with do_imports=True (single-TU inline
+        path), build with gcc -fgimple, run, and return captured stdout.
+        Returns (compiled_stdout, cpython_stdout) so the caller can compare
+        the compiled program against the interpreter on the SAME source —
+        the comparison this file's other helpers skip because their fixtures
+        have no imports to run twice."""
+        with tempfile.TemporaryDirectory() as wd:
+            for rel, src in files.items():
+                path = os.path.join(wd, pkg_name, rel)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                open(path, 'w').write(src)
+            entry = os.path.join(wd, pkg_name, entry_relpath)
+            from gimple_codegen import compile_to_gimple
+            c_code = compile_to_gimple(open(entry).read(),
+                                       do_imports=True, filename=entry)
+            # CPython, on the very same files, from the package's parent so
+            # the relative import resolves the same way it must for the
+            # compiled path (`python3 -m <pkg>.<entry>`).
+            cp = subprocess.run(
+                [sys.executable, '-m', pkg_name + '.' +
+                 entry_relpath[:-len('.py')].replace('/', '.')],
+                cwd=wd, capture_output=True, text=True, timeout=timeout)
+            cpython_stdout = cp.stdout
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
+            f.write(c_code)
+            c_file = f.name
+        exe_file = c_file.replace('.c', '.exe')
+        try:
+            runtime_dir = os.path.join(HERE, 'runtime')
+            result = subprocess.run(
+                [find_gcc(), '-fgimple', f'-I{runtime_dir}', '-o', exe_file,
+                 c_file, os.path.join(HERE, 'runtime', 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=timeout)
+            if result.returncode != 0:
+                raise RuntimeError(f"gcc -fgimple failed: {result.stderr[:300]}")
+            return run_executable_stdout(exe_file), cpython_stdout
+        finally:
+            for p in (c_file, exe_file):
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
+
+    def test_relative_underscore_module_mangled_suffix_agrees():
+        """A `from ._helper import f` (leading-dot relative import whose
+        module basename starts with `_`) must give the imported free
+        function ONE mangled C identifier across its declaration, its
+        definition and its call site — even when the defining and importing
+        modules DISAGREE about the callee's parameter types.
+
+        The disagreement is the point, not decoration. `count_items` infers
+        `items` as `MojoList *` from its own `for it in items:` body; the
+        importing module's own `_signature_ctypes` snapshot of the same
+        FunctionDef has no such evidence and freezes `int64_t`. The whole
+        program shares `_home_def_param_types` precisely so the definer's
+        committed signature — the one the emitted definition's overload
+        suffix is hashed from — wins that disagreement.
+
+        It did not, for any module whose name has BOTH a leading depth dot
+        and its own leading underscore: `_local_def_pts` published the entry
+        under `module_name.replace('.', '_')`, which spells `._helper` as
+        `__helper`, while every importer resolves the same module as
+        `_helper`. The read missed, the all-int64_t tier answered, the two
+        halves of one symbol hashed different suffixes, and the build died
+        at gcc with
+
+            implicit declaration of function '__helper_count_items_2dbb98';
+            did you mean '__helper_count_items_d07985'?
+
+        — the exact shape that refused Tools/c-analyzer's
+        c_parser/parser/__init__.py (`_common_set_capture_groups_37bd8e` vs
+        `..._6aabcf`). Asserted on the built binary's real stdout against
+        CPython's, so a future regression cannot pass by merely compiling:
+        the pre-fix state does not compile at all."""
+        global _PASS, _FAIL, _TIMEOUT
+        name = "relative_underscore_module_mangled_suffix_agrees"
+        files = {
+            '__init__.py': '',
+            '_helper.py': ("def count_items(items, stop):\n"
+                           "    n = 0\n"
+                           "    for it in items:\n"
+                           "        n = n + 1\n"
+                           "    return n\n"),
+            'main.py': ("from ._helper import count_items\n"
+                        "\n"
+                        "def main():\n"
+                        "    print(count_items(('a', 'b'), 0))\n"
+                        "\n"
+                        "main()\n"),
+        }
+        try:
+            got, want = _compile_package_and_run(
+                'uscore', files, 'main.py')
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if want != "2\n":
+            print(f"FAIL  {name}: CPython baseline is not '2\\n' "
+                  f"(got {want!r}) — fixture is wrong, not the compiler")
+            _FAIL += 1
+            return
+        if got == want:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: compiled stdout {got!r} != CPython {want!r}")
+            _FAIL += 1
+
+    test_relative_underscore_module_mangled_suffix_agrees()
 
     def test_cross_module_ctor_scalar_field_type():
         global _PASS, _FAIL, _TIMEOUT

@@ -614,3 +614,70 @@ above, and the two attributions they guessed.
   failures are a THIRD `19bc0dd` regression in `formal/`, not string work.
   See `bugs/FORMAL_default_int_type_typed_flag_collapse.md`.
 
+
+---
+
+# Wave 8: the RETURNED half of the 16 is landed, and the other half is now a
+# named crash rather than a wrong answer
+
+This document's closing section is the one a reader of a `String` finding opens,
+so the two things that have changed since it was written go here rather than
+into the text above it.
+
+## 1. `return <frame>` no longer names a String, or anything else
+
+The 16 "a String receiver is returned/passed" findings were one construct, and
+the returned half of it is now lowered. A function that returns a multi-field
+struct's receiver takes one hidden trailing argument — the address of a block
+the CALLER reserved, per call site, in the prologue — and `return <frame>`
+becomes "copy the block there and return that word". Full design, the three
+properties that make it work, the refusals that remain and the measured sweep
+numbers on both machines: `bugs/FORMAL_wide_receiver_by_reference.md`, wave 8.
+
+Measured on this repository's own arm64 sweep: the family
+`frame address escapes: returned by its creator` went from **11 files to 0** and
+`frame address escapes: aliased out of a method` from **3 to 0**, with **zero
+files gaining a PASS** and zero losing one. The six stdlib files the snapshot
+named all moved as well, four of them to a construct in a DIFFERENT module —
+which is what a terminal-construct fix is supposed to produce, and it is why
+none of them passes yet.
+
+**This does not touch the collision this document is about.** The convention is
+keyed on `struct_is_framed` — a purely local question — and not on any table of
+names, so it is name-independent and says nothing about whether a `String` local
+is a frame. The next step is still D2's, and the two are independent: the
+returned half was reachable because a frame's LIFETIME had an answer, not
+because its REPRESENTATION did.
+
+## 2. The remaining half now has a reproducer, a crash, and a doc
+
+The representation collision named above — *"a `String` local must be either a
+three-slot frame or a `char *`, and today the two representations are in force
+simultaneously"* — is not reachable through a `return`. It is reachable through
+a constructor and it is a **SIGBUS on both machines**:
+
+```python
+struct String:
+    var _ptr_or_data: Pointer[UInt8]
+    var _len_or_data: Int
+    var _capacity_or_data: Int
+    def size(self) -> Int:
+        return self._len_or_data
+
+def main(n: Int) -> Int:
+    var a = String()
+    a._len_or_data = 5
+    return a.size()          # SIGBUS, exit 138; the source says 5
+```
+
+`type_constructor_prefers_local_struct` only fires for
+`UNREPRESENTABLE_TYPE_CTORS`, so `String()` goes down the string-conversion path
+and `a` holds a `char *`; `_constructor_bindings` sees a name in
+`framed_struct_names` and makes `a` a three-slot-frame holder. The store is
+then through a text-section address plus 8. Two answers to one question, in one
+file, and the measurement is a crash rather than a wrong number.
+
+Full reproducer, the two candidate fixes and their blast radii, and the
+denominator warning that goes with either:
+`bugs/FORMAL_string_constructor_collision.md`. It is the file to read before
+trying to land a `String`-shaped frame on this path.

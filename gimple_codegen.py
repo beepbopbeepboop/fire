@@ -1453,6 +1453,20 @@ class GimpleGen:
         self.auto_gpu = auto_gpu
         self.func_return_types: dict[str, str] = {}
         self.struct_field_types: dict[str, dict[str, str]] = {}
+        # local alias -> the struct's own BARE name, for `from M import
+        # Class as Alias`. `struct_field_types` is keyed by the name as
+        # written in the DEFINING module and is the table the constructor
+        # dispatch in emit_calls.py tests membership against, so an aliased
+        # import has to be mapped BACK before that test or `Alias(...)`
+        # misses every struct table and lands in the generic
+        # single-string-argument "opaque constructor" fallback, which
+        # returns the argument unchanged — `x` became the literal `"a"` and
+        # `x.widgetName` then dispatched getattr on a `char *`
+        # (bugs/CODEGEN_aliased_imported_struct_construction_unresolved.md).
+        # Populated by `_note_struct_import_alias`, which is the single
+        # writer for BOTH the module-scope (`_register_sym`) and the
+        # function-scoped (`_gen_stmt_FromImportStmt`) spelling.
+        self._struct_import_aliases: dict[str, str] = {}
         # Names of user structs that subclass the builtin `dict` (directly
         # or transitively) — populated by gen_module_impl. Such a struct
         # gets a synthesized `_data: MojoDict *` backing field, and
@@ -1918,7 +1932,7 @@ class GimpleGen:
         self._regex_progs_defined: set = set()       # pattern source → already emitted its C decl (avoid duplicate `static const ARRAY[] = {...}` across submodules)
         self._find_generic_visited: set = set()      # (module, name, kind) already visited by _find_generic_source (breaks import cycles)
         self._scalar_annotated_locals: set = set()   # per-function allow-list for _emit_call's BUG-2026-016 auto-address coercion (reseeded by gen_func)
-        self._struct_home_cache: dict = {}           # (module, name) -> defining-module ref | None, memo for _find_struct_home_module (breaks re-export cycles)
+        self._struct_home_cache: dict = {}           # "kind\x1fmodule\x1fname" -> defining-module ref | None, memo for _find_symbol_home_module (which _find_struct_home_module delegates to), and the re-export-cycle guard
         self._regex_match_vars: dict[str, dict] = {} # for-loop var name → live match context (set/cleared per loop)
         self._dataclass_fields_vars: set = set()     # for-loop vars bound from dataclasses.fields(x) — f.name is f itself (set/cleared per loop)
         self._const_str_locals: dict[str, str] = {}  # _pair_key(func_name, var_name) → compile-time-folded string constant
@@ -3849,10 +3863,18 @@ class GimpleGen:
         return gfn._find_imported_struct(self, module, name)
     def _find_struct_home_module(self, module: str, name: str, depth: int = 0) -> str | None:
         return gfn._find_struct_home_module(self, module, name, depth=depth)
+    def _find_symbol_home_module(self, module: str, name: str, kind: str,
+                                 depth: int = 0, want_abs: bool = False):
+        return gfn._find_symbol_home_module(self, module, name, kind,
+                                           depth=depth, want_abs=want_abs)
+    def _resolved_export_entry(self, module: str, name: str, info):
+        return gfn._resolved_export_entry(self, module, name, info)
     def _resolve_test_relative_module(self, module: str) -> str | None:
         return gfn._resolve_test_relative_module(self, module)
     def _parsed_import(self, module: str):
         return gfn._parsed_import(self, module)
+    def _note_struct_import_alias(self, module: str, alias: str, orig_name: str):
+        return gfn._note_struct_import_alias(self, module, alias, orig_name)
     def _local_sibling_module_exports(self, module: str):
         return gfn._local_sibling_module_exports(self, module)
     @staticmethod
@@ -4900,6 +4922,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     gimple_gen_coro.register_abi_externs(gen)
     if _coro_meta or gimple_gen_coro._NATIVE_FUTURE_CLASSES:
         gimple_gen_coro.register(gen, _coro_meta)
+        grsl.publish_a3_generators(gen, _coro_meta)
     gen._current_filename = filename
     # Self-hosting bootstrap: when compiling this compiler's own source as a
     # transitive closure (`python3 fire.py build fire.py`, `--dump-full

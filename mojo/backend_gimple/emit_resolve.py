@@ -359,6 +359,77 @@ def _register_closure_struct_inits(gen, stmts) -> None:
                     gen.func_param_types[_mangled] = _ctypes
 
 
+def publish_a3_generators(gen, meta) -> None:
+    """Publish `gen`'s own A3-lowered (stack-switch) free-function
+    generators into the whole-program `_generator_home_api` — the same
+    cross-module registry `_register_free_generator`
+    (mojo/backend_gimple/module_gen.py) publishes the C++20-coroutine-path
+    ones into.
+
+    Without it, `_cpp_resolve_generator_call_api`'s `<module>.<gen_fn>`
+    shape — the only way a generator body of one module can construct a
+    FOREIGN module's compiled generator handle — could resolve a
+    cpp-lowered generator and never an A3-lowered one, because
+    `mojo/middle/coro.py`'s `register` fills only the per-bare-name
+    `_generator_api`. Both backends deliberately expose the IDENTICAL
+    four-symbol ABI (`<base>_start` -> `MojoGenerator *`, `<base>_resume`
+    -> `_Bool`, `<base>_value`, `<base>_destroy`, with matching
+    `func_return_types`/`func_param_types` entries — coro.py's `register`
+    sets the same keys `_register_free_generator` does), so a handle from
+    either is drivable by one `next()` / for-loop lowering; only the
+    registry entry was missing.
+
+    Real: `c_common/tables.py`'s `read_table` doing
+    `lines = strutil._iter_significant_lines(infile)` then `next(lines)`.
+    `_iter_significant_lines` is A3-eligible while `read_table` is not
+    (kwonly params → "kwonly params (v0)"), so `read_table` compiles
+    through the cpp path and could not resolve the foreign handle,
+    refusing the whole module with `a call to unresolved callee
+    'next(...)'`. See bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
+
+    Must be called at the A3 registration site, not from gen_module: by the
+    time gen_module runs, `mojo/middle/coro.py`'s `lower()` has already
+    REPLACED each generator's FunctionDef with its injected
+    `__mgco_<name>_body`, so the original bare name is gone from
+    `_local_top_level_func_names` and there is nothing left to key on. The
+    `meta` list handed to `register` is the authoritative, per-module record
+    of exactly what this module lowered.
+
+    Qualifier: `module_qualifier(gen.module_name)`, NOT `_func_qualifier`.
+    The A3 backend mangles a free generator's symbols UNQUALIFIED
+    (`__mgco_<name>`, coro.py's own `base = f'__mgco_{fn.name}'`), so there
+    is no per-call-site qualifier to consult — this module's own sanitized
+    name IS the right half of the key, and it is exactly what a reader
+    computing `module_qualifier(imported_symbols[bound_module]['module'])`
+    produces for the same module (`strutil`, `._strutil`, `pkg.strutil` all
+    land on the same spelling). First writer wins, so a cpp-lowered
+    generator's own entry is never displaced."""
+    from mojo.middle.module_shared import module_qualifier
+    if not meta:
+        return
+    qual = module_qualifier(getattr(gen, 'module_name', None) or '')
+    if not qual:
+        return
+    for _m in meta:
+        # A method goes to `_generator_method_api` (keyed by struct), an
+        # async generator drives a different API (`last_yield_was_wd`), and
+        # a nested `@parameter async def` is keyed by its qualified base
+        # with no module-level binding at all — none of the three is a
+        # `<module>.<free generator>` a cpp body can look up.
+        if (_m.get('is_method') or _m.get('nested')
+                or _m.get('is_async') or _m.get('is_async_gen')):
+            continue
+        _name = _m.get('name')
+        if not _name:
+            continue
+        _api = (gen._generator_api or {}).get(_name)
+        if _api is None:
+            continue
+        _key = qual + '::' + _name
+        if _key not in gen._generator_home_api:
+            gen._generator_home_api[_key] = _api
+
+
 def _compile_imported_module(gen, module_name: str) -> tuple:
     """Find and compile an imported .mojo/.py module, extracting type
     information.
@@ -771,6 +842,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(stmts)
                 if _ss_meta:
                     gimple_codegen.gimple_gen_coro.register(temp_gen, _ss_meta)
+                    publish_a3_generators(temp_gen, _ss_meta)
 
                 code = temp_gen.gen_module(stmts)
 
@@ -1282,6 +1354,34 @@ def _register_link_imports(gen, stmts) -> list:
                             gen._link_inline_modules.add(
                                 gimple_ctypes._join_import_member(stmt.module, name))
                             continue
+                        # A module that only RE-EXPORTS `name` (a package
+                        # `__init__.py` doing `from .sub import tri`) is the
+                        # same dead end for a different reason: there is no
+                        # `def` in its source for the classification below to
+                        # find, and no submodule file of that name, so
+                        # nothing at all was registered — while the call
+                        # site's `extern` (emitted from the call-site
+                        # registration in module_shared.py's
+                        # `_register_sym`, which DOES follow the hop) names
+                        # the DEFINING module's symbol. The program then
+                        # failed to link with
+                        # `Undefined symbols: "_sub_tri_9f63a2"`, where
+                        # before the call-site half was fixed it had bound
+                        # the extern preamble's `weak` "unavailable in
+                        # compiled mode" stub and printed a wrong 0.
+                        #
+                        # Inline the DEFINING module, which is the same
+                        # mechanism the submodule branch just above uses and
+                        # needs no reflection bookkeeping: the inline-compile
+                        # loop emits the real definition into this
+                        # translation unit. The ref is the spelling that
+                        # statement used, which is exactly what that loop
+                        # keys its own compilation by.
+                        _reex_home = gen._find_symbol_home_module(
+                            stmt.module, name, 'fn')
+                        if _reex_home and _reex_home != stmt.module:
+                            gen._link_inline_modules.add(_reex_home)
+                            continue
                         # Not a concrete export — classify `name` against the
                         # module's own SOURCE TEXT and record how to make it
                         # available: on-demand elaboration for a generic /
@@ -1441,6 +1541,35 @@ def _register_link_imports(gen, stmts) -> list:
                         _csym = gen._func_csym(sym)
                         decls.append(
                             f"extern {ret} {_csym} ({', '.join(ptypes) if ptypes else 'void'});")
+            elif isinstance(stmt, gimple_ctypes.ImportStmt):
+                # A plain `import a.b` binds `a` and makes the SUBMODULE
+                # `a.b` reachable as an attribute, so `a.b.f(...)` is a real
+                # cross-module call whose symbol link mode has to be able to
+                # provide. `scan` only ever looked at FromImportStmt, so
+                # nothing registered the submodule, and the call site bound
+                # the extern preamble's `weak` "unavailable in compiled mode"
+                # stub — printing `tri: unavailable in compiled mode` then
+                # `0`, exit 0, with the diagnostic on the program's own
+                # stdout (bugs/CODEGEN_import_dotted_name_two_hop_attribute_
+                # call_exits_1.md's link-mode half).
+                #
+                # Only the DOTTED form, and only when nothing else can
+                # provide the module: a real dylib/reflection entry keeps
+                # its own path, and `import a` (no dot) names a module the
+                # normal machinery already handles. `import a.b as q` is
+                # left alone — the alias names the submodule directly, which
+                # is the single-hop spelling `_register_sym` already
+                # resolves.
+                for _im_pair in ([(stmt.module, stmt.alias)]
+                                 + list(getattr(stmt, 'extra', None) or [])):
+                    _im_m = gimple_ctypes._as_str(_im_pair[0])
+                    if '.' not in _im_m or gimple_ctypes._as_str(_im_pair[1]):
+                        continue
+                    _exp2, _refl2, _src2 = _exports(_im_m)
+                    if _exp2:
+                        continue
+                    if _src2 and gen._submodule_source_path(_im_m):
+                        gen._link_inline_modules.add(_im_m)
             elif isinstance(stmt, gimple_ctypes.FunctionDef):
                 scan(stmt.body)
             elif isinstance(stmt, gimple_ctypes.IfStmt):

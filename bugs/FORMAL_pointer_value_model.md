@@ -17,7 +17,9 @@ count corrections rather than features:
    dereference answered they are blocked *one step earlier in the same file*, by
    `external_call['setenv', Int32]`'s tuple subscript at `std/os/env.mojo:42`.
    Zero of the 54 became buildable, and the reason is measured, not argued
-   (§3).
+   (§3). **Both halves of this are now superseded**: the tuple subscript itself
+   was closed on 2026-09-29 (`4ad34f3`), and the 54-file group has moved on to
+   `bugs/FORMAL_env_family_next_terminal.md`, which records where it lands.
 2. **`DEREFERENCE_METHODS` was a FALSE refusal about 527 of the 528 `value` sites
    in the stdlib.** `value` is spelled the same for an enum's integral value, an
    iterator's current item, a `SIMD`'s scalar and a pointer's pointee; the table
@@ -195,6 +197,13 @@ CODEGEN/DEPENDENCY: std/algorithm/backend/cpu/elementwise.mojo  (build: elementw
 That is `env.mojo:42`, not `:85` — a different construct, in the
 `is_multi_index` family, and **not** the pointer value model. `grep -c
 DEREFERENCE` over the whole stdlib sweep is **0** on both architectures.
+
+> **Superseded 2026-09-29.** `env.mojo:42` is closed (`4ad34f3`; see
+> `bugs/FORMAL_known_limits.md` §6.2.1 for why it was never a monomorphization
+> problem) and the group has moved on — see
+> `bugs/FORMAL_env_family_next_terminal.md` for where. This block is left as
+> the record of what the measurement said at the time, which is the only reason
+> it is still worth reading.
 
 | | baseline | after |
 |---|---:|---:|

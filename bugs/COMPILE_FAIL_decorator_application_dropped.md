@@ -5,6 +5,35 @@ Found 2026-09-27 while closing
 opposite kind of problem, and the reason that file needed a separate
 correctness caveat even after it started building.
 
+## Status (2026-09-30 — compiled half still OPEN; re-measured, not attempted)
+
+Re-measured on this tree, so the numbers below are current rather than
+inherited: the doc's minimal repro (`deco(f) -> 99`, `@deco def step`, then
+`print(step)` / `print(step(7))`) gives CPython `99` then
+`TypeError: 'int' object is not callable`, `fire.py run` `99` then the same
+TypeError (the interpreter half really is fixed), and `fire.py --jit`
+`35260224` then `1`, exit 0 — the function's own code address printed as a
+scalar, then the UNDECORATED result. Unchanged, and still a feature-sized
+piece of work rather than a small fix; not attempted this session. See
+"Next bounded action" for what the current tree says the first step is.
+
+One correction to the 2026-09-27 note below, because it would send the next
+session to the wrong place: the free-function calling convention is no
+longer name-keyed in quite the way that entry describes. Import
+resolution now answers "which module DEFINES this symbol" by following
+re-export hops (`_find_symbol_home_module` in `mojo/middle/funcs_shared.py`,
+used by `_register_sym`, `_gen_stmt_FromImportStmt`, `_collect_body_
+import_bindings` and the extern preamble), so the qualifier half of a
+mangled symbol is derived from the defining module rather than from the
+import statement's own module string. That does NOT make decorated
+functions easier — a decorated `def` is a module-level REBINDING, and
+nothing in this area rebinds a name that the overload/qualifier machinery
+(`_func_csym`'s mangled-key mirror, `_effective_param_types`,
+`_overload_suffix`) reads — but the obstacle to clear first is smaller than
+"make five name-keyed tables agree", and the import half of that work is
+already done and regression-tested
+(`test_gimple.py::test_aliased_and_reexported_imports_resolve_to_the_defining_module`).
+
 ## Status (2026-09-27, later — the INTERPRETER half is FIXED; the compiled half is untouched and still open)
 
 Landed, each piece with a regression that fails at `435cc71`:

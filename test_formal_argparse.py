@@ -12,17 +12,30 @@ what is asserted here is:
   2. every public name in the module reaches a dylib's export table, so a name
      added without checking it cannot produce a module that builds and cannot be
      called;
-  3. **THE PARSE IS CPYTHON'S.** One table of parser declarations and command
+  3. **THE MODULE BUILDS ON ITS OWN.** `build --formal` of
+     `formal/hostmods/argparse.mojo` itself, with nothing importing it. Every
+     other assertion here builds a program that IMPORTS the module, which is
+     the module's real use — and a refusal raised in the module's own body is
+     reachable from those too, so this looks redundant until you count what it
+     catches first: it is the only assertion here whose subject is the module
+     as a translation unit rather than a program that uses it, which is the
+     question "does this file lower?" and the one nobody was asking. Measured:
+     `_name_len` and `_fname_len` shipped unannotated, and their results are
+     compared against non-literal operands, so the module did not build and
+     every program importing it was refused for a diagnostic whose subject is a
+     line inside it — `formal/model.py`'s `string_compare_word_refusal`, whose
+     own message names the two annotations that clear it;
+  4. **THE PARSE IS CPYTHON'S.** One table of parser declarations and command
      lines below drives two generated programs: one that uses CPython's own
      `argparse`, and one that uses this module through `formal/hostmods`. Both
      are built, the second is BUILT AS AN ARM64 IMAGE AND RUN, and their stdout,
      their stderr and their exit status must be identical. Every case in the
      table is either a value, a usage line, an error message or an exit code
      that this module has to reproduce exactly;
-  4. the refusals are refusals — `type=float` is declined with a reason rather
+  5. the refusals are refusals — `type=float` is declined with a reason rather
      than truncated to an integer, because a value on this path is one 64-bit
      integer word (measured: `2.5` is the integer 2, `atof("3.5")` is 1);
-  5. the limits this module is written around are pinned as measurements —
+  6. the limits this module is written around are pinned as measurements —
      `int("1_0")` is refused rather than read as 10, and help text is laid out
      but not wrapped — so the next reader finds them in the test rather than
      rediscovering them.
@@ -630,6 +643,50 @@ def test_every_declared_name_is_exported(tmp, _shared):
           "can call")
 
 
+# ── The module is a program too ──────────────────────────────────────────────
+
+def test_the_module_builds_on_its_own(tmp, _shared):
+    """`fire.py build --formal` of argparse.mojo itself exits 0.
+
+    Every other assertion in this file builds a program that IMPORTS the
+    module, so the module is only ever reached as somebody else's dependency,
+    and a diagnostic raised about a line inside it arrives as a failure of the
+    importing program instead of as a statement about the file that has the
+    problem. That is the whole reason a refusal lived here as long as it did: 36
+    of the 44 files in the sweep that import `argparse` were refused as
+    `codegen/dependency`, and every one of them carried the same message, whose
+    subject is a comparison inside `_lookup` — a module none of the 36 had
+    anything to do with.
+
+    So: the module as a translation unit, with nothing importing it, on the
+    default backend (arm64, which is the target the corpus above is run on).
+
+    Not asserted for x86_64, and that is a real gap rather than a shrug: on that
+    backend the build stops earlier, in `os/_syscalls.mojo`'s own dylib
+    ("main executable failed strict validation"), before argparse's body is
+    reached, so nothing here has measured whether this module lowers on that
+    backend at all. The whole per-module, per-backend table is in
+    bugs/FORMAL_x86_64_hostmods_that_do_not_build.md, with the two reasons x86-64
+    has fewer of them than arm64 — and asserting it here would turn a red about
+    one module into a red about two.
+
+    The build is a cold one: this file points GMOJO_HOME at a private CAS per
+    process, so a dylib published by an earlier run cannot answer for this
+    module's source (bugs/FORMAL_sweep_cache_ignores_imports.md is the
+    measurement of what happens when something keyed on the importer is served
+    from a cache that does not know about it).
+    """
+    out = os.path.join(tmp, "argparse_standalone.aout")
+    built = run_fire(["build", "--formal", "--no-prove", "-o", out,
+                      ARGPARSE_MODULE])
+    check(built.returncode == 0,
+          f"argparse.mojo does not build as a program, so nothing that imports "
+          f"it can either: "
+          f"{(built.stderr or built.stdout).strip()[-600:]}")
+    check(os.path.isfile(out),
+          f"the build reported success and wrote no image at {out}")
+
+
 # ── The parse is CPython's ────────────────────────────────────────────────────
 
 def test_the_parse_matches_cpython(tmp, _shared):
@@ -863,6 +920,8 @@ TESTS = [
     ("`import argparse` resolves to the module source",
      test_argparse_resolves_to_the_module_source),
     ("every declared name is exported", test_every_declared_name_is_exported),
+    ("the module builds on its own",
+     test_the_module_builds_on_its_own),
     ("the parse matches CPython, case for case",
      test_the_parse_matches_cpython),
     ("an unsupported spec is refused with a reason",

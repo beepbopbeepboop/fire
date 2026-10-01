@@ -1954,6 +1954,96 @@ def test_selfhost_key_is_complete():
           'a codegen source missing from the self-host key')
 
 
+def test_the_compiler_imports_from_every_real_entry_point():
+    """Every module the compiler is entered through must import FIRST.
+
+    The middle tier and the gimple backend are mutually recursive by design —
+    `mojo/middle/funcs_shared.py` and `mojo/middle/module_shared.py` both
+    `import gimple_codegen`, which imports the backend, which imports them
+    back — so the graph has a load order it tolerates and a set it does not,
+    and Python resolves a cycle by letting whichever module the process
+    reached first finish, which is why this failure reads as an unrelated
+    `ImportError` a long way from the import that closed the loop.
+
+    Real, twice, both from merged branches that each added one edge between
+    the two middle modules:
+
+      * `formal/model.py` `runtime_abi` -> `import reflect` ->
+        `gimple_codegen` -> `mojo/backend_gimple/emit_methods` ->
+        `emit_funcs` -> `mojo.middle.module_shared` -> `mojo.middle.funcs_shared`
+        -> `from mojo.middle.module_shared import module_qualifier`
+
+        -> `ImportError: cannot import name 'module_qualifier' from partially
+        initialized module 'mojo.middle.module_shared'`
+
+        The formal build path refused EVERY program, on every source, with no
+        build artifact involved — so it was invisible to every compiled-path
+        test and visible to every formal one.
+
+      * the same shape one edge later, via
+        `mojo/backend_gimple/module_gen.py` -> `module_shared` ->
+        `funcs_shared` -> `gimple_codegen`.
+
+    Each module that can be a process's FIRST `mojo.*` import is therefore
+    probed in a FRESH interpreter. Checking from inside this process would
+    prove nothing: by the time this test runs, `sys.modules` already holds
+    whichever order the test runner happened to pick, and the failing order
+    is exactly the one it cannot reproduce.
+
+    The probe is EVERY module under `mojo/middle/` and `mojo/backend_gimple/`
+    plus the top-level entry points, not a hand-kept shortlist, so a new
+    module that closes a cycle is caught by being added rather than by
+    somebody remembering to extend a list. `_LOAD_ORDER_DEPENDENT` is the
+    declared exemption, and it is checked in BOTH directions — a new entry
+    appearing in the failure set fails, and so does an entry in the
+    declaration that no longer fails, because a stale exemption is a hole
+    the next reader cannot see through.
+    """
+    import glob
+    import subprocess
+    entries = ['fire', 'fire_main', 'myinterpreter', 'reflect',
+               'gimple_codegen', 'formal.build', 'formal.model']
+    for pat in ('mojo/middle/*.py', 'mojo/backend_gimple/*.py'):
+        entries += sorted(os.path.relpath(p, HERE)[:-3].replace(os.sep, '.')
+                          for p in glob.glob(os.path.join(HERE, pat))
+                          if not p.endswith('__init__.py'))
+    bad = []
+    for mod in entries:
+        r = subprocess.run([sys.executable, '-c', f'import {mod}'],
+                           capture_output=True, text=True, cwd=HERE,
+                           timeout=300)
+        if r.returncode != 0:
+            last = [l for l in r.stderr.strip().splitlines() if l.strip()]
+            bad.append(f'{mod}: {last[-1] if last else "failed"}')
+    failed = {b.split(':', 1)[0] for b in bad}
+    # The eight `mojo/middle/*` modules that each `import gimple_codegen`,
+    # which imports the gimple backend, which imports them back. That is the
+    # middle tier's pre-existing shape — measured identical on master, before
+    # any of the branches this test was written for — so none of the eight can
+    # be the first `mojo.*` import a program makes, and every one of them
+    # DOES import fine behind `gimple_codegen` or `fire.py`. Named rather than
+    # omitted so a reader who finds one of them broken learns it was already
+    # load-order-dependent instead of concluding the exemption is where to
+    # start looking. No `mojo/backend_gimple/*` module is exempt: the backend
+    # sits downstream of `gimple_codegen`, so every one of them is reachable
+    # first and a new cycle among them would be caught here.
+    declared = {
+        'mojo.middle.calls_shared', 'mojo.middle.funcs_shared',
+        'mojo.middle.infra_infer', 'mojo.middle.loops_shared',
+        'mojo.middle.methods_shared', 'mojo.middle.module_shared',
+        'mojo.middle.resolve_shared', 'mojo.middle.stmts_shared',
+    }
+    check('imports: every real entry point imports first',
+          failed <= declared, '; '.join(bad))
+    check('imports: the load-order exemption list is not stale',
+          declared <= failed,
+          f'declared but importing fine: {sorted(declared - failed)} — the '
+          f'declaration has to be deleted in the same commit that fixes it')
+    check('imports: the probe actually probed something', len(entries) >= 30,
+          f'only reached {len(entries)} modules — the glob or the list went '
+          f'stale and this check is vacuous')
+
+
 def test_bucket_dedup():
     """`make gate` contains both `native` and `bootstrap`; a test reachable
     from both must be scheduled once, not twice."""
@@ -2413,6 +2503,20 @@ UNREGISTERED = {
     'test_arm64_emission.py': 'A hand count that the new arm64 instructions '
         'are emitted at all, which the differential test above cannot tell from '
         'an instruction emitted where a different one should be.',
+
+    # ── the returned-frame convention, both machines, against CPython ──
+    #
+    # Unregistered on purpose rather than by omission, and the reason is in
+    # tools/suite.py's own terms: it builds and RUNS fourteen images (seven per
+    # architecture) and asks CPython for each answer, so a run of it is a
+    # measured cost on every invocation and nothing in the gate wants that
+    # shape. It is listed rather than left out because the estate check below
+    # exists to make an unaccounted-for test file impossible, and a file that is
+    # unaccounted-for is the state this is avoiding.
+    'test_formal_returned_frame.py': 'The returned-frame convention: builds, '
+        'runs and compares with CPython on arm64 AND x86-64. Runs beside '
+        'test_formal_run.py rather than inside it, because the convention is '
+        'one construct and the suite that hosts it is already the longest.',
 
     # ── the interpreter, which is the oracle everything else is compared to ──
     'test_myinterpreter.py': 'Runs a real .mojo file end to end through '
@@ -2935,7 +3039,8 @@ def main():
                test_timeout_is_a_failure_not_a_vanished_job,
                test_tally_accounts_for_every_test,
                test_a_status_with_no_counter_stops_the_runner,
-               test_artifact_cache, test_selfhost_key_is_complete,
+               test_artifact_cache,                test_selfhost_key_is_complete,
+               test_the_compiler_imports_from_every_real_entry_point,
                test_bucket_dedup, test_missing_dep_is_reported,
                test_named_test_brings_its_deps,
                test_log_has_passes_screen_does_not,
