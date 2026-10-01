@@ -41,8 +41,8 @@ wrong answer rather than a refusal. The corpus is the corners: below `5`,
 above `5`, a leading `+`, an embedded `_`, an empty first component, a doubled
 underscore, a trailing dot, and a name that merely STARTS WITH `SunOS`.
 
-Groups: `resolve`, `uname`, `processor`, `macver`, `alias`, `free`, `exports`,
-`absent`. With no argument, all.
+Groups: `resolve`, `uname`, `processor`, `macver`, `alias`, `free`, `arch`,
+`exports`, `absent`. With no argument, all.
 """
 import argparse
 import os
@@ -61,12 +61,11 @@ sys.path.insert(0, HERE)
 # The independent driver, the record format and the assertion helpers live in
 # the dylib suite; imported rather than copied so a fix to any of them cannot
 # leave a second, quietly different one behind.
-from test_formal_json import (Failure, build, check, compare, mj, records,  # noqa: E402
+from test_formal_json import (build, check, compare, mj, records,  # noqa: E402
                               reader, run)
 import test_formal_json as J  # noqa: E402
 
 TEMP = None
-REC = "@@"
 
 # The record writer every generated program here shares. `<len>:<value>` records
 # rather than a bare separator, for the reason `test_formal_json.py` gives and
@@ -516,6 +515,53 @@ def group_absent(tmpdir, verbose):
     return True, f"{len(absent)} absent names refused"
 
 
+def group_arch(tmpdir, verbose):
+    """`machine()` on BOTH backends, and it names the ARCHITECTURE OF THE IMAGE.
+
+    The oracle is deliberately NOT this process's `platform.machine()`. An
+    x86-64 image running under Rosetta on an Apple Silicon host legitimately
+    reports `x86_64`, because that is what the kernel tells THAT process — so
+    comparing it with the arm64 answer of the python3 running this test would
+    report a correct image as a wrong one. The assertion is the honest one: an
+    image built for an architecture reports that architecture.
+
+    It is also the measurement behind the module docstring's claim that this
+    module works on both backends, which it inherited an expectation of NOT
+    doing from `formal/hostmods/os/_syscalls.mojo`'s arm64-only note.
+    """
+    src = ('import platform\n\ndef main() -> int:\n'
+           '    printf("%s@@", platform.machine())\n'
+           "    return 0\n")
+    for arch, want in (("arm64", "arm64"), ("x86_64", "x86_64")):
+        tmp = _write(f"machine_{arch}.mojo", src)
+        out = os.path.join(TEMP, f"machine_{arch}")
+        r = subprocess.run(
+            [sys.executable, FIRE, "build", "--formal", "--no-prove",
+             "--backend", arch, "-o", out, tmp],
+            capture_output=True, text=True, timeout=J.BUILD_TIMEOUT, cwd=HERE)
+        check(r.returncode == 0,
+              f"{arch}: build failed: {(r.stderr or r.stdout).strip()[-400:]}")
+        try:
+            got = subprocess.run([out], capture_output=True,
+                                 timeout=J.RUN_TIMEOUT, cwd=HERE)
+        except OSError as e:
+            # An x86-64 image will not launch at all on a machine without
+            # Rosetta, and that is a fact about the HOST, not about the
+            # module. Say so and stop rather than failing the group.
+            check(arch == "arm64",
+                  f"the {arch} image would not launch on this host: {e}")
+            continue
+        check(got.returncode == 0,
+              f"{arch}: image exited {got.returncode}")
+        text = got.stdout.decode("latin-1")
+        check(text == want + "@@",
+              f"{arch}: machine() reported {text!r}, and an image built for "
+              f"{arch} must report {want!r}")
+    if verbose:
+        print("    machine() reports its own image's architecture, on both")
+    return True, "machine() names the image's own architecture on arm64 and x86_64"
+
+
 GROUPS = {
     "resolve": group_resolve,
     "uname": group_uname,
@@ -523,6 +569,7 @@ GROUPS = {
     "macver": group_macver,
     "alias": group_alias,
     "free": group_free,
+    "arch": group_arch,
     "exports": group_exports,
     "absent": group_absent,
 }

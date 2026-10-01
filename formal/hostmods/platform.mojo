@@ -96,12 +96,14 @@ THE TWO SPELLING RULES EVERY FUNCTION HERE FOLLOWS
     and without it a call result is a word of unknown provenance and `f() == g()`
     on two of those is an ADDRESS comparison
     (`bugs/FORMAL_string_equality_of_two_unclassified_words.md`).
-  * NO DEFAULT ARGUMENTS. Every CPython `platform` function here that has
-    parameters takes exactly the ones a caller must supply.
-    `bugs/FORMAL_default_argument_not_applied_across_a_dylib.md` is the
-    measurement, and `system_alias` is the reason this module needed none of
-    them spelled: CPython's signature is `system_alias(system, release,
-    version)` with no defaults.
+  * NO DEFAULT ARGUMENT ANYWHERE. `system_alias` is the only function here that
+    takes arguments and CPython's own signature for it has none to default, so
+    there was never a spelling to drop; the measurement that a default is not
+    applied across a dylib boundary at all is
+    `bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`, and the
+    functions CPython DOES give defaults to (`platform(aliased, terse)`,
+    `architecture(executable, bits, linkage)`, `mac_ver(release, versioninfo,
+    machine)`) are absent here anyway, so the question does not arise twice.
 
 MEMORY, AND WHO OWNS A STRING
 -----------------------------
@@ -117,6 +119,25 @@ The functions that return an argument unchanged say so, and the string they
 hand back is the CALLER'S and must not be passed to `platform_free`. Which is
 which is stated at each definition, because `os.path` has the same split and a
 caller who gets it wrong gets a double free.
+
+BOTH BACKENDS, and that is worth saying because the module this one takes its
+C library calls from says otherwise
+----------------------------------------------------
+`formal/hostmods/os/_syscalls.mojo`'s docstring says a module dylib that calls
+into the C library "is arm64-only on this backend", and this module inherits
+`uname`, `sysctlbyname` and `strcmp` from there — so it was written expecting
+to inherit that too. It does not: measured on this tree, `machine()` builds AND
+RUNS under `--backend=x86_64` and under `--backend=arm64`, and on each it
+reports the architecture of the image it is running in, which is the whole
+point of the name. (`os.getcwd()`, measured the same way on the same tree,
+also builds and runs on x86_64, so that claim in `_syscalls.mojo` is stale for
+whatever `os` too — not this claim's file to correct, and recorded here only so
+nobody reads this paragraph as the opposite finding.)
+
+A Rosetta-emulated x86-64 process on an Apple Silicon host sees
+`hw.machine == "x86_64"`, so the x86-64 image's answer is `x86_64` and not this
+process's `arm64`. That is correct behaviour rather than a discrepancy, and
+`test_formal_platform.py`'s `arch` group is written to expect it.
 """
 
 
@@ -193,10 +214,11 @@ def machine() -> str:
     """`platform.machine()`: the hardware name — `"arm64"` on this target.
 
     `os.uname()[4]`. This is the name thirty swept files import this module
-    for, and the reason it comes first in every test in this tree: it is a
-    fact about the image the program is running IN, so a formal image can
-    answer it exactly, and it is the one question `platform` asks that a
-    freestanding image has every reason to know.
+    for, and it is a fact about the image the program is running IN, so a
+    formal image can answer it exactly: it is the one question `platform` asks
+    that a freestanding image has every reason to know.
+
+    A `malloc`'d string the caller owns; see the module docstring.
     """
     return uts_str(U_MACHINE)
 
@@ -243,9 +265,18 @@ def mac_ver_machine() -> str:
     the canonical `PowerPC`; everything else is returned unchanged. That is
     reproduced here rather than skipped, because "the canonical spelling" is
     part of the name's contract and this image could be asked about it: the
-    rewrite is three comparisons and costs nothing.
+    rewrite is two comparisons and costs nothing.
 
-    A `malloc`'d string the caller owns; see the module docstring.
+    OWNERSHIP DIFFERS BETWEEN THE TWO BRANCHES, which is the one thing a caller
+    has to be told twice. `uname`'s machine is a `malloc`'d buffer the caller
+    owns, and on this target (`arm64`) that is what comes back; `"PowerPC"` is a
+    string literal in this module's own text, in the read-only section of a
+    dylib that outlives the call, and must NOT be passed to `platform_free`.
+    So `platform_free` the result only when it is not the literal — which a
+    caller cannot test, and does not have to: on any machine this backend can
+    produce the literal branch is dead, so the honest rule is the one
+    `platform_free`'s own docstring gives, and this function is called out here
+    as the second place where the two answers differ.
     """
     var m = uts_str(U_MACHINE)
     if str_cmp(m, "ppc") == 0:
@@ -575,9 +606,11 @@ def platform_free(p) -> int:
     `free` through the same wrapper, and using either on the other's strings is
     correct: one allocator, one `free`.
 
-    A string this module RETURNED UNCHANGED from one of its arguments is the
-    caller's own and must NOT be passed here — the three `system_alias_*`
-    functions say which branch each of them is in, and `os.path` has the same
-    split for the same reason.
+    A string this module RETURNED UNCHANGED from one of its arguments, or that
+    it returned as one of its own string literals, is not this module's to
+    release and must NOT be passed here. There are two such cases and both say
+    so where they are: the three `system_alias_*` functions, and
+    `mac_ver_machine`'s `"PowerPC"` branch. `os.path` has the same split for
+    the same reason.
     """
     return fs_free(p)
