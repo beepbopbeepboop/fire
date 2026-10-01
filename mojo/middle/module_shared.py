@@ -22,12 +22,34 @@ from mojo.middle.solvers import *  # noqa: F401,F403
 # `_resolved_export_entry` — `from X import *` skips underscore names, and
 # `_register_sym` needs it to give a re-exported function's registered
 # signature the DEFINING module's real one instead of the export text scan's
-# parameter-less placeholder. (The re-export-hop WALK itself is not imported:
-# it needs `gen`, so it is reached as the `GimpleGen` method
-# `gen._find_symbol_home_module`, exactly like `gen._parsed_import` beside
-# it.)
+# parameter-less placeholder. It is NOT imported here or at its use site: like
+# the re-export-hop WALK beside it, it needs `gen`, so it is reached as the
+# `GimpleGen` method `gen._resolved_export_entry` — the same shape as
+# `gen._find_symbol_home_module` and `gen._parsed_import`.
 #
-# Imported at the ONE use site rather than here, and that is load-bearing:
+# Not importing it at all is also what makes the self-hosted closure compile.
+# The one `from mojo.middle.funcs_shared import _resolved_export_entry` this
+# used to carry, at `_register_sym`'s one call, registered the name in THAT
+# module's `imported_symbols`, and `imported_symbols` is per-gen while
+# `inline_defined` — the preamble's "this TU defines it, so do not declare it
+# again" set — is built from TOP-LEVEL imports only. So the same symbol that
+# `emit_funcs`' top-level `from mojo.middle.funcs_shared import ...` correctly
+# suppresses here escaped the suppression, and the text scan's declaration of
+# it reached the file beside the definition it contradicts:
+#
+#   mojo/middle/module_shared.py:561: error: too many arguments to function
+#     'mojo_middle_funcs_shared__resolved_export_entry_ee1b12'; expected 2,
+#     have 4
+#   mojo/middle/funcs_shared.py:507: error: conflicting types for the same
+#     symbol; have 'int64_t(GimpleGen *, char *, char *, int64_t)'
+#
+# Two is the scan's arity, not the definition's: the def annotates two of its
+# four params and `module_loader._scan_source` DROPS an unannotated one, and
+# nothing in the scan can type a leading `gen` as `GimpleGen *` at all — so
+# the scan cannot be made to agree, and a `name (...)` fallback cannot either
+# (gcc rejects a prototype against a later full one). Removing the import
+# removes the declaration instead, which is the fix.
+#
 # `funcs_shared` reaches `gimple_codegen`, which reaches the gimple backend,
 # which reaches `funcs_shared` again, so a top-level import in BOTH middle
 # modules closes a cycle. Whichever of the two the process happened to
@@ -536,11 +558,10 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
                 # unannotated `def tri(x)` would become the only prototype
                 # in the file and reject its own call site. See
                 # `_resolved_export_entry`.
-                # Imported here, at the one use site: the module-scope
-                # comment above explains why.
-                from mojo.middle.funcs_shared import _resolved_export_entry
-                sym_info = _resolved_export_entry(self, _eff_mod, orig_name,
-                                                  _hinfo)
+                # Reached as a `GimpleGen` method, not imported at this use
+                # site: the module-scope comment above gives both reasons.
+                sym_info = self._resolved_export_entry(_eff_mod, orig_name,
+                                                       _hinfo)
                 if _hqual:
                     _sib_qualifier = _hqual
     if _sib_qualifier and not sym_info:

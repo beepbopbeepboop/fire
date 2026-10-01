@@ -1,0 +1,522 @@
+"""Parser-only unit tests for the syntax the new-modular stdlib uses that this
+parser did not have before 2026-09-30.
+
+Every case here is one of the nine features that `compile_stdlib.py` went from
+356/610 to 610/610 on, and each is written to FAIL if its feature is removed —
+asserting a node's existence, its field values, and (where the distinction is
+the whole point) a POSITIVE and a NEGATIVE case for the same syntax, so a
+parser that simply accepted more without modelling it does not pass.
+
+Parser-only: `Parser(py_tokenize(src)).parse_module()` is constructed directly
+and the resulting AST inspected. No interpreter, no codegen, no execution.
+"""
+import sys
+
+import fire_compiler as N
+
+_PASS = 0
+_FAIL = 0
+
+
+def _parse(src: str):
+    return N.Parser(N.py_tokenize(src)).parse_module()
+
+
+def check(name: str, cond: bool, detail: str = ""):
+    global _PASS, _FAIL
+    if cond:
+        print(f"PASS  {name}")
+        _PASS += 1
+    else:
+        print(f"FAIL  {name}  {detail}")
+        _FAIL += 1
+
+
+def check_raises(name: str, src: str, exc_type=SyntaxError):
+    """The negative half of a pair: this must STILL be rejected."""
+    global _PASS, _FAIL
+    try:
+        _parse(src)
+    except exc_type:
+        print(f"PASS  {name}")
+        _PASS += 1
+        return
+    except Exception as e:
+        print(f"FAIL  {name}  wrong exception: {type(e).__name__}: {e}")
+        _FAIL += 1
+        return
+    print(f"FAIL  {name}  expected {exc_type.__name__}, parse succeeded")
+    _FAIL += 1
+
+
+def _fns(stmts):
+    return [s for s in stmts if isinstance(s, N.FunctionDef)]
+
+
+def _named(stmts, name):
+    for s in stmts:
+        if isinstance(s, N.FunctionDef) and s.name == name:
+            return s
+    return None
+
+
+def _walk(node, seen=None):
+    """Every AST node under `node`, descending into dataclass fields and
+    lists. Written here rather than reused from mojo/middle/types.py because
+    `_used_idents_node` deliberately stops at FunctionDef boundaries, which is
+    the wrong rule for 'did the parser produce a DottedLiteral anywhere'."""
+    if seen is None:
+        seen = []
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _walk(item, seen)
+        return seen
+    if not hasattr(node, '__dataclass_fields__'):
+        return seen
+    seen.append(node)
+    import dataclasses
+    for f in dataclasses.fields(node):
+        _walk(getattr(node, f.name), seen)
+    return seen
+
+
+# ── 1. Dotted literals ────────────────────────────────────────────────────
+def test_dotted_literal():
+    src = '@inline(.always)\ndef f():\n    pass\n'
+    deco = _parse(src)[0].decorators[0]
+    check("dotted_deco_is_a_call", isinstance(deco, N.CallExpr), repr(deco))
+    lits = [n for n in _walk(deco) if isinstance(n, N.DottedLiteral)]
+    check("dotted_deco_has_one_literal", len(lits) == 1, repr(lits))
+    check("dotted_path_has_no_leading_dot",
+          lits and lits[0].path == 'always', repr(lits[0].path if lits else None))
+
+    # Expression position: subscript type argument, with postfix chained on.
+    src2 = 'def f():\n    var a = SIMD[.uint64, 4](0)\n'
+    stmts = _parse(src2)
+    lits = [n for n in _walk(stmts) if isinstance(n, N.DottedLiteral)]
+    check("dotted_subscript_typearg", len(lits) == 1, repr(lits))
+    check("dotted_subscript_path",
+          lits and lits[0].path == 'uint64', repr(lits[0].path if lits else None))
+    # The postfix must survive: `.of_bytes[128]()` is a CALL on the literal.
+    src3 = 'def f():\n    var l = Layout[Int, alignment=.of_bytes[128]()]\n'
+    lits = [n for n in _walk(_parse(src3)) if isinstance(n, N.DottedLiteral)]
+    calls = [n for n in _walk(_parse(src3)) if isinstance(n, N.CallExpr)]
+    check("dotted_with_subscript_and_call", len(lits) == 1 and len(calls) >= 1,
+          f"lits={lits} calls={calls}")
+
+    # Dotted chain: `.a.b` keeps both components in one path.
+    src4 = 'def f():\n    var x = SIMD[.a.b, 1](0)\n'
+    lits = [n for n in _walk(_parse(src4)) if isinstance(n, N.DottedLiteral)]
+    check("dotted_chain_in_one_path",
+          len(lits) == 1 and lits[0].path == 'a.b',
+          repr(lits[0].path if lits else None))
+
+    # NEGATIVE half. A leading DOT is only a dotted literal where an
+    # EXPRESSION is expected; these must keep their old meaning, or the rule
+    # has merely grown to swallow everything.
+    ell = [n for n in _walk(_parse('def f():\n    var x = ...\n'))
+           if isinstance(n, N.EllipsisLiteral)]
+    check("ellipsis_not_a_dotted_literal", len(ell) == 1 and not [
+        n for n in _walk(_parse('def f():\n    var x = ...\n'))
+        if isinstance(n, N.DottedLiteral)], repr(ell))
+    fl = [n for n in _walk(_parse('def f():\n    var x = .5\n'))
+          if isinstance(n, N.FloatLiteral)]
+    check("float_literal_not_a_dotted_literal", len(fl) == 1, repr(fl))
+    mem = [n for n in _walk(_parse('def f():\n    var x = a.b\n'))
+           if isinstance(n, N.MemberExpr)]
+    check("attribute_access_not_a_dotted_literal", len(mem) == 1, repr(mem))
+    check_raises("bare_dot_still_rejected", 'def f():\n    var x = .\n')
+
+
+# ── 2. __match, and its two case layouts ──────────────────────────────────
+def test_match():
+    # Mojo layout: cases at the SAME indent as the keyword.
+    src = ('def f(x):\n'
+           '    __match x:\n'
+           '    case .PASS:\n'
+           '        return 1\n'
+           '    case _:\n'
+           '        return 2\n')
+    m = _parse(src)[0].body[0]
+    check("flat_match_is_a_matchstmt", isinstance(m, N.MatchStmt), repr(m))
+    check("flat_match_case_count", isinstance(m, N.MatchStmt) and len(m.cases) == 2,
+          repr(len(m.cases) if isinstance(m, N.MatchStmt) else None))
+
+    # A statement AFTER the match in the same block must not be eaten as a case.
+    src2 = ('def f(x):\n'
+            '    __match x:\n'
+            '    case .A:\n'
+            '        return 1\n'
+            '    return 2\n')
+    body = _parse(src2)[0].body
+    check("statement_after_flat_match_survives",
+          len(body) == 2 and isinstance(body[1], N.ReturnStmt),
+          repr([type(b).__name__ for b in body]))
+
+    # Python layout: cases indented past the keyword. Still accepted.
+    src3 = ('def f(x):\n'
+            '    match x:\n'
+            '        case .A:\n'
+            '            return 1\n')
+    m3 = _parse(src3)[0].body[0]
+    check("indented_match_still_works",
+          isinstance(m3, N.MatchStmt) and len(m3.cases) == 1, repr(m3))
+
+    # comptime __match
+    src4 = ('fn g(dtype):\n'
+            '    comptime __match dtype:\n'
+            '    case .int:\n'
+            '        return 1\n')
+    check("comptime_match_parses", isinstance(_parse(src4)[0], N.FunctionDef))
+
+    # An or-pattern of dotted literals is ONE BinaryOp, not two cases.
+    src5 = ('def f(x):\n'
+            '    __match x:\n'
+            '    case .A | .B:\n'
+            '        return 1\n')
+    m5 = _parse(src5)[0].body[0]
+    check("or_pattern_is_one_case",
+          isinstance(m5, N.MatchStmt) and len(m5.cases) == 1, repr(m5))
+
+    # A guard still parses after a dotted pattern.
+    src6 = ('def f(x):\n'
+            '    __match x:\n'
+            '    case .A if x > 0:\n'
+            '        return 1\n')
+    m6 = _parse(src6)[0].body[0]
+    check("guard_after_dotted_pattern",
+          isinstance(m6, N.MatchStmt) and m6.cases[0].guard is not None, repr(m6))
+
+
+# ── 3. Typed lambdas ─────────────────────────────────────────────────────
+def test_lambda():
+    src = 'g = lambda (i: Int) -> Int: i * i\n'
+    lam = _parse(src)[0].value
+    check("lambda_is_lambdaexpr", isinstance(lam, N.LambdaExpr), repr(lam))
+    check("lambda_param_name", lam.params == [('i', None)], repr(lam.params))
+    check("lambda_param_type", lam.param_types == ['Int'], repr(lam.param_types))
+    check("lambda_return_type", lam.return_type == 'Int', repr(lam.return_type))
+
+    # `params` must stay 2-tuples: consumers unpack it positionally.
+    check("lambda_params_are_2tuples",
+          all(isinstance(p, tuple) and len(p) == 2 for p in lam.params),
+          repr(lam.params))
+
+    # Empty parameter list, typed return. The annotation is stored with its
+    # internal whitespace normalised ('Array[T, size]' -> 'Array[T,size]'), which
+    # is what every other annotation in the tree does; assert the normalised
+    # form so a change in THAT normalisation is caught here too.
+    src2 = 'g = lambda () -> Array[T, size]: {fill = T()}\n'
+    lam2 = _parse(src2)[0].value
+    check("lambda_empty_params_typed_ret",
+          lam2.params == [] and lam2.return_type == 'Array[T,size]',
+          repr(lam2.return_type))
+
+    # Capture list between params and `->`.
+    src3 = 'g = lambda (k: Key) {imm key} -> Bool: (k == key)\n'
+    lam3 = _parse(src3)[0].value
+    check("lambda_capture_text", lam3.captures == 'imm key', repr(lam3.captures))
+    check("lambda_capture_with_typed_ret",
+          lam3.return_type == 'Bool' and lam3.param_types == ['Key'], repr(lam3))
+
+    # Comptime block before the parameter list.
+    src4 = 'g = lambda [i: Int]() -> Int: r.field_offset[index=i]()\n'
+    lam4 = _parse(src4)[0].value
+    check("lambda_comptime_block",
+          lam4.comptime_params == [('i', 'Int')], repr(lam4.comptime_params))
+    check("lambda_comptime_with_ret", lam4.return_type == 'Int', repr(lam4.return_type))
+
+    # The four pre-existing Python shapes must be untouched.
+    for name, s, want in [
+            ("py_bare", 'g = lambda x, y: x + y\n', [('x', None), ('y', None)]),
+            ("py_default", 'g = lambda e, self=self: e\n', [('e', None), ('self', N.IdentExpr(name='self', line=0, col=0))]),
+            ("py_star", 'g = lambda *a, **k: a\n', [('*a', None), ('**k', None)]),
+            ("py_empty", 'g = lambda: 1\n', []),
+    ]:
+        got = _parse(s)[0].value.params
+        ok = len(got) == len(want) and all(
+            g[0] == w[0] for g, w in zip(got, want))
+        check(f"lambda_python_shape_{name}", ok, f"{got} vs {want}")
+
+
+# ── 4. Explicit capture lists on a nested def ─────────────────────────────
+def test_capture_lists():
+    src = ('def outer():\n'
+           '    var x = 0\n'
+           '    var d = [1]\n'
+           '    def h(a: Int) {mut x, var d^}:\n'
+           '        x += a\n')
+    h = _parse(src)[0].body[-1]
+    check("capture_list_parsed", h.captures == [('x', 'mut'), ('d', 'owned')],
+          repr(h.captures))
+    check("capture_list_flag_set", h.has_capture_list is True, repr(h.has_capture_list))
+
+    # `{}` and "no list at all" are DIFFERENT statements and must be told
+    # apart by the flag, since both leave `captures == []`.
+    empty = _parse('def o():\n    def h() {}:\n        pass\n')[0].body[0]
+    absent = _parse('def o():\n    def h():\n        pass\n')[0].body[0]
+    check("empty_capture_list_is_empty", empty.captures == [], repr(empty.captures))
+    check("empty_capture_list_flag_true", empty.has_capture_list is True)
+    check("absent_capture_list_flag_false", absent.has_capture_list is False)
+
+    # `{mut}` with no name: a convention-only entry, recorded with a None NAME
+    # so it cannot be confused with a capture of a variable called `mut`.
+    bare = _parse('def o():\n    def h() {mut}:\n        pass\n')[0].body[0]
+    check("bare_convention_entry_has_none_name",
+          bare.captures == [(None, 'mut')], repr(bare.captures))
+
+    # A trailing comma is allowed.
+    trail = _parse('def o():\n    def h() {mut c,}:\n        c += 1\n')[0].body[0]
+    check("capture_list_trailing_comma", trail.captures == [('c', 'mut')],
+          repr(trail.captures))
+
+    # `var`/`inout`/`borrowed` canonicalise; `imm` does not.
+    check("capture_var_canon_to_owned",
+          _parse('def o():\n    def h() {var v}:\n        pass\n')[0]
+          .body[0].captures == [('v', 'owned')])
+    check("capture_imm_passes_through",
+          _parse('def o():\n    def h() {imm i}:\n        pass\n')[0]
+          .body[0].captures == [('i', 'imm')])
+
+    # A lambda's `{...}` is its capture TEXT, not a name list — a different
+    # field on a different node, and the two must not be confused.
+    lam = _parse('g = lambda () {ref} -> T: 1\n')[0].value
+    check("lambda_captures_is_text_not_pairs",
+          lam.captures == 'ref' and not isinstance(lam.captures, list),
+          repr(lam.captures))
+
+
+# ── 5. `imm` as a convention keyword ──────────────────────────────────────
+def test_imm_convention():
+    src = ('struct L:\n'
+           '    def __eq__(imm self, imm other: Self) -> Bool:\n'
+           '        return self.x == other.x\n')
+    m = _parse(src)[0].methods[0]
+    check("imm_not_a_parameter_name",
+          [p[0] for p in m.params] == ['self', 'other'], repr(m.params))
+    check("imm_recorded_as_convention",
+          m.param_convs == {'self': 'imm', 'other': 'imm'}, repr(m.param_convs))
+
+    # It is a real KEYWORD now, so it must not survive as an identifier.
+    check("imm_is_a_keyword", 'imm' in N._KEYWORDS)
+
+    # ...and it is an immutable borrow, in one shared vocabulary.
+    for c in ('read', 'ref', 'imm'):
+        check(f"conv_{c}_is_read_only", N.conv_is_read_only(c) is True)
+    for c in ('mut', 'out'):
+        check(f"conv_{c}_is_exclusive", N.conv_is_exclusive(c) is True)
+    check("conv_owned_is_transfer", N.conv_is_transfer('owned') is True)
+    # An ABSENT convention must not read as read-only: callers opt in.
+    for c in (None, ''):
+        check(f"conv_absent_not_read_only_{c!r}", N.conv_is_read_only(c) is False)
+
+    # A convention keyword immediately before a separator is still a NAME.
+    named = _parse('def f(imm):\n    pass\n')[0]
+    check("imm_as_plain_param_name", named.params == [('imm', None)],
+          repr(named.params))
+
+
+# ── 6. `where` on a struct's base list ────────────────────────────────────
+def test_struct_where():
+    src = ('struct I[T](\n'
+           '    Copyable where conforms_to(T, Copyable),\n'
+           '    Iterable,\n'
+           ') where conforms_to(T, Deinitable):\n'
+           '    pass\n')
+    st = _parse(src)[0]
+    check("struct_where_parses", isinstance(st, N.StructDef), repr(st))
+    check("struct_where_keeps_body", len(st.fields) == 0, repr(st.fields))
+    # A plain base list still works.
+    plain = _parse('struct S(A, B):\n    pass\n')[0]
+    check("struct_plain_bases_unaffected", isinstance(plain, N.StructDef))
+
+
+# ── 7. Multi-target comptime binding ─────────────────────────────────────
+def test_multi_target_comptime():
+    src = ('def f():\n'
+           '    comptime a, b = g()\n')
+    body = _parse(src)[0].body
+    check("multi_target_comptime_yields_two_statements", len(body) == 2,
+          repr([type(s).__name__ for s in body]))
+    check("multi_target_comptime_targets",
+          all(isinstance(s, N.ComptimeVarStmt) for s in body)
+          and [s.target for s in body] == ['a', 'b'],
+          repr([getattr(s, 'target', None) for s in body]))
+
+    # Single-target is unchanged, and a bare `comptime NAME` still works.
+    one = _parse('def f():\n    comptime a = g()\n')[0].body
+    check("single_target_comptime_unaffected",
+          len(one) == 1 and one[0].target == 'a', repr(one))
+
+
+# ── 8. Function type in subscript (index) position ───────────────────────
+def test_fn_type_in_subscript():
+    src = ('def f(self):\n'
+           '    var p = q.unsafe_bitcast[\n'
+           '        def(* a: * T) thin abi("C") -> Int\n'
+           '    ]()\n')
+    stmts = _parse(src)
+    subs = [n for n in _walk(stmts) if isinstance(n, N.SubscriptExpr)]
+    check("fn_type_subscript_parses", len(subs) >= 1, repr(subs))
+    check("fn_type_in_subscript_not_a_slice",
+          not any(isinstance(n, N.SliceExpr) for n in _walk(stmts)),
+          "a slice was produced for the function type")
+
+    # Ordinary slices and plain indexes must be unaffected.
+    check("plain_slice_still_a_slice",
+          any(isinstance(n, N.SliceExpr)
+              for n in _walk(_parse('def f():\n    var y = a[1:2]\n'))))
+    check("plain_index_not_a_slice",
+          not any(isinstance(n, N.SliceExpr)
+                  for n in _walk(_parse('def f():\n    var y = a[i]\n'))))
+
+
+# ── 9. Decorated import ──────────────────────────────────────────────────
+def test_decorated_import():
+    src = ('@stable(recursive=True)\n'
+           'from std.builtin.tuple import Tuple\n')
+    st = _parse(src)[0]
+    check("decorated_import_parses", isinstance(st, N.FromImportStmt), repr(st))
+    check("decorated_import_records_deco",
+          len(getattr(st, 'decorators', [])) == 1, repr(getattr(st, 'decorators', None)))
+    # A bare `@deco` and `@deco(x)` must stay distinguishable.
+    bare = _parse('@stable\nimport os\n')[0]
+    check("bare_decorated_import_records_name",
+          getattr(bare, 'decorators', []) == ['stable'],
+          repr(getattr(bare, 'decorators', None)))
+    check("undecorated_import_has_no_deco",
+          getattr(_parse('import os\n')[0], 'decorators', []) == [])
+    check("undecorated_from_import_has_no_deco",
+          getattr(_parse('from a import b\n')[0], 'decorators', []) == [])
+
+
+# ── 10. One syntactic construct may yield several statements ─────────────
+def test_multi_statement_result():
+    # `_parse_stmt_into` is what lets `_parse_comptime` return a list; the two
+    # collectors must flatten it rather than nest a list into the body.
+    src = ('def f():\n'
+           '    if True:\n'
+           '        comptime a, b = g()\n')
+    body = _parse(src)[0].body[0].then_body
+    check("nested_block_flattens_multi_statement",
+          len(body) == 2 and all(isinstance(s, N.ComptimeVarStmt) for s in body),
+          repr(body))
+
+
+# ── 11. The middle tier sees the free names in all of it ──────────────────
+def test_used_idents_covers_new_syntax():
+    # `mojo/middle/types._used_idents_node` is the fallback that
+    # `discover_closures` turns into a nested def's capture list
+    # (`used - inner_declared`). It used to END in a bare `return set()`, so any
+    # node type without an explicit branch reported NO free names at all — an
+    # UNDER-approximation, and the dangerous direction: the free names vanish
+    # and the closure does not capture what its body reads. 39 of the 67 AST
+    # dataclass node types had no branch, including `ComptimeIfStmt`,
+    # `ComptimeForStmt`, `MatchStmt` and `AwaitExpr` — every construct this
+    # file's other sections added. It now walks an unhandled node's dataclass
+    # fields generically.
+    from mojo.middle.types import _used_idents_node as U
+
+    def free(src):
+        """The free names of the statements in f's body."""
+        mod = N.Parser(N.py_tokenize(src)).parse_module()
+        out = set()
+        for st in mod[0].body:
+            out |= U(st)
+        return out
+
+    # An unhandled node type is no longer silently empty.
+    check("comptime_if_free_names",
+          free('def f():\n    comptime if True:\n        y = a + b\n    return 0\n')
+          == {'a', 'b', 'y'}, "a comptime if's body must be visible")
+    check("comptime_for_free_names",
+          free('def f():\n    comptime for i in r:\n        y = a + b\n    return 0\n')
+          == {'a', 'b', 'r', 'y'}, "a comptime for's iterable and body")
+    check("comptime_var_rhs_is_a_use",
+          free('def f():\n    comptime x = a + b\n    return 0\n') == {'a', 'b'},
+          "the target is a binding, only the RHS is free")
+    check("await_operand_is_a_use",
+          free('async def f():\n    y = await g(a, b)\n    return 0\n')
+          == {'a', 'b', 'g', 'y'}, "await's operand")
+    check("yield_value_is_a_use",
+          free('def f():\n    y = yield a + b\n    return 0\n') == {'a', 'b', 'y'},
+          "yield's value")
+    check("del_target_is_a_use",
+          free('def f():\n    del a\n    return 0\n') == {'a'},
+          "del reads the name it unbinds")
+
+    # A pattern BINDS; it is not a use of an enclosing name. In `match`
+    # semantics a bare name in a pattern is an irrefutable capture, so
+    # `case Int(v)` binds both `Int` and `v` and neither may be captured.
+    check("match_pattern_binds_type_and_name",
+          free('def f(s):\n    match s:\n        case Int(v):\n            return a + v\n'
+               '        case _:\n            return 0\n') == {'s', 'a'},
+          "neither the type name nor the binding is free")
+    check("match_seq_pattern_binds",
+          free('def f(s):\n    match s:\n        case [x, y]:\n            return x + a\n'
+               '        case _:\n            return 0\n') == {'s', 'a'},
+          "sequence-pattern elements bind")
+    check("match_dict_pattern_binds",
+          free('def f(s):\n    match s:\n        case {"k": z}:\n            return z + a\n'
+               '        case _:\n            return 0\n') == {'s', 'a'},
+          "dict-pattern values bind, its string key is not a name")
+    check("match_or_of_literals_has_no_names",
+          free('def f(s):\n    match s:\n        case 1 | 2:\n            return a\n'
+               '        case _:\n            return 0\n') == {'s', 'a'},
+          "alternation of literals binds nothing")
+    check("match_as_binds_both_and_guard_is_a_use",
+          free('def f(s):\n    match s:\n        case other as w if w > 3:\n            return w + a\n'
+               '        case _:\n            return 0\n') == {'s', 'a'},
+          "`as` binds both sides; the guard reads what the pattern bound")
+    # The one pattern shape that really DOES read an enclosing name is a dotted
+    # value pattern, `case mod.CONST`, and its base must survive.
+    check("match_dotted_value_pattern_keeps_base",
+          free('def f(s):\n    match s:\n        case mod.CONST:\n            return a\n'
+               '        case _:\n            return 0\n') == {'s', 'mod', 'a'},
+          "the base of a value pattern is a use, not a binding")
+
+    # Consistency with the pre-existing ForStmt, which also does not report its
+    # loop variable: a binding is a binding whichever statement introduced it.
+    check("for_loop_var_not_free",
+          free('def f():\n    for i in a:\n        y = b\n    return 0\n') == {'a', 'y', 'b'},
+          "matches comptime for")
+
+    # And the boundaries still hold: the generic walk must not descend into a
+    # nested callable, or the ENCLOSING function would capture what only the
+    # inner one needs.
+    check("nested_def_is_a_boundary",
+          free('def f():\n    def g():\n        return a + b\n    return 0\n') == set(),
+          "a nested def's body is not the outer function's free names")
+    check("nested_lambda_is_a_boundary",
+          free('def f():\n    g = lambda: a + b\n    return 0\n') == {'g'},
+          "a lambda's body is not the outer function's free names")
+
+    # A node with no names at all stays empty — the generic walk must not
+    # invent uses out of `VarDecl.name` or a str-typed annotation.
+    check("no_names_stays_empty",
+          free('def f():\n    return 1 + 2\n') == set(), "literals only")
+    check("var_decl_name_is_not_a_use",
+          free('def f():\n    zz = 5\n    return zz\n') == {'zz'},
+          "the assignment target is a use, per AssignStmt's branch")
+
+
+def run_tests():
+    print("=" * 70)
+    print("PARSER: new-modular syntax")
+    print("=" * 70)
+    for fn in (test_dotted_literal, test_match, test_lambda, test_capture_lists,
+               test_imm_convention, test_struct_where,
+               test_multi_target_comptime, test_fn_type_in_subscript,
+               test_decorated_import, test_multi_statement_result,
+               test_used_idents_covers_new_syntax):
+        print(f"\n--- {fn.__name__}")
+        fn()
+    print()
+    print("=" * 70)
+    print(f"Results: {_PASS} passed, {_FAIL} failed")
+    print("=" * 70)
+    return _FAIL == 0
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run_tests() else 1)

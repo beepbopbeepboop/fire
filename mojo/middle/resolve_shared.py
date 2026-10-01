@@ -1622,11 +1622,3 @@ def _collect_calls_in_stmt(gen, n, out):
         if isinstance(_eb2, list):
             gen._calls_in_stmts(_eb2, out)
 
-
-# ---------------------------------------------------------------------------
-# Dependencies extracted with the shared API (originally gimple_gen_resolve.py)
-# ---------------------------------------------------------------------------
-
-# --- dependency KNOWN_LEAF_RETS (from gimple_gen_resolve.py) ---
-KNOWN_LEAF_RETS = {'_mojo_type': 'char *'}
-

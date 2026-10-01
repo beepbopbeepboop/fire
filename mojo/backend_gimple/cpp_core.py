@@ -14,7 +14,7 @@ import re
 
 from fire_compiler import (
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
-    EllipsisLiteral, NoneLiteral,
+    EllipsisLiteral, DottedLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
     SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr,
     ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension,
@@ -1408,6 +1408,11 @@ def _cpp_expr(gen, e) -> str:
         return s
     if isinstance(e, gimple_ctypes.BoolLiteral):
         return 'true' if e.value else 'false'
+    if isinstance(e, gimple_ctypes.DottedLiteral):
+        # A dot-relative value reference (`.always`, `.uint64`). Zero
+        # placeholder, for the reason and with the same convention as
+        # `_lower_DottedLiteral` in the GIMPLE path — see its docstring.
+        return '0'
     if isinstance(e, gimple_ctypes.StringLiteral):
         val = e.value
         if val.startswith('`') and val.endswith('`') and len(val) > 2:

@@ -131,6 +131,61 @@ def test_gimple_execution(name: str, mojo_src: str, expected_return: int = 0):
                 pass
 
 
+def test_gimple_stdout_repeated(name: str, mojo_src: str, expected_stdout: str,
+                                runs: int = 8):
+    """`test_gimple_stdout`, but runs the binary `runs` times and requires
+    EVERY run to agree.
+
+    For a bug whose symptom is reading uninitialised or freed memory, one run
+    is a coin flip and the test is worth much less than it looks. The
+    capture-by-pointer-of-a-pointer case
+    (`gimple_lambda_capture_pointer_local_by_value`) was measured at 8/16
+    correct, 4/16 wrong answer, 4/16 SIGSEGV — because the lambda read the
+    first 8 bytes of the ADDRESS of a stack local, so what it got depended on
+    what the stack happened to hold. A single-run assertion there passes half
+    the time, which is the worst kind of regression test: green on the gate
+    that introduced the bug.
+
+    Reporting the distinct outcomes (not just the first mismatch) matters too,
+    because "wrong value" and "crashed" are different bugs and only the first
+    one is a silent-wrong-answer.
+    """
+    global _PASS, _FAIL, _TIMEOUT
+    exe_path = None
+    try:
+        exe_path = compile_mojo_to_gimple_exe(mojo_src)
+        seen = {}
+        for _ in range(runs):
+            try:
+                r = subprocess.run([exe_path], capture_output=True, text=True,
+                                   timeout=30)
+                key = f"exit {r.returncode}: {r.stdout!r}"
+            except subprocess.TimeoutExpired:
+                key = "TIMEOUT"
+                _TIMEOUT += 1
+            seen[key] = seen.get(key, 0) + 1
+        if len(seen) == 1 and next(iter(seen)) == f"exit 0: {expected_stdout!r}":
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected {expected_stdout!r} on all {runs} runs, "
+                  f"got {sorted(seen.items(), key=lambda kv: -kv[1])}")
+            _FAIL += 1
+    except subprocess.TimeoutExpired as e:
+        print(f"TIMEOUT {name}: {e}")
+        _TIMEOUT += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+    finally:
+        if exe_path:
+            for suffix in ('', '.c'):
+                try:
+                    os.unlink(exe_path + suffix)
+                except OSError:
+                    pass
+
+
 def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
     """Test that mojo code compiles to GIMPLE, executes, and prints exactly
     `expected_stdout`. Unlike test_gimple_execution's exit-code check, this
@@ -1475,10 +1530,57 @@ main()
     # call site binds the dict's `char *` key element to the lambda's
     # parameter, so an independently computed declaration said `char *` where
     # the definition inferred `int64_t`).
-    test_gimple_stdout("gimple_lambda_capture_as_sorted_key", """\
+    #
+    # Repeated, because this is the case that caught the capture-by-pointer
+    # regression below and it is NONDETERMINISTIC: the broken build read
+    # `_env->d` as the first 8 bytes of `&d`, so the answer depended on the
+    # stack. Measured 8/16 correct, 4/16 wrong, 4/16 SIGSEGV. See
+    # test_gimple_stdout_repeated.
+    test_gimple_stdout_repeated("gimple_lambda_capture_as_sorted_key", """\
 def main():
     d = {"b": 2, "a": 1}
     print(sorted(d, key=lambda k: d[k]))
+
+main()
+""", "['a', 'b']\n")
+
+    # The regression itself, stated as its own case, in a shape that reaches the
+    # LIFTED path (the lambda has to have an env materialized at the reference
+    # site) rather than the beta-reduced/inlined one. That distinction is the
+    # whole test: with the bug, the four shapes below all fail, and a lambda
+    # that gets inlined never notices. Capturing a local that is ITSELF a
+    # pointer puts a `MojoDict **` into a `MojoDict *` env field when the
+    # address is taken instead of the value, and the body then reads the first
+    # 8 bytes of the address of a stack local.
+    #
+    # via map(), where the wrong value is unmissable (garbage ~4.3e9 rather
+    # than a plausible-but-wrong small int).
+    test_gimple_stdout_repeated("gimple_lambda_capture_pointer_local_via_map", """\
+def main():
+    n = [10]
+    print(list(map(lambda v: v + n[0], [1, 2])))
+
+main()
+""", "[11, 12]\n")
+
+    # …and two pointer locals at once, so a fix that only handles the
+    # single-capture case cannot pass.
+    test_gimple_stdout_repeated("gimple_lambda_captures_two_pointer_locals", """\
+def main():
+    d = {"b": 2, "a": 1}
+    off = [0]
+    print(sorted(d, key=lambda k: d[k] + off[0]))
+
+main()
+""", "['a', 'b']\n")
+
+    # A scalar local captured BY VALUE alongside the pointer one, so the rule
+    # has to choose per-capture rather than once per closure.
+    test_gimple_stdout_repeated("gimple_lambda_captures_pointer_and_scalar_locals", """\
+def main():
+    d = {"b": 2, "a": 1}
+    z = 0
+    print(sorted(d, key=lambda k: d[k] + z))
 
 main()
 """, "['a', 'b']\n")

@@ -9,7 +9,7 @@ from __future__ import annotations
 from __future__ import annotations
 import os
 import re
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_dict, _pair_key, _as_structdef_node, _as_funcdef_node
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_dict, _pair_key, _as_structdef_node, _as_funcdef_node, conv_is_read_only, conv_is_exclusive, conv_is_transfer
 import ast_rewriter
 import regex_compile
 import mlir
@@ -367,7 +367,13 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         # no-runtime-representation type already is throughout this file.
         ctype = 'int64_t'
     conv  = (getattr(node, 'param_convs', {}) or {}).get(pname)
-    if conv in ('read', 'ref') and gimple_ctypes.TypeLattice.is_pointer(ctype):
+    # `conv_is_read_only` is the ONE definition of "immutable borrow" — it
+    # covers `read`, `ref` and `imm` together (fire_compiler's `_CONV_READ_ONLY`).
+    # This used to carry its own literal `('read', 'ref')` tuple, so the stdlib's
+    # new `imm` convention silently lost the `const` qualification it means until
+    # someone remembered to add it here. Asking the shared question is the fix;
+    # adding a fourth spelling to a second hardcoded tuple would not be.
+    if conv_is_read_only(conv) and gimple_ctypes.TypeLattice.is_pointer(ctype):
         # Immutable borrow of a pointer arg → const T *
         # Only add const if not already present
         if not ctype.startswith('const '):

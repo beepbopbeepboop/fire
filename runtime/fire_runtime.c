@@ -4453,12 +4453,41 @@ int mojo_is_registered_dict(int64_t addr) {
 }
 
 /* Decimal formatting for an int64_t. `tmp` is a scratch buffer of
- * _INT_STR_BLOCK bytes (24: "-9223372036854775808" is 20 characters, plus the
- * NUL); the returned pointer is INSIDE it, so the string is
+ * _INT_STR_BLOCK bytes; the returned pointer is INSIDE it, so the string is
  * tmp + sizeof tmp - result bytes long including the NUL. A hand-rolled itoa:
  * snprintf("%lld") was half the cost of an Int-keyed dict access (vfprintf,
- * locale lookup, buffer setup) for what is a divide loop. */
-#define _INT_STR_BLOCK 24
+ * locale lookup, buffer setup) for what is a divide loop.
+ *
+ * 32, not the 20+1 an int needs. This is also the POOL BLOCK SIZE for every
+ * transient decimal that `mojo_cstr_or_int_release` hands back (see
+ * `_int_str_block`), and the pool also carries FLOAT keys rendered by
+ * `mojo_str_from_double`.
+ *
+ * That second consumer is why the number is measured rather than reasoned. The
+ * worst `%.17g` spelling of a double is 24 characters, not the ~21 a 16-digit
+ * estimate suggests: 17 significant digits ("1.7976931348623157") plus a sign
+ * ("-"), a point, an exponent marker and a THREE-digit exponent ("e-308"), and
+ * the sign and the 3-digit exponent are independent, so
+ * "-1.2345678901234567e-308" is 24. `%.17g` of `DBL_MAX` ("1.7976931348623157e+308")
+ * and of the smallest subnormal ("4.9406564584124654e-324") are 23. A whole
+ * number takes the other branch and gets the ".0" Python's str(float) keeps:
+ * the widest is "10000000000000000" -> "10000000000000000.0", 19. So 24 + 1 NUL
+ * = 25 is the true requirement and 32 has room.
+ *
+ * Getting this wrong does NOT crash, which is what made it worth measuring:
+ * `snprintf(tmp, sizeof tmp, ...)` into an undersized `tmp` TRUNCATES, so a
+ * 24-byte block silently rendered "-1.2345678901234567e-308" as a 23-character
+ * prefix and every such float became a dict key that no other spelling of that
+ * float could ever find. test_ptr_registry.py pins both the width and the
+ * producer/pool agreement.
+ *
+ * The pool stores its free-list link in a block's first 8 bytes and hands
+ * blocks out with no size of its own, so every producer into it must agree on
+ * one size — a producer that malloc'd a different size and released through
+ * this path would put a wrongly-sized block on the free list, and the next
+ * `_fmt_int`/`%.17g` would write past it. `mojo_str_from_double` therefore
+ * allocates from `_int_str_block()` rather than with a size-exact malloc. */
+#define _INT_STR_BLOCK 32
 static char *_fmt_int(int64_t v, char *tmp) {
     char *p = tmp + _INT_STR_BLOCK;
     uint64_t u = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
@@ -9295,6 +9324,49 @@ float  mojo_div_float(float a, float b)    { return a / b; }
 /* Decimal string of an integer (heap-allocated). Used when a string is
    concatenated with a numeric operand (String + Int) so codegen never has
    to emit an invalid `char* + int` expression. */
+/* Decimal string of a floating-point value, formatted the way Python's
+ * str(float) is: `%.17g`, with the trailing ".0" re-added for a whole number so
+ * `3.0` does not print as "3".
+ *
+ * Exists because a FLOAT dict key has to become a string to be looked up —
+ * the runtime keys every dict by a `char *` — and the codegen had no way to
+ * produce one: `_char_to_cstr` handles `char` and `int64_t` and otherwise fell
+ * through to a raw `(char *)value` bit-cast, which for a `double` is not valid
+ * C at all ("cannot convert to a pointer type") and would have been a garbage
+ * pointer even if it compiled. Call sites: `d[Float64(0.0)] = v` in the
+ * stdlib's test/collections/test_dict.mojo.
+ *
+ * Negative zero needs no special case and gets none: `%.17g` prints `-0.0` as
+ * "-0", which is Python's own spelling and keeps it a distinct key from "0".
+ * The stdlib test that needs this is precisely the signed-zero one, since
+ * `-0.0 == 0.0` numerically is what makes two such inserts collide on one key
+ * — so the two spellings must agree between themselves, which they do.
+ *
+ * A whole number is detected by the ABSENCE of `.`, `e`/`E` and the `nan`/`inf`
+ * spellings in the formatted output.
+ *
+ * ALLOCATED FROM THE TRANSIENT POOL, not with malloc. The release half of this
+ * contract is `mojo_cstr_or_int_release`, which does not free: it links the
+ * block onto `_int_str_pool` for the next access to reuse. A malloc'd block put
+ * through that path was a live bug — the pool hands out `_INT_STR_BLOCK`-sized
+ * blocks with no size of its own, so a differently-sized block on the free list
+ * is a buffer overrun on the next use, and the malloc is never reclaimed
+ * (+16 B per dict access, measured on build/memprobes/float_dict_key.mojo).
+ * `_INT_STR_BLOCK` is sized to fit this output for exactly that reason. */
+char *mojo_str_from_double(double v) {
+    char tmp[_INT_STR_BLOCK];
+    snprintf(tmp, sizeof tmp, "%.17g", v);
+    size_t n = strlen(tmp);
+    if (n && !strpbrk(tmp, ".eEnN")) {
+        if (n + 3 <= sizeof tmp) {   /* room for the ".0" and the NUL */
+            tmp[n] = '.'; tmp[n + 1] = '0'; tmp[n + 2] = '\0'; n += 2;
+        }
+    }
+    char *out = _int_str_block();
+    memcpy(out, tmp, n + 1);
+    return out;
+}
+
 char *mojo_str_from_int(int64_t v) {
     /* A string that is KEPT (concatenated into a result, stored as a dict
      * value, bound to a local) gets an exact-size allocation. The pooled

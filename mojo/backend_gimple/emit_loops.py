@@ -2533,6 +2533,21 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
     gen.func_param_types[ci.lifted_name] = closure_param_ctypes
     params_str = ', '.join(param_strs) if param_strs else 'void'
 
+    # A doubly-nested closure's by-reference captures live in ITS OWN parent —
+    # this lifted function — so the boxing setup `gen_func` does for a
+    # top-level function has to be done here too, keyed by `ci.lifted_name`
+    # (which is exactly how `discover_closures` keys this function's own
+    # nested defs). Without it a `{mut x}` capture two levels down declared
+    # `x` as an ordinary scalar, and the env-fill then assigned that scalar to
+    # an `int64_t *` field: "non-trivial conversion in 'var_decl'"
+    # (benchmarks/memory/bench_heap_parallel's `call_fn` -> `task_body`
+    # -> `{mut checksum}`). Same three calls, same order, as `gen_func`:
+    # seed the boxed-pointer declarations, seed the address-taken locals, then
+    # allocate each box once in the prologue.
+    gen._seed_mut_captured_local_types(ci.lifted_name)
+    gen._seed_addressed_locals(node.body)
+    gen._emit_mut_local_box_allocs()
+
     gen._emit_label("bb_2")
     # `{mut}`-capture-spec names (ClosureInfo.mut_names): the env
     # struct field is a POINTER (see the struct-typedef emission's own

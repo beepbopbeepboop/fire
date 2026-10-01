@@ -1460,6 +1460,9 @@ void mojo_setattr(void *obj, char *attr, int64_t val);
 void mojo_delattr(void *obj, char *attr);
 char *mojo_str_cat(char *a, char *b);
 char *mojo_str_from_int(int64_t v);
+/* str(float) for a float dict key — see mojo_str_from_double's own comment in
+ * fire_runtime.c for why the key has to be materialized as text at all. */
+char *mojo_str_from_double(double v);
 MojoList *mojo_divmod(int64_t a, int64_t b);
 int64_t mojo_pow_mod(int64_t base, int64_t exp, int64_t mod);
 char *mojo_hex(int64_t v);

@@ -23,7 +23,7 @@ import re
 import sys
 import zlib
 import dataclasses
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, DottedLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, Generator, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, MatchCase, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, py_tokenize, Parser, _as_str, _as_int, _as_intlit_node, _as_boollit_node, _signed_int64, _signed_int64_c_literal
 from module_loader import load_module, get_symbol_type
 import ast_rewriter
 import mlir
@@ -795,7 +795,7 @@ def _mojo_type(ann: str | type | None) -> str:
         return 'int64_t'
     if isinstance(ann, str) and ann.endswith('()') and ('[' not in ann):
         base = ann[:-2].strip()
-        if base in ('list', 'List', 'DynamicVector'):
+        if base in ('list', 'List', 'DynamicVector', 'Array'):
             return 'MojoList *'
         if base in ('dict', 'Dict'):
             return 'MojoDict *'
@@ -811,7 +811,20 @@ def _mojo_type(ann: str | type | None) -> str:
         if base in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'):
             elem = _mojo_type(_split_top_level_commas(inner)[0].strip())
             return f'{elem} *'
-        if base in ('List', 'list', 'InlineArray'):
+        if base in ('List', 'list', 'InlineArray', 'Array'):
+            # `Array[T, N]` — Mojo's fixed-size array — is a LIST at this
+            # representation level, exactly like `List[T]`: one `MojoList *`
+            # with an element type, no separate fixed-size struct. It was
+            # missing here, so the annotation erased to `int64_t` and every
+            # use lost its static container type. The visible damage was a
+            # `for x in xs:` over an `Array[Int, N]`, where an untyped
+            # iterable emits the runtime dict-or-list dispatch and the DICT
+            # arm declares the loop variable `char *` (it is a key); the
+            # later `var val = <a double>` in the same function then assigned
+            # a double to that `char *` — "cannot convert to a pointer type"
+            # in the stdlib's test_math.mojo. Also in
+            # `_IMPORTED_STRUCT_SKIP_BASENAMES`, i.e. already agreed not to
+            # be an ordinary imported struct.
             return 'MojoList *'
         if base in ('Dict', 'dict'):
             return 'MojoDict *'
@@ -1447,12 +1460,51 @@ def _module_init_name(module_name: str) -> str:
     return f'{safe}_init'
 
 def _used_idents_node(node) -> set[str]:
-    """All IdentExpr names referenced in node; does NOT cross FunctionDef boundaries."""
+    """All IdentExpr names referenced in node; does NOT cross FunctionDef or
+    LambdaExpr boundaries.
+
+    Two rules, and the second one is what this function's structure exists to
+    enforce:
+
+    1. A name bound inside the subtree is not free. The explicit branches below
+       handle the shapes that need that said out loud (Comprehension subtracts
+       its generator targets, AssignStmt counts its target as a use, IfStmt
+       walks elifs and else), because a generic field walk cannot tell a
+       binding from a reference.
+    2. A node type with no explicit branch is walked GENERICALLY over its
+       dataclass fields, never silently reported as using nothing.
+
+    Rule 2 was added 2026-09-30 because the function used to end in a bare
+    `return set()`, which made an unhandled node type an UNDER-approximation:
+    the free names inside it vanished, and `discover_closures` feeds this set
+    straight into a closure's capture list (`used - inner_declared`), so a
+    `comptime if`, a `comptime for`, a `match`, an `await` or a `yield` nested
+    in a nested `def` with no explicit `[capture ...]` list produced a closure
+    that did not capture what its body reads. 39 of the 67 AST dataclass node
+    types had no branch. An over-approximation costs a slightly larger env and
+    is absorbed by the existing `inner_declared` subtraction; an
+    under-approximation is a wrong capture and a wrong read. Deliberately the
+    same direction as ForStmt, which also does not subtract its loop variable.
+
+    The generic walk must still not cross into a nested function or lambda, so
+    those two return early above and are never reached by the fallback.
+    """
     if node is None:
         return set()
+    if isinstance(node, (list, tuple, set, frozenset)):
+        rl: set = set()
+        for item in node:
+            rl |= _used_idents_node(item)
+        return rl
     if isinstance(node, IdentExpr):
         return {node.name}
     if isinstance(node, FunctionDef):
+        return set()
+    if isinstance(node, LambdaExpr):
+        # A closure boundary, for the same reason FunctionDef is one: the
+        # nested callable's own capture analysis is a separate pass, and
+        # counting its body's names here would make the ENCLOSING function
+        # capture variables only the lambda needs.
         return set()
     if isinstance(node, BinaryOp):
         return _used_idents_node(node.left) | _used_idents_node(node.right)
@@ -1545,6 +1597,25 @@ def _used_idents_node(node) -> set[str]:
             for s in node.else_body:
                 r5 |= _used_idents_node(s)
         return r5
+    if isinstance(node, MatchStmt):
+        rm = _used_idents_node(node.subject)
+        for case in node.cases:
+            rm |= _used_idents_node(case)
+        return rm
+    if isinstance(node, MatchCase):
+        # The guard and the body are free uses. The patterns contribute their
+        # EVALUATED parts and then give back their bindings, which is what makes
+        # `case mod.CONST` keep `mod` (a real read) while `case Int(v)` gives
+        # back both `Int` and `v`. Getting this the other way round is what the
+        # generic fallback would have done: a bare `case Int(v)` contributes
+        # `Int` (a type name) and `v` (a fresh binding) as if the enclosing
+        # function read both, and `discover_closures` would try to CAPTURE them.
+        rc = _used_idents_node(node.patterns)
+        if node.guard is not None:
+            rc |= _used_idents_node(node.guard)
+        for s in node.body:
+            rc |= _used_idents_node(s)
+        return rc - _match_pattern_bound(node.patterns)
     if isinstance(node, WhileStmt):
         r6 = _used_idents_node(node.condition)
         for s in node.body:
@@ -1576,7 +1647,83 @@ def _used_idents_node(node) -> set[str]:
         for s in node.body:
             r9 |= _used_idents_node(s)
         return r9
-    return set()
+    return _used_idents_generic(node)
+
+
+def _match_pattern_bound(patterns) -> set[str]:
+    """The names a `case`'s patterns BIND, which are therefore not free uses.
+
+    Follows `match` semantics rather than guessing: a bare name in a pattern is
+    an irrefutable CAPTURE, not a comparison. So `case _`, `case other`,
+    `case Int(v)`, `case [x, y, *rest]`, `case {"k": z}` and `case a as b` all
+    bind every IdentExpr they contain, and none of those is a use of an
+    enclosing name. A pattern that does compare against an existing name spells
+    it as a dotted value pattern -- `case mod.CONST` -- and that is the one
+    shape whose base must be KEPT, because `mod` really is read from the
+    enclosing scope. It arrives as a MemberExpr, whose `member` is a plain str
+    (the bound name, so nothing to add) and whose `obj` is the use, so
+    MemberExpr is deliberately not descended into.
+
+    Without this, every `match` in the new-modular syntax leaked its type names
+    and its bindings into the enclosing function's free-name set.
+    """
+    bound: set = set()
+
+    def go(p) -> None:
+        if p is None or isinstance(p, (str, bytes, int, float, bool)):
+            return
+        if isinstance(p, (list, tuple)):
+            for item in p:
+                go(item)
+            return
+        if isinstance(p, IdentExpr):
+            bound.add(p.name)
+            return
+        if isinstance(p, MemberExpr):
+            return          # value pattern: obj is a use, member is the binding
+        if dataclasses.is_dataclass(p):
+            for f in dataclasses.fields(p):
+                go(getattr(p, f.name, None))
+
+    for pat in (patterns or ()):
+        go(pat)
+    return bound
+
+
+def _used_idents_generic(node) -> set[str]:
+    """Rule 2: walk an unhandled node's dataclass fields for IdentExpr names.
+
+    Split out from `_used_idents_node` so the recursion is obviously total: this
+    is the only exit from that function that does not depend on the node's type
+    matching one of the branches above.
+
+    Every child goes back through `_used_idents_node`, never through itself.
+    That is the whole trick, and getting it wrong is silent: recursing into
+    `_used_idents_generic` instead walks an `IdentExpr` as a dataclass, finds
+    its `name` is a str, and returns NOTHING for it — so the generic path
+    reported zero free names and looked like a clean, plausible result. Strings,
+    ints, bools and None are not nodes and contribute nothing here, which is what
+    makes a blind field walk safe: a `VarDecl.name` or an annotation spelled as a
+    str cannot invent a use.
+
+    Because children re-enter `_used_idents_node`, a handled grandchild still
+    gets its specialised treatment (a `MatchStmt`'s case bodies reach ExprStmt
+    and AssignStmt that way), and an unhandled great-grandchild falls back here
+    again. Every step descends the tree, so this terminates.
+    """
+    if node is None or isinstance(node, (str, bytes, int, float, bool)):
+        return set()
+    if isinstance(node, (list, tuple, set, frozenset)):
+        r: set = set()
+        for item in node:
+            r |= _used_idents_node(item)
+        return r
+    if not dataclasses.is_dataclass(node) or isinstance(node, (FunctionDef, LambdaExpr)):
+        return set()
+    out: set = set()
+    for f in dataclasses.fields(node):
+        out |= _used_idents_node(getattr(node, f.name, None))
+    return out
 
 def _compute_exc_descendants(all_struct_defs):
     """For each struct name, the set of all struct names that transitively

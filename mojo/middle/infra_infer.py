@@ -2375,14 +2375,3 @@ _FC_SEP = '\x1f'
 # --- dependency _POINTER_CTOR_NAMES (from gimple_gen_infra.py) ---
 _POINTER_CTOR_NAMES = frozenset({'UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'})
 
-
-# ---------------------------------------------------------------------------
-# Dependencies extracted with the shared API (originally gimple_gen_infra.py)
-# ---------------------------------------------------------------------------
-
-# --- dependency _FC_SEP (from gimple_gen_infra.py) ---
-_FC_SEP = '\x1f'
-
-# --- dependency _POINTER_CTOR_NAMES (from gimple_gen_infra.py) ---
-_POINTER_CTOR_NAMES = frozenset({'UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer'})
-

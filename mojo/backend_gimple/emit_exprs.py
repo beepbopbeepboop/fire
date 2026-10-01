@@ -76,6 +76,8 @@ def lower_expr(gen, node) -> tuple[str, str]:
         return gen._lower_BoolLiteral(node)
     elif isinstance(node, gimple_ctypes.EllipsisLiteral):
         return gen._lower_EllipsisLiteral(node)
+    elif isinstance(node, gimple_ctypes.DottedLiteral):
+        return gen._lower_DottedLiteral(node)
     elif isinstance(node, gimple_ctypes.StringLiteral):
         return gen._lower_StringLiteral(node)
     elif isinstance(node, gimple_ctypes.IdentExpr):
@@ -146,6 +148,27 @@ def _lower_EllipsisLiteral(gen, node) -> tuple[str, str]:
     t = gen._new_temp('int')
     gen._emit(f"  {t} = 0;  /* ... */")
     return 'int', t
+
+
+def _lower_DottedLiteral(gen, node) -> tuple[str, str]:
+    """A dot-relative value reference (`.always`, `.uint64`) used as a value.
+
+    The reference is only meaningful against the type the surrounding position
+    supplies — the `inline` decorator's parameter, a DType parameter, the
+    subject of a `__match` — and this backend does not model enums, so there is
+    nothing here to resolve it against. It lowers to a zero placeholder, which
+    is exactly what the SPELLED-OUT form already produces: `_lower_IdentExpr`
+    emits `(int64_t)0` for a class ref used as a value (`DType`, `SIMD` are both
+    in `_BUILTIN_TYPE_NAMES`), so `SIMD[.uint64, 4]` and `SIMD[DType.uint64, 4]`
+    compile to the same thing and neither is silently better than the other.
+
+    int64_t, not int, for the reason `_lower_IdentExpr`'s class-ref branch gives:
+    this value commonly flows into a `(void *)` cast, where a 4-byte int is a
+    real size mismatch on LP64.
+    """
+    t = gen._new_temp('int64_t')
+    gen._emit(f"  {t} = (int64_t)0;  /* .{getattr(node, 'path', '?')} */")
+    return 'int64_t', t
 
 
 def _lower_StringLiteral(gen, node):
@@ -877,6 +900,21 @@ def _lower_TernaryExpr(gen, node) -> tuple[str, str]:
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_merge)
     return res_type, result
+
+
+# C types with no structure or union behind them, so `.member` on one can
+# only be a dynamic attribute access — never a C field selection. Listed
+# explicitly rather than derived from "does not end in ` *`", because a bare
+# struct value (`Span`, boxed as `int64_t` and separately tracked through
+# `_actual_types`) also does not end in ` *` yet IS a real field read.
+_GIMPLE_SCALAR_CTYPES = frozenset({
+    'char', 'signed char', 'unsigned char',
+    'short', 'unsigned short', 'int', 'unsigned', 'unsigned int',
+    'long', 'unsigned long', 'long long', 'unsigned long long',
+    'int8_t', 'int16_t', 'int32_t', 'int64_t',
+    'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t',
+    'float', 'double', 'long double', '_Bool', 'size_t', 'ssize_t',
+})
 
 
 def _lower_MemberExpr(gen, node) -> tuple[str, str]:
@@ -1681,7 +1719,17 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # MojoList field name remapping: Mojo List uses _len/_capacity/elems; C MojoList uses len/cap/data
     _sn = gimple_exprtypes._struct_name_of(ot)
     if _sn == 'MojoList':
-        _mojo_to_c = {'_len': 'len', '_capacity': 'cap', '_size': 'len', 'elems': 'data', '_data': 'data', 'cap': 'cap', 'len': 'len', 'data': 'data'}
+        _mojo_to_c = {'_len': 'len', '_capacity': 'cap', '_size': 'len', 'elems': 'data', '_data': 'data', 'cap': 'cap', 'len': 'len', 'data': 'data',
+                        # Mojo `Array`'s public length member is `.length`, and
+                        # it is the same C field as `.len` (std/collections/
+                        # span.mojo's `Span.__init__` reads `array.length`).
+                        # Without the entry the read fell through to a direct
+                        # `array->length` on a `MojoList`, which has no such
+                        # member: "'MojoList' has no member named 'length'".
+                        # Reachable now that `_mojo_type` maps `Array[T, N]` to
+                        # `MojoList *`, which is what makes the static member
+                        # path apply at all.
+                        'length': 'len'}
         if node.member in _mojo_to_c:
             _c_field = _mojo_to_c[node.member]
             _ftype = 'int64_t' if _c_field in ('len', 'cap') else 'int64_t *'
@@ -2222,6 +2270,26 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # uses instead — real per-object dynamic-attribute storage
         # (mojo_obj_getattr), not a direct field access.
         vp = gen._new_val('void *', f'(void *){ov}')
+        return 'int64_t', gen._call_expr('int64_t', '_mojo_dispatch_getattr',
+                        [('void *', vp), ('char *', f'"{node.member}"')])
+    elif ot in _GIMPLE_SCALAR_CTYPES:
+        # The base is an ordinary SCALAR — `char`, `int64_t`, `_Bool`, ... —
+        # so there is no struct for `.member` to select from and the
+        # "Unknown struct field" fallback below would emit `_t12.data` on a
+        # `char`, which GCC rejects outright ("request for member 'data' in
+        # something not a structure or union"). Same reasoning and the same
+        # remedy as the `_FIXED_RUNTIME_STRUCT_NAMES` branch above, for the
+        # same reason: the direct field access is not merely wrong here, it is
+        # not valid C.
+        #
+        # Reached when the base's element/field type was erased rather than
+        # lost at the call site — `span[0].data` on a `Span` whose element type
+        # the compiler has no record of compiles the subscript to a `char`
+        # (Span's `_data` is a `char *` fat pointer), and the field read then
+        # lands here (test/collections/test_span.mojo's
+        # `assert_equal(span[0].data, 42)`). The tag-dispatched accessor is a
+        # real read of the boxed value rather than a fabricated one.
+        vp = gen._new_val('void *', f'(void *)(int64_t){ov}')
         return 'int64_t', gen._call_expr('int64_t', '_mojo_dispatch_getattr',
                         [('void *', vp), ('char *', f'"{node.member}"')])
     else:

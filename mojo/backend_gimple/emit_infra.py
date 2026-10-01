@@ -2078,6 +2078,46 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         if transient:
             gen._cstr_key_src[key] = val
         return 'char *', key
+    if typ in ('double', 'float'):
+        # A FLOATING-POINT dict key: the runtime keys every dict by a `char *`,
+        # so the value has to be rendered to text. The old fall-through below
+        # emitted a raw `(char *)value` bit-cast, which for a `double` is not
+        # valid C ("cannot convert to a pointer type") and would have been a
+        # garbage pointer even if it had compiled — real on
+        # `d[Float64(0.0)] = "zero"` in the stdlib's test_dict.mojo.
+        #
+        # One helper for both widths: a `float` widens to `double` exactly
+        # (C's usual arithmetic conversions), and `%.17g` of the widened value
+        # is the same text `%.9g` of the original would print for every value
+        # that round-trips — so a separate float formatter would be a second
+        # spelling of the same key for no gain.
+        # Register the string as a class-C temporary so
+        # `_release_transient_cstr_args` frees it after its one consuming call
+        # (§4.1's protocol). Without this a float-keyed dict access in a loop
+        # leaks the rendered key every time — measured +32.17 B/iter on
+        # build/memprobes/float_dict_key.mojo, which is exactly the
+        # "Int-keyed dict in a hot loop leaks nothing" result §10.4 reports for
+        # the integer case.
+        #
+        # Recorded with `_orig = 0`, not the double's own bits: the protocol's
+        # release test is `release(s) iff s != (char *)orig`, and its purpose is
+        # to spare the BORROWED case where the helper returned its argument
+        # unchanged (`mojo_cstr_or_int_str` on an already-boxed string). A
+        # rendered float key has no borrowed case — `mojo_str_from_double`
+        # always returns a block of its own, from the transient pool or a fresh
+        # malloc, never the argument — so 0, which is never a live pointer, says
+        # "always release" outright instead of relying on the double's bit
+        # pattern not colliding with the string it just produced.
+        #
+        # "Release" rather than "free" is load-bearing since the float key moved
+        # onto the pool: the key is a `_INT_STR_BLOCK`-sized block, and
+        # `mojo_cstr_or_int_release` is what puts it back. Passing a pool block
+        # to plain `free()` is a live memory-corruption bug, which is the whole
+        # reason `_cstr_key_src` is consulted here rather than a bare free.
+        key = gen._call_expr('char *', 'mojo_str_from_double', [(typ, val)])
+        if transient:
+            gen._cstr_key_src[key] = '0'
+        return 'char *', key
     if typ != 'char *':
         return 'char *', gen._new_val('char *', f'(char *){val}')
     return typ, val
@@ -4714,7 +4754,17 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
                 push_fn = 'mojo_cleanup_push_ptr'
                 free_fn = 'free'
     if push_fn:
-        gen._emit(f"  {push_fn} ({name});")
+        # `_cname(name)`, not `name`: `_declare_var` renames a local whose Mojo
+        # name is a C keyword (`var unsigned = ...` in the stdlib's
+        # test_range.mojo -> `_unsigned`) and records that in `_c_names`, so
+        # every ordinary read/write goes through the renamed identifier. The
+        # cleanup push is emitted from the OWNERSHIP analysis, which works in
+        # Mojo-level names and never consulted `_c_names` — so it wrote
+        # `mojo_cleanup_push_list (unsigned);`, and GCC read `unsigned` as the
+        # type keyword: "expected expression before 'unsigned'". The free at
+        # `_emit_owned_local_frees` below had the identical bug on the same
+        # name.
+        gen._emit(f"  {push_fn} ({gen._cname(name)});")
         pushed.add(name)
         if name in gen._scope_armed:
             _scope_register(gen, name, free_fn)
@@ -4773,7 +4823,10 @@ def _emit_owned_local_frees(gen):
             if runtime_fn == '' and _struct_ptr_owned(gen, name, ctype):
                 runtime_fn = 'free'
         if runtime_fn:
-            gen._emit(f"  {runtime_fn} ({name});")
+            # `_cname(name)`, for the same reason as the cleanup push in
+            # `_maybe_push_owned_local` — a keyword-named local is declared
+            # under a renamed identifier and must be freed under it too.
+            gen._emit(f"  {runtime_fn} ({gen._cname(name)});")
             freed += 1
     # Block-scoped candidates still live at this exit (a `return` inside a
     # loop body, after the declaration): the same free, the same cancel.

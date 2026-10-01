@@ -45,7 +45,8 @@ cache in front of the runner rather than the runner:
                bucket rests on and NOTHING executed it: `checked_run.py` had no
                test importing it, so its behaviour was trusted, not checked.
   the estate   every `test_*.py` in the repo is named by a registered spec, or
-               is in a list that says why not. 50 of 81 were named by nothing.
+               is in a list that says why not. 50 of 81 were named by nothing
+              when this was written; 38 excuses over 118 files remain.
 
 Run:  python3 test_suite.py         (or `make check-suite`, part of `smoke`)
 """
@@ -2881,9 +2882,12 @@ def test_checked_run_replays_a_pass_and_reruns_a_failure():
 # below are what keep it honest in the other direction, so an entry cannot
 # outlive the file it excuses or the registration that supersedes it.
 #
-# This IS the inventory from `bugs/UNTESTED.md`, in a form that runs. The
-# measured shape: 50 of 81, and 5 of those 50 are RED today, so the tree carries
-# 25 known-failing assertions that no gate, tally or coverage number reports.
+# This IS the inventory from `bugs/UNTESTED.md`, in a form that runs. The shape
+# when the check was written: 50 of 81 test files named by nothing, 5 of those
+# RED, so 25 known-failing assertions no gate, tally or coverage number
+# reported. What is left after the registrations that have since landed is 38
+# excuses over 118 files — the count moves as tests get registered, which is
+# the point: every removal below is a test something now runs.
 UNREGISTERED = {
     # ── RED today: exit non-zero, and no gate, tally or coverage number
     #    reports any of it. The count is a re-run of every entry, not a
@@ -2910,52 +2914,6 @@ UNREGISTERED = {
         'test_formal_run.py rather than inside it, because the convention is '
         'one construct and the suite that hosts it is already the longest.',
 
-    # ── one construct per file, each an oracle against CPython, each a
-    #    build-and-RUN rather than a build ─────────────────────────────────────
-    #
-    # The same reason as the returned-frame entry above, at the same shape, and
-    # each is here rather than left out for the reason that check exists: a
-    # test file that nothing runs and nothing excuses is the state it is
-    # written to make impossible. They are grouped because what they share is
-    # the cost, not the subject — five constructs, five files, and the fifth is
-    # the one case where the file was missing from the table entirely.
-    'test_formal_external_call.py': 'external_call["sym", RetType](args): '
-        'builds, runs and compares with CPython os.environ on arm64 AND '
-        'x86-64, including the whole of std/os/env.mojo transcribed.',
-    'test_formal_target_queries.py': 'A #kgen.param.expr target query '
-        'answered at build time: BUILDS the image, EXECUTES it and requires '
-        'the printed arch, because a fabricated answer is indistinguishable '
-        'from a right one in a refusal.',
-    'test_formal_specialization.py': 'A comptime specialization call: the '
-        'dropped-bracket case builds and RUNS on both architectures, and the '
-        'fabricated-answer case (plain[3](5) printing plain(5)) is what the '
-        'refusal exists for.',
-    # — the seven formal suites batch 1 brought in and nobody accounted
-    # for.  Each builds and RUNS images against CPython on both
-    # architectures, which is a measured cost per invocation; the estate
-    # check is what makes "nobody accounted for it" impossible, so they are
-    # listed rather than left out.  Six of the seven host a
-    # `formal/hostmods/*.mojo` module and are its only coverage.
-    'test_formal_json.py': 'formal/hostmods/json.mojo: the scanner and the '
-        'encoder, case for case against CPython\'s own json on both '
-        'architectures. Build-and-RUN.',
-    'test_formal_pathlib.py': 'formal/hostmods/pathlib.mojo, the pure half of '
-        'PurePosixPath, read for read against CPython on both architectures.',
-    'test_formal_small_hosts.py': 'formal/hostmods/{io,typing}.mojo, and the '
-        'measurement that an annotation-erasing path cannot keep a name used '
-        'as a VALUE. Build-and-RUN on both architectures.',
-    'test_formal_value_model.py': 'The value model itself: what a word is, '
-        'which is the premise every other formal suite rests on. Both '
-        'architectures, against CPython.',
-    'test_formal_x86_64_dylib.py': 'x86-64 module dylibs end to end — the '
-        'one shape the x86-64 backend has that arm64 does not, so nothing '
-        'else covers it.',
-    'test_formal_method_param_field.py': "A method PARAMETER's field type read "
-        'from its DECLARED type, which is what closed a 17-file family; both '
-        'architectures.',
-    'test_formal_receiver_position.py': 'The receiver-position family: which '
-        'argument a frame receiver lands in, on both architectures. Build-and-'
-        'RUN plus the refusals that must stay refusals.',
     'test_string_literal_lexing.py': 'The LEXER: escapes, the line model, tab '
         'expansion, CR, an unterminated literal, and a backslash line '
         'continuation inside a raw literal \u2014 build-and-run against CPython '
@@ -3168,10 +3126,13 @@ def test_every_test_file_is_registered():
     file run at all, and until this check nothing noticed when one did not
     happen.
 
-    Measured before it existed: 50 of 81, of which 5 are RED. The 50 are
-    declared below with a reason each, because a check that failed 50 times on
-    its first day is a check nobody runs — and the declarations are the
-    inventory from `bugs/UNTESTED.md`, in a form that executes.
+    Measured before it existed: 50 of 81, of which 5 are RED. They were
+    declared with a reason each rather than left failing, because a check that
+    failed 50 times on its first day is a check nobody runs — and the
+    declarations are the inventory from `bugs/UNTESTED.md`, in a form that
+    executes. The declarations SHRINK as tests get registered (a registration
+    supersedes an excuse, and the anti-rot assertion below says so), so the
+    count here is the residue, not the original measurement.
     """
     excused = _unregistered_reason_table()
     on_disk = set(_test_files_in_repo())

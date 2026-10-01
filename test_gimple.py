@@ -6867,6 +6867,102 @@ print("%r" % p)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_gen_taking_middle_helper_is_never_reached_by_a_local_import():
+        """No `gen`-taking `mojo/middle` helper may be reached by a
+        FUNCTION-LOCAL `from mojo.middle.X import ...` unless the importing
+        file already imports X at top level.
+
+        Why that is an invariant rather than a style rule: a function-local
+        import registers the name in THAT module's `imported_symbols`, and the
+        import preamble's "this translation unit already defines it, so do
+        not declare it again" test (`inline_defined`) is built from TOP-LEVEL
+        imports only. So the very same symbol that a top-level import
+        suppresses correctly escapes the suppression when it arrives through a
+        nested import, and `module_loader`'s TEXT SCAN's declaration of it
+        lands in the file beside the definition it contradicts — two
+        independent inferences about one prototype, and gcc takes the first.
+
+        `_resolved_export_entry(gen, module, name, info)` was exactly that:
+        `mojo/middle/module_shared.py` imported it inside `_register_sym`,
+        annotating two of its four params, so the scan (which DROPS an
+        unannotated param) declared `int64_t (char *, char *)` against a
+        definition of `int64_t (GimpleGen *, char *, char *, int64_t)`, and
+        the self-hosted closure stopped compiling:
+
+            too many arguments to function
+              'mojo_middle_funcs_shared__resolved_export_entry_ee1b12';
+              expected 2, have 4
+
+        The scan cannot be taught to type a leading `gen`, and a variadic
+        `name (...)` fallback is rejected by gcc against the real prototype,
+        so the fix has to be structural: a `gen`-taking helper is reached as
+        the `GimpleGen` method `gen.<name>`, which is what
+        `module_shared`'s own module-scope comment prescribes for its
+        siblings. This test is what keeps the next such helper from being
+        added back as a local import.
+
+        Cheap and structural on purpose — it reads the sources rather than
+        compiling a closure, because the thing that broke is a whole-program
+        self-compile and `gimple` must stay a fast gate.
+        """
+        global _PASS, _FAIL
+        name = "gen_taking_middle_helper_is_never_reached_by_a_local_import"
+        import re
+        root = _PROJECT_DIR
+        fs_path = os.path.join(root, 'mojo', 'middle', 'funcs_shared.py')
+        with open(fs_path) as fh:
+            fs_src = fh.read()
+        # `def <name>(gen|self, ...` at column 0 — the exact shape
+        # `_selfhost_extracted_fn_index` registers as a GimpleGen delegate,
+        # so this is the same set, read the same way, not a second opinion.
+        gen_helpers = set(re.findall(r'^def (\w+)\(\s*(?:gen|self)\b', fs_src,
+                                    re.M))
+        if not gen_helpers:
+            print(f"FAIL  {name}: read no `def f(gen|self, ...)` out of "
+                  f"{fs_path} — the pattern is stale, not the tree clean")
+            _FAIL += 1
+            return
+        sources = [os.path.join(root, 'gimple_codegen.py')]
+        for sub in ('mojo/middle', 'mojo/backend_gimple'):
+            d = os.path.join(root, sub)
+            for fn in sorted(os.listdir(d)):
+                if fn.endswith('.py'):
+                    sources.append(os.path.join(d, fn))
+        offenders = []
+        for path in sources:
+            with open(path) as fh:
+                lines = fh.read().split('\n')
+            for i, line in enumerate(lines, 1):
+                # Indented => inside a function/class body => local.
+                m = re.match(r'\s+from\s+(mojo\.middle\.\w+)\s+import\s+(.+)',
+                             line)
+                if not m:
+                    continue
+                mod, names = m.group(1), m.group(2)
+                imported = {n.strip().split(' as ')[0].strip()
+                            for n in names.replace('(', '').replace(')', '')
+                            .split(',')}
+                for nm in sorted(imported & gen_helpers):
+                    # A top-level `from <mod> import` of the same module puts
+                    # the name in `inline_defined` whatever else the file does,
+                    # so only a file WITHOUT one is a real offender.
+                    toplevel = any(
+                        re.match(r'from\s+' + re.escape(mod) + r'\s+import\b', l)
+                        for l in lines)
+                    if not toplevel:
+                        offenders.append(
+                            f"{os.path.relpath(path, root)}:{i} "
+                            f"`from {mod} import {nm}`")
+        if offenders:
+            print(f"FAIL  {name}: a `gen`-taking mojo/middle helper reached by "
+                  f"a function-local import escapes the import preamble's "
+                  f"inline_defined skip, so the text scan declares it beside "
+                  f"its own definition: {offenders}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_dotted_import_two_hop_attribute_call():
         """`import a.b` binds `a`, so `a.b.f(...)` is a TWO-hop attribute
         call whose receiver is the SUBMODULE — Python's own
@@ -7345,6 +7441,7 @@ outer([10, 20, 30])
     test_user_defined_dunder_repr_is_called()
     test_user_defined_dunder_repr_value()
     test_aliased_and_reexported_imports_resolve_to_the_defining_module()
+    test_gen_taking_middle_helper_is_never_reached_by_a_local_import()
     test_dotted_import_two_hop_attribute_call()
     test_dedup_variadic_externs_cache_is_a_faithful_parse()
     test_every_funcptr_initializer_has_a_definition()

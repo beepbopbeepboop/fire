@@ -205,9 +205,16 @@ def test_every_declaration_is_seen():
     #   465 -> 466 (metal): one more entry point, from the self-host closure
     #   work in d446f5be.
     # Verified by COUNTING the merged header, not by adding the two deltas:
-    # `reflect.collect_runtime_exports_h('runtime/fire_runtime.h')` returns 479
+    # `reflect.collect_runtime_exports_h('runtime/fire_runtime.h')` returns 480
     # on the merged tree. Take this number from that call, not from the
     # arithmetic -- that is the whole point of the check.
+    #
+    # 479 -> 480 (2026-09-30): `mojo_str_from_double`, the float dict-key
+    # formatter. It was defined in fire_runtime.c and CALLED by generated code
+    # (emit_infra.py's dict-key path) with no declaration in the header, so the
+    # emitted `.ci` prototype came from the compiler's own inference rather
+    # than from the header this scan reads -- the exact gap the scan exists to
+    # close, found by the scan rather than by a link error.
     #
     # 475 -> 479 (2026-09-30): the four container value-equality entry points
     # (`mojo_list_eq` / `mojo_dict_eq` / `mojo_set_eq` / `mojo_value_eq`). They
@@ -230,7 +237,12 @@ def test_every_declaration_is_seen():
     # 526 -> 531 (2026-10-01, `memory-ownership`): the two frees for the two
     # things a bound method can be — `mojo_bound_method_free` and
     # `mojo_closure_free` — and their cleanup thunks. Taken from the call.
-    for header, want in (('fire_runtime.h', 531),
+    # 531 -> 532 (2026-10-01, merging batch 1 in): `mojo_str_from_double`, the
+    # 479 -> 480 entry above, which no branch that landed on THIS side of the
+    # merge had. One name, and it is the whole delta -- which is exactly why the
+    # number is read off the call and never added up: 531 + 1 is right here and
+    # would have been wrong on any other pair of sides.
+    for header, want in (('fire_runtime.h', 532),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

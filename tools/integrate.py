@@ -112,6 +112,8 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False):
     for name, t in sorted(C.load().items(), key=lambda kv: kv[1]["slot"]):
         if only and name not in only:
             continue
+        if t.get("hold") and not (only and name in only):
+            continue                                         # held (control.py hold): built in advance, released later
         st = C.state_of(t)
         if st not in ("exited-ok", "exited-err", "integration-failed"):
             continue
