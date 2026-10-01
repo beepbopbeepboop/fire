@@ -89,8 +89,19 @@ belongs to other bugs, not to this one, so it is filed in `bugs/`, not here:
 | `linkmode` was **already red on master** — a `from . import SUB` + `SUB.f(...)` call prints 0, exit 0 | `bugs/CODEGEN_link_mode_bare_submodule_marker_call_silent_wrong_value.md` |
 | a `from p import f` whose module only RE-EXPORTS `f` names the re-exporting module, not the defining one | `bugs/CODEGEN_reexported_function_import_qualifier_names_the_wrong_module.md` |
 | `import p.sub` + `p.sub.f(14)` exits 1 with no output, on both pipelines | `bugs/CODEGEN_import_dotted_name_two_hop_attribute_call_exits_1.md` |
-| an enclosing function's return type is `int64_t` when its only `return` is a method call, so a `char *` prints as a pointer decimal | `bugs/CODEGEN_return_type_not_inferred_from_a_method_call_result.md` |
 | `str()`/`%s` never consult `__str__`; a struct inside a list/tuple reprs as a raw pointer | `bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_container_spellings.md` |
+
+CLOSED 2026-09-30 on `work/codegen-old-divergences`: the "return type is
+`int64_t` when its only `return` is a method call" row is gone — the method-call
+case of the return-type inference now reads the callee's registered type out of
+`func_return_types` under its MANGLED name (via a third overlay in
+`_infer_return_type_with_locals`: a local bound to a registered struct's
+constructor is visible as `<Struct> *`, which is what `_quick_type`'s
+method-call branch is gated on). Measured: `return p.__repr__()` printed
+`R<a>` on CPython and `4380508000` on the compiled path, and now prints `R<a>`
+on both. Its doc is deleted; the regression is `method_call_result` in
+`test_runtime_diff.py`, which the harness now also cross-checks against
+CPython.
 
 The first of those is the one to act on first: while `linkmode` is red it
 cannot be used to distinguish a new regression from a pre-existing failure,
