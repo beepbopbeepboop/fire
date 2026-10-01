@@ -204,6 +204,24 @@ def run(out):
     return r.returncode, (r.stderr or r.stdout)
 
 
+def _build_one(src, out, expect_ok=True):
+    """`fire.py build --formal --no-prove` on one EXISTING source file.
+
+    `build` above compiles `<root>/<name>.mojo`, which is the right shape for a
+    test that writes its own tree and the wrong one for a file already in this
+    repository — the program under test here is a real swept file, and copying
+    it to a temp directory would change what the sweep means (its own imports
+    resolve relative to where it sits).
+    """
+    argv = ["build", "--formal", "--no-prove", "-o", out, src]
+    result = run_fire(argv, cwd=HERE)
+    if expect_ok:
+        check(result.returncode == 0,
+              f"build failed: {(result.stderr or result.stdout).strip()[-400:]}")
+        check(os.path.isfile(out), f"no executable written at {out}")
+    return result.returncode, (result.stderr or result.stdout or "")
+
+
 def manifest(dylib):
     with open(dylib + ".manifest.json") as f:
         return json.load(f)
@@ -558,10 +576,17 @@ def test_guarded_imports_stay_inert(tmpdir, _shared):
     `TYPE_CHECKING` blocks, `if False:` and `if sys.version_info` arms and
     guarded `try: import x except ImportError:` are all inert for the same
     reason `__future__` is. They need no list of their own because they are
-    all NESTED inside an `if`/`try` and `imported_modules` reads only the
-    module's top level. That is load-bearing rather than incidental — a
-    resolver that descended into a body would make every one of these a hard
-    dependency — so it is pinned here, both at the collector and end to end."""
+    all NESTED inside an `if`/`try` and `imported_modules` descends into a
+    function body but stops at a conditional. That is load-bearing rather than
+    incidental — a resolver that descended into a conditional would make every
+    one of these a hard dependency — so it is pinned here at the collector and
+    end to end.
+
+    The FUNCTION-LOCAL half is here for the same reason, and it is the half a
+    reader would most expect to be missed: `imported_modules` now walks INTO a
+    `def` body, so a guarded import inside one has to be shown to stay inert
+    too. Without this case the walk could descend into `If`/`Try` bodies as
+    well and every assertion below would still pass."""
     from formal.imports import imported_modules
     src = ("from __future__ import annotations\n"
            "import os\n"
@@ -569,13 +594,25 @@ def test_guarded_imports_stay_inert(tmpdir, _shared):
            "if sys.version_info >= (3, 99):\n"
            "  import nonexistent_guard_version\n"
            "try:\n  import nonexistent_guard_try\n"
-           "except ImportError:\n  nonexistent_guard_try = None\n")
+           "except ImportError:\n  nonexistent_guard_try = None\n"
+           # …and the same three inside a function body, which the walk now
+           # reaches and must still treat as inert.
+           "def f():\n"
+           "  import real_function_local\n"
+           "  if False:\n    import nonexistent_guard_in_fn\n"
+           "  try:\n    import nonexistent_guard_try_in_fn\n"
+           "  except ImportError:\n    nonexistent_guard_try_in_fn = None\n")
     import fire_compiler as F
     stmts = F.Parser(F.py_tokenize(src)).with_filename("g.py").parse_module()
     got = imported_modules(stmts)
-    check(got == ["os"],
-          f"imported_modules returned {got}; a guarded import is inert, and "
-          f"so is the __future__ directive — only `os` is a dependency")
+    # `real_function_local` IS a dependency — an unconditional statement of the
+    # function's block, and the callee it binds is on the link line — while
+    # every guarded one is not, at module level and inside the function alike.
+    check(got == ["os", "real_function_local"],
+          f"imported_modules returned {got}; a guarded import is inert at "
+          f"module level AND inside a function body, while an unconditional "
+          f"function-local import is a real dependency — only `os` and "
+          f"`real_function_local` are")
     root = os.path.join(tmpdir, "guarded")
     os.makedirs(root)
     # The probe is the program's OUTPUT, and it prints from `main` — which the
@@ -594,7 +631,10 @@ def test_guarded_imports_stay_inert(tmpdir, _shared):
     # body has to have run. Both are visible in what the program prints.
     write_tree(root, {"prog.mojo":
                       "if False:\n  import nonexistent_guard_false\n"
-                      "def main():\n  printf(\"guarded-import-inert\\n\")\n"
+                      "def guarded():\n"
+                      "  if False:\n    import nonexistent_guard_in_fn\n"
+                      "def main():\n  guarded()\n"
+                      "  printf(\"guarded-import-inert\\n\")\n"
                       "main()\n"})
     fresh_cas()
     _result, out = build(root, "prog.aout")
@@ -603,6 +643,150 @@ def test_guarded_imports_stay_inert(tmpdir, _shared):
           f"the guarded import was not inert: the body did not run "
           f"(exit {code}, output {out_text!r}). A non-inert resolver would "
           f"have failed the build on `nonexistent_guard_false` instead.")
+
+
+def test_a_function_local_import_is_a_dependency(tmpdir, _shared):
+    """`import X` inside a function body is on the link line, and the file is
+    refused as an IMPORT problem rather than as a name-placement one.
+
+    The old behaviour was not a missing refusal but a MISDIRECTED one.
+    `test_runtime_header_scan.py` — the one file in the 623-file x86-64 sweep
+    whose terminal refusal was a nested import read as a value — was reported
+    as
+
+        exports: 'reflect' has no home: this module declares no module-level
+        name by that spelling, and the reading function declares no local or
+    parameter by it either. This path places a name in a register or a spill
+    slot allocated for THIS function […]
+
+    which is false in a way a reader cannot check: `reflect` IS a module-level
+    name, of ANOTHER module, and the walk asked the wrong question because the
+    name it never found is the answer. A reader sent to the register allocator
+    for a fact about the import graph is the cost this pins shut.
+
+    Three things are asserted, and each is a different property:
+
+      * the file is refused (it is — `reflect` reaches `importlib`, a host
+        module), so this is not a case of the refusal being removed;
+      * the message names the IMPORT, which is the diagnosis; and
+      * the message does NOT claim the name has no home, because that is the
+        sentence that was false about the file.
+
+    The collector is asserted directly as well, since the end-to-end half can
+    only observe this one file's particular chain."""
+    from formal.imports import imported_modules
+    import fire_compiler as F
+    src = ("def exports(h):\n"
+           "  import reflect\n"
+           "  return reflect.collect_runtime_exports_h(h)\n")
+    stmts = F.Parser(F.py_tokenize(src)).with_filename("g.py").parse_module()
+    got = imported_modules(stmts)
+    check(got == ["reflect"],
+          f"imported_modules returned {got} for a function-local import; a "
+          f"module the code cannot run without is on the link line whether the "
+          f"import is written at column 0 or in a body")
+
+    rc, text = _build_one(os.path.join(HERE, "test_runtime_header_scan.py"),
+                           os.path.join(tmpdir, "trhs.aout"),
+                           expect_ok=False)
+    check(rc != 0,
+          "test_runtime_header_scan.py is still refused — its `reflect` chain "
+          "reaches `importlib`, which is a host module, so this is not a case "
+          "of the refusal being removed: it BUILT")
+    check("imports 'reflect'" in text,
+          "the refusal names the import, which is the whole diagnosis; the "
+          f"message does not mention the import: {text.strip()[-400:]}")
+    check("has no home" not in text,
+          "the refusal no longer claims `reflect` has no home — it is a "
+          "module-level name of another module, and that sentence sent the "
+          "reader to the register allocator for a fact about the import "
+          f"graph; it is still there: {text.strip()[-400:]}")
+
+
+def test_widening_the_imported_list_widens_nothing_else(tmpdir, _shared):
+    """The gate `check_module_symbols` documents, exercised.
+
+    Its own comment is explicit that it is "GATED on the root naming an
+    imported module", and that the gate is what makes admitting a dotted callee
+    safe — so widening the imported list widens what that gate admits, and
+    that is the one risk in collecting a function-local import.
+
+    What has to keep working is the method call on a VALUE whose spelling is
+    the same as a module reference. `import os` binds the name `os`; so does a
+    local variable, and `os.join(x)` on the second is a method call while on the
+    first it is `os.path.join`. The gate tells them apart by asking whether the
+    root names an imported module, and a program where a LOCAL shadows one is
+    the case where getting it backwards computes a plausible wrong number
+    instead of failing.
+
+    So the requirement here is not that these are refused — `xs.append` lowers
+    and should — but that each one runs and answers what the source says. A
+    gate that over-refused would be a coverage bug; a gate that under-refused
+    would be a wrong-answer bug, and only RUNNING the image tells the two
+    apart. The programs therefore return a value the test computes, and the
+    exit status is compared with it.
+
+    The value `n` the entry function receives is MEASURED rather than written
+    down — the formal entry point passes 10, and a test that hard-coded it
+    would be asserting a fact about the harness rather than about the gate. A
+    program that returns `n` unchanged measures it."""
+    entry_root = os.path.join(tmpdir, "entry")
+    os.makedirs(entry_root)
+    write_tree(entry_root, {"prog.mojo":
+                            "def main(n: Int) -> Int:\n  return n\n"})
+    fresh_cas()
+    _r, entry_out = build(entry_root, "prog.aout")
+    n_at_entry = run(entry_out)[0]
+    check(n_at_entry == 10,
+          f"the entry function receives 10 (measured, not assumed); it got "
+          f"{n_at_entry}, so every expected value below is wrong")
+    cases = {
+        # A LOCAL named `os` with `os` imported: `os` here is the local's
+        # word, and a dotted callee rooted at it is the local's method.  The
+        # answer uses `os` twice, so a lowering that read the MODULE would not
+        # merely differ — it would have no storage to read.
+        "local_shadows_imported_name": (
+            "import os\n"
+            "def main(n: Int) -> Int:\n"
+            "  var os = 40\n"
+            "  return os + n\n", 40 + n_at_entry),
+        # A method call on a value, with nothing imported at all — so the gate
+        # has no imported name to admit and `xs` can only be a value. The
+        # count after the append is what says the method lowered as a method.
+        "value_method_no_import": (
+            "def main(n: Int) -> Int:\n"
+            "  var xs = [1, 2, 3]\n"
+            "  xs.append(4)\n"
+            "  return len(xs)\n", 4),
+        # A struct whose NAME is also imported. `Pair()` is a construction of
+        # this module's struct; a gate that treated the root as a module
+        # reference would look for a `Pair` in the imported package. The
+        # struct is TWO fields, so it is a frame and the field reads are real
+        # loads — a construction that quietly produced a frame address would
+        # answer with an address here.
+        "struct_named_like_imported_module": (
+            "import struct\n"
+            "struct Pair:\n"
+            "  var a: Int\n"
+            "  var b: Int\n"
+            "def main(n: Int) -> Int:\n"
+            "  var p = Pair()\n"
+            "  p.a = n\n"
+            "  return p.a + p.b\n", n_at_entry),
+    }
+    for name, (source, want) in cases.items():
+        root = os.path.join(tmpdir, name)
+        os.makedirs(root)
+        write_tree(root, {"prog.mojo": source})
+        fresh_cas()
+        _result, out = build(root, "prog.aout")
+        if not os.path.isfile(out):
+            check(False, f"{name} builds")
+            continue
+        code, text = run(out)
+        check(code == want,
+              f"{name} runs and returns what the source says ({want}); it "
+              f"returned {code}, output {text!r}")
 
 
 def test_repository_sibling_resolves(tmpdir, _shared):
@@ -1578,6 +1762,10 @@ TESTS = [
     ("a __future__ import is inert, not a dependency",
      test_future_import_is_inert),
     ("a guarded import is inert too", test_guarded_imports_stay_inert),
+    ("a function-local import is a dependency",
+     test_a_function_local_import_is_a_dependency),
+    ("widening the imported list widens nothing else",
+     test_widening_the_imported_list_widens_nothing_else),
     ("a repository sibling resolves", test_repository_sibling_resolves),
     ("a package-relative dotted import resolves",
      test_package_relative_dotted_import_resolves),
