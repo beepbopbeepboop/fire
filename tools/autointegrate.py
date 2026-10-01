@@ -113,6 +113,72 @@ def bisect_first_bad(merged, failed_jobs_):
     return lo
 
 
+def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=25):
+    """THE PIECE-FIX RULE. A red batch is usually a handful of small, customary breakages where many branches meet (a
+    half-applied conflict resolution, a helper renamed in one branch and still called by its old name in another, an
+    unregistered test file, a stale marker or hard-coded count, two fixes of one thing). An agent working on the MERGED tree fixes
+    five twenty-line problems in ~10 minutes; ONE bisect step costs 3-8 min per probe x log2(n) probes, then a gate on the good
+    half (15-20 min), then a re-batch gate (15-20 min): 45-80 min per culprit. So fix forward first; bisect only if this fails.
+
+    The merged tree is snapshotted as a branch, a worker starts ON it with the failing jobs as its acceptance test, and its
+    branch (which contains the whole batch plus the fixes) is probed with just those jobs and then gated: green lands EVERYTHING."""
+    import argparse as _ap
+    ts = int(time.time() % 1000000)
+    base = "batchfix-%d" % ts
+    C.git("branch", "-f", base, "HEAD", cwd=I.INTEG)             # the exact tree the red gate ran on
+    excerpt = failed_jobs(gate_log)
+    for attempt in range(1, attempts + 1):
+        name = "%s-a%d" % (base, attempt)
+        task = ("The integrator merged %d finished branches onto master in ONE batch and the full gate is RED. You start on branch %s: "
+                "EXACTLY that merged tree. Jobs failing (confirmed by re-running them alone, so not load): %s.\n\nFailure excerpt:\n%s\n\n"
+                "Make each of them pass with the SMALLEST edits. The usual and customary breakages when many branches meet: a conflict "
+                "resolved wrongly or left half-applied; a helper renamed or moved by one branch and still called by its old name from "
+                "another; a registration or estate entry missing for a new test file; a stale expected-failure marker, hard-coded count or "
+                "table row; two branches fixing the same thing two ways (consolidate to one, CLAUDE.md); an index/doc conflict. Use "
+                "`git log --merges --oneline master..HEAD` to see which branch each file came from. You may run EXACTLY the failing jobs "
+                "to verify: python3 tools/suite.py %s (they reserve their own memory; one at a time). Do NOT revert or disable a branch's "
+                "behaviour, and do NOT delete or skip a test to get green. Commit each fix on its own, with a message naming the branch it "
+                "repairs. If a problem is bigger than ~50 lines, or you cannot find the cause with a reasonable effort, STOP and say which "
+                "branch appears responsible and why: finish with CONTROL-STATUS: BLOCKED and a QUESTION: line naming it (that triggers a "
+                "bisect). Otherwise finish with the REPORT block and CONTROL-STATUS: DONE once ALL of those jobs pass."
+                % (len(merged), base if attempt == 1 else prev, ", ".join(failed), excerpt, " ".join(failed)))
+        ns = _ap.Namespace(name=name, claim=["task:" + name], task=task, task_file=None, file=[], base=(base if attempt == 1 else prev), model=None)
+        try:
+            C.cmd_spawn(ns)
+        except SystemExit as e:
+            log("could not start the batch fixer: %s" % e); return False
+        log("PIECE-FIX attempt %d: %s started on the merged tree (failing: %s)" % (attempt, name, ",".join(failed)))
+        t0 = time.time()
+        while time.time() - t0 < timeout_min * 60:
+            time.sleep(20)
+            tasks = C.load()
+            family = [n for n in tasks if n == name or n.startswith(name + "-r")]       # unstick restarts it as NAME-rN
+            if not any(C.state_of(tasks[n]) == "running" for n in family):
+                break
+        tasks = C.load()
+        family = sorted((n for n in tasks if n == name or n.startswith(name + "-r")), key=lambda n: tasks[n]["slot"])
+        done = [n for n in family if C.ahead(tasks[n]) > 0 and tasks[n].get("state") != "abandoned"]
+        for n in family:                                       # timed out: stop it
+            if C.state_of(tasks[n]) == "running":
+                try: os.killpg(tasks[n]["pid"], 15)
+                except OSError: pass
+        if not done:
+            log("PIECE-FIX attempt %d produced no commits (%s)" % (attempt, "BLOCKED" if any(C.verdict(tasks[n]) == "BLOCKED" for n in family) else "timeout/none"))
+            return False
+        fixname = done[-1]
+        prev = tasks[fixname]["branch"]
+        log("PIECE-FIX attempt %d: %s has %d commit(s); probing just the failing jobs on it" % (attempt, fixname, C.ahead(tasks[fixname])))
+        if not probe([fixname], failed):
+            log("  the fixes do not yet make %s pass" % ",".join(failed))
+            continue
+        log("  right track: the failing jobs pass. Full gate on the whole batch + fixes now.")
+        rc, out = run_integrate("--only", fixname)
+        log("  batch+fixes: rc=%d %s" % (rc, " | ".join(l for l in out.splitlines() if l.startswith(("GREEN", "RED")))[:200]))
+        if rc == 0 and "GREEN" in out:
+            return True
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--interval-min", type=float, default=3, help="sleep only when there is nothing to do or the integrator is busy")
@@ -149,7 +215,10 @@ def main():
                     if not failed:
                         log("red but no failing job could be named: setting the whole batch aside for a human"); 
                         for n in merged: red[n] = head_sha(n)
+                    elif fix_forward(merged, failed, os.path.join(I.INTEG, "gate.log")):
+                        log("PIECE-FIX landed the whole batch (%d branches + the fixes)" % len(merged))
                     else:
+                        log("piece-fix did not get it green: falling back to a BISECT")
                         k = bisect_first_bad(merged, failed)
                         culprit = merged[k]
                         log("first bad branch: %s (the %d before it pass %s)" % (culprit, k, ",".join(failed)))
