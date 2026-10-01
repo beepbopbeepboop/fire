@@ -58,14 +58,25 @@ def build(td: str) -> str:
     return out
 
 
+# The AST attributes a node's children can hang off. A fixed list, walked
+# explicitly, because there is no generic `__dict__` to iterate: every
+# attribute name here is a source-level spelling the parser actually produces.
+_CHILD_ATTRS = ('body', 'args', 'value', 'func', 'iterable', 'obj', 'left',
+                'right', 'operand', 'target', 'elt', 'key', 'results',
+                'statements', 'expr', 'handlers', 'finalbody', 'orelse',
+                'ifs', 'decorator_list', 'defaults')
+
+
 def _unlowered_coroutines(stmts: list) -> list:
     """Every generator / `async def` in `stmts`, by bare name.
 
-    A plain recursive walk, not a generator: the reason this file exists is
-    that a generator in the self-host closure is the thing being looked for,
-    and a generator FUNCTION here would be one more instance of it (see
+    An explicit-stack walk, and deliberately NOT a generator: the thing this
+    file exists to look for is a generator in the self-host closure, so a
+    generator function here would be one more instance of it (see
     `mojo/middle/coro.py::_walk`'s own note for the same conversion, and
-    `run_produced_binary`'s for the class).
+    `run_produced_binary`'s for the class). The depth cap is a backstop, not a
+    shape anyone expects to hit: the deepest node in a parsed module body is a
+    handful of levels down.
     """
     import fire_compiler as N
     found = []
@@ -88,15 +99,6 @@ def _unlowered_coroutines(stmts: list) -> list:
             else:
                 stack.append((sub, depth + 1))
     return found
-
-
-# The AST attributes a node's children can hang off. A fixed list, walked
-# explicitly, because there is no generic `__dict__` to iterate: every
-# attribute name here is a source-level spelling the parser actually produces.
-_CHILD_ATTRS = ('body', 'args', 'value', 'func', 'iterable', 'obj', 'left',
-                'right', 'operand', 'target', 'elt', 'key', 'results',
-                'statements', 'expr', 'handlers', 'finalbody', 'orelse',
-                'ifs', 'decorator_list', 'defaults')
 
 
 def closure_coroutines_are_lowerable() -> bool:
