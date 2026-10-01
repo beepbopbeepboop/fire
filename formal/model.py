@@ -5118,12 +5118,15 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
             f"exported SYMBOL names and no parameter contract. "
             f"bugs/FORMAL_callee_no_def_ceiling_zero.md has the measurement")
     return (f"a {who} receiver is passed to {callee}(), which is a name with no "
-            f"definition in hand: nothing in this image binds it — this module "
-            f"does not define it, and no `from … import …` here binds it "
-            f"either — so the symbol is unbound before the receiver's layout is "
-            f"a question. A frame address would be meaningful to a callee "
-            f"compiled against the same field list, but there is no such "
-            f"callee here to be compiled. "
+            f"definition in hand in this image: this module defines no FUNCTION "
+            f"of that name — a method declared here is reached as "
+            f"`recv.{callee}(…)` or under its lifted `<Struct>_<method>` name, "
+            f"and a bare `{callee}(recv)` is a spelling this path does not "
+            f"lower — and no `from … import …` in it binds the name either. So "
+            f"the symbol is unbound before the receiver's layout is a question. "
+            f"A frame address would be meaningful to a callee compiled against "
+            f"the same field list, but there is no such callee here to be "
+            f"compiled. "
             f"bugs/FORMAL_wide_receiver_by_reference.md records the design and "
             f"what is still open about it")
 

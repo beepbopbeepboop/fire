@@ -2456,6 +2456,33 @@ BYREF_REFUSALS = [
      "    var lit = __get_mvalue_as_litref(q)\n"
      "    return n\n",
      "refuse:__get_mvalue_as_litref is not a function at all", None),
+    # A bare call of a METHOD name with the receiver as the first argument. The
+    # module declares `get` — as a method of `S` — so "this module does not
+    # define it" would have been false, and the message now says the sharper
+    # thing: there is no FUNCTION of that name, and a method here is reached as
+    # `recv.get()` or under the lifted `S_get`.
+    #
+    # It is a GUARD on a spelling rather than a demonstration of a gap. Measured:
+    # the same spelling with a VALUE receiver (`get(3)`) is not refused by this
+    # pass at all — it lowers to a call of a symbol nothing defines and is caught
+    # later by the bind audit, with "the image would bind 1 symbol(s) that
+    # nothing provides". So bare method calls are unsupported here either way, and
+    # this case pins which of the two diagnostics a frame receiver reaches. If a
+    # future change makes the spelling legal, this case is the one to update.
+    ("byref_refuse_bare_method_name",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    fn get(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 7\n"
+     "    s.b = 8\n"
+     "    return get(s) + n\n",
+     "refuse:defines no FUNCTION of that name", None),
     # ── wave 3 (C5) ──
     #
     # A frame address PARKED IN A FIELD. `o.inner = i` looks like an ordinary
