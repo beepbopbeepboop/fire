@@ -113,7 +113,7 @@ bug doc**; row 3 did not and is filed here.
 
 | cause | r1 | r2 | why |
 |---|---|---|---|
-| MLIR dialect construct | 107 | 108 | +1 in-file; the family is stable and permanent |
+| MLIR dialect construct | 107 | 108 | `dtype.mojo` 48 → 49; the family is stable and permanent |
 | **module exports no public functions** | 3 | **38** | the `L[T]()` fix let 35 `binary_heap.mojo` importers reach the export gate (§3.1 of r1 predicted 35) |
 | **`==` between two values whose kind no call site established** | — (in `other refusal`) | **37** | 36 files blocked by `argparse.mojo`'s one comparison; **this cause did not exist in the table until this commit** — see below |
 | a TYPE name placed as a value | 41 | **4** | `5536f17b` landed it. The 4 survivors are `DType.bool` in a value position, a different spelling the fix deliberately does not touch (`fix-merge-formal-type-as-value`) |
@@ -126,7 +126,7 @@ bug doc**; row 3 did not and is filed here.
 | frame escapes: aliased | 11 | 10 | as row 7 |
 | slot's declared type | 10 | 10 | owner's 5 commits unmerged |
 | module-global storage | 6 | 5 | owner's 13 commits unmerged |
-| **the `other refusal` residual** | 32 | **4** | −36 argparse (now row 3), −4 a reworded message that had silently emptied its own row, −3 the `None` default (now its own row), −… the rest moved with the tree |
+| the **`other refusal`** bucket | 32 | **48 → 4** | measured on this log with the table as it stood, 48 decomposed as **37** argparse's one comparison (now row 3), **4** a message a reword had emptied out of its own row, **3** the `None` default (now its own row), and a **4-file residual**. r1's 32 was measured on a different log; the two are not directly diffable, and the composition above is the part that is a census |
 
 **The taxonomy was quietly wrong, and this commit fixes it.** Three defects,
 none of which raised anything:
@@ -278,8 +278,10 @@ was a partial list, not a census; this one is.
 
 **Deliberately NOT enqueued**, because a claim is held (rows 1, 4, 5, 6, 7, 8, 10,
 11, 12 — 139 files): more work against them would collide with the 88 commits of
-finished, unmerged work their owners already wrote. **The cheapest thing anyone can do for 132 files is
-integrate those branches and re-run this sweep.**
+finished, unmerged work their owners already wrote. **The cheapest thing anyone can do for those 139 files
+is integrate those branches and re-run this sweep** — and the controller's queue
+already holds `fix-merge-formal-{comptime-asm-r2-r2, module-globals,
+class-fields-in-init, frame-by-value, frame-escape}`, so this is in flight.
 
 ## 6. Tooling findings from this run
 
@@ -330,6 +332,7 @@ only ranking that has survived contact with a measurement:
    previous run — which is most of them.
 3. **Row 3's two annotations**: +1 pass, −34 from the denominator. Cheap,
    measured, and a decision about the rate as much as about the backend.
-4. **Rows 5, 7, 9, 10, 11** are the in-file rows, they have no dependencies,
-   and their owners' work is already written. Integrate before starting
-   anything.
+4. **Rows 5, 7, 8, 9, 10, 11, 12** (94 files) are the in-file rows: no
+   dependency chain, so a file's own construct is the only thing between it and
+   `pass`, and each one's owner has already written the fix. Integrate before
+   starting anything.
