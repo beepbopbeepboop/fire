@@ -228,6 +228,43 @@ value is `Self.rank == Self.flat_rank`, a `BinaryOp` over two names that are
 themselves not literals, so even with the census attached it would refuse: this
 is not a file waiting on a fix, it is a file this value model cannot represent.
 
+### The 82-file exposure, re-measured on the eight largest
+
+The filing recorded "82 files declare at least one, 731 names; NOT measured how
+many this would move." Nine files measured directly, arm64, `fire.py build
+--formal --no-prove`, the same command on the base commit for the "before"
+column:
+
+| file | aliases | before | after |
+|---|---|---|---|
+| `sys/_libc_errno.mojo` | 153 | refused: a `Pointer` receiver is passed to `type_of()` | refused: `ErrNo.SUCCESS` is a class-level constant, and its value is not a literal |
+| `builtin/variadics.mojo` | 61 | refused: a `Pointer` receiver is stored in `self.src` | refused: `Self.reduce` is a class-level constant of `TypeList`, non-literal |
+| `itertools/itertools.mojo` | 34 | refused: an `Optional` receiver is stored in `self._inner_a_elem` | refused: `Self._Product2Type` is a class-level constant of `_Product3`, non-literal |
+| `builtin/dtype.mojo` | 32 | refused: module-level `comptime _mIsSigned` is initialized from an MLIR attribute template | **unchanged** |
+| `iter/__init__.mojo` | 24 | refused: `_ZipIterator` has no field `_InjectedValues` | refused: `Self._InjectedValues` is a class-level constant, non-literal |
+| `sys/_amdgpu.mojo` | 22 | refused: an `Array` receiver is stored in `self.reserved3` | refused: `ServiceId.fprintf` is a class-level constant, non-literal |
+| `simd.mojo` | 21 | refused: module-level `comptime Scalar` is initialized from an MLIR attribute template | **unchanged** |
+| `utils/coord.mojo` | 17 | refused: a `Coord` receiver is passed to `type_of()` | refused: `Self.DTYPE` is a class-level constant of `ComptimeInt`, non-literal |
+| `python/numpy.mojo` | (reads one) | refused: `Coord` has no field `is_flat` | **unchanged** — see "What is still open" |
+
+**0 built before, 0 built after.** Six moved to a refusal that names a
+`comptime` class member of the file itself; two were already refused upstream of
+any of this code and did not move.
+
+**The side effect, stated rather than buried: the six moved refusals arrive
+EARLIER in the pipeline**, because a non-literal class-constant read is raised
+from inside `_prepare_functions` — the window `formal/build.py`'s own comment
+says exists to keep frame refusals from pre-empting a better-worded later
+diagnosis ("measured at 67 and 14 files"). Nothing got worse here: no file
+changed verdict, no wrong answer was produced, and in all six the earlier
+message is about a construct the file really contains while the later one is
+about a downstream consequence of it. But the preemption is real, it is
+pre-existing in kind (a non-literal class constant read at `S.NAME` already
+refused from that window), and the natural follow-up is to move the
+non-literal refusal to `check_construction_shapes`, which runs outside it. That
+is a refactor of an existing mechanism with a wider blast radius than this
+change, so it is named here rather than done here.
+
 ## What is still open
 
 **A `comptime` member declared in an IMPORTED module is still classified by
