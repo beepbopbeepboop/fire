@@ -21,7 +21,10 @@ from gimple_codegen import _selfhost_impl_py_files
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-from mojo.middle.module_shared import module_qualifier
+# NOT `from mojo.middle.module_shared import module_qualifier` here:
+# `module_shared` imports `_resolved_export_entry` from this module at its
+# own top level, so that would be a cycle. It is imported at the one use
+# site instead — see `_struct_method_qualifier._sanitize_qualifier`.
 
 def _from_import_name_is_submodule(gen, module: str, name: str) -> bool:
     """True when `from module import name` binds a real SUBMODULE FILE
@@ -1090,11 +1093,31 @@ def _struct_method_qualifier(gen, struct_name: str) -> str:
         # rule — leading dots stripped BEFORE the '.'->'_' substitution,
         # since a raw relative-import spelling (`.base`) would otherwise
         # sanitize to `_base` while `_emit_stdlib_import_externs`' own
-        # relative-import resolution already produced plain `base`. See that
+        # relative-import resolution already produced `base`. See that
         # function's docstring for the full failure mode the divergence
         # caused and the three other copies this one replaces. Kept as a
         # one-line wrapper so the struct- and free-function qualifiers read
         # identically instead of re-spelling the chain.
+        #
+        # Imported HERE, not at module scope, and that is load-bearing rather
+        # than a micro-optimization: `module_shared` imports
+        # `_resolved_export_entry` from THIS module at its own top level, so a
+        # module-scope import back is a cycle and whichever of the two the
+        # process happens to reach first fails. The measured symptom was the
+        # formal build path refusing every program:
+        #
+        #   formal/model.py `runtime_abi` -> `import reflect` ->
+        #   `gimple_codegen` -> `mojo.backend_gimple.emit_methods` ->
+        #   `emit_funcs` -> `mojo.middle.module_shared` -> (line 29)
+        #   `mojo.middle.funcs_shared` -> (this import) `module_qualifier`
+        #   ImportError: cannot import name 'module_qualifier' from
+        #   partially initialized module 'mojo.middle.module_shared'
+        #
+        # — i.e. the cycle closed on the one path that has no other way in.
+        # `mojo/backend_gimple/emit_resolve.py` already imports the same name
+        # at its use site for the same reason; the direction that stays
+        # top-level is `module_shared` -> `funcs_shared`.
+        from mojo.middle.module_shared import module_qualifier
         return module_qualifier(q)
     # NOT an early self-hosting-file bare short-circuit — see the free-
     # function sibling `_func_qualifier`'s matching comment: unconditionally

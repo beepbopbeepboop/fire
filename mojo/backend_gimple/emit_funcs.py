@@ -41,7 +41,14 @@ from gimple_codegen import _selfhost_impl_py_files
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import mojo.backend_gimple.emit_infra as ginf
-from mojo.middle.module_shared import module_qualifier
+# NOT `from mojo.middle.module_shared import module_qualifier` at module
+# scope: this file is reached FROM `gimple_codegen`, which the middle
+# tier reaches in turn, so a top-level import back into
+# `mojo.middle.module_shared` closes a cycle and whichever module the
+# process reaches first dies with `ImportError: cannot import name
+# ... from partially initialized module`. It is imported at each use
+# site instead (`mojo/backend_gimple/emit_resolve.py` already did so
+# for the same reason).
 
 # Re-export shared helpers from mojo.middle.funcs_shared via explicit imports.
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
@@ -1730,6 +1737,7 @@ def _imported_def_pts(gen, bare_name: str):
         # which is the same class of drift that kept `_local_def_pts`'s
         # write side from ever matching this one (see
         # _record_home_def_pts).
+        from mojo.middle.module_shared import module_qualifier
         return module_qualifier(q)
 
     # Tier order deliberately mirrors _func_qualifier (scope stack, then
@@ -2050,6 +2058,7 @@ def _func_qualifier(gen, bare_name: str) -> str:
         # other copies this one replaced. Kept as a one-line wrapper only
         # to layer on the per-compile `_inline_module_qualifiers` remap,
         # which needs a `gen`.
+        from mojo.middle.module_shared import module_qualifier
         key = module_qualifier(q)
         resolved = gen._inline_module_qualifiers.get(key, key)
         return module_qualifier(resolved)

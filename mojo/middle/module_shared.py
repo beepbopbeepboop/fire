@@ -26,7 +26,20 @@ from mojo.middle.solvers import *  # noqa: F401,F403
 # it needs `gen`, so it is reached as the `GimpleGen` method
 # `gen._find_symbol_home_module`, exactly like `gen._parsed_import` beside
 # it.)
-from mojo.middle.funcs_shared import _resolved_export_entry
+#
+# Imported at the ONE use site rather than here, and that is load-bearing:
+# `funcs_shared` reaches `gimple_codegen`, which reaches the gimple backend,
+# which reaches `funcs_shared` again, so a top-level import in BOTH middle
+# modules closes a cycle. Whichever of the two the process happened to
+# reach first then died with `ImportError: cannot import name ... from
+# partially initialized module`, and the measured victim was the formal
+# build path, which enters through `reflect` -> `gimple_codegen` and has no
+# other way in: `formal/model.py` `runtime_abi` -> ... ->
+# `mojo/backend_gimple/emit_funcs.py` -> here. The direction that stays
+# top-level is `funcs_shared` -> `gimple_codegen`; every edge back down
+# into the middle tier is at its use site, so importing EITHER middle module
+# first works. See `funcs_shared._struct_method_qualifier._sanitize_qualifier`
+# for the same rule on the other side.
 # Closure-scan leaf helpers live in mojo/middle.closures (formal + gimple
 # share one copy; closures must not import this module — it pulls gimple_codegen).
 from mojo.middle.closures import (
@@ -542,6 +555,9 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
                 # unannotated `def tri(x)` would become the only prototype
                 # in the file and reject its own call site. See
                 # `_resolved_export_entry`.
+                # Imported here, at the one use site: the module-scope
+                # comment above explains why.
+                from mojo.middle.funcs_shared import _resolved_export_entry
                 sym_info = _resolved_export_entry(self, _eff_mod, orig_name,
                                                   _hinfo)
                 if _hqual:
