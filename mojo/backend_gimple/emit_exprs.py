@@ -4803,21 +4803,14 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
             vv = vv_tmp
         gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}str ({t}, {kv}, {vv});")
     else:
-        # A bool stored as a dict value is indistinguishable from a genuine
-        # 0/1 int once it is a slot (vt is a plain `int` for a bool in this
-        # backend — `_lower_BoolLiteral` returns `int`, and any/all/isinstance
-        # return a C int on purpose), so the dict is MARKED and
-        # mojo_is_bool_dict picks the bool formatter for its whole repr. That
-        # mark used to require a literal RHS, which missed every other bool
-        # expression: `b = True; d = {'k': b}` and `d = {'k': 1 == 1}` both
-        # printed `{'k': 1}` while `print(b)` and `print(repr(b))` were
-        # already right. `is_python_bool_expr` is the one predicate, shared
-        # with the print dispatch.
-        if gimple_exprtypes.is_python_bool_expr(gen, val_expr):
-            gen._emit(f"  mojo_mark_dict_bool_values ({t});")
-        gen._note_dict_callable_ret(t, vv)
-        vv64 = gen._to_int64(vt, vv)
-        gen._emit(f"  mojo_dict_set_{'bytes_' if _bytes_key else ''}int ({t}, {kv}, {vv64});")
+        # `gen._emit_dict_int_value_store` picks `mojo_dict_set_bool` over
+        # `mojo_dict_set_int` for a Python bool VALUE: the two are the same
+        # int64_t slot, so the store's type cannot tell them apart and the
+        # expression can — one shared decision for the dict literal, the dict
+        # comprehension and every `d[k] = v` spelling, which are five copies
+        # of it. See that function's docstring.
+        ginf_emit = gen._emit_dict_int_value_store
+        ginf_emit(t, kt, kv, vt, vv, val_expr)
 
 
 def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:

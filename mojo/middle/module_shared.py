@@ -937,12 +937,25 @@ def _gmi_container_ctype(v):
     return None
 
 
-def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found: dict) -> None:
+def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found: dict,
+                              param_bools=None) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Not recursive (walks via _walk_ast), but a
     lifted closure all the same; `param_types`/`found` (dicts) threaded
     and annotated per the hoist GOTCHA, and the captured struct name is
-    passed as `_sname` instead of the whole StructDef."""
+    passed as `_sname` instead of the whole StructDef.
+
+    `param_bools` is the set of parameter names whose DECLARED annotation is
+    `bool`, which `param_types` cannot express: `_TYPE_MAP` maps `'bool'` to
+    `'int'` on purpose, so a `def __init__(self, flag: bool)` parameter and an
+    `int` one are the same string in that dict. The annotation is the only
+    place the difference exists, and it is what
+    `gen.struct_bool_fields` records — the table `is_python_bool_expr` reads
+    to decide whether `self.<f>` is a Python bool worth printing as
+    True/False rather than 1/0, and that the struct's own generated
+    `_mojo_repr_<Sn>` already reads. Without it the canonical Python shape
+    (`self.flag = flag` from a `flag: bool` parameter) had no bool evidence
+    anywhere and every spelling of `b.flag` printed `1`/`0`."""
     for node in _walk_ast(body):
         if isinstance(node, AssignStmt):
             fn = _gmi_self_member(node.target)
@@ -962,6 +975,8 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
                 v = node.value
                 if isinstance(v, IdentExpr):
                     ft = param_types.get(v.name, 'int64_t')
+                    if param_bools and v.name in param_bools:
+                        self.struct_bool_fields.setdefault(_sname, set()).add(fn)
                 elif isinstance(v, IntLiteral):
                     ft = 'int64_t'
                 elif isinstance(v, FloatLiteral):

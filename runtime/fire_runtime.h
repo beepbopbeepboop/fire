@@ -1061,8 +1061,10 @@ typedef struct {
     int64_t  kind;  /* what `val` actually holds, needed by consumers that
                      * must re-interpret the untagged slot (runtime dict-keyed
                      * %-formatting): 0 = plain int64_t, 1 = double bit-cast,
-                     * 2 = char * pointer. Maintained by the typed setters
-                     * below; zero-defaulted everywhere else. */
+                     * 2 = char * pointer, 3 = a Python bool (0/1, which is
+                     * the same int64_t as case 0 and so is only separable
+                     * because the tag is per SLOT). Maintained by the typed
+                     * setters below; zero-defaulted everywhere else. */
     int64_t  keykind; /* key DOMAIN, since every key is stored as its own
                      * characters in `key` and matched with strcmp: 0 = a str
                      * key, 1 = a bytes key. Keeps `d[b'x']` and `d['x']` the
@@ -1113,8 +1115,6 @@ void        mojo_dict_free(MojoDict *d);
 void        mojo_dict_init(MojoDict *d);
 void        mojo_dict_destroy(MojoDict *d);
 void        mojo_dict_clear(MojoDict *d);
-void        mojo_mark_dict_bool_values(MojoDict *d);
-int         mojo_is_bool_dict(MojoDict *d);
 
 void        mojo_dict_set_int(MojoDict *d, char *key, int64_t v);
 /* `_kw` variants: the key arrives as a raw machine WORD that is either a boxed
@@ -1135,6 +1135,11 @@ char       *mojo_dict_setdefault_str_kw(MojoDict *d, int64_t kw, char *dflt);
 void        mojo_dict_set_double(MojoDict *d, char *key, double v);
 void        mojo_dict_set_bytes_double(MojoDict *d, MojoBytes *key, double v);
 void        mojo_dict_set_str(MojoDict *d, char *key, char *v);
+/* A Python bool stored as a dict VALUE: same 0/1 int64_t as
+ * mojo_dict_set_int, but tagged `_DictSlot.kind == 3` so the dict's repr can
+ * still say True/False. Emitted by codegen wherever the stored expression is a
+ * Python bool (see `is_python_bool_expr`). */
+void        mojo_dict_set_bool(MojoDict *d, char *key, int v);
 
 int64_t     mojo_dict_get_int(MojoDict *d, char *key);
 double      mojo_dict_get_double(MojoDict *d, char *key);
@@ -1257,6 +1262,8 @@ int         mojo_dict_contains(MojoDict *d, char *key);
  * `d[b'x']` and `d['x']` stay distinct entries. Keyed by content. */
 void        mojo_dict_set_bytes_int(MojoDict *d, MojoBytes *key, int64_t v);
 void        mojo_dict_set_bytes_str(MojoDict *d, MojoBytes *key, char *v);
+/* The bytes-key twin of mojo_dict_set_bool. */
+void        mojo_dict_set_bytes_bool(MojoDict *d, MojoBytes *key, int v);
 int64_t     mojo_dict_get_bytes_int(MojoDict *d, MojoBytes *key);
 char       *mojo_dict_get_bytes_str(MojoDict *d, MojoBytes *key);
 double      mojo_dict_get_bytes_double(MojoDict *d, MojoBytes *key);
