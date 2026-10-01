@@ -267,6 +267,32 @@ class IdentExpr:
     col: int = 0
 
 @dataclass
+class DottedLiteral:
+    """A dot-relative value reference: `.always`, `.uint64`, `.of_bytes`.
+
+    The spelling omits the enum/class the variant belongs to, so the reference
+    only has a meaning once the surrounding position supplies that type —
+    `@inline(.always)` against the `inline` decorator's parameter,
+    `SIMD[.uint64, 4]` against `SIMD`'s DType parameter, `case .PASS:` against
+    the matched value. `path` therefore holds ONLY the variant part, without
+    the leading dot: `"always"`, `"uint64"`, `"of_bytes"`, or a longer chain
+    (`"a.b"` for `.a.b`).
+
+    Deliberately its own node rather than an `IdentExpr` named `".always"`:
+    an `IdentExpr` is a lookup of a real binding, so every consumer would treat
+    a dotted name as an ordinary (missing) symbol and resolve it to its
+    "unknown identifier" fallback. A distinct node makes the "type-relative,
+    needs a context to resolve" property visible to every consumer instead of
+    silently degrading it into a name lookup.
+
+    A backtick-quoted component keeps its backticks in `path` (as elsewhere in
+    the parser), so ``.`if` `` resolves to the keyword spelled `if`.
+    """
+    path: str
+    line: int = 0
+    col: int = 0
+
+@dataclass
 class CallExpr:
     func: object
     args: list = field(default_factory=list)
@@ -333,10 +359,40 @@ class TernaryExpr:
 
 @dataclass
 class LambdaExpr:
+    """`lambda ...: body`.
+
+    `params` is a list of `(pname, default_value_AST_or_None)` 2-tuples —
+    deliberately still 2, because consumers unpack it positionally
+    (`for pname, default in node.params` in the GIMPLE lambda lifting), and a
+    3-tuple would break every one of them with an unpacking error rather than
+    a missing annotation.
+
+    The Mojo-only annotations are therefore carried in the parallel lists
+    rather than folded into `params`:
+
+    - `param_types[i]` is `params[i]`'s declared type (`lambda (i: Int)`), or
+      None when that parameter is unannotated. Positionally aligned with
+      `params`, and may contain holes — an unannotated parameter between two
+      annotated ones still gets a None slot, so the indices always line up.
+    - `return_type` is the `-> T` annotation, or None.
+    - `comptime_params` is the `[i: Int]` generic/comptime parameter block that
+      may precede the parameter list (`lambda [i: Int]() -> Int: ...`), as a
+      list of `(name, type_ann_or_None)` pairs.
+    - `captures` is the `{ref}` / `{imm key}` capture list that may sit between
+      the parameter list and `->`, kept as the raw text between the braces.
+
+    All four default to empty/None, so every pre-existing construction of this
+    node (the interpreter, the codegen lifting, the formal backend) keeps
+    working untouched.
+    """
     params: list[tuple[str, str]]
     body: object
     line: int = 0
     col: int = 0
+    param_types: list = field(default_factory=list)
+    return_type: object = None
+    comptime_params: list = field(default_factory=list)
+    captures: str = ''
 
 @dataclass
 class WalrusExpr:
@@ -515,6 +571,10 @@ class ImportStmt:
     extra: object = None  # list[(module, alias|None)] for `import a, b, c`
     line: int = 0
     col: int = 0
+    # Decorators applied to the import (`@stable(recursive=True)` in front of
+    # `from ... import ...`), same shape as `FunctionDef.decorators`: bare
+    # names, or CallExpr/DecoratorArgs for a parameterised form.
+    decorators: list = field(default_factory=list)
 
 @dataclass
 class FromImportStmt:
@@ -527,6 +587,8 @@ class FromImportStmt:
     # box their str slots to int64_t self-hosted. Read via gimple_ctypes._fi_name
     # / _fi_alias.
     name_alias_strs: list = field(default_factory=list)
+    # Decorators applied to the import — see ImportStmt.decorators.
+    decorators: list = field(default_factory=list)
 
 @dataclass
 class IfStmt:
@@ -587,6 +649,25 @@ class FunctionDef:
         # valid Python "async generator"); the two flags are independent, not
         # mutually exclusive. No execution semantics are implied by this flag
         # yet — see AwaitExpr's docstring.
+    # Explicit CAPTURE list from a brace-delimited clause on a nested `def`:
+    # `def handler(...) {mut count, var s}:` — `(name, conv_or_None)` pairs,
+    # `None` for a bare name, and a `None` NAME for the bare-convention form
+    # (`{mut}` = "capture whatever this body references"). See
+    # `Parser._parse_capture_list` for why this is parsed rather than skipped.
+    #
+    # `has_capture_list` is what says a list was WRITTEN, and it is load-bearing
+    # in both consumers, because `{}` and "no list at all" both leave `captures`
+    # empty and mean opposite things: `{}` asserts the closure captures nothing,
+    # while no list leaves the captures to be inferred from the body.
+    #   * `discover_closures` — an explicit `{}` must NOT fall back to the
+    #     inference, or a source that says "captures nothing" gets captures.
+    #   * `ownership_destruct._nested_capture_names` — a def with no list is
+    #     UNKNOWN and must keep the conservative veto; one with `{}` is known
+    #     to capture nothing and may be ignored.
+    # Folding the two into one empty list would silently conflate them in both
+    # directions, so the flag is explicit.
+    captures: list = field(default_factory=list)
+    has_capture_list: bool = False
     line: int = 0
     col: int = 0
 
@@ -788,7 +869,7 @@ class ComptimeVarStmt:
 
 
 # ── Lexer ──────────────────────────────────────────────────────────
-_KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned', 'enum', 'del', 'nonlocal'}
+_KEYWORDS = {'out', 'or', 'mut', 'finally', 'return', 'except', 'raises', 'struct', 'not', 'class', 'True', 'trait', 'assert', 'break', 'from', 'while', 'try', 'and', 'as', 'let', 'in', 'deinit', 'for', 'comptime', 'super', 'var', 'pass', 'ref', 'read', 'else', 'if', 'with', 'elif', 'raise', 'import', 'False', 'continue', 'def', 'is', 'fn', 'global', 'inout', 'borrowed', 'owned', 'enum', 'del', 'nonlocal', 'imm'}
 
 _TOKEN_RE = re.compile(r'(?P<IMAG>(?:\d[\d_]*\.[\d_]*(?:[eE][+-]?\d[\d_]*)?|\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?|\d[\d_]*(?:[eE][+-]?\d[\d_]*)?)[jJ])|(?P<FLOAT>\d[\d_]*\.[\d_]*(?:[eE][+-]?\d[\d_]*)?|\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?|\d[\d_]*[eE][+-]?\d[\d_]*)|(?:0x|0X)[0-9a-fA-F][0-9a-fA-F_]*|(?:0o|0O)[0-7][0-7_]*|(?:0b|0B)[01][01_]*|(?P<INT>(?:0|[1-9][0-9_]*))|(?P<AUGASSIGN>\*\*=|//=|<<=|>>=|\+=|\-=|\*=|/=|%=|@=|\&=|\|=|\^=)|(?P<ARROW>->)|(?P<OP>\*\*|//|<<|>>|==|!=|<=|>=|:=|\*|@|/|%|\+|\-|\&|\^|\||<|>|\?|\~)|(?P<ASSIGN>=)|(?P<XFER>\^)|(?P<STRING>[fFrRbBuUtT]{0,2}(?:\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|\"(?:[^\"\\]|\\.)*\"|\'(?:[^\'\\]|\\.)*\')|`[^`]*`)|(?P<DOT>\.)|(?P<COLON>:)|(?P<LPAREN>\()|(?P<RPAREN>\))|(?P<LBRACKET>\[)|(?P<RBRACKET>\])|(?P<LBRACE>\{)|(?P<RBRACE>\})|(?P<COMMA>,)|(?P<SEMICOLON>;)|(?P<NAME>[A-Za-z_][A-Za-z0-9_]*)|(?P<WS>[^\S\n]+)|(?P<UNK>.)')
 _INDENT_SIZE    = 4
@@ -2406,6 +2487,105 @@ def method_receiver_kind(m: object) -> str:
     return ''
 
 
+# ---------------------------------------------------------------------------
+# Argument/ownership CONVENTIONS: the vocabulary, in one place.
+# ---------------------------------------------------------------------------
+# `_CONV_CANON` collapses SPELLINGS of one convention onto one spelling
+# (the old-style `inout`/`borrowed` and the new-style `mut`/`read` are
+# semantically identical; a parameter-position `var` means the same as
+# `owned`). Storing the canonical form in `param_convs` means every later
+# consumer checks one spelling instead of tracking every historical name
+# everywhere -- see doc/OWNERSHIP_MODEL.md's Phase 0.
+_CONV_CANON = {'inout': 'mut', 'borrowed': 'read', 'var': 'owned'}
+
+# ---------------------------------------------------------------------------
+# What each convention MEANS, for the consumers that reason about it.
+# ---------------------------------------------------------------------------
+# `_CONV_CANON` above collapses SPELLINGS of one convention onto one spelling;
+# these three sets are the other direction — they say which conventions share a
+# PROPERTY, so a consumer asks "is this an exclusive borrow?" instead of
+# hardcoding a subset of names.
+#
+# They exist because the set of spellings grew past what any single consumer
+# tracked. `read`, `ref` and `imm` all mean "borrows immutably", and each was
+# recognised separately: `ownership_check.py` tested `c == 'mut'` and so let an
+# `imm` parameter through as "not mutable" only by accident of not matching,
+# while `funcs_shared._param_ctype` carried its own literal `('read', 'ref')`
+# tuple. Adding `imm` to the language would have silently widened that gap. One
+# table, asked two ways, cannot drift that way.
+#
+# Module-level frozensets reached through module-level FUNCTIONS, not class
+# attributes: a class-attribute dict read erases to int64_t on the self-hosted
+# path (see `_canon_conv`'s own note), which would turn these lookups into
+# truthy garbage rather than failing loudly.
+_CONV_READ_ONLY = frozenset({'read', 'ref', 'imm'})
+# Exclusive/mutable borrows: the callee may write through them, so two of them
+# aliasing one binding in a single call is a conflict (ownership_check Phase 2).
+_CONV_EXCLUSIVE = frozenset({'mut', 'out'})
+# Ownership transfer: the callee takes the value outright.
+_CONV_TRANSFER = frozenset({'owned'})
+
+
+def conv_is_read_only(conv) -> bool:
+    """True if `conv` is an immutable borrow (`read`, `ref`, `imm`).
+
+    An unannotated parameter is NOT read-only: callers must opt in by writing
+    the convention, so an absent convention has to read as "unknown" and fail
+    the safe way. Pass the raw value; None and '' are both unknown.
+    """
+    return bool(conv) and conv in _CONV_READ_ONLY
+
+
+def conv_is_exclusive(conv) -> bool:
+    """True if `conv` is a mutable/exclusive borrow (`mut`, `out`)."""
+    return bool(conv) and conv in _CONV_EXCLUSIVE
+
+
+def conv_is_transfer(conv) -> bool:
+    """True if `conv` transfers ownership (`owned`)."""
+    return bool(conv) and conv in _CONV_TRANSFER
+
+
+# ── Code generator ─────────────────────────────────────────────────
+
+
+
+
+def _canon_conv(conv: str):
+    # `cls._CONV_CANON.get(conv, conv)` was the original form: a
+    # CLASS-attribute dict read erases to int64_t on the self-hosted
+    # path, so the following `dict.get(...)` fell to the scalar-receiver
+    # stub and returned 0 for EVERY convention — the single largest .ast
+    # divergence class (`param_convs={'x': None}` vs the reference's
+    # `'mut'`/`'read'`/`'owned'`).
+    #
+    # Explicit `==` comparisons alone are NOT enough: `conv` arrives
+    # BOXED (its callers pass `_as_str(self._advance().value)` through a
+    # local, and the two-argument classmethod erases it) — a boxed
+    # int64_t compared against a `char *` string literal is the
+    # constant-FALSE static guard, so `conv == 'inout'` was always
+    # False and the function fell through to `return conv`, whose own
+    # boxed return then rendered as `''` in `param_convs`. Re-view the
+    # argument with `_as_str` INSIDE this one place so every comparison
+    # and the returned value are real `char *`.
+    # A SEPARATE local name (`_cv`), not `conv = _as_str(conv)` + reuse:
+    # the codegen re-read the PARAMETER `conv` (erased int64_t) in every
+    # comparison below even after the reassignment (`_t5 = (int64_t)conv;
+    # _t6 = (char*)conv; mojo_cstr_cmp(_t6, ...)` in the emitted .ci), so
+    # `conv == 'inout'` was still the constant-FALSE static guard. A
+    # fresh local that is only ever written from `_as_str(...)` keeps the
+    # real `char *` type through every use.
+    _cv = _as_str(conv)
+    if _cv == 'inout':
+        return 'mut'
+    if _cv == 'borrowed':
+        return 'read'
+    if _cv == 'var':
+        return 'owned'
+    return _cv
+# ── Code generator ─────────────────────────────────────────────────
+
+
 class Parser:
     def __init__(self, tokens: list[Token]):
         self._tok = tokens
@@ -2432,1338 +2612,7 @@ class Parser:
                 if nxt.kind == "NAME":
                     self._known_traits.add(nxt.value)
 
-    def with_filename(self, filename: str) -> Parser:
-        """Attach a source filename for `file:line:col:` diagnostics.
-        Kept as a separate setter (not an __init__ param) because the
-        self-hosted compiled path emits one fixed C signature per function —
-        callers passing 1 vs 2 constructor args would produce two conflicting
-        declarations for Parser___init__."""
-        self._filename = filename
-        return self
 
-    def _peek(self, offset: int = 0) -> Token:
-        i = self._pos + offset
-        if i < len(self._tok):
-            return self._tok[i]
-        last_line = 0
-        last_col = 0
-        if self._tok:
-            last_tok = self._tok[-1]
-            last_line = last_tok.line
-            last_col = last_tok.col
-        # Pass every field explicitly (not relying on Token's `col: int = 0`
-        # dataclass default) — the self-hosted compiled path doesn't reliably
-        # apply Python default field values on a constructor call that omits
-        # them, so an implicit default can come back as an uninitialized/
-        # None-ish slot instead of 0 (seen as "file:line:None:" in a
-        # compiled-path diagnostic).
-        return Token("EOF", "", line=last_line, col=last_col)
-
-    def _advance(self) -> Token:
-        t = self._tok[self._pos]
-        if self._pos < len(self._tok) - 1: self._pos += 1
-        return t
-
-    def _loc(self, tok: Token) -> str:
-        """Format a gcc-style `file:line:col: ` prefix for a diagnostic.
-        Omits the filename segment when none was supplied to the Parser
-        (e.g. inline snippets compiled from a string with no source file).
-
-        `tok` is required (no default/None-fallback) — every call site
-        already has a concrete token in hand, and a `tok if tok is not
-        None else self._peek()` ternary here previously confused the
-        self-hosted compiled path's type inference: the phi'd local came
-        back typed int64_t instead of Token*, so `.col` silently read back
-        as garbage/None in compiled diagnostics (`.line` happened to still
-        work). Only ever called from *inside* an f-string interpolation at
-        each raise site (never via a `raise self._error(...)` indirection)
-        — the compiled path's raise-lowering (_gen_stmt_RaiseStmt) pattern-
-        matches the literal shape `raise ExcName(single_string_arg)` to
-        capture the exception's type tag and message; routing the raise
-        through a helper method call breaks that match silently (the
-        exception still fires, but with an empty message and no type tag,
-        since `val.func` is a MemberExpr instead of a bare IdentExpr)."""
-        if self._filename:
-            return f"{self._filename}:{tok.line}:{tok.col}: "
-        return f"{tok.line}:{tok.col}: "
-
-    def _expect(self, kind: str, value: str = None) -> Token:
-        t = self._peek()
-        if t.kind != kind:
-            raise SyntaxError(f"{self._loc(t)}Expected {kind} got {t.kind}({t.value!r})")
-        if value and t.value != value:
-            raise SyntaxError(f"{self._loc(t)}Expected {value!r} got {t.value!r}")
-        return self._advance()
-
-    def _ident(self) -> str:
-        """Consume an identifier, allowing keywords (e.g. `out`, `mut`) and
-        backtick-quoted names to be used as plain identifiers."""
-        t = self._peek()
-        if t.kind in ("NAME", "KW"):
-            return self._advance().value
-        if t.kind == "STRING" and t.value.startswith("`"):
-            return self._advance().value
-        raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
-
-    def _capture_opaque_annotation_tail(self) -> str:
-        """Consume the remainder of an arbitrary (non-type) expression that
-        continues past a type-shaped annotation prefix, e.g. the `obj)` in
-        `gamma: some < obj)` — see bugs/PARSE_FAIL_annotation_trailing_binary_op.md.
-        Python's grammar permits any expression in an annotation position
-        with zero semantic type-checking, and nothing downstream re-parses
-        the annotation string assuming real type syntax (traced in commit
-        6ee8291), so the tail is captured as opaque raw text rather than
-        raised as a SyntaxError.
-
-        Bracket-depth-aware (nested `(`/`[`/`{` don't prematurely trip a
-        terminator check) and stops BEFORE consuming whichever terminator
-        token the various `_parse_type_ann` call sites rely on to know the
-        annotation is done: COMMA/RPAREN for parameter lists, COLON/ASSIGN
-        for return types and var-decls, ARROW, NEWLINE/EOF, INDENT/DEDENT.
-        An unmatched closing `)`/`]`/`}` (depth back to 0) is left for the
-        caller the same way; only a still-open nested bracket's closer is
-        consumed as part of the opaque text."""
-        STOP_KINDS = ("COMMA", "COLON", "ASSIGN", "ARROW", "NEWLINE", "EOF", "INDENT", "DEDENT")
-        depth = 0
-        parts = []
-        while True:
-            t = self._peek()
-            if depth == 0 and t.kind in STOP_KINDS:
-                break
-            if t.kind in ("LPAREN", "LBRACKET", "LBRACE"):
-                depth += 1
-                parts.append(self._advance().value)
-            elif t.kind in ("RPAREN", "RBRACKET", "RBRACE"):
-                if depth == 0:
-                    break
-                depth -= 1
-                parts.append(self._advance().value)
-            elif t.kind == "EOF":
-                break
-            else:
-                parts.append(self._advance().value)
-        return " ".join(parts)
-
-    def _consume_trailing_annotation_ops(self, name: str) -> str:
-        """After a type-shaped annotation prefix (`name`) is fully parsed,
-        consume any trailing operator that continues the expression:
-        1. PEP 604 union (`|`) / trait intersection (`&`) — real Mojo type
-           syntax, recursively parsing a real nested type annotation as the
-           RHS (pre-existing behavior).
-        2. Any OTHER trailing operator (`<`, `>`, `==`, binary `+`/`-`, etc.)
-           — not real type syntax, but Python's grammar syntactically
-           permits an arbitrary expression in an annotation position (PEP
-           649), so the operator and its RHS are captured as opaque text via
-           `_capture_opaque_annotation_tail` instead of raising. See
-           bugs/PARSE_FAIL_annotation_trailing_binary_op.md. `?` is
-           deliberately excluded here — it's the optional-type suffix
-           handled by the caller, `_parse_type_ann`."""
-        while self._peek().kind == "OP" and self._peek().value in ("|", "&"):
-            op = self._advance().value
-            rhs = self._parse_type_ann()
-            name = name + f" {op} " + rhs
-        if self._peek().kind == "OP" and self._peek().value != "?":
-            op = self._advance().value
-            tail = self._capture_opaque_annotation_tail()
-            name = name + " " + op + (" " + tail if tail else "")
-        return name
-
-    def _capture_bracketed_text(self) -> str:
-        """Consume a balanced `[...]` (tracking nested bracket depth so an
-        inner comma, e.g. `d[a, b]`'s tuple key, is correctly treated as
-        part of the subscript rather than ending the block early) and
-        return its contents — WITHOUT the enclosing brackets — reconstructed
-        as source text by joining consumed tokens' raw values. Every token's
-        `.value` is the exact matched source substring (see the tokenizer's
-        `_TOKEN_RE`, including STRING tokens which keep their quotes), so
-        joining them with spaces reconstructs syntactically valid Mojo
-        source that myinterpreter.py can re-tokenize/re-parse later via its
-        own `py_tokenize`/`Parser` (the same approach already used for
-        f-string field interpolation)."""
-        self._expect("LBRACKET")
-        depth = 1
-        parts = []
-        while depth > 0:
-            t = self._peek()
-            if t.kind == "LBRACKET":
-                depth += 1
-                parts.append(self._advance().value)
-            elif t.kind == "RBRACKET":
-                depth -= 1
-                self._advance()
-                if depth == 0:
-                    break
-                parts.append("]")
-            elif t.kind == "EOF":
-                break
-            else:
-                parts.append(self._advance().value)
-        return " ".join(parts)
-
-    def _parse_unpack_target(self):
-        """Parse a single unpacking-target element, supporting nested tuples:
-        (a, (b, c)) and a single starred element within a comma-list
-        (`a, *rest`), matching Python's extended-unpacking grammar. The
-        starred form is represented as "*rest" in the comma-joined string
-        target that myinterpreter.py's _bind_comprehension_target consumes.
-
-        A target element may also be a dotted attribute-access expression
-        (`st.lineno`, possibly chained `a.b.c`), e.g. `for st.lineno, line
-        in items:` — real-world code (CPython's configparser.py) mutates an
-        existing object's attribute directly in the loop instead of binding
-        a fresh local. This is kept as literal text ("st.lineno") within
-        the comma-joined string, the same way a starred name is kept as
-        literal text ("*rest"); myinterpreter.py's _bind_comprehension_target
-        recognizes the embedded "." and performs a real attribute SET
-        (reusing _assign_target) instead of a scope.define().
-
-        A target element may also be a subscript expression (`d["k"]`,
-        possibly chained `d[1][0]`), e.g. `for d["k"] in items:` or
-        `with EXPR as targets[1][0]:` (the latter straight from CPython's
-        own `Lib/test/test_with.py`). Same "keep as literal text" scheme:
-        the bracket and its contents are captured verbatim (via
-        `_capture_bracketed_text`) and appended to the target string
-        ("d[\"k\"]"); myinterpreter.py's `_bind_single_target` recognizes
-        the embedded "[" and performs a real subscript SET (again reusing
-        `_assign_target`, via a re-parsed `SubscriptExpr`). NOTE: because a
-        subscript's contents are an arbitrary expression that could itself
-        contain a top-level comma (`d[a, b]`, a tuple key) — which would be
-        ambiguous with this SAME comma used to separate elements of the
-        outer target list — the outer comma-list join above only splits on
-        commas it consumes as its own token stream (safe), but
-        myinterpreter.py's later `str.split(',')` re-parse of the joined
-        target string is NOT bracket-depth-aware. A comma-containing
-        subscript key as a for/with target is therefore not supported; the
-        real-world motivating case (`targets[1][0]`) and this bug's own
-        repro (`d["k"]`) both use comma-free keys and work correctly.
-
-        Shared by `for`-loop targets and `with ... as (a, b):` targets — one
-        representation, one parser, reused everywhere a comma-joined
-        unpacking-target string is needed (per this project's consolidation
-        convention). (Chained-assignment tuple targets use a separate
-        Expr-based TupleExpr representation, not this string form — see
-        _parse_stmt's ASSIGN handling.)"""
-        if self._peek().kind == "LPAREN":
-            self._advance()
-            parts = []
-            while self._peek().kind != "RPAREN" and self._peek().kind != "EOF":
-                parts.append(self._parse_unpack_target())
-                if self._peek().kind == "COMMA":
-                    self._advance()
-            self._expect("RPAREN")
-            return "(" + ", ".join(parts) + ")"
-        elif self._peek().kind == "OP" and self._peek().value == "*":
-            self._advance()
-            tok = self._advance()
-            return "*" + tok.value
-        else:
-            # Accept KW tokens (e.g. "fn", "var") as variable names
-            tok = self._advance()
-            name = tok.value
-            # Dotted attribute target: st.lineno, or chained a.b.c
-            while self._peek().kind == "DOT":
-                self._advance()
-                attr_tok = self._advance()
-                name += "." + attr_tok.value
-            # Subscript target: d["k"], or chained d[1][0]
-            while self._peek().kind == "LBRACKET":
-                name += "[" + self._capture_bracketed_text() + "]"
-            return name
-
-    def _parse_dotted_name(self) -> str:
-        """Consume a dotted name like `asyncio.CancelledError` and return it
-        as a single string. Used for exception types in `except` clauses."""
-        name = self._ident()
-        while self._peek().kind == "DOT":
-            self._advance(); name += "." + self._ident()
-        return name
-
-    def _dotted_name_expr(self, dotted: str):
-        """The AST for a dotted name string, as nested IdentExpr/MemberExpr.
-
-        The inverse of `_parse_dotted_name`, needed because a decorator with
-        arguments (`@functools.lru_cache(maxsize=8)`) has to be recorded as a
-        real CallExpr rather than as a bare name: the argument list is
-        discarded by the name-only form, so `@deco` and `@deco(x)` were
-        indistinguishable in the AST, and both silently did nothing."""
-        parts = dotted.split('.')
-        node = IdentExpr(name=parts[0])
-        for p in parts[1:]:
-            node = MemberExpr(obj=node, member=p)
-        return node
-
-    def _parse_paren_args(self):
-        """Parse a call's argument list, with LPAREN already current. Returns
-        `(args, kwargs)` where `kwargs` is the `(name, expr)` list shape
-        `CallExpr.kwargs` holds.
-
-        Extracted from `_parse_expr`'s postfix loop so a decorator's argument
-        list can be parsed by exactly the same rules as any other call's --
-        before, `@deco(x)` skipped the tokens instead, so the AST could not
-        tell it from a bare `@deco` and every parameterised decorator was
-        silently inert."""
-        self._advance()          # skip LPAREN
-        args = []
-        keywords = {}
-        while self._peek().kind != "RPAREN":
-            # Handle unpacking (*expr / **expr). Don't consume the
-            # star(s) here — let _parse_expr (via _parse_unary) wrap
-            # the operand in UnaryOp(op='*'/'**', operand=...) so the
-            # marker survives into the AST. The interpreter's call
-            # evaluation (myinterpreter.py) detects that wrapper and
-            # splices the iterable's elements/mapping's items into
-            # the flat arg/kwargs lists at call time, instead of
-            # treating the whole expression as one ordinary
-            # positional argument value.
-            if self._peek().kind == "OP" and self._peek().value in ("*", "**"):
-                args.append(self._parse_expr(0))
-            # Handle keyword arguments (name=value) — name can be NAME or KW token
-            elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
-                keyword_name = self._advance().value  # get keyword name
-                self._advance()  # skip =
-                keywords[keyword_name] = self._parse_expr(0)  # parse and store value
-            else:
-                first = self._parse_expr(0)
-                if self._is_kw("for"):
-                    gens = self._parse_generators()  # allow chained for-clauses
-                    args = [Comprehension(kind="generator", element=first, generators=gens)]
-                    continue
-                args.append(first)
-            if self._peek().kind == "COMMA": self._advance()
-        self._expect("RPAREN")
-        # Convert keywords dict to list of (name, expr) tuples for
-        # CallExpr.kwargs. Explicit accumulation loop, NOT the
-        # `[(k, v) for k, v in keywords.items()]` comprehension — a
-        # list comprehension over dict items is the established
-        # self-hosted trap (same family as `''.join(<genexpr>)`):
-        # the compiled result erased to the garbage non-list 1.
-        kwargs_list = []
-        for _kw_name, _kw_val in keywords.items():
-            kwargs_list.append((_kw_name, _kw_val))
-        return args, kwargs_list
-
-    def _parse_decorator_args(self, dec_name: str):
-        """A decorator's parenthesised argument list, with LPAREN current.
-
-        Returns either a `CallExpr` — the ordinary case, `@deco(x, k=1)`, the
-        exact node `_parse_expr`'s own call would build — or a
-        `DecoratorArgs` when the region is a `;`-separated specification.
-
-        WHY the second case exists. A decorator's argument list is NOT a call
-        argument list: the arguments belong to the decorator's own
-        mini-grammar, and at least one real grammar in this tree
-        (`formal/examples/{fact,fib,sum,count}.mojo`'s `@spec(...)`, read by
-        the Lean proof pipeline) is not Mojo expression syntax at all:
-
-            @spec(fact_spec; fact_spec 0 = 1; fact_spec (n+1) = (n+1) * fact_spec n)
-
-        That is a name, then `;`-separated EQUATIONS: juxtaposed application
-        (`fact_spec 0`), a bare `=` in operator position, and a `;` between
-        clauses. Reading it as a call argument list is a `SyntaxError` at the
-        first `;` (it was introduced by 19bc0dd, which made this a real parse
-        where it used to skip the tokens, and it took 13 of 45
-        `formal/examples/*.mojo` out of the parser).
-
-        The `;` is the discriminator, and it is unambiguous rather than a
-        guess: a semicolon is not valid anywhere in a Mojo EXPRESSION — the
-        same file's `_split_on_separators` already states the rule ("real
-        Python has no such thing as a semicolon inside an expression at all")
-        and, crucially, already DELEGATES that case to the bracketed reader by
-        tracking bracket depth so a `;` inside `(...)` is left in place
-        instead of being split off as a statement separator. This is that
-        bracketed reader. A `;` nested inside a further `(`/`[`/`{` does not
-        count, so a `;` that somehow appeared in a real call's arguments would
-        still be reported rather than silently reinterpreted.
-
-        So a decorator region containing no top-level `;` takes the
-        `_parse_paren_args()` path unchanged, which is what every other
-        decorator in the tree uses and what keeps `@deco` and `@deco(x)`
-        distinguishable (the point of 19bc0dd). Nothing is discarded either
-        way: the CallExpr keeps its parsed arguments, and `DecoratorArgs`
-        keeps its clauses as text.
-        """
-        # Look ahead for a top-level SEMICOLON before committing to a shape.
-        # Rewind and re-parse rather than remember a token list: `_parse_
-        # paren_args` is the single definition of what a call's arguments
-        # mean, and a second copy of it would drift from it.
-        start = self._pos
-        self._advance()          # skip LPAREN, so `depth` counts only INNER
-        depth = 0
-        spec = False
-        while True:
-            k = self._peek().kind
-            if k == "LPAREN" or k == "LBRACKET" or k == "LBRACE":
-                depth += 1
-            elif k == "RPAREN" or k == "RBRACKET" or k == "RBRACE":
-                if depth == 0:
-                    break
-                depth -= 1
-            elif k == "SEMICOLON" and depth == 0:
-                spec = True
-            elif k == "EOF":
-                break
-            self._advance()
-        close_line = self._peek().line
-        close_col = self._peek().col
-        self._pos = start
-        if not spec:
-            args, kwargs = self._parse_paren_args()
-            return CallExpr(func=self._dotted_name_expr(dec_name),
-                            args=args, kwargs=kwargs)
-        # The specification form: consume the balanced region and keep each
-        # `;`-separated clause as text. Token values, not source slicing:
-        # Token carries line/col but no source offset, and a STRING token's
-        # `;` is already part of its value rather than a SEMICOLON.
-        self._advance()          # skip LPAREN
-        clauses = []
-        cur = []
-        depth = 0
-        while True:
-            k = self._peek().kind
-            if k == "RPAREN" and depth == 0:
-                self._advance()
-                break
-            if k == "EOF":
-                break
-            if k == "SEMICOLON" and depth == 0:
-                self._advance()
-                clauses.append(" ".join(cur))
-                cur = []
-                # Layout tokens inside the region (a multi-line `@spec(...)`)
-                # are dropped by the filter at the bottom of this loop; no
-                # extra advance here, or the first token of the next clause
-                # is swallowed.
-                continue
-            if k == "LPAREN" or k == "LBRACKET" or k == "LBRACE":
-                depth += 1
-            elif k == "RPAREN" or k == "RBRACKET" or k == "RBRACE":
-                depth -= 1
-            if k != "NEWLINE" and k != "INDENT" and k != "DEDENT":
-                cur.append(self._peek().value)
-            self._advance()
-        clauses.append(" ".join(cur))
-        return DecoratorArgs(name=dec_name, clauses=clauses,
-                             line=close_line, col=close_col)
-
-    def _skip_newlines(self):
-        while self._peek().kind == "NEWLINE": self._advance()
-
-    def _at_end(self) -> bool: return self._peek().kind == "EOF"
-    def _is_kw(self, *w) -> bool:
-        t = self._peek(); return t.kind == "KW" and t.value in w
-
-    def parse_module(self) -> list:
-        stmts = []
-        self._skip_newlines()
-        while not self._at_end():
-            stmts.append(self._parse_stmt())
-            self._skip_newlines()
-        return _synthesize_fieldwise_inits(stmts)
-
-    def _parse_block(self) -> list:
-        # Support inline single-statement body: "def foo(): return x" on one line
-        if self._peek().kind != "NEWLINE":
-            start_line = self._peek().line
-            stmt = self._parse_stmt()
-            stmts = [stmt] if stmt is not None else []
-            # Same-line multi-statement inline body: "if x: a = 1; continue" —
-            # the tokenizer (see py_tokenize's `_split_on_separators` loop)
-            # splits each ';'-separated piece of a physical line into its own
-            # token run terminated by a NEWLINE, which loses the fact that
-            # every piece after the colon is still part of THIS compound
-            # statement's body, not a sibling of the enclosing block. Without
-            # this loop, only the first piece ("a = 1") became the body and
-            # anything after the first ';' (here, "continue") silently became
-            # a sibling statement instead — executing unconditionally on every
-            # loop iteration regardless of `x`. Detected via physical line
-            # number: every ';'-split piece from the same source line shares
-            # the same `line`, so a NEWLINE followed by a token still on the
-            # same line means "more of this same-line body", not a new line.
-            while (self._peek().kind == "NEWLINE"
-                   and self._peek(1).line == start_line
-                   and self._peek(1).kind not in ("DEDENT", "EOF")):
-                self._advance()  # consume the semicolon-split NEWLINE
-                start_line = self._peek().line
-                nxt = self._parse_stmt()
-                if nxt is not None:
-                    stmts.append(nxt)
-            return stmts
-        self._expect("NEWLINE")
-        self._skip_newlines()
-        # Empty block: comment-only body produces DEDENT with no INDENT
-        if self._peek().kind in ("DEDENT", "EOF", "KW"):
-            return [PassStmt()]
-        self._expect("INDENT")
-        stmts = []
-        self._skip_newlines()
-        while self._peek().kind not in ("DEDENT", "EOF"):
-            stmts.append(self._parse_stmt())
-            self._skip_newlines()
-        self._expect("DEDENT")
-        return stmts
-
-    def _parse_yield_expr(self):
-        """Parse a `yield`/`yield from` expression — assumes the current
-        token is the NAME('yield') token. `yield` is never a real Python
-        identifier (reserved since Python 2.2; confirmed by grepping
-        CPython's own test suite — the only `yield = ...`-shaped source
-        found there is test_syntax.py/test_generators.py doctests that
-        assert it's a SyntaxError), so no `var`/`await`-style "used as an
-        identifier" disambiguation is needed — every call site below only
-        invokes this where real Python's own grammar also treats `yield` as
-        the keyword, so no ambiguity is possible.
-        """
-        t = self._advance()  # consume 'yield'
-        line, col = t.line, t.col
-        if self._peek().kind == "KW" and self._peek().value == "from":
-            self._advance()
-            val = self._parse_expr(0)
-            return YieldFromExpr(value=val, line=line, col=col)
-        # Bare `yield`: next token can't start an expression.
-        if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "RPAREN",
-                "RBRACKET", "RBRACE", "COMMA", "COLON", "SEMICOLON"):
-            return YieldExpr(value=None, line=line, col=col)
-        val = self._parse_expr(0)
-        # Implicit tuple: yield a, b, c — same convention as `return a, b`.
-        if self._peek().kind == "COMMA":
-            elements = [val]
-            while self._peek().kind == "COMMA":
-                self._advance()
-                if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "RPAREN",
-                        "RBRACKET", "RBRACE", "COLON", "SEMICOLON"):
-                    break
-                elements.append(self._parse_expr(0))
-            val = TupleExpr(elements=elements, line=val.line, col=val.col)
-        return YieldExpr(value=val, line=line, col=col)
-
-    def _parse_expr_or_yield(self):
-        """Like `_parse_expr(0)` but also recognizes a leading `yield`/
-        `yield from` — for use ONLY at the specific grammar positions real
-        Python allows a bare (unparenthesized) yield expression: the whole
-        RHS of a simple/chained/annotated/augmented assignment, and a bare
-        expression statement. Every other position (call arguments, `return`
-        value, `if`/`while` conditions, container-literal elements, ...)
-        must keep going through plain `_parse_expr(0)` so `yield` there
-        still requires explicit parens, matching real Python (`f((yield x))`,
-        not `f(yield x)`) — parenthesized grouping itself routes back through
-        this same recognition (see the LPAREN case in `_parse_primary`), so
-        `(yield x)` still works in those positions.
-        """
-        t = self._peek()
-        if t.kind == "NAME" and t.value == "yield":
-            return self._parse_yield_expr()
-        return self._parse_expr(0)
-
-    def _parse_stmt(self):
-        t = self._peek()
-        line, col = t.line, t.col
-        # `match` is a soft keyword (like Python's own) — only a match
-        # statement when followed by a real expression and a top-level `:`
-        # before the line ends; otherwise it's an ordinary identifier
-        # (`match(x)` a call, `match = 5` an assignment, etc).
-        if t.kind == "NAME" and t.value == "match" and self._is_match_stmt():
-            return self._parse_match()
-        # `async` is a soft keyword, same story as `match`/`fn`/`struct`/`var`
-        # above: `async` lexes as a plain NAME (not in _KEYWORDS — real
-        # Python has no bare `async` keyword outside `async def`/`async
-        # for`/`async with` either), so it's also a legal ordinary
-        # identifier. Only commit to an async-prefixed parse when the very
-        # next token is one of the three real async-statement openers
-        # (`def`/`fn`, `for`, `with`); otherwise fall through to ordinary
-        # expression/assignment parsing, where `async` reads as a plain
-        # identifier via _parse_primary. This is the UNDECORATED path for
-        # `async def` — the decorated path (`@dec\nasync def f(): ...`) is
-        # handled separately below, in the `@` decorator block, which strips
-        # a leading `async` before dispatching to `def`/`fn`.
-        if t.kind == "NAME" and t.value == "async":
-            nxt = self._peek(1)
-            if nxt.kind == "KW" and nxt.value in ("def", "fn"):
-                self._advance()  # consume 'async'
-                self._advance()  # consume 'def'/'fn'
-                return self._parse_funcdef([], is_async=True)
-            if nxt.kind == "KW" and nxt.value == "for":
-                self._advance()  # consume 'async'
-                stmt = self._parse_for()
-                stmt.is_async = True
-                return stmt
-            if nxt.kind == "KW" and nxt.value == "with":
-                self._advance()  # consume 'async'
-                stmt = self._parse_with()
-                stmt.is_async = True
-                return stmt
-            # else: `async` used as an ordinary identifier — fall through.
-        if t.kind == "KW":
-            if t.value == "import": return self._parse_import()
-            if t.value == "from":   return self._parse_from_import()
-            if t.value == 'var':
-                # `var` is ambiguous, same as `fn`/`struct`: it's both this
-                # dialect's declaration keyword AND a perfectly ordinary
-                # Python identifier (arguably more common as a plain name
-                # than `fn`/`struct`/`enum` ever are). Only commit to
-                # _parse_var_decl() when the shape that follows could
-                # actually BE a declaration. Per _parse_var_decl itself, a
-                # real declaration is `var` followed by either:
-                #   - a name-like token (NAME/KW/backtick-STRING) that then
-                #     becomes the declared name (optionally followed by
-                #     `,` more names, `:` a type annotation, `=` a value,
-                #     or nothing — a bare uninitialized `var x`), or
-                #   - `:` directly, meaning `var` itself is the field name
-                #     being annotated (`var: Type`) — this shape parses
-                #     identically whether `var` is "the keyword declaring a
-                #     field named var" or "the identifier var being
-                #     annotated", so there's no actual ambiguity to resolve
-                #     there.
-                # Anything else — `var.attr` (member access), `var.method()`
-                # (call), `var,` where var is itself one of several plain
-                # tuple-unpack targets (`var, x = ...`), `var == y`,
-                # `var[0]`, `var =`/`var +=` (assignment), bare `var` alone,
-                # etc. — means `var` is being used as an ordinary identifier
-                # here, so fall through to ordinary expression/assignment
-                # parsing (which already accepts KW tokens as identifiers
-                # via _parse_primary).
-                nxt = self._peek(1)
-                name_like = nxt.kind in ("NAME", "KW") or (
-                    nxt.kind == "STRING" and nxt.value.startswith("`"))
-                looks_like_vardecl = name_like or nxt.kind == "COLON"
-                if looks_like_vardecl:
-                    return self._parse_var_decl()
-                # else: fall through to expression/assignment handling below
-            if t.value == 'if': return self._parse_if()
-            if t.value == 'while': return self._parse_while()
-            if t.value == 'for': return self._parse_for()
-            if t.value in ("def", "fn"):
-                # `fn` is ambiguous: it's both this dialect's function-def
-                # keyword AND a legal plain identifier in real Python code
-                # (e.g. `fn, lno, func, sinfo = self.findCaller(...)` in
-                # CPython's logging/__init__.py). Only commit to the
-                # function-definition parse when the token shape that
-                # follows could actually BE a function signature: `fn`
-                # immediately followed by a name (the function's name,
-                # which per _parse_funcdef may itself be NAME/KW/backtick)
-                # and then either `(` (no generics) or `[` (generic params
-                # before the `(`). Anything else — `fn,` (tuple-unpacking
-                # target), `fn =`/`fn +=` (assignment), `fn.attr`
-                # (attribute access), `fn == x`, `fn[0]` used as a subscript
-                # target, `fn` alone, etc. — means `fn` is being used as an
-                # ordinary identifier here, so fall through to ordinary
-                # expression/assignment parsing (which accepts KW tokens as
-                # identifiers via _parse_primary).
-                if t.value == "fn":
-                    nxt, nxt2 = self._peek(1), self._peek(2)
-                    name_like = nxt.kind in ("NAME", "KW") or (
-                        nxt.kind == "STRING" and nxt.value.startswith("`"))
-                    looks_like_funcdef = name_like and nxt2.kind in ("LPAREN", "LBRACKET")
-                    if not looks_like_funcdef:
-                        pass  # fall through to expression statement
-                    else:
-                        self._advance(); return self._parse_funcdef([])
-                else:
-                    self._advance(); return self._parse_funcdef([])
-            if t.value in ("struct", "class"):
-                # `struct` is ambiguous the same way `fn` is (see the `fn`
-                # carve-out above): it's both this dialect's struct-def
-                # keyword AND a legal plain identifier/module name in real
-                # Python code (e.g. `struct.pack_into(...)` using the
-                # stdlib `struct` module, from CPython's
-                # multiprocessing/shared_memory.py). Real Python has no
-                # `struct` keyword at all, so this collision is real.
-                # `class`, by contrast, IS a hard keyword in real Python —
-                # a variable literally named `class` is invalid Python — so
-                # it has no realistic identifier-collision risk and is left
-                # unconditionally routed to _parse_struct.
-                #
-                # Only commit to the struct-definition parse when the shape
-                # that follows could actually BE one: `struct` immediately
-                # followed by a name-like token (per _parse_struct's name
-                # read via `self._ident()`, struct names may be NAME/KW/
-                # backtick-quoted, just like function names — a struct can
-                # itself be named after another keyword, e.g. `struct
-                # super:`, mirroring CPython's own test_super.py which
-                # defines a class named `super`) and then one of `[`
-                # (struct param block), `(` (base-class list), or `:`
-                # (straight into the body). Anything else — `struct.attr`
-                # (attribute access), `struct(...)` used as a call, `struct
-                # =` (assignment), `struct` alone, etc. — means `struct` is
-                # being used as an ordinary identifier here, so fall through
-                # to ordinary expression/assignment parsing (which accepts
-                # KW tokens as identifiers via _parse_primary).
-                if t.value == "struct":
-                    nxt, nxt2 = self._peek(1), self._peek(2)
-                    name_like = nxt.kind in ("NAME", "KW") or (
-                        nxt.kind == "STRING" and nxt.value.startswith("`"))
-                    looks_like_structdef = name_like and nxt2.kind in (
-                        "LBRACKET", "LPAREN", "COLON")
-                    if looks_like_structdef:
-                        return self._parse_struct()
-                    # else: fall through to expression statement
-                else:
-                    return self._parse_struct()
-            if t.value == "enum":
-                # `enum` is ambiguous the same way `fn`/`struct` are (see the
-                # carve-outs above): real Python has no `enum` keyword — it's
-                # a common plain identifier/module name (e.g. `import enum`
-                # then `enum = SomeEnum`, or a local var named `enum`). Only
-                # commit to the enum-definition parse when the shape that
-                # follows could actually BE one: `enum` immediately followed
-                # by a name-like token (per _parse_enum's name read) and then
-                # one of `(` (optional base-class list) or `:` (straight into
-                # the body). Anything else — `enum.attr` (attribute access),
-                # `enum(...)` used as a call, `enum =` (assignment), `enum`
-                # alone, etc. — means `enum` is being used as an ordinary
-                # identifier here, so fall through to ordinary
-                # expression/assignment parsing (which accepts KW tokens as
-                # identifiers via _parse_primary).
-                nxt, nxt2 = self._peek(1), self._peek(2)
-                name_like = nxt.kind in ("NAME", "KW") or (
-                    nxt.kind == "STRING" and nxt.value.startswith("`"))
-                looks_like_enumdef = name_like and nxt2.kind in ("LPAREN", "COLON")
-                if looks_like_enumdef:
-                    return self._parse_enum()
-                # else: fall through to expression statement
-            if t.value == "trait": return self._parse_trait()
-            if t.value == "try": return self._parse_try()
-            if t.value == "with": return self._parse_with()
-            if t.value == "comptime":
-                # Only commit to the comptime-statement parse when the next
-                # token could actually start one: `comptime if/for/assert`,
-                # `comptime var NAME = ...`, `comptime NAME = ...`, or
-                # `comptime \`name\` = ...`.
-                # Anything else — `comptime.foo` (imported module named
-                # comptime), `comptime(...)`, `comptime = ...`, bare
-                # `comptime` — is an ordinary identifier use; fall through
-                # to expression/assignment parsing (same carve-out pattern
-                # as `enum` above; `_parse_primary` accepts KW as ident).
-                nxt = self._peek(1)
-                if ((nxt.kind == "KW"
-                     and nxt.value in ("if", "for", "assert", "var", "let"))
-                        or nxt.kind == "NAME"
-                        or (nxt.kind == "STRING" and nxt.value.startswith("`"))):
-                    return self._parse_comptime()
-                # else: fall through to expression statement
-            if t.value == 'pass': return self._parse_pass()
-            if t.value == 'return': return self._parse_return()
-            if t.value == 'raise': return self._parse_raise()
-            if t.value == 'break': return self._parse_break()
-            if t.value == 'continue': return self._parse_continue()
-            if t.value == 'assert': return self._parse_assert()
-            if t.value == 'global': return self._parse_global()
-            if t.value == 'nonlocal': return self._parse_nonlocal()
-            if t.value == 'del': return self._parse_del()
-        # Handle __mlir_attr and other MLIR/special forms as opaque no-ops.
-        # NOT __mlir_region (handled below) and NOT __mlir_op: a bare __mlir_op
-        # statement is a real side-effecting op (e.g. `pop.store`, ownership
-        # markers) — let it fall through to an expression statement so the
-        # backend lowers it (mlir.py).
-        if t.kind == "NAME" and t.value.startswith("__mlir") \
-                and t.value not in ("__mlir_region", "__mlir_op"):
-            self._advance()  # skip __mlir_attr/etc
-            # Skip string literal if present
-            if self._peek().kind == "LPAREN":
-                self._advance()  # skip (
-                if self._peek().kind == "STRING":
-                    self._advance()  # skip string
-                self._advance()  # skip )
-            # Skip the rest of the line (result type annotation, etc)
-            while self._peek().kind not in ("NEWLINE", "DEDENT", "EOF"):
-                self._advance()
-            return PassStmt()
-        # Handle __extension Type: methods and __mlir_region name(...): body
-        if t.kind == "NAME" and t.value in ("__extension", "__mlir_region"):
-            self._advance()  # skip __extension or __mlir_region
-            name = self._expect("NAME").value
-            # Skip any function call arguments if present
-            if self._peek().kind == "LPAREN":
-                self._advance()  # (
-                depth = 1
-                while depth > 0:
-                    t_inner = self._advance()
-                    if t_inner.kind == "LPAREN":
-                        depth += 1
-                    elif t_inner.kind == "RPAREN": depth -= 1
-            self._expect("COLON")
-            # Check if there is a body on this line or on following lines
-            if self._peek().kind == "NEWLINE":
-                # Indented block follows
-                body = self._parse_block()
-            else:
-                # Body on same line, skip until newline
-                while self._peek().kind not in ("NEWLINE", "DEDENT", "EOF"):
-                    self._advance()
-            # Treat as a pass statement
-            return PassStmt(line=line, col=col)
-        if t.kind == "OP" and t.value == "@":
-            decs = []
-            while self._peek().kind == "OP" and self._peek().value == "@":
-                self._advance()
-                # Decorator name may be dotted (@functools.lru_cache, @a.b.c)
-                # and each component may lex as a Mojo keyword while still
-                # being an ordinary Python identifier (e.g. `@enum.global_enum`,
-                # `@ref(...)`) — use _parse_dotted_name(), the same
-                # keyword-accepting helper used for `except mod.Error:` and
-                # the earlier `from X import ref` fix, instead of
-                # _expect("NAME") which only accepts a real NAME token.
-                dec_name = self._parse_dotted_name()
-                # Handle decorator with arguments: @decorator(args).
-                #
-                # The argument list used to be SKIPPED token by token, so
-                # `@deco` and `@deco(x)` produced the identical AST node --
-                # the arguments were unrecoverable, which is part of why a
-                # decorator could be dropped without anything noticing. The
-                # call is now parsed into a real CallExpr and stored in place
-                # of the bare name, so the two are distinguishable and
-                # `dumps` (which prints `node.decorators` verbatim) no longer
-                # loses the arguments. A bare `@deco` still stores the plain
-                # string, so every existing `X in decorators` check -- the
-                # `staticmethod`/`classmethod`/`property`/`export`/`parameter`
-                # readers across the tree -- is unaffected.
-                #
-                # `_parse_decorator_args` picks between that CallExpr and a
-                # `DecoratorArgs`, whose argument list is a `;`-separated
-                # specification rather than Mojo call syntax (`@spec(...; ...)`);
-                # its docstring has the rule and the regression it fixes.
-                if self._peek().kind == "LPAREN":
-                    decs.append(self._parse_decorator_args(dec_name))
-                    self._skip_newlines()
-                    continue
-                decs.append(dec_name)
-                self._skip_newlines()
-            kw = self._peek()
-            if kw.kind == "KW" and kw.value in ("struct", "class"):
-                self._pending_decs = decs
-                return self._parse_struct()
-            if kw.kind == "KW" and kw.value == "enum":
-                self._pending_decs = decs
-                return self._parse_enum()
-            if kw.kind == "KW" and kw.value == "trait":
-                self._pending_decs = decs
-                return self._parse_trait()
-            if kw.kind == "KW" and kw.value == "comptime":
-                # Same carve-out as the statement-level dispatch: only a
-                # real comptime-statement shape commits; `comptime.foo` etc.
-                # falls through (and the decorator path below will 404 with
-                # a clear expect-error rather than misparse).
-                nxt = self._peek(1)
-                if ((nxt.kind == "KW"
-                     and nxt.value in ("if", "for", "assert", "var", "let"))
-                        or nxt.kind == "NAME"
-                        or (nxt.kind == "STRING" and nxt.value.startswith("`"))):
-                    return self._parse_comptime()
-                # else: fall through
-            # Handle 'async def' — async is tokenized as NAME not KW. Milestone
-            # 3a: build a real is_async=True FunctionDef instead of silently
-            # discarding the `async` token (see AwaitExpr's docstring).
-            is_async = False
-            if kw.kind == "NAME" and kw.value == "async":
-                is_async = True
-                self._advance()
-                kw = self._peek()
-            if kw.kind == "KW" and kw.value in ("def", "fn"):
-                self._advance()
-                return self._parse_funcdef(decs, is_async=is_async)
-            # Field-level decorators (e.g. @__allow_legacy_any_origin_fields)
-            # applied to a `var` declaration: decorators carry no codegen
-            # meaning here, so just parse the var decl and drop them.
-            if kw.kind == "KW" and kw.value == "var":
-                return self._parse_var_decl()
-            self._expect("KW", "def or fn")
-            return self._parse_funcdef(decs)
-        expr = self._parse_expr_or_yield()
-        # Collect a comma-separated group starting with `expr` — this is
-        # either a tuple-unpacking target (if followed by `=`) or a bare
-        # comma/tuple expression statement (if not).
-        saw_comma = self._peek().kind == "COMMA"
-        if saw_comma:
-            first_group = [expr]
-            while self._peek().kind == "COMMA":
-                self._advance()
-                if self._peek().kind == "ASSIGN": break
-                # A trailing comma with nothing meaningful after it (e.g.
-                # `print(1),` as its own statement, or `a, b,` — a plain
-                # expression statement, not a tuple-unpacking target) —
-                # matches the terminator check the chained-assignment RHS
-                # loop below already does. Without this, `expr,` at
-                # statement end tried to parse another expression starting
-                # at NEWLINE/DEDENT/EOF and blew up with "Unexpected
-                # NEWLINE". Leave the comma consumed; first_group already
-                # has everything that came before it.
-                if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "SEMICOLON"):
-                    break
-                first_group.append(self._parse_expr(0))
-        else:
-            first_group = [expr]
-
-        # Chained assignment where ANY link (including the first) may itself
-        # be a comma-separated tuple-unpacking target list, e.g.
-        # `a, b = x = pair` (unpack AND keep the whole value bound to `x`,
-        # matching CPython's difflib.py / platform.py idiom) as well as the
-        # simpler `x = y = expr` and `a, b = expr` cases. Was: the
-        # tuple-target branch (above) and the chained-assignment loop
-        # (formerly below) were mutually exclusive passes, so a tuple target
-        # followed by another `= target` link hit "Unexpected ASSIGN".
-        if self._peek().kind == "ASSIGN":
-            # Parallel lists `group_elems` / `group_had_comma`: `had_comma`
-            # records that this group was written with a trailing comma
-            # (`nm,`), i.e. a 1-element TUPLE target / value (`nm, = args`
-            # unpacks args' single element), NOT a bare `nm`. Without the
-            # flag a single-element comma group is indistinguishable from a
-            # plain target and `nm, = args` silently became `nm = args`.
-            # Two PARALLEL lists (not a list of (elems, flag) tuples): this
-            # file is compiled by the self-hosted compiler, and 2-tuple
-            # unpacking over `list` elements boxes the slots to int64_t
-            # there — the tuple-of-tuples form silently corrupted the parse
-            # (58-file A/B regression, found 2026-09-25).
-            group_elems = [first_group]
-            group_had_comma = [saw_comma]
-            while self._peek().kind == "ASSIGN":
-                self._advance()
-                val_expr = self._parse_expr_or_yield()
-                group = [val_expr]
-                had_comma = False
-                while self._peek().kind == "COMMA":
-                    had_comma = True
-                    self._advance()
-                    if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "ASSIGN"):
-                        break
-                    group.append(self._parse_expr(0))
-                group_elems.append(group)
-                group_had_comma.append(had_comma)
-
-            def _group_to_expr(g, had_comma):
-                if len(g) == 1 and not had_comma:
-                    return g[0]
-                return TupleExpr(elements=g)
-
-            # The last group parsed is the real RHS; every group before it
-            # (starting with `first_group`) is a target in the chain — a
-            # single-element group WITHOUT a trailing comma is a plain
-            # target, otherwise it is a tuple-unpacking target.
-            _last = len(group_elems) - 1
-            val = _group_to_expr(group_elems[_last], group_had_comma[_last])
-            targets = []
-            for _gi in range(_last):
-                targets.append(_group_to_expr(group_elems[_gi], group_had_comma[_gi]))
-            if len(targets) == 1:
-                return AssignStmt(target=targets[0], value=val, line=line, col=col)
-            return MultiAssignStmt(targets=targets, value=val, line=line, col=col)
-
-        if saw_comma:
-            # Not an assignment, treat as expression statement with comma
-            # operator — a 1-element `first_group` here means a single
-            # trailing comma (`EXPR,`), which is still a 1-element tuple
-            # literal in Python, just like `len(first_group) > 1` (`EXPR1,
-            # EXPR2,` etc.) is a multi-element one.
-            return ExprStmt(TupleExpr(elements=first_group), line=line, col=col)
-        expr = first_group[0]
-        # Annotated assignment: target: Type [= value]
-        if self._peek().kind == "COLON":
-            self._advance()
-            type_ann = self._parse_type_ann()
-            if self._peek().kind == "ASSIGN":
-                self._advance()
-                val = self._parse_expr_or_yield()
-                # `x: Type = value` previously silently discarded the
-                # annotation (AssignStmt has no type_ann field) — harmless
-                # for a local (type gets re-inferred from the value), but a
-                # real bug for a dataclass field with both an annotation AND
-                # a default (`x: list = field(default_factory=list)`, the
-                # normal shape for every trailing/optional field in this
-                # file's own AST-node dataclasses): the struct-field scanner
-                # that builds struct_field_types only recognized VarDecl (no
-                # value = pure declaration), so every such field was
-                # invisible to the self-hosted compiled path — found via
-                # StructDef's own _fieldwise_ctor_synthesized field aborting
-                # through the generic getattr fallback. Switching this whole
-                # branch to VarDecl (instead of adding type_ann to
-                # AssignStmt) turned out to have a much wider blast radius:
-                # every module-level `X: dict = {...}`-style global is
-                # driven by machinery keyed on `isinstance(stmt, AssignStmt)`
-                # (global C-storage boxing, _toplevel() statement collection)
-                # that doesn't know about VarDecl — so stick the annotation
-                # directly on AssignStmt instead, touching nothing else.
-                return AssignStmt(target=expr, value=val, type_ann=type_ann, line=line, col=col)
-            else:
-                # Bare annotation (e.g. class field `kind: str`) → VarDecl for struct fields.
-                # NOTE: this codegen's ternary always evaluates BOTH branches (no
-                # real short-circuiting), so `expr.name if isinstance(expr, IdentExpr)
-                # else None` would call `.name` unconditionally even when expr isn't
-                # an IdentExpr — falling to the dynamic-getattr runtime path, which
-                # aborts by design for an unresolvable static type. Use a real `if`
-                # instead. Found via example_imports.mojo's module docstring.
-                name = None
-                if isinstance(expr, IdentExpr):
-                    name = expr.name
-                if name:
-                    return VarDecl(name=name, type_ann=type_ann, value=None, line=line, col=col)
-                return ExprStmt(expr, line=line, col=col)
-        # Augmented assignment (`=`/chained-assignment/tuple-unpacking are
-        # all handled uniformly above, before the COLON-annotation check).
-        if self._peek().kind == "AUGASSIGN":
-            op = self._advance().value
-            val = self._parse_expr_or_yield()
-            return AugAssignStmt(target=expr, op=op, value=val, line=line, col=col)
-        self._skip_newlines()
-        return ExprStmt(expr, line=line, col=col)
-
-    def _parse_import(self):
-        t = self._peek()
-        self._expect("KW", "import")
-        module, alias = self._parse_import_target()
-        # `import a, b, c` — comma-separated module list
-        extra = None
-        while self._peek().kind == "COMMA":
-            self._advance()
-            if extra is None:
-                extra = []
-            extra.append(self._parse_import_target())
-        return ImportStmt(module=module, alias=alias, extra=extra,
-                          line=t.line, col=t.col)
-
-    def _parse_import_target(self):
-        # Handle relative imports: import .warp, import ..sibling
-        module = ""
-        while self._peek().kind == "DOT":
-            self._advance()
-            module += "."
-        # Module names may collide with keywords (e.g. a module named `comptime`),
-        # so accept NAME or KW via _ident().
-        module += self._ident()
-        while self._peek().kind == "DOT":
-            self._advance()
-            module += "." + self._ident()
-        alias = None
-        if self._is_kw("as"):
-            self._advance(); alias = self._ident()
-        return (module, alias)
-
-    def _parse_from_import(self):
-        t = self._peek()
-        self._expect("KW", "from")
-        # Handle relative imports: from . or from .. or from .module
-        module = ""
-        while self._peek().kind == "DOT":
-            self._advance()
-            module += "."
-        # If not just dots, parse the module name. Accept a keyword-named
-        # module (e.g. `from struct import pack` — `struct` lexes as KW), but
-        # never swallow the `import` keyword itself as the module name.
-        if self._peek().kind == "NAME" or (self._peek().kind == "KW" and not self._is_kw("import")):
-            module += self._advance().value
-            while self._peek().kind == "DOT":
-                self._advance()
-                module += "." + self._ident()
-        elif not module:
-            # No dots and no name: error
-            self._expect("NAME")  # Will raise error
-        self._expect("KW", "import")
-        if self._peek().kind == "OP" and self._peek().value == "*":
-            self._advance()
-            return FromImportStmt(module=module, names=[], wildcard=True, line=t.line, col=t.col)
-        # Handle parenthesized multi-line imports: from x import (a, b, c)
-        paren_import = False
-        if self._peek().kind == "LPAREN":
-            self._advance()
-            paren_import = True
-        names = []
-        _nas = []
-        # Parse first name, skipping any leading newlines in parenthesized imports
-        if paren_import:
-            while self._peek().kind == "NEWLINE": self._advance()
-        if self._peek().kind == "RPAREN":
-            # Empty parens: from x import ()
-            self._advance()
-            return FromImportStmt(module=module, names=names, wildcard=False, line=t.line, col=t.col)
-        # `_ident()` (not `_expect("NAME")`): an imported name may collide with
-        # a Mojo keyword, e.g. `from weakref import ref` — `ref` lexes as KW.
-        name = self._ident()
-        alias = None
-        if self._is_kw("as"):
-            self._advance(); alias = self._ident()
-        names.append((name, alias))
-        _nas.append((name + '|' + alias) if alias else name)
-        # Parse remaining names
-        while True:
-            if paren_import:
-                while self._peek().kind == "NEWLINE": self._advance()
-            if self._peek().kind == "RPAREN":
-                self._advance()
-                break
-            if self._peek().kind != "COMMA":
-                break
-            self._advance()
-            if paren_import:
-                while self._peek().kind == "NEWLINE": self._advance()
-            if self._peek().kind == "RPAREN":
-                self._advance()
-                break
-            name = self._ident()  # keyword-named imports (e.g. `ref`) allowed
-            alias = None
-            if self._is_kw("as"):
-                self._advance(); alias = self._ident()
-            names.append((name, alias))
-            _nas.append((name + '|' + alias) if alias else name)
-        return FromImportStmt(module=module, names=names, wildcard=False,
-                              name_alias_strs=_nas, line=t.line, col=t.col)
-
-    def _parse_var_decl(self):
-        self._expect("KW", 'var')
-        # Allow KW, backtick identifiers as variable names (e.g., "out", "fn", `6bit`)
-        t = self._peek()
-        if t.kind == "NAME": name = self._advance().value
-        elif t.kind == "KW": name = self._advance().value
-        elif t.kind == "STRING" and t.value.startswith("`"): name = self._advance().value
-        elif t.kind == "COLON":
-            # Python-style field annotation: "var: type"  (var is the field name)
-            name = "var"
-        else: raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
-        # Check for tuple unpacking (var a, b, c = ...)
-        if self._peek().kind == "COMMA":
-            names = [name]
-            while self._peek().kind == "COMMA":
-                self._advance()
-                t = self._peek()
-                if t.kind == "NAME": names.append(self._advance().value)
-                elif t.kind == "KW": names.append(self._advance().value)
-                elif self._peek().kind == "ASSIGN": break
-                else: break
-            # Tuple unpacking: create as single VarDecl with tuple name
-            if self._peek().kind == "ASSIGN":
-                self._advance()
-                value = self._parse_expr(0)
-                # Handle tuple RHS: var a, b = x, y
-                if self._peek().kind == "COMMA":
-                    rhs = [value]
-                    while self._peek().kind == "COMMA":
-                        self._advance()
-                        if self._peek().kind == "NEWLINE": break
-                        rhs.append(self._parse_expr(0))
-                    value = TupleExpr(elements=rhs)
-                return VarDecl(name=",".join(names), type_ann=None, value=value)
-            else:
-                # No assignment, treat as error or incomplete
-                return VarDecl(name=",".join(names), type_ann=None, value=None)
-        type_ann = None
-        if self._peek().kind == "COLON":
-            self._advance()
-            type_ann = self._parse_type_ann()
-        value = None
-        if self._peek().kind == "ASSIGN":
-            self._advance(); value = self._parse_expr(0)
-            # Implicit (parenthesis-less) tuple RHS: `var name = 'a', 'b', 'c'`
-            # — a bare comma-separated list on the right of `=` is a tuple.
-            # Mirrors the plain-assignment handling in the AssignStmt path above.
-            if self._peek().kind == "COMMA":
-                rhs_elements = [value]
-                while self._peek().kind == "COMMA":
-                    self._advance()
-                    if self._peek().kind in ("NEWLINE", "DEDENT", "EOF"):
-                        break
-                    rhs_elements.append(self._parse_expr(0))
-                value = TupleExpr(elements=rhs_elements)
-        return VarDecl(name=name, type_ann=type_ann, value=value)
-
-    def _parse_if(self):
-        self._expect("KW", "if")
-        cond = self._parse_expr(0)
-        self._expect("COLON")
-        body = self._parse_block()
-        elifs, else_body = [], None
-        self._skip_newlines()
-        while self._is_kw("elif"):
-            self._advance(); ec = self._parse_expr(0)
-            self._expect("COLON"); eb = self._parse_block()
-            elifs.append((ec, eb))
-            self._skip_newlines()
-        if self._is_kw("else"):
-            self._advance(); self._expect("COLON")
-            else_body = self._parse_block()
-        return IfStmt(condition=cond, then_body=body, elifs=elifs, else_body=else_body)
-
-    def _parse_while(self):
-        self._expect("KW", "while")
-        cond = self._parse_expr(0)
-        self._expect("COLON")
-        body = self._parse_block()
-        else_body = None
-        self._skip_newlines()
-        if self._is_kw("else"):
-            self._advance(); self._expect("COLON")
-            else_body = self._parse_block()
-        return WhileStmt(condition=cond, body=body, else_body=else_body)
-
-    def _is_match_stmt(self):
-        """Lookahead for the `match` soft keyword: it's a match statement
-        only if, after the subject expression, the next token before any
-        NEWLINE is a top-level `:` — a real expression can never contain a
-        bare top-level colon (dict/slice colons are always inside braces/
-        brackets, which this tracks via depth). Doesn't consume anything;
-        always restores position."""
-        saved = self._pos
-        self._advance()  # consume 'match'
-        depth = 0
-        is_match = False
-        while True:
-            t = self._peek()
-            if t.kind in ("NEWLINE", "EOF"):
-                break
-            if t.kind in ("LPAREN", "LBRACKET", "LBRACE"):
-                depth += 1
-            elif t.kind in ("RPAREN", "RBRACKET", "RBRACE"):
-                depth -= 1
-            elif t.kind == "COLON" and depth == 0:
-                is_match = True
-                break
-            self._advance()
-        self._pos = saved
-        return is_match
-
-    def _parse_match(self):
-        self._advance()  # consume 'match' (a NAME token, soft keyword)
-        subject = self._parse_expr(0)
-        self._expect("COLON")
-        self._expect("NEWLINE")
-        self._skip_newlines()
-        self._expect("INDENT")
-        cases = []
-        self._skip_newlines()
-        while self._peek().kind not in ("DEDENT", "EOF"):
-            cases.append(self._parse_match_case())
-            self._skip_newlines()
-        self._expect("DEDENT")
-        return MatchStmt(subject=subject, cases=cases)
-
-    def _parse_match_case(self):
-        # 'case' is also a soft keyword (NAME, not KW) — same as real Python.
-        t = self._peek()
-        if not (t.kind == "NAME" and t.value == "case"):
-            raise SyntaxError(f"{self._loc(t)}Expected 'case' got {t.kind}({t.value!r})")
-        self._advance()
-        # `case _:` (bare wildcard, an IdentExpr named '_') is recognized at
-        # match time (interpreter/codegen), not specially here — parsing it
-        # as a plain expression pattern keeps this parser simple, and lets
-        # `_` combine with an or-pattern list the same as any other pattern.
-        # Patterns are parsed at min_prec=1 (the same trick comprehension
-        # `for`/`if` clauses use below) so a top-level `if` here is left
-        # untouched for the guard-clause check below instead of being
-        # swallowed by _parse_expr's ternary-conditional-expression handling
-        # (`X if COND else Y`), which only fires at min_prec==0. Without
-        # this, `case n if n > 0:` fails trying to parse `if n > 0:` as a
-        # ternary expecting a matching `else`.
-        patterns = [self._parse_expr(1)]
-        while self._peek().kind == "COMMA":
-            self._advance()
-            if self._peek().kind == "COLON" or self._is_kw("if"):
-                break  # trailing comma before guard/colon
-            patterns.append(self._parse_expr(1))
-        guard = None
-        if self._is_kw("if"):
-            self._advance()
-            guard = self._parse_expr(0)
-        self._expect("COLON")
-        body = self._parse_block()
-        return MatchCase(patterns=patterns, body=body, guard=guard)
-
-    def _parse_for(self):
-        _for_tok = self._peek()
-        self._expect("KW", "for")
-        # Skip optional convention keyword (var, ref, mut, etc.) — but only
-        # when it's genuinely a prefix, i.e. something that can start a
-        # target follows it (another name, or `(` for tuple unpacking).
-        # `var` is BOTH a convention keyword (`for var x in y:`, never
-        # actually used anywhere in this codebase — grepped) AND a
-        # perfectly ordinary Python identifier for the loop variable
-        # itself (`for var in (...):`, real code in imports.py). Without
-        # the peek(1) check, `for var in (...):` swallowed `var` as a
-        # bogus convention prefix, then swallowed `in` too (mistaking it
-        # for the loop-variable name), leaving the parser expecting `in`
-        # but finding the tuple's `(` instead — "Expected KW got LPAREN".
-        # `peek(1) != COMMA` guards the same collision for a plain
-        # tuple-unpack target starting with the identifier `var`/etc.,
-        # e.g. `for var, other_var in pairs:`
-        # (bugs/PARSE_FAIL_var_as_for_loop_target_comma.md) — without it,
-        # `var` was swallowed as a bogus prefix (peek(1)=COMMA matched
-        # neither existing exclusion), leaving `_parse_unpack_target()` to
-        # start from the comma itself and misparse everything after.
-        if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
-                and not (self._peek(1).kind == "KW" and self._peek(1).value == "in")
-                and self._peek(1).kind != "COLON"
-                and self._peek(1).kind != "COMMA"):
-            self._advance()
-
-        # Handle tuple unpacking: for (a, b) in ..., for a, b in ..., or
-        # for a, *rest in ... (single starred element anywhere in the list).
-        # _parse_unpack_target is the shared unpacking-target-element parser
-        # (also used by `with ... as (a, b):`) — see its docstring.
-        target = self._parse_unpack_target()
-        if self._peek().kind == "COMMA":
-            names = [target]
-            while self._peek().kind == "COMMA":
-                self._advance()
-                names.append(self._parse_unpack_target())
-            target = "(" + ", ".join(names) + ")"
-        self._expect("KW", "in")
-        iterable = self._parse_expr(0)
-        # Implicit (parenthesis-less) tuple iterable: `for x in a, b, c:`
-        if self._peek().kind == "COMMA":
-            elems = [iterable]
-            while self._peek().kind == "COMMA":
-                self._advance()
-                if self._peek().kind == "COLON": break
-                elems.append(self._parse_expr(0))
-            iterable = TupleExpr(elements=elems)
-        self._expect("COLON")
-        body = self._parse_block()
-        else_body = None
-        if self._is_kw("else"):
-            self._advance(); self._expect("COLON")
-            else_body = self._parse_block()
-        return ForStmt(target=target, iterable=iterable, body=body, else_body=else_body,
-                       line=_for_tok.line, col=_for_tok.col)
-
-    # Ownership/convention keywords preserved in param_convs
-    _CONV_KWS = {'ref', 'out', 'mut', 'var', 'deinit', 'read', 'inout', 'borrowed', 'owned'}
-    # Canonical spelling for each convention keyword — old-style Mojo syntax
-    # (`inout`/`borrowed`) and new-style (`mut`/`read`) are semantically
-    # identical, and a parameter-position `var` means the same thing as
-    # `owned` (the callee receives the value outright). Storing the
-    # canonical form in param_convs means every later consumer (the
-    # ownership_check.py move/borrow analysis, eventually codegen) checks
-    # one spelling instead of tracking both historical names everywhere —
-    # see doc/OWNERSHIP_MODEL.md's Phase 0. `ref`/`out`/`deinit` have no
-    # older synonym and pass through unchanged.
-    _CONV_CANON = {'inout': 'mut', 'borrowed': 'read', 'var': 'owned'}
-    @classmethod
-    def _canon_conv(cls, conv: str):
-        # `cls._CONV_CANON.get(conv, conv)` was the original form: a
-        # CLASS-attribute dict read erases to int64_t on the self-hosted
-        # path, so the following `dict.get(...)` fell to the scalar-receiver
-        # stub and returned 0 for EVERY convention — the single largest .ast
-        # divergence class (`param_convs={'x': None}` vs the reference's
-        # `'mut'`/`'read'`/`'owned'`).
-        #
-        # Explicit `==` comparisons alone are NOT enough: `conv` arrives
-        # BOXED (its callers pass `_as_str(self._advance().value)` through a
-        # local, and the two-argument classmethod erases it) — a boxed
-        # int64_t compared against a `char *` string literal is the
-        # constant-FALSE static guard, so `conv == 'inout'` was always
-        # False and the function fell through to `return conv`, whose own
-        # boxed return then rendered as `''` in `param_convs`. Re-view the
-        # argument with `_as_str` INSIDE this one place so every comparison
-        # and the returned value are real `char *`.
-        # A SEPARATE local name (`_cv`), not `conv = _as_str(conv)` + reuse:
-        # the codegen re-read the PARAMETER `conv` (erased int64_t) in every
-        # comparison below even after the reassignment (`_t5 = (int64_t)conv;
-        # _t6 = (char*)conv; mojo_cstr_cmp(_t6, ...)` in the emitted .ci), so
-        # `conv == 'inout'` was still the constant-FALSE static guard. A
-        # fresh local that is only ever written from `_as_str(...)` keeps the
-        # real `char *` type through every use.
-        _cv = _as_str(conv)
-        if _cv == 'inout':
-            return 'mut'
-        if _cv == 'borrowed':
-            return 'read'
-        if _cv == 'var':
-            return 'owned'
-        return _cv
     def _parse_funcdef(self, decorators=None, is_async=False):
         if decorators is None: decorators = []
         # Allow keywords, backtick identifiers as function names (e.g., def read(...), def `6bit`(...))
@@ -3820,7 +2669,7 @@ class Parser:
                     if self._peek().kind == "COLON":
                         self._advance(); ptype = self._parse_type_ann()
                     params.append(("**" + pname, ptype))
-                    if conv is not None: param_convs[pname] = _as_str(Parser._canon_conv(conv))
+                    if conv is not None: param_convs[pname] = _as_str(_canon_conv(conv))
                     if self._peek().kind == "COMMA": self._advance()
                     while self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
                         self._advance()
@@ -3880,7 +2729,7 @@ class Parser:
                         param_has_default[pname] = True
                         param_defaults[pname] = default_expr
                     params.append((pname, ptype))
-                    param_convs[pname] = _as_str(Parser._canon_conv(conv))
+                    param_convs[pname] = _as_str(_canon_conv(conv))
                     if seen_bare_star: kwonly.append(pname)
                     if self._peek().kind == "COMMA": self._advance()
                     while self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
@@ -3911,7 +2760,7 @@ class Parser:
                 param_has_default[pname] = True
                 param_defaults[pname] = default_expr
             params.append((pname, ptype))
-            if conv is not None: param_convs[pname] = _as_str(Parser._canon_conv(conv))
+            if conv is not None: param_convs[pname] = _as_str(_canon_conv(conv))
             if seen_bare_star: kwonly.append(pname)
             # Skip trailing comma and newlines
             if self._peek().kind == "COMMA": self._advance()
@@ -3965,17 +2814,32 @@ class Parser:
             self._advance()  # where
             while self._peek().kind not in ("COLON", "NEWLINE", "EOF"):
                 self._advance()
-        # Skip capture lists in curly braces (for closures/lambdas)
+        # Capture list in curly braces: `def handler(...) {mut count, var s}:`
+        #
+        # This used to be skipped token by token, which made the list
+        # unrecoverable — the closure analysis then had to GUESS the captures
+        # from which names the body reads minus which it declares, and the
+        # guess is wrong in both directions for exactly the shapes the list
+        # exists to state:
+        #
+        #   * a name the body only AUGMENTS (`got_sum += x`) is invisible to
+        #     the read-based scan, so it was not captured at all and the
+        #     lifted function referenced it undeclared — a hard "got_sum
+        #     undeclared" (test/builtin/test_tuple.mojo);
+        #   * a name the body ASSIGNS (`got_str = ...`) was taken for a local
+        #     of the inner function rather than a capture of the enclosing
+        #     one, so the write landed in a local and the enclosing
+        #     `assert_equal(got_str, "hello")` read back a zero.
+        #
+        # Parsed, not skipped: the list is the authoritative statement of what
+        # the inner function borrows, and `discover_closures` reads it. An
+        # ABSENT list still falls back to the read-based inference, so every
+        # closure written without one behaves exactly as before.
+        captures = []
+        has_capture_list = False
         if self._peek().kind == "LBRACE":
-            self._advance()  # {
-            depth = 1
-            while depth > 0:
-                t = self._advance()
-                if t.kind == "LBRACE":
-                    depth += 1
-                elif t.kind == "RBRACE":
-                    depth -= 1
-                elif t.kind == "EOF": break
+            captures = self._parse_capture_list()
+            has_capture_list = True
         # Return type may appear after the capture list
         if ret is None and self._peek().kind == "ARROW":
             self._advance()
@@ -3996,7 +2860,89 @@ class Parser:
                            comptime_params=comptime_params,
                            is_generator=is_generator,
                            yield_bearing_node_ids=yield_bearing_node_ids,
-                           is_async=is_async)
+                           is_async=is_async,
+                           captures=captures,
+                           has_capture_list=has_capture_list)
+
+    def _parse_capture_list(self):
+        """A brace-delimited CAPTURE list on a nested `def`:
+        `def handler(...) {mut count, var s}:`, LBRACE current.
+
+        Returns `(name, conv_or_None)` pairs in source order, where `conv` is the
+        canonical convention the capture is taken under — `mut` for a capture
+        the body may write, `var`/`owned` for one it takes by value, `imm`/
+        `read`/`ref` for a read-only borrow. A bare name (`{self_ptr}`) has
+        conv None: captured, convention unspecified.
+
+        An EMPTY list `{}` is a real and meaningful list — it says "captures
+        nothing" — and is returned as `[]`, which the consumer distinguishes
+        from "no list at all" by the list being absent, not by being empty.
+        """
+        self._expect("LBRACE")
+        out = []
+        self._skip_newlines()
+        while self._peek().kind not in ("RBRACE", "EOF"):
+            if self._peek().kind == "COMMA":
+                self._advance(); self._skip_newlines(); continue
+            # A convention prefix may precede the captured name (`mut count`)
+            # or stand alone (`{mut}`, meaning "captures, mutably, whatever the
+            # body references" — 42 occurrences in the stdlib, so it is a form
+            # with its own meaning and not a typo for a missing name).
+            conv = None
+            # A KW from the convention set at the START of an entry is always a
+            # prefix, never the captured name — the same disambiguation the
+            # parameter loop uses (KW followed by COLON/ASSIGN is a name), with
+            # one addition: `peek(1) in (COMMA, RBRACE)` does NOT make it a
+            # name here, because `{mut}` and `{var}` are the bare-convention
+            # form ("capture whatever this body references, under this
+            # convention"). Requiring a non-terminating `peek(1)` instead made
+            # `{mut}` parse as a capture of a variable named `mut`.
+            while (self._peek().kind == "KW"
+                   and self._peek().value in self._CONV_KWS
+                   and self._peek(1).kind not in ("COLON", "ASSIGN")):
+                conv = _as_str(self._advance().value)
+            if self._peek().kind in ("COMMA", "RBRACE"):
+                # `{mut}` / `{var}` — a convention with NO name: "capture
+                # whatever this body references, under this convention" (42
+                # `{mut}` and 4 `{var}` in the stdlib). Recorded with a None
+                # name so it cannot be confused with a capture of a variable
+                # that happens to be called `mut`, and so the consumer can
+                # tell "infer the names, this is the convention" from an
+                # ordinary named capture.
+                out.append((None, _as_str(_canon_conv(conv))
+                            if conv is not None else None))
+                self._skip_newlines()
+                if self._peek().kind == "COMMA":
+                    self._advance(); self._skip_newlines()
+                continue
+            if self._peek().kind not in ("NAME", "KW"):
+                t = self._peek()
+                raise SyntaxError(
+                    f"{self._loc(t)}Unexpected {t.kind}({t.value!r}) in capture "
+                    f"list")
+            name = self._advance().value
+            # A trailing `^` MOVES the value into the closure: `{var data^}`
+            # — `data` is owned by the closure for its whole life, which the
+            # source comments call out as the reason the form exists (an
+            # implicit by-reference capture would not keep it alive). The
+            # closure then owns the captured value, so the move is recorded as
+            # the `owned` convention, which is what `var` already canonicalises
+            # to; an explicit conv on the same entry wins, since the source
+            # said so. No information is lost: the two spellings agree on the
+            # only thing the capture machinery acts on.
+            moved = False
+            if (self._peek().kind == "OP" and self._peek().value == "^"):
+                self._advance()
+                moved = True
+            _cc = _as_str(_canon_conv(conv)) if conv is not None else None
+            if _cc is None and moved:
+                _cc = 'owned'
+            out.append((name, _cc))
+            self._skip_newlines()
+            if self._peek().kind == "COMMA":
+                self._advance(); self._skip_newlines()
+        self._expect("RBRACE")
+        return out
 
     def _parse_struct(self):
         # Accept both "struct" and "class" keywords
@@ -4061,6 +3007,19 @@ class Parser:
                     bases.append(last_name)
                     expect_name = False
                     continue
+                self._advance()
+        # Optional `where conforms_to(...)` clause after the base list, the
+        # struct-level counterpart of the one `_parse_funcdef` already skips
+        # after a parameter list:
+        #     struct Iter[...](Iterable where conforms_to(...), ...) \
+        #         where conforms_to(T.Element, Deinitable):
+        # The bases are consumed as a token soup above, so the clause lands
+        # here. It constrains conformance and carries no codegen meaning in
+        # this backend, so it is skipped to the colon — the same treatment
+        # `_parse_funcdef`'s own `where` skip gets.
+        if self._peek().kind == "NAME" and self._peek().value == "where":
+            self._advance()
+            while self._peek().kind not in ("COLON", "NEWLINE", "EOF"):
                 self._advance()
         self._expect("COLON")
         body = self._parse_block()
@@ -4475,6 +3434,13 @@ class Parser:
         if t.kind == "KW" and t.value in ("var", "let"):
             self._advance()
             t = self._peek()
+        # `comptime __match dtype:` — a compile-time match, which the stdlib uses
+        # to pick a value out of a DType at compile time. Routed here rather
+        # than falling into the NAME branch below, which would read `__match` as
+        # the name being declared and leave a dangling `dtype:` behind.
+        if t.kind == "NAME" and t.value in ("match", "__match") \
+                and self._is_match_stmt():
+            return self._parse_match()
         # comptime NAME [TypeParams] [: Type] = expr
         # Also allow backtick-quoted identifiers: comptime `A` = Byte(ord("A"))
         if t.kind == "NAME" or (t.kind == "STRING" and t.value.startswith("`")):
@@ -4485,11 +3451,55 @@ class Parser:
             if self._peek().kind == "COLON":
                 self._advance()  # skip colon
                 self._parse_type_ann()  # parse and discard type annotation
+            # A multi-target comptime binding: `comptime a, b = expr(...)`, which
+            # unpacks ONE compile-time value into two names. Collected BEFORE the
+            # ASSIGN test below, because at this point the next token is the
+            # COMMA — testing for `=` first returned a bare `ExprStmt(IdentExpr
+            # ('a'))` and left `, b = expr` to be parsed as an ordinary statement
+            # tuple-assignment, which is how it silently misparsed.
+            targets = [name]
+            # The loop consumes its OWN `=`, so remember that it did: testing
+            # for an ASSIGN again afterwards looks for a SECOND one, finds the
+            # RHS expression instead, and falls through to
+            # `ExprStmt(IdentExpr(name))` — which silently drops the binding
+            # and leaves the RHS to be parsed as the next statement.
+            # `comptime char, num_bytes = Codepoint.unsafe_decode_...(...)`
+            # (std/collections/string/codepoint.mojo) compiled that way, with
+            # both names bound to nothing and the call statement orphaned; only
+            # a fixture that inspects the resulting node types saw it.
+            _saw_multi_eq = False
+            while (self._peek().kind == "COMMA"
+                   and self._peek(1).kind in ("NAME", "KW")
+                   and self._peek(2).kind == "ASSIGN"):
+                self._advance()
+                targets.append(self._advance().value)
+                self._advance()          # this entry's own '='
+                _saw_multi_eq = True
+            if _saw_multi_eq:
+                rhs = self._skip_comptime_rhs()
+                # Each name is bound to the same RHS node: the parser cannot see
+                # that `expr` yields a 2-tuple (nothing in the syntax says so),
+                # and this backend models a comptime alias as name-to-expression,
+                # which is the shape every consumer of `comptime NAME = expr`
+                # already reads. Splitting one value per name is the backends'
+                # business, not the parser's.
+                #
+                # The loop variable is `_name`, NOT `t`: `t` is already a
+                # `Token *` local in this function (from the `t = self._peek()`
+                # above), and a comprehension target that shadows an enclosing
+                # local of a STRUCT-POINTER type reused that local's C variable,
+                # so the `char *` element came out as an `int64_t` temp assigned
+                # into `struct Token * t` and the self-hosted `make mojoc` died
+                # with "non-trivial conversion in 'var_decl'". Shadowing an
+                # int64_t local happens to work; shadowing a struct pointer does
+                # not, and this function has one. See
+                # bugs/CODEGEN_comprehension_target_shadows_struct_local.md.
+                return [ComptimeVarStmt(target=_name, value=rhs) for _name in targets]
             if self._peek().kind == "ASSIGN":
                 self._advance()
                 # Parse/skip RHS expression, handling complex function types
                 rhs = self._skip_comptime_rhs()
-                return ComptimeVarStmt(target=name, value=rhs)
+                return [ComptimeVarStmt(target=name, value=rhs)]
             return ExprStmt(IdentExpr(name))
         raise SyntaxError(f"{self._loc(t)}Unexpected token after comptime: {t.value!r}")
 
@@ -4816,13 +3826,29 @@ class Parser:
         indexing."""
         start = None
         if self._peek().kind != "COLON":
-            start = self._parse_expr(0)
-            # Function-type annotation in type position: def(...) [quals] -> T
-            self._skip_fn_quals()
-            if self._peek().kind == "ARROW":
-                self._advance(); self._parse_type_ann()
-            if self._peek().kind != "COLON":
-                return start  # plain index, not a slice
+            # A FUNCTION TYPE in index position: `unsafe_bitcast[def(*a: *T)
+            # thin abi("C") -> Ret]()`. `_parse_type_ann_inner` already parses
+            # the whole `def(params) quals -> Ret` form (balanced-paren
+            # parameter skip, `thin`/`abi("C")` qualifiers, recursive return
+            # type), whereas `_parse_expr` cannot: the parameter list's own
+            # `(*a: *T)` annotation colon is not an expression at all, so the
+            # expression parse died on it before the ARROW handling below could
+            # ever run.
+            if self._peek().kind == "KW" and self._peek().value in ("def", "fn"):
+                start = self._parse_type_ann()
+                self._skip_fn_quals()
+                if self._peek().kind == "ARROW":
+                    self._advance(); self._parse_type_ann()
+                if self._peek().kind != "COLON":
+                    return start  # plain index, not a slice
+            else:
+                start = self._parse_expr(0)
+                # Function-type annotation in type position: def(...) [quals] -> T
+                self._skip_fn_quals()
+                if self._peek().kind == "ARROW":
+                    self._advance(); self._parse_type_ann()
+                if self._peek().kind != "COLON":
+                    return start  # plain index, not a slice
         # At a COLON → this element is a slice.
         self._advance()
         stop = (None if self._peek().kind in ("RBRACKET", "COMMA", "COLON")
@@ -5378,6 +4404,12 @@ class Parser:
             if t.value == "lambda" and t.kind == "NAME" and (
                 self._peek().kind == "COLON"
                 or self._peek().kind == "NAME"
+                # LBRACKET/LPAREN/LBRACE are the Mojo lambda's own parameter
+                # block, capture list and parameter list; `lambda` is a real
+                # Python keyword and so is never an ordinary identifier, which
+                # is what makes it safe to treat these as a lambda rather than
+                # as a call/index on a variable.
+                or self._peek().kind in ("LBRACKET", "LPAREN", "LBRACE")
                 or (self._peek().kind == "OP" and self._peek().value in ("*", "**"))
             ):
                 return self._parse_lambda()
@@ -5385,45 +4417,222 @@ class Parser:
         if t.kind == "DOT" and self._peek(1).kind == "DOT" and self._peek(2).kind == "DOT":
             self._advance(); self._advance(); self._advance()
             return EllipsisLiteral(line=line, col=col)
+        # Dot-relative value reference: `.always`, `.uint64`, `.of_bytes[128]()`.
+        # Only reachable where an expression is expected, so a DOT here can
+        # never be the attribute access `_parse_postfix` handles — that one
+        # always has a preceding primary. Requiring a NAME (or a backtick-
+        # quoted name) after the dot is what keeps `...` above, a float like
+        # `.5` (which lexes as a NUMBER, not DOT NUMBER) and a genuine error
+        # out of this branch.
+        if t.kind == "DOT" and (self._peek(1).kind in ("NAME", "KW")
+                                or (self._peek(1).kind == "STRING"
+                                    and self._peek(1).value.startswith("`"))):
+            self._advance()          # the leading dot
+            path = self._ident()
+            # `.a.b` — a chain, kept as one dotted string for the same reason
+            # the leading dot is: no component is a real binding on its own.
+            while self._peek().kind == "DOT" and (
+                    self._peek(1).kind in ("NAME", "KW")
+                    or (self._peek(1).kind == "STRING"
+                        and self._peek(1).value.startswith("`"))):
+                self._advance()
+                path += "." + self._ident()
+            return DottedLiteral(path=path, line=line, col=col)
         raise SyntaxError(f"{self._loc(t)}Unexpected {t.kind}({t.value!r})")
 
-    def _parse_lambda(self):
+    def _parse_lambda_bracket_params(self):
+        """`lambda [i: Int, ...]` — the generic/comptime parameter block in
+        front of a lambda's parameter list. Returns `(name, type_ann_or_None)`
+        pairs, in source order.
+
+        Same skip-the-body shape as a function's bracket parameters elsewhere
+        (`_skip_bracketed`), except the names and their annotations are kept
+        rather than discarded, because for a lambda they are the only place the
+        parameterization is recorded at all.
+        """
+        self._expect("LBRACKET")
+        out = []
+        self._skip_newlines()
+        while self._peek().kind not in ("RBRACKET", "EOF"):
+            if self._peek().kind == "COMMA":
+                self._advance(); self._skip_newlines(); continue
+            if self._peek().kind in ("NAME", "KW"):
+                nm = self._advance().value
+                ann = None
+                if self._peek().kind == "COLON":
+                    self._advance()
+                    ann = self._parse_type_ann()
+                # A default (`[i: Int = 4]`) — parsed and dropped; a lambda's
+                # generic parameter default is not something the backends read.
+                if self._peek().kind == "ASSIGN":
+                    self._advance()
+                    self._parse_expr(0)
+                out.append((nm, ann))
+            else:
+                t = self._peek()
+                raise SyntaxError(
+                    f"{self._loc(t)}Unexpected {t.kind}({t.value!r}) in lambda "
+                    f"parameter list")
+            self._skip_newlines()
+        self._expect("RBRACKET")
+        return out
+
+    def _parse_lambda_captures(self):
+        """`{ref}` / `{imm key}` — the capture list between a lambda's parameter
+        list and its `->`. Returns the text between the braces, whitespace-
+        normalised (the token-text convention `_parse_decorator_args` uses for
+        a brace-delimited clause list), and consumes the braces."""
+        self._expect("LBRACE")
+        parts = []
+        depth = 0
+        while True:
+            t = self._peek()
+            if t.kind == "RBRACE" and depth == 0:
+                self._advance()
+                break
+            if t.kind == "EOF":
+                break
+            if t.kind == "LBRACE":
+                depth += 1
+            elif t.kind == "RBRACE":
+                depth -= 1
+            if t.kind not in ("NEWLINE", "INDENT", "DEDENT"):
+                parts.append(t.value)
+            self._advance()
+        return " ".join(parts)
+
+    def _parse_lambda_paren_params(self):
+        """`lambda (a, b: Int = 1, *args, **kw)` — a parenthesised parameter
+        list, LPAREN already current. Returns `(params, param_types)` where
+        `params` is the 2-tuple list `LambdaExpr` has always carried and
+        `param_types` is the positionally aligned annotation list.
+
+        A COLON after a parameter NAME is a type annotation, not the lambda's
+        body separator — the distinction the old token loop could not make,
+        because it scanned for the first COLON and a typed parameter's own
+        annotation colon ended the parameter list early.
+        """
         params = []
-        while self._peek().kind != "COLON":
-            if self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
-                self._advance(); continue
-            if self._peek().kind == "RPAREN": break
-            if self._peek().kind == "OP" and self._peek().value == "/":
-                # Positional-only parameter separator (PEP 570), also valid in lambdas.
-                self._advance()
-                if self._peek().kind == "COMMA": self._advance()
-                continue
-            if self._peek().kind == "OP" and self._peek().value == "*":
-                self._advance()
-                if self._peek().kind in ("NAME", "KW"):
-                    params.append(("*" + self._advance().value, None))
-                continue
-            if self._peek().kind == "OP" and self._peek().value == "**":
-                self._advance()
-                if self._peek().kind in ("NAME", "KW"):
-                    params.append(("**" + self._advance().value, None))
-                continue
+        param_types = []
+        self._advance()          # consume LPAREN
+        self._skip_newlines()
+        while self._peek().kind not in ("RPAREN", "EOF"):
+            if self._peek().kind == "COMMA":
+                self._advance(); self._skip_newlines(); continue
+            if self._peek().kind == "RPAREN":
+                break
+            star = ""
+            if (self._peek().kind == "OP"
+                    and self._peek().value in ("*", "**")):
+                star = self._advance().value
+            ann = None
             if self._peek().kind in ("NAME", "KW"):
                 pname = self._advance().value
+                if self._peek().kind == "COLON":
+                    self._advance()
+                    ann = self._parse_type_ann()
                 default = None
                 if self._peek().kind == "ASSIGN":
                     self._advance()
                     default = self._parse_expr(0)
-                params.append((pname, default))
-            elif self._peek().kind == "COMMA":
-                pass
+                params.append((star + pname, default))
+                param_types.append(ann)
+            elif star:
+                # A bare `*` or `**` with no name after it.
+                params.append((star, None))
+                param_types.append(None)
             else:
                 t = self._peek()
-                raise SyntaxError(f"{self._loc(t)}Unexpected {t.kind}({t.value!r}) in lambda parameter list")
-            if self._peek().kind == "COMMA": self._advance()
+                raise SyntaxError(
+                    f"{self._loc(t)}Unexpected {t.kind}({t.value!r}) in lambda "
+                    f"parameter list")
+            self._skip_newlines()
+            if self._peek().kind == "COMMA":
+                self._advance(); self._skip_newlines()
+        self._skip_newlines()
+        return params, param_types
+
+    def _parse_lambda(self):
+        """Parse `lambda`, keyword already current and verified as a lambda.
+
+        Three parameter spellings, told apart by what follows the keyword:
+
+          lambda x, y: ...            bare, unannotated (Python's own)
+          lambda (i: Int) -> T: ...   parenthesised, annotated
+          lambda [i: Int]() -> T: ... comptime block, then empty parens
+
+        plus two optional clauses that sit between the parameter list and the
+        body: a `{ref}`/`{imm key}` capture list, and a `-> T` return
+        annotation. Neither exists in Python's lambda grammar, so both are
+        consumed explicitly here rather than left to the expression parser,
+        which would read `{ref}` as a set display and `->` as a syntax error.
+        """
+        comptime_params = []
+        if self._peek().kind == "LBRACKET":
+            comptime_params = self._parse_lambda_bracket_params()
+
+        params = []
+        param_types = []
+        if self._peek().kind == "LPAREN":
+            params, param_types = self._parse_lambda_paren_params()
+            self._expect("RPAREN")
+        else:
+            # Bare parameter list — the pre-existing loop, kept verbatim in
+            # behaviour: scan to the COLON that opens the body.
+            while self._peek().kind != "COLON":
+                if self._peek().kind in ("NEWLINE", "INDENT", "DEDENT"):
+                    self._advance(); continue
+                if self._peek().kind == "RPAREN": break
+                if self._peek().kind == "OP" and self._peek().value == "/":
+                    # Positional-only parameter separator (PEP 570), also valid in lambdas.
+                    self._advance()
+                    if self._peek().kind == "COMMA": self._advance()
+                    continue
+                if self._peek().kind == "OP" and self._peek().value == "*":
+                    self._advance()
+                    if self._peek().kind in ("NAME", "KW"):
+                        params.append(("*" + self._advance().value, None))
+                    continue
+                if self._peek().kind == "OP" and self._peek().value == "**":
+                    self._advance()
+                    if self._peek().kind in ("NAME", "KW"):
+                        params.append(("**" + self._advance().value, None))
+                    continue
+                if self._peek().kind in ("NAME", "KW"):
+                    pname = self._advance().value
+                    default = None
+                    if self._peek().kind == "ASSIGN":
+                        self._advance()
+                        default = self._parse_expr(0)
+                    params.append((pname, default))
+                elif self._peek().kind == "COMMA":
+                    pass
+                else:
+                    t = self._peek()
+                    raise SyntaxError(f"{self._loc(t)}Unexpected {t.kind}({t.value!r}) in lambda parameter list")
+                if self._peek().kind == "COMMA": self._advance()
+
+        captures = ''
+        if self._peek().kind == "LBRACE":
+            captures = self._parse_lambda_captures()
+        return_type = None
+        if self._peek().kind == "ARROW":
+            self._advance()
+            if self._is_kw("ref"):
+                self._advance()
+                if self._peek().kind == "LBRACKET":
+                    self._skip_bracketed()
+            return_type = self._parse_type_ann()
+            while self._peek().kind in ("NAME", "KW") and self._peek().value in (
+                    "unified", "register_passable", "capturing", "raises"):
+                self._advance()
         self._expect("COLON")
         body = self._parse_expr(0)
-        return LambdaExpr(params=params, body=body)
+        return LambdaExpr(params=params, body=body,
+                          param_types=param_types,
+                          return_type=return_type,
+                          comptime_params=comptime_params,
+                          captures=captures)
 
     def _parse_list_or_compr(self):
         self._expect("LBRACKET")
@@ -6009,8 +5218,1376 @@ class Parser:
         # (X & Y & Z), and any other trailing operator continuing an
         # arbitrary (non-type) expression in this annotation position.
         return self._consume_trailing_annotation_ops(result)
+    def with_filename(self, filename: str) -> Parser:
+        """Attach a source filename for `file:line:col:` diagnostics.
+        Kept as a separate setter (not an __init__ param) because the
+        self-hosted compiled path emits one fixed C signature per function —
+        callers passing 1 vs 2 constructor args would produce two conflicting
+        declarations for Parser___init__."""
+        self._filename = filename
+        return self
 
-# ── Code generator ─────────────────────────────────────────────────
+    def _peek(self, offset: int = 0) -> Token:
+        i = self._pos + offset
+        if i < len(self._tok):
+            return self._tok[i]
+        last_line = 0
+        last_col = 0
+        if self._tok:
+            last_tok = self._tok[-1]
+            last_line = last_tok.line
+            last_col = last_tok.col
+        # Pass every field explicitly (not relying on Token's `col: int = 0`
+        # dataclass default) — the self-hosted compiled path doesn't reliably
+        # apply Python default field values on a constructor call that omits
+        # them, so an implicit default can come back as an uninitialized/
+        # None-ish slot instead of 0 (seen as "file:line:None:" in a
+        # compiled-path diagnostic).
+        return Token("EOF", "", line=last_line, col=last_col)
+
+    def _advance(self) -> Token:
+        t = self._tok[self._pos]
+        if self._pos < len(self._tok) - 1: self._pos += 1
+        return t
+
+    def _loc(self, tok: Token) -> str:
+        """Format a gcc-style `file:line:col: ` prefix for a diagnostic.
+        Omits the filename segment when none was supplied to the Parser
+        (e.g. inline snippets compiled from a string with no source file).
+
+        `tok` is required (no default/None-fallback) — every call site
+        already has a concrete token in hand, and a `tok if tok is not
+        None else self._peek()` ternary here previously confused the
+        self-hosted compiled path's type inference: the phi'd local came
+        back typed int64_t instead of Token*, so `.col` silently read back
+        as garbage/None in compiled diagnostics (`.line` happened to still
+        work). Only ever called from *inside* an f-string interpolation at
+        each raise site (never via a `raise self._error(...)` indirection)
+        — the compiled path's raise-lowering (_gen_stmt_RaiseStmt) pattern-
+        matches the literal shape `raise ExcName(single_string_arg)` to
+        capture the exception's type tag and message; routing the raise
+        through a helper method call breaks that match silently (the
+        exception still fires, but with an empty message and no type tag,
+        since `val.func` is a MemberExpr instead of a bare IdentExpr)."""
+        if self._filename:
+            return f"{self._filename}:{tok.line}:{tok.col}: "
+        return f"{tok.line}:{tok.col}: "
+
+    def _expect(self, kind: str, value: str = None) -> Token:
+        t = self._peek()
+        if t.kind != kind:
+            raise SyntaxError(f"{self._loc(t)}Expected {kind} got {t.kind}({t.value!r})")
+        if value and t.value != value:
+            raise SyntaxError(f"{self._loc(t)}Expected {value!r} got {t.value!r}")
+        return self._advance()
+
+    def _ident(self) -> str:
+        """Consume an identifier, allowing keywords (e.g. `out`, `mut`) and
+        backtick-quoted names to be used as plain identifiers."""
+        t = self._peek()
+        if t.kind in ("NAME", "KW"):
+            return self._advance().value
+        if t.kind == "STRING" and t.value.startswith("`"):
+            return self._advance().value
+        raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
+
+    def _capture_opaque_annotation_tail(self) -> str:
+        """Consume the remainder of an arbitrary (non-type) expression that
+        continues past a type-shaped annotation prefix, e.g. the `obj)` in
+        `gamma: some < obj)` — see bugs/PARSE_FAIL_annotation_trailing_binary_op.md.
+        Python's grammar permits any expression in an annotation position
+        with zero semantic type-checking, and nothing downstream re-parses
+        the annotation string assuming real type syntax (traced in commit
+        6ee8291), so the tail is captured as opaque raw text rather than
+        raised as a SyntaxError.
+
+        Bracket-depth-aware (nested `(`/`[`/`{` don't prematurely trip a
+        terminator check) and stops BEFORE consuming whichever terminator
+        token the various `_parse_type_ann` call sites rely on to know the
+        annotation is done: COMMA/RPAREN for parameter lists, COLON/ASSIGN
+        for return types and var-decls, ARROW, NEWLINE/EOF, INDENT/DEDENT.
+        An unmatched closing `)`/`]`/`}` (depth back to 0) is left for the
+        caller the same way; only a still-open nested bracket's closer is
+        consumed as part of the opaque text."""
+        STOP_KINDS = ("COMMA", "COLON", "ASSIGN", "ARROW", "NEWLINE", "EOF", "INDENT", "DEDENT")
+        depth = 0
+        parts = []
+        while True:
+            t = self._peek()
+            if depth == 0 and t.kind in STOP_KINDS:
+                break
+            if t.kind in ("LPAREN", "LBRACKET", "LBRACE"):
+                depth += 1
+                parts.append(self._advance().value)
+            elif t.kind in ("RPAREN", "RBRACKET", "RBRACE"):
+                if depth == 0:
+                    break
+                depth -= 1
+                parts.append(self._advance().value)
+            elif t.kind == "EOF":
+                break
+            else:
+                parts.append(self._advance().value)
+        return " ".join(parts)
+
+    def _consume_trailing_annotation_ops(self, name: str) -> str:
+        """After a type-shaped annotation prefix (`name`) is fully parsed,
+        consume any trailing operator that continues the expression:
+        1. PEP 604 union (`|`) / trait intersection (`&`) — real Mojo type
+           syntax, recursively parsing a real nested type annotation as the
+           RHS (pre-existing behavior).
+        2. Any OTHER trailing operator (`<`, `>`, `==`, binary `+`/`-`, etc.)
+           — not real type syntax, but Python's grammar syntactically
+           permits an arbitrary expression in an annotation position (PEP
+           649), so the operator and its RHS are captured as opaque text via
+           `_capture_opaque_annotation_tail` instead of raising. See
+           bugs/PARSE_FAIL_annotation_trailing_binary_op.md. `?` is
+           deliberately excluded here — it's the optional-type suffix
+           handled by the caller, `_parse_type_ann`."""
+        while self._peek().kind == "OP" and self._peek().value in ("|", "&"):
+            op = self._advance().value
+            rhs = self._parse_type_ann()
+            name = name + f" {op} " + rhs
+        if self._peek().kind == "OP" and self._peek().value != "?":
+            op = self._advance().value
+            tail = self._capture_opaque_annotation_tail()
+            name = name + " " + op + (" " + tail if tail else "")
+        return name
+
+    def _capture_bracketed_text(self) -> str:
+        """Consume a balanced `[...]` (tracking nested bracket depth so an
+        inner comma, e.g. `d[a, b]`'s tuple key, is correctly treated as
+        part of the subscript rather than ending the block early) and
+        return its contents — WITHOUT the enclosing brackets — reconstructed
+        as source text by joining consumed tokens' raw values. Every token's
+        `.value` is the exact matched source substring (see the tokenizer's
+        `_TOKEN_RE`, including STRING tokens which keep their quotes), so
+        joining them with spaces reconstructs syntactically valid Mojo
+        source that myinterpreter.py can re-tokenize/re-parse later via its
+        own `py_tokenize`/`Parser` (the same approach already used for
+        f-string field interpolation)."""
+        self._expect("LBRACKET")
+        depth = 1
+        parts = []
+        while depth > 0:
+            t = self._peek()
+            if t.kind == "LBRACKET":
+                depth += 1
+                parts.append(self._advance().value)
+            elif t.kind == "RBRACKET":
+                depth -= 1
+                self._advance()
+                if depth == 0:
+                    break
+                parts.append("]")
+            elif t.kind == "EOF":
+                break
+            else:
+                parts.append(self._advance().value)
+        return " ".join(parts)
+
+    def _parse_unpack_target(self):
+        """Parse a single unpacking-target element, supporting nested tuples:
+        (a, (b, c)) and a single starred element within a comma-list
+        (`a, *rest`), matching Python's extended-unpacking grammar. The
+        starred form is represented as "*rest" in the comma-joined string
+        target that myinterpreter.py's _bind_comprehension_target consumes.
+
+        A target element may also be a dotted attribute-access expression
+        (`st.lineno`, possibly chained `a.b.c`), e.g. `for st.lineno, line
+        in items:` — real-world code (CPython's configparser.py) mutates an
+        existing object's attribute directly in the loop instead of binding
+        a fresh local. This is kept as literal text ("st.lineno") within
+        the comma-joined string, the same way a starred name is kept as
+        literal text ("*rest"); myinterpreter.py's _bind_comprehension_target
+        recognizes the embedded "." and performs a real attribute SET
+        (reusing _assign_target) instead of a scope.define().
+
+        A target element may also be a subscript expression (`d["k"]`,
+        possibly chained `d[1][0]`), e.g. `for d["k"] in items:` or
+        `with EXPR as targets[1][0]:` (the latter straight from CPython's
+        own `Lib/test/test_with.py`). Same "keep as literal text" scheme:
+        the bracket and its contents are captured verbatim (via
+        `_capture_bracketed_text`) and appended to the target string
+        ("d[\"k\"]"); myinterpreter.py's `_bind_single_target` recognizes
+        the embedded "[" and performs a real subscript SET (again reusing
+        `_assign_target`, via a re-parsed `SubscriptExpr`). NOTE: because a
+        subscript's contents are an arbitrary expression that could itself
+        contain a top-level comma (`d[a, b]`, a tuple key) — which would be
+        ambiguous with this SAME comma used to separate elements of the
+        outer target list — the outer comma-list join above only splits on
+        commas it consumes as its own token stream (safe), but
+        myinterpreter.py's later `str.split(',')` re-parse of the joined
+        target string is NOT bracket-depth-aware. A comma-containing
+        subscript key as a for/with target is therefore not supported; the
+        real-world motivating case (`targets[1][0]`) and this bug's own
+        repro (`d["k"]`) both use comma-free keys and work correctly.
+
+        Shared by `for`-loop targets and `with ... as (a, b):` targets — one
+        representation, one parser, reused everywhere a comma-joined
+        unpacking-target string is needed (per this project's consolidation
+        convention). (Chained-assignment tuple targets use a separate
+        Expr-based TupleExpr representation, not this string form — see
+        _parse_stmt's ASSIGN handling.)"""
+        if self._peek().kind == "LPAREN":
+            self._advance()
+            parts = []
+            while self._peek().kind != "RPAREN" and self._peek().kind != "EOF":
+                parts.append(self._parse_unpack_target())
+                if self._peek().kind == "COMMA":
+                    self._advance()
+            self._expect("RPAREN")
+            return "(" + ", ".join(parts) + ")"
+        elif self._peek().kind == "OP" and self._peek().value == "*":
+            self._advance()
+            tok = self._advance()
+            return "*" + tok.value
+        else:
+            # Accept KW tokens (e.g. "fn", "var") as variable names
+            tok = self._advance()
+            name = tok.value
+            # Dotted attribute target: st.lineno, or chained a.b.c
+            while self._peek().kind == "DOT":
+                self._advance()
+                attr_tok = self._advance()
+                name += "." + attr_tok.value
+            # Subscript target: d["k"], or chained d[1][0]
+            while self._peek().kind == "LBRACKET":
+                name += "[" + self._capture_bracketed_text() + "]"
+            return name
+
+    def _parse_dotted_name(self) -> str:
+        """Consume a dotted name like `asyncio.CancelledError` and return it
+        as a single string. Used for exception types in `except` clauses."""
+        name = self._ident()
+        while self._peek().kind == "DOT":
+            self._advance(); name += "." + self._ident()
+        return name
+
+    def _dotted_name_expr(self, dotted: str):
+        """The AST for a dotted name string, as nested IdentExpr/MemberExpr.
+
+        The inverse of `_parse_dotted_name`, needed because a decorator with
+        arguments (`@functools.lru_cache(maxsize=8)`) has to be recorded as a
+        real CallExpr rather than as a bare name: the argument list is
+        discarded by the name-only form, so `@deco` and `@deco(x)` were
+        indistinguishable in the AST, and both silently did nothing."""
+        parts = dotted.split('.')
+        node = IdentExpr(name=parts[0])
+        for p in parts[1:]:
+            node = MemberExpr(obj=node, member=p)
+        return node
+
+    def _parse_paren_args(self):
+        """Parse a call's argument list, with LPAREN already current. Returns
+        `(args, kwargs)` where `kwargs` is the `(name, expr)` list shape
+        `CallExpr.kwargs` holds.
+
+        Extracted from `_parse_expr`'s postfix loop so a decorator's argument
+        list can be parsed by exactly the same rules as any other call's --
+        before, `@deco(x)` skipped the tokens instead, so the AST could not
+        tell it from a bare `@deco` and every parameterised decorator was
+        silently inert."""
+        self._advance()          # skip LPAREN
+        args = []
+        keywords = {}
+        while self._peek().kind != "RPAREN":
+            # Handle unpacking (*expr / **expr). Don't consume the
+            # star(s) here — let _parse_expr (via _parse_unary) wrap
+            # the operand in UnaryOp(op='*'/'**', operand=...) so the
+            # marker survives into the AST. The interpreter's call
+            # evaluation (myinterpreter.py) detects that wrapper and
+            # splices the iterable's elements/mapping's items into
+            # the flat arg/kwargs lists at call time, instead of
+            # treating the whole expression as one ordinary
+            # positional argument value.
+            if self._peek().kind == "OP" and self._peek().value in ("*", "**"):
+                args.append(self._parse_expr(0))
+            # Handle keyword arguments (name=value) — name can be NAME or KW token
+            elif self._peek().kind in ("NAME", "KW") and self._peek(1).kind == "ASSIGN":
+                keyword_name = self._advance().value  # get keyword name
+                self._advance()  # skip =
+                keywords[keyword_name] = self._parse_expr(0)  # parse and store value
+            else:
+                first = self._parse_expr(0)
+                if self._is_kw("for"):
+                    gens = self._parse_generators()  # allow chained for-clauses
+                    args = [Comprehension(kind="generator", element=first, generators=gens)]
+                    continue
+                args.append(first)
+            if self._peek().kind == "COMMA": self._advance()
+        self._expect("RPAREN")
+        # Convert keywords dict to list of (name, expr) tuples for
+        # CallExpr.kwargs. Explicit accumulation loop, NOT the
+        # `[(k, v) for k, v in keywords.items()]` comprehension — a
+        # list comprehension over dict items is the established
+        # self-hosted trap (same family as `''.join(<genexpr>)`):
+        # the compiled result erased to the garbage non-list 1.
+        kwargs_list = []
+        for _kw_name, _kw_val in keywords.items():
+            kwargs_list.append((_kw_name, _kw_val))
+        return args, kwargs_list
+
+    def _parse_decorator_args(self, dec_name: str):
+        """A decorator's parenthesised argument list, with LPAREN current.
+
+        Returns either a `CallExpr` — the ordinary case, `@deco(x, k=1)`, the
+        exact node `_parse_expr`'s own call would build — or a
+        `DecoratorArgs` when the region is a `;`-separated specification.
+
+        WHY the second case exists. A decorator's argument list is NOT a call
+        argument list: the arguments belong to the decorator's own
+        mini-grammar, and at least one real grammar in this tree
+        (`formal/examples/{fact,fib,sum,count}.mojo`'s `@spec(...)`, read by
+        the Lean proof pipeline) is not Mojo expression syntax at all:
+
+            @spec(fact_spec; fact_spec 0 = 1; fact_spec (n+1) = (n+1) * fact_spec n)
+
+        That is a name, then `;`-separated EQUATIONS: juxtaposed application
+        (`fact_spec 0`), a bare `=` in operator position, and a `;` between
+        clauses. Reading it as a call argument list is a `SyntaxError` at the
+        first `;` (it was introduced by 19bc0dd, which made this a real parse
+        where it used to skip the tokens, and it took 13 of 45
+        `formal/examples/*.mojo` out of the parser).
+
+        The `;` is the discriminator, and it is unambiguous rather than a
+        guess: a semicolon is not valid anywhere in a Mojo EXPRESSION — the
+        same file's `_split_on_separators` already states the rule ("real
+        Python has no such thing as a semicolon inside an expression at all")
+        and, crucially, already DELEGATES that case to the bracketed reader by
+        tracking bracket depth so a `;` inside `(...)` is left in place
+        instead of being split off as a statement separator. This is that
+        bracketed reader. A `;` nested inside a further `(`/`[`/`{` does not
+        count, so a `;` that somehow appeared in a real call's arguments would
+        still be reported rather than silently reinterpreted.
+
+        So a decorator region containing no top-level `;` takes the
+        `_parse_paren_args()` path unchanged, which is what every other
+        decorator in the tree uses and what keeps `@deco` and `@deco(x)`
+        distinguishable (the point of 19bc0dd). Nothing is discarded either
+        way: the CallExpr keeps its parsed arguments, and `DecoratorArgs`
+        keeps its clauses as text.
+        """
+        # Look ahead for a top-level SEMICOLON before committing to a shape.
+        # Rewind and re-parse rather than remember a token list: `_parse_
+        # paren_args` is the single definition of what a call's arguments
+        # mean, and a second copy of it would drift from it.
+        start = self._pos
+        self._advance()          # skip LPAREN, so `depth` counts only INNER
+        depth = 0
+        spec = False
+        while True:
+            k = self._peek().kind
+            if k == "LPAREN" or k == "LBRACKET" or k == "LBRACE":
+                depth += 1
+            elif k == "RPAREN" or k == "RBRACKET" or k == "RBRACE":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif k == "SEMICOLON" and depth == 0:
+                spec = True
+            elif k == "EOF":
+                break
+            self._advance()
+        close_line = self._peek().line
+        close_col = self._peek().col
+        self._pos = start
+        if not spec:
+            args, kwargs = self._parse_paren_args()
+            return CallExpr(func=self._dotted_name_expr(dec_name),
+                            args=args, kwargs=kwargs)
+        # The specification form: consume the balanced region and keep each
+        # `;`-separated clause as text. Token values, not source slicing:
+        # Token carries line/col but no source offset, and a STRING token's
+        # `;` is already part of its value rather than a SEMICOLON.
+        self._advance()          # skip LPAREN
+        clauses = []
+        cur = []
+        depth = 0
+        while True:
+            k = self._peek().kind
+            if k == "RPAREN" and depth == 0:
+                self._advance()
+                break
+            if k == "EOF":
+                break
+            if k == "SEMICOLON" and depth == 0:
+                self._advance()
+                clauses.append(" ".join(cur))
+                cur = []
+                # Layout tokens inside the region (a multi-line `@spec(...)`)
+                # are dropped by the filter at the bottom of this loop; no
+                # extra advance here, or the first token of the next clause
+                # is swallowed.
+                continue
+            if k == "LPAREN" or k == "LBRACKET" or k == "LBRACE":
+                depth += 1
+            elif k == "RPAREN" or k == "RBRACKET" or k == "RBRACE":
+                depth -= 1
+            if k != "NEWLINE" and k != "INDENT" and k != "DEDENT":
+                cur.append(self._peek().value)
+            self._advance()
+        clauses.append(" ".join(cur))
+        return DecoratorArgs(name=dec_name, clauses=clauses,
+                             line=close_line, col=close_col)
+
+    def _skip_newlines(self):
+        while self._peek().kind == "NEWLINE": self._advance()
+
+    def _at_end(self) -> bool: return self._peek().kind == "EOF"
+    def _is_kw(self, *w) -> bool:
+        t = self._peek(); return t.kind == "KW" and t.value in w
+
+    def parse_module(self) -> list:
+        stmts = []
+        self._skip_newlines()
+        while not self._at_end():
+            self._parse_stmt_into(stmts)
+            self._skip_newlines()
+        return _synthesize_fieldwise_inits(stmts)
+
+    def _parse_stmt_into(self, stmts: list):
+        """Parse one statement and append it to `stmts`.
+
+        One syntactic construct can yield SEVERAL statements — a multi-target
+        `comptime a, b = expr` is two ComptimeVarStmts — so a parse result may
+        be a single node or a list of them. Flattening here, in the two places
+        that collect statements, keeps every `_parse_stmt` branch free to return
+        either without each caller having to know which it got.
+        """
+        produced = self._parse_stmt()
+        if isinstance(produced, list):
+            stmts.extend(produced)
+        else:
+            stmts.append(produced)
+
+    def _parse_block(self) -> list:
+        # Support inline single-statement body: "def foo(): return x" on one line
+        if self._peek().kind != "NEWLINE":
+            start_line = self._peek().line
+            stmt = self._parse_stmt()
+            stmts = [stmt] if stmt is not None else []
+            # Same-line multi-statement inline body: "if x: a = 1; continue" —
+            # the tokenizer (see py_tokenize's `_split_on_separators` loop)
+            # splits each ';'-separated piece of a physical line into its own
+            # token run terminated by a NEWLINE, which loses the fact that
+            # every piece after the colon is still part of THIS compound
+            # statement's body, not a sibling of the enclosing block. Without
+            # this loop, only the first piece ("a = 1") became the body and
+            # anything after the first ';' (here, "continue") silently became
+            # a sibling statement instead — executing unconditionally on every
+            # loop iteration regardless of `x`. Detected via physical line
+            # number: every ';'-split piece from the same source line shares
+            # the same `line`, so a NEWLINE followed by a token still on the
+            # same line means "more of this same-line body", not a new line.
+            while (self._peek().kind == "NEWLINE"
+                   and self._peek(1).line == start_line
+                   and self._peek(1).kind not in ("DEDENT", "EOF")):
+                self._advance()  # consume the semicolon-split NEWLINE
+                start_line = self._peek().line
+                nxt = self._parse_stmt()
+                if nxt is not None:
+                    stmts.append(nxt)
+            return stmts
+        self._expect("NEWLINE")
+        self._skip_newlines()
+        # Empty block: comment-only body produces DEDENT with no INDENT
+        if self._peek().kind in ("DEDENT", "EOF", "KW"):
+            return [PassStmt()]
+        self._expect("INDENT")
+        stmts = []
+        self._skip_newlines()
+        while self._peek().kind not in ("DEDENT", "EOF"):
+            self._parse_stmt_into(stmts)
+            self._skip_newlines()
+        self._expect("DEDENT")
+        return stmts
+
+    def _parse_yield_expr(self):
+        """Parse a `yield`/`yield from` expression — assumes the current
+        token is the NAME('yield') token. `yield` is never a real Python
+        identifier (reserved since Python 2.2; confirmed by grepping
+        CPython's own test suite — the only `yield = ...`-shaped source
+        found there is test_syntax.py/test_generators.py doctests that
+        assert it's a SyntaxError), so no `var`/`await`-style "used as an
+        identifier" disambiguation is needed — every call site below only
+        invokes this where real Python's own grammar also treats `yield` as
+        the keyword, so no ambiguity is possible.
+        """
+        t = self._advance()  # consume 'yield'
+        line, col = t.line, t.col
+        if self._peek().kind == "KW" and self._peek().value == "from":
+            self._advance()
+            val = self._parse_expr(0)
+            return YieldFromExpr(value=val, line=line, col=col)
+        # Bare `yield`: next token can't start an expression.
+        if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "RPAREN",
+                "RBRACKET", "RBRACE", "COMMA", "COLON", "SEMICOLON"):
+            return YieldExpr(value=None, line=line, col=col)
+        val = self._parse_expr(0)
+        # Implicit tuple: yield a, b, c — same convention as `return a, b`.
+        if self._peek().kind == "COMMA":
+            elements = [val]
+            while self._peek().kind == "COMMA":
+                self._advance()
+                if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "RPAREN",
+                        "RBRACKET", "RBRACE", "COLON", "SEMICOLON"):
+                    break
+                elements.append(self._parse_expr(0))
+            val = TupleExpr(elements=elements, line=val.line, col=val.col)
+        return YieldExpr(value=val, line=line, col=col)
+
+    def _parse_expr_or_yield(self):
+        """Like `_parse_expr(0)` but also recognizes a leading `yield`/
+        `yield from` — for use ONLY at the specific grammar positions real
+        Python allows a bare (unparenthesized) yield expression: the whole
+        RHS of a simple/chained/annotated/augmented assignment, and a bare
+        expression statement. Every other position (call arguments, `return`
+        value, `if`/`while` conditions, container-literal elements, ...)
+        must keep going through plain `_parse_expr(0)` so `yield` there
+        still requires explicit parens, matching real Python (`f((yield x))`,
+        not `f(yield x)`) — parenthesized grouping itself routes back through
+        this same recognition (see the LPAREN case in `_parse_primary`), so
+        `(yield x)` still works in those positions.
+        """
+        t = self._peek()
+        if t.kind == "NAME" and t.value == "yield":
+            return self._parse_yield_expr()
+        return self._parse_expr(0)
+
+    def _parse_stmt(self):
+        t = self._peek()
+        line, col = t.line, t.col
+        # `match` is a soft keyword (like Python's own) — only a match
+        # statement when followed by a real expression and a top-level `:`
+        # before the line ends; otherwise it's an ordinary identifier
+        # (`match(x)` a call, `match = 5` an assignment, etc).
+        if t.kind == "NAME" and t.value in ("match", "__match") and self._is_match_stmt():
+            return self._parse_match()
+        # `async` is a soft keyword, same story as `match`/`fn`/`struct`/`var`
+        # above: `async` lexes as a plain NAME (not in _KEYWORDS — real
+        # Python has no bare `async` keyword outside `async def`/`async
+        # for`/`async with` either), so it's also a legal ordinary
+        # identifier. Only commit to an async-prefixed parse when the very
+        # next token is one of the three real async-statement openers
+        # (`def`/`fn`, `for`, `with`); otherwise fall through to ordinary
+        # expression/assignment parsing, where `async` reads as a plain
+        # identifier via _parse_primary. This is the UNDECORATED path for
+        # `async def` — the decorated path (`@dec\nasync def f(): ...`) is
+        # handled separately below, in the `@` decorator block, which strips
+        # a leading `async` before dispatching to `def`/`fn`.
+        if t.kind == "NAME" and t.value == "async":
+            nxt = self._peek(1)
+            if nxt.kind == "KW" and nxt.value in ("def", "fn"):
+                self._advance()  # consume 'async'
+                self._advance()  # consume 'def'/'fn'
+                return self._parse_funcdef([], is_async=True)
+            if nxt.kind == "KW" and nxt.value == "for":
+                self._advance()  # consume 'async'
+                stmt = self._parse_for()
+                stmt.is_async = True
+                return stmt
+            if nxt.kind == "KW" and nxt.value == "with":
+                self._advance()  # consume 'async'
+                stmt = self._parse_with()
+                stmt.is_async = True
+                return stmt
+            # else: `async` used as an ordinary identifier — fall through.
+        if t.kind == "KW":
+            if t.value == "import": return self._parse_import()
+            if t.value == "from":   return self._parse_from_import()
+            if t.value == 'var':
+                # `var` is ambiguous, same as `fn`/`struct`: it's both this
+                # dialect's declaration keyword AND a perfectly ordinary
+                # Python identifier (arguably more common as a plain name
+                # than `fn`/`struct`/`enum` ever are). Only commit to
+                # _parse_var_decl() when the shape that follows could
+                # actually BE a declaration. Per _parse_var_decl itself, a
+                # real declaration is `var` followed by either:
+                #   - a name-like token (NAME/KW/backtick-STRING) that then
+                #     becomes the declared name (optionally followed by
+                #     `,` more names, `:` a type annotation, `=` a value,
+                #     or nothing — a bare uninitialized `var x`), or
+                #   - `:` directly, meaning `var` itself is the field name
+                #     being annotated (`var: Type`) — this shape parses
+                #     identically whether `var` is "the keyword declaring a
+                #     field named var" or "the identifier var being
+                #     annotated", so there's no actual ambiguity to resolve
+                #     there.
+                # Anything else — `var.attr` (member access), `var.method()`
+                # (call), `var,` where var is itself one of several plain
+                # tuple-unpack targets (`var, x = ...`), `var == y`,
+                # `var[0]`, `var =`/`var +=` (assignment), bare `var` alone,
+                # etc. — means `var` is being used as an ordinary identifier
+                # here, so fall through to ordinary expression/assignment
+                # parsing (which already accepts KW tokens as identifiers
+                # via _parse_primary).
+                nxt = self._peek(1)
+                name_like = nxt.kind in ("NAME", "KW") or (
+                    nxt.kind == "STRING" and nxt.value.startswith("`"))
+                looks_like_vardecl = name_like or nxt.kind == "COLON"
+                if looks_like_vardecl:
+                    return self._parse_var_decl()
+                # else: fall through to expression/assignment handling below
+            if t.value == 'if': return self._parse_if()
+            if t.value == 'while': return self._parse_while()
+            if t.value == 'for': return self._parse_for()
+            if t.value in ("def", "fn"):
+                # `fn` is ambiguous: it's both this dialect's function-def
+                # keyword AND a legal plain identifier in real Python code
+                # (e.g. `fn, lno, func, sinfo = self.findCaller(...)` in
+                # CPython's logging/__init__.py). Only commit to the
+                # function-definition parse when the token shape that
+                # follows could actually BE a function signature: `fn`
+                # immediately followed by a name (the function's name,
+                # which per _parse_funcdef may itself be NAME/KW/backtick)
+                # and then either `(` (no generics) or `[` (generic params
+                # before the `(`). Anything else — `fn,` (tuple-unpacking
+                # target), `fn =`/`fn +=` (assignment), `fn.attr`
+                # (attribute access), `fn == x`, `fn[0]` used as a subscript
+                # target, `fn` alone, etc. — means `fn` is being used as an
+                # ordinary identifier here, so fall through to ordinary
+                # expression/assignment parsing (which accepts KW tokens as
+                # identifiers via _parse_primary).
+                if t.value == "fn":
+                    nxt, nxt2 = self._peek(1), self._peek(2)
+                    name_like = nxt.kind in ("NAME", "KW") or (
+                        nxt.kind == "STRING" and nxt.value.startswith("`"))
+                    looks_like_funcdef = name_like and nxt2.kind in ("LPAREN", "LBRACKET")
+                    if not looks_like_funcdef:
+                        pass  # fall through to expression statement
+                    else:
+                        self._advance(); return self._parse_funcdef([])
+                else:
+                    self._advance(); return self._parse_funcdef([])
+            if t.value in ("struct", "class"):
+                # `struct` is ambiguous the same way `fn` is (see the `fn`
+                # carve-out above): it's both this dialect's struct-def
+                # keyword AND a legal plain identifier/module name in real
+                # Python code (e.g. `struct.pack_into(...)` using the
+                # stdlib `struct` module, from CPython's
+                # multiprocessing/shared_memory.py). Real Python has no
+                # `struct` keyword at all, so this collision is real.
+                # `class`, by contrast, IS a hard keyword in real Python —
+                # a variable literally named `class` is invalid Python — so
+                # it has no realistic identifier-collision risk and is left
+                # unconditionally routed to _parse_struct.
+                #
+                # Only commit to the struct-definition parse when the shape
+                # that follows could actually BE one: `struct` immediately
+                # followed by a name-like token (per _parse_struct's name
+                # read via `self._ident()`, struct names may be NAME/KW/
+                # backtick-quoted, just like function names — a struct can
+                # itself be named after another keyword, e.g. `struct
+                # super:`, mirroring CPython's own test_super.py which
+                # defines a class named `super`) and then one of `[`
+                # (struct param block), `(` (base-class list), or `:`
+                # (straight into the body). Anything else — `struct.attr`
+                # (attribute access), `struct(...)` used as a call, `struct
+                # =` (assignment), `struct` alone, etc. — means `struct` is
+                # being used as an ordinary identifier here, so fall through
+                # to ordinary expression/assignment parsing (which accepts
+                # KW tokens as identifiers via _parse_primary).
+                if t.value == "struct":
+                    nxt, nxt2 = self._peek(1), self._peek(2)
+                    name_like = nxt.kind in ("NAME", "KW") or (
+                        nxt.kind == "STRING" and nxt.value.startswith("`"))
+                    looks_like_structdef = name_like and nxt2.kind in (
+                        "LBRACKET", "LPAREN", "COLON")
+                    if looks_like_structdef:
+                        return self._parse_struct()
+                    # else: fall through to expression statement
+                else:
+                    return self._parse_struct()
+            if t.value == "enum":
+                # `enum` is ambiguous the same way `fn`/`struct` are (see the
+                # carve-outs above): real Python has no `enum` keyword — it's
+                # a common plain identifier/module name (e.g. `import enum`
+                # then `enum = SomeEnum`, or a local var named `enum`). Only
+                # commit to the enum-definition parse when the shape that
+                # follows could actually BE one: `enum` immediately followed
+                # by a name-like token (per _parse_enum's name read) and then
+                # one of `(` (optional base-class list) or `:` (straight into
+                # the body). Anything else — `enum.attr` (attribute access),
+                # `enum(...)` used as a call, `enum =` (assignment), `enum`
+                # alone, etc. — means `enum` is being used as an ordinary
+                # identifier here, so fall through to ordinary
+                # expression/assignment parsing (which accepts KW tokens as
+                # identifiers via _parse_primary).
+                nxt, nxt2 = self._peek(1), self._peek(2)
+                name_like = nxt.kind in ("NAME", "KW") or (
+                    nxt.kind == "STRING" and nxt.value.startswith("`"))
+                looks_like_enumdef = name_like and nxt2.kind in ("LPAREN", "COLON")
+                if looks_like_enumdef:
+                    return self._parse_enum()
+                # else: fall through to expression statement
+            if t.value == "trait": return self._parse_trait()
+            if t.value == "try": return self._parse_try()
+            if t.value == "with": return self._parse_with()
+            if t.value == "comptime":
+                # Only commit to the comptime-statement parse when the next
+                # token could actually start one: `comptime if/for/assert`,
+                # `comptime var NAME = ...`, `comptime NAME = ...`, or
+                # `comptime \`name\` = ...`.
+                # Anything else — `comptime.foo` (imported module named
+                # comptime), `comptime(...)`, `comptime = ...`, bare
+                # `comptime` — is an ordinary identifier use; fall through
+                # to expression/assignment parsing (same carve-out pattern
+                # as `enum` above; `_parse_primary` accepts KW as ident).
+                nxt = self._peek(1)
+                if ((nxt.kind == "KW"
+                     and nxt.value in ("if", "for", "assert", "var", "let"))
+                        or nxt.kind == "NAME"
+                        or (nxt.kind == "STRING" and nxt.value.startswith("`"))):
+                    return self._parse_comptime()
+                # else: fall through to expression statement
+            if t.value == 'pass': return self._parse_pass()
+            if t.value == 'return': return self._parse_return()
+            if t.value == 'raise': return self._parse_raise()
+            if t.value == 'break': return self._parse_break()
+            if t.value == 'continue': return self._parse_continue()
+            if t.value == 'assert': return self._parse_assert()
+            if t.value == 'global': return self._parse_global()
+            if t.value == 'nonlocal': return self._parse_nonlocal()
+            if t.value == 'del': return self._parse_del()
+        # Handle __mlir_attr and other MLIR/special forms as opaque no-ops.
+        # NOT __mlir_region (handled below) and NOT __mlir_op: a bare __mlir_op
+        # statement is a real side-effecting op (e.g. `pop.store`, ownership
+        # markers) — let it fall through to an expression statement so the
+        # backend lowers it (mlir.py).
+        if t.kind == "NAME" and t.value.startswith("__mlir") \
+                and t.value not in ("__mlir_region", "__mlir_op"):
+            self._advance()  # skip __mlir_attr/etc
+            # Skip string literal if present
+            if self._peek().kind == "LPAREN":
+                self._advance()  # skip (
+                if self._peek().kind == "STRING":
+                    self._advance()  # skip string
+                self._advance()  # skip )
+            # Skip the rest of the line (result type annotation, etc)
+            while self._peek().kind not in ("NEWLINE", "DEDENT", "EOF"):
+                self._advance()
+            return PassStmt()
+        # Handle __extension Type: methods and __mlir_region name(...): body
+        if t.kind == "NAME" and t.value in ("__extension", "__mlir_region"):
+            self._advance()  # skip __extension or __mlir_region
+            name = self._expect("NAME").value
+            # Skip any function call arguments if present
+            if self._peek().kind == "LPAREN":
+                self._advance()  # (
+                depth = 1
+                while depth > 0:
+                    t_inner = self._advance()
+                    if t_inner.kind == "LPAREN":
+                        depth += 1
+                    elif t_inner.kind == "RPAREN": depth -= 1
+            self._expect("COLON")
+            # Check if there is a body on this line or on following lines
+            if self._peek().kind == "NEWLINE":
+                # Indented block follows
+                body = self._parse_block()
+            else:
+                # Body on same line, skip until newline
+                while self._peek().kind not in ("NEWLINE", "DEDENT", "EOF"):
+                    self._advance()
+            # Treat as a pass statement
+            return PassStmt(line=line, col=col)
+        if t.kind == "OP" and t.value == "@":
+            decs = []
+            while self._peek().kind == "OP" and self._peek().value == "@":
+                self._advance()
+                # Decorator name may be dotted (@functools.lru_cache, @a.b.c)
+                # and each component may lex as a Mojo keyword while still
+                # being an ordinary Python identifier (e.g. `@enum.global_enum`,
+                # `@ref(...)`) — use _parse_dotted_name(), the same
+                # keyword-accepting helper used for `except mod.Error:` and
+                # the earlier `from X import ref` fix, instead of
+                # _expect("NAME") which only accepts a real NAME token.
+                dec_name = self._parse_dotted_name()
+                # Handle decorator with arguments: @decorator(args).
+                #
+                # The argument list used to be SKIPPED token by token, so
+                # `@deco` and `@deco(x)` produced the identical AST node --
+                # the arguments were unrecoverable, which is part of why a
+                # decorator could be dropped without anything noticing. The
+                # call is now parsed into a real CallExpr and stored in place
+                # of the bare name, so the two are distinguishable and
+                # `dumps` (which prints `node.decorators` verbatim) no longer
+                # loses the arguments. A bare `@deco` still stores the plain
+                # string, so every existing `X in decorators` check -- the
+                # `staticmethod`/`classmethod`/`property`/`export`/`parameter`
+                # readers across the tree -- is unaffected.
+                #
+                # `_parse_decorator_args` picks between that CallExpr and a
+                # `DecoratorArgs`, whose argument list is a `;`-separated
+                # specification rather than Mojo call syntax (`@spec(...; ...)`);
+                # its docstring has the rule and the regression it fixes.
+                if self._peek().kind == "LPAREN":
+                    decs.append(self._parse_decorator_args(dec_name))
+                    self._skip_newlines()
+                    continue
+                decs.append(dec_name)
+                self._skip_newlines()
+            kw = self._peek()
+            if kw.kind == "KW" and kw.value in ("struct", "class"):
+                self._pending_decs = decs
+                return self._parse_struct()
+            if kw.kind == "KW" and kw.value == "enum":
+                self._pending_decs = decs
+                return self._parse_enum()
+            if kw.kind == "KW" and kw.value == "trait":
+                self._pending_decs = decs
+                return self._parse_trait()
+            if kw.kind == "KW" and kw.value == "comptime":
+                # Same carve-out as the statement-level dispatch: only a
+                # real comptime-statement shape commits; `comptime.foo` etc.
+                # falls through (and the decorator path below will 404 with
+                # a clear expect-error rather than misparse).
+                nxt = self._peek(1)
+                if ((nxt.kind == "KW"
+                     and nxt.value in ("if", "for", "assert", "var", "let"))
+                        or nxt.kind == "NAME"
+                        or (nxt.kind == "STRING" and nxt.value.startswith("`"))):
+                    return self._parse_comptime()
+                # else: fall through
+            # Handle 'async def' — async is tokenized as NAME not KW. Milestone
+            # 3a: build a real is_async=True FunctionDef instead of silently
+            # discarding the `async` token (see AwaitExpr's docstring).
+            is_async = False
+            if kw.kind == "NAME" and kw.value == "async":
+                is_async = True
+                self._advance()
+                kw = self._peek()
+            if kw.kind == "KW" and kw.value in ("def", "fn"):
+                self._advance()
+                return self._parse_funcdef(decs, is_async=is_async)
+            # Field-level decorators (e.g. @__allow_legacy_any_origin_fields)
+            # applied to a `var` declaration: decorators carry no codegen
+            # meaning here, so just parse the var decl and drop them.
+            if kw.kind == "KW" and kw.value == "var":
+                return self._parse_var_decl()
+            # A decorated import: `@stable(recursive=True)` in front of
+            # `from std.builtin.tuple import Tuple`. The decorator is recorded
+            # on the import node rather than dropped, because `@deco` and
+            # `@deco(x)` are otherwise indistinguishable — the same reason
+            # `_parse_decorator_args` parses the argument list instead of
+            # skipping it.
+            if kw.kind == "KW" and kw.value in ("from", "import"):
+                stmt = (self._parse_from_import() if kw.value == "from"
+                        else self._parse_import())
+                stmt.decorators = decs
+                return stmt
+            self._expect("KW", "def or fn")
+            return self._parse_funcdef(decs)
+        expr = self._parse_expr_or_yield()
+        # Collect a comma-separated group starting with `expr` — this is
+        # either a tuple-unpacking target (if followed by `=`) or a bare
+        # comma/tuple expression statement (if not).
+        saw_comma = self._peek().kind == "COMMA"
+        if saw_comma:
+            first_group = [expr]
+            while self._peek().kind == "COMMA":
+                self._advance()
+                if self._peek().kind == "ASSIGN": break
+                # A trailing comma with nothing meaningful after it (e.g.
+                # `print(1),` as its own statement, or `a, b,` — a plain
+                # expression statement, not a tuple-unpacking target) —
+                # matches the terminator check the chained-assignment RHS
+                # loop below already does. Without this, `expr,` at
+                # statement end tried to parse another expression starting
+                # at NEWLINE/DEDENT/EOF and blew up with "Unexpected
+                # NEWLINE". Leave the comma consumed; first_group already
+                # has everything that came before it.
+                if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "SEMICOLON"):
+                    break
+                first_group.append(self._parse_expr(0))
+        else:
+            first_group = [expr]
+
+        # Chained assignment where ANY link (including the first) may itself
+        # be a comma-separated tuple-unpacking target list, e.g.
+        # `a, b = x = pair` (unpack AND keep the whole value bound to `x`,
+        # matching CPython's difflib.py / platform.py idiom) as well as the
+        # simpler `x = y = expr` and `a, b = expr` cases. Was: the
+        # tuple-target branch (above) and the chained-assignment loop
+        # (formerly below) were mutually exclusive passes, so a tuple target
+        # followed by another `= target` link hit "Unexpected ASSIGN".
+        if self._peek().kind == "ASSIGN":
+            # Parallel lists `group_elems` / `group_had_comma`: `had_comma`
+            # records that this group was written with a trailing comma
+            # (`nm,`), i.e. a 1-element TUPLE target / value (`nm, = args`
+            # unpacks args' single element), NOT a bare `nm`. Without the
+            # flag a single-element comma group is indistinguishable from a
+            # plain target and `nm, = args` silently became `nm = args`.
+            # Two PARALLEL lists (not a list of (elems, flag) tuples): this
+            # file is compiled by the self-hosted compiler, and 2-tuple
+            # unpacking over `list` elements boxes the slots to int64_t
+            # there — the tuple-of-tuples form silently corrupted the parse
+            # (58-file A/B regression, found 2026-09-25).
+            group_elems = [first_group]
+            group_had_comma = [saw_comma]
+            while self._peek().kind == "ASSIGN":
+                self._advance()
+                val_expr = self._parse_expr_or_yield()
+                group = [val_expr]
+                had_comma = False
+                while self._peek().kind == "COMMA":
+                    had_comma = True
+                    self._advance()
+                    if self._peek().kind in ("NEWLINE", "DEDENT", "EOF", "ASSIGN"):
+                        break
+                    group.append(self._parse_expr(0))
+                group_elems.append(group)
+                group_had_comma.append(had_comma)
+
+            def _group_to_expr(g, had_comma):
+                if len(g) == 1 and not had_comma:
+                    return g[0]
+                return TupleExpr(elements=g)
+
+            # The last group parsed is the real RHS; every group before it
+            # (starting with `first_group`) is a target in the chain — a
+            # single-element group WITHOUT a trailing comma is a plain
+            # target, otherwise it is a tuple-unpacking target.
+            _last = len(group_elems) - 1
+            val = _group_to_expr(group_elems[_last], group_had_comma[_last])
+            targets = []
+            for _gi in range(_last):
+                targets.append(_group_to_expr(group_elems[_gi], group_had_comma[_gi]))
+            if len(targets) == 1:
+                return AssignStmt(target=targets[0], value=val, line=line, col=col)
+            return MultiAssignStmt(targets=targets, value=val, line=line, col=col)
+
+        if saw_comma:
+            # Not an assignment, treat as expression statement with comma
+            # operator — a 1-element `first_group` here means a single
+            # trailing comma (`EXPR,`), which is still a 1-element tuple
+            # literal in Python, just like `len(first_group) > 1` (`EXPR1,
+            # EXPR2,` etc.) is a multi-element one.
+            return ExprStmt(TupleExpr(elements=first_group), line=line, col=col)
+        expr = first_group[0]
+        # Annotated assignment: target: Type [= value]
+        if self._peek().kind == "COLON":
+            self._advance()
+            type_ann = self._parse_type_ann()
+            if self._peek().kind == "ASSIGN":
+                self._advance()
+                val = self._parse_expr_or_yield()
+                # `x: Type = value` previously silently discarded the
+                # annotation (AssignStmt has no type_ann field) — harmless
+                # for a local (type gets re-inferred from the value), but a
+                # real bug for a dataclass field with both an annotation AND
+                # a default (`x: list = field(default_factory=list)`, the
+                # normal shape for every trailing/optional field in this
+                # file's own AST-node dataclasses): the struct-field scanner
+                # that builds struct_field_types only recognized VarDecl (no
+                # value = pure declaration), so every such field was
+                # invisible to the self-hosted compiled path — found via
+                # StructDef's own _fieldwise_ctor_synthesized field aborting
+                # through the generic getattr fallback. Switching this whole
+                # branch to VarDecl (instead of adding type_ann to
+                # AssignStmt) turned out to have a much wider blast radius:
+                # every module-level `X: dict = {...}`-style global is
+                # driven by machinery keyed on `isinstance(stmt, AssignStmt)`
+                # (global C-storage boxing, _toplevel() statement collection)
+                # that doesn't know about VarDecl — so stick the annotation
+                # directly on AssignStmt instead, touching nothing else.
+                return AssignStmt(target=expr, value=val, type_ann=type_ann, line=line, col=col)
+            else:
+                # Bare annotation (e.g. class field `kind: str`) → VarDecl for struct fields.
+                # NOTE: this codegen's ternary always evaluates BOTH branches (no
+                # real short-circuiting), so `expr.name if isinstance(expr, IdentExpr)
+                # else None` would call `.name` unconditionally even when expr isn't
+                # an IdentExpr — falling to the dynamic-getattr runtime path, which
+                # aborts by design for an unresolvable static type. Use a real `if`
+                # instead. Found via example_imports.mojo's module docstring.
+                name = None
+                if isinstance(expr, IdentExpr):
+                    name = expr.name
+                if name:
+                    return VarDecl(name=name, type_ann=type_ann, value=None, line=line, col=col)
+                return ExprStmt(expr, line=line, col=col)
+        # Augmented assignment (`=`/chained-assignment/tuple-unpacking are
+        # all handled uniformly above, before the COLON-annotation check).
+        if self._peek().kind == "AUGASSIGN":
+            op = self._advance().value
+            val = self._parse_expr_or_yield()
+            return AugAssignStmt(target=expr, op=op, value=val, line=line, col=col)
+        self._skip_newlines()
+        return ExprStmt(expr, line=line, col=col)
+
+    def _parse_import(self):
+        t = self._peek()
+        self._expect("KW", "import")
+        module, alias = self._parse_import_target()
+        # `import a, b, c` — comma-separated module list
+        extra = None
+        while self._peek().kind == "COMMA":
+            self._advance()
+            if extra is None:
+                extra = []
+            extra.append(self._parse_import_target())
+        return ImportStmt(module=module, alias=alias, extra=extra,
+                          line=t.line, col=t.col)
+
+    def _parse_import_target(self):
+        # Handle relative imports: import .warp, import ..sibling
+        module = ""
+        while self._peek().kind == "DOT":
+            self._advance()
+            module += "."
+        # Module names may collide with keywords (e.g. a module named `comptime`),
+        # so accept NAME or KW via _ident().
+        module += self._ident()
+        while self._peek().kind == "DOT":
+            self._advance()
+            module += "." + self._ident()
+        alias = None
+        if self._is_kw("as"):
+            self._advance(); alias = self._ident()
+        return (module, alias)
+
+    def _parse_from_import(self):
+        t = self._peek()
+        self._expect("KW", "from")
+        # Handle relative imports: from . or from .. or from .module
+        module = ""
+        while self._peek().kind == "DOT":
+            self._advance()
+            module += "."
+        # If not just dots, parse the module name. Accept a keyword-named
+        # module (e.g. `from struct import pack` — `struct` lexes as KW), but
+        # never swallow the `import` keyword itself as the module name.
+        if self._peek().kind == "NAME" or (self._peek().kind == "KW" and not self._is_kw("import")):
+            module += self._advance().value
+            while self._peek().kind == "DOT":
+                self._advance()
+                module += "." + self._ident()
+        elif not module:
+            # No dots and no name: error
+            self._expect("NAME")  # Will raise error
+        self._expect("KW", "import")
+        if self._peek().kind == "OP" and self._peek().value == "*":
+            self._advance()
+            return FromImportStmt(module=module, names=[], wildcard=True, line=t.line, col=t.col)
+        # Handle parenthesized multi-line imports: from x import (a, b, c)
+        paren_import = False
+        if self._peek().kind == "LPAREN":
+            self._advance()
+            paren_import = True
+        names = []
+        _nas = []
+        # Parse first name, skipping any leading newlines in parenthesized imports
+        if paren_import:
+            while self._peek().kind == "NEWLINE": self._advance()
+        if self._peek().kind == "RPAREN":
+            # Empty parens: from x import ()
+            self._advance()
+            return FromImportStmt(module=module, names=names, wildcard=False, line=t.line, col=t.col)
+        # `_ident()` (not `_expect("NAME")`): an imported name may collide with
+        # a Mojo keyword, e.g. `from weakref import ref` — `ref` lexes as KW.
+        name = self._ident()
+        alias = None
+        if self._is_kw("as"):
+            self._advance(); alias = self._ident()
+        names.append((name, alias))
+        _nas.append((name + '|' + alias) if alias else name)
+        # Parse remaining names
+        while True:
+            if paren_import:
+                while self._peek().kind == "NEWLINE": self._advance()
+            if self._peek().kind == "RPAREN":
+                self._advance()
+                break
+            if self._peek().kind != "COMMA":
+                break
+            self._advance()
+            if paren_import:
+                while self._peek().kind == "NEWLINE": self._advance()
+            if self._peek().kind == "RPAREN":
+                self._advance()
+                break
+            name = self._ident()  # keyword-named imports (e.g. `ref`) allowed
+            alias = None
+            if self._is_kw("as"):
+                self._advance(); alias = self._ident()
+            names.append((name, alias))
+            _nas.append((name + '|' + alias) if alias else name)
+        return FromImportStmt(module=module, names=names, wildcard=False,
+                              name_alias_strs=_nas, line=t.line, col=t.col)
+
+    def _parse_var_decl(self):
+        self._expect("KW", 'var')
+        # Allow KW, backtick identifiers as variable names (e.g., "out", "fn", `6bit`)
+        t = self._peek()
+        if t.kind == "NAME": name = self._advance().value
+        elif t.kind == "KW": name = self._advance().value
+        elif t.kind == "STRING" and t.value.startswith("`"): name = self._advance().value
+        elif t.kind == "COLON":
+            # Python-style field annotation: "var: type"  (var is the field name)
+            name = "var"
+        else: raise SyntaxError(f"{self._loc(t)}Expected NAME or KW got {t.kind}({t.value!r})")
+        # Check for tuple unpacking (var a, b, c = ...)
+        if self._peek().kind == "COMMA":
+            names = [name]
+            while self._peek().kind == "COMMA":
+                self._advance()
+                t = self._peek()
+                if t.kind == "NAME": names.append(self._advance().value)
+                elif t.kind == "KW": names.append(self._advance().value)
+                elif self._peek().kind == "ASSIGN": break
+                else: break
+            # Tuple unpacking: create as single VarDecl with tuple name
+            if self._peek().kind == "ASSIGN":
+                self._advance()
+                value = self._parse_expr(0)
+                # Handle tuple RHS: var a, b = x, y
+                if self._peek().kind == "COMMA":
+                    rhs = [value]
+                    while self._peek().kind == "COMMA":
+                        self._advance()
+                        if self._peek().kind == "NEWLINE": break
+                        rhs.append(self._parse_expr(0))
+                    value = TupleExpr(elements=rhs)
+                return VarDecl(name=",".join(names), type_ann=None, value=value)
+            else:
+                # No assignment, treat as error or incomplete
+                return VarDecl(name=",".join(names), type_ann=None, value=None)
+        type_ann = None
+        if self._peek().kind == "COLON":
+            self._advance()
+            type_ann = self._parse_type_ann()
+        value = None
+        if self._peek().kind == "ASSIGN":
+            self._advance(); value = self._parse_expr(0)
+            # Implicit (parenthesis-less) tuple RHS: `var name = 'a', 'b', 'c'`
+            # — a bare comma-separated list on the right of `=` is a tuple.
+            # Mirrors the plain-assignment handling in the AssignStmt path above.
+            if self._peek().kind == "COMMA":
+                rhs_elements = [value]
+                while self._peek().kind == "COMMA":
+                    self._advance()
+                    if self._peek().kind in ("NEWLINE", "DEDENT", "EOF"):
+                        break
+                    rhs_elements.append(self._parse_expr(0))
+                value = TupleExpr(elements=rhs_elements)
+        return VarDecl(name=name, type_ann=type_ann, value=value)
+
+    def _parse_if(self):
+        self._expect("KW", "if")
+        cond = self._parse_expr(0)
+        self._expect("COLON")
+        body = self._parse_block()
+        elifs, else_body = [], None
+        self._skip_newlines()
+        while self._is_kw("elif"):
+            self._advance(); ec = self._parse_expr(0)
+            self._expect("COLON"); eb = self._parse_block()
+            elifs.append((ec, eb))
+            self._skip_newlines()
+        if self._is_kw("else"):
+            self._advance(); self._expect("COLON")
+            else_body = self._parse_block()
+        return IfStmt(condition=cond, then_body=body, elifs=elifs, else_body=else_body)
+
+    def _parse_while(self):
+        self._expect("KW", "while")
+        cond = self._parse_expr(0)
+        self._expect("COLON")
+        body = self._parse_block()
+        else_body = None
+        self._skip_newlines()
+        if self._is_kw("else"):
+            self._advance(); self._expect("COLON")
+            else_body = self._parse_block()
+        return WhileStmt(condition=cond, body=body, else_body=else_body)
+
+    def _is_match_stmt(self):
+        """Lookahead for the `match`/`__match` soft keyword: it's a match
+        statement only if, after the subject expression, the next token before any
+        NEWLINE is a top-level `:` — a real expression can never contain a
+        bare top-level colon (dict/slice colons are always inside braces/
+        brackets, which this tracks via depth). Doesn't consume anything;
+        always restores position."""
+        saved = self._pos
+        self._advance()  # consume 'match'
+        depth = 0
+        is_match = False
+        while True:
+            t = self._peek()
+            if t.kind in ("NEWLINE", "EOF"):
+                break
+            if t.kind in ("LPAREN", "LBRACKET", "LBRACE"):
+                depth += 1
+            elif t.kind in ("RPAREN", "RBRACKET", "RBRACE"):
+                depth -= 1
+            elif t.kind == "COLON" and depth == 0:
+                is_match = True
+                break
+            self._advance()
+        self._pos = saved
+        return is_match
+
+    def _parse_match(self):
+        """Parse a `match`/`__match` statement (the keyword is current).
+
+        Two case-block layouts, because the two spellings disagree:
+
+          match x:              __match x:
+          case .A:              case .A:
+              body                  body
+
+        Real Python (and every `match` in this tree's own tests) indents the
+        cases one level past the `match`; Mojo's `__match` puts them at the SAME
+        indentation as the keyword, with only the case BODIES indented. Both are
+        accepted, and the two are told apart by whether an INDENT follows the
+        header's newline rather than by the keyword, so `match x:` with
+        same-level cases parses too rather than needing a second keyword test.
+
+        The case list terminates on the enclosing block either way: a DEDENT/EOF
+        for the indented layout, and for the flat layout the first token that is
+        not a `case` at the first case's column — which is what stops the flat
+        form from swallowing the statements that follow the match inside the same
+        enclosing block.
+        """
+        self._advance()  # consume 'match'/'__match' (a NAME token, soft keyword)
+        subject = self._parse_expr(0)
+        self._expect("COLON")
+        self._expect("NEWLINE")
+        self._skip_newlines()
+        indented = self._peek().kind == "INDENT"
+        if indented:
+            self._advance()
+        cases = []
+        self._skip_newlines()
+        case_col = None
+        while True:
+            t = self._peek()
+            if t.kind in ("DEDENT", "EOF"):
+                break
+            if not (t.kind == "NAME" and t.value == "case"):
+                break
+            if case_col is None:
+                case_col = t.col
+            elif t.col != case_col:
+                break        # a `case` belonging to an OUTER match
+            cases.append(self._parse_match_case())
+            self._skip_newlines()
+        if indented:
+            self._expect("DEDENT")
+        return MatchStmt(subject=subject, cases=cases)
+
+    def _parse_match_case(self):
+        # 'case' is also a soft keyword (NAME, not KW) — same as real Python.
+        t = self._peek()
+        if not (t.kind == "NAME" and t.value == "case"):
+            raise SyntaxError(f"{self._loc(t)}Expected 'case' got {t.kind}({t.value!r})")
+        self._advance()
+        # `case _:` (bare wildcard, an IdentExpr named '_') is recognized at
+        # match time (interpreter/codegen), not specially here — parsing it
+        # as a plain expression pattern keeps this parser simple, and lets
+        # `_` combine with an or-pattern list the same as any other pattern.
+        # Patterns are parsed at min_prec=1 (the same trick comprehension
+        # `for`/`if` clauses use below) so a top-level `if` here is left
+        # untouched for the guard-clause check below instead of being
+        # swallowed by _parse_expr's ternary-conditional-expression handling
+        # (`X if COND else Y`), which only fires at min_prec==0. Without
+        # this, `case n if n > 0:` fails trying to parse `if n > 0:` as a
+        # ternary expecting a matching `else`.
+        patterns = [self._parse_expr(1)]
+        while self._peek().kind == "COMMA":
+            self._advance()
+            if self._peek().kind == "COLON" or self._is_kw("if"):
+                break  # trailing comma before guard/colon
+            patterns.append(self._parse_expr(1))
+        guard = None
+        if self._is_kw("if"):
+            self._advance()
+            guard = self._parse_expr(0)
+        self._expect("COLON")
+        body = self._parse_block()
+        return MatchCase(patterns=patterns, body=body, guard=guard)
+
+    def _parse_for(self):
+        _for_tok = self._peek()
+        self._expect("KW", "for")
+        # Skip optional convention keyword (var, ref, mut, etc.) — but only
+        # when it's genuinely a prefix, i.e. something that can start a
+        # target follows it (another name, or `(` for tuple unpacking).
+        # `var` is BOTH a convention keyword (`for var x in y:`, never
+        # actually used anywhere in this codebase — grepped) AND a
+        # perfectly ordinary Python identifier for the loop variable
+        # itself (`for var in (...):`, real code in imports.py). Without
+        # the peek(1) check, `for var in (...):` swallowed `var` as a
+        # bogus convention prefix, then swallowed `in` too (mistaking it
+        # for the loop-variable name), leaving the parser expecting `in`
+        # but finding the tuple's `(` instead — "Expected KW got LPAREN".
+        # `peek(1) != COMMA` guards the same collision for a plain
+        # tuple-unpack target starting with the identifier `var`/etc.,
+        # e.g. `for var, other_var in pairs:`
+        # (bugs/PARSE_FAIL_var_as_for_loop_target_comma.md) — without it,
+        # `var` was swallowed as a bogus prefix (peek(1)=COMMA matched
+        # neither existing exclusion), leaving `_parse_unpack_target()` to
+        # start from the comma itself and misparse everything after.
+        if (self._peek().kind == "KW" and self._peek().value in self._CONV_KWS
+                and not (self._peek(1).kind == "KW" and self._peek(1).value == "in")
+                and self._peek(1).kind != "COLON"
+                and self._peek(1).kind != "COMMA"):
+            self._advance()
+
+        # Handle tuple unpacking: for (a, b) in ..., for a, b in ..., or
+        # for a, *rest in ... (single starred element anywhere in the list).
+        # _parse_unpack_target is the shared unpacking-target-element parser
+        # (also used by `with ... as (a, b):`) — see its docstring.
+        target = self._parse_unpack_target()
+        if self._peek().kind == "COMMA":
+            names = [target]
+            while self._peek().kind == "COMMA":
+                self._advance()
+                names.append(self._parse_unpack_target())
+            target = "(" + ", ".join(names) + ")"
+        self._expect("KW", "in")
+        iterable = self._parse_expr(0)
+        # Implicit (parenthesis-less) tuple iterable: `for x in a, b, c:`
+        if self._peek().kind == "COMMA":
+            elems = [iterable]
+            while self._peek().kind == "COMMA":
+                self._advance()
+                if self._peek().kind == "COLON": break
+                elems.append(self._parse_expr(0))
+            iterable = TupleExpr(elements=elems)
+        self._expect("COLON")
+        body = self._parse_block()
+        else_body = None
+        if self._is_kw("else"):
+            self._advance(); self._expect("COLON")
+            else_body = self._parse_block()
+        return ForStmt(target=target, iterable=iterable, body=body, else_body=else_body,
+                       line=_for_tok.line, col=_for_tok.col)
+
+    # Ownership/convention keywords preserved in param_convs
+    _CONV_KWS = {'ref', 'out', 'mut', 'var', 'deinit', 'read', 'inout', 'borrowed', 'owned', 'imm'}
+    # Canonical spelling for each convention keyword — old-style Mojo syntax
+    # (`inout`/`borrowed`) and new-style (`mut`/`read`) are semantically
+    # identical, and a parameter-position `var` means the same thing as
+    # `owned` (the callee receives the value outright). Storing the
+    # canonical form in param_convs means every later consumer (the
+    # ownership_check.py move/borrow analysis, eventually codegen) checks
+    # one spelling instead of tracking both historical names everywhere —
+    # see doc/OWNERSHIP_MODEL.md's Phase 0. `ref`/`out`/`deinit` have no
+    # older synonym and pass through unchanged.
+    #
+    # `imm` is the stdlib's immutable-borrow convention and has no older
+    # synonym either, so it likewise passes through unchanged — but it is NOT
+    # interchangeable with `ref`: it is what `read` means (a shared read-only
+    # borrow), so `_param_ctype` treats the two alike when adding `const`. It
+    # has to be a member of this set at all because a convention keyword is
+    # consumed as a PREFIX here; left out, `def __eq__(imm self, imm other:
+    # Self)` parsed as four parameters named `imm`, `self`, `imm`, `other` and
+    # emitted `(int64_t imm, LinkedList * self, int64_t imm, LinkedList *
+    # other)` — a C redefinition of `imm`, a hard error.
+
+
 def emit_module(stmts: list, indent: int = 0) -> str:
     return "\n".join(emit(s, indent) for s in stmts)
 
