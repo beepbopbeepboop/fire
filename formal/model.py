@@ -13844,6 +13844,72 @@ def _slot_rows(candidates, name):
     return [(st.name, struct_frame_slot(st, name)) for st in (candidates or ())]
 
 
+def ambiguous_method_specialization_refusal(chain, member, owners) -> str:
+    """`recv.m[T](x)` where two structs in this image declare `m`.
+
+    A refusal whose stated reason was **entirely false**, which is the defect
+    class §4 of `bugs/FORMAL_frame_receiver_handoff.md` is three examples of.
+    It was refused as `b.run names 'run', which is a METHOD of Box … a
+    value-position method reference is a bound method`, which is a claim about a
+    program that has no such reference in it: `b.run[3](4)` is a CALL, the
+    brackets bind `run`'s comptime parameter, and the sentence told the reader to
+    add parentheses to a program that already had them.
+
+    The reason it cannot be lifted is narrower than any of the sentences that
+    replaced it, and it is a fact about THIS MODULE'S DECLARATIONS rather than
+    about the backend's capabilities:
+
+      * `_rewrite_method_calls` dispatches by NAME, because a receiver's type is
+        not inferred on this path, so `run` has no single owner to lift to;
+      * and `Box` and `Other` both declare it, so picking either would compile
+        the callee against one struct's field list and call it with a receiver
+        that may be the other — a wrong answer with exit 0.
+
+    So the reader's next step is in their own source, and this says which of the
+    two things they can do about it.  `bugs/FORMAL_frame_receiver_handoff.md`
+    §18 measured the shape across the corpus: it is what still refuses
+    `std/runtime/_asyncrt.mojo` and `std/utils/index.mojo` of the eight files the
+    sweep reported as value-position method references.
+
+    **`owners` is every struct that declares `member`, and the message names all
+    of them rather than the receiver's own** — deliberately.  Nothing here
+    establishes which struct `{chain.split('.')[0]}` holds: a receiver's type is
+    not inferred on this path, which is the premise of the whole refusal. So a
+    version that said "whose type is Box — the receiver's OWN struct" would be
+    asserting the very thing it cannot know, and it would be asserting it in the
+    clause that decides the verdict.
+
+    **The advice is a RENAME and nothing else, and that is measured rather than
+    guessed.**  Qualifying the call with the owning struct — `Box.run[...](...)` —
+    reads as the obvious fix and does not work: a specialization of a DOTTED
+    callee is not `recv.m(x)`, so `_rewrite_method_calls` has no receiver to
+    prepend and no parameter list to read, and it lands on
+    `frame_opaque_position_refusal`'s `callee_shape` arm instead.  Measured on
+    this very program with the qualification added: refused with "The callee of
+    this call is Box.run[3], which names no function this pass has a parameter
+    list for".  That is the fifth shape
+    `bugs/FORMAL_method_call_on_a_subscripted_receiver.md` records, and offering
+    it here would send the reader into a second refusal with the first one
+    closed.  A rename is enough: with one `run` in the image the name
+    dispatches, and the lift is the ordinary one.
+    """
+    names = ", ".join(st.name for st in owners)
+    holder = chain.split(".")[0]
+    return (
+        f"{chain}[…](…) is a method CALL — the brackets bind a generic's "
+        f"comptime parameters, so this is `{chain}(...)` and not a subscript of "
+        f"a value — and {member!r} is declared by {names}. It cannot be lifted "
+        f"because all of them declare it: dispatch on this path is by NAME, "
+        f"since a receiver's type is not inferred, so there is no one function "
+        f"to lift this call to, and binding any of them would compile the "
+        f"callee against that struct's field list and call it with a receiver "
+        f"that may be a different one — a wrong answer rather than a failure. "
+        f"Rename one of them, so that the name dispatches to a single "
+        f"declaration; writing the call out (`{holder}.{member}[...]` becomes "
+        f"`{owners[0].name}_{member}[...]({holder}, ...)`) also works"
+    )
+
+
 def member_read_without_a_field(chain, holder, name, candidates) -> str:
     """Why `holder.<name>` has no slot: a message, for the three real shapes.
 
@@ -13876,6 +13942,20 @@ def member_read_without_a_field(chain, holder, name, candidates) -> str:
     for, and that is the whole of what changed: the class of program that
     refuses is identical and the sentence about why is no longer a description
     of a disagreement that did not happen.
+
+    **What is deliberately NOT a fourth shape here**, and its absence is a
+    measurement rather than an oversight.  A METHOD CALL this pass could not lift
+    — `b.run[3](4)` with `Box` and `Other` both declaring `run` — used to arrive
+    at this function and be reported by the second bullet above, which is false
+    about it in every clause: it is a call and not a value-position reference,
+    and `run` is a method of the receiver's OWN struct, which is the hand-off
+    `bugs/FORMAL_frame_receiver_handoff.md` §1 measures to be sound.  It has its
+    own message, `ambiguous_method_specialization_refusal`, reached from
+    `formal/build.py`'s `check_module_symbols` instead — which is where the
+    BRACKET is examined, and therefore the only place the ambiguity is knowable
+    (`iter_nodes` has no parent, so nothing here can tell a call's subscript from
+    a subscript of a value).  A flag on this function carrying that fact would
+    have been an argument the caller does not have.
     """
     owners = structs_declaring_method(candidates, name)
     if owners:
