@@ -133,11 +133,17 @@ Falls through to the generic single-string-arg "opaque constructor"
 fallback, so `ADialog("a")` silently becomes the string `"a"`.
 
 ### 2.5 Yield-kind and capture residue
-- `bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md` — items 2/3: a
-  cross-closure `async for` neighbour shape that is neither refused nor
-  correct, and a nested async generator driven by `async for` in its own
-  enclosing function (prints `0` where CPython prints `11`, with only a
-  `mojo_unsupported_iter` warning).
+- ~~`bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md`~~ — **closed
+  2026-09-29, doc removed.** Items 2 and 3 are fixed: the orphaned
+  regression file is registered (`coro-nested-capture`) and 10/10, and the
+  capture-independent `async for`-over-a-generator gap (which printed `0`
+  where CPython prints `11`, with only a `mojo_unsupported_iter` warning)
+  now drives the generator for real. Re-testing that doc's own
+  "Verified genuinely fixed" list also surfaced and fixed three more: a
+  wait-descriptor bound as the `async for` loop variable (a heap address,
+  exit 0 — now a compile-time refusal), two nested `async def`s sharing one
+  captured local (a generated-code argument-count error), and Increment D's
+  honest refusal not existing on the `MOJO_CORO=cpp` backend at all.
 - `bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md` — case 8, which
   was **reclassified**: the same wrong output appears with no generator at all
   (`def show(data): for r in data: print(r)` called with `[1.5, 2.5]`), so it

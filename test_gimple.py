@@ -5975,7 +5975,6 @@ def main():
         (`UnsafePointer[T](...)` / `.address`). Before this, a struct
         capture was refused outright, so the async def fell through to the
         C++ path and failed to compile at all.
-        See bugs/hard/CODEGEN_coro_captured_param_capture_crashes.md.
         """
         global _PASS, _FAIL
         name = "nested_async_struct_capture_boxes_pointer"
@@ -6039,6 +6038,107 @@ def outer():
     t.wait()
 """,
         "capture box cannot be threaded into a driven consumer")
+
+    # The SAME shape on the C++ backend (`MOJO_CORO=cpp`, the escape
+    # hatch), which the assertion above does not reach: the guard it
+    # exercises -- `_UNTHREADABLE_NESTED_ASYNC_GENS` -- used to be filled
+    # ONLY by the stack-switch lowering pass, so on the C++ backend the set
+    # was always empty, the guard never fired, and the program generated a
+    # .cpp referring to a name that does not exist in that scope. Measured
+    # through a real `fire.py build`:
+    #
+    #     x4_gen.cpp:136:5: error: 'acc' was not declared in this scope
+    #     x4_gen.cpp:136:5: note: did you mean 'acct'?
+    #
+    # i.e. exactly the class of error the set was introduced to replace
+    # with an honest message, present on one backend and absent on the
+    # other. So the assertion is made against the C++ backend explicitly,
+    # and it is a REFUSAL at codegen time rather than a codegen that later
+    # fails to compile -- the difference that made the original a bug.
+    def test_nested_async_gen_drive_refused_on_cpp_backend():
+        global _PASS, _FAIL
+        import gimple_codegen
+        name = "nested_async_gen_drive_refused_on_cpp_backend"
+        src = """\
+def outer():
+    var acc = 0
+    async def gen():
+        acc = acc + 1
+        yield 10
+    async def consume():
+        async for x in gen():
+            acc = acc + x
+    var t = create_task(consume())
+    t.wait()
+"""
+        try:
+            with _force_cpp_coro():
+                gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            if "capture box cannot be threaded into a driven consumer" in str(e):
+                print(f"PASS  {name}")
+                _PASS += 1
+            else:
+                print(f"FAIL  {name}: wrong error: {e}")
+                _FAIL += 1
+            return
+        print(f"FAIL  {name}: the C++ backend generated a unit for a nested "
+              f"async generator it has no capture model for, instead of "
+              f"refusing it")
+        _FAIL += 1
+
+    test_nested_async_gen_drive_refused_on_cpp_backend()
+
+    # ... and the capture-LESS neighbour of the same shape, which must keep
+    # COMPILING on the C++ backend. This is the boundary the fix must not
+    # overshoot: `_UNTHREADABLE_NESTED_ASYNC_GENS` is about the C++
+    # emitter's missing capture MODEL, and a nested async generator that
+    # closes over nothing needs no model. It is also the only member of this
+    # family that runs correctly on the C++ backend today, so refusing it
+    # would trade a working program for a message. Asserted on the
+    # generated C++ COMPILING (g++ -fsyntax-only), which is the assertion
+    # that would have caught the bug above had it been written here.
+    def test_nested_async_gen_no_capture_drive_compiles_on_cpp_backend():
+        global _PASS, _FAIL
+        import gimple_codegen
+        from build_config import find_gxx
+        name = "nested_async_gen_no_capture_drive_compiles_on_cpp_backend"
+        src = """\
+def outer():
+    var acc = 0
+    async def gen():
+        yield 1
+        yield 2
+    async def consume():
+        async for x in gen():
+            acc = acc + x
+    var t = create_task(consume())
+    t.wait()
+"""
+        try:
+            with _force_cpp_coro():
+                c_src, cpp_src = gimple_codegen.compile_to_gimple_with_cpp(src)
+        except Exception as e:
+            print(f"FAIL  {name}: wrongly refused a capture-less nested async "
+                  f"generator: {e}")
+            _FAIL += 1
+            return
+        with tempfile.NamedTemporaryFile(suffix='.cpp', mode='w', delete=False) as f:
+            f.write(cpp_src)
+            cpp_path = f.name
+        r_cpp = subprocess.run(
+            [find_gxx(), '-std=c++20', '-fsyntax-only', f'-I{_RUNTIME_INC}', cpp_path],
+            capture_output=True, text=True)
+        if r_cpp.returncode == 0:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: generated .cpp does not compile")
+            for line in r_cpp.stderr.splitlines():
+                print(f"      {line}")
+            _FAIL += 1
+
+    test_nested_async_gen_no_capture_drive_compiles_on_cpp_backend()
 
     # ------------------------------------------------------------------
     # A container-typed constructor argument. bugs/hard/
