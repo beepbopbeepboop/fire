@@ -5288,6 +5288,11 @@ def _constant_read_sites(body, structs_by_name: dict,
         for key in [k for k in out if k.startswith(struct_name + ".")]:
             out[f"{local}.{key.split('.', 1)[1]}"] = out[key]
     for base, st in (receiver_structs or {}).items():
+        # The method names, ONCE per base rather than once per constant: this
+        # function is a census over a whole body and it runs per function, so a
+        # linear re-scan of a struct's method list for each of its constants is
+        # the shape that makes a compile quadratic in the class body.
+        method_names = {m.name for m in M.struct_methods(st)}
         for name, _default in M.struct_class_constants(st):
             path = f"{base}.{name}"
             # A name the struct also declares as a METHOD is not in here. The
@@ -5297,7 +5302,7 @@ def _constant_read_sites(body, structs_by_name: dict,
             # read checks `methods` before `comptime_aliases`) — and a value
             # whose meaning depends on which one you asked is a value this path
             # cannot answer, so the method wins and the read is left alone.
-            if any(m.name == name for m in M.struct_methods(st)):
+            if name in method_names:
                 continue
             if out.setdefault(path, st) is not st:
                 # The receiver reading and the local-alias reading disagree
