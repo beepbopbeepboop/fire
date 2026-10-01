@@ -106,13 +106,35 @@ Either is coherent. What is not coherent is a module that implements some of
 the absent ones for aesthetic reasons and leaves the rest, because then the
 set is nobody's decision.
 
+## Step 1, ANSWERED (2026-09-30, the `module:copy+collections+io+json+pathlib+
+typing+builtins` claim): nobody needs any of them
+
+The question this document's step 1 asks has an answer, and it is the one that
+makes (1) the standing decision:
+
+```console
+$ grep -rn "sha3_\|blake2s\|shake_" --include=*.py --include=*.mojo . | grep -v '^./.tmp'
+formal/imports.py:188:  #     seven absent names (SHA-3, SHAKE, blake2s) are named with the
+formal/imports.py:189:  #     measurements in `bugs/FORMAL_hashlib_sha3_and_blake2s_absent.md`.
+formal/hostmods/hashlib.mojo:55:`blake2s`, `sha3_224`, ... are ABSENT rather than approximated.
+formal/hostmods/hashlib.mojo:56:`shake_128`, `shake_256` are ABSENT ...
+test_formal_hashlib.py:324:  absent = ["blake2s", "sha3_224", ...
+test_formal_hashlib.py:325:                "shake_128", "shake_256", "new"]
+```
+
+**Six hits, and every one of them is this document, the module's own docstring,
+or the test that asserts the absence.** No caller anywhere in the tree asks for
+any of the seven. So (1) stands: the module covers what the tree uses, checked
+against CPython, and the rest is named rather than approximated. Steps 2 and 3
+are not started and should not be without a caller — step 3's "do not implement
+SHAKE on this target, in any spelling" is not a matter of taste and still
+stands, because a run-time-length output is a value-model limit rather than a
+missing algorithm.
+
 ## The exact next step
 
-1. **Ask who needs what, before writing anything.** The cheapest version of
-   this question is a sweep: `grep -rn "sha3_\|blake2s\|shake_" --include=*.py
-   --include=*.mojo .` over the tree. If the answer is nobody, (1) stands and
-   this document is the record. If something needs one, that something is the
-   specification of record and the work is scoped by it.
+1. **DONE — see the section above.** Re-run the sweep if a caller ever appears;
+   the decision is a function of whether one does, and today none does.
 
 2. **If blake2s is wanted, it is cheap and should reuse what is here.** The
    pieces that carry over are `b2_g`'s structure, `sigma_table` (the same ten

@@ -20,6 +20,8 @@ import platform
 import argparse
 import tempfile
 import subprocess
+import contextlib
+import fcntl
 from concurrent.futures import ProcessPoolExecutor
 
 import cas
@@ -634,6 +636,79 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tupl
     return path, name, ofile, exports, None, hit
 
 
+@contextlib.contextmanager
+def _output_lock(out: str):
+    """Exclusive, cross-process, released on exit: an `flock` on a side file
+    next to `out`, held across `build`'s whole publish. A SIDE file, because
+    `build` replaces the `.dylib` and a lock on the library itself would admit
+    a second process the instant the first created it.
+
+    **What this buys, and what it does not.** It buys LATENCY, not safety: with
+    the currency check moved inside it, N concurrent callers collapse to one
+    link and N-1 no-ops instead of N identical links. Safety comes entirely
+    from the atomic publish — the link stages into the work directory and
+    `os.replace`s into `out`, and the cache-hit copy renames rather than
+    truncating in place — and that half deliberately depends on nothing but
+    `os.replace` / `shutil.copy` / `os.path`, all of which this file already
+    relies on (`runtime_dylib`'s own staged link is the same shape).
+
+    The split is not tidiness, it is measured. `fcntl.flock` does NOT survive
+    the compiled path: compiled through this compiler's own link-mode
+    pipeline, a module whose body is `fcntl.flock(fd, 2)` emits
+
+        _t4 = _t2;  /* int64_t.flock() stubbed */
+
+    — the extern preamble's weak stub, which returns 0 and takes no lock. So
+    in a self-hosted build this lock is a no-op, and it must be: a
+    correctness argument that rested on it would be an argument that holds on
+    `python3 fire.py build` and silently does not hold in `mojoc`. Staging +
+    `os.replace` is the half that is equally true in both.
+
+    Why the lock is here at all, then: `out` is a FIXED path
+    (`build_stdlib`'s default is `build/libmojostdlib.<arch>.dylib`) and every
+    `fire.py build` reaches it through `driver.compile_program`, so every
+    parallel job in the gate asks for the same library at once. Measured on
+    this tree, twice, `python3 tools/suite.py -j4 linkmode nonlocal ...`:
+
+        ld: open() failed, errno=17 (File exists) for
+            '<checkout>/build/libmojostdlib.arm64.dylib'
+
+    which reached two of this batch's own jobs as a failing `test_link_mode`
+    case (`test_bare_submodule_import_value_read raised: ... -o,
+    .../libmojostdlib.arm64.dylib ... returned non-zero exit status 1`) and a
+    failing `test_nonlocal` case wanting `'7\n'`. That error is the link
+    colliding on the shared output path; on the python3 path the lock is what
+    removes it, and the staged link is what makes it harmless if it recurs.
+
+    `flock` is advisory and per-open-file-description, so the kernel releases
+    it when the process dies and a killed build cannot wedge the tree — the
+    same shape and the same reasoning as `formal/imports.py::_dylib_lock` (and
+    the reason this helper is LOCAL to this module rather than shared with it:
+    this file is in `mojoc`'s own compile closure — `cas.selfhost_inputs()`
+    lists it — and `_is_selfhost_source_dir`'s docstring in
+    `mojo/backend_gimple/module_gen.py` records a measured self-host failure
+    for exactly the cross-module function reference sharing one would mean)."""
+    fd = os.open(out + '.lock', os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _publish_bytes(src_path: str, out: str) -> None:
+    """Put `src_path`'s bytes at `out` with a single atomic rename.
+
+    `os.replace` within a directory is atomic, so a concurrent reader of
+    `out` — another job linking a program against the stdlib dylib — sees
+    either the whole previous library or the whole new one, never a partial
+    file. `shutil.copy` onto `out` in place gives it a window in which
+    `out` is a truncated Mach-O."""
+    staged = out + '.incoming.' + str(os.getpid())
+    shutil.copy(src_path, staged)
+    os.replace(staged, out)
+
+
 def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = False,
           extra_exports: list = None, jobs: int = 1, opt_flag: str = None,
           track_local_deps: bool = True, arch: str = None) -> str:
@@ -897,47 +972,82 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     link_key = cas.dylib_link_key(
         objs, reflect_src, cc, undefined=not link_runtime,
         extra_digest=extra_link_digest, arch=arch)
-    if use_cache:
-        cached_dylib = cas.lookup(link_key, '.dylib')
-        if cached_dylib:
-            cas.stats['hits'] += 1
-            shutil.copy(cached_dylib, out)
-            _arch_or_die(out, arch, 'cached dylib')
-            return out
-        cas.stats['misses'] += 1
 
-    # Reflection table: one merged __mojo_reflect over all Mojo modules + runtime.
-    reflect_c = os.path.join(workdir, '_mojo_reflect.c')
-    reflect_o = os.path.join(workdir, '_mojo_reflect.o')
-    with open(reflect_c, 'w') as f:
-        f.write(reflect_src)
-    # -fno-builtin: the table forward-declares every exported symbol as
-    # `extern void sym();` purely to take its address. Some exported names
-    # collide with C builtins (memcmp, nan, isnan, …); without -fno-builtin gcc
-    # rejects the unprototyped redeclaration as a conflicting type.
-    subprocess.run([cc, '-fno-builtin', '-fPIC', f'-I{HERE}', *arch_flags(arch),
-                    '-c', '-o', reflect_o, reflect_c], check=True)
-    objs.append(reflect_o)
+    # One exclusive section from here to the return, covering the currency
+    # check, the link and the publish. The CAS is consulted INSIDE the lock
+    # and not before it: a check-then-act on a shared filesystem is the
+    # stampede, and `out` is the most-shared path in the tree (every parallel
+    # `fire.py build` in the gate wants this one library). Everything above
+    # the lock — the per-module compiles, all individually content-addressed —
+    # still runs in parallel across callers, so the serialised section is only
+    # the table compile and the link.
+    #
+    # Correctness does NOT rest on that lock; `_output_lock`'s own docstring
+    # gives the measurement (a compiled `fcntl.flock` is the extern preamble's
+    # weak stub), and the guarantee is the staged link plus `os.replace` below,
+    # which hold whether or not the lock did anything.
+    with _output_lock(out):
+        if use_cache:
+            # Re-checked under the lock: a caller that queued behind another
+            # one's fresh link finds the artifact published and returns,
+            # which is what turns N racing builds into one build.
+            cached_dylib = cas.lookup(link_key, '.dylib')
+            if cached_dylib:
+                cas.stats['hits'] += 1
+                _publish_bytes(cached_dylib, out)
+                _arch_or_die(out, arch, 'cached dylib')
+                return out
+            cas.stats['misses'] += 1
 
-    # Linking depends on whether runtime is included or linked separately.
-    # link_driver=cxx: the production dylib now always folds in mojo_
-    # async_runtime.o (a real C++20 translation unit, not plain -fgimple C)
-    # — g++ as the final link driver pulls in libstdc++ correctly, mirroring
-    # fire.py's own link_executable(cxx=True) convention exactly.
-    if link_runtime:
-        # For test modules: link against runtime dylib, all symbols must resolve
-        link = _dylink(cc, out, objs, undefined=False, extra_libs=[rt_path],
-                       rpath=os.path.dirname(rt_path), link_driver=cxx, arch=arch)
-    else:
-        # For production: cross-module references resolve at load time
-        link = _dylink(cc, out, objs, undefined=True, link_driver=cxx, arch=arch)
-    subprocess.run(link, check=True)
-    _arch_or_die(out, arch, 'linked dylib')
-    # Publish the linked dylib to the shared CAS so future builds skip the link
-    # (even on use_cache=False runs: the fresh link is the correct artifact).
-    with open(out, 'rb') as f:
-        cas.publish(link_key, '.dylib', f.read())
-    return out
+        # Reflection table: one merged __mojo_reflect over all Mojo modules + runtime.
+        reflect_c = os.path.join(workdir, '_mojo_reflect.c')
+        reflect_o = os.path.join(workdir, '_mojo_reflect.o')
+        with open(reflect_c, 'w') as f:
+            f.write(reflect_src)
+        # -fno-builtin: the table forward-declares every exported symbol as
+        # `extern void sym();` purely to take its address. Some exported names
+        # collide with C builtins (memcmp, nan, isnan, …); without -fno-builtin gcc
+        # rejects the unprototyped redeclaration as a conflicting type.
+        subprocess.run([cc, '-fno-builtin', '-fPIC', f'-I{HERE}', *arch_flags(arch),
+                        '-c', '-o', reflect_o, reflect_c], check=True)
+        objs.append(reflect_o)
+
+        # Link into the WORK DIRECTORY and rename into place, because `out` is
+        # a fixed path every other job links against: a dylib linked straight
+        # to `out` is a partially-written Mach-O at every path a concurrent
+        # reader can reach it, which is the silent half of the race
+        # `_output_lock` names. `_dylink` is given the final install name
+        # explicitly for the reason `runtime_dylib`'s own staged link gives
+        # it — the install name is baked into the load command of everything
+        # that links this library, so deriving it from a staging path and
+        # renaming afterwards produces an artifact that disagrees with its own
+        # name.
+        staged = os.path.join(workdir, os.path.basename(out))
+        # Linking depends on whether runtime is included or linked separately.
+        # link_driver=cxx: the production dylib now always folds in mojo_
+        # async_runtime.o (a real C++20 translation unit, not plain -fgimple C)
+        # — g++ as the final link driver pulls in libstdc++ correctly, mirroring
+        # fire.py's own link_executable(cxx=True) convention exactly.
+        if link_runtime:
+            # For test modules: link against runtime dylib, all symbols must resolve
+            link = _dylink(cc, staged, objs, undefined=False, extra_libs=[rt_path],
+                           rpath=os.path.dirname(rt_path), link_driver=cxx,
+                           install_name='@rpath/' + os.path.basename(out),
+                           arch=arch)
+        else:
+            # For production: cross-module references resolve at load time
+            link = _dylink(cc, staged, objs, undefined=True, link_driver=cxx,
+                           install_name='@rpath/' + os.path.basename(out),
+                           arch=arch)
+        subprocess.run(link, check=True)
+        _arch_or_die(staged, arch, 'linked dylib')
+        os.replace(staged, out)
+        # Publish the linked dylib to the shared CAS so future builds skip the
+        # link (even on use_cache=False runs: the fresh link is the correct
+        # artifact). Inside the lock, so the latecomer above finds it.
+        with open(out, 'rb') as f:
+            cas.publish(link_key, '.dylib', f.read())
+        return out
 
 
 def _dylink(gcc, out, objs, undefined=False, rpath=None, extra_libs=None,

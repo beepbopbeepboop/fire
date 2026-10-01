@@ -537,11 +537,21 @@ def _name_ptr(rec, k):
     return 0
 
 
-def _name_len(rec, k):
+def _name_len(rec, k) -> int:
     """Length of the k-th name of `rec`.
 
     Stops at a space (names are space separated) or at the end of the field.
     Both are found with `strspn`, so no byte is ever loaded by subscript.
+
+    `-> int` is LOAD-BEARING, for the reason `os/__init__.mojo` gives for every
+    function in that module: `strcspn`/`strspn` are unbound libc externs whose
+    return is a word of unknown provenance, so without the annotation the
+    `return n` below classifies this callee's result as neither a number nor a
+    string, and `_name_len(rec, k) == nlen` in `_lookup` then reads as a
+    comparison of two unclassified words — which lowers to an ADDRESS compare
+    and is refused (`formal/model.py`'s `string_compare_word_refusal`). Both
+    operands really are lengths, so `-> int` is what lets the call site classify
+    the result.
     """
     p = _name_ptr(rec, k)
     if p == 0:
@@ -951,8 +961,14 @@ def _nfields(out):
     return n
 
 
-def _fname_len(p):
-    """Length of field `p`'s NAME: up to `=` or `;`, whichever comes first."""
+def _fname_len(p) -> int:
+    """Length of field `p`'s NAME: up to `=` or `;`, whichever comes first.
+
+    `-> int` for the reason `_name_len` gives: the answer is a `strcspn` length,
+    and an unannotated callee makes `_fname_len(p) == str_len(dest)` a
+    comparison of two words of unknown kind, which is refused rather than
+    lowered as a string equality the operands never were.
+    """
     n = strcspn(p, ";")
     eq = strcspn(p, "=")
     if eq < n:

@@ -269,6 +269,58 @@ def encode_mov_rm64_r64(base: Reg, disp: int, src: Reg) -> bytes:
     return bytes([rex, 0x89, modrm]) + extra
 
 
+def encode_movabs_r64(reg: Reg, imm: int) -> bytes:
+    """`movabs reg, imm64` — load an ABSOLUTE address into a register, 10 bytes.
+
+    This is the correct encoding for the module-global `__DATA` segment, and the
+    reason is that `GLOBALS_VM` is a FIXED address rather than a link-time
+    relative one. Every other absolute reference in an image — a call target, a
+    string literal the compiler chose to put in `__TEXT` — moves with the code
+    when the loader slides the image, which is exactly what RIP-relative
+    addressing encodes. A segment mapped at a hard-coded address does not move,
+    so a RIP-relative reference to one drifts by the slide and points somewhere
+    the program never chose.
+
+    Measured, and the failure is worth stating precisely because it does not
+    look like an addressing bug: the image loaded with a slide of 0x2105000, so
+    RIP-relative code computed `__DATA` at 0x102505000 while the segment was
+    mapped at its fixed 0x100400000. The initializer's flag word therefore read
+    from an address the program never wrote, happened to be non-zero, and the
+    initializer was SKIPPED — leaving each address-valued slot holding the
+    link-time pointer it shipped with. The first read of such a global then
+    dereferenced a non-relocated address and the process died of SIGSEGV, on
+    arm64 code that is byte-for-byte correct.
+
+    The arm64 backend's ADRP/ADD has the same PC-relative shape and the same
+    hazard; see `arm64_codegen._global_slot_address`, which materialises the
+    address with MOVZ/MOVK instead.
+
+    10 bytes: REX.W(+B), opcode B8+rd, then the full 64-bit immediate. A `mov
+    r32, imm32` cannot hold the address, which is the whole reason this opcode
+    and not that one."""
+    return bytes([_rex(w=1, b=1 if reg.value >= 8 else 0), 0xB8 + (reg.value & 7)]) \
+        + struct.pack("<q", imm)
+
+
+def encode_mov_rip_r64(disp: int, src: Reg) -> bytes:
+    """mov [rip + disp], src — a RIP-relative STORE, 6 bytes.
+
+    The counterpart of `encode_lea_r64_rip`, and the reason it exists here
+    rather than being spelt at the call site: the module-global initializer
+    needs to write a computed address to a computed address, and both operands
+    are absolute addresses in another segment. A base register for the store
+    would mean materialising the slot address first and keeping it live across
+    the second LEA, which costs a register this path does not have spare.
+
+    mod=00 with rm=101 is the RIP-relative form of the r/m field (no SIB byte —
+    see `encode_lea_r64_rip`), and the displacement counts from the END of the
+    instruction, which is what makes it 6 bytes: REX, opcode, ModRM, disp32."""
+    assert -2**31 <= disp < 2**31
+    rex = _rex(w=1, r=1 if src.value >= 8 else 0)
+    return bytes([rex, 0x89, _modrm(0, src.value & 7, 5)]) \
+        + struct.pack("<i", disp)
+
+
 def encode_mov_rm8_r8(base: Reg, disp: int, src: Reg) -> bytes:
     """mov [base + disp], src8 — 88 /r, the low BYTE of `src`.
 
@@ -683,6 +735,33 @@ def encode_jmp_rm64(offset: int) -> bytes:
     """jmp [rip + offset] — indirect jump through memory at RIP-relative address"""
     assert -2**31 <= offset < 2**31
     return bytes([0xFF, 0x25]) + struct.pack("<I", offset & 0xFFFFFFFF)
+
+
+def encode_jne_rel32(offset: int) -> bytes:
+    """`jne rel32` — branch if the ZERO flag is clear.
+
+    NOT `jne [rip + offset]`. That was the original form here, and it was wrong
+    in a way that read as a working instruction: `jcc rel32` is encoded
+    `0F 8x cd` with NO ModRM byte, because the condition code IS the low byte
+    of the opcode and there is no register operand to encode. Emitting a ModRM
+    anyway puts one extra byte between the opcode and the displacement, so the
+    CPU — and every disassembler — reads the first byte of the intended
+    displacement as a ModRM and the branch lands `offset` bytes somewhere else.
+    Measured: the lazy-initializer's "already initialised, skip the body"
+    branch jumped 0xE15 bytes past the end of the image, and the x86-64
+    backend SIGBUSed on every program with a module global while the arm64
+    backend, whose equivalent CBNZ takes no operands either, ran the same source
+    correctly.
+
+    What made it survive inspection is that the emitted bytes are still a
+    plausible `0f 85` prefix — a wrong-but-valid prefix reads as a branch, so
+    the only symptom is a branch to an address nobody chose.
+
+    6 bytes: `0F 85 disp32`, displacement relative to the END of the
+    instruction. `reg` is gone with the ModRM; the caller branches on the flags
+    that `cmp`/`test` left behind, so there is nothing else to name here."""
+    assert -2**31 <= offset < 2**31
+    return bytes([0x0F, 0x85]) + struct.pack("<i", offset)
 
 
 # ── assembler ────────────────────────────────────────────────────────
