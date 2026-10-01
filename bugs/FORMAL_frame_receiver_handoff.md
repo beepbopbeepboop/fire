@@ -898,6 +898,27 @@ question about a TYPE. Handed over as
 `bugs/FORMAL_type_argument_call_base_name_has_no_home.md`, with a
 three-line reproducer and the one set to add the subscript base to.
 
+**CLOSED 2026-09-30, and the doc is gone** (`git rm`, per the rule that a doc
+for a fixed bug is deleted rather than left with a Status history). The
+hand-off above was taken: `formal/model.py`'s `subscript_callee_names` is the
+one recogniser for "a call's subscript callee is a symbol, not a value",
+`formal/build.py`'s name-placement walk asks it, and both backends now lower the
+zero-operand container constructor to the eight-byte blob that IS the empty
+container. `test_formal_run.py`'s `TYPE_APPLICATION_CASES` /
+`TYPE_APPLICATION_REFUSALS` are the cases, and each answered one is compared
+against CPython running the equivalent program, on both architectures.
+
+**What it was worth, measured: 0 of the 41 files.** `binary_heap.mojo` is behind
+two further limits — premise **B2** (`S()` does not run `__init__`, so
+`len(self._data)` is a load from address 0) and an `Optional` niche
+(`self.step.or_else()`) — so all 35 of its dependents stay refused and the
+value of the fix is the diagnostic and the construct rather than the count.
+`bugs/FORMAL_sweep_work_map_2026-09-30.md` §3.1 is the measurement, and §3.2
+is the same experiment on the 27-file `Slice.__eq__` cause, whose ceiling is
+also 0. **That document is where a planning fact of this kind belongs**: a
+"41 files move here" number was in this table's history twice and was wrong
+about what the 41 files would then hit.
+
 ## 17. Where the code is
 
 | what | where |

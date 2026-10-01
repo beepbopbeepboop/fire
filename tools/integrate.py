@@ -157,6 +157,9 @@ def main():
                          "instead of the full `make gate`: the way a branch's heavy verification is done, by the "
                          "one integrator, never by a worker. Landing still requires the FULL gate; a --jobs run "
                          "only reports (it never fast-forwards master).")
+    ap.add_argument("--no-fixers", action="store_true",
+                    help="a conflicting branch is merely left out: no merge fixer is queued and nothing is superseded "
+                         "(used by the bisect probes, which re-merge the same branches many times)")
     ap.add_argument("--fast", action="store_true",
                     help="FAST LANE for a branch that touches only test infrastructure/docs (infra_only): no project gate; "
                          "run the suite's own tests and the changed test files, and land on green")
@@ -178,6 +181,8 @@ def main():
         sys.exit("another integrator is already running (lock %s/integrator.lock): there is only ever one" % C.ctl_dir())
 
     cands = pick_candidates(a.only, a.allow_dirty)
+    if a.only:                                       # the caller's order is the merge order (a bisect depends on it)
+        cands = sorted(cands, key=lambda n: a.only.index(n))
     if not cands:
         print("nothing to integrate"); return
 
@@ -193,9 +198,13 @@ def main():
         if r.returncode:
             subprocess.run(["git", "merge", "--abort"], cwd=INTEG)
             print("CONFLICT %s:\n%s" % (name, r.stdout[-600:]))
-            enqueue_merge_fix(name, tasks[name], r.stdout)   # marks the task superseded, queues its fixer
+            if a.no_fixers:                          # a bisect probe: just leave it out, no side effects
+                print("(probe) %s conflicts: left out" % name)
+            else:
+                enqueue_merge_fix(name, tasks[name], r.stdout)   # marks the task superseded, queues its fixer
         else:
             merged.append(name); print("merged %s" % name)
+    print("MERGED: %s" % " ".join(merged))
     if not merged or a.dry_run:
         print("merged: %s (dry-run or nothing to gate)" % merged); return
 
@@ -256,6 +265,9 @@ def main():
             if run(["python3", "tools/suite.py"] + failed, INTEG, os.path.join(INTEG, "confirm.log")) == 0:
                 print("the red did NOT reproduce when the failed jobs ran alone (load): treating the gate as green")
                 rc = 0
+            else:
+                failed = failed_job_names(os.path.join(INTEG, "confirm.log")) or failed
+            print("FAILED_JOBS: %s" % " ".join(failed))
     judg = subprocess.run("grep -h -E '^skip [a-z_./]+:|FAILED: [0-9]+' build/suite.log gate.log | sort | uniq -c | tail -20",
                           shell=True, cwd=INTEG, capture_output=True, text=True).stdout
     open(os.path.join(INTEG, "gate-judgement.txt"), "w").write(judg)

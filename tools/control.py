@@ -135,6 +135,7 @@ def next_slot():
 
 
 def cmd_spawn(a):
+    a.model = a.model or MODEL            # callers that build a Namespace by hand (autointegrate) pass None
     task = a.task if a.task is not None else open(a.task_file).read()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", a.name):
         sys.exit("NAME must be lowercase-kebab")

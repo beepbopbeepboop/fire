@@ -100,7 +100,8 @@ explicitly-typed builtin call results. The method-call branch of that
 inference has no case, so the declared `int64_t` default stands.
 
 `bugs/hard/CODEGEN_method_call_on_struct_param_mistyped.md` is the
-adjacent, already-closed report — it typed the method CALL on a struct
+adjacent report, now FIXED and deleted 2026-09-30 (see the
+2026-09-30 section of bugs/hard/README.md) — it typed the method CALL on a struct
 passed as a free-function PARAMETER. Same area, different question: that
 one asked "which method is this?", this one asks "what type does the
 enclosing function give back?". Its own docstring records that "the

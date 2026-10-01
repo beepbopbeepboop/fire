@@ -10,13 +10,14 @@ Every entry carries a `**State: CLOSED | PARTIAL | OPEN.**` banner directly
 under its title, with the residue named. Start there; the banner tells you
 whether re-reading the body is worth your time.
 
-Last updated 2026-09-29.
+Last updated 2026-09-30.
 
 ## OPEN — not fixed, no code change yet
 
 | doc | one line |
 |---|---|
 | `CODEGEN_same_bare_name_struct_collision_across_modules.md` | two same-named structs in sibling modules collide on an unqualified field table / typedef name. Re-derived 2026-09-26: mechanism intact, but the documented `'Dialog' has no member named 'result'` C error is **gone** (the loser's field access now degrades to dynamic getattr/setattr), and the one genuinely silent residue is a field name **both** structs share — the loser's value is coerced into the winner's ctype, so a `str` field lands as a heap address in an `int64_t` slot. Unfixable *today* only because a **bigger bug sits in front of it**: `module.Class(...)` construction is unresolved on every path, so no program can exhibit this. Fix that first. |
+| `CODEGEN_cross_module_struct_ctor_at_module_scope_mistyped.md` | a cross-module struct constructor called at **module scope** (not inside a function) is mistyped, in BOTH import spellings and neither is the import seam: the bare-`import` spelling prints the object's own pointer as a decimal with exit 0, the `from`-import spelling fails the build outright with `non-trivial conversion in 'var_decl'`. The same four cases inside a function body, and the same two cases with the class in the same file, are all correct. Found 2026-09-30 next to the deleted row below. |
 
 ## PARTIAL — the recorded gap is fixed; named residue remains
 
@@ -24,7 +25,6 @@ Last updated 2026-09-29.
 |---|---|
 | `CODEGEN_coro_captured_param_capture_crashes.md` | capturing an enclosing function's *parameter* in a nested `async def` raised `ValueError` in the compiler. **FIXED 2026-09-26** — and not with the doc's one-liner: the capture plan is now a named `_Capture` class with one constructor, because the positional 3-tuple that three passes unpacked blindly is what caused the crash. Items 2/3 remain: a cross-closure `async for` neighbour shape that is neither refused nor correct, and a nested async generator driven by `async for` in its own enclosing function. |
 | `CODEGEN_coro_yield_kind_unresolved_callsite.md` | one untypable call site silently re-poisoned the yield slot to `int64_t`. **FIXED 2026-09-26** for cases 1–7, and *correct* rather than refused — the evidence was always reachable, it just was not read. The doc's own docstring parenthetical is implemented, plus six sound widenings (any-annotation is not a hole; a bare identifier bound to a list answers `('list', k)`; `if caller_env:` was truthiness where membership was meant; ordinary `def`s are now scanned too). One shape has no reachable evidence and must stay refused. Case 8 reclassified: it is the ordinary loop lowering, not this subsystem. |
-| `CODEGEN_method_call_on_struct_param_mistyped.md` | a method call on a struct passed as a free-function *parameter* was mistyped by method name alone — 6 crashes plus 2 silent wrong values. **FIXED 2026-09-26** for everything it owns: 8/8 names now correct, via a new cross-call contract in Pass 1.3d plus three supporting fixes. The doc's suggested refusal was not needed; the call site knows the type. One cross-module row remains and is *not* this bug in link mode — `module.Class(...)` construction is unresolved on every path, the larger gap named above. |
 | `CODEGEN_bytes_silent_wrong_values.md` | six `bytes`/`memoryview` paths returning plausible wrong values with exit 0. **5 of 6 FIXED 2026-09-26**, plus several found alongside: a bytes fill char that emitted a heap-address byte, empty-bytes predicates, `memoryview.readonly`, `dict.get`/`pop` on a bytes key, a loop-target rebind that was never bytes-specific, and swapped `partition` arms, a non-raising empty separator, `center` padding on the wrong side and a `width` keyword read as the fill. `isprintable`/`isnumeric` were **removed from `bytes`** (CPython raises; only the buggy code dissented) and added to `str`, where they answered a silent `0`. Two enshrined-wrong test expectations were corrected. Residue: `partition` returns a `MojoList *` because **this runtime has no tuple type at all** — not a bytes fix. |
 | `CODEGEN_struct_kwargs_and_inline_unpack.md` | `struct.*` keyword arguments were silently dropped, and mixed int+float `unpack` returned raw IEEE-754 bits. **BOTH FIXED 2026-09-26**, and the residue under the second one **FIXED 2026-09-29**: the per-slot kinds now travel with the VALUE (a side table on the live `MojoList` address, `mojo_list_set_kinds`) instead of dying with one compile-time C name, so a copy, a slice, a concat, a returned value and a class attribute's `Struct` handle all read back correctly; and a read with no compile-time slot index — iteration, a computed subscript — is **boxed** (`mojo_list_get_boxed` + `mojo_repr_boxed`), which also fixes the heterogeneous `[1, 2.5]` literal that the doc named as the root cause underneath it. A uniform format records nothing and pays nothing. One thing the work uncovered is a DIFFERENT bug and is filed separately: a function returning a `MojoList *` it built in a local is typed `int64_t`, so the caller print()s the address and iterating it segfaults (pre-existing, not `struct`). |
 | `CODEGEN_generator_lambda_expr_unsupported.md` | **rewritten 2026-09-26: the recorded residue was stale.** Escaping/rebound capturing lambdas are CLOSED — they take a heap env, and the escape analysis now only picks between two correct lowerings. What remains is the **variadic** shape, and it is a call-site SIGSEGV rather than a lost capture: the lifted definition is correct (`int64_t f (MojoList * a)`) but the call site passes loose args positionally as scalars and never packs the list, so the callee dereferences address 4. Three corpus sites. Still excluded: capturing lambdas inside a coroutine body. |
@@ -111,6 +111,47 @@ named for is genuinely fixed and linear, but a fresh 2026-09-26 measurement
 found the remaining per-level rescan over generated C text is still
 superlinear (`_dedup_variadic_externs`, halved and cached in Phase 7 but
 still ~n^1.7), so the doc stays OPEN.
+
+### 2026-09-30: one removal, and the blocker turned out to be a different bug than the doc claimed
+
+`CODEGEN_method_call_on_struct_param_mistyped.md` (the PARTIAL row it came
+from) is **fixed and deleted**. All eight method-name rows, the q3
+two-spelling contrast, the single-file cross-module row and the
+link-mode cross-module row now match CPython on the real
+`python3 fire.py build` pipeline, with `test_gimple_runner.py` 176/176 and
+`test_link_mode.py` 9 passed / 1 failed — that one failure being the
+pre-existing `from . import SUB` row in the table above, re-measured on a
+reversed diff, not a regression.
+
+The interesting part is why its last row was still red, because the doc's
+own explanation was wrong twice over. It said the row was blocked by
+`CODEGEN_same_bare_name_struct_collision_across_modules.md`, whose §4 it
+quoted ("`module.Class(...)` construction is unresolved on every path"). It
+was not that bug: a same-bare-name collision needs two same-named classes,
+and the row has one. And the blocker was not "every path" — the
+`from insp import Parameter` spelling of the *same* program printed `v`
+through the *same* link-mode build. The real cause was that
+`_register_link_imports` (`mojo/backend_gimple/emit_resolve.py`) scanned
+only `FromImportStmt`, so a module reached through its own module object
+was never a candidate for `_link_inline_modules` and never appeared in the
+client's translation unit: `insp.Parameter(...)` fell to the generic
+scalar-receiver stub and the module HANDLE came back as the object.
+
+That is cause (c) from the list below — *closed on a narrower spelling than
+the one still broken* — the third time it has produced a removal from this
+directory, and the first time the narrower spelling was **import
+resolution** rather than pipeline. Which is the transferable lesson: "the
+other spelling" is not a safe place to stop, and the cheapest way to check
+is to write both spellings of the same program down side by side and diff
+their answers, which took two builds here and would have closed the row on
+2026-09-27.
+
+The residue the closure turned up belongs to a different bug and is filed in
+this directory:
+
+| found while fixing it | filed as |
+|---|---|
+| the same cross-module construction at **module scope** rather than inside a function is mistyped in BOTH import spellings — a pointer decimal, exit 0, on one, a hard `non-trivial conversion` build failure on the other | `bugs/hard/CODEGEN_cross_module_struct_ctor_at_module_scope_mistyped.md` |
 
 ## Notes for future sessions
 
