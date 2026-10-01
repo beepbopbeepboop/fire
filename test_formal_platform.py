@@ -41,8 +41,23 @@ wrong answer rather than a refusal. The corpus is the corners: below `5`,
 above `5`, a leading `+`, an embedded `_`, an empty first component, a doubled
 underscore, a trailing dot, and a name that merely STARTS WITH `SunOS`.
 
-Groups: `resolve`, `uname`, `processor`, `macver`, `alias`, `free`, `arch`,
-`exports`, `absent`. With no argument, all.
+`architecture` IS THE GROUP THAT NEEDED A CAPABILITY
+---------------------------------------------------
+CPython reads it out of `file -b <exe>` — a SUBPROCESS — and this module reads
+the same two facts (the pointer width, and whether the format is one `file`
+would call an executable) out of the file's own Mach-O header, which is where
+`file` reads them. That needed `read(2)` in `formal/hostmods/os/_syscalls.mojo`
+(it had `open`, `lseek` and `close` and could not read a byte) and a reader for
+the header, and the `architecture` group is what pins the result against
+CPython over the four shapes of file — an executable, a UNIVERSAL binary (every
+system tool on an Apple Silicon macOS), a dylib, and something that is not a
+Mach-O at all. It is also the group that pins a CPython quirk rather than a
+Mach-O fact: CPython accepts `file -b` output containing `executable` or the
+phrase `shared object`, and this macOS's `file` no longer prints that phrase, so
+CPython answers `('64bit', '')` for a dylib and this module answers the same.
+
+Groups: `resolve`, `uname`, `processor`, `macver`, `alias`, `free`,
+`architecture`, `arch`, `exports`, `absent`. With no argument, all.
 """
 import argparse
 import os
@@ -447,6 +462,11 @@ def group_exports(tmpdir, verbose):
         # Nested, because that is the spelling the module's docstring gives a
         # caller: release what the next call allocates.
         ("platform_free", "(platform.machine())"),
+        # `architecture` is two functions because its answer is a tuple, and the
+        # sink takes the string each half returns. The path is this repository's
+        # own `fire.py`, which exists on every checkout that can run this file.
+        ("architecture_bits", '("fire.py")'),
+        ("architecture_linkage", '("fire.py")'),
     ]
     check(sorted(n for n, _ in calls) == declared,
           f"the call list is not the module's public surface; only in the "
@@ -476,8 +496,11 @@ def group_absent(tmpdir, verbose):
     does not name the name being asked for.
     """
     absent = [
-        # One `file(1)` subprocess away — `platform()` itself, `architecture()`.
-        "platform", "architecture",
+        # One composition away, and what it is composed of is here: `platform()`
+        # itself, which is `uname` + `mac_ver` + `system_alias` + `architecture`
+        # and one string-formatting helper
+        # (bugs/FORMAL_platform_one_call_from_answered.md).
+        "platform",
         # Subprocesses and a readable file.
         "processor", "libc_ver",
         # No Python on this image.
@@ -562,6 +585,114 @@ def group_arch(tmpdir, verbose):
     return True, "machine() names the image's own architecture on arm64 and x86_64"
 
 
+def group_architecture(tmpdir, verbose):
+    """`architecture(path)`, both halves, against CPython's own answer.
+
+    THE CORPUS IS THE FOUR SHAPES OF FILE, not one path. CPython's answer is
+    `file -b`'s output parsed for `32-bit`/`64-bit` and one of `Mach-O`/`ELF`/
+    `PE`/`COFF`/`MS-DOS`, so it has four shapes and a matcher that only knows
+    one of them is a matcher with a bug in it:
+
+      * a Mach-O executable — one header, one magic;
+      * a FAT/universal binary, which is EVERY SYSTEM TOOL on an Apple Silicon
+        macOS: `/bin/ls` is "Mach-O universal binary with 2 architectures",
+        two headers behind a slice table, big-endian offsets and little-endian
+        slice magics. Answering "not a Mach-O" here is a wrong answer on the
+        most ordinary path a caller can name, and it is why
+        `os/_syscalls.mojo`'s `fs_macho_bits` walks the table;
+      * a file that is not a Mach-O at all (a text file), and a DIRECTORY, and
+        a path that is not there — all three answer CPython's DEFAULT width
+        with an empty linkage, because CPython returns its presets unchanged
+        when it cannot read the format.
+
+    arm64 only, and the reason is that the answer is a property of the FILE and
+    not of the image reading it: the same path gives the same answer on either
+    backend, and the group that runs both is `arch`.
+    """
+    cases = [
+        ("a single-architecture Mach-O", sys.executable),
+        ("a FAT/universal binary", "/bin/ls"),
+        ("another system tool", "/bin/cat"),
+        ("a text file", "README.md"),
+        ("a directory", "formal"),
+        ("a path that is not there", os.path.join(tmpdir, "no-such-file")),
+    ]
+    body = ["import platform",
+            "from platform import architecture_bits, architecture_linkage",
+            "",
+            "def show(p):",
+            '    printf("%s %s@@", architecture_bits(p), '
+            "architecture_linkage(p))", "",
+            "def main(n):"]
+    for _, p in cases:
+        body.append('    show("%s")' % p.replace("\\", "\\\\").replace('"', '\\"'))
+    body.append("    return 0")
+    got = _program("architecture", "\n".join(body) + "\n")
+    recs = [r for r in got.split("@@") if r.strip()]
+    check(len(recs) == len(cases),
+          f"architecture: image reported {len(recs)} of {len(cases)}")
+    bad = []
+    for (what, p), v in zip(cases, recs):
+        b, l = platform.architecture(p)
+        want = f"{b} {l}"
+        if v != want:
+            bad.append(f"{what} ({p}): image {v!r}, CPython {want!r}")
+    check(not bad, f"architecture: {len(bad)} of {len(cases)} differ; first: "
+                   + (bad[0] if bad else ""))
+    # A MACHO DYLIB is the fourth shape, and the only one this repository can
+    # name without inventing a path: `file -b` calls it a "shared object", which
+    # is the other string CPython's parser accepts, and it has a different
+    # filetype (MH_DYLIB) from an executable. It only exists after a build has
+    # made one, so it is looked for AFTER the program above has run and the case
+    # is added to the same comparison — never skipped silently, and skipped
+    # LOUDLY if the cas has no dylib yet.
+    lib = _a_built_dylib()
+    if lib is None:
+        if verbose:
+            print("    NOTE: no formal dylib in the cas yet, so the "
+                  "MH_DYLIB case did not run")
+    else:
+        got1 = _program("architecture_dylib",
+                        "import platform\n"
+                        "from platform import architecture_bits, "
+                        "architecture_linkage\n\n"
+                        "def main(n):\n"
+                        '    printf("%s %s@@", '
+                        'architecture_bits("' + lib + '"),\n'
+                        '           architecture_linkage("' + lib + '"))\n'
+                        "    return 0\n")
+        v = [r for r in got1.split("@@") if r.strip()]
+        check(len(v) == 1,
+              f"architecture: the dylib case reported {len(v)} records")
+        b, l = platform.architecture(lib)
+        want = f"{b} {l}"
+        check(v[0] == want,
+              f"a dylib ({lib}): image {v[0]!r}, CPython {want!r}")
+        cases.append(("a Mach-O dylib", lib))
+    if verbose:
+        print(f"    {len(cases)} paths: a Mach-O, two universal binaries, a "
+              f"dylib, a text file, a directory, a missing path")
+    return True, (f"{len(cases)} architecture() answers agree with CPython, "
+                  f"universal binaries and dylibs included")
+
+
+def _a_built_dylib():
+    """One formal-built dylib in the cas, or None.
+
+    `formal.build.cas_dir` is where `formal/imports.py` puts them, and the
+    `*syscalls*` name is the one every `os`-importing program links, so the
+    glob finds one after any build in this suite has run.
+    """
+    import glob
+    import formal.build as B
+    for pat in ("formal-imports/arm64/*syscalls*.dylib",
+                "formal-imports/x86_64/*syscalls*.dylib"):
+        hits = sorted(glob.glob(os.path.join(B.cas_dir(), pat)))
+        if hits:
+            return hits[-1]
+    return None
+
+
 GROUPS = {
     "resolve": group_resolve,
     "uname": group_uname,
@@ -569,6 +700,7 @@ GROUPS = {
     "macver": group_macver,
     "alias": group_alias,
     "free": group_free,
+    "architecture": group_architecture,
     "arch": group_arch,
     "exports": group_exports,
     "absent": group_absent,

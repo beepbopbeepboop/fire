@@ -431,6 +431,26 @@ def fs_lseek(fd, off, whence) -> int:
     return lseek(fd, off, whence)
 
 
+def fs_read(fd, buf, n) -> int:
+    """`read(fd, buf, n)`: bytes read, 0 at end of file, -1 on failure.
+
+    THE MISSING THIRD of the descriptor calls, and the one every other
+    descriptor function above is waiting for: `fs_open_ro`, `fs_lseek` and
+    `fs_close` can open a file and find its size and cannot read a byte of it,
+    which is why `io`'s streams, `platform.architecture` and `libc_ver` are all
+    absent (the first and last two are named at the definitions that want them,
+    and the stream argument is `bugs/FORMAL_glob_copy_collections_io_not_
+    attempted.md`). Three fixed arguments and no fourth, which is `read(2)`'s
+    own signature: the C library's `fread` takes a `FILE *` and this path has no
+    `FILE`, and `read` is the call that works on a bare descriptor.
+
+    A short read is not an error and is not retried: `n` bytes is what the
+    caller asked for and this is what arrived, which is the same contract C has.
+    The caller loops.
+    """
+    return read(fd, buf, n)
+
+
 def fs_mkdir(p, mode) -> int:
     """`mkdir(p, mode)`: 0 on success, -1 with EEXIST if it is already there."""
     return mkdir(p, mode)
@@ -623,6 +643,188 @@ def le64(b: Pointer[UInt8], i) -> int:
     k = 0
     while k < 8:
         v = v + b[i + k] * (1 << (8 * k))
+        k = k + 1
+    return v
+
+
+MACHO_WIDTH = 0
+MACHO_EXECUTABLE = 1
+
+
+def fs_macho_field(p, which) -> int:
+    """One fact about the Mach-O at `p`, chosen by `which`.
+
+    `which` is `MACHO_WIDTH` (32, 64, or 0 when `p` is not a Mach-O at all) or
+    `MACHO_EXECUTABLE` (1 or 0). ONE function and a parameter rather than two
+    functions, because the answer to either needs the other's work: a FAT
+    header has to be walked to reach either, and two walkers are two things to
+    be wrong about a slice table.
+
+    THE WIDTH, read rather than assumed, from the magic at offset 0 of each
+    header:
+
+        0xFEEDFACF   64-bit   -> 64
+        0xFEEDFACE   32-bit   -> 32
+        0xCAFEBABE   a FAT binary: several Mach-Os, each with its own header
+        0xCAFEBABF   the 64-bit-offset FAT
+        anything else         -> 0
+
+    THE FAT CASE IS NOT A CORNER, it is `/bin/ls`, `/bin/cat` and every other
+    system tool on an Apple Silicon macOS: `/bin/ls` is "Mach-O universal binary
+    with 2 architectures: [x86_64:Mach-O 64-bit executable x86_64] [arm64e:
+    Mach-O 64-bit executable arm64e]", and calling that "not a Mach-O" would
+    make `platform.architecture("/bin/ls")` disagree with CPython on the most
+    ordinary path a caller can name. So a fat header is walked: the slice count
+    at offset 4, then one `struct fat_arch` per slice, and each slice's own
+    header read at the offset that entry gives.
+
+    The rule for the WIDTH of a fat binary is CPython's own: its `architecture`
+    looks for `'32-bit'` anywhere in `file -b`'s output before it looks for
+    `'64-bit'`, and for a fat binary that output is one line per slice — so 32
+    if ANY slice is 32-bit, else 64 if any is 64-bit, else 0.
+
+    `MACHO_EXECUTABLE` IS NOT "IS A MACHO-O", and the difference is CPython's
+    parser being older than `file(1)`. CPython accepts a file whose `file -b`
+    output contains the word `executable` or the phrase `shared object`:
+
+        if 'executable' not in fileout and 'shared object' not in fileout:
+            return bits, linkage          # the presets, unchanged
+
+    and this macOS's `file` prints "Mach-O 64-bit dynamically linked shared
+    library" for a dylib — never the phrase `shared object` — so CPython
+    answers `architecture(dylib)` as `('64bit', '')` here, MEASURED, and
+    `'Mach-O'` for an executable. Emulating that is this function's whole
+    reason: the module that reads it, `platform.architecture`, is a MIRROR of
+    CPython's, and a dylib answered `'Mach-O'` would be a right answer that
+    disagrees with the thing being mirrored. It reads the header's `filetype`
+    field (offset 12; `MH_EXECUTE` is 2), which is where `file` reads it too.
+
+    LITTLE-ENDIAN SLICES ONLY, and stated rather than implied: the slice headers
+    are read with `le32`, so a big-endian slice reads as its byte-reverse and is
+    not recognised. That is not a gap on this target — both architectures
+    `formal` emits are little-endian and no macOS slice is big-endian — but it IS
+    a fact about the answer rather than about the world, and a reader should not
+    have to derive it from the `le32`. The FAT HEADER, by contrast, is
+    big-endian on disk (see `be32`).
+
+    0 for anything that is not a Mach-O — a text file, a directory, a path that
+    is not there — and that is the answer the caller needs rather than an error:
+    it is what makes `architecture` fall back to CPython's own "format not
+    supported" branch instead of claiming a width it did not read. The file is
+    opened, read and closed here rather than handed back, because a descriptor
+    cannot cross a dylib boundary and neither can the header it read.
+    """
+    var fd = fs_open_ro(p)
+    if fd < 0:
+        return 0
+    var buf: Pointer[UInt8] = str_alloc(8)
+    var n = fs_read(fd, buf, 4)
+    if n < 4:
+        fs_close(fd)
+        return 0
+    var m = le32(buf, 0)
+    if m == 4277009103 or m == 4277009102:
+        # One header, not a table: read its `filetype` and answer both.
+        var exe = 0
+        if which == MACHO_EXECUTABLE:
+            if fs_lseek(fd, 12, 0) < 0:
+                fs_close(fd)
+                return 0
+            if fs_read(fd, buf, 4) < 4:
+                fs_close(fd)
+                return 0
+            if le32(buf, 0) == 2:
+                exe = 1
+        fs_close(fd)
+        if which == MACHO_EXECUTABLE:
+            return exe
+        if m == 4277009103:
+            return 64          # 0xFEEDFACF
+        return 32              # 0xFEEDFACE
+    var wide = 0
+    if m == 3199925962:
+        wide = 0               # 0xCAFEBABE, read little endian
+    elif m == 3215774410:
+        wide = 1               # 0xCAFEBABF, the 64-bit-offset FAT
+    else:
+        fs_close(fd)
+        return 0
+    # The slice count, BIG endian: a fat header is written by a tool that had
+    # to be readable on a big-endian machine, so this one field is read the
+    # other way round from every other header here. The bytes are the same
+    # either way; only the order differs.
+    n = fs_read(fd, buf, 4)
+    if n < 4:
+        fs_close(fd)
+        return 0
+    var count = be32(buf, 0)
+    # One `struct fat_arch` is 20 bytes, or 32 for the 64-bit-offset FAT, and
+    # `offset` is its THIRD field — cputype and cpusubtype come first — so the
+    # read seeks to entry+8 rather than to the entry.
+    var step = 20
+    if wide == 1:
+        step = 32
+    var best = 0
+    var exe = 0
+    var k = 0
+    while k < count and k < 64:
+        if fs_lseek(fd, 8 + step * k + 8, 0) < 0:
+            break
+        var at = 0
+        if wide == 1:
+            n = fs_read(fd, buf, 8)
+            if n < 8:
+                break
+            at = be64(buf, 0)
+        else:
+            n = fs_read(fd, buf, 4)
+            if n < 4:
+                break
+            at = be32(buf, 0)
+        if fs_lseek(fd, at, 0) < 0:
+            break
+        n = fs_read(fd, buf, 16)
+        if n < 16:
+            break
+        var sm = le32(buf, 0)
+        if sm == 4277009102:
+            best = 32          # a 32-bit slice wins, as CPython's scan does
+        elif sm == 4277009103 and best == 0:
+            best = 64
+        if le32(buf, 12) == 2:
+            exe = 1
+        k = k + 1
+    fs_close(fd)
+    if which == MACHO_EXECUTABLE:
+        return exe
+    return best
+
+
+def be16(b: Pointer[UInt8], i) -> int:
+    """The big-endian 16-bit field at byte `i` of `b`. See `le16`."""
+    return 256 * b[i] + b[i + 1]
+
+
+def be32(b: Pointer[UInt8], i) -> int:
+    """The big-endian 32-bit field at byte `i` of `b`.
+
+    BIG ENDIAN, and the reason this exists at all: a FAT Mach-O header is
+    written by a tool that had to be readable on a big-endian machine, so its
+    slice count and every `struct fat_arch` offset are big-endian while the
+    slice's own header is not (`fs_macho_bits` reads that one with `le32`).
+    Two byte orders in one header, which is exactly the kind of thing a
+    transcription gets wrong silently — so the reader is named for what it does
+    rather than left as an expression.
+    """
+    return 16777216 * b[i] + 65536 * b[i + 1] + 256 * b[i + 2] + b[i + 3]
+
+
+def be64(b: Pointer[UInt8], i) -> int:
+    """The big-endian 64-bit field at byte `i` of `b`. A LOOP, as `le64` is."""
+    var v = 0
+    var k = 0
+    while k < 8:
+        v = v * 256 + b[i + k]
         k = k + 1
     return v
 
