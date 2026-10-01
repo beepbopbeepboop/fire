@@ -810,32 +810,6 @@ def _build_sys_stdin_read(b):
     return CallExpr(func=IdentExpr(name='mojo_stdin_read'), args=[])
 
 
-# `sys.stdout.write(s)` and friends. `sys.<stream>` is a POSIX fd boxed as
-# an opaque handle (emit_exprs.py's sys-stream case), so `.write()` on it
-# has to go to the fd. Without these rules the call reached the generic
-# unknown-method stub, which emitted `int_write(1, s)` — the integer 1 used
-# as a `FILE *`, faulting inside fputs. Mirrors the `sys_stdin_read` rule
-# above: same "no file-object model, so name the real operation" shape.
-#
-# Only the DIRECT `sys.<stream>.write(...)` form. A stream aliased to a
-# local first (`out = sys.stdout; out.write(...)`) is NOT rewritten — by
-# the time the call is seen, the receiver is a plain int64_t and there is
-# nothing left to tell it apart from any other integer. See
-# CODEGEN_stream_handle_alias_has_no_type.
-def _sys_stream_write(fd):
-    def _build(b):
-        return CallExpr(func=IdentExpr(name='mojo_stream_write'),
-                        args=[IntLiteral(value=fd), b['s']])
-    return _build
-
-
-def _sys_stream_write_pattern(stream):
-    return P.call(func=P.member(obj=P.member(obj=P.ident('sys'),
-                                            member=Lit(stream)),
-                                member=Lit('write')),
-                  args=Seq(Var('s')))
-
-
 # re.MULTILINE etc. are plain integer flag constants in real Python (values
 # per cpython's re module: I=2, M=8, S=16, X=64). `import re` binds `re` to
 # a bare marker (see _gen_stmt_ImportStmt), so `re.MULTILINE` has no runtime
@@ -898,21 +872,6 @@ RULES = [
         pattern=P.member(obj=Var('x'), member=Lit('stderr')),
         build=_build_subprocess_stderr,
         guard=_not_sys_stream,
-    ),
-    RewriteRule(
-        name='sys_stdout_write',
-        pattern=_sys_stream_write_pattern('stdout'),
-        build=_sys_stream_write(1),
-    ),
-    RewriteRule(
-        name='sys_stderr_write',
-        pattern=_sys_stream_write_pattern('stderr'),
-        build=_sys_stream_write(2),
-    ),
-    RewriteRule(
-        name='sys_stdin_write',
-        pattern=_sys_stream_write_pattern('stdin'),
-        build=_sys_stream_write(0),
     ),
     RewriteRule(
         name='sys_stdin_read',

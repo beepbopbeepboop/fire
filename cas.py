@@ -93,80 +93,23 @@ _COMPILER_SOURCES = [
     # ownership_check's diagnostics gate real emission paths.
     'ownership_check.py', 'ownership_destruct.py', 'regex_compile.py',
 ]
-def _list_py_files(root, prefix=None, suffix=None, recursive=True):
-    """Every `*.py` under `root`, recursively, via `os.listdir`.
-
-    NOT `glob.glob`, and the reason is the self-hosted binary rather than
-    taste. `glob` is not one of the modules compiled into it, and a call on an
-    uncompiled module is a RAISE (`emit_methods`' module-marker rule: a program
-    that computes with a marker where it named an object deserves to be told).
-    So a `glob.glob` at module scope here took the self-hosted compiler down at
-    import — `NotImplementedError: glob.glob: module 'glob' is not compiled into
-    this binary`, before it compiled anything.
-
-    It was survivable for exactly the wrong reason, which is what made it worth
-    changing rather than documenting: the old call answered 0 SILENTLY, so both
-    lists below came out EMPTY in that binary and the fingerprints were
-    computed over no sources at all — the same silently-stale-cache failure this
-    enumeration exists to prevent, hiding behind a green run. `os.listdir` is
-    what the tree already uses for the same reason (`gimple_codegen.
-    _selfhost_impl_py_files`, whose docstring records the measurement).
-
-    `prefix`/`suffix` are the literal ends of the name (`'gimple_'`, `'.py'`),
-    spelled literally because `fnmatch` is another uncompiled module and
-    `startswith`/`endswith` is the whole of what the globs did.
-
-    `recursive=False` for the top-level `gimple_*` scan, because the glob it
-    replaces was `'gimple_*.py'` — THIS directory only. Recursing found six more
-    matches under the worktrees this repo is worked from (`.tmp/` holds other
-    checkouts, each with its own `gimple_codegen.py`), which is the second half
-    of why the lists must match a glob: a key that hashes a file in a
-    neighbouring worktree is a key that changes when someone else's checkout
-    does.
-    """
-    out = []
-    try:
-        names = sorted(os.listdir(root))
-    except OSError:
-        return out
-    for n in names:
-        full = os.path.join(root, n)
-        if os.path.isdir(full):
-            if not recursive or n == '__pycache__':
-                continue
-            out.extend(_list_py_files(full, prefix, suffix))
-        elif n.endswith('.py') and (not prefix or n.startswith(prefix)):
-            out.append(full)
-    return out
-
-
-for _p in _list_py_files(HERE, prefix='gimple_', recursive=False):
+import glob as _glob
+for _p in sorted(_glob.glob(os.path.join(HERE, 'gimple_*.py'))):
     _COMPILER_SOURCES.append(os.path.basename(_p))
 # The actual compiler implementation (post-2026-09 package split). Paths are
 # repo-relative with forward slashes so the fingerprint is host-OS-stable.
-for _p in _list_py_files(os.path.join(HERE, 'mojo')):
+for _p in sorted(_glob.glob(os.path.join(HERE, 'mojo', '**', '*.py'),
+                            recursive=True)):
+    if '__pycache__' in _p.split(os.sep):
+        continue
     _COMPILER_SOURCES.append(os.path.relpath(_p, HERE).replace(os.sep, '/'))
 
 # Runtime ABI: every cached object is compiled against this header (and links the
 # runtime). A change to either MUST invalidate the cache, or stale objects link
 # against a mismatched ABI. These live under runtime/, not next to the .py files.
-# fire_metal.m/.h were MISSING here, and that is not a theoretical gap: the
-# whole Metal runtime lives in them -- dispatch, pipeline creation, buffer
-# allocation, the copy-back. A change to any of it left every cache key
-# unchanged, so build/libmojostdlib.<arch>.dylib was served STALE and a
-# measurement of a "no improvement" change was really a measurement of the
-# previous binary. Caught by: instrumenting the runtime with an fprintf, seeing
-# no output, and asking why. A change that cannot be observed is a change that
-# was never tested, and the cache was hiding that.
-#
-# They are built by a different compiler (clang -fobjc-arc, not cc) and link
-# Metal rather than nothing, which is exactly why they were overlooked: nothing
-# in the C path includes them.
 _RUNTIME_SOURCES = [
     os.path.join('runtime', 'fire_runtime.h'),
     os.path.join('runtime', 'fire_runtime.c'),
-    os.path.join('runtime', 'fire_metal.h'),
-    os.path.join('runtime', 'fire_metal.m'),
 ]
 
 # In-process hit/miss instrumentation (and reset for tests).
@@ -205,26 +148,6 @@ def compiler_fingerprint() -> str:
                     h.update(f.read())
             except FileNotFoundError:
                 h.update(b'\0missing:' + name.encode())
-        # Environment variables that change the GENERATED CODE.
-        #
-        # These are invisible to a content-addressed cache by construction: the
-        # files on disk are identical for MOJO_GEMM_FUSE=0 and =1, so both
-        # fingerprints come out equal and the second run is served the first
-        # run's binary. That is not hypothetical -- it produced an A/B
-        # comparison in which BOTH arms reported the fused kernel's dispatch
-        # count, and the fusion "win" it appeared to show was measured against a
-        # stale artifact. Same class as fire_metal.m missing from
-        # _RUNTIME_SOURCES: a cache that cannot see an input will confidently
-        # serve the wrong binary.
-        #
-        # Only variables that affect emitted code belong here. One that merely
-        # tunes a threshold at runtime (MOJO_OFFLOAD_MIN_ELEMENTS) does NOT
-        # change the generated C, so it is deliberately absent -- adding it
-        # would invalidate the cache on every threshold experiment for nothing.
-        for _var in ('MOJO_GEMM_TENSOR_CORES', 'MOJO_GEMM_FUSE'):
-            h.update(b'\0env:' + _var.encode() + b'='
-                     + os.environ.get(_var, '').encode())
-
         # Fold in the compiler version as a coarse epoch + safety net: a new
         # commit (or a dirty tree) bumps it, invalidating across versions even if
         # a relevant file were missing from the list above.
@@ -255,23 +178,14 @@ _toolchain_fp_cache = {}
 # explicitly and then CHECKED (see `selfhost_closure_is_complete`).
 #
 # The list is a superset-by-enumeration, not a live import walk, because a walk
-# would silently change meaning as the code moves. The two checks below are what
-# keep the enumeration honest — `selfhost_closure_is_complete` for the NARROW
-# direction (a file the walk reaches that nothing hashes) and
-# `selfhost_extra_is_justified` for the WIDE one (a file nothing reaches that
-# the key still hashes).
-#
-# A self-host entry point is a file that is run, not imported, so no walk from
-# `fire.py` can ever reach it. Each is hashed because its content changes what
-# the artifact does, and each is listed here so `selfhost_extra_is_justified`
-# can accept it without inventing a second, unstated exception.
-_SELFHOST_ENTRIES = ['fire.py', 'fire_main.py']
-
+# would silently change meaning as the code moves. The check below is what
+# keeps the enumeration honest.
 _SELFHOST_EXTRA = [
     'fire.py',            # the CLI/entry point everything is dumped through
-    'fire_main.py',       # a second entry point: run, never imported
+    'fire_main.py',
     'myinterpreter.py',   # the interpreter the self-hosted closure embeds
     'driver.py',          # link-mode's entry, read by fire.py build
+    'build_mojo_cli.py',
     'elaborate.py',       # already in _COMPILER_SOURCES; named for clarity
     # Reached by the import walk in `selfhost_closure_is_complete`, so named
     # here for that check to stay silent. Whether each one can actually change
@@ -370,73 +284,6 @@ def selfhost_closure_is_complete(entry: str = 'fire.py') -> tuple:
                         queue.append((grp, cand))
                         break
     return missing, seen
-
-
-def selfhost_extra_is_justified(entries=None) -> tuple:
-    """The OTHER direction of the self-host key, and the one that was unchecked.
-
-    `selfhost_closure_is_complete` above is one-directional by design: it
-    reports files the import walk REACHES that the key does not hash. It is
-    silent about the reverse — a file the key hashes that nothing reaches — and
-    that is not a harmless gap. `build_mojo_cli.py` sat in `_SELFHOST_EXTRA`
-    for its whole life with no importer, no Makefile rule and no caller, a
-    second producer of the `build/mojo` CLI script sitting next to the real
-    one, and nothing in the tree could see it: over-wide is the direction the
-    comment above `_SELFHOST_EXTRA` accepts ("only costs a rebuild"), but it is
-    a live dependency on a file one `git rm` from being unbuildable, sitting in
-    the key for the binary whose entire purpose is to be trusted across a
-    self-host chain.
-
-    Returns `(missing, unreached, reached)`. The invariant is that the first
-    two are EMPTY, i.e. every file
-    `selfhost_fingerprint()` hashes
-
-      * exists on disk (`missing`) — the fingerprint tolerates an absent file
-        by folding `\0missing:` into the key, which makes a deleted input look
-        like a present one rather than failing, so the key would go on
-        covering something that is not there; and
-
-      * is EARNED: a declared entry point (`_SELFHOST_ENTRIES`, which is run
-        rather than imported and so no walk can reach), a member of
-        `_COMPILER_SOURCES` or `_RUNTIME_SOURCES`, or reached by the walk from
-        one of those entries (`unreached` names the residue).
-
-    Both halves are cheap and both have failed silently: a hash of a 54-file
-    closure is microseconds, against a whole self-host build.
-
-    Returns `(missing, unreached, reached)`, and the shapes below are chosen
-    for the SELF-HOSTED path, which is not an optimisation. This file is in
-    its own compiled closure, and on that path every AST node is an
-    int64_t-boxed pointer (see `mojo/middle/infra_infer.py`'s own notes on
-    boxed parameters). The first version of this function used `set(a) |
-    set(b) | set(c)` and `set(x) - y - z`, and the self-host build rejected it
-    with four hard errors in this very function --
-    `passing argument 1 of 'mojo_list_len'/'mojo_list_get_str'/... makes
-    pointer from integer without a cast`, i.e. a set union of three lists of
-    strings lowered to reading list slots off a scalar. `update()` on a set
-    built by `add`, two membership tests in a comprehension over a plain list,
-    and a 3-tuple return are the shapes this codegen already lowers
-    correctly everywhere else in the closure. A performance-adjacent helper in
-    `cas.py` that the self-host build cannot compile is worse than no helper.
-    """
-    entries = list(_SELFHOST_ENTRIES if entries is None else entries)
-    reached = set()
-    for entry in entries:
-        for path in selfhost_closure_is_complete(entry)[1]:
-            reached.add(path)
-    hashed = selfhost_inputs()
-    missing = sorted(n for n in hashed
-                     if not os.path.isfile(os.path.join(HERE, n)))
-    earned = set()
-    for name in entries:
-        earned.add(name)
-    for name in _COMPILER_SOURCES:
-        earned.add(name)
-    for name in _RUNTIME_SOURCES:
-        earned.add(name)
-    unreached = sorted(n for n in hashed
-                       if n not in reached and n not in earned)
-    return missing, unreached, reached
 
 
 def toolchain_fingerprint(gcc: str, flags: tuple = ()) -> str:
@@ -588,9 +435,14 @@ def runtime_fingerprint() -> str:
 # globbed because formal/*.py reaches into it (boundnames, closures, and their
 # own imports) — it is a subtree rather than an enumeration for that reason.
 _FORMAL_SOURCES = ['fire.py', 'fire_compiler.py']
-for _p in _list_py_files(os.path.join(HERE, 'formal')):
+for _p in sorted(_glob.glob(os.path.join(HERE, 'formal', '**', '*.py'),
+                            recursive=True)):
+    if '__pycache__' in _p.split(os.sep):
+        continue
     _FORMAL_SOURCES.append(os.path.relpath(_p, HERE).replace(os.sep, '/'))
-for _p in _list_py_files(os.path.join(HERE, 'mojo', 'middle')):
+for _p in sorted(_glob.glob(os.path.join(HERE, 'mojo', 'middle', '*.py'))):
+    if '__pycache__' in _p.split(os.sep):
+        continue
     _FORMAL_SOURCES.append(os.path.relpath(_p, HERE).replace(os.sep, '/'))
 
 _formal_fp_cache = None
@@ -622,7 +474,7 @@ def formal_fingerprint() -> str:
 # ── Compile-to-GIMPLE keys ─────────────────────────────────────────────
 
 def compile_key(source: str, do_imports: bool, filename: str = "",
-                deps_digest: str = "", auto_gpu: bool = True) -> str:
+                deps_digest: str = "") -> str:
     """Key (`compile/<hash>`) for caching compile_to_gimple output (.ci).
 
     Folds in the entry source, do_imports mode, filename, ABI_VERSION, the
@@ -630,49 +482,25 @@ def compile_key(source: str, do_imports: bool, filename: str = "",
     against stdlib sources even when not inlined). `deps_digest` must cover
     every non-stdlib source the compile can read — the sibling-import closure
     (see gimple_codegen._dep_sources_digest) — so editing an imported file
-    invalidates the cached .ci.
-
-    `auto_gpu` is in the key because it changes the OUTPUT, not just how it
-    is produced: with it False, a recognised parallel loop nest gets no
-    synthesised device kernel, so the .ci has a different function set and a
-    different MSL sidecar. Leaving it out would serve a cached GPU build to a
-    `--no-gpu` request, which is exactly the silent-wrong-output class this
-    cache exists to avoid."""
-    # The auto-offload trip-count floor is in the key for the same reason
-    # `auto_gpu` is: it changes the OUTPUT, because it decides whether the
-    # host keeps its loop or gains a dispatch. Measured, not reasoned about --
-    # with the floor at 0 a two-call program dispatched twice, and re-running
-    # it with the floor at 90000 served the CACHED floor-0 binary and still
-    # dispatched twice, because nothing in the key had moved. An override that
-    # silently does nothing is worse than no override.
+    invalidates the cached .ci."""
     return 'compile/' + _hash(
         'mojo-compile-v1', ABI_VERSION, compiler_fingerprint(),
         stdlib_fingerprint(), source, 't' if do_imports else 'f',
-        filename, deps_digest, 'gpu' if auto_gpu else 'nogpu',
-        'minel:' + os.environ.get('MOJO_OFFLOAD_MIN_ELEMENTS', ''),
+        filename, deps_digest,
     )
 
 
-def stdlib_compile_key(source: str, path: str, module_name: str,
-                       extra: str = '') -> str:
+def stdlib_compile_key(source: str, path: str, module_name: str) -> str:
     """Key (`stdlib-compile/<hash>`) for caching compile_module_to_c output (.ci).
 
     Covers the module source, its file path, its module name, the compiler
     fingerprint, and the stdlib fingerprint — a stdlib module's generated C
     depends on its imports' signatures/layouts, and those imports are
     themselves stdlib modules, so the whole-stdlib fingerprint covers the
-    closure without tracing it.
-
-    `extra` is for a caller whose ARTIFACT differs from the default one for the
-    same three inputs. `compile_module_to_c_cached`'s `linkable=False` uses it:
-    a `.ci` published with no link-line check on it must not be reachable by a
-    caller that will link it, or the dylib build would republish the dangling
-    `_mojogen_*` reference its refusal exists to refuse. Without `extra` the two
-    artifacts would share one key, and a cache is exactly where a distinction
-    that exists only in a parameter would be lost."""
+    closure without tracing it."""
     return 'stdlib-compile/' + _hash(
         'mojo-stdlib-compile-v1', ABI_VERSION, compiler_fingerprint(),
-        stdlib_fingerprint(), source, path, module_name, extra,
+        stdlib_fingerprint(), source, path, module_name,
     )
 
 
@@ -692,40 +520,19 @@ def gcc_syntax_key(gcc_variant: str, flags: tuple, c_source: str) -> str:
 
 
 def formal_build_key(source: str, path: str, flags: tuple = (),
-                     criteria: str = '', imports: str = '') -> str:
+                     criteria: str = '') -> str:
     """Key (`formal/<hash>`) for caching one `build --formal` VERDICT.
 
     The same contract as every other key here — ABI version + a compiler-source
     fingerprint + a toolchain + the exact source bytes — specialised for the
-    formal backend, which has no gcc:
+    formal backend, which has no gcc and resolves no imports:
 
       * "compiler" is formal_fingerprint() (formal/**, the parser, mojo/middle);
       * "toolchain" is the Python interpreter that runs the in-process arm64
         emitter, plus the flags, since the emitted code depends on both;
-      * "imports" is `formal.imports.import_closure_digest(path)` — every source
-        the build reads BESIDES the entry file. `compile_formal` skips an
-        import statement, but it does not skip the IMPORT: `formal/build.py`'s
-        `_resolve_imports` compiles every module in the file's transitive
-        closure into a dylib and links it, so the module's bytes decide which
-        symbols the image binds, whether the build succeeds at all, and the
-        image's whole dependency set. A module that cannot be resolved IS also
-        the verdict (`not-answerable/host-import`), which is why the closure
-        digest records unresolved names too.
-
-        This clause used to say the opposite — "imported signatures do not
-        exist here … a stdlib edit cannot change this artifact" — and that was
-        true when it was written and stopped being true when `formal/imports.py`
-        stopped modelling modules and started COMPILING them. It was the
-        sentence that would be read next time somebody wondered whether an
-        import belongs in this key, which is why it is replaced rather than
-        amended: `stdlib_fingerprint()` is still deliberately NOT folded in
-        (it is the whole stdlib, and a build reads a handful of files out of
-        it), and the closure digest is what replaces it as the honest scope.
-
-        `imports=''` — the default — is the pre-fix behaviour, and callers that
-        cache a verdict MUST pass it. It is a default rather than a required
-        argument so that the few callers which cache something narrower than a
-        verdict (a per-module dylib key, say) keep saying so in one word.
+      * "imported signatures" do not exist here — compile_formal compiles one
+        file and skips its import statements, so a stdlib edit cannot change
+        this artifact and stdlib_fingerprint() is deliberately not folded in.
 
     `path` only enters the key through the source it names, but is kept for
     diagnostics in the store. `flags` must carry every build flag that changes
@@ -746,7 +553,6 @@ def formal_build_key(source: str, path: str, flags: tuple = (),
         toolchain_fingerprint(sys.executable, flags),
         source,
         criteria,
-        imports,
     )
 
 

@@ -32,11 +32,10 @@ number that disagrees is stale, not wrong; the name is the claim.
 ## 1. The thesis
 
 `fire.py` has two machine-code backends. The gimple backend emits C, links
-`runtime/fire_runtime.c` (486 KB) plus the other runtime translation units, and
+`runtime/fire_runtime.c` (299 KB) plus the other runtime translation units, and
 hands the result to a system linker. The formal backend emits Mach-O or ELF
-itself, links **libSystem, and — since phase 2 landed — the per-architecture
-runtime dylib when and only when the image names something in it**, and carries
-a Lean model of the machine it emitted.
+itself, links **libSystem and nothing else**, and carries a Lean model of the
+machine it emitted.
 
 They are treated as two languages with two runtimes. They should be **one language
 with one runtime, and a proof about it.** Concretely:
@@ -76,38 +75,27 @@ The formal codegen already lowers a call to an external symbol, emits a `BL` to 
 | stubs + GOT + bind opcodes; ordinal 1 libSystem, `dylibs[k]` → `k+2` | `build_macho_executable_extern`, `formal/macho_linker.py:464` (bind stream at `_bind_info`, `:337`) |
 | `load_dylib_manifests` — a dylib's export spellings rewrite the caller's callee mangling | `formal/build.py:3507` |
 
-`test_formal_dylib.py` covers cross-dylib calls end to end (it builds a
-two-module pair, calls across, and checks the answer), so **"you can already
-handle a function with a function call in it; it is just wiring" is correct
-about the call half.** Its case count is not published here on purpose: a tally
-is a claim about a run, and this document's job is to be a claim about the tree.
-`python3 tools/suite.py --list` has the current figure.
+`test_formal_dylib.py` is 11/11, so cross-dylib calls work end to end. **"You can
+already handle a function with a function call in it; it is just wiring" is
+correct about the call half.**
 
 ### 2.2 A minority of the runtime surface is word-shaped
 
-**Re-measured 2026-10-04.** This section's figures have now moved twice and the
-move is always the same direction: the runtime has grown. `formal.model`'s
+**Corrected 2026-09-28.** The figures this section used to carry — 455 entry
+points, 352 word-returning, 101 box-returning, "20 of 22" for sqlite — are
+stale in *every* number, and one of them is nearly inverted. `formal.model`'s
 `runtime_abi()` is the authority and it reads **every** header in `runtime/`,
 not just `fire_runtime.h`:
 
 | | count | note |
 |---|---|---|
-| entry points across **11** headers | **668** | `fire_runtime.h` 565, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 13, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
-| **word in, word out** | **262** | every parameter and the return value is one 64-bit word |
-| not word-shaped | **406** | a box crosses the boundary — in an argument, in the return, or both |
+| entry points across 10 headers | **540** | `fire_runtime.h` 450, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_ssl.h` 13, `fire_async_runtime.h` 13, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_coro.h` and `fire_wd.h` scan to **zero** |
+| **word in, word out** | **219** | every parameter and the return value is one 64-bit word |
+| not word-shaped | **321** | a box crosses the boundary — in an argument, in the return, or both |
 
-So **262 of 668 (39.2%)** is the reachable-surface ceiling. The previous
-revision of this section published 219 of 540 (40.6%), and before that 352 of
-455 (77%) — the word *share* has been stable near 40% across all three
-censuses, and it is the denominators that moved. Two headers have been added
-since (`fire_coro.h`, `fire_metal.h`), `fire_runtime.h` alone grew by 115
-entry points, and `fire_coro.h` going from zero to 7 is why the header count is
-11 rather than 10.
-
-**Every figure in that table is read out of the document by
-`test_formal_doc_truth.py`, in both directions**, because a census published in
-prose is a census with two copies. That test is also what found the two errors
-this paragraph used to carry, below.
+So **219 of 540 (40.6%)** is the reachable-surface ceiling, against the 352 of
+455 (77%) this section previously claimed. The reachable surface is **smaller**
+than believed, not larger, and the number to beat is 219 rather than 352.
 
 **The word/box split is over parameters AND return, and never was only the
 return.** The old table split by return type alone, which is why it read
@@ -120,197 +108,137 @@ with a word return and a boxed argument is `word: False`.
 `runtime/fire_sqlite3.c` — 22 functions, header and source in exact 1:1
 agreement:
 
-- **16 of 22 are pure word-in/word-out** (`runtime/fire_sqlite3.h`, measured via
-  `runtime_abi` and `runtime_abi_entry`). This section previously said 18, and said 20 before that; both
-  were over-counts, because a `double` crosses the boundary as a word but is not
-  one, and the word flag is about SHAPE.
-- **The six exceptions are named here, not counted**, because a count a reader
-  cannot act on is a number and a list is a census. Four of them are one shape
-  and two are another:
-  - **A `void *` RETURN** — `mojo_sqlite3_query`, `mojo_sqlite3_query_dict`
-    (`runtime/fire_sqlite3.h:17,27`), `mojo_sqlite3_prepare` and
-    `mojo_sqlite3_open`. The model cannot read a return as a word here, because
-    the CALLER is handed the address and may read what is behind it and the
-    header does not say what is behind it. `_query_dict` returns a `MojoList *`
-    whose elements are boxed `MojoDict *`, each stored as the `int64_t`
-    bit-pattern of its pointer (`runtime/fire_sqlite3.c:156-157`).
-  - **A `double`** — `mojo_sqlite3_bind_double` (a `double` argument) and
-    `mojo_sqlite3_column_double` (a `double` return). A `double` is one 64-bit
-    slot and `word: True` would call it portable; it is not, and the float
-    families were closed separately for exactly this reason.
+- **18 of 22 are pure word-in/word-out** (`runtime/fire_sqlite3.h`, measured via
+  `runtime_abi_entry`). This section previously said 20; the correction is
+  recorded in `bugs/FORMAL_known_limits.md` and is right there — `void *`,
+  `int64_t`, `double`, `const char *` in, one word out, directly portable.
+- The exceptions include `mojo_sqlite3_query` and `mojo_sqlite3_query_dict`
+  (`runtime/fire_sqlite3.h:17,27`). The latter returns a `MojoList *` whose
+  elements are boxed `MojoDict *`, each stored as the `int64_t` bit-pattern of
+its pointer (`runtime/fire_sqlite3.c:156-157`). The remaining two are
+`mojo_sqlite3_open`/`_close`, whose `void *` handle is a box on **both** sides.
 
-  `mojo_sqlite3_close` is **not** an exception, and the reason is worth one
-  sentence because the reverse is the intuitive guess: it takes the handle as a
-  `void *` argument and returns `void`, and a `void *` PARAMETER is one word — an
-  address the program hands back to the library that made it, never
-  interpreting it. `mojo_sqlite3_open` is refused on the *same* `void *`
-  spelling, on the other side of the boundary.
+`runtime/fire_python.c` — 15 functions, all word-shaped, with CPython behind
+`#if USE_PYTHON` whose default is **0** (`runtime/fire_python.c:7`). At the default
+the file compiles to 15 stubs with no `<Python.h>` include at all. This is the
+scaffold for "the python runtime can be compiled too", and it already exists.
 
-`runtime/fire_python.c` — 15 functions, **6 of them word-shaped**, with CPython
-behind `#if USE_PYTHON` whose default is **0** (`runtime/fire_python.c:7`). At
-the default the file compiles to 15 stubs with no `<Python.h>` include at all.
-This section called all 15 word-shaped, which was never measured and is false:
-`mojo_python_import`, `_getattr`, `_call`, `_tuple_new`, `_from_int`,
-`_from_double`, `_from_str` and `_call_func` all return a `void *`, and
-`_to_double` returns a `double` — nine non-word entries, which is most of the
-file. The consequence is the same as §6 phase 0's: this surface is
-`gimple`-only in practice whatever the header's arity suggests.
+### 2.3 A runtime dylib already exists
 
-### 2.3 A runtime dylib already exists — and the formal path now links it
+`runtime_dylib()` (`build_stdlib_dylib.py:697`) builds exactly the artifact this
+programme needs: a `-dynamiclib` exporting the `mojo_*` namespace, with an `@rpath`
+install name. It is used today only by the gimple path. The formal linker simply
+is not told about it.
 
-`runtime_dylib()` (`build_stdlib_dylib.py`) builds exactly the artifact this
-programme needs: a `-dynamiclib` exporting the `mojo_*` namespace, with an
-`@rpath` install name, **per architecture** (`-arch arm64` / `-arch x86_64`,
-`build_stdlib_dylib.py::_arch_flags`, verified back with `lipo -archs`).
+### 2.4 The export table can already be read
 
-This section used to end "it is used today only by the gimple path, and the
-formal linker simply is not told about it", and that was true when it was
-written. It is not true now: phase 1 and phase 2 have both landed, the formal
-link line carries this library **when and only when the image names an entry
-point of it**, and the measurement is in §6's phase-2 paragraph.
+`collect_runtime_exports_h` (`reflect.py:566`) scans a runtime header for exported
+functions, and `build_stdlib_dylib.py:750-751` already uses it to populate the
+stdlib dylib's reflection table. A formal-side provider registry has a scanner
+available and needs no new parsing.
 
-### 2.4 The export table can already be read — and the formal linker reads the DYLIB'S
+### 2.5 The refusal is already half shape-aware
 
-`collect_runtime_exports_h` (`reflect.py`) scans a runtime header for exported
-functions, and `build_stdlib_dylib.py` already uses it to populate the stdlib
-dylib's reflection table. That was the scanner phase 1 needed and needed no new
-parsing.
-
-What phase 1 actually built is one step better than this section's proposal,
-and it is worth stating because the proposal would have been wrong: the
-formal-side provider registry is **the dylib's own export trie**, read out of
-the finished image, and *not* a second copy of what the headers declare. The two
-differ in both directions on this tree, so a map built from the headers would
-have passed every "the call works" check and still offered a client a name the
-library does not define. `test_formal_runtime_link.py` asserts both directions.
-
-### 2.5 The refusal is no longer half shape-aware — it is fully shape-aware
-
-`gimple_runtime_refusal` (`formal/model.py`) is a single function shared by
+`gimple_runtime_refusal` (`formal/model.py:4161`) is a single function shared by
 both backends — deliberately, so the two architectures cannot drift in their
-refusals — and it used to special-case `GIMPLE_LIST_PREFIX` with the correct
-reason: those take a `MojoList *`, a heap box the gimple runtime owns, "while a
-list on a formal path is a frame blob whose first word IS its count".
-
-**That constant is gone**, and its docstring says why in the present tense: "a
-hand-kept list of prefixes is a list that rots". The diagnosis is now made per
-type by `_box_why` from `runtime_abi()`'s own `boxes` field, so it covers all
-668 entry points rather than the 40-odd names one prefix happened to cover.
-`is_gimple_runtime_builtin` still answers "is this name the gimple runtime's",
-but the question that now gates a call is `gimple_runtime_callable`, and it asks
-the two questions phase 2 named: is every type crossing the boundary one word,
-and is the symbol on the link line.
+refusals — and it already special-cases `GIMPLE_LIST_PREFIX`
+(`formal/model.py:4148`) with the correct reason: those take a `MojoList *`, a heap
+box the gimple runtime owns, "while a list on a formal path is a frame blob whose
+first word IS its count". The project has diagnosed the precise problem. Phase 2
+generalises the diagnosis from one hand-picked prefix to the whole header.
 
 ---
 
 ## 3. What does not exist
 
-### 3.1 The proof side: three of the four stubs below are CLOSED, and the fourth is named
+### 3.1 The proof side, which is most of the work
 
-At an extern call site, **as of round 1 of §11.1 (2026-09-28)**:
+At an extern call site today:
 
-| what | where | what it asserted then | what it asserts now |
-|---|---|---|---|
-| the call step | `_gen_extern_test`, `formal/arm64_proof_gen.py` | `theorem extern_<sym>_step : True := by trivial` — the trivial proposition | a real obligation: `arm64_step <pre> <code> = some ({<pre> with x30 := …, pc := …} : Arm64State)`, discharged by the file's own per-instruction step lemma at the concrete pre-call state |
-| the post-call state | `formal/arm64_proof_gen.py` | **fabricated** as `{pre with pc := bl+4}`, under the name `…_post_extern`, which read as though the model had followed the call | **still fabricated, and named for it**: `…_post_extern_given_callee_returns`, whose docstring states the premise — the callee is outside the image, so the model cannot execute it |
-| `DylibExport.Semantics` | `lib/ProofLib.lean` | `∀ o, o ∈ [] → True` — vacuously true of *any* export in *any* image, because `formal/arm64_proof_gen.py::dylib_observables` was `[]` | **split into `Total` and `Functional`**, and the observable list is `[id]`, the minimum that makes the clause bite: two runs to the same result agree on the result word |
-| `dylib_export_contract_stub` | `lib/Refine.lean` | `by sorry`, invoked with `obs := fun n => n` — the contract claimed every export is the **identity function** | **deleted**; replaced by an `export_result_spec` obligation plus a proved `dylib_export_contract_of_spec`. The false claim was measured before removal: `export_result dylib_image triple 7 = 21`, a shape the stub could not have distinguished from `7` |
+| what | where | what it actually asserts |
+|---|---|---|
+| the call step | `_gen_extern_test`, `formal/arm64_proof_gen.py:6910` | `theorem extern_<sym>_step : True := by trivial` — the trivial proposition |
+| the post-call state | `formal/arm64_proof_gen.py:6923` | **fabricated** as `{pre with pc := bl+4}`; the callee's effect on registers and memory is discarded, and the following theorem proves a claim about code that ran as if the callee had been deleted |
+| `DylibExport.Semantics` | `lib/ProofLib.lean:4617` | `∀ o, o ∈ [] → True` — vacuously true of *any* export in *any* image, because the observable list is hardcoded empty at `formal/arm64_proof_gen.py:8356` (`def dylib_observables : List (UInt64 → UInt64) := []`) |
+| `dylib_export_contract_stub` | `lib/Refine.lean:660` | `by sorry`, invoked with `obs := fun n => n` — the contract claims every export is the **identity function** |
 
-**The root cause is mechanical and it is STILL the one open item**: `lib/ProofLib.lean`
-gives `BL` a bare `x30`/pc transfer with no callee, and a dylib/libc branch target
-is a stub address *outside the image*, so `arm64_go_exit` returns `none` and the
-model halts. **To make a call provable, the machine model needs call and return
-semantics: a call frame, a callee entry, and return-to-`x30`.** What the four
-rows above changed is that the *consequences* are now either discharged or named,
-which is what makes the remaining cause visible rather than buried under three
-stubs that read like proofs. A named premise is a thing phase 4 can discharge; a
-`True` is not.
+The root cause is mechanical: `lib/ProofLib.lean:1548-1549` gives `BL` a bare
+`x30`/pc transfer with no callee, and a dylib/libc branch target is a stub address
+*outside the image*, so `arm64_go_exit` returns `none` and the model halts. **To
+make a call provable, the machine model needs call and return semantics: a call
+frame, a callee entry, and return-to-`x30`.** Everything in this section is a
+consequence of that one gap.
 
-The x86-64 side is coarser and **has not moved**: it emits **no run tests at all**
-for any program with externs (`formal/x86_64_proof_gen.py::_run_tests_section`'s
-`externs` guard, which explains that the model has no memory for a `__TEXT,__stubs`
-trampoline), and both its end-to-end theorem (`…_compiles_correctly`) and its
-AST⟷bytes theorem `_compile_correct` (`_compile_correct_section`) are still
-unconditional `sorry`. Its `none` branch used to be `True` and is now `False`,
-which is not a proof but is at least no longer a hole shaped like one.
+The x86-64 side is coarser: it emits **no run tests at all** for any program with
+externs (`formal/x86_64_proof_gen.py:460`), and both its end-to-end theorem
+(`:690`) and its AST⟷bytes theorem `_compile_correct` (`_compile_correct_section`,
+`:239`) are unconditional `sorry`.
 
 `formal/x86_64_proof_gen.py:26-31` says this itself: *"A `sorry` in Lean makes the
 theorem ACCEPTED, so a `sorry` here is a claim of trust, not a proof."* The project
 already knows. The programme is to stop needing the claim.
 
 **Consequence for sequencing.** `generate_dylib_proof`
-(`formal/arm64_proof_gen.py`) genuinely produces real content — the code memory
+(`formal/arm64_proof_gen.py:8311`) genuinely produces real content — the code memory
 function, per-instruction decode lemmas, per-instruction step and step-result
-lemmas, and two cardinality theorems — and it typechecks. Its per-export
-*semantic* theorems now rest on `total_of_halts` (proved for an acyclic,
-call-free export) and on a spec obligation, rather than on the stubs above; the
-named `sorry` that remains for a **looping** export is a recorded open item
-(`OPUS.md` §4.1), not a stub. Building the runtime before the model has call
-semantics would still produce exactly that artifact, one level up — which is why
-phase 3 is the gate it is.
+lemmas, and two cardinality theorems — and it typechecks. But its four per-export
+*semantic* theorems rest on the stubs above. It is a well-formed skeleton with the
+meaning removed. Building the runtime before the model has call semantics would
+produce exactly that artifact, one level up.
 
 ### 3.2 The ABI is not unified, and today is incompatible
 
 | | layout | storage |
 |---|---|---|
-| gimple `MojoList` (`runtime/fire_runtime.h`) | `{ int64_t *data; int64_t len; int64_t cap; }` | **heap**, two-level indirection, resizable |
-| formal list (`formal/model.py`, `BLOB_HEADER_BYTES = 8`) | `[count:i64][elem0][elem1]…` | **frame blob**, contiguous, the address is a stack address |
+| gimple `MojoList` (`runtime/fire_runtime.h:257-261`) | `{ int64_t *data; int64_t len; int64_t cap; }` | **heap**, two-level indirection, resizable |
+| formal list (`formal/model.py:49-61`, `BLOB_HEADER_BYTES = 8`) | `[count:i64][elem0][elem1]…` | **frame blob**, contiguous, the address is a stack address |
 
 Word 0 is a data pointer on one side and a count on the other.
-`formal/model.py::_box_why` names this precisely: reading offset 0 of a
+`formal/model.py:4139-4148` already names this precisely: reading offset 0 of a
 `MojoList *` "would be a plausible-looking wrong number rather than a crash."
 
 The formal model also has **no allocator at all**. Blobs are frame-resident and
-bounded: arm64 against a scratch region (`_SCRATCH = ARM64_CONTAINER_BUDGET =
-131072`, declared in `formal/model.py` and read by
-`formal/arm64_codegen.py`; over-capacity raises in `_blob_cap`'s callers) and
-x86-64 against `_BLOB_BYTES = X86_64_CONTAINER_BUDGET = 16384` the same way.
-So the **406** non-word entry points of §2.2 are not merely unwired — they have
-no representation.
+bounded: arm64 against a scratch region (`_SCRATCH = 131072`,
+`formal/arm64_codegen.py:37`; `_blob_cap` at `:738`; over-capacity raises at
+`:1909-1912`) and x86-64 against `_BLOB_BYTES = 16384`
+(`formal/x86_64_codegen.py:63`). So the 321 non-word entry points are not merely
+unwired — they have no representation.
 
-### 3.3 The gimple premise — ESTABLISHED by phase 0, with one latent failure left
+### 3.3 The gimple premise needs establishing before anything is measured against it
 
-The premise is that sqlite works from gimple and formal should match. **It did
-not when this section was written, and the reason it did not is fixed.** What
-this section found, and the state of each finding:
+The premise is that sqlite works from gimple and formal should match. Measured, it
+does not:
 
-- ~~**No build rule compiles `runtime/fire_sqlite3.c`.**~~ **CLOSED.** The four
-  optional units — `fire_sqlite3.c`, `fire_zlib.c`, `fire_ssl.c`,
-  `fire_ncurses.c` — are declared in `build_config._OPTIONAL_RUNTIME_UNITS`
-  and compiled **on demand**, so a program that names one of their symbols gets
-  it. `tools/suite.py`'s `sqliteruntime` job runs `test_sqlite3_runtime.py`,
-  which builds, links **and runs** `test_sqlite3*.mojo` on both pipelines, so
-  this is a gate step and not a script.
-- ~~**No driver builds `test_sqlite3*.mojo`, and `rg sqlite tools/suite.py
-  Makefile` returns nothing.**~~ **CLOSED**, by that same job.
-- **`fire_python.c` is deliberately still not compiled**, and the asymmetry is
-  the decision rather than an omission: its whole surface is `#if USE_PYTHON 0`
-  stubs, so linking it would convert a loud link error into a silent NULL. Its
-  header is not `#include`d either, so the failure stays loud.
-- **The unconditional `#include`s are still there.** `mojo/backend_gimple/
-  module_gen.py` `#include`s `fire_sqlite3.h`, `fire_zlib.h`, `fire_ssl.h` and
-  `fire_ncurses.h` into every generated translation unit, and
-  `gimple_codegen.py::_KNOWN_SIGS` carries the sqlite signatures. So the
-  declarations are visible in every translation unit while the definitions are
-  in a build path only when something names them. That is a **latent** link
-  failure rather than a live one, and what keeps it latent is phase 0's second
-  half: a link audit that fails when a program calls a declared-but-undefined
-  runtime symbol. The audit is the load-bearing part; the `#include` is a
-  cosmetic leftover.
-- ~~**`test_sqlite3_min_proof.lean` proves nothing.**~~ **WITHDRAWN as
-  unanswerable, not as false.** Every `*_proof.lean` is a gitignored build
-  artifact (`.gitignore`), rewritten by any formal build, so a claim about its
-  contents is a claim about a file that does not exist in the tree. The finding
-  lives in `test_sqlite3_runtime.py` instead, which is a file that does.
+- **No build rule compiles `runtime/fire_sqlite3.c`.** Nor `fire_python.c`,
+  `fire_zlib.c`, `fire_ssl.c`, `fire_ncurses.c`. Only `fire_runtime.c` has one:
+  `Makefile:333-334` (the `build/fire_runtime.o` rule, over `RUNTIME_SRC` at
+  `Makefile:25`), `fire.py:583` (`runtime_cmd`, over `runtime_src` at `:541`),
+  `build_stdlib_dylib.py:480` (`rt_src`, compiled at `:498`), `build_module.py:89-94`,
+  and `comptime.py:78`.
+- `mojo/backend_gimple/module_gen.py:6788-6791` `#include`s all four of those
+  headers **unconditionally** into every generated translation unit, and
+  `gimple_codegen.py:2364-2386` carries all 22 sqlite signatures in `_KNOWN_SIGS`.
+  The declarations are therefore always visible while the definitions are in no
+  build path: **a program calling `mojo_sqlite3_open` compiles clean and dies at
+  load with "Undefined symbols."** That is a live defect on the gimple path.
+- No driver builds `test_sqlite3*.mojo`, and `rg sqlite tools/suite.py Makefile`
+  returns nothing.
+- `test_sqlite3_min_proof.lean` proves nothing. `main_go` is `(0 : UInt64)`, the
+  "compiled image" is a hardcoded literal byte blob, and both `main_compile_correct`
+  and `main_compiles_correctly` are `sorry`. It contains a `mojo_sqlite3_close`
+  call in its AST and executes no sqlite.
+
+This is not an argument against the programme. It is phase 0, it is on the gimple
+path where bug reduction is wanted anyway, and it turns the programme's baseline
+from assumed into measured.
 
 ### 3.4 ~~The provider notion is a hardcoded 19-name set~~ — FIXED, with a caveat
 
 `_is_libsystem` was a 19-element literal set: a *name* guess rather than a check of
 anything, and the audit using it ran only on the dylib path. Both halves are
-closed — the provider is now a real `dlsym` probe of the C library
-(`formal/build.py::_is_libsystem`), and the executable path is audited too
-(`formal/build.py`'s `_unaccounted_report`, pinned by
-`test_formal_link_accounting.py`).
+closed — the provider is now a real `dlsym` probe of the C library, and the
+executable path is audited too (`formal/build.py`'s `_unaccounted_report`, pinned
+by `test_formal_link_accounting.py`, 83 checks).
 
 **The caveat, and it is the reason this is not simply struck.** The audit can
 only say *nothing on this link line defines these names*; it cannot say **why**.
@@ -319,15 +247,6 @@ failed to lower, so no code in the backend can distinguish a dangling emitted
 call from a bare reference with no call site behind it. The message says so
 rather than guessing. Distinguishing them is a real, small piece of work and it
 is not in §11.2's five.
-
-**A second caveat, and it is a live one: the audit's "provided" set grew by 478
-names when the runtime dylib came onto a formal link line.** That is a lot of
-new green, and a lot of names nobody has audited one at a time.
-`test_formal_runtime_link.py` holds the line from the other side — the map must
-be the dylib's own export trie rather than the headers, and the audit must still
-fire on a name outside it — but "the audit is still strict" and "every one of
-those 478 was checked by a human" are different claims and only the first is
-true.
 
 ---
 
@@ -346,71 +265,6 @@ true.
    the formal target's containers become genuinely heap-backed, which is what makes
    the documented ABI true on both sides.
 4. **The runtime is written in Mojo.** C is retained only for bootstrapping.
-5. **There is deliberately no logical-shift operator on this target, and `>>`
-   is arithmetic even on a signed value.** `formal/model.py`'s
-   `shift_signedness` reads the LEFT operand alone, because the right operand of
-   a shift is a COUNT and how far to move says nothing about what to move in —
-   `common_type`'s signed-wins rule is right for `/` and `%`, where the operands
-   genuinely combine, and wrong here. A program that wants zeros shifted in says
-   so with an unsigned type. Pinned by `test_formal_run.py`'s
-   `ushift_u64_by_typed_int_amount`, `ushift_u64_by_typed_u64_amount`,
-   `ushift_u64_by_literal_amount`, `ushift_u64_by_variable_amount` and
-   `signed_shift_by_unsigned_amount_stays_arithmetic` - **spelled out in full
-   rather than abbreviated after the first**, because
-   `test_formal_doc_truth.py` checks each of these names in both directions and
-   `…_typed_u64_amount` is not a name anything can grep.
-
-   **Do not add `>>>`.** It is not a way to spell this, and the reason is
-   measured rather than remembered: `fire_compiler.py`'s `_PREC` has `<<` and
-   `>>` and no `>>>`, and **CPython 3.14.7 rejects it too** — checked through
-   `ast.parse`, through `exec`, and through `eval` of a string built at run time
-   (`op = ">>" + ">"`), so it is the grammar and not the shell. Adding it would
-   make this compiler accept a program its own oracle refuses. The bug doc that
-   worked this out is deleted with its fix; this line is what is left of it,
-   because "add the missing operator" is exactly the fix a future reader will
-   propose.
-
-6. **`with EXPR as TARGET:` is the context-manager PROTOCOL, and a value that is
-   not enterable is REFUSED rather than bound.** `formal/build.py`'s
-   `_rewrite_with_statements` lowers every `with` to `__enter__` (which produces
-   the name the body sees) plus `__exit__` in a `finally`, and
-   `formal/model.py`'s `struct_is_context_manager` says which values can be: a
-   FRAMED struct declaring both dunders, whose receiver is the frame's address —
-   which is the by-reference receiver, so no part of the value model moves. Every
-   other `with` is refused by name, which is what CPython does with a value that
-   has no `__enter__`. Pinned by `test_formal_run.py`'s
-   `with_on_a_word_is_the_context_manager_protocol_or_a_refusal` and
-   `with_enter_binds_the_alias_before_the_body` - the first for the refusal, the
-   second for the half that must still work, since a decision that refused
-   everything would pass a check that only looked for a refusal.
-
-   **The lowering this replaced bound the name to the expression's value and ran
-   the body, and that is a wrong-but-exit-0 answer with nothing on the link line
-   to catch it**: `with tempfile.TemporaryDirectory() as d:` printed every right
-   answer and left the tree behind, and `with closing(7) as v:` printed `v=7`
-   where CPython raises `AttributeError`. Both emitters' `_emit_with` docstrings
-   said so at the time, which is how it stayed true for so long.
-
-   **Do not add a `with` lowering to a backend.** One implementation, in the pass
-   that owns statement rewriting; a `WithStmt` reaching an emitter is an internal
-   invariant and is refused as one.
-
-7. **A `finally`'s fall-through copy is emitted even when an exit edge inside the
-   body already flushed it.** The old rule read "the frame was flushed, so the
-   end of the block is unreachable" and dropped the copy, which is true only of an
-   unconditional `return`. A conditional `return`, and a `continue`/`break` in a
-   loop, are different paths through the same block and are still reachable —
-   measured on both machines: `try: if n > 0: return 1 … finally: print()`
-   printed nothing at all when `n` was 0. `formal/arm64_codegen.py`'s
-   `_emit_try` and its x86-64 twin, pinned on both architectures by
-   `test_formal_run.py`'s `with_exit_runs_on_an_early_return` (the conditional
-   `return`) and `with_exit_runs_on_a_continue_inside_a_loop` (the back edge) -
-   two shapes, because the defect was that both were being treated as the
-   unconditional one.
-
-   **Do not restore the suppression to save bytes.** The copy is dead code in the
-   unconditional case, and dead code costs bytes; the suppression costs a cleanup
-   that does not run, which is the failure this project refuses everywhere else.
 
 ---
 
@@ -418,23 +272,16 @@ true.
 
 This is stated separately because it is the load-bearing consequence of decision 3.
 
-Under (c) alone, the formal target's containers stay frame blobs and the 406
-box-crossing entry points of §2.2 stay gimple-only, permanently. That is a real
-ceiling, and it is why (c) cannot be the destination.
+Under (c) alone, the formal target's containers stay frame blobs and the 321
+box-returning entry points stay gimple-only, permanently. That is a real ceiling,
+and it is why (c) cannot be the destination.
 
 A slab allocator removes the ceiling. Once the formal target has a *proved* bump
 allocator, its `MojoList` can be a real pointer into a region rather than a stack
 blob; `doc/ABI.md`'s `List → MojoList *` becomes literally true on both backends;
-and the 406 become callable **incrementally, one entry point at a time, each with
-its own proof** — rather than in one change to the value model that would disturb
-a proof library which is currently **hole-free**: zero `sorry`, zero `axiom` and
-zero vacuous declarations across all five `lib/` modules, measured by
-`test_formal_admitted.py`'s `LIBRARY_TRUST` and asserted in both directions.
-
-This paragraph used to say "34 of 40 clean", which was a figure with no
-instrument behind it in this tree and no way for a reader to check it. The
-load-bearing property is not a ratio — it is that the library admits nothing —
-and that one is a test.
+and the 321 become callable **incrementally, one entry point at a time, each with
+its own proof** — rather than in one change to the value model that would disturb a
+proof library currently 34 of 40 clean.
 
 So the sequence is: **(c) for the word surface → proved slab allocator → heap-backed
 formal containers → (a) reached without a big bang.** The cost of (c) is bounded,
@@ -454,16 +301,14 @@ Dependency-ordered. **Phase 3 gates 4, 5 and 6; nothing after it is worth buildi
 before it.** Each phase's exit criterion is checkable and each names the trust it
 removes.
 
-### Phase 0 — make gimple's sqlite real — **LANDED**
+### Phase 0 — make gimple's sqlite real
 
 Add `fire_sqlite3.c` to the runtime build. Add a registered suite entry that builds
 **and runs** `test_sqlite3.mojo`. Decide the other four translation units: compile
 them, or stop `#include`ing their headers unconditionally — a declaration with no
-definition is a latent link failure either way. **The decision, as it stands:**
-the optional units are rows of `build_config`'s registry (`_OPTIONAL_RUNTIME_UNITS`,
-read through `optional_unit_names()`, which answers `sqlite3`, `zlib`, `ssl`,
-`ncurses` and `metal`) and are compiled on demand;
-`fire_python.c` is deliberately NOT, because its whole surface is
+definition is a latent link failure either way. **The 2026-09-27 decision:** the
+four are registered in `build_config.OPTIONAL_RUNTIME_UNITS` and compiled on
+demand; `fire_python.c` is deliberately NOT, because its whole surface is
 `#if USE_PYTHON 0` stubs and linking it would convert a loud link error into a
 silent NULL. Its header was never `#include`d either, so the failure stays loud.
 
@@ -479,33 +324,26 @@ runtime symbol. This is the test that would have caught §3.3, and it stops it
 recurring as the runtime grows.
 
 *Exit:* `test_sqlite3.mojo` builds, links, runs, and produces the expected rows.
-**Met** — `tools/suite.py`'s `sqliteruntime` job runs
-`test_sqlite3_runtime.py`, which builds, links and runs `test_sqlite3*.mojo` on
-both pipelines, and the link audit is `test_formal_link_accounting.py`.
 *Removes:* a live gimple link defect. No proof content.
 
-### Phase 1 — per-arch runtime dylibs and a real provider registry — **LANDED**
+### Phase 1 — per-arch runtime dylibs and a real provider registry
 
 `runtime_dylib()` already produces the artifact; add `-arch arm64` / `-arch x86_64`
-to it. ~~**No build rule in the tree has an `-arch` flag today**~~ — **this was
-the state when the phase was written and it is false now**: `build_stdlib_dylib.
-py` builds per-architecture runtime dylibs (`arch_flags`, `normalize_arch`,
-verified back with `lipo -archs`) and the sweep runs both, so both are built. The
-formal linker reads the dylib's *actual* export table (its export trie, §2.4) in
-place of `_is_libsystem`'s 19 names, and the bind audit covers the **executable**
-path as well as the dylib path.
+to it. **No build rule in the tree has an `-arch` flag today** — everything is
+host-only, and the sweep runs both architectures, so both are required. Make the
+formal linker read the dylib's *actual* export table (via
+`collect_runtime_exports_h`, §2.4) in place of `_is_libsystem`'s 19 names, and
+extend the bind audit from the dylib path to the **executable** path.
 
 *Exit:* a formal image links a clang-built runtime dylib and dyld resolves every
-name in its bind stream; the executable path is audited. **Met** —
-`test_formal_runtime_link.py` reads the finished image's dependencies back with
-`otool -L` and runs it, on both architectures.
+name in its bind stream; the executable path is audited.
 *Removes:* the hardcoded provider guess, and a real class of silent link failures.
 
-### Phase 2 — lift the `mojo_*` refusal, shaped by ABI — **LANDED**
+### Phase 2 — lift the `mojo_*` refusal, shaped by ABI
 
-`is_gimple_runtime_builtin` (`formal/model.py`) used to refuse any callee whose
-name starts with `mojo_` (`GIMPLE_RUNTIME_PREFIX`), raised at the call site in
-both `formal/arm64_codegen.py` and `formal/x86_64_codegen.py`. The
+`is_gimple_runtime_builtin` (`formal/model.py:4151`) refuses any callee whose name
+starts with `mojo_` (`GIMPLE_RUNTIME_PREFIX`, `:4136`), raised at
+`formal/arm64_codegen.py:4936-4937` and `formal/x86_64_codegen.py:4563-4564`. The
 refusal text is already correct about *why* it is currently right and wrong only in
 being prefix-based.
 
@@ -514,82 +352,32 @@ Replace it with: **callable iff every parameter type and the return type in
 generated from the header by the existing scanner, so it cannot drift from the
 runtime — a second hand-kept list would be exactly the rot phase 2 exists to
 remove. This is a generalisation of the `GIMPLE_LIST_PREFIX` special case that
-used to exist, not a new idea.
+already exists (`formal/model.py:4148`), not a new idea.
 
 *Exit:* the word-only surface is callable from formal; the box surface is still
 refused, and the refusal now names the *type* mismatch rather than a prefix.
-**Met** — `formal/model.py::gimple_runtime_callable` is the rule whole,
-`runtime_abi()` is the table (and it reads *every* header, not only
-`fire_runtime.h`), and `test_formal_runtime_link.py` measures the result:
+*Removes:* `gimple_runtime_refusal`'s over-broad claim. No proof content yet.
 
-| | arm64 | x86_64 |
-|---|---|---|
-| word-shaped entry points (`runtime_abi`) | 262 | 262 |
-| …of which the runtime dylib actually **exports** | 206 | 206 |
-| …reachable with no heap handle the formal path cannot obtain | **166** | **166** |
+### Phase 3 — the proof model: call and return semantics. **THE GATE**
 
-So the honest statement of the surface is **166 word-shaped calls are callable
-from a formal image today**, not the "0" this document published when the phase
-was written, and not the 219 (now 262) of §2.2. The two gaps between 262 and 166
-are both deliberate and both named:
+Extend `arm64_step`'s `BL` (`lib/ProofLib.lean:1548-1549`) with a call frame, a
+callee entry, and return-to-`x30`. Wire the x86-64 `call_rel32`
+(`x86_step_call_rel32`, `lib/X86.lean:720`), which `bugs/OPEN_WORK.md` A1 already
+records as present but not connected to the generator's `_FORMS`/`_SUCCS`/`_resolve`
+trio.
 
-- **40 of the 206** the library exports take a `void *` parameter the
-  frame-resident value model cannot obtain — a `MojoList *` or `MojoDict *` that
-  only the heap could have produced. That is phase 6's work, not a bug.
-- **56 of the 262** the dylib does not export at all, because
-  `runtime_dylib` links `runtime_units(arch, None)` — the core runtime, the
-  coroutine runtime and the async scheduler — and not the OPTIONAL units
-  (`fire_sqlite3.c`, `fire_ssl.c`, `fire_zlib.c`, `fire_ncurses.c`, which the
-  gimple path compiles on demand), nor `fire_metal.h` / `fire_python.h`, which
-  have no linked definition in any path. So `mojo_strlen` is exported and
-  `mojo_sqlite3_step` is not, and both are word-shaped.
+Then, in this order:
 
-The two architectures agree exactly, which is the property phase 2 was for.
-*Removes:* `gimple_runtime_refusal`'s over-broad claim. No proof content yet —
-and that last clause is the honest boundary: a call that *builds, links and
-runs* is not a call a *proof* can yet follow, which is phase 3.
-
-### Phase 3 — the proof model: call and return semantics. **THE GATE** — **PARTIAL: the three consequences are closed, the cause is not**
-
-Extend `arm64_step`'s `BL` (`lib/ProofLib.lean`) with a call frame, a
-callee entry, and return-to-`x30`. **This is the part that is still open.**
-`arm64_step`'s `BL` arm is still a bare transfer — `{ s with x30 := …, pc := … }`
-— and the consequence is still visible in the generated file as the named
-premise `…_post_extern_given_callee_returns`.
-
-**The x86-64 half of this phase is DONE and this paragraph used to say it was
-not.** `call_rel32` is wired: `x86_step_call_rel32` in `lib/X86.lean` is named by
-`_FORMS` and reached through the successor expression and the literal-address
-substitution in `formal/x86_64_endtoend_test.py`, `lib/X86.lean` grew the
-call/return pairing section (`x86_call_post`, `x86_ret_post`, `x86_at_target`
-and the stack round-trip theorem), and `bugs/OPEN_WORK.md` A1 records it as
-wired with `call_rel32` named as a missing lemma by **0 of 45** examples. What
-A1 still asks for is a verification run, and A1 also records that its own
-mechanism claim was stale — the trio lives in `x86_64_endtoend_test.py`, not in
-the generator — which is the correction §11.2's [1] entry carries.
-
-Then, in this order — **all three are DONE**, and §3.1's table is the
-before/after:
-
-1. ~~Replace `theorem extern_<sym>_step : True := by trivial` with a real
-   obligation.~~ **DONE** — a real `arm64_step` equality, discharged by the
-   file's own per-instruction step lemma.
-2. ~~Give `DylibExport.Semantics` a non-vacuous definition, with real
-   observables rather than the hardcoded `[]`.~~ **DONE** — split into `Total`
-   and `Functional`; `dylib_observables` is `[id]`.
-3. ~~Either prove `dylib_export_contract_stub` or **delete it**.~~ **DELETED**,
-   replaced by `export_result_spec` plus a proved
-   `dylib_export_contract_of_spec`.
+1. Replace `theorem extern_<sym>_step : True := by trivial` with a real obligation.
+2. Give `DylibExport.Semantics` a non-vacuous definition, with real observables
+   rather than the hardcoded `[]`.
+3. Either prove `dylib_export_contract_stub` or **delete it**, so it cannot be read
+   as a proof of a contract that currently asserts every export is the identity.
 
 *Exit:* a dylib export has a semantics that is not vacuously true, and a caller can
-discharge an obligation against it. **Met** for the dylib half. **Not met** for
-a call out of the image: that is what the call frame is for, and a caller can
-currently discharge its obligation only against the premise the generated file
-names.
-*Removes:* the two `sorry`s that were in `lib/ProofLib.lean` and the one that was
-in `lib/Refine.lean`; and the vacuous extern step theorem. All three `lib/` holes
-are gone — `lib/` now has zero `sorry`, zero `axiom` and zero vacuous
-declarations, which is the standing fact §5 now rests on.
+discharge an obligation against it.
+*Removes:* the two `sorry`s at `lib/ProofLib.lean:4624` and `:4627`, and
+`lib/Refine.lean:660`; and the vacuous extern step theorem.
 
 ### Phase 4 — per-export contracts
 
@@ -633,61 +421,16 @@ What a proof currently rests on, so that removing an item is visible. The projec
 has **no Lean `axiom` and no `opaque`** anywhere; everything is assumed in the
 `sorry` sense, which is the harder habit to see.
 
-**That sentence is about the SOURCE TEXT, and a theorem's transitive closure is a
-different question.** `native_decide` and `bv_decide` close a goal by compiling
-and running a decision procedure rather than by producing a term the kernel
-checks, so every theorem proved with one depends on a GENERATED AXIOM and
-`#print axioms` reports it — which `OPUS.md` §1 already says about a generated
-theorem.  **What that axiom is called is the one thing this paragraph got wrong
-twice.**  It said `Lean.ofReduceBool`, and on the pinned toolchain
-(`leanprover/lean4:v4.32.2`) `ofReduceBool` is DEPRECATED — "in-kernel native
-reduction is deprecated; assert native evaluations with axioms instead" — and
-each USE of a reflection tactic elaborates to a fresh axiom named after the
-declaration that used it: `'work_step_mov._native.native_decide.ax_1_1'`, with
-`_1_7` counting reflection uses in the whole MODULE.  A census that grepped for
-`ofReduceBool` would therefore have called a library that reaches an axiom at
-every one of its sites clean.  The instrument that matches what Lean prints is
-`formal/lean.py::GENERATED_AXIOM_RE`, and the measurement is
-`test_formal_axioms.py`.
-
-There are no `axiom` declarations and no `sorry` in any of the five `lib/`
-modules, and 688 proof sites go through one of those two tactics — 751 before
-2026-10-04, and the 749 this section published until then was an UNDER-count
-of its own scanner (`lean_code_regions` read an identifier's apostrophe as a
-character literal, blanked 97 real declaration headers as prose, and so missed
-two sites).  Both halves are counted by `test_formal_admitted.py`
-(`LIBRARY_TRUST`, a hard 0 for the first two and a ceiling for the third,
-because that number is a debt being paid down in a file several branches edit).
-Neither tactic can prove a FALSE
-statement — it evaluates and answers — so this is row 10 below about where the
-trust SITS, not about whether it holds, and
-`bugs/FORMAL_native_decide_axiom.md` carries the replacement plan and what is
-left of it.
-
-**And the axiom is NOT `Lean.ofReduceBool`, which is what this section used to
-say.**  Lean 4.32.2 gives each use its own axiom, named after the declaration and
-the tactic — `t32s_t8s._native.bv_decide.ax_1_5` — and a `#print axioms` census over
-all 375 theorems in `lib/` reports `Lean.ofReduceBool` for **none** of them
-(`AXIOM_CLOSURE`, measured 2026-10-04).  So the number the SITE census cannot give
-is now measured: of 375 theorems, **53 reach a decide axiom and 304 are
-kernel-checked**, the 751 sites belong to those 53, five theorems name a decide
-tactic in their own text and reach no axiom at all, and thirteen reach one through
-another theorem and name none.  A reader grepping a proof's axiom list for
-`Lean.ofReduceBool` finds nothing and concludes the proof is kernel-checked, which
-is how a wrong name becomes a wrong conclusion.
-
 | # | where | what is trusted |
 |---|---|---|
-| 1 | ~~`lib/ProofLib.lean` `in_image_stub`~~ | **CLOSED 2026-09-28** (round 1, §11.1). Was: a dylib export is in the image. Now a decidable `in_image_decide` check, and the caller discharges it as a hypothesis. `lib/ProofLib.lean` carries no `sorry` at all |
-| 2 | ~~`lib/ProofLib.lean` `semantics_stub`~~ | **CLOSED 2026-09-28** (round 1). Was: an export has a semantics, vacuously. Now `DylibExport.Semantics` is split into `Total` and `Functional`, and the observable list is `[id]` rather than `[]` |
-| 3 | ~~`lib/Refine.lean` `dylib_export_contract_stub`~~ | **CLOSED 2026-09-28** (round 1) — **DELETED, not proved.** Was: an export computes its observable, with the contract claiming every export is the *identity function*. Replaced by an `export_result_spec` obligation plus a proved `dylib_export_contract_of_spec` |
-| 4 | `formal/x86_64_proof_gen.py::_compile_correct_section` | the AST compiles to the emitted bytes (x86-64) — still `sorry`. Its `none` branch used to be `True` and is now `False` |
-| 5 | `formal/x86_64_proof_gen.py`'s `…_compiles_correctly` | the x86-64 end-to-end theorem — still `sorry` |
-| 6 | ~~`formal/arm64_proof_gen.py::_gen_extern_test`'s `extern_<sym>_step`~~ | **CLOSED.** Was: every extern call step, as `True := by trivial`. Now a real `arm64_step` equality discharged by the file's own per-instruction step lemma. **What is still trusted is the premise it cannot remove**: `…_post_extern_given_callee_returns` continues from `{pre with pc := bl+4}` because the callee is outside the image — a NAMED hypothesis, which is phase 3's remaining item rather than a hole |
-| 7 | `formal/arm64_proof_gen.py`'s `CFG_LEAF_SITES` | every CFG leaf that admits — **fifteen named sites**, each stamping its name into the generated Lean: the eight `all_goals (first \| done \| sorry)` leaves of the walk, the five `for i in range(…)` obligations, and the two loop-contract closers. Owned by `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md` and `bugs/FORMAL_arm64_a_cbz_on_a_literal_pool_register_admits_over_a_false_claim.md`. Named rather than counted by line number because this row and the trust audit's table had already disagreed about how many there were (seven here, eight there), and `cfg_leaf_census` / `no_admission_fallback` turn "which of them admits" into a measurement |
-| 8 | FORMAL.md §7a | **the ADMITTED HOST CONTRACTS**: one `sorry` per `@admitted(...)` in a `formal/hostmods/` module, counted by the same census as every other hole, named per file by a `trust:` line, and classified by `tools/formal_sweep.py` as `built-with-admitted-contracts`. 19 of them across `concurrent.futures`, `ctypes`, `subprocess` and `threading`. `fcntl` admits nothing and is not among them; the figure was 15 and the list did name `fcntl`, until the audit of 2026-10-04 found both stale. This is the FIRST row here that is about the HOST rather than about this compiler's own code: it is a claim about a second process, a thread and a dynamic loader, declared in the Mojo source and checked for scope AND checked for TRUTH — every contract is probed against CPython or the OS, and fifteen of the nineteen were found asserting something the host does not do. The policy is §7a; the per-contract assumptions are in each module's own `@admitted` text, and `test_formal_admitted.py`'s `truth` group is the probe per contract that corrected them — `PRE_AUDIT_TEXT` is the text the audit found false and `test_the_truth_probes_reject_the_pre_audit_text` puts every one of those sentences back through its own probe, so a probe that has stopped complaining is the failure that row asserts on. The audit's own doc is deleted with the corrections it made |
-| 10 | `lib/ProofLib.lean`, `lib/Contracts.lean`, `lib/X86.lean`, `lib/IEEE754.lean`, `lib/Refine.lean`, `lib/work.lean`, `lib/Peephole.lean` | `native_decide`/`bv_decide` sites, whose proofs reach a GENERATED AXIOM rather than the kernel — the largest admitted assumption in the model, and the one §7's preamble used to leave out of the inventory entirely. Counted as of 2026-10-05: total **1616**, replaced **67**, remaining **1549** (9 of them with `lib/Peephole.lean`, the peephole rules, added later the same day). **The total is a LEDGER, not a running figure, and that is the point**: 751 sites when the pay-down started, **63 replaced** on 2026-10-03, **67 replaced** with the four closed-proposition `bv_decide` lemmas that followed on 2026-10-04, and **856 that ARRIVED** — 19 with `lib/IEEE754.lean` (the binary64 arithmetic theorems), 4 `native_decide` in `lib/X86.lean`, and **833 with arm64's twelve narrower/unscaled memory forms and its two flag-setting compares** (`work/formal28-2`, 2026-10-05), each new `arm64_step` arm carrying a `work_step_*` lemma proved by `bv_decide` over a quantified word. So 1616 sites have been accounted for, 67 of them replaced and therefore no longer in the source, and the identity `total - replaced == remaining` holds against the 1549 the census actually measures, with the arrivals visible as the total RISING — which is the only way a pay-down ledger can record new debt instead of silently absorbing it. **The pay-down moved in nobody's favour in this window**: `NATIVE_DECIDE_REPLACED` is still 67 and `REPLACEABLE_THEOREMS` is still 0, and the 833 are the right tool for the shape they prove — `bv_decide` over a quantified word is not something `decide` can take. The 63 were CLOSED propositions over literals (`¬ (0xd65f03c0 &&& 0xffe00000 = 0x2a00fa00)`, `(1 : UInt64).toNat = 1`), which `decide` discharges in microseconds and the KERNEL checks, and the **4** more that went on 2026-10-04 (`work/formal29-3`) were the same shape (`@[simp] theorem x86_mask_{one,two,four,eight}` — `x86_mask 1 = 0xff` and its three siblings, four lines at `lib/X86.lean:503..506`); what remains is 1518 `bv_decide` over a quantified word in `ProofLib`, 3 more in `X86`, 19 in `IEEE754`, 9 in `Peephole` and none in `Contracts`/`Refine`/`work` — the census's per-module `native_decide`/`bv_decide` figures together, of which 22 `native_decide` evaluate the model at a ground value (`Float.ofBits` arithmetic, `runExport … = none`, `InImage …`). `NATIVE_DECIDE_ALLOWED` in `test_formal_admitted.py` names all 22 of those by declaration, so a `native_decide` added anywhere else fails by name rather than as a module that grew, and the one-site `native_decide` work list `REPLACEABLE_THEOREMS` is at **0**. Owned by `bugs/FORMAL_native_decide_axiom.md`, which carries the plan, the per-shape timings, and the fact that the 1549 remaining sites are the shape `decide` cannot take. **The site census is attributed PER THEOREM and separately, the CLOSURE census (`AXIOM_CLOSURE`) asks Lean what a proof term actually reaches: of `lib/`'s 612 askable declarations, 82 rest on one of these axioms and 516 are kernel-checked** (`formal/admitted.py::theorem_axiom_census`, 6.9 s over all EIGHT modules through `formal/lean.py::run_lean`, re-measured 2026-10-05 on the tree carrying `lib/Peephole.lean` and `lib/Specs.lean`: the +45 asked and +15 reaching are 14 declarations and 14 sites with arm64's step arms, 12/1 with the peephole rules and 11 more specifications, and `Specs`'s row moved 55 to 66 with `reaches` still 0 — which is the shape that says the arrivals are specifications rather than new trusted evaluation). Those 67 were published as 53 of 375 until 2026-10-04, and BOTH instruments were wrong: `AXIOM_SITE_RE`'s declaration group was `[^.]+`, so a namespaced declaration's axiom read as "not one of ours" (`IEEE754` measured `reaches 0 / text_only 19`, the opposite of the truth), and `library_theorems` carried its own declaration-head pattern with no `@[...]` prefix, so 98 attributed declarations were never asked about and were filed as `clean`. One declaration is unanswered by design: `ProofLib.ifUpdate_congr`, the `private theorem` at `lib/ProofLib.lean:7364`, whose name Lean mangles — and it carries no site. And the axiom is PER USE — `t32s_t8s._native.bv_decide.ax_1_5`, named after the declaration that used it — so a census that grepped for one axiom name would call a library that reaches an axiom at every site clean |
-| 9 | ~~`lib/ProofLib.lean:895`~~ | **REMOVED 2026-09-28.** This row said "All per-node lemmas currently admit". Read, they do not: all seven `evalExpr_*` lemmas are `rfl`, which is the whole content of each statement, and `lib/ProofLib.lean` contains no `sorry` or `admit` at all. The section comment above them said the same false thing and said so in the present tense; both are corrected. The trust that remains is row 4 — `rfl` proves the unfolding of `evalExpr`, not that `evalExpr` is what the machine runs. |
+| 1 | `lib/ProofLib.lean:4624` `in_image_stub` | a dylib export is in the image |
+| 2 | `lib/ProofLib.lean:4627` `semantics_stub` | an export has a semantics; the goal is vacuous regardless |
+| 3 | `lib/Refine.lean:660` `dylib_export_contract_stub` | an export computes its observable |
+| 4 | `formal/x86_64_proof_gen.py:239` `_compile_correct_section` | the AST compiles to the emitted bytes (x86-64) |
+| 5 | `formal/x86_64_proof_gen.py:690` | the x86-64 end-to-end theorem |
+| 6 | `formal/arm64_proof_gen.py:6910` | every extern call step (`True := by trivial`) |
+| 7 | `formal/arm64_proof_gen.py:4077,4258,4790,4797,4875,4891,5089` | `all_goals (first \| done \| sorry)` CFG leaves — 13 sorries in 9 of 43 arm64 proofs, owned by `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md` |
+| 8 | ~~`lib/ProofLib.lean:895`~~ | **REMOVED 2026-09-28.** This row said "All per-node lemmas currently admit". Read, they do not: all seven `evalExpr_*` lemmas are `rfl`, which is the whole content of each statement, and `lib/ProofLib.lean` contains no `sorry` or `admit` at all. The section comment above them said the same false thing and said so in the present tense; both are corrected. The trust that remains is row 4 — `rfl` proves the unfolding of `evalExpr`, not that `evalExpr` is what the machine runs. |
 
 **The two holes in the mechanism that checks this** were both closed in the
 five-agent round of 2026-09-27, by that round's [5] (`formal/lean.py`) and the
@@ -717,29 +460,23 @@ sharpest entry in this table. `lib/` is out of scope for the parallel round, so
 nothing was changed — but the figure is now *read* on every run rather than
 merely known.
 
-**What the five-agent round did to phase 2, measured — and then what landed
-after it.** The round made the refusal ABI-shaped ([3]: a call is refused for
-its type, and a word-in/word-out call is explicitly named as one a formal image
-**could** make), made the library exist ([2]: a per-architecture runtime dylib),
-and made the optional units link on the gimple path ([1]: a program calling
-`mojo_strlen` builds, links and prints `5`).
+**What the five-agent round did to phase 2, measured.** The word-shaped
+callable surface is now *unblocked but not yet reachable*, and the distinction
+is the whole remaining step. [3] made the refusal ABI-shaped: a call is refused
+for its type, and a word-in/word-out call is explicitly named as one a formal
+image **could** make. [2] then made the library exist — a per-architecture
+runtime dylib, whose export table now advertises 1964 of 1968 entry points
+with 0 misresolved. And [1] made the optional units link, so the non-formal
+path is whole: a program calling `mojo_strlen` builds, links and prints `5`.
 
-**The step that was still missing then has since landed, so the "0" this
-paragraph used to publish is wrong.** The formal path is now opted into the
-dylib: a formal image that names a word-shaped runtime entry point carries the
-per-architecture library on its link line, and the measured surface is **166
-callable entry points, identically on both architectures** (§6 phase 2 has the
-three-row table and where the other 96 go). `test_formal_runtime_link.py` is
-what measures it, and it goes further than "is not refused": it builds, links
-and **runs** the image on both architectures and checks the answer, because a
-refusal replaced by an image that builds and computes the wrong number is the
-failure this whole programme is about.
-
-**The one thing that has NOT moved is the honest boundary between "callable"
-and "provable".** 166 calls build and run; none of them is yet a call a *proof*
-can follow, because `arm64_step`'s `BL` still has no callee (§3.1, phase 3). A
-number that conflated the two would be the more comfortable one and the less
-true one.
+A *formal* image still refuses `mojo_strlen`, and the refusal is now honest
+about why — the image is freestanding, it links libSystem and nothing else, and
+the per-arch runtime dylib is simply not on its link line. That is the next
+piece of work and it is a `formal/build.py` change, not a codegen one: opt the
+formal path into the dylib [2] already builds. Until then the honest statement
+of the surface is "0 of the word-shaped calls are callable from a proof", and
+the number that will move first when that is done is the phase 2 coverage
+figure.
 
 Under this programme a proof will be asked to carry real weight, so the honesty
 mechanism has to see vacuity and not only holes. That is part of phase 3's exit
@@ -747,228 +484,35 @@ criterion, not a separate cleanup.
 
 ---
 
-## 7a. ADMITTED HOST CONTRACTS — the one place the policy lives
-
-A module can be **unreachable** on this target and still be answerable. `subprocess`
-needs a second process, `ctypes` needs a dynamic loader for foreign code,
-`threading` and `concurrent.futures` need a thread, `fcntl` needs a kernel-held
-lock — none of which a freestanding image linking libSystem and nothing else has.
-`formal/imports.py` refused every file importing one, which is a true statement
-about the TARGET standing where a statement about the FILE belongs, and it is why
-30 files of the arm64 sweep were reported for a fact no work in this tree can
-change.
-
-The question this adds is the one the `HOST_MODELLED`/`HOST_UNREACHABLE` split was
-missing: **what would a proof have to ASSUME about the host to accept the file?**
-
-Each such module gets a Mojo-side model of its **API shape** in
-`formal/hostmods/`, and each operation whose answer is an external fact is
-declared an **admitted contract**:
-
-```mojo
-@admitted("the child's exit status, an integer in 0..255, and the captured "
-          "output bytes are an arbitrary byte string")
-def run(request: str) -> int:
-    ...
-```
-
-Five rules, each of which is enforced somewhere other than this paragraph, because
-a rule stated only here is a rule that rots.
-
-**1. The declaration is written once, in the Mojo source.** `formal/admitted.py`
-is the only reader and the only place the text is shaped; the `trust:` line, the
-generated Lean docstring and the sweep's class reason are all rendered from it. A
-reader of `formal/hostmods/subprocess.mojo` reads the same sentence a reader of
-the `trust:` line does.
-
-**2. An admission may constrain the host's ANSWER and nothing else.**
-`formal/admitted.py`'s `contract_text_is_scoped` refuses any contract text
-containing "always", "never", "deterministic", "empty" or "no other". A claim
-about what the host *does* is not an admission — it is an unproved assertion with a
-proof attached to it, which is exactly what the deleted
-`dylib_export_contract_stub`'s `fun n => n` was.
-
-**3. It is `sorry`, not `axiom`, because `sorry` is countable.** §7's position is
-that this project has no `axiom` and no `opaque` anywhere, and that is load-bearing
-rather than stylistic: `formal/lean.py`'s census counts what Lean reports as
-`declaration uses 'sorry'`, so an admission written as an `axiom` would be a claim
-of trust that no count ever reports. Each contract is emitted as
-
-```lean
-def admitted_subprocess_run (req : UInt64) : UInt64 := by sorry
-```
-
-`def` and not `theorem`, because a `theorem`'s type must be a `Prop` and this
-declaration's type is the contract's **value**; measured, `theorem` is refused
-with `type of theorem … is not a proposition`. The `sorry` is counted all the
-same — Lean's warning fires for any declaration reaching `sorryAx`.
-
-**4. The contract IS the model, and only what depends on it is admitted.**
-`formal/arm64_proof_gen.py`'s `_call_go` refuses any callee it has no `_go` for,
-which is right for an extern (an extern's return value is not a term the model can
-invent) and wrong for a callee whose return value *is* a declared contract. An
-admitted call renders as the `sorry`-proved `admitted_*` applied to its argument,
-so the model's value is the contract's. Then `native_decide` cannot close a
-theorem about that value — it *executes* the model — so those theorems are
-emitted as named `sorry`s by `_decide_or_admit`, and **everything else in the file
-keeps its normal proof**. The condition is about CALLS, not about contracts being
-present: a file that imports `subprocess` and never calls it links a library with
-seven contracts in it and its own proof is decidable.
-
-**5. An admitted call REFUSES at run time, and the refusal is identified by the
-diagnostic, not by the number.** `subprocess.run` prints which contract stopped
-it and exits **125**.  A refusal that RETURNED a plausible number would be a
-fabricated answer wearing a diagnostic's clothes, so what makes the mistake
-impossible is that it exits at all; the number then says only that the image did
-not answer, and it says that by being nonzero and reserved by this tree.
-
-This rule used to claim something false, and the correction is the kind of thing
-an audit exists to find: it said 125 was *outside 0..255* and therefore could not
-be read as a child's exit status.  125 is inside it (`sh -c 'exit 125'` is
-reported as 125), and **no exit code can be outside it at all** — the kernel
-masks one, so `sh -c 'exit 300'` is reported as 44.  The diagnostic on stdout is
-the channel that distinguishes a refusal from an answer;
-`test_formal_admitted.py`'s `truth` group re-measures both halves every run so the
-claim cannot rot back.
-
-### What each contract assumes
-
-The counts in the next table are **checked against the declarations** —
-`test_formal_admitted.py`'s `test_the_formal_md_inventory_agrees` reads this file
-and fails in both directions.  A census published in prose is a census with two
-copies, and until this row was added the second copy was free to describe a trust
-boundary that no longer existed: it said `subprocess` admits 7 and `fcntl` 1,
-against 12 and 0.  The ASSUMPTION column is a summary; each module's own
-`@admitted` text is the text, and `test_formal_admitted.py`'s `SCOPE_PROBES`
-carry
-the audit of it against CPython.
-
-| module | contracts | assumes |
-|---|---|---|
-| `concurrent.futures` | 2 | `submit` runs the callable on a thread of this process or in a process of this machine and answers one word; `shutdown(wait=True)` has joined the pool's OWN workers |
-| `ctypes` | 2 | `CDLL` returns 0 when `dlopen(3)` failed — the file may be absent, may not be a loadable image, or a symbol may be unresolvable — or a non-zero word this target's loader owns; a call through a handle answers one word under the default `restype`, unconstrained in value |
-| `subprocess` | 12 | the child's status word: `0..255` for a normal exit or `-N` for a death by signal N; output answers stop at the first NUL byte, because a `str` here is a NUL-terminated `char *`; `poll`'s "not collected" marker is the model's own `-65`, outside every answer the host gives; `kill`/`terminate` deliver only while the child is still running |
-| `threading` | 3 | `Thread.start` begins running the target; `Thread.join` with no timeout, it has stopped; `Lock.acquire` is a per-object userspace mutex inside this process, naming no descriptor |
-
-**Fifteen of the nineteen were FALSE of the real host**, three more were true only
-under a reading the audit had to guess at, and one was true and is unchanged:
-
-| what was claimed | what the host does |
-|---|---|
-| six `subprocess` contracts: "the exit status, an integer in 0..255" | CPython reports `-N` for a death by signal, and `subprocess.run(["sh","-c","kill -9 $$"]).returncode` is `-9` |
-| three `subprocess` contracts: the output is "an arbitrary byte string" | a `str` on this path is a NUL-terminated `char *`, and CPython's answer really does contain NULs: `check_output(["sh","-c","printf 'a\0b'"])` is three bytes |
-| `popen_poll`: `-1` while the child has not been collected | `-1` is an answer CPython gives -- a child killed by `SIGHUP` -- so the model's "not collected" marker and a real answer were one word |
-| `popen_kill`/`popen_terminate`: "the signal reaches the child this handle names" | once the child has been collected CPython sends **nothing** and raises nothing: `Popen.send_signal` polls and returns |
-| `ctypes.CDLL`: "0, meaning no library of that name is on this target" | `dlopen` fails on files that EXIST and are not loadable images, so handle 0 does not mean the library is absent |
-| a call through a `ctypes` handle: "the value the foreign function returns is one word" | true of `ctypes`' default `restype` of `c_int` and of nothing else: `restype = None` answers `None` |
-| `threading.Lock.acquire`: "the lock is held by the kernel on a descriptor" | CPython's `threading.Lock` is a userspace semaphore with no `fileno`, no `_handle` and no descriptor, and a CHILD PROCESS took `fcntl.flock(LOCK_EX)` on a file while this process held one |
-| `Executor.submit`: "the callable runs on some thread" | a `ProcessPoolExecutor` runs it in another PROCESS, measured by having the callable report its own pid |
-
-True only under a reading the audit had to choose, and now said out loud:
-`Thread.start` "has run the target callable" (it has BEGUN -- `start()` returns
-before a sleeping callable finishes), `Thread.join` "the thread has stopped" (true
-of `join()` with no timeout, false of `join(timeout)`), and
-`Executor.shutdown(wait=True)` "every thread the pool started has stopped" (true
-of the pool's OWN workers -- a thread a submitted callable started itself is
-still running when it returns).
-
-Every one of them now has a `truth` row in `test_formal_admitted.py` that
-re-measures it, a contract that lands without one fails the
-`every admitted contract has a truth row` check, and every row is checked in the
-other direction too: `every truth probe rejects the pre-audit text` puts the old
-sentence back through its own probe, so a probe that stopped testing what it was
-written for fails as well.
-
-Everything a hostmod **decides** rather than admits is checked against CPython's
-own answer by `test_formal_admitted.py` — `subprocess`'s argument shapes and
-constants, `ctypes`'s thirteen sizes and five conversions and three buffer
-refusals, `fcntl`'s eleven flags, `Future`'s five states against a live `Future`,
-`threading`'s `TIMEOUT_MAX` against CPython's own `Lock`. That half is what stops
-the trust from growing to cover something CPython can simply be asked about, and it
-has already earned its keep: it caught `TIMEOUT_MAX` written as 2^63−1 when
-CPython's answer is 9223372036, and a timeout check that refused `-1` — the value
-`Lock.acquire` passes itself.
-
-### Where the trust is visible
-
-| surface | what it shows |
-|---|---|
-| `fire.py build --formal` | a `trust:` line naming each contract and its assumption — on its OWN line, not appended to `Proof:`, because the sweep builds with `--no-prove` and a note attached there would vanish for exactly the files whose class depends on it |
-| `result["admitted"]` | the same list as plain dicts, computed once, computed ALWAYS, handed to the proof generator so the proof and the verdict cannot describe different admissions |
-| the generated Lean | one `def admitted_<module>_<name> … := by sorry` per contract, each with its assumption in its docstring, under a `/- ADMITTED HOST CONTRACTS -/` header naming all of them |
-| `formal/lean.py`'s census | the count, as Lean reports it — the same instrument that counts every other hole in this project |
-| `tools/formal_sweep.py` | the class `built-with-admitted-contracts`: in the answerable denominator, NOT in the numerator |
-| `test_formal_admitted.py` | `ADMITTED_COUNTS`, pinned per module, failing in BOTH directions |
-| `test_formal_admitted.py`'s `truth` group | every contract's ASSUMPTION against CPython or the OS, and this file's own inventory against `counts_by_module()` — the instrument that found the eight false contracts |
-
-The sweep class is the one that matters for a coverage report. A `pass` is this
-tool's claim that the image built and every symbol it binds is on its own link
-line; a file that also asked a second process to answer a question has not had
-that claim made for it. It is deliberately in the denominator and not the
-numerator, so the headline rate can only go **down** as more of the tree is
-admitted against — which is the direction a rate about provability has to move in.
-
-### Two limits worth knowing, both stated rather than hidden
-
-- **One word per admitted call.** `MojoExpr.call` in `lib/ProofLib.lean` carries a
-  single `UInt64`, so the AST layer of a proof can only evaluate a one-argument
-  call. An admission applied to two arguments in the source model and one in the
-  AST model would make `eval_eq_mojo` — the statement that the two layers are the
-  same function — *false* rather than merely unproved. So a call with any other
-  arity is refused by `_call_go`, naming the call. `fcntl.flock(fd, operation)`
-  keeps CPython's real two-argument signature anyway: the task is to model the API
-  shape, and a one-parameter `flock` would be a signature CPython does not have.
-- **A cross-dylib call whose value is used still has no machine half.** Admitting
-  the model is what lets the proof be *generated and typechecked*; the end-to-end
-  theorem about a program that calls into a dylib is a separate, pre-existing gap
-  (`“[3] The Lean model — what landed, and what did not”`), and the generated file says so at
-  the call boundary rather than pretending.
-
----
-
 ## 8. What this does not fix
 
 Stated so no reader infers otherwise.
 
-- **The host-process sweep tier stays out of reach.** `subprocess`, `ctypes`,
+- **The 108-file sweep tier stays out of reach.** `subprocess`, `ctypes`,
   `asyncio`, `threading`, `socket` need a host process or an embedded interpreter.
   `fork`/`exec` exist in libSystem, but a *proved* model of them is a separate
   programme, and `ctypes` needs libpython, which by construction cannot be in a
-  proved image. What `subprocess`, `ctypes` and `threading` do have now is a
-  Mojo-side model in `formal/hostmods/` whose *external facts* are admitted
-  contracts (§7a) — a file that only imports them and calls nothing links and
-  proves today. Calling into them still stops at the refusal, which is the
-  honest answer.
-- **The host-import problem is a repository problem.** Phases 0-6 move repository
-  files; the stdlib scope is untouched by them, and its residue is the MLIR /
-  generics / one-word families in `bugs/FORMAL_known_limits.md`.
-- **Stage 5 monomorphization is still the largest lever on the sweep headline**
-  and it is **not** in this programme. It is phase 7, and it is weeks, not an
-  afternoon. `formal/monomorph.py` now does per-EDGE monomorphization for module
-  dylibs, which is a different mechanism solving a different problem: it makes a
-  *known* instantiation publishable, not a call to an unknown one answerable.
-- **The sweep's coverage numbers are not published here, deliberately.** This
-  section used to carry a per-file census — "288 repo files, 190 with a host
-  import, 108 in this tier, 56 needing an engine, 24 importing nothing outside
-  `{os, sys, math, struct, time}`", and "108/416 = 26.0% on arm64". Every one of
-  those figures is a claim about a *run*, over a *scope* that has since grown by
-  several hundred files, and `CLAUDE.md`'s own rule is the reason they are gone:
-  a tally is not a property of the tree, and a file that states one goes stale
-  underneath a change made in none of the files that state it. The current
-  census lives in `bugs/FORMAL_sweep_work_map.md` §1, which supersedes every
-  per-round map this tree grew — and a fresh one is
-  `python3 tools/formal_sweep.py`. Read the headline there.
-
-  What survives from the old paragraph is the lesson, which is the part that was
-  never a number: **a coverage number is only as good as the classification under
-  it.** The cheapest large win in this programme was a truthfulness fix, not a
-  capability — `CLASS_HOST`'s "not fixable" was wrong of `os`, `sys`, `re`,
-  `json` and 10 more, and the relative-import bug was falsely classifying 9 stdlib
-  files. The b10 map records the modern version of the same failure: a 166-file
-  refusal row emptied not because the backend got better but because a gate in
-  front of it changed, and **170 files moved out of a NAMED row into the
-  unclassified bucket** — a row emptying because the wall behind it was removed
-  is `FILES BLOCKED IS AN UPPER BOUND` catching a planner.
+  proved image. Measured on the current sweep: 288 repo files, 190 with a host
+  import — 108 in this tier, 56 needing an engine, and only **24** importing
+  nothing outside `{os, sys, math, struct, time}`. Phases 0-6 reach the 24 and a
+  real slice of the 56. They do not reach the 108.
+- **The external stdlib's 294 files import zero host modules.** The host-import
+  problem is entirely a repository problem. Phases 0-6 move repository files; the
+  stdlib scope is untouched by them, and its residue is the MLIR / generics /
+  one-word families in `bugs/FORMAL_known_limits.md`.
+- **Stage 5 monomorphization is still the single largest lever on the sweep
+  headline** — 24 of family 1's 30 files (`bugs/FORMAL_known_limits.md` §1.2) — and
+  it is **not** in this programme. It is phase 7, and it is weeks, not an
+  afternoon.
+- **The sweep's headline has already moved, further than this section predicted.**
+  Measured 2026-09-28: **108/416 = 26.0%** on arm64, against the ~8% this
+  section was written against. What changed is not that the backend got 3x
+  better but that the largest unanswerable bucket stopped resting on a claim we
+  knew to be false (`CLASS_HOST`'s "not fixable" was wrong of `os`, `sys`,
+  `re`, `json` and 10 more), and that 9 stdlib files stopped being falsely
+  classified by the relative-import bug. The lesson worth keeping: a coverage
+  number is only as good as the *classification* under it, and the cheapest
+  large win in this programme was a truthfulness fix, not a capability.
 
 ---
 
@@ -998,20 +542,18 @@ Stated so no reader infers otherwise.
 - **How far the phase-3 model goes.** A call frame in the Lean model is one thing; a
   *stack* discipline, reentrancy and unwinding are others. The exit criterion above
   is deliberately the minimum that makes phase 4 meaningful.
-- ~~**`doc/ABI.md` has two stale names.**~~ **CLOSED.** `runtime/mojo_runtime.h`
-  and `mojo_compiler.py` were renamed to `fire_runtime.h` and `fire_compiler.py`
-  and `doc/ABI.md` was corrected in the same revision that recorded it — it now
-  names both renames in its own header. Nothing is outstanding here; it is left
-  struck because a bullet that silently disappears is indistinguishable from one
-  that was never filed.
-- ~~**A duplicated block in `formal/arm64_proof_gen.py`.**~~ **CLOSED.** The file
-  used to define `generate_arm64_proof` twice, `_gen_extern_test` twice and
-  `_find_extern_call` twice, with byte-identical copies, so Python bound the
-  second and every citation above referred to the wrong one. It no longer does:
-  there is exactly one `def` of each, and `test_formal_doc_truth.py` asserts that
-  for every top-level `def` in both `formal/model.py` and
-  `formal/arm64_proof_gen.py`, because "the proof generator is the wrong place to
-  be carrying two copies of anything" is a rule and not a one-off cleanup.
+- **`doc/ABI.md` has two stale names**, and this document defers to it:
+  `runtime/mojo_runtime.h` (`:55`, renamed to `fire_runtime.h`) and
+  `mojo_compiler.py` (`:95`, renamed to `fire_compiler.py`). A separate one-line
+  fix; flagged here so `FORMAL.md` does not inherit the staleness.
+- **A duplicated block in `formal/arm64_proof_gen.py`.** `generate_arm64_proof` is
+  defined at both `:6034` and `:7222`; `_gen_extern_test` at both `:5661` and
+  `:6849`; `_find_extern_call` at both `:5556` and `:6744`. The copies are
+  byte-identical so behaviour is unaffected and Python binds the second, but the
+  live `_gen_extern_test` is the one at **`:6849`** and every line number above
+  that touches it refers to that copy. The proof generator is the wrong place to be
+  carrying two copies of anything. `formal/model.py` has 205 `def`s and no
+  duplicates, so its line numbers are unambiguous.
 - **Whether the two hand-kept module tables in `mojo/middle/` should be folded in
   during this programme.** `_MODULE_ATTR_CTYPES` (`mojo/middle/types.py:722`) and
   `_STRUCT_MODULE_FN_RETVALS` (`:360`) exist only to keep a type estimator and a
@@ -1362,114 +904,3 @@ test files in `tools/suite.py`, resolves any overlap that turns out to be real,
 updates this document with what actually landed, deletes the bug doc for any bug
 that is now **fixed** (a doc for a fixed bug is a doc that lies), and then
 **runs the gate once**.
-
----
-
-## 12. Every Lean run is bounded — the launch policy
-
-`formal/lean.py::run_lean` is the **only** way this tree starts Lean 4, and
-every run it makes carries an upper bound on wall time, on total CPU across the
-whole process tree, and in Lean's own `maxHeartbeats`. The numbers and the
-measurements behind them are in that module's docstring; this section is the
-policy, and it is here rather than only there because a bound nobody can find is
-not a policy.
-
-**Why it exists.** On 2026-10-02 the user killed ten `lean` processes on this
-machine by hand, some of them hundreds of CPU-hours old. A valid inductive proof
-here checks in seconds to minutes, so those were non-terminating elaborations,
-and nothing would have stopped them: the launch sites that had a bound at all
-had a **wall** bound (`subprocess.run(timeout=1200)`), three of them had none,
-and `maxHeartbeats` does not meter the thing that spins (`native_decide`, kernel
-reduction, and `simp`'s congruence recursion — three separate budgets measured
-FAILING to fire on the one case ever diagnosed; the numbers are in §12 below and
-in `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
-
-| what | bound | why that size |
-|---|---|---|
-| one generated proof | `PROOF_WALL_S` / `PROOF_CPU_S` = 1500 s | 5x the slowest legitimate proof measured (`formal/examples/udivmod.mojo`, 297.8 s wall / 219.2 s CPU) |
-| one `lib/*.olean` build or census | `LIBRARY_WALL_S` / `LIBRARY_CPU_S` = 1800 s | ~16x the slowest module build (`ProofLib`, 112.0 s / 83.1 s) |
-| memory | `-M 6144` = 6.0 GB (proof), `-M 12288` = 12.0 GB (library) | above the measured peak of the largest of each — 3.00 GB and 7.82 GB, so **2.0x** and **1.53x**. **Not** the project's 4 GB line: with `-M 4096` the `ProofLib` build fails outright ("(kernel) excessive memory consumption detected"), so that ceiling is a red suite, not a policy. The over-4 GB fact is `prooflib`'s `memwhy`. This row used to say "2x the measured peak of the largest of each", which is right of the proof ceiling and a 30% overstatement of the library one — it is one ratio per ceiling, and a table row that gives one number for two is a row that cannot be checked |
-| threads | `-j 4` | one file is elaborated sequentially; the threads only decide how fast a runaway burns the machine |
-
-**The escape hatch is the library build and nothing else**
-(`FORMAL_LEAN_LIBRARY_WALL_S`, `FORMAL_LEAN_LIBRARY_CPU_S`). A proof bound the
-environment can lift is not a bound: the thing that needs lifting during a
-runaway is exactly the thing somebody would lift it for.
-
-**A breach is a verdict of its own.** `LeanRun.exceeded` says which bound was
-broken, `proof_census` refuses to publish it to the verdict cache (a bound is a
-fact about this machine at that moment, and a cached timeout is a permanent red),
-and the hole census for a killed elaboration is `None` — UNMEASURED — rather than
-`0`. Re-measure any of the numbers above with `FORMAL_LEAN_TRACE=1`, which makes
-the launcher print wall/CPU/peak for every run it makes.
-
-**What was switched off, and what switched it back on.** From `3b9bb56e` to
-`7d0ac990` the eight gate tests that typecheck generated Lean — `formal`,
-`formal-call-proofgen`, `formal-dylib`, `formal-imports`, `formal-sweep`,
-`formal-x86`, `formal-x86-endtoend`, `formal-x86-model` — were `disabled=` in
-`tools/suite.py` against
-`“The formal Lean proof checks in the gate have no time bound”`, which said plainly
-that `formal7-lean-bound` owned the fix and that the doc was the switch: deleting
-it re-enabled the tests, and `tools/suite.py` refused to load the registry while
-a disabled test's doc was gone.
-
-Both halves are now in, and the doc is deleted:
-
-1. the launcher, above — `formal/lean.py::run_lean`, one bounded path for every
-   Lean run in the tree, sized from the measured slowest legitimate proof;
-2. the looping obligation, which was the per-export dylib contract in
-   `formal/arm64_proof_gen.py::_dylib_contract_proof`. It emitted the runner's
-   own pc bump as a **fourteen-fold nest** of `if <pc of the whole composed
-   state> = <pc of the whole composed state> then .. else ..`, and `bv_decide`'s
-   internal normalisation of that nest is what does not terminate — a case split
-   per level, in a `simp` the emitted file has no way to configure, with
-   `maxHeartbeats`, `maxSteps` and `maxRecDepth` all measured failing to fire.
-
-   The emitter already knows statically which steps move the pc — `_step_rhs`
-   writes the `pc` field exactly when the instruction does — so it emits the
-   `if` **resolved** for every one of them, which is the same function, because
-   `(st_i s).pc = s.pc` holds by `rfl` for a step whose effect is a record
-   update on `sp`. One `if` survives, at the closing `ret`, where `BlockCert`
-   quantifies over every state at the entry and the answer is genuinely
-   data-dependent; it never reaches `bv_decide` (`arm64_reg_pc` projects a
-   register read through both branches) and is decided for the start state by
-   `ret_ne`. Measured on the generated proof of `def triple(n): return n * 3`:
-   **9.0 s wall / 14.4 s CPU / 1.63 GB peak, rc 0, 0 holes**, against "did not
-   finish" (177.1 s CPU in 79.9 s wall before `RLIMIT_CPU` fired; and 79.7 s
-   wall / 296 s CPU even with `bv_decide` replaced by `sorry`, because
-   `noEarly`'s fifteen `simp only [S15…, st0…]` blocks were a second cost
-   centre — they are now one `omega` per step off a per-step `pc` lemma).
-
-   **What that fix was NOT.** The contract had never been checked, and checking
-   it found that it was wrong: `st_i` composed *itself* while `S_{i+1}` feeds it
-   the running state, so every step ran once per earlier step again and the
-   composed effect of `triple` was `n * 243` where the machine computes `n * 3`
-   — a `sorry` over a false claim, which is what `OPUS.md` §4.1a is about
-   (`DylibExport.total_refuted_backward_branch`). Also
-   wrong and also never elaborated: `body.step` was one step short of the block
-   it certifies, the `BlockCert` was an `instance` of a `structure … : Prop`
-   that is not a class, `runsTo0` was used but never emitted, and `noEarly`
-   split its `u` with `interval_cases`, a Mathlib tactic this toolchain does not
-   have. `test_formal_dylib.py`'s `a wrong spec is rejected, not believed` is
-   what keeps any of that from coming back: a proof that merely elaborates says
-   nothing, and `n * 243` elaborated.
-
-The per-unit costs behind the bound, all on an idle box with
-`FORMAL_LEAN_TRACE=1`:
-
-* `prooflib` — 112 s wall, 7.82 GB peak on a cold CAS, and **0.3 s** on a warm
-  one (five CAS hits).
-* one generated proof — 8.6 s (`const2`) … 297.8 s (`udivmod`), 1.5-3.0 GB peak.
-  Eleven of the **51** `formal/examples/*.mojo` are measured (the corpus has grown
-  from the 45 this paragraph used to name; the eleven are the ones in
-  `formal/lean.py`'s own table), and the largest by SIZE are not the slowest.
-  Those sizes are of the **generated proof file**, not the `.mojo` — `wide_recv`
-  is 296 bytes of source and 703 KB of generated Lean, and it checks in 93.4 s
-  while `udivmod` is 45 bytes of source, 437 KB generated, and takes 297.8 s. So
-  size is not a usable proxy, and neither is source size.
-* `formal-x86-endtoend` and `formal-x86-model` — **still not measured**, and
-  named as such rather than left to be discovered: their Lean runs are
-  `formal/x86_64_endtoend_test.py`'s and
-  `formal/x86_64_model_coverage_test.py`'s, bounded at `PROOF_WALL_S`/3600 s.
-  One `make gate` replaces that sentence with a number, the same way it replaces
-  `prooflib`'s `module` class.

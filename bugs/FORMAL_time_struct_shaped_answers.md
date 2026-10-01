@@ -1,26 +1,11 @@
 # FORMAL_time_struct_shaped_answers: five `time` names are absent because their answer is a struct
 
-**Status: UPDATED 2026-10-03 (`work/formal16-8`). Item 1 is CLOSED and item 2 is
-RESOLVED AS A LIMIT, so what is left here is a FACT rather than work: the five
-names are absent because their answer is a STRUCT, a struct cannot cross a module
-boundary on this path, and the API shape that would work around that would be an
-API CPython's `time` does not have — which this module's own docstring rules
-forbid inventing.** Both halves are measured below. Nothing is "fixed" in the
-sense of five names answering, and nothing should be: see item 2.
-
-**Status: OPEN, and a limit rather than a defect — but NOT the limit this doc
-used to name.** It is the reason `localtime`, `gmtime`, `mktime`, `strftime` and
-`get_clock_info` are ABSENT from `formal/hostmods/time.mojo` rather than
-approximate. Found while writing `time` (2026-09-29, the `module:time` claim).
-**Re-measured 2026-10-02: the struct LAYOUT is not what is missing — a module can
-read a C library's struct field-wise today, and what it cannot do is STORE
-through a pointer. That capability is filed as
-`FORMAL_a_module_cannot_store_through_a_pointer_with_a_declared_pointee.md`, and
-`test_formal_time.py`'s `structroute` group is the standing measurement behind
-it. What remains here is that capability plus an API-shape judgement.** The
-struct rule is the same on both backends, so no file is claimed here; the
-container capacity rule is a separate, already-filed limit
-(`FORMAL_listdir_no_run_time_sequence.md`).
+**Status: OPEN, and a limit rather than a defect. It is the reason `localtime`,
+`gmtime`, `mktime`, `strftime` and `get_clock_info` are ABSENT from
+`formal/hostmods/time.mojo` rather than approximate.** Found while writing
+`time` (2026-09-29, the `module:time` claim). The struct rule is the same on
+both backends, so no file is claimed here; the container capacity rule is a
+separate, already-filed limit (`FORMAL_listdir_no_run_time_sequence.md`).
 
 ---
 
@@ -135,83 +120,39 @@ follow the `os` precedent is scalar functions — `localtime_year(t)`,
 judgement about the API shape and it is the integrator's or the next worker's
 to make, not something to guess at from here.
 
-## The exact next step, re-measured: the layout is NOT what is missing
+## The exact next step
 
-The plan this doc used to end with was (1) give a struct an addressable field
-layout across a dylib boundary, then (2) answer the three that RETURN one in the
-scalar spelling, then (3) `mktime`/`strftime` last. **Step 1 turned out to be
-already done, and the blocker is somewhere step 1's plan did not look.**
+The struct read is the same problem `bugs/FORMAL_stat_out_parameter_is_unreadable.md`
+and `bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md` record, so
+there is one fix for all of them rather than five:
 
-`test_formal_time.py`'s new `structroute` group is the measurement, on both
-architectures:
+1. **Give a struct an addressable field layout across a dylib boundary.**
+   `doc/ABI.md`'s "Aggregates" section already says the right thing —
+   *"Structs are passed and returned by pointer … Field layout (name → C type,
+   in declaration order) is recorded in the reflection table and must match on
+   both sides"* — and the block that follows says the `Span` row is a hardcoded
+   model rather than a declared struct. So the contract is written and the
+   implementation is a special case. Routing `_emit_subscript_addr`'s
+   pointer-with-declared-pointee rule (the one
+   `FORMAL_subscript_of_a_pointer_reads_a_blob_count.md` §"exact next step"
+   asks for) to a struct whose fields the reflection table knows would give
+   `tm.tm_year` as a load at a stated offset.
 
-| what a module tries | result |
-|---|---|
-| read a C library's struct byte-wise through `Pointer[UInt8]` | **works** — `(p + k).value()`, checked against the bytes of a value the test put in the environment |
-| read it through a wider pointee | refused, naming the width rule |
-| **write** through a pointee (`p.value() = 1`) | **refused** — "assignment target must be a plain name" / "only a plain name has a home" |
+2. **Then answer the three that return one, in the scalar spelling**, and
+   check each field against CPython's own `time.localtime(t)` in a new group
+   of `test_formal_time.py`. That group should compare fields, not the tuple:
+   the tuple is the thing with no representation, and comparing it would
+   reintroduce the obstacle the fix removes.
 
-So the read half of the route exists, field by field, in four little-endian byte
-loads each — which is exactly what a `struct tm`'s nine `int`s are. What a module
-cannot do is WRITE, and that is what the five names are waiting on:
+3. **`mktime` and `strftime` last**, and each needs its timezone answered
+   separately — `strftime("%Z")` reads the process's `TZ`, which is a `char *`
+   in the C library's data, and `localtime` reads it too. That is a reachable
+   facility (`getenv` already is, in the `os` module) but it is a second
+   capability, and neither of these two names is correct without it.
 
-* `localtime`/`gmtime` take a `const time_t *`, and the eight bytes that pointer
-  must address cannot be built on this path (no store, and a module has no state
-  of its own — `bugs/FORMAL_module_state_no_storage.md`). Passing an integer
-  instead passes a null pointer and the image segfaults inside libc: measured,
-  exit -11, which is why this is a refusal here and not a plausible answer there;
-* `mktime`/`strftime` take a `struct tm *`, i.e. 36 bytes to fill one field at a
-  time — the same missing store;
-* `get_clock_info` is a different absence (a host-object type) and is not
-  waiting on this.
-
-The capability is filed, with the exact next step and the reason the analysis
-belongs in one place for both backends, as
-`FORMAL_a_module_cannot_store_through_a_pointer_with_a_declared_pointee`.
-
-That leaves two open items here, and neither is a defect in this tree:
-
-1. **the store** (above) — the only thing between `localtime_year` and an
-   answer. **CLOSED 2026-10-03, measured.** `p.value() = v` through a pointee
-   with a DECLARED type is a store at that pointee's own width, and it builds and
-   RUNS on both architectures: `test_formal_time.py`'s `structroute` group reads
-   `read yes / store yes` on arm64 and on x86-64, 5/5 groups on each. The store is
-   checked by running it and reading the bytes AT and AFTER each pointee, because
-   a store at the wrong width writes the right answer and corrupts the bytes
-   behind it — the one failure a build cannot see. Still refused on both machines
-   by name: a store whose width would be a CHOICE rather than a fact (no recorded
-   pointee, a float/blob/struct pointee, a `p + k` whose element width the
-   declaration does not fix, a read-only page).
-   `FORMAL_a_module_cannot_store_through_a_pointer_with_a_declared_pointee.md` is
-   already gone from `bugs/`, so its capability landed and this group is its
-   standing guard. One repair was needed to make the measurement readable: the
-   `unscaled` row's needle was pinned to the refusal's old FRAMING while the
-   refusal is intact on both machines, so `structroute` was red on master for a
-   wording change. The needle is now the sentence's operative clause, with both
-   current sentences quoted in the case's comment.
-2. **the API shape**, still a judgement and still not mine to make: once the
-   store lands, `localtime(t)` cannot return a `struct tm` on this path, so the
-   choice is nine scalar functions against CPython's one struct, or one function
-   taking a caller-owned buffer and an offset. `os`'s `stat` precedent answers
-   with a scalar (`getsize`, via `lseek`) rather than a struct, which is a
-   reason to prefer the first — but "a program that wants `tm_year` and `tm_mon`
-   pays for two libc calls" is the cost, and it was already named here before
-   the store question was answered. **RESOLVED AS A LIMIT 2026-10-03, and the
-   resolution is that NEITHER candidate shape is available to THIS module.** The
-   `os`/`stat` precedent does not carry, and the difference is the whole answer:
-   `getsize` is a CPython name whose CPython answer IS a number, so answering it
-   with `lseek` answers the same question, whereas `time.localtime_year` is not a
-   CPython name at all — CPython has `localtime`, and its answer is a
-   `struct_time` — so a scalar spelling would be inventing an API, which this
-   module's own rules forbid ("each export is a CPython name with CPython's
-   meaning", and the `now` section below, which declines to add a `now` for
-   exactly this reason). A caller-owned buffer plus an offset is a second invented
-   name for the same reason.
-
-   **So the five names STAY absent**, and `test_formal_time.py`'s `limits` group
-   is the standing statement of that ("5 absent names refused, each naming
-   itself", on both architectures). What would actually answer them is a
-   struct-RETURNING export — the same capability
-   `FORMAL_returned_frame_caller_owned_block.md` gives a function inside one
-   image, and which a dylib boundary does not have — and that is a project rather
-   than a judgement call about five names.
+**Not attempted here, and why.** Answering `localtime` with nine separate
+functions that each re-derive the broken-down time from the timestamp is
+possible — the arithmetic is pure — but it would be nine libc calls per field
+and a program that wanted `tm_year` and `tm_mon` would pay for all eighteen.
+That is a worse API than CPython's for a saving that is not the one the module
+is for, so the honest state is the refusal above.

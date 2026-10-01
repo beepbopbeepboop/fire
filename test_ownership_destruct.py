@@ -11,7 +11,7 @@ import fire_compiler as N
 import mojo.middle.infra_infer as II
 from ownership_destruct import (analyze_module, analyze_function, analyze_scoped_locals,
                                 analyze_returns_fresh, receiver_results_consumed,
-                                key_views_consumed, list_elements_owned, lambda_value_owned)
+                                key_views_consumed)
 
 
 def _candidates(src, fname):
@@ -787,70 +787,6 @@ def mk() -> List[Int]:
     return l
 """, "mk", False),
 
-    # The nested-scope veto is decided against the CAPTURE SET, not the mere
-    # existence of a nested scope. `has_capture_list` is what makes the set
-    # known: a def that wrote one can only capture the names in it, and `{}`
-    # captures nothing. Every True below used to be refused.
-    ("nested_def_with_capture_list_not_naming_the_returned_local", """
-def mk() -> List[Int]:
-    total = 0
-    def note() {mut total}:
-        total += 1
-    note()
-    l = []
-    return l
-""", "mk", True),
-
-    ("nested_def_with_explicit_empty_capture_list", """
-def mk() -> List[Int]:
-    def note() {}:
-        total = 1
-        return total
-    note()
-    l = []
-    return l
-""", "mk", True),
-
-    ("nested_def_capturing_the_returned_local_is_still_refused", """
-def mk() -> List[Int]:
-    l = []
-    def note() {mut l}:
-        l.append(1)
-    note()
-    return l
-""", "mk", False),
-
-    ("nested_def_capturing_the_returned_local_by_ordinary_borrow", """
-def mk() -> List[Int]:
-    l = []
-    def note() {read l}:
-        return len(l)
-    note()
-    return l
-""", "mk", False),
-
-    # A bare `{mut}`/`{var}` names no one, so it captures "whatever the body
-    # references" — the set is unknown and the refusal stands.
-    ("nested_def_with_bare_mut_capture_convention_is_refused", """
-def mk() -> List[Int]:
-    l = []
-    def note() {mut}:
-        l.append(1)
-    note()
-    return l
-""", "mk", False),
-
-    ("lambda_alongside_an_explicit_list_is_still_refused", """
-def mk() -> List[Int]:
-    l = []
-    def note() {mut total}:
-        total = 1
-        return total
-    g = lambda: l
-    g()
-    return l
-""", "mk", False),
-
     ("is_a_generator", """
 def mk():
     l = []
@@ -1142,159 +1078,9 @@ def f() -> Int:
 ]
 
 
-# list_elements_owned: a list built by a runtime function that SOLELY owns its
-# string elements (a `split()` result) may be torn down WITH them only if no
-# element of it is ever named — see ownership_destruct.list_elements_owned. The
-# rule is deliberately narrow and fail-closed, so most of these are False; the
-# True cases are the shape the ~48 B/iteration leak had.
-LIST_ELEM_CASES = [
-    ("len_only_is_the_leak_shape", """
-def f() -> Int:
-    var parts = String("a b c").split(" ")
-    return len(parts)
-""", "parts", True),
-    ("len_inside_a_loop_is_fine", """
-def f(n: Int) -> Int:
-    var t = 0
-    for i in range(n):
-        var parts = String("a b c").split(" ")
-        t += len(parts)
-    return t
-""", "parts", True),
-    ("printing_and_comparing_the_whole_list_is_fine", """
-def f(parts: List[String]) -> Int:
-    print(parts)
-    if parts == []:
-        return 0
-    return len(parts)
-""", "parts", True),
-    # ── and every way an element can be named is rejected ──
-    ("a_subscript_read_hands_the_element_out", """
-def f(kept: List[String]):
-    var parts = String("a b c").split(" ")
-    kept.append(parts[0])
-""", "parts", False),
-    ("a_name_bound_from_a_subscript_hands_the_element_out", """
-def f() -> String:
-    var parts = String("a b c").split(" ")
-    var one = parts[1]
-    return one
-""", "parts", False),
-    ("iteration_hands_every_element_out", """
-def f(kept: List[String]):
-    var parts = String("a b c").split(" ")
-    for p in parts:
-        kept.append(p)
-""", "parts", False),
-    ("a_comprehension_over_it_hands_every_element_out", """
-def f() -> List[String]:
-    var parts = String("a b c").split(" ")
-    return [p for p in parts]
-""", "parts", False),
-    ("a_copy_shares_the_element_pointers", """
-def f() -> List[String]:
-    var parts = String("a b c").split(" ")
-    return list(parts)
-""", "parts", False),
-    ("a_slice_shares_the_element_pointers", """
-def f() -> List[String]:
-    var parts = String("a b c").split(" ")
-    return parts[:]
-""", "parts", False),
-    ("concatenation_shares_the_element_pointers", """
-def f(other: List[String]) -> List[String]:
-    var parts = String("a b c").split(" ")
-    return parts + other
-""", "parts", False),
-    ("extend_into_another_list_shares_the_element_pointers", """
-def f(kept: List[String]):
-    var parts = String("a b c").split(" ")
-    kept.extend(parts)
-""", "parts", False),
-    ("passing_the_list_to_an_unknown_callee_is_rejected", """
-def f(kept: List[String]):
-    var parts = String("a b c").split(" ")
-    kept.append(len(parts))
-""", "parts", True),      # len only -> still fine
-]
-
-
 def _keyviews(src, name):
     stmts = N.Parser(N.py_tokenize(src)).with_filename("<test>").parse_module()
     return key_views_consumed([st for st in stmts if isinstance(st, N.FunctionDef)][0].body, name)
-
-
-def _listelems(src, name):
-    stmts = N.Parser(N.py_tokenize(src)).with_filename("<test>").parse_module()
-    return list_elements_owned([st for st in stmts if isinstance(st, N.FunctionDef)][0].body, name)
-
-
-# lambda_value_owned: a capturing lambda's bound method and the environment it
-# captured are ONE allocation unit, freed together only if the only mention of
-# the name after the binding is the call it is written for — see
-# ownership_destruct.lambda_value_owned.
-LAMBDA_CASES = [
-    ("called_in_place_is_owned", """
-def f(n: Int) -> Int:
-    var t = 0
-    for i in range(n):
-        var g = lambda x: x + i
-        t += g(1)
-    return t
-""", "g", True),
-    ("called_in_place_at_function_level_is_owned", """
-def f(n: Int) -> Int:
-    var g = lambda x: x + n
-    return g(1)
-""", "g", True),
-    ("stored_in_a_container_escapes", """
-def f(kept: List) -> Int:
-    var t = 0
-    for i in range(4):
-        var g = lambda x: x + i
-        kept.append(g)
-        t += g(1)
-    return t
-""", "g", False),
-    ("aliased_to_another_name_escapes", """
-def f() -> Int:
-    var g = lambda x: x + 1
-    var h = g
-    return h(2)
-""", "g", False),
-    ("captured_by_another_lambda_escapes", """
-def f() -> Int:
-    var g = lambda x: x + 1
-    var h = lambda y: g(y)
-    return h(3)
-""", "g", False),
-    ("returned_escapes", """
-def f() -> Int:
-    var g = lambda x: x + 1
-    return g
-""", "g", False),
-    ("passed_as_an_argument_escapes", """
-def use(cb: Int) -> Int:
-    return 0
-
-def f() -> Int:
-    var g = lambda x: x + 1
-    return use(g)
-""", "g", False),
-    ("a_rebinding_is_a_second_value", """
-def f() -> Int:
-    var g = lambda x: x + 1
-    g = lambda x: x + 2
-    return g(3)
-""", "g", False),
-]
-
-
-def _lambda_owned(src, name):
-    stmts = N.Parser(N.py_tokenize(src)).with_filename("<test>").parse_module()
-    fns = [st for st in stmts if isinstance(st, N.FunctionDef)]
-    f = fns[-1]
-    return lambda_value_owned(f.body, name)
 
 
 def run():
@@ -1318,14 +1104,6 @@ def run():
         got = _candidates(src, fname)
         if got != expected:
             failures.append(f"{name!r}: expected {expected}, got {got}")
-    for name, src, var, expected in LAMBDA_CASES:
-        got = _lambda_owned(src, var)
-        if got != expected:
-            failures.append(f"{name!r}: expected lambda_value_owned={expected}, got {got}")
-    for name, src, var, expected in LIST_ELEM_CASES:
-        got = _listelems(src, var)
-        if got != expected:
-            failures.append(f"{name!r}: expected list_elements_owned={expected}, got {got}")
     for name, src, var, expected in RECEIVER_CASES:
         got = _receiver(src, var)
         if got != expected:
@@ -1335,7 +1113,7 @@ def run():
         if got != expected:
             failures.append(f"{name!r}: expected key_views_consumed={expected}, got {got}")
     total = (len(CASES) + len(SCOPED_CASES) + len(FRESH_RETURN_CASES) + len(STRUCT_CASES)
-             + len(RECEIVER_CASES) + len(KEYVIEW_CASES) + len(LIST_ELEM_CASES) + len(LAMBDA_CASES))
+             + len(RECEIVER_CASES) + len(KEYVIEW_CASES))
     passed = total - len(failures)
     for f in failures:
         print("FAIL:", f)

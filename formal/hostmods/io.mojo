@@ -25,7 +25,8 @@ in name only: `io.SEEK_SET` is a module-level name, and a module-level name is
 inlined at its use site and crosses no boundary, so every one of them is a
 zero-argument function for the reason `os.sep` is one
 (`formal/hostmods/os/__init__.mojo` says it at length). Four names, four
-numbers, and `test_formal_io.py` checks each against CPython's own `io`.
+numbers, and `test_formal_small_hosts.py` checks each against CPython's own
+`io`.
 
 WHAT IS NOT HERE, AND WHY
 -------------------------
@@ -84,8 +85,8 @@ def DEFAULT_BUFFER_SIZE() -> int:
     measured rather than assumed: this tree's CPython 3.14.6 reports
     `os.stat('/').st_blksize == 4096` and `io.DEFAULT_BUFFER_SIZE == 131072`,
     so the value is not derived from a block size on this build. A future
-    CPython that derived it would make `test_formal_io.py` red, which is the
-    right outcome for a module whose job is to be a mirror.
+    CPython that derived it would make `test_formal_small_hosts.py` red, which
+    is the right outcome for a module whose job is to be a mirror.
 
     Nothing in this tree reads it, and it is here because it is a CPython `io`
     name with an exact answer rather than because a caller needs it — the one

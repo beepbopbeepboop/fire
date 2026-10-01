@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""driver.py — `fire build`/`run`, thin by design (MODULE_CACHE_DESIGN.md).
+"""driver.py — `mojo build`/`run`, thin by design (MODULE_CACHE_DESIGN.md).
 
 `import` does the work: as the codegen resolves each import it builds the module's
 dylib (CAS), wires its `__mojo_reflect` ABI, and *records the dylib on the link
@@ -161,19 +161,13 @@ def _compile_optional_unit(unit, src, plain, gcc):
     publishes whatever build_fn returns, so a None here would enter the CAS as
     a zero-length artifact and every later build would "hit" it.
     """
-    # The per-unit compiler and flags go into the key as well as the command:
-    # the Metal unit is Objective-C and needs clang + ARC, so keying it on the
-    # build-wide gcc alone would let a gcc-built .o satisfy a later
-    # clang-built request (or vice versa) across two checkouts sharing a cas.
-    cc = optional_unit_cc(unit) or gcc
-    ccf = tuple(optional_unit_cc_flags(unit))
-    key = cas.module_key(open(src).read(), [], gcc, plain + (unit, cc) + ccf)
+    key = cas.module_key(open(src).read(), [], gcc, plain + (unit,))
 
     def _build_fn():
         import tempfile as _tf
         wd = _tf.mkdtemp(prefix='mojo_optrt_')
         obj = os.path.join(wd, 'x.o')
-        r = subprocess.run([cc, *plain, *ccf, '-c', '-o', obj, src],
+        r = subprocess.run([gcc, *plain, '-c', '-o', obj, src],
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise _OptionalUnitFailed(
@@ -188,8 +182,7 @@ def _compile_optional_unit(unit, src, plain, gcc):
 
 
 def compile_program(input_file, src, output=None, run=True,
-                    opt_flag=None, debug_flag=None, program_args=None,
-                    auto_gpu=True):
+                    opt_flag=None, debug_flag=None, program_args=None):
     """Compile (and optionally run) a Mojo program through the module-cache system.
     Returns the program's exit code when run / 0 on a successful build, or None if
     the build failed (caller decides the fallback)."""
@@ -202,8 +195,7 @@ def compile_program(input_file, src, output=None, run=True,
     # see compile_linked's own docstring — a real coroutine translation
     # unit either directly in this module or inside an elaborated generic
     # it calls.
-    c_code, dylibs, objects, cpp_code, needs_cxx = compile_linked(
-        src, filename=input_file, auto_gpu=auto_gpu)
+    c_code, dylibs, objects, cpp_code, needs_cxx = compile_linked(src, filename=input_file)
     objects = list(objects)
     if cpp_code:
         objects.append(_build_client_cpp_object(cpp_code, gcc, objflags))
@@ -233,8 +225,7 @@ def compile_program(input_file, src, output=None, run=True,
             objects.append(cas.get_or_build(_key, '.o', _mk)[0])
 
     # Optional runtime units (build_config's registry -- see
-    # build_config.py's own header, where the bug is described). runtime/
-    # holds six C
+    # bugs/CODEGEN_optional_runtime_units_not_linked.md). runtime/ holds six C
     # units and only fire_runtime.c was in a build path, while the headers of
     # the other four are `#include`d into EVERY generated TU (module_gen.py's
     # preamble) and all their signatures sit in gimple_codegen._KNOWN_SIGS --
@@ -313,7 +304,7 @@ def _expand_dylib_modules(input_files):
     Since `bsd.build()` already treats every module explicitly PASSED to it
     as unconditionally exporting its own full top-level API (that's exactly
     how the real 664-file stdlib dylib works — no module in that list is
-    "unused"), the fix is to make `fire dylib` walk each input file's own
+    "unused"), the fix is to make `mojo dylib` walk each input file's own
     `from X import ...` statements (any form, not just `*` — a normal named
     import of a name nothing else calls has the identical problem) and add
     every LOCAL (non-stdlib) module it names to the build list too, so their
@@ -375,7 +366,7 @@ def compile_dylib(input_files, output=None, jobs=1, opt_flag=None):
     no separate mojo runtime dylib to also manage.
 
     `input_files`: a single path or a list of paths — every module's own
-    exported symbols land in the same output dylib (mirrors `fire dylib
+    exported symbols land in the same output dylib (mirrors `mojo dylib
     a.mojo b.mojo -o combined.dylib` bundling multiple library modules
     together, the same way `build_stdlib_dylib.py`'s own CLI already
     accepts multiple module args). Each input file's own `from X import ...`
@@ -387,7 +378,7 @@ def compile_dylib(input_files, output=None, jobs=1, opt_flag=None):
 
     `opt_flag` defaults to '-O2': unlike the internal stdlib dylib (compiled
     once, at -O0, optimized for build time and CAS cache-friendliness — see
-    build_stdlib_dylib.build()'s own docstring), a `fire dylib` artifact is
+    build_stdlib_dylib.build()'s own docstring), a `mojo dylib` artifact is
     meant to be linked into a real program and actually run — fire.py's CLI
     passes through an explicit -O0/-O1/-O3/-Os/-Oz/-Og if the caller gave
     one (via the same `_extract_codegen_flags` every other subcommand uses),

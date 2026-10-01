@@ -118,15 +118,7 @@ facts. So every verdict now carries a class:
   tool                              timeout, unreadable file, or an internal
                                     exception in the sweep or the build
                                     driver — no verdict about the source was
-                                    reached at all. Also the two ways a file
-                                    is killed by THIS TOOL's per-file memory
-                                    ceiling rather than by its source:
-                                    `memory-killed` (memcap reported a breach,
-                                    with the measured peak) and `wrapper-died`
-                                    (memcap itself was killed before it
-                                    reported anything, so the build's own
-                                    verdict was never observed — see
-                                    CAUSE_WRAPPER_DIED)
+                                    reached at all
   unknown                           a message shape this tool does not
                                     recognise. Deliberately its own bucket
                                     rather than a fallback into `codegen`:
@@ -196,69 +188,13 @@ earlier run, prints how the verdicts moved: every file whose class changed is
 accounted for by name, in both directions, so a rule change can never quietly
 turn a reported failure into a differently-counted one.
 
-TWO NUMBERS THIS TOOL REFUSES TO PRINT WITHOUT A CROSS-CHECK
--------------------------------------------------------------
-Everything above is a count, and a count has two failure modes that no table
-catches. This section is about both, and both were real on the same round.
-
-THE FIRST: a bucket that means NOBODY HAS LOOKED can be the largest row in the
-corpus and read as a finding. On the 2026-10-04 b12 sweep `_REFUSAL_OTHER` held
-236 files — half of every codegen finding — and it held them because a NEW
-refusal had no row in `_REFUSAL_FAMILIES` and none in
-`tools/formal_sweep_causes.py`'s `CAUSES` either, so the two ranking tables
-agreed there was no name for it. What filled it was one edit: six lines of
-em-dash prose in a docstring in `formal/hostmods/os/_syscalls.mojo`, which the
-model's TEXT ENCODING scan read as a non-ASCII string value and refused every
-file in its import closure behind. 229 of the 236 were that one module. The
-findings were CORRECT (the sweep said those files do not build and they did not
-build) and the report was useless: a rank-1 row called `other refusal` with an
-example file and no next step, found by reading a work map afterwards rather
-than by running the sweep. So a shape over `UNCLASSIFIED_MIN_FILES` files or
-`UNCLASSIFIED_MIN_FRACTION` of the corpus is now printed as a LOUD FINDING that
-names the shape, its top example files and what the OTHER ranking table calls
-it, and it exits 4. `unclassified_report` owns the shape grouping, the bar and
-the wording; `formal_sweep_causes.py` calls the same three through its own `FS`
-handle, so there is one threshold and one printer for both tables.
-
-THE SECOND: a class count cannot say whether a round improved or regressed,
-because one edit moves files both ways. The same round's 236 files were the
-capability arriving AND the regression (`…_b12.md` §3.4), which is why that map
-prints both numbers. So every run compares its per-file classes against a
-COMMITTED baseline, `bugs/sweeps/sweep-<arch>.baseline.json`, and names every
-file that moved to a class FURTHER FROM A PASS, grouped by the refusal now in
-front of it. The ledger above cannot do this: it is keyed on arch and scope and
-lives in the CAS, so it is gone when the cache is, and comparing it needs the
-previous run to have happened on this machine. A committed baseline needs
-neither — which is the whole difference, and the reason the alarm is a file in
-`bugs/sweeps/` rather than another CAS artifact. `CLASS_SEVERITY` states the
-order the word "worse" uses, including the two boundaries a reader is most
-likely to argue with.
-
 EXIT STATUS
 -----------
   0  no codegen finding (in a file or in a dependency), no backend crash, no
      `tool` failure, no `unknown` verdict
   1  at least one of those (a real finding, a backend that fell over, or a
      file the sweep could not answer for a reason that is its own problem)
-  2  the sweep did not run (no input files, or another sweep of the same
-     architecture holds the lock, or the committed baseline is not a baseline
-     this tool can read — the last one refuses BEFORE any build, because a run
-     that spends half an hour and then discovers its alarm was never going to
-     fire is the worst place to find that out)
-  3  the sweep was INTERRUPTED (SIGINT/SIGTERM). Everything it classified was
-     printed and published, and the summary says how much of the scope it
-     reached. Its own status rather than 1's because "you stopped it" and "it
-     found something" are different facts, and a caller retrying on 1 alone
-     would retry a run that needs no retrying
-  4  a refusal shape is over the honesty bar (`UNCLASSIFIED_MIN_FILES` /
-     `UNCLASSIFIED_MIN_FRACTION`): part of this run's findings match no row in
-     this file's `_REFUSAL_FAMILIES` AND no row in
-     `tools/formal_sweep_causes.py`'s `CAUSES`, so the counts below are not a
-     census of causes and cannot be planned from. It is a fact about the
-     INSTRUMENT rather than the backend, which is why it is its own status: it
-     is the only one of the four no change under `formal/` can clear, and it is
-     the one the 2026-10-04 b12 round should have exited with — 236 files on a
-     refusal no table named, half of every codegen finding in the corpus
+  2  the sweep did not run (no input files)
 
 `not-answerable` never affects the exit status in either direction: it is a
 permanent property of the source and the target, so failing a run over it (or
@@ -267,64 +203,11 @@ from the older contract, where any FAIL at all meant exit 1 — with 170
 permanent facts in the FAIL bucket that contract could not distinguish "the
 backend regressed" from "this file imports os".
 
-A REGRESSION against the committed baseline (`bugs/sweeps/*.baseline.json`) is
-NOT a status of its own, and that is a considered omission rather than an
-oversight. It is always accompanied by 1 or 4 — a file that moved to a worse
-class is by definition no longer a `pass` — so a distinct code would separate two
-facts that cannot occur apart, while failing a run over a moved class would fire
-on every worker who sweeps a tree that is mid-edit and would drown the one run
-that regressed on purpose. It is printed at the TOP of the summary, grouped by
-the refusal now in front of the files, and it names every file: see
-`report_baseline`.
-
-
-SURVIVING, and why a sweep needs to
-------------------------------------
-Two things here exist because of one measured failure, and both are worth
-stating as mechanisms rather than as features.
-
-A sweep is `jobs` compiler processes at once, and a compiler process recurses
-through a module closure. Nothing about that is bounded, so ONE file could take
-the whole run down with it — and on 2026-10-01 one did: the arm64 sweep died of
-an external SIGKILL and its output file was the 5-line header and nothing else,
-so 623 files produced no classifications at all. The fix is the per-file
-ceiling (`-M`, MEMCAP_GB): every build runs under `tools/memcap.py`, a file
-that exceeds
-it is killed and classified `tool`/`memory-killed` WITH its measured peak, and
-the sweep continues. It is not a timeout wearing another name: a timeout says
-raise -t, a memory kill says this file's build is a different shape from every
-other one and running it wider will not help. Measured on the tree where the
-sweep was killed, no file exceeded 0.2 GB and the whole -j18 sweep peaked at
-1.97 GB, so the 4 GB default is an order of magnitude above everything observed
-— it is here for the file nobody has run yet.
-
-And a run that is killed anyway must not lose what it already knows. Results are
-printed as each file is classified, and printed with an explicit flush, because
-a redirected stdout is a block-buffered FILE: the previous design built the whole
-table and printed it after the pool drained, so an interrupted run printed
-nothing at all however far it had got, which is precisely what made the 2026-10-01
-kill undiagnosable. A partial run publishes a ledger under its own extension
-and marks itself partial, so the next run's history diff is against the last
-COMPLETE run and a missing file is never reported as a verdict that changed.
-
-And a run that is TOLD to stop must stop, which is a different property and was
-also false: every file is submitted up front, so the executor's queue is the
-whole run, and a plain `return` from the reporting loop let `__exit__`'s
-`shutdown(wait=True)` walk that queue to the end (measured: builds still
-starting ten minutes after the signal, and a second SIGTERM needed to die).
-SIGINT/SIGTERM now cancels what has not started, refuses to start a build once
-the flag is set, and then collects the `-j` builds that were in flight — which is
-the half that keeps the partial ledger and the CAS from disagreeing about how
-far the run got, since `run_one` publishes before it returns. See
-`_stream_results`.
-
 Verdicts are cached in the CAS (cas.formal_build_key: source bytes + the
 formal backend's own sources + the interpreter + the build flags + this tool's
-own bytes — see _criteria_id — + the IMPORT CLOSURE the build reads, see
-_imports_digest), so a re-run with nothing changed reads a file per file
-instead of recompiling. Editing anything under formal/, the parser, mojo/middle/,
-or any module in the file's own import closure invalidates it. The cache stores
-the raw build verdict; the
+own bytes — see _criteria_id), so a re-run with nothing changed reads a file
+per file instead of recompiling. Editing anything under formal/, the parser,
+or mojo/middle/ invalidates it. The cache stores the raw build verdict; the
 class is recomputed from it on every run, so a cached entry can never be
 reported under a class the current rules would not assign it — which is the
 half of the contract that matters now that a class is a function of the stored
@@ -347,33 +230,22 @@ name roots explicitly:
 
   python3 tools/formal_sweep.py -t 300 /path/to/mojo/stdlib
 
-`-t` is a bound PER POPULATION, which is the point of the two of them being
-different populations at all (see `Timeouts` for the measurements that put them
-apart): `-t SECONDS` is one bound for the whole run, `-t POP=SECONDS`
-is one population's, and a run that gives both gets a repo-root sweep and a
-stdlib sweep that are each measured at a bound that means something:
-
-  python3 tools/formal_sweep.py -t repo=600 -t stdlib=120
-
 The architecture is a cache-key input, not a global: `--arch` adds
 `--backend=<arch>` to the build flags, and those flags are what
 cas.formal_build_key folds in, so an arm64 verdict is never served for an
 x86_64 sweep (or the reverse).
 
 Usage:
-  python3 tools/formal_sweep.py [-j N] [-t SECONDS | -t POP=SECONDS]
-                                [--arch x86_64] [paths...]
+  python3 tools/formal_sweep.py [-j N] [-t SECONDS] [--arch x86_64] [paths...]
 """
 import argparse
 import collections
 import concurrent.futures
 import ctypes
 import datetime
-import importlib
 import json
 import os
 import re
-import signal
 import struct
 import subprocess
 import sys
@@ -381,16 +253,11 @@ import tempfile
 import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cas
-import procrun
 from formal import macho_linker as ML
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIRE = os.path.join(REPO, "fire.py")
-# The per-file memory ceiling, as an EXECUTABLE and not a copy of one: see
-# MEMCAP_GB below for why this is tools/memcap.py and not a private watchdog.
-MEMCAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memcap.py")
 
 # Every build flag that changes the artifact, and therefore the cache key
 # (cas.formal_build_key folds them in). The arch is one of them: the two
@@ -400,55 +267,6 @@ MEMCAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memcap.py")
 # the cache key and the argv below, so the two cannot drift apart.
 def build_flags(arch: str) -> tuple:
     return ("--formal", "--no-prove", f"--backend={arch}")
-
-
-def interpreter_diagnosis() -> str:
-    """Empty when this interpreter can load the backend; the diagnosis if not.
-
-    Every file in a sweep is answered by `fire.py build --formal` in a child of
-    THIS interpreter, so an interpreter that cannot import the backend cannot
-    answer one file, and it fails in the least visible way there is: each child
-    dies on the same exception inside an import, the classifier reads a
-    traceback ending in a build failure as `backend-crash`, and the run comes
-    back as N findings about the compiler's own plumbing and zero about any
-    source. Measured on this machine with the `python3` a shell finds by
-    default — Xcode's 3.9.6, because it is what `python3` resolves to before
-    any Homebrew directory is on PATH:
-
-        $ python3 tools/formal_sweep.py --no-stdlib --arch x86_64 -j2
-        BACKEND-CRASH: abfulltest_driver.mojo  (the backend raised: TypeError:
-          unsupported operand type(s) for |: 'type' and 'NoneType')
-        ... 392 of them, one per file, in about a minute ...
-        backend-crash                 392
-
-    which reads as "this backend is broken in every file at once" and is
-    actually "no file was built at all". The refusal is not in the backend's
-    coverage and must not be counted in it, so the check is here, before any
-    build, and it exits 2 — the documented status for a sweep that did not run.
-
-    It imports the module rather than testing `sys.version_info` against a
-    number, because the number is not written down anywhere in this repository
-    and a hard-coded floor would be a second, wrong one: what the sweep needs is
-    "the backend imports", and that is a fact this interpreter can answer.
-    """
-    try:
-        importlib.import_module("formal.build")
-    except Exception as e:
-        return (
-            f"this python cannot import the formal backend, so no file in this "
-            f"sweep could have been built: {type(e).__name__}: {e}\n"
-            f"  interpreter: {sys.executable} (python "
-            f"{sys.version.split()[0]})\n"
-            f"  the backend needs a python that can evaluate a PEP 604 "
-            f"annotation (`str | None`) at def time — 3.10 or newer. On macOS "
-            f"`python3` is Apple's 3.9 unless a newer one comes first on PATH, "
-            f"so run this with the interpreter the suite uses, e.g.\n"
-            f"    /opt/homebrew/bin/python3 {sys.argv[0]} ...\n"
-            f"  (or put that directory first on PATH). Nothing was swept and "
-            f"nothing was cached; every file would have been classified "
-            f"`backend-crash`, which is a fact about this interpreter and not "
-            f"about any source.")
-    return ""
 
 
 def _criteria_id() -> str:
@@ -462,33 +280,6 @@ def _criteria_id() -> str:
     that would have caught it was added."""
     with open(os.path.abspath(__file__), "rb") as f:
         return cas.hash_parts(f.read())
-
-
-def _imports_digest(path: str) -> str:
-    """The digest of every source this file's build reads BESIDES itself.
-
-    `formal/imports.py`'s, called here rather than reimplemented, because it
-    walks the closure with the SAME `imported_modules` / `resolve_module_path`
-    pair the build walks with and cannot therefore resolve a module the build
-    would not have compiled. `formal_fingerprint()` is a `.py` glob over
-    `formal/**`, so `formal/hostmods/*.mojo` — the one place a module edit
-    lands in practice — was not in the key at all, and a sweep run right after
-    a fix to one of them reported the fix as having done nothing.
-
-    Returned as `''` if the walk itself cannot run, which leaves the key equal
-    to the pre-fix one rather than failing the file: the build is the authority
-    on whether a file is answerable, and this must never be the thing that
-    decides it. (`import_closure_digest` already returns `''` for an unreadable
-    or unparseable file, which is the common case here.)
-    """
-    try:
-        from formal.imports import import_closure_digest
-        return import_closure_digest(path)
-    except Exception as e:  # noqa: BLE001 — see the docstring
-        if os.environ.get("FORMAL_SWEEP_VERBOSE_IMPORTS"):
-            print(f"  (import digest unavailable for {path}: "
-                  f"{type(e).__name__}: {e})", file=sys.stderr)
-        return ""
 
 
 # ── Verdict classes ──────────────────────────────────────────────────────────
@@ -515,18 +306,6 @@ def _imports_digest(path: str) -> str:
 # under a class the current rules would not assign it, because the current
 # rules are what assign it.
 CLASS_PASS = "pass"
-# BUILT, and it rests on ADMITTED HOST CONTRACTS.  A separate class from
-# `pass` because a `pass` is a claim this backend can make on its own -- the
-# image built and every symbol it binds is on its own link line -- and a file
-# that also needed a second process, a thread or a dynamic loader has not had
-# that claim made for it.  Counting it as a `pass` would make the headline rate
-# a measure of how much the sweep was willing to believe.
-#
-# It IS in ANSWERABLE, deliberately: the backend got to look at the file's
-# constructs and answered them.  What it is NOT is in the numerator, so the
-# rate can only go DOWN as more of the tree is admitted against, which is the
-# direction a rate about provability has to move in.
-CLASS_ADMITTED = "built-with-admitted-contracts"
 CLASS_CODEGEN = "codegen"
 CLASS_CODEGEN_DEP = "codegen/dependency"
 CLASS_HOST = "not-answerable/host-import"
@@ -540,9 +319,9 @@ CLASS_UNKNOWN = "unknown"
 
 # Report order: the findings first, then the reasons there is none, then the
 # buckets that mean the tool itself did not finish the job.
-CLASS_ORDER = (CLASS_PASS, CLASS_ADMITTED, CLASS_CODEGEN, CLASS_CODEGEN_DEP,
-               CLASS_HOST, CLASS_UNRESOLVED, CLASS_EXTERN, CLASS_TARGET,
-               CLASS_SYSCALL, CLASS_CRASH, CLASS_UNKNOWN, CLASS_TOOL)
+CLASS_ORDER = (CLASS_PASS, CLASS_CODEGEN, CLASS_CODEGEN_DEP, CLASS_HOST,
+               CLASS_UNRESOLVED, CLASS_EXTERN, CLASS_TARGET, CLASS_SYSCALL,
+               CLASS_CRASH, CLASS_UNKNOWN, CLASS_TOOL)
 # ANSWERABLE = the classes in which the backend got to look at the file's
 # constructs and returned a verdict about them. `codegen/dependency` is in it
 # deliberately (see the position taken in the module docstring): a file whose
@@ -553,8 +332,7 @@ CLASS_ORDER = (CLASS_PASS, CLASS_ADMITTED, CLASS_CODEGEN, CLASS_CODEGEN_DEP,
 # the construct it was looking at, and letting it into the denominator would
 # report a compiler bug as a coverage gap (B4's 74-file sweep, in which every
 # one was a mid-edit artefact of another agent's work).
-ANSWERABLE = frozenset((CLASS_PASS, CLASS_ADMITTED, CLASS_CODEGEN,
-                        CLASS_CODEGEN_DEP))
+ANSWERABLE = frozenset((CLASS_PASS, CLASS_CODEGEN, CLASS_CODEGEN_DEP))
 # Classes that make the run exit non-zero. A codegen finding (in this file or
 # in a dependency it needs) is real; CLASS_CRASH is real too and is counted and
 # printed like any other finding, because a crash that is allowed to pass
@@ -572,55 +350,6 @@ DIRTY = frozenset((CLASS_CODEGEN, CLASS_CODEGEN_DEP, CLASS_CRASH,
 CAUSE_TIMEOUT = "timeout"
 CAUSE_UNREADABLE = "unreadable"
 CAUSE_TOOL_ERROR = "tool-error"
-# The build was KILLED for memory, by this tool's own per-file ceiling. This is
-# the cause that makes the sweep survivable at all, and it is its own label
-# rather than a flavour of `timeout` because the two demand opposite responses:
-# a timeout says raise -t, a memory kill says this file's build is a different
-# shape from every other one, and re-running it wider will not help.
-#
-# 2026-10-01: the arm64 sweep died of an external SIGKILL with nothing in its
-# output but the 5-line header, so not one file was classified. One file's
-# build being able to take the whole run down with it is what that made
-# possible, and the fix is the ceiling that produces this label: the file is
-# killed, classified, and the sweep continues — `TestPerFileMemoryCeiling`
-# in `test_formal_sweep.py`.
-CAUSE_MEMORY = "memory-killed"
-# The per-file ceiling's WRAPPER died before it reported an outcome: memcap
-# printed its banner and nothing else, so the build's own verdict was never
-# observed. A machine fact, in `tool` for the same reason a timeout is, and its
-# own label because the two are told apart by evidence rather than by shape: a
-# breach is memcap saying the ceiling fired, this is memcap not saying anything,
-# and a reader who is told "killed at the ceiling" about a build that was never
-# measured against it will go and look for a memory bug that is not there.
-#
-# 2026-10-02: six files per architecture in the b6 sweep carried memcap's
-# banner as their `codegen` "refusal" — the class whose count is a gap in the
-# backend — and were PUBLISHED to the CAS, so a machine fact survived the run
-# that observed it. The files are not memory hogs: `bit/mask.mojo`, one of the
-# six, builds in 0.1 GB and is refused for a real reason in three minutes.
-# FORMAL_sweep_memcap_death_is_filed_as_codegen.
-CAUSE_WRAPPER_DIED = "wrapper-died"
-# The image BUILDS, but this host cannot check whether its imports resolve.
-# Not a finding about the image and not a fact about the target: it is a gap in
-# the RUN. Its own label because the neighbouring classes give the opposite
-# advice — an `unresolved-extern` says the link line is wrong, which would send
-# someone to fix an image that is already correct.
-#
-# 2026-10-01: this label meant "the dylibs are of the other architecture, and
-# dlopen can only load this process's own", and the fix was to say so instead of
-# calling it a load failure. That was necessary and not sufficient: refusing to
-# answer filed 7 correct x86-64 images with no verdict at all, so the x86-64
-# pass count was a floor rather than a number, and the answer was still sitting
-# in the file.
-#
-# 2026-10-02: a dylib this process cannot dlopen is now looked up in its
-# EXPORT TRIE — the same table dyld resolves against — so being of the other
-# architecture no longer leaves a name unchecked (`_exports`). What is left here
-# is what really is unknowable from this process: an export table this host
-# could not read, or a host architecture it could not establish. Each row names
-# which, because the advice differs and the old wording would have described
-# neither.
-CAUSE_FOREIGN_ARCH = "unverifiable-here"
 # The build driver raised instead of refusing a construct. Which side of the
 # line that falls on is decided by the DEEPEST frame of the traceback, not by
 # the message: fire.py prints `build: {e}` for a FormalBuildError *and* for
@@ -634,37 +363,16 @@ _TRACEBACK_MARK = "Traceback (most recent call last)"
 _FRAME_RE = re.compile(r'^\s+File "([^"]+)"', re.M)
 
 # Substrings of the messages formal/build.py and formal/imports.py raise for a
-# failed import. All raise ImportBuildError with one wording for one condition
-# (build.py's own comment says two messages for one cause is how a real failure
-# ends up filed under the wrong heading), so these markers partition that error
-# space between them. Matching the wording rather than re-deriving the condition
-# is deliberate: formal/ owns the condition, and a second copy of HOST_MODULES
-# here would be a list that silently rots. Nothing keys off the exact template —
-# an unrecognised shape falls into CLASS_UNKNOWN below rather than being guessed
-# at. There are THREE markers rather than two because
-# `formal/imports.py::unresolvable_import_error` has three wordings, not two.
+# failed import. Both raise ImportBuildError with one wording for one
+# condition (build.py's own comment says two messages for one cause is how a
+# real failure ends up filed under the wrong heading), so these two markers
+# partition that error space between them. Matching the wording rather than
+# re-deriving the condition is deliberate: formal/ owns the condition, and a
+# second copy of HOST_MODULES here would be a list that silently rots.
+# Nothing keys off the exact template — an unrecognised shape falls into
+# CLASS_UNKNOWN below rather than being guessed at.
 _HOST_MARK = "host module (CPython standard library)"
 _UNRESOLVED_MARK = "not a stdlib or sibling module"
-# THE THIRD of the three wordings `formal/imports.py::unresolvable_import_error`
-# can produce, and the one this pair of markers above did not know about. It is
-# the SAME class of fact — a CPython stdlib module with no Mojo source in this
-# tree — said apart from `_HOST_MARK`'s on purpose, because the two differ in
-# something a reader acts on: a name in `host_module_tier`'s `modelled` or
-# `admitted` tier has an owner and a next step, and a name in NO tier has
-# neither (`bugs/FORMAL_stdlib_module_names_are_not_classified.md` is the queue;
-# `formal/imports.py`'s own comment says the split is deliberate).
-#
-# Measured on the 2026-10-03 sweep, and the cost of not having this marker was
-# four files in `unknown` — a class that is in NO rate — with the reason printed
-# in full on the row: `test_ast_formal.py` and `test_no_new_container_casts.py`
-# (`tokenize`), `test_formal_platform.py` (`plistlib`), `tools/codeindex.py`
-# (`sqlite3`). The backend was RIGHT about all four; this tool could not read it.
-# Classified as CLASS_HOST, which is the not-answerable bucket the fact belongs
-# to, and deliberately NOT added to `IN_REACH_HOST_MODULES`: this sweep reports
-# a build's verdict and does not claim a tier for a name the build says it cannot
-# classify. A name that gains a tier moves out of here on its own, because the
-# next build stops refusing it.
-_STDLIB_UNCLASSIFIED_MARK = "a CPython standard-library module"
 _EXTERN_MARK = "import(s) dyld cannot resolve"
 # The SAME fact, caught a step earlier. `formal/build.py`'s bind audit refuses a
 # build whose image would bind a symbol no linked library provides, and says so
@@ -683,34 +391,7 @@ _EXTERN_MARK = "import(s) dyld cannot resolve"
 # agent [4] extended the same audit there, so the classifier was half-fixed
 # before and is now fully wrong.
 _EXTERN_BUILD_MARK = "symbol(s) that nothing provides"
-# The NAMES in that message's own sentence, which is what makes the marker
-# narrowable. `_unaccounted_report` spells them as a comma-joined list between
-# `so it could not be loaded: ` and the next full stop — "the image would bind 2
-# symbol(s) that nothing provides, so it could not be loaded: Bag_get, foo."
-# — so a rule that wants to ask WHICH symbols they are can read them rather
-# than pattern-match the whole diagnostic.
-#
-# The stop is the boundary because a symbol cannot contain one: `_c_export_name`
-# admits only `[A-Za-z0-9_]`, so the list cannot run past its own sentence into
-# the per-name clauses that follow.
-_UNPROVIDED_NAMES_RE = re.compile(
-    r"nothing provides, so it could not be loaded: (?P<names>[^.]*)\.")
 _IMPORT_RE = re.compile(r"imports '([^']+)'")
-# ONE message naming SEVERAL of a file's unresolvable imports, one indented
-# line each, which is what `formal/imports.py`'s `unresolvable_import_errors`
-# produces when a file has more than one. It exists because `_IMPORT_RE` alone
-# cannot read it: `mods[-1]` below is right for a CHAIN (the innermost import is
-# the one with no source) and wrong for this shape, where every name is at the
-# SAME level and the last one is whatever sorted last. That is the measurement in
-# `“What the admitted contracts did and did NOT move in the sweep”` — a per-module
-# breakdown drawn from a diagnostic that named one of a file's blockers decided
-# by the order its imports are written in.
-#
-# Matched on the LEAD, which is the part only this shape has, so a chained
-# message (one import wrapping another) cannot be read as a list of siblings.
-_MULTI_IMPORT_RE = re.compile(
-    r"imports (?P<n>\d+) modules this backend cannot build[^\n]*\n"
-    r"(?P<body>(?:[ \t]+.*\n?)*)")
 # A quoted dotted identifier, whatever the sentence around it says. Used only
 # as a CANDIDATE, confirmed against the file's own source below — a codegen
 # diagnostic quotes nothing of this shape (`self.<field>` is in backticks), and
@@ -841,21 +522,8 @@ _FRAME_ESCAPES = (
     # A field slot holding a frame address, so two bindings of one name
     # disagree about what lives where.
     ("hands the word in the slot", "field slot holds a frame address"),
-    # A member read of a name that is a METHOD of the receiver's own struct,
-    # in a VALUE position. Not a frame question at all: a bound method is not
-    # a word, so there is no slot to read it out of. `formal/model.py`'s
-    # `member_read_without_a_field` says so where the old message claimed two
-    # layouts disagreed when there was one, and WITHOUT this family the five
-    # files it fixed fall into "other refusal" — which is the specific thing
-    # this table exists to prevent, introduced by fixing a diagnostic.
-    ("which is a METHOD of", "member read of a method used as a value"),
-    # A member read of a name the receiver's struct does not have. One
-    # candidate and no disagreement, so there was nothing to disagree about;
-    # the same five-file note applies.
-    ("has no field", "member read of a name the struct does not have"),
     # The same disagreement, stated as a placement failure rather than as a
-    # slot. Matches ONLY the two-candidate wording now, which is the only case
-    # it was ever true of.
+    # slot.
     ("cannot be placed", "name has two disagreeing shapes"),
 )
 
@@ -867,182 +535,10 @@ _REFUSAL_FAMILIES = (
     # and the distinctions — which are the ones with different fixes — would
     # be lost. Order here is load-bearing; see _FRAME_ESCAPES above.
 ) + _FRAME_ESCAPES + (
-    # A container operation over a word that is ESTABLISHED not to be a
-    # container. FOUR members of one family with four different bases — a bare
-    # name holding a frame address, a bare name this function bound to an
-    # integer, a struct FIELD declared a number or a type tag, and a base the
-    # SOURCE proves is a scalar without naming a binding (a literal, or a type
-    # value); the last three are read by `model.scalar_container_base_evidence`
-    # and said by `model.scalar_container_base_refusal`, and one fix covers all
-    # of them: the base is not a container. Split by base rather than lumped
-    # because the base decides which of them a reader has to look at, and because
-    # the two newer rows are new (the other two were already being filed as
-    # "other refusal", which is the specific thing this table exists to prevent).
-    #
-    # **Each row's marker is the clause only THAT base's message carries**, and
-    # that is what keeps the four from shadowing one another: order in this tuple
-    # is load-bearing for the same reason the frame escapes are (the first match
-    # wins, so a broader marker above a narrower one silently swallows it), and
-    # the broad marker every one of these four messages opens with —
-    # "asks for a container element" — is therefore NOT one of them. That is what
-    # stops the row below from swallowing the two above it, which is the failure
-    # a broad marker produces silently.
-    # The FRAME half of the same family, and it is ABOVE the scalar row for the
-    # reason the comment above this tuple states: first match wins, and the
-    # scalar row's marker — "is a struct field declared to hold" — is a prefix
-    # of the frame message's own clause ("is a struct field declared to hold a
-    # FRAME"), so a scalar row above it would swallow every frame finding and
-    # send a planner looking for an annotation that is not the problem.  Its own
-    # fix (a subscript of a struct is `__getitem__`) is not the scalar row's.
-    #
-    # The frame refusal is `model.frame_slot_element_refusal`'s, asked AFTER the
-    # dict and string readings rather than from `NON_CONTAINER_SLOT_KINDS` — see
-    # that constant — and this marker is the clause only its message carries.
-    ("declared to hold a FRAME", "container operation on a frame slot"),
-    ("is a struct field declared to hold", "container operation on a scalar slot"),
-    ("carries no count at offset 0", "element of a value that is not a container"),
-    ("is a value this function bound to an integer",
-     "container operation on a non-container"),
-    ("is a CONTAINER operation on a", "container operation on a frame address"),
     ("is a method call on a value", "method call on a value"),
     ("is a method on a string", "method call on a string"),
     ("is a real method of String", "string method needing a length"),
-    # COMPOSITION: the missing BUFFER, in the two wordings the model emits it
-    # in. Named rather than left in "other refusal" because it is 114 files on
-    # the 2026-10-04 b11 sweep — the largest family in the corpus by a wide
-    # margin, and it had no row here or in `formal_sweep_causes.py` until that
-    # sweep. The two markers are one family because `formal/model.py` says in
-    # both messages that they are one missing thing, and `LENGTH_DEPENDENT_
-    # METHODS` is its third spelling; the sibling row above
-    # ("string method needing a length") is the other half — a missing WRITE
-    # rather than a missing buffer to write into. Position is load-bearing and
-    # these two sit with the other string rows for the reason every other
-    # placement here does: first match wins, and a broader marker above a
-    # narrower one swallows it silently.
-    ("no buffer to compose one in", "string composition has no buffer"),
-    ("on two strings is refused on this path",
-     "string composition has no buffer"),
-    # The TEXT ENCODING block, in the two wordings `formal/model.py` emits it
-    # in, and it was the corpus's largest UNNAMED family on the 2026-10-04 b12
-    # sweep: 229 of the 236 `other refusal` codegen findings were this one
-    # refusal in one module (`formal/hostmods/os/_syscalls.mojo`), which is what
-    # "other refusal" means — nobody has looked. The row above is its SIBLING and
-    # the two are deliberately separate: composition is a missing buffer and
-    # fires on ASCII text too, this one is a `char *` to BYTES where CPython has
-    # CHARACTERS and its own docstring names the clearing condition ("no literal
-    # with a byte >= 0x80 anywhere means no string in the image can have one").
-    #
-    # The FIRST marker collects three of the four constructs in the block rather
-    # than there being three markers, because `codepoint_refusal`,
-    # `printf_text_width_refusal` and `printf_text_conversion_refusal` all quote
-    # that one clause; the second is `string_element_refusal`'s and shares none of
-    # it. Neither marker is a substring of a broader marker above, which is the
-    # placement rule every row in this tuple obeys.
-    #
-    # What made it 229 files was a defect in the SCAN, fixed on 2026-10-04
-    # (`formal/model.py::is_docstring_statement`): it published DOCSTRINGS as
-    # non-ASCII string values, and nothing can name a docstring, so six lines of
-    # em-dash prose in a hostmod refused the whole corpus behind it. The family
-    # STAYS, because the refusal is correct for a real non-ASCII value.
-    ("is refused: on this path it would answer in BYTES where CPython "
-     "answers in CHARACTERS",
-     "a non-ASCII string: BYTES where CPython has CHARACTERS"),
-    ("is refused on a string whose text is not ASCII",
-     "a non-ASCII string: BYTES where CPython has CHARACTERS"),
-    # A CPython BUILTIN this target does not lower, refused BY NAME before any
-    # emitter (`formal/model.py::not_lowered_builtin_refusal`, asked from
-    # `_prepare_functions` beside the generator/`nonlocal`/decorator refusals).
-    # It has its own row because until that check existed these names were
-    # refused by the LINK AUDIT — a message about SYMBOLS, whose advice is about
-    # the link line rather than about the fact that no library on any line
-    # provides a Python builtin's semantics — and a reader who took that advice
-    # was told to bind a name that cannot be bound. `NOT_LOWERED_BUILTINS` is
-    # the table the refusal quotes, and `tools/formal_proof_breadth.py`'s
-    # `UNLOWERED_CALLEE_MARKS` includes this sentence's marker so a proof
-    # census files the row as `refused-builtin` rather than `codegen-refused`:
-    # one table, three readers, one marker.
-    #
-    # Placed here rather than lower down for the same reason every row's
-    # placement is load-bearing: the message contains "binding a symbol nothing
-    # provides", which is close to the wording rows further down key on, and
-    # this one must win.
-    ("is not lowered on this path", "a builtin this path does not lower"),
     ("multi-index subscript", "multi-index subscript"),
-    # A call through a VALUE, in three shapes with three fixes: the callee's
-    # declared type, the bracket, the keyword. Ahead of everything below
-    # because each message contains "a call through a VALUE" and the generic
-    # markers further down would otherwise claim them without distinguishing
-    # the three.
-    ("a word that is not a code address is nothing to branch through",
-     "value call: declared type cannot hold a function"),
-    ("read as a value", "function value into a declared non-function"),
-    ("is a bracketed call through a VALUE",
-     "value call: bracket unreadable"),
-    ("no declaration to bind it by NAME",
-     "value call: keyword unreadable"),
-    # The same construct from the other two ends: the word is not an address
-    # because the SOURCE says what it holds, rather than because a declaration
-    # says what it could hold. One message for both ends on purpose — see
-    # `formal/model.py::not_a_code_address_refusal` — so one marker and one
-    # family, and it sits with the three above rather than below them.
-    ("is called as a FUNCTION and the source says it holds",
-     "value call: the word is not an address"),
-    # A bracketed callee spelled THROUGH A MODULE (`L.Pair[Int]()`), and it has
-    # to be ABOVE `"would bind"` because the message contains "the brackets
-    # cannot bind" — which that row claims, and which would file a RECOGNISER's
-    # gap under the link line's. Measured: without this row
-    # `_refusal_family` answered `dependency binds what nothing provides` for
-    # `formal/model.py::dotted_specialization_refusal`, which is the exact
-    # mis-filing this table's precedence paragraph is about. Sibling of the
-    # bare-name row in `formal_sweep_causes.py`, which keys on a different
-    # sentence and therefore has its own rot.
-    ("is a bracketed callee spelled THROUGH A MODULE",
-     "specialization spelled through a module"),
-    # …and the BARE spelling of the same construct, which had a CAUSE row and no
-    # FAMILY row at all: `specialization_call_refusal` classified as
-    # `other refusal`, the bucket this table's own docstring calls "nobody has
-    # looked", for the largest single bracketed-callee row in the corpus. The
-    # marker is the phrase both wordings open with and it is above
-    # `"would bind"` for the same reason the row above it is — the dotted text
-    # says "cannot bind", and this one says "does not compile", so the two
-    # cannot shadow each other.
-    ("calls a name this unit does not compile, so the brackets cannot be bound",
-     "specialization of a callee this unit does not compile"),
-    # A CALL to a name the DEFINING module does not export — 148 files on the
-    # 2026-10-05 b13 sweep, the largest codegen row in the corpus, and until this
-    # row it had a CAUSE and no FAMILY, so the sweep's own by-family breakdown
-    # reported all of it as `other refusal`: the bucket whose definition, in
-    # `tools/formal_sweep_causes.py`'s module docstring, is "nobody has looked".
-    # 136 of the b12 log's 472 codegen rows — 28.8 % — are this one shape. The
-    # two tables are keyed on different things and are MEANT to disagree
-    # (`_REFUSAL_FAMILIES` groups by the shape of the message for a tool that
-    # must classify one it has never seen; `CAUSES` by what a fix would have to
-    # change), so both need the row — and the pair of refusals that make this one
-    # a CALLEE question rather than a bind question are stated in the test.
-    #
-    # **THE MARKER IS THE FACT, NOT THE ADVICE, and it is the SAME clause
-    # `formal_sweep_causes.py` keys on.** Two clauses of
-    # `formal/model.py::imported_callee_refusal` are load-bearing and survive a
-    # reword: the call "has to bind a symbol `M` exports", and "That module does
-    # not export it". The sentence that USED to follow them — "spell it as
-    # `name[<a type>](…)`" — is ADVICE, and `work/formal19-1` deletes it because
-    # it is wrong about correct Mojo (a bare template call is the spelling the
-    # stdlib uses), so a marker keyed on it would have taken the row silently
-    # back to `other refusal` the day that branch landed.
-    #
-    # Placement is above `"would bind"` and above the two specialization rows
-    # because of the first-match rule, and it is safe in BOTH directions because
-    # the two sibling messages share no substring with this one: this message
-    # never says "would bind", never says "does not compile", and never says
-    # "which is a name with no definition in hand". `test_refusal_taxonomy.py`
-    # asserts all of that rather than leaving it to this comment — the cost of
-    # getting it wrong is a 148-file row counted as a neighbour's.
-    #
-    # The label names what a fix would have to CHANGE and is spelled once, here
-    # and in the test's own `EXPORT_RULE_FAMILY`: this module's neighbours are
-    # "value call: declared type cannot hold a function" and "dependency binds
-    # what nothing provides", so this is the third of that shape.
-    ("does not export it", "callee: the defining module does not export it"),
     ("has no representation on this path", "value with no representation"),
     ("has no public functions", "module exports nothing"),
     ("would bind", "dependency binds what nothing provides"),
@@ -1058,41 +554,9 @@ _REFUSAL_FAMILIES = (
     ("unsupported call target", "unsupported node"),
     # MLIR. Three different wordings reach this bucket: the attribute template
     # itself, the dialect operation, and the bare builtin spelling.
-    #
-    # The dialect operation marker is `dialect OPERATION`, not the old "MLIR
-    # dialect construct": `formal/model.py`'s `mlir_dialect_op_refusal` now
-    # classifies the operation by what it DENOTES (an effect, an elementwise
-    # arithmetic result, or a value needing a fact this path lacks), so its
-    # messages name the operation and no longer contain that phrase. The OLD
-    # marker is kept because it is still reachable — a call site that knows only
-    # the `__mlir_` name and no operation still emits it — and because a marker
-    # list that drops the wording it is currently matching is how a family
-    # silently empties. `test_refusal_taxonomy.py` has a sample per wording.
     ("MLIR attribute template", "MLIR construct"),
     ("MLIR dialect construct", "MLIR construct"),
-    ("dialect OPERATION", "MLIR construct"),
     ("__mlir_", "MLIR construct"),
-    # The two halves of an MLIR TEMPLATE that name something with no value here
-    # rather than a dialect attribute: a `__mlir_type` is a TYPE, and the
-    # current target is a target. Both used to be reported as "MLIR attribute
-    # template", which is false of every `__mlir_type` binding in the stdlib —
-    # including `std/sys/info.mojo`'s `_TargetType`, the module that heads this
-    # family. Same bucket, because the repair is the same (a value model that
-    # can hold a type or a target); distinct markers, because a message that
-    # names the construct is the only thing a reader of a file nobody has read
-    # can act on.
-    ("names an MLIR TYPE", "MLIR construct"),
-    ("asks for the current TARGET", "MLIR construct"),
-    # A `#kgen.param.expr<…>` QUESTION the build cannot answer, as opposed to
-    # the attribute templates above, which are answers with nowhere to go. Its
-    # OWN family because the fix is different and specific: this build states
-    # the architecture it emits and the container it wraps it in, and a field
-    # or a CPU feature outside those two needs an input the backend does not
-    # have. One marker for the whole class, so the three specific wordings
-    # behind it (a field with no source, a per-CPU question, an operand that
-    # does not fold) are counted as the limit they are rather than falling
-    # through to whatever matches next.
-    ("this build cannot answer this target query", "target query not answerable"),
     # A read through a nested frame, e.g. `self._a._b._c`: the outer frame slot
     # holds a frame address and the inner one is then read through it.
     ("out of a nested", "nested frame field read"),
@@ -1124,34 +588,6 @@ _REFUSAL_FAMILIES = (
     # A receiver put in a container, which has no layout for a frame address.
     ("is stored in a container, which has no layout",
      "receiver stored in a container"),
-    # A one-field struct's MUTATING method, where the receiver is the struct
-    # itself, so the callee hands the receiver back and the caller has to store
-    # it. FOUR wordings and one family, because one mechanism refuses all four
-    # and the family's own marker would be a phrase ("a mutating method") that
-    # no message contains. Each wording is its own row in the fix's message.
-    #
-    # **All four markers were re-pointed on 2026-10-03** and the family was
-    # RENAMED, because the mechanism underneath them changed: the receiver is
-    # now handed over by reference (`model.receiver_writeback_name`, mechanism in
-    # its docstring) rather than returned in the return register, which removed
-    # the refusal that used to be the headline of this family ("both changes its
-    # receiver and returns a value" — `BinaryHeap.pop`) and left three narrower
-    # ones. A marker list that keeps matching a wording nothing emits is the
-    # same rot as one that drops the wording it IS matching: this family would
-    # have read as three live findings for a message no build produces.
-    #
-    # The rename is the honest half. "no return convention" named the DEFEAT —
-    # there was no way to write the answer back — and the mechanism now has a
-    # convention, so the family is about the shapes the convention does not
-    # cover. The four wordings, in the order `model.py` raises them:
-    ("declares no return type, so the call has no value",
-     "one-field mutator receiver hand-off"),
-    ("is not a place this path can take the address of",
-     "one-field mutator receiver hand-off"),
-    ("is called in the same argument list that reads",
-     "one-field mutator receiver hand-off"),
-    ("two hidden-word conventions",
-     "one-field mutator receiver hand-off"),
     # A method on a value whose receiver is a frame address, stated as a
     # description of the call rather than as a receiver placement.
     ("is a method on a", "method call on a value"),
@@ -1161,31 +597,7 @@ _REFUSAL_FAMILIES = (
     # the address is not the problem, the ABSENCE of storage is.
     ("has no module-global storage for it",
      "module-global name has no storage"),
-    # A `try` whose arm cannot be entered, because the body can reach a `raise`
-    # and a `raise` here is `exit(1)` rather than an exception. It is its own
-    # family and not a clause of the handler-arm refusal (which this table has
-    # no row for either, and `formal_sweep_causes.py` has one row for each of
-    # the two): the two messages describe DIFFERENT wrong programs — that one
-    # loses the arm's body, this one loses every statement the `try` was
-    # supposed to continue into — and both of them carry the clause "no edge
-    # runs from a raise site into an arm", so a shared marker would make the
-    # first match win and report this construct as that one.
-    #
-    # Keyed on the clause only this message writes. Zero files today, measured
-    # over this repository's 479 `.py`/`.mojo` files and the stdlib's 252: every
-    # file the question reaches is already refused for another reason, so this
-    # row exists to name the construct rather than to count a backlog.
-    ("cannot catch it, so the `try` is refused",
-     "a `try` that can reach a raise, whose arm cannot catch it"),
     ("takes exactly one value to convert", "wrong argument count"),
-    # A missing symbol that is a METHOD OF A STRUCT IN THE FILE THAT REFUSED.
-    # Its own family, and it is here rather than folded into the link-line story
-    # because the fix is on this side of the boundary: the definition was never
-    # emitted into the image, so no link line could have provided it and adding
-    # one would not help. `_own_unprovided_methods` is the reader and
-    # `_struct_methods` is what it reads.
-    ("are METHODS OF A STRUCT IN THIS FILE",
-     "a method of this file's own struct was never emitted"),
     # Reachable from `codegen` only through a rule that has not fired yet; it
     # is here so the breakdown has a name for the day it does, and so a future
     # message that does not match it lands in "other refusal" — visible —
@@ -1268,24 +680,6 @@ def _in_reach_from_authority() -> frozenset:
 IN_REACH_HOST_MODULES = _in_reach_from_authority()
 
 
-def _admitted_host_modules() -> frozenset:
-    """Every host module that ANSWERS under a declared contract.
-
-    A third bucket, read from `formal/imports.py`'s own `host_module_tier`, and
-    separate because the two existing ones could not describe these: `subprocess`
-    is not a gap with an owner (it has a model) and it is not unreachable (it
-    builds), so a two-way split called it one or the other and both were false.
-    The reach line below reads it so a file that moved out of `host-import`
-    because its host module now answers is not silently missing from the report.
-    """
-    try:
-        from formal import imports as I
-        return frozenset(n for n in I.HOST_MODULES
-                         if I.host_module_tier(n) == 'admitted')
-    except Exception:
-        return frozenset()
-
-
 def _host_tiers() -> tuple:
     """(in_reach, unreachable, where) — the split, and which file said so.
 
@@ -1301,15 +695,8 @@ def _host_tiers() -> tuple:
         return set(), set(), None
     try:
         from formal import imports as I
-        unreachable = frozenset(
-            n for n in I.HOST_MODULES
-            if I.host_module_tier(n) == 'unreachable'
-            # An ADMITTED module is not unreachable: it has a model and it
-            # builds.  Counting it here would put it in the "permanent fact about
-            # the target" bucket of the reach line, which is the claim that made
-            # the sweep's largest bucket look unfixable, and it would be false of
-            # every one of the five.
-            and I.host_module_tier(n) != 'admitted')
+        unreachable = frozenset(n for n in I.HOST_MODULES
+                                if I.host_module_tier(n) == 'unreachable')
     except Exception:
         unreachable = frozenset()
     return set(in_reach), set(unreachable), "formal/imports.py"
@@ -1324,22 +711,26 @@ def _is_cpython_stdlib(name: str) -> bool:
     name this returns True for, the answer is "it is the host's own standard
     library" — a fact about the target, not a gap in the backend.
 
-    **A DELEGATION, and it used to be a second reader of the same fact.** This
-    copy existed because the build's own diagnostic consulted only the
-    hand-classified tiers and so worded `binascii`, `ctypes`, `asyncio` and 219
-    other CPython modules as "not a stdlib or sibling module"; the sweep then
-    read `sys.stdlib_module_names` to correct the verdict the build had already
-    printed, which is a report disagreeing with the message it is reporting on.
-    `formal/imports.py::is_cpython_stdlib` now asks the oracle in the place that
-    decides the WORDING, so the two cannot come apart, and this answers from it.
-    An import that cannot be had at all still answers False, which narrows
-    nothing and raises nothing: the caller keeps its own behaviour.
+    Two authorities, in order, and no list of our own: formal.imports's
+    HOST_MODULES (the set the build itself consults, so the two agree by
+    construction) and then the running interpreter's own
+    sys.stdlib_module_names. The second one is not redundant: on this tree
+    `__future__`, `ctypes`, `asyncio` and `concurrent.futures` are all CPython
+    standard-library modules that HOST_MODULES does not list, so the build
+    words those failures "not a stdlib or sibling module" and 36 of them would
+    otherwise be filed as unresolved imports — implying a defect in the source
+    that does not exist. Reading the interpreter's own table keeps that
+    classification correct as CPython grows, with nothing to maintain here.
     """
+    top = name.split(".")[0]
     try:
-        from formal.imports import is_cpython_stdlib
-        return bool(is_cpython_stdlib(name))
+        from formal.imports import HOST_MODULES
+        if name in HOST_MODULES or top in HOST_MODULES:
+            return True
     except Exception:
-        return False
+        pass
+    names = getattr(sys, "stdlib_module_names", None)
+    return bool(names) and top in names
 
 
 def _short(detail: str, limit: int = 68) -> str:
@@ -1390,72 +781,6 @@ def _source_imports(source, name: str) -> bool:
     top = re.escape(name.split(".")[0])
     return re.search(rf"^[ \t]*(?:import|from)[ \t]+{top}\b", source,
                      re.M) is not None
-
-
-def _declared_method_symbols(path) -> set:
-    """The `<Struct>_<method>` symbols this file's own structs DECLARE, or {}.
-
-    **`formal.build._struct_methods` is the reader, not a second spelling of the
-    mangling.** It is the function that decides which of a struct's methods are
-    lifted into the compiled set at all (`struct_fits_one_word` or
-    `struct_is_framed`), and each one it returns carries the name
-    `model.method_function_name` gave it — so a set built from it is exactly
-    "the method symbols this file owes its own image". Re-deriving the
-    `<Struct>_<method>` shape here would be a second answer to a question
-    `formal/` already answers, and the two would come apart the first time that
-    spelling changed.
-
-    `{}` for a file that cannot be read or parsed, and for no path at all
-    (`classify` called without one, which is most of the test suite). That is
-    the direction that matters: this narrows a rule, and a reader that cannot
-    answer must leave the caller's rule exactly as it was rather than narrow it
-    on nothing.
-    """
-    if not path:
-        return set()
-    try:
-        from formal.build import _struct_methods
-        from formal.imports import module_statements
-        return {getattr(fn, "name", "") for fn in _struct_methods(
-            module_statements(path))}
-    except Exception:
-        return set()
-
-
-def _own_unprovided_methods(detail: str, path) -> list:
-    """The unprovided symbols that are METHODS OF A STRUCT IN THIS FILE.
-
-    **This is the narrower form of `_EXTERN_BUILD_MARK` the env-family needed,
-    and it exists because the marker was right about the case it was written for
-    and wrong about a real one.** "Nothing on the link line provides this
-    symbol" is a fact about the TARGET only when the symbol's definition is
-    somewhere else. When the missing symbol is a method of a struct the file
-    itself declares, the definition was never supposed to be on any link line —
-    it was supposed to be EMITTED INTO THIS IMAGE — so its absence is a defect
-    in the backend's own lowering of this file (the shape
-    `formal/build.py::_struct_methods`'s docstring records: a method call that
-    was never rewritten falls through to a `BL` against a symbol nothing
-    defines), and the class that says "a fact about the target" is exactly
-    backwards for it.
-
-    Measured: `external_call["setenv", T]`'s bracket list put a 55-file family
-    here, and `codegen coverage` read 10.2% instead of something lower for the
-    wrong reason (`bugs/FORMAL_env_family_next_terminal.md`).
-
-    A LIST and not a boolean, because the two causes really do coexist in one
-    image — a dangling call to an unlowered builtin AND a method this file never
-    emitted — and a rule that answered "codegen" for the whole message on the
-    strength of one of them would file the other as a gap in the target. The
-    names are returned so the caller can name them.
-    """
-    declared = _declared_method_symbols(path)
-    if not declared:
-        return []
-    m = _UNPROVIDED_NAMES_RE.search(detail)
-    if not m:
-        return []
-    return sorted(n.strip() for n in m.group("names").split(",")
-                  if n.strip().lstrip("_") in declared)
 
 
 def _declared_host() -> frozenset:
@@ -1516,35 +841,6 @@ def _terminal_reason(term: str) -> str:
     return _FILE_PREFIX_RE.sub("", term, count=1)
 
 
-_EXPORT_GATE_MODULE_RE = re.compile(r"is imported from `([^`]+)`")
-"""The module a call's DEFINING module is named by, in prose.
-
-`formal/model.py::imported_callee_refusal` says it in a sentence rather than
-in a `<file>: ` prefix, so `_refuser` answers "" for the largest refusal row in
-the corpus — 170 of the 710 files on the 2026-10-04 b10 sweep, all of them
-carrying this one sentence. The backtick span is the module name as the build's
-own resolver spells it: `std.format._utils`, `std.math`, `..fstat`, `.path`.
-
-ONE reader, because two tools now want it and a second spelling rule would be a
-second thing to keep right: `tools/formal_sweep_causes.py` (whose `uses:`
-column could not be measured for that row until it existed — see
-`bugs/FORMAL_std_os_io_round2_scope_is_one_refusal_shape.md` §6.1) and
-`tools/formal_chain_probe.py`, whose `_EXPORT_GATE_RE` is this same pattern.
-"""
-
-
-def refusing_module(msg: str) -> str:
-    """The dotted module name a message says a call is imported from, or "".
-
-    A NAME, not a path: answering "which module do I stub to break this link"
-    and answering "which module declares these names" are two questions, and
-    only the second needs a file. `formal.imports.resolve_module_path` is the
-    resolver for both, and a caller that wants the file says so.
-    """
-    m = _EXPORT_GATE_MODULE_RE.search(msg or "")
-    return m.group(1) if m else ""
-
-
 def _refuser(term: str) -> str:
     """The file the innermost message came from, or "" if it names none.
 
@@ -1562,219 +858,6 @@ def _refusal_family(term: str) -> str:
         if marker in term:
             return family
     return _REFUSAL_OTHER
-
-
-# ── THE HONESTY FLOOR: a refusal shape nobody has classified ────────────────
-#
-# `_REFUSAL_OTHER` is the bucket this file's own table calls "nobody has looked",
-# and on the 2026-10-04 b12 sweep it was the corpus's LARGEST row — 236 files,
-# half of every codegen finding — with no row in `formal_sweep_causes.py`'s
-# table either, so the two instruments agreed there was no name for it. What
-# grew that row from 6 was ONE edit six lines of em-dash prose in
-# `formal/hostmods/os/_syscalls.mojo`, and it was found by reading a work map
-# rather than by the sweep: a bucket that means "unclassified" is only alarming
-# if it is checked, and nothing checked it. `…_b12.md` §3.1 is the record.
-#
-# So the bucket is now LOUD by construction, at a threshold stated here rather
-# than left to a reader's judgement. A refusal shape at or above either bound is
-# not a finding about the corpus; it is a finding about this table, and the
-# sweep reports it as one and exits 4 (`exit_status`), because a run that exits
-# 1 for "the backend refused things" and 1 for "I cannot name 146 of them" is
-# the same number for two facts a reader must not confuse.
-#
-# The threshold is a COUNT and a SHARE because the two catch different
-# mistakes, and both are strict bounds — ten files does not fire, eleven does.
-# Ten files of one shape on the 735-file b12 corpus is 1.4 % and stays quiet: a
-# count of eleven is what the bound asks for, and a tenth of the corpus behind
-# one construct is not yet a thing a reader must act on today. Three files of one
-# shape on a 30-file corpus is 10 % and IS loud, and no file-count bound says so
-# — which is the half that matters, because the shapes that hide are the ones
-# that grow, and the corpus they grow in is the whole tree. `UNCLASSIFIED_MIN_
-# FILES` is 10 rather than 5 for the same reason: a small shape is usually one
-# file behind one construct, and the per-file rows already name those.
-UNCLASSIFIED_MIN_FILES = 10
-UNCLASSIFIED_MIN_FRACTION = 0.02
-
-# A shape is the message with the things that VARY between copies of it folded
-# out: every quoted span (a `'name'`, a `` `module` ``, a string literal — three
-# delimiters, because they MEAN three different things in these messages and a
-# shape that lost the distinction would merge a refused name with a path) and
-# every number. What survives is the sentence, which is what two copies of one
-# refusal share verbatim: measured on the b12 arm64 log, the 105-file and
-# 28-file rows of `other refusal` that name different callees in different
-# modules are ONE shape, and grouping by the whole message would have reported
-# them as two shapes of 105 and 28 instead of one of 133.
-_QUOTED_SPAN_RES = (
-    (re.compile(r"'[^']*'"), "'…'"),
-    (re.compile(r"`[^`]*`"), "`…`"),
-    (re.compile(r'"[^"]*"'), '"…"'),
-)
-_NUMBER_RE = re.compile(r"\b\d+\b")
-_SPACES_RE = re.compile(r"\s+")
-
-#: The other half of the pair, named in the finding so "nobody has looked"
-#: points at the second place to look rather than leaving the reader to guess.
-_CAUSES_TOOL = "tools/formal_sweep_causes.py"
-
-
-def unclassified_shape(msg: str, width: int = 72) -> str:
-    """`msg` as the SHAPE it is: the part every copy of it shares.
-
-    Not the whole message, because the whole message is what made this invisible:
-    133 files of one refusal with 133 different callee names read as 133 shapes
-    of one file each, and a threshold over file counts then reports nothing. The
-    `width` truncation is at a word boundary and only ever merges messages that
-    agree for `width` characters, which is the part a reader would use to tell
-    them apart anyway; it is a grouping, so an over-merge shows up as a shape
-    whose count is bigger than the sum of its rows and the exact texts are
-    printed beside it in `unclassified_report`.
-    """
-    shape = _SPACES_RE.sub(" ", _NUMBER_RE.sub("#", msg.strip()))
-    for pattern, placeholder in _QUOTED_SPAN_RES:
-        shape = pattern.sub(placeholder, shape)
-    shape = _SPACES_RE.sub(" ", shape)
-    if len(shape) > width:
-        shape = shape[:width].rsplit(" ", 1)[0] + " …"
-    return shape
-
-
-def unclassified_report(pairs, total, say=print, other_classify=None,
-                        other_name=""):
-    """Print every refusal shape no row classified; True if any is LOUD.
-
-    `pairs` is `[(path, terminal message)]` over the printed codegen rows the
-    CALLING instrument's own classifier could not name — `_refusal_family` here,
-    `formal_sweep_causes.classify_message` there. The classifier is the caller's
-    and not this function's because the two tables are keyed on different things
-    (the shape of the message versus what a fix would have to CHANGE) and are
-    meant to disagree; what they share is the alarm, so the alarm is here and
-    the classification is not. `formal_sweep_causes.py` calls this through its
-    own `FS` handle rather than keeping a second threshold and a second printer.
-
-    Every shape is printed, not only the loud ones. A threshold that hides the
-    small shapes is a threshold that can be beaten by splitting one shape in
-    two, and the shapes below the bar are the ones the next edit would grow.
-
-    `other_classify` is the OTHER instrument's classifier, when the caller has it
-    to hand, and it turns the finding from a shrug into a to-do: on the b12 log
-    the largest `other refusal` shape is named by `formal_sweep_causes.py` and
-    NOT by this table, which is a one-row fix rather than a new construct — and
-    a shape neither table names is b12's own failure, said out loud.
-    """
-    groups = {}
-    for path, msg in pairs:
-        key = unclassified_shape(msg)
-        entry = groups.setdefault(key, {"files": [], "texts": {}})
-        entry["files"].append(path)
-        entry["texts"].setdefault(msg, []).append(path)
-    if not groups:
-        say(f"  no printed codegen row fell to {_REFUSAL_OTHER!r}: every "
-            f"refusal this run produced matches a row above. The rule is live "
-            f"and unfired — a shape over {UNCLASSIFIED_MIN_FILES} files or "
-            f"{UNCLASSIFIED_MIN_FRACTION:.0%} of the {total} swept is a LOUD "
-            f"finding and exit 4")
-        return False
-
-    ranked = sorted(groups.items(),
-                    key=lambda kv: (-len(kv[1]["files"]), kv[0]))
-    say(f"  {sum(len(e['files']) for _k, e in ranked)} printed codegen row(s) "
-        f"fall to {_REFUSAL_OTHER!r} — the bucket that means NOBODY HAS "
-        f"CLASSIFIED THIS — across {len(ranked)} message shape(s), "
-        f"{sum(1 for _k, e in ranked if _loud_enough(len(e['files']), total))}"
-        f" of them over the {UNCLASSIFIED_MIN_FILES}-file / "
-        f"{UNCLASSIFIED_MIN_FRACTION:.0%} bar")
-    loud = False
-    for key, entry in ranked:
-        n, texts = len(entry["files"]), entry["texts"]
-        big = _loud_enough(n, total)
-        wordings = ", ".join(
-            f"{len(ps)} file(s) in one wording" for msg, ps in
-            sorted(texts.items(), key=lambda kv: -len(kv[1]))[:3])
-        say(f"  {'LOUD FINDING' if big else 'under the bar'}: {n} file(s) of "
-            f"the {total} swept" + (f" ({n / total:.1%})" if big else "")
-            + f" — shape: {key}")
-        say(f"      {_unclassified_label(texts, other_classify, other_name)}")
-        say(f"      {wordings}" + (f"; {len(texts)} exact wording(s) in all"
-                                  if len(texts) > 3 else ""))
-        biggest = max(texts, key=lambda m: len(texts[m]))
-        say(f"      said by: {_first_sentence(biggest)}")
-        say(f"      e.g. {sorted(entry['files'])[0]}"
-            + (f", … and {n - 1} more" if n > 1 else ""))
-        loud = loud or big
-    if loud:
-        say("  (a shape over the bar is a HOLE IN THE RANKING TABLES rather "
-            "than a row of work, and closing it is adding the row — the same "
-            "two-part job the `b12` round of `bugs/FORMAL_sweep_work_map.md` §5.2 "
-            "did for the refusal that hid 229 files behind one module)")
-    return loud
-
-
-def unclassified_rows(rows):
-    """`[(path, terminal message)]` for the printed rows this table cannot name.
-
-    Over the sweep's own printed rows, `(rel, class, reason, detail)`. Two
-    things are decided here and not in the report, because both are
-    classifications and not presentation: a row counts only when its class is
-    one of the two codegen classes (`not-answerable/host-import`'s own reason
-    matches no family and must not be counted as an unclassified REFUSAL), and
-    the message is the terminal one with the chain peeled (`_split_chain` /
-    `_terminal_reason`, so a refusal three modules deep is the message that
-    carries the clause the markers key on).
-
-    One function rather than a comprehension in `main`, because
-    `formal_sweep_causes.py` reports the same rows against ITS table and the
-    test that pins the loud finding needs the same reader both tools use.
-    """
-    out = []
-    for path_, cls, _reason, detail in rows:
-        if cls not in (CLASS_CODEGEN, CLASS_CODEGEN_DEP):
-            continue
-        msg = _terminal_reason(_split_chain(detail)[1]).strip()
-        if _refusal_family(msg) == _REFUSAL_OTHER:
-            out.append((path_, msg))
-    return out
-
-
-def _loud_enough(n: int, total: int) -> bool:
-    """The threshold itself, in one place: over the file count OR the share."""
-    if total <= 0:
-        return False
-    return n > UNCLASSIFIED_MIN_FILES or n / total > UNCLASSIFIED_MIN_FRACTION
-
-
-def _first_sentence(msg: str, width: int = 200) -> str:
-    """The leading clause of a message, for a line that has to stay one line."""
-    head = msg.strip().split(". ", 1)[0]
-    if len(head) > width:
-        head = head[:width].rsplit(" ", 1)[0] + " …"
-    return head
-
-
-def _unclassified_label(texts, other_classify, other_name) -> str:
-    """One line saying what the OTHER ranking table calls this shape.
-
-    "nobody has looked" is only actionable if the reader is told where to look,
-    so the line names the other instrument's verdict when the caller passed it:
-    a shape the other table DOES name is a one-row fix in this one, and a shape
-    NEITHER names is the 2026-10-04 b12 failure itself, which is worth saying in
-    those words because it is the case where a reader's first instinct is to
-    assume the other table has it.
-    """
-    if not other_classify:
-        return (f"this table names no row for it, and {_CAUSES_TOOL} — which "
-                f"ranks the same rows by what a fix would have to change — is "
-                f"the other half of the pair to check")
-    tally = {}
-    for msg, ps in texts.items():
-        label = other_classify(msg)
-        tally[label] = tally.get(label, 0) + len(ps)
-    who = other_name or "the other ranking table"
-    parts = []
-    for label, n in sorted(tally.items(), key=lambda kv: -kv[1]):
-        parts.append(f"named `{label}` for {n} of them ({who})" if
-                     label != _REFUSAL_OTHER else
-                     f"UNNAMED for {n} of them too ({who})")
-    return ("this table names no row for it; " + "; ".join(parts))
 
 
 def _target_limit(term: str):
@@ -1860,46 +943,19 @@ def _system_module_call(term: str, source=None) -> str:
         for a host module `mod` this file actually imports. Structural, and
         the file's own source is the confirmation, so a coincidental `a.b` in a
         diagnostic cannot put a file in a class its own text contradicts.
-
-    **The second way asks the TIER and not membership of `HOST_MODULES`, and
-    that is the fix, not a refinement.** `HOST_MODULES` is
-    `HOST_UNREACHABLE | HOST_MODELLED | HOST_ADMITTED`, so it answers "does the
-    backend know this name", and a name in the `modelled` or `admitted` tier
-    HAS a `formal/hostmods/` source — which makes this class's own sentence,
-    "no Mojo source on any path", false of it. Measured on the 2026-10-03
-    sweep: 11 files whose refusal is
-
-        line 324: `subprocess.TimeoutExpired` is a handler arm with a body this
-        path cannot put in the image, so it is refused rather than dropped: …
-
-    were filed `not-answerable/system-module-call`, on the strength of the
-    mention — `subprocess` is in `HOST_MODULES`, being admitted, and the file
-    does import it. Every clause of the class's claim is false of that row:
-    nothing is CALLED, `subprocess` answers under declared contracts, and the
-    refusal is a construct refusal (`FORMAL_except_arm_is_never_emitted`,
-    another worker's row) which this class had just hidden from the codegen
-    count. `host_module_tier` is the authority the sweep's own reach split and
-    its own test suite already read for exactly this question, so the fix is one
-    reader of one table rather than a second copy of the division.
-
-    `test_formal_sweep_truth.py` states the rule this now implements: "a name in
-    `HOST_MODULES` that is MODELLED or ADMITTED answers, so a refusal naming it
-    is about a construct in a module this build compiles and not a fact about
-    the target". The first arm is untouched on purpose: when the BUILD says "no
-    Mojo source on any path", that is the backend talking about itself and this
-    tool does not get to have an opinion about it.
     """
     if _SYSCALL_MARK in term:
         m = _MEMBER_RE.search(term)
         return m.group(1) if m else "a system module"
     if not source:
         return ""
+    declared = _declared_host()
     try:
-        from formal.imports import HOST_UNREACHABLE, host_module_tier
+        from formal.imports import HOST_MODULES
     except Exception:
         return ""
     for mod, member in _MEMBER_RE.findall(term):
-        if (mod in HOST_UNREACHABLE or host_module_tier(mod) == "unreachable") \
+        if (mod in HOST_MODULES or mod.split(".")[0] in HOST_MODULES) \
                 and _source_imports(source, mod):
             return mod
     return ""
@@ -1926,57 +982,6 @@ def _crash_cause(err: str):
     return (CAUSE_BACKEND_CRASH
             if frame.endswith(".py") and "formal" in parts
             else CAUSE_DRIVER_CRASH)
-
-
-def _admitted_reason(path):
-    """Why this file is `built-with-admitted-contracts`, or '' if it is not.
-
-    The contracts are the BUILD's, read through the build's own walk:
-    `formal/imports.py`'s `admitted_contracts`, which is the same function
-    `formal/build.py` calls to fill `result["admitted"]` and the same one
-    `fire.py`'s `trust:` line renders.  Reading them here rather than computing a
-    second answer is the whole reason the three agree: a classifier that walked the
-    closure a second time could classify a file as trusting nothing while the
-    build's own line named six contracts, and the sweep is the one a reader would
-    believe over the build.
-
-    THE REASON WHY THE TRUST BOUNDARY IS A CLASS AT ALL, and not a note on the
-    `pass` line: a `pass` is this tool's claim that the image built and every
-    symbol it binds is on its own link line.  A file that also asked a second
-    process to answer a question has not had that claim made for it, and the
-    report's job is to say which of its rows rest on what.  The alternative --
-    folding these into `pass` and mentioning the contracts in prose -- is exactly
-    how a file that cannot be proved at all becomes indistinguishable from one
-    that can, which is the confusion `FORMAL_known_limits.md` records as "a false
-    PASS, the worst outcome this project has".
-
-    NOT CACHED with the verdict, and that is deliberate in the same direction.
-    `run_one`'s `.result` blob records `(ok, detail)` and `classify` re-derives
-    the class on every run INCLUDING a cache hit -- the rules are applied after
-    the cache, never inside it (the comment above `CLASS_PASS` says why).  So a
-    verdict recorded before this class existed is still classified correctly the
-    first time it is read, with no key change and no re-run.
-
-    A failure to walk is NOT a pass.  It returns '' and the caller falls through to
-    `CLASS_PASS`, which is the wrong answer, and it is the wrong answer the tool
-    already makes elsewhere when it cannot read a file (`CAUSE_UNREADABLE`).
-    Reading the build's OWN answer is what avoids that: a build that succeeded
-    published its `trust:` line, and this re-derivation can only disagree with it
-    if `formal/imports.py` changed, in which case `cas.formal_fingerprint()` has
-    moved and every `.result` is a miss anyway.
-    """
-    if not path:
-        return ''
-    try:
-        from formal import imports as I
-        contracts = I.admitted_contracts(path)
-    except Exception:                            # noqa: BLE001
-        return ''
-    if not contracts:
-        return ''
-    mods = sorted({c.module for c in contracts})
-    return (f"{len(contracts)} admitted host contract(s) from "
-            f"{', '.join(mods)}")
 
 
 def classify(ok: bool, detail: str, cause=None, source=None,
@@ -2015,9 +1020,6 @@ def classify(ok: bool, detail: str, cause=None, source=None,
         dropping them from every rate is what made 204 files invisible.
     """
     if ok:
-        admitted = _admitted_reason(path)
-        if admitted:
-            return CLASS_ADMITTED, admitted
         return CLASS_PASS, ""
     if cause == CAUSE_BACKEND_CRASH:
         # Not `codegen`, and the difference is not cosmetic. A refusal is a
@@ -2056,26 +1058,6 @@ def classify(ok: bool, detail: str, cause=None, source=None,
 def _classify_terminal(detail: str, source=None, path=None) -> tuple:
     """(class, reason) for the innermost message of a build's own answer."""
     if _EXTERN_MARK in detail or _EXTERN_BUILD_MARK in detail:
-        # FIRST, the narrower form of the marker: a missing symbol that is a
-        # method of a struct in THIS file is not a fact about the link line,
-        # because the link line was never where its definition belonged. This
-        # runs before the class is chosen rather than after it, so a message
-        # carrying one of these cannot be filed as `not-answerable` however it
-        # is worded — and `_own_unprovided_methods` returns a LIST because the
-        # message may also carry names that really are the link line's business,
-        # which then stay in the class below with their count intact.
-        mine = _own_unprovided_methods(detail, path)
-        if mine:
-            total = _EXTERN_BUILD_COUNT_RE.search(detail)
-            return CLASS_CODEGEN, (
-                f"{len(mine)} of the "
-                f"{total.group(1) if total else '?'} unprovided symbol(s) "
-                f"are METHODS OF A STRUCT IN THIS FILE "
-                f"({', '.join(mine)}), so the link line is not what is "
-                f"missing: those definitions were never emitted into this "
-                f"image at all, which means a method call here was not "
-                f"rewritten into a call on the lifted function. That is a fact "
-                f"about this file's own lowering and not about the target")
         m = (_EXTERN_BUILD_COUNT_RE if _EXTERN_BUILD_MARK in detail
              else _EXTERN_COUNT_RE).search(detail)
         caught = ("nothing on the link line provides it, caught when the build "
@@ -2089,32 +1071,6 @@ def _classify_terminal(detail: str, source=None, path=None) -> tuple:
     target = _target_limit(_terminal_reason(detail))
     if target:
         return target
-    # SEVERAL of this file's own imports, all at one level. Handled before the
-    # single-import rule below, which would take the last name in the message —
-    # and here the last name is the alphabetically last one, so the class and
-    # the breakdown would be decided by sorting rather than by the file.
-    multi = _MULTI_IMPORT_RE.search(detail)
-    if multi:
-        names = sorted(set(_IMPORT_RE.findall(multi.group("body"))))
-        if names:
-            # The WORST of the reasons the build gave, not the best: a file that
-            # imports one host module and one module that does not exist at all
-            # is blocked by the second, and calling the whole file host-import
-            # would file a missing-module finding under "not fixable here".
-            if _UNRESOLVED_MARK in multi.group("body"):
-                cls = CLASS_UNRESOLVED
-            elif _HOST_MARK in multi.group("body") \
-                    or _STDLIB_UNCLASSIFIED_MARK in multi.group("body"):
-                cls = CLASS_HOST
-            else:
-                # A wording this tool has not learned to read, kept in its own
-                # bucket for the reason the single-import rule keeps one: the
-                # backend refused for a reason that was not recognised, and
-                # counting that as coverage is what this classification exists
-                # to prevent.
-                cls = CLASS_UNKNOWN
-            return cls, (", ".join(names) if cls != CLASS_UNKNOWN
-                         else f"import message not recognised: {_short(detail)}")
     mods = _IMPORT_RE.findall(detail)
     if mods:
         # The build's own two wordings, which partition the ImportBuildError
@@ -2126,7 +1082,7 @@ def _classify_terminal(detail: str, source=None, path=None) -> tuple:
         # is the one to report; naming the outer module instead would blame a
         # module that resolves perfectly well.
         mod = mods[-1]
-        if _HOST_MARK in detail or _STDLIB_UNCLASSIFIED_MARK in detail:
+        if _HOST_MARK in detail:
             return CLASS_HOST, mod
         if _UNRESOLVED_MARK in detail:
             return _import_class(mod)
@@ -2231,165 +1187,6 @@ DEFAULT_JOBS = max(4, min(os.cpu_count() or 8, 20))
 # is now visible instead of silent. It is still too small for the larger
 # stdlib modules, which is what the -t help text says.
 DEFAULT_TIMEOUT = 30
-
-# …and a timeout is a bound PER POPULATION, which is the half of the
-# `-t` argument that used to be missing.
-#
-# The two populations are separated by one measured fact, not by taste: a stdlib
-# module imports a few stdlib modules, while a repository-root `.py` imports the
-# repository's OTHER ROOT `.py` files, so one repo file's build is the SUM of its
-# import closure's builds
-# (measured on one tree: a 135-line repo file passes inside 30 s, a 185-line one
-# crashes inside 600 s, a 5 645-line one is still running at 5 400 s — all three
-# in the same run under one `-t`.)
-# What that measurement also rules out is a bound proportional to the closure:
-# four files that
-# cannot be told apart by line count — one that crashes inside 600 s, two that
-# pass inside 30 s, and two that no `-t` answers — share ONE import closure of
-# identical size, so a bound proportional to closure size cannot separate them
-# either. The population is the axis that can, which is why `-t` takes it and why
-# both defaults below are the same number: this is a knob, not a change of
-# behaviour, and a run that passes no `-t` still times out every file at 30 s.
-POPULATIONS = ("repo", "stdlib")
-
-
-class Timeouts:
-    """`-t`, resolved into a per-file bound.
-
-    One object rather than a number threaded through the run, because the
-    question it answers is PER FILE — "which population is this file in, and
-    what did the reader ask for in that population" — and a reader who has to
-    ask that question outside this class is reading a number that does not
-    exist. It also holds the stdlib root, so the population is decided once at
-    construction instead of by every caller that wants a bound.
-
-    `seconds` is a partial mapping and an absent population takes
-    `DEFAULT_TIMEOUT`: `-t repo=180` is a complete, sensible command, and
-    making the reader spell out the population they did not mean would be a
-    worse interface than the default it falls back to.
-    """
-
-    def __init__(self, seconds=None, stdlib_root=None):
-        self.seconds = {p: DEFAULT_TIMEOUT for p in POPULATIONS}
-        for pop, value in (seconds or {}).items():
-            if pop not in self.seconds:
-                raise ValueError(
-                    f"unknown timeout population {pop!r}; "
-                    f"known: {', '.join(POPULATIONS)}")
-            self.seconds[pop] = int(value)
-        self.stdlib_root = (os.path.abspath(stdlib_root)
-                            if stdlib_root else None)
-
-    def population(self, path):
-        """`stdlib` for a file under the stdlib root, `repo` for everything else.
-
-        A prefix test on the resolved root, and it is deliberately the ONLY
-        thing that decides this. The alternative — asking the resolver what the
-        file imports and calling a file with several swept imports "the other
-        population" — is the closure-proportional bound §2 measured and rejected:
-        `imports.py`, `monomorphize.py`, `reflect.py` and `gimple_codegen.py`
-        have the SAME closure of the same size and differ by a factor of twenty
-        in what a build of them costs, so a rule that reads the closure would
-        hand all four the same bound and be wrong about three of them.
-
-        `repo` is the fallback for everything the stdlib root does not contain,
-        which is the whole of an explicit-path sweep of this repository and the
-        whole of `--no-stdlib`. There is no third population and no guessing:
-        a file outside the stdlib tree is a repo file, and if that is wrong the
-        reader says so with `--stdlib` on a different root.
-        """
-        if not self.stdlib_root:
-            return "repo"
-        try:
-            inside = os.path.commonpath(
-                (os.path.abspath(path), self.stdlib_root)) == self.stdlib_root
-        except ValueError:          # different drives: not under the root
-            inside = False
-        return "stdlib" if inside else "repo"
-
-    def for_file(self, path):
-        """The bound for one file, in seconds."""
-        return self.seconds[self.population(path)]
-
-    def uniform(self):
-        """True when both populations share one number (what a bare `-t 90` means)."""
-        return len(set(self.seconds.values())) == 1
-
-    def describe(self):
-        """How the run's bounds read on the header line.
-
-        A bare number when the two agree, because that is what the run is
-        actually doing and a reader comparing this line with a previous run's
-        wants to see whether anything CHANGED.
-        """
-        if self.uniform():
-            return f"{self.seconds['repo']}s"
-        return " ".join(f"{pop}={self.seconds[pop]}s" for pop in POPULATIONS)
-
-    def retry_arg(self, pop):
-        """The `-t` argument that re-answers a file in `pop`, larger than the one that failed.
-
-        Twice the bound, or a minute more than it, whichever is larger: the
-        point is a NUMBER THAT IS NOT THE ONE THAT JUST FAILED, and a run that
-        used no `-t` at all still gets a usable one. A uniform run gets the
-        bare spelling, because suggesting `-t repo=90` at a reader who wrote
-        `-t 90` is noise; a per-population run gets the spelling that raises
-        THIS file's population and leaves the other one alone, which is the
-        reason the flag exists.
-        """
-        now = self.seconds[pop]
-        bigger = max(int(now or 0) * 2, int(now or 0) + 60)
-        return f"-t {bigger}" if self.uniform() else f"-t {pop}={bigger}"
-
-    def populations_with_seconds(self):
-        return {pop: self.seconds[pop] for pop in POPULATIONS}
-
-
-def _timeout_arg(text):
-    """One `-t` value: `SECONDS` for both populations, or `POPULATION=SECONDS`.
-
-    argparse `type=`, so the error a reader gets for a typo names the two
-    spellings that work rather than a traceback.
-    """
-    raw = str(text).strip()
-    if "=" not in raw:
-        try:
-            seconds = int(raw)
-        except ValueError:
-            raise argparse.ArgumentTypeError(
-                f"-t {raw!r} is neither SECONDS nor POPULATION=SECONDS; "
-                f"populations are {', '.join(POPULATIONS)}")
-        return {pop: seconds for pop in POPULATIONS}
-    pop, _, raw_seconds = raw.partition("=")
-    pop = pop.strip()
-    if pop not in POPULATIONS:
-        raise argparse.ArgumentTypeError(
-            f"-t names population {pop!r}; known: {', '.join(POPULATIONS)}")
-    try:
-        seconds = int(raw_seconds.strip())
-    except ValueError:
-        raise argparse.ArgumentTypeError(
-            f"-t {pop}= needs a whole number of seconds, not {raw_seconds!r}; "
-            f"the populations are {', '.join(POPULATIONS)}")
-    if seconds <= 0:
-        raise argparse.ArgumentTypeError(
-            f"-t {pop}={seconds} is not a bound: the build is killed at "
-            f"`subprocess`'s own deadline, so every file in that population "
-            f"would be reported `timeout` having built nothing. Omit -t for "
-            f"the default ({DEFAULT_TIMEOUT}s).")
-    return {pop: seconds}
-
-
-def merge_timeout_args(values):
-    """Fold repeated `-t` values into one mapping; a later value wins.
-
-    `-t 90 -t repo=600` is a reader changing their mind about one population,
-    and last-wins is what every other option in this tool does.
-    """
-    merged = {}
-    for value in values or ():
-        merged.update(value)
-    return merged
 
 
 # The stdlib subtrees swept when no paths are given. `std/` is the library
@@ -2631,24 +1428,9 @@ def _bind_symbols(binary: bytes) -> list:
 #
 #   1. read the image's LC_LOAD_DYLIB list, in order (_load_dylib_names);
 #   2. read each bind as the (ordinal, name) pair dyld itself will use (_binds);
-#   3. look the name up in THAT library alone — by dlopen+dlsym where this
-#      process can load it, and otherwise by reading the library's EXPORT
-#      TRIE, which is the same table dyld consults and which needs no load at
-#      all (_exports).
+#   3. look the name up in THAT library alone — dlopen it, then dlsym.
 #
-# So the answer is dyld's own two-level lookup, minus dyld. Step 3's two arms
-# are not interchangeable and are not a preference between them. `dlopen` can
-# only ever load a library of THIS process's architecture, so on an arm64 host
-# an x86-64 image's own perfectly good x86-64 dylibs could not be looked up at
-# all, and until 2026-10-02 the tool answered that by refusing to answer —
-# which cost 7 correct images their verdict outright and made the x86-64 sweep's
-# pass count a floor rather than a number
-# (the `2026-10-01` round of `bugs/FORMAL_sweep_work_map.md` §4). Reading the trie answers the
-# same question from the same bytes, on any host. `formal/build.py`'s
-# `macho_dylib_exports` is already this project's independent reader of that
-# format (an independent one deliberately: `formal/macho_linker.py` writes these
-# images, and asking a writer to read its own output is how its bugs hide), so
-# the sweep calls that rather than growing a second reader.
+# So the answer is dyld's own two-level lookup, minus dyld.
 #
 # What this DOES prove: for every name the image binds, there is a library on
 # its link line that loads here and exports that name.
@@ -2664,15 +1446,6 @@ def _bind_symbols(binary: bytes) -> list:
 #     so that is checked separately (_loadable_for): an arm64 dylib on an
 #     x86-64 image's link line exports exactly the right names and still
 #     cannot be loaded. That is a real load failure, reported as one.
-#   * For a library this process cannot dlopen, loadability is established from
-#     that library's own header and the name lookup from its export trie — so
-#     "the image's dyld could actually LOAD it" is not among the things checked
-#     for it. A corrupt, truncated or otherwise unsatisfiable dylib of the other
-#     architecture would read here as a resolution. The trie is exactly what
-#     dyld resolves against, so this is a small gap rather than a different
-#     question, but the direction to be honest about is named: it can only
-#     overstate coverage, never understate it, and the run prints how many
-#     binds were answered this weaker way so a reader of a `pass` can tell.
 #   * Nothing about behaviour. This says the image can be loaded and its
 #     symbols bound; it does not say the program computes the right answer.
 #     `make check-formal-run` is what runs images. Note the direction of the
@@ -2687,66 +1460,12 @@ def _bind_symbols(binary: bytes) -> list:
 # this and a silent inversion.
 _LIBSYSTEM = ML.LIBSYSTEM_PATH.decode().rstrip("\0")
 _LIBS: dict = {}            # dylib path -> "" if it loads here, else the reason
-_MEMO: dict = {}            # (dylib path, name) -> bool, for the whole run.
-                            # The dlopen arm's memo ONLY: a statically-read
-                            # table is memoised per LIBRARY in _EXPORT_TABLES
-                            # instead, since one parse answers every name in it.
+_MEMO: dict = {}            # (dylib path, name) -> bool, for the whole run
 
 # The two CPU types this tool ever sees an image or a library built for, named
 # so the "why" a finding prints is readable. Anything else falls back to the
 # number, which is still an answer.
 _CPU_NAMES = {ML.CPU_TYPE_ARM64: "arm64", ML.CPU_TYPE_X86_64: "x86_64"}
-
-
-def _host_cputype():
-    """The CPU type of the PROCESS doing the probing, or None if unreadable.
-
-    Read from the running interpreter's own Mach-O header rather than from
-    `platform.machine()`, because the question is not "what is this machine
-    called" but "what will this process's dlopen accept" — and those are the
-    same question with one fewer way to be wrong (a Rosetta-translated shell on
-    an arm64 host reports the translated name).
-
-    This is the fourth fact the probe needs, and until 2026-10-01 it was missing:
-    the probe `dlopen`s each library on the image's link line, and dlopen can
-    only ever load a library of THIS process's architecture. So on an arm64
-    host, an x86-64 image's own perfectly good x86-64 dylibs could not be
-    opened, and the resulting OSError was reported as the finding
-    `dyld cannot load <path> here: ... (mach-o file, but is an incompatible
-    architecture (have 'x86_64', need 'arm64'))` — a claim about the image,
-    derived entirely from a limitation of the instrument. Measured: it is the
-    whole of the arm64-vs-x86-64 pass difference, all 7 files, every one of them
-    an image that builds and links correctly for its architecture
-    (the `2026-10-01` round of `bugs/FORMAL_sweep_work_map.md` §4).
-
-    It then became a SECOND limitation, having stopped being the first: the same
-    mismatch made the tool decline to look the names up at all, filing those 7
-    as `tool` with no verdict. So as of 2026-10-02 this fact decides only WHICH
-    ARM of the lookup runs — `dlopen`+`dlsym` where this process can load the
-    library, the library's export trie where it cannot (see `_exports`). It is
-    still read from the interpreter's own Mach-O header rather than from
-    `platform.machine()`, because the question it now answers is the same one:
-    what can this process's loader open.
-    """
-    global _HOST_CPUTYPE
-    if _HOST_CPUTYPE is _UNSET:
-        _HOST_CPUTYPE = None
-        for exe in (sys.executable, sys.prefix):
-            types = _macho_cputypes(exe) if exe and os.path.exists(exe) else set()
-            if len(types) == 1:
-                _HOST_CPUTYPE = next(iter(types))
-                break
-    return _HOST_CPUTYPE
-
-
-_UNSET = object()
-_HOST_CPUTYPE = _UNSET
-
-
-def _host_arch_name() -> str:
-    """This process's architecture, in the spelling the report uses."""
-    host = _host_cputype()
-    return _cpu_name(host) if host is not None else "unknown-architecture"
 
 
 def _cpu_name(cputype: int) -> str:
@@ -2779,317 +1498,86 @@ def _macho_cputypes(path: str) -> set:
         return set()
 
 
-def _loadable_for(path: str, cputype: int):
-    """`(state, foreign, why)` for a library this image's dyld could load.
+def _loadable_for(path: str, cputype: int) -> str:
+    """"" for a library this image's dyld could load, else why not.
 
-    FOUR states, and the fourth is the one added on 2026-10-02. `foreign` is the
-    architecture a host would need in order to answer by LOADING the library,
-    and is None for the other three:
+    dlopen is deliberately NOT the test — it is happy to load a library built
+    for the other architecture, which is precisely the case dyld refuses
+    ("Library not loaded: … (mach-o file, but is an incompatible architecture
+    (have 'arm64', need 'x86_64'))") and precisely the case that would turn
+    this probe into a false PASS. The architecture is checked first, from the
+    file's own header; cpusubtype is not, because dyld accepts a mismatch
+    there and matching it more strictly would invent findings.
 
-      ("loadable",    None, "")     the image could load it, and a load says so
-      ("header-only", arch, "")      the image could load it — its own header
-                                    says so — but this process cannot dlopen it
-                                    to confirm, so `_exports` must read its
-                                    export trie instead
-      ("unloadable",  None, why)    the image could NOT load it — a real failure
-      ("unprovable",  None, why)    this PROCESS cannot find out at all
-
-    dlopen is deliberately NOT the test for the third — it is happy to load a
-    library built for the other architecture, which is precisely the case dyld
-    refuses and precisely the case that would turn this probe into a false PASS.
-    The architecture is checked first, from the file's own header; cpusubtype is
-    not, because dyld accepts a mismatch there and matching it more strictly
-    would invent findings.
-
-    `header-only` is separated from `unloadable` because "this image cannot load
-    it" and "I cannot check whether this image can load it" are different facts
-    and the tool conflated them. A `dlopen` failure on a library of the HOST's
-    architecture is a fact about the image (the image's dyld runs in the same
-    world). A `dlopen` failure on a library of the OTHER architecture says
-    nothing at all about the image — the image's dyld would be a different
-    process on a different slice. Reporting it as a load failure filed 7 correct
-    x86-64 images as `not-answerable/unresolved-extern` on an arm64 host.
-
-    `header-only` is then separated from `unprovable` because the NAME lookup
-    does not need a load either: dyld resolves a bind against the library's
-    export trie, which is bytes in a file this process is perfectly able to
-    read whatever it is built for. So "I cannot dlopen it" stops being the end
-    of the answer and becomes the choice of which arm of the lookup to run
-    (`_exports`). `unprovable` survives for what is genuinely unknowable here:
-    this process's own architecture cannot be established, or the trie could
-    not be read.
-
-    libSystem short-circuits to "loadable" without any of the checks: it is
-    answered from the host process (see the block comment above), and on this
-    system /usr/lib/libSystem.B.dylib is a shared-cache stub with no header to
-    read — so the arch test below would report every image as unloadable, which
-    is the false-finding direction.
+    libSystem short-circuits to "loadable" without either check: it is answered
+    from the host process (see the block comment above), and on this system
+    /usr/lib/libSystem.B.dylib is a shared-cache stub with no header to read —
+    so the arch test below would report every image as unloadable, which is the
+    false-finding direction.
     """
     if path == _LIBSYSTEM:
-        return "loadable", None, ""       # ordinal 1, answered from the host
+        return ""                       # ordinal 1, answered from the host
     types = _macho_cputypes(path)
     if not types:
-        return "unloadable", None, f"cannot read a Mach-O header at {path}"
+        return f"cannot read a Mach-O header at {path}"
     if cputype not in types:
         have = "/".join(sorted(_cpu_name(t) for t in types))
-        return ("unloadable", None,
-                f"{path} is built for {have}, which this "
+        return (f"{path} is built for {have}, which this "
                 f"{_cpu_name(cputype)} image cannot load")
-    host = _host_cputype()
-    if host is None:
-        # Cannot establish what this process can dlopen, so which arm of the
-        # lookup below is the right one is unknown. Refusing to answer is the
-        # direction that cannot invent a finding.
-        return ("unprovable", None,
-                f"cannot establish this host's architecture, so whether "
-                f"{path} could be loaded here is unknown")
-    if host not in types:
-        foreign = "/".join(sorted(_cpu_name(t) for t in types))
-        return ("header-only", foreign,
-                f"{path} is built for {foreign}, which this "
-                f"{_cpu_name(host)} host cannot dlopen — so the loadability "
-                f"above is the file's own header rather than a load, and its "
-                f"exports are read from its trie rather than dlsym'd")
     if path in _LIBS:
-        return ("loadable" if not _LIBS[path] else "unloadable"), None, _LIBS[path]
+        return _LIBS[path]
     try:
         _LIBS[path] = ""
         ctypes.CDLL(path)
     except OSError as e:
         _LIBS[path] = f"dyld cannot load {path} here: {e}"
-    return ("unloadable" if _LIBS[path] else "loadable"), None, _LIBS[path]
+    return _LIBS[path]
 
 
-# The export trie of each library read statically, as (exports or None, why).
-# Read once per library per run: an image binds the same helper dylib for every
-# one of its imports, and the parse is the only part of this probe that is not
-# O(bytes of a load command). Keyed by path, so a library swapped under a run is
-# still one answer — and the swap is caught by the CAS key, not by this memo.
-_EXPORT_TABLES: dict = {}
+def _exports(path: str, name: str) -> bool:
+    """Whether the library at `path` exports `name`, which is spelled bare.
 
-# Binds answered from an export trie rather than by dlopen, and the files they
-# were in. Its own counters beside `_DYLIB_LINKED`, for `_DYLIB_LINKED`'s
-# reason: these are facts about how this tool reached a verdict, not CAS
-# lookups, and the summary prints them because a `pass` reached this way is
-# weaker than one confirmed by a load (see the block comment above).
-_STATIC_BINDS = 0
-_STATIC_FILES = 0
-
-
-def _bump_static_probe(nbinds: int) -> None:
-    global _STATIC_BINDS, _STATIC_FILES
-    with _STATS_LOCK:
-        _STATIC_BINDS += nbinds
-        _STATIC_FILES += 1
-
-
-def _static_exports(path: str):
-    """`(exports, why)` for a library's EXPORT TRIE — the table dyld consults.
-
-    `exports` is None when the trie could not be read, and `why` then says why.
-    Read through `formal.build.macho_dylib_exports`, which is this project's
-    own reader of the format and RAISES rather than answering partially: a name
-    quietly missing from that dict is a bind called unresolvable, and a name
-    quietly added is a bind whose ordinal points at the wrong library, so a
-    truncated answer is the one thing worse than none.
-
-    Every exception is caught, and this is deliberate in a way the rest of the
-    probe is not: an unreadable table must be able to become a stated "I cannot
-    find out" (which `_resolvable` files as `unprovable`, no verdict) and must
-    never become a resolution or an accusation. Both of those would be
-    inventions about the image derived from a reader that failed.
+    `hasattr` on a CDLL is a dlsym, and dlsym re-adds the leading underscore
+    the Mach-O symbol carries — so the name the bind stream holds (bare, as
+    macho_linker writes it) is exactly what dlsym wants. libSystem is the one
+    exception to "the library at `path`": it is answered from the HOST process
+    (see the block comment above for why that is the same library), and
+    CDLL(None) searches the global namespace, which is why the lstrip is not
+    optional here.
     """
-    if path not in _EXPORT_TABLES:
-        try:
-            from formal.build import macho_dylib_exports
-            _EXPORT_TABLES[path] = (macho_dylib_exports(path), "")
-        except Exception as e:                    # see the docstring
-            _EXPORT_TABLES[path] = (None, f"{path}: its export table could not "
-                                          f"be read ({e})")
-    return _EXPORT_TABLES[path]
+    key = (path, name)
+    if key not in _MEMO:
+        lib = ctypes.CDLL(None) if path == _LIBSYSTEM else ctypes.CDLL(path)
+        _MEMO[key] = hasattr(lib, name.lstrip("_"))
+    return _MEMO[key]
 
 
-def _macho_symbol(bind_name: str) -> str:
-    """The Mach-O EXPORT NAME dyld forms from a bind-stream name.
-
-    Exactly one leading underscore, and it is dyld's: the bind stream carries
-    the C name (`macho_linker._bind_info` writes it as given), while the export
-    trie — and every other lookup table in the format — carries the Mach-O name,
-    which is that C name with one `_` in front. `_os__syscalls_str_alloc_9f63a2`
-    is the export; the bind says `os__syscalls_str_alloc_9f63a2`.
-
-    `macho_linker.macho_export_name` IS that mapping, and this asks it rather
-    than repeating it: the probe exists to corroborate the build's own symbol
-    accounting against the loader, so a fourth independent spelling of the rule
-    would be able to disagree with the three that produce the image — and did,
-    in the one case where it mattered, which is why the two ends of the rule now
-    live in one function.
-
-    The dlopen arm gets this for free: on macOS `ctypes` prepends the same
-    underscore before calling `dlsym`, so it is handed the bind name unchanged.
-    The static arm has no such shim, so it applies the mapping here — and gets
-    it wrong in the worst direction if it does not, looking up a name the trie
-    cannot hold and reporting a load failure for an image that loads. Measured:
-    that is what the first version of the static arm did, on
-    `formal/hostmods/ast.mojo`, whose three binds all came back "not exported"
-    from a dylib that exports all three.
-    """
-    from formal.macho_linker import macho_export_name
-    return macho_export_name(bind_name)
-
-
-def _libsystem_provides(name: str) -> bool:
-    """Whether the C library provides `name`, asked the way the build asks.
-
-    Delegated rather than re-implemented, and the delegation is the point: there
-    were two answers to this question on this tree, and they disagreed on
-    exactly one architecture's worth of names. `formal/build.py`'s
-    `_is_libsystem` asks about `model.libc_source_name(name)` — the name the
-    SOURCE spells — because macOS's C library exports the whole
-    directory-and-stat family twice (`readdir` and `readdir$INODE64`) and which
-    one a given target's calls bind is the TARGET's choice, decided in
-    `model.target_libc_symbol`. This probe used to hand the bind name straight
-    to `dlsym`, and on this host that is the host's libSystem, so every
-    x86-64 image was asked about a spelling the host does not have. Measured,
-    and it is the whole of the arm64-vs-x86-64 difference in the 2026-10-02
-    sweep: `formal/hostmods/os/_syscalls.mojo`, which binds five `$INODE64`
-    names on x86-64 and none on arm64, was reported
-    `not-answerable/unresolved-extern` on x86-64 and `pass` on arm64 — an image
-    that builds, links and loads, measured by running it: `arch -x86_64` on the
-    x86-64 image exits with an empty stderr (the code is the module's own; the
-    arm64 one exits 64 and this one 80), where the refusal had said dyld could
-    not bind five of its symbols.
-
-    Two things come with the delegation and both are wanted. The C library is
-    asked through a handle on the library itself rather than through
-    `ctypes.CDLL(None)`, which searches this process's whole global namespace —
-    the false-PASS direction `_libsystem_handle`'s own docstring measures on
-    this machine (`sqlite3_open` and `inflate` are visible there and are not in
-    libSystem). And every C function name in a real formal image answers the
-    same on both handles, measured, so nothing that passed before stops
-    passing; only the names this process loaded for its own reasons change
-    answer, and those are exactly the ones that should.
-    """
-    from formal.build import _is_libsystem
-    return _is_libsystem(name)
-
-
-def _exports(path: str, name: str, static: bool = False):
-    """`(state, why)` for whether the library at `path` exports `name`.
-
-    `state` is `"exported"`, `"not-exported"`, or `"unprovable"` — the third for
-    the static arm only, and it exists so a table this tool could not read is
-    never silently the same answer as a table that does not carry the name.
-
-    TWO WAYS TO ASK, and which one is right is a fact about this process rather
-    than a preference. `static=False` is `dlopen` + `dlsym`, which is what the
-    host can do for its own architecture and what libSystem is always answered
-    from. `static=True` reads the library's export trie: the same table dyld
-    resolves against, read out of the file rather than through a load, so it
-    answers for a library of ANOTHER architecture too — which is the whole
-    reason it exists (2026-10-02; before that, an x86-64 image probed from an
-    arm64 host got no verdict at all, see the block comment above).
-
-    A DYLIB's name goes to dlsym EXACTLY as the image's bind stream spells it,
-    and that is the whole contract. The stream already carries the C name —
-    `macho_linker._bind_info` takes off the single leading underscore that is
-    dyld's rather than the name's, and dyld puts it back on when it forms the
-    symbol it looks up — so the name read back out of the image is already the
-    spelling `dlsym` wants, and this must not normalise it a second time.
-
-    It used to, with `lstrip("_")`, which is wrong in the direction that
-    invents findings. A formal module's ABI prefix can begin with an
-    underscore — `abi_module_name('._syscalls')` is `__syscalls`, so EVERY
-    relative import produces one — and stripping "the" underscore turned the
-    bind name `_syscalls_fs_chdir_9f63a2` into `syscalls_fs_chdir_9f63a2`,
-    which dlsym resolved against `__syscalls_fs_chdir_9f63a2` and did not find.
-    The sweep then reported a load failure for an image that loads: measured on
-    `formal/hostmods/os/__init__.mojo` and `formal/hostmods/os/path/__init__.mojo`,
-    both classified `unresolved-extern` on a build that links and runs. See
-    `FORMAL_relative_submodule_abi_prefix_off_by_one`. A dylib's name is
-    therefore still not normalised, and the static arm still applies exactly the
-    one mapping that IS correct on macOS (`_macho_symbol`).
-
-    libSystem is the exception, and for the opposite reason: its name is not
-    this project's to spell. See `_libsystem_provides`.
-
-    `macho_dylib_exports` lists ORDINARY exports only, and the omission is
-    deliberate rather than tidy: a thread-local or an absolute is not something
-    an image can call at this bind, so its absence is the answer. A RE-EXPORT is
-    the one kind where dyld would have kept looking (into the re-exporting
-    library's own dependencies) and this table does not, so a library that
-    forwarded a name would be reported unresolved when dyld would have bound
-    it. It cannot arise here and the reason is worth stating rather than
-    assuming: `formal/macho_linker.py`'s `_export_trie` writes every terminal
-    with flags 0, `EXPORT_SYMBOL_FLAGS_KIND_REGULAR`, and that is the only
-    emitter of a dylib on this link line. So the gap is documented, closed, and
-    would need reopening only if a re-exporting library ever entered the path.
-    """
-    if static:
-        exports, why = _static_exports(path)
-        if exports is None:
-            return "unprovable", why
-        found = _macho_symbol(name) in exports
-    elif path == _LIBSYSTEM:
-        found = _libsystem_provides(name)
-    else:
-        key = (path, name)
-        if key not in _MEMO:
-            lib = ctypes.CDLL(path)
-            _MEMO[key] = hasattr(lib, name)
-        found = _MEMO[key]
-    if found:
-        return "exported", ""
-    return "not-exported", f"{name} is not exported by {path}"
-
-
-def _resolvable(ordinal: int, name: str, dylibs: list, cputype: int):
-    """`(state, foreign, why)` for whether dyld can bind `name` from `ordinal`.
+def _resolvable(ordinal: int, name: str, dylibs: list, cputype: int) -> str:
+    """Why dyld cannot bind `name` from dylib `ordinal`, or "" if it can.
 
     See the block comment above: the answer is read out of the image's own load
     commands and bind stream, and looked up in the one library dyld would use.
-
-    `state` is the whole of the answer and `"resolved"` is the only success, so
-    a caller cannot mistake a partial answer — including "this host cannot find
-    out" — for a resolution. `foreign` on a `resolved` is a qualifier, never a
-    second outcome: it names the architecture of the library when the lookup was
-    a static export-trie read because this process could not dlopen it, so a
-    caller that wants to count the verdicts reached the weaker way can, and one
-    that only reads `state` cannot be misled by it.
+    "" is the only success value, so a caller cannot mistake a partial answer
+    for a resolution.
     """
     if not dylibs:
-        return "unresolved", None, "the image has no load commands"
+        return "the image has no load commands"
     if ordinal < 1 or ordinal > len(dylibs):
-        return ("unresolved", None,
-                f"the bind names dylib ordinal {ordinal}, which the image's "
+        return (f"the bind names dylib ordinal {ordinal}, which the image's "
                 f"{len(dylibs)} load command(s) do not define")
     path = dylibs[ordinal - 1]
-    state, foreign, bad = _loadable_for(path, cputype)
-    if state == "unprovable":
-        # Propagated as itself rather than folded into "unresolved": the caller
-        # files the two differently, and that difference is the whole point.
-        return state, foreign, bad
-    if state == "unloadable":
-        return state, None, f"{bad}; nothing in it binds"
-    found, why = _exports(path, name, static=(state == "header-only"))
-    if found == "unprovable":
-        return "unprovable", foreign, why
-    if found == "not-exported":
-        return "unresolved", None, why
-    return "resolved", foreign, ""
+    bad = _loadable_for(path, cputype)
+    if bad:
+        return f"{bad}; nothing in it binds"
+    if not _exports(path, name):
+        return f"{name} is not exported by {path}"
+    return ""
 
 
 # A name the image binds that no loadable library provides, and the reason —
 # so the printed finding says WHICH library was consulted and what was wrong
 # with it, rather than only how many names there were.
-#
-# `unprovable` is a third answer beside "dyld cannot bind this" and "dyld binds
-# this": it means the sweep ran on a host that cannot answer, so the name is
-# neither bound nor unbound as far as this run knows. Carried on the record
-# rather than encoded in the message, because run_one files the two differently
-# and a caller that had to tell them apart by reading prose would eventually
-# read them the same way round.
-Missing = collections.namedtuple("Missing", "name why unprovable foreign")
+Missing = collections.namedtuple("Missing", "name why")
 
 
 def _unresolved_imports(binary: bytes) -> list:
@@ -3099,16 +1587,6 @@ def _unresolved_imports(binary: bytes) -> list:
     would, at the first call to it): that is not coverage and is not a codegen
     finding, so it is reported in its own class. See the block comment above
     for what this does and does not prove.
-
-    `Missing.unprovable` marks the names this host could not check at all; see
-    _loadable_for's fourth state. Both kinds are returned so a caller can see
-    that a name was looked for, and the caller is what decides that one is a
-    finding and the other is a gap in the run.
-
-    Counts this image's statically-read lookups, because a resolved name found
-    in an export trie is a weaker fact than one dlsym'd out of a loaded library
-    and the summary has to be able to say how many verdicts rest on it (see
-    `_bump_static_probe`).
     """
     dylibs = _load_dylib_names(binary)
     if not dylibs and binary[:4] not in _MACHO_MAGICS:
@@ -3118,25 +1596,10 @@ def _unresolved_imports(binary: bytes) -> list:
         # failure of the reader itself. Said out loud instead.
         return [Missing("<unreadable image>",
                         f"{len(binary)} bytes with no Mach-O header, so what "
-                        f"it binds could not be read at all", False, None)]
+                        f"it binds could not be read at all")]
     cputype = struct.unpack_from("<i", binary, 4)[0]
-    out = []
-    static = 0
-    for ordinal, name in _binds(binary):
-        state, foreign, why = _resolvable(ordinal, name, dylibs, cputype)
-        if state == "resolved":
-            # A `resolved` with `foreign` set was read out of an export trie
-            # rather than dlsym'd out of a loaded library, because this process
-            # cannot dlopen a library of the image's architecture. That is a
-            # real answer — it is the table dyld resolves against — but it is
-            # the weaker of the two, so it is counted for the summary.
-            if foreign is not None:
-                static += 1
-            continue
-        out.append(Missing(name, why, state == "unprovable", foreign))
-    if static:
-        _bump_static_probe(static)
-    return out
+    return [Missing(name, why) for ordinal, name in _binds(binary)
+            for why in [_resolvable(ordinal, name, dylibs, cputype)] if why]
 
 
 def _verdict_bytes(ok, detail):
@@ -3157,167 +1620,9 @@ def _verdict_from_bytes(raw):
 Verdict = collections.namedtuple(
     "Verdict", "ok detail cause cached cls reason")
 
-# What one build invocation produced. A named type rather than a
-# subprocess.CompletedProcess with attributes hung off it, because the two facts
-# that are not on a CompletedProcess (`mem_killed`, `peak_gb`) are the two a
-# reader of this file has to be unable to miss: they are why a file has no
-# verdict, and what it cost. `returncode`/`stdout`/`stderr` carry their usual
-# meanings, and `stdout`+`stderr` are the BUILD's streams — memcap's own
-# accounting is read off them in _run_build and not passed on, so nothing
-# downstream can match a `memcap:` line as if the build had printed it.
-BuildRun = collections.namedtuple(
-    "BuildRun", "returncode stdout stderr mem_killed peak_gb wrapper_died")
 
-
-# ── Per-file memory ceiling ──────────────────────────────────────────────────
-# The sweep launches `jobs` builds at once and, until 2026-10-01, ran each one
-# with nothing between it and the machine. That is the structural reason the
-# arm64 sweep could be killed outright by one file: 18 unbounded children, no
-# per-file ceiling, and a build driver that will happily recurse through a
-# module closure. Measured on that tree, no single file exceeded 0.2 GB and the
-# whole -j18 sweep peaked at 1.97 GB — so the ceiling below is generous by an
-# order of magnitude against every file measured, and it is here for the file
-# nobody has run yet rather than to bound anything observed.
-#
-# It is deliberately the SHARED implementation (tools/memcap.py, whose
-# measurement and kill are in tools/procrun.py) rather than a second copy of a
-# process walk here: a second RSS-threading-and-killing implementation is a
-# second set of ways to get the tree walk wrong, and `formal-sweep` is
-# registered in the suite under a `small` memclass precisely because memcap is
-# what enforces it.
-#
-# `MEMCAP_GB` is measured against the per-file peaks above and the 3-4 GB
-# standard in bugs/PERF_memory_over_4gb_is_a_bug.md: over 4 GB for one file's
-# build is a debt, so 4 GB is both a real bound and a claim worth making.
-MEMCAP_GB = 4.0
-
-
-def _build_argv(path, out, flags, mem_gb):
-    """The argv for one file's build, under `memcap` when a ceiling is set.
-
-    `mem_gb` <= 0 means no ceiling, and then this is the bare build. That is a
-    real mode rather than a degenerate one: a ceiling of 0 would also be read as
-    "off" by memcap itself, so the two would agree by accident, and a caller that
-    passes 0 deserves the un-capped build it asked for rather than a child that
-    is killed instantly.
-    """
-    build = [sys.executable, FIRE, "build", *flags, "-o", out, path]
-    if not mem_gb or mem_gb <= 0:
-        return build
-    return [sys.executable, MEMCAP, "--limit-gb", str(mem_gb),
-            "--label", os.path.basename(path), "--"] + build
-
-
-def _as_text(value) -> str:
-    """`str(value)` for a pipe's output, which may be bytes or str.
-
-    `subprocess`'s timeout path hands back bytes even where the pipes were
-    opened in text mode, so every reader of a `TimeoutExpired` would otherwise
-    have to ask. One place that asks.
-    """
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
-    return str(value)
-
-
-def _run_build(path, out, flags, timeout, mem_gb):
-    """Run one file's build under its memory ceiling. Returns a BuildRun.
-
-    The child gets its own process group (`start_new_session`), which is what
-    makes both bounds here whole-tree rather than direct-child: `subprocess.run`'s
-    timeout SIGKILLs the process it started, and a build that has spawned a
-    compiler of its own would leave that compiler running and still holding the
-    memory the kill was meant to release. Under memcap that is moot — memcap
-    walks and kills the tree itself — but the timeout fires on the memcap
-    wrapper, and the wrapper's own group is this one, so the two bounds nest
-    correctly rather than fighting.
-
-    `mem_killed` is the whole point of the exercise and it is carried as a
-    FIELD rather than left to be re-derived from the exit code, because the exit
-    code cannot carry it: memcap's 125 is also what a build that exits 125 by
-    itself produces, and procrun.memcap_verdict exists to refuse exactly that
-    conflation. The peak travels with it so the report can name the number the
-    ceiling was measured against rather than only saying a kill happened.
-
-    `Popen` + `kill_group` rather than `subprocess.run(timeout=…)`, and the
-    difference is the whole of the timeout's reach. `subprocess.run` SIGKILLs
-    the process it started and nothing below it, so a timeout here killed the
-    memcap WRAPPER and left its child — the build — running, unmonitored, still
-    holding the memory the ceiling exists to bound. The child was already in its
-    own session (which is what makes a group kill possible at all); nothing was
-    using it. `procrun.kill_group` is the same call `tools/suite.py` makes on
-    every job it times out, and its docstring is why it walks the tree before
-    killing the group: a group kill aimed at the wrapper stops AT the wrapper,
-    which would recreate the runaway the ceiling exists to prevent.
-
-    stdout and stderr stay SEPARATE (the classifier prefers stderr), so this is
-    `procrun.spawn` — which merges them — plus an explicit `Popen` rather than
-    the shared helper. The `TimeoutExpired` is re-raised rather than returned as
-    a `BuildRun`, because that is the contract `run_one` reports a timeout
-    through (and a timeout is deliberately never published — see there).
-    """
-    argv = _build_argv(path, out, flags, mem_gb)
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True,
-                            cwd=REPO, start_new_session=True)
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        # The tree goes down FIRST, and the wait for its output comes after, so
-        # what the build printed before it died is not lost to the pipe: a file
-        # that refused a construct and then hung should still show the refusal.
-        procrun.kill_group(proc)
-        try:
-            stdout, stderr = proc.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            stdout, stderr = "", ""
-        # `communicate(timeout=…)` puts BYTES on the exception even with
-        # text=True on this interpreter, and a caller that concatenates
-        # `.output` with a str gets a TypeError instead of the message.
-        raise subprocess.TimeoutExpired(
-            argv, timeout, output=stdout or _as_text(e.output),
-            stderr=stderr or _as_text(e.stderr)) from None
-    mem_killed, peak, wrapper_died = False, None, False
-    if mem_gb and mem_gb > 0:
-        # memcap's own accounting goes to stdout, where it would otherwise be
-        # mistaken for the build's message. It is read here, off the CHILD's
-        # streams, rather than stripped from what the classifier sees: the
-        # classifier must not be able to match a `memcap:` line as a build
-        # refusal, and the build's real message is the one it should read.
-        mem_killed, peak = procrun.memcap_verdict(
-            (stdout or "") + (stderr or ""))
-        wrapper_died = procrun.memcap_wrapper_died(
-            (stdout or "") + (stderr or ""))
-    return BuildRun(proc.returncode, stdout, stderr, mem_killed, peak,
-                    wrapper_died)
-
-
-def _timeout_detail(timeout, population=None) -> str:
-    """The `tool` detail for a build that hit its bound.
-
-    One place, because the number and the population name are the same fact
-    split in two: the summary counts this string's cause and the per-file row
-    prints it, and a wording that named the population in one and not the other
-    would leave the summary unable to answer the question the row raised.
-    """
-    if population:
-        return f"timeout (> {timeout}s, {population} population)"
-    return f"timeout (> {timeout}s)"
-
-
-def run_one(path, timeout, flags, mem_gb=MEMCAP_GB, population=None) -> Verdict:
+def run_one(path, timeout, flags) -> Verdict:
     """Build one file and classify the outcome. See Verdict.
-
-    `timeout` is this FILE's bound in seconds, already resolved from `-t` by
-    `Timeouts.for_file` — the caller owns the population question and this
-    function owns none of it. `population` is that same file's name, and it
-    appears in the timeout row because the bound it hit is only half the fact:
-    a reader who sees `timeout (> 30s)` on `imports.py` cannot tell whether the
-    30 was the stdlib default or a repo-file bound they chose, and the two want
-    different next steps. It is optional so a caller with no `Timeouts` in hand
-    (a test harness, a one-file probe) gets the older wording.
 
     `cause` is non-None when the outcome is not one of the build's own
     diagnostics — a timeout, an unreadable file, an internal exception in the
@@ -3334,12 +1639,8 @@ def run_one(path, timeout, flags, mem_gb=MEMCAP_GB, population=None) -> Verdict:
     default would publish one architecture's verdict under the other's key.
 
     Cached in the CAS under cas.formal_build_key (source bytes + the formal
-    backend's sources + the interpreter + BUILD_FLAGS + _criteria_id() + this
-    file's IMPORT CLOSURE digest), so a re-run with nothing unchanged is a
-    file read per file instead of a compile — and a change to a module this
-    build COMPILES is a miss rather than a replay of the verdict that module's
-    previous contents produced.
-
+    backend's sources + the interpreter + BUILD_FLAGS + _criteria_id()), so a
+    re-run with nothing changed is a file read per file instead of a compile.
     The entry is the RAW build verdict (ok, detail); the class is derived from
     it by classify() on every run, for hits as much as for misses, so no cached
     entry can ever be reported under a class the current rules would not assign
@@ -3350,10 +1651,7 @@ def run_one(path, timeout, flags, mem_gb=MEMCAP_GB, population=None) -> Verdict:
     stale entry harmless if it ever survives.
     A timeout is a property of this machine's load, not of the source, so it is
     never published — it would otherwise pin a file at "timeout" until the key
-    changed. Neither is a memory kill, for the same reason and one more: the
-    ceiling that produced it is a flag on THIS run, so publishing would pin a
-    file at "memory-killed" under a key that says nothing about which flag set
-    it.
+    changed.
     """
     def verdict(ok, detail, cause, cached):
         cls, reason = classify(ok, detail, cause, source, path)
@@ -3373,8 +1671,7 @@ def run_one(path, timeout, flags, mem_gb=MEMCAP_GB, population=None) -> Verdict:
         # apart from a differently-built one.
         return verdict(False, f"cannot fingerprint this tool: {e}"[:200],
                        CAUSE_TOOL_ERROR, False)
-    key = cas.formal_build_key(source, path, flags, criteria,
-                               imports=_imports_digest(path))
+    key = cas.formal_build_key(source, path, flags, criteria)
     hit = cas.lookup(key, ".result")
     if hit is not None:
         _bump("hits")
@@ -3389,7 +1686,10 @@ def run_one(path, timeout, flags, mem_gb=MEMCAP_GB, population=None) -> Verdict:
         # -o into a temp dir so we don't scatter .aout across the tree
         with tempfile.TemporaryDirectory(prefix="formal_sweep_") as td:
             out = os.path.join(td, "a.out")
-            proc = _run_build(path, out, flags, timeout, mem_gb)
+            proc = subprocess.run(
+                [sys.executable, FIRE, "build", *flags, "-o", out, path],
+                capture_output=True, text=True, timeout=timeout, cwd=REPO,
+            )
             if proc.returncode == 0:
                 with open(out, "rb") as f:
                     binary = f.read()
@@ -3401,125 +1701,25 @@ def run_one(path, timeout, flags, mem_gb=MEMCAP_GB, population=None) -> Verdict:
             linked = [d for d in _load_dylib_names(binary) if d != _LIBSYSTEM]
             cause = None
             if missing:
-                # Split first, because the two kinds need different files. A
-                # name the probe could not check is NOT a fact about the image,
-                # and reporting it as one is how 7 correct x86-64 images came
-                # to be filed `not-answerable/unresolved-extern` on an arm64
-                # host. If every unprovable name is unprovable, the file gets no
-                # verdict at all and says why; if some are real, the real ones
-                # are the finding and the unchecked ones are counted beside it,
-                # because a reader has to know the finding is not the whole
-                # story.
-                unprovable = [m for m in missing if m.unprovable]
-                real = [m for m in missing if not m.unprovable]
-                names = sorted({m.name for m in real or unprovable})
-                if not real:
-                    # The reason is the PROBE'S, and is quoted rather than
-                    # described: it is now "this host cannot dlopen a dylib of
-                    # the image's architecture" for the loadability and "its
-                    # export table could not be read" for the name, and a
-                    # sentence written here would go on describing the first
-                    # after the second had replaced it. Naming the architecture
-                    # that a host WOULD need is kept, because that is the one
-                    # thing a reader acts on.
-                    need = unprovable[0].foreign
-                    return verdict(
-                        False,
-                        f"builds, but this {_host_arch_name()} host cannot "
-                        f"check the {len(unprovable)} import(s) it binds "
-                        f"({', '.join(names[:3])}"
-                        + (" ..." if len(names) > 3 else "")
-                        + "): "
-                        + unprovable[0].why
-                        + (f". Re-run on a {need} host, or take this as "
-                           f"unproven rather than as a failure" if need
-                           else ". This run reports no verdict rather than a "
-                                "failure"),
-                        CAUSE_FOREIGN_ARCH, False)
+                names = sorted({m.name for m in missing})
                 ok, detail = False, (
-                    f"builds, but {len(real)} import(s) dyld cannot "
+                    f"builds, but {len(missing)} import(s) dyld cannot "
                     f"resolve: {', '.join(names[:3])}"
                     + (" ..." if len(names) > 3 else "")
-                    + f" [{real[0].why}]"
-                    + (f" ({len(unprovable)} further name(s) could not be "
-                       f"checked from this host at all — see "
-                       f"'{CAUSE_FOREIGN_ARCH}')" if unprovable else ""))
+                    + f" [{missing[0].why}]")
             else:
                 ok, detail = True, ""
         else:
-            # A memory kill outranks every reading of the message. memcap
-            # SIGKILLed the tree, so there is no build message to read — whatever
-            # the child managed to print before it died is not a verdict about
-            # the source, and classifying it as one (a `codegen` row, via the
-            # silent-death fallback below) would file a machine fact as a finding
-            # about this file. It is checked FIRST, and it names the peak, so
-            # the report says what happened rather than only that something did.
-            if proc.mem_killed:
-                return verdict(
-                    False,
-                    f"killed at the {mem_gb:g} GB per-file ceiling"
-                    + (f" (peak {proc.peak_gb:.1f} GB)" if proc.peak_gb else ""),
-                    CAUSE_MEMORY, False)
             err = (proc.stderr or proc.stdout or "").strip()
             # keep the last non-empty line — that's the formal build's message
             lines = [ln for ln in err.splitlines() if ln.strip()]
-            # …but memcap's own accounting is not the build's message, and the
-            # namedtuple's docstring above promises nothing downstream can
-            # match one. It is separated here rather than only in the branch
-            # below, because a build that printed NOTHING leaves the wrapper's
-            # `done, … child exit -9` line as the last line there, and that is
-            # how "the ceiling wrapper's bookkeeping" becomes a file's alleged
-            # refusal. `build_lines` is empty exactly when the build said
-            # nothing at all.
-            build_lines = [ln for ln in lines
-                           if not ln.startswith("memcap: ")]
-            if proc.wrapper_died and not build_lines:
-                # The wrapper started the build and never reported how it
-                # ended, so there is no verdict about the source to report —
-                # not a refusal, and not a memory kill either, since nothing was
-                # measured against the ceiling. Not published, for the reason a
-                # timeout and a memory kill are not: it is a fact about this
-                # run's machine, and a verdict published under this key would
-                # pin the file here until the key changed.
-                #
-                # The signal is NAMED, read off the wrapper's own exit status,
-                # because "what killed the wrapper" used to be an open question
-                # for exactly this state (six files per architecture, 2026-10-02,
-                # `FORMAL_sweep_memcap_death_is_filed_as_codegen`) and an
-                # exit status answers it without anybody reproducing it. memcap
-                # handles SIGTERM and SIGINT (it reports `interrupted`, kills its
-                # tree and exits 130/143), so the only signal that can leave this
-                # state behind is SIGKILL — and in this repository the only thing
-                # that sends one is `tools/control.py guard`, aimed at the largest
-                # process in a worker tree once the tree's RSS sum passes its
-                # budget. So the row now names its own cause instead of leaving
-                # a reader to guess which of the two it was.
-                sig = (-proc.returncode if proc.returncode is not None
-                       and proc.returncode < 0 else None)
-                who = ("killed by SIGKILL, which nothing here can catch: in this "
-                       "tree that is tools/control.py guard, aimed at the "
-                       "largest process in a worker worktree once the tree's "
-                       "RSS sum passes its budget"
-                       if sig == 9 else
-                       f"killed by signal {sig}" if sig else
-                       "gone, and its exit status says nothing about how")
-                return verdict(
-                    False,
-                    f"the {mem_gb:g} GB per-file wrapper (tools/memcap.py) died "
-                    f"before it reported an outcome — {who} — so its banner is "
-                    f"in the output with no breach and no completion and this "
-                    f"build's own verdict was never observed. A fact about this "
-                    f"run's machine, not about the source; not cached, so "
-                    f"re-running re-measures it",
-                    CAUSE_WRAPPER_DIED, False)
             # No message at all still counts as the build's own verdict: with
             # no traceback there is no evidence of a crash, and a silent death
             # is far more often a refusal whose message went to stdout. The
             # fallback is deliberately the finding side (a codegen row: exit 1,
             # printed, in the denominator) — a crash we cannot see must not be
             # able to hide, and a false FAIL only sends someone to look.
-            detail = (build_lines[-1] if build_lines
-                      else f"exit {proc.returncode}")
+            detail = lines[-1] if lines else f"exit {proc.returncode}"
             ok = False
             cause = _crash_cause(err)
             if cause == CAUSE_BACKEND_CRASH:
@@ -3557,8 +1757,7 @@ def run_one(path, timeout, flags, mem_gb=MEMCAP_GB, population=None) -> Verdict:
         # this machine's load, and caching it would pin the file here until
         # the key changed. It is a named class, not a silent skip, so a
         # too-small -t shows up in the report instead of shrinking coverage.
-        return verdict(False, _timeout_detail(timeout, population),
-                       CAUSE_TIMEOUT, False)
+        return verdict(False, f"timeout (> {timeout}s)", CAUSE_TIMEOUT, False)
     except Exception as e:
         # An exception in the sweep or the build driver is not a verdict about
         # the file, so it is CAUSE_TOOL_ERROR and lands in `tool`, not in the
@@ -3582,7 +1781,6 @@ def run_one(path, timeout, flags, mem_gb=MEMCAP_GB, population=None) -> Verdict:
 # arch, and it moves when the scope moves (so a narrowed sweep does not diff
 # itself against a wider one).
 LEDGER_EXT = ".ledger"
-LEDGER_PARTIAL_EXT = ".ledger.partial"
 LEDGER_MAGIC = b"formal-sweep-ledger-v1"
 
 
@@ -3606,27 +1804,13 @@ def load_ledger(arch: str, files):
     return data
 
 
-def publish_ledger(arch: str, files, verdicts: dict, partial=False) -> None:
-    """Record this run's path -> class, for the next run to diff against.
-
-    `partial=True` writes a DIFFERENT extension, and that is the whole design of
-    the interrupted case rather than a detail of it. A partial run classified
-    some files and never reached others, so a class "change" against it is
-    mostly the arithmetic of what was not run — diffing a complete run against
-    one would report hundreds of files as having moved when nothing about them
-    changed. Writing it under its own extension means load_ledger (which looks
-    for the complete one) cannot see it at all, so the next run's report_history
-    is a diff against the last COMPLETE run and says so, and a reader who wants
-    the partial record goes and reads the partial file, which is named for what
-    it is.
-    """
+def publish_ledger(arch: str, files, verdicts: dict) -> None:
     body = json.dumps(
-        {"arch": arch, "total": len(verdicts), "partial": bool(partial),
+        {"arch": arch, "total": len(verdicts),
          "when": datetime.datetime.now().isoformat(timespec="seconds"),
          "verdicts": verdicts},
         sort_keys=True).encode("utf-8")
-    cas.publish(ledger_key(arch, files),
-                LEDGER_PARTIAL_EXT if partial else LEDGER_EXT, body)
+    cas.publish(ledger_key(arch, files), LEDGER_EXT, body)
 
 
 def report_history(prev, verdicts: dict) -> None:
@@ -3662,522 +1846,13 @@ def report_history(prev, verdicts: dict) -> None:
         print(f"  in the previous report, not swept this time: {len(gone)}")
 
 
-# ── THE COMMITTED BASELINE, and the regression alarm ─────────────────────────
-#
-# `report_history` above answers "what changed since the last run ON THIS
-# MACHINE", and the ledger it reads is in the CAS: keyed by arch and file list,
-# cleared with the cache, and never reviewed by anybody. That is the right
-# mechanism for "did a rule change reclassify a file" and the wrong one for
-# "did an EDIT regress the corpus", because the 2026-10-04 b12 round is the case
-# that needs the second and could not use the first: 229 of 735 files stopped
-# building behind one module because six lines of em-dash prose were added to a
-# docstring, and the only record of it was a work map written afterwards from two
-# logs by hand (the `b12` round of `bugs/FORMAL_sweep_work_map.md` §1). Nobody ran
-# the diff, because the diff needs the previous round's log, which is a file on
-# somebody's machine from three days ago.
-#
-# So the previous state is a COMMITTED FILE, `bugs/sweeps/sweep-<arch>.
-# baseline.json`, and its own git history is the provenance — which is the
-# whole difference from the ledger, and the reason this is not a CAS entry.
-# `--write-baseline` records a run there; `tools/formal_sweep_rounds.py
-# --write-baseline` records one from a log already on disk, so refreshing the
-# ratchet after a sweep does not require re-running one.
-#
-# THE ALARM IS WORSE, NOT DIFFERENT. A class count that moved is not news on its
-# own: the scope grows every round, a host model landing moves files between
-# classes in both directions at once, and `…_b12.md` §3.4 is a whole section
-# about 236 files whose capability and whose regression were the same files.
-# So every file that moved to a class FURTHER FROM A PASS is named, grouped by
-# the refusal now standing in front of it, and the direction is stated in both
-# directions so the alarm cannot be satisfied by an edit that fixes as much as it
-# breaks.
-BASELINE_TAG = "formal-sweep-baseline-v1"
-BASELINE_DIR = os.path.join(REPO, "bugs", "sweeps")
-#: Per-architecture stems, spelled the way the sweep LOGS in that directory are
-#: (`sweep-arm-12.txt`, `sweep-x86-12.txt`), so the baseline a reader looks for
-#: sits beside the log it came from rather than under a second naming scheme.
-BASELINE_STEMS = {"arm64": "sweep-arm", "x86_64": "sweep-x86"}
-#: The class a banked-from-a-log baseline records for a file the log printed no
-#: row for. NOT a verdict: it says "this file did not print a row, and a log
-#: records the COUNT of those and not their NAMES", which is a different fact
-#: from `pass` and is treated as one everywhere it is compared — a file moved
-#: out of this row is a move whose direction the baseline cannot say, and it is
-#: reported as exactly that rather than guessed in either direction. It appears
-#: only in a baseline banked from a log; a baseline banked by a sweep names
-#: every file.
-BASELINE_UNNAMED_PASS = "pass-unnamed"
-
-# HOW FAR IS A FILE FROM A PASS, in the units that matter: how much of the
-# remaining work is the BACKEND's. Read the boundaries, because each one is a
-# judgement and a reader who disagrees with one can compute the answer
-# differently; what is not negotiable is that the order is TOTAL and stated.
-#
-#   * `pass` is 0 and nothing beats it.
-#   * `built-with-admitted-contracts` is 1: the file builds, and the residue is
-#     declared trust rather than a refusal.
-#   * the two codegen classes are 2 and 3. The in-file one is nearer, because
-#     fixing the construct it names is enough to make the file build; the
-#     dependency one is further, because the refusal is not in the file and
-#     fixing the file's own construct would not have built it. That ordering is
-#     what makes "a refusal landed IN FRONT of them" (`…_b12.md` §3.3, 110
-#     files) a regression rather than a reclassification.
-#   * every `not-answerable/*` class is 4, and they are EQUAL to each other on
-#     purpose. These are facts about the target: no change to this backend makes
-#     such a file build, so a file moving off a codegen row onto one has stopped
-#     being a claim about the backend and become a permanent excuse. The
-#     consequence is stated here because it is the surprising half: the 99 files
-#     that crossed from `host-import` into codegen rows on the b12 round count
-#     as IMPROVEMENTS here — which is what they are, the backend reached them —
-#     while the coverage RATE fell over the same files, because they entered the
-#     denominator and failed there. Both numbers are printed. `…_b12.md` §2.3
-#     prints both for the same reason.
-#   * `unknown` and `tool` are 5: no verdict about the file at all, so a file
-#     that had one and no longer does is a hole in the measurement.
-#   * `backend-crash` is 6: the compiler RAISED, which is worse than refusing.
-#   * a class this tool does not know is 7, so a NEW class can never read as an
-#     improvement — the whole point of this block is to be wrong loudly.
-CLASS_SEVERITY = {
-    CLASS_PASS: 0,
-    CLASS_ADMITTED: 1,
-    CLASS_CODEGEN: 2,
-    CLASS_CODEGEN_DEP: 3,
-    CLASS_HOST: 4,
-    CLASS_UNRESOLVED: 4,
-    CLASS_EXTERN: 4,
-    CLASS_TARGET: 4,
-    CLASS_SYSCALL: 4,
-    CLASS_UNKNOWN: 5,
-    CLASS_TOOL: 5,
-    CLASS_CRASH: 6,
-}
-CLASS_SEVERITY_UNKNOWN = 7
-
-#: Exit statuses. 4 is this file's own addition and its own fact: not "the
-#: backend refused something" (1) but "I cannot name a refusal shape that a
-#: large part of the corpus is sitting on", which is a statement about the
-#: instrument and the only one of the four a caller cannot act on by fixing
-#: code in `formal/`. See EXIT STATUS in the module docstring.
-EXIT_DID_NOT_RUN = 2
-EXIT_FINDINGS = 1
-EXIT_UNCLASSIFIED = 4
-
-
-def _severity(cls: str) -> int:
-    """How far `cls` is from a pass; unknown classes are the furthest."""
-    return CLASS_SEVERITY.get(cls, CLASS_SEVERITY_UNKNOWN)
-
-
-def worse_class(before: str, after: str) -> bool:
-    """True when `after` is FURTHER from a pass than `before` was.
-
-    Strict, so two classes at the same distance — two `not-answerable/*` classes
-    swapping, which happens whenever an import resolver changes its mind — are
-    not a regression. A tie-break would report dozens of files moving between two
-    buckets that are equally far from a pass, and an alarm that fires on that is
-    an alarm nobody reads.
-    """
-    return _severity(after) > _severity(before)
-
-
-def exit_status(dirty: bool, loud: bool) -> int:
-    """The run's exit status, in one function so the table is the contract.
-
-    `loud` is `unclassified_report`'s verdict — a refusal shape over the honesty
-    bar. It outranks `dirty` because both are true whenever it happens (an
-    unclassified shape is a printed codegen row), and the more specific fact is
-    the more useful one: exit 4 says the numbers below are not a census of causes
-    and cannot be planned from until a row is added.
-    """
-    if loud:
-        return EXIT_UNCLASSIFIED
-    return EXIT_FINDINGS if dirty else 0
-
-
-def baseline_path(arch: str) -> str:
-    """The committed baseline's own path for `arch`, whether or not it exists."""
-    stem = BASELINE_STEMS.get(arch, f"sweep-{arch}")
-    return os.path.join(BASELINE_DIR, f"{stem}.baseline.json")
-
-
-def _repo_relative(path: str) -> str:
-    """`path` with this repository's own prefix dropped, for PRINTING.
-
-    The baseline is a COMMITTED file, so the line that names it belongs in a log
-    as the path a reader can open rather than as one that happens to be right on
-    the machine that wrote it — and every other committed path this tool prints
-    (`bugs/sweeps/…`, the `doc/ABI.md` it quotes) is already repo-relative.
-    """
-    try:
-        return os.path.relpath(path, REPO)
-    except ValueError:                       # a different drive, on Windows
-        return path
-
-
-def load_baseline(path: str):
-    """The baseline at `path`, or None when there is no file there.
-
-    A file that IS there and is not a baseline is a refusal, not a None: a
-    baseline read as "nothing moved" when it is really a schema this tool does
-    not know is the quietest possible way to disable the alarm, which is why
-    `BASELINE_TAG` is checked rather than trusted (`tools/formal_proof_census.py`
-    refuses on its tag for the same reason, and says why there).
-    """
-    try:
-        with open(path, "rb") as f:
-            raw = f.read()
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        _refuse_baseline(f"cannot read the committed baseline {path}: {exc}")
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
-        _refuse_baseline(
-            f"{path} is not JSON ({exc}). Refusing to compare against it: a "
-            f"baseline that cannot be read must not read as 'nothing "
-            f"regressed'")
-    if not isinstance(data, dict) or data.get("tag") != BASELINE_TAG:
-        _refuse_baseline(
-            f"{path} is not a {BASELINE_TAG} baseline (tag="
-            f"{data.get('tag') if isinstance(data, dict) else 'not an object'!r}"
-            f"). Re-seed it: `--write-baseline` records a run, and "
-            f"tools/formal_sweep_rounds.py --write-baseline records a log")
-    if not isinstance(data.get("verdicts"), dict):
-        _refuse_baseline(
-            f"{path} is a {BASELINE_TAG} baseline with no verdicts dict, so "
-            f"there is nothing to compare a file against")
-    return data
-
-
-def _refuse_baseline(message: str):
-    """Print why and exit `EXIT_DID_NOT_RUN`, rather than raising with a message.
-
-    `raise SystemExit(message)` prints the message and exits **1**, which in this
-    tool is "the backend refused something": a caller retrying on 1 would retry a
-    sweep that never ran, and the status would be saying the opposite of what
-    happened. Read before any build starts, which is the other half of why.
-    """
-    print(message, file=sys.stderr)
-    raise SystemExit(EXIT_DID_NOT_RUN)
-
-
-def write_baseline(path: str, arch: str, verdicts: dict, source=None,
-                   unnamed_passes=0, summary_pass=None, unnamed=()) -> str:
-    """Record `verdicts` as the baseline at `path`, and return the path.
-
-    Written atomically through a private temporary file, because a
-    half-written baseline is worse than no baseline: it is a committed file that
-    the next run would refuse to read as a schema error, which at least is loud,
-    but only after someone has noticed that the alarm stopped firing.
-    `tools/dangling_doc_refs.py`'s `write_baseline` says the same of its own and
-    `tools/formal_proof_census.py`'s says it again — three files, one rule.
-
-    `source` is whatever the caller read the verdicts out of (a sweep log, for
-    the rounds tool), recorded because a baseline with no provenance is a number
-    nobody can check, and the git history of the file is provenance of a second
-    order: it says when the FILE changed, not which run wrote it.
-    `unnamed_passes` is the size of the `BASELINE_UNNAMED_PASS` population, kept
-    as a figure rather than derived from the rows so the report can say how much
-    of the corpus this baseline cannot speak for without counting 700 strings to
-    find out. `summary_pass` is the pass COUNT a log recorded for itself; it is
-    the one `pass` figure such a baseline has, and it is carried explicitly
-    because a `pass` row of 0 next to a real count of 131 reads as a claim that
-    nothing passed.
-
-    `unnamed` is the paths whose refusal `_REFUSAL_FAMILIES` matched no row
-    for, which is this table's own verdict and nothing else's: a class count
-    cannot see a file swap one NAMED refusal for another without moving class,
-    and on the b12 round 110 of the 229 files did exactly that. Recording which
-    files were already on a nameless refusal is what lets the comparison name
-    them; without it the loud finding says how many and the baseline alarm cannot
-    say which.
-    """
-    counts = collections.Counter(verdicts.values())
-    body = json.dumps(
-        {"tag": BASELINE_TAG, "arch": arch, "total": len(verdicts),
-         "when": datetime.datetime.now().isoformat(timespec="seconds"),
-         "source": source, "unnamed_passes": unnamed_passes,
-         "summary_pass": summary_pass, "unnamed": sorted(unnamed),
-         "classes": dict(sorted(counts.items())),
-         "verdicts": dict(sorted(verdicts.items()))},
-        indent=1, sort_keys=True)
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
-                               prefix=".baseline-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(body + "\n")
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    return path
-
-
-def _terminal_group(path, detail):
-    """`(family, refusing module)` for a regressed file, or None.
-
-    None for a row that is not a construct refusal — a file that moved into
-    `not-answerable/host-import` has no terminal cause to group it by, and
-    inventing one out of its import message would put it under whatever family
-    that message's wording happens to match.
-    """
-    hops, term = _split_chain(detail or "")
-    msg = _terminal_reason(term).strip()
-    if not msg:
-        return None
-    return (_refusal_family(msg), _refuser(term) or (hops[-1] if hops else ""))
-
-
-def _example_files(paths, cap=12) -> str:
-    """The group's files, up to `cap`, and where the rest of them are.
-
-    Twelve, not all of them: a group of 229 printed in full is 229 lines of the
-    summary, which is not a finding, it is this run's own per-file output read
-    back. The twelve establish the pattern, the count above them is the number
-    to plan with, and the rest are locatable because the sweep ALREADY printed
-    every one of them — one line per file it did not pass, with the whole
-    refusal chain on it. So the tail says where they are rather than pretending
-    the list is complete.
-    """
-    paths = sorted(paths)
-    head = ", ".join(paths[:cap])
-    return head + (f", … and {len(paths) - cap} more, every one of them a "
-                   f"printed row of this run" if len(paths) > cap else "")
-
-
-def report_baseline(path, prev, verdicts: dict, rows, total, unnamed_now=(),
-                    say=print) -> bool:
-    """Name every file that moved to a WORSE class than the baseline records.
-
-    `prev` is `load_baseline`'s answer (None when there is no baseline), `rows`
-    is this run's printed rows, `(rel, class, reason, detail)`, which is where
-    the terminal refusal of each moved file comes from, and `unnamed` is the
-    paths this run put on a refusal `_REFUSAL_FAMILIES` matched nothing for.
-    Returns True when there is anything to read here, so the caller can print
-    one line about it.
-
-    FOUR SECTIONS, because a class count answers one question and the b12 round
-    showed there are four. The per-file one is every file that moved to a class
-    FURTHER FROM A PASS, grouped by the refusal now standing in front of it —
-    grouped by CAUSE rather than by class because the class is what moved and
-    the cause is what a reader has to open: `codegen/dependency 270 -> 430` is
-    not a finding and `229 file(s), refused in _syscalls.mojo, one message
-    shape` is. The second is a file whose CLASS DID NOT MOVE and whose refusal
-    became one no table names, which is 110 of the b12 229 and which a
-    class-only rule misses completely. The third is the coverage RATE with the
-    two counts that explain it, because `CLASS_SEVERITY` deliberately ranks
-    `not-answerable` beyond both codegen classes and so calls the 99 files that
-    crossed from `host-import` into a codegen row an improvement — while the
-    rate they moved is down. The fourth is the `pass-unnamed` population, whose
-    direction this baseline cannot say: those files are named by the class they
-    are in now, because that half IS known.
-
-    Files the baseline does not have, and files it has that this run did not
-    sweep, are counted in one line and are NOT regressions: a scope that grew is
-    not a regression, and reading it as one is how a real one gets lost in the
-    noise.
-    """
-    if prev is None:
-        say(f"  committed baseline: none at {path} — nothing to compare "
-            f"against, so a regression in this run can only be found by reading "
-            f"the counts. `--write-baseline` records this run there, and "
-            f"`tools/formal_sweep_rounds.py --write-baseline` records one from "
-            f"a log already on disk")
-        return False
-    say(f"  committed baseline: {_repo_relative(path)} — banked "
-        f"{prev.get('when', '?')}, [{prev.get('arch', '?')}], "
-        f"{prev.get('total', '?')} file(s)"
-        + (f", from {prev['source']}" if prev.get("source") else ""))
-
-    old = prev.get("verdicts", {})
-    # Two scopes are not two states of one corpus. A sweep of a subset — a
-    # worker checking one directory, a test sweeping a fixture — shares almost
-    # no file with the 738-file baseline, and a delta table over that prints
-    # `pass 131 -> 0` next to `codegen/dependency 430 -> 0`, which reads as a
-    # catastrophe and is arithmetic. The per-file check below is still correct,
-    # because it only ever compares files both sides name; the TABLE is what
-    # needs the scope, so the table is what the scope gates.
-    shared = len(set(verdicts) & set(old))
-    comparable = (shared >= total / 2 and shared >= len(old) / 2) if total else False
-    if not comparable:
-        say(f"    NOTE: this run swept {total} file(s) and the baseline records "
-            f"{len(old)}, and {shared} of them are the same file. The class "
-            f"counts are NOT printed: two scopes are not two states of one "
-            f"corpus, and a delta over them reads as a catastrophe. The "
-            f"per-file check below still holds — it compares only files both "
-            f"sides name. Re-sweep the same roots, or bank a fresh baseline "
-            f"with --write-baseline")
-    was, now = prev.get("classes", {}), collections.Counter(verdicts.values())
-    was_pass = (was.get(CLASS_PASS, 0) if was.get(CLASS_PASS)
-                else prev.get("summary_pass"))
-    for cls in (CLASS_ORDER + (BASELINE_UNNAMED_PASS,)) if comparable else ():
-        a, b = was.get(cls, 0), now.get(cls, 0)
-        note = ""
-        if cls == CLASS_PASS and was_pass is not None and not was.get(cls):
-            # The one number a baseline banked from a log still knows exactly,
-            # and the headline of every sweep report: it is printed from the
-            # log's own `PASS=` figure because the log's arithmetic cannot name
-            # those files (see BASELINE_UNNAMED_PASS), and it is the figure the
-            # b12 round's "145 -> 131" came from.
-            a = was_pass
-            note = (f"   <- the log's own PASS= count; this baseline does NOT "
-                    f"name those {a} file(s), so the {a} -> {b} delta cannot "
-                    f"be attributed from it (see the note below)")
-        if not a and not b:
-            continue
-        say(f"    {'  ' if a == b else '->'} {cls:<40} {a:>5} {b:>5}  ({b - a:+d})"
-            + note)
-    # THE RATE, and the two counts that explain it. `CLASS_SEVERITY` puts every
-    # `not-answerable` class BEYOND both codegen classes, so a file that moves
-    # from `host-import` into a codegen row is an IMPROVEMENT by that ladder —
-    # the backend reached a file it could not reach before — and the coverage
-    # rate still FALLS, because the file entered the denominator and failed
-    # there. Both are true and they are different questions, so both are printed:
-    # the b12 round is the case (99 files crossed in, the rate went 28.8% ->
-    # 21.7%), and a report that printed only one of them would be wrong in the
-    # direction its reader came for.
-    was_ans = sum(was.get(c, 0) for c in ANSWERABLE) + (was_pass or 0)
-    now_ans = sum(now.get(c, 0) for c in ANSWERABLE)
-    if comparable:
-        was_pct = 100.0 * (was_pass or 0) / was_ans if was_ans else 0.0
-        now_pct = 100.0 * now.get(CLASS_PASS, 0) / now_ans if now_ans else 0.0
-        say(f"    codegen coverage {was_pct:.1f}% -> {now_pct:.1f}% "
-            f"({now_pct - was_pct:+.1f} pp), over {was_ans} -> {now_ans} "
-            f"answerable file(s) — the sweep's own headline, and the two "
-            f"figures a class count cannot give")
-    entered = left = unknown = 0
-    for path_, cls in verdicts.items():
-        before = old.get(path_)
-        if before is None or before == BASELINE_UNNAMED_PASS:
-            if before == BASELINE_UNNAMED_PASS and cls != BASELINE_UNNAMED_PASS:
-                unknown += 1
-            continue
-        was_in, is_in = before in ANSWERABLE, cls in ANSWERABLE
-        entered += 1 if is_in and not was_in else 0
-        left += 1 if was_in and not is_in else 0
-    if comparable and (entered or left or unknown):
-        say(f"      of which: {entered} file(s) ENTERED the answerable "
-            f"denominator (a not-answerable class into a codegen one) and "
-            f"{left} left it; {unknown} more are in a class this baseline does "
-            f"not name, so their direction is unknown rather than counted")
-
-    detail = {r: d for r, _c, _reason, d in rows}
-    was_unnamed = set(prev.get("unnamed", ()))
-    worse, silent, better, sideways = [], [], 0, 0
-    for path_ in sorted(verdicts):
-        cls, before = verdicts[path_], old.get(path_)
-        if before is None or before == cls:
-            continue
-        if before == BASELINE_UNNAMED_PASS:
-            silent.append((path_, cls))
-        elif worse_class(before, cls):
-            worse.append((path_, before, cls))
-        elif worse_class(cls, before):
-            better += 1
-        else:
-            sideways += 1
-    # Each file lands in exactly one group: a file that moved to a worse class
-    # AND onto a nameless refusal is reported by the class group, which already
-    # carries its cause, rather than twice.
-    darker = sorted((set(unnamed_now) - was_unnamed) - {p for p, _b, _c in worse})
-    fresh = sorted(set(verdicts) - set(old))
-    gone = sorted(set(old) - set(verdicts))
-    tail = (f"{better} moved the other way, {sideways} sideways, {len(fresh)} "
-            f"not in the baseline, {len(gone)} baseline file(s) not swept")
-    if prev.get("unnamed_passes"):
-        tail += (f"; {prev['unnamed_passes']} file(s) are `{BASELINE_UNNAMED_PASS}`"
-                 f", which is this baseline's way of saying a log records the"
-                 f" COUNT of the files that printed no row and not their names")
-
-    if not worse and not silent and not darker:
-        say(f"  REGRESSION CHECK: no file moved to a worse class than the "
-            f"baseline records ({tail})")
-        return False
-    groups = {}
-    for path_, before, cls in worse:
-        group = _terminal_group(path_, detail.get(path_))
-        cause = (f"{group[0]}"
-                 + (f"  (refused in {group[1]})" if group[1] else "")
-                 if group and cls in (CLASS_CODEGEN, CLASS_CODEGEN_DEP) else
-                 f"(no terminal cause: {cls} is not a construct refusal)")
-        groups.setdefault((f"{before} -> {cls}", cause), []).append(path_)
-    by_class = collections.defaultdict(list)
-    for path_, cls in silent:
-        by_class[cls].append(path_)
-    say(f"  REGRESSION: {len(worse)} file(s) moved to a WORSE class than the "
-        f"committed baseline records"
-        + (f", {len(darker)} kept their class and lost their NAME (a refusal "
-           f"no ranking table matches replaced a named one)" if darker else "")
-        + (f", and {len(silent)} more are in a class this baseline does not "
-           f"name at all" if silent else "")
-        + f" ({tail})")
-    for (move, cause), paths in sorted(groups.items(),
-                                       key=lambda kv: (-len(kv[1]), kv[0])):
-        say(f"    {len(paths)} file(s)  {move}")
-        say(f"        {cause}")
-        say(f"        {_example_files(paths)}")
-    if darker:
-        # A same-class move onto a nameless refusal is invisible to every class
-        # count and to every cause table, because the cause table's own answer is
-        # `other refusal` for all of them — so the shape-level loud finding
-        # above says how MANY and this says WHICH. The b12 round's 110 files that
-        # swapped a named row for the docstring wall are the case this exists
-        # for, and they are the largest group of that round's 229.
-        say(f"    {len(darker)} file(s)  (class unchanged) -> a refusal this "
-            f"table does not name:")
-        by_shape = {}
-        for path_ in darker:
-            by_shape.setdefault(unclassified_shape(
-                _terminal_reason(_split_chain(detail.get(path_, ""))[1]).strip()),
-                []).append(path_)
-        for shape, paths in sorted(by_shape.items(), key=lambda kv: -len(kv[1])):
-            say(f"        {len(paths)} file(s) — shape: {shape}")
-            say(f"          {_example_files(paths)}")
-    if silent:
-        say(f"    {len(silent)} file(s) were `{BASELINE_UNNAMED_PASS}` here and "
-            f"are now something else, which this baseline cannot put a "
-            f"direction on — see the note above. They are named because the "
-            f"CLASS they moved to is known:")
-        for cls, paths in sorted(by_class.items(), key=lambda kv: -len(kv[1])):
-            say(f"        now {cls}: {len(paths)} file(s)")
-            say(f"          {_example_files(paths)}")
-    say("    (a class count that moved is not the finding; the file list is. "
-        "A host model landing moves files in BOTH directions over one edit, so "
-        "read the direction before reading the count — "
-        "the `b12` round of `bugs/FORMAL_sweep_work_map.md` §3.4 is the record)")
-    return True
-
-
-#: The summary line `main` prints, `[x86_64] 668 files: PASS=125
-#: not-pass=543`, as a pattern. Here because this file PRINTS it and every other
-#: regex it owns is a pattern of something it reads or writes; the readers are
-#: `tools/formal_sweep_causes.py` (the loud unclassified finding's denominator)
-#: and `tools/formal_sweep_parity.py`, which takes its own from here so a change
-#: to the line cannot leave one reader matching and the other not.
-SUMMARY_RE = re.compile(
-    r"^\[(?P<arch>[a-z0-9_]+)\] (?P<files>\d+) files: PASS=(?P<pass>\d+) "
-    r"not-pass=(?P<notpass>\d+)\s*$")
-
 # What each class means, in the summary. Long on purpose: the class names are
 # the tool's contract with a reader who has not read this file, and a bare
 # count of 170 files called `not-answerable/host-import` is only honest if the
 # report also says what that is.
 CLASS_BLURB = {
     CLASS_PASS: "built, and every symbol it binds is in a library on its own "
-                "link line of the image's own architecture — checked by "
-                "loading that library where this host can, and by reading its "
-                "export trie (what dyld resolves against) where it cannot; the "
-                "summary below counts the ones read rather than loaded",
-    CLASS_ADMITTED: "built, and it ALSO rests on declared assumptions about a "
-                    "host this image does not have -- a second process, a "
-                    "thread, a dynamic loader for foreign code -- each named in "
-                    "its own `trust:` line and counted as a `sorry` in its "
-                    "proof. In the denominator, NOT in the numerator: a pass is a "
-                    "claim this backend made on its own",
+                "link line that dyld can load",
     CLASS_CODEGEN: "THE FINDING: the backend refused a construct IN THIS FILE",
     CLASS_CODEGEN_DEP: "the backend refused a construct in a module this file "
                        "imports, so this file did not build either — a failure "
@@ -4207,422 +1882,21 @@ CLASS_BLURB = {
                  "compiler, in no rate, exit 1 — never cached, so it re-runs",
     CLASS_UNKNOWN: "a build message this tool does not recognise — the "
                    "classifier needs updating, not the backend",
-    CLASS_TOOL: "no verdict reached, and therefore NO CLAIM either WAY about the "
-            "file: the build timed out (its answer is unknown at that -t, not "
-            "absent), blew this tool's per-file memory ceiling, its wrapper "
-            "died before reporting, was unreadable, or the sweep or build "
-            "driver raised. The summary splits this bucket by cause, with each "
-            "cause's share of the scope and what answers it",
+    CLASS_TOOL: "no verdict reached: timeout, unreadable file, or an internal "
+                "exception in the sweep or build driver",
 }
-
-
-# ── Running the pool, and surviving not finishing it ──────────────────────────
-def _stream_results(files, jobs, timeouts, flags, mem_gb, results) -> bool:
-    """Classify every file, printing each as it lands. True if interrupted.
-
-    `timeouts` is a `Timeouts`, not a number: each file's bound is looked up in
-    the population that file belongs to, in the worker that is about to build
-    it, so no caller has to know which population a file is in.
-
-    Prints, does not returns, because the printing is the point: an interrupted
-    run has to leave the files it classified on the output, and the only way to
-    guarantee that is to write them down at the moment they are known rather than
-    reconstructing them from a dict afterwards.
-
-    A signal handler rather than only a `try`, because the two interruptions are
-    not the same event. SIGINT/SIGTERM is a person or a watchdog asking the run
-    to stop, and the handler turns it into a clean drain: the files that had NOT
-    started building are cancelled, the `-j` builds already in flight are waited
-    for and their verdicts recorded and printed, and the exit status says the
-    run was cut short. A SIGKILL cannot be caught at all — that is why the
-    per-file ceiling above exists, to make sure the only thing a SIGKILL can
-    take is the tool's OWN process and not a build that had already been
-    classified and thrown away.
-
-    What the drain does is chosen, not incidental, and it is the opposite of what
-    this used to do. Every file is submitted up front, so the executor's queue is
-    the WHOLE run; a plain `return` left the `with` block, whose `__exit__` calls
-    `shutdown(wait=True)` with `cancel_futures=False`, so each worker kept
-    pulling the next queued file until it reached the sentinel `shutdown` appends
-    — a stopped sweep built every file it had been told to stop building, which
-    is what `ps` showed ten minutes after the signal (children younger than it,
-    each with almost no CPU). Cancelling the queue alone is not enough either,
-    because a worker that returns from one file picks up the next immediately
-    while the main thread is still waiting to hear that it should stop, so
-    `build` refuses to START a file once the flag is set. It is also why the
-    numbers had to be reconstructed from the CAS: `run_one` publishes before it
-    returns, so those builds wrote verdicts that `results` never heard about.
-    Hence the collection of what was in flight — that is what makes the log and
-    the cache agree again. What remains is the delay the builds in flight cost
-    (bounded by one `-t`), which is the honest price of not throwing away a build
-    that may be seconds from a verdict AND of not losing its published verdict.
-    """
-    stop = threading.Event()
-
-    def _on_signal(signum, _frame):
-        # Signal handlers must not do work; set the flag and let the loop notice.
-        # A second signal is left to the default disposition so an operator who
-        # wants out NOW gets out, rather than being held by a handler that is
-        # only going to drain politely.
-        if stop.is_set():
-            signal.signal(signum, signal.SIG_DFL)
-            os.kill(os.getpid(), signum)
-            return
-        stop.set()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, _on_signal)
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
-            def build(path):
-                """One file's build, unless the run was told to stop first.
-
-                The check is HERE, at the one place a build is launched, and not
-                only in the reporting loop, because the loop's own cancellation
-                cannot be prompt enough on its own: a worker that returns from
-                one file picks up the next one immediately, and the main thread
-                only learns that it should stop when a verdict arrives. Without
-                this, a signal landing mid-build still buys one more file per
-                worker — measured as "thirteen children ten minutes after the
-                signal" on the b6 sweep. `None` means not reached, which the
-                caller records as nothing at all rather than as a verdict.
-                """
-                if stop.is_set():
-                    return None
-                return run_one(path, timeouts.for_file(path), flags, mem_gb,
-                               timeouts.population(path))
-
-            futs = {ex.submit(build, p): p for p in files}
-
-            def collect(fut):
-                """One build's verdict: recorded in `results` and printed.
-
-                One function for the streaming loop and for the drain below, so
-                a verdict that arrives during the drain is reported exactly like
-                one that arrived during the run — `run_one` published both to the
-                CAS, and a run whose log and cache disagree is the state this
-                whole function exists to prevent.
-                """
-                path = futs[fut]
-                if fut.cancelled():
-                    # Never built, so there is nothing to record. Reaching here
-                    # means the queue was drained after a stop, which is the
-                    # queue being thrown away rather than walked.
-                    return None
-                try:
-                    v = fut.result()
-                except Exception as e:
-                    # run_one catches its own failures; this is the belt to that
-                    # braces, and a whole sweep must not die because one future
-                    # did. It is reported as `tool`, never as a verdict.
-                    v = Verdict(False, f"sweep worker raised: {e}"[:200],
-                                CAUSE_TOOL_ERROR, False, CLASS_TOOL,
-                                CAUSE_TOOL_ERROR)
-                if v is None:
-                    # The build declined to start because the run was stopped;
-                    # nothing is claimed about this file, which is what
-                    # _report_partial's "not reached" has to mean.
-                    return None
-                results[path] = v
-                if v.cls != CLASS_PASS:
-                    # `v.detail or v.reason`, because a class whose diagnosis is
-                    # not a build MESSAGE has an empty detail: `built-with-
-                    # admitted-contracts` is decided from the file's import
-                    # closure rather than from anything the build said, so
-                    # printing only the detail would print a line with nothing
-                    # in it for every admitted file.
-                    print(f"{v.cls.upper()}: {rel(path)}  "
-                          f"({v.detail or v.reason})", flush=True)
-                return v
-
-            for fut in concurrent.futures.as_completed(futs):
-                collect(fut)
-                if stop.is_set():
-                    # Stop BUILDING the rest of the scope, then keep what was
-                    # already running. Both halves are needed: the queue is the
-                    # whole run, so cancelling it is what makes a stopped sweep
-                    # stop, and collecting the in-flight builds is what keeps the
-                    # partial ledger and the CAS from disagreeing about how far
-                    # the run got.
-                    ex.shutdown(wait=False, cancel_futures=True)
-                    _drain_in_flight(futs, collect)
-                    return True
-    finally:
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            signal.signal(sig, signal.SIG_DFL)
-    return False
-
-
-def _drain_in_flight(futs, collect) -> None:
-    """Record the builds that were ALREADY RUNNING when the run was stopped.
-
-    Called after `shutdown(cancel_futures=True)`, so every future that had not
-    started is already cancelled and this only ever waits on the `-j` builds the
-    pool had taken. Each of those publishes its verdict to the CAS before
-    `run_one` returns, so a drain that ignored them would leave verdicts in the
-    cache that the run's own output never mentions — which is what forced
-    the `b6` round of `bugs/FORMAL_sweep_work_map.md` §2.3 to reconstruct a run's
-    numbers from the cache instead of reading its log.
-
-    Waited for rather than killed, and the cost is bounded: each in-flight build
-    has its own `-t` already running, so the drain costs at most one more `-t`.
-    That is the price of not discarding a build that may be seconds from a
-    verdict, and of not losing the verdict it is about to publish.
-    """
-    running = [f for f in futs if not f.done() and not f.cancelled()]
-    if not running:
-        return
-    concurrent.futures.wait(running)
-    for fut in running:
-        collect(fut)
-
-
-def _report_tool_causes(done, results, timeouts, mem_gb, arch, emit,
-                        indent="  "):
-    """The `tool` bucket, one line per CAUSE, each with its share of the scope.
-
-    The bucket is "no verdict was reached", and lumping it into one sentence is
-    what made it read as a verdict: it hid a real backend crash
-    (`AttributeError: 'str' object has no attribute 'name'`, the same defect
-    `test_dataclasses_formal.py` was failing on) that never appeared in the
-    ledger at all, because its file hit the default `-t 30` first and the tool
-    said "21 files got no verdict" about it in the same breath as the files that
-    genuinely have none. A `tool` row is a file this run says NOTHING about; the
-    cause says what stopped the answer, and the causes want opposite responses
-    (raise `-t`, write the module, look at the machine, look at the file).
-
-    So each line carries three things the reader cannot otherwise get: the count
-    by cause, that count as a FRACTION OF THE CLASSIFIED SCOPE (a `tool` row
-    read as "not a finding" is a very different claim over 3 files than over
-    300), and what the file's answer therefore is. `timeout` gets the command
-    that answers it, because it is the one cause a reader can do something about
-    immediately.
-
-    Shared by the complete run's summary and by an interrupted run's, because
-    they answer the same question and a second copy is a second wording for a
-    reader to be told two things by. The fraction is over the files this run
-    CLASSIFIED, because that is the denominator every count above it is over; an
-    interrupted run has already said how much of the scope it never reached.
-
-    Counted from `results` by CAUSE, never by matching the detail text: the
-    cause is a field the classifier set, and re-deriving it from the message it
-    formatted would be the second implementation of the same question.
-
-    The timeout row is the one that is SPLIT BY POPULATION, because it is the
-    one cause whose answer is a number and the two populations do not want the
-    same one: measured on one tree, a 135-line repo file passes inside 30 s
-    while a 185-line one crashes inside 600 s and a 5 645-line one is still
-    running at 5 400 s, and all three live in the same run under one `-t`. One
-    retry command over both populations would either spend the big bound on the
-    stdlib or hide the repo files' cost, so each population gets the command
-    that raises ITS OWN bound and leaves the other where it was.
-    """
-    by_cause = collections.Counter(results[p].cause for p in done
-                                   if results[p].cls == CLASS_TOOL)
-    if not by_cause:
-        return False
-    scope = len(done)
-    emit(f"{indent}note: {sum(by_cause.values())} of the {scope} classified "
-         f"file(s) ({_pct(sum(by_cause.values()), scope)}) got no verdict at all "
-         f"and are in NO rate. Each one is a file this run says NOTHING about, "
-         f"which is not the same as a file it has cleared:")
-    for cause in (CAUSE_TIMEOUT, CAUSE_MEMORY, CAUSE_WRAPPER_DIED,
-                  CAUSE_UNREADABLE, CAUSE_TOOL_ERROR):
-        n = by_cause.get(cause, 0)
-        if not n:
-            continue
-        emit(f"{indent}  {cause:<22} {n:>4} file(s) "
-             f"({_pct(n, scope)} of the classified scope) — "
-             f"{_CAUSE_BLURB[cause].format(mem_gb=f'{mem_gb:g}')}")
-    if by_cause.get(CAUSE_TIMEOUT):
-        # Grouped by population, in POPULATIONS order rather than arrival order,
-        # so two runs of the same sweep print the same lines in the same places
-        # and a reader diffing them is not reading a reordering as a change.
-        by_pop = collections.defaultdict(list)
-        for p in done:
-            if results[p].cause == CAUSE_TIMEOUT:
-                by_pop[timeouts.population(p)].append(rel(p))
-        for pop in POPULATIONS:
-            timed_out = by_pop.get(pop) or []
-            if not timed_out:
-                continue
-            paths = " ".join(timed_out) if len(timed_out) <= 8 else ""
-            cmd = _RETRY_CMD.format(arch=arch, timeout=timeouts.retry_arg(pop),
-                                    paths=paths)
-            emit(f"{indent}  re-answer the {len(timed_out)} {pop} file(s) with "
-                 f"a larger -t: {cmd}"
-                 + ("" if paths else "  [the paths are the `timeout` rows "
-                                     "above]"))
-    return True
-
-
-def _pct(n, total):
-    return f"{100.0 * n / total:.1f}%" if total else "n/a"
-
-
-# What each `tool` cause means for the file it is on. One sentence each, and
-# each says what the run does NOT know — which is the whole point of the split.
-_CAUSE_BLURB = {
-    CAUSE_TIMEOUT:
-        "the build did not finish inside its population's -t — the bound is PER "
-        "POPULATION, because a repo-root file's build is the sum of its import "
-        "closure's and a stdlib module's is its own — so what it WOULD have "
-        "answered is unknown at that bound. A file that turns out to crash says "
-        "so in `backend-crash` instead, and that is never cached, so it "
-        "re-measures every run; a file that is merely slow to build is the "
-        "other reading",
-    CAUSE_MEMORY:
-        "killed at this tool's {mem_gb} GB per-file ceiling — a real cost "
-        "finding about that file (see bugs/PERF_memory_over_4gb_is_a_bug.md), "
-        "NOT something a wider run fixes, and not cached, so re-running "
-        "re-measures it",
-    CAUSE_WRAPPER_DIED:
-        "this tool's per-file memory wrapper died before it reported an "
-        "outcome, so no peak was ever measured against the ceiling and this is "
-        "not a memory finding — a fact about the machine, not cached, "
-        "re-measured by re-running",
-    CAUSE_UNREADABLE:
-        "the file could not be read, so nothing about it was asked",
-    CAUSE_TOOL_ERROR:
-        "this tool or the build driver raised, so the run lost the answer it "
-        "would otherwise have had",
-}
-
-# `{timeout}` is the WHOLE `-t` argument, not a number: `Timeouts.retry_arg`
-# decides between the bare spelling (one bound for both populations) and
-# `-t <pop>=<seconds>`, and putting that decision here would be a second place
-# that has to know it.
-_RETRY_CMD = ("python3 tools/formal_sweep.py --arch {arch} {timeout} "
-              "{paths}")
-
-
-def _report_partial(arch, files, results, timeouts=None, mem_gb=0.0) -> None:
-    """Say what an interrupted run managed to classify, and publish it.
-
-    The counts are over the files that were classified, NOT over `files`, and
-    the two are printed as separate numbers on purpose. A partial run that
-    reported "623 files: PASS=113" would be claiming a denominator it does not
-    have; the honest form is "113 of 623 classified" with the tally over the
-    113. A reader comparing the two numbers can see exactly how much of the sweep
-    the interruption cost, which is the fact that makes a partial run worth
-    reading at all.
-    """
-    done = [p for p in files if p in results]
-    counts = {}
-    for p in done:
-        counts[results[p].cls] = counts.get(results[p].cls, 0) + 1
-    print("", file=sys.stderr)
-    print(f"[{arch}] INTERRUPTED: {len(done)} of {len(files)} files "
-          f"classified; the rest were not reached and nothing is claimed about "
-          f"them", file=sys.stderr)
-    for cls in CLASS_ORDER:
-        if counts.get(cls):
-            print(f"    {cls:<28} {counts[cls]:>4}", file=sys.stderr)
-    _report_tool_causes(done, results, timeouts or Timeouts(), mem_gb, arch,
-                        emit=lambda s: print(s, file=sys.stderr))
-    # The two honesty instruments did NOT run, and an interrupted summary that
-    # simply omits them reads as a run where they found nothing. Both are
-    # computed over the WHOLE scope: the loud unclassified shape's share half
-    # would be measured against the files this run never reached, and the
-    # baseline's comparison would see `swept - classified` files as missing
-    # rather than as not-yet-run. `--write-baseline` is refused here for the
-    # same reason — a baseline banked from a partial scope would report every
-    # unclassified file as a pass.
-    print("    the unclassified-refusal finding and the committed-baseline "
-          "regression check did NOT run: both are computed over the whole "
-          "scope, and this run classified "
-          f"{len(done)} of {len(files)} file(s). Nothing was banked.",
-          file=sys.stderr)
-    sys.stderr.flush()
-    # Publish the partial ledger under a key that says PARTIAL, so it can never
-    # be read as a complete run's history by the next one. Same shape, so
-    # load_ledger finds it and report_history can still say what moved; the
-    # `partial` flag is what a reader (and report_history) check before
-    # treating a class change as a fact about the tree.
-    try:
-        publish_ledger(arch, files, {rel(p): results[p].cls for p in done},
-                       partial=True)
-    except Exception as e:            # noqa: BLE001
-        print(f"  (could not publish the partial ledger: {e})", file=sys.stderr)
-
-
-# ── One sweep per architecture ───────────────────────────────────────────────
-# Keyed by ARCH, not by scope and not by the file list, and both exclusions are
-# deliberate. Not by scope: a narrowed sweep (`-j6 <20 paths>` while bisecting)
-# and a full one write the same dylibs and the same ledger, so a scope key would
-# let exactly the pair that collides run together. Not by the file list: the
-# dylib a sweep writes depends on the module a file IMPORTS, so two disjoint
-# file lists still meet in the middle (and the owner's own two-at-once run was
-# an arm64 and an x86-64 sweep, which this key correctly allows).
-#
-# The lock is `flock`, like formal/imports.py's `_dylib_lock` and for the same
-# two reasons: advisory, and released by the kernel when the holder dies, so a
-# killed sweep cannot wedge the next one. It is a LOCKFILE, so a second sweep
-# can say which pid holds it instead of only that it is busy.
-def sweep_lock_path(arch: str) -> str:
-    return os.path.join(cas.CAS_DIR, f"formal-sweep-{arch}.lock")
-
-
-# The held lock fd. Module-level and never closed, on purpose: the lock is held
-# for the life of the process, and there is no code path that should release it
-# early (releasing it would let a second sweep start while this one is still
-# writing dylibs). Naming it here rather than returning it from _claim_arch says
-# "this is held forever" instead of "the caller must remember to keep this".
-_HELD_LOCK = None
-
-
-def _claim_arch(arch: str, files) -> bool:
-    """Take this architecture's sweep lock, or return False if it is held.
-
-    Like formal/imports.py's `_dylib_lock`: `flock` is advisory and
-    per-open-file-description, so the kernel releases it when the holder dies and
-    a killed sweep cannot wedge the next one. A lockFILE rather than the ledger
-    itself, because the ledger is replaced (so a second process would acquire a
-    lock on a file the first is about to unlink) and because a reader can then be
-    told which pid holds it.
-    """
-    import fcntl
-
-    global _HELD_LOCK
-    os.makedirs(cas.CAS_DIR, exist_ok=True)
-    fd = os.open(sweep_lock_path(arch), os.O_CREAT | os.O_RDWR, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(fd)
-        return False
-    os.ftruncate(fd, 0)
-    os.write(fd, ("%d\n%s\n" % (os.getpid(), " ".join(files[:3]))).encode())
-    os.fsync(fd)
-    _HELD_LOCK = fd
-    return True
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-j", "--jobs", type=int, default=DEFAULT_JOBS,
                     help=f"parallel workers (default {DEFAULT_JOBS})")
-    ap.add_argument("-t", "--timeout", action="append", metavar="SECONDS",
-                    type=_timeout_arg, default=None,
-                    help="per-file build timeout in seconds, PER POPULATION. "
-                         "A bare `-t 90` is 90s for both; `-t repo=600` is 600s "
-                         "for files under this repository and the default "
-                         f"({DEFAULT_TIMEOUT}s) for stdlib files, and `-t` may "
-                         "be repeated (a later value wins). The two "
-                         "populations are separated because one of them needs "
-                         "a different bound and the other must not pay for it: "
-                         "a repository-root `.py` imports the repository's "
-                         "other root `.py` files, so its build is the SUM of "
-                         "its import closure's, while a stdlib module's build "
-                         "is its own. A file that hits its bound is reported "
-                         "in the `tool` class — counted, printed, and in no "
-                         "rate — and it means THIS RUN SAYS NOTHING ABOUT "
-                         "THAT FILE, never that the file is not a finding: a "
-                         "build that would have CRASHED inside the bound is "
-                         "reported in `backend-crash` instead, and the "
-                         "summary's `tool` block names the timeout files, "
-                         "which population each is in, and the command that "
-                         "answers it")
+    ap.add_argument("-t", "--timeout", type=int, default=DEFAULT_TIMEOUT,
+                    help="per-file build timeout in seconds "
+                         f"(default {DEFAULT_TIMEOUT}; raise it for the "
+                         "much larger stdlib modules). A file that hits it is "
+                         "reported in the `tool` class — counted, printed, "
+                         "and in no rate — never as a pass or a finding")
     ap.add_argument("--arch", default="arm64",
                     choices=("arm64", "x86_64", "x86-64", "amd64"),
                     help="machine subset to sweep (default arm64; the "
@@ -4638,44 +1912,6 @@ def main():
                          "or pass paths positionally to choose exactly)")
     ap.add_argument("--no-stdlib", action="store_true",
                     help="sweep this repo only (the pre-stdlib default)")
-    ap.add_argument("-M", "--mem-gb", type=float, default=MEMCAP_GB,
-                    metavar="GB",
-                    help="per-file memory ceiling for ONE file's build, in GB "
-                         f"(default {MEMCAP_GB:g}; 0 disables it). A file that "
-                         "exceeds it is killed, classified in `tool` as "
-                         f"'{CAUSE_MEMORY}' with the measured peak, and the "
-                         "sweep CONTINUES — one file's build cannot take the "
-                         "run down with it. Not cached: a memory kill is a "
-                         "property of this run's ceiling, not of the source. "
-                         "If the wrapper itself is killed, the file is "
-                         f"classified '{CAUSE_WRAPPER_DIED}' — also `tool`, and "
-                         "also not cached, because it too is a fact about this "
-                         "run's machine rather than about the source")
-    ap.add_argument("--allow-concurrent", action="store_true",
-                    help="sweep even if another sweep of the SAME architecture "
-                    "is running. They share the formal module-dylib "
-                    "directory and the ledger, and a manifest there is "
-                    "rewritten in place, so a reader in one can see the "
-                    "other's half-written JSON. Different architectures "
-                    "are independent and never need this")
-    ap.add_argument("--baseline", metavar="PATH", default=None,
-                    help="the committed class baseline to compare this run "
-                         "against (default: bugs/sweeps/sweep-<arch>."
-                         "baseline.json). Every file that moved to a WORSE "
-                         "class than the baseline records is named at the top "
-                         "of the summary, grouped by the refusal now in front "
-                         "of it, which is how a one-edit regression of 229 "
-                         "files is caught by running the sweep rather than by "
-                         "diffing two logs by hand. The ledger's own history "
-                         "answers the machine-local version of this question "
-                         "and cannot answer this one: it lives in the CAS, so "
-                         "it is gone when the cache is")
-    ap.add_argument("--write-baseline", action="store_true",
-                    help="record THIS RUN's per-file classes as the baseline "
-                         "at --baseline, overwriting it. Bank a completed run "
-                         "rather than a work-in-progress tree; to bank a log "
-                         "you already have without re-running the sweep, use "
-                         "`tools/formal_sweep_rounds.py --write-baseline`")
     ap.add_argument("paths", nargs="*",
                     help="files or dirs (default: this repo plus the stdlib's "
                          f"{','.join(DEFAULT_STDLIB_SUBTREES)}/ — the roots "
@@ -4683,23 +1919,6 @@ def main():
     args = ap.parse_args()
     arch = "x86_64" if args.arch in ("x86-64", "amd64") else args.arch
     flags = build_flags(arch)
-    # The stdlib root is discovered ONCE, here, and handed to `Timeouts`: it is
-    # what decides a file's population, and a per-file rediscovery would be a
-    # per-file answer that could differ from the one the report used.
-    timeouts = Timeouts(merge_timeout_args(args.timeout), find_stdlib_path())
-
-    unusable = interpreter_diagnosis()
-    if unusable:
-        print(unusable, file=sys.stderr)
-        sys.exit(2)
-
-    # The committed baseline is resolved and READ before any build starts, so a
-    # baseline this tool cannot read is a refusal in seconds rather than after a
-    # half-hour of compiles: it would otherwise fail the run at the point where
-    # the alarm is printed, which is the worst possible moment to discover that
-    # the alarm was never going to fire.
-    baseline_file = args.baseline or baseline_path(arch)
-    prev_baseline = load_baseline(baseline_file)
 
     # Roots: explicit paths win outright, otherwise repo + stdlib subtrees.
     notes = []
@@ -4743,77 +1962,30 @@ def main():
         sys.exit(2)
     print(f"Total: {len(files)} files", file=sys.stderr)
 
-    # One sweep per architecture, at a time. Taken AFTER the scope is resolved
-    # (so the message can name what the other run is sweeping) and BEFORE any
-    # build starts, because a lock acquired after the first build has run has
-    # already lost the race it exists to arbitrate.
-    if not args.allow_concurrent:
-        held = _claim_arch(arch, files)
-        if not held:
-            print(f"another {arch} sweep is already running on this machine "
-                  f"(lock: {sweep_lock_path(arch)}). Two sweeps of the SAME "
-                  f"architecture share the formal module-dylib output "
-                  f"directory (~/.gmojo/cas/formal-imports/{arch}/) and the "
-                  f"ledger, and a manifest there is rewritten in place, so a "
-                  f"reader in one sweep can see the other's half-written "
-                  f"JSON — which is what a `json.decoder.JSONDecodeError` in "
-                  f"the `tool` class is. The manifests are written through "
-                  f"`formal/build.py`'s `_write_json_atomic` now, so this "
-                  f"message is belt to that braces (`test_formal_manifest_atomic.py`). "
-                  f"Two sweeps "
-                  f"of DIFFERENT architectures are independent (separate dylib "
-                  f"directories, separate cache keys) and are allowed; pass "
-                  f"--allow-concurrent to override this one anyway.",
-                  file=sys.stderr)
-            sys.exit(2)
-
     jobs = max(1, args.jobs)
-    mem_gb = args.mem_gb
-    # The ceiling is in the HEADER, not only in --help, for the same reason the
-    # root list is: a run whose log does not say what bound it cannot be
-    # compared with a run that had a different bound. A `tool` row saying
-    # "killed at the 4 GB per-file ceiling" is only readable next to a header
-    # that says the ceiling was 4 GB.
     print(f"Sweeping {len(files)} files through build --formal "
-          f"[{arch}] ({jobs} workers, {timeouts.describe()} timeout, "
-          + (f"{mem_gb:g} GB per-file ceiling..." if mem_gb > 0
-             else "NO per-file memory ceiling...")
-          + ")", file=sys.stderr)
+          f"[{arch}] ({jobs} workers, {args.timeout}s timeout)...",
+          file=sys.stderr)
     print("Every file is classified (pass / codegen / codegen-dependency / "
           "not-answerable / backend-crash / tool / unknown); the two codegen "
           "classes are the gaps in the backend, and only the first of them is "
           "in the file itself.", file=sys.stderr)
-    print("Results are printed as each file is classified, so an interrupted "
-          "run keeps what it classified (and exits 3).", file=sys.stderr)
 
     results = {}
-    # Every file that did not pass is printed AS IT IS CLASSIFIED, not at the
-    # end. That is the difference between a sweep that is interrupted and a
-    # sweep that produced nothing: this loop used to fill a dict and print
-    # after the pool drained, so a run killed at file 600 of 623 left an output
-    # file with a header and no classifications at all — 2026-10-01's arm64
-    # sweep, whose whole log was the 5-line header, because the process died
-    # before the one print statement that would have named a single file.
-    #
-    # `flush=True` on every line matters as much as the streaming: a redirected
-    # stdout is a block-buffered FILE, so without it the lines would sit in a
-    # buffer and an interrupted run would lose them anyway, which is the exact
-    # failure this is here to fix. Ordering is arrival order, and that is
-    # DELIBERATE: the deterministic order (`files`) is still what every count,
-    # the headline, the family breakdown and the ledger are computed over, so
-    # the parts a reader diffs run-to-run are unchanged. Only the interleaving
-    # of the per-file lines moves, and the ledger — not this list — is the
-    # run-to-run diff (see LEDGER).
-    if _stream_results(files, jobs, timeouts, flags, mem_gb, results):
-        # An interrupted run is still a run: it publishes what it classified,
-        # marked partial, so the next run's report_history has something to
-        # compare against instead of calling itself the first classified run.
-        # Exit 3, distinct from 1 (findings) and 2 (did not run), because "you
-        # killed it" and "it found something" and "it never started" are three
-        # different facts and a caller that has to tell them apart should not
-        # have to read the log to do it.
-        _report_partial(arch, files, results, timeouts, mem_gb)
-        sys.exit(3)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
+        futs = {ex.submit(run_one, p, args.timeout, flags): p
+                for p in files}
+        for fut in concurrent.futures.as_completed(futs):
+            path = futs[fut]
+            try:
+                results[path] = fut.result()
+            except Exception as e:
+                # run_one catches its own failures; this is the belt to that
+                # braces, and a whole sweep must not die because one future
+                # did. It is reported as `tool`, never as a verdict.
+                results[path] = Verdict(
+                    False, f"sweep worker raised: {e}"[:200], CAUSE_TOOL_ERROR,
+                    False, CLASS_TOOL, CAUSE_TOOL_ERROR)
 
     # Every file gets exactly one class, and the classes sum to the file count
     # by construction: one entry per file, one class per entry. run_one has
@@ -4829,27 +2001,29 @@ def main():
             rows.append((rel(path), v.cls, v.reason, v.detail))
     total = len(files)
     passed = counts[CLASS_PASS]
-    admitted = counts[CLASS_ADMITTED]
     codegen = counts[CLASS_CODEGEN]
     codegen_dep = counts[CLASS_CODEGEN_DEP]
-    answerable = passed + admitted + codegen + codegen_dep
+    answerable = passed + codegen + codegen_dep
 
-    # Every file that did not pass was already printed, one line each under its
-    # class, by _stream_results as it was classified — so this block only
-    # BUILDS the table the summary reads, and prints nothing per file. The
-    # reason that is the right split is in _stream_results: a per-file line
-    # printed after the pool drains is a per-file line an interrupted run never
-    # prints.
+    # Every file that did not pass is still printed, one line each, under its
+    # class. Nothing that used to print as `FAIL:` stops printing: a file
+    # reclassified out of FAIL is still here, with the class that says where
+    # it went, and report_history() below names the move in both directions.
     #
-    # `detail` is printed WHOLE, deliberately, and this is the settled position
-    # rather than an oversight (it was ~20 KB for a 263-field diagnostic; that
-    # generator now bounds its own text and the longest line in a 280-file run
-    # is under 800 bytes, with the whole report ~70 KB). `reason` is the bounded
-    # one-line form, and it is what the per-class breakdown uses. Truncating
-    # would hide the actionable half of a message from the one class the report
-    # exists for — and it would buy nothing: the full text is in the CAS entry
-    # this same run published (cas.lookup(cas.formal_build_key(...),
-    # ".result")), and for a build refusal it is the build's own message.
+    # `detail` is printed WHOLE, deliberately, and this is the settled
+    # position rather than an oversight (it was ~20 KB for a 263-field
+    # diagnostic; that generator now bounds its own text and the longest line
+    # in a 280-file run is under 800 bytes, with the whole report ~70 KB).
+    # `reason` above is the bounded one-line form, and it is what the per-class
+    # breakdown uses. Truncating here would hide the actionable half of a
+    # message from the one class the report exists for — and it would buy
+    # nothing: the full text is in the CAS entry this same run published
+    # (cas.lookup(cas.formal_build_key(...), ".result")), and for a build
+    # refusal it is the build's own message, reproducible with the `fire.py
+    # build --formal` line this file prints at the top of the run.
+    for r, cls, _reason, detail in rows:
+        print(f"{cls.upper()}: {r}  ({detail})")
+
     print(f"[{arch}] {total} files: PASS={passed} not-pass={total - passed}")
     for cls in CLASS_ORDER:
         if not counts[cls]:
@@ -4857,37 +2031,6 @@ def main():
         mark = "  <-" if cls == CLASS_CODEGEN else "    "
         print(f"  {mark} {cls:<28} {counts[cls]:>4}   {CLASS_BLURB[cls]}")
     print(f"  (classes sum to {sum(counts.values())} = {total} files swept)")
-
-    # ── The two honesty instruments, FIRST ─────────────────────────────────
-    # Both are printed above every explanation on purpose. Everything below this
-    # point is a reading of the counts, and both of these say a count cannot be
-    # read yet: the regression block says the corpus moved somewhere worse than
-    # the committed record, and the unclassified block says part of it has no
-    # name in either ranking table. A summary that buries either one under the
-    # per-module breakdowns is a summary in which the finding that matters is the
-    # one you scroll past.
-    # One list, two readers: the loud finding below and the baseline's
-    # "kept their class and lost their name" group both read it, and
-    # `formal_sweep_causes.py` reports the same rows against ITS table.
-    unclassified = unclassified_rows(rows)
-    regressed = report_baseline(baseline_file, prev_baseline, verdicts, rows,
-                                total, [p for p, _m in unclassified])
-    loud = unclassified_report(unclassified, total)
-    if args.write_baseline:
-        print(f"  wrote baseline "
-              f"{write_baseline(baseline_file, arch, verdicts, unnamed=[p for p, _m in unclassified])}"
-              f" ({len(verdicts)} file(s))")
-    if regressed or loud:
-        why = []
-        if regressed:
-            why.append("a regression against the committed baseline, whose fix "
-                       "is the edit that moved those files")
-        if loud:
-            why.append("a refusal shape no ranking table names, whose fix is "
-                       "adding the row and which no change under formal/ "
-                       "clears")
-        print("  (this run's counts are not a census of causes: "
-              + "; ".join(why) + ")")
 
     # WHY each unanswerable file is unanswerable. "170 files" is a number
     # without a cause; "170 files, 60 of them because of `os`" is the fact a
@@ -4936,20 +2079,6 @@ def main():
         if reach_files:
             print(f"    in reach, and therefore WORK rather than a permanent "
                   f"fact: {', '.join(reach_files)}")
-        admitted_mods = sorted(_admitted_host_modules())
-        if admitted_mods:
-            # Named here because the OTHER two halves of this line went quiet
-            # when these five modules got models: a file that used to be reported
-            # here stopped being reported anywhere, and a reader comparing two
-            # runs would see the bucket shrink with nothing to say where the
-            # files went.  They are not in `host-import` (they are not refused)
-            # and they are not in `in reach` (nothing is left to write), so this
-            # line is the only place their absence is explained.
-            print(f"    neither, and not in this count at all: "
-                  f"{', '.join(admitted_mods)} now have a formal/hostmods model "
-                  f"and answer under DECLARED CONTRACTS -- files importing them "
-                  f"are no longer refused, and a file that builds on one is "
-                  f"counted as `{CLASS_ADMITTED}`, never as a pass")
         # The two names that used to be hardcoded here, and why neither is any
         # more: they were a standing editorial claim that `os` and `sys` were
         # "most of it", which is a statement about the WORK and goes stale the
@@ -4961,31 +2090,6 @@ def main():
         print("    None of this is close, and none of it is in the rate "
               "above: the point is to size the work, not to improve the "
               "number")
-
-        # The FOURTH tier, in neither count above, and named for the same reason
-        # the admitted one is: a file importing one of these would drop out of
-        # both halves of this line with nothing to say where it went.
-        # `HOST_NOT_A_MODULE` is a name with nothing to IMPLEMENT (`this`,
-        # `antigravity`, `turtledemo`), so it is neither work nor a permanent
-        # fact about the target — it is the absence of a question, and this
-        # report's first half is built out of questions about reachability.
-        # A file that imports one is still refused (the tier is in the host
-        # union), so the count above still contains it; what changes is that the
-        # `…and {N} one that needs a host process` half is not the right
-        # description of it, and printing nothing would leave the reader to
-        # assume it was.
-        try:
-            from formal.imports import HOST_NOT_A_MODULE
-            notamodule = sorted(n for n in HOST_NOT_A_MODULE
-                                if n.split(".")[0] in host_modules)
-        except Exception:
-            notamodule = []
-        if notamodule:
-            print(f"    neither, because there is nothing to implement and "
-                  f"nothing missing: {', '.join(notamodule)} — a name whose "
-                  f"only content is documentation or a demonstration, so it is "
-                  f"in NEITHER count above and a file importing one is refused "
-                  f"for that reason rather than for a missing capability")
 
     # ── A codegen finding in a file no backend change can make build ────────
     # A construct refusal is `codegen` and that is right: the construct is in
@@ -5073,24 +2177,12 @@ def main():
         print("codegen coverage: no file could be answered by this backend")
     print(f"  denominator: the {answerable} swept file(s) whose build could "
           f"have answered")
-    print(f"  ({passed} pass + {admitted} built-with-admitted-contracts + "
-          f"{codegen} codegen + {codegen_dep} "
+    print(f"  ({passed} pass + {codegen} codegen + {codegen_dep} "
           f"codegen/dependency = {answerable}), i.e. every "
           f"swept file EXCEPT the {una} in a not-answerable or tool class "
           f"[{una_parts}].")
     print("  A not-answerable file is a fact about the target, not a gap in "
           "the backend, so it neither raises nor lowers this number.")
-    if admitted:
-        # The line that makes the class cost something.  Without it the headline
-        # would read as though admitting trust were free, and it is not: these
-        # files are in the denominator and not in the numerator, so every one of
-        # them LOWERS the rate rather than raising it.
-        print(f"  {admitted} of those {answerable} BUILT but rest on declared "
-              f"assumptions about a host this image does not have, so they are "
-              f"counted here and NOT as passes. Each file's `trust:` line names "
-              f"them and each is a `sorry` in its proof; a file that builds with "
-              f"no such admission is a `pass` and a file that does not build at "
-              f"all is not in this denominator either.")
 
     # CAS accounting, complete: every input file lands in exactly one bucket.
     hits, misses = cas.stats["hits"], cas.stats["misses"]
@@ -5105,57 +2197,11 @@ def main():
               f"rebuilt every run on purpose: the dylib is not in the cache "
               f"key, so publishing their verdict could outlive the dylib it "
               f"was measured against")
-    # The `tool` bucket, by cause, with each cause's share of the scope — one
-    # shared reporter with an interrupted run's, because it is the same question
-    # and two copies of it would be two wordings for a reader to be told two
-    # things by. The old single lumped sentence ("N file(s) got no verdict at
-    # all (timeout/unreadable/memory-killed/tool error) … a too-small -t is the
-    # usual cause") is what let a file whose build CRASHES at 42 s read as a file
-    # that is merely slow at the default `-t 30`: the crash never reached the
-    # ledger and the count said nothing about which files were unknown.
-    _report_tool_causes(files, results, timeouts, mem_gb, arch, print)
-    foreign_arch = sum(1 for p in files
-                       if results[p].cause == CAUSE_FOREIGN_ARCH)
-    if foreign_arch:
-        # Said in the summary, not only on the rows, because it changes what the
-        # headline IS. These files are in no rate, so the rate is unchanged —
-        # but a reader comparing this arch's PASS count with another host's is
-        # comparing a floor with a number, and the difference is exactly this
-        # many files. The honest way to say that is in the sentence a reader
-        # will actually read.
-        #
-        # Since 2026-10-02 this is NOT the ordinary cross-arch case any more:
-        # a dylib this process cannot dlopen is read from its export trie
-        # instead (_exports), so a correct x86-64 image on an arm64 host gets a
-        # verdict rather than this row. What remains here is a library whose
-        # export table could not be READ, or a host whose own architecture
-        # could not be established — a much narrower thing, and the wording says
-        # which, because "this host cannot dlopen it" is no longer a reason for
-        # a file to go unanswered.
-        print(f"  note: {foreign_arch} file(s) built, but this "
-              f"{_host_arch_name()} host could not check whether their "
-              f"imports resolve. They are in `tool`, in NO rate, and NOT "
-              f"cached — so the {passed} pass(es) above is a FLOOR for this "
-              f"arch on this host. Each row says why (an export table this host "
-              f"could not read, or a host architecture it could not "
-              f"establish); re-running on a host of the image's architecture is "
-              f"what turns the floor into a number. This is the instrument's "
-              f"limit, not a defect in those images")
-    if _STATIC_BINDS:
-        # The counterpart of the note above, and it is about the PASSES rather
-        # than about the files in no rate. These binds WERE answered — from the
-        # same export trie dyld resolves against, read out of the file rather
-        # than through a load — so they are in the pass count. What was not
-        # checked for them is that the image's own dyld could load the dylib at
-        # all, so the count is stated rather than left implicit in a `pass`
-        # that looks exactly like one confirmed by dlopen.
-        print(f"  note: {_STATIC_BINDS} bind(s) across {_STATIC_FILES} file(s) "
-              f"were resolved by reading their dylib's export trie rather than "
-              f"by dlopen, because dlopen loads only this process's own "
-              f"architecture ({_host_arch_name()}). The trie is what dyld "
-              f"resolves against, so this is the image's own answer; a host of "
-              f"the image's architecture would additionally confirm the dylib "
-              f"can be loaded at all")
+    if counts[CLASS_TOOL]:
+        print(f"  note: {counts[CLASS_TOOL]} file(s) got no verdict at all "
+              f"(timeout/unreadable/tool error) and are in NO rate; a "
+              f"too-small -t is the usual cause — this run used "
+              f"-t {args.timeout}")
     if counts[CLASS_CRASH]:
         print(f"  note: {counts[CLASS_CRASH]} file(s) made the BACKEND RAISE "
               f"rather than refuse a construct. A crash is a bug in the "
@@ -5185,12 +2231,8 @@ def main():
     # target and never gate the run; a codegen finding, an unclassifiable
     # verdict, or a file nobody answered for all do. See EXIT STATUS in the
     # module docstring — this is a deliberate change from "any FAIL means 1",
-    # which could not tell a backend regression from `import os`. `loud` adds
-    # the one status that is about this tool rather than the backend: a refusal
-    # shape over the honesty bar has no row in either ranking table, so the
-    # findings below cannot be planned from until a row is added, and that is a
-    # different thing for a caller to be told than "the backend refused things".
-    sys.exit(exit_status(bool(dirty), loud))
+    # which could not tell a backend regression from `import os`.
+    sys.exit(1 if dirty else 0)
 
 
 if __name__ == "__main__":

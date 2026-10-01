@@ -63,30 +63,10 @@ empty:
     8 metavar    empty to derive it (`{choices}`, else dest.upper())
     9 help       the help text
 
-`R` is `nargs=REMAINDER`. A `;` or `|` in help text or in a choice IS
-expressible: a field ESCAPES them (`\;`, `\|`), and a backslash in the text is
-itself written `\\`. Only the ESCAPED bytes are separators, so every reader that
-walks a record or a field skips a backslash and the byte after it. `_esc_end`
-below is the ONE scan that does this and every one of those readers goes
-through it — `_fend` and `_rend` for the two separator sets, and the two
-`choices` readers with `,` added. `_ftext` is the only place the backslashes are
-removed, because it is one of only two readers that produce TEXT out of a field
-(the other is `_quote_choices`, and both go through `_unesc_upto`); the rest
-measure or compare raw bytes, which is right for them because no field but
-`help` can contain a separator (an option string, a type name, a nargs letter, a
-comma-joined choice list, a flag, a default, a dest and a metavar have none) and
-because a spec written before this rule existed contains no backslash at all and
-so reads identically.
-
-This is a rule on the WRITER, not a hidden convention: `add(spec, record)`
-appends a record the caller has already written, and it cannot tell a `|` that
-separates two fields from one that is help text, so the caller escapes. A VALUE
-containing `;` is still refused rather than written, because a value that
-quietly split a field would be a wrong answer with nothing left to detect it —
-and a value is written by this module into the NAMESPACE buffer, not by a caller
-into a spec, so the escape rule does not reach it.
-
-`add(spec, record)` appends one record and returns a new spec, which
+`R` is `nargs=REMAINDER`. A `;` or `|` in help text or in a choice is not
+expressible; a VALUE containing `;` is refused rather than written, because a
+value that quietly split a field would be a wrong answer with nothing left to
+detect it. `add(spec, record)` appends one record and returns a new spec, which
 is the alternative to one long literal — string `+` is refused on this path
 (`bugs/FORMAL_string_value_model.md`), so a spec cannot be concatenated in the
 source.
@@ -125,15 +105,17 @@ time.
 
 WHAT IS NOT HERE, AND WHY
 -------------------------
-  * **BOTH BACKENDS TODAY, and not because of anything in this source.** This
+  * **ARM64 ONLY TODAY, and not because of anything in this source.** This
     module calls the C library (`malloc`, `strlen`, `memcmp`, `snprintf`), and
-    a module dylib that makes a call into it builds and RUNS under
-    `--backend=x86_64` as well as `--backend=arm64`, measured on this tree.
-    It used to say otherwise here and in five sibling modules, citing a bug doc
-    that does not exist; `formal/hostmods/os/__init__.mojo` gives the corrected
-    claim and the evidence at length. A host with no x86-64 support at all still
-    skips the x86-64 half of `test_formal_argparse.py`, with the reason
-    printed.
+    a module dylib that makes a call into it builds and RUNS with
+    `--backend=arm64` while the loader refuses the same image under
+    `--backend=x86_64` on this host with ``main executable failed strict
+    validation``. Measured on the two-line program above, and it is the same
+    defect `formal/hostmods/os/__init__.mojo` records at the top of its own
+    docstring — filed as
+    `bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md`.
+    `test_formal_argparse.py` builds arm64 for the same reason
+    `test_formal_sys.py` does.
   * **`type=float` is REFUSED, and that is not an oversight.** A value on this
     path is one 64-bit word holding an INTEGER: `2.5` as a literal is the
     integer 2, `1.0` is 1, and `atof("3.5")` is 1 — measured, and the reason is
@@ -150,23 +132,17 @@ WHAT IS NOT HERE, AND WHY
     Measured: no file the sweep lists for `argparse` uses any of them. They are
     absent rather than approximated — a subparser is a second parser reachable
     from the first, which is precisely the state this target has none of.
-  * **THE WIDTH IS 78 AND CANNOT BE ASKED FOR, BUT EVERYTHING IS WRAPPED AT
-    IT.** `help_text` reproduces CPython's layout — usage, blank, description,
-    blank, `positional arguments:`, the positionals two-column, blank,
-    `options:`, the options two-column — AND folds all three of the things that
-    can overflow it: a help string at `max(width - help_position, 11)`, the
-    description at the full width, and a usage line past the width onto indented
-    continuation lines. The width is 78 because that is what
+  * **HELP TEXT IS NOT WRAPPED AND A LONG USAGE LINE IS NOT FOLDED.**
+    `help_text` reproduces CPython's layout — usage, blank, description, blank,
+    `positional arguments:`, the positionals two-column, blank, `options:`,
+    the options two-column — at the width 78 that
     `shutil.get_terminal_size().columns - 2` gives when `COLUMNS` is unset and
-    stdout is not a terminal, and it is the only width this target can know: a
-    terminal is a host object (`shutil` and `os.get_terminal_size` are in
-    HOST_UNREACHABLE). So a program run in a WIDE terminal gets CPython's
-    80-column layout, not its own — a difference of 2 columns and no more, and
-    the one thing here that is a property of the target rather than of this
-    module. The wrapping itself is `textwrap`'s (see `_wrap_into`, with
-    `_get_lines` for the usage line, which is a different algorithm), and
-    `test_formal_argparse.py` compares all of it byte for byte against CPython
-    over 14 parsers.
+    stdout is not a terminal. Nothing is wrapped, because the width cannot be
+    ASKED for: a terminal is a host object (`shutil` and
+    `os.get_terminal_size` are in HOST_UNREACHABLE), so 78 is the only width
+    this target can know. A parser whose usage line is longer than that gets it
+    on one line where CPython would fold it; filed as
+    `bugs/FORMAL_argparse_help_wrapping_not_implemented.md`.
 
 ERRORS
 ------
@@ -312,43 +288,19 @@ BUF_CAP = 8192
 
 # ── separators, as BYTES and not as spellings ────────────────────────────────
 #
-# A newline cannot reach a caller through a printf-style format, so every
-# separator below is a byte value written with `memset`/`memmove` rather than a
-# character in a literal. That reason is CURRENT. The reason this file used to
-# give — "a string literal on this path is interned verbatim and its escapes are
-# NOT unescaped, measured: `"a\nb"` is four bytes, and `sys.mojo` says so at its
-# writers" — is NOT, and had stopped being true at `9023031b` (the decoder every
-# engine now shares), which `sys.mojo`'s writers and
-# `test_formal_sys.py::test_a_literal_inside_a_module_is_decoded_too` both pin:
-# a literal IS decoded, inside a module as well as inside a program, on both
-# architectures. The idiom below is kept because it is correct and because these
-# separators are written at a computed offset anyway;
-# `bugs/FORMAL_sys_mojos_escape_note_is_stale.md` §"what remains" is what
-# simplifying the rest of the tree's corpora would take.
+# A string literal on this path is interned verbatim and its escapes are NOT
+# unescaped — measured: `"a\nb"` is four bytes, and `sys.mojo` says so at its
+# writers — so a newline cannot be written as a literal and every separator
+# below is a byte value written with `memset`/`memmove`.
 
-# A BYTE WRITTEN WITH `memset` IS SPELLED INLINE unless the module already has
-# a NAME for the value it is — which the `PAT_` bytes in `_build_pat` are, and
-# which the separators below are not: NUL, newline and space are written dozens
-# of times each here and each carries the character in a comment at its use.
-#
-# **The reason this comment used to give was false, and the measurement that
-# replaces it is stronger than the one it quoted.** It said a named byte is
-# REFUSED with "'PAT_DASH' has no home: the register allocator collected no home
-# for it" — true when it was measured, and false since
-# `formal/build.py`'s `_substitute_module_constants` began substituting a module
-# constant at every read BEFORE any emitter runs. A folded name never reaches an
-# emitter, so it needs no register, no spill slot and no `__DATA` slot, and
-# there is nothing for the allocator to run out of.
-#
-# Measured on this tree, 2026-10-02, with `_build_pat`'s two bytes spelled
-# `PAT_A` and `PAT_DASH` and this module built as a DYLIB on both architectures
-# (`formal.imports.build_module_dylib` — the shape an importing program reaches
-# it by, which is not the shape a file built as a program of its own reaches it
-# by): both build, and `__TEXT` — code, constants and data — is BYTE-IDENTICAL
-# to the inline spelling on arm64 and on x86-64. The only bytes that differ in
-# either image are the install-name strings, which carry the content digest in
-# the filename. So the name costs nothing measurable, and what is left of the old
-# rule is the sentence above.
+# A BYTE WRITTEN WITH `memset` IS SPELLED INLINE, and these names are only for
+# the places module-constant folding does reach (a call argument, a return). The
+# reason is measured and it is not a subtlety: `memset(pat + i, PAT_DASH, 1)`
+# is REFUSED with "'PAT_DASH' has no home: the register allocator collected no
+# home for it, so the emitter and the allocation walk disagree about this
+# function's locals", while the identical call with `45` written inline builds
+# and runs. A name that reads well is not worth a build that does not compile,
+# and every separator below is named in a comment at each use.
 SEP_FIELD = 59        # ';'
 SEP_KV = 61           # '='
 
@@ -379,116 +331,28 @@ NONE_TEXT = "~"
 # copying, because the hot path — matching one option string against every
 # declared one — asks the same questions thousands of times.
 
-def _esc_end(p, stops) -> int:
-    """Offset from `p` to the first byte of `stops` that is not ESCAPED.
-
-    A backslash escapes the byte after it, so a `;` or a `|` inside a field can
-    be written `\;` / `\|` and is not a separator. That is the whole rule, and
-    what it costs is this function: `strcspn` alone cannot express it, so the
-    scan is a loop that jumps to the next byte worth looking at and then steps
-    over an escape.
-
-    `stops` is the separator SET as a NUL-terminated string, because `strcspn`
-    takes one; the backslash is part of the scan rather than of `stops` so that
-    every caller gets the escape rule and cannot forget it.
-
-    THE COST ON THE COMMON PATH, measured rather than assumed, because this is
-    the number the doc this fixes asks for: `_fld` is asked for every field of
-    every record on every parse, and it used to be one `strcspn` plus one
-    `strspn` per field. It is STILL one `strcspn` plus two `strspn`, and every
-    one of the three is O(1) — `strcspn` stops at the first byte in `stops` or
-    at the NUL, and `strspn` stops at the first byte out of it. The scan cannot
-    ask "is the byte at `j` the NUL" with `str_len`, which is the obvious way to
-    write it and which is O(the rest of the spec): a field is three bytes long
-    and the spec is five hundred, so that strlen would have made `_fld`
-    quadratic in the number of fields for no gain. `strspn(p + j, stops) == 0`
-    says the same thing in one byte read, because `strcspn` above cannot have
-    stopped anywhere else.
-
-    A lone backslash at the very end of a field escapes nothing: the field ends
-    AT it, and the byte after it is not read. Reading it would be the one way
-    this loop could walk off the end of the buffer, and a spec is caller memory.
-    That test IS a `str_len`, and it runs only on the escape path — which is the
-    other half of why the two are not symmetric.
-    """
-    i = 0
-    while True:
-        j = i + strcspn(p + i, stops)      # at a stop byte, or at the NUL
-        if strspn(p + j, stops) == 0:
-            return j                        # the NUL ends the run
-        if strspn(p + j, "\\") == 0:
-            return j                        # a real separator
-        if str_len(p + j + 1) == 0:
-            return j                        # a dangling escape: nothing follows
-        i = j + 2                           # step over `\` and the byte it escapes
-
-
-def _fend(p) -> int:
-    """Offset from `p` to the end of the field, honouring escapes."""
-    return _esc_end(p, "\\|;")
-
-
-def _rend(p) -> int:
-    """Offset from `p` to the end of the RECORD, honouring escapes.
-
-    A record's separators are only `;`, so the field scan's `|` must not stop it
-    — hence a second name over the same function rather than a second scan.
-    """
-    return _esc_end(p, "\\;")
-
-
-def _esc_at(p) -> int:
-    """1 if the byte at `p` is a backslash."""
-    return strspn(p, "\\")
-
-
-def _unesc_upto(dst, u, p, n) -> int:
-    """`n` bytes of `p` at `dst[u:]`, ESCAPES REMOVED, NUL-terminated. New `u`.
-
-    **The one copy-with-unescape in this module**, and it is one because there
-    are exactly two readers that turn a field's RAW bytes into TEXT — `_ftext`
-    for a help string, `_quote_choices` for a choice inside an error message —
-    and a `str_put` of the raw range at either of them would print the very
-    backslash the writer put there to keep the byte out of the separator set.
-
-    Copied a RUN at a time rather than a byte, because a help string is sixty
-    characters and `_cp` is a `memmove` plus a `memset`; the loop only runs per
-    ESCAPE, so the common field is one `_cp`.
-    """
-    i = 0
-    start = 0
-    while i < n:
-        if _esc_at(p + i) == 1:
-            u = _cp(dst, u, p + start, i - start)
-            i = i + 1
-            start = i
-        i = i + 1
-    return _cp(dst, u, p + start, n - start)
-
-
 def _rec(spec, i):
     """Pointer to record `i` of `spec`, or 0 if there is no such record."""
     p = spec
     k = 0
     while k < i:
-        d = _rend(p)
-        if strspn(p + d, ";") == 0:
+        q = strchr(p, SEP_FIELD)
+        if q == 0:
             return 0
-        p = p + d + 1
+        p = q + 1
         k = k + 1
     return p
 
 
-def _nrec(spec) -> int:
+def _nrec(spec):
     """How many records `spec` holds. An empty spec is one (empty) record."""
     n = 1
-    p = spec
-    while True:
-        d = _rend(p)
-        if strspn(p + d, ";") == 0:
-            return n                    # NUL: no more records
-        n = n + 1
-        p = p + d + 1
+    i = 0
+    while i < str_len(spec):
+        if strspn(spec + i, ";") > 0:
+            n = n + 1
+        i = i + 1
+    return n
 
 
 def _fld(rec, f):
@@ -497,14 +361,12 @@ def _fld(rec, f):
     The delimiter has to be FOUND before it can be recognised: `strspn` asks
     whether a byte at a pointer is one of a set, and the first byte of a field
     is almost never a `|`. So each step measures the run up to the next
-    delimiter with `_fend` and then asks whether the byte there is the field
-    separator — which is what makes an ESCAPED `|` inside an earlier field not
-    end that field.
+    delimiter and then asks whether the byte there is the field separator.
     """
     p = rec
     k = 0
     while k < f:
-        d = _fend(p)
+        d = strcspn(p, "|;")
         if strspn(p + d, "|") == 0:
             return 0                    # ';' or NUL: no such field
         k = k + 1
@@ -512,17 +374,12 @@ def _fld(rec, f):
     return p
 
 
-def _flen(rec, f) -> int:
-    """Length of field `f`, or 0 when there is no such field.
-
-    The RAW length, backslashes included: `_feq` compares the bytes the spec
-    holds, and the only reader that turns a field into text is `_ftext`. A
-    length that counted escape bytes as two would be right for neither.
-    """
+def _flen(rec, f):
+    """Length of field `f`, or 0 when there is no such field."""
     p = _fld(rec, f)
     if p == 0:
         return 0
-    return _fend(p)
+    return strcspn(p, "|;")
 
 
 def _feq(rec, f, s):
@@ -530,35 +387,18 @@ def _feq(rec, f, s):
     p = _fld(rec, f)
     if p == 0:
         return 0
-    n = _fend(p)
+    n = strcspn(p, "|;")
     if n != str_len(s):
         return 0
     return str_eq_n(p, s, n)
 
 
 def _ftext(rec, f):
-    """Field `f` as a NUL-terminated buffer the caller owns; "" if absent.
-
-    **THE ONE PLACE BACKSLASHES ARE REMOVED**, and that is not an accident of
-    where this function sits: a field's escapes are load-bearing all the way
-    through the readers above — `_fend` has to skip them to find the field's end
-    at all, and a `strcspn` that ignored them would truncate the help text at
-    exactly the separator the writer escaped. So the escapes survive to here and
-    are dropped in the copy, which is the only step that produces TEXT.
-
-    The fast path is the old one-instruction `str_prefix`, taken whenever the
-    field holds no backslash — which is every field of every spec written before
-    the rule existed, and every field but `help` of every spec since.
-    """
+    """Field `f` as a NUL-terminated buffer the caller owns; "" if absent."""
     p = _fld(rec, f)
     if p == 0:
         return ""
-    n = _fend(p)
-    if strcspn(p, "\\") >= n:
-        return str_prefix(p, n)
-    d = str_alloc(n + 1)
-    _unesc_upto(d, 0, p, n)
-    return d
+    return str_prefix(p, strcspn(p, "|;"))
 
 
 def _haschar(s, chars):
@@ -666,7 +506,7 @@ def _nname(rec):
     p = _fld(rec, F_NAMES)
     if p == 0:
         return 0
-    end = _fend(p)
+    end = strcspn(p, "|;")
     if end == 0:
         return 0
     n = 0
@@ -683,7 +523,7 @@ def _name_ptr(rec, k):
     p = _fld(rec, F_NAMES)
     if p == 0:
         return 0
-    end = _fend(p)
+    end = strcspn(p, "|;")
     i = 0
     c = 0
     while i < end:
@@ -697,27 +537,17 @@ def _name_ptr(rec, k):
     return 0
 
 
-def _name_len(rec, k) -> int:
+def _name_len(rec, k):
     """Length of the k-th name of `rec`.
 
     Stops at a space (names are space separated) or at the end of the field.
     Both are found with `strspn`, so no byte is ever loaded by subscript.
-
-    `-> int` is LOAD-BEARING, for the reason `os/__init__.mojo` gives for every
-    function in that module: `strcspn`/`strspn` are unbound libc externs whose
-    return is a word of unknown provenance, so without the annotation the
-    `return n` below classifies this callee's result as neither a number nor a
-    string, and `_name_len(rec, k) == nlen` in `_lookup` then reads as a
-    comparison of two unclassified words — which lowers to an ADDRESS compare
-    and is refused (`formal/model.py`'s `string_compare_word_refusal`). Both
-    operands really are lengths, so `-> int` is what lets the call site classify
-    the result.
     """
     p = _name_ptr(rec, k)
     if p == 0:
         return 0
     start = _fld(rec, F_NAMES)
-    lim = _fend(start) - (p - start)
+    lim = strcspn(start, "|;") - (p - start)
     n = 0
     while n < lim and strspn(p + n, " ") == 0:
         n = n + 1
@@ -933,50 +763,14 @@ def _in_choices(rec, v):
     if _flen(rec, F_CHOICES) == 0:
         return 1
     p = _fld(rec, F_CHOICES)
-    end = _fend(p)
+    end = strcspn(p, "|;")
     i = 0
     while i < end:
-        j = _esc_end(p + i, "\\,|;")
-        if _ceq(p + i, j, v) == 1:
+        j = strcspn(p + i, ",|;")
+        if j == str_len(v) and str_eq_n(p + i, v, j) == 1:
             return 1
         i = i + j + 1
     return 0
-
-
-def _ceq(p, n, v) -> int:
-    """1 if the `n` RAW bytes at `p` are `v` once ESCAPES are removed.
-
-    The CHOICES comparison, and it is a LOCKSTEP walk rather than an unescape
-    into a buffer for two reasons that point the same way. It cannot unescape
-    first because `_has_choice` is the hot path — every value of every
-    `choices` action is compared against every declared choice, so a scratch
-    buffer per comparison is an allocation in the middle of a parse. And it
-    cannot compare raw bytes because the choice is stored ESCAPED (`alpha\|beta`)
-    while the value on the command line is not (`alpha|beta`): `str_eq_n` over
-    the raw range would find no such choice and refuse a value CPython accepts.
-
-    The length test is the walk's own, and it is what makes the two lengths
-    comparable at all — `n` counts raw bytes and `str_len(v)` counts unescaped
-    ones, so they are equal only for a choice with no escape in it, which is
-    every choice a spec written before this rule existed holds.
-    """
-    m = str_len(v)
-    i = 0
-    j = 0
-    while i < n and j < m:
-        if _esc_at(p + i) == 1:
-            i = i + 1
-            if i >= n:
-                break
-        if str_eq_n(p + i, v + j, 1) == 0:
-            return 0
-        i = i + 1
-        j = j + 1
-    if i < n:
-        return 0
-    if j < m:
-        return 0
-    return 1
 
 
 # ── Finding an action by one of its option strings ──────────────────────────
@@ -1157,14 +951,8 @@ def _nfields(out):
     return n
 
 
-def _fname_len(p) -> int:
-    """Length of field `p`'s NAME: up to `=` or `;`, whichever comes first.
-
-    `-> int` for the reason `_name_len` gives: the answer is a `strcspn` length,
-    and an unannotated callee makes `_fname_len(p) == str_len(dest)` a
-    comparison of two words of unknown kind, which is refused rather than
-    lowered as a string equality the operands never were.
-    """
+def _fname_len(p):
+    """Length of field `p`'s NAME: up to `=` or `;`, whichever comes first."""
     n = strcspn(p, ";")
     eq = strcspn(p, "=")
     if eq < n:
@@ -1605,521 +1393,34 @@ def _usage_part(spec, i):
     return _wrap1(d, "[", "]")
 
 
-def _usage_sides(spec, opt, pos):
-    """The usage line's two halves: the optionals into `opt`, the rest into `pos`.
+def _parts_into(spec, buf):
+    """Every action's usage part into `buf`, a single space between them.
 
     Optionals in declaration order and then positionals in declaration order:
-    CPython's `_get_actions_usage_parts`, and the order is visible in every usage
-    line. `-h` comes first, because CPython's help action is the first action it
-    adds.
-
-    **Two buffers rather than one, and that is `_format_usage`'s shape rather
-    than a choice**: a usage line too long for the width is folded with the
-    optionals and the positionals folded SEPARATELY (`opt_parts` and
-    `pos_parts`, two `get_lines` calls), so a line may end on an optional and the
-    positionals begin the next one. One joined string cannot express that, which
-    is why the parts are built here once and read twice rather than rebuilt per
-    line.
+    CPython's `_get_actions_usage_parts`, and the order is visible in every
+    usage line. `-h` comes first, because CPython's help action is the first
+    action it adds.
     """
     na = _nrec(spec)
-    u = _putlit(opt, 0, "[-h]")
+    d = str_alloc(BUF_CAP)
+    u = _putlit(d, 0, "[-h]")
     i = 0
     while i < na:
         if _isopt(_rec(spec, i)) == 1:
             p = _usage_part(spec, i)
-            u = _putlit(opt, u, " ")
-            u = str_put(opt, u, p, str_len(p))
+            u = _putlit(d, u, " ")
+            u = str_put(d, u, p, str_len(p))
         i = i + 1
-    memset(opt + u, 0, 1)
-    u = 0
     i = 0
     while i < na:
         if _isopt(_rec(spec, i)) == 0:
             p = _usage_part(spec, i)
-            if u > 0:
-                u = _putlit(pos, u, " ")
-            u = str_put(pos, u, p, str_len(p))
+            u = _putlit(d, u, " ")
+            u = str_put(d, u, p, str_len(p))
         i = i + 1
-    memset(pos + u, 0, 1)
-    return 0
-
-
-def _part_len(s, i, n):
-    """The length of the usage part at `s[i:]`, its brackets included.
-
-    `_format_usage`'s `part_regexp` — `\S+`, except that a `[` opens a part
-    which runs to the `]` that closes it. `[-j JOBS]` is ONE part, and a
-    splitter that broke it on the space would let a folded line end between an
-    option and the metavar that belongs to it.
-    """
-    if strncmp(s + i, "[", 1) == 0:
-        k = i + 1
-        while k < n and strncmp(s + k, "]", 1) != 0:
-            k = k + 1
-        if k < n:
-            return k + 1 - i
-    k = i
-    while k < n and strspn(s + k, " ") == 0:
-        k = k + 1
-    return k - i
-
-
-def _get_lines(out, s, indent_len, prefix_len):
-    """The usage parts in `s` folded at TEXT_WIDTH into `out`. The LINE COUNT.
-
-    `_format_usage`'s `get_lines`, which is not `textwrap`: a usage line folds
-    over PARTS, so a line break can only land between two of them and a part is
-    never split. That is why this function exists beside `_wrap_into` instead of
-    calling it — the two rules disagree, and CPython uses both.
-
-    `out` is written from 0 and NUL-terminated, so the caller copies it with
-    `str_put` and gets its length from `str_len`; that is also how the LINE COUNT
-    comes back, which `_format_usage` needs (`if len(lines) > 1`) to decide
-    whether the optionals and the positionals have to be folded separately.
-
-    `prefix_len` is the length of the `usage: ` prefix when the first line
-    carries NO indent — CPython writes the indent and then strips it off line 0
-    (`lines[0] = lines[0][indent_length:]`), which is the same thing said once.
-    """
-    u = 0
-    lines = 0
-    line_len = indent_len - 1
-    if prefix_len > 0:
-        line_len = prefix_len - 1
-    placed = 0
-    n = str_len(s)
-    i = 0
-    while i < n:
-        while i < n and strspn(s + i, " ") > 0:
-            i = i + 1
-        if i >= n:
-            break
-        pl = _part_len(s, i, n)
-        if line_len + 1 + pl > TEXT_WIDTH and placed > 0:
-            u = _nl_at(out, u)
-            lines = lines + 1
-            placed = 0
-            line_len = indent_len - 1
-        if placed == 0:
-            if not (lines == 0 and prefix_len > 0):
-                u = _pad(out, u, indent_len)
-            lines = lines + 1
-        else:
-            u = _putlit(out, u, " ")
-        u = str_put(out, u, s + i, pl)
-        placed = placed + 1
-        line_len = line_len + 1 + pl
-        i = i + pl
-    if placed > 0:
-        u = _nl_at(out, u)
-    return lines
-
-
-def _with_prog(prog, parts):
-    """`prog` then the parts in `parts`, space-separated. A fresh buffer."""
-    d = str_alloc(BUF_CAP)
-    u = str_put(d, 0, prog, str_len(prog))
-    if str_len(parts) > 0:
-        u = _putlit(d, u, " ")
-        u = str_put(d, u, parts, str_len(parts))
     memset(d + u, 0, 1)
-    return d
-
-
-# ── wrapping: `textwrap`'s greedy fill, at the one width this target knows ────
-#
-# CPython's help formatter does not decide where a line ends; it asks
-# `textwrap.wrap`, and the answer is a byte-for-byte property of that function's
-# chunker and its greedy loop. So this is a re-implementation of ONE function
-# rather than a layout of its own, and it is here rather than in the callers
-# because two of them need it with two different indents (`_entry` and the
-# description). The usage line's fold is NOT this one — `_get_lines` below is
-# `_format_usage`'s own, simpler rule over parts rather than characters.
-#
-# Every value here is a plain integer and a `char *`: there are no tuples, no
-# lists and no closures on this path, so a "current line" is an OFFSET INTO THE
-# OUTPUT plus a length, and a chunk is an (offset, length) pair carried in
-# locals. Nothing is copied before it is written — a chunk goes from `text` to
-# `buf` in one `str_put` — and the trailing whitespace `drop_whitespace` removes
-# is not removed at all: it is simply not written over, because the newline goes
-# at the offset before it.
-
-# `TextWrapper.tabsize`, kept because it is a property of the wrapping rather
-# than of this target: the formatter squashes whitespace BEFORE `textwrap` runs
-# (see `_squashed`), so on this path nothing expands a tab — and if a caller ever
-# wraps without squashing first, the tab stop is the number that decides where.
-TAB_STOP = 8
-
-MIN_WRAP_WIDTH = 11  # CPython's `max(self._width - help_position, 11)`
-
-USAGE_PREFIX = "usage: "
-
-
-def _ws_set():
-    """The bytes `\s` matches in ASCII, as a set `strspn` can be given.
-
-    A LITERAL now, and the set is the six ASCII whitespace bytes CPython's `\\s`
-    matches: 0x20, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, NUL-terminated by the literal
-    itself, which is the one thing `strspn` reads. It is still a FUNCTION rather
-    than a module constant because a module-level name has no storage on this
-    path (`formal/hostmods/textwrap.mojo` says so at its own byte sets), and all
-    three callers only READ the set — `strspn` is its only use — so handing them
-    the constant pool's bytes instead of a fresh `str_alloc` cannot be written
-    through.
-
-    This function used to `str_alloc(8)` and `memset` the seven bytes one at a
-    time, on a claim that was FALSE from `9023031b` onwards: "a string literal's
-    escapes are NOT unescaped on this path, so `\\t` here would be a backslash and
-    a `t`". A literal IS decoded, inside a module as well as inside a program, on
-    both architectures — `fire_compiler.py`'s `decode_c_escapes`, which every
-    engine shares, pinned by
-    `test_formal_sys.py::test_a_literal_inside_a_module_is_decoded_too` and
-    spelled live in `formal/hostmods/ast.mojo`'s `_quotes`. The byte set is
-    unchanged, which is what the 69 parses in `test_formal_argparse.py` measure:
-    every one of them is diffed against CPython's own argparse.
-
-    The other `memset` separators in this module are NOT this case and keep the
-    idiom for the reason the section above `BUF_CAP` gives: they are single bytes
-    written at a computed OFFSET, and a byte value is not a string.
-    """
-    return " \t\n\v\f\r"
-
-
-def _cat3(a, b, c):
-    """`a` then `b` then `c`, NUL-terminated. A fresh buffer each call."""
-    s = str_alloc(str_len(a) + str_len(b) + str_len(c) + 1)
-    u = str_put(s, 0, a, str_len(a))
-    u = str_put(s, u, b, str_len(b))
-    u = str_put(s, u, c, str_len(c))
-    memset(s + u, 0, 1)
-    return s
-
-
-def _letter_set():
-    """`[^\d\W]` — a letter or an underscore, which is `wordsep_re`'s `letter`.
-
-    Not the whole of `\w`: a DIGIT is a word character and not a letter, and the
-    difference decides whether `a-1` is one chunk or two.
-    """
-    return _cat3(LOWER, UPPER, "_")
-
-
-def _word_set():
-    """`\w` without the unicode: letters, digits and `_`, as one set."""
-    return _cat3(_letter_set(), DIGITS, "")
-
-
-def _punct_set():
-    """`wordsep_re`'s `word_punct` — the characters an em-dash may follow."""
-    return _cat3(_word_set(), "!\"'&.,?", "")
-
-
-def _is_letter(p, lt):
-    """1 if the byte at `p` is a letter or `_`."""
-    return strspn(p, lt)
-
-
-def _is_wordchar(p, wd):
-    """1 if the byte at `p` is a letter, a digit or `_`."""
-    return strspn(p, wd)
-    
-
-def _is_wordpunct(p, wd, pt):
-    """1 if the byte at `p` is `word_punct`: a word character or one of `!"'&.,?`."""
-    if strspn(p, wd) > 0:
-        return 1
-    return strspn(p, pt)
-
-
-def _emdash_at(text, j, n, wd):
-    """1 if a run of 2 or more `-` starts at `j` and a word character follows it.
-
-    The `--` in `Look, goof-ball -- use the -b option!` is a chunk of its own in
-    CPython's chunker, and this is the test for it: an em-dash is two or more
-    hyphens followed by a word character.
-    """
-    k = j
-    while k < n and strncmp(text + k, "-", 1) == 0:
-        k = k + 1
-    if k - j < 2 or k >= n:
-        return 0
-    return _is_wordchar(text + k, wd)
-
-
-def _chunk_end(text, j, n, ws, wd, lt, pt):
-    """The index just past the WORD chunk that starts at `j`.
-
-    `TextWrapper._split`'s word branch, read rule by rule for the ASCII this
-    target has. `wordsep_re` is `\S+?` as SHORT as possible, finished by one of
-    three things, and this is those three:
-
-      * the end of a word — a whitespace byte, or the end of the text;
-      * a hyphenated word — a `-` with two letters (or letter-`-`-letter)
-        before it and a letter, an optional `-` and a letter after it. That is
-        what splits `--no-cache` into `--no-` and `cache` and leaves `a-1` and
-        `-x` whole;
-      * an em-dash — a run of two or more `-` after a `word_punct`, which ends
-        the chunk BEFORE the run.
-
-    The em-dash run is itself a chunk when the chunk STARTS at one, which is the
-    first arm here and not a special case of the rest.
-    """
-    if j > 0 and strncmp(text + j, "-", 1) == 0 \
-            and _is_wordpunct(text + j - 1, wd, pt) > 0 \
-            and _emdash_at(text, j, n, wd) == 1:
-        k = j
-        while k < n and strncmp(text + k, "-", 1) == 0:
-            k = k + 1
-        return k
-    pos = j + 1
-    while pos <= n:
-        if pos == n or strspn(text + pos, ws) > 0:
-            return pos
-        if pos > j and strncmp(text + pos, "-", 1) == 0 \
-                and _is_wordpunct(text + pos - 1, wd, pt) > 0 \
-                and _emdash_at(text, pos, n, wd) == 1:
-            return pos
-        if strncmp(text + pos, "-", 1) == 0 and pos - 1 > j:
-            lb = 0
-            if pos >= 2 and _is_letter(text + pos - 1, lt) > 0 \
-                    and _is_letter(text + pos - 2, lt) > 0:
-                lb = 1
-            if pos >= 3 and _is_letter(text + pos - 1, lt) > 0 \
-                    and strncmp(text + pos - 2, "-", 1) == 0 \
-                    and _is_letter(text + pos - 3, lt) > 0:
-                lb = 1
-            la = 0
-            if pos + 2 < n and _is_letter(text + pos + 1, lt) > 0:
-                if _is_letter(text + pos + 2, lt) > 0:
-                    la = 1
-                elif strncmp(text + pos + 2, "-", 1) == 0 \
-                        and _is_letter(text + pos + 3, lt) > 0:
-                    la = 1
-            if lb == 1 and la == 1:
-                return pos + 1
-        pos = pos + 1
-    return n
-
-
-def _hyphen_break(text, j, clen, space_left):
-    """Where to break a word too long for the line it is on: at its last `-`.
-
-    `TextWrapper._handle_long_word`'s `break_on_hyphens` refinement, which
-    prefers a break at a hyphen to filling the line exactly. The regex's own
-    conditions are kept: the hyphen must be inside the piece (`h > 0` in the
-    original is "not at the start of the chunk") and something before it must
-    not itself be a hyphen, so a run of dashes is not a break.
-    """
-    end = space_left
-    if clen > space_left:
-        h = -1
-        k = 0
-        while k < space_left and k < clen:
-            if strncmp(text + j + k, "-", 1) == 0:
-                h = k
-            k = k + 1
-        if h > 0:
-            bare = 0
-            m = 0
-            while m < h:
-                if strncmp(text + j + m, "-", 1) != 0:
-                    bare = 1
-                m = m + 1
-            if bare == 1:
-                end = h + 1
-    return end
-
-
-def _nl_at(buf, at):
-    """A newline (and the NUL that keeps the buffer terminated) at `buf[at]`.
-
-    `_nl` at an offset that is not the end, which is what dropping a line's
-    trailing whitespace amounts to: the newline goes where the whitespace began
-    and the whitespace bytes are simply not there any more.
-    """
-    memset(buf + at, 10, 1)
-    memset(buf + at + 1, 0, 1)
-    return at + 1
-
-
-def _squashed(text):
-    """`text` with every whitespace byte a single space, then stripped.
-
-    **`HelpFormatter._split_lines` and `_fill_text` do this before `textwrap`
-    ever sees the text**, and the order is the whole content of this function:
-
-        text = self._whitespace_matcher.sub(' ', text).strip()
-
-    So a TAB in a help string is a SPACE here — `textwrap`'s own `expandtabs`
-    never runs, because by the time its `wrap` is called there is no tab left in
-    the string, and a help string is therefore expanded to one space and not to a
-    tab stop. Both call sites go through the same two lines in CPython, which is
-    why this is one function rather than one per caller, and why the folding a tab
-    produces is the folding a space produces.
-
-    The `strip` is the other half and is just as observable: `_format_action`
-    tests `action.help.strip()` and `_format_text` strips before filling, so a
-    help text with a leading or trailing space does not carry it into the column.
-    """
-    n = str_len(text)
-    if n == 0:
-        return str_alloc(2)
-    ws = _ws_set()
-    d = str_alloc(n + 2)
-    u = 0
-    i = 0
-    while i < n:
-        if strspn(text + i, ws) > 0:
-            u = str_put(d, u, " ", 1)
-        else:
-            u = str_put(d, u, text + i, 1)
-        i = i + 1
-    # `str.strip()`: drop the whitespace runs at both ends, keeping the spaces
-    # between two non-whitespace bytes exactly one for one.
-    start = 0
-    while start < u and strspn(d + start, ws) > 0:
-        start = start + 1
-    end = u
-    while end > start and strspn(d + end - 1, ws) > 0:
-        end = end - 1
-    tail = str_alloc(u - start + 2)
-    v = str_put(tail, 0, d + start, end - start)
-    memset(tail + v, 0, 1)
-    return tail
-
-
-def _wrap_into(buf, u, text, width, ind0, indn, wsub):
-    """`text` wrapped to `width` at `buf[u:]`, one line each. The new `u`.
-
-    `wsub` is how many columns of the indent count AGAINST the width, and it is a
-    parameter because `textwrap` counts all of an indent it is handed while
-    `_format_action` hands it none: the help column is `%*s` added to each
-    wrapped line AFTER the wrap, so a help text is wrapped at the full
-    `help_width` and then indented, and an implementation that counted the
-    indent would fold one word early. The description passes 0 for the same
-    reason — `_format_text`'s indent is `current_indent`, which is 0 at the top
-    level — and would pass 2 inside a section, where `textwrap` really would
-    count it.
-
-    `textwrap.wrap(text, width, initial_indent=ind0, subsequent_indent=indn)`
-    with every default left at its default — which is what `HelpFormatter` asks
-    for: it calls `textwrap.wrap` and `textwrap.fill` with no keyword of its own,
-    so `drop_whitespace`, `break_long_words` and `break_on_hyphens` are all at
-    their defaults. (`expand_tabs` is at its default too, and does nothing here:
-    the formatter squashes whitespace before it gets here — `_squashed`.)
-
-    The loop is `_wrap_chunks` with the chunk LIST flattened into integers: a
-    line is open or it is not, and while it is open its length is enough to
-    decide every branch the original takes, because nothing here re-reads what it
-    has already written. Four rules carry the whole of it, and all four are
-    textwrap's:
-
-      * `wsub` columns of the indent count against the width, which is
-        `width - len(indent)` when the caller passed the indent to `textwrap`
-        and `width` when it added the indent afterwards;
-      * a chunk is added while `cur_len + len(chunk) <= width - len(indent)`,
-        which is why the whitespace between two words has to fit too;
-      * a chunk that does not fit ends the line, UNLESS it is longer than the
-        whole width — then the word is BROKEN (`_handle_long_word`) after its
-        last hyphen that fits, and the REMAINDER of the chunk is still that
-        chunk: it is not re-split, which is the one thing a flattened loop has to
-        carry explicitly;
-      * whitespace at the start of a line is dropped and at the end of one is
-        dropped, and a line with nothing else on it is not a line at all — the
-        last rule is why a paragraph of nothing but spaces produces no output.
-
-    The text is `_squashed` first, which is what CPython's formatter does first.
-    """
-    if str_len(text) == 0:
-        return u
-    text = _squashed(text)
-    n = str_len(text)
-    ws = _ws_set()
-    lt = _letter_set()
-    wd = _word_set()
-    pt = _punct_set()
-    i = 0
-    forced = -1          # the end of a chunk left over from a broken word
-    forced_word = 0      # …and whether that chunk was a word or whitespace
-    open_line = 0
-    emitted = 0          # lines written, which is `_wrap_chunks`' `lines`
-    first = 1
-    content = 0          # `buf` offset where the open line's content began
-    keep = 0             # …and where its content ends without trailing space
-    while i < n:
-        if forced > i:
-            k = forced
-            word = forced_word
-            forced = -1
-        elif strspn(text + i, ws) > 0:
-            k = i
-            while k < n and strspn(text + k, ws) > 0:
-                k = k + 1
-            word = 0
-        else:
-            k = _chunk_end(text, i, n, ws, wd, lt, pt)
-            word = 1
-        clen = k - i
-        # Whitespace at the start of a line is dropped, and `emitted == 0` is
-        # the whole of that exception: a paragraph that starts with a space
-        # keeps it. Asked BEFORE the line is opened, because "at the start of a
-        # line" is what it is.
-        if word == 0 and open_line == 0 and emitted > 0:
-            i = k
-            continue
-        if open_line == 0:
-            if first == 1:
-                u = str_put(buf, u, ind0, str_len(ind0))
-            else:
-                u = str_put(buf, u, indn, str_len(indn))
-            content = u
-            keep = u
-            open_line = 1
-        if (u - content) + clen <= width - wsub:
-            u = str_put(buf, u, text + i, clen)
-            if word == 1:
-                keep = u
-            i = k
-            continue
-        # It does not fit.
-        if clen > width - wsub:
-            if width - wsub < 1:
-                space_left = 1
-            else:
-                space_left = width - wsub - (u - content)
-            if space_left > 0:
-                end = _hyphen_break(text, i, clen, space_left)
-                if word == 1:
-                    # A WORD: it is content, and whitespace already on the line
-                    # is interior now, so it stays.
-                    u = str_put(buf, u, text + i, end)
-                    keep = u
-                # A WHITESPACE piece is dropped by the same rule that drops a
-                # line's trailing whitespace, so a line made only of it is not
-                # written at all.
-                if keep > content:
-                    u = _nl_at(buf, keep)
-                    emitted = emitted + 1
-                else:
-                    u = keep
-                open_line = 0
-                first = 0
-                i = i + end
-                forced = k
-                forced_word = word
-                continue
-        if keep > content:
-            u = _nl_at(buf, keep)
-            emitted = emitted + 1
-        else:
-            u = keep
-        open_line = 0
-        first = 0
-        if word == 0:
-            i = k
-    if open_line == 1 and keep > content:
-        u = _nl_at(buf, keep)
-    return u
+    memmove(buf, d, u + 1)
+    return 0
 
 
 def _basename(p):
@@ -2138,67 +1439,20 @@ def _basename(p):
 
 
 def _usage_line(spec, argv, err):
-    """`usage: prog <parts>` into `err`, folded when it does not fit. The length.
+    """`usage: prog <parts>` into `err`. The length written.
 
-    `_format_usage` in full, including the half it usually skips: a usage line
-    longer than the width is folded onto indented continuation lines, with the
-    prog sharing the first line when it is short enough and sitting on a line of
-    its own when it is not, and with the optionals and the positionals folded
-    SEPARATELY so a line can end between them. The width test is against the
-    one-line form, so that form is built — once — to be measured.
+    `_format_usage` for the case where the result fits the width, which is the
+    case for every parser in the corpus this module was measured against.
     """
-    opt = str_alloc(BUF_CAP)
-    pos = str_alloc(BUF_CAP)
-    _usage_sides(spec, opt, pos)
+    pb = str_alloc(BUF_CAP)
+    _parts_into(spec, pb)
     prog = _basename(argv[0])
-    u = _putlit(err, 0, USAGE_PREFIX)
-    flat = str_alloc(BUF_CAP)
-    f = str_put(flat, 0, prog, str_len(prog))
-    if str_len(opt) > 0:
-        f = _putlit(flat, f, " ")
-        f = str_put(flat, f, opt, str_len(opt))
-    if str_len(pos) > 0:
-        f = _putlit(flat, f, " ")
-        f = str_put(flat, f, pos, str_len(pos))
-    memset(flat + f, 0, 1)
-    if str_len(USAGE_PREFIX) + f <= TEXT_WIDTH:
-        u = str_put(err, u, flat, f)
-        return _nl_at(err, u)
-    if (str_len(USAGE_PREFIX) + str_len(prog)) * 4 <= TEXT_WIDTH * 3:
-        # A SHORT prog: it shares the first line with the optionals, and the
-        # continuation lines are indented past `usage: <prog> `.
-        indent = str_len(USAGE_PREFIX) + str_len(prog) + 1
-        head = _with_prog(prog, opt)
-        if str_len(opt) == 0:
-            head = _with_prog(prog, pos)
-        _get_lines(err + u, head, indent, str_len(USAGE_PREFIX))
-        u = u + str_len(err + u)
-        _get_lines(err + u, pos, indent, 0)
-        u = u + str_len(err + u)
-        return u
-    # A LONG prog: it gets a line of its own, and the parts are folded after it.
-    indent = str_len(USAGE_PREFIX)
-    u = _putlit(err, u, prog)
-    u = _nl_at(err, u)
-    allp = str_alloc(BUF_CAP)
-    g = str_put(allp, 0, opt, str_len(opt))
-    if str_len(pos) > 0:
-        g = _putlit(allp, g, " ")
-        g = str_put(allp, g, pos, str_len(pos))
-    memset(allp + g, 0, 1)
-    block = str_alloc(BUF_CAP)
-    # One fold of everything, and the SEPARATE folds only if that took more than
-    # one line — which is CPython's own test, and the reason a usage line whose
-    # parts fit on one continuation line is not split at the optional/positional
-    # boundary for no visible reason.
-    if _get_lines(block, allp, indent, 0) > 1:
-        _get_lines(err + u, opt, indent, 0)
-        u = u + str_len(err + u)
-        _get_lines(err + u, pos, indent, 0)
-        u = u + str_len(err + u)
-    else:
-        u = str_put(err, u, block, str_len(block))
-    return u
+    u = _putlit(err, 0, "usage: ")
+    u = str_put(err, u, prog, str_len(prog))
+    u = _putlit(err, u, " ")
+    u = str_put(err, u, pb, str_len(pb))
+    memset(err + u, 10, 1)      # newline
+    return u + 1
 
 
 def _invocation(spec, i):
@@ -2260,96 +1514,31 @@ def _helppos(spec):
 
 
 def _entry(err, u, inv, h, helppos):
-    """One `  invocation   help` entry of the help listing. The new length.
+    """One `  invocation   help` line of the help listing. The new length.
 
     `_format_action`'s three cases: a short invocation is padded out to the help
     column and its help follows on the same line; a long one is printed on its
     own and the help is indented under it; and an action with no help text is
     the invocation and nothing else.
-
-    **And the help text is WRAPPED**, which is the part that used to be missing
-    (`bugs/FORMAL_argparse_help_wrapping_not_implemented.md`). The help column is
-    `help_width = max(self._width - help_position, 11)` — the floor is CPython's
-    — the first line starts where the header left it, and every line after it is
-    indented to the help column.
-
-    **TWO conditions, not one**, which is the detail that made this wrong once:
-    `if not action.help:` decides whether the invocation is PADDED, and
-    `if action.help and action.help.strip():` decides whether the help is
-    PRINTED. A help text of nothing but spaces is therefore padded like a real
-    one and then prints nothing — and CPython emits the padded spaces, so the
-    difference is visible at the end of the line.
     """
     if str_len(h) == 0:
         u = _putlit(err, u, "  ")
         u = str_put(err, u, inv, str_len(inv))
         return _nl(err, u)
     width = helppos - 4
-    hw = TEXT_WIDTH - helppos
-    if hw < MIN_WRAP_WIDTH:
-        hw = MIN_WRAP_WIDTH
     if str_len(inv) <= width:
         u = _putlit(err, u, "  ")
         u = str_put(err, u, inv, str_len(inv))
         u = _pad(err, u, width - str_len(inv))
         u = _putlit(err, u, "  ")
-        if _has_nonspace(h) == 1:
-            return _wrap_help(err, u, h, hw, helppos, 0)
-        # `elif not action_header.endswith('\n'): parts.append('\n')` — the
-        # header of this case does not end in one, so the newline is added here.
+        u = str_put(err, u, h, str_len(h))
         return _nl(err, u)
     u = _putlit(err, u, "  ")
     u = str_put(err, u, inv, str_len(inv))
     u = _nl(err, u)
-    if _has_nonspace(h) == 0:
-        return u
-    return _wrap_help(err, u, h, hw, helppos, helppos)
-
-
-def _wrap_help(err, u, h, hw, helppos, ind0):
-    """`h` wrapped into the help column at `err[u:]`. The new `u`.
-
-    `_format_action`'s two `indent_first` cases, and nothing else:
-    `indent_first = 0` when the invocation shared the line with the first line of
-    the help and `indent_first = help_position` when it did not, with every line
-    after the first written at `'%*s' % (help_position, '')`. The continuation
-    indent is therefore a string of `helppos` spaces, and `ind0` is how many of
-    them the FIRST line gets.
-    """
-    if ind0 > 0:
-        u = _pad(err, u, ind0)
-    cont = _spaces(helppos)
-    # 0, not `helppos`: `_format_action` wraps at `help_width` and adds the
-    # column afterwards, so the indent is not one of the columns the width is
-    # made of. See `_wrap_into`'s `wsub`.
-    return _wrap_into(err, u, h, hw, "", cont, 0)
-
-
-def _has_nonspace(t):
-    """1 if `t` holds a byte that is not whitespace.
-
-    `_format_text` prints nothing for a text that is empty once it is stripped,
-    and stripping is a question about whitespace — so it is asked with the
-    whitespace SET `_wrap_into` builds rather than with a second notion of what
-    whitespace is.
-    """
-    if str_len(t) == 0:
-        return 0
-    ws = _ws_set()
-    i = 0
-    while i < str_len(t):
-        if strspn(t + i, ws) == 0:
-            return 1
-        i = i + 1
-    return 0
-
-
-def _spaces(n):
-    """`n` spaces, NUL-terminated. The continuation indent of a wrapped block."""
-    s = str_alloc(n + 2)
-    memset(s, 32, n)
-    memset(s + n, 0, 1)
-    return s
+    u = _pad(err, u, helppos)
+    u = str_put(err, u, h, str_len(h))
+    return _nl(err, u)
 
 
 def _pad(buf, u, n):
@@ -2417,24 +1606,17 @@ def _option_section(spec, err, u, helppos):
 def _help_into(spec, argv, desc, err):
     """The whole help text into `err`. The length written.
 
-    CPython's `format_help`: the usage, the description, `positional arguments:`
-    and its entries, `options:` and its entries, each block followed by a blank
-    line, and the whole thing ending in exactly one newline — which is what
-    `format_help`'s `help.strip(chr(10)) + chr(10)` amounts to. The description
-    and every help text are WRAPPED at the width, which is the part this used not
-    to do.
+    CPython's `format_help` for a parser whose entries and description fit the
+    width: the usage, the description, `positional arguments:` and its entries,
+    `options:` and its entries, each block followed by a blank line, and the
+    whole thing ending in exactly one newline — which is what `format_help`'s
+    `help.strip(chr(10)) + chr(10)` amounts to.
     """
     u = _usage_line(spec, argv, err)
     u = _nl(err, u)
-    if _has_nonspace(desc) == 1:
-        # `_format_text`: the description is `textwrap.fill(text, max(width -
-        # current_indent, 11), initial_indent=indent, subsequent_indent=indent)`
-        # and `current_indent` is 0 here, so both indents are empty and the
-        # width is the full one. A description of nothing but whitespace prints
-        # nothing at all, which is what `text.strip()` is asked above.
-        # `_wrap_into` ends the last line itself, so this ONE newline is the
-        # blank line `_format_text`'s `'\n\n'` leaves after the text.
-        u = _wrap_into(err, u, desc, TEXT_WIDTH, "", "", 0)
+    if str_len(desc) > 0:
+        u = str_put(err, u, desc, str_len(desc))
+        u = _nl(err, u)
         u = _nl(err, u)
     helppos = _helppos(spec)
     u = _positional_section(spec, err, u, helppos)
@@ -3108,9 +2290,9 @@ def _build_pat(spec, argv, argc, pat):
     dseen = 0
     while i < argc:
         if dseen == 1:
-            memset(pat + i, PAT_A, 1)
+            memset(pat + i, 65, 1)      # 'A'
         elif strncmp(argv[i], "--", 3) == 0:
-            memset(pat + i, PAT_DASH, 1)
+            memset(pat + i, 45, 1)
             dseen = 1
         else:
             memset(pat + i, _classify(spec, argv[i]), 1)
@@ -3206,15 +2388,15 @@ def _quote_choices(rec, buf, u):
     not the message and `(choose from 'a', 'b')` is.
     """
     p = _fld(rec, F_CHOICES)
-    end = _fend(p)
+    end = strcspn(p, "|;")
     first = 1
     i = 0
     while i < end:
-        j = _esc_end(p + i, "\\,|;")
+        j = strcspn(p + i, ",|;")
         if first == 0:
             u = _putlit(buf, u, ", ")
         u = _putlit(buf, u, "'")
-        u = _unesc_upto(buf, u, p + i, j)
+        u = str_put(buf, u, p + i, j)
         u = _putlit(buf, u, "'")
         first = 0
         i = i + j + 1

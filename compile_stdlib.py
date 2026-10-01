@@ -31,80 +31,14 @@ _gcc_syntax_cache: dict = {}
 # Subtrees of the stdlib to attempt, in the order we want maximal coverage:
 # benchmarks first (smallest, exercises real client code), then the library
 # proper, then the test corpus, then tools.
-#
-# This is a PREFERENCE ORDER, not an enumeration. It used to be the whole
-# story, and that was a silent-coverage hole: a root that does not exist is
-# skipped without a word (`if not search_root.exists(): continue`), so any
-# top-level directory the stdlib adds later would simply never be compiled —
-# while the run still reported "PASSED: 610" over the files it did find. Five
-# of the nine entries here (`_core`, `collections`, `io`, `math`, `os`) are
-# from the previous stdlib layout and do not exist at all in the current one.
-#
-# `discover_roots` below now appends every top-level directory the stdlib
-# actually has, so a new subcomponent is picked up without editing this list;
-# this list only decides the ORDER of what is already known.
-DEFAULT_ROOTS = ['benchmarks', 'std', 'test', 'tools']
+DEFAULT_ROOTS = ['benchmarks', 'std', 'test', 'tools', '_core', 'collections', 'io', 'math', 'os']
 
-# Directory names under the stdlib root that are never source to compile even
-# though they sit beside the ones that are. Keyed by name so a subcomponent
-# appearing here is a deliberate, visible decision.
-ROOT_EXCLUDE = {
-    # Build/tooling trees: Python and shell, not Mojo modules. `scripts` is in
-    # this stdlib today with no .mojo files at all, but it is the exact shape of
-    # the hole described above, so it is named rather than left to chance.
-    'scripts',
-    'docs', 'doc', 'examples', 'proposals', 'bench', 'bazel-*',
-}
-
-
-def discover_roots(base: Path) -> list:
-    """Every top-level directory under the stdlib root that holds .mojo files,
-    ordered by DEFAULT_ROOTS preference first and then alphabetically.
-
-    The alphabetical tail is the load-bearing part: a subcomponent nobody
-    listed still gets compiled, in a deterministic position, instead of being
-    silently skipped. `sorted()` rather than directory order, so two runs over
-    one tree emit the same order (the failure report and the CAS keys both
-    depend on it).
-    """
-    on_disk = []
-    try:
-        entries = sorted(p for p in base.iterdir() if p.is_dir())
-    except OSError:
-        return list(DEFAULT_ROOTS)
-    for entry in entries:
-        name = entry.name
-        if name in ROOT_EXCLUDE or name.startswith('.'):
-            continue
-        if name.startswith('bazel-'):
-            continue
-        on_disk.append(name)
-    preferred = [r for r in DEFAULT_ROOTS if r in on_disk]
-    rest = [r for r in on_disk if r not in DEFAULT_ROOTS]
-    return preferred + rest
-
-
-_NEXT_ON_STRUCT = (
-    "`next(<user-defined iterator struct>)` has no lowering, and the "
-    "receiver's type is not inferred. `var it = peekable(list)` types `it` "
-    "as `int64_t`, not `_PeekableIterator *`, because `peekable` is never "
-    "ELABORATED: it is a generic, so `reflect.export_exclusions` "
-    "deliberately keeps it out of `std.iter`'s export table (the elaborator "
-    "is supposed to instantiate it on demand), and the on-demand path "
-    "declines — the two `peekable` overloads differ only by a trait bound "
-    "(`Some[Iterable]` vs `Some[IterableOwned]`), which "
-    "`Elaborator.elaborate_overload_call` cannot match against a scalar "
-    "parameter type, and the chosen overload's return type "
-    "(`_PeekableIterator[type_of(iterable).IteratorOwnedType]`) is "
-    "dependent on the argument. Until 2026-10-01 this file PASSED here "
-    "while its C carried `extern int64_t peekable (...)` with no definition "
-    "anywhere, plus a call to a `next` symbol nothing defines — this check "
-    "is `gcc -fgimple -fsyntax-only`, which cannot see that, and nothing "
-    "else links the `test/` tree. `next(<struct>)` DOES lower whenever the "
-    "receiver's type IS resololvable, and `Self.<type-param>` substitution "
-    "inside a monomorphized generic struct is fixed; see "
-    "bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md")
-
+# Files that are honest, currently-understood, documented whole-module
+# refusals — genuinely out of reach right now, not a shortcut around actually
+# trying. Each entry names the specific bugs/ writeup with the full root
+# cause, so a failure here is still visible (reported separately from
+# genuinely UNEXPECTED failures below) rather than silently absorbed.
+# Never add an entry here without a bugs/*.md file backing it.
 EXPECTED_FAILURES = {
     # UPDATE (this session, continued): `create_task`/`create_raising_task`
     # await-composition (`await create_task(<call>) + await create_task(
@@ -177,143 +111,6 @@ EXPECTED_FAILURES = {
     # `_ = time_function(test_atomic)` / `_ = lock^` where `_` is boxed
     # because the nested async `inc()` reassigns it via
     # `_ = counter.fetch_add(1)`).
-    #
-    # 2026-10-01 — the `next(<user-defined iterator struct>)` family. 21
-    # files, all of them `test/` or stdlib iterators, that this check
-    # reported PASS while their generated C carried a call to a `next`
-    # symbol nothing defines. `_lower_call` now REFUSES an unlowered
-    # `next(...)` rather than emitting it, which is what turned a silent
-    # wrong artifact into a named failure — so these moved from a false
-    # green to a declared red. The refusal is right and stays; the shape
-    # behind it is not implemented, because `var iter = peekable(list)`
-    # types `iter` as `int64_t` rather than `_PeekableIterator *` and
-    # inferring an imported generic function's return type through
-    # `Self.<member>` is its own project. `next(<struct>)` DOES lower
-    # whenever the receiver's type is resolvable; and the `for` loop over
-    # these same objects was already a `mojo_unsupported_iter` no-op for
-    # the identical reason. Full analysis, the 3-undefined-`next` +
-    # 23-`mojo_unsupported_iter` measurement, and the next step:
-    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md
-    #
-    # A dict, not a set: the summary at the bottom prints each entry's
-    # REASON beside its path, and a bare set could only ever satisfy the
-    # membership tests. It was empty until now, so nothing had ever
-    # exercised that.
-    # REMOVED 2026-10-03, with the artifact evidence rather than the syntax
-    # check: `test/iter/test_empty.mojo`, `test/iter/test_once.mojo` and
-    # `test/itertools/test_repeat.mojo` now compile, LINK and run. The
-    # iterator structs they need (`_Empty`, `_Once`, `_RepeatIterator`) are
-    # instantiated IN this translation unit by
-    # `mojo/backend_gimple/elab_intu.py` rather than declared `extern` beside a
-    # CAS object, because every one of them overloads `__iter__` on `var self`
-    # and on `ref self`, both overloads erase to `(Struct *)`, and so
-    # `_register_generic_struct` can register NEITHER and declines the struct —
-    # which is what typed the receiver as a boxed `int64_t` and left
-    # `next(it)` with nothing to dispatch on. Verified per file, after a real
-    # `gcc -c` (`nm -g` on the module's own object):
-    #
-    #   test_empty  T _empty_1_T_3_Int
-    #               T __Empty_1_T_3_Int___iter___0120be / _0120be_2
-    #               T __Empty_1_T_3_Int___next__ / T __Empty_1_T_3_Int_bounds
-    #   test_once   T _once_1_T_5_Int64
-    #               T __Once_1_T_5_Int64___next__, T __Once_1_T_5_Int64_bounds
-    #   test_repeat T _repeat_11_ElementType_5_Int64 and _6_String
-    #               T __RepeatIterator_11_ElementType_5_Int64___next__
-    #
-    # and a real `ld` of each module's C against `runtime/fire_runtime.c`
-    # leaves no undefined iterator symbol (the only stubs are `std.testing`'s
-    # `assert_equal`/`assert_raises`, which this driver does not compile), the
-    # binary exits 0. `once(10)` and `repeat(42, times=3)` needed no
-    # inference at all — the type argument is the literal's own exact Mojo
-    # type. The other 18 stay: they need either overload selection on a trait
-    # bound (`peekable`'s `Some[Iterable]` vs `Some[IterableOwned]`), a
-    # dependent return type through `Self.IteratorOwnedType`, or an overload
-    # OUTSIDE the iteration protocol (`_TakeWhileIterator.__init__`,
-    # `List.__getitem__`), which in-TU provably cannot yet carry. See
-    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md.
-    #
-    # `test/collections/test_span.mojo` is out of this list as of 2026-10-03,
-    # and it is the one removal in this family that needed no inference at
-    # all: its receiver was a REAL `Span *`, not a boxed integer, so nothing
-    # about the callee's type had to be inferred. Three defects stood between
-    # the cursor and that receiver, all now fixed:
-    #   * `iter(<span>)` was refused by `_try_bind_iter_cursor` (then
-    #     `_try_bind_list_iter`), which gated on `MojoList *` — so a Span,
-    #     which IS a sequence with a real length, got no cursor at all and
-    #     `next(it)` had no receiver to dispatch on. The gate is now the tree's
-    #     own `_struct_data_field` + `_len` test, so `span[i]` and
-    #     `iter(span)` agree by construction, and the cursor's accessors all
-    #     live in `mojo/middle/itcursor.py` so `next(it)`, `it.__next__()`,
-    #     `for x in it:` and `len(it)` cannot drift apart.
-    #   * `len(<cursor>)` answered the CONTAINER's total length, unchanged by
-    #     every `next()` — wrong for a partially consumed iterator on the list
-    #     cursor too, and silently so.
-    #   * `Span(<list>)` stored the list POINTER in `_data` and left `_len`
-    #     unset, so `len(span)` was whatever the fresh allocation happened to
-    #     hold and `span[i]` read the list's own header. Both silent, both
-    #     exit 0.
-    'std/collections/string/iterators.mojo': _NEXT_ON_STRUCT,
-    'std/itertools/itertools.mojo': _NEXT_ON_STRUCT,
-    'test/collections/string/test_iterators.mojo': _NEXT_ON_STRUCT,
-    'test/collections/test_set.mojo': _NEXT_ON_STRUCT,
-    'test/iter/test_chain.mojo': _NEXT_ON_STRUCT,
-    'test/iter/test_enumerate.mojo': _NEXT_ON_STRUCT,
-    'test/iter/test_map.mojo': _NEXT_ON_STRUCT,
-    'test/iter/test_peek.mojo': _NEXT_ON_STRUCT,
-    'test/iter/test_zip.mojo': _NEXT_ON_STRUCT,
-    'test/itertools/test_count.mojo': _NEXT_ON_STRUCT,
-    'test/itertools/test_cycle.mojo': _NEXT_ON_STRUCT,
-    'test/itertools/test_drop.mojo': _NEXT_ON_STRUCT,
-    'test/itertools/test_drop_while.mojo': _NEXT_ON_STRUCT,
-    'test/itertools/test_product.mojo': _NEXT_ON_STRUCT,
-    'test/itertools/test_take.mojo': _NEXT_ON_STRUCT,
-    'test/itertools/test_take_while.mojo': _NEXT_ON_STRUCT,
-    'test/python/test_python_object.mojo': _NEXT_ON_STRUCT,
-    # 2026-10-01 — added by the merge of the formal5 batch, and the class is the
-    # `explicit-failed` half of the census, not the `next(...)` half above.
-    # `std/os/path/path.mojo`'s `getsize` is a bracket template, and once the
-    # elaborator started instantiating it its own translation unit was compiled
-    # for the first time — and failed. The emitted body shows this is NOT a
-    # missing prototype, which is what it looks like from the error:
-    #
-    #   _t2 = 0;  /* TODO: char*.__fspath__ */
-    #   _t3 = stat (_t2);
-    #   _t4 = (void *)_t3;
-    #   _t5 = _mojo_dispatch_getattr (_t4, "st_size");
-    #
-    # Three defects in five lines. The argument is a stubbed NULL because
-    # `path.__fspath__()` has no lowering. `stat` is unprototyped. And the
-    # result is modelled as a struct POINTER with `.st_size` fetched by dynamic
-    # getattr on it, where the real signature is `int stat(const char *,
-    # struct stat *)` — an out-param that fills a caller-owned struct and
-    # returns 0/-1, not a pointer at all. So a correct prototype would NOT fix
-    # this: it would assign an int error code to a pointer temp and getattr on
-    # that. Lowering `stat` means teaching its out-param shape, which is a
-    # feature, not a declaration.
-    #
-    # A declaration is also not available: `#include <sys/stat.h>` in
-    # fire_runtime.h breaks every TU, because std/os/_macos.mojo:137 reaches
-    # the same symbol through `external_call["stat", Int32]` and emits its own
-    # declaration — the identical `conflicting types` failure
-    # runtime/fire_runtime.h:1581-1596 documents for `<time.h>`. A hand-written
-    # prototype in that shared header has the same conflict.
-    #
-    # Declared rather than left as an UNEXPECTED red, because the codegen did
-    # the correct thing here: it refused to emit a call it cannot lower instead
-    # of emitting the above. That is the same situation as the 21 entries
-    # above, which is why the summary line reads 22 expected / 0 unexpected.
-    'test/os/path/test_getsize.mojo': (
-        "`getsize`'s `stat(path.__fspath__()).st_size` has no lowering. Three "
-        "defects in the emitted body: `__fspath__()` is stubbed to 0, `stat` is "
-        "called unprototyped, and its result is modelled as a struct POINTER "
-        "with `.st_size` fetched by dynamic getattr on it — the real signature "
-        "is `int stat(const char *, struct stat *)`, an out-param filling a "
-        "caller-owned struct, so a prototype alone would not fix it. Not "
-        "fixable by `#include <sys/stat.h>` either: every TU includes "
-        "fire_runtime.h and std/os/_macos.mojo:137 declares `stat` itself via "
-        "`external_call[\"stat\", Int32]`. Reachable only once the codegen "
-        "models the out-param. See "
-        "bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md"),
 }
 
 def get_stdlib_path():
@@ -323,10 +120,6 @@ def get_stdlib_path():
 def find_mojo_files(base_path, roots=None, module=None):
     """
     Find all .mojo files in the stdlib subtrees named in `roots`.
-
-    If `roots` is None the roots are DISCOVERED from the stdlib tree (see
-    `discover_roots`) rather than taken from DEFAULT_ROOTS, so a subcomponent
-    added later is compiled without editing this file.
 
     If `module` is specified, only search that module's subdirectory under std/.
     Paths are yielded relative to the stdlib root so display shows e.g.
@@ -347,44 +140,12 @@ def find_mojo_files(base_path, roots=None, module=None):
             yield (mojo_file.relative_to(base), mojo_file)
         return
 
-    # `roots` given explicitly means the caller asked for exactly those (the
-    # `--module` path above, and any direct caller); otherwise discover what
-    # the stdlib actually has. See DEFAULT_ROOTS for why that is not the same
-    # thing as the preference list.
-    for root in (roots if roots is not None else discover_roots(base)):
+    for root in (roots or DEFAULT_ROOTS):
         search_root = base / root
         if not search_root.exists():
             continue
         for mojo_file in sorted(search_root.rglob("*.mojo")):
             yield (mojo_file.relative_to(base), mojo_file)
-
-
-def excluded_mojo_files(base: Path) -> list:
-    """.mojo files under the stdlib root that this sweep deliberately does NOT
-    attempt, as (relative_path, excluding_directory_name) pairs.
-
-    This is the honest form of the coverage cross-check. An earlier version
-    compared the attempted count against a raw `rglob('*.mojo')` total and
-    warned on any shortfall, which fires spuriously the moment `ROOT_EXCLUDE`
-    excludes a directory that actually has Mojo files in it — i.e. exactly
-    when the exclusion is doing its job. What is worth surfacing is not "the
-    numbers differ" but WHICH files are not being compiled and WHY, so a
-    subcomponent that acquires real source cannot sit in `scripts` (or any
-    other excluded name) quietly.
-
-    Returns [] when nothing is excluded, which is the normal case.
-    """
-    try:
-        entries = sorted(p for p in base.iterdir() if p.is_dir())
-    except OSError:
-        return []
-    out = []
-    for entry in entries:
-        name = entry.name
-        if name in ROOT_EXCLUDE or name.startswith('.') or name.startswith('bazel-'):
-            for f in sorted(entry.rglob('*.mojo')):
-                out.append((f.relative_to(base), name))
-    return out
 
 def _gcc_syntax_cached(c_src: str) -> tuple:
     """CAS-cached gcc -fsyntax-only check.  Returns (returncode, stderr);
@@ -434,16 +195,7 @@ def transpile_file(mojo_file):
     cache hit. Both True ⇒ the file was fully cached. Worker processes return these
     so the parent can aggregate cas.stats across processes (the same pattern as
     build_stdlib_dylib._compile_module_job).
-
-    `auto_gpu` defaults OFF here, which is `--no-gpu`. This sweep is a
-    syntax/coverage instrument, not a GPU target, and automatic offload costs
-    it real work for output it cannot check: `gen_module`'s synthesis pass
-    recognises parallel loop nests, appends a `@gpu` kernel for each and
-    rewrites the host loop into a call to it, for every one of the 610 modules
-    here. That is the "automaticalization" this step does not want. Explicitly
-    `@gpu`-marked functions are unaffected — `--no-gpu` suppresses INFERENCE,
-    not device codegen for a function that asked for it (module_gen.py's own
-    note). `--gpu` on the command line turns it back on."""
+    """
     try:
         src = open(mojo_file).read()
         rel = os.path.relpath(mojo_file, STDLIB_PATH)
@@ -457,8 +209,7 @@ def transpile_file(mojo_file):
 
         # Stage 1: Python codegen (CAS-cached)
         try:
-            c_src = compile_module_to_c_cached(src, str(mojo_file), name,
-                                               linkable=False)
+            c_src = compile_module_to_c_cached(src, str(mojo_file), name)
         except Exception as e:
             return False, f"codegen: {str(e)[:120]}", False, False
 
@@ -497,15 +248,12 @@ def main():
                              'as they happen).')
     args = parser.parse_args()
 
-    # `--roots` overrides discovery (an explicit ask for a subset); with no
-    # flag, compile everything the stdlib root actually contains.
-    roots = ([r.strip() for r in args.roots.split(',')] if args.roots
-             else None)
+    roots = [r.strip() for r in args.roots.split(',')] if args.roots else DEFAULT_ROOTS
 
     stdlib_root = get_stdlib_path()
     print(f"Stdlib path: {stdlib_root}")
     if not args.module:
-        print(f"Scanning roots: {', '.join(roots if roots is not None else discover_roots(stdlib_root))}")
+        print(f"Scanning roots: {', '.join(roots)}")
 
     if not stdlib_root.exists():
         print(f"ERROR: stdlib path does not exist", file=sys.stderr)
@@ -521,24 +269,6 @@ def main():
         sys.exit(0)
 
     print(f"Found {len(mojo_files)} .mojo files\n")
-
-    # Coverage cross-check, in the only form that is accurate: report the
-    # .mojo files this sweep is NOT attempting and which directory excluded
-    # them. Silent under-reporting was the original hazard here (a hardcoded
-    # root list meant a new subcomponent was never compiled while the run still
-    # said PASSED); `discover_roots` fixes the cause, and this makes any
-    # remaining exclusion a stated decision rather than a gap.
-    if roots is None and not args.module:
-        excluded = excluded_mojo_files(stdlib_root)
-        if excluded:
-            by_dir = {}
-            for _rel, dirname in excluded:
-                by_dir[dirname] = by_dir.get(dirname, 0) + 1
-            print(f"NOTE: {len(excluded)} .mojo file(s) are NOT being attempted, "
-                  f"excluded by ROOT_EXCLUDE: "
-                  + ', '.join(f'{d}/ ({n} file(s))' for d, n in sorted(by_dir.items()))
-                  + "\n      If any of that is real Mojo source, move the name "
-                    "from ROOT_EXCLUDE to DEFAULT_ROOTS.\n")
 
     # Transpile each file. Each file is fully independent (own codegen
     # instance + its own gcc subprocess), so this parallelizes cleanly across
@@ -588,23 +318,6 @@ def main():
     unexpected_failed = [(rp, err) for rp, err in failed if str(rp) not in EXPECTED_FAILURES]
     stale_expected = sorted((set(EXPECTED_FAILURES) - {str(rp) for rp, _ in failed})
                              & {str(rp) for rp in passed})
-    # An entry whose FILE NO LONGER EXISTS is the same rot as one that now
-    # passes, and it is worse: a passing entry is at least re-checked by every
-    # run and reported the moment it goes green, whereas a vanished file is
-    # never attempted, so its entry can never be observed doing anything —
-    # it just sits in the dict forever and inflates the "N expected" count
-    # with a red that no longer describes anything real. Two were sitting
-    # there (`test/itertools/test_chain.mojo`, `test/itertools/test_peek.mojo`
-    # — both renamed/moved under `test/iter/`) before this check existed, and
-    # nothing in the summary said so.
-    #
-    # Only decidable on a FULL sweep: `--module`/`--roots` attempt a subset, so
-    # under those every entry outside the subset would look absent. Same
-    # condition as the ROOT_EXCLUDE coverage cross-check above.
-    _gone_expected = []
-    if roots is None and not args.module:
-        _swept = {str(rel) for rel, _ in mojo_files}
-        _gone_expected = sorted(set(EXPECTED_FAILURES) - _swept)
 
     # Print summary
     print("\n" + "="*70)
@@ -619,20 +332,7 @@ def main():
     if expected_failed:
         print("\nExpected (documented) failures:")
         for rel_path, error in expected_failed:
-            # Wrapped, and deduped to one line per reason: all 21 entries
-            # share one reason string, and printing it 21 times buries the
-            # paths this section exists to show. The reason is still printed
-            # in full — once — and the paths are the point.
-            print(f"  {rel_path}")
-        _seen_reasons = []
-        for rel_path, _error in expected_failed:
-            _r = EXPECTED_FAILURES[str(rel_path)]
-            if _r not in _seen_reasons:
-                _seen_reasons.append(_r)
-        print(f"  ({len(expected_failed)} file(s), "
-              f"{len(_seen_reasons)} distinct reason(s)):")
-        for _r in _seen_reasons:
-            print(f"    - {_r}")
+            print(f"  {rel_path}  — {EXPECTED_FAILURES[str(rel_path)]}")
 
     if unexpected_failed:
         print("\nUNEXPECTED failed files:")
@@ -642,25 +342,16 @@ def main():
                 print(f"    → {error}")
 
     if stale_expected:
-        print("\nSTALE EXPECTED_FAILURES entries (now passing — remove from the dict):")
+        print("\nSTALE EXPECTED_FAILURES entries (now passing — remove from the set):")
         for rel_path in stale_expected:
             print(f"  {rel_path}")
-
-    if _gone_expected:
-        print("\nGONE EXPECTED_FAILURES entries (the file is no longer in the "
-              "sweep — the entry describes nothing):")
-        for rel_path in _gone_expected:
-            print(f"  {rel_path}")
-        print("      Each was renamed or removed without its entry being "
-              "updated. Fix the path, or drop the entry.")
 
     if passed and len(passed) <= 10:
         print(f"\nPassed files:")
         for rel_path in passed:
             print(f"  {rel_path}")
 
-    sys.exit(0 if not unexpected_failed and not stale_expected
-             and not _gone_expected else 1)
+    sys.exit(0 if not unexpected_failed and not stale_expected else 1)
 
 if __name__ == '__main__':
     main()

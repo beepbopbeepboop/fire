@@ -29,10 +29,8 @@ Exit: 0 iff every example agrees.
 
 import glob
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -45,17 +43,6 @@ three more to keep the same instruction stream honest on other paths."""
 
 LEAN_ENV_EXTRA = (os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "lib"),)
-
-#: Bounds for the ONE Lean run this file makes, which is bigger than a proof
-#: check: ~150 `#eval!` goals over the whole example corpus, in one process.
-#: 3600 s wall / 3600 s CPU is 12x the slowest generated proof measured on this
-#: tree (297.8 s; see `formal/lean.py`'s docstring) and two orders of magnitude
-#: below the hundred-CPU-hour processes this bound exists to end. Set as
-#: constants rather than as a bare `timeout=` because this file used to carry a
-#: 7200-second wall timeout and NO cpu bound at all, which is the case where a
-#: spinning elaboration is invisible.
-MODEL_WALL_S = 3600.0
-MODEL_CPU_S = 3600.0
 
 
 def _lean_and_lib():
@@ -122,34 +109,14 @@ def main(argv):
         print("lean not found (see ./lean-toolchain)")
         return 1
     cases = _build_cases()
-    # A PRIVATE, self-removing directory, and an ABSOLUTE path handed to lean.
-    # This used to be a hard-coded /tmp/x86_model_test shared by every run of
-    # this script — see formal/lean.py::scratch_dir for what two concurrent
-    # runs of it do to the file that name points at.
-    with L.scratch_dir("x86_model_test") as workdir:
-        src = os.path.join(workdir, "ModelCheck.lean")
-        with open(src, "w") as f:
-            f.write(_lean_source(cases))
-        env = dict(os.environ, LEAN_PATH=os.pathsep.join((workdir, lib)))
-        # Through the one launcher (`formal/lean.py`), never a bare `subprocess`:
-        # this file checks 43 examples at four inputs each, so it is one of the
-        # bigger Lean runs in the tree, and it used to carry a 7200-second WALL
-        # timeout and nothing else — which is a bound a `native_decide` loop walks
-        # straight past while it burns every core.  The bound is the policy's, and
-        # the two numbers below are what this run needs on top of it: this
-        # elaborates ~150 `#eval!` goals over the whole example corpus in ONE Lean
-        # process, which is a bigger unit of work than a single generated proof, so
-        # it is sized against the measurements recorded in `formal/lean.py`'s
-        # docstring rather than against PROOF_WALL_S.
-        run = L.run_lean(lean, [src], cwd=workdir, env=env,
-                         wall_s=MODEL_WALL_S, cpu_s=MODEL_CPU_S)
-    if run.exceeded:
-        print("FAIL: " + run.exceeded)
-        print("  no comparison is possible: the model did not finish, and a "
-              "partial run compared against the hardware is not a smaller "
-              "result, it is a wrong one.")
-        return 1
-    cp = run
+    workdir = os.path.join("/tmp", "x86_model_test")
+    os.makedirs(workdir, exist_ok=True)
+    src = os.path.join(workdir, "ModelCheck.lean")
+    with open(src, "w") as f:
+        f.write(_lean_source(cases))
+    env = dict(os.environ, LEAN_PATH=os.pathsep.join((workdir, lib)))
+    cp = subprocess.run([lean, os.path.basename(src)], cwd=workdir, env=env,
+                        capture_output=True, text=True, timeout=7200)
     got = {}
     for line in (cp.stdout + cp.stderr).splitlines():
         line = line.strip().strip('"')

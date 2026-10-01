@@ -125,30 +125,16 @@ downstream of the same unbounded accumulation.
 ## 4. Next lever
 
 **Per-module AST lifetime** — the untried structural fix, and the one the
-evidence points at. The two confirmed-cheap wins this section used to list
-as "documented and still undone" are both DONE now; that line was stale and
-was corrected on 2026-10-01:
+evidence points at. Two confirmed-cheap wins are documented and still
+undone:
 
-1. ~~The three `_selfhost_*` passes tokenize the same file list **3x**,
-   under three separate cache keys.~~ **Fixed.** All three
-   (`_selfhost_module_scalar_globals`, `_selfhost_struct_dict_field_val_types`,
-   `_selfhost_homogeneous_tuple_ret_funcs`) now read
-   `module_shared._selfhost_parsed_modules`, one list built from the shared
-   per-FILE cache `funcs_shared._selfhost_parsed_source` (keyed
-   `path + '@' + mtime`). One parse per file, shared by every pass, and the
-   per-file key means editing one file re-reads one file rather than
-   invalidating all three passes wholesale.
-2. ~~`_set_grow`'s replay probes each key **twice**.~~ **Fixed, along with
-   three silent bugs found while fixing it** (bytes entries dropped by the
-   rehash, every string strdup'd then freed, and a recursive `_set_grow` the
-   replay's `next_seq` save/restore existed to paper over). The replay is now
-   `_set_replay_entry`, which probes once and stamps `seq` directly.
+1. The three `_selfhost_*` passes tokenize the same file list **3x**,
+   under three separate cache keys — so the cache cannot help, and the
+   work is done three times.
+2. `_set_grow`'s replay probes each key **twice**.
 
-Both are repeated-work, not growth, which is why neither is the fix — the fix
-is still not releasing anything. What they do change is the slope's constant:
-the shared parse is ~1/3 the instructions and ~1/3 the retained AST nodes for
-that seed work, so the remaining measurement has to be re-taken rather than
-compared against §2's 58.6 GB / 1.24 T instructions.
+Both are repeated-work, not growth, so both are cheap wins rather than
+the fix. The fix is not releasing anything.
 
 ## 5. Rules for measuring this, learned the hard way
 

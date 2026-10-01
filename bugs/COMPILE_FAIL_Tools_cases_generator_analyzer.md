@@ -1,149 +1,5 @@
 # COMPILE_FAIL: Tools/cases_generator/analyzer.py
 
-## Status 2026-10-01 — the `var_decl` error below is STILL this file's own; but its `194: expected expression before '('` sibling is NOT, and belongs to a same-bare-name STRUCT collision
-
-Fresh `python3 fire.py build .tmp/ca/cases_generator/analyzer.py` (sources
-copied from `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/`),
-arm64: **11 `error:` lines**, of two distinct families.
-
-### Family A (this file's own, unchanged): the `var_decl` loop-variable store
-
-```
-.tmp/ca/cases_generator/analyzer.py:723:1: error: non-trivial conversion in 'var_decl'
-```
-
-Byte-identical to the entry below, including its raised-on C. Not attempted;
-that entry's analysis stands (the `char * tkn` loop variable against
-`stmt.contents`' unknown element type — the list-element-typing family).
-
-### Family B (NOT this file's): `194: expected expression before '(' token`
-
-```
-.tmp/ca/cases_generator/analyzer.py:194:10: error: expected expression before '(' token
-  194 |         print(indent, self.stack, ", ".join([str(c) for c in self.caches]))
-```
-
-This LOOKS like a comprehension-inside-`str.join` lowering bug and is not.
-Compiling `analyzer.py` directly — `do_imports=True` and
-`do_imports=False`, both dumped and read — produces a `Uop_dump` that is
-entirely correct:
-
-```c
-_t21 = mojo_list_get_int (_t17, _t19);
-_t24 = CacheEntry___str__ (_t23);
-_t25 = (_t23 ? _t24 : _slit_10035);
-mojo_list_append_str (_t16, _t25);
-...
-_t28 = mojo_str_join (_t15, _t16);
-```
-
-every temp correctly typed, the comprehension correctly turned into an
-indexed loop, the `? :` None-guard present. The minimal fixtures
-(`", ".join([str(c) for c in self.caches])` with and without a class
-receiver, and the generator-expression spelling) all compile.
-
-It fails only under `fire.py build`, which compiles the whole
-`Tools/cases_generator` sibling set into one unit — where `parser.py`'s
-errors are present:
-
-```
-parser.py:48:3:  error: too many arguments to function
-                        'fire_compiler_Parser___init__'; expected 2, have 3
-parser.py:52,58,67,68,72,74,75: implicit declaration of function
-                        'fire_compiler_Parser_{next,getpos,setpos,peek,
-                                              definition,eof,backup}'
-```
-
-`cases_generator/parsing.py:333` declares `class Parser(PLexer)` and
-`parser.py:1` re-exports it across a module boundary, while
-`fire_compiler.py:2869` declares its own `class Parser` with a different
-`__init__`. Root-caused (two independent bare-name-keyed tables, one merged
-C struct layout and one forced `fire_compiler_` method qualifier) in
-`CODEGEN_user_class_named_Parser_merged_with_fire_compiler_Parser`.
-
-**This entry exists so the two families are not confused.** Family A is
-this doc's subject and is unfixed; Family B is fixed nowhere and is not
-this file's to fix — `fire.py build`'s one-unit-per-Tools-subtree policy is
-what makes a sibling's failure surface as this file's error.
-
-## Status (2026-09-30, branch work/compile-fail-stdlib-misc — own-file errors 4 → 1; the three gone were a C-style cast used as a GIMPLE operand, which is now the tree's one `_inc_val`)
-
-Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Tools/cases_generator/analyzer.py`
-(13 s, exit 1). Was **4** own-file `error:` lines; now **1**.
-
-### FIXED this session (commit `6a7c69fd`): `_tN = _t71 + (int64_t)1` is not legal GIMPLE
-
-Two of the four were
-
-```
-analyzer.py:700:17: error: expected expression before '(' token
-analyzer.py:715:18: error: expected expression before '(' token
-```
-
-and the reported source lines (`next(tkn_iter)`, the following `def`) were
-misleading — stripping the `#line` directives and recompiling puts GCC's
-caret squarely on the `(int64_t)` of `_t99 = _t71 + (int64_t)1;`, i.e.
-`_t71 + 1` from the `tokens[idx+1]` at analyzer.py:719. Five
-cursor/counter advances spelled their increment that way: the `next(it)`
-cursor, the `for x in it:` cursor, the regex finditer/findall scan
-positions, and the enumerate counter.
-
-A C-style cast is not a legal gimple OPERAND, so the error is confined to
-`__GIMPLE`-tagged bodies — a lifted closure, i.e. every nested `def`. Both
-of analyzer.py's `visit` helpers are nested `def`s, which is why nothing
-in the existing corpus caught it. The tree already knew the rule
-(`_gen_for_range`'s own `step_v` uses `1LL` for exactly this reason, with
-a comment naming `idx + (int64_t)1` as the failure), so the five sites had
-each grown its own cast instead of using the idiom; they now share one
-helper, `_inc_val`, next to `_new_val`. Regression test
-`cursor_advance_has_no_cast_operand_in_gimple` on both pipelines with
-CPython on the same text: FAIL before (`gcc -fgimple: expected expression
-before '(' token` ×2), PASS after.
-
-### Still blocking: ONE error
-
-```
-analyzer.py:723:1: error: non-trivial conversion in 'var_decl'
-```
-
-raised on
-
-```
-  char * tkn;
-  ...
-  _t74 = mojo_list_get_int (tkn_iter, _t71);
-  tkn = _t74;
-```
-
-`check_escaping_calls_visit` (analyzer.py:690-712) does
-`tkn_iter = iter(stmt.contents)` then `for tkn in tkn_iter:`. The local
-`tkn` is declared `char *` by usage inference (its only uses are
-`tkn.kind` / `tkn.text`, lowered as `_mojo_dispatch_getattr` on an opaque
-handle), but the loop's element read goes through
-`mojo_list_get_int` because `stmt.contents`' element type is unknown, so
-an `int64_t` is stored into the `char *`. GIMPLE rejects that store
-outright; coercing it instead would be a silent reinterpretation of the
-element pointer's bits as a string, which is strictly worse.
-
-So the two defensible fixes are both real work, and neither is narrow:
-thread the element type of a foreign struct's list-valued field into the
-loop-variable's read, or read the element as whatever the loop variable's
-declared type is and let the `.kind`/`.text` dynamic dispatch take it from
-there. NOT attempted — this is the list-element-typing family that
-`construct:cross-function-element-type` / the `hard/` container-element
-docs track, and a wrong guess here silently reinterprets a pointer as a
-string.
-
-### The two architectural blockers below are unchanged
-
-Link-mode sibling resolution still stubs `parser.*` / `lexer.*` (so
-`analyzer.py` reaches gcc but links against weak stubs), and
-`parsing.py`'s polymorphic `yield from self.<field>.tokens()` generators
-are still refused — see `bugs/COMPILE_FAIL_Tools_cases_generator_parsing.md`,
-whose own status changed materially this session.
-
-Doc kept open on the one remaining error.
-
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/cases_generator/analyzer.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
@@ -395,7 +251,7 @@ exit 1). Single error, identical to 2026-08-07:
 build2, at tree.cc:5204`. This file (`analyzer.py`) itself is not
 directly implicated — the failure is entirely in the transitively-
 imported `cwriter.py` (`import lexer`/`from cwriter import CWriter`
-chain). `“COMPILE_FAIL: Tools/cases_generator/cwriter.py”` (checked
+chain). `bugs/COMPILE_FAIL_Tools_cases_generator_cwriter.md` (checked
 the same session) confirms this GCC ICE is still open there too, and
 is a genuinely different/deeper bug than the field-typing gap (task
 #143) that used to mask it — not a generator/coroutine yield-type
@@ -426,10 +282,10 @@ not this file's own code:
 /Users/mrs/net/Python-3.14.6/Tools/cases_generator/cwriter.py:20:1: error: type mismatch in binary expression
 ```
 
-Root-caused in `“COMPILE_FAIL: Tools/cases_generator/cwriter.py”` (a
+Root-caused in `bugs/COMPILE_FAIL_Tools_cases_generator_cwriter.md` (a
 comprehension-assigned struct field defaulting to `int` instead of
 `MojoList *` — new sibling gap originally recorded in
-`“the constructor-call-site field-typing pass understood only scalars”`, the doc that
+`bugs/hard/CODEGEN_ctor_arg_field_type_scalars_only.md`, the doc that
 supersedes the removed
 `CODEGEN_unannotated_init_param_field_type_defaults_int64.md`).
 `analyzer.py` imports `lexer`/`cwriter` transitively; nothing specific
