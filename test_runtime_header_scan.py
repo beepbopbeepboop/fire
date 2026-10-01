@@ -181,10 +181,16 @@ def test_every_declaration_is_seen():
     #   465 -> 466 (metal): one more entry point, from the self-host closure
     #   work in d446f5be.
     # Verified by COUNTING the merged header, not by adding the two deltas:
-    # `reflect.collect_runtime_exports_h('runtime/fire_runtime.h')` returns 475
+    # `reflect.collect_runtime_exports_h('runtime/fire_runtime.h')` returns 479
     # on the merged tree. Take this number from that call, not from the
     # arithmetic -- that is the whole point of the check.
-    for header, want in (('fire_runtime.h', 475),
+    #
+    # 475 -> 479 (2026-09-30): the four container value-equality entry points
+    # (`mojo_list_eq` / `mojo_dict_eq` / `mojo_set_eq` / `mojo_value_eq`). They
+    # are declared here rather than in their container's own section because
+    # unlike every other comparison primitive all three container types have to
+    # be complete first -- see bugs/CODEGEN_container_eq_is_pointer_identity.md.
+    for header, want in (('fire_runtime.h', 479),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

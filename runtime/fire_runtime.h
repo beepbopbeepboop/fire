@@ -952,6 +952,37 @@ void         mojo_set_iter_free(MojoSetIter *it);
 
 void     mojo_set_print(MojoSet *s);
 
+/* ── Value equality ─────────────────────────────────────────────────────────
+ * `a == b` / `a != b` between two VALUES, as Python defines it — not as C
+ * does, where comparing two `MojoList *` is a pointer comparison that answers
+ * True only for one object compared with itself. Every convergence test the
+ * compiler's own source writes over containers is `while nxt != proven:` with
+ * `nxt` and `proven` two separate allocations, so the pointer comparison
+ * never fired and the loop never ended
+ * (bugs/CODEGEN_container_eq_is_pointer_identity.md). See fire_runtime.c's
+ * "`==` / `!=` between values" block for the whole story.
+ *
+ * `elem` is the element code the CODEGEN knows statically for the container
+ * it built — MOJO_EQ_UNKNOWN asks the container's own per-slot kinds instead,
+ * which is the only evidence available for an operand erased to int64_t. It is
+ * PER SIDE (`ea`, `eb`) because `[1.0] == [1]` is a legitimate program and one
+ * code cannot describe both halves of it.
+ * Declared here, after all three container types, because unlike every other
+ * comparison primitive these three need all of them. */
+#define MOJO_EQ_UNKNOWN 0
+#define MOJO_EQ_INT     1
+#define MOJO_EQ_DOUBLE  2
+#define MOJO_EQ_STR     3
+#define MOJO_EQ_BYTES   4
+#define MOJO_EQ_GENERIC 5
+int mojo_list_eq(MojoList *a, MojoList *b, int ea, int eb);
+int mojo_dict_eq(MojoDict *a, MojoDict *b, int va, int vb);
+int mojo_set_eq(MojoSet *a, MojoSet *b, int ea, int eb);
+/* `a == b` for two operands whose static types the codegen could not BOTH
+ * resolve — the shape a container handed to an unannotated parameter takes.
+ * `elem` describes the side the codegen knew and is applied to both. */
+int mojo_value_eq(int64_t a, int64_t b, int elem);
+
 /* ── Python integration ─────────────────────────────────────────────────*/
 void mojo_print(char *str);
 void mojo_print_stderr(char *str);
