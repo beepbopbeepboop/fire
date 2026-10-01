@@ -136,8 +136,23 @@ int main(int argc, char **argv) {
 
     size_t na = (size_t)M*K, nb = (size_t)K*N, nc = (size_t)M*N;
     float *A = (float *)malloc(na*4), *B = (float *)malloc(nb*4), *C = (float *)malloc(nc*4);
-    for (size_t i = 0; i < na; i++) A[i] = (float)((i * 37) % 17) * 0.01f - 0.08f;
-    for (size_t i = 0; i < nb; i++) B[i] = (float)((i * 53) % 13) * 0.01f - 0.06f;
+    /* EQUIV mode uses the same data as test_llm/dumb_gemm.mojo: exact multiples
+     * of 1/16, so every partial sum is exactly representable in f32 and the
+     * reduction order cannot change the answer. The tensor-core kernel reduces
+     * in a completely different ORDER from the naive triple loop, so the two
+     * must agree BIT-EXACTLY. A tolerance check would hide a transposition. */
+    int equiv = getenv("EQUIV") != NULL;
+    if (equiv) {
+        if (M != 64 || K != 64 || N != 64) {
+            printf("EQUIV mode is defined for 64x64x64 (the dumb_gemm sizes)\n");
+            return 2;
+        }
+        for (size_t i = 0; i < na; i++) A[i] = (float)((i * 37) % 17) * 0.0625f - 0.5f;
+        for (size_t i = 0; i < nb; i++) B[i] = (float)((i * 53) % 13) * 0.0625f - 0.25f;
+    } else {
+        for (size_t i = 0; i < na; i++) A[i] = (float)((i * 37) % 17) * 0.01f - 0.08f;
+        for (size_t i = 0; i < nb; i++) B[i] = (float)((i * 53) % 13) * 0.01f - 0.06f;
+    }
     memset(C, 0, nc*4);
 
     @autoreleasepool {
@@ -228,6 +243,30 @@ int main(int argc, char **argv) {
                 double t0 = now_ms(); [cb commit]; [cb waitUntilCompleted];
                 double d = now_ms()-t0; if (d < best) best = d;
             }
+        }
+        if (equiv) {
+            /* Print exactly what dumb_gemm.mojo prints, in the same order, so
+               the two can be diffed as text. C[4095] is row 63 col 63. */
+            double total = 0.0;
+            for (int i = 0; i < M*N; i++) total += (double)C[i];
+            printf("checksum %.17g\n", total);
+            printf("elems %.9g %.9g %.9g %.9g %.9g\n",
+                   (double)C[0], (double)C[1], (double)C[63],
+                   (double)C[64], (double)C[4095]);
+            /* and the naive C triple loop, for a third opinion */
+            static float Ref[64*64];
+            for (int i = 0; i < 64; i++)
+              for (int j = 0; j < 64; j++) {
+                float acc = 0.0f;
+                for (int pp = 0; pp < 64; pp++)
+                  acc += A[(size_t)i*64+pp] * B[(size_t)pp*64+j];
+                Ref[(size_t)i*64+j] = acc;
+              }
+            int bad = 0;
+            for (int i = 0; i < 64*64; i++) if (Ref[i] != C[i]) bad++;
+            printf("bit-exact vs naive C triple loop: %s (%d/%d differ)\n",
+                   bad ? "NO" : "YES", bad, 64*64);
+            return 0;
         }
         double flops = 2.0 * M * N * K;
         double tf = flops / (best*1e-3) / 1e12;
