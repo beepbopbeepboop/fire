@@ -5194,67 +5194,375 @@ def _rewrite_self_fields(node, mapping: dict):
     return node
 
 
-def _constant_read_sites(body, structs_by_name: dict) -> dict:
-    """{access path: struct} for every read of a class-level constant.
+def _binding_names(node) -> list:
+    """The names one node binds, as strings — every shape, not just `x = …`.
 
-    The two spellings that are provably a read of the CLASS's own value:
-    `S.NAME`, where `S` is the struct's name, and `x.NAME` where `x` is a local
-    initialised from `S()`. A read through any other object is deliberately not
-    in here: without types, `o.NAME` might be an instance of `S` (a constant) or
-    of some other struct with a real field of the same name (a field), and
-    guessing is the error this whole rule is arranged to avoid.
+    `_write_targets` is the enumeration (declaration, assignment, augmented
+    assignment, `for`, `with … as`, tuple target, comprehension target,
+    `except … as`), and this adds the two the census below needs and
+    `_write_targets` has no opinion about: the name a `VarDecl` introduces and
+    the parameters of a NESTED `def`/`lambda`, which shadow an outer local of
+    the same name inside a body this pass will also rewrite."""
+    out = []
+    for t in _write_targets(node):
+        name = t if isinstance(t, str) else getattr(t, "name", None)
+        if isinstance(name, str):
+            out.append(name.lstrip("*"))
+    if isinstance(node, F.VarDecl) and isinstance(node.name, str):
+        out.append(node.name)
+    kind = type(node).__name__
+    if kind in ("FunctionDef", "LambdaExpr"):
+        for p in (getattr(node, "params", None) or []):
+            if isinstance(p, (tuple, list)) and p and isinstance(p[0], str):
+                out.append(p[0].lstrip("*"))
+    return out
 
-    A receiver spelling (`self.NAME`) is not here either, and cannot be: the
-    model counts any name a method reaches that way as a FIELD, precisely so
-    this decision never has to be made."""
-    aliases = {}
-    for node in M.iter_nodes(body):
+
+def _constant_constructor_bindings(fn, structs_by_name: dict) -> dict:
+    """`{local: struct}` for a local this body can only have bound to ONE struct.
+
+    The evidence for a `x.NAME` read of a class-level value, and what makes it
+    a census rather than a guess: a local qualifies only when EVERY binding of
+    it in this body is a call to that struct's constructor and nothing else
+    could have bound it.
+
+    Which is stricter than the shape this replaced, and deliberately so — the
+    earlier version kept the LAST `x = S(...)` it walked past and answered every
+    `x.NAME` from it, which produced a wrong number rather than a refusal. The
+    program that shows it:
+
+        struct S:
+            var n: Int
+            LIMIT = 3
+        struct T:
+            var LIMIT: Int
+        def pick(flag: Int) -> Int:
+            var o = T()
+            if flag:
+                o = S(1)
+            return o.LIMIT
+
+    With `flag == 0` the receiver is a `T` whose `LIMIT` was never written, so
+    this path's own model says the answer is the word 0 (`struct_default_word`'s
+    `DEFAULT_NONE` for a field with no initializer); the image built, ran, and
+    printed 3 on BOTH branches, on both architectures. Now `o` is dropped and the
+    read is refused, which is the outcome this path exists to prefer over a
+    plausible number.
+
+    Three ways a name can be bound without a constructor call, and all three
+    disqualify it:
+
+      * a PARAMETER, which the caller may have filled with anything — so a
+        constructor binding inside the body is one arm of the function, not the
+        function;
+      * a binding of any other shape (`o = other`, `for o in …`, `o, x = …`,
+        `with … as o`, `o += 1`, a comprehension target), enumerated by
+        `_binding_names` so this census and the shadowing rule in
+        `_substitute_module_constants` read the same set of bindings;
+      * a NESTED `def`/`lambda` parameter of the same name, which shadows the
+        outer local in a body this rewrite also visits — the lambdas are lifted
+        to functions AFTER this pass, so their parameters are still spelled in
+        place here.
+
+    Two bindings of the SAME struct are fine (`o = S(1)` on both arms): the
+    question is what the name can hold, not how often it was written. Two
+    bindings of DIFFERENT structs are a disagreement, and are refused like every
+    other disagreement on this path.
+
+    Returns `(agreed, disputed)`. The second half is what the REFUSAL is built
+    from, and it is reported rather than dropped: the emitter's own
+    `model.field_access_refusal` answers a base it cannot place with "'o' is
+    bound here as a parameter", which for `var o = T()` / `o = S(1)` is not
+    what happened at all, and it offers as the remedy the very thing the source
+    already did. `disputed[name]` is `[(struct name, the source's spelling of
+    that binding)]`, so the diagnostic can name the disagreement and the line
+    that caused it instead of guessing at a binding it does not have
+    (`_class_read_disagreement`)."""
+    bound_elsewhere = set()
+    for p in (getattr(fn, "params", None) or []):
+        if isinstance(p, (tuple, list)) and p and isinstance(p[0], str):
+            bound_elsewhere.add(p[0].lstrip("*"))
+    ctor, disputed = {}, {}
+    for node in M.iter_nodes(getattr(fn, "body", None) or []):
         target = value = None
         if isinstance(node, F.VarDecl):
             target, value = node.name, node.value
         elif isinstance(node, F.AssignStmt) and isinstance(node.target,
                                                            F.IdentExpr):
             target, value = node.target.name, node.value
+        struct_name = None
         if target and isinstance(value, F.CallExpr) \
                 and isinstance(value.func, F.IdentExpr) \
                 and value.func.name in structs_by_name:
-            aliases[target] = value.func.name
+            struct_name = value.func.name
+        names = _binding_names(node)
+        if not names and isinstance(target, str):
+            names = [target]
+        for name in names:
+            if struct_name is not None and name not in bound_elsewhere:
+                seen = disputed.setdefault(name, [])
+                if not any(s == struct_name for s, _spelling in seen):
+                    seen.append((struct_name, M.expr_spelling(value)))
+            if name in bound_elsewhere or struct_name is None \
+                    or ctor.get(name, struct_name) != struct_name:
+                ctor.pop(name, None)
+                continue
+            ctor[name] = struct_name
+    return ({name: structs_by_name[s] for name, s in ctor.items()},
+            {name: sorted(bindings) for name, bindings in disputed.items()
+             if name not in ctor and len(bindings) > 1})
+
+
+def _class_read_disagreement(fn, structs_by_name: dict) -> dict:
+    """`{access path: diagnostic}` for every class-level value a base may not be.
+
+    The reads this path cannot answer because the BASE is a local bound from two
+    different constructors and the name means different things on each — `o`
+    built from `S()` and from `T()`, read as `o.LIMIT`, where `LIMIT` is a
+    class-level constant of one and a field of the other.
+
+    It is a refusal with its own words rather than a gap, because the two
+    available answers are both wrong and the emitter's is the more wrong of the
+    two. Substituting the constant would answer a field read with a literal;
+    falling through to the field lowering would answer it with whatever the word
+    holds; and what the emitter says instead — `field_access_refusal`'s "'o' is
+    bound here as a parameter" — is a claim about a binding that never happened,
+    followed by a remedy (`bind the base from a constructor this module
+    declares`) the source has already used. A refusal whose stated reason is
+    entirely false is the worst outcome on this path
+    (`bugs/FORMAL_frame_receiver_handoff.md` §4), and this is the one place the
+    disagreement is actually known.
+
+    Only a path whose name is a class-level value of one of the candidates is
+    reported. A name that is a plain field of all of them is not ambiguous —
+    whichever struct it is, the read is a field read — so it is left to the
+    field path, which can place it or refuse it with a reason about the layout.
+    And nothing is reported for a name that is not read: the caller raises this
+    at the read site, so an unused local costs nothing.
+    """
+    _agreed, disputed = _constant_constructor_bindings(fn, structs_by_name)
     out = {}
-    for st in structs_by_name.values():
-        for name, _default in M.struct_class_constants(st):
-            out[f"{st.name}.{name}"] = st
-    for local, struct_name in aliases.items():
-        for key in [k for k in out if k.startswith(struct_name + ".")]:
-            out[f"{local}.{key.split('.', 1)[1]}"] = out[key]
+    for local, bindings in sorted(disputed.items()):
+        structs = [structs_by_name[n] for n, _spelling in bindings
+                   if n in structs_by_name]
+        spellings = ", ".join(spelling for _n, spelling in bindings)
+        for st in structs:
+            for name, _default in M.struct_class_constants(st):
+                path = f"{local}.{name}"
+                if path in out:
+                    continue
+                kind = _constant_kind(st, name)
+                others = [s for s in structs if s is not st]
+                other_text = ", ".join(
+                    f"{s.name} declares {name!r} as "
+                    + ("a field" if name in M.struct_field_names(s)
+                       else "nothing at all")
+                    for s in others)
+                out[path] = (
+                    f"{path} reads a {'`comptime` class attribute' if kind == 'comptime' else 'class-level constant'}"
+                    f" of {st.name} through {local!r}, and {local!r} is built "
+                    f"from more than one constructor in this function "
+                    f"({spellings}): {other_text}. So the same spelling is the "
+                    f"class's own value on one path and "
+                    + ("a field" if others and any(
+                        name in M.struct_field_names(s) for s in others)
+                       else "nothing readable")
+                    + f" on another, and which one reaches this read depends on "
+                    f"which binding ran — which is a question about control "
+                    f"flow, and this path lowers a field from the BINDING of its "
+                    f"base with no analysis of which binding is live. Refused "
+                    f"rather than answered from either: the literal is a wrong "
+                    f"number where the read is a field, and the field is a wrong "
+                    f"number where the read is the constant. Use two names, or "
+                    f"read the class's own value through the class "
+                    f"({st.name}.{name})")
     return out
 
 
-def _constant_literal(struct_def, name: str):
-    """The literal node a read of `struct_def`'s constant `name` yields, or None.
+def _constant_read_sites(fn, structs_by_name: dict, owner=None) -> dict:
+    """{access path: (struct, kind)} for every read of a class-level constant.
 
-    None when the constant's value is not a literal this path can materialize
-    exactly — a dict, a list, a call, a name. The caller refuses there; see
-    `_rewrite_class_constants` for why substituting a zero is not an option."""
+    `fn` and not a statement list, because the evidence below is a property of
+    the FUNCTION: what it binds, and which struct it is a method of. Both call
+    sites have the function and neither has anything else.
+
+    `kind` is `"constant"` for a class-level assignment and `"comptime"` for a
+    `comptime NAME = …` binding, and the two are named differently in a refusal
+    because they are different constructs: one is a value the class body
+    assigned, the other is a compile-time binding with no word behind it at all
+    (`model.struct_comptime_aliases`). Both are materialized at the read by the
+    same rewrite, because both are one value for every instance.
+
+    Four spellings, each with the evidence that makes the name the CLASS's own
+    value rather than a same-named field of something else:
+
+      * `S.NAME`, where `S` is the struct's own name. Unambiguous — provided the
+        function does not itself bind a local called `S`, which is checked
+        against the same bound-name set the module-constant substitution uses,
+        because a local of that name is what the source means there.
+      * `self.NAME` (and `this`/`cls`, or whatever this struct's methods spell
+        their receiver — `model.struct_receivers`) and `Self.NAME`, inside a
+        method of `S`. The receiver is an `S` or a SUBCLASS of it, which is why
+        anything this unit derives from `S` disqualifies it: see
+        `model.struct_is_derived_from`.
+      * `x.NAME` where `x` is a local every binding of which constructs `S`
+        (`_constant_constructor_bindings`), or a parameter declared `x: S`
+        (`model.parameter_declared_structs` — the same declaration evidence the
+        frame-slot check uses for `other.start` in `Slice.__eq__`).
+
+    The receiver spellings are deliberately NOT offered for a class-level
+    ASSIGNMENT. `self.A` with `A = 3` stays a field, because that is what
+    `struct_default_word` puts the 3 behind and what makes the spelling correct
+    for a one-field struct (the note above `model.struct_class_constants` has the
+    argument). A `comptime` binding is the case they are for: it has no word to
+    put anything behind, so `self.rank` in a struct declaring `comptime rank: Int
+    = 3` reads the 3 — in the language, and in `myinterpreter`'s
+    `_eval_member_of`.
+
+    A read through any OTHER object is not here and still cannot be: without
+    types, `o.NAME` might be an instance of `S` (a constant) or of some other
+    struct with a real field of the same name (a field), and guessing is the
+    error this whole rule is arranged to avoid."""
+    sites = {}
+    if not structs_by_name:
+        return sites
+    bound = _names_bound_in(fn)
+    for st in structs_by_name.values():
+        if st.name in bound:
+            continue
+        for name, _default in M.struct_class_constants(st):
+            sites[f"{st.name}.{name}"] = (
+                st, "comptime" if name in M.struct_comptime_aliases(st)
+                else "constant")
+    def publish(holder, st, comptime_only):
+        """Every read of `st`'s class-level values through `holder`.
+
+        `comptime_only` is the receiver case and the reason the two are not one
+        loop: `self.A` for a class-level ASSIGNMENT stays a field (see the
+        docstring), while `self.rank` for a `comptime` binding is the binding.
+
+        A subclass REDECLARING a binding withholds exactly that one read, and the
+        site is recorded as `overridden` rather than dropped so the refusal can
+        say why — see `_overridden_comptime_refusal`. The two shapes are kept
+        apart on purpose: `Child(Base)` that overrides `rank` makes `self.rank`
+        inside a method `Base` declares unanswerable, and a `Child(Base)` that
+        inherits it changes nothing, so disqualifying the whole struct would
+        refuse a program whose answer is exact."""
+        shadowed = _overridden_comptime_names(structs_by_name, st)
+        for name, _default in M.struct_class_constants(st):
+            kind = _constant_kind(st, name)
+            if comptime_only and kind != "comptime":
+                continue
+            if holder != st.name and name in shadowed:
+                sites[f"{holder}.{name}"] = (st, "overridden")
+                continue
+            sites[f"{holder}.{name}"] = (st, kind)
+
+    # A LOCAL (or a parameter) bound to `S` may read ANY of `S`'s class-level
+    # values: the base is the value the call site or the declaration says it is,
+    # and nothing about `x.A` is a field read when `A` is the class's own value.
+    locals_ = dict(_constant_constructor_bindings(fn, structs_by_name)[0])
+    for local, st in M.parameter_declared_structs(
+            fn, structs_by_name, owner).items():
+        locals_.setdefault(local, st)
+    for local, st in locals_.items():
+        publish(local, st, comptime_only=False)
+    # The RECEIVER, and `Self` beside it. Only a `comptime` binding is readable
+    # through these; see the docstring for why the assignment case is not.
+    if owner is not None:
+        for receiver in sorted(M.struct_receivers(owner)):
+            publish(receiver, owner, comptime_only=True)
+        shadowed = _overridden_comptime_names(structs_by_name, owner)
+        for name in M.struct_comptime_aliases(owner):
+            sites[f"Self.{name}"] = (
+                (owner, "overridden") if name in shadowed
+                else (owner, "comptime"))
+    return sites
+
+
+def _overridden_comptime_names(struct_defs: dict, st) -> set:
+    """The `comptime` names a struct DERIVED from `st` redeclares.
+
+    The set that decides whether a receiver read of `st`'s own binding can be
+    answered. A subclass that inherits a binding cannot change what it reads — the
+    interpreter merges the bases' aliases into the child and the child's own win,
+    so an inherited one is the base's value verbatim — and a subclass that
+    REDECLARES it makes the read depend on the receiver's class, which this path
+    does not track (`formal/build.py`'s `_method_owners` dispatches a method by
+    name, so a method `st` declares is compiled once and runs with whatever
+    receiver the call site passed)."""
+    out = set()
+    for derived in M.struct_derived_names(struct_defs.values(), st.name):
+        other = (struct_defs or {}).get(derived)
+        if other is not None:
+            out |= set(M.struct_comptime_aliases(other))
+    return out
+
+
+def _overridden_comptime_refusal(struct_def, name: str, spelling: str) -> str:
+    """The refusal for a `comptime` read a subclass redeclares."""
+    return (
+        f"{spelling} reads a `comptime` class attribute of {struct_def.name}, "
+        f"whose value is not necessarily {struct_def.name}'s: a struct "
+        f"deriving from {struct_def.name} in this unit redeclares it, and the "
+        f"interpreter gives the DERIVED class's value — the base's aliases are "
+        f"merged into the child and the child's own win, and a method "
+        f"{struct_def.name} declares is called with whichever receiver the call "
+        f"site passed. This path dispatches a method by NAME and does not track "
+        f"the receiver's class, so it cannot say which of the two a read gets, "
+        f"and answering with {struct_def.name}'s own value would print the "
+        f"parent's number for a child. Read it through the class instead "
+        f"({struct_def.name}.{name}), which is unambiguous, or give the subclass "
+        f"no binding of its own so the two cannot differ"
+    )
+
+
+def _constant_kind(struct_def, name: str) -> str:
+    """`"comptime"` for a `comptime` binding, `"constant"` for an assignment.
+
+    One reading of the two kinds, because the rewrite and the two diagnostics
+    that quote a read all have to agree about which construct a spelling names:
+    a reader told "class-level constant" about `Self.rank` would go looking for
+    a class-level assignment that does not exist."""
+    return "comptime" if name in M.struct_comptime_aliases(struct_def) \
+        else "constant"
+
+
+def _constant_literal(struct_def, name: str):
+    """`(literal node or None, the initializer)` for a read of the constant `name`.
+
+    The initializer comes back with the `None` because that is the half a
+    refusal needs: `Level.NOTSET`'s value is the CALL `Self(0)` and
+    `_ZipIterator._InjectedValues`'s is `Tuple[*Self.Ts]`, and a diagnostic that
+    quotes the thing it could not materialize sends the reader to the line that
+    would have to change, while one that says "not a literal" sends them to
+    search the file for a literal that is not there.
+
+    None for the first half when the value is not a literal this path can
+    materialize exactly — a dict, a list, a call, a name. The caller refuses
+    there; see `_rewrite_class_constants` for why substituting a zero is not an
+    option."""
     for const_name, default in M.struct_class_constants(struct_def):
         if const_name != name:
             continue
         kind, payload = M.class_constant_word(const_name, default)
         if kind == M.DEFAULT_INT:
-            return F.IntLiteral(value=int(payload))
+            return F.IntLiteral(value=int(payload)), default
         if kind == M.DEFAULT_STRING:
-            return F.StringLiteral(value=payload)
-        return None
-    return None
+            return F.StringLiteral(value=payload), default
+        return None, default
+    return None, None
 
 
-def _rewrite_class_constants(node, structs_by_name: dict):
-    """`S.NAME` -> the literal `NAME` holds, in place, over a statement tree.
+def _rewrite_class_constants(fn, structs_by_name: dict, owner=None):
+    """`S.NAME` / `self.NAME` -> the literal `NAME` holds, in place, over `fn`.
 
-    A class-level constant is not part of any value: it is one value for every
-    instance, so there is nothing for a receiver word to hold and nothing for
-    the member-access lowering to read. The two ways this could go wrong are
-    both wrong answers rather than refusals, which is why the value is
-    materialized HERE, at the read, instead of being left to the field path:
+    A class-level constant — a class-level assignment OR a `comptime` binding —
+    is not part of any value: it is one value for every instance, so there is
+    nothing for a receiver word to hold and nothing for the member-access
+    lowering to read. The two ways this could go wrong are both wrong answers
+    rather than refusals, which is why the value is materialized HERE, at the
+    read, instead of being left to the field path:
 
       * leave it. `Regs.R0` then reads the local slot spelled `Regs.R0`, which
         nothing ever writes, and the constant becomes whatever the register
@@ -5268,11 +5576,18 @@ def _rewrite_class_constants(node, structs_by_name: dict):
     the same at every read site in every function), and anything else is
     refused by name: there is no module-global storage on this path for a
     non-literal to live in, and a container constant read as 0 is a
-    plausible-looking wrong number rather than a crash."""
+    plausible-looking wrong number rather than a crash.
+
+    `owner` is the struct `fn` is a method of, and it is what makes the RECEIVER
+    spellings available — `self.rank`, `Self.rank`, and the `this`/`cls`/`Self`
+    spellings `model.struct_receivers` reports for this struct. Without it (a
+    plain function) the receiver of the same name is some other value, and the
+    census in `_constant_read_sites` says so rather than guessing."""
     if not structs_by_name:
-        return node
-    return _apply_constant_sites(node,
-                                 _constant_read_sites(node, structs_by_name))
+        return
+    _apply_constant_sites(
+        fn.body, _constant_read_sites(fn, structs_by_name, owner),
+        _class_read_disagreement(fn, structs_by_name))
 
 
 # ── A module-level NAME, and where its value lives ─────────────────────────
@@ -6962,7 +7277,28 @@ def _variadic_call_note(functions: list, fn, shape) -> str:
             f"{fixed} fixed parameter(s)")
 
 
-def _apply_constant_sites(node, sites: dict):
+# The AST fields that hold a TYPE rather than a value, so that a rewrite which
+# substitutes VALUES knows where not to go.  `VarDecl.type_ann` and
+# `AssignStmt.type_ann` are `x: T`, `FunctionDef.return_type` is `-> T`, and a
+# parameter's annotation is a STRING inside `FunctionDef.params[i][1]` (so there
+# is nothing to substitute there and nothing to skip either — a table of names
+# rather than a set of node types is what keeps that from drifting).
+#
+# Read by `_apply_constant_sites`, whose sites table gained the receiver
+# spellings and with them the possibility of a read in one of these positions.
+#
+# NOT read by `_apply_module_constant_sites`, which is the other
+# value-substituting walk here and has the same shape of question.  Left alone
+# deliberately: that walk is parent-directed (a store target and a callee name
+# are only identifiable from the parent), its sites are a table of NAMES rather
+# than of member reads, and a module-level constant in an annotation is a
+# different exposure with its own measurement.  Widening it from here would be a
+# change nobody measured, and this table is here because a reader of one
+# substitution needs to know about the other.
+_TYPE_POSITION_FIELDS = frozenset({"type_ann", "return_type", "annotation"})
+
+
+def _apply_constant_sites(node, sites: dict, disputed: dict = None):
     """The substitution itself, over a statement tree, in place.
 
     Split from `_rewrite_class_constants` so the sites can be computed once per
@@ -6973,46 +7309,90 @@ def _apply_constant_sites(node, sites: dict):
     `_apply_module_constant_sites` gives at length: `IfStmt.elifs` is a list of
     `(condition, body)` pairs, so without this the class-constant rewrite covered
     `if p.B == 1:` and skipped `elif p.B == 1:` — the same one-position gap, in
-    the second of the two walks that share it."""
+    the second of the two walks that share it.
+
+    A TYPE POSITION is skipped whole, and that is a correctness fix rather than a
+    politeness: `var _value: Self._mlir_type` in `std/builtin/none.mojo` is a
+    read of a `comptime` binding in an ANNOTATION, and an annotation is not
+    evaluated on this path — `struct_field_names`, `annotation_base_name` and
+    `struct_field_declared_type` read the SPELLING. Substituting there would put
+    the integer 3 where the source wrote a type (`var _v: 3`) and refuse on the
+    next one (`NoneType._mlir_type` is not a literal, so it would have taken
+    `builtin/none.mojo` — measured, one of only two stdlib files that build at
+    all and has a struct-body MLIR binding — from BUILDS to REFUSED). The
+    positions are the three field names an annotation can arrive in, and the list
+    is a table rather than a shape test because the shape test would have to know
+    every node that carries one.
+
+    The refusal names the SPELLING the source wrote, not the struct's own name:
+    a reader who wrote `res._InjectedValues` is looking at that line, and a
+    message about `_ZipIterator._InjectedValues` sends them to the declaration
+    they had already found. The two kinds are named apart as well, because a
+    `comptime` binding is not a class-level assignment and the remedy differs
+    (a binding's value is often a COMPUTATION, which no amount of writing the
+    result at the use site can fix — the binding itself has to become a
+    literal)."""
 
     if isinstance(node, (list, tuple)):
-        items = [_apply_constant_sites(x, sites) for x in node]
+        items = [_apply_constant_sites(x, sites, disputed) for x in node]
         if isinstance(node, tuple):
             return tuple(items)
         node[:] = items
         return node
     if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr):
-        st = sites.get(f"{node.obj.name}.{node.member}")
-        if st is not None:
-            literal = _constant_literal(st, node.member)
+        why = (disputed or {}).get(f"{node.obj.name}.{node.member}")
+        if why is not None:
+            raise CodegenError(why)
+        got = sites.get(f"{node.obj.name}.{node.member}")
+        if got is not None:
+            st, kind = got
+            if kind == "overridden":
+                raise CodegenError(_overridden_comptime_refusal(
+                    st, node.member, f"{node.obj.name}.{node.member}"))
+            literal, default = _constant_literal(st, node.member)
             if literal is None:
+                spelling = f"{node.obj.name}.{node.member}"
+                declared = (f"a `comptime` class attribute" if kind == "comptime"
+                            else f"a class-level constant")
+                reason = (f"a `comptime` binding's value is written in the class "
+                          f"body and is often a CALL or a COMPUTATION rather "
+                          f"than a literal, and this path has no comptime "
+                          f"evaluator to run one"
+                          if kind == "comptime" else
+                          f"a class-level constant's value is written in the "
+                          f"class body, and this path has no module-global "
+                          f"storage to read it back out of")
+                spelled = (M.expr_spelling(default)
+                           if default is not None else "nothing at all")
                 raise CodegenError(
-                    f"{st.name}.{node.member} is a class-level constant, and a "
-                    f"formal value is one 64-bit word with nowhere to keep a "
-                    f"non-literal one: this path has no module-global storage, "
-                    f"so reading {st.name}.{node.member} can only be answered by "
-                    f"the value it is written with, and that value is not a "
-                    f"literal. Write the value at the use site (a literal, or "
-                    f"an assignment the compiler can see), which is the same "
-                    f"program with a representation")
+                    f"{spelling} reads {declared} of {st.name}, whose value is "
+                    f"`{spelled}` — and a formal value is one 64-bit word with "
+                    f"nowhere to keep a non-literal one: {reason}. Write the "
+                    f"value at the use site (a literal, or an assignment the "
+                    f"compiler can see), which is the same program with a "
+                    f"representation")
             return literal
     for name in getattr(node, "__dataclass_fields__", {}):
-        setattr(node, name, _apply_constant_sites(getattr(node, name), sites))
+        if name in _TYPE_POSITION_FIELDS:
+            continue
+        setattr(node, name,
+                _apply_constant_sites(getattr(node, name), sites, disputed))
     return node
 
 
 def _constant_read_spelling(node) -> str:
     """The `S.NAME` access path `node` spells, or None.
 
-    The two spellings `_constant_read_sites` recognizes as a read of a CLASS's
-    own value, and nothing else — the same restriction, so this cannot name a
+    The spellings `_constant_read_sites` recognizes as a read of a CLASS's own
+    value, and nothing else — the same restriction, so this cannot name a
     path that table does not have an answer for."""
     if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr):
         return f"{node.obj.name}.{node.member}"
     return None
 
 
-def refuse_none_comparisons(functions: list, structs_by_name: dict) -> None:
+def refuse_none_comparisons(functions: list, structs_by_name: dict,
+                         method_owners: dict = None) -> None:
     """Refuse `==` / `!=` whose operand is a read of a `None`-valued constant.
 
     Asked BEFORE either substitution, and that ordering is the whole reason this
@@ -7038,7 +7418,13 @@ def refuse_none_comparisons(functions: list, structs_by_name: dict) -> None:
         `none_valued` — which is the fact the folded `IntLiteral(0)` no longer
         carries.
     A function that BINDS the name shadows it, so a read of a local called `G`
-    is not this check's business, exactly as in `_substitute_module_constants`."""
+    is not this check's business, exactly as in `_substitute_module_constants`.
+
+    `method_owners` is `{function name: struct}` and is here for the same reason
+    `_rewrite_class_constants` takes it: a `None`-valued `comptime` binding read
+    through a receiver (`self.MISSING`, `p.MISSING`) is a comparison this cannot
+    answer, and asking a DIFFERENT census than the substitution does would leave
+    one of the two answering a comparison the other has already materialized."""
     none_names = {name for name, sym in M.module_symbols().items()
                   if getattr(sym, "none_valued", False)}
     none_consts = {(st.name, cname)
@@ -7051,8 +7437,9 @@ def refuse_none_comparisons(functions: list, structs_by_name: dict) -> None:
         # The alias census is PER FUNCTION, because `p = Plain(1)` is a fact
         # about one body: `p.b` is a read of the class's own value in the
         # function that wrote that `p` and not in any other.
-        none_paths = {path for path, st in _constant_read_sites(
-            fn.body, structs_by_name).items()
+        none_paths = {path: kind for path, (st, kind) in _constant_read_sites(
+            fn, structs_by_name,
+            (method_owners or {}).get(fn.name)).items()
             if (st.name, path.partition(".")[2]) in none_consts}
         if not none_names and not none_paths:
             continue
@@ -7070,6 +7457,8 @@ def refuse_none_comparisons(functions: list, structs_by_name: dict) -> None:
                     kind = "class-level constant"
                     if spelling is None or spelling not in none_paths:
                         continue
+                    if none_paths[spelling] == "comptime":
+                        kind = "`comptime` class attribute"
                 raise CodegenError(
                     f"{spelling} is {kind} holding `None`, and `{node.op}` cannot "
                     f"be answered for it: `None` is this target's word 0 (which is "
@@ -7299,7 +7688,16 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         # correctly calls one word, or zero — reads its own table as the zero
         # an unwritten slot gives, and a program that builds and runs returns
         # a number nobody wrote.
-        _rewrite_class_constants(fn.body, structs_by_name)
+        #
+        # `method_owners.get(fn.name)` is what makes the RECEIVER spellings
+        # available to this call — `self.rank` and `Self.rank` inside a method of
+        # the struct that declares the `comptime` binding. A function that is not
+        # a method, or a method whose name two structs declare (`_method_owners`
+        # drops those as ambiguous), gets no receiver sites at all: the receiver
+        # is then some value this census cannot place, which is a refusal rather
+        # than a guess about whose `self` it is.
+        _rewrite_class_constants(fn, structs_by_name,
+                                 method_owners.get(fn.name))
     ctx = FormalClosureCtx()
     discover_closures(ctx, stmts)
     functions = _flatten_closures(functions, ctx._all_closures)

@@ -687,6 +687,11 @@ CASES = [
     # refuse by name rather than hand back the zero an unwritten slot gives.
     # Checked on both backends, because the failure it replaces was a wrong
     # ANSWER (0, from an uninitialised slot) rather than a diagnostic.
+    #
+    # The needle is the read (`Table.NAMES`) followed by the VALUE it could not
+    # materialize (`["a", "b"]`), because a diagnostic that names the construct
+    # without naming the value sends the reader to a literal the file does not
+    # contain — which is the whole cost of the message this replaced.
     ("pyclass_nonliteral_constant_refused",
      "class Table:\n"
      "    NAMES = [\"a\", \"b\"]\n"
@@ -696,7 +701,145 @@ CASES = [
      "\n"
      "def main(n):\n"
      "    return Table.first()\n",
-     "refuse:Table.NAMES is a class-level constant", None),
+     "refuse:Table.NAMES reads a class-level constant of Table, whose value is "
+     "`['a', 'b']` — and a formal value is one 64-bit word with nowhere to keep "
+     "a non-literal one", None),
+
+     # ── a `comptime` class attribute, read through a RECEIVER ────────────
+     #
+     # `comptime NAME = …` in a struct body is not per-instance state: the parser
+     # keeps it in `StructDef.comptime_aliases` and out of `StructDef.fields`, and
+     # `myinterpreter` resolves `obj.NAME` out of that dict. Before this group the
+     # names were in no table on the formal side at all, so a read of one arrived
+     # at the member-access lowering as a name the struct does not have and was
+     # refused with a sentence about a run-time `AttributeError` — in a program
+     # that does not raise, because the attribute is right there in the class body
+     # (`std/iter/__init__.mojo`'s `res._InjectedValues` is the real one).
+     #
+     # Three spellings in ONE program, because the three have different evidence
+     # and a fix that covered two of them would leave the third silently wrong:
+     # `self.rank` (the receiver of a method of the struct that declares it),
+     # `Self.rank` (the class name, `struct_receivers` has no `self` for a
+     # `def first()` that takes no receiver), and `c.rank` through a local the
+     # constructor was bound to.
+     ("comptime_attribute_read_through_receiver_and_self",
+      "struct Coord:\n"
+      "    var rows: Int\n"
+      "    var cols: Int\n"
+      "    comptime rank: Int = 3\n"
+      "\n"
+      "    def get_rank(self) -> Int:\n"
+      "        return self.rank\n"
+      "\n"
+      "    @staticmethod\n"
+      "    def class_rank() -> Int:\n"
+      "        return Self.rank\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var c = Coord(2, 3)\n"
+      "    printf(\"%d %d %d %d\", c.get_rank(), Coord.class_rank(), c.rank, "
+      "c.rows + c.cols)\n"
+      "    return 0\n", 0, "3 3 3 5"),
+     # The same attribute with a value this path CANNOT materialize, read
+     # through a receiver — refused by name, and the diagnostic quotes the VALUE
+     # (`Self(0)`), because "not a literal" sends the reader to look for a
+     # literal the file does not contain. This is the enum-like shape
+     # `logger/logger.mojo:75` writes 10 times over (`comptime NOTSET = Self(0)`).
+     ("comptime_attribute_with_a_call_value_is_refused_by_name",
+      "struct Level:\n"
+      "    var value: Int\n"
+      "    comptime NOTSET = Self(0)\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    return Level.NOTSET\n",
+      "refuse:Level.NOTSET reads a `comptime` class attribute of Level, whose "
+      "value is `Self(0)`", None),
+     # A TYPE POSITION is not a read. `var v: Self.K` is the shape
+     # `std/builtin/none.mojo:30` has (`var _value: Self._mlir_type`, a file that
+     # BUILDS), and an annotation is not evaluated on this path — the field
+     # readers take the SPELLING. Substituting there would put the integer where
+     # the source wrote a type, and for a non-literal binding it would REFUSE a
+     # file that builds: this case is that file, with 7 * 3 standing in for an MLIR
+     # type so the test needs no dialect.
+     ("comptime_attribute_in_a_type_annotation_is_inert",
+      "struct Scaled:\n"
+      "    comptime K = 7 * 3\n"
+      "    var v: Self.K\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var s = Scaled()\n"
+      "    s.v = 21\n"
+      "    printf(\"%d\", s.v)\n"
+      "    return 0\n", 0, "21"),
+     # A name the unit WRITES is per-instance state whatever the parser says, so
+     # it stays a field and the write is what the read sees. This is the one
+     # direction `struct_comptime_aliases` resolves the other way, and it is the
+     # direction a wrong answer lives in: demoting a name something writes would
+     # make two slots share one word.
+     ("comptime_attribute_the_unit_writes_is_still_a_field",
+      "struct Pair:\n"
+      "    var a: Int\n"
+      "    comptime b: Int = 3\n"
+      "\n"
+      "    def get_b(self) -> Int:\n"
+      "        return self.b\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var p = Pair()\n"
+      "    p.b = 7\n"
+      "    printf(\"%d\", p.get_b())\n"
+      "    return 0\n", 0, "7"),
+     # A base class's `comptime` binding read through a receiver is NOT answered
+     # from the base's value when a subclass can override it: the interpreter
+     # copies the base's aliases onto the child and lets the child's own win, and
+     # it copies the base's METHODS onto the child too, so the method runs with a
+     # child receiver and `self.rank` is the child's. Refused by name rather than
+     # printed as the parent's value.
+     ("comptime_attribute_of_a_derived_struct_is_refused",
+      "struct Base:\n"
+      "    var a: Int\n"
+      "    comptime rank: Int = 3\n"
+      "\n"
+      "    def get_rank(self) -> Int:\n"
+      "        return self.rank\n"
+      "\n"
+      "struct Child(Base):\n"
+      "    var b: Int\n"
+      "    comptime rank: Int = 9\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var c = Child(1, 2)\n"
+      "    printf(\"%d\", c.get_rank())\n"
+      "    return 0\n",
+      "refuse:self.rank reads a `comptime` class attribute of Base, whose value "
+      "is not necessarily Base's: a struct deriving from Base in this unit "
+      "redeclares it", None),
+     # The local-alias census has to AGREE before it substitutes. This is the
+     # program that made it stricter: `o` is built from `T()` and from `S(1)`, so
+     # `o.LIMIT` is a field on one path and the class's own value on the other,
+     # and the answer depends on which binding ran. Before the census required
+     # agreement the image BUILT, RAN, and printed 3 for both — the wrong answer
+     # for `flag == 0`, on both architectures, where this path's own model says
+     # the answer is the word 0 of a field nothing wrote.
+     ("class_constant_through_a_base_bound_from_two_constructors_is_refused",
+      "struct S:\n"
+      "    var n: Int\n"
+      "    LIMIT = 3\n"
+      "\n"
+      "struct T:\n"
+      "    var LIMIT: Int\n"
+      "\n"
+      "def pick(flag: Int) -> Int:\n"
+      "    var o = T()\n"
+      "    if flag:\n"
+      "        o = S(1)\n"
+      "    return o.LIMIT\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    printf(\"%d %d\", pick(0), pick(1))\n"
+      "    return 0\n",
+      "refuse:o.LIMIT reads a class-level constant of S through 'o', and 'o' is "
+      "built from more than one constructor in this function (S(1), T())", None),
 
     # ── methods on a string ──────────────────────────────────────────────
     #
@@ -9073,6 +9216,87 @@ TYPE_APPLICATION_CASES = [
 ]
 
 
+# ── a `comptime` class attribute read through a receiver, against CPython ──
+#
+# `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md`. A
+# `comptime NAME = …` in a class body is a compile-time value the class
+# PUBLISHES: the parser keeps it in `StructDef.comptime_aliases` and out of
+# `StructDef.fields`, and `myinterpreter` resolves `obj.NAME` out of that dict.
+# The formal backend had no table for those names at all, so a read of one
+# reached the member-access lowering as a name the struct does not have and was
+# refused with a sentence about a run-time `AttributeError` — in a program that
+# does not raise.
+#
+# These are CPython PAIRS and not four-column cases because the property under
+# test is a VALUE: the substitution has to put the class's own number where the
+# read is, and a hand-written expectation in this file is an assertion about the
+# lowering made by whoever wrote the lowering. CPython's class attribute is the
+# same object by a different route (a dict on the class rather than a `comptime`
+# binding), which is the closest available oracle and the one the interpreter
+# agrees with.
+COMPTIME_ATTRIBUTE_CASES = [
+    ("comptime_attribute_receiver_reads_match_cpython",
+     "struct Coord:\n"
+     "    var rows: Int\n"
+     "    var cols: Int\n"
+     "    comptime rank: Int = 3\n"
+     "    comptime label: String = \"xy\"\n"
+     "\n"
+     "    def get_rank(self) -> Int:\n"
+     "        return self.rank\n"
+     "\n"
+     "    @staticmethod\n"
+     "    def class_rank() -> Int:\n"
+     "        return Self.rank\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var c = Coord(2, 3)\n"
+     "    printf(\"%d %d %d %s\", c.get_rank(), Coord.class_rank(), c.rank, "
+     "c.label)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Coord:\n"
+     "    rank = 3\n"
+     "    label = \"xy\"\n"
+     "    def __init__(self, rows, cols):\n"
+     "        self.rows = rows\n"
+     "        self.cols = cols\n"
+     "    def get_rank(self):\n"
+     "        return self.rank\n"
+     "    @staticmethod\n"
+     "    def class_rank():\n"
+     "        return Coord.rank\n"
+     "def main():\n"
+     "    c = Coord(2, 3)\n"
+     "    sys.stdout.write(\"%d %d %d %s\" % (c.get_rank(), "
+     "Coord.class_rank(), c.rank, c.label))"),
+    # The name a subclass REDECLARES, through the class's own spelling, which is
+    # unambiguous and therefore answerable: `Base.rank` names Base's value even
+    # where `self.rank` inside a method Base declares does not. The pair is here
+    # so the refusal and the answer are the two halves of one rule rather than
+    # two independent facts.
+    ("comptime_attribute_through_the_class_name_is_the_base_value",
+     "struct Base:\n"
+     "    var a: Int\n"
+     "    comptime rank: Int = 3\n"
+     "\n"
+     "struct Child(Base):\n"
+     "    var b: Int\n"
+     "    comptime rank: Int = 9\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    printf(\"%d %d\", Base.rank, Child.rank)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class Base:\n"
+     "    rank = 3\n"
+     "class Child(Base):\n"
+     "    rank = 9\n"
+     "def main():\n"
+     "    sys.stdout.write(\"%d %d\" % (Base.rank, Child.rank))"),
+]
+
+
 # The rows that assert a DIAGNOSTIC rather than a value, with the words BOTH
 # backends must use. Declared here rather than inline so `main`'s dispatch stays
 # one lookup and a reader can see at a glance which rows are refusals.
@@ -9411,9 +9635,11 @@ def main():
     # a sentinel as if it were a status — which is how a case ends up asserting
     # nothing.
     pair_names = {c[0] for c in TYPE_APPLICATION_CASES} | {
-        c[0] for c in OVERLOAD_LAYOUT_CASES}
+        c[0] for c in OVERLOAD_LAYOUT_CASES} | {
+        c[0] for c in COMPTIME_ATTRIBUTE_CASES}
     wanted_pairs = ([c for c in TYPE_APPLICATION_CASES
                      + OVERLOAD_LAYOUT_CASES
+                     + COMPTIME_ATTRIBUTE_CASES
                      if not args.cases or c[0] in args.cases])
     # `selected` is the four-column groups, so the pair cases have to be OUT of
     # it: they are dispatched separately below, and a name in both would be
