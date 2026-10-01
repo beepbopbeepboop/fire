@@ -136,10 +136,10 @@ it.
 - **The buffer is the caller's, and the window is the caller's.** Three words
   per token, and `tokenize_from` reports TOKEN_FULL (-2) at the end of a window
   and TOKEN_ERROR (-1) for a refusal, so the two are told apart by sign. A list
-  literal on this target is capped at about 4095 words (the encoder asserts in
-  `formal/arm64.py` — filed as
-  `CODEGEN_list_literal_over_4095_words_asserts.md`), which is why a caller
-  windows at a few hundred tokens rather than holding a whole file.
+  literal holds at most 16383 words on arm64 and 2047 on x86-64 — the FRAME
+  limits, measured and tabulated in `FORMAL_known_limits.md`, not an
+  instruction's — which is why a caller windows at a few hundred tokens rather
+  than holding a whole file.
 - **Bracket nesting is capped at 64 and indentation depth at 64** (`BRACKET_CAP`,
   `INDENT_CAP`), because both are fixed-size lists in `_lex`'s frame rather than
   a heap-allocated stack. A file nested deeper than that is refused, not
