@@ -210,6 +210,23 @@ trustworthy (`call_rel32` 7, `movsx_r64_r8` 3, eight singletons); the loop
 split is not. Cheap to reconcile, and worth doing before anyone reasons about
 "how many loop examples are left".
 
+### D4. Two finished branches each built the whole returned-frame convention, differently — **needs a decision**
+
+`work/formal-string-return` and `work/formal-frame-escape` diverge from the
+same commit and each implemented the caller-owned-block convention in full —
+prologue, call site, model and its own refusal family. Merging the second onto
+a tree carrying the first was attempted and aborted: 22 conflict regions over 8
+files, and the two disagree about the *shape of the table the backends read*
+and about the **arity of the predicate** `model.struct_returned_frame_sites` is
+called with, so neither tree passes the other's tests
+(`TypeError: _p() takes 1 positional argument but 2 were given`).
+
+Neither is half-applied; both branches are intact. The map, the evidence, the
+argument for which table shape to keep, and the five steps to reconcile are in
+`FORMAL_returned_frame_two_incompatible_designs.md`. **Do not resolve it by
+keeping both tables** — they answer the same question for the same image, and
+which one a backend reads would then depend on which was assigned last.
+
 ### D3. A/B sweep shows 605 CI-DIFFs, untriaged — **medium, may be benign**
 
 At 2026-09-25: `clean=157 CI-DIFF=605 SELFHOST-CRASHED=0 AST/TOK-DIFF=0`.
