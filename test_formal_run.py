@@ -6690,6 +6690,164 @@ ORIGIN_OF_REFUSALS = [
 ]
 
 
+# `Foo[A, frame]` — a bracket list that is a TYPE ARGUMENT list and not a
+# container, and the two false sentences it used to draw.
+#
+# It arrived as the SAME `TupleExpr` as `[s, 1]`, and `formal/build.py`'s
+# escape check refused it as "is stored in a container, which has no layout for
+# a frame address" — a sentence about a lifetime the program does not have,
+# which is the false diagnosis that cost the most because it sends the reader
+# to look for an escape that is not there. Four stdlib files drew it
+# (`std/builtin/tuple.mojo`, `std/collections/{deque,linked_list,set}.mojo`;
+# measured in `bugs/FORMAL_frame_by_value_ceiling_zero.md`).
+#
+# Every row here is a REFUSAL, and that is not a gap in the fix: a type
+# application is a compile-time construct this backend still cannot lower, and
+# the honest answer for it is the model's own — "a compile-time
+# explicit-parameter list on a generic, not a subscript", from
+# `model.multi_index_kind`'s `MULTI_INDEX_COMPTIME_PARAMS`. What changed is
+# WHICH sentence, so `refuse_without:` is the load-bearing prefix here: a fix
+# that merely appended the true one would leave both rows passing.
+#
+# Four stdlib files land on four OTHER causes and 0 reach `pass` — the ceiling
+# of map row 7 is measured at 0 and this change does not move it.
+TYPE_ARGUMENT_LIST_CASES = [
+    # The corpus's own base: a TYPE CONSTRUCTOR. `Pointer` is in
+    # `IDENTITY_TYPE_CTORS`, so `type_constructor_kind("Pointer")` answers
+    # before any table of this module's own declarations is consulted — which is
+    # the half of the decision that needs nothing but the name.
+    #
+    # `var m = …` binds a name to the application, so it is also a check that
+    # the classification does not depend on the subscript being in CALLEE
+    # position. Refused on both architectures before this change, with the
+    # container sentence.
+    ("type_argument_list_on_a_type_constructor",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 3\n"
+     "    s.b = 4\n"
+     "    var m = Pointer[Int, s]\n"
+     "    return s.a\n", "refuse:compile-time explicit-parameter list", None),
+    # The other half, and the one no name table can answer: a struct THIS MODULE
+    # declares. `_DequeIter[Self.ElementType, origin_of(self), False]` in
+    # `std/collections/deque.mojo` is this shape, and it is here because
+    # `structs_by_name` is the only thing that settles it — a declared struct
+    # has no runtime container representation at all, so a subscript on its name
+    # cannot be a lookup into one.
+    ("type_argument_list_on_a_struct_this_unit_declares",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "struct Triple[A: AnyType, B: AnyType, C: AnyType]:\n"
+     "    var v: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 3\n"
+     "    s.b = 4\n"
+     "    var m = Triple[Int, s, False](5)\n"
+     "    return m.v + s.a\n", "refuse:compile-time explicit-parameter list", None),
+    # NO FRAME ANYWHERE, which is what pins the change as being about the
+    # CONSTRUCT rather than about the escape check. Every row above could be
+    # satisfied by a fix that only reworded the frame-address refusal; this one
+    # has no frame address to reword. `Box[Int, Int]` is the case the stdlib
+    # writes, and it drew "is a subscript whose index is a tuple — it is one of
+    # two things: a lookup keyed by the tuple … or a two-dimensional index",
+    # which is about a container lookup that cannot happen when the base is a
+    # type.
+    ("type_argument_list_without_any_frame",
+     "struct Box[T: AnyType, U: AnyType]:\n"
+     "    var v: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var m = Box[Int, Int](7)\n"
+     "    return m.v\n", "refuse:compile-time explicit-parameter list", None),
+    # THE COUNTER-CASES, and they are the whole reason the change is a narrow
+    # skip rather than a deletion of the container branch. Every escape the
+    # branch exists for has a base that is a DICT or a LIST, and no type name is
+    # either, so all four keep the sentence they had. Without these rows a fix
+    # that read every bracket list as a type application would pass the three
+    # above and silently accept a program that parks a frame address in a dict's
+    # storage.
+    ("a_dict_key_tuple_holding_a_frame_is_still_a_store",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 3\n"
+     "    s.b = 4\n"
+     "    var d = {1: 0, 2: 0}\n"
+     "    d[s, 1] = 5\n"
+     "    return d[1, 1]\n", "refuse:is stored in a container", None),
+    ("a_list_index_tuple_holding_a_frame_is_still_a_store",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 3\n"
+     "    s.b = 4\n"
+     "    var l = [0, 1, 2, 3]\n"
+     "    var k = l[s, 1]\n"
+     "    return k\n", "refuse:is stored in a container", None),
+    # A bracket list over a base this unit CANNOT classify — the limit the fix
+    # deliberately does not cross. `Self.IteratorType[origin_of(self)]` is the
+    # corpus's shape and it IS a comptime parameter list, but deciding it needs
+    # the IMPORTED module's declarations, which is `formal/imports.py`'s
+    # question. This row pins that such a base is still refused, and NOT that
+    # the wording improves: `_base_name` answers None for anything but a bare
+    # `IdentExpr`, so a dotted base is not asked the question at all.
+    ("a_bracket_list_over_a_dotted_base_is_still_refused",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "struct Alias:\n"
+     "    var tag: Int\n"
+     "    var v: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 3\n"
+     "    s.b = 4\n"
+     "    var h = Alias()\n"
+     "    h.tag = 1\n"
+     "    h.v = 2\n"
+     "    var m = h.tag[Int, s]\n"
+     "    return s.a\n",
+     "refuse:is stored in a container", None),
+]
+
+# THE FALSE SENTENCES, as assertions of their ABSENCE. `refuse_without:` exists
+# for exactly this class — a fix that appends a correct clause beside an
+# incorrect one leaves every `refuse:` above green while the reader is still
+# sent to a non-bug, and that is how "a formal value is one 64-bit word, and
+# DType is not one thing" survived beside a corrected first clause. Two
+# sentences are pinned here because two were false about the same construct.
+TYPE_ARGUMENT_LIST_ABSENT_CASES = [
+    ("no_container_store_sentence_about_a_type_argument_list",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 3\n"
+     "    s.b = 4\n"
+     "    var m = Pointer[Int, s]\n"
+     "    return s.a\n",
+     "refuse_without:compile-time explicit-parameter list:is stored in a container",
+     None),
+    ("no_tuple_index_sentence_about_a_type_argument_list",
+     "struct Box[T: AnyType, U: AnyType]:\n"
+     "    var v: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var m = Box[Int, Int](7)\n"
+     "    return m.v\n",
+     "refuse_without:compile-time explicit-parameter list:whose index is a tuple",
+     None),
+]
+
+
 # The ninth-argument and read-before-store rows are REFUSALS, and they are in
 # their own group because they assert a DIAGNOSTIC rather than a value — the
 # whole point is that the program must not build, so no exit status can carry
@@ -6839,6 +6997,8 @@ def main():
                   + WAVE6_NAME_CASES + WAVE7_G2_CASES
                   + SHIFT_CASES + REFUSAL_CASES
                   + ORIGIN_OF_CASES + ORIGIN_OF_REFUSALS
+                  + TYPE_ARGUMENT_LIST_CASES
+                  + TYPE_ARGUMENT_LIST_ABSENT_CASES
                   + [X86_ONLY_1SLOT_BUG_CASE])
     selected = [c for c in everything if not args.cases or c[0] in args.cases]
     known = {c[0] for c in everything}

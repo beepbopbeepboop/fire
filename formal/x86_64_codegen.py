@@ -2867,8 +2867,8 @@ class X86_64Codegen:
         # case on the BASE name rather than on a comma list — see its
         # docstring. A single-element `__mlir_type[x]` used to skip this call
         # entirely and fabricate a word.
-        why = M.multi_index_refusal_for(
-            e, self._is_dict_subscript(e.obj), self._functions)
+        why = M.multi_index_refusal_for(e, self._is_dict_subscript(e.obj),
+                                        self._functions, self._structs)
         if why is not None:
             raise CodegenError(why)
         if self._is_dict_subscript(e.obj):
