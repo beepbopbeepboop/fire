@@ -245,9 +245,23 @@ differ from §1 the difference is the sweep's own `tool` class moving, not the
 backend.
 
 ```
-python3 tools/memslot.py --gb 16 --label sweep -- python3 tools/formal_sweep.py -j6
-python3 tools/memslot.py --gb 16 --label sweep -- python3 tools/formal_sweep.py -j6 --arch x86_64
+python3 tools/memslot.py --gb 16 --label sweep -- python3 tools/formal_sweep.py -j6 \
+        > .tmp/sweep-arm-b3-r2.txt
+python3 tools/memslot.py --gb 16 --label sweep -- python3 tools/formal_sweep.py -j6 --arch x86_64 \
+        > .tmp/sweep-x86-b3-r2.txt
 ```
+
+Every number in §8–§11 is re-derivable from those two logs:
+
+```
+python3 tools/formal_sweep_causes.py --min 4 .tmp/sweep-arm-b3-r2.txt
+python3 tools/formal_sweep_causes.py --min 4 .tmp/sweep-x86-b3-r2.txt
+python3 test_refusal_taxonomy.py
+```
+
+(the two logs are in `.tmp/`, which is git-ignored, so a reader who wants to
+re-run the table needs a sweep first — 630 files at `-j6` is about nine minutes a
+side and under 1 GB)
 
 | | §1 (first run) | r2 | was (2026-10-01, other trees) |
 |---|---|---|---|
