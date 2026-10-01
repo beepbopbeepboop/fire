@@ -2124,13 +2124,17 @@ test('formal-dataclasses', [PY, 'test_dataclasses_formal.py'],
 # bugs/FORMAL_bracketed_call_to_a_private_name_is_refused_as_a_dangling_symbol.md.
 test('formal-module-attr', [PY, 'test_formal_module_attr.py'], mem='tiny',
      deps=['preflight'],
-     expect='bugs/FORMAL_bracketed_call_to_a_private_name_is_refused_as_a_'
-            'dangling_symbol.md — 1 of 11: a bracketed call to a private name '
-            'is refused as a dangling symbol on arm64 and as an unsupported '
-            'call target on x86-64, instead of as the export gap it is',
+     expect='bugs/FORMAL_bracketed_private_name_refused_as_a_specialization.md '
+            '— 1 of 18: a bracketed call to a private name is refused as a '
+            'specialization whose brackets have nowhere to bind, rather than '
+            'as the export gap it is (a leading `_` is private). The older '
+            'doc for this case records a dangling symbol on arm64 and an '
+            'unsupported call target on x86-64; both of those are fixed, and '
+            'the two backends now agree',
      extra=['test_formal_module_attr.py', 'formal/model.py',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
-     desc='mod.NAME: calls, re-exports, chains and constants, on both backends')
+     desc='mod.NAME: calls, re-exports, chains, constants and attribute '
+          'reads, on both backends')
 # The REAL syscalls behind the `os` host module — the `_syscalls.mojo` layer and
 # the images it builds — against the machine rather than against a table: 51
 # cases (the file's own tally says so, and it is printed), on BOTH

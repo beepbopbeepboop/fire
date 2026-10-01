@@ -1,5 +1,13 @@
 # FORMAL_bracketed_call_to_a_private_name_is_refused_as_a_dangling_symbol
 
+> **Its measurements are STALE — see
+> `bugs/FORMAL_bracketed_private_name_refused_as_a_specialization.md`.** As of
+> 2026-10-01 neither backend produces either message recorded below: both now
+> refuse the call as a specialization whose brackets have nowhere to bind, so
+> the two architectures no longer disagree (which is what this doc called the
+> real problem). §"The next step, exactly" below is still the right work; the
+> "What was run" section is not what this tree does.
+
 ## Status
 
 OPEN — found 2026-09-30 while registering `test_formal_module_attr.py` (it was

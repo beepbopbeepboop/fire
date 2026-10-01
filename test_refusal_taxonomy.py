@@ -225,6 +225,14 @@ CAUSE_SAMPLES = [
     ("a module-level name of ANOTHER module is not exported as a word",
      "main: 'sys' is imported from `sys`, and it is a module-level name of "
      "another module. This path compiles an import into a dylib"),
+    # The DOTTED spelling, and a separate sample rather than a variant of the
+    # one above: the bare message blames the NAME for having no storage, which
+    # is true of a name and false of a module. The two rows key on clauses only
+    # their own message contains, so neither can swallow the other — see the
+    # comment on the two CAUSES entries in tools/formal_sweep_causes.py.
+    ("a module's ATTRIBUTE read as a value, across a dylib boundary",
+     "main: sys.argv reads 'argv' out of the imported module `sys`, and a "
+     "module is not a value this path can place"),
     ("method parameter's field, with no call site to establish it",
      "Slice___eq__: 'other.start' is a field access through 'other', and this "
      "path has no way to say what 'other' holds"),

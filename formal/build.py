@@ -1583,7 +1583,8 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
     # with the construct checks that only an executable's codegen can answer.
     check_dataclass_constructs(stmts, functions)
     check_module_symbols(functions, by_name,
-                         imported_module_names=imported_module_names)
+                         imported_module_names=imported_module_names,
+                         link_line=link_line)
 
 
 def _struct_methods(stmts: list) -> list:
@@ -5983,12 +5984,20 @@ def _apply_imported_constant_sites(node, tables: dict, bound: set) -> int:
 
     ONE test, in `_rewrite_dotted_child`, used from every parent shape — and that is
     the whole design. A child reached from a list element, from a dataclass
-    field and from a call's argument list are three spellings of the same
-    parent-directed rewrite, and the first version of this walked the argument
-    list element by element, so `printf("%d", mod.K)` — the single most common
-    shape there is — recursed into the `MemberExpr` instead of testing it and
-    rewrote nothing while reporting success. A rewrite that is applied in one
-    spelling of a position and not in another is not a rewrite."""
+    field, from a call's argument list and from a store's VALUE side are four
+    spellings of the same parent-directed rewrite, and a rewrite applied in
+    three of them and not the fourth is not a rewrite. Measured, that fourth
+    omission was live: `print(mod.K)` lowered (a call argument goes through
+    `_rewrite_dotted_child`) while `x = mod.K` and `var x = mod.K` were refused
+    with `mod_global_refusal` — the message that claims a dylib cannot publish a
+    VARIABLE, about a name that is a folded CONSTANT the module's own manifest
+    already carries. Both spellings were refused by the same walk with the same
+    message, so the construct looked like a storage gap in half its positions.
+    Hence the assignment below rather than a bare recursive call: the store's
+    value is a CHILD of the statement, so the replacement has to be written back
+    into the statement's slot, which is what `_rewrite_dotted_child` returns it
+    for.
+    """
     if isinstance(node, list):
         done = 0
         for i, child in enumerate(node):
@@ -5996,9 +6005,16 @@ def _apply_imported_constant_sites(node, tables: dict, bound: set) -> int:
             done += n
         return done
     if isinstance(node, (F.AssignStmt, F.AugAssignStmt, F.VarDecl)):
-        # The target is a store: leave it, and walk the value side only.
-        return _apply_imported_constant_sites(getattr(node, "value", None),
-                                              tables, bound)
+        # The TARGET is a store and is left alone — `mod.K = 5` writes another
+        # module's state, which has nowhere to live and is refused by name
+        # (`bugs/FORMAL_module_state_no_storage.md`); substituting it would trade
+        # a refused store for a dropped one. The VALUE side is an ordinary read
+        # and goes through the ONE test.
+        value, n = _rewrite_dotted_child(getattr(node, "value", None),
+                                         tables, bound)
+        if hasattr(node, "value"):
+            node.value = value
+        return n
     if isinstance(node, F.CallExpr):
         # The callee is a SYMBOL, not a read of a value — the same rule the
         # identifier rewriter follows, for the same reason: `mod.f(...)` must
@@ -6536,8 +6552,31 @@ def _materialize_entry_dunder_name(functions: list) -> int:
     return done
 
 
+def _module_published_names(module: str, link_line) -> set:
+    """Every name the library built for `module` publishes, by definition or by
+    re-export.
+
+    What the module-attribute refusal prints, so a reader can see in one line
+    whether the attribute they wrote is one the module has. Read through
+    `model.dylib_export_tables` — the same tables the emitted CALL binds
+    through, in the same link order — rather than off the manifests directly,
+    because "what this module publishes" is a question the emitter already asks
+    and a second reading of the manifests is a second answer to it.
+
+    A module with no library on the line publishes nothing, and that is the
+    honest answer rather than a crash: `imported_module_names` is gated on
+    `import_dylibs` by `_run_late_checks`, so an empty table means the caller
+    has not resolved imports and the rooted-chain gate is already closed."""
+    if not link_line:
+        return set()
+    _by_name, by_module, forwarded = M.dylib_export_tables(
+        dylib_export_lists(link_line))
+    return set(M.dylib_export_module(by_module, module)) | set(
+        M.dylib_export_module(forwarded, module))
+
+
 def check_module_symbols(functions: list, structs_by_name: dict = None,
-                         imported_module_names=None) -> None:
+                         imported_module_names=None, link_line=None) -> None:
     """Refuse every name a function reads that no table in the compiler places.
 
     A LATE check, called beside `check_frame_field_blob_premises` and
@@ -6582,7 +6621,17 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
     root of the chain is a module reference, not a read of a value, and the
     emitter resolves the call from that module's own export table. Omitted (or
     empty) the dotted spelling is refused exactly as before, so a caller that
-    has not resolved its imports still gets the old answer."""
+    has not resolved its imports still gets the old answer.
+
+    `link_line` is the same list `check_imported_frame_handoffs` takes — the
+    link line's manifests in LINK ORDER, which is the order the emitted call
+    binds. It is consulted for ONE thing, and only when a rooted member chain
+    needs a refusal: what that module PUBLISHES, so the message can print it
+    (`sys.argv` next to the list of names `sys` does publish, which is
+    `dylib_extern_symbol`'s own device for a dotted call). Omitted it prints
+    nothing rather than guessing, and the refusal is unchanged otherwise — so
+    a caller that passes only the first three arguments keeps every verdict it
+    had."""
     struct_names = set(structs_by_name or {})
     # A read-before-store hit per function, raised after the loop: see the
     # ordering note where they are raised.
@@ -6742,12 +6791,19 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             if isinstance(func, F.IdentExpr):
                 callees.add(id(func))
             elif isinstance(func, F.MemberExpr):
-                root = func
-                while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
-                    root = root.obj
-                if isinstance(root, F.IdentExpr) and any(
-                        root.name == m or m.startswith(f"{root.name}.")
-                        for m in imported):
+                # Case 2, through `model.dylib_module_reference` — the ONE
+                # recogniser of "this chain is rooted at an imported module".
+                # The gate was inline `any(root.name == m or m.startswith(...))`
+                # before, and the member-read loop below asks the same question
+                # about the same chains, so it lives in one function: that is
+                # the only way the two cannot disagree about where the exemption
+                # stops. Only the ROOT's identity is collected, because a
+                # callee is a symbol and the emitter resolves the whole chain
+                # from it (`ARM64Codegen._extern_symbol`).
+                if M.dylib_module_reference(func, imported) is not None:
+                    root = func
+                    while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
+                        root = root.obj
                     callees.add(id(root))
             elif not M.is_external_call_template(func):
                 # Case 3. `elif`, not `if`: a SubscriptExpr callee that IS an
@@ -7009,6 +7065,103 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # template that is not exported is two different facts.
         bracket_callees = _bracket_callee_roots(fn.body)
         bracket_callees -= set(bracketed)
+        # A dotted READ of an imported module — `sys.argv`, `os.path.join` in a
+        # value position, `len(sys.argv)` — is the same construct as the dotted
+        # CALL above, asked one question later, and before this it was refused
+        # for a reason that was FALSE about it.
+        #
+        # The callee exemption collects the ROOT of a dotted call and lets the
+        # emitter resolve the chain; nothing collected the root of a dotted READ,
+        # so the placement walk below reached the root `sys` as a free name and
+        # answered `module_global_refusal` — "'sys' … is a module-level name of
+        # another module … there is no storage for one here". `sys` is not a
+        # module-level name of `sys`; `sys` IS the module, and a module is not a
+        # value with nowhere to live, it is the library on the link line with a
+        # manifest. The name that has no representation is the ATTRIBUTE
+        # (`sys.argv`), which is what the new message says and what the old one
+        # did not. Measured on this tree: all six files the work map's row
+        # "a module-level name of ANOTHER module is not exported as a word"
+        # blocks — `t_argv.mojo`, `mojo.mojo`, `tools/ab_filelist.py`,
+        # `tools/audit_determinism.py`, `tools/ci_line.py`, `tools/detach.py` —
+        # name `sys`, on BOTH architectures, three at `main:` and three at
+        # `__module_body__:`.
+        #
+        # The root is exempted and the MEMBER is refused, and both halves are
+        # load-bearing. Exempting the root alone would be a silently wrong
+        # answer rather than a failure: `ARM64Codegen._emit_expr` on
+        # `MemberExpr(IdentExpr('sys'), 'argv')` finds no frame slot for
+        # `"sys.argv"` and falls to its "no object model, so the field itself
+        # reads as 0" arm, evaluating `_load_var('sys')` and emitting `#0` —
+        # `print(sys.argv)` would print 0 and exit 0. So the member refusal is
+        # raised for EVERY rooted chain, before the placement walk skips the
+        # root, and the two cannot be separated.
+        #
+        # Collected by node IDENTITY of the root, never by name, for the reason
+        # the rest of this function repeats: `iter_nodes` has no parent, the same
+        # spelling is a module root in one position and a genuine local in
+        # another (`import os` plus a parameter named `os` shadows it), and
+        # keying on the string would exempt every read of that name in the
+        # function — the silently-wrong direction this whole pass is arranged to
+        # refuse. `_apply_imported_constant_sites` has already substituted a
+        # published CONSTANT by this point (`_publish_imported_constants` runs
+        # before these checks), so a chain that survives to here names a module
+        # attribute the module does not publish as a value.
+        module_reads = {}
+        if imported:
+            # Every `MemberExpr` on the SPINE of a call's callee — `os.path` as
+            # well as `os.path.join` in `os.path.join("a", "b")`. Collected by
+            # walking each dotted callee down to its root, which is the same walk
+            # the callee exemption does, because it is the same question: is
+            # this link part of a SYMBOL the emitter resolves, or a value being
+            # read? `callees` cannot answer it — it records only the chain's
+            # ROOT — and `iter_nodes` has no parent, so this is the only place
+            # that can. Measured, and this is the second version: skipping only
+            # the outermost `MemberExpr` refused `os.path.join(…)`, a program
+            # that builds on master, because `os.path` is the callee's object.
+            dotted_callees = set()
+            for c in M.iter_nodes(fn.body):
+                if not isinstance(c, F.CallExpr) \
+                        or not isinstance(c.func, F.MemberExpr):
+                    continue
+                link = c.func
+                while True:
+                    dotted_callees.add(id(link))
+                    if not isinstance(link, F.MemberExpr):
+                        break
+                    link = link.obj
+            for sub in M.iter_nodes(fn.body):
+                if not isinstance(sub, F.MemberExpr):
+                    continue
+                # A CALL through the chain is the callee exemption's business
+                # and the emitter already resolves it from the module's export
+                # table; `_extern_symbol` refuses a name the module does not
+                # publish, with a message that already lists what it does
+                # publish. Asking about it here too would pre-empt that with
+                # this one — and would REFUSE programs that build today, which
+                # is how both versions of this arm were caught. Every link on
+                # the callee's spine is skipped, `os.path` included: the spine
+                # is `dylib_export_module`'s question, not this one's.
+                if id(sub) in dotted_callees:
+                    continue
+                root_name = M.dylib_module_reference(sub, imported)
+                if root_name is None:
+                    continue
+                # A LOCAL of this function shadows an imported module name, and
+                # a local's attribute read is a frame slot, not a module
+                # attribute — `def main(os): os.argv` is a parameter read. The
+                # callee exemption has the same shadowing hole and is not
+                # changed here; this arm must not widen it.
+                if root_name in placed or root_name in frame_slots:
+                    continue
+                root = sub
+                while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
+                    root = root.obj
+                if id(root) in bracketed:
+                    continue
+                leaf = sub.member
+                module_reads[id(root)] = M.module_attribute_refusal(
+                    M.member_chain_text(sub), root_name, leaf, fn.name,
+                    _module_published_names(root_name, link_line))
         # A TYPE name in a VALUE position is a compile-time constant whose value
         # is the type's TAG, so it has a home — the same one a folded
         # module-level constant has, which is the fourth of the four this walk
@@ -7076,6 +7229,17 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             # the stdlib with `'Int32' has no home`.
             if id(node) in bracketed:
                 raise CodegenError(bracketed[id(node)])
+            # The module-attribute refusal, asked HERE and before the callee
+            # exemption, for the same reason `bracketed` is: the message that
+            # names the CONSTRUCT wins over the one about the root's storage.
+            # `sys.argv` used to be reported as a placement failure of `sys` —
+            # "'sys' … there is no storage for one here" — which is a claim
+            # about a name that is not a value; this names the attribute the
+            # source actually wrote. `test_formal_module_attr.py` case 4 (a
+            # module OBJECT still has no storage) is unaffected and is the test
+            # that would catch this exemption widening past a member chain.
+            if id(node) in module_reads:
+                raise CodegenError(module_reads[id(node)])
             if id(node) in callees:
                 continue
             name = node.name

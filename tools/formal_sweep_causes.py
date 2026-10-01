@@ -237,6 +237,17 @@ CAUSES = (
      # reads an old log as `other refusal`. See the module docstring.
      (("so it is a module-level name of another module",),
       ("and it is a module-level name of another module",))),
+    # The DOTTED spelling of the same boundary, which is a different construct
+    # and has its own row rather than joining the one above. `mod.NAME` reads
+    # an ATTRIBUTE of a module; `from mod import NAME` then `NAME` reads the
+    # name itself. Both are refused, for the same underlying reason and with
+    # two different messages, and before this the dotted one was refused with
+    # the BARE one's message — about a storage problem for a name that is a
+    # MODULE and needs none. Keyed on the clause that is unique to the new
+    # message ("a module is not a value this path can place"), which is why the
+    # two rows cannot collide: the bare message does not contain it.
+    ("a module's ATTRIBUTE read as a value, across a dylib boundary",
+     (("is not a value this path can place",),)),
 
     # ── the frame / receiver families. The by-reference receiver design, and
     #    each of these is one of its bands. ──
