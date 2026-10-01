@@ -32,6 +32,7 @@ from fire_compiler import (
 )
 import regex_compile
 import mlir
+import mojo.backend_gimple.device_glue as _gmi_glue
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
@@ -340,6 +341,12 @@ def _reset_func(gen, body: list = None, params: list = None,
     gen._dict_item_int_key_vars: set = set()
     gen._int_key_loop_vars: set = set()
     gen._tuple_slot_types: dict[str, list] = {}
+    # NOTE: `gen._return_slot_types` (the name-keyed, CROSS-function half of
+    # per-slot tuple types, written at a return and read at a later call
+    # site) is deliberately NOT re-created here. It is initialized once per
+    # MODULE in gimple_codegen.py's setup, next to `_return_elem_types` —
+    # resetting it per function would discard every callee whose body was
+    # emitted before the caller's.
     gen._dict_item_pair_vars: dict[str, str] = {}
     # `it = iter(<list>)` inside ordinary codegen (incl. an A3 stack-switch
     # generator body): C-name of the iterator local -> {'list','cursor','elem'}.
@@ -1225,6 +1232,29 @@ def _addressable_to_target(gen, ctype: str, aval: str) -> bool:
     return aval in gen.var_types
 
 
+#: Scalar element types a boxed list may be packed into. Deliberately a
+#: closed set rather than "anything that ends in ` *`": a `void *`, a `char *`
+#: and a struct pointer all end in ` *` too, and none of them is an array of
+#: numbers. Packing a list into a `char *` would compile, run, and be wrong in
+#: a way no test in the tree would notice, so the gate is a list of names.
+_LIST_MARSHAL_ELEMS = frozenset((
+    'float', 'double', 'int', 'int32_t', 'int64_t',
+    'uint16_t', 'uint32_t', 'uint64_t', 'int16_t', 'uint8_t', 'int8_t',
+    '__fp16', '_Bool',
+))
+
+
+def _list_pack_name(elem: str) -> str:
+    """The generated pack helper for `elem`. Lives in device_glue so the
+    name is computed the same way by the call site and by the emitter that
+    defines it -- a name spelled twice is a name that eventually drifts."""
+    return _gmi_glue._c_helper_name(elem)
+
+
+def _list_unpack_name(elem: str) -> str:
+    return _gmi_glue._c_unpack_name(elem)
+
+
 def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[tuple[str, str]]) -> None:
     """Emit a function call with GIMPLE-valid argument coercions.
 
@@ -1286,6 +1316,11 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         arg_pairs = fixed_pairs + [('MojoList *', lst)]
         param_types = list(param_types[:-1]) + ['MojoList *']
 
+    # Buffers packed for this call, written back and freed once it is emitted.
+    # Local, not on `gen`: `_emit_call` can be re-entered by a nested lowering
+    # while a call is still being built, and a shared list would then write the
+    # inner call's buffers back at the outer call's return.
+    _pending_list_unpacks: list = []
     coerced_args = []
     for i, _apair in enumerate(arg_pairs):
         # `_as_str` on every unpacked slot — a `(ctype, varname)` tuple boxes
@@ -1510,6 +1545,38 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             gen._emit(f'  {ip} = (int64_t){aval};')
             gen._emit(f'  {pp} = (ModuleLoader *){ip};')
             coerced_args.append(pp)
+        elif (actual_atype == 'MojoList *' and ptype.endswith(' *')
+                and ptype[:-2] in _LIST_MARSHAL_ELEMS):
+            # A BOXED LIST where the callee declared a scalar-element pointer.
+            #
+            # This must never be a cast, and the branch below would make it one.
+            # `MojoList` is a struct whose first field is a data pointer, so
+            # `(float *)l` points at the struct HEADER and the callee reads
+            # data/len/cap/the inline buffer as the array's contents. It
+            # compiles, links, runs, and returns garbage at exit 0 -- measured
+            # on `sumf([1.0, 2.0, 3.0], 3)`: the interpreter says 6.0, the
+            # compiled path says 2.45e+26.
+            #
+            # So the list is packed into a real contiguous buffer, the call
+            # runs against that, and the buffer is written back into the list
+            # and freed afterwards. The write-back covers EVERY list-typed
+            # pointer argument, not just the ones the callee writes: a
+            # `T *` parameter does not say whether it is read-only, skipping a
+            # write-back that was needed loses the result, and writing back an
+            # argument the callee did not touch restores the values it already
+            # held. Data loss is the worse of the two failures.
+            #
+            # `-1` for the count means "the whole list": the general call path
+            # has no length argument, and the list's own length is the only
+            # thing that can size the buffer. It cannot change during the call
+            # -- the callee is handed a plain buffer and has no route back to
+            # the list -- so the unpack side clamps to the same count.
+            _elem = ptype[:-2]
+            gen._list_marshalling_needed.add(_elem)
+            _mb = gen._new_temp(f'{_elem} *')
+            gen._emit(f'  {_mb} = {_list_pack_name(_elem)}({aval}, -1);')
+            coerced_args.append(_mb)
+            _pending_list_unpacks.append((aval, _mb, _elem))
         elif ptype.endswith(' *') and atype.endswith(' *') and ptype != atype:
             # Two different pointer types (e.g. MojoList * where MojoDict * is
             # declared, or a struct ptr vs Span *): cast via a temp rather than
@@ -1587,6 +1654,11 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
         gen._emit(f'  {result_var} = {fname} ({args_str});')
     else:
         gen._emit(f'  {fname} ({args_str});')
+    for _lv, _bv, _le in _pending_list_unpacks:
+        gen._emit(f'  if ({_bv}) {{')
+        gen._emit(f'    {_list_unpack_name(_le)}({_lv}, {_bv}, -1);')
+        gen._emit(f'    free ({_bv});')
+        gen._emit('  }')
     _release_transient_cstr_args(gen, arg_pairs)
 
 
@@ -1903,13 +1975,43 @@ def _declare_var(gen, name: str, ctype: str, elem: str | None = None, force: boo
     # The `decls.append(f"  {ctype} {c_name};")` calls below would then
     # write the string's ADDRESS as the type — `47303466400 * _t34;`.
     ctype = _as_str(ctype)
-    if force and name in gen.var_types:
-        gen.temp_counter += 1
+    if force:
+        # The shadow counter is `gen._shadow_seq_box`, NOT `temp_counter`.
+        # `temp_counter` restarts at 0 in every function's prologue, and every
+        # function's `decls` are all emitted into ONE translation unit -- so two
+        # functions could mint the same `_shadow7_n` and the second use
+        # inherited the first one's declared type. A box rather than a bare int
+        # because each imported module is emitted by a throwaway temp_gen; the
+        # box is shared by reference (see emit_resolve's temp_gen sharing
+        # block), and a bare int would restart in each one.
+        #
+        # Measured in the self-host closure: `module_gen.py`'s
+        # `{_safe_name(n) for n in _imported_names}` is a set-of-str
+        # comprehension whose loop variable is `char *`, and it collided with
+        # an `int64_t` `_shadow272_n` from another function, so
+        # `char * = mojo_set_iter_val_str(...)` would not gimplify. One
+        # translation unit needs one counter.
+        # `if force:` and NOT `if force and name in gen.var_types:` -- a
+        # self-shadowing loop target must ALWAYS get its own C variable,
+        # which is what this branch's own docstring above promises. The old
+        # `and name in var_types` guard made the behaviour depend on whether
+        # a PREVIOUS loop with the same target name had already cleaned up
+        # after itself: when it had, this call fell through to the normal
+        # path, which reuses `gen._c_names[name]` -- i.e. the earlier loop's
+        # C identifier, declared with the earlier loop's element type.
+        #
+        # Measured: `gen_module_impl` has two self-shadowing loops both named
+        # `_n` (`for _n in _n`). One iterates ints and the other
+        # `{_safe_name(n) for n in _imported_names}` iterates a set of
+        # strings, so the second needs `char *` and the shared variable was
+        # declared `int64_t` -- `char * = mojo_set_iter_val_str(...)` then
+        # failed to gimplify. Distinct variables per loop, always.
+        gen._shadow_seq_box[0] += 1
         import re as _re
         safe = _re.sub(r'[^a-zA-Z0-9_]', '_', name.strip('`'))
         if safe and safe[0].isdigit():
             safe = '_' + safe
-        c_name = f"_shadow{gen.temp_counter}_{safe}"
+        c_name = f"_shadow{gen._shadow_seq_box[0]}_{safe}"
         gen._c_names[name] = c_name
         gen.decls.append(f"  {ctype} {c_name};")
         gen.var_types[name] = ctype
@@ -2390,7 +2492,18 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         gen._elem_types[_dk] = 'char *'  # dict keys are always strings
         return _dk
     if src_type == 'MojoSet *':
-        return gen._call_expr('MojoList *', 'mojo_set_to_list', [('MojoSet *', value)])
+        _sl = gen._call_expr('MojoList *', 'mojo_set_to_list', [('MojoSet *', value)])
+        # Carry the set's element type onto the list, exactly as the dict
+        # branch just above does for its keys. `set.to_list` only reboxes;
+        # without this the list is untyped and every later consumer reads
+        # it with the int accessor — `for i, c in enumerate(sorted(
+        # set(text)))` bound `c` as int64_t and then passed those raw
+        # pointer bits to `stoi[c] = i`, which gimple rejects ("invalid
+        # argument to gimple call": mojo_dict_set_int takes char *).
+        _se = gen._elem_of(value)
+        if _se and _se != 'int64_t':
+            gen._elem_types[_sl] = _se
+        return _sl
     if src_type == 'MojoGenerator *':
         return _generator_to_list(gen, value)
     if src_type in ('int64_t', 'int', 'void *') or src_type.endswith(' *'):
@@ -2438,6 +2551,33 @@ def _quick_container_elem(gen, node) -> str | None:
         # `[f(x) for _, x in it]` — element type is the mapped expression's
         # container-elem (or scalar-leaf) type.
         return gen._quick_container_elem(node.element)
+    if isinstance(node, gimple_ctypes.MemberExpr):
+        # `return self.data` — a list FIELD's element type, from the
+        # cross-method contract `_field_elem_types` records whenever the
+        # field is assigned a container literal (or appended to). Without
+        # this arm a method returning one of its own float-list fields
+        # inferred no return element type, so every call site typed the
+        # result's elements by the unknown-element default — and a
+        # comprehension binding them (`[a + gi * v for a, v in zip(gx,
+        # self.w.row(i))]`) declared `v` as a MojoList* and emitted
+        # `MojoList * * double`, a hard gcc error.
+        _pst = getattr(gen, '_prepass_struct', None)
+        if _pst and _pst in gen.struct_field_types:
+            _ft = gen.struct_field_types[_pst].get(node.member)
+            if _ft in ('MojoList *', 'MojoSet *'):
+                return gen._field_elem_types.get(_pst, {}).get(node.member)
+        return None
+    if isinstance(node, gimple_ctypes.SubscriptExpr):
+        # `return self.data[a:b]` — a list SLICE is a fresh list of the
+        # SAME elements, so it carries the sliced list's element type.
+        # A str slice is itself a str, not a container, so it answers
+        # None rather than a char* element type.
+        if isinstance(getattr(node, 'index', None), gimple_ctypes.SliceExpr):
+            _ot = gen._quick_type(node.obj) if hasattr(gen, '_quick_type') else None
+            if _ot == 'char *':
+                return None
+            return gen._quick_container_elem(node.obj)
+        return None
     if isinstance(node, gimple_ctypes.TernaryExpr):
         a = gen._quick_container_elem(getattr(node, 'if_true', None) or getattr(node, 'body', None))
         b = gen._quick_container_elem(getattr(node, 'if_false', None) or getattr(node, 'orelse', None))
@@ -2953,7 +3093,8 @@ def _maybe_lower_mlir_op(gen, node: gimple_ctypes.CallExpr):
 
 
 def _compr_range_loop(gen, node, gen0, res, res_type):
-    gen._declare_var(gen0.target, 'int64_t')
+    gen._declare_var(gen0.target, 'int64_t',
+                    force=_compr_target_is_shadowed(gen, gen0.target))
     args = gen0.iterable.args
     dynamic_step = False
     if len(args) == 1:
@@ -2978,8 +3119,13 @@ def _compr_range_loop(gen, node, gen0, res, res_type):
         # the resulting bare temp name used in the binary expression.
         # Found via Tools/cases_generator/cwriter.py's `CWriter.
         # __init__`: `self.indents = [i * 4 for i in range(indent + 1)]`.
-        start_v = gen._new_val('int64_t', '(int64_t)0')
-        step_v = gen._new_val('int64_t', '(int64_t)1')
+# `1LL`/`0LL`, not `(int64_t)1`/`(int64_t)0`: a C-style cast is not a
+# legal gimple OPERAND, so `idx + (int64_t)1` is a hard gimplification
+# error ("expected expression before '(' token") that takes out the whole
+# self-host closure. The `LL` suffix is the tree's existing idiom for a
+# width-correct int64_t literal and needs no cast.
+        start_v = gen._new_val('int64_t', '0LL')
+        step_v = gen._new_val('int64_t', '1LL')
         cond_op = '<'
         _stop_t, stop_v = gen.lower_expr(args[0])
         if _stop_t != 'int64_t':
@@ -3008,7 +3154,12 @@ def _compr_range_loop(gen, node, gen0, res, res_type):
         # mirroring `one64`/the 1-arg branch's own `start_v` construction.
         if start_t != 'int64_t':
             start_v = gen._new_val('int64_t', f"(int64_t){start_v}")
-        step_v = gen._new_val('int64_t', '(int64_t)1')
+# `1LL`/`0LL`, not `(int64_t)1`/`(int64_t)0`: a C-style cast is not a
+# legal gimple OPERAND, so `idx + (int64_t)1` is a hard gimplification
+# error ("expected expression before '(' token") that takes out the whole
+# self-host closure. The `LL` suffix is the tree's existing idiom for a
+# width-correct int64_t literal and needs no cast.
+        step_v = gen._new_val('int64_t', '1LL')
         cond_op = '<'
     elif len(args) == 3:
         start_t, start_v = gen.lower_expr(args[0])
@@ -3214,7 +3365,12 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         gen._gen_compr_append(node, gen0, res, res_type, bb_post)
         gen._emit(f"  goto {bb_post};")
         gen._emit_label(bb_post)
-        one64 = gen._new_val('int64_t', "(int64_t)1")
+# `1LL`/`0LL`, not `(int64_t)1`/`(int64_t)0`: a C-style cast is not a
+# legal gimple OPERAND, so `idx + (int64_t)1` is a hard gimplification
+# error ("expected expression before '(' token") that takes out the whole
+# self-host closure. The `LL` suffix is the tree's existing idiom for a
+# width-correct int64_t literal and needs no cast.
+        one64 = gen._new_val('int64_t', "1LL")
         st = gen._new_val('int64_t', f"{idx64} + {one64}")
         gen._emit(f"  {idx64} = {st};")
         gen._emit(f"  goto {bb_cond};")
@@ -3321,7 +3477,8 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
         var_names = [v.strip() for v in _inner_str.split(',')]
     else:
         var_names = None
-        gen._declare_var(gen0.target, vct)
+        gen._declare_var(gen0.target, vct,
+                        force=_compr_target_is_shadowed(gen, gen0.target))
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._emit(f"  goto {bb_cond};")
@@ -3357,7 +3514,8 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
 
 def _compr_dict_loop(gen, node, gen0, res, res_type, it_val):
     _iv = _as_str(it_val)   # see _compr_list_loop: keep the ptr a char* in the f-string
-    gen._declare_var(gen0.target, 'char *')
+    gen._declare_var(gen0.target, 'char *',
+                    force=_compr_target_is_shadowed(gen, gen0.target))
     iter_t = gen._new_temp('MojoDictIter *')
     more_t = gen._new_temp('int')
     gen._emit(f"  {iter_t} = mojo_dict_iter_new ({_iv});")
@@ -3387,6 +3545,30 @@ def _compr_dict_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  mojo_dict_iter_free ({iter_t});")
 
 
+def _compr_target_is_shadowed(gen, target) -> bool:
+    """True when a comprehension's loop target must get its OWN C variable.
+
+    A comprehension's `for` target is a fresh binding in the comprehension's
+    own scope, so it can never share the enclosing function's C variable for
+    that source name. Without this, `_declare_var`'s first-decl-wins guard
+    reused whatever was already declared -- and a self-shadowing `for n in n`
+    earlier in the function leaves behind a SHADOW variable with that name,
+    typed for THAT loop's elements.
+
+    Measured in the self-host closure: `gen_module_impl` has a
+    `for _n in _n` loop (int64_t elements) and later
+    `{_safe_name(n) for n in _imported_names}` (a set of strings, so
+    `char *`). The comprehension reused the loop's `_shadow5_n`, declared
+    `int64_t`, and `char * = mojo_set_iter_val_str(...)` would not
+    gimplify -- one of the four errors that took out bootstrap-stage2-cc.
+
+    Only true when a variable of that name is already live, so the
+    single-comprehension case -- by far the common one -- is completely
+    unchanged.
+    """
+    return _as_str(target) in gen.var_types
+
+
 def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     _iv = _as_str(it_val)   # see _compr_list_loop
     # A source set of strings (e.g. `frozenset({'a','b'})`) must round-trip
@@ -3395,7 +3577,8 @@ def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     # mojo_set_contains_str misses every element.
     _sv_elem = _as_str(gen._elem_of(_iv))
     _sv_is_str = (_sv_elem == 'char *')
-    gen._declare_var(gen0.target, 'char *' if _sv_is_str else 'int64_t')
+    gen._declare_var(gen0.target, 'char *' if _sv_is_str else 'int64_t',
+                    force=_compr_target_is_shadowed(gen, gen0.target))
     iter_t = gen._new_temp('MojoSetIter *')
     more_t = gen._new_temp('int')
     gen._emit(f"  {iter_t} = mojo_set_iter_new ({_iv});")

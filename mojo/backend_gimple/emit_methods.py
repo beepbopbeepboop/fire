@@ -42,9 +42,35 @@ import mojo.backend_gimple.emit_calls as ggc
 # Re-export shared helpers from mojo.middle.methods_shared via explicit imports.
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
+from mojo.middle.types import (
+    # The struct format-string analysis (codes / per-slot kinds / element
+    # ctype) is pure and lives in the middle tier beside
+    # _STRUCT_MODULE_FN_RETVALS, because the static type estimator in
+    # mojo/middle/resolve_shared.py needs the same answer to write a
+    # function PROTOTYPE that the lowering here then has to satisfy.
+    # Underscore-prefixed, so `import *` would not carry them.
+    #
+    # IMPORTED, NOT REDEFINED HERE. This used to carry thin delegating shims
+    # to `gimple_ctypes._struct_format_codes`, which is a real hazard rather
+    # than a matter of taste: the shim's body is a call through the module
+    # object, which return-type inference cannot see through, so it emitted
+    # `int64_t mojo_backend_gimple_emit_methods__struct_value_codes(char *)`
+    # -- a SECOND function with the same name and a DIFFERENT return type
+    # from the real one, both mangled to the same `d719e0` suffix because
+    # that suffix comes from the bare name. Every name-keyed return-type map
+    # then had two entries to choose between, and resolve_shared's
+    # `codes = _struct_value_codes(...)` picked the impostor:
+    #
+    #   resolve_shared.py:98: error: assignment to 'int64_t' from 'MojoList *'
+    #   makes integer from pointer without a cast [-Wint-conversion]
+    #
+    # which failed the whole-closure mojoc/selfhost build. One definition,
+    # one name, one return type.
+    _struct_value_codes, _struct_slot_kinds, _struct_elem_ctype,
+)
 from mojo.middle.methods_shared import *  # noqa: F401,F403
 from mojo.middle.methods_shared import (
-    _SELFHOST_SIBLING_MODULE_PREFIXES, _as_str, _gmm_callexpr_node, _is_selfhost_sibling_alias, _sms_key
+    _SELFHOST_SIBLING_MODULE_PREFIXES, _as_str, _gmm_callexpr_node, _is_selfhost_sibling_alias, _is_selfhost_source_file, _sms_key
 )
 
 # Sentinel for "this api entry has no `receiver` key at all", so a
@@ -535,77 +561,6 @@ def _lower_bound_method_call_value(gen, bm: str, node: gimple_ctypes.CallExpr,
 # to the Python type CPython's "not callable" message names for its value.
 # See _lower_struct_attr_call, which is the only consumer.
 _STRUCT_FMT_DATA_ATTRS = {'format': 'str', 'size': 'int'}
-
-
-def _struct_value_codes(fmt: str | None):
-    """The per-VALUE format codes of a const-foldable struct format string
-    ('4h' -> ['h','h','h','h'], 'x' padding dropped, '10s' -> ['s']), or
-    None if the format isn't statically known. Used to pick the right
-    MojoList append (int vs double vs bytes-pointer) per argument and the
-    element type of an unpack result.
-
-    A THIN delegate: the format grammar is `_struct_format_codes` in
-    mojo/middle/types.py, shared with `_struct_format_is_mixed` and
-    `_struct_ctor_format` there so the struct-format knowledge the low-level
-    middle tier and this backend both need has one definition."""
-    return gimple_ctypes._struct_format_codes(fmt)
-
-
-def _struct_slot_kinds(codes):
-    """Per-slot element kind for an unpack format: one of 'int'/'double'/
-    'bytes' per value, in wire order.
-
-    A `MojoList` holds ONE element ctype, which is why a format mixing ints
-    and floats used to degrade wholesale to int64 slots — the float came
-    back as its raw IEEE bits (`struct.unpack('<if', ...)` giving
-    `1 4607182418800017408`). But the format string is a compile-time
-    constant here, so each slot's real kind is statically known and only
-    the CONTAINER is untyped. Recording the per-slot kinds lets every
-    statically-indexed read of the result pick the right accessor for that
-    slot: the subscript (emit_calls.py's MojoList branch), the `a, b = t`
-    destructuring target (loops_shared._tuple_elem_value), and the
-    whole-result repr (`_list_repr_fn` -> `mojo_repr_list_kinds`). It is a
-    property of the VALUE, not of whether it was bound to a local; a read
-    with no compile-time slot index (iteration, a computed subscript) still
-    has no single right C type, which is the residue named in
-    bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
-    """
-    out = []
-    for c in codes or ():
-        if c in 'fd':
-            out.append('double')
-        elif c == 's' or c == 'c':
-            out.append('bytes')
-        else:
-            out.append('int')
-    return out
-
-
-def _struct_elem_ctype(codes):
-    """Uniform MojoList element ctype for an unpack tuple, or 'int64_t'
-    when the codes are mixed / unknown (the common integer-format case is
-    exact; a genuinely mixed int+float format degrades to int64 slots).
-
-    That degradation is now confined to reads with no compile-time slot
-    index: `_struct_slot_kinds` carries the real per-slot kinds, and the
-    subscript, the `a, b = t` destructuring target and the whole-result repr
-    all consult it. See
-    bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md."""
-    if not codes:
-        return 'int64_t'
-    kinds = set()
-    for c in codes:
-        if c in 'fd':
-            kinds.add('double')
-        elif c == 's':
-            kinds.add('bytes')
-        else:
-            kinds.add('int')
-    if kinds == {'double'}:
-        return 'double'
-    if kinds == {'bytes'}:
-        return 'MojoBytes *'
-    return 'int64_t'
 
 
 def _struct_build_value_list(gen, arg_nodes, codes):
@@ -2543,31 +2498,53 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # elaboration mechanism (generics, overloads, struct
         # construction) that some earlier, more specific branch in this
         # very function already owns.
-        # Excluded entirely for this compiler's OWN self-hosting sources
-        # (mirrors `_is_selfhost_sibling_alias`'s identical directory
-        # gate): `_func_qualifier` deliberately returns '' (an
-        # UNQUALIFIED bare symbol) for every function while compiling a
-        # `_SELFHOST_DIR` file — self-hosting relies on flat, hand-
-        # verified bare-name registration (see doc/ "self-host
-        # hardcoded struct tables"), not module-qualified mangling.
-        # `_note_own_func_home`/`_func_csym` still WORK in that mode
-        # (returning the bare name), but calling `_call_expr` directly
-        # here bypasses whatever separate bookkeeping the NORMAL bare-
-        # name call path (`_lower_call`/`_lower_named_call`) performs to
-        # get that bare symbol actually forward-declared/defined in the
-        # self-hosted output — confirmed via a real regression: routing
+        # Excluded entirely for this compiler's OWN self-hosting sources:
+        # `_func_qualifier` deliberately returns '' (an UNQUALIFIED bare
+        # symbol) for the functions such a module defines, so self-hosting
+        # relies on flat, hand-verified bare-name registration (see doc/
+        # "self-host hardcoded struct tables"), not module-qualified
+        # mangling. `_note_own_func_home`/`_func_csym` still WORK in that
+        # mode (returning the bare name), but calling `_call_expr` directly
+        # here bypasses whatever separate bookkeeping the NORMAL bare-name
+        # call path (`_lower_call`/`_lower_named_call`) performs to get that
+        # bare symbol actually forward-declared/defined in the self-hosted
+        # output — confirmed via a real regression: routing
         # `build_stdlib_dylib`'s `_imported_sigs`/`build` through this
         # branch during `imports.py`'s own self-host compile produced
-        # `implicit declaration of function '_imported_sigs'` (no
-        # forward decl ever emitted), where the pre-existing behavior
-        # (falling through to whatever handled it before this branch
-        # existed) at least compiled clean.
-        _mgc_cur = getattr(gen, '_current_filename', None)
-        _mgc_is_selfhost = False
-        if _mgc_cur and _mgc_cur.endswith('.py'):
-            _mgc_abs = gimple_ctypes.os.path.abspath(_mgc_cur)
-            _mgc_is_selfhost = (_mgc_abs == gimple_codegen._SELFHOST_DIR
-                                 or _mgc_abs.startswith(gimple_codegen._SELFHOST_DIR + '/'))
+        # `implicit declaration of function '_imported_sigs'` (no forward
+        # decl ever emitted), where the pre-existing behavior (falling
+        # through to whatever handled it before this branch existed) at
+        # least compiled clean.
+        #
+        # "This compiler's own source" is `_is_selfhost_source_file`, the
+        # shared answer to exactly that question (it lives beside
+        # `_is_selfhost_sibling_alias`, which adds the name of the thing
+        # being referenced on top of it). It used to be spelled inline here
+        # as a bare `_SELFHOST_DIR` equality/prefix test on `_current_filename`
+        # — the same predicate MINUS its "and only the compiler's own
+        # modules" half, and a file's location is not something the language
+        # gives a compiler any reason to treat specially. Anything checked
+        # out inside the compiler's own tree (a test fixture, a scratch
+        # script, a downstream project's subdirectory) was therefore denied
+        # this resolution, so a `<marker>.<plain_top_level_fn>(...)` call
+        # fell through to the generic scalar-receiver stub and answered a
+        # literal `0` — a silent wrong value, exit 0, no diagnostic.
+        #
+        # Measured, byte-identical source text, one process, only the
+        # fixture's directory differing:
+        #   <repo>/.tmp/fi/pkg2/main.py -> `_t4 = _t2;  /* int64_t.doubleval()
+        #                                           stubbed */`     (prints 0)
+        #   /tmp/fi/pkg2/main.py        -> `_t2 = base2_doubleval_9f63a2 (_t3);`
+        # `test_link_mode.py` builds its packages with
+        # `tempfile.TemporaryDirectory()`, so `$TMPDIR` — not the compiler —
+        # decided whether the registered `linkmode` gate step passed, which
+        # is why the very same case was red in some checkouts and green in
+        # every other. Pinned now by that file's
+        # `test_bare_submodule_import_call_inside_source_tree`, which builds
+        # the identical package at a path under this checkout so the
+        # invariant is tested in BOTH locations however the suite is run.
+        _mgc_is_selfhost = _is_selfhost_source_file(
+            getattr(gen, '_current_filename', None))
         if (not _mgc_is_selfhost
                 and module_name in getattr(gen, '_module_alias_names', ())
                 and not getattr(node, 'kwargs', None)):

@@ -161,13 +161,19 @@ def _compile_optional_unit(unit, src, plain, gcc):
     publishes whatever build_fn returns, so a None here would enter the CAS as
     a zero-length artifact and every later build would "hit" it.
     """
-    key = cas.module_key(open(src).read(), [], gcc, plain + (unit,))
+    # The per-unit compiler and flags go into the key as well as the command:
+    # the Metal unit is Objective-C and needs clang + ARC, so keying it on the
+    # build-wide gcc alone would let a gcc-built .o satisfy a later
+    # clang-built request (or vice versa) across two checkouts sharing a cas.
+    cc = optional_unit_cc(unit) or gcc
+    ccf = tuple(optional_unit_cc_flags(unit))
+    key = cas.module_key(open(src).read(), [], gcc, plain + (unit, cc) + ccf)
 
     def _build_fn():
         import tempfile as _tf
         wd = _tf.mkdtemp(prefix='mojo_optrt_')
         obj = os.path.join(wd, 'x.o')
-        r = subprocess.run([gcc, *plain, '-c', '-o', obj, src],
+        r = subprocess.run([cc, *plain, *ccf, '-c', '-o', obj, src],
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise _OptionalUnitFailed(

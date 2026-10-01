@@ -1,31 +1,96 @@
-# FORMAL_listdir_no_run_time_sequence: there is no way to return a directory listing
+# FORMAL_listdir_no_run_time_sequence: a run-time-length blob is answerable; a run-time-length LIST is not
 
-**Status:** open, and it is a limit rather than a defect — but it is the reason
-`os.listdir` and `os.walk` are ABSENT from the `os` module rather than
-approximate, and an absent function with a bug doc is a different thing from a
-function that returns something plausible. Found while writing `os`; the
-container capacity rule is in `formal/arm64_codegen.py` and is the same on
-x86-64, so no file is claimed here.
+**Status: the directory half is fixed, the sequence half is open.** `os.listdir`
+and `os.walk` exist in `formal/hostmods/os`, are exact, and are checked entry by
+entry and in order against `os.listdir`/`os.walk` in the test process
+(`test_formal_os_backing.py`'s `listdir_and_walk`, 49 answers over nine
+directory shapes and three depths). What does not exist is a Python-level LIST
+of a length only known at run time, and that is the part of this document's
+title that is still true.
 
-## What I ran
+## What landed, and what it was
 
-```
-$ cat > .tmp/pi.mojo
-def count_it(parts):
-    n = 0
-    for x in parts:
-        n = n + 1
-    return n
+The document below (kept, because its two blockers are what the fix turned on)
+said that `listdir` was unanswerable for two independent reasons. Both turned
+out to be things already in the tree or landed alongside, and neither needed a
+patch.
 
-def main(n):
-    xs = ["a", "b", "c"]
-    printf("n=%d\n", count_it(xs))
-    return 0
-$ ./.tmp/pi
-n=3
-```
+**The allocator.** The claim was that a container's length must be known when
+it is built, because capacity is the number of `append` SITES in the function
+that builds it. That is still true of a LIST, and it is not true of an
+ALLOCATION: `malloc(n)` takes a run-time size, and the memory it returns
+outlives the function that asked for it, which a frame blob does not. So
+`listdir` builds a blob of the shape every container on this path already has
+— `[count:i64][element]…`, one word per element — in `malloc`'d memory, with the
+count read out of word 0 and each element from word 1 on. Measured on
+`/Users/mrs/net/chatgpt/claude/modular`: 204 entries, first, second and last
+identical to `os.listdir`, in `readdir` order, which is CPython's order too.
 
-so a `for` over a list walks it correctly. Then the same append inside a loop:
+**The struct read.** The claim was that `readdir`'s `d_name` is a `char[1024]`
+inside a struct the source never declares, so there is no width to read and no
+offset to trust. The offset was never the problem. A read of that struct was a
+COUNT-WALK — `_emit_subscript_addr`'s blob path, bounds-checking the index
+against whatever word sat at offset 0, which on a `struct dirent` is
+`d_ino`. `model.subscript_base_lowering` (see below) routes a subscript whose
+base has a DECLARED POIN-TEE through the pointer value model, so each byte is
+now a load of the width it declares. `d_name` is at byte 21 of this target's
+`struct dirent`; the whole layout, and the one byte the reading does not
+account for, is written out in `formal/hostmods/os/_syscalls.mojo` and was
+measured with `ctypes` on this host.
+
+So this document's three numbered next steps read, with what happened to each:
+
+1. **"Make the overflow loud before making it rarer."** NOT DONE, and still the
+   cheapest thing here. `xs.append(v)` past the append-site count is still the
+   Darwin `exit(1)` at `formal/arm64_codegen.py:_emit_list_append`'s bounds
+   path, with no message — a one-line change in that emitter would turn every
+   one of them into a named gap. It helps every container and it is not this
+   document's own code.
+2. **"Then the capacity itself … refuse a `list` whose length is not bounded by
+   construction."** NOT DONE, and the framing below is still right: the blob is
+   FRAME-resident, so a list of unknown length inside a loop is a frame that
+   grows every iteration. That is FORMAL.md decision 3 and Phase 6.
+3. **`readdir` needs a name, not a struct.** DONE, and by a different route
+   than the one proposed: rather than a C shim on the link line
+   (`bugs/FORMAL_runtime_library_on_the_link_line.md`), the name is read out of
+   the struct a byte at a time. The proposed shim would have been the only way
+   *before* the byte read existed.
+
+## What is still missing, and the exact next step
+
+**A Python-level list whose length is a run-time value.** `listdir` answers
+with a blob and a pair of accessors, which is honest and usable, and it is not
+`xs = os.listdir(p)` followed by `for x in xs`. Four things stand between the
+two, and none of them is in `formal/model.py`'s business:
+
+1. `len(blob)` and `for x in blob` and `xs[i]` on a value this path knows is a
+   `malloc`'d BLOB rather than a frame one. The blob readers all begin with
+   "the base is a frame-resident blob", and nothing in the model records that a
+   particular word is a heap allocation with a run-time length. The
+   representation is already the same shape — that is the whole of the fix above
+   — so what is missing is a KIND: `BLOB_KIND`, carried by the callee's
+   declared return type, which is the same annotation channel
+   `dylib_export_return_kind` already reads for `char *`.
+2. A `list` LITERAL's frame reserve cannot be a run-time value
+   (`_blob_est` is a compile-time upper bound), so `xs = []` followed by `n`
+   appends has nowhere to put them. With (1) that becomes a `malloc`.
+3. A function returning a container. `formal/model.py`'s
+   "A frame that OUTLIVES the function that built it" is the shape of this: a
+   frame address is not a value a caller can use after the callee returns. With
+   (1) and (2) the value is a heap address, which is.
+4. A `for` over it, and `len`. Both are "is this a blob" questions and both
+   already exist; they need the kind from (1).
+
+That is Phase 6's tagged-value convergence arriving from the `os` side, and it
+is the same work in both directions. **It is not a patch**, which is what this
+document said before, and the number in the paragraph below has not changed:
+`os.listdir` is 12 uses across the 87 files the sweep lists for `os` and
+`os.walk` another 5, and what is now reachable is all of them — as a blob.
+
+## The original measurements, re-verified on this tree
+
+Re-measured before the fix, on the tree this branch started from, so the two
+answers are the same question asked twice:
 
 ```
 $ cat > .tmp/p3.mojo
@@ -39,12 +104,7 @@ def main(n):
     return 0
 $ ./.tmp/p3
 exit=1                 # no output
-
-$ # two append SITES, two iterations: still exit 1
-$ # three append SITES, three iterations: still exit 1
 ```
-
-## What I saw
 
 **A list's capacity is the number of `append` SITES in the function that builds
 it, and each EXECUTION of a site counts against it.** One site, run twice,
@@ -54,57 +114,22 @@ bound — the count of append sites in the function — and the store is checked
 against it."* The overflow is the Darwin `exit(1)` at
 `formal/arm64_codegen.py:5252`, so it is a silent exit with no message.
 
-So a list whose LENGTH IS ONLY KNOWN AT RUN TIME cannot be built. That is the
-whole of `listdir`, and through it `walk`.
+So a list whose LENGTH IS ONLY KNOWN AT RUN TIME cannot be built as a list.
+That is still true. What is no longer true is that this makes a directory
+listing impossible: the listing does not have to be a list.
 
-The second half is independent and just as final: even a bounded `listdir`
-could not read the names. `readdir` returns a `struct dirent *` whose `d_name`
-is at a fixed offset, and reading a struct on this path is a frame blob whose
-word 0 is a COUNT — the same fact as
-`bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md`, one indirection
-further out. `d_name` is a `char[256]` inside a struct the source never
-declares, so there is no width to read and no offset to trust.
+**A caveat worth keeping, because it is the shape of the wrong answer.** An
+earlier version of `walk` in this branch wrote the first PATH into word 0
+instead of the count, and the observable was a segfault on the first
+`listdir_get` — word 0 read as a count of billions, and every read of the blob a
+walk off the end of the heap. A blob's count is its own business, and nothing
+about a wrong count in word 0 looks like a wrong count.
 
-## What I expect, and what it is worth
-
-`os.listdir(p)` returning the entries. Worth 12 uses across the 87 files the
-sweep lists for `os`, and `os.walk` another 5, so it is not nothing — but it
-is 17 of 1 400-odd measured uses, and the two things that unblock it are
-Phase 6 (a real allocator) and the struct-read question, neither of which is a
-patch.
-
-## The exact next step, in the order the measurements suggest
-
-1. **Make the overflow loud before making it rarer.** `exit(1)` with no
-   message for a list that outgrew its compile-time capacity is the same
-   "plausible exit, no diagnosis" shape as everything else in this family, and
-   a `CodegenError`-style message naming the function, the number of append
-   SITES and the capacity would turn every one of these into a named gap in the
-   sweep instead of a file that exits 1. That is a one-line change in
-   `_emit_list_append`'s bounds path and it helps every container, not just
-   this one.
-2. **Then the capacity itself.** `_blob_cap` is a fixed region
-   (`_SCRATCH`, `formal/arm64_codegen.py:37`), so the honest capacity for a
-   list whose length is not statically known is "the region", and the check
-   should be against that rather than against the append-site count. What makes
-   it not-yet-honest is that the blob is FRAME-resident, so a list of unknown
-   length inside a loop is a frame that grows every iteration — which is
-   FORMAL.md decision 3 and Phase 6, not a patch. Until then, refuse a
-   `list` whose length is not bounded by construction, with a message that says
-   which of the two reasons applies.
-3. **`readdir` needs a name, not a struct.** The cheapest real answer is a
-   C-level shim on the link line — `char *readdir_name(DIR *)` returning the
-   `d_name` pointer — which turns the read into a `char *` this path already
-   represents exactly. It needs the runtime dylib to be on a formal link line
-   (`bugs/FORMAL_runtime_library_on_the_link_line.md`), so it is downstream of
-   that, not parallel to it.
-
-**What `os` does instead**, so the shape is a decision and not an omission:
-`os` and `os.path` ship no `listdir` and no `walk`, and
-`formal/hostmods/os/__init__.mojo` says so at the top of its
-docstring. A caller who writes `os.listdir(p)` gets a
-build refusal naming `listdir` — an unresolved name, with the module in hand —
-which is the honest answer. The alternative, a `listdir` that returned a
-fixed-capacity list of whatever fitted, would be a function whose length is a
-property of the program rather than of the directory, and every caller of it
-would be wrong in a way nothing downstream could detect.
+**What `os` does**, so the shape is a decision and not an omission:
+`os.listdir(p)` returns a blob, `listdir_len` and `listdir_get` read it, and
+`listdir_free` releases it. A caller who writes `os.listdir(p)` and then indexes
+the result as a list gets the blob path's answer, which is what
+`bugs/FORMAL_subscript_of_a_pointer_reads_a_blob_count.md` measured; the two
+docstrings in `formal/hostmods/os/__init__.mojo` say what the value is and how
+to read it, and a run-time-length blob with a count nobody can reach would have
+been the thing not to ship.

@@ -158,6 +158,10 @@ def test_every_declaration_is_seen():
     # are still included, and all five removed declarations are still absent.
     # 450 -> 451 (2026-09-28): `mojo_cstr_or_int_release`, the free half of
     # `mojo_cstr_or_int_str`'s ownership contract (doc/MEMORY.html section 4).
+    # 465 -> 466: mojo_stream_write, the fd-keyed `sys.stdout.write` entry point
+    # (a POSIX fd boxed as an opaque handle, so `.write()` on it has to resolve
+    # against the fd rather than a FILE*; without it the call fell through to
+    # `int_write(1, s)`, treating the integer 1 as a FILE*).
     # 464 -> 465 (2026-09-29): mojo_dict_slot_key, the accessor that builds an integer
     # key's decimal string on demand (generated repr code read the field directly).
     # 462 -> 464 (2026-09-28): mojo_dict_iter_key_int and mojo_dict_items_int, the
@@ -166,13 +170,27 @@ def test_every_declaration_is_seen():
     # keys passed as a raw word; doc/MEMORY.html section 10.4).
     # 451 -> 452 (2026-09-28): `mojo_cleanup_push_ptr`, the cleanup-stack kind
     # for an owned struct instance (doc/MEMORY.html section 3.B).
-    # 465 -> 474 (2026-09-29): the per-slot-kind side table on a MojoList
-    # (`mojo_list_set_kinds` / `_get_kinds` / `_slot_kind` /
-    # `_inherit_kinds`) and the box that carries an element kind out of a slot
-    # whose index is not a compile-time constant (`mojo_list_get_boxed`,
-    # `mojo_is_boxed`, `mojo_box_double`, `mojo_box_int`, `mojo_repr_boxed`) —
-    # see bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
-    for header, want in (('fire_runtime.h', 474),
+    # 465 -> 475. Two independent additions, so the counts ADD rather than
+    # either side winning:
+    #   465 -> 474 (integ, 2026-09-29): the per-slot-kind side table on a
+    #   MojoList (`mojo_list_set_kinds` / `_get_kinds` / `_slot_kind` /
+    #   `_inherit_kinds`) and the box that carries an element kind out of a
+    #   slot whose index is not a compile-time constant (`mojo_list_get_boxed`,
+    #   `mojo_is_boxed`, `mojo_box_double`, `mojo_box_int`, `mojo_repr_boxed`)
+    #   -- see bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md.
+    #   465 -> 466 (metal): one more entry point, from the self-host closure
+    #   work in d446f5be.
+    # Verified by COUNTING the merged header, not by adding the two deltas:
+    # `reflect.collect_runtime_exports_h('runtime/fire_runtime.h')` returns 479
+    # on the merged tree. Take this number from that call, not from the
+    # arithmetic -- that is the whole point of the check.
+    #
+    # 475 -> 479 (2026-09-30): the four container value-equality entry points
+    # (`mojo_list_eq` / `mojo_dict_eq` / `mojo_set_eq` / `mojo_value_eq`). They
+    # are declared here rather than in their container's own section because
+    # unlike every other comparison primitive all three container types have to
+    # be complete first -- see bugs/CODEGEN_container_eq_is_pointer_identity.md.
+    for header, want in (('fire_runtime.h', 479),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

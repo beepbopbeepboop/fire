@@ -3,7 +3,8 @@
 **Status: OPEN, and it is a property of the value model rather than a gap in any
 one emitter. Nothing in `sys.mojo` is a workaround; the names it does not define
 are listed there with this document as the reason. Closing it means changing what
-a formal value IS, which is a change the two backends AND the Lean proof share.**
+a formal value IS, which is a change the two backends AND the Lean proof share.
+One part of (2) below landed on 2026-09-30 and is marked where it stands.**
 
 Found while writing the `sys` module for the formal backend (2026-09-29, the
 `module:sys` claim). Every measurement below is from this tree at `ca6e758`.
@@ -57,6 +58,30 @@ build: main: 'PLAT' is imported from `mylib`, so it is a module-level name of
 another module. This path compiles an import into a dylib, and a module-level
 name is not exported as a word — there is no storage for it here
 ```
+
+**HALF OF THIS LANDED (2026-09-30, the `construct:module-attribute-access`
+claim), and it is the half that needed no storage at all.** A module-level name
+the build FOLDED TO A LITERAL now crosses the boundary: `compile_formal_dylib`
+records the folded values in the manifest's `constants`, and the importer
+materializes the same literal in its own image
+(`build._publish_imported_constants`, `model.dylib_module_constants`). So
+`mylib.PLAT`, `from mylib import PLAT` and `pkg.PLAT` for a re-exported constant
+all lower, on both architectures, and are pinned by
+`test_formal_module_attr.py` against CPython's own answers.
+
+The argument is the one this document already makes for the IN-unit case: a
+folded module-level name has exactly one value in a whole program, because the
+module-level sequence is its only writer and a function that assigns the name
+binds a local that shadows it. There is nothing to store and nothing that can
+change it, so a copy of the literal in each image is the same value rather than
+a second one.
+
+**What did not change is everything this document is actually about**: a name
+whose value is NOT a literal is a real global, still refused, and still for the
+reason below. `sys.argv` (a list), `sys.stderr` (an object) and `sys.modules` (a
+dict) are all in that set, and the refusal message now says which of the two
+kinds it is — a dylib publishes FUNCTIONS and folded CONSTANTS, and what it
+cannot publish is a VARIABLE.
 
 **(3) A tuple cannot cross a dylib boundary — and the failure is a
 use-after-frame, not a refusal.** A module returning `(3, 14, 0)`, printed by the
@@ -159,6 +184,20 @@ it was one line among several.
 
 `re` is worth calling out separately: it blocks four of the fourteen and no
 worker holds it.
+
+**Re-measured 2026-09-30** (the `construct:module-attribute-access` claim, arm64,
+`tools/formal_sweep.py --no-stdlib` on a handful of these): the classes are
+UNCHANGED — `t_argv.mojo` and `tools/ci_line.py` are still `codegen` on
+`sys.argv`/`sys.stderr`, `unescape_c.py` still on `len(s)`, and the three
+host-import files are still host-import (`shutil`, `subprocess`, `re`). The
+constant half of (2) does not move them, and it was not expected to: none of
+these four reads a name whose value is a literal. What the re-measurement does
+show is that the tree has moved under the table — `determinism_trace.py`, which
+this document's author listed as reaching the module-attribute refusal, now
+stops earlier at `_f.write()` (a name classified as `int` where the C library's
+`write(2)` needs a descriptor), and `analyze_benchmarks_types.py` stops at a
+name that "holds a frame address in more than one shape". Both are real
+findings and both are somebody else's construct.
 
 ## The exact next step, for whoever takes it
 

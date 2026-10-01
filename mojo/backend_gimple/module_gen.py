@@ -43,6 +43,10 @@ from mojo.middle.exprtypes import _walk_ast
 import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
 from mojo.middle.closures import discover_closures
+import mojo.backend_gimple.device_select as _gmi_device_select
+import mojo.middle.offload as _gmi_offload
+import mojo.backend_gimple.device_glue as _gmi_device_glue
+import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
 # Re-export shared helpers from mojo.middle.module_shared via explicit imports.
@@ -58,6 +62,149 @@ from mojo.middle.module_shared import (
     _mojo_type, _pair_key, _ptr_slot_in_range, _register_sym, _selfhost_fn_reassigns_method, _selfhost_homogeneous_tuple_ret_funcs,
     _selfhost_modglobal_is_pathcall, _selfhost_module_scalar_globals, _selfhost_struct_dict_field_val_types, _sms_key, _walk_ast
 )
+
+
+def _gmi_literal_ctype(node):
+    """The ctype of an UNAMBIGUOUS container/string literal, else None.
+
+    "Unambiguous" is the whole point. A string literal is never a list and a
+    list literal is never a string, so either one is ground truth about what
+    the callee's parameter really is. Anything whose ctype depends on context
+    (an identifier, an arithmetic expression, a call result) returns None
+    rather than guessing.
+    """
+    if isinstance(node, (gimple_ctypes.StringLiteral,
+                        gimple_ctypes.TstringLiteral)):
+        return 'char *'
+    # `fire_compiler` also exports `ListLiteral`/`SetLiteral`/... but those are
+    # ALIASES of the `*Expr` classes, not subclasses, so naming them in an
+    # isinstance tuple raises `AttributeError` against `mojo.middle.types` --
+    # which is what `gimple_ctypes` re-exports here. Only the `*Expr` spellings
+    # are real attributes.
+    if isinstance(node, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
+        return 'MojoList *'
+    if isinstance(node, gimple_ctypes.SetExpr):
+        return 'MojoSet *'
+    if isinstance(node, gimple_ctypes.DictExpr):
+        return 'MojoDict *'
+    return None
+
+
+def _gmi_iter_calls(stmts, _seen=None):
+    """Every CallExpr in the tree, via a generic walk over node attributes."""
+    if _seen is None:
+        _seen = set()
+    for st in (stmts or []):
+        stack = [st]
+        while stack:
+            node = stack.pop()
+            if node is None or id(node) in _seen:
+                continue
+            _seen.add(id(node))
+            if isinstance(node, gimple_ctypes.CallExpr):
+                yield node
+            for attr in ('body', 'args', 'value', 'func', 'iterable',
+                         'obj', 'left', 'right', 'operand', 'target', 'elt',
+                         'key', 'results', 'statements', 'expr'):
+                sub = getattr(node, attr, None)
+                if sub is None:
+                    continue
+                if isinstance(sub, (list, tuple)):
+                    stack.extend(sub)
+                else:
+                    stack.append(sub)
+
+
+def _gmi_apply_call_site_param_evidence(gen, stmts):
+    """Ground an unannotated parameter in what its CALLERS actually pass.
+
+    `_infer_param_types` infers a parameter's type from how the body USES it,
+    and for an iterable-consuming builtin that inference has to collapse
+    "iterable" onto one concrete container. That is lossy: `str` is iterable
+    too, so `reversed(seq)` says "container" and cannot say WHICH.
+
+    Real regression this fixes, introduced with the
+    `_ITERABLE_CONSUMING_BUILTINS` signal: `def rev(seq): for c in
+    reversed(seq): ...` called as `rev("abc")` inferred `seq` as
+    `MojoList *`, so the call passed a `char *` into `mojo_list_copy()` and
+    the process SEGFAULTED (exit -11) on ordinary Python. The parent commit
+    inferred `char *` here and worked.
+
+    The call site is the only input that can settle it, and nothing consulted
+    it. This pass records the ctype of *unambiguous literal* arguments and,
+    when a parameter's use-derived type contradicts every call site, believes
+    the callers.
+
+    Deliberately narrow, because this runs on every module:
+      - free-function calls only (`IdentExpr` callee), so there is no
+        `self`-offset ambiguity in positional alignment;
+      - only when the call's arity equals the declared param count, so
+        positional alignment cannot silently shift;
+      - only to resolve str-vs-container, and only when the call sites are
+        UNANIMOUS. One ambiguous or absent call site leaves the inference
+        exactly as it was.
+    A wrong override here would silently re-type a parameter, so anything
+    less than unanimous evidence declines to act.
+    """
+    ipt = gen._inferred_param_types
+    if not ipt:
+        return
+    names = getattr(gen, '_func_param_names', {})
+    # (func, param) -> {ctype, ...} for unambiguous literal arguments only
+    evidence: dict = {}
+    for call in _gmi_iter_calls(stmts):
+        if not isinstance(call.func, gimple_ctypes.IdentExpr):
+            continue
+        fname = _as_str(call.func.name)
+        params = names.get(fname)
+        if not params:
+            continue
+        args = call.args or []
+        if len(args) != len(params):
+            # Arity mismatch means positional alignment (an optional or
+            # defaulted param, a *args call) is not trustworthy here.
+            continue
+        for pname, arg in zip(params, args):
+            ctype = _gmi_literal_ctype(arg)
+            if ctype is not None:
+                evidence.setdefault((fname, pname), set()).add(ctype)
+
+    containers = ('MojoList *', 'MojoSet *', 'MojoDict *')
+    for (fname, pname), ctypes in evidence.items():
+        if len(ctypes) != 1:
+            continue  # not unanimous
+        # `list(ctypes)[0]`, NOT `next(iter(ctypes))`: this function is part
+        # of the self-host closure, and `next` is not one of the runtime
+        # symbols the compiled path links (caught by `selfhost` as an
+        # undefined-symbol link failure -- `_next`, referenced from
+        # `_gmi_apply_call_site_param_evidence`). The set is known to hold
+        # exactly one element here, so a literal subscript is both equivalent
+        # and linkable.
+        call_type = list(ctypes)[0]
+        cur = ipt.get(fname, {}).get(pname)
+        # Every UNANIMOUS literal container also grounds the callee's
+        # `==` / `!=` lowering, which cannot see through an erased
+        # int64_t parameter: record the KIND separately, in a table of its
+        # own, so a container-typed parameter reaches
+        # `mojo_value_eq`/`mojo_set_eq` instead of a pointer comparison.
+        # Separate table because `_inferred_param_types` above re-types
+        # parameters all over the backend and a container entry there has
+        # effects far past comparison; this one is read only by the
+        # comparison lowering. A unanimous CHAR * proves nothing about
+        # equality (two separately-built strings compare by content through
+        # a different, already-correct path), so only containers are kept.
+        if call_type in containers:
+            kinds = gen._container_param_kinds.setdefault(fname, {})
+            kinds[pname] = ('list' if call_type == 'MojoList *' else
+                            'set' if call_type == 'MojoSet *' else 'dict')
+        if cur == call_type:
+            continue
+        if not ((cur in containers and call_type == 'char *')
+                or (cur == 'char *' and call_type in containers)):
+            # The two agree, or the disagreement is not the str/list
+            # ambiguity this pass exists to settle. Leave it alone.
+            continue
+        ipt.setdefault(fname, {})[pname] = call_type
 
 
 def _is_selfhost_source_dir(_dir: str) -> bool:
@@ -973,6 +1120,94 @@ def _gmi_has_unresolved_base(_struct_bases_map: dict, _all_struct_names: set,
 
 
 def gen_module_impl(self, stmts):
+
+    # ── GPU offload, Seam 1 ──────────────────────────────────────────────
+    # Classified ONCE, at the very top, because three different places
+    # need the answer and they run at different times: the preamble (to emit
+    # the runtime include and the prototypes the compiled program calls),
+    # the function-body loop (to route a device function to the MSL emitter
+    # instead of gen_func), and the tail (to emit the sidecar). Deciding
+    # "emit this one to a different target" is not something an emitter can
+    # do about a function it has already started, which is why this is a
+    # pre-pass and not a check inside gen_func.
+    _device_kinds = _gmi_device_select.classify_functions(stmts)
+
+    # Increment 3 (doc/GPU_OFFLOAD_PLAN.html): synthesise a device function
+    # for a recognised parallel loop nest, so ordinary Python offloads with
+    # no marker. The synthesised FunctionDef is appended to `stmts` and
+    # carries `@gpu`, which is what makes it flow through seam 1's
+    # classifier, seam 2's MSL emitter and seam 3's host wrappers with no
+    # change to any of them -- increment 3 adds a recogniser and a
+    # synthesiser, not a second code path.
+    #
+    # The synthesised functions are added AFTER the classifier has run and
+    # then the classification is refreshed, because a synthesised function is
+    # not in `stmts` when classify_functions sees it.
+    _synth_names = _gmi_offload.synthesise_module(stmts)
+    if _synth_names:
+        stmts = list(stmts) + list(_synth_names)
+        _device_kinds = _gmi_device_select.classify_functions(stmts)
+
+    _device_parts: list[str] = []
+    _device_names = sorted(n for n, k in _device_kinds.items()
+                           if k == _gmi_device_select.DEVICE)
+    # The host-side marshalling signature of every device kernel, computed
+    # HERE, off the AST, because a device function never runs through
+    # gen_func and so never gets an inferred C signature to read back. It
+    # feeds two emissions at different times: the prototypes in the
+    # preamble, and the wrapper definitions in the tail sidecar.
+    self._device_kernels = {n: True for n in _device_names}
+    # Which of those a HUMAN marked, and which merely matched by inference --
+    # see the DEVICE branch's own note. A function that falls back to the host
+    # is recorded here so the reason is visible instead of silent.
+    _device_explicit = _gmi_device_select.explicitly_marked_functions(stmts)
+    _device_fallbacks: list = []
+    self._device_launch_args = {}
+    self._device_launch_count: dict = {}
+    _device_kernels_meta: dict = {}
+    for _s in stmts:
+        if (isinstance(_s, FunctionDef)
+                and _device_kinds.get(_as_str(_s.name)) == _gmi_device_select.DEVICE):
+            _nm = _as_str(_s.name)
+            _tys, _ci = _gmi_device_glue.launch_arg_types(_s.params)
+            # Fail here, at the classification pass, rather than at the first
+            # call site: an un-marshallable kernel is a build error either
+            # way, and failing before anything is emitted gives a file and
+            # line instead of a stack through the call-site lowering.
+            try:
+                _gmi_device_glue.element_count_index(_nm, _ci)
+            except _gmi_device_glue.LaunchError as _le:
+                # No length parameter means the host has no way to size the
+                # copy-back, so this kernel cannot be dispatched -- a real
+                # limitation, and for an EXPLICIT `@gpu` a build error is the
+                # right answer (the check exists so a silently-empty
+                # copy-back cannot pass for a result).
+                #
+                # For an INFERRED stdlib kernel it is not: nobody asked for
+                # the device path, and raising here made the module
+                # uncompilable. Same rule as the emitter's own
+                # MetalUnsupported branch -- explicit is honoured, inference
+                # falls back to the host with the reason recorded.
+                if _nm in _device_explicit:
+                    raise
+                _device_fallbacks.append(f'{_nm}: {_le}')
+                continue
+            self._device_launch_args[_nm] = _tys
+            # A kernel's buffer parameters are `T *`, and a list argument at
+            # a call site is a MojoList -- so the kernel's own element types
+            # need the pack/unpack pair, whether or not any call site in this
+            # module has been reached yet. The call-site pass adds to the
+            # same set, so the preamble emits whichever is larger.
+            for _pn, _ct, _isb, _w in _tys:
+                if _isb:
+                    self._list_marshalling_needed.add(_ct[:-2])
+            # (name, c_type, is_buffer) triples, plus the element-count
+            # index. The wrapper generator needs to tell a buffer from a
+            # scalar; emit_calls.py reads only the c_types, from
+            # `_device_launch_args`, plus the count index from here, which is
+            # what it needs to size a list-to-buffer marshalling.
+            self._device_launch_count[_nm] = _ci
+            _device_kernels_meta[_nm] = (_tys, _ci)
     self._actual_types['stmts'] = 'MojoList *'
     if self._current_filename:
         self._inline_module_qualifiers[os.path.abspath(self._current_filename)] = self.module_name
@@ -2987,6 +3222,22 @@ def gen_module_impl(self, stmts):
                     else:
                         ctype = 'int64_t'
                 self._global_var_types[mangled] = ctype
+                # A container-valued class attribute keeps its ELEMENT
+                # type on the `_classattr_...` global, the same side-table
+                # a local list uses. Without it a class-level registry of
+                # objects (`T.registry = []` ... `T.registry.append(self)`)
+                # reads back as an untyped handle, and every element of it
+                # types as int64_t — so `p.numel()` became
+                # `int64_t.numel() stubbed` and a model's parameter count
+                # came back as a pointer-sized garbage number. An EMPTY
+                # literal has no evidence and is left alone; the first
+                # `.append()` on the attribute records the type (see
+                # `_lower_list_method`'s pointer branch, which writes
+                # `_elem_types[ov]`).
+                if isinstance(v, (ListExpr, TupleExpr, SetExpr)) and v.elements:
+                    _cel = self._infer_list_elem_type(v.elements)
+                    if _cel and _cel != 'int64_t':
+                        self._elem_types[mangled] = _cel
                 # UPGRADE an already-registered instance field's type —
                 # do NOT create one for a pure class-level attribute. A
                 # container-valued class attr (`Parser._CONV_KWS = {...}`)
@@ -4196,9 +4447,34 @@ def gen_module_impl(self, stmts):
                     self._elaborated_externs.append(bare_decl)
 
     self._inferred_param_types: dict[str, dict[str, str]] = {}  # func_name -> {param_name -> type}
+    # Function name -> parameter name -> container kind ('list'/'dict'/'set'),
+    # for parameters every unambiguous literal CALL SITE agrees is a
+    # container. Read only by the `==` / `!=` lowering, which cannot see
+    # through an erased int64_t parameter and would otherwise emit a pointer
+    # comparison for it. Filled by `_gmi_apply_call_site_param_evidence`
+    # beside `_inferred_param_types` — a table of its own because THAT one
+    # re-types parameters all over the backend, and a container entry there
+    # has effects far past comparison.
+    self._container_param_kinds: dict[str, dict[str, str]] = {}
+    # Function name -> its parameter NAMES in order. Populated here, in the
+    # same pass that fills `_inferred_param_types`, because that map is keyed
+    # by param NAME while a call site identifies a callee's parameter only by
+    # POSITION: `analyze_param_usage` records `callee + _FC_SEP + arg_index`
+    # and the decision step needs to turn that index back into a name to ask
+    # "what did the callee infer for that parameter?". Looked up, never
+    # computed, so there is no inference recursion.
+    self._func_param_names: dict[str, list[str]] = {}
+    for s in all_functions:
+        if isinstance(s, FunctionDef):
+            self._func_param_names[_as_str(s.name)] = [
+                _as_str(pn) for pn, _pt in (s.params or []) if not _as_str(pn).startswith('*')]
     for s in all_functions:
         if isinstance(s, FunctionDef):
             self._inferred_param_types[s.name] = self._infer_param_types(s)
+    # Ground those use-derived parameter types in what callers pass, where the
+    # two disagree and a call site is unambiguous. See
+    # `_gmi_apply_call_site_param_evidence`.
+    _gmi_apply_call_site_param_evidence(self, stmts)
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             s = _as_structdef_node(s)
@@ -4329,6 +4605,15 @@ def gen_module_impl(self, stmts):
           and a free function's full caller set is not visible to any
           fixpoint here, so such a flip cannot be made consistent.
         """
+        # Unary +/- in front of a literal: `-1` and `-3.5` parse as
+        # UnaryOp('-', <literal>), NOT as a negative literal node, so
+        # without looking through them every NEGATIVE literal argument was
+        # invisible here — a param reached only from `f(-3.5)` got no
+        # observation and kept its int64_t default, so `abs(x)` inside `f`
+        # truncated the double (printed 3 for 3.5). The sign cannot change
+        # the type, so the operand's own answer is the answer.
+        if isinstance(a, UnaryOp) and a.op in ('-', '+'):
+            return _arg_scalar_type(caller_name, a.operand, deep_str, prefer_refined_param, caller_struct)
         if isinstance(a, FloatLiteral):
             return 'double'
         if isinstance(a, StringLiteral):
@@ -4846,6 +5131,61 @@ def gen_module_impl(self, stmts):
     # `_scalar_obs`' set) and applied by the struct contract below.
     _struct_obs: dict[str, dict[str, set]] = {}
 
+
+    # ...and the METHOD half of the same contract. The walk above only
+    # recognises a callee spelled as a bare `IdentExpr`, so every
+    # `self.q.backward(gq, n)` / `obj.method(xs)` call site was invisible:
+    # a container passed into a METHOD kept no element type, and the
+    # callee read it with mojo_list_get_int whatever the caller stored.
+    # For a list of doubles that returns the raw IEEE-754 bit pattern,
+    # which then flows through arithmetic as a perfectly ordinary-looking
+    # int64_t — a SILENT wrong answer, exit 0 (real: a hand-written
+    # neural-net's `g[i]` incoming-gradient read in a Linear.backward,
+    # where `gi == 0.0` then compared a bit pattern against zero and never
+    # matched, so every gradient silently went the wrong way).
+    #
+    # Receiver resolution mirrors `_collect_method_scalar_obs` exactly
+    # (self.<field> via the caller's own struct, a local via
+    # _inferred_var_types), because it answers the same question: which
+    # struct owns this method call.
+    def _static_arg_elems(a, elem, nested):
+        """(element, nested-element) C types provable for one argument
+        expression, or (None, None). IdentExpr defers to the caller's
+        scanned local map; a container LITERAL is provable on the spot,
+        which is what the IdentExpr-only walk above could not see either
+        (`total([1.0, 2.0])` read its argument as int64 bits)."""
+        if isinstance(a, gimple_ctypes.IdentExpr):
+            _n = _gmi_as_str(a.name)
+            if _n in elem:
+                _e = _gmi_as_str(elem[_n])
+                # An `int64_t` element type is NOT positive evidence: it is
+                # both the honest answer for a list of ints AND this
+                # codegen's "cannot tell" default (an empty literal, an
+                # int/double join, a subscript store whose value type was
+                # unresolvable). Recording it changes nothing at the read --
+                # the default accessor already is mojo_list_get_int -- but
+                # it DOES collide in `_record_param_elem`'s conflict rule
+                # and erase the real answer from a sibling call site, so a
+                # method reached from both a float-list and a not-yet-typed
+                # call site lost its element type outright (real:
+                # Linear.backward's incoming gradient -- three double call
+                # sites in GatedLinearAttention, two untyped ones in
+                # SwiGLU -- joined to (None, None), and every `g[i]` in it
+                # read back as raw int64 bits).
+                if _e == 'int64_t':
+                    return None, None
+                return _e, _gmi_as_str(nested.get(_n))
+            return None, None
+        if isinstance(a, gimple_ctypes.ListExpr):
+            _e = self._infer_list_elem_type(a.elements)
+            if _e == 'int64_t':
+                return None, None
+            if not self._literal_elements_include_none(a.elements):
+                if a.elements and isinstance(a.elements[0], gimple_ctypes.ListExpr):
+                    return 'MojoList *', self._infer_list_elem_type(a.elements[0].elements)
+                return _gmi_as_str(_e), None
+        return None, None
+
     for caller_name, body in _caller_bodies:
         elem, nested, _ = self._scan_container_elems(body)
         calls = []
@@ -4860,9 +5200,9 @@ def gen_module_impl(self, stmts):
             for i, a in enumerate(call.args):
                 if i >= len(pnames):
                     break
-                if isinstance(a, IdentExpr) and _as_str(a.name) in elem:
-                    _record_param_elem(callee, pnames[i],
-                                        elem[_as_str(a.name)], nested.get(_as_str(a.name)))
+                _fe, _fne = _static_arg_elems(a, elem, nested)
+                if _fe is not None:
+                    _record_param_elem(callee, pnames[i], _fe, _fne)
                 st = _arg_scalar_type(caller_name, a)
                 if st:
                     # Split the chained `_scalar_obs.setdefault(callee, {})
@@ -4885,6 +5225,57 @@ def gen_module_impl(self, stmts):
                     _sp_inner = _struct_obs.setdefault(callee, {})
                     _sp_set = _sp_inner.setdefault(pnames[i], set())
                     _sp_set.add(_gmi_as_str(spt))
+
+    for caller_name, caller_struct, cbody in _method_caller_bodies:
+        _melem, _mnested, _ = self._scan_container_elems(cbody)
+        _mcalls = []
+        self._calls_in_stmts(cbody, _mcalls)
+        for _mcall in _mcalls:
+            if not isinstance(_mcall.func, MemberExpr):
+                continue
+            _mrecv = _mcall.func.obj
+            _mrstruct = None
+            if isinstance(_mrecv, IdentExpr):
+                if _mrecv.name == 'self':
+                    _mrstruct = caller_struct
+                else:
+                    _mt = self._inferred_var_types.get(caller_name, {}).get(_mrecv.name)
+                    if isinstance(_mt, str) and _mt.endswith(' *'):
+                        _mrstruct = _mt[:-2]
+            elif (isinstance(_mrecv, MemberExpr) and isinstance(_mrecv.obj, IdentExpr)
+                    and _mrecv.obj.name == 'self' and caller_struct
+                    and caller_struct in self.struct_field_types):
+                _mft = self.struct_field_types[caller_struct].get(_mrecv.member)
+                if isinstance(_mft, str) and _mft.endswith(' *'):
+                    _mrstruct = _mft[:-2]
+            if not _mrstruct:
+                continue
+            _mmeth = _method_scalar_ann.get(_mrstruct, {}).get(_mcall.func.member)
+            if _mmeth is None:
+                continue
+            _mpn = []
+            _meth_is_cls = 'classmethod' in (getattr(_mmeth, 'decorators', None) or [])
+            for _pn, _pt in (_mmeth.params or []):
+                _pn = _gmi_as_str(_pn)
+                # `self` (and a classmethod's `cls`) is bound by the
+                # RECEIVER, not by any argument, so it must not consume
+                # call-arg slot 0 — `_collect_method_scalar_obs` drops them
+                # for exactly this reason, and copying its rule is what
+                # keeps the two contracts aligned. Getting it wrong
+                # records arg 0's element type against `self` and shifts
+                # every later argument one slot up.
+                if _pn != 'self' and not (_meth_is_cls and _pn == 'cls') \
+                        and not _pn.startswith('*'):
+                    _mpn.append(_pn)
+            if not _mpn:
+                continue
+            _mcallee = f"{_gmi_as_str(_mrstruct)}_{_gmi_as_str(_mcall.func.member)}"
+            for _mi, _ma in enumerate(_mcall.args):
+                if _mi >= len(_mpn):
+                    break
+                _me, _mne = _static_arg_elems(_ma, _melem, _mnested)
+                if _me is not None:
+                    _record_param_elem(_mcallee, _mpn[_mi], _me, _mne)
 
     # A container param whose ELEMENTS the callee `isinstance()`-checks
     # against struct types (`for s in stmts: if isinstance(s, FunctionDef)`)
@@ -6681,6 +7072,14 @@ def gen_module_impl(self, stmts):
             if _shn not in self.func_param_types:
                 self.func_param_types[_shn] = _shp
 
+    # ── GPU offload, Seam 1 + Seam 3 ──────────────────────────────────────
+    # Which functions are DEVICE is decided ONCE, here, before any body is
+    # emitted -- "emit this one to a different target" is not a decision an
+    # emitter can make about a function it has already started, which is why
+    # device_select is a separate pre-pass rather than a check inside
+    # gen_func. Cheap when there are no device functions (the overwhelmingly
+    # common case), and it only walks the AST for functions, never bodies.
+
     for stmt in stmts:
         if isinstance(stmt, FunctionDef):
             if (stmt.name in self._supported_generators or stmt.name in self._supported_async
@@ -6688,6 +7087,45 @@ def gen_module_impl(self, stmts):
                 continue
             if stmt.name in self._unsupported_generator_names:
                 continue
+            # A DEVICE function becomes MSL, accumulated into
+            # `_device_parts` and embedded as a C string at the end of the
+            # module -- the same trick `test_llm/kernels.metal.inc` uses, and
+            # the reason this needs no offline metallib step at all. It is
+            # NOT emitted as C, because a C definition of a kernel would be
+            # dead code that still has to typecheck.
+            if _device_kinds.get(_as_str(stmt.name)) == _gmi_device_select.DEVICE:
+                _msl = None
+                try:
+                    _msl = _gmi_emit_metal.emit_kernel(stmt, kernel=True)
+                except _gmi_emit_metal.MetalUnsupported as _me:
+                    if _as_str(stmt.name) in _device_explicit:
+                        # EXPLICIT `@gpu` that will not lower is a build
+                        # error, not a silently-stubbed C function: the user
+                        # asked for the GPU, the whole point of the path is
+                        # that the GPU runs the code they wrote, and quietly
+                        # running it on the CPU is a lie with exit 0.
+                        raise RuntimeError(
+                            f'GPU kernel {_as_str(stmt.name)!r} did not lower '
+                            f'to MSL: {_me}') from _me
+                    # INFERRED (a stdlib kernel reached through
+                    # `compile_function[...]`) that will not lower is
+                    # different in kind: nobody asked for the device path for
+                    # this function, and erroring here made the module
+                    # uncompilable. Measured: 10 stdlib/test files died on it
+                    # -- std/gpu's `abort_kernel`/`_read_back_kernel`, the
+                    # test/asyncrt and test/algorithm/gpu device-pointer
+                    # kernels -- so `stdlib-syntax` was 91 unexpected and the
+                    # whole stdlib could not be built. Falling back to the
+                    # host costs nothing that was asked for: the function
+                    # compiles and runs as ordinary C, and the GPU path simply
+                    # does not engage for it until the emitter covers it
+                    # (`doc/GPU_OFFLOAD_PLAN.md` increment 2).
+                    _device_fallbacks.append(
+                        f'{_as_str(stmt.name)}: {_me}')
+                    _device_kinds[_as_str(stmt.name)] = _gmi_device_select.HOST
+                if _msl is not None:
+                    _device_parts.append(_msl)
+                    continue
             _nested_pushed = []
             _prefix = f"{stmt.name}::"
             for _qn, _info in self._nested_async_api.items():
@@ -6946,6 +7384,17 @@ def gen_module_impl(self, stmts):
         '#include <Python.h>',
         '#endif',
         '#include <fire_runtime.h>',
+        # Only when this module actually offloads something. A module with
+        # no kernels must not acquire a dependency on the Metal runtime, or
+        # it stops being linkable against a plain fire_runtime. Header first,
+        # then the launch prototypes -- these are plain C signatures and do
+        # not need the header, but the sidecar's own definitions call through
+        # it and reading them in the order they are used is worth more than
+        # the dependency they do not have. The star-unpack-of-a-conditional
+        # is the same shape as the coroutine shim just below.
+        *(['#include <fire_metal.h>',
+           _gmi_device_glue.emit_launch_prototypes(_device_kernels_meta)]
+          if _device_kernels_meta else []),
         '#include <fire_sqlite3.h>',
         '#include <fire_zlib.h>',
         '#include <fire_ssl.h>',
@@ -7425,6 +7874,25 @@ def gen_module_impl(self, stmts):
     # erased on the self-hosted path) — non-deterministic run to run. And
     # `_ptr_slot_in_range` drops an entry that is raw garbage rather than
     # a boxed-but-valid string pointer.
+    #
+    # list<->buffer helpers for exactly the element types some call site or
+    # kernel needed. Same value-dedup-then-sort treatment as `_ptr_helpers_`
+    # just below, for the same reason: iterating the raw set orders by the
+    # boxed pointer VALUE on the self-hosted path, which is non-deterministic
+    # run to run and would show up as a stage2-vs-stage3 idempotency failure.
+    _lmn: list = []
+    for _lm in self._list_marshalling_needed:
+        if not _ptr_slot_in_range(_lm):
+            continue
+        _lm_s = _as_str(_lm)
+        if _lm_s and _lm_s not in _lmn:
+            _lmn.append(_lm_s)
+    _emitted_list_marshalling: set = set()
+    for _lm_s in sorted(_lmn):
+        if _lm_s in _emitted_list_marshalling:
+            continue
+        _emitted_list_marshalling.add(_lm_s)
+        parts.append(_gmi_device_glue.list_marshalling_definitions([_lm_s]))
     _pth_names: list = []
     for _pth in self._ptr_helpers_needed:
         if not _ptr_slot_in_range(_pth):
@@ -8830,6 +9298,15 @@ def gen_module_impl(self, stmts):
             continue
         if fdef.name in self._unsupported_generator_names:
             continue
+        # A DEVICE function has no C definition -- it is MSL in the tail
+        # sidecar, entered through `_mg_launch_<name>`. This pass emits each
+        # local function's C prototype, and for a device function that
+        # prototype describes a symbol nothing ever defines: dead, and
+        # actively misleading to a reader, who sees a declaration with real
+        # parameter types and no matching body. Its host entry point gets a
+        # REAL prototype in the preamble instead (see emit_launch_prototypes).
+        if _as_str(fdef.name) in getattr(self, '_device_kernels', ()):
+            continue
         ret    = self.func_return_types.get(fdef.name, 'int64_t')
         # This SECOND, later computation of `param_ctypes`/
         # `func_param_types` OVERWRITES the earlier forward-declaration
@@ -9560,6 +10037,25 @@ def gen_module_impl(self, stmts):
     if _ss_units:
         parts.append('')
         parts.extend(_ss_units)
+
+    # ── GPU offload, Seam 3: the device sidecar ───────────────────────────
+    # Emitted LAST, because the MSL text is only final once every device
+    # function has been walked. It goes into the SAME .ci as a C string
+    # literal, so one generated file is still the whole program — which is
+    # what removes the offline `xcrun metal`/`metallib` step entirely: the
+    # Metal runtime compiles the string at load time, for the GPU actually
+    # present. The alternative (a second emitted artifact) would need build
+    # wiring and a cache key for it, and buys nothing that
+    # `newLibraryWithSource:` does not already do.
+    if _device_parts:
+        # The definitions -- MSL string, init, dispatch shim, per-kernel
+        # launch wrappers, introspection. The `#include` and the wrapper
+        # PROTOTYPES went into the preamble instead, because a host function
+        # can call a kernel defined later in the file and an implicit
+        # declaration of `float *` vs `int64_t` is a "conflicting types"
+        # error reported against the wrong line.
+        parts.append(_gmi_device_glue.emit_device_sidecar(
+            _device_parts, sorted(self._device_kernels), _device_kernels_meta))
 
     return self._dedup_variadic_externs(parts)
 

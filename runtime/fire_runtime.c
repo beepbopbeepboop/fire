@@ -3410,6 +3410,17 @@ static char *_read_all(int fd) {
     return buf;
 }
 
+void mojo_stream_write(int64_t fd, char *s) {
+    if (!s) return;
+    /* Only the three standard streams: this handle is an fd, and a
+     * handle that is not one must not become a wild write(). */
+    if (fd < 0 || fd > 2) return;
+    /* fwrite, not write(2): stdio may have buffered output already, and
+     * mixing a raw write(2) with buffered stdio reorders the two. */
+    fwrite(s, 1, strlen(s), fd == 0 ? stdin : (fd == 1 ? stdout : stderr));
+    fflush(fd == 0 ? stdin : (fd == 1 ? stdout : stderr));
+}
+
 char *mojo_stdin_read(void) {
     return _read_all(STDIN_FILENO);
 }
@@ -5026,10 +5037,233 @@ int mojo_in_dispatch_int(int64_t container, int64_t needle)
 {
     if (container == 0) return 0;
     if (mojo_is_registered_list(container))
-        return mojo_list_contains_int((MojoList *)(uintptr_t)container, needle);
+        return mojo_list_contains_int((MojoList *)(intptr_t)container, needle);
     if (mojo_is_registered_set(container))
-        return mojo_set_contains_int((MojoSet *)(uintptr_t)container, needle);
+        return mojo_set_contains_int((MojoSet *)(intptr_t)container, needle);
     return 0;
+}
+
+/* ── `==` / `!=` between values: Python value equality ──────────────────────
+ *
+ * The compiled path used to lower every comparison between two containers to
+ * a raw POINTER comparison, because that is what falls out of C. It is wrong
+ * for every value, not just for the aliasing case: `{1,2} == {1,2}` built from
+ * two literals is two allocations, so the answer was always False. The visible
+ * damage is a `while new != old:` fixed point over containers that can never
+ * terminate (and, with no GC, leaks a fresh set/list per round) — measured at
+ * 43 GB on a two-line program, see
+ * bugs/CODEGEN_container_eq_is_pointer_identity.md.
+ *
+ * The three `mojo_*_eq` functions below are the per-kind answer; `elem` is the
+ * ELEMENT code the codegen knows statically for the container it built (the
+ * codegen has no element type at all for an erased operand, and passes
+ * MOJO_EQ_UNKNOWN, which asks the value's own per-slot kinds first). One code
+ * per comparison, not one per kind: `a == b` with `a` erased to int64_t is the
+ * shape the compiler's own source is full of, and it still needs the other
+ * side's static element type to compare a list of strings by CONTENT.
+ *
+ * Every one of these is allocation-free — a comparison must not change what
+ * the heap looks like, and this one runs inside fixed points. The MOJO_EQ_*
+ * element codes live in fire_runtime.h, next to the declarations.
+ */
+
+/* One slot word pair, by element code. `ka`/`kb` are the per-slot kinds
+ * (mojo_list_slot_kind's alphabet), consulted only for the side whose code is
+ * MOJO_EQ_UNKNOWN. Returns 1 when the two slots hold equal values.
+ *
+ * The codes are PER SIDE because `[1.0] == [1]` is a legitimate program: the
+ * codegen knows the left list is float and the right one int, and a single
+ * code cannot say so. Exactly one side being DOUBLE is therefore a normal
+ * case, not an error -- and the integer side has to be CONVERTED, not
+ * reinterpreted, or its 64 one-bits become a denormal. Plain `return 0` on a
+ * mismatch is what made `[1.0] == [1]` and `{"a": 1.0} == {"a": 1}` False.
+ *
+ * A pointer-typed word against a float is unequal by inspection rather than by
+ * dereference, and the two pointer-typed arms below range-check both words
+ * before reading them: the erased-operand path below can guess STR for a
+ * container whose real elements are not strings (a type-confused program), and
+ * a strcmp on a small integer is a segfault, not a wrong answer. */
+static double _eq_as_double(int64_t w)
+{
+    double d;
+    __builtin_memcpy(&d, &w, 8);
+    return d;
+}
+
+static int _kind_to_eq(char k)
+{
+    if (k == 'd') return MOJO_EQ_DOUBLE;
+    if (k == 'p') return MOJO_EQ_STR;
+    if (k == 's') return MOJO_EQ_BYTES;
+    if (k == 'l') return MOJO_EQ_GENERIC;
+    return MOJO_EQ_INT;                    /* 'i' and 'n' (None) */
+}
+
+static int _slot_eq(int64_t x, int64_t y, int ea, int eb, char ka, char kb)
+{
+    if (ea == MOJO_EQ_UNKNOWN) ea = _kind_to_eq(ka);
+    if (eb == MOJO_EQ_UNKNOWN) eb = _kind_to_eq(kb);
+    if ((ea == MOJO_EQ_DOUBLE) != (eb == MOJO_EQ_DOUBLE)) {
+        if (ea == MOJO_EQ_INT)   return (double)x == _eq_as_double(y);
+        if (eb == MOJO_EQ_INT)   return _eq_as_double(x) == (double)y;
+        return 0;                  /* a pointer is equal to no float */
+    }
+    if (ea != eb) return 0;
+    switch (ea) {
+    case MOJO_EQ_INT:
+        /* An int64_t slot the codegen could not TYPE can still be holding a
+         * container: a dict literal whose value is a list is stored through
+         * mojo_dict_set_int with no value-type record behind it, and that is
+         * why `{"k": [1, 2]} == {"k": [1, 2]}` answered False. The registries
+         * are this runtime's own answer to "what is this word", so ask them
+         * before concluding unequal — mojo_value_eq is that answer, and it
+         * returns 0 for two words that are not the same container kind. A
+         * plain integer is never a registered container address, so the probe
+         * cannot turn an unequal pair into an equal one. */
+        if (x == y) return 1;
+        return mojo_value_eq(x, y, MOJO_EQ_UNKNOWN);
+    case MOJO_EQ_DOUBLE:  return _eq_as_double(x) == _eq_as_double(y);
+    case MOJO_EQ_STR:
+        return (_mojo_ptr_shaped(x) && _mojo_ptr_shaped(y)
+                && strcmp((char *)(intptr_t)x, (char *)(intptr_t)y) == 0);
+    case MOJO_EQ_BYTES:
+        return (_mojo_ptr_shaped(x) && _mojo_ptr_shaped(y)
+                && mojo_bytes_eq((MojoBytes *)(intptr_t)x,
+                                 (MojoBytes *)(intptr_t)y));
+    default:               /* MOJO_EQ_GENERIC: a nested container */
+        return mojo_value_eq(x, y, MOJO_EQ_UNKNOWN);
+    }
+}
+
+int mojo_list_eq(MojoList *a, MojoList *b, int ea, int eb)
+{
+    if (a == b) return 1;                    /* the same storage: equal */
+    if (!a || !b) return 0;
+    /* A tuple and a list are both MojoList at the C level and Python says
+     * they are never equal, so the marker decides (see mojo_mark_as_tuple). */
+    if (mojo_is_tuple(a) != mojo_is_tuple(b)) return 0;
+    if (a->len != b->len) return 0;
+    for (int64_t i = 0; i < a->len; i++) {
+        if (!_slot_eq(a->data[i], b->data[i], ea, eb,
+                      mojo_list_slot_kind(a, i), mojo_list_slot_kind(b, i)))
+            return 0;
+    }
+    return 1;
+}
+
+/* A dict is order-INSENSITIVE: same entries, any insertion order. Keys are
+ * compared with the same strcmp the table itself probes with (_dict_find_k),
+ * so "the same key" means here exactly what it means to every other lookup —
+ * including the integer-key domain, where `key` still holds the decimal text
+ * and `ikey` the integer. */
+int mojo_dict_eq(MojoDict *a, MojoDict *b, int va, int vb)
+{
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    if (a->used != b->used) return 0;
+    for (int64_t i = 0; i < a->cap; i++) {
+        _DictSlot *sa = &a->slots[i];
+        if (!sa->key) continue;
+        _DictSlot *sb = _dict_find_k(b, sa->key, sa->keykind);
+        if (!sb || !sb->key) return 0;               /* key absent from b */
+        /* The value is an untagged word: the codegen's static value type when
+         * it has one, else this slot's own `kind` tag. */
+        if (va == MOJO_EQ_UNKNOWN)
+            va = (sa->kind == 1) ? MOJO_EQ_DOUBLE
+              : (sa->kind == 2) ? MOJO_EQ_STR
+              : MOJO_EQ_INT;
+        if (vb == MOJO_EQ_UNKNOWN)
+            vb = (sb->kind == 1) ? MOJO_EQ_DOUBLE
+              : (sb->kind == 2) ? MOJO_EQ_STR
+              : MOJO_EQ_INT;
+        if (!_slot_eq(sa->val, sb->val, va, vb, 'i', 'i')) return 0;
+    }
+    return 1;
+}
+
+/* Does `s` hold this int-tagged entry, comparing as FLOATS? A set of floats
+ * stores the IEEE-754 bits in an int slot, so `mojo_set_contains_int` would
+ * look for the exact bits and miss `{1.0}` against `{1}` (which Python calls
+ * equal). Sets are small and this arm only runs when the two sides' element
+ * codes disagree about float-ness, so a linear scan is the right trade. */
+static int _set_has_double(MojoSet *s, double want)
+{
+    for (int64_t i = 0; i < s->cap; i++) {
+        if (s->slots[i].tag != 0) continue;
+        if (_eq_as_double(s->slots[i].val_i) == want) return 1;
+    }
+    return 0;
+}
+
+int mojo_set_eq(MojoSet *a, MojoSet *b, int ea, int eb)
+{
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    if (a->used != b->used) return 0;
+    int mixed = ((ea == MOJO_EQ_DOUBLE) != (eb == MOJO_EQ_DOUBLE));
+    for (int64_t i = 0; i < a->cap; i++) {
+        if (a->slots[i].tag < 0) continue;          /* empty slot */
+        int hit;
+        if (a->slots[i].tag == 1)
+            hit = mojo_set_contains_str(b, a->slots[i].val_s);
+        else if (a->slots[i].tag == 2)
+            hit = mojo_set_contains_bytes(b,
+                                (MojoBytes *)(intptr_t)a->slots[i].val_s);
+        else if (mixed)
+            hit = _set_has_double(b, _eq_as_double(a->slots[i].val_i));
+        else
+            hit = mojo_set_contains_int(b, a->slots[i].val_i);
+        if (!hit) return 0;
+    }
+    return 1;
+}
+
+/* The kind of an ambiguous (boxed int64_t) value, from the same registries
+ * mojo_in_dispatch_* above use. Only the three container kinds are
+ * distinguishable: a `char *` string has no header of its own, and every
+ * other value in this model is a bare word. */
+#define MOJO_VK_NONE 0
+#define MOJO_VK_LIST 1
+#define MOJO_VK_DICT 2
+#define MOJO_VK_SET  3
+
+static int _value_kind(int64_t v)
+{
+    if (mojo_is_registered_dict(v)) return MOJO_VK_DICT;
+    if (mojo_is_registered_list(v)) return MOJO_VK_LIST;
+    if (mojo_is_registered_set(v))  return MOJO_VK_SET;
+    return MOJO_VK_NONE;
+}
+
+/* `a == b` for two values whose static types the codegen could not both
+ * resolve — the shape the compiler's own source is written in, where a
+ * container handed to an unannotated parameter arrives as a bare int64_t.
+ *
+ * The word comparison first is not an optimization but the whole answer for
+ * every pair that is not two containers of the same kind: it is CPython's
+ * identity, and a registry address is never a small int or a bool, so
+ * "equal words" can only mean equal values. Anything else falls out of the
+ * kind pair, and only the same-kind pairs are ever equal. */
+int mojo_value_eq(int64_t a, int64_t b, int elem)
+{
+    if (a == b) return 1;
+    int ka = _value_kind(a), kb = _value_kind(b);
+    if (ka != kb || ka == MOJO_VK_NONE) return 0;
+    /* `elem` is the element code of the side the CODEGEN knew. The erased side
+     * gets the same code: it has no static type by definition, and in the
+     * shape that reaches here (`an_erased_handle == ["a", "b"]`) it really does
+     * hold the same elements. When that guess is wrong the answer is unequal —
+     * what the pointer comparison this replaced said too — and the STR/BYTES
+     * arms of _slot_eq range-check before dereferencing, so a wrong guess
+     * cannot be a crash. */
+    if (ka == MOJO_VK_LIST) return mojo_list_eq((MojoList *)(intptr_t)a,
+                                               (MojoList *)(intptr_t)b,
+                                               elem, elem);
+    if (ka == MOJO_VK_DICT) return mojo_dict_eq((MojoDict *)(intptr_t)a,
+                                               (MojoDict *)(intptr_t)b,
+                                               elem, elem);
+    return mojo_set_eq((MojoSet *)(intptr_t)a, (MojoSet *)(intptr_t)b,
+                       elem, elem);
 }
 
 int mojo_isinstance(int64_t obj, int type_id) {

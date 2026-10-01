@@ -21,10 +21,15 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 | `FORMAL_x86_64_end_to_end_proof.md` | B1–B23, the proof work, the per-form ledger |
 | `CODEGEN_bootstrap_resource_blowup.md` | the ~192 GB runaway, the 55 GB ceiling, attribution |
 | `CODEGEN_noshim_dumpfull_preexisting_divergence.md` | native-vs-reference `.ci` divergence |
-| `CODEGEN_nested_comprehension.md` | nested comprehension, both backends |
+| `CODEGEN_nested_comprehension.md` | the `gimple`-path part, which is FIXED: a 2+ clause comprehension silently dropped every clause after the first (see the commit that lands `_compr_pending_inner`). Read it for the dropped-clause mechanism; the OPEN remainder is `FORMAL_nested_comprehension_nondeterministic_exit.md` |
+| `FORMAL_nested_comprehension_nondeterministic_exit.md` | the OPEN remainder of the case above: the same shape in the SEPARATE proof-oriented backend, which exits 58 or SIGSEGV at random and is not reachable from a `mojo/backend_gimple/` fix |
+| `TEST_expect_marked_tests_in_no_bucket_never_run.md` | 11 of the 16 `expect`-marked tests have NO bucket, so no gate runs them and their anti-rot "marked expect= but it PASSES" check can never fire — ~69 failing cases, mostly the compiled-path async/await cluster |
+| `CODEGEN_set_dict_comprehension_multi_clause_dropped.md` | the list/generator half of the multi-clause comprehension fix is in; `set` and `dict` still drop every clause after the first (silent, exit 0) |
+| `CODEGEN_range_comprehension_tuple_slot_type_lost.md` | a comprehension over `range()` whose element is a tuple/list drops the per-slot element types, so a 0 in a non-first slot reads as NULL and prints `None` — silent, exit 0, and pre-existing (reproduces on a single clause) |
 | `FORMAL_x86_64_formal_backend_gaps.md` | the two backend gaps (both now fixed) |
 | `FORMAL_string_value_model.md` | what a string IS on the formal path, `len`/`==`/`+` on it, and the `String`-struct collision behind the 16 "a String receiver" refusals |
 | `FORMAL_arm64_instruction_coverage.md`, `FORMAL_arm64_known_proof_gaps.md`, `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` | arm64 work — not duplicated here |
+| `FORMAL_formal_frame_size_bounds_recursion_depth.md` | neither backend guards the stack: a fixed 128 KiB (arm64) / 16 KiB (x86-64) frame per call and no depth test, so recursion past 61 (arm64) or 450 (x86-64) frames is a SIGSEGV and not a refusal. **Both backends.** |
 | `FORMAL_frame_receiver_handoff.md` | who can take a frame address: the cross-module method hand-off (a binding bug, fixed), `Pointer(to=frame)` (an unjustified refusal, fixed), whether the frame layout and the struct's C layout coincide (measured: they do, for 8-byte fields), and the three refusals that named a cause which was not operating |
 
 ---

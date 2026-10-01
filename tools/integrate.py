@@ -20,7 +20,7 @@ One round:
      (`control.py spawn --base work/<culprit>`); the next round is master + what
      is still outstanding, so one bad set never blocks the rest.
 """
-import argparse, fcntl, os, subprocess, sys, time
+import argparse, fcntl, os, re, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control as C
 
@@ -45,6 +45,52 @@ QUICK = ["mojoc", "selfhost", "bootstrap-stage1-transitive", "bootstrap-stage2-c
 # master changed under the round and the round must be redone, not merged.
 CONTROLLER_FILES = ("tools/control.py", "tools/control_prompt.md", "tools/gatewatch.py", "tools/integrate.py",
                     "tools/autointegrate.py", "CONTROL.html", "bugs/PERF_memory_over_4gb_is_a_bug.md")
+
+
+# TEST INFRASTRUCTURE: code that only decides how, whether and with how much memory the project is TESTED. A
+# change here cannot alter what the compiler produces, and the suite's own tests (test_suite.py,
+# test_memslot.py, the changed test files) are the right check for it; gating it on the project gate costs
+# hours and proves nothing more (owner's policy, 2026-09-30: turning a test off, changing 64 to 8, are
+# inherently safe). A branch whose EVERY changed file is listed here lands through the fast lane.
+INFRA_FILES = ("tools/suite.py", "tools/memslot.py", "tools/memcap.py", "tools/procrun.py", "tools/ab_run_one.py",
+               "tools/gatewatch.py", "tools/control.py", "tools/control_prompt.md", "tools/integrate.py",
+               "tools/autointegrate.py", "CLAUDE.md", "CONTROL.html", "checked_run.py")
+INFRA_PREFIXES = ("bugs/", "doc/")
+
+
+def is_infra_file(f):
+    return (f in INFRA_FILES or f.startswith(INFRA_PREFIXES)
+            or (f.startswith("test_") and f.endswith(".py") and "/" not in f))
+
+
+def infra_only(branch):
+    """True if every file `branch` changes relative to master is test infrastructure or docs."""
+    r = subprocess.run(["git", "diff", "--name-only", "master..." + branch], cwd=C.MAIN, capture_output=True, text=True)
+    files = r.stdout.split()
+    return r.returncode == 0 and bool(files) and all(is_infra_file(f) for f in files)
+
+
+def failed_job_names(log):
+    """Job names from the FAILED section of a suite/gate log (real failures only, not EXPECTED/RESOURCE)."""
+    try:
+        txt = open(log, errors="replace").read()
+    except OSError:
+        return []
+    m = re.search(r"^FAILED:\n(.*?)(?=^[A-Z][A-Z-]+.*:\n|^suite:)", txt, re.S | re.M)
+    if not m:
+        return []
+    names = []
+    for line in m.group(1).splitlines():
+        t = line.strip().split()
+        if t and re.fullmatch(r"[\w.:-]+", t[0]) and "(" in line:
+            names.append(t[0].split(":")[0])
+    return sorted(set(names))
+
+
+def test_failures(tree):
+    """The set of 'FAIL  <check>' names test_suite.py reports in `tree` (its own registry-of-checks)."""
+    r = subprocess.run(["python3", "test_suite.py"], cwd=tree, capture_output=True, text=True)
+    return set(re.findall(r"^FAIL\s+(.+?)(?::|$)", r.stdout, re.M)), r
 
 
 def land_on_master():
@@ -111,6 +157,12 @@ def main():
                          "instead of the full `make gate`: the way a branch's heavy verification is done, by the "
                          "one integrator, never by a worker. Landing still requires the FULL gate; a --jobs run "
                          "only reports (it never fast-forwards master).")
+    ap.add_argument("--no-fixers", action="store_true",
+                    help="a conflicting branch is merely left out: no merge fixer is queued and nothing is superseded "
+                         "(used by the bisect probes, which re-merge the same branches many times)")
+    ap.add_argument("--fast", action="store_true",
+                    help="FAST LANE for a branch that touches only test infrastructure/docs (infra_only): no project gate; "
+                         "run the suite's own tests and the changed test files, and land on green")
     ap.add_argument("--quick", action="store_true",
                     help="run the quick tier first (self-host build + the fast jobs, minutes) and stop at the first red, "
                          "so a bad branch is rejected without paying for the full gate")
@@ -129,6 +181,8 @@ def main():
         sys.exit("another integrator is already running (lock %s/integrator.lock): there is only ever one" % C.ctl_dir())
 
     cands = pick_candidates(a.only, a.allow_dirty)
+    if a.only:                                       # the caller's order is the merge order (a bisect depends on it)
+        cands = sorted(cands, key=lambda n: a.only.index(n))
     if not cands:
         print("nothing to integrate"); return
 
@@ -144,12 +198,47 @@ def main():
         if r.returncode:
             subprocess.run(["git", "merge", "--abort"], cwd=INTEG)
             print("CONFLICT %s:\n%s" % (name, r.stdout[-600:]))
-            enqueue_merge_fix(name, tasks[name], r.stdout)   # marks the task superseded, queues its fixer
+            if a.no_fixers:                          # a bisect probe: just leave it out, no side effects
+                print("(probe) %s conflicts: left out" % name)
+            else:
+                enqueue_merge_fix(name, tasks[name], r.stdout)   # marks the task superseded, queues its fixer
         else:
             merged.append(name); print("merged %s" % name)
+    print("MERGED: %s" % " ".join(merged))
     if not merged or a.dry_run:
         print("merged: %s (dry-run or nothing to gate)" % merged); return
 
+    if a.fast:
+        bad = [f for f in C.git("diff", "--name-only", "master...integ", cwd=INTEG).splitlines() if not is_infra_file(f)]
+        if bad:
+            print("NOT test infrastructure (%s): the fast lane refuses; use the gate" % ", ".join(bad[:5])); sys.exit(1)
+        changed = [f for f in C.git("diff", "--name-only", "master...integ", cwd=INTEG).splitlines()
+                   if f.startswith("test_") and f.endswith(".py")]
+        checks = [["python3", "test_suite.py"], ["python3", "tools/suite.py", "smoke", "-j2"]]
+        checks += [["python3", "tools/memslot.py", "--gb", "8", "--label", "fast:" + f, "--", "python3", f]
+                   for f in changed if f != "test_suite.py"]
+        print("fast lane for %s: %d check(s)" % (merged, len(checks)))
+        base_fail, _ = test_failures(C.MAIN)          # what test_suite.py already reports red on master itself
+        for c in checks:
+            if c == ["python3", "test_suite.py"]:
+                now_fail, r = test_failures(INTEG)
+                open(os.path.join(INTEG, "fast.log"), "w").write(r.stdout + r.stderr)
+                if now_fail - base_fail or (r.returncode != 0 and not now_fail):
+                    print("RED in the fast lane: test_suite.py has NEW failures vs master: %s" % sorted(now_fail - base_fail))
+                    with C.registry() as reg:
+                        for n in merged: reg[n]["state"] = "integration-failed"
+                    sys.exit(1)
+                print("test_suite.py: no new failures vs master (still red on master itself: %s)" % sorted(base_fail & now_fail))
+                continue
+            if run(c, INTEG, os.path.join(INTEG, "fast.log")) != 0:
+                with C.registry() as reg:
+                    for n in merged: reg[n]["state"] = "integration-failed"
+                print("RED in the fast lane: %s (see %s/fast.log); master untouched" % (" ".join(c[:4]), INTEG)); sys.exit(1)
+        land_on_master()
+        with C.registry() as reg:
+            for n in merged: reg[n]["state"] = "integrated"
+        print("GREEN (fast lane): master is now %s; integrated %s" % (C.git("rev-parse", "--short", "master"), merged))
+        return
     if a.quick and not a.jobs:
         print("quick tier for %s: %s" % (merged, " ".join(QUICK)))
         qrc = run(["python3", "tools/suite.py"] + QUICK, INTEG, os.path.join(INTEG, "quick.log"))
@@ -166,6 +255,19 @@ def main():
     if a.jobs:
         print("--jobs run finished with exit %d; master NOT touched (only a full gate lands)" % rc)
         sys.exit(rc)
+    if rc != 0 and not a.jobs:
+        # A red gate under load is often a timeout, not a verdict (2026-09-30: gimplegenerators 450-616 s, runner's
+        # 10 s per-program limit, each spawning a pointless fixer). Confirm it the way a human would: re-run exactly
+        # the jobs that failed, ALONE, on the same tree. If they pass alone the red was contention, not the branch.
+        failed = failed_job_names(os.path.join(INTEG, "gate.log"))
+        if failed:
+            print("gate red on %s: confirming by re-running them alone" % ", ".join(failed))
+            if run(["python3", "tools/suite.py"] + failed, INTEG, os.path.join(INTEG, "confirm.log")) == 0:
+                print("the red did NOT reproduce when the failed jobs ran alone (load): treating the gate as green")
+                rc = 0
+            else:
+                failed = failed_job_names(os.path.join(INTEG, "confirm.log")) or failed
+            print("FAILED_JOBS: %s" % " ".join(failed))
     judg = subprocess.run("grep -h -E '^skip [a-z_./]+:|FAILED: [0-9]+' build/suite.log gate.log | sort | uniq -c | tail -20",
                           shell=True, cwd=INTEG, capture_output=True, text=True).stdout
     open(os.path.join(INTEG, "gate-judgement.txt"), "w").write(judg)
