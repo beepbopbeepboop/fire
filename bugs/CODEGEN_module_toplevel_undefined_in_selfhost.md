@@ -27,9 +27,12 @@ a single defect takes out seven tests.
 Worth recording, because it is the first thing to check and it is a dead end:
 
 - **Not a stale artifact.** `stage1/fire.ci` is regenerated (the compile step
-  succeeds), and the symbols are absent from the `.ci` entirely — `grep -c
-  __mojo_middle_offload_toplevel stage1/fire.ci` is 0, not "present but
-  malformed".
+  succeeds) and the symbol names in the error do not literally appear in it —
+  the linker prints `__mojo_middle_offload_toplevel` with two leading
+  underscores while the generated C uses one (`_mojo_middle_offload_toplevel`,
+  `fire.ci:198` declares and `fire.ci:1077825` calls it, consistently). The
+  missing thing is the BODY, not the name; do not go looking for a name-mangling
+  bug on the strength of the linker's spelling.
 - **Not the memory blowup in `CODEGEN_bootstrap_resource_blowup.md`.** That one
   is a resource ceiling at ~15-30 GB per call; this is a link-time symbol
   resolution failure at 1.0 GB peak.
@@ -47,6 +50,35 @@ fails with the **same five symbols**, and `diff` of the two sorted symbol lists
 is empty. So the GPU line neither introduced nor repaired it, and bisecting it
 inside the metal branch will not find it — the bisect point is inside the merge.
 
+## Localised (2026-10-01, after the first gate)
+
+Not five bugs. **57 forward declarations, 0 bodies** in `stage1/fire.ci`:
+
+    declarations matching ^void _mojo_*_toplevel\(void\);$      57
+    bodies      matching ^void _mojo_*_toplevel\(void\) {$      0
+    root `_toplevel` body                                          0
+
+The root module's own `_toplevel` is missing too, so this is not about
+sub-modules. Only 5 of the 57 are *referenced* (from `_main`, via
+`_sub_toplevels`), and those 5 are the entire link error — the other 52 are
+declared and never called, so the linker says nothing about them. **The blast
+radius is 57 modules; the visible symptom is 5.**
+
+The declarations are emitted from `gen_module_impl`'s declaration block
+(`mojo/backend_gimple/module_gen.py:7623`, iterating `self._sub_toplevels`).
+The bodies are emitted by `_gen_toplevel`
+(`mojo/backend_gimple/emit_funcs.py:2596`) into `func_parts`, at
+`module_gen.py:7380`:
+
+    if has_toplevel_code:
+        toplevel_func = self._gen_toplevel(toplevel_stmts)
+        func_parts.append(toplevel_func)
+
+with `has_toplevel_code = len(toplevel_stmts) > 0` (line 7350). So the
+declaration and the body are gated on DIFFERENT conditions in different places,
+and in the `do_imports=True` whole-program path the declarations get emitted
+while the bodies do not. That asymmetry is the thing to explain.
+
 ## Where to look next
 
 Five modules, one symptom, so it is systemic rather than five bugs. The common
@@ -56,15 +88,22 @@ references all five while the definitions are not emitted. The question to
 answer is therefore in the *emission* of module toplevels, not in any of the
 five modules:
 
-1. Does the self-hosted codegen path (the one that built `stage1/fire.ci` via
-   the compiled `mojoc`, not the python3 reference) take a different branch for
-   module-level statements? The python3 reference path clearly emits them, or
-   the `.ci` would not reference them.
-2. Is there a size or complexity cap past which a toplevel body is dropped
-   without a diagnostic? `offload.py` is the largest of the five, and the
-   failure is silent — consistent with a cap, and worth checking first.
-3. Compare `mojoc`'s emission of one of these five against the reference's for
-   the same module; a single module diff should localise a systemic fault fast.
+1. **Why do declarations and bodies disagree under `do_imports=True`?** The
+   declarations come from `_sub_toplevels`, the bodies from `has_toplevel_code`
+   over `toplevel_stmts`. If a module registers its toplevel name without
+   contributing to `toplevel_stmts`, it gets a declaration and no body — which is
+   exactly the observed shape, and would explain all 57 at once. Check whether
+   the registration at `module_gen.py:7397` can run with `toplevel_stmts` empty
+   (e.g. if `emit_entry_points` is False for a sub-module while its statements
+   were consumed elsewhere).
+2. **Is the `do_imports=True` path dropping `func_parts` wholesale?** The root
+   `_toplevel` is missing as well, and the root is not a sub-module — so
+   whatever discards these bodies may be discarding ordinary function bodies
+   too, which would be a much larger defect that only shows up here because
+   these are the symbols `_main` actually calls.
+3. Then check a size/complexity cap last. It is the least likely of the three
+   now that the root toplevel is missing too: a cap that dropped exactly the
+   58 largest bodies and nothing else would be a coincidence.
 
 ## How to confirm a fix
 
