@@ -848,7 +848,19 @@ def declared_kinds(path: str) -> dict:
     Read from the module's OWN source — the same file the dylib is built from,
     so the two cannot disagree about what the module contains. A name the
     source does not declare at all is simply absent, which is how a re-export
-    of something that does not exist gets caught rather than forwarded."""
+    of something that does not exist gets caught rather than forwarded.
+
+    **A `TraitDef` is filed as a TYPE.** It was not, and the omission refused
+    every package that re-exports a trait: `std/traits/__init__.mojo` is five
+    `from .sub import Name` statements over four submodules whose whole content
+    is traits, and an absent name reaches `compile_formal_dylib` with kind
+    `"unknown"` — which is not `"type"`, so it lands in the re-exported-FUNCTION
+    set that must be *provided as a symbol*. A trait has no symbol, so the
+    check refused `std/traits` with "re-exports AnyType from .anytype, but no
+    module it imports exports that name", which is the message for a missing
+    FUNCTION DEFINITION and is false about a name that is declared two files
+    away. Filing it as the kind it is also keeps it out of that set for the
+    same reason a re-exported struct is: a type is not a missing symbol."""
     out: dict = {}
     try:
         with open(path) as f:
@@ -862,7 +874,7 @@ def declared_kinds(path: str) -> dict:
             continue
         if isinstance(st, F.FunctionDef):
             out.setdefault(name, "function")
-        elif isinstance(st, F.StructDef):
+        elif isinstance(st, (F.StructDef, F.TraitDef)):
             out.setdefault(name, "type")
     return out
 
