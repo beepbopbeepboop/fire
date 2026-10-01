@@ -5025,44 +5025,60 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
     `formal.imports.imported_bound_names` and `star_imported_modules` read the
     import statements without resolving them (this pass runs before
     `_resolve_imports`), and `FunctionDef.comptime_params` is the declaration
-    itself."""
+    itself.
+
+    **EVERY arm opens with the clause `which is a name with no definition in
+    hand`, and that is load-bearing rather than a courtesy.**  Two taxonomies key
+    on that exact substring — `tools/formal_sweep.py`'s `_FRAME_ESCAPES` and
+    `tools/formal_sweep_causes.py`'s `callee has no definition on this path` —
+    and it is what keeps this family out of the `receiver passed as an argument`
+    bucket that its own message begins with.  An arm that reworded the opening
+    would not fail here: it would drop every file it names out of the family
+    they are counted in, into whichever family matches next, with no test
+    failing and a wrong number in a table a planner acts on.  Measured after
+    this split: 41 files, all 41 still classified `callee has no definition on
+    this path` by both tools, 41 messages changed and nothing else did."""
     who = ", ".join(struct_names) if struct_names else "this struct"
     if callee in COMPTIME_REFLECTION_INTRINSICS:
         return (
-            f"a {who} receiver is passed to {callee}(), and {callee} is not a "
-            f"function at all: it is a compile-time REFLECTION INTRINSIC of "
-            f"the compiler, which is handed a value and hands back an MLIR "
-            f"reference to it. There is no MLIR on this path — an attribute, a "
-            f"type or an operation has no representation in a model whose "
-            f"every value is one 64-bit word — so the reference it would "
-            f"produce does not exist here at any stage of the compilation and "
-            f"there is nothing compiled to hand an address to. In the standard "
-            f"library it is the operand of an `__mlir_op.…` build (48 of its "
-            f"50 spellings), and that construct is what this path refuses; this "
-            f"name is its operand rather than a call of its own. Nothing about "
-            f"the receiver's layout is at fault here")
+            f"a {who} receiver is passed to {callee}(), which is a name with no "
+            f"definition in hand in this image, and the reason is not a missing "
+            f"export: {callee} is not a function at all. It is a compile-time "
+            f"REFLECTION INTRINSIC of the compiler, which is handed a value and "
+            f"hands back an MLIR reference to it. There is no MLIR on this path "
+            f"— an attribute, a type or an operation has no representation in a "
+            f"model whose every value is one 64-bit word — so the reference it "
+            f"would produce does not exist here at any stage of the compilation "
+            f"and there is nothing compiled to hand an address to. In the "
+            f"standard library it is the operand of an `__mlir_op.…` build (48 "
+            f"of its 50 spellings), and that construct is what this path "
+            f"refuses; this name is its operand rather than a call of its own. "
+            f"Nothing about the receiver's layout is at fault here")
     if comptime_param_of:
         return (
-            f"a {who} receiver is passed to {callee}(), and {callee} is a "
-            f"compile-time PARAMETER of {comptime_param_of} — declared in its "
-            f"`def {comptime_param_of}[… {callee} …]` — not a function this "
-            f"image compiles. Calling one means MONOMORPHISING it: the body "
-            f"comes from the argument at each call site and is instantiated "
-            f"against that argument's own struct, so the callee's field list is "
-            f"a property of the call rather than of any declaration in hand. "
-            f"This path does not instantiate type parameters, so there is "
-            f"nothing here that was compiled against a field list, and an "
-            f"address handed to it would point at a layout the callee never "
-            f"learned. Measured: `def drive[Fn: def(mut W)]` calling `Fn(w)` on "
-            f"a `W` frame reaches here and the image cannot be built. Nothing "
-            f"is missing — the callee does not exist until a call site creates "
-            f"it, and nothing here creates one")
+            f"a {who} receiver is passed to {callee}(), which is a name with no "
+            f"definition in hand in this image, and none of the kind that could "
+            f"be added to it: {callee} is a compile-time PARAMETER of "
+            f"{comptime_param_of}, declared in its "
+            f"`def {comptime_param_of}[… {callee} …]`, and calling one means "
+            f"MONOMORPHISING it. The body comes from the argument at each call "
+            f"site and is instantiated against that argument's own struct, so "
+            f"the callee's field list is a property of the call rather than of "
+            f"any declaration in hand. This path does not instantiate type "
+            f"parameters, so there is nothing here that was compiled against a "
+            f"field list, and an address handed to it would point at a layout "
+            f"the callee never learned. Measured: `def drive[Fn: def(mut W)]` "
+            f"calling `Fn(w)` on a `W` frame reaches here and the image cannot "
+            f"be built. Nothing is missing — the callee does not exist until a "
+            f"call site creates it, and nothing here creates one")
     if imported_from:
         return (
-            f"a {who} receiver is passed to {callee}(), and this file does not "
-            f"define {callee}: it imports it (`from {imported_from} import "
-            f"{callee}`), so its definition is in ANOTHER module's compilation "
-            f"rather than in this one. That is not by itself a reason to "
+            f"a {who} receiver is passed to {callee}(), which is a name with no "
+            f"definition in hand IN THIS IMAGE and not because this module "
+            f"lacks one: it imports {callee} (`from {imported_from} import "
+            f"{callee}`), so {callee} IS compiled — by {imported_from}, into a "
+            f"library of its own, when that module builds at all. That is "
+            f"not by itself a reason to "
             f"refuse — a frame address is exactly what a method of the "
             f"receiver's own struct wants, and the cross-module METHOD case is "
             f"followed across the boundary — but the fact that decides it is a "
@@ -5084,8 +5100,9 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
             f"what is still open about it")
     if star_imported_from:
         return (
-            f"a {who} receiver is passed to {callee}(), and this module neither "
-            f"defines {callee} nor names it in any `from … import …`. The one "
+            f"a {who} receiver is passed to {callee}(), which is a name with no "
+            f"definition in hand in this image, and this module neither defines "
+            f"{callee} nor names it in any `from … import …`. The one "
             f"thing that can bind a name like that here is a "
             f"`from {star_imported_from} import *`, and what such a statement "
             f"binds is {star_imported_from}'s EXPORT SET — which is not a fact "

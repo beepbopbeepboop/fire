@@ -109,6 +109,18 @@ sends the reader after a non-bug").
 Nothing else moved: over the same 987 files, 41 messages changed and **all 41
 are this construct** — no other file's message and **no file's class** changed.
 
+**All five arms keep the clause `which is a name with no definition in hand`,
+and that is load-bearing.** `tools/formal_sweep.py`'s `_FRAME_ESCAPES` and
+`tools/formal_sweep_causes.py`'s cause table both key on that exact substring —
+it is what keeps this family out of the `receiver passed as an argument` bucket
+its own message begins with. An arm that reworded the opening would not fail
+any test: it would quietly move every file it names into whichever family
+matches next, with a wrong number in a table a planner acts on. The first
+version of this split had four arms that did *not* keep it. Measured after the
+fix: 41 files, and **all 41 still classify as `callee has no definition on this
+path`** in both tools (`formal_sweep._refusal_family` and
+`formal_sweep_causes`' label, run over the real messages).
+
 ## 4. What is NOT fixed, and the exact next step
 
 The hand-off stays refused in all five arms, and for the imported arm that is

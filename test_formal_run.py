@@ -2439,7 +2439,7 @@ BYREF_REFUSALS = [
      "    w.b = 2\n"
      "    drive(w)\n"
      "    return n\n",
-     "refuse:is a compile-time PARAMETER of drive", None),
+     "refuse:Fn is a compile-time PARAMETER of drive", None),
     # A COMPILER INTRINSIC rather than a function: `__get_mvalue_as_litref`
     # hands back an MLIR reference to the value it is given, and there is no
     # MLIR here, so the thing a receiver would be handed to does not exist at
@@ -2455,7 +2455,7 @@ BYREF_REFUSALS = [
      "    var q = Q()\n"
      "    var lit = __get_mvalue_as_litref(q)\n"
      "    return n\n",
-     "refuse:is a compile-time REFLECTION INTRINSIC", None),
+     "refuse:__get_mvalue_as_litref is not a function at all", None),
     # ── wave 3 (C5) ──
     #
     # A frame address PARKED IN A FIELD. `o.inner = i` looks like an ordinary
@@ -2870,7 +2870,7 @@ CROSS_MODULE_CASES = [
               "    p.a = 3\n"
               "    p.b = 4\n"
               "    return take_it(p) + n\n"},
-     "refuse:it imports it (`from byref_xmod import take_it`)", None),
+     "refuse:it imports take_it (`from byref_xmod import take_it`)", None),
     # The same hand-off reached through a STAR import, which is the shape where
     # "this module's own functions are the only ones in this image" is at its
     # least true: `from byref_xmod import *` binds whatever that module
@@ -2893,7 +2893,7 @@ CROSS_MODULE_CASES = [
               "    p.a = 3\n"
               "    p.b = 4\n"
               "    return take_it(p) + n\n"},
-     "refuse:is a `from byref_xmod import *`", None),
+     "refuse:can bind a name like that here is a `from byref_xmod import *`", None),
 ]
 
 # ── wave 5 (E3): a frame address in a NON-FIRST parameter position ──────────
