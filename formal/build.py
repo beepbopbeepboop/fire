@@ -5700,82 +5700,10 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         holders = set(getattr(fn, "_frame_holders", None) or ())
         # A call's CALLEE is not a read of a value: it names a symbol, and a
         # callee this unit does not compile is a link-time fact rather than a
-        # missing local.  Collected by node identity because `M.iter_nodes`
-        # has no parent, and an un-compiled callee is the common case in a
-        # file that calls into a dylib.
-        callees = {id(c.func) for c in M.iter_nodes(fn.body)
-                   if isinstance(c, F.CallExpr) and isinstance(c.func,
-                                                               F.IdentExpr)}
-        # …and a SUBSCRIPT callee, `List[Int]()` / `f[a, b](x)`, which is the
-        # same rule one level up and the last spelling this check was missing.
-        # A call names a symbol; when the symbol is spelled with a bracket, the
-        # bracket is that symbol's compile-time argument list and the base is
-        # the thing the call dispatches on. Neither is a read of a value, so
-        # neither may be placed, and asking this walk to place them produced a
-        # diagnostic that was false about the file in the most expensive way
-        # this tool has: `List[Int]()` was refused with "'List' has no home: the
-        # module-level symbol table is empty for this unit … the register
-        # allocator collected no home for it", which is a statement about the
-        # register allocator sent to a reader for a fact about the language —
-        # `List` is a TYPE, it is in none of the four places a value can be, and
-        # no amount of looking at `_load_var` would have found the bug.
-        #
-        # 41 of the 2026-09-30 sweep's files were filed under that sentence
-        # (35 of them through `std/collections/binary_heap.mojo`'s
-        # `self._data = List[Self.T]()`), which is why it is worth the three
-        # lines: the whole terminal cause was one missing position in a set.
-        # `model.subscript_callee_names` is the ONE recogniser of the shape and
-        # it returns NODES, not names, because `iter_nodes` has no parent and
-        # the same spelling is a genuine read in a value position — the
-        # exemption is for this call site, not for every read of `List` in the
-        # function, which is the silently-wrong direction.
-        #
-        # It is a CALL-SITE exemption, so a bare `f(x)` where `f` is genuinely
-        # undeclared is unaffected (it was already exempt, and refuses
-        # downstream at the emitter's "this module does not compile" arm), and
-        # a type in a non-callee position is unaffected: `var xs: List[Int]`
-        # and `len(List)` keep whatever answer they had.
-        # SPECIALIZATION is included here too, and it is not a nicety: a
-        # comptime specialization is a call whose callee is a `SubscriptExpr`,
-        # so keying on `isinstance(c.func, F.IdentExpr)` alone misses every one
-        # of them and the ROOT of the bracket is then walked as if it were a
-        # read of a value. That is the false diagnosis the arm64 sweep reported
-        # for seventeen files: `std/sys/_assembly.mojo` spells
-        # `_get_kgen_string[asm]()` and was told "'_get_kgen_string' is imported
-        # from std.collections.string.string_slice, so it is a module-level name
-        # of another module" — which names a storage problem the file does not
-        # have. The name is a CALLEE. What crosses the dylib boundary is the
-        # instantiation, and whether this path has a symbol for it is a question
-        # for the export rule and the linker, not for the allocator's local
-        # table; that question is asked where it belongs (see `_callee_defs` for
-        # the generic's base name, and the export rule in
-        # `no_public_api_reason` for what a generic can bind as).
-        for c in M.iter_nodes(fn.body):
-            if isinstance(c, F.CallExpr):
-                for node in M.subscript_callee_names(c):
-                    callees.add(id(node))
-        # …and the DOTTED callee, `mod.f(...)`, which is the other spelling of
-        # a cross-module call and the only one `import mod` produces. The root
-        # of the chain is not a read of a value either: it names the MODULE,
-        # and the emitter answers the call from that module's own export table
-        # (see `ARM64Codegen._extern_symbol`). Without this the check refused
-        # `mod` — "is imported from `mod`, so it is a module-level name of
-        # another module" — for a call the emitter can already lower, which
-        # made `import mod` unusable and left `from mod import f` as the only
-        # spelling of a module call this path had. The refusal was worse than
-        # useless here: its own remedy sentence said "give it a function (a
-        # `struct.fn()` call lowers)", recommending the very spelling it
-        # refused.
-        #
-        # `struct.pack(...)` parses as `CallExpr(func=MemberExpr(obj=
-        # IdentExpr('struct'), member='pack'))`, so the set comprehension above
-        # misses it — `c.func` is a MemberExpr, and the root IdentExpr is never
-        # collected. So the fix is to collect that root, by node IDENTITY (the
-        # only way to name a node again, since `M.iter_nodes` has no parent),
-        # and only in CALLEE position: the same name in a genuine read
-        # (`len(struct)`) is still refused, which is the point — a module
-        # object has no storage either way, and what has no storage is the
-        # READ, not the call through it.
+        # missing local. ONE loop below answers THREE of the four spellings of
+        # that question, because several loops answering one question are free
+        # to disagree about where the answer stops — and `M.iter_nodes` has no
+        # parent, so a node can only be named again by its identity.
         #
         #   1. `f(…)` — a bare name. A callee this unit does not compile is a
         #      link-time fact rather than a missing local, and an un-compiled
@@ -5806,38 +5734,90 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         #      one. The dotted qualifier itself is resolved by module identity
         #      further in (`_extern_symbol`), where the manifest says whether
         #      that submodule exports the name at all.
-        #   3. `f[T](…)` — a comptime SPECIALIZATION, whose callee is a
-        #      `SubscriptExpr` and whose root is therefore walked as a read if
-        #      only `isinstance(c.func, F.IdentExpr)` is asked. That is the
-        #      false diagnosis the arm64 sweep reported for seventeen files:
-        #      `std/sys/_assembly.mojo` spells `_get_kgen_string[asm]()` and
-        #      was told `'_get_kgen_string' is imported from
-        #      std.collections.string.string_slice, so it is a module-level
-        #      name of another module` — which names a storage problem the file
-        #      does not have. The name is a CALLEE. What crosses the dylib
-        #      boundary is the instantiation, and whether this path has a
-        #      symbol for it is a question for the export rule and the linker,
-        #      not for the allocator's local table; that question is asked
-        #      where it belongs (see `_callee_defs` for the generic's base
-        #      name, and the export rule in `no_public_api_reason` for what a
-        #      generic can bind as). Exempted only when the bracket is not a
-        #      template some other rule has a sentence about — an MLIR template
-        #      in CALLEE position is a construct refusal, and the
-        #      `bracketed` scan below is the one that words it.
+        #
+        #      `struct.pack(...)` parses as `CallExpr(func=MemberExpr(obj=
+        #      IdentExpr('struct'), member='pack'))`, so a test on `func` alone
+        #      would miss it — the ROOT IdentExpr is what has to be collected,
+        #      and only in CALLEE position: the same name in a genuine read
+        #      (`len(struct)`) is still refused, which is the point — a module
+        #      object has no storage either way, and what has no storage is the
+        #      READ, not the call through it.
+        #   3. `f[a, b](…)` — a SUBSCRIPT callee: a comptime SPECIALIZATION
+        #      (`_horner_evaluate[coeffs](x)`, `plain[3](5)`) or a TYPE
+        #      APPLICATION (`List[Int]()`, `Tuple[Int, Int]()`,
+        #      `List[Self.T]()`). Both are one level up from case 1 and get the
+        #      same answer: the bracket is that symbol's compile-time argument
+        #      list and the base is the thing the call dispatches on, so
+        #      neither the base nor anything in the bracket is a read of a
+        #      value.
+        #
+        #      Specialization was the spelling the arm64 sweep reported for
+        #      seventeen files: `std/sys/_assembly.mojo` writes
+        #      `_get_kgen_string[asm]()`, and keying on
+        #      `isinstance(func, F.IdentExpr)` alone missed every one of them,
+        #      so the ROOT of the bracket was walked as if it were a read of a
+        #      value and the file was told "'_get_kgen_string' is imported from
+        #      std.collections.string.string_slice, so it is a module-level name
+        #      of another module" — a storage problem the file does not have.
+        #      The name is a CALLEE. What crosses the dylib boundary is the
+        #      INSTANTIATION, and whether this path has a symbol for it is a
+        #      question for the export rule and the linker, not for the
+        #      allocator's local table; that question is asked where it belongs
+        #      (see `_callee_defs` for the generic's base name, and the export
+        #      rule in `no_public_api_reason` for what a generic can bind as).
+        #
+        #      The type application is the SAME shape with the SAME refusal, and
+        #      it was the second-largest cause on the tree:
+        #      `std/collections/binary_heap.mojo`'s
+        #      `self._data = List[Self.T]()` was told "'List' has no home: the
+        #      module-level symbol table is empty for this unit … the register
+        #      allocator collected no home for it", and 79 of the 80 files the
+        #      x86-64 sweep filed under that sentence were waiting on it.
+        #      Every clause is false about the file: `List` is a TYPE, it is in
+        #      none of the four places a value can be, and no amount of reading
+        #      `_load_var` would have found anything.
+        #      (`model.empty_blob_constructor` is what makes the zero-operand
+        #      form ANSWERABLE and is asked by both backends; this exemption is
+        #      only what stops the name-placement walk from refusing the callee
+        #      before either of them is reached. A blob constructor WITH
+        #      operands keeps its own refusal — a blob sized at layout time
+        #      needs a frame reservation this compiler cannot size.)
+        #
+        #      `model.subscript_callee_names` is the ONE recogniser of the
+        #      shape and it returns NODES, not names, because `iter_nodes` has
+        #      no parent and the same spelling is a genuine read in a value
+        #      position — `len(List)`, `var xs: List[Int]`. Exempting by NAME
+        #      would exempt every read of `List` in the function, which is the
+        #      silently-wrong direction this whole pass is arranged to refuse.
+        #
+        #      It is a CALL-SITE exemption, so `f(x)` where `f` is genuinely
+        #      undeclared is unaffected (it was already exempt, and refuses
+        #      downstream at the emitter's "this module does not compile" arm),
+        #      and a type in a non-callee position keeps whatever answer it
+        #      had. The `bracketed` scan below runs FIRST, so a construct
+        #      refusal still wins over this: an MLIR template in CALLEE position
+        #      is refused by name, and a specialization with no callee to bind
+        #      the brackets to is refused by
+        #      `model.specialization_call_refusal`. This loop never pre-empts
+        #      either, in either direction.
         #   4. `external_call["setenv", Int32](…)` — a C symbol named by a
         #      string literal in the bracket, so `external_call` is left as a
         #      bare name with no home, and the bracket's second element is a
         #      type EXPRESSION (`Int32`, `_CPointer[UInt8,
         #      UntrackedOrigin[mut=False]]`) that is compile-time by
-        #      construction and is not a read of a value either. Only a
-        #      WELL-FORMED template is exempt: a malformed one still reaches
-        #      the bracketed refusal below, which words the malformed template
-        #      rather than a name-placement symptom. The type nodes are added
-        #      rather than left to fall through because `'Int32' has no home`
-        #      is a true statement about this pass and a useless one — it names
-        #      an allocator table the reader has to go and look up instead of
-        #      the subscript they wrote, and it was what every
-        #      `external_call[…]` in the stdlib was reported as.
+        #      construction and is not a read of a value either. This is the
+        #      same AST shape as case 3 and it is NOT collected there, because
+        #      it needs a well-formedness test of its own: only a WELL-FORMED
+        #      template is exempt, and a malformed one still reaches the
+        #      bracketed refusal below, which words the malformed template
+        #      rather than a name-placement symptom. So case 4 has its own loop
+        #      below, and the precedence is stated in the `elif` that skips it.
+        #
+        #      The type nodes are added rather than left to fall through
+        #      because `'Int32' has no home` is a true statement about this pass
+        #      and a useless one — it names an allocator table the reader has to
+        #      go and look up instead of the subscript they wrote, and it was
+        #      what every `external_call[…]` in the stdlib was reported as.
         #      `xc_callees` is the same set of templates, kept apart because
         #      the bracketed scan below needs the OPPOSITE answer for a
         #      template that is NOT a callee: `var x = external_call["sym", T]`
@@ -5845,19 +5825,6 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         #      there names a symptom of this pass rather than the construct.
         #      `M.iter_nodes` has no parent, so "is this subscript a call's
         #      callee" is answerable here and nowhere else.
-        #
-        # `xc_type_args` is every node of a well-formed template's TYPE
-        # argument, kept as its own set rather than folded into `callees`,
-        # because it has to be exempt from the `bracketed` scan BELOW as well
-        # and that scan runs first. `_CPointer[UInt8, UntrackedOrigin[…]]` is
-        # a two-element subscript whose root is a bare name, so the scan would
-        # record the tuple-index refusal against `_CPointer` and then report it
-        # — a construct refusal about a TYPE, raised because of where the type
-        # was written. The scan's own `template_is_answered` skip is the
-        # precedent and the same statement: an argument that is compile-time by
-        # construction is not a use of anything this pass places.
-        xc_callees = set()
-        xc_type_args = set()
         callees = set()
         imported = imported_module_names or ()
         for c in M.iter_nodes(fn.body):
@@ -5874,6 +5841,16 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         root.name == m or m.startswith(f"{root.name}.")
                         for m in imported):
                     callees.add(id(root))
+            elif not M.is_external_call_template(func):
+                # Case 3. `elif`, not `if`: a SubscriptExpr callee that IS an
+                # `external_call` template belongs to case 4, whose loop below
+                # collects the well-formed ones and subtracts the malformed
+                # ones back out again — so collecting it here would undo that
+                # precedence and let a malformed template's type argument fall
+                # through as a name with no home, which is the symptom the
+                # subtraction exists to stop.
+                for node in M.subscript_callee_names(c):
+                    callees.add(id(node))
         # The same rule one level up, for a callee spelled with a BRACKET.
         # `external_call["setenv", Int32](…)` puts the C symbol in the bracket
         # and leaves `external_call` as a bare name with no home — but it is the
