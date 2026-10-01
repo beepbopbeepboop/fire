@@ -18,9 +18,11 @@ The dylib WRITE is serialised — `formal/imports.py`'s `_dylib_lock` takes an
 exclusive `flock` and holds it across the compile and the manifest record. The
 READER takes no lock at all, so the pair exists inside ONE sweep: two workers
 that import the same stdlib module both build its dylib, and one links it while
-the other rewrites its manifest. Measured, against a real 11,668-byte manifest
-and exactly the old code: **357 of 882 concurrent reads (40 %) landed in the
-0.21 ms window** — `bugs/FORMAL_dylib_manifest_written_in_place.md`.
+the other rewrites its manifest. Measured twice, against exactly the old code and
+a real manifest of 11.6 kB: **357 of 882 concurrent reads (40 %) landed in the
+0.21 ms window** in the original report, and **1804 failures in 4095 reads** in
+this file's own reproducer — 1759 of them the empty-file `char 0` signature —
+against **0 in 12792** after the fix.
 
 What is asserted here:
 

@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """The holder fixpoint TERMINATES, and an overloaded name gets ONE answer.
 
-`bugs/FORMAL_bindings_mojo_build_never_terminates.md` was a hang with a
-specific cause, and both halves of it are pinned here: the fix, and the two
-properties the fix rests on.
+`std/python/bindings.mojo` used to wedge the arm64 formal build at a flat
+0.06 GB with no growth — 850 s and still going, with the sweep's per-file `-t 30`
+the only bound on it. That hang had a specific cause, and both halves of the fix
+are pinned here: the cause, and the two properties the fix rests on.
 
-**The hang.** `std/python/bindings.mojo` wedged the arm64 formal build at a
-flat 0.06 GB with no growth — 850 s and still going, with the sweep's per-file
-`-t 30` the only bound on it. It is not a slow build and not an allocator
+**The hang.** It is not a slow build and not an allocator
 blow-up; it is a loop, and the loop is in `formal/build.py`'s holder fixpoint.
 `returns_frame` — "which functions return a frame address, and of which struct" —
 was keyed by `fn.name` and WRITTEN by every definition under that name.

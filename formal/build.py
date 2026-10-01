@@ -2271,8 +2271,11 @@ def _returns_frame_by_name(name_defs: dict, returns_frame: dict) -> tuple:
     `std/python/bindings.mojo`, whose `PythonTypeBuilder.def_py_init` is
     declared twice (one overload ends `return self`, the other
     `return self.def_py_init[…](…)`): 7819 passes and 4.1 M node walks in 20 s,
-    still going, at 0.06 GB flat — the sweep's `-t 30` was the only bound on it
-    (`bugs/FORMAL_bindings_mojo_build_never_terminates.md`).
+    still going, at 0.06 GB flat — the sweep's `-t 30` was the only bound on it,
+    and `std/python/bindings.mojo` now refuses in 2.0 s with a specific message
+    (the next real finding: calling a compile-time `def` parameter means
+    MONOMORPHISING it, and this path does not instantiate type parameters —
+    `bugs/FORMAL_known_limits.md` §1.1).
 
     The per-function table it reads is keyed by `_fn_key`, like every other
     per-function table here, so one definition's answer can no longer overwrite
@@ -7723,10 +7726,11 @@ def _write_json_atomic(path: str, payload) -> None:
     writers are serialised by `formal/imports.py`'s `_dylib_lock`; the READERS
     take no lock at all, so the pair exists inside one `-j6` sweep — two workers
     importing the same stdlib module both build its dylib, and one links it
-    while the other rewrites its manifest. Measured on a real 11,668-byte
-    manifest against exactly this code: 357 of 882 concurrent reads (40 %)
-    landed in the 0.21 ms window
-    (`bugs/FORMAL_dylib_manifest_written_in_place.md`).
+    while the other rewrites its manifest. Measured twice, on real manifests of
+    11.6 kB: the original report saw 357 of 882 concurrent reads (40 %) land in
+    the 0.21 ms window, and the reproducer against this tree's own code saw 1804
+    failures in 4095 reads — 1759 of them the empty-file `char 0` signature —
+    against 0 in 12792 reads after the fix.
 
     fsync before the rename, because the failure this removes is a reader
     seeing a half-written file; a rename that reaches disk before the data does
