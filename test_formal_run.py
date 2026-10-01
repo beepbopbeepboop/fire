@@ -6998,6 +6998,175 @@ SHIFT_CASES = [
 ]
 
 
+# `origin_of(x)` — the COMPILE-TIME IDENTITY, and the seven stdlib files it
+# un-blocks are measured in `bugs/FORMAL_frame_by_value_ceiling_zero.md`.
+#
+# `origin_of` is in the corpus almost entirely as a TYPE argument —
+# `Self.IteratorType[origin_of(self)]`, `Pointer[Deque[T], origin_of(self)]` —
+# and the escape check refused every one of those as "a frame address is passed
+# to `origin_of()`, which is lowered as an operation on a VALUE: it wants the
+# object itself … so what would arrive is the address `origin_of()` would then
+# dereference as one". Every clause after "is passed" is false: `origin_of` has
+# no body on this path, so there is no call to emit and nothing dereferences the
+# word. The interpreter this project treats as the reference for the language
+# says the same thing in one line — `myinterpreter.py` defines it as
+# `lambda x, *args, **kwargs: x` — so the identity is an ORACLE here, not a
+# judgement call, and these cases are written so that the expected values can be
+# read off the source.
+#
+# It is a REWRITE (`formal/build.py`'s `_rewrite_identity_intrinsic_calls`) and the two
+# refusals below are why: an emitter-level lowering leaves `origin_of(s)` in the
+# tree the build pass has already walked, and a frame address then walks through
+# the return check, a variadic C call and a container with none of them able to
+# see it. Both of those BUILT and ran before the rewrite existed.
+ORIGIN_OF_CASES = [
+    # The corpus's own shape: a comptime bracket naming the receiver's origin.
+    # `tag` never reads `origin`, so the bracket is a type token, and the value
+    # that matters is `s.a` — 3, doubled, plus `s.b`. The frame is not disturbed
+    # and the arithmetic is the source's: 3*2 + 4 = 10.
+    #
+    # This is the case that was refused, on both architectures, with the message
+    # quoted above.
+    ("origin_of_in_a_comptime_bracket_is_the_identity",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def tag[origin: AnyType](x: Int) -> Int:\n"
+     "    return x * 2\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 3\n"
+     "    s.b = 4\n"
+     "    return tag[origin_of(s)](s.a) + s.b\n", 10, None),
+    # The same construct on a PLAIN VALUE, and the row that shows the change is
+    # about `origin_of` rather than about frames: before it, `origin_of(k)` was
+    # emitted as a call to a symbol nothing in this image defines, so the build
+    # died at the link check with "the image would bind 1 symbol(s) that
+    # nothing provides: origin_of" — a message about a missing symbol rather
+    # than about the construct. 7 + 10 = 17, which is `origin_of`'s own
+    # definition read off the source.
+    ("origin_of_of_a_plain_value_is_the_value",
+     "def main(n: Int) -> Int:\n"
+     "    var k = 7\n"
+     "    var o = origin_of(k)\n"
+     "    return o + 10\n", 17, None),
+    # The frame ALIASING an origin names, which is what the construct is FOR:
+    # writing through `o` writes the same slot `t` reads. 9*1000 + 6*10 + 9 is
+    # 9069, and all three terms are the source's own: `o.a = 9` first, so
+    # `t.a`, `t.b` (untouched) and `o.a` (the same slot) are 9, 6 and 9.
+    #
+    # This is the row that would catch a lowering which copied the frame instead
+    # of aliasing it, and it is measured on both architectures, which agree on
+    # 9069 — a copy of the address would not.
+    ("origin_of_a_frame_aliases_the_frame_it_names",
+     "struct Bag:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var t = Bag()\n"
+     "    t.a = 5\n"
+     "    t.b = 6\n"
+     "    var o = origin_of(t)\n"
+     "    o.a = 9\n"
+     "    printf(\"%d\", t.a * 1000 + t.b * 10 + o.a)\n"
+     "    return 0\n", 0, "9069"),
+    # A control, and it is reported as one: this built BEFORE the change and
+    # still builds, on both architectures. A type ANNOTATION is not a runtime
+    # expression, so nothing is emitted for the `origin_of` in it and the
+    # escape check — which walks `fn.body` for statements — never saw it.
+    #
+    # It is here because the rewrite walks the same tree and an annotation IS
+    # reachable from `fn.body` (this one is a local's, one field of a VarDecl),
+    # so a rewrite that mangled one would be mangling something the emitters do
+    # not read, and the only way to know it does not is to build the thing. The
+    # value is the source's: `Marker(b.a)` is 7 and `.v` is that field.
+    ("origin_of_in_a_local_type_annotation_is_still_a_type",
+     "struct Marker[T: AnyType]:\n"
+     "    var v: Int\n\n"
+     "struct Bag:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def tag(ref b: Bag) -> Int:\n"
+     "    var m: Marker[origin_of(b)] = Marker(b.a)\n"
+     "    return m.v\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var g = Bag()\n"
+     "    g.a = 7\n"
+     "    g.b = 8\n"
+     "    return tag(g)\n", 7, None),
+]
+
+# The rewrite erases the CALL, not the CHECK. Every row here is a construct that
+# the build pass refuses when the frame address reaches it directly, and each one
+# was BUILT AND RAN when the identity was lowered in the emitters instead —
+# which is the reason it is a rewrite. `formal/build.py`'s
+# `_rewrite_identity_intrinsic_calls` carries the two measurements; these are them as
+# regressions, on both architectures.
+ORIGIN_OF_REFUSALS = [
+    # Returned. `return s` is `frame_return_refusal`, and the frame is reclaimed
+    # when this function returns, so the word is a dangling address. With the
+    # identity in the emitters this BUILT, RAN, and returned the frame's own
+    # address modulo 256 — silently, with the program exiting 0.
+    # The EXPECTED WORDS are `model.entry_frame_return_refusal`'s rather than
+    # the lifetime sentence this case was written against, and that is the
+    # improvement rather than a loosened assertion: the program returns a frame
+    # from `main`, so it is not "a receiver is returned from the function that
+    # created it" — a rule the reader has to re-derive — but "there is no
+    # caller to reserve a block for", which is the whole fact. That model's
+    # docstring says so, naming this exact older wording as the one it replaces.
+    # Both architectures, one shared message (`_ABI_ARG_REGS`'s twin asks it in
+    # `formal/x86_64_codegen.py`).
+    ("origin_of_refuse_returning_the_frame",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 3\n"
+     "    s.b = 4\n"
+     "    return origin_of(s)\n",
+     "refuse:is this image's ENTRY", None),
+    # A VARIADIC C call. This is the exact failure
+    # `FRAME_C_VALUE_CALLS`'s own message cites ("measured, `printf(\"val=%d\n\",
+    # r)` builds, runs, prints the frame's address as a decimal, and exits 0"),
+    # reached through a door the identity opened: with the emitters doing it,
+    # `printf("%d\n", origin_of(s))` printed 1793355120 and exited 0.
+    #
+    # The needle names `printf`, which is what makes this a test of the
+    # hand-off and not of the construct: the refusal has to be the one about a
+    # wrong CATEGORY of argument, and the address must never reach the format
+    # string's conversion.
+    ("origin_of_refuse_a_variadic_c_call_still_reads_a_value",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 3\n"
+     "    s.b = 4\n"
+     "    printf(\"%d\\n\", origin_of(s))\n"
+     "    return 0\n",
+     "refuse:passed to printf()", None),
+    # A CONTAINER. `origin_of(s)` erased to `s` inside a subscript's argument
+    # list is refused as a container store, which is the right ANSWER for the
+    # wrong reason — an index list is not a container — and that imprecision has
+    # its own bug doc (`FORMAL_type_argument_read_as_a_container.md`) with the
+    # one-line reproducer that has no `origin_of` in it at all. The row is here
+    # so the answer is pinned as a refusal: whatever the index list is, a frame
+    # address in it does not become a store the analysis can see through.
+    ("origin_of_refuse_a_frame_in_a_container",
+     "struct S:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = S()\n"
+     "    s.a = 3\n"
+     "    s.b = 4\n"
+     "    return [origin_of(s), 1][0]\n",
+     "refuse:is stored in a container", None),
+]
+
+
 # The ninth-argument and read-before-store rows are REFUSALS, and they are in
 # their own group because they assert a DIAGNOSTIC rather than a value — the
 # whole point is that the program must not build, so no exit status can carry
@@ -7548,7 +7717,8 @@ def main():
                   + SHIFT_CASES + REFUSAL_CASES
                   + TYPE_APPLICATION_REFUSALS + TYPE_VALUE_CASES \
                   + TYPE_VALUE_DTYPE_CASES + TYPE_VALUE_REFUSALS \
-                  + TYPE_VALUE_TAG_CASES
+                  + TYPE_VALUE_TAG_CASES + ORIGIN_OF_CASES \
+                  + ORIGIN_OF_REFUSALS
                   + [X86_ONLY_1SLOT_BUG_CASE])
     # The CPython-pair group is a DIFFERENT SHAPE (three columns: name, Mojo
     # text, CPython text), so it is selected and dispatched separately rather

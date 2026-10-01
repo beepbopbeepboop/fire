@@ -5948,6 +5948,12 @@ def builtin_function(name: str):
 # arrives is the answer, not the mistake, and `Pointer(to=stat)` over a frame is
 # the one hand-off in this family that is simply correct. See
 # `FRAME_ADDRESS_CTORS`.
+#
+# `origin_of` is the second member of that set, and it was the same mistake
+# twice: it is not a callee that reads a value either, it is a compile-time
+# intrinsic with no body here at all, so the dereference its sentence described
+# was one nothing performs. See `FRAME_IDENTITY_CALLS` below, which is where it
+# went.
 
 # Calls by bare name that ASK FOR THE ADDRESS of what they are handed.
 #
@@ -5963,19 +5969,89 @@ def builtin_function(name: str):
 # frame address). So the word that escapes here is one nothing on this path
 # dereferences.
 
+# Calls by bare name that are COMPILE-TIME intrinsics with no runtime body, and
+# which lower as the IDENTITY on their first argument: `origin_of(x)` names the
+# storage `x` already lives in, and that is the whole of what it does.
+#
+# `origin_of` was in `FRAME_VALUE_ONLY_CALLS` until this table existed, and the
+# sentence it was refused with is false in its central claim about 7 stdlib
+# files. It said the callee "wants the object itself … so what would arrive is
+# the address `origin_of()` would then dereference as one" — but `origin_of` has
+# no body here to dereference anything: there is no call to emit, and nothing
+# reads the address it names. So the hand-off was refused for a dereference that
+# does not exist, and a reader who followed the advice ("give it a field,
+# `origin_of(self.n)`") was sent to rewrite a program that is already correct.
+#
+# The identity is not a convenience, it is what the language means, and there is
+# an oracle for it in the tree rather than a judgement call: `myinterpreter.py`
+# defines `origin_of` as `lambda x, *args, **kwargs: x`. So the compiler that
+# is this project's reference for the language already answers it this way, and
+# a lowering that disagreed with it would be the one that is wrong.
+#
+# It is the IDENTITY rather than a fresh "origin" word, and the reason is the
+# by-reference design: a frame address is already the address of the storage a
+# multi-field struct occupies, which is exactly what an origin of that struct
+# names. `origin_of(t).f` and `t.f` are therefore the same slot read, and
+# `origin_of(t).f = v` is the same write — which is what the idiom in the corpus
+# is FOR (`UnsafePointer(to=self._data).unsafe_origin_cast[origin_of(self)]()` is
+# retargeting a pointer's origin from one object to its container). Erasing the
+# call to the operand keeps every existing refusal load-bearing: the operand is
+# then a bare frame holder in whatever position the call was in, so the escape
+# walk, the holder fixpoint and the position rules all see it, and a name the
+# analysis could not settle is still refused by them.
+#
+# The consumers are `frame_receiver_escape_refusal` (whose FIRST branch is this
+# table, beside `FRAME_ADDRESS_CTORS`'s, because a hand-off to one of these
+# names is not a refusal at all) and `identity_call_operand` below, which
+# `formal/build.py`'s rewrite asks for the operand.
+FRAME_IDENTITY_CALLS = frozenset({"origin_of"})
+
+
+def identity_call_operand(callee: str, call):
+    """The expression `call` lowers as ITSELF, or None if it is not one.
+
+    `origin_of(x)` is the identity on its first argument.
+
+    The one consumer is the REWRITE in `formal/build.py`, and that it is a
+    rewrite rather than a lowering in the emitters is a measured decision rather
+    than a preference — see `_rewrite_identity_intrinsic_calls` there for the
+    two programs that are the reason. Briefly, because the escape analysis reads
+    the AST: erasing the call in the emitter leaves `origin_of(s)` in the tree
+    the build pass has already walked, so a frame address reaches the return
+    statement, the variadic C call and the container without any of them being
+    able to see it.
+
+    A call with NO positional argument is not an identity call — there is no
+    operand to be the identity of — and falls through to whatever refused it
+    before, rather than reaching into an empty argument list. Keyword arguments
+    are the same: the formal ABI has no keyword slots, and an `origin_of` that
+    needed one is not the construct this table describes."""
+    if callee not in FRAME_IDENTITY_CALLS:
+        return None
+    if getattr(call, "kwargs", None):
+        return None
+    args = getattr(call, "args", None) or ()
+    return args[0] if args else None
+
+
 # Calls by bare name that the model lowers as an operation on a value, and so
 # take the VALUE rather than a pointer to it. `len` is here because it is the
-# commonest one by an order of magnitude; the others are the value/type
-# constructors and `origin_of`, which all ask what the object IS.
+# commonest one by an order of magnitude; the others are the value and type
+# constructors, which all ask what the object IS.
 #
-# The identity ADDRESS constructors are NOT here any more — see
+# `origin_of` is NOT here and its being gone is a measured correction, not a
+# tidy-up: it was refused as "lowered as an operation on a VALUE" for 7 stdlib
+# files, and there is no such operation — see `FRAME_IDENTITY_CALLS` above, which
+# is where the construct went and why the sentence it was refused with was false.
+#
+# The identity ADDRESS constructors are not here either — see
 # `FRAME_ADDRESS_CTORS` above for the measurement — and the string-producing
 # identity ones (`String`, `str`, `StringLiteral`, `StringSlice`) stay, because
 # they are the opposite case: the word they are handed becomes a `char *` that
 # every `%s` and every string method DEREFERENCES, so handing one a frame
 # address is handing printf an address to read as text.
 FRAME_VALUE_ONLY_CALLS = {
-    "len", "origin_of", "isinstance", "issubclass", "repr", "str", "int",
+    "len", "isinstance", "issubclass", "repr", "str", "int",
     "float", "bool", "hash", "id", "type", "String",
     "StringRef", "PointerType",
     # The container and scalar CONSTRUCTORS, and the folds over them.  They are
@@ -6061,11 +6137,13 @@ def frame_receiver_escape_refusal(callee: str, struct_names) -> str | None:
     what it compiled — so this function is about the cases where the answer
     does not depend on that.
 
-    FIVE answers, and the order is the order the question is actually decided
-    in, because the first three are the ones that were being answered wrongly:
+    SIX answers, and the order is the order the question is actually decided
+    in, because the first four are the ones that were being answered wrongly:
 
-    1. an ADDRESS constructor — **not a refusal at all**, and that is the
-       measurement rather than a hope (see `FRAME_ADDRESS_CTORS`);
+    1. an ADDRESS constructor, and a compile-time IDENTITY intrinsic — **not a
+       refusal at all**, and for the first of the two that is the measurement
+       rather than a hope (see `FRAME_ADDRESS_CTORS` and
+       `FRAME_IDENTITY_CALLS`);
     2. a C library entry point, which reads the struct's BYTES;
     3. a type constructor the model knows about but cannot represent, which is a
        different thing again from "a function this module does not compile" and
@@ -6076,6 +6154,14 @@ def frame_receiver_escape_refusal(callee: str, struct_names) -> str | None:
     if callee in FRAME_ADDRESS_CTORS:
         # Measured, not assumed: see FRAME_ADDRESS_CTORS. Returning None here
         # is the whole of the fix for the `_c_stat`/`Pointer(to=stat)` shape.
+        return None
+    if callee in FRAME_IDENTITY_CALLS:
+        # `origin_of(x)` names the storage `x` lives in, and a frame address IS
+        # the address of the storage a multi-field struct occupies, so there is
+        # no hand-off here to refuse: the operand arrives as itself, and every
+        # channel out of the frame is checked on the operand from there. Before
+        # this branch the call fell through to the value-only set and was
+        # refused for a dereference `origin_of()` does not perform.
         return None
     if callee in FRAME_C_LIBRARY_CALLS:
         return (f"a {who} frame address is passed to {callee}(), which is a C "

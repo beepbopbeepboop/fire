@@ -149,6 +149,42 @@ already refused by name: `DEREFERENCE_METHODS` covers `value`/`unsafe_value`,
 and says why in terms a reader can act on. The word that escapes is one nothing
 on this path dereferences.
 
+### 2b. Case (a) again: `origin_of`, which has no body to dereference anything
+
+Added 2026-09-30, and it is the same mistake as `Pointer` one step further
+out. `origin_of` was in `FRAME_VALUE_ONLY_CALLS`, so the same sentence refused
+it: *"it wants the object itself … so what would arrive is the address
+`origin_of()` would then dereference as one"*. But `origin_of` is not a callee
+this model lowers at all — it is a COMPILE-TIME intrinsic with no body here, so
+there is no call to emit and nothing on this path reads the word it names. The
+clause that makes the sentence false is the last one, and it is the only one that
+mattered: the sentence describes a dereference that does not exist, and its
+advice (`origin_of(self.n)`) sends a reader to rewrite a program that is already
+correct. **7 stdlib files** were refused this way, and every one of them is in
+the shape the corpus actually uses — a TYPE argument,
+`Self.IteratorType[origin_of(self)]`, `Pointer[Deque[T], origin_of(self)]` — so
+the reader being misled was being misled about a construct that is not even a
+runtime expression.
+
+It is now `FRAME_IDENTITY_CALLS`, the first branch of
+`frame_receiver_escape_refusal` beside `FRAME_ADDRESS_CTORS`'s, and it is
+erased to its operand by `build._rewrite_identity_intrinsic_calls`. **A rewrite
+and not an emitter lowering**, for a reason this file's row 1 already states in
+another form: the escape analysis reads the AST, so an emitter that lowers the
+call leaves `origin_of(s)` standing in the tree the build pass has walked.
+Measured, on both machines, with the identity in the emitters: `return
+origin_of(s)` builds, runs and returns the frame's own address modulo 256, and
+`printf("%d\n", origin_of(s))` prints 1793355120 and exits 0 — the second of
+those is the exact failure §13's `FRAME_C_VALUE_CALLS` message cites as its
+reason. Three regressions for it are in `test_formal_run.py`
+(`ORIGIN_OF_REFUSALS`: the return, the variadic C call, the container), because
+the rewrite erases the CALL and not the CHECK.
+
+The identity is not a convenience: `myinterpreter.py` — this project's own
+reference for the language — defines `origin_of` as
+`lambda x, *args, **kwargs: x`, so there is an oracle for the answer in the tree
+rather than a judgement call about it.
+
 ## 3. Case (b): the frame layout and the struct's C layout **coincide**, and
 ## it is measured
 
