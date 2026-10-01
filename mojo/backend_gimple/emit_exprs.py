@@ -1593,7 +1593,8 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     if ot == 'MojoMemoryView *' and node.member in ('nbytes', 'itemsize', 'format',
                                                      'obj', 'readonly',
                                                      'c_contiguous', 'f_contiguous',
-                                                     'contiguous'):
+                                                     'contiguous', 'shape', 'strides',
+                                                     'suboffsets', 'ndim'):
         mp = gen._ensure_local('MojoMemoryView *', ov)
         if node.member in ('nbytes', 'itemsize'):
             fn = ('mojo_memoryview_nbytes' if node.member == 'nbytes'
@@ -1605,6 +1606,22 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         if node.member == 'obj':
             return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_memoryview_obj',
                                                  [('MojoMemoryView *', mp)])
+        if node.member in ('shape', 'strides', 'suboffsets'):
+            # The tuple-valued descriptors. Neither this member read nor the
+            # call form (_lower_memoryview_method) had a case, so each fell
+            # to the generic unknown-member path and printed its own heap
+            # ADDRESS as a decimal: `mv.shape` printed 4341225952 where
+            # CPython prints `(4,)`. The runtime returns the spelling string,
+            # which is exact for this always-1-D representation.
+            if node.member == 'suboffsets':
+                return 'char *', gen._call_expr(
+                    'char *', 'mojo_memoryview_suboffsets_str', [])
+            return 'char *', gen._call_expr(
+                'char *', 'mojo_memoryview_' + node.member + '_str',
+                [('MojoMemoryView *', mp)])
+        if node.member == 'ndim':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_ndim',
+                                             [('MojoMemoryView *', mp)])
         if node.member == 'readonly':
             # A real query, not a constant fold: the answer is the
             # MUTABILITY of the object the view was taken over, which the
@@ -1620,8 +1637,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                                [('MojoMemoryView *', mp)])
             return '_Bool', gen._new_val('_Bool', f'{t} != 0')
         # A 1-D byte window over contiguous memory is C-contiguous by
-        # construction, so these two really are constant.
-        return '_Bool', gen._new_val('_Bool', '1')
+        # construction, so these really are constant — but they are asked of
+        # the runtime rather than folded here, so all three come from ONE
+        # place instead of this being the only site that knows the rule.
+        t = gen._call_expr('int', 'mojo_memoryview_' + node.member,
+                           [('MojoMemoryView *', mp)])
+        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
 
     # MojoList field name remapping: Mojo List uses _len/_capacity/elems; C MojoList uses len/cap/data
     _sn = gimple_exprtypes._struct_name_of(ot)
@@ -3040,6 +3061,37 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # MojoBytes == / != → mojo_bytes_eq (bytewise; never conflated with str)
     if op in ('==', '!=') and lt == 'MojoBytes *' and rt == 'MojoBytes *':
         eq_t = gen._new_val('int', f"mojo_bytes_eq ({lv}, {rv})")
+        t = gen._new_temp('_Bool')
+        cmp = '!= 0' if op == '==' else '== 0'
+        gen._emit(f"  {t} = {eq_t} {cmp};")
+        return '_Bool', t
+
+    # MojoList == / != (lists AND tuples — same representation, see
+    # _lower_tuple_literal) → mojo_list_eq, by VALUE. This fell through to
+    # the generic pointer comparison below, which is IDENTITY: two
+    # separately-built containers with equal contents compared unequal, and
+    # `(1,2) == (1,2)` was False. The element kind the runtime needs is the
+    # statically known one `_elem_of` already tracks — a slot holds a raw
+    # int64_t with no tag, so a list of strings can only be compared as
+    # strings if the CALL SITE says so.
+    if op in ('==', '!=') and lt == 'MojoList *' and rt == 'MojoList *':
+        # The element kind is the statically known one `_elem_of` tracks, and
+        # it is NOT derivable from the C type alone: a bytes element is a
+        # `MojoBytes *` in the slot, and comparing that as a raw int64_t
+        # compares two heap addresses, so `b'ab'.split(b'b') == [b'a', b'']`
+        # was False for two genuinely equal containers. Hence the explicit
+        # bytes case, matching mojo_list_count_bytes's reasoning.
+        # The element codes come from `_eq_call_args` — the ONE reader of the
+        # runtime's `MOJO_EQ_*` encoding, and the one every other container
+        # `==` goes through. This arm used to derive its own code from
+        # `_elem_of` with a DIFFERENT numbering (0 int, 1 str, 2 double,
+        # 3 bytes), which is not the runtime's: `MOJO_EQ_STR` is 3 and
+        # `MOJO_EQ_BYTES` is 4. Passing 3 for a bytes element therefore
+        # strcmp'd two `MojoBytes *`, and `b'ab'.split(b'b') == [b'a', b'']`
+        # answered False for two equal containers. A second spelling of the
+        # same table is the failure this repo keeps paying for.
+        _args = _eq_call_args(gen, 'MojoList *', 'list', lv, lt, rv, rt, True)
+        eq_t = gen._call_expr('int', 'mojo_list_eq', _args)
         t = gen._new_temp('_Bool')
         cmp = '!= 0' if op == '==' else '== 0'
         gen._emit(f"  {t} = {eq_t} {cmp};")
@@ -4665,11 +4717,6 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
     if _inner_ct:
         gen._nested_elem_types[t] = _inner_ct
     gen._emit(f"  {t} = mojo_list_new ();")
-    # Mark as a tuple (not a plain list) so generic repr() picks `(...)`
-    # over `[...]` — see mojo_mark_as_tuple's doc comment in
-    # runtime/fire_runtime.c; there is otherwise no runtime distinction
-    # between the two, since both lower to the same MojoList.
-    gen._emit(f"  mojo_mark_as_tuple ({t});")
     # Explicit loop, NOT `[(el, *gen.lower_expr(el)) for el in ...]`: the
     # 2-tuple return of `lower_expr` unpacked into a comprehension target
     # boxes `et`/`ev` on the self-hosted path, so `_tuple_slot_types[t]`
@@ -4730,6 +4777,14 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
             temp = gen._new_val('char *', f'{ev_cast}')
             ev_cast = temp
         gen._emit(f"  mojo_list_append_{use} ({t}, {ev_cast});")
+    # Mark as a tuple AFTER the elements are in, not before. The mark is
+    # what makes this value a tuple rather than a list (see
+    # mojo_mark_as_tuple's doc comment in runtime/fire_runtime.c), and since
+    # 2026-09-29 every mutating MojoList entry point REFUSES a marked list,
+    # so marking first made every tuple literal raise out of its own
+    # construction. The mark is a statement about the FINISHED value, which
+    # is exactly what placing it last says.
+    gen._emit(f"  mojo_mark_as_tuple ({t});")
     return 'MojoList *', t
 
 

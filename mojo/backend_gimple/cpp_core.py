@@ -3966,8 +3966,11 @@ def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list
     consumer side actually trusts for its own accessor choice."""
     tvar = gen._cpp_fresh_name('_mg_tup')
     self_fields = getattr(gen, '_cpp_gen_self_fields', None)
-    lines = [f"{indent}MojoList *{tvar} = mojo_list_new();",
-             f"{indent}mojo_mark_as_tuple({tvar});"]
+    # Built unmarked and marked at the END (just before the yield), because a
+    # marked list is refused by every mutating MojoList entry point — marking
+    # first made every `yield (a, b)` raise out of its own construction. Same
+    # ordering rule as _lower_tuple_literal's identical literal.
+    lines = [f"{indent}MojoList *{tvar} = mojo_list_new();"]
     for el in tup.elements:
         ectype = gimple_exprtypes._infer_simple_expr_ctype(el, declared, self_fields, gen._async_api) or 'int64_t'
         ev = gen._cpp_expr(el)
@@ -3988,6 +3991,7 @@ def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list
                 lines.append(f"{indent}mojo_list_append_str({tvar}, (char *)\"\");")
             else:
                 lines.append(f"{indent}mojo_list_append_int({tvar}, 0);")
+    lines.append(f"{indent}mojo_mark_as_tuple({tvar});")
     lines.append(f"{indent}co_yield {tvar};")
     return lines
 

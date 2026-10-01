@@ -566,8 +566,6 @@ def _gen_for_findall_loop(gen, node: gimple_ctypes.ForStmt) -> None:
         # `for a, b in ...` then unpacks as N pairs of (group, null) —
         # twice the iterations and a null second slot.)
         _tup = gen._call_expr('MojoList *', 'mojo_list_new', []) if ngroups >= 2 else None
-        if _tup is not None:
-            gen._void_call('mojo_mark_as_tuple', [('MojoList *', _tup)])
         for _gi in range(ngroups):
             _gi64 = gen._new_val('int64_t', f'(int64_t){_gi + 1}')
             _gsp = gen._new_val('int64_t *', f'_mojo_at_int64_t ({gstart}, {_gi64})')
@@ -600,6 +598,12 @@ def _gen_for_findall_loop(gen, node: gimple_ctypes.ForStmt) -> None:
             # the same way.
             _boxed = gen._new_val('int64_t', f'(int64_t)(intptr_t){_tup}')
             gen._void_call('mojo_list_append_int', [('MojoList *', res), ('int64_t', _boxed)])
+            # Marked AFTER the group slots are appended, not before: a
+            # marked list is refused by every mutating MojoList entry
+            # point (mojo_require_mutable_list's own comment), so marking
+            # first made `re.findall` with 2+ groups raise out of its own
+            # construction. Same ordering rule as _lower_tuple_literal.
+            gen._void_call('mojo_mark_as_tuple', [('MojoList *', _tup)])
     _close_regex_scan(gen, pieces)
     if ngroups >= 2:
         gen._elem_types[res] = 'MojoList *'

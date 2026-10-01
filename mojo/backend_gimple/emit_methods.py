@@ -4165,6 +4165,22 @@ def _lower_list_method(gen, ov: str, method: str, args: list) -> tuple:
         if at == 'char *':
             return 'int64_t', gen._call_expr('int64_t', 'mojo_list_index_str', [('MojoList *', ov), ('char *', av)])
         return 'int64_t', gen._call_expr('int64_t', 'mojo_list_index_int', [('MojoList *', ov), ('int64_t', av)])
+    if method == 'count' and args:
+        # `l.count(x)` counts OCCURRENCES; `x in l` only asks whether there
+        # is one, and the two share no runtime helper. This case did not
+        # exist at all, so every `list.count(...)` fell to the dummy 0-stub
+        # below and answered 0 for a list that plainly contained the value:
+        # `[1,2,1].count(1)` was 0 where CPython says 2 — a silent wrong
+        # value, not an error. `mojo_list_count_int` / `_str` / `_bytes`
+        # count slots; the bytes one is needed because a bytes needle is a
+        # boxed pointer, and comparing that as a raw slot would compare
+        # addresses (see mojo_list_contains_bytes's own comment).
+        at, av = gen.lower_expr(args[0])
+        if at == 'char *':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_list_count_str', [('MojoList *', ov), ('char *', av)])
+        if at == 'MojoBytes *':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_list_count_bytes', [('MojoList *', ov), ('MojoBytes *', av)])
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_list_count_int', [('MojoList *', ov), ('int64_t', av)])
     if method == '__len__':
         # The builtin `len(x)` call form already lowers to mojo_list_len
         # (see the len() handling in _lower_call), but the dunder-method
@@ -4352,6 +4368,17 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
         cstr_ov = ov
     if method == '__len__':
         return 'int64_t', gen._new_val('int64_t', f'mojo_strlen ({cstr_ov})')
+    if method == 'hex':
+        # `str` has NO `hex` in Python — `'abc'.hex()` is an AttributeError.
+        # This compiler had a `mojo_hex` for it (an INTEGER formatter, used
+        # by the `%x` printf path), so the name resolved to a stub that
+        # answered a raw int 0: `'abc'.hex()` printed 0, and `'ab'.hex(' ')`
+        # printed 0 too. Raise the real AttributeError, the same shape
+        # _BYTES_STR_ONLY_PREDICATES uses on the bytes side.
+        gen._emit_call(
+            'void', '', 'mojo_raise_attribute_error',
+            [('char *', gen._intern_string("'str' object has no attribute 'hex'"))])
+        return 'char *', gen._new_temp('char *')
     if method == 'group':
         return 'char *', cstr_ov
     if method in ('as_c_string_slice', 'unsafe_cstr_ptr', 'unsafe_ptr', 'data'):
@@ -4363,6 +4390,22 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
         'strip': 'string_strip',
         'lstrip': 'mojo_str_lstrip', 'rstrip': 'mojo_str_rstrip',
     }
+    if method == 'expandtabs':
+        tabsize = arg_vals[0] if arg_vals else '8'
+        return 'char *', gen._new_val('char *', f"mojo_str_expandtabs ({cstr_ov}, {tabsize})")
+    # casefold / swapcase / title / capitalize. None of these had a case
+    # here, so each fell to the generic unknown-method stub and answered a
+    # raw int 0 — printed as `0`, which is neither the string nor even a
+    # plausible-looking false. `casefold` is additionally in
+    # _BYTES_STR_ONLY_PREDICATES, because `b'a'.casefold()` is an
+    # AttributeError: the method exists on str and not on bytes.
+    _CSTR_CASE_METHODS: dict[str, str] = {
+        'casefold': 'mojo_str_casefold', 'swapcase': 'mojo_str_swapcase',
+        'title': 'mojo_str_title', 'capitalize': 'mojo_str_capitalize',
+    }
+    if method in _CSTR_CASE_METHODS:
+        return 'char *', gen._new_val(
+            'char *', f"{_CSTR_CASE_METHODS[method]} ({cstr_ov})")
     if method in _CSTR_METHODS:
         # `str.rstrip(chars)` / `str.lstrip(chars)` with a chars argument:
         # the plain mojo_str_rstrip/lstrip only strip whitespace and IGNORE
@@ -4377,9 +4420,6 @@ def _lower_str_method(gen, ov: str, method: str, args: list) -> tuple:
                 _a0v = gen._coerce_to_type(_a0t, 'char *', _a0v)
             return 'char *', gen._new_val('char *', f"{fn} ({cstr_ov}, {_a0v})")
         return 'char *', gen._new_val('char *', f"{_CSTR_METHODS[method]} ({cstr_ov})")
-    if method == 'expandtabs':
-        tabsize = arg_vals[0] if arg_vals else '8'
-        return 'char *', gen._new_val('char *', f"mojo_str_expandtabs ({cstr_ov}, {tabsize})")
     if method == 'join':
         if arg_vals:
             iter_val = arg_vals[0]
@@ -4597,7 +4637,13 @@ def _bytes_is_kind(method: str) -> int | None:
 # value that disagrees with CPython on the only inputs that reach it) and
 # dropping them (the generic unknown-method stub, a silent int 0 that also
 # happens to be `False` for two of the ten and not for the rest).
-_BYTES_STR_ONLY_PREDICATES = ('isprintable', 'isnumeric')
+#
+# `casefold` is here for a different reason but the same answer: it is not a
+# `str`-only method, it is a str-ONLY method (`'abc'.casefold()` is real), so
+# `b'abc'.casefold()` is an AttributeError in CPython. It answered a silent
+# int 0 here — the generic unknown-method stub, printed as `0` rather than
+# even a plausible-looking False.
+_BYTES_STR_ONLY_PREDICATES = ('isprintable', 'isnumeric', 'casefold')
 
 
 def _raise_bytes_str_only_predicate(gen, method: str) -> None:
@@ -4732,14 +4778,30 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
     if method == 'hexdigest':
         return 'char *', gen._call_expr('char *', 'mojo_bytes_hash_hexdigest', [('MojoBytes *', ov)])
     if method == 'hex':
-        # `bytes.hex()` takes NO arguments in Python (unlike `str.hex(sep)`
-        # and unlike `binascii.hexlify`, which is a different function).
+        # `bytes.hex()` takes NO arguments in Python (unlike `str.hex` —
+        # and `str` has no `hex` at all, see the str case below). The
+        # comment claiming that used to be the whole implementation: the
+        # argument was dropped on the floor, so `b'abc'.hex(2)` answered the
+        # same string as `b'abc'.hex()` where CPython raises TypeError.
+        if arg_pairs or kwargs:
+            gen._emit_call(
+                'void', '', 'mojo_raise_type_error',
+                [('char *', gen._intern_string("hex() takes no arguments"))])
         return 'char *', gen._call_expr('char *', 'mojo_bytes_hex', [('MojoBytes *', ov)])
 
     if method in ('startswith', 'endswith') and arg_pairs:
         pv = _coerce_to_bytes(gen, *arg_pairs[0])
-        fn = 'mojo_bytes_startswith' if method == 'startswith' else 'mojo_bytes_endswith'
-        t = gen._call_expr('int', fn, [('MojoBytes *', ov), ('MojoBytes *', pv)])
+        # The optional [start[, end]] window. It was silently DROPPED: the
+        # call site passed only (bytes, prefix), so the comparison ran over
+        # the whole string and `b'abc'.startswith(b'a', 1, 2)` answered True
+        # where CPython says False. `_range_opts` is the same resolver the
+        # find/index/count family below already uses, and the `_from`
+        # variants clamp the window the same way.
+        st, sp = _range_opts(gen, args, kwargs, 1)
+        fn = ('mojo_bytes_startswith_from' if method == 'startswith'
+              else 'mojo_bytes_endswith_from')
+        t = gen._call_expr('int', fn, [('MojoBytes *', ov), ('MojoBytes *', pv),
+                                       ('int64_t', st), ('int64_t', sp)])
         return '_Bool', gen._new_val('_Bool', f'{t} != 0')
 
     # find/index/rindex/rfind/count. The needle is EITHER a bytes value or a
@@ -4755,12 +4817,15 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
             v = gen._to_int64(*arg_pairs[0])
             if method == 'count':
                 fn = 'mojo_bytes_count_int'
-            elif method in ('index', 'rindex'):
-                fn = 'mojo_bytes_rindex_int' if backward else 'mojo_bytes_index_int'
+            elif backward:
+                # find/rfind answer -1 when absent; index/rindex RAISE.
+                # All four used to route to the raising pair, so
+                # `b'abc'.find(b'z')` raised where CPython returns -1 —
+                # the same conflation in the other direction that made
+                # `index` answer -1.
+                fn = 'mojo_bytes_rindex_int' if method == 'rindex' else 'mojo_bytes_rfind_int'
             else:
-                # find/rfind over a byte VALUE is find_of a 1-byte needle;
-                # express it through the int indexer, which is exact.
-                fn = 'mojo_bytes_rindex_int' if backward else 'mojo_bytes_index_int'
+                fn = 'mojo_bytes_index_int' if method == 'index' else 'mojo_bytes_find_int'
             return 'int64_t', gen._call_expr('int64_t', fn,
                                              [('MojoBytes *', ov), ('int64_t', v),
                                               ('int64_t', st), ('int64_t', sp)])
@@ -4777,9 +4842,16 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
             return 'int64_t', gen._call_expr('int64_t', fn,
                                              [('MojoBytes *', ov), ('MojoBytes *', sv)])
         fn = 'mojo_bytes_rfind_from' if backward else 'mojo_bytes_find_from'
-        return 'int64_t', gen._call_expr('int64_t', fn,
-                                         [('MojoBytes *', ov), ('MojoBytes *', sv),
-                                          ('int64_t', st), ('int64_t', sp)])
+        at = gen._call_expr('int64_t', fn,
+                            [('MojoBytes *', ov), ('MojoBytes *', sv),
+                             ('int64_t', st), ('int64_t', sp)])
+        if method in ('index', 'rindex'):
+            # `index`/`rindex` over a BYTES needle are the same search as
+            # over a byte value, with the same difference in failure: -1 for
+            # find/rfind, ValueError for index/rindex. Without this,
+            # `b'abc'.index(b'z')` printed -1 with exit 0.
+            return 'int64_t', gen._new_val('int64_t', f'_mojo_bytes_index_or_raise ({at})')
+        return 'int64_t', at
 
     if method in ('split', 'rsplit'):
         sep = 'NULL'
@@ -4910,9 +4982,37 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
                                              [('MojoBytes *', ov), ('MojoBytes *', pv)])
 
     if method == 'translate' and arg_pairs:
-        tbl = _coerce_to_bytes(gen, *arg_pairs[0])
-        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_translate',
-                                             [('MojoBytes *', ov), ('MojoBytes *', tbl)])
+        # `b.translate(table, delete)` — the SECOND argument (a delete set)
+        # was silently dropped, so `b'hello'.translate(None, b'l')` came
+        # back unchanged where CPython answers `b'heo'`. `None` for either
+        # argument is CPython's own spelling and lowers to a NULL table /
+        # NULL delete, which the runtime distinguishes correctly.
+        tbl = ('NULL' if arg_pairs[0][0] in ('void', 'void *')
+               else _coerce_to_bytes(gen, *arg_pairs[0]))
+        dele = 'NULL'
+        for k, v in (kwargs or []):
+            if k == 'delete':
+                dele = _coerce_to_bytes(gen, *gen.lower_expr(v))
+        if len(arg_pairs) > 1:
+            dele = ('NULL' if arg_pairs[1][0] in ('void', 'void *')
+                    else _coerce_to_bytes(gen, *arg_pairs[1]))
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_translate_del',
+                                             [('MojoBytes *', ov), ('MojoBytes *', tbl),
+                                              ('MojoBytes *', dele)])
+
+    if method == 'expandtabs':
+        # `tabsize` is a named parameter, so `b.expandtabs(tabsize=4)` is
+        # legal Python: the keyword wins, then the first positional, and
+        # omitting both means CPython's default of 8. There was no bytes
+        # case at all, so every spelling answered a raw int 0.
+        tabsize = None
+        for k, v in (kwargs or []):
+            if k == 'tabsize':
+                tabsize = gen._to_int64(*gen.lower_expr(v))
+        if tabsize is None:
+            tabsize = gen._to_int64(*arg_pairs[0]) if arg_pairs else '8'
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_expandtabs',
+                                             [('MojoBytes *', ov), ('int64_t', tabsize)])
 
     _is_kind = _bytes_is_kind(method)
     if _is_kind is not None:
@@ -5006,10 +5106,35 @@ def _lower_memoryview_method(gen, ov: str, method: str, args: list, kwargs=None)
         t = gen._call_expr('int', 'mojo_memoryview_readonly', [('MojoMemoryView *', ov)])
         return '_Bool', gen._new_val('_Bool', f'{t} != 0')
     if method in ('c_contiguous', 'f_contiguous', 'contiguous'):
-        # Genuinely constant: a 1-D byte window over contiguous memory is
-        # C-contiguous by construction, and `f_contiguous`/`contiguous` are
-        # the same fact under this representation.
-        return '_Bool', gen._new_val('_Bool', '1')
+        # A 1-D byte window over contiguous memory is C-contiguous by
+        # construction, and `f_contiguous`/`contiguous` are the same fact
+        # under this representation. Asked of the runtime rather than
+        # folded here, so all three come from ONE place (the other memoryview
+        # attributes are queries) instead of this call site being the only
+        # one that knows the rule.
+        fn = 'mojo_memoryview_' + method
+        t = gen._call_expr('int', fn, [('MojoMemoryView *', ov)])
+        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
+    if method in ('shape', 'strides', 'suboffsets'):
+        # Tuple-valued descriptors. They have no lowering at all, so each
+        # fell to the unknown-member stub and printed its own heap ADDRESS as
+        # a decimal: `mv.shape` printed 4340423136 where CPython prints
+        # `(4,)`. The runtime returns the spelling string, which is exact for
+        # this always-1-D representation.
+        if method == 'suboffsets':
+            return 'char *', gen._call_expr(
+                'char *', 'mojo_memoryview_suboffsets_str', [])
+        t = gen._call_expr('char *', 'mojo_memoryview_' + method + '_str',
+                           [('MojoMemoryView *', ov)])
+        return 'char *', t
+    if method == 'ndim':
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_memoryview_ndim',
+                                         [('MojoMemoryView *', ov)])
+    if method == 'tolist':
+        # The view's elements as a real list of ints; this answered a raw
+        # int 0 from the unknown-member stub.
+        return 'MojoList *', gen._call_expr('MojoList *', 'mojo_memoryview_tolist',
+                                            [('MojoMemoryView *', ov)])
     if method in ('release', '__enter__', '__exit__'):
         # No refcount model — context-manager / release is a no-op that
         # yields the view itself (so `with memoryview(x) as m:` binds m).

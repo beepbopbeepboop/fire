@@ -141,11 +141,18 @@ the number it was assigned when it was filed.
   `hard/CODEGEN_bytes_silent_wrong_values.md` had **items 1-5 and 6b closed
   2026-09-27** (plus three more wrong values found on the way:
   `partition`'s swapped no-match arms, its empty-separator case, and four
-  `str` predicates that did not exist and answered `0`), and keeps only
-  **item 6a**: `partition`/`rpartition`'s container TYPE, which cannot be
-  fixed without introducing a tuple type — this runtime has none, and a
-  tuple literal is a marked `MojoList`. Two test expectations that asserted
-  the CPython-wrong answers were corrected, not worked around.
+  `str` predicates that did not exist and answered `0`), and kept only
+  **item 6a**: `partition`/`rpartition`'s container TYPE.
+  **CLOSED AND REMOVED 2026-09-29.** Item 6a's stated blocker — "which
+  cannot be fixed without introducing a tuple type — this runtime has none,
+  and a tuple literal is a marked `MojoList`" — was **false**: a tuple type
+  is exactly that marked `MojoList`, already used at eight construction sites
+  and already read by `isinstance(x, tuple)`. The marker was decorative
+  (read by `repr` only), so the fix was to make it load-bearing, not to add a
+  container type. Twelve further silent wrong values in the
+  bytes/memoryview/`str` surface were found by a differential sweep in the
+  same pass and fixed. Two test expectations that asserted the CPython-wrong
+  answers had been corrected earlier, not worked around.
 - `hard/CODEGEN_coro_nested_async_closure_capture.md` — landed, report removed 2026-09-26; live residue went to `hard/CODEGEN_coro_captured_param_capture_crashes.md`, which is itself **closed and removed 2026-09-29**: item 1 (capturing an enclosing function's *parameter* crashed the compiler) 2026-09-27; item 2 (the regression file orphaned at 0/9, one case asserting the pre-Increment-E answer) 2026-09-27, now 10/10 and registered as `coro-nested-capture`; item 3 (a capture-independent `async for`-over-a-generator gap printing `0` where CPython prints `11`) 2026-09-29 — plus three residues that re-testing the doc's own "Verified genuinely fixed" list turned up: a wait-descriptor bound as the `async for` loop variable (a heap address, exit 0), two nested `async def`s sharing one captured local (a generated-code argument-count error), and Increment D's honest refusal not existing on the `MOJO_CORO=cpp` backend.
 - `COMPILE_FAIL_Tools_build_umarshal.md` and `COMPILE_FAIL_Tools_build_deepfreeze.md` — compile blockers resolved; remaining items are runtime/adjacent and need a new doc if pursued.
 - `hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md` — excluded from this queue because the documented candidate optimizations are unsafe without a new design.

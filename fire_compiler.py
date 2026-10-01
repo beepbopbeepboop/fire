@@ -5469,10 +5469,16 @@ class Parser:
     def _decode_bytes_literal(self, raw: str) -> str:
         """Strip a `b'...'` token's prefix+quotes and decode its escape
         sequences to a latin-1 string carrying one character per output
-        byte (codepoints 0-255). `\\xNN`, `\\n`, `\\t`, `\\r`, `\\0`,
-        `\\\\`, `\\'`, `\\"` are recognised; a raw `r` prefix disables all
-        escape processing. Unknown `\\c` sequences are kept verbatim
-        (backslash + char), matching CPython's bytes-literal leniency."""
+        byte (codepoints 0-255). `\\xNN`, `\\n`, `\\t`, `\\r`, `\\a`,
+        `\\b`, `\\f`, `\\v`, `\\0`, `\\\\`, `\\'`, `\\"` are recognised; a
+        raw `r` prefix disables all escape processing. Unknown `\\c`
+        sequences are kept verbatim (backslash + char), matching CPython's
+        bytes-literal leniency — but a KNOWN one is not unknown, and
+        `\\f`/`\\v`/`\\a`/`\\b` were missing from the table below, so
+        `b"\\f"` was two characters (backslash, f) rather than one
+        (0x0c): a silent wrong value in every bytes literal using them, and
+        an inconsistency with the `str` path, which decoded all of them
+        correctly. Measured against CPython, all four now agree."""
         inner = self._strip_string_prefix_and_quotes(raw)
         is_raw = False
         prefix_len = 0
@@ -5504,6 +5510,14 @@ class Parser:
                 out.append('\t'); i += 2; continue
             if nxt == 'r':
                 out.append('\r'); i += 2; continue
+            if nxt == 'a':
+                out.append('\a'); i += 2; continue
+            if nxt == 'b':
+                out.append('\b'); i += 2; continue
+            if nxt == 'f':
+                out.append('\f'); i += 2; continue
+            if nxt == 'v':
+                out.append('\v'); i += 2; continue
             if nxt == '\\':
                 out.append('\\'); i += 2; continue
             if nxt == "'":

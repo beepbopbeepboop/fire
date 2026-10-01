@@ -2613,6 +2613,169 @@ fn main():
     print(b'a=b'.partition(b''))
 """, "ValueError: empty separator")
 
+    # The doc's item 6a residue: `partition`'s container TYPE. The doc
+    # concluded it was unfixable for want of a tuple type; re-tested, that
+    # premise is STALE. A tuple type has existed for some time — a
+    # `mojo_mark_as_tuple` marker on the MojoList (see that function's own
+    # doc comment) — but only repr and `isinstance(x, tuple)` read it, so a
+    # "tuple" was a list that merely PRINTED like one. The fix makes the
+    # marker load-bearing, and these four cases pin each way it is now
+    # observable: the mutation refusals, the value comparison, the
+    # cross-type inequality, and the type predicates.
+    test_gimple_runtime_error("gimple_tuple_append_raises", """\
+fn main():
+    print('before')
+    t = b'a=b'.partition(b'=')
+    t.append(b'z')
+""", "'tuple' object has no attribute 'append'")
+
+    # The two item forms are a TypeError with CPython's exact wording, and
+    # are NOT the same operation as `.pop` even though all three remove an
+    # element — which is why `del t[i]` got its own runtime entry point
+    # (mojo_list_delitem) rather than sharing mojo_list_pop_at's.
+    test_gimple_runtime_error("gimple_tuple_setitem_raises", """\
+fn main():
+    print('before')
+    t = (1, 2, 3)
+    t[0] = 9
+""", "'tuple' object does not support item assignment")
+
+    test_gimple_runtime_error("gimple_tuple_delitem_raises", """\
+fn main():
+    print('before')
+    t = (1, 2, 3)
+    del t[0]
+""", "'tuple' object doesn't support item deletion")
+
+    # The refusals must be TYPED and CATCHABLE, not a print-and-exit: real
+    # code distinguishes AttributeError from TypeError here, and a
+    # program that guards `if not isinstance(p, list): p.append(...)`
+    # depends on being able to catch and continue. Pinned because "raises
+    # the right text" and "raises catchably with the right type" are
+    # different properties and only the second one is load-bearing.
+    test_gimple_stdout("gimple_tuple_mutation_refusals_are_catchable", """\
+fn main():
+    t = (1, 2, 3)
+    try:
+        t.append(9)
+    except AttributeError:
+        print('caught AttributeError')
+    try:
+        t[0] = 9
+    except TypeError:
+        print('caught TypeError set')
+    try:
+        del t[0]
+    except TypeError:
+        print('caught TypeError del')
+    try:
+        t.pop()
+    except AttributeError:
+        print('caught AttributeError pop')
+    try:
+        t.extend([4])
+    except AttributeError:
+        print('caught AttributeError extend')
+    try:
+        t.insert(0, 4)
+    except AttributeError:
+        print('caught AttributeError insert')
+    try:
+        t.remove(1)
+    except AttributeError:
+        print('caught AttributeError remove')
+    try:
+        t.clear()
+    except AttributeError:
+        print('caught AttributeError clear')
+    try:
+        t.reverse()
+    except AttributeError:
+        print('caught AttributeError reverse')
+    try:
+        t.sort()
+    except AttributeError:
+        print('caught AttributeError sort')
+    print(t)
+    # A REAL list is unaffected by any of that.
+    l = [1, 2, 3]
+    l.append(4); l.extend([5]); l.insert(0, 0); l.pop()
+    l.remove(0); l.reverse(); l.clear()
+    print(l, len(l))
+    l = [1, 2, 3]
+    l[0] = 9; del l[0]; l[0:1] = [7, 8]; del l[0:1]
+    print(l)
+""", "caught AttributeError\ncaught TypeError set\ncaught TypeError del\n"
+     "caught AttributeError pop\ncaught AttributeError extend\n"
+     "caught AttributeError insert\ncaught AttributeError remove\n"
+     "caught AttributeError clear\ncaught AttributeError reverse\n"
+     "caught AttributeError sort\n(1, 2, 3)\n[] 0\n[8, 3]\n")
+
+    # The remaining half of the container TYPE: what the marker decides
+    # about the value, not just about mutation. `==` was a raw C POINTER
+    # comparison, so two equal containers compared unequal — including two
+    # equal tuples, and (the other direction) a tuple equalling a list.
+    test_gimple_stdout("gimple_container_value_equality", """\
+fn main():
+    t = (1, 2)
+    u = (1, 2)
+    print(t == u, t == (1, 2), u == t, t != u, t == (1, 3))
+    l = [1, 2]
+    m = [1, 2]
+    print(l == m, l == [1, 2], m == l, l != m, l == [1, 3])
+    # a tuple is never equal to a list, in either order
+    print(t == l, l == t)
+    s = b'ab'.split(b'b')
+    print(s == [b'a', b''], s != [b'a', b'z'])
+    st = (b'a', b'')
+    print(st == (b'a', b''), st == s)
+    # strings compare by content, not by address
+    print(['a', 'b'] == ['a', 'b'], ['a'] == ['b'])
+    # floats stored as raw bits
+    print([1.5, 2.5] == [1.5, 2.5], [1.5] == [2.5])
+    # different lengths
+    print([1, 2] == [1, 2, 3], [] == [], () == ())
+""", "True True True False False\nTrue True True False False\n"
+     "False False\nTrue True\nTrue False\nTrue False\nTrue False\n"
+     "False True True\n")
+
+    # `count` counts OCCURRENCES; `x in l` only asks whether there is one.
+    # There was no `count` case at all for a list, so every `l.count(v)`
+    # fell to the dummy 0-stub and answered 0 for a list that plainly
+    # contained the value — a silent wrong value, not an error.
+    test_gimple_stdout("gimple_list_count_counts_occurrences", """\
+fn main():
+    l = [1, 2, 1]
+    print(l.count(1), l.count(2), l.count(9))
+    m = ['a', 'b', 'a']
+    print(m.count('a'), m.count('b'), m.count('z'))
+    s = b'ab'.split(b'a')
+    print(s.count(b'a'), s.count(b'b'), s.count(b'z'))
+    t = (1, 2, 1)
+    print(t.count(1), t.count(2))
+    print([] .count(1), [1].count(1))
+""", "2 1 0\n2 1 0\n0 1 0\n2 1\n0 1\n")
+
+    # The rest of what the marker decides, beyond mutation and equality:
+    # the operations that PRESERVE a container's type and the two that do
+    # not. `mojo_list_copy` deliberately does NOT propagate the marker
+    # (`list(t)` is a list), while slice/concat/repeat do.
+    test_gimple_stdout("gimple_tuple_type_preserved_by_ops", """\
+fn main():
+    t = (1, 2)
+    l = [1, 2]
+    print(t + (3,), t * 2, t[:], t[:1])
+    print(l + [3], l * 2, l[:], l[:1])
+    print(list(t), tuple(l), list(l))
+    print(isinstance(t, tuple), isinstance(t, list))
+    print(isinstance(l, tuple), isinstance(l, list))
+    print(isinstance(b'a=b'.partition(b'='), tuple))
+    print(isinstance(b'a=b'.partition(b'='), list))
+    print(isinstance((1, 2), (int, str)))
+    print(isinstance((1, 2), (list, str)))
+""", "(1, 2, 3) (1, 2, 1, 2) (1, 2) (1,)\n[1, 2, 3] [1, 2, 1, 2] [1, 2] [1]\n"
+     "[1, 2] (1, 2) [1, 2]\nTrue False\nFalse True\nTrue\nFalse\nFalse\nFalse\n")
+
     test_gimple_stdout("gimple_bytes_fromhex_maketrans_translate", """\
 fn main():
     print(bytes.fromhex('68656c6c6f'))
@@ -2622,6 +2785,321 @@ fn main():
     print(b'abc'.translate(bytes.maketrans(b'a', b'b', b'c')))
     print(b'abc'.translate(bytes(range(256))))
 """, "b'hello'\nb'hel'\nb'\\xde\\xad\\xbe\\xef'\nb'bbc'\nb'bbc'\nb'abc'\n")
+
+    # Found by a differential sweep of the bytes surface against CPython
+    # (one expression per line, run on both engines, diffed). Each of these
+    # answered a PLAUSIBLE wrong value with exit 0, or a raw int 0.
+    #
+    # `startswith`/`endswith` took [start[, end]] and silently DROPPED it —
+    # the call site passed only (bytes, prefix), so the comparison ran over
+    # the whole string and `b'abc'.startswith(b'a', 1, 2)` said True.
+    test_gimple_stdout("gimple_bytes_startswith_endswith_window", """\
+fn main():
+    print(b'abc'.startswith(b'a', 1, 2))
+    print(b'abc'.startswith(b'b', 1, 2))
+    print(b'abc'.endswith(b'c', 0, 2))
+    print(b'abc'.endswith(b'b', 0, 2))
+    print(b'abc'.startswith(b'abc', 0, 3))
+    print(b'abc'.endswith(b'abc', 0, 3))
+    print(b'abc'.startswith(b'a', -1))
+    print(b'abc'.endswith(b'c', -1))
+    print(b'abc'.startswith(b'a', 10))
+    print(b'abc'.endswith(b'c', 10))
+    print(b'abc'.startswith(b'a', 2, 1))
+    print(b'abc'.startswith(b'a'))
+    print(b'abc'.endswith(b'c'))
+    print(b'abc'.startswith(b''))
+    print(b''.startswith(b''))
+    print(b'abc'.endswith(b''))
+""", "False\nTrue\nFalse\nTrue\nTrue\nTrue\nFalse\nTrue\nFalse\nFalse\n"
+     "False\nTrue\nTrue\nTrue\nTrue\nTrue\n")
+
+    # `expandtabs` had NO bytes implementation at all: every spelling fell to
+    # the generic unknown-method stub and answered a raw int 0. The
+    # non-positive-tabsize row is here because CPython REMOVES the tab
+    # there (`b'a\\tb\\tc'.expandtabs(0)` is `b'abc'`) rather than leaving it.
+    test_gimple_stdout("gimple_bytes_expandtabs", """\
+fn main():
+    print(b'abc'.expandtabs())
+    print(b'a\\tb'.expandtabs(4))
+    print(b'\\t'.expandtabs())
+    print(b'a\\tb\\tc'.expandtabs(0))
+    print(b'a\\tb\\tc'.expandtabs(-1))
+    print(b'\\ta\\tb'.expandtabs(1))
+    print(b''.expandtabs(0))
+    print(b''.expandtabs(4))
+    print(b'a\\rb\\tc'.expandtabs(4))
+    print(b'a\\t\\f\\tx'.expandtabs(4))
+    print(b'a\\tb\\tc'.expandtabs(tabsize=2))
+""", "b'abc'\nb'a   b'\nb'        '\nb'abc'\nb'abc'\nb' a b'\nb''\nb''\n"
+     "b'a\\rb   c'\nb'a   \\x0c   x'\nb'a b c'\n")
+
+    # `b.translate(table, delete)` dropped the DELETE set entirely, so
+    # `b'hello'.translate(None, b'l')` came back unchanged. A table of the
+    # wrong length is a ValueError in CPython; a short one used to be
+    # partially applied instead.
+    test_gimple_stdout("gimple_bytes_translate_delete_set", """\
+fn main():
+    print(b'hello'.translate(None, b'l'))
+    print(b'hello'.translate(None, b'l'))
+    print(b'hello'.translate(bytes(range(256)), b'l'))
+    print(b'hello'.translate(None, b'lxo'))
+    print(b'hello'.translate(None, b''))
+    print(b'hello'.translate(bytes(range(256))))
+    print(b'abc'.translate(bytes.maketrans(b'a', b'b')))
+""", "b'heo'\nb'heo'\nb'heo'\nb'he'\nb'hello'\nb'hello'\nb'bbc'\n")
+
+    test_gimple_runtime_error("gimple_bytes_translate_short_table_raises", """\
+fn main():
+    print(b'hello'.translate(b'xyz', b'l'))
+""", "ValueError: translation table must be 256 characters long")
+
+    # `b.replace(b'', x)` is a real CPython spelling, not a no-op: the empty
+    # pattern matches before every character and after the last. It
+    # answered the string UNCHANGED, because the loop advances by the
+    # pattern length and so never matched at all.
+    test_gimple_stdout("gimple_bytes_replace_empty_pattern", """\
+fn main():
+    print(b'aaa'.replace(b'', b'-'))
+    print(b''.replace(b'', b'-'))
+    print(b'ab'.replace(b'', b'--'))
+    print(b'aaa'.replace(b'', b'-', 2))
+    print(b'aaa'.replace(b'', b'-', 0))
+    print(b'aaa'.replace(b'a', b'b'))
+    print(b'aaa'.replace(b'a', b'b', 2))
+    print(b'aaa'.replace(b'a', b'b', 0))
+    print(b'hello'.replace(b'l', b'L'))
+""", "b'-a-a-a-'\nb'-'\nb'--a--b--'\nb'-a-aa'\nb'aaa'\nb'bbb'\nb'bba'\n"
+     "b'aaa'\nb'heLLo'\n")
+
+    # `b.count(b'')` counts len+1 non-overlapping empty matches, not 0. The
+    # counting loop advances by needle->len, which is 0, so it could not
+    # produce that answer and answered 0 for every input.
+    test_gimple_stdout("gimple_bytes_count_empty_needle", """\
+fn main():
+    print(b'abc'.count(b''))
+    print(b''.count(b''))
+    print(b'abc'.count(b'b'))
+    print(b'aaa'.count(b'a'))
+    print(b'aaa'.count(b'a', 1))
+    print(b'abc'.count(b'b', 1, 3))
+    print(b'abc'.count(97))
+    print(b'abc'.count(98, 0, 2))
+""", "4\n1\n1\n3\n2\n1\n1\n1\n")
+
+    # `split(b'')` is a ValueError, and it was conflated with the genuinely
+    # absent separator (`split()`, which IS a whitespace split) because both
+    # arrive as a NULL-or-empty `sep`. So `split(b'')` silently
+    # whitespace-split instead of raising.
+    test_gimple_runtime_error("gimple_bytes_split_empty_sep_raises", """\
+fn main():
+    print(b'ab'.split(b''))
+""", "ValueError: empty separator")
+
+    test_gimple_runtime_error("gimple_bytes_rsplit_empty_sep_raises", """\
+fn main():
+    print(b'ab'.rsplit(b''))
+""", "ValueError: empty separator")
+
+    test_gimple_stdout("gimple_bytes_split_no_sep_is_whitespace", """\
+fn main():
+    print(b'a b'.split())
+    print(b'a b'.split(None))
+    print(b'  a  b '.split())
+    print(b'a,,b'.split(b','))
+    print(b'a-b-c'.rsplit(b'-', 1))
+    print(b'a-b-c'.rsplit(b'-'))
+    print(b''.split(b','))
+    print(b'a,b'.split(b',', 1))
+    print(b'a b c'.split(maxsplit=1))
+""", "[b'a', b'b']\n[b'a', b'b']\n[b'a', b'b']\n[b'a', b'', b'b']\n"
+     "[b'a-b', b'c']\n[b'a', b'b', b'c']\n[b'']\n[b'a', b'b']\n[b'a', b'b c']\n")
+
+    # `index`/`rindex` RAISE when the subsection is absent; `find`/`rfind`
+    # answer -1. All four were one function, so both halves were wrong:
+    # `index` printed -1, and the byte-value form of `find` raised.
+    test_gimple_runtime_error("gimple_bytes_index_missing_raises", """\
+fn main():
+    print(b'abc'.index(b'z'))
+""", "ValueError: subsection not found")
+
+    test_gimple_runtime_error("gimple_bytes_rindex_missing_raises", """\
+fn main():
+    print(b'abc'.rindex(b'z'))
+""", "ValueError: subsection not found")
+
+    test_gimple_stdout("gimple_bytes_find_rfind_still_return_minus_one", """\
+fn main():
+    print(b'abc'.find(b'z'))
+    print(b'abc'.rfind(b'z'))
+    print(b'abc'.find(300 - 203))
+    print(b'abc'.rfind(300 - 203))
+    print(b'abc'.find(b'b'))
+    print(b'abc'.rfind(b'b'))
+    print(b'abc'.find(98))
+    print(b'abc'.rfind(98))
+    print(b'abc'.index(b'c'))
+    print(b'abc'.rindex(b'a'))
+    print(b'abc'.index(b'c', 2))
+    print(b'abc'.rindex(b'a', 0, 2))
+""", "-1\n-1\n0\n0\n1\n1\n1\n1\n2\n0\n2\n0\n")
+
+    # A byte VALUE outside 0-255 is a ValueError, not a silently wrapped
+    # one: `& 0xFF` turned 300 into 44, so `count(300)` counted 'c'.
+    test_gimple_runtime_error("gimple_bytes_count_out_of_range_raises", """\
+fn main():
+    print(b'abc'.count(300))
+""", "ValueError: byte must be in range(0, 256)")
+
+    # `b[i]` at an explicit subscript RAISES out of range. It answered 0,
+    # and 0 is not a neutral value here: it is a real byte value, so
+    # `if b[i] == 0:` on a short buffer silently took the true branch.
+    test_gimple_runtime_error("gimple_bytes_index_out_of_range_raises", """\
+fn main():
+    print(b'abc'[10])
+""", "IndexError: index out of range")
+
+    test_gimple_runtime_error("gimple_bytes_negative_index_out_of_range_raises", """\
+fn main():
+    print(b'abc'[-10])
+""", "IndexError: index out of range")
+
+    test_gimple_runtime_error("gimple_empty_bytes_index_raises", """\
+fn main():
+    print(b''[0])
+""", "IndexError: index out of range")
+
+    test_gimple_stdout("gimple_bytes_in_range_index_still_works", """\
+fn main():
+    print(b'abc'[0], b'abc'[1], b'abc'[2], b'abc'[-1], b'abc'[-3])
+    print(b'ab'[0], b'ab'[-1])
+    total = 0
+    for b in b'abc':
+        total = total + b
+    print(total)
+""", "97 98 99 99 97\n97 98\n294\n")
+
+    # Iterating `bytes` yields its INTEGERS. all/any/sum/max/min over a
+    # bytes object were either the codegen's constant stub or a reinterpret
+    # of the MojoBytes header as a list — so `sum(b'abc')` printed a
+    # heap-pointer decimal and `max(b'abc')` printed an address.
+    test_gimple_stdout("gimple_bytes_builtins_iterate_as_ints", """\
+fn main():
+    print(all(b'abc'))
+    print(all(b''))
+    print(all(b'a0b'))
+    print(any(b'abc'))
+    print(any(b''))
+    print(sum(b'abc'))
+    print(sum(b''))
+    print(max(b'abc'))
+    print(min(b'abc'))
+    print(max(b'cba'))
+    print(min(b'cba'))
+    print(max(b'\\x00\\x7f'))
+    print(min(b'\\x00\\x7f'))
+""", "True\nTrue\nTrue\nTrue\nFalse\n294\n0\n99\n97\n99\n97\n127\n0\n")
+
+    # `any` asks whether any ELEMENT is truthy, and an element of a bytes
+    # object is an int where 0 is falsy — so this is not "is the container
+    # non-empty", and `any(b'\\x00')` is False in CPython.
+    test_gimple_stdout("gimple_bytes_any_tests_elements", """\
+fn main():
+    print(any(b'\\x00'))
+    print(any(b'\\x00\\x00'))
+    print(any(b'\\x00a'))
+    print(all(b'\\x00\\x00'))
+    print(any(b''))
+""", "False\nFalse\nTrue\nTrue\nFalse\n")
+
+    # `list(reversed(b))` and `sorted(b)` had no bytes route: the first
+    # produced an EMPTY list (the comprehension cannot iterate a reversed()
+    # call) and the second SEGFAULTED, reading the MojoBytes header as a
+    # list's data pointer and length.
+    test_gimple_stdout("gimple_bytes_reversed_and_sorted", """\
+fn main():
+    print(list(reversed(b'abc')))
+    print(list(reversed(b'')))
+    print(bytes(reversed(b'abc')))
+    print(sorted(b'cba'))
+    print(sorted(b''))
+    print(sorted(b'cab'))
+    for x in sorted(b'ba'):
+        print(x)
+""", "[99, 98, 97]\n[]\nb'cba'\n[97, 98, 99]\n[]\n[97, 98, 99]\n97\n98\n")
+
+    # `casefold` exists on str and NOT on bytes; `hex` exists on bytes and
+    # NOT on str, and takes no arguments. Each pair used to answer a raw
+    # int 0 from the generic unknown-method stub — `str.hex` resolving to
+    # the runtime's integer formatter, and `bytes.hex` dropping its
+    # argument.
+    test_gimple_runtime_error("gimple_bytes_casefold_raises", """\
+fn main():
+    print(b'abc'.casefold())
+""", "AttributeError: 'bytes' object has no attribute 'casefold'")
+
+    test_gimple_runtime_error("gimple_str_hex_raises", """\
+fn main():
+    print('abc'.hex())
+""", "AttributeError: 'str' object has no attribute 'hex'")
+
+    test_gimple_runtime_error("gimple_bytes_hex_takes_no_args_raises", """\
+fn main():
+    print(b'abc'.hex(2))
+""", "TypeError: hex() takes no arguments")
+
+    # str.casefold / swapcase / title / capitalize: all four were missing
+    # from the str lowering and answered the unknown-method stub's 0.
+    test_gimple_stdout("gimple_str_case_methods", """\
+fn main():
+    print('aBc'.swapcase())
+    print('hello world'.title())
+    print('aBC'.capitalize())
+    print('abc'.capitalize())
+    print('ABC'.casefold())
+    print('Hello World'.casefold())
+    print('aBc dEf'.swapcase())
+    print('a1b c'.title())
+    print('hello WORLD'.title())
+    print(''.title())
+    print(''.capitalize())
+    print(''.swapcase())
+    print('  lead'.capitalize())
+""", "AbC\nHello World\nAbc\nAbc\nabc\nhello world\nAbC DeF\nA1B C\n"
+     "Hello World\n\n\n\n  lead\n")
+
+    # A bytes literal did not decode \\a, \\b, \\f or \\v, so b"\\f" was TWO
+    # characters (backslash, f) rather than one (0x0c) — a silent wrong
+    # value in every bytes literal using them, and an inconsistency with
+    # the str path, which decoded all four correctly.
+    test_gimple_stdout("gimple_bytes_literal_escapes", """\
+fn main():
+    print(b'\\f')
+    print(b'\\v')
+    print(b'\\a')
+    print(b'\\b')
+    print(b'\\x0c')
+    print(b'\\f\\v\\a\\b\\n\\t\\r\\0\\\\')
+    print(b'a\\fb\\vc')
+    print(b'\\q')
+    print(rb'\\f')
+    print(len(b'\\f'), len(b'\\n'), len(b'\\x41'))
+""", "b'\\x0c'\nb'\\x0b'\nb'\\x07'\nb'\\x08'\nb'\\x0c'\n"
+     "b'\\x0c\\x0b\\x07\\x08\\n\\t\\r\\x00\\\\'\nb'a\\x0cb\\x0bc'\nb'\\\\q'\n"
+     "b'\\\\f'\n1 1 1\n")
+
+    # `x[a:b:0]` is a ValueError in CPython — a zero step is a
+    # contradiction, not an empty range. Every slice helper treated step 0
+    # as "step 1", so the compiled path answered the WHOLE sequence.
+    test_gimple_runtime_error("gimple_bytes_slice_zero_step_raises", """\
+fn main():
+    print(b'abc'[1:2:0])
+""", "ValueError: slice step cannot be zero")
+
+    test_gimple_runtime_error("gimple_list_slice_zero_step_raises", """\
+fn main():
+    print([1,2,3][0:3:0])
+""", "ValueError: slice step cannot be zero")
 
     test_gimple_stdout("gimple_bytes_membership_in_containers", """\
 fn main():
@@ -2774,6 +3252,60 @@ fn main():
     ba[0] = 90
     print(memoryview(ba).readonly)
 """, "4 1 B\nb'abcd'\nTrue True\n4\nFalse True\nTrue False\nTrue True\nFalse\n")
+
+    # The rest of the memoryview descriptor surface, found by the same
+    # differential sweep. None of these had a lowering at either the member
+    # read or the call form, so each fell to the generic unknown-member path
+    # and printed ITS OWN HEAP ADDRESS as a decimal: `mv.shape` printed
+    # 4341225952 where CPython prints `(4,)`. That is a silent wrong value
+    # twice over — it is not a shape, and it changes every run, so a program
+    # comparing it against anything took a branch decided by the allocator.
+    test_gimple_stdout("gimple_memoryview_shape_descriptors", """\
+fn main():
+    var mv = memoryview(b'abcd')
+    print(mv.shape)
+    print(mv.strides)
+    print(mv.suboffsets)
+    print(mv.ndim)
+    print(mv.c_contiguous, mv.f_contiguous, mv.contiguous)
+    print(memoryview(b'').shape)
+    print(memoryview(bytearray(b'abc')).shape)
+    print(mv[1:3].shape)
+    # The CALL form must agree with the member read, or a program that
+    # writes `mv.shape` and one that writes `mv.__getattribute__('shape')`
+    # would not.
+    print(len(str(mv.shape)))
+""", "(4,)\n(1,)\n()\n1\nTrue True True\n(0,)\n(3,)\n(2,)\n4\n")
+
+    test_gimple_stdout("gimple_memoryview_tolist", """\
+fn main():
+    print(memoryview(b'abcd').tolist())
+    print(memoryview(bytearray(b'abc')).tolist())
+    print(memoryview(b'').tolist())
+    print(memoryview(b'abcd')[1:3].tolist())
+    for x in memoryview(b'ab').tolist():
+        print(x)
+""", "[97, 98, 99, 100]\n[97, 98, 99]\n[]\n[98, 99]\n97\n98\n")
+
+    # An out-of-range memoryview read raises a real, CATCHABLE IndexError.
+    # It was a print-and-exit, so a program guarding an optional read
+    # (`try: v = mv[n] except IndexError: v = None`) died instead of
+    # taking the fallback.
+    test_gimple_stdout("gimple_memoryview_index_error_is_catchable", """\
+fn main():
+    var mv = memoryview(b'abcd')
+    print(mv[0], mv[3], mv[-1], mv[-4])
+    try:
+        print(mv[10])
+    except IndexError:
+        print('caught IndexError')
+    try:
+        print(mv[-10])
+    except IndexError:
+        print('caught IndexError neg')
+    print(bytes(mv[1:100]), bytes(mv[1:3]))
+""", "97 100 100 97\ncaught IndexError\ncaught IndexError neg\n"
+     "b'bcd' b'bc'\n")
 
     # ── constructor-call-site inference reaches METHOD bodies and
     # MemberExpr/BinaryOp arguments ───────────────────────────────────────

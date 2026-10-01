@@ -149,10 +149,21 @@ fallback, so `ADialog("a")` silently becomes the string `"a"`.
   (`def show(data): for r in data: print(r)` called with `[1.5, 2.5]`), so it
   is the ordinary loop lowering not knowing a list *parameter's* element type.
   A different subsystem, behind its own gate.
-- `bugs/hard/CODEGEN_bytes_silent_wrong_values.md` — `partition` returns a
+- ~~`bugs/hard/CODEGEN_bytes_silent_wrong_values.md` — `partition` returns a
   `MojoList *` rather than a tuple, because **this runtime has no tuple type
   at all**: a tuple *literal* lowers to a plain `MojoList *` distinguished
-  only by a marker. Not a bytes fix; the repr is already correct.
+  only by a marker. Not a bytes fix; the repr is already correct.~~
+  **RESOLVED 2026-09-29 — and the stated reason was false.** A tuple type
+  has existed for some time, as the `mojo_mark_as_tuple` marker, used at
+  eight construction sites and already read by `isinstance(x, tuple)`. The
+  marker was not *load-bearing*: `repr` read it and nothing else, so a tuple
+  was a list that merely printed like one. Making it load-bearing closed the
+  doc's residue (mutating a tuple now raises with CPython's exact exception
+  type and text) and the doc is removed. Two silent wrong values the doc did
+  not have fell out of the same helper family: `l == m` was a raw C POINTER
+  comparison, and `list.count(x)` had no lowering at all and answered 0.
+  This is the second time in this directory that a residue's stated reason
+  for existing was stale rather than the residue itself.
 - `bugs/hard/CODEGEN_struct_kwargs_and_inline_unpack.md` — a read with no
   compile-time slot index needs one C type for a heterogeneous value. That is
   the runtime's missing container tag (boxing), not a struct bug.
