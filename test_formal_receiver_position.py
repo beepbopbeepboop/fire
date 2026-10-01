@@ -31,21 +31,36 @@ a method call at that site.  §4 of the handoff doc is three examples of a
 refusal for a reason that was not operating; this was a fourth, in the family
 that §4 exists to police.
 
-WHY THE HOST IS arm64 AND x86-64 IS A REFUSAL, which is the one thing here a
-reader should not skim.  `f[1](3, 7)` builds and returns 307 on arm64 and is
-REFUSED on x86-64 with "unsupported call target on the formal x86-64 path (got
-SubscriptExpr)", and that asymmetry is correct rather than a gap in the change:
-the two backends do not share the comptime ABI.  arm64's `_emit_call` evaluates
-the bracket expressions in the caller's scope and passes them AHEAD of the
-call-time arguments (`_specialization_args`), and `model.incoming_args` puts a
-generic's comptime parameters first, so both sides agree.  x86-64's `_emit_call`
-has no specialization pass at all — its own constructor docstring says so — and
-its `_callee_symbol` answers `None` for a `SubscriptExpr`.  That refusal is
-LOAD-BEARING: the callee prologue on x86-64 reserves a register per comptime
-parameter (`incoming_args` is shared), so a caller that passed only the
-call-time arguments would read `type` from `x`'s register and `x` from `y`'s —
-silently.  `x86_abi_refusal_is_load_bearing` pins that, and
-`bugs/FORMAL_x86_64_comptime_specialization_abi.md` carries the rest.
+BOTH ARCHITECTURES NOW AGREE, and getting there took THREE halves rather than
+the one the filing named.  `f[1](3, 7)` returned 307 on arm64 and was REFUSED on
+x86-64 with "unsupported call target on the formal x86-64 path (got
+SubscriptExpr)"; `bugs/FORMAL_x86_64_comptime_specialization_abi.md` filed that
+and correctly said the fix was not a one-line delegation of `_callee_symbol`.
+Measured, in the order they had to land:
+
+  1. the CALL SITE passes the bracket expressions ahead of the call-time
+     arguments (`comptime_eval.specialization_args`, the shared reader);
+  2. `_callee_symbol` answers a `SubscriptExpr` with the bare name;
+  3. the CALLEE PROLOGUE allocates a home for a comptime parameter.
+
+(3) is the one the filing recorded as already present, and it was not.  It said
+"the callee prologue reserves a register per comptime parameter — yes —
+`model.incoming_args` is shared and both backends' prologues read it", which was
+true of arm64 and not of x86-64: this backend's prologue read `f.params`, which
+does not list a comptime parameter at all.  That is invisible until (1) lands,
+because before it a bare `f(3, 7)` agreed with arm64 by accident.  The moment (1)
+went in, a bare `f(3, 7)` returned 3 on x86-64 against arm64's 307 — a
+callee with no home for `type`, so every read fell back to the first incoming
+register and `x` read the `type` slot.  Both backends now ask the shared
+`model.incoming_args` in the prologue and allocate through arm64's
+`_allocation_order` shape, and the two spellings agree with each other and with
+CPython on both machines.
+
+`x86_abi_refusal_is_load_bearing` is therefore gone rather than updated: what it
+pinned — that x86-64 refusing was correct — is no longer true.  `every_specialized
+_spelling_agrees_on_both_architectures` replaces it, and it is the anti-rot
+direction: if the ABI half is ever removed from one backend alone, this case
+goes red on the wrong number rather than on a refusal.
 
 Every case is DIFFERENTIAL: the same program is written twice, once as Mojo and
 once as plain Python, and the two are made to AGREE rather than the expectation
@@ -65,10 +80,6 @@ FIRE = os.path.join(HERE, "fire.py")
 BUILD_TIMEOUT = 180
 RUN_TIMEOUT = 60
 BACKENDS = ("arm64", "x86_64")
-# The architecture whose comptime ABI this construct needs.  Every refusal case
-# below is still checked on BOTH, because a refusal raised by the shared build
-# pass has to be the same refusal on both.
-COMPTIME_ABI = "arm64"
 
 # ── the differential cases ──────────────────────────────────────────────────
 #
@@ -352,16 +363,71 @@ REFUSALS = [
      "which is lowered as an operation on a VALUE"),
 ]
 
-# ── the x86-64 half, which is a refusal and a LOAD-BEARING one ─────────────
+# ── the comptime ABI, now on BOTH architectures ────────────────────────────
 #
-# (name, mojo_source, needle)
-X86_ABI_REFUSALS = [
-    ("x86_abi_refusal_is_load_bearing",
+# These move here from the differential table because they were the cases the
+# x86-64 refusal blocked, and they are the anti-rot direction for the ABI: each
+# builds on BOTH machines and its answer must equal CPython's.  If either half
+# of the convention is removed from one backend alone, this goes red on a
+# WRONG NUMBER rather than on a refusal — which is the whole point, since a
+# refusal is a legible failure and `f(3, 7)` returning 3 instead of 307 is not.
+#
+# Three rows, and each one is a different way the two halves can come apart:
+#
+#   * `f[1](3, 7)` — the bracket expression. The callee has a home for `type`
+#     and the caller fills it with 1. A prologue that ignored the comptime
+#     parameter would read `x` from the register `type` was passed in.
+#   * `f(3, 7)` — the BARE spelling of the same generic, which binds every
+#     comptime parameter to 0 (`comptime_eval.specialization_args`'s answer, and
+#     therefore the same on both). The two spellings cannot disagree about the
+#     callee's arity because both go through one parameter list, and this row
+#     is what proves it: it is the case that reads most wrong if a backend
+#     passes only the runtime arguments.
+#   * a comptime parameter that is READ in the body, so a home that exists but
+#     is never stored shows up as 0 rather than as a refusal.
+#
+# (name, mojo_source, python_source)
+COMPTIME_ABI_CASES = [
+    # `printf` and a `return 0`, as every other case here: a process exit status
+    # is ONE BYTE on this host, and 307 & 0xFF == 51 — so an exit-status
+    # expectation for these answers would pass on a backend that returned the
+    # right number for the wrong reason.
+    ("comptime_abi_bracket_expression",
      "def f[type: Int](x: Int, y: Int) -> Int:\n"
      "    return x * 100 + y\n\n"
      "def main(n: Int) -> Int:\n"
-     "    return f[1](3, 7)\n",
-     "unsupported call target on the formal x86-64 path (got SubscriptExpr)"),
+     '    printf("v=%d", f[1](3, 7))\n'
+     "    return 0\n",
+     "def f(type, x, y):\n"
+     "    return x * 100 + y\n\n"
+     "def main():\n"
+     '    print("v=%d" % f(1, 3, 7), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
+    ("comptime_abi_bare_call_binds_zero",
+     "def f[type: Int](x: Int, y: Int) -> Int:\n"
+     "    return x * 100 + y\n\n"
+     "def main(n: Int) -> Int:\n"
+     '    printf("v=%d", f(3, 7))\n'
+     "    return 0\n",
+     "def f(type, x, y):\n"
+     "    return x * 100 + y\n\n"
+     "def main():\n"
+     '    print("v=%d" % f(0, 3, 7), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
+    ("comptime_abi_the_parameter_is_read",
+     "def pick[type: Int](x: Int, y: Int) -> Int:\n"
+     "    return type * 1000 + x * 10 + y\n\n"
+     "def main(n: Int) -> Int:\n"
+     '    printf("v=%d", pick[4](3, 7))\n'
+     "    return 0\n",
+     "def pick(type, x, y):\n"
+     "    return type * 1000 + x * 10 + y\n\n"
+     "def main():\n"
+     '    print("v=%d" % pick(4, 3, 7), end="")\n'
+     "    return 0\n\n"
+     "main()\n"),
 ]
 
 
@@ -398,11 +464,13 @@ def run_diff_case(case, tmpdir, verbose):
     wrong backend.  A case whose Python twin does not produce the answer the
     case is about is a bug in the case.
 
-    Built on the architecture whose comptime ABI has the construct, which for
-    every case here is `COMPTIME_ABI`.  `X86_ABI_REFUSALS` is where the other
-    architecture's answer is pinned, and it is a separate table rather than a
-    loop over `BACKENDS` because the two answers DIFFER and the difference is
-    the finding — see this file's docstring.
+    BOTH architectures, and both must match CPython.  It was `COMPTIME_ABI`
+    alone while x86-64 refused the construct; now that the two backends share
+    the comptime ABI (see the module docstring), a one-sided assertion would be
+    the weaker of the two and would let exactly the regression this file exists
+    to catch back in: a backend whose prologue stopped allocating a home for a
+    comptime parameter still builds, still runs, and returns a number no source
+    wrote — a failure a refusal-shaped expectation cannot see.
     """
     name, source, oracle = case
     want = run_cpython(oracle, tmpdir)
@@ -413,23 +481,24 @@ def run_diff_case(case, tmpdir, verbose):
     src = os.path.join(tmpdir, name + ".mojo")
     with open(src, "w") as f:
         f.write(source)
-    out = os.path.join(tmpdir, f"{name}.{COMPTIME_ABI}")
-    rc, text = build_formal(src, out, COMPTIME_ABI)
-    if rc != 0:
-        return False, (f"--backend={COMPTIME_ABI} did not build: "
-                       f"{text.strip()[-300:]}")
-    if not os.path.isfile(out):
-        return False, f"--backend={COMPTIME_ABI} built but wrote no binary"
-    run = subprocess.run([out], capture_output=True, text=True,
-                         timeout=RUN_TIMEOUT)
-    if run.returncode != want.returncode:
-        return False, (f"--backend={COMPTIME_ABI} exit status {run.returncode}, "
-                       f"CPython {want.returncode}")
-    if run.stdout != want.stdout:
-        return False, (f"--backend={COMPTIME_ABI} stdout {run.stdout!r}, CPython "
-                       f"{want.stdout!r}")
-    if verbose:
-        print(f"      --backend={COMPTIME_ABI} stdout={run.stdout!r}")
+    for backend in BACKENDS:
+        out = os.path.join(tmpdir, f"{name}.{backend}")
+        rc, text = build_formal(src, out, backend)
+        if rc != 0:
+            return False, (f"--backend={backend} did not build: "
+                           f"{text.strip()[-300:]}")
+        if not os.path.isfile(out):
+            return False, f"--backend={backend} built but wrote no binary"
+        run = subprocess.run([out], capture_output=True, text=True,
+                             timeout=RUN_TIMEOUT)
+        if run.returncode != want.returncode:
+            return False, (f"--backend={backend} exit status {run.returncode}, "
+                           f"CPython {want.returncode}")
+        if run.stdout != want.stdout:
+            return False, (f"--backend={backend} stdout {run.stdout!r}, CPython "
+                           f"{want.stdout!r}")
+        if verbose:
+            print(f"      --backend={backend} stdout={run.stdout!r}")
     return True, ""
 
 
@@ -460,40 +529,6 @@ def run_refusal_case(case, tmpdir, verbose):
     return True, ""
 
 
-def run_x86_abi_case(case, tmpdir, verbose):
-    """x86-64 must refuse the specialization, and arm64 must build it.
-
-    Both halves, and the second one is not decoration: the reason x86-64 has to
-    refuse is that its caller does not pass the comptime arguments while its
-    callee reserves a register for them.  Asserting only the refusal would let a
-    change that made x86-64 "work" by answering the name without the ABI pass
-    this case while producing a silently wrong image.
-    """
-    name, source, needle = case
-    src = os.path.join(tmpdir, name + ".mojo")
-    with open(src, "w") as f:
-        f.write(source)
-    rc, text = build_formal(src, os.path.join(tmpdir, f"{name}.x86_64"),
-                            "x86_64")
-    if rc == 0:
-        return False, ("x86-64 BUILT a comptime-specialized call. That backend "
-                       "does not pass the bracket expressions ahead of the "
-                       "call-time arguments while its callee prologue reserves "
-                       "a register per comptime parameter, so a build here is a "
-                       "silently wrong image, not a feature")
-    if needle not in text:
-        return False, (f"x86-64 refused, but not with the expected words "
-                       f"{needle!r}: {text.strip()[-300:]}")
-    rc, text = build_formal(src, os.path.join(tmpdir, f"{name}.arm64"), "arm64")
-    if rc != 0:
-        return False, (f"arm64 refused the same source ({text.strip()[-200:]}) "
-                       f"while this case says it lowers; if that is no longer "
-                       f"true the case and the docstring are both stale")
-    if verbose:
-        print("      x86-64 refused naming the missing ABI; arm64 built it")
-    return True, ""
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -506,11 +541,11 @@ def main():
 
     diff_names = {c[0] for c in DIFF_CASES}
     refuse_names = {c[0] for c in REFUSALS}
-    x86_names = {c[0] for c in X86_ABI_REFUSALS}
+    abi_names = {c[0] for c in COMPTIME_ABI_CASES}
     runners = [
         (DIFF_CASES, diff_names, run_diff_case),
         (REFUSALS, refuse_names, run_refusal_case),
-        (X86_ABI_REFUSALS, x86_names, run_x86_abi_case),
+        (COMPTIME_ABI_CASES, abi_names, run_diff_case),
     ]
     everything = [c for group, _n, _r in runners for c in group]
     known = {c[0] for c in everything}

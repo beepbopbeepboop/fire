@@ -282,6 +282,49 @@ def _collect_var_names(f: F.FunctionDef) -> list:
     return names
 
 
+def _comptime_param_names(f: F.FunctionDef) -> list:
+    """`def f[a, b](…)`'s comptime parameter names, in declaration order.
+
+    A THIN wrapper over `comptime_eval.param_names`, which is the shared reader
+    the arm64 backend and the gimple backend both go through — the RULE for
+    which bracket names are parameters is not restated here."""
+    return comptime_eval.param_names(f)
+
+
+def _allocation_order(f: F.FunctionDef) -> list:
+    """Register-then-spill allocation order for a function's locals.
+
+    The same shape as arm64's `_allocation_order`, and for the same reason it
+    exists there: a COMPTIME parameter is only ever READ in the body, never
+    assigned, so `bound_names_in_order` — which walks assignments — does not
+    list it, and without it here it got no register home at all.  Every read
+    then fell back to the first incoming register, so the generic's comptime
+    and runtime parameters aliased each other: with `type` unmoved, `x` landed
+    in the register `type` was passed in and `f(3, 7)` returned 3 where the
+    source says 307.
+
+    Comptime parameters first (they are LEADING arguments — the prologue reads
+    the shared `model.incoming_args` and the call site passes the bracket
+    expressions ahead of the runtime ones), then the runtime parameters, then
+    the loop control temps, then the remaining locals.  First
+    `len(CALLEE_SAVED)` names get a callee-saved register; the rest spill.
+
+    A comptime name that is ALSO a runtime parameter — a shadowed declaration —
+    keeps the runtime parameter's home, so the de-dup below cannot hand one
+    register to two names.  That is arm64's rule, asked through the same two
+    shared helpers, rather than a second reading of it."""
+    names = _collect_var_names(f)
+    ct = _comptime_param_names(f)
+    nparams = len(f.params or [])
+    params = names[:nparams]
+    rest = names[nparams:]
+    taken = set(params) | set(rest)
+    ct = [n for n in ct if n not in taken]
+    temps = [n for n in rest if n[:3] in ("_fi", "_fb", "_ci", "_cb")]
+    others = [n for n in rest if n not in set(temps)]
+    return ct + params + temps + others
+
+
 def var_register_map(f: F.FunctionDef) -> dict[str, Reg]:
     """Variable -> callee-saved register, matching `_emit_function`.
 
@@ -289,7 +332,7 @@ def var_register_map(f: F.FunctionDef) -> dict[str, Reg]:
     exports its own `var_register_map`: per-value facts have to name the
     register the codegen actually allocated. Only the first
     `len(CALLEE_SAVED)` names appear — the rest live in spill slots."""
-    names = _collect_var_names(f)
+    names = _allocation_order(f)
     return {name: CALLEE_SAVED[i]
             for i, name in enumerate(names[:len(CALLEE_SAVED)])}
 
@@ -308,7 +351,23 @@ def _callee_symbol(func) -> str | None:
     `self._functions`, so `_emit_call` lowers it to a call to that extern —
     which is how a module-level or method call reaches the C library. Same
     reading as the arm64 backend, so the two agree on what a callee name is.
+
+    A `SubscriptExpr` over a plain name is a comptime SPECIALIZATION, `f[a, b]`,
+    and answers the bare name — the same `comptime_eval.specialization_name`
+    arm64's `_specialization_of` asks, so the RULE is the shared one and this
+    is not a third copy of it. It is only sound because `_emit_call` now also
+    passes the bracket expressions AHEAD of the call-time arguments, which is
+    the half that was missing: with a callee prologue that reserves a
+    register per comptime parameter (both backends read the shared
+    `model.incoming_args`, comptime first) and a call site that passed only
+    the runtime arguments, `f[1](3, 7)` would have built an image in which `x`
+    read 7 and `y` read whatever was in RSI before — a wrong number with exit
+    0. See bugs/FORMAL_x86_64_comptime_specialization_abi.md, which is why this
+    arm and the `_specialization_args` call below landed together rather than
+    one at a time.
     """
+    if isinstance(func, F.SubscriptExpr):
+        return comptime_eval.specialization_name(func)
     if isinstance(func, F.IdentExpr):
         return func.name
     parts = []
@@ -699,10 +758,10 @@ class X86_64Codegen:
         # name is served from `__DATA` or from a register — see
         # `model.module_slot_for`. Built from the same shared allocation order
         # registers come from, so the two cannot disagree.
-        self._fn_local_names = set(_collect_var_names(f))
+        self._fn_local_names = set(_allocation_order(f))
         self.asm.label(f.name)
 
-        var_names = _collect_var_names(f)
+        var_names = _allocation_order(f)
         # The RETURNED-FRAME convention, set up before the locals so the hidden
         # word has a home of its own: a function that returns a frame address
         # takes one extra trailing argument — the address of a block in its
@@ -857,7 +916,21 @@ class X86_64Codegen:
         for i, reg in enumerate(self._var_regs.values()):
             self.asm.emit(encode_mov_rm64_r64(Reg.RBP, self._saved_reg_off(i),
                                               reg))
-        params = list(f.params or [])
+        # The INCOMING arguments in ABI order, which is NOT `f.params` for a
+        # generic: a `def f[a, b](x, y)` declares comptime parameters first and
+        # the call site passes their bracket expressions ahead of the runtime
+        # ones, so `a` is argument 0 and `x` is argument 2.
+        #
+        # This backend read `f.params` here, which is correct for every function
+        # without comptime parameters and MISALIGNED by one register for every
+        # function with them — and the misalignment was invisible until the call
+        # site began passing the bracket expressions too, at which point a bare
+        # `f(3, 7)` read `x` as the `a` slot and returned 3 where the source
+        # says 307.  `model.incoming_args` is arm64's reader and is the shared
+        # one (comptime parameters first, as type None because they arrive as
+        # full words with no declared width to normalize to), so this is the same
+        # question asked in the same order rather than a second rule.
+        params = M.incoming_args(f)
 
         if len(params) > len(ARG_REGS):
             raise CodegenError(
@@ -5655,6 +5728,28 @@ class X86_64Codegen:
             # statement that the bracket is a specialization's comptime
             # parameters rather than a C symbol and a return type.
             raise CodegenError(M.specialization_call_refusal(name))
+        # A comptime SPECIALIZATION: `f[a, b](x, y)` passes the bracket
+        # expressions AHEAD of the call-time arguments, because both backends'
+        # callee prologues read the shared `model.incoming_args`, which puts the
+        # comptime parameters first (they arrive as ordinary full words, with
+        # no declared width to normalize to).  The three lines are arm64's, and
+        # `mojo/middle/comptime.py` is already shared, so the RULE is not
+        # re-implemented here — only reached.
+        #
+        # This is the half whose absence made `_callee_symbol`'s new
+        # SubscriptExpr arm above unsound on its own: with `type` in a prologue
+        # register and a caller passing only `3, 7`, `x` would read 7 and `y`
+        # whatever was in RSI before.  A bare `f(3, 7)` to the same generic
+        # binds each comptime parameter to 0, which is the shared
+        # `specialization_args`'s answer and therefore the same on both
+        # architectures — the two cannot disagree about the arity of one
+        # spelling, because both go through one parameter list.
+        if not is_extern:
+            fdef = self._functions.get(name)
+            ct_params = (comptime_eval.param_names(fdef)
+                         if fdef is not None else [])
+            if ct_params:
+                args = self._specialization_args(e, ct_params) + list(args)
 
         if len(args) > len(ARG_REGS):
             raise CodegenError(
@@ -5726,6 +5821,18 @@ class X86_64Codegen:
         width, signed = kind
         self._emit_extend(Reg.RAX, IntType(width, signed))
 
+
+    def _specialization_args(self, e: F.CallExpr, ct_params: list) -> list:
+        """The argument expressions binding `ct_params` at this call site.
+
+        A THIN wrapper over `comptime_eval.specialization_args`, the same one
+        arm64 calls, so the bracket-binding rule — position, 0 for anything
+        the bracket does not supply, extra bindings ignored — is the shared
+        one and not a second reading of it."""
+        try:
+            return comptime_eval.specialization_args(e, ct_params)
+        except ValueError as exc:
+            raise CodegenError(str(exc))
 
     def _bind_call_args(self, name: str, e: F.CallExpr) -> list:
         """`e`'s arguments in positional form, for a known callee.
