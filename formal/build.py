@@ -3157,6 +3157,29 @@ def check_frame_return_shapes(functions) -> None:
             raise CodegenError(message)
 
 
+def _bracket_callee_roots(body) -> set:
+    """Node ids of the bare names a call's BRACKETED callee is written on.
+
+    `f[x](...)` and `mod.f[x](...)`, keyed by the ROOT `IdentExpr` because
+    `M.iter_nodes` has no parent and the root is the only node the name-placement
+    walk below ever sees. One function for it because there are now two users —
+    the construct refusal in `check_module_symbols` and the export refusal that
+    follows it — and a set computed twice is a set that can disagree with
+    itself, which is the failure mode the whole callee-exemption arrangement
+    exists to prevent."""
+    out = set()
+    for c in M.iter_nodes(body):
+        if not isinstance(c, F.CallExpr) \
+                or not isinstance(c.func, F.SubscriptExpr):
+            continue
+        root = c.func
+        while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
+            root = root.obj
+        if isinstance(root, F.IdentExpr):
+            out.add(id(root))
+    return out
+
+
 def _check_returned_frame_budget(functions, returns_frame, params_of) -> None:
     """Refuse a frame-returning callee with no argument register left.
 
@@ -4573,6 +4596,21 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # downstream at the emitter's "this module does not compile" arm), and
         # a type in a non-callee position is unaffected: `var xs: List[Int]`
         # and `len(List)` keep whatever answer they had.
+        # SPECIALIZATION is included here too, and it is not a nicety: a
+        # comptime specialization is a call whose callee is a `SubscriptExpr`,
+        # so keying on `isinstance(c.func, F.IdentExpr)` alone misses every one
+        # of them and the ROOT of the bracket is then walked as if it were a
+        # read of a value. That is the false diagnosis the arm64 sweep reported
+        # for seventeen files: `std/sys/_assembly.mojo` spells
+        # `_get_kgen_string[asm]()` and was told "'_get_kgen_string' is imported
+        # from std.collections.string.string_slice, so it is a module-level name
+        # of another module" — which names a storage problem the file does not
+        # have. The name is a CALLEE. What crosses the dylib boundary is the
+        # instantiation, and whether this path has a symbol for it is a question
+        # for the export rule and the linker, not for the allocator's local
+        # table; that question is asked where it belongs (see `_callee_defs` for
+        # the generic's base name, and the export rule in
+        # `no_public_api_reason` for what a generic can bind as).
         for c in M.iter_nodes(fn.body):
             if isinstance(c, F.CallExpr):
                 for node in M.subscript_callee_names(c):
@@ -4697,6 +4735,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # better-worded message wins here rather than being pre-empted by the
         # symptom. Recorded by the identity of the ROOT IdentExpr, because
         # `M.iter_nodes` has no parent and the two spellings nest.
+        bracket_callee_roots = _bracket_callee_roots(fn.body)
         bracketed = {}
         for sub in M.iter_nodes(fn.body):
             if not isinstance(sub, (F.SubscriptExpr, F.MemberExpr)):
@@ -4715,8 +4754,27 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 root_ident = root_ident.obj
             if not isinstance(root_ident, F.IdentExpr):
                 continue
+            # A TYPE APPLICATION in callee position — `Tuple[Int, Int]()`,
+            # `List[Int]()` — is a construct both backends lower
+            # (`empty_blob_constructor` in each `_emit_call`), and the
+            # multi-element bracket on it is the type's own argument list, not
+            # a two-dimensional index. So the tuple-index refusal is not asked
+            # about it. The gate is here, in the `bracketed` computation, and
+            # not in the placement loop below: the loop asks `bracketed`
+            # BEFORE the callee exemption (that order is what lets a template
+            # root be refused by name instead of through its type argument),
+            # so a root recorded here is refused unconditionally — and with
+            # the loop's original order the same case was fine, which is
+            # exactly the kind of coupling that makes one branch's ordering
+            # change another's verdict. Measured: `Tuple[Int, Int]()` built
+            # and printed 0 before, and was refused with "`Tuple[Int, Int]` is
+            # a subscript whose index is a tuple" after.
+            type_application = (isinstance(sub, F.SubscriptExpr)
+                                and id(root_ident) in bracket_callee_roots
+                                and M.empty_blob_constructor(root_ident.name))
             why = M.mlir_template_refusal(sub)
-            if why is None and isinstance(sub, F.SubscriptExpr):
+            if why is None and isinstance(sub, F.SubscriptExpr) \
+                    and not type_application:
                 why = M.multi_index_refusal_for(sub, False,
                                                 _callee_defs(functions))
                 if why is None and M.is_external_call_template(sub) \
@@ -4743,6 +4801,53 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                             why = M.multi_index_refusal_for(
                                 outer, False, _callee_defs(functions))
                         break
+            if why is None and isinstance(sub, F.SubscriptExpr) \
+                    and id(root_ident) in bracket_callee_roots:
+                # A BRACKETED CALLEE this unit does not compile. Asked HERE,
+                # which is where the other construct refusals are asked and for
+                # the reason the order below documents: the refusal that names
+                # the construct wins over one about the boundary it crosses,
+                # because the boundary is a consequence of the brackets rather
+                # than the other way round.
+                #
+                # This is the ONE place the two branches' answers to the same
+                # construct meet. `imported_callee_refusal` (below) refuses the
+                # same call because the defining module exports no single
+                # symbol for a generic — true, and the right sentence when the
+                # base name is a `_`-prefixed or generic template. It is the
+                # WRONG sentence for a name the module does export, which
+                # `plain[3](5)` is: the report told the reader "`lib` does not
+                # export it … a C library name like `exit` or `write`", about a
+                # `plain` the module exports perfectly well, and the reader has
+                # no way to tell which of the four reasons applies to their
+                # name. `specialization_call_refusal` asks the question that
+                # both shapes share — there is no callee here to pass the
+                # brackets to — and it is the one both backends already ask at
+                # `_emit_call`, so this hoists the answer rather than adding
+                # one. `imported_callee_refusal` keeps the case it is right
+                # about: a bracketed callee whose base name is not a function
+                # here for any OTHER reason, which is what is left after this.
+                # The two exclusions are the two bracketed callees this tree
+                # already has a BETTER answer for, and asking here without them
+                # replaced both: `List[Int]()` with
+                # `specialization_call_refusal` (it is the one bracketed callee
+                # both backends lower, and the arm that lowers it is
+                # `empty_blob_constructor` below) and an MLIR dialect
+                # subscript with it (the dialect refusal further down names the
+                # construct, which is the whole point of it). A construct
+                # refusal asked here has to be the LAST one, not the first.
+                #
+                # `root_ident.name` and not `model.subscript_callee_name`:
+                # that one takes the CALL, and `iter_nodes` hands this loop the
+                # subscript with no parent to find the call through. Membership
+                # in `bracket_callee_roots` is what established that this root
+                # IS a call's bracketed base, so the name is the base name by
+                # that fact rather than by asking again.
+                base_name = root_ident.name
+                if (base_name not in _callee_defs(functions)
+                        and not M.empty_blob_constructor(base_name)
+                        and not base_name.startswith(M.MLIR_DIALECT_PREFIX)):
+                    why = M.specialization_call_refusal(base_name)
             if why is not None:
                 bracketed[id(root_ident)] = why
         # A BRACKETED CALLEE, `f[x](...)`, is a comptime SPECIALIZATION of `f`
@@ -4760,21 +4865,25 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # are asked first, so an MLIR template in callee position is still
         # refused by name — the message here is about the EXPORT, and a
         # template that is not exported is two different facts.
-        bracket_callees = set()
-        for c in M.iter_nodes(fn.body):
-            if not isinstance(c, F.CallExpr) \
-                    or not isinstance(c.func, F.SubscriptExpr):
-                continue
-            root = c.func
-            while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
-                root = root.obj
-            if isinstance(root, F.IdentExpr) and id(root) not in bracketed:
-                bracket_callees.add(id(root))
+        bracket_callees = _bracket_callee_roots(fn.body)
+        bracket_callees -= set(bracketed)
         for node in M.iter_nodes(fn.body):
-            if not isinstance(node, F.IdentExpr) or id(node) in callees:
+            if not isinstance(node, F.IdentExpr):
                 continue
+            # `bracketed` is asked BEFORE the callee exemption, and the order
+            # is load-bearing rather than tidiness. A construct refusal is
+            # about the whole expression — `external_call['setenv', Int32]`
+            # assembles a two-element subscript, and `Int32` inside it is a
+            # TYPE ARGUMENT rather than a read of a value. Skipping a callee
+            # root without asking first made the type argument the reported
+            # failure, which names an allocator table the reader has to go and
+            # look up instead of the subscript they wrote; measured, it
+            # replaced the tuple-index refusal on every `external_call[…]` in
+            # the stdlib with `'Int32' has no home`.
             if id(node) in bracketed:
                 raise CodegenError(bracketed[id(node)])
+            if id(node) in callees:
+                continue
             name = node.name
             if name in placed or name in frame_slots \
                     or M.module_constant_literal(name) is not None \
@@ -4884,8 +4993,17 @@ def _unstored_read(fn, placed: set, frame_slots: dict):
     Returns rather than raises, because of where it is called from — see the
     ordering note at the call site.
     """
-    params = {p[0] if isinstance(p, (tuple, list)) and p else p
-              for p in (getattr(fn, "params", None) or [])}
+    # `M.incoming_args`, not `fn.params`: a generic's `[dtype: DType]`
+    # parameters are leading ARGUMENTS and this walk used `fn.params`, which
+    # does not carry them, so `def widen[x: Int32](v: Int32): return v * x`
+    # was refused for reading `x` before anything in the function stores it —
+    # the read is of a value the CALLER passed, which is the same reason a
+    # runtime parameter is excluded and the same sentence in the docstring
+    # above. Measured: `test_formal_specialization.py`'s
+    # `a_local_specialization_lowers_and_matches_cpython` builds on this tree
+    # and did not. One reader of "the names a call site binds", and it is the
+    # one the ABI itself is written against.
+    params = {name for name, _ptype in M.incoming_args(fn)}
     # Only names this function ITSELF binds can be unstored: a parameter is
     # stored by the caller, and everything else in `placed` is stored by
     # something this walk does not see.

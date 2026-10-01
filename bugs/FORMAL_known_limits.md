@@ -1057,3 +1057,59 @@ section header reading "Compile-time constant evaluators (for comptime)" and
 `self._comptime_vals` / `_module_const_int` already track folded values, so the
 scaffolding is half-present. That is a feature, not a fix, and it is the kind of
 item §11.4's easy/hard line sends to a bug doc rather than a session.
+
+---
+
+# Addendum (2026-09-29, `formal-inline-asm`): §1.1's `_assembly.mojo` row now has the right MEASUREMENT behind it
+
+The **verdict** in the §1.1 audit table is unchanged and was re-measured: the
+row is a true limit, and nothing here closes it. What changed is the
+**diagnosis** the build actually produced, which was false about the file.
+
+`std/sys/_assembly.mojo` used to refuse with
+
+> `inlined_assembly: '_get_kgen_string' is imported from
+> `std.collections.string.string_slice`, so it is a module-level name of
+> another module.`
+
+That is false, and it is false in the way this document cares about: it names
+a **storage** problem the file does not have. `_get_kgen_string[asm]()` is a
+CALL — a comptime specialization, whose brackets bind a generic's parameters —
+and the root of the bracket was being walked as a read of a value because
+`check_module_symbols` collected a call's callee only when the callee was a
+bare `IdentExpr`. Seventeen files inherited the diagnosis through their import
+chains, so one mis-worded sentence about a subscript was the stated terminal
+cause for a sixth of the residue.
+
+**What the file needs, stated honestly.** `inlined_assembly` cannot be lowered
+on this path, and the reason is not the import:
+
+1. its body is `__mlir_op.`pop.inline_asm`` — an MLIR dialect **operation**.
+   This path has no MLIR (it lowers to a Mach-O image whose only value is a
+   64-bit word) and no inline assembler, so the constraint string has nowhere
+   to go. `model.mlir_dialect_refusal` already says exactly this, arch-free;
+2. even with MLIR, `doc/ABI.md` §Generics is the binding constraint and it is
+   unchanged — a generic is not a boundary symbol, each instantiation is, and
+   this path does not monomorphize. `_assembly.mojo`'s only public declaration
+   is generic, so `_export_entries` returns `{}` and `no_public_api_reason`
+   refuses it as a module that exports nothing. **That is this row's own
+   verdict, and it is still the reason.**
+
+So the honest answer is the refusal, and §1.1's "true limit" stands. The 17
+files do not unblock, and the task's expectation that they would was wrong:
+nothing in this branch can move them, and a doc that said otherwise would send
+the next session after a fix that does not exist.
+
+**The two constructs now standing in front of the true one**, both filed, both
+diagnostic-accuracy rather than coverage, both with the measurement that sizes
+them:
+
+| reported instead of the true limit | docs |
+|---|---|
+| `'NoneType' has no home` — a bare TYPE name in a `comptime` type comparison, refused with an enumeration of where a *value* lives (52 stdlib files, up from 35) | `FORMAL_type_name_as_a_value.md` |
+| any unplaced name earlier in the body — the construct-refusal pre-pass is implemented for the bracketed/dotted MLIR spellings and not for the bare `__mlir_op` dialect name, so line order decides the message for 18 of 36 files | `FORMAL_mlir_refusal_preemption.md` |
+
+**The one measured gain**, over all 664 stdlib files through the exact function
+that changed: 305 files were refused as an imported module-level name, 269 are
+after; 10 files are no longer refused by it at all; 612 of 664 verdicts are
+byte-identical.

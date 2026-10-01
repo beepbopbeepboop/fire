@@ -5240,6 +5240,22 @@ class X86_64Codegen:
                             base, len(operands)))
                 self._emit_empty_blob()
                 return
+            # …and a BRACKETED callee this unit does not compile, asked about
+            # by the ONE shared reader arm64 asks too, so the two
+            # architectures cannot give different answers about one construct —
+            # measured, arm64 named the specialization while x86-64 said "got
+            # SubscriptExpr", which is a symptom naming an AST node the author
+            # never wrote.
+            #
+            # AFTER the empty-blob constructor above, because that is the one
+            # bracketed callee this path CAN answer, and reusing `base` rather
+            # than re-deriving `e.func.obj.name` so there is one recogniser of
+            # the shape in this file and not two. Scoped to a base name with no
+            # declaration in hand, because a LOCAL generic's specialization is a
+            # different question and this backend still answers that one where it
+            # always has — the residual gap the comment above declines to close.
+            if base is not None and base not in self._functions:
+                raise CodegenError(M.specialization_call_refusal(base))
             raise CodegenError(
                 "unsupported call target on the formal x86-64 path "
                 f"(got {type(e.func).__name__})")
@@ -5340,6 +5356,13 @@ class X86_64Codegen:
         # almost always literals like `flush=True`. A known callee gets them
         # bound to their parameters' registers.
         args = list(e.args) if is_extern else self._bind_call_args(name, e)
+        if is_extern and isinstance(e.func, F.SubscriptExpr):
+            # A BRACKETED callee this unit does not compile, refused with the
+            # SAME shared text arm64 asks (`model.specialization_call_refusal`)
+            # so the two architectures cannot answer differently about one
+            # construct. Without it the brackets are dropped on the extern path
+            # too, and `plain[3](5)` is emitted as `plain(5)`.
+            raise CodegenError(M.specialization_call_refusal(name))
 
         if len(args) > len(ARG_REGS):
             raise CodegenError(

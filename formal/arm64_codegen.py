@@ -5725,6 +5725,15 @@ class ARM64Codegen:
             if ct_params:
                 bound = self._specialization_args(e, ct_params)
                 args = bound + list(args)
+        elif isinstance(e.func, F.SubscriptExpr):
+            # A BRACKETED callee this unit does not compile. The branch above
+            # is the only place a specialization's brackets are turned into
+            # arguments, so without this the brackets are silently DROPPED and
+            # `plain[3](5)` is emitted as `plain(5)` — measured, an image that
+            # built, ran and printed a number the source never wrote. The
+            # shared text is `model.specialization_call_refusal`, which x86-64
+            # asks too.
+            raise CodegenError(M.specialization_call_refusal(name))
         # Flatten `*star` / reject `**dst` before the arity check so a
         # single list literal expands to its elements (common: f(*[a,b])).
         flat: list = []

@@ -2243,6 +2243,59 @@ def is_generic(fn) -> bool:
     return bool(getattr(fn, "comptime_params", None))
 
 
+def specialization_call_refusal(name: str) -> str:
+    """The refusal for `name[a, b](...)` when `name` is not a function here.
+
+    ARCH-FREE and asked by BOTH backends from `_emit_call`, for the same
+    reason `gimple_runtime_refusal` is: one construct, one language
+    implementation, one answer — an architecture that answered differently
+    about the same call would be the two-machines-one-language failure this
+    file exists to prevent.
+
+    A comptime specialization is a CALL whose brackets bind the generic's
+    comptime parameters, and on this path those parameters are ordinary
+    LEADING arguments (see the calling convention above): the call site
+    evaluates the brackets and passes them first. That is a decision about a
+    signature, so it can only be made against a declaration — and when the
+    name is not a function this unit compiles, there is none. The two
+    spellings that reach here are both unanswerable, and they are unanswerable
+    for the same reason:
+
+      * the name is a generic of ANOTHER module. Its instantiation is the
+        boundary symbol (doc/ABI.md §Generics), one per set of type arguments,
+        and this path has no monomorphization to key them, so there is no
+        callee here to pass leading arguments to.
+      * the name is an ordinary VALUE and the brackets are a subscript. A
+        subscript of a value is not a call this path can name at all.
+
+    **The alternative is worse than a wrong number, and it is measured.**
+    Both backends flatten the callee to the base name and then, for a callee
+    this unit does not compile, emit the call with the brackets DROPPED:
+    `plain[3](5)` becomes a plain `plain(5)`. Measured on arm64 — a module
+    exporting `def plain(v): return v + 100`, and a program that wrote
+    `plain[3](5)` — the image built, ran, and printed 105. Nothing in the
+    source says 105, and no link line would have caught it, because `plain`
+    really is a defined symbol; the bracket is simply gone. Refused here
+    instead, which is the whole difference between a build error and a
+    program that answers a question nobody asked.
+    """
+    return (
+        f"{name}[…](…) calls a name this unit does not compile, so the "
+        f"brackets cannot be bound. A comptime specialization's brackets are "
+        f"the generic's comptime parameters, and on this path those are "
+        f"ordinary leading arguments the call site evaluates and passes "
+        f"first — a decision about a signature, which needs a declaration "
+        f"and there is none in hand. If `{name}` is a generic of another "
+        f"module then its instantiation is the boundary symbol, one per set "
+        f"of type arguments (doc/ABI.md §Generics), and this path does not "
+        f"monomorphize, so there is no callee here to pass them to; if it is "
+        f"an ordinary value then the brackets are a subscript, which is not "
+        f"a call this path can name. Refused rather than emitted with the "
+        f"brackets dropped: that builds, runs, and returns a number the "
+        f"source never wrote, with nothing on the link line to catch it"
+    )
+
+
 # The kind constants live HERE, above every table that names one, because the
 # string-method table below records what each method YIELDS and a table that
 # had to spell "str" as a literal to dodge a forward reference would be one
