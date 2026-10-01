@@ -243,6 +243,39 @@ def _reset_func(gen, body: list = None, params: list = None,
     gen._cstr_key_src: dict[str, str] = {}
     gen._kw_key_src: dict[str, str] = {}
     gen._fresh_vals: set = set()   # per function: temp names repeat across functions
+    # Names of values whose per-slot element kinds are recorded ON THE VALUE
+    # (`struct.unpack` of a mixed format, and a local bound from one) — the
+    # marker that makes a read with no compile-time slot index (iteration, a
+    # computed subscript) lower as a BOXED read. Per-function by DESIGN, and
+    # that is what `_infer_return_maybe_kinds`'s own docstring says: "inside
+    # one function the marker rides along on the local name"; the cross-
+    # function half is `_return_maybe_kinds`, keyed by CALLEE name, precisely
+    # because a temp name cannot survive a return.
+    #
+    # So it has to be reset here, and did not used to be: `temp_counter`
+    # restarts at 0 in every function's prologue (two lines above), so every
+    # function's temps are `_t1.._tN` again, while this set accumulated one
+    # entry per NAME for the whole module. A function whose loop-iterable temp
+    # then reused a name an earlier function had registered read that list
+    # through `mojo_list_get_boxed` instead of the accessor its element type
+    # calls for. Measured on this tree, on a change to build_stdlib_dylib.py
+    # that shifted nothing but temp numbering: both
+    # `for e in reflect.collect_runtime_exports_h(...)` loops (in
+    # `runtime_export_entries` and `build_stdlib`) stopped compiling with
+    #
+    #     error: assignment to 'char *' from 'long long int' makes pointer
+    #            from integer without a cast [-Wint-conversion]
+    #
+    # because the runtime-dispatched DICT arm had already declared the shared
+    # target `char * e` and the LIST arm then stored a box into it. The
+    # hand-reduced form is in test_gimple.py's
+    # `kinds_marker_does_not_leak_into_a_later_function`: same program, one
+    # extra `s = 'ab'` in the second function, and the emitted C goes from one
+    # `mojo_list_get_boxed` (the one the mixed literal earns) to two. On a
+    # plain int list the two accessors return the same word, so that case is a
+    # C-shape divergence only — which is the other reason not to leave it: a
+    # divergence nobody can see is one nobody looks for.
+    gen._maybe_kinds_vals: set = set()
     # Temps holding a heap string THIS function's own concatenation lowering
     # just built (`_emit_str_cat`) and that nothing else can hold yet. The
     # parent concatenation that consumes one as a direct operand frees it.
