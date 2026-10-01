@@ -242,7 +242,13 @@ def test_every_declaration_is_seen():
     # merge had. One name, and it is the whole delta -- which is exactly why the
     # number is read off the call and never added up: 531 + 1 is right here and
     # would have been wrong on any other pair of sides.
-    for header, want in (('fire_runtime.h', 532),
+    # 532 -> 537 (2026-10-01, `bugs-container-compare`): the container ORDERING
+    # entry points, which are to `<` / `<=` / `>` / `>=` between containers what
+    # `mojo_*_eq` / `mojo_value_eq` were to `==` / `!=` --
+    # `mojo_list_cmp`, `mojo_set_cmp`, `mojo_value_cmp`, `mojo_cmp_fold`, and
+    # `mojo_bytes_cmp` (the three-way sibling of `mojo_bytes_eq`, needed for a
+    # bytes ELEMENT of an ordered container). Five, taken from the call.
+    for header, want in (('fire_runtime.h', 537),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

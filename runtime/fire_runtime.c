@@ -2172,6 +2172,24 @@ int mojo_bytes_eq(MojoBytes *a, MojoBytes *b)
     return a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0;
 }
 
+/* The three-way sibling of mojo_bytes_eq, for `b'a' < b'b'` and for a bytes
+ * ELEMENT of an ordered container (`[b'a'] < [b'b']`, which is what _slot_cmp
+ * asks). A prefix orders first, same as every other sequence here. Defined
+ * next to mojo_bytes_eq rather than at the ordering block because it is a
+ * primitive of the bytes type, not of the comparison operators. */
+int mojo_bytes_cmp(MojoBytes *a, MojoBytes *b)
+{
+    if (a == b) return 0;
+    if (a == NULL || b == NULL) return MOJO_CMP_UNORDERABLE;
+    int64_t n = a->len < b->len ? a->len : b->len;
+    if (n > 0) {
+        int r = memcmp(a->data, b->data, (size_t)n);
+        if (r) return r < 0 ? -1 : 1;
+    }
+    if (a->len == b->len) return 0;
+    return a->len < b->len ? -1 : 1;
+}
+
 int mojo_bytes_truthy(MojoBytes *b) { return b != NULL && b->len != 0; }
 
 /* The `index`/`rindex` half of the find family over a BYTES needle: the
@@ -5871,6 +5889,20 @@ static int _kind_to_eq(char k)
     return MOJO_EQ_INT;                    /* 'i' and 'n' (None) */
 }
 
+/* The Python type name an MOJO_EQ_* code stands for, for the TypeError text
+ * an unordered comparison raises. Derived from the SAME table `_kind_to_eq`
+ * reads, so a new element code cannot produce a message naming a type this
+ * runtime does not have. MOJO_EQ_UNKNOWN is an int as far as the caller knows
+ * (nothing better was available), which is the right answer for the erased
+ * operand in `an_erased_handle < ["a"]`. */
+static const char *_eq_typename(int code)
+{
+    if (code == MOJO_EQ_DOUBLE) return "float";
+    if (code == MOJO_EQ_STR) return "str";
+    if (code == MOJO_EQ_BYTES) return "bytes";
+    return "int";                          /* INT, GENERIC and UNKNOWN */
+}
+
 static int _slot_eq(int64_t x, int64_t y, int ea, int eb, char ka, char kb)
 {
     if (ea == MOJO_EQ_UNKNOWN) ea = _kind_to_eq(ka);
@@ -5967,6 +5999,24 @@ static int _set_has_double(MojoSet *s, double want)
     return 0;
 }
 
+/* Does `b` hold `a`'s i-th entry? ONE reading of a set slot, shared by
+ * mojo_set_eq (membership in both directions) and the subset test
+ * mojo_set_cmp needs — the two differ only in what they conclude from the
+ * answer, and keeping the slot-kind dispatch in one place is what stops them
+ * drifting on the `mixed` float case, where a set of floats stores its bits
+ * in an int slot. */
+static int _set_has_slot(MojoSet *b, MojoSet *a, int64_t i, int mixed)
+{
+    _SetSlot *sl = &a->slots[i];
+    if (sl->tag == 1)
+        return mojo_set_contains_str(b, sl->val_s);
+    if (sl->tag == 2)
+        return mojo_set_contains_bytes(b, (MojoBytes *)(intptr_t)sl->val_s);
+    if (mixed)
+        return _set_has_double(b, _eq_as_double(sl->val_i));
+    return mojo_set_contains_int(b, sl->val_i);
+}
+
 int mojo_set_eq(MojoSet *a, MojoSet *b, int ea, int eb)
 {
     if (a == b) return 1;
@@ -5975,17 +6025,7 @@ int mojo_set_eq(MojoSet *a, MojoSet *b, int ea, int eb)
     int mixed = ((ea == MOJO_EQ_DOUBLE) != (eb == MOJO_EQ_DOUBLE));
     for (int64_t i = 0; i < a->cap; i++) {
         if (a->slots[i].tag < 0) continue;          /* empty slot */
-        int hit;
-        if (a->slots[i].tag == 1)
-            hit = mojo_set_contains_str(b, a->slots[i].val_s);
-        else if (a->slots[i].tag == 2)
-            hit = mojo_set_contains_bytes(b,
-                                (MojoBytes *)(intptr_t)a->slots[i].val_s);
-        else if (mixed)
-            hit = _set_has_double(b, _eq_as_double(a->slots[i].val_i));
-        else
-            hit = mojo_set_contains_int(b, a->slots[i].val_i);
-        if (!hit) return 0;
+        if (!_set_has_slot(b, a, i, mixed)) return 0;
     }
     return 1;
 }
@@ -6036,6 +6076,276 @@ int mojo_value_eq(int64_t a, int64_t b, int elem)
                                                elem, elem);
     return mojo_set_eq((MojoSet *)(intptr_t)a, (MojoSet *)(intptr_t)b,
                        elem, elem);
+}
+
+/* ── `<` / `<=` / `>` / `>=` between containers: Python's ordering ────────
+ *
+ * The same lowering question `==` was, one level up: `a < b` between two
+ * containers used to fall out of C as the same raw POINTER comparison `==`
+ * used to, so the answer was decided by heap addresses — a stable, plausible
+ * and wrong answer, exit 0, no diagnostic. Unlike `==` this is answerable
+ * rather than a refusal: CPython implements ordering for lists (lexicographic,
+ * a shorter prefix ordering FIRST) and for sets (proper subset), and this
+ * project's CPython is the oracle the tests diff against.
+ *
+ * A dict is the one container kind with NO ordering — `{'a':1} < {'b':2}` is
+ * a genuine TypeError even on 3.14 — so the dict arm raises rather than
+ * inventing an answer, which is also what a pair of DIFFERENT kinds and a
+ * container against a non-container must do.
+ *
+ * The element comparison is `_slot_cmp`, the three-way sibling of `_slot_eq`
+ * above, and it reads the same evidence: a per-side MOJO_EQ_* code from the
+ * codegen, falling back to the value's own per-slot kinds. Allocation-free,
+ * for `_slot_eq`'s reason — this runs inside fixed points.
+ */
+
+/* The one place "these have no ordering" becomes a Python-level exception, so
+ * every producer refuses identically instead of each spelling it. CPython's
+ * text for `[1] < ['a']` is "'<' not supported between instances of 'int' and
+ * 'str'"; the element type names are what the element codes carry, so this
+ * spells them from the same MOJO_EQ_* table `_kind_to_eq` reads rather than
+ * from a second list.
+ *
+ * `op` is the operator SPELLING the program used, not the internal code, so the
+ * message says `'<= not supported…'` for `<=` rather than always saying `'<'`:
+ * CPython names the operator the user wrote, and a diagnostic that misreports
+ * which one failed is worse than none. */
+static void _raise_unorderable_ea(int ea, int eb, const char *op)
+{
+    char detail[128];
+    snprintf(detail, sizeof detail,
+             "'%s' not supported between instances of '%s' and '%s'",
+             op, _eq_typename(ea), _eq_typename(eb));
+    mojo_raise_type_error(detail);
+}
+
+/* The list/tuple half: a tuple and a list are the same C type with a marker to
+ * tell them apart, and CPython's message names which one each side was — it
+ * has the real Python types, this backend only has the markers. Same helper,
+ * the two type names passed in, so there is one place that builds this text. */
+static void _raise_unorderable(const char *ta, const char *tb, const char *op)
+{
+    char detail[128];
+    snprintf(detail, sizeof detail,
+             "'%s' not supported between instances of '%s' and '%s'",
+             op, ta, tb);
+    mojo_raise_type_error(detail);
+}
+
+/* Which operator is being evaluated, as the string the exception message needs.
+ * Threaded down from the codegen (which knows the operator the source spelled)
+ * rather than derived here, so the recursion through nested containers
+ * (`[[1]] < [['a']]`) keeps naming the OUTERMOST operator — which is the one
+ * CPython reports, and the only one the user wrote. */
+static const char *_cmp_op_name(int op)
+{
+    switch (op) {
+    case MOJO_CMP_OP_LE: return "<=";
+    case MOJO_CMP_OP_GT: return ">";
+    case MOJO_CMP_OP_GE: return ">=";
+    default:             return "<";
+    }
+}
+
+/* NaN is unordered against everything INCLUDING itself, which is not the same
+ * as equal: `[nan] <= [nan]` is False in Python while `nan == nan` is also
+ * False, so folding NaN into either verdict gets one of the two wrong. */
+static int _cmp_double(double x, double y)
+{
+    if (x < y) return -1;
+    if (x > y) return 1;
+    if (x == y) return 0;
+    return MOJO_CMP_UNORDERABLE;
+}
+
+/* One slot word pair, three-way: <0, 0, >0, or MOJO_CMP_UNORDERABLE.
+ *
+ * UNORDERABLE rather than a plain 0 because 0 means EQUAL, and the two
+ * collapse into each other at the call site if this returns "equal" for a
+ * pair Python refuses: `[1] < ['a']` must raise, not answer False, and
+ * `mojo_list_cmp` has to be able to tell "these differ" from "these cannot
+ * be compared". Every arm that dereferences ranges-checks its words first,
+ * for `_slot_eq`'s reason — the erased-operand path can guess STR for a
+ * container whose elements are not strings, and a strcmp on a small integer
+ * is a segfault, not a wrong answer. */
+static int _slot_cmp(int64_t x, int64_t y, int ea, int eb, char ka, char kb,
+                     int op)
+{
+    if (ea == MOJO_EQ_UNKNOWN) ea = _kind_to_eq(ka);
+    if (eb == MOJO_EQ_UNKNOWN) eb = _kind_to_eq(kb);
+    /* Exactly one side DOUBLE: a genuine int/float pair compares NUMERICALLY
+     * ([1] < [1.5] is True), so the integer word is CONVERTED rather than
+     * reinterpreted -- `_eq_as_double`, the same helper `_slot_eq` uses, for
+     * the same reason. A pointer-typed side against a float is not a numeric
+     * comparison at all and is unordered. */
+    if ((ea == MOJO_EQ_DOUBLE) != (eb == MOJO_EQ_DOUBLE)) {
+        if (ea == MOJO_EQ_INT)  return _cmp_double((double)x, _eq_as_double(y));
+        if (eb == MOJO_EQ_INT)  return _cmp_double(_eq_as_double(x), (double)y);
+        return MOJO_CMP_UNORDERABLE;
+    }
+    /* Two DIFFERENT non-numeric codes have no ordering between them, and this
+     * is the arm `==` gets for free (`if (ea != eb) return 0`) while ordering
+     * does not: `[1] < ['a']` is a TypeError, and falling through to the INT
+     * arm below because the LEFT side is an int would compare the integer 1
+     * against the string's ADDRESS and answer True — a refusal turned into a
+     * verdict. Only two float-ish codes ever legitimately differ, and the arm
+     * above has already handled those. */
+    if (ea != eb) return MOJO_CMP_UNORDERABLE;
+    /* Equal int codes: the word is either a number or, when the codegen could
+     * not type it, a nested container handle (`[[1]] < [[2]]` recurses). */
+    if (ea == MOJO_EQ_INT) {
+        if (x == y) return 0;
+        int nk = _value_kind(x), nl = _value_kind(y);
+        if (nk != MOJO_VK_NONE || nl != MOJO_VK_NONE)
+            return mojo_value_cmp(x, y, MOJO_EQ_UNKNOWN, op);
+        return x < y ? -1 : 1;
+    }
+    if (ea == MOJO_EQ_DOUBLE) return _cmp_double(_eq_as_double(x), _eq_as_double(y));
+    if (ea == MOJO_EQ_STR) {
+        if (!_mojo_ptr_shaped(x) || !_mojo_ptr_shaped(y))
+            return MOJO_CMP_UNORDERABLE;
+        char *sx = (char *)(intptr_t)x, *sy = (char *)(intptr_t)y;
+        if (!sx || !sy) return MOJO_CMP_UNORDERABLE;   /* a NULL slot is None */
+        int r = strcmp(sx, sy);
+        return r < 0 ? -1 : (r > 0 ? 1 : 0);
+    }
+    if (ea == MOJO_EQ_BYTES) {
+        if (!_mojo_ptr_shaped(x) || !_mojo_ptr_shaped(y))
+            return MOJO_CMP_UNORDERABLE;
+        return mojo_bytes_cmp((MojoBytes *)(intptr_t)x,
+                              (MojoBytes *)(intptr_t)y);
+    }
+    /* MOJO_EQ_GENERIC: a nested container, ordered by the same rules at the
+     * next level down. */
+    return mojo_value_cmp(x, y, MOJO_EQ_UNKNOWN, op);
+}
+
+/* CPython's list rule: lexicographic on the elements, and a SHORTER prefix
+ * orders first (`[1] < [1, 2]`). A tuple and a list are the same C type, so
+ * the marker decides — and when the markers DISAGREE there is no ordering at
+ * all (`[1] < (1,)` is a TypeError), which is UNORDERABLE rather than an
+ * invented answer. */
+int mojo_list_cmp(MojoList *a, MojoList *b, int ea, int eb, int op)
+{
+    if (!a || !b) return MOJO_CMP_UNORDERABLE;
+    if (mojo_is_tuple(a) != mojo_is_tuple(b)) {
+        _raise_unorderable(mojo_is_tuple(a) ? "tuple" : "list",
+                           mojo_is_tuple(b) ? "tuple" : "list",
+                           _cmp_op_name(op));
+        return MOJO_CMP_UNORDERABLE;
+    }
+    int64_t n = a->len < b->len ? a->len : b->len;
+    for (int64_t i = 0; i < n; i++) {
+        int c = _slot_cmp(a->data[i], b->data[i], ea, eb,
+                          mojo_list_slot_kind(a, i), mojo_list_slot_kind(b, i),
+                          op);
+        if (c == MOJO_CMP_UNORDERABLE) {
+            int ca = ea, cb = eb;
+            if (ca == MOJO_EQ_UNKNOWN) ca = _kind_to_eq(mojo_list_slot_kind(a, i));
+            if (cb == MOJO_EQ_UNKNOWN) cb = _kind_to_eq(mojo_list_slot_kind(b, i));
+            _raise_unorderable_ea(ca, cb, _cmp_op_name(op));
+            return MOJO_CMP_UNORDERABLE;
+        }
+        if (c != 0) return c;
+    }
+    if (a->len == b->len) return 0;
+    return a->len < b->len ? -1 : 1;
+}
+
+/* CPython's set rule, which is NOT the list rule: `s1 < s2` is "s1 is a
+ * PROPER SUBSET of s2", not a lexicographic order — `{1,2} < {1,3}` is False,
+ * and so is `{1,2} < {2,3}`. So the three-way answer is derived from
+ * SUBSETNESS, in both directions, and a pair that is neither (the `{1,2}` /
+ * `{1,3}` case) is UNORDERABLE in both directions — which is exactly what
+ * CPython says, since all four of `<`, `<=`, `>`, `>=` are False for it.
+ *
+ * `mojo_set_difference`'s emptiness shortcut is NOT the test: it answers
+ * "does s1 have something s2 lacks", which is what `s1 - s2` means, and it
+ * says nothing about the other direction — `s1 > s2` is False for two
+ * equal-size proper subsets of each other, which is the case that failed.
+ * `_set_has_slot` (beside mojo_set_eq) is the per-slot read this and
+ * mojo_set_eq share. */
+
+/* Is every entry of `a` also in `b`? */
+static int _set_subset(MojoSet *a, MojoSet *b, int mixed)
+{
+    if (!a || !b) return 0;
+    if (a == b) return 1;
+    if (a->used > b->used) return 0;
+    for (int64_t i = 0; i < a->cap; i++) {
+        if (a->slots[i].tag < 0) continue;          /* empty slot */
+        if (!_set_has_slot(b, a, i, mixed)) return 0;
+    }
+    return 1;
+}
+
+int mojo_set_cmp(MojoSet *a, MojoSet *b, int ea, int eb, int op)
+{
+    if (!a || !b) return MOJO_CMP_UNORDERABLE;
+    int mixed = ((ea == MOJO_EQ_DOUBLE) != (eb == MOJO_EQ_DOUBLE));
+    int ab = _set_subset(a, b, mixed);       /* a proper-or-not subset of b */
+    int ba = _set_subset(b, a, mixed);
+    if (ab && ba) {
+        /* Both subset tests pass, so the two hold the same elements -- a set
+         * cannot be a proper subset of itself, whatever `used` says. */
+        return 0;
+    }
+    if (ab) return -1;
+    if (ba) return 1;
+    /* Neither is a subset of the other: CPython answers False for all four of
+     * `<`, `<=`, `>`, `>=` here and does NOT raise, because a set ordering
+     * test is a subset question and "no" is a real answer to it. That is why
+     * this one is UNORDERABLE-without-a-raise while mojo_list_cmp's is not:
+     * MOJO_CMP_UNORDERABLE is the value the fold reads, not a synonym for
+     * "TypeError", and only the producers that CPython actually refuses call
+     * _raise_unorderable. */
+    return MOJO_CMP_UNORDERABLE;
+}
+
+/* `a OP b` for two operands whose static types the codegen could not BOTH
+ * resolve — the erased-handle shape, the twin of mojo_value_eq. The kind
+ * pair decides everything, exactly as it does there: only same-kind operands
+ * have an ordering, and a dict has none, so this raises. That raise is
+ * CPython's own answer for every pair that reaches it, which is why a wrong
+ * guess about an erased operand's kind is a loud failure rather than a wrong
+ * verdict. */
+int mojo_value_cmp(int64_t a, int64_t b, int elem, int op)
+{
+    if (a == b) return 0;
+    int ka = _value_kind(a), kb = _value_kind(b);
+    if (ka != kb || ka == MOJO_VK_NONE) {
+        _raise_unorderable_ea(MOJO_EQ_UNKNOWN, MOJO_EQ_UNKNOWN,
+                              _cmp_op_name(op));
+        return MOJO_CMP_UNORDERABLE;
+    }
+    if (ka == MOJO_VK_LIST)
+        return mojo_list_cmp((MojoList *)(intptr_t)a,
+                             (MojoList *)(intptr_t)b, elem, elem, op);
+    if (ka == MOJO_VK_SET)
+        return mojo_set_cmp((MojoSet *)(intptr_t)a,
+                            (MojoSet *)(intptr_t)b, elem, elem, op);
+    _raise_unorderable("dict", "dict", _cmp_op_name(op));
+    return MOJO_CMP_UNORDERABLE;
+}
+
+/* Fold a three-way answer to the `_Bool` the operator wants.
+ *
+ * MOJO_CMP_UNORDERABLE is refused explicitly rather than left to fall out of
+ * `c < 0` / `c > 0`, because 2 satisfies BOTH of those: `[1] < ['a']` would
+ * answer False from `c < 0` and True from `c > 0` off one and the same
+ * unordered answer. It has already raised by the time it gets here -- both
+ * `mojo_*_cmp` raise where they produce it -- so this is the never-taken
+ * branch, and it is the False that a program which somehow got here would get
+ * rather than a second wrong answer. */
+int mojo_cmp_fold(int c, int op)
+{
+    if (c == MOJO_CMP_UNORDERABLE) return 0;
+    switch (op) {
+    case MOJO_CMP_OP_LT: return c < 0;
+    case MOJO_CMP_OP_LE: return c <= 0;
+    case MOJO_CMP_OP_GT: return c > 0;
+    default:             return c >= 0;      /* MOJO_CMP_OP_GE */
+    }
 }
 
 int mojo_isinstance(int64_t obj, int type_id) {

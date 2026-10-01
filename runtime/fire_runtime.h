@@ -837,6 +837,9 @@ int64_t    mojo_bytes_get(MojoBytes *b, int64_t i); /* -> int 0-255, neg idx ok 
  * kept for the iteration loop, which bounds its own index. */
 int64_t    mojo_bytes_get_checked(MojoBytes *b, int64_t i);
 int        mojo_bytes_eq(MojoBytes *a, MojoBytes *b);
+/* The three-way sibling, for `b'a' < b'b'` and for a bytes ELEMENT of an
+ * ordered container. A prefix orders first. */
+int        mojo_bytes_cmp(MojoBytes *a, MojoBytes *b);
 int        mojo_bytes_truthy(MojoBytes *b);
 char      *mojo_bytes_repr(MojoBytes *b);
 void       mojo_bytes_print(MojoBytes *b);
@@ -1393,6 +1396,41 @@ int mojo_set_eq(MojoSet *a, MojoSet *b, int ea, int eb);
  * resolve — the shape a container handed to an unannotated parameter takes.
  * `elem` describes the side the codegen knew and is applied to both. */
 int mojo_value_eq(int64_t a, int64_t b, int elem);
+
+/* ── the ORDERING comparisons, the same story one level up ────────────────
+ * `a < b` between two containers used to lower to the same raw POINTER
+ * comparison `==` did, so the answer was decided by heap addresses. Unlike
+ * `==` this is answerable: CPython orders lists (lexicographic, shorter prefix
+ * first) and sets (proper subset). A dict has NO ordering — `{'a':1} < {'b':2}`
+ * is a genuine TypeError on 3.14 too — so the dict arm raises instead of
+ * inventing an answer, as does any pair of different kinds.
+ *
+ * The three `mojo_*_cmp` functions return a three-way answer, not a boolean,
+ * because the four operators are four folds of ONE comparison and re-deriving
+ * the comparison per operator is how the `==` family ended up with several
+ * near-identical implementations. `mojo_value_cmp` is mojo_value_eq's
+ * ordering twin for the erased-handle shape.
+ *
+ * UNORDERABLE is not "equal": it is "these have no ordering". For a LIST it is
+ * a TypeError, raised at the point it is produced so a comparison CPython
+ * refuses does not silently become a False; for a SET it is an ordinary False
+ * for all four operators, because a set ordering test is a subset question and
+ * "neither is a subset of the other" is a real answer to it.
+ *
+ * `op` is the operator (MOJO_CMP_OP_*) because the three-way result and the
+ * operator are both needed below: the result to fold, and the SPELLING for the
+ * TypeError text, which must say the operator the source wrote. It is threaded
+ * down rather than reconstructed at each raise so a nested container keeps
+ * naming the outermost operator. */
+#define MOJO_CMP_UNORDERABLE 2
+#define MOJO_CMP_OP_LT 0
+#define MOJO_CMP_OP_LE 1
+#define MOJO_CMP_OP_GT 2
+#define MOJO_CMP_OP_GE 3
+int mojo_list_cmp(MojoList *a, MojoList *b, int ea, int eb, int op);
+int mojo_set_cmp(MojoSet *a, MojoSet *b, int ea, int eb, int op);
+int mojo_value_cmp(int64_t a, int64_t b, int elem, int op);
+int mojo_cmp_fold(int c, int op);
 
 /* ── Python integration ─────────────────────────────────────────────────*/
 void mojo_print(char *str);
