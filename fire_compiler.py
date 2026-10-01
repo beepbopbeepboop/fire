@@ -1259,22 +1259,29 @@ def _scan_string_end(src: str, i: int, quote: str, triple: bool) -> int:
         j += 1
     return -1
 
-def _ends_inside_string(line: str) -> bool:
-    r"""True when `line` stops part-way through an unterminated string literal.
+def _unterminated_quote_pos(line: str) -> int:
+    r"""Index of the opening quote of the string literal `line` ends inside, or
+    -1 when it ends outside one.
 
     The companion question to `_scan_string_end` ("where does the literal that
-    OPENS at `i` end") — this one asks "is the line's last character inside one",
-    which is what the backslash-continuation join in `py_tokenize` needs to know.
-    Same escape rule, so the two cannot disagree: a backslash consumes the NEXT
-    character, and a backslash at the very end of the line therefore consumes
-    the line break that follows it, leaving the line still inside its string.
+    OPENS at `i` end") — this one asks "which literal is the line's last
+    character inside", which is what the backslash-continuation join in
+    `py_tokenize` needs to know. Same escape rule, so the two cannot disagree: a
+    backslash consumes the NEXT character, and a backslash at the very end of
+    the line therefore consumes the line break that follows it, leaving the
+    line still inside its string.
+
+    The answer is a position rather than a bool because the join has a second
+    question to ask about that literal — is it RAW? — and that needs the quote,
+    not a yes/no. Both are answered from this one scanner so they cannot
+    disagree; see `_is_raw_literal_at`.
 
     A backtick string is skipped as an opaque unit and is NOT reported as being
     inside: it has no backslash escape, so a trailing backslash in one is not a
     continuation and the join must keep treating it as one (the pre-existing
     behaviour for that spelling, unchanged).
 
-    Only single-quoted literals can reach `True`. `py_tokenize` replaces
+    Only single-quoted literals can reach a position. `py_tokenize` replaces
     triple-quoted spans with placeholder names before this is consulted, and a
     single-quoted literal cannot hold a raw newline, so a line can only end
     inside one by way of the backslash-newline pair this function exists for.
@@ -1282,17 +1289,19 @@ def _ends_inside_string(line: str) -> bool:
     i = 0
     n = len(line)
     delim = None
+    open_at = -1
     while i < n:
         c = line[i]
         if delim is None:
             if c == '`':
                 j = line.find('`', i + 1)
                 if j < 0:
-                    return False
+                    return -1
                 i = j + 1
                 continue
             if c in ('"', "'"):
                 delim = c * 3 if line.startswith(c * 3, i) else c
+                open_at = i
                 i += len(delim)
                 continue
             i += 1
@@ -1303,9 +1312,96 @@ def _ends_inside_string(line: str) -> bool:
         if line.startswith(delim, i):
             i += len(delim)
             delim = None
+            open_at = -1
             continue
         i += 1
-    return delim is not None
+    return open_at if delim is not None else -1
+
+
+def _ends_inside_string(line: str) -> bool:
+    """True when `line` stops part-way through an unterminated string literal.
+
+    A question about `_unterminated_quote_pos`'s answer, kept as its own name for
+    the callers that only need the yes/no.
+    """
+    return _unterminated_quote_pos(line) >= 0
+
+
+def _is_raw_literal_at(line: str, quote_pos: int) -> bool:
+    r"""True when the literal whose opening quote is at `quote_pos` in `line` is
+    raw — i.e. its prefix carries `r`/`R`, so nothing in it is an escape.
+
+    What a backslash-newline pair is worth inside a literal is CPython's rule,
+    measured rather than inferred (see the `CONTINUATIONS` table in
+    test_string_literal_lexing.py): DELETED unless the literal is raw, where the
+    pair is content. So this is the one question that decides whether the join
+    may delete the pair, and the prefix is read with `_string_prefix_start` —
+    the same helper `replace_multiline_strings` and `_process_nested_tstrings`
+    use, which already knows that a prefix letter must not be the tail of a
+    longer identifier (`self.r` before `.format("...")` is not a raw prefix).
+    """
+    if quote_pos < 0:
+        return False
+    prefix = line[_string_prefix_start(line, quote_pos):quote_pos]
+    return 'r' in prefix or 'R' in prefix
+
+# The marker a placeholder carries when it stands for a backslash-newline pair
+# this join KEPT inside a raw literal, as opposed to a triple-quoted span
+# `replace_multiline_strings` collapsed. Deliberately a namespace of its own:
+# these two are substituted from two different caches into two different token
+# shapes, and sharing a marker would make every docstring that NAMES the scheme
+# (`__MOJO_STR_<n>__`, spelled in prose throughout this file) a live collision —
+# measured, not theoretical: with one shared marker, this file's own module
+# docstring was substituted into the middle of another docstring that mentioned
+# the placeholder name, because the two happened to share an index.
+_CONT_PLACEHOLDER = "__MOJO_CONT_"
+
+
+def _substitute_str_placeholders(value: str, cache: dict) -> str:
+    r"""Put back every continuation placeholder that landed INSIDE a STRING
+    token's value, from `cache`.
+
+    The other arm of this — `if kind == "NAME" and val in string_cache` — can
+    only fire for a placeholder that occupies a token by itself, which is all a
+    triple-quoted span ever produced. A raw literal's kept line continuation is
+    the first shape where a placeholder lands in the middle of another token:
+    `r"a\<nl>b"` joins to `r"a__MOJO_CONT_0__b"`, one STRING token, and what
+    stands in for the pair is the line break alone. So the value that reaches
+    the parser is this path's byte-exact content either way, with the pair kept
+    because the literal is raw — which is CPython's answer, and the reason the
+    join cannot simply delete the pair.
+
+    A continuation placeholder is always inside the literal it belongs to (the
+    join writes it where the backslash was, and `_unterminated_quote_pos` has
+    already established that the backslash is inside one), so it can only ever
+    appear inside a STRING token and needs no arm of its own above.
+
+    A name under the marker that is not in `cache` is left exactly as written,
+    so source that spells one in a string keeps that text.
+    """
+    if _CONT_PLACEHOLDER not in value:
+        return value
+    out = []
+    i = 0
+    n = len(value)
+    while i < n:
+        j = value.find(_CONT_PLACEHOLDER, i)
+        if j < 0:
+            out.append(value[i:])
+            break
+        name_end = value.find('__', j + len(_CONT_PLACEHOLDER))
+        if name_end < 0:
+            out.append(value[i:])
+            break
+        name = value[j:name_end + 2]
+        if name in cache:
+            out.append(value[i:j])
+            out.append(cache[name])
+            i = name_end + 2
+        else:
+            out.append(value[i:j + len(_CONT_PLACEHOLDER)])
+            i = j + len(_CONT_PLACEHOLDER)
+    return ''.join(out)
 
 def _src_loc(src: str, pos: int, filename: str = "") -> str:
     """gcc-style `file:line:col: ` prefix for a diagnostic about `src[pos]`.
@@ -1333,6 +1429,10 @@ def py_tokenize(src: str, filename: str = "") -> list[Token]:
     diagnostic; omit it and the message carries `line:col:` alone."""
     import re
     string_cache = {}
+    # Kept pairs from the backslash join below, restored into the STRING token
+    # that contains them — a cache of its own, for the reason spelled out at
+    # `_CONT_PLACEHOLDER`.
+    continuation_cache = {}
     string_idx = [0]
     def replace_multiline_strings(src):
         # A single-pass, quote-nesting-aware scan — NOT a blind regex search
@@ -1523,12 +1623,14 @@ def py_tokenize(src: str, filename: str = "") -> list[Token]:
     # What the pair is worth is CPython's own rule, measured with `tokenize`
     # rather than inferred: the STRING token's TEXT is `'"a\\nb"'` for
     # `"a\<nl>b"` and `'r"a\\\nb"'` for `r"a\<nl>b"` — deleted unless the
-    # literal is raw. This join deletes it unconditionally, which is right for
-    # three of the four shapes and wrong for a raw single-quoted literal, where
-    # CPython keeps the pair as content. That one is pinned with its exact next
-    # step in bugs/CODEGEN_backslash_continuation_in_a_raw_literal.md; the
-    # triple-quoted shapes are placeholdered before this pass runs and so are
-    # untouched by it either way.
+    # literal is raw. So the raw case is NOT a deletion, and it cannot be one
+    # here: a value reaches the token stream with a newline in it only through
+    # the placeholder `replace_multiline_strings` builds, and this pass runs
+    # after it. Hence the placeholder written below, holding the two characters
+    # the source wrote and substituted back out of the STRING token's own value
+    # by `_substitute_str_placeholders`. The triple-quoted shapes are
+    # placeholdered before this pass runs and so are untouched by it either way
+    # — `r"""a\<nl>b"""` already keeps the pair, which is CPython's answer.
     joined = []
     line_nums = []  # track physical line number (1-based) for each logical line
     i = 0
@@ -1537,8 +1639,20 @@ def py_tokenize(src: str, filename: str = "") -> list[Token]:
         line = raw_lines[i]
         while line.rstrip().endswith('\\'):
             stripped = line.rstrip()
-            inside = _ends_inside_string(stripped)
-            line = stripped[:-1]  # strip the backslash
+            quote_pos = _unterminated_quote_pos(stripped)
+            inside = quote_pos >= 0
+            if inside and _is_raw_literal_at(stripped, quote_pos):
+                # The pair is CONTENT in a raw literal, so the backslash stays
+                # where the source wrote it and only the line break has to be
+                # carried across — as a placeholder, because nothing else in
+                # this pass can hand a newline to the token stream. A cache of
+                # its own, restored into the STRING token's own value below.
+                placeholder = f"{_CONT_PLACEHOLDER}{string_idx[0]}__"
+                continuation_cache[placeholder] = "\n"
+                string_idx[0] += 1
+                line = stripped + placeholder
+            else:
+                line = stripped[:-1]  # strip the backslash
             i += 1
             if i < len(raw_lines):
                 nxt = raw_lines[i] if inside else raw_lines[i].lstrip()
@@ -1588,6 +1702,11 @@ def py_tokenize(src: str, filename: str = "") -> list[Token]:
                 if kind == "NAME" and val in string_cache:
                     val = string_cache[val]
                     kind = "STRING"
+                # …and the placeholders that landed INSIDE one: a raw literal's
+                # line continuation is kept as content, and a content value can
+                # only carry a newline through a placeholder.
+                if kind == "STRING":
+                    val = _substitute_str_placeholders(val, continuation_cache)
                 # Track paren/bracket/brace depth to suppress INDENT/NEWLINE inside
                 if kind in ("LPAREN", "LBRACKET", "LBRACE") or val in ("(", "[", "{"): paren_depth += 1
                 elif kind in ("RPAREN", "RBRACKET", "RBRACE") or val in (")", "]", "}"): paren_depth = max(0, paren_depth - 1)
