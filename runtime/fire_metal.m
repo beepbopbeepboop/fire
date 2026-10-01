@@ -13,6 +13,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/time.h>
 
 /* Device-side singletons. `g_ready` guards init so a dispatch from any
  * thread, or a second dispatch, is a no-op check rather than a second
@@ -89,6 +90,84 @@ int mojo_metal_init(const char *msl_source) {
  * earlier version counted at the success tail only, which meant every one of
  * the failure paths (no device, no library, no function, no pipeline, OOM,
  * encoder failure) silently reported zero failures. */
+/* Device buffers, reused across calls, keyed by ARGUMENT SLOT.
+ *
+ * `newBufferWithBytes:` was called once per buffer per call -- at 512x512x4096
+ * that is two 8 MB allocations and copies every iteration, for data that is
+ * usually the SAME data every iteration. Allocating and freeing that repeatedly
+ * is most of why the offload path moved bytes at ~1 GB/s while a plain memcpy on
+ * the same machine manages ~10.
+ *
+ * Keyed by slot, not by size. The buffer at index `bi` is the same ROLE on every
+ * call (A is A, C is C), and the generated wrapper always passes them in the
+ * same order, so a role-keyed cache hits where a size-keyed one would thrash
+ * between two shapes. Grow-only: a smaller request reuses the larger buffer and
+ * uses a prefix of it.
+ *
+ * CORRECTNESS does not depend on the host data being unchanged, because the
+ * host bytes are memcpy'd in on EVERY call. The cache only removes the
+ * allocation, never the upload. That distinction is the whole safety argument:
+ * a cache that skipped the upload would need to know the host buffer had not
+ * been written, and nothing here can know that.
+ *
+ * A stale-but-correct buffer is still a hazard in one direction: a previous
+ * call may have left MORE live elements than this one uploads, so a kernel that
+ * read past `sizes[bi]` would see old data instead of nothing. Bounds are
+ * checked against the m/k/n scalars, which are re-uploaded every call, so that
+ * cannot happen -- but it is why the sizes are not cached alongside.
+ *
+ * Retention is bounded two ways: _MG_BUF_MAX slots, and _MG_BUF_TOTAL bytes.
+ * Past the byte cap we stop caching and allocate per call, which is no worse
+ * than the behaviour this replaced.
+ *
+ * Not thread-safe. Neither is the rest of this file: g_dispatches and the
+ * pipeline cache below are plain statics mutated without a lock, and this
+ * runtime has always been called from the one thread that owns the device.
+ */
+#define _MG_BUF_MAX 16
+#define _MG_BUF_TOTAL (256u << 20)
+#define _MG_SCAL_OFF _MG_BUF_MAX
+#define _MG_BUF_SLOTS (_MG_BUF_MAX * 2)
+static id<MTLBuffer> g_buf[_MG_BUF_SLOTS] __attribute__((unused));
+static NSUInteger g_buf_len[_MG_BUF_SLOTS] __attribute__((unused));
+static size_t g_buf_total __attribute__((unused));
+static int64_t g_buf_hits, g_buf_misses __attribute__((unused));
+
+static id<MTLBuffer> _mg_upload(id<MTLDevice> dev, const void *host,
+                                NSUInteger nbytes, int slot) {
+    if (slot >= 0 && slot < _MG_BUF_MAX) {
+        if (g_buf[slot] && g_buf_len[slot] >= nbytes) {
+            g_buf_hits++;
+            /* The upload happens whether or not the buffer was reused -- that
+             * is what makes a hit safe. */
+            if (nbytes) memcpy([g_buf[slot] contents], host, nbytes);
+            return g_buf[slot];
+        }
+        g_buf_misses++;
+        if (g_buf[slot]) {
+            g_buf_total -= g_buf_len[slot];
+            g_buf[slot] = nil;      /* ARC releases the old one */
+        }
+        /* Only adopt the new one if the cache is not already over its cap. */
+        if (g_buf_total + nbytes <= _MG_BUF_TOTAL) {
+            id<MTLBuffer> b = [dev newBufferWithLength:nbytes
+                options:MTLResourceStorageModeShared];
+            if (b) {
+                if (nbytes) memcpy([b contents], host, nbytes);
+                g_buf[slot] = b;
+                g_buf_len[slot] = nbytes;
+                g_buf_total += nbytes;
+                return b;
+            }
+            g_buf[slot] = nil;
+            g_buf_len[slot] = 0;
+        }
+    }
+    /* Uncached path, and the fallback when the cap is hit. */
+    return [dev newBufferWithBytes:host length:nbytes
+        options:MTLResourceStorageModeShared];
+}
+
 /* Pipeline states, cached by kernel name.
  *
  * Creating one is NOT free: `newComputePipelineStateWithFunction:` asks the
@@ -157,8 +236,26 @@ static int mojo_metal_dispatch_impl(const char *kernel_name,
         return 0;
     }
     @autoreleasepool {
+        const int _mg_tr = getenv("MOJO_GEMM_TRACE") != NULL;
+        double _mg_t[8]; int _mg_i = 0;
+        double _mg_up = 0, _mg_bind = 0;
+        #define MG_NOW() ({ struct timeval _tv; gettimeofday(&_tv, 0); \
+            (double)_tv.tv_sec * 1e6 + (double)_tv.tv_usec; })
+        #define MG_BUMP(acc) do { if (_mg_tr) { double _n = MG_NOW(); \
+            acc += _n - _mg_last; _mg_last = _n; } } while (0)
+        double _mg_last = 0;
+        #define MG_TICK() do { if (_mg_tr) { struct timeval _tv; \
+            gettimeofday(&_tv, 0); \
+            _mg_t[_mg_i++] = (double)_tv.tv_sec * 1e6 + (double)_tv.tv_usec; \
+        } } while (0)
+        #define MG_MARK(i) do { if (_mg_tr) { struct timeval _tv; \
+            gettimeofday(&_tv, 0); \
+            _mg_t[(i)] = (double)_tv.tv_sec * 1e6 + (double)_tv.tv_usec; \
+        } } while (0)
+        MG_TICK(); _mg_last = MG_NOW();
         id<MTLFunction> fn = [g_lib newFunctionWithName:
                               [NSString stringWithUTF8String:kernel_name]];
+        MG_MARK(1);
         if (!fn) {
             _set_error("no kernel named '%s' in the compiled library", kernel_name);
             return 0;
@@ -169,6 +266,7 @@ static int mojo_metal_dispatch_impl(const char *kernel_name,
     if (getenv("MOJO_GEMM_TRACE"))
         fprintf(stderr, "[mg] %s ps_hits=%lld ps_misses=%lld\n", kernel_name,
                 (long long)g_ps_hits, (long long)g_ps_misses);
+        MG_MARK(2);
         id<MTLBuffer> __strong *devbufs = NULL;
         if (n_bufs > 0) {
             devbufs = (id<MTLBuffer> __strong *)
@@ -194,21 +292,51 @@ static int mojo_metal_dispatch_impl(const char *kernel_name,
             BOOL is_buffer = (bi < n_bufs);
             if (is_buffer) {
                 int64_t n = sizes ? sizes[bi] : 0;
-                id<MTLBuffer> db = [g_device newBufferWithBytes:bufs[bi]
-                    length:(NSUInteger)(n * (int64_t)sizeof(float))
-                    options:MTLResourceStorageModeShared];
+                NSUInteger nbytes = (NSUInteger)(n * (int64_t)sizeof(float));
+                id<MTLBuffer> db = _mg_upload(g_device, bufs[bi], nbytes,
+                                              (int)bi);
+                MG_BUMP(_mg_up);
                 if (!db) {
                     _set_error("buffer %lld allocation failed", (long long)bi);
                     goto fail;
                 }
                 [enc setBuffer:db offset:0 atIndex:(NSUInteger)bi];
+                MG_BUMP(_mg_bind);
                 devbufs[bi] = db;
             } else {
                 int64_t si = bi - n_bufs;
                 NSUInteger w = widths ? widths[si] : (NSUInteger)sizeof(int64_t);
                 if (w == 0) w = (NSUInteger)sizeof(int64_t);
-                id<MTLBuffer> db = [g_device newBufferWithLength:w
-                    options:MTLResourceStorageModeShared];
+                /* Cached like the data buffers, and for the same reason. This
+                 * was the whole fixed per-dispatch cost: phase timing showed
+                 * ~190 us in bind+upload for a 12 KB payload, and a 12 KB
+                 * memcpy is ~1 us, so the time was never the copying. A GEMM
+                 * has three scalars (m, k, n) and each was a fresh
+                 * `newBufferWithLength:` on every single call -- three MTLBuffer
+                 * allocations to hold 4 bytes each. MTLBuffer allocation is
+                 * not free and this was paying it 3x per dispatch to pass three
+                 * integers.
+                 *
+                 * Keyed by scalar slot and grow-only, like the data buffers, and
+                 * the value is still written on every call -- the cache removes
+                 * the allocation, never the store. */
+                id<MTLBuffer> db = NULL;
+                int _s = (int)si;
+                if (_s >= 0 && _s < _MG_BUF_MAX && g_buf[_MG_SCAL_OFF + _s]
+                        && g_buf_len[_MG_SCAL_OFF + _s] >= w) {
+                    g_buf_hits++;
+                    db = g_buf[_MG_SCAL_OFF + _s];
+                } else {
+                    g_buf_misses++;
+                    db = [g_device newBufferWithLength:w
+                        options:MTLResourceStorageModeShared];
+                    if (db && _s >= 0 && _s < _MG_BUF_MAX
+                        && g_buf_total + w <= _MG_BUF_TOTAL) {
+                        g_buf[_MG_SCAL_OFF + _s] = db;
+                        g_buf_len[_MG_SCAL_OFF + _s] = w;
+                        g_buf_total += w;
+                    }
+                }
                 if (!db) {
                     _set_error("scalar %lld allocation failed", (long long)si);
                     goto fail;
@@ -218,6 +346,7 @@ static int mojo_metal_dispatch_impl(const char *kernel_name,
                 else
                     memset([db contents], 0, w);
                 [enc setBuffer:db offset:0 atIndex:(NSUInteger)bi];
+                MG_BUMP(_mg_bind);
             }
         }
         /* The grid has to cover the whole output. Kernels in this tree guard
@@ -248,16 +377,21 @@ static int mojo_metal_dispatch_impl(const char *kernel_name,
         if (tg == 0) tg = 1;
         NSUInteger use = nthreads > 0 ? (NSUInteger)nthreads : tptg;
         if (use > tptg) use = tptg;
+        MG_MARK(3);
         [enc dispatchThreadgroups:MTLSizeMake(tg, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(use, 1, 1)];
+        MG_MARK(4);
         [enc endEncoding];
         [cb commit];
+        MG_MARK(5);
         [cb waitUntilCompleted];
+        MG_MARK(6);
         if (cb.error) {
             _set_error("dispatch of '%s' failed: %s", kernel_name,
                        cb.error.description.UTF8String);
             return 0;
         }
+        MG_MARK(7);
         /* Copy back only the buffers the kernel could have WRITTEN, so the
          * caller's arrays hold the result.
          *
@@ -277,6 +411,20 @@ static int mojo_metal_dispatch_impl(const char *kernel_name,
             if (devbufs[i] && (!writable || writable[i]))
                 memcpy(bufs[i], [devbufs[i] contents],
                        (size_t)(n * (int64_t)sizeof(float)));
+        }
+        MG_MARK(6);
+        if (_mg_tr) {
+            static int64_t _mg_n = 0;
+            if ((++_mg_n % 200) == 0) {
+                fprintf(stderr, "[mg] %-22s fn %4.0f  pipe %4.0f  "
+                        "bind %5.0f  dispatch %6.0f  commit %5.0f  wait %6.0f  "
+                        "copybk %5.0f  TOTAL %6.0f us\n",
+                        kernel_name,
+                        _mg_t[1] - _mg_t[0], _mg_t[2] - _mg_t[1],
+                        _mg_t[3] - _mg_t[2], _mg_t[4] - _mg_t[3],
+                        _mg_t[5] - _mg_t[4], _mg_t[6] - _mg_t[5],
+                        _mg_t[7] - _mg_t[6], _mg_t[7] - _mg_t[0]);
+            }
         }
         free(devbufs);
         return 1;
