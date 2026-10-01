@@ -25,8 +25,10 @@ otherwise. A file's terminal cause is the FIRST refusal the build's walk
 reaches, so a module is typically behind a stack of two to four of them, and
 fixing one moves the file to the next with the count unchanged. Two causes were
 measured this way on 2026-09-30 and BOTH had a ceiling of zero files — see
-`bugs/FORMAL_sweep_work_map_2026-09-30.md` §3. Nothing here can tell you a
-cause's real value; only re-sweeping the files it blocks can.
+`bugs/FORMAL_sweep_work_map_2026-09-30.md` §3. The current map, which every
+number below comes from, is `bugs/FORMAL_sweep_work_map_2026-09-30_r2.md`.
+Nothing here can tell you a cause's real value; only re-sweeping the files it
+blocks can.
 
 THE MARKERS ARE AND-WITHIN / OR-WITHIN, and both halves are load-bearing
 -------------------------------------------------------------------------
@@ -58,6 +60,28 @@ load-bearing: `callee has no definition on this path` is asked before
 `receiver passed at argument position 0` (they share `… is passed to …`, and
 asking the other way round puts 12 findings in the wrong column), and
 `frame address passed where a value is wanted` is asked before the same pair.
+
+A MARKER IS A CONTRACT WITH A MESSAGE THAT CAN BE REWORDED, and breaking it is
+invisible from here
+-----------------------------------------------------------------------------
+A marker is a quoted substring of a message `formal/` owns. When a worker
+rewords that message — which is a routine improvement, and a good one — every
+cause keyed on the old wording silently drops to zero and its files fall into
+`other refusal`, which is the bucket that means "this tool has not classified
+this". That is the quiet failure mode again, one level up: nothing raises, the
+table still sums to the total, and the number that changed is the number a
+planner would act on. It happened here for real between the two 2026-09-30
+sweeps: `formal-module-attr` reworded `… so it is a module-level name of
+another module` into `… and it is a module-level name of another module`, and
+4 findings walked out of that row into `other refusal` with nothing to show
+for it.
+
+So this table lists BOTH wordings where a message has had one, and — the part
+that keeps doing it from happening again — `test_formal_sweep.py` asserts that
+every marker matches at least one refusal the sweep actually produced, by
+building the message from `formal/`'s own text rather than from a copy in the
+test. A reword that breaks a marker fails a test instead of quietly moving a
+column.
 
     python3 tools/formal_sweep_causes.py .tmp/sweep.log          # the table
     python3 tools/formal_sweep_causes.py --json .tmp/sweep.log   # machine-readable
@@ -126,6 +150,15 @@ CAUSES = (
       ("__mlir_op is an MLIR dialect construct",))),
     ("inlined_assembly (a gimple-C runtime construct)",
      (("inlined_assembly:",),)),
+    # ABOVE the broad `has no representation` cause below, and it has to be:
+    # `model.multi_index_refusal` ENDS with "so a tuple index has no
+    # representation on this path", so a multi-index message satisfies both and
+    # first match wins. Asked the other way round this cause collects nothing
+    # forever and nothing says so — the precedence failure this file's sibling
+    # test (`test_refusal_taxonomy.py`) exists to catch, in the table that
+    # ranks the causes rather than the one that summarises them.
+    ("multi-index subscript",
+     (("is a subscript whose index is a tuple",),)),
     ("value with no representation on this path",
      (("has no representation on this path",),
       ("has no representation for",))),
@@ -151,7 +184,12 @@ CAUSES = (
     ("a module-global name has no storage",
      (("is bound at module level, and this path has no module-global storage",),)),
     ("a module-level name of ANOTHER module is not exported as a word",
-     (("so it is a module-level name of another module",),)),
+     # TWO wordings, because the message has been reworded once and the
+     # earlier wording is what the 2026-09-30 sweep log still contains — the
+     # log is an artifact, so a table that only knows the new wording silently
+     # reads an old log as `other refusal`. See the module docstring.
+     (("so it is a module-level name of another module",),
+      ("and it is a module-level name of another module",))),
 
     # ── the frame / receiver families. The by-reference receiver design, and
     #    each of these is one of its bands. ──
@@ -193,6 +231,14 @@ CAUSES = (
      (("does not match its fields",),)),
     ("a `...` body: no instructions to emit",
      (("stands where this path needs instructions",),)),
+    # 37 files on the 2026-09-30 r2 sweep, and 36 of them are ONE stdlib host
+    # module refusing on ONE comparison — the largest single construct in the
+    # whole table, and it was in `other refusal` until this marker existed.
+    # `other refusal` is the bucket that means "unclassified", so a construct
+    # this large sitting in it is not a rounding error in a reader's
+    # judgement; it is the tool declining to do the one job it exists for.
+    ("`==` between two values whose kind no call site established",
+     (("compares two values this path can only call numbers",),)),
     ("print() cannot classify the argument's type",
      (("cannot tell whether",),)),
     ("len() of a value that has no length",
@@ -207,12 +253,22 @@ CAUSES = (
      (("does not fold to a compile-time constant",),)),
     ("variadic call has no ABI",
      (("has no variadic ABI",),)),
-    ("multi-index subscript",
-     (("multi-index subscript",),)),
-    ("unimplemented intrinsic",
-     (("unimplemented intrinsic",),)),
+    # (`unimplemented intrinsic` was a cause here until 2026-09-30 r2, and it
+    # was DEAD twice over: its marker was the FAMILY NAME from
+    # `formal_sweep.py`'s `_REFUSAL_FAMILIES` rather than anything a message
+    # contains — no message anywhere in the tree says "unimplemented
+    # intrinsic" — and the message it was written for is the `...`-body
+    # refusal three entries above. A duplicate with a dead marker is worse
+    # than no row: it reads as a cause that blocks nothing, which is
+    # indistinguishable from a cause nothing is blocked by.)
     ("method call on a value receiver is not one of the lowered methods",
      (("lowers only append, close, write",),)),
+    # 3 files, and below the 5-file bar a cause has to clear to be worth a
+    # row — but it has a bug doc of its own
+    # (`bugs/FORMAL_none_is_not_a_literal.md`), and a cause with a doc and no
+    # marker is a cause nobody can find from the table.
+    ("a class-level default is the NAME `None`",
+     (("is a NAME rather than a literal",),)),
 )
 
 def _check_cause_shape():
@@ -355,7 +411,7 @@ def main():
         print("FILES BLOCKED IS AN UPPER BOUND: a file's terminal cause is the "
               "first refusal reached,\nso fixing one usually moves it to the "
               "next. Measure a cause's real value by\nre-sweeping the files it "
-              "blocks — see bugs/FORMAL_sweep_work_map_2026-09-30.md §3.")
+              "blocks — see bugs/FORMAL_sweep_work_map_2026-09-30_r2.md.")
     return 0
 
 

@@ -1,5 +1,23 @@
 # FORMAL_sweep_work_map_2026-09-30: the formal backend's coverage, re-measured on current master and ranked by TERMINAL cause
 
+> **SUPERSEDED for planning by `FORMAL_sweep_work_map_2026-09-30_r2.md`**
+> (same day, `f378280d`, 637 files). Nothing below is wrong — the §3 ceiling
+> measurements are measurements and three documents cite them — but three of its
+> numbers no longer describe the tree, and the r2 map says which:
+>
+> * **`type-name-as-value` 41 → 4.** `5536f17b` landed it. The 35 files it moved
+>   are now counted under `module exports no public functions`, which went 3 → 38
+>   and is the second-largest cause on the tree. §3.1 predicted exactly this.
+> * **`other refusal` 32 → 4**, and one cause of 37 files was extracted from it
+>   (argparse's one comparison) which **had no row in the table at all**.
+> * **§4's per-module host-import split cannot be diffed** against r2's: its
+>   rows sum to 175 against its own stated 176, and it omits `importlib` (38
+>   files) and `zlib` (5). It was a partial list; r2's is a census.
+>
+> Also: the pass count was **112 on both sweeps**, and the reason is not that
+> nothing landed — 88 commits of finished formal work sit in unintegrated
+> branches, and eight of the twelve causes above 5 files are owned by them.
+
 **Measured 2026-09-30 on `24f96604` (master), arm64, the tool's default scope**
 (this repo + `../modular/mojo/stdlib/std`). Replaces the sweep snapshot the
 earlier workers planned from, which predates the `os`/`sys`/`struct`/

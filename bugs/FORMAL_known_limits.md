@@ -221,6 +221,42 @@ symbol is advertised (`test_every_defined_entry_point_is_advertised`). The
 first held while the table named 30 of 459, because the other 429 were dropped
 rather than advertised wrongly; only the second makes a regression red.
 
+## 1.1a Re-audited 2026-09-30: the family is 38 files and 9 terminal modules, and `binary_heap.mojo` is 35 of them
+
+The 2026-09-27 audit above measured this family at 30 files across 8 terminal
+modules. It is now **38 across 9**, and the new member is not a small one:
+
+| terminal module | files | what the file actually declares | verdict |
+|---|---|---|---|
+| `std/collections/binary_heap.mojo` | **35** | one `struct BinaryHeap[T: …]` — a generic struct template and nothing else | **true limit**, measured the same way as the eight above |
+
+Measured with the same two functions, on this tree:
+
+```
+std/collections/binary_heap.mojo        exports: []   exclusions={'BinaryHeap': 'generic-template'}
+std/stat/stat.mojo                      exports: []   exclusions={'S_ISLNK': …, all 'generic-template'}
+std/sys/_assembly.mojo                  exports: []   exclusions={'inlined_assembly': 'generic-template'}
+```
+
+(`formal.build._export_entries` + `reflect.export_exclusions` — the same pair the
+table above measured with, and the same rule: a generic template has no single
+boundary layout, so `doc/ABI.md` excludes it and an importer has nothing to
+bind.)
+
+**Why it was invisible for a week, which is the part worth keeping.**
+`binary_heap.mojo` did not fail at the export gate until `5536f17b` ("a type
+APPLICATION is not a type value") landed: before it, `BinaryHeap`'s own
+`List[Self.T]()` refused first, so every one of its 35 importers was counted
+under a different cause entirely and this family read 3 files. **A family's size
+is a function of how far the walk gets before it reaches the question**, so a
+row in this document can be an order of magnitude out of date without anything
+being wrong — the audit table is a measurement of a walk's progress as much as
+of a module's shape. The re-measurement is
+`bugs/FORMAL_sweep_work_map_2026-09-30_r2.md` §3.2, and it notes what is NOT
+available: with the 35 files behind it, this family is now the largest single
+cause on the tree that nobody owns, and its ceiling is Stage 5 (§1.2), not a
+bug.
+
 
 ## 1.2 What would close it, and what it costs
 
