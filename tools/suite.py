@@ -2096,16 +2096,25 @@ test('formal-hashlib', [PY, 'test_formal_hashlib.py'], mem='tiny',
 #
 # RED, and registered red rather than excused — the estate check's own rule,
 # and the reason it exists: a declared red is a report and an unrun red is
-# silence. 2 of 148, and the next step is written down in
+# silence. 2 of 154, and the next step is written down in
 # bugs/FORMAL_struct_pack_over_eight_arguments.md: `pack(fmt, v0..v7)` is a
 # 9-argument call, and a formal arm64 call is limited to the 8 its ABI passes
 # in registers, so the call is refused before `struct.mojo`'s own "return an
 # empty list" decline can happen.
 #
 # `proofs` and not `check` for a reason the solo number hides: 43 s alone, and
-# 201 s measured in a `-j4` run beside the other seven (it is 148 checks, most
+# 201 s measured in a `-j4` run beside the other seven (it is 154 checks, most
 # of them a build). A job's cost in a bucket is its cost beside the others, and
 # that is the number the everyday loop would have paid.
+#
+# 154 and not 148 because `test_struct_formal.py` now carries a harness
+# self-test (`test_the_harness_records_a_case_even_when_it_cannot_pass`, six
+# checks, one of them a real build). It is there because the file's own total
+# used to move with its own verdicts — 122, 127, 144, 145, 147, 148 across six
+# runs of one tree — which is a suite a reader learns to re-run, and a re-run
+# that comes back green is not evidence. Every case now costs a fixed number of
+# checks whatever happened to it, so the denominator is a function of the cases
+# and the two declared failures stay the only two.
 test('formal-struct', [PY, 'test_struct_formal.py'], mem='tiny',
      deps=['preflight'],
      expect='bugs/FORMAL_struct_pack_over_eight_arguments.md — a formal arm64 '

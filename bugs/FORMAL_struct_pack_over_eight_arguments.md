@@ -4,7 +4,10 @@
 
 OPEN — found 2026-09-30 while registering `test_struct_formal.py` (it was
 named by no spec and in no bucket; it is now `formal-struct`, in `proofs`,
-declared red with `expect=`). **2 of 148 checks fail, on arm64.**
+declared red with `expect=`). **2 of 154 checks fail, on arm64** — 148 cases
+plus the six the harness self-test added, so the count is a function of the
+CASES rather than of the verdicts (see
+`bugs/CODEGEN_test_struct_formal_is_flaky.md`, which is why).
 
 ## What is believed
 

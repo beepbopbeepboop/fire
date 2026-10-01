@@ -172,7 +172,7 @@ investigation. Read it with the threshold from CLAUDE.md: over ~4 GB (the
 | `nested-async-generic` | unmeasured | `small` 8 GB | **no bucket** | not recorded | none needed — leave it. |
 | `coro-detached-async` | unmeasured | `small` 8 GB | **no bucket** | not recorded | none needed — leave it. |
 | `async-runtime-scaffold` | unmeasured | `small` 8 GB | **no bucket** | not recorded | none needed — leave it. |
-| `formal-struct` | 0.08 GB | `tiny` 4 GB | `proofs` | 43 s alone, 201 s beside the other seven | **leave it as `expect=`.** 0.08 GB is two hundredths of the 4 GB line, so by the stated threshold this is the cheap side and the anti-rot is worth more than the saving. 2 of 148 cases; `bugs/FORMAL_struct_pack_over_eight_arguments.md` has the next step. |
+| `formal-struct` | 0.08 GB | `tiny` 4 GB | `proofs` | 43 s alone, 201 s beside the other seven | **leave it as `expect=`.** 0.08 GB is two hundredths of the 4 GB line, so by the stated threshold this is the cheap side and the anti-rot is worth more than the saving. 2 of 154 cases; `bugs/FORMAL_struct_pack_over_eight_arguments.md` has the next step. |
 | `formal-toplevel` | 0.04 GB | `tiny` 4 GB | `proofs` | not recorded (70 checks) | **leave it as `expect=`.** Same reasoning — and its doc records the *opposite* of the marker now (`bugs/FORMAL_toplevel_body_struct_construction_no_longer_refused.md`: a case that builds where it asserted a refusal), so the burst of "marked expect=… but it PASSES" is exactly what should surface. |
 | `formal-module-attr` | 0.07 GB | `tiny` 4 GB | `proofs` | 10.3 s | **leave it as `expect=`.** Same reasoning; 1 of 11, and both halves of it are in `bugs/FORMAL_bracketed_call_to_a_private_name_is_refused_as_a_dangling_symbol.md`. |
 
