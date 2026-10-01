@@ -3584,11 +3584,13 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
             # only its INNER names get declared, as boxed int64_t (the
             # assignment recursion below reads the slot as an opaque
             # boxed pair; mirrors _gen_for_list's identical convention).
-            if vn.startswith('(') and vn.endswith(')'):
-                for _nv in _split_top_level_comma(vn[1:-1].strip()):
-                    _declare_target_name(_nv, 'int64_t')
-            else:
-                gen._declare_var(vn, se)
+            # Declares only: it appends to nothing, because a nested closure
+            # that mutates a captured list is the shape that has broken this
+            # compiler's own self-host before (see `replace_multiline_strings`
+            # in fire_compiler.py for the instance and the reason). The caller
+            # below owns the shadow bookkeeping.
+            for _bn in _compr_target_leaf_names(vn):
+                gen._declare_var(_bn, se)
 
         # index walk + `_as_str` — NOT `for vn, se in zip(var_names,
         # slot_elems)`: the zip 2-tuple unpack boxes both slots on the
@@ -3596,10 +3598,17 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         # and `mojo_str_cat` in the decl builder ran `strlen()` on
         # garbage (a hard segfault on the single-TU `--dump
         # myinterpreter.py`, in a list comprehension with a tuple target).
+        saved_slots = []
         for _czi in range(len(var_names)):
             _cvn = _as_str(var_names[_czi])
             _cse = _as_str(slot_elems[_czi]) if _czi < len(slot_elems) else 'int64_t'
             _declare_target_name(_cvn, _cse)
+            # Own binding per bound name, exactly as the single-target branch
+            # below: `[(a, b) for a, b in pairs]` shadows BOTH names, and each
+            # one's token is kept so the enclosing function's `a`/`b` come
+            # back when the comprehension ends.
+            for _bn in _compr_target_leaf_names(_cvn):
+                saved_slots.append((_bn, _compr_bind_target(gen, _bn, _cse)))
         len64 = gen._new_val('int64_t', f'mojo_list_len ({_iv})')
         idx64 = gen._new_val('int64_t', '(int64_t)0')
         bb_cond = gen._new_bb(); bb_body = gen._new_bb()
@@ -3664,9 +3673,13 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
         gen._emit(f"  {idx64} = {st};")
         gen._emit(f"  goto {bb_cond};")
         gen._emit_label(bb_after)
+        for _sn, _st in saved_slots:
+            _compr_restore_target(gen, _sn, _st)
         return
     elem = _as_str(gen._elem_of(_iv))
-    gen._declare_var(_as_str(gen0.target), elem)
+    # Own binding — see `_compr_bind_target`. Restored at the end of this
+    # function, below.
+    saved_target = _compr_bind_target(gen, _as_str(gen0.target), elem)
     # FRESH `char *` view of the loop-target C name: `gen0.target` (an AST
     # str field) erases to int64_t on the self-hosted path, so a bare
     # `f'  {gen0.target} = ...'` LVALUE emitted a raw ASLR pointer decimal
@@ -3718,6 +3731,9 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  {idx64} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
+    # The comprehension is over: the enclosing function's own binding for this
+    # name is live again (see `_compr_restore_target`).
+    _compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
 def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
@@ -3856,6 +3872,94 @@ def _compr_target_is_shadowed(gen, target) -> bool:
     unchanged.
     """
     return _as_str(target) in gen.var_types
+
+
+def _compr_target_leaf_names(target_str: str) -> list:
+    """The source names a comprehension target binds, in binding order.
+
+    A parenthesised slot is not itself a variable, so `(a, (b, c))` binds
+    `a`, `b`, `c` and not `(a, (b, c))`. One walk, so the declaration side and
+    the restore side cannot disagree about how many bindings there are or what
+    they are called — the same reason `_gen_for_list`'s per-slot machinery is
+    bracket-aware rather than a `split(',')`.
+    """
+    _t = _as_str(target_str).strip()
+    if _t.startswith('(') and _t.endswith(')'):
+        out = []
+        for _nv in _split_top_level_comma(_t[1:-1].strip()):
+            out.extend(_compr_target_leaf_names(_nv))
+        return out
+    return [_t]
+
+
+def _compr_bind_target(gen, name, ctype):
+    """Declare a comprehension's loop target as a binding of its OWN, and
+    return the token `_compr_restore_target` needs (None when the name was
+    free, so the common case allocates nothing).
+
+    A comprehension's `for` target is a new binding in the comprehension's own
+    scope in every language here, so it can never reuse the enclosing
+    function's C variable for that source name — and when it does, the damage
+    is not subtle. Measured, six lines of plain Python (a `class` lowers to a
+    struct, so the fixture is something CPython can be the oracle for; the
+    regression is `test_gimple_runner.py`'s
+    `comprehension_target_shadows_struct_local`): with a `struct Tok *` local
+    named `t` in scope, `[t for t in names]` re-declared nothing, so the
+    `char *` element was routed through an `(int64_t)` temp into the existing
+    `Tok *` variable and gcc refused the whole program — `assignment to
+    'Tok *' from 'int64_t' makes pointer from integer without a cast`. The same
+    input with `t` an `int64_t` built, ran, and was silently wrong instead.
+
+    So this is the `_declare_var(..., force=True)` the other comprehension
+    lowerings already pass (see `_compr_target_is_shadowed`'s own docstring),
+    applied where it was MISSING: every comprehension whose iterable lowers to
+    a `MojoList *` goes through `_compr_list_loop`, whatever its result kind, so
+    the list/set/dict comprehensions were all reaching the one loop helper that
+    did not shadow.
+    """
+    _n = _as_str(name)
+    if not _compr_target_is_shadowed(gen, _n):
+        gen._declare_var(_n, ctype)
+        return None
+    saved = (gen._c_names.get(_n), gen.var_types.get(_n),
+             _n in gen._elem_types, gen._elem_types.get(_n),
+             _n in gen._actual_types, gen._actual_types.get(_n))
+    gen._declare_var(_n, ctype, force=True)
+    return saved
+
+
+def _compr_restore_target(gen, name, saved):
+    """Undo `_compr_bind_target`'s shadow: put the enclosing function's binding
+    back under that source name.
+
+    Without this the shadow would last until the end of the function, and the
+    comprehension's LAST element would be what every later read of that name
+    sees — trading a loud compile error for a silent wrong answer on
+    `a = [t for t in names]` followed by `t.k`. The C declaration the shadow
+    made is left alone (`_declare_var`'s force branch never touches the old
+    one; it is still valid C, just no longer reachable under that name), and
+    the free-name case restores nothing because nothing was saved.
+    """
+    if saved is None:
+        return
+    _n = _as_str(name)
+    prev_cname, prev_type, had_elem, prev_elem, had_actual, prev_actual = saved
+    if prev_cname is None:
+        gen._c_names.pop(_n, None)
+    else:
+        gen._c_names[_n] = prev_cname
+    gen.var_types[_n] = prev_type
+    if had_elem:
+        gen._elem_types[_n] = prev_elem
+    else:
+        gen._elem_types.pop(_n, None)
+    # `_actual_types` too, because `_emit_slot_assign`'s string branch writes
+    # one for the TARGET name (`gen._actual_types[vn] = 'char *'`), and a later
+    # read of the enclosing binding asks that table what it holds.
+    if had_actual:
+        gen._actual_types[_n] = prev_actual
+    else:
+        gen._actual_types.pop(_n, None)
 
 
 def _compr_set_loop(gen, node, gen0, res, res_type, it_val):

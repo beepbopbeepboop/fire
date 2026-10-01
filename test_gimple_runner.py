@@ -5812,6 +5812,86 @@ def main():
             print(f"FAIL  {name}: compiled {got!r} != CPython {want!r}")
             _FAIL += 1
 
+    # A comprehension's `for` target is a NEW binding in the comprehension's own
+    # scope, so it cannot reuse the enclosing function's C variable for that
+    # name. Every comprehension whose iterable lowers to a `MojoList *` goes
+    # through `_compr_list_loop` (whatever its result kind), and that was the
+    # one comprehension loop helper NOT passing `_declare_var(..., force=True)`
+    # — so the `char *` element was routed through an `(int64_t)` temp into the
+    # existing `struct Tok *` variable and gcc refused the whole program:
+    #
+    #   u.py:10:5: error: assignment to 'Tok *' from 'int64_t' makes pointer
+    #   from integer without a cast [-Wint-conversion]
+    #
+    # This was filed as a doc whose own next step was "reduce to a user-level
+    # reproducer", having failed to find one: its negative results (a struct
+    # VALUE local, an int64_t local, a `MojoList *` local, a `String` local, a
+    # dict local) all came out correct and the shape was reported as narrower
+    # than "shadows a struct pointer". It is not: this is that reproducer, six
+    # lines of plain Python, because a `class` lowers to a struct and so the
+    # fixture is something CPython can run and be the oracle for. Neither the
+    # loop-assigned local nor the `if`-nested `return` in the original report
+    # is needed. Both the compile and the values are asserted: the helper
+    # raises on a gcc failure, so before the fix this case failed at the
+    # compile and not on an answer.
+    #
+    # The second row is the same fix's other half. A comprehension's target
+    # does not outlive the comprehension, so the enclosing binding has to come
+    # back — `a = [t for t in names]` followed by `print(t.k)` must read the
+    # OUTER `t`, not the comprehension's last element. It is printed rather
+    # than returned on purpose: a heterogeneous list bound from a call result
+    # reads its elements back through the wrong accessor, which is its own
+    # filed bug (CODEGEN_list_element_read_defaults_to_str_across_a_call.md)
+    # and would otherwise be what made this case red.
+    _check_agrees_with_cpython("comprehension_target_shadows_struct_local", {
+        'compr_shadow.py': "class Tok:\n"
+                           "    def __init__(self, k):\n"
+                           "        self.k = k\n"
+                           "\n"
+                           "def peek(i):\n"
+                           "    return Tok(i)\n"
+                           "\n"
+                           "def f(names):\n"
+                           "    t = peek(0)\n"
+                           "    return [t for t in names]\n"
+                           "\n"
+                           "def g(names):\n"
+                           "    t = peek(3)\n"
+                           "    a = [t for t in names]\n"
+                           "    print(t.k)\n"
+                           "    return a\n"
+                           "\n"
+                           "def main():\n"
+                           "    r = f(['aa', 'bb'])\n"
+                           "    print(r[0])\n"
+                           "    print(r[1])\n"
+                           "    s = g(['cc'])\n"
+                           "    print(s[0])\n"
+                           "main()\n",
+    }, 'compr_shadow.py')
+
+    # The tuple-target half of the same comprehension target: `[(a, b) for a,
+    # b in pairs]` binds BOTH names, so both must be their own bindings (and
+    # both must come back afterwards). A `char *` slot against an enclosing
+    # struct-pointer slot of the same name was the same int64_t-into-pointer
+    # refusal as the single-target row.
+    _check_agrees_with_cpython("comprehension_tuple_target_shadows_struct_local", {
+        'compr_shadow2.py': "class Tok:\n"
+                            "    def __init__(self, k):\n"
+                            "        self.k = k\n"
+                            "\n"
+                            "def f(names):\n"
+                            "    a = Tok(7)\n"
+                            "    b = Tok(8)\n"
+                            "    return [a for a, b in names]\n"
+                            "\n"
+                            "def main():\n"
+                            "    r = f([['p', 'q'], ['r', 's']])\n"
+                            "    print(r[0])\n"
+                            "    print(r[1])\n"
+                            "main()\n",
+    }, 'compr_shadow2.py')
+
     # bugs/CODEGEN_inline_import_string_pool_name_collision.md — an imported
     # module's string-literal pool, and what that doc's report actually was.
     #
