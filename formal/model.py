@@ -9786,6 +9786,37 @@ def struct_field_name(field) -> object:
     return None
 
 
+# `comptime NAME = expr` in a struct body is a CLASS-SCOPE BINDING, and it is in
+# `StructDef.comptime_aliases` rather than in `StructDef.fields` — the parser puts
+# it there (`fire_compiler._parse_struct`, a `ComptimeVarStmt` is neither a
+# `VarDecl` nor an `AssignStmt`), the interpreter reads it when it builds the
+# class (`myinterpreter.execute_StructDef`: `comptime_aliases[name] = eval_expr(...)`
+# — once, at struct-definition time, with no instance in hand), and the compiled
+# path read it through `gimple_codegen`'s `_struct_comptime_aliases`. NOTHING on
+# the formal path read it: `grep -rn comptime_aliases formal/` finds this comment
+# and nothing else, so a `comptime` class member was in no table here at all —
+# not the field census, not `struct_class_constants`, not the constant-substitution
+# rewrite. The consequence was measured and is a silent WRONG ANSWER, not a
+# refusal, because the receiver sweep below counts any name a method reaches as a
+# field: a one-word struct whose method reads `self.LIMIT` where `comptime LIMIT = 10`
+# measures ONE field, reads the slot nothing ever writes, and prints 0 where the
+# source says 10 (both architectures). See `struct_class_constants` for where the
+# names are classified, and `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md`.
+#
+# The accessor, because the dict is read from the class-constant split, the
+# substitution's site census and a diagnostic, and three `getattr(…, None) or {}`
+# spellings of the same default is three places to keep in step.
+def struct_comptime_aliases(struct_def) -> dict:
+    """`{name: value node}` — the class body's `comptime NAME = expr` bindings.
+
+    In declaration order, which is the order the dict was built in and the order
+    a class body writes them in. Not a field list and not a constant list: what
+    a name in here IS — a class value, or per-instance state the program
+    overwrites — is decided by `_split_declaration`, which is the one place that
+    asks."""
+    return dict(getattr(struct_def, "comptime_aliases", None) or {})
+
+
 # The class-level assignment that DECLARES fields rather than making one, and
 # the two names a `__slots__` tuple may carry that are not storage at all
 # (Python adds them itself to a class that wants weak references or a
@@ -9985,14 +10016,31 @@ def struct_receivers(struct_def) -> set:
     form is treated as HAVING a receiver."""
     out = {"self"}
     for m in struct_methods(struct_def):
-        if "staticmethod" in _decorator_names(m):
-            continue
-        params = list(getattr(m, "params", None) or [])
-        if params and isinstance(params[0], (tuple, list)) and params[0]:
-            first = params[0][0]
-            if isinstance(first, str):
-                out.add(first)
+        name = method_receiver_name(m)
+        if name is not None:
+            out.add(name)
     return out
+
+
+def method_receiver_name(method) -> object:
+    """The name ONE method binds its receiver to, or None if it takes none.
+
+    The per-method half of `struct_receivers`, and a function rather than an
+    inline copy of its loop because a caller that needs the receiver of the
+    method it is looking at — not of the struct, which has as many methods as it
+    has receiver spellings — must not answer a slightly different question. It
+    answers the receiverless case too, which is the one the class-wide set
+    cannot: `def first():` declares a method with no receiver at all, and
+    nothing about it is a member access.
+    """
+    if "staticmethod" in _decorator_names(method):
+        return None
+    params = list(getattr(method, "params", None) or [])
+    if params and isinstance(params[0], (tuple, list)) and params[0]:
+        first = params[0][0]
+        if isinstance(first, str):
+            return first
+    return None
 
 
 def struct_declared_names(struct_def) -> list:
@@ -10081,6 +10129,21 @@ def struct_declared_names(struct_def) -> list:
 #      that reason (test_formal_imports.py asserts it). A declaration with no
 #      initializer is the one shape in which "nothing writes it" is a statement
 #      about the PROGRAM rather than about the DECLARATION.
+#
+# And the rule has a SECOND input, which is not one of the class-level names
+# above: a `comptime NAME = expr` binding, which the parser keeps out of
+# `StructDef.fields` entirely and which was therefore classified by nothing until
+# this. It is a class value by the language's own construction — one value,
+# evaluated once at struct-definition time, identical for every instance — so it
+# is a constant unless clauses 3 and 5 say this program stores into it, and when
+# they do it is a FIELD with a slot, because then the value really is
+# per-instance. Clause 2 does not apply to it, and the reason is the whole
+# point: a `self.NAME` read of a `comptime` member is a read of the CLASS's
+# value rather than of storage, so the receiver spelling is a read site the
+# substitution materializes (or refuses by name) instead of a slot to count.
+# Left to the receiver sweep below it was counted as a field and read as the zero
+# an unwritten slot gives — measured, a one-word struct printing 0 where the
+# source says 10, on both architectures. See `struct_comptime_aliases`.
 #
 # Two things this deliberately does NOT do. It does not resolve a bare read:
 # `X` inside a method does not see the class body's scope in Python or Mojo, so
@@ -10314,9 +10377,46 @@ def _split_declaration(struct_def):
                 fields.append(name)
             else:
                 constants.append((name, getattr(field, "value", None)))
+    # A `comptime NAME = expr` in the class body, which is in NO field list at
+    # all (see `struct_comptime_aliases`) and used to be classified by nothing.
+    # It is a class value by construction — evaluated once, at struct-definition
+    # time, in the class body's own scope, with no instance in hand — so the
+    # only question the rule above has to answer about it is whether this
+    # PROGRAM stores into it, and that is clauses 3 and 5 verbatim: a name
+    # written through any object in this unit, or any unit with a write whose
+    # name cannot be read, keeps the alias as a FIELD, because then the value
+    # is per-instance and the slot the write lands in is the only copy of it.
+    # The reference engine agrees about which of the two it is: an instance read
+    # consults the instance dict before the alias table
+    # (`myinterpreter`'s member read), so `obj.A = 5` really does change what
+    # `obj.A` says, and folding the declared 10 into it would be a wrong
+    # answer rather than a refusal.
+    #
+    # NO evidence, no claim: like every other name here, an alias in a struct
+    # nothing attached evidence to is left where the pre-rule path left it —
+    # counted as a field if a method reaches it, and a constant nobody may
+    # substitute. That is the safe direction and it is not a gap in the rule;
+    # it is the rule's own clause ("no evidence attached keeps every class-level
+    # name as a field"), and `attach_field_evidence`'s docstring says why the
+    # two must not disagree.
+    for name, value in struct_comptime_aliases(struct_def).items():
+        if not isinstance(name, str) or name in seen:
+            # already a field or a constant: the class body declared the name
+            # twice, and the `fields` spelling above won, which is the order
+            # this table has always used.
+            continue
+        seen.add(name)
+        if name in written or dynamic:
+            fields.append(name)
+        else:
+            constants.append((name, value))
     # Per method, not globally sorted, so that the field list is byte-for-byte
     # the list `_pre_rule_field_names` produces for a struct with no evidence:
     # a name that moves position in a diagnostic is a change nobody asked for.
+    # An alias name is in `seen` by the loop above, so a method that reaches
+    # `self.LIMIT` does not put `LIMIT` back into the field list: the read is a
+    # read of the class's value, and the substitution materializes it (or
+    # refuses by name) rather than leaving it to a slot nothing writes.
     for method in struct_methods(struct_def):
         touched = _receiver_names(getattr(method, "body", None), receivers)
         for name in sorted(touched):
