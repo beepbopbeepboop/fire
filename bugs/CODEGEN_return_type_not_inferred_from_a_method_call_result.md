@@ -1,6 +1,45 @@
 # a function's return type is inferred as `int64_t` when its only `return` is a method call — the `char *` is then printed as a raw pointer decimal, exit 0
 
-**State: OPEN. Found 2026-09-29 by `work/hard-fn-import` while fixing
+**State: FIXED for every shape measured 2026-09-30 (the doc's claim
+reproduced first, verbatim, at `86d862fc`; see the Status section at the
+bottom). The fix is in the ONE place return-type inference makes its own
+locals visible, so it cannot be half-applied.** The `VarDecl`-free reading
+of the doc's mechanism is right and the root cause is one level below
+where the doc looked: `_quick_type`'s `CallExpr`/`MemberExpr`
+struct-receiver arm already existed and already read
+`gen.func_return_types[<Struct>_<method>]`, gated on the receiver's
+`var_types` entry naming a registered struct. It was the RECEIVER that
+was unknown, because at return-inference time `var_types` does not hold
+this function's locals — so a struct bound to a local was invisible, the
+method result fell to the `int64_t` default, and one wrong declaration
+turned the value into a pointer decimal at the caller's `print`.
+
+The overlay that already existed for exactly this reason
+(`_infer_return_type_with_locals` -> `_prebound_local_ctypes`, formerly
+`_container_literal_locals`, `mojo/middle/infra_infer.py`) now also records
+a local bound from any call whose result is a REGISTERED STRUCT pointer —
+`p = P("a")` (a constructor), `p = mk()` (a factory) and `p = b.get()` (a
+method returning a struct) alike — with the type read out of the SAME
+`_quick_type` estimator the call site itself uses, so the two agree by
+construction. One extra walk round covers the `q = p` alias. The
+restriction to a registered struct is what keeps this a strict improvement:
+an opaque imported class, whose constructor this codegen does not inline,
+keeps the `int64_t` default exactly as before, and no scalar, container or
+`char *` answer is touched. Regression test
+`gimple_return_type_from_a_method_call_on_a_local` in
+`test_gimple_runner.py` covers the doc's three functions plus the alias,
+the non-dunder method, a factory, and a struct-returning method, all
+against CPython's answers.
+
+Not covered, and unchanged by this: `def g(): p = P("a"); return p` now
+declares `g` as `P *` (correct — the old `int64_t` was a value-identity
+bug) but the CALLER's `print(g())` still formats the `P *` as a decimal
+address. That is the separate "print a struct value" gap, pre-existing and
+independent: a bare `p = P("a"); print(p)` in one function prints an
+address too, with no function boundary involved. It is not this doc's bug
+and is not fixed by it.
+
+## Earlier status — Found 2026-09-29 by `work/hard-fn-import` while fixing
 cross-module-import report (see the 2026-09-29 section of
 `bugs/hard/README.md`), whose rows 2/4 spell `repr(p)` and would have hit
 this had they used `p.__repr__()`. Not a regression from that fix: unchanged

@@ -1,6 +1,11 @@
 # OPEN: a field read straight off a constructor TEMPORARY loses element-type tracking
 
-**State: OPEN.** Recorded 2026-09-27 while closing out
+**State: OPEN, and BOTH of the doc's scope claims are wrong — re-measured
+2026-09-30, see "Status (2026-09-30)" at the bottom: the trigger is
+narrower than "a `0` element to trip the sentinel" (it takes a
+COMPREHENSION) and the blast radius is wider than "through a constructor
+TEMPORARY" (reading it through a local fails identically).** Recorded
+2026-09-27 while closing out
 `bugs/PARTIAL_WORK_HANDOFF.md` §4.2 (the other two container-printing
 findings in that section — `print([True, False])` and `print({1, 2})` — are
 fixed; this third, related one is not).
@@ -60,3 +65,52 @@ Not attempted this session — scoped as its own item since it is additive
 (a new element-type tracer, not a change to the type tracer just fixed) and
 the two together in one change would make either one harder to verify in
 isolation.
+
+## Status (2026-09-30) — the doc's scope is wrong in both directions; the trigger is a COMPREHENSION, and the local spelling is broken too
+
+Re-measured at `86d862fc` against CPython on the same text. The
+`[None, 1, 2]` sentinel misread reproduces, but the shape is much narrower
+and the "reading it through a local works" claim does not hold any more:
+
+    print(B4([i for i in range(3)]).v)   # [None, 1, 2]   CPython: [0, 1, 2]   BROKEN
+    b = B4([i for i in range(3)]); print(b.v)
+                                        # [None, 1, 2]   CPython: [0, 1, 2]   ALSO BROKEN
+    print(B4([i for i in [7, 8, 9]]).v)  # [7, 8, 9]     CPython: [7, 8, 9]   correct
+    print(B4([1, 2, 3]).v)              # [1, 2, 3]     correct
+    print(B4(["a", "b"]).v)             # ['a', 'b']    correct
+    print(B4([str(i) for i in range(3)]).v)
+                                        # ['0','1','2']  correct
+    print(B4([i for i in [0]]).v)       # [None]        CPython: [0]         BROKEN
+    print(B4([i for i in [0, 1]]).v)    # [0, 1]        correct
+
+So: it needs a COMPREHENSION whose element is a bare bound identifier, and
+it needs that comprehension's FIRST element to be falsy — the sentinel
+heuristic in `_mojo_generic_elem_repr` is what turns the `0` into `None`,
+which is why `[i for i in [7, 8, 9]]` is fine and `[i for i in [0]]` is
+not. A plain list literal of any element types is fine, temporary receiver
+or local, and so is a comprehension over a `str` call. And the doc's
+"reading the SAME field through a local is exactly right" is stale: the
+local spelling fails identically, so this is not a constructor-TEMPORARY
+problem at all — it is the same missing element-type evidence whichever way
+the value is reached, which also means the doc's framing (a temporary has
+"no tracked identity to inherit from") is not the mechanism.
+
+Two of this session's other fixes are adjacent and did NOT close it, which
+is worth recording so nobody re-derives that they might have: a
+constructor temporary's field read still does not consult the *argument's*
+element type (nothing traces `B4(<arg>)`'s element type into
+`_field_elem_types[B4][v]` — the doc's "shape of the fix" is still the
+right shape), and the comprehension's own element type is not recorded for
+the `range()` iterable case even though the identical comprehension is
+printed correctly when it is not stored in a struct field
+(`x = [i for i in range(3)]; print(x)` is exactly right). So the
+evidence exists at the literal and is lost on the way into the field.
+
+Not attempted: the fix is a call-site element-type tracer feeding
+`_field_elem_types`, which is a new inference pass rather than a patch,
+and per the gate rules it would owe `mojoc`/bootstrap like everything else
+in `mojo/backend_gimple/`. The first thing to measure before writing it is
+which of the two losses above is the real one — if the comprehension's
+element type were simply recorded for the `range()` case, would the field
+read come out right on its own? That is a much smaller change than a
+constructor-argument tracer and it would cover the local spelling too.

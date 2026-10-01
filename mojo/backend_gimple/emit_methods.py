@@ -3231,7 +3231,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # `_lower_set_method`, which has no 'remove' case at all and
         # silently no-op'd instead of removing the element. Runtime-
         # dispatch via the kind registries instead (DESIGN.html R5). See
-        # bugs/CODEGEN_boxed_method_name_list_set_ambiguity.md.
+        # bugs/CODEGEN_boxed_method_name_list_set_ambiguity.md, closed and
+        # removed with the runtime kind registries.
         ip = gen._new_temp('int64_t')
         ov_local = gen._ensure_local(ot, ov)
         if ot == 'int64_t':

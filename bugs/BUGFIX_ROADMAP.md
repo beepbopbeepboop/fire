@@ -122,9 +122,7 @@ the number it was assigned when it was filed.
 
 ## Recently completed or intentionally excluded
 
-- `CODEGEN_all_any_dict_set_miscompile.md` — fixed.
 - `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` — item 0, partially landed 2026-09-26 (signedness + the loop-contract parameterisation); the doc keeps ownership of the loop-model gap.
-- `CODEGEN_boxed_method_name_list_set_ambiguity.md` — fixed.
 - `CODEGEN_container_free_registry_dangling_entries.md` — resolved.
 - `CODEGEN_container_no_deallocation_unbounded_growth.md` — resolved.
 - `CODEGEN_large_dict_accumulation_exit_crash.md` — no longer reproduces.

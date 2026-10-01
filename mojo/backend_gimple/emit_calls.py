@@ -2113,8 +2113,33 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _is_selfhost_file = _is_selfhost_source_file(
                 getattr(gen, '_current_filename', None))
             _boxed_ft = gen._known_field_type(_attr) if _is_selfhost_file else None
+            # OR the receiver's OWN declared field, when the receiver's
+            # static type proves which struct it is and that struct really
+            # has this field. This is the sound version of the name-keyed
+            # lookup above, and it is exactly the evidence
+            # `_lower_MemberExpr`'s own `o.x` read uses (see its
+            # `_resolved_field` branch) — so `getattr(o, 'x', d)` and `o.x`
+            # now agree by construction instead of one of them being right
+            # by accident. It also matters MORE than usual right now
+            # because a dynamically-set attribute is stored in a real
+            # (phantom-minted) field, which the generated
+            # `_mojo_getattr_<Struct>` reads back
+            # (`strcmp(attr, "x") == 0 ? obj->x : ...`), so the value IS
+            # there and only the call site's cast was missing — a
+            # string attribute read through `getattr` printed the pointer's
+            # decimal. Deliberately NOT the bare `_known_field_type` name
+            # lookup, which is unsound for an arbitrary receiver and is why
+            # that one is gated on the self-hosted source above.
+            _gattr_ot = ''
+            _gattr_ov = ''
+            if _boxed_ft is None:
+                _gattr_ot, _gattr_ov = gen.lower_expr(node.args[0])
+                if _gattr_ot.endswith(' *'):
+                    _gsn = gimple_exprtypes._struct_name_of(_gattr_ot)
+                    if _gsn in gen.struct_field_types:
+                        _boxed_ft = gen.struct_field_types[_gsn].get(_attr)
             if _boxed_ft is not None:
-                ot, ov = gen.lower_expr(node.args[0])
+                ot, ov = (_gattr_ot, _gattr_ov) if _gattr_ot else gen.lower_expr(node.args[0])
                 if ot in ('int', 'char'):
                     ov = gen._new_val('int64_t', f'(int64_t){ov}')
                 vp = gen._new_val('void *', f'(void *){ov}')

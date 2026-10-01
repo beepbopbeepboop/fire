@@ -59,6 +59,7 @@ from mojo.middle.resolve_shared import (
     _lbn_walk, _module_const_int, _parse_fstring_parts, _prepass_callee_key, _quick_type, _record_closure_alias,
     _refine_generic_return_type, _sms_key, _str_literal_to_slit, _subst_idents, _type_expr_to_ann
 )
+from mojo.middle.calls_shared import user_dunder_repr_call
 # gimple_gen_coro is reached via `gimple_codegen.gimple_gen_coro` below,
 # not a separate import of its own here -- see gimple_codegen.py's own
 # module-level `import gimple_gen_coro` and its comment on why a
@@ -2109,25 +2110,20 @@ def _repr_value(gen, rat: str, rav: str) -> str:
         # which its `repr(p)` spelling reached through an import but which
         # is NOT an import bug.
         #
-        # Deliberately CONSERVATIVE: each condition below is one "we know
-        # this is right", and anything unproven falls through to the
-        # pre-existing lowering, so this can only ever replace a wrong
-        # answer with a right one, never introduce a new shape.
+        # The lookup itself is `user_dunder_repr_call` in
+        # mojo/middle/calls_shared.py, SHARED with `_stringify_value` (the
+        # `str()` / `%s` / f-string route) so the two spellings cannot
+        # disagree about which dunder a struct answers. `repr()` passes
+        # `('__repr__',)` only: CPython's own fallback here is `__str__`, and
+        # taking it would silently change the repr of every struct in the
+        # tree that defines `__str__` without `__repr__` — a wide behaviour
+        # change, recorded rather than smuggled in here.
         _rsn = rat[:-2].strip() if rat.endswith(' *') else ''
-        if _rsn and '__repr__' in (gen._struct_method_names.get(_rsn) or ()):
-            _rcs = gen._struct_method_csym(_rsn, '__repr__', '')
-            if gen.func_return_types.get(_rcs) == 'char *':
-                _rcall = gen._call_expr('char *', _rcs, [(rat, rav_local)])
-                # Same null semantics the generated field-dump has: a NULL
-                # object reprs as "None" rather than crashing. Interned
-                # through `_intern_string` because a bare `"None"` literal is
-                # not a GIMPLE r-value (see its own docstring), and bound to
-                # a local first rather than nested in the f-string so the
-                # expression uses no quote nesting at all — this file is
-                # compiled by the compiler it implements.
-                _none_slit = gen._intern_string('None')
-                return gen._new_val(
-                    'char *', f'({rav_local} ? {_rcall} : {_none_slit})')
+        if _rsn:
+            _rcall = user_dunder_repr_call(gen, _rsn, rat, rav_local,
+                                           ('__repr__',))
+            if _rcall is not None:
+                return _rcall
         # Dispatch through the per-struct field-by-field reprs generated
         # in gen_module (see reflect_structs) when the runtime type tag
         # is one this program actually allocates — falls back to the

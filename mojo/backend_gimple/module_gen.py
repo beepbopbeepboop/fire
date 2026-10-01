@@ -3722,6 +3722,27 @@ def gen_module_impl(self, stmts):
         self._field_scan_member_cache[sid] = cands
         return cands
 
+    def _scan_stmt_member_assigns(stmt):
+        """`[(obj name, member, value node)]` for every `o.m = <value>`
+        whose receiver is a bare identifier — the assignment EVIDENCE the
+        phantom-field mint below types the field from. A sibling of the two
+        scans above, and memoized the same way (`_walk_ast` is the expensive
+        part, and this runs over every top-level statement twice)."""
+        sid = id(stmt)
+        cached = self._field_scan_assign_cache.get(sid)
+        if cached is not None:
+            return cached
+        cands = []
+        for node in _walk_ast(stmt):
+            if (isinstance(node, AssignStmt)
+                    and isinstance(getattr(node, 'target', None), MemberExpr)
+                    and isinstance(node.target.obj, IdentExpr)
+                    and node.value is not None):
+                cands.append((node.target.obj.name, node.target.member,
+                              node.value))
+        self._field_scan_assign_cache[sid] = cands
+        return cands
+
     def _scan_body_for_local_field_access(body, own_struct_name):
         # Collect EVERY struct type each local name is ever bound to, then
         # keep only unambiguous names. The candidate scan is flow-insensitive
@@ -3751,6 +3772,26 @@ def gen_module_impl(self, stmts):
                     local_types[name] = only_type
         if not local_types:
             return
+        # `{(obj name, member): ctype}` for every `o.m = <value>` in this
+        # body, keyed like the mint that consumes it. Built BEFORE the mint
+        # loop so an assignment that appears textually AFTER the read (the
+        # `print(o.x)` line, then `o.x = "hello"`) still counts — the same
+        # flow-insensitive union `local_type_sets` above is built on, and
+        # for the same reason: a struct's field set is a whole-program
+        # fact, not a statement-order one. First answer wins, so a member
+        # written twice keeps the first write's type; conflicting writes are
+        # not represented, exactly as `local_type_sets` drops an ambiguous
+        # name rather than guessing.
+        _assigned_member_ctypes = {}
+        for stmt in body:
+            for obj_name, fn, value in _scan_stmt_member_assigns(stmt):
+                _k = (obj_name, fn)
+                if _k in _assigned_member_ctypes:
+                    continue
+                try:
+                    _assigned_member_ctypes[_k] = self._quick_type(value)
+                except Exception:
+                    pass
         for stmt in body:
             for obj_name, fn in _scan_stmt_member_candidates(stmt):
                 target_struct = local_types.get(obj_name)
@@ -3819,7 +3860,24 @@ def gen_module_impl(self, stmts):
                         for _base_name in (getattr(target_def, 'bases', None) or [])
                         for m in getattr(_struct_by_name.get(_base_name), 'methods', ())):
                     continue
-                self.struct_field_types[target_struct][fn] = 'int'
+                # The minted field's TYPE, from the value actually assigned to
+                # this member, when there is one. The `int` below is the
+                # "nothing is known about this member" answer, and it is
+                # right for a read-only phantom — but a member that IS
+                # assigned is not read-only, and storing a `char *` or a
+                # `double` through a 4-byte `int` field TRUNCATES the value:
+                # `o.x = "hello"; print(o.x)` printed the low 32 bits of the
+                # string's address as a decimal, and `len(o.x)` then
+                # dereferenced that truncated value and SEGFAULTED. Only
+                # POINTER-shaped and floating answers override `int` — those
+                # are the ones an `int` slot is provably wrong for — so a
+                # member assigned an ordinary integer keeps exactly the
+                # declaration it has always had.
+                _mft = 'int'
+                _afn = _assigned_member_ctypes.get((obj_name, fn))
+                if _afn and (_afn.endswith(' *') or _afn in ('double', 'float')):
+                    _mft = _afn
+                self.struct_field_types[target_struct][fn] = _mft
                 if target_def is not None and not any(
                         isinstance(f, VarDecl) and f.name == fn for f in target_def.fields):
                     target_def.fields.append(VarDecl(name=fn, type_ann=None, value=None))

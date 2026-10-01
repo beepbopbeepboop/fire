@@ -64,6 +64,12 @@ from mojo.middle.infra_infer import (
     _pair_key, _prepass_list_elem, _ptr_slot_in_range, _resolve_member_expr_type, _resolve_type, _scan_container_elems,
     _seed_addressed_locals, _type_of
 )
+# `user_dunder_repr_call` is the SHARED dunder lookup behind both the
+# `repr()` route (`_repr_value`, in emit_resolve.py) and the `str()`/`%s`/
+# f-string route (`_stringify_value`, below), so the two spellings of "ask
+# this object to describe itself" cannot disagree about which dunder wins.
+from mojo.middle.calls_shared import user_dunder_repr_call
+from mojo.middle.stmts_shared import _annotation_container_elem_type
 
 # Separator for `function_calls`' `name<sep>index` composite strings — see
 # `analyze_param_usage`. U+001F (ASCII Unit Separator): never appears in a
@@ -2483,7 +2489,8 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
     handle (int64_t/void*/other pointer — the real kind isn't statically
     known), guard with the runtime kind registries
     (`mojo_is_registered_dict`/`_set`) instead of blindly assuming list —
-    the exact gap bugs/CODEGEN_all_any_dict_set_miscompile.md documented.
+    the exact gap bugs/CODEGEN_all_any_dict_set_miscompile.md documented
+    (that doc is gone, closed by this change).
     Fixing it here, once, closes it for all 5 call sites at once."""
     if src_type == 'MojoList *':
         return value
@@ -2810,6 +2817,27 @@ def _stringify_value(gen, et: str, ev: str) -> str:
     if et in ('double', 'float'):
         fv = ev if et == 'double' else gen._new_val('double', f'(double){ev}')
         return gen._call_expr('char *', 'mojo_repr_float', [('double', fv)])
+    if et.endswith(' *') and et != 'void *':
+        # A struct value: consult the receiver's OWN dunder, `__str__`
+        # first and `__repr__` second, which is CPython's order for
+        # `str(x)` and is what makes `str(p)` stop printing the bare type
+        # name the generated field dump produces for an empty field list.
+        # This arm did not exist at all, so `str(obj)` and `"%s" % obj` —
+        # a SECOND, entirely separate route from the `repr()` one — ran the
+        # generated field dump, with the user's `__str__` compiled, exported
+        # and never called from anywhere. Same shape as the `repr()` half
+        # (bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_
+        # container_spellings.md), one spelling over.
+        #
+        # The lookup is `user_dunder_repr_call`, SHARED with `_repr_value`
+        # so the two routes cannot drift apart. No dunder → the generic
+        # `mojo_str` fallback below, exactly as before.
+        _rsn = et[:-2].strip()
+        if _rsn:
+            _rcall = user_dunder_repr_call(gen, _rsn, et, ev,
+                                           ('__str__', '__repr__'))
+            if _rcall is not None:
+                return _rcall
     return gen._call_expr('char *', 'mojo_str', [(et, ev)])
 
 
@@ -4520,6 +4548,35 @@ _OWNED_STACK_KIND = {
     'MojoSet *':  ('mojo_set_init',  'MojoSet'),
 }
 
+def ann_container_ctype(gen, ann):
+    """The container ctype a binding statement's OWN annotation names, when
+    it names one of the three owned-stack container kinds; else None.
+
+    `var s: Set[Int] = {}` — the annotation is the ground truth about what
+    `s` is, and an EMPTY `{}` is evidence for no kind at all (an empty dict,
+    list and set are equally "nothing"), so the destination's declared kind
+    is what both the storage decision (`maybe_stack_alloc_owned_ctor` below)
+    and the coercion (`gimple_ctypes.reify_empty_container_literal`) have to
+    build. Resolving the annotation to `MojoDict *` because the literal's own
+    default lowering is a dict is what made `s.add(i)` a silent no-op on a
+    `MojoDict` header and the variable print `{}` forever. A non-container
+    annotation, or one this codegen cannot resolve, answers None and leaves
+    every existing decision exactly as it was.
+
+    Lives here, beside the `_OWNED_STACK_KIND` table whose keys it is
+    restricted to, because that table is the whole answer: the question is
+    only ever "is this annotation one of the three container kinds this
+    feature stack-allocates?", and both consumers (the storage decision and
+    the `AssignStmt` ctype override) ask it from different modules."""
+    if not isinstance(ann, str) or not ann:
+        return None
+    try:
+        _ct = gen._resolve_type(ann)
+    except Exception:
+        return None
+    return _ct if _ct in _OWNED_STACK_KIND else None
+
+
 _OWNED_DESTROY_RUNTIME_FN = {
     'MojoDict *': 'mojo_dict_destroy',
     'MojoList *': 'mojo_list_destroy',
@@ -4561,7 +4618,7 @@ def _vetted_struct_ctor_name(gen, value) -> str:
     return ''
 
 
-def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
+def maybe_stack_alloc_owned_ctor(gen, name: str, value, ann=None) -> bool:
     """Call from gimple_gen_stmts.py's central `gen_stmt` dispatcher
     BEFORE lowering a `VarDecl`/single-target `AssignStmt` normally (a
     plain identifier `name` bound to `value`) — returns True if it fully
@@ -4569,7 +4626,31 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
     caller must SKIP its own normal lowering of this statement entirely;
     False means "not applicable, lower it normally" (not a candidate, not
     an empty-constructor shape, or — belt-and-suspenders — already
-    handled, which single static assignment should make impossible)."""
+    handled, which single static assignment should make impossible).
+
+    `ann` is the binding statement's OWN type annotation, and BOTH of the
+    things this path decides from it exist because this path handles the
+    statement WHOLE: the two ordinary statement paths in
+    gimple_gen_stmts.py never see a binding this function claims.
+
+    * The CONTAINER KIND. `_empty_ctor_ctype` answers `MojoDict *` for every
+      `{}` because `{}` is a dict DISPLAY — the right answer for a display,
+      the wrong one for `var s: Set[Int] = {}`, where the storage allocated
+      here, the C type the variable is declared with, and the runtime
+      push/destroy pair all followed the display: `s.add(i)` became a no-op
+      against a `MojoDict` header and `print(s)` said `{}` no matter what
+      was added. An empty literal is evidence for NO kind, so the
+      declaration's own annotation decides (`ann_container_ctype` above) —
+      the same premise `reify_empty_container_literal` is built on for the
+      non-stack-allocated path.
+
+    * The ELEMENT TYPE (`_annotation_container_elem_type` in
+      mojo/middle/stmts_shared.py). So `kept: List[String] = []` — the shape
+      that IS stack-allocated, because `[]` is an empty constructor — lost
+      the one piece of type information its own annotation carried, and a
+      list filled only from a callee read back as ints
+      (bugs/CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee.md,
+      closed and removed with the annotation-seeding fix)."""
     # Direct attribute access — see `maybe_push_owned_local`'s note.
     candidates = gen._owned_free_candidates
     if name not in candidates and name not in gen._scope_armed:
@@ -4578,6 +4659,9 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
     if name in pushed:
         return False
     ctype = _empty_ctor_ctype(value)
+    _ann_ct = ann_container_ctype(gen, ann) if ctype is not None else None
+    if _ann_ct is not None:
+        ctype = _ann_ct
     _kind = ctype if ctype is not None else _literal_ctor_ctype(value)
     if _kind is not None and not _container_keys_safe(gen, name, _kind):
         _drop_owned_candidate(gen, name)
@@ -4615,7 +4699,8 @@ def maybe_stack_alloc_owned_ctor(gen, name: str, value) -> bool:
     storage = f'_owned_storage{gen.temp_counter}_{name}'
     gen.decls.append(f"  {struct_name} {storage};")
     gen._emit(f"  {init_fn} (&{storage});")
-    gen._declare_var(name, ctype)
+    gen._declare_var(name, ctype,
+                     _annotation_container_elem_type(gen, ann, ctype))
     gen._emit(f"  {gen._write_dest(name)} = &{storage};")
     push_fn = _OWNED_STACK_PUSH_RUNTIME_FN[ctype]
     gen._emit(f"  {push_fn} ({gen._cname(name)});")

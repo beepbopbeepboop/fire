@@ -127,7 +127,8 @@ module that keeps a registry or index in a global.
 ## Independently found, same root cause
 
 `CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee.md` (recorded
-2026-09-28, one day before this doc) is this same defect seen from the
+2026-09-28, one day before this doc, and since closed and removed) is this
+same defect seen from the
 `List[String]` angle, and its repro is the sharper one — it is kept here
 rather than in a second file:
 

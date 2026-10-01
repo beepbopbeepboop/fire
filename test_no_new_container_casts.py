@@ -97,8 +97,9 @@ def strip_comments(src: str) -> str:
 # update(list), bytes.join(dict), the self-host-erasure-sensitive
 # _lb_as_set, and the remaining boxed/untyped branches of all()/any()/
 # enumerate()) - each needs its own runtime-guard or loop-based fix, not
-# a mechanical swap; see bugs/CODEGEN_all_any_dict_set_miscompile.md for
-# the one with a written-up fix plan.
+# a mechanical swap; the one that had a written-up fix plan was
+# bugs/CODEGEN_all_any_dict_set_miscompile.md, closed by the DESIGN.html R5
+# runtime guard below and removed with that fix.
 #
 # 30 -> 29 (R1 follow-up, same day): the dict/set-materialization shape
 # above (all()/any()/enumerate()/str.join()/bytes.join()/shlex.join(), 5

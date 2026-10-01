@@ -1809,6 +1809,13 @@ class GimpleGen:
         # not final filtered results.
         self._field_scan_var_cache: dict = {}
         self._field_scan_member_cache: dict = {}
+        # A THIRD field-scan cache, for `_scan_stmt_member_assigns` (the
+        # `o.m = <value>` evidence the phantom-field mint types a field
+        # from). Separate dict, not a second entry in the one above: the
+        # cache is keyed by `id(stmt)` alone, so two different walks of the
+        # same statement would collide and whichever ran second would read
+        # the other's candidates back.
+        self._field_scan_assign_cache: dict = {}
         # Phase 3 (same doc, same pattern): per-function/method memoization
         # of `_infer_param_types`'s own expensive per-parameter AST scan
         # (`analyze_param_usage`, gen_module's Pass 1.3 unannotated-parameter
