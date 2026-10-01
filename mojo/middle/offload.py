@@ -1262,63 +1262,68 @@ def _msl(x: str) -> str:
 def gemm_tensor_core_msl(info: 'GemmInfo', fused: int | None = None) -> str:
     """The whole tensor-core kernel body, as MSL text.
 
-    A 32x32 output tile per threadgroup, as a 4x4 grid of 8x8 MMAs, one
-    SIMDGROUP wide, stepping K 8 at a time. This is the configuration measured
-    at 0.96 TFLOPS and verified bit-exact in test_llm/gemm_tensorcore.m, and it
-    is transcribed rather than redesigned -- the only adaptation is that `lane`
-    comes from __lid and the tile index from __tgid, because the grid is one
-    SIMDGROUP wide.
+    A 16x16 output tile per simdgroup, as a 2x2 grid of 8x8 MMAs, ONE simdgroup
+    wide. 16x16 is the MEASURED optimum, not a round number, and the reason is
+    the opposite of the intuition that more work per thread is better.
 
-    THE TILE IS THE WHOLE DIFFERENCE from the 8x8 version, which was correct
-    and no faster than scalar code. One 8x8 tile loads 64 A-elements and 64
-    B-elements to do 1024 FLOP: 2 FLOP/byte, memory-bound, so the MMA was
-    never the thing being waited on. A 32x32 tile loads 32 A-elements and 32
-    B-elements to do 8192 FLOP: 128 FLOP/byte. Same intrinsic, same fragment
-    layout, same instruction -- 16 accumulators instead of 1, so each loaded
-    element is used 16 times instead of once.
+    test_llm/gemm_ilp_sweep.m, 2048^3, median of 15 with the spread printed:
 
-    One SIMDGROUP rather than four: 16 accumulators is 32 registers of acc,
-    and four SIMDGROUPS of them would want 128 registers before any operands,
-    which is the register-pressure cliff. The reuse comes from the TILE, not
-    from the SIMDGROUP count, so there is nothing to buy by widening it.
+        tile/simdgroup   acc   threadgroups    ms   TFLOPS   % of 117
+             8x8          1        8192      4.530     3.79      3.2
+            16x16          4        2048      1.906     9.01      7.7   <- here
+            24x24          9         925      2.381     7.22      6.1
+            32x32         16         512     18.595     0.92      0.8
+            64x64         64         128     45.507     0.38      0.3
 
-    There is no threadgroup staging. test_llm/gemm_tiled.m measured the staged,
-    double-buffered version at 2-4% SLOWER, so staging would be code that
-    exists to be slower. Fragments are read straight from global memory into
-    registers.
+    Doubling the work per thread from 16x16 to 32x32 costs TEN TIMES the
+    runtime. Bigger tiles mean fewer threadgroups, and at this size an
+    under-occupied GPU is the constraint -- not instruction latency, and not
+    bandwidth (measured peak here is 307.8 GB/s, which at even an 8x8 tile's
+    2 FLOP/byte would still permit 616 TFLOPS, so bandwidth never binds).
+
+    So the register-blocking instinct is right about hiding memory LATENCY and
+    wrong about what limits a large GEMM. Occupancy wins. Four accumulators is
+    what 16x16 means, and it is already register-blocked.
+
+    ONE SIMDGROUP, not several, and not because of registers this time: with
+    2x2 the accumulator array is 4 simdgroup_matrices, which is nowhere near the
+    pressure cliff. Widening the threadgroup buys nothing -- 32/64/128-thread
+    threadgroups all measure within noise of each other, and one simdgroup keeps
+    the grid arithmetic to `tg` alone.
+
+    THE TRAP THIS SHAPE SITS ON, found by the sweep: simdgroup_matrix must live
+    in REGISTERS for `thread_elements()` to be valid. An asymmetric acc[TM][TN]
+    stops fitting and the kernel does not fault -- it silently computes
+    something else. Every non-square grid the sweep tried (1x2, 2x1, 2x4, 4x2)
+    produced wrong answers at up to 64/4096 elements wrong. Hence 2x2, and hence
+    the bit-exactness check on every configuration.
 
     Out-of-range reads are 0.0 rather than predicated, because a zeroed A or B
-    row contributes exactly nothing to the product; the stores below are then
-    the only place bounds are checked.
+    row contributes nothing to the product, so the stores are the only place
+    bounds are checked.
     """
     m, k, n = info.m, info.k, info.n
     A, B, C = info.a, info.b, info.c
-    # Fused: the grid is tiles*reps, so __tgid carries BOTH the repetition and
-    # the tile. Recover the repetition first and keep the TILE index, because
-    # everything below is in tile space. Dividing by the repetition count
-    # instead would fold the repetition axis into the tile axis -- the right
-    # number of outputs in the wrong places, and no error to notice it by.
-    tile = ('(__tgid - (__tgid / _mg_tiles) * _mg_tiles)' if fused
-            else '__tgid')
-    tiles = (f'    int _mg_tiles = (({m} + 31) / 32) * (({n} + 31) / 32);\n'
+    tiles = (f'    int _mg_tiles = (({m} + 15) / 16) * (({n} + 15) / 16);\n'
              if fused else '')
+    tile = ('(__tgid - (__tgid / _mg_tiles) * _mg_tiles)' if fused else '__tgid')
     return f"""\
-{tiles}    int nn = ({n} + 31) / 32;
-    int m0 = ({tile} - ({tile} / nn) * nn) * 32;
-    int n0 = ({tile} / nn) * 32;
+{tiles}    int nn = ({n} + 15) / 16;
+    int m0 = ({tile} - ({tile} / nn) * nn) * 16;
+    int n0 = ({tile} / nn) * 16;
     int lane = int(__lid);
     int fr = ((lane / 4) & 4) + ((lane / 2) % 4);
     int fcol = ((lane / 4) & 2) * 2 + (lane % 2) * 2;
-    simdgroup_matrix<float, 8, 8> acc[4][4];
-    for (int i = 0; i < 4; ++i) {{
-        for (int j = 0; j < 4; ++j) {{
+    simdgroup_matrix<float, 8, 8> acc[2][2];
+    for (int i = 0; i < 2; ++i) {{
+        for (int j = 0; j < 2; ++j) {{
             reinterpret_cast<thread float2&>(acc[i][j].thread_elements()) = float2(0.0f);
         }}
     }}
     for (int k0 = 0; k0 < {k}; k0 += 8) {{
-        simdgroup_matrix<float, 8, 8> af[4];
-        simdgroup_matrix<float, 8, 8> bf[4];
-        for (int i = 0; i < 4; ++i) {{
+        simdgroup_matrix<float, 8, 8> af[2];
+        simdgroup_matrix<float, 8, 8> bf[2];
+        for (int i = 0; i < 2; ++i) {{
             int r = m0 + i * 8 + fr;
             int c = k0 + fcol;
             float2 v = float2(0.0f);
@@ -1326,7 +1331,7 @@ def gemm_tensor_core_msl(info: 'GemmInfo', fused: int | None = None) -> str:
             if (r < {m} && c + 1 < {k})     v.y = {A}[r * {k} + (c + 1)];
             reinterpret_cast<thread float2&>(af[i].thread_elements()) = v;
         }}
-        for (int j = 0; j < 4; ++j) {{
+        for (int j = 0; j < 2; ++j) {{
             int r = k0 + fr;
             int c = n0 + j * 8 + fcol;
             float2 v = float2(0.0f);
@@ -1334,14 +1339,14 @@ def gemm_tensor_core_msl(info: 'GemmInfo', fused: int | None = None) -> str:
             if (r < {k} && c + 1 < {n})     v.y = {B}[r * {n} + (c + 1)];
             reinterpret_cast<thread float2&>(bf[j].thread_elements()) = v;
         }}
-        for (int i = 0; i < 4; ++i) {{
-            for (int j = 0; j < 4; ++j) {{
+        for (int i = 0; i < 2; ++i) {{
+            for (int j = 0; j < 2; ++j) {{
                 simdgroup_multiply_accumulate(acc[i][j], af[i], bf[j], acc[i][j]);
             }}
         }}
     }}
-    for (int i = 0; i < 4; ++i) {{
-        for (int j = 0; j < 4; ++j) {{
+    for (int i = 0; i < 2; ++i) {{
+        for (int j = 0; j < 2; ++j) {{
             int r = m0 + i * 8 + fr;
             int c = n0 + j * 8 + fcol;
             float2 v = reinterpret_cast<thread float2&>(acc[i][j].thread_elements());
@@ -1360,7 +1365,7 @@ def gemm_fused_tensor_core_grid(info: 'GemmInfo', reps: int) -> tuple:
     transposes the repetition axis into the tile axis, which computes the right
     number of outputs in the wrong places: a wrong answer with no error.
     """
-    return ('32', f'(({info.m} + 31) / 32) * (({info.n} + 31) / 32) * ({_as_str(reps)})')
+    return ('32', f'(({info.m} + 15) / 16) * (({info.n} + 15) / 16)')
 
 
 def gemm_naive_grid(info: 'GemmInfo', reps: int) -> tuple:
@@ -1381,7 +1386,7 @@ def gemm_tensor_core_grid(info: 'GemmInfo') -> tuple:
     spend 128 registers on accumulators before any operands. (nthreads,
     ngroups) as C expressions because m/k/n are runtime scalars in the wrapper.
     """
-    return ('32', f'(({info.m} + 31) / 32) * (({info.n} + 31) / 32)')
+    return ('32', f'(({info.m} + 15) / 16) * (({info.n} + 15) / 16)')
 
 
 #: Choose the tensor-core body. OFF by default, because the AST-expressed
@@ -1448,8 +1453,41 @@ def synthesise_gemm(info: 'GemmInfo', tensor_cores: bool = False,
             line=0, col=0)
 
     if tensor_cores:
-        return _fdef([_raw_msl(gemm_tensor_core_msl(
-            info, int(reps) if reps else None))])
+        body = [_raw_msl(gemm_tensor_core_msl(info, int(reps) if reps else None))]
+        if reps:
+            # The repetitions loop INSIDE, exactly as the naive body does, so
+            # one grid serves them all. NOT multiplied into the grid: the raw
+            # MSL body computes one tile from __tgid, so a grid of tiles*reps
+            # would send the surplus threadgroups at out-of-range tiles, where
+            # they write nothing -- correct, but it wastes reps-1 of the work.
+            #
+            # This path was silently broken until now and the reason is worth
+            # recording, because it is not a typo: a FUSED kernel deliberately
+            # gets NO grid override, on the grounds that the grid sized for one
+            # repetition is right. That reasoning is true for the NAIVE body,
+            # where one thread computes one output and the inferred grid (which
+            # encodes ONE THREAD PER OUTPUT ELEMENT) is correct -- and false for
+            # an MMA body, where each thread produces TILE_AREA outputs. At
+            # 16x16 that is a factor of 256: the inferred grid gave 256
+            # threadgroups where 1024 tiles were needed, and exactly a quarter of
+            # the output was written.
+            #
+            # The 32x32 body this replaced needed 256 tiles for 512x512, and the
+            # inference happens to give exactly 256 -- so it passed, by
+            # coincidence, with a checksum that could not see the difference
+            # (see the periodic-data trap in the completeness test). The tile
+            # retune exposed a latent grid bug that had been passing by luck.
+            body = [gctypes.ForStmt(
+                target='_mg_r',
+                iterable=gctypes.CallExpr(
+                    # Qualified, not the local `I`: that binding happens after
+                    # this branch, and a closure reads it at CALL time, so the
+                    # short name is an UnboundLocalError here.
+                    func=gctypes.IdentExpr(name='range', line=0, col=0),
+                    args=[gctypes.IntLiteral(value=int(reps), line=0, col=0)],
+                    line=0, col=0),
+                body=body, else_body=None, is_async=False, line=0, col=0)]
+        return _fdef(body)
 
     I = gctypes.IdentExpr
     Lit = gctypes.IntLiteral
@@ -1869,10 +1907,12 @@ def _offload_module_inner(stmts: list, lengths_sink, grids_sink,
             # A tensor-core kernel needs a grid the runtime cannot infer: one
             # SIMDGROUP per 8x8 output tile. Recorded for the same reason as
             # the lengths -- BEFORE the classification pass builds the args.
-            # A FUSED kernel deliberately gets NO grid override. It runs the
-            # repetitions inside one grid sized for a single repetition, so the
-            # inferred grid is exactly right and an override would break it.
-            if grids_sink is not None and TENSOR_CORES and not _use_reps:
+            # A FUSED NAIVE kernel deliberately gets NO grid override: one
+            # thread per output, so the inferred grid is exactly right. An MMA
+            # kernel is the opposite -- inference assumes one thread per output
+            # and an MMA thread produces a whole tile -- so it states its grid
+            # whether fused or not.
+            if grids_sink is not None and TENSOR_CORES:
                 grids_sink[_as_str(gkernel.name)] = gemm_tensor_core_grid(ginfo)
             out.append(rewrite_gemm(s, ginfo, gkernel))
             kernels.append(gkernel)

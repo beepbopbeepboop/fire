@@ -99,7 +99,53 @@ bigger tile.</strong> On a single pass, intensity is capped by
 register pressure — the two fight each other, and that tension is the real
 optimisation problem.</p>
 
-<h3>The configuration that reaches peak</h3>
+<h3>Tile size: measured, and the opposite of the intuition</h3>
+<p>The best MMA grid is <strong>16&times;16 per simdgroup (2&times;2, four
+accumulators)</strong>. It is a measurement, not a round number, and the reason
+inverts the usual register-blocking instinct. 2048&sup3;, median of 15 with the
+spread printed:</p>
+<table>
+<tr><th>tile/simdgroup</th><th>acc</th><th>threadgroups</th><th>median ms</th><th>TFLOPS</th><th>% of 117</th></tr>
+<tr><td>8&times;8</td><td>1</td><td>8192</td><td>4.530</td><td>3.79</td><td>3.2%</td></tr>
+<tr><td><strong>16&times;16</strong></td><td><strong>4</strong></td><td><strong>2048</strong></td><td><strong>1.906</strong></td><td><strong>9.01</strong></td><td><strong>7.7%</strong></td></tr>
+<tr><td>24&times;24</td><td>9</td><td>925</td><td>2.381</td><td>7.22</td><td>6.1%</td></tr>
+<tr><td>32&times;32</td><td>16</td><td>512</td><td>18.595</td><td>0.92</td><td>0.8%</td></tr>
+<tr><td>64&times;64</td><td>64</td><td>128</td><td>45.507</td><td>0.38</td><td>0.3%</td></tr>
+</table>
+<p>Doubling the work per thread from 16&times;16 to 32&times;32 costs
+<strong>ten times</strong> the runtime. Bigger tiles mean fewer threadgroups,
+and at this size an under-occupied GPU is the constraint. Register blocking is
+right about hiding memory <em>latency</em> and wrong about what limits a large
+GEMM: <strong>occupancy wins</strong>.</p>
+<p><strong>Bandwidth never binds.</strong> Measured peak here is 307.8 GB/s
+(<code>test_llm/bandwidth.m</code>, float4 streaming; the scalar version reaches
+only 277). At even an 8&times;8 tile's 2 FLOP/byte that permits 616 TFLOPS, so
+the intensity ladder above is not the binding constraint at any usable tile
+size &mdash; which is why it alone would have predicted the wrong answer.</p>
+<p><strong>117 TFLOPS is not reachable for a real GEMM on this GPU.</strong> It
+is an instruction-issue ceiling with operands already in registers; a real GEMM
+must fetch them. Best measured is <strong>9.01 TFLOPS, 7.7% of 117</strong>
+&mdash; which is 13&times; the 0.68 TFLOPS of the best kernel written before the
+sweep existed.</p>
+<p>Two traps the sweep found, both silent:</p>
+<ul>
+<li><p><strong>Non-square grids compute the wrong answer.</strong>
+<code>1&times;2</code>, <code>2&times;1</code>, <code>2&times;4</code> and
+<code>4&times;2</code> all fail bit-exactness at 64&sup3; (32&ndash;64 of 4096
+elements wrong, max err ~1.2) while every square grid passes.
+<code>simdgroup_matrix</code> must live in <em>registers</em> for
+<code>thread_elements()</code> to be valid; an asymmetric <code>acc[TM][TN]</code>
+stops fitting, and a spilled one does not fault &mdash; it computes something
+else. Hence the bit-exactness check on every configuration, never optional.</p></li>
+<li><p><strong>Tile indexing needs <code>tg*nsg + sgi</code>, not
+<code>tg</code>.</strong> <code>threadgroup_position_in_grid</code> is per
+<em>threadgroup</em>, so with 8 simdgroups per group a <code>tg</code>-only index
+makes all 8 compute the same tile and leaves the rest unwritten. A kernel using
+one simdgroup per threadgroup is correct with <code>tg</code> alone, so the bug
+only appears when the threadgroup is widened.</p></li>
+</ul>
+
+<h3>The configuration, and two traps that cost real time</h3>
 <ul>
 <li><p><strong>32&times;32 output tile</strong>, as a 4&times;4 grid of 8&times;8 MMAs. This is the reuse: 16 accumulators means each loaded element is used 16 times instead of once, and intensity goes 2 &rarr; 8 FLOP/byte. 32&times;32 is the sweet spot <em>given the no-staging constraint</em> — 64&times;64 reaches 16 FLOP/byte but measured slower.</p></li>
 <li><p><strong>One simdgroup, not four.</strong> 16 accumulators is already 32 registers of <code>acc</code>; four simdgroups of them want 128 registers before any operands, which is the register-pressure cliff. The reuse comes from the tile, not the simdgroup count, so there is nothing to buy by widening it.</p></li>
@@ -395,6 +441,7 @@ output, wrong answer or no effect.</p>
 <tr><td>Writability mask keyed on <code>'Mut' in ctype</code></td><td>GEMM returned <code>0.0</code>, exit 0, bit-exact</td><td>these are the <em>MSL-side</em> params, where the address space is already lowered to <code>device const float *</code>; the Mojo spelling is gone, so the predicate never matched and the mask was all zeros. Now keys on <code>const</code>.</td></tr>
 <tr><td>A second loop over the original statements when appending the GEMM</td><td><code>main</code> appeared twice; prints vanished; <strong>exit 0 with no output</strong></td><td>the worst available symptom to debug. One pass, with the GEMM as a fallback, so there is one append per statement.</td></tr>
 <tr><td>Assuming a measured "no change" meant the code ran</td><td>concluded "pipeline creation isn't the cost" from a stale binary</td><td>see row 1. A change you cannot observe is a change you have not tested.</td></tr>
+<tr><td>A fused MMA kernel left to the <strong>inferred</strong> grid</td><td>exactly a quarter of the output unwritten, checksum unchanged</td><td>inference encodes ONE THREAD PER OUTPUT ELEMENT. True for the naive body, false for an MMA thread, which produces a whole 16&times;16 tile &mdash; a factor of 256. The old 32&times;32 body needed exactly 256 tiles for 512&sup2;, which is exactly what inference gives, so it passed <strong>by coincidence</strong>; the retune to 16&times;16 exposed it. Fused MMA kernels now state their grid, and reps loop inside.</td></tr>
 <tr><td>A benchmark row below the offload floor</td><td>three columns all read "18 ms"</td><td>256&times;256 = 65536 elements is under the 90 000 default floor, so it <strong>never dispatched</strong> and all three paths were identical. Always check the dispatch count, not just the time.</td></tr>
 </table>
 <p>Related: <code>simdgroup_matrix</code> state is a per-lane <em>register tile</em>,
