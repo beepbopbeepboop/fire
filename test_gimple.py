@@ -7747,7 +7747,7 @@ outer([10, 20, 30])
     test_dedup_variadic_externs_cache_is_a_faithful_parse()
     test_handwritten_selfhost_signature_tables_match_the_source()
     test_every_funcptr_initializer_has_a_definition()
-    test_ast_walk_covers_every_child_field()
+    test_ast_walk_reaches_every_name_in_a_lambda_body()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")
