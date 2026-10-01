@@ -69,12 +69,42 @@ SAMPLES = [
      "Random_step(self) here, and something that is not a frame address at "
      "Random_step(self._rng)"),
     # The rest.
+    # MLIR. Three kinds of thing reach this bucket: a dialect attribute
+    # template, a dialect operation, and a construct that names a TYPE — which
+    # the old fixed word called an attribute, false of every `__mlir_type`
+    # binding in the stdlib including `std/sys/info.mojo`'s `_TargetType`, the
+    # module that heads this family.
     ("MLIR construct",
      "materialize: __mlir_op is an MLIR dialect construct. This path has no "
      "MLIR: it lowers a Mojo program to a Mach-O image"),
     ("MLIR construct",
      "the module-level comptime binding '_PLUGIN_COUNT' is initialized from an "
      "MLIR attribute template: __mlir_attr[`#kgen.param_list.size<:`,"),
+    ("MLIR construct",
+     "the module-level comptime binding 'AnyCoroutine' is initialized from an "
+     "MLIR type template: __mlir_type.`!co.routine` names an MLIR TYPE, not a "
+     "value"),
+    # The current target as a VALUE. A different limit from the dialect
+    # attributes above, with a different repair, and the message says so: the
+    # same target's FIELDS do answer, so "there is no MLIR on this path" would
+    # be a claim about the file that is false.
+    ("MLIR construct",
+     "return: __mlir_attr.`#kgen.param.expr<current_target> : !kgen.target` "
+     "asks for the current TARGET itself, which is not a value on this path"),
+    # A QUESTION this build cannot answer, its own family because the fix is
+    # specific: the backend states the architecture it emits and the container
+    # it wraps it in, and a per-CPU question needs neither. ONE marker for the
+    # whole class, so the three specific wordings behind it are counted as the
+    # limit they are instead of falling through to whatever matches next.
+    ("target query not answerable",
+     "target_has_feature('neon') is a per-CPU question: this build cannot "
+     "answer this target query: a CPU feature is a property of a CPU"),
+    ("target query not answerable",
+     "this build cannot answer this target query: the current target "
+     "arm64/darwin has no 'triple' for this build to state"),
+    ("target query not answerable",
+     "this build cannot answer this target query: an argument of the 'eq' "
+     "query is neither a literal nor another query this build can read"),
     ("nested frame field read",
      "self._handle._get_ctx reads '_get_ctx' out of a nested RaisingCoroutine "
      "frame, and that struct's 2 field(s): origins, _handle has no such"),
