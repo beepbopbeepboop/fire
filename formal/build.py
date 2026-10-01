@@ -1581,10 +1581,11 @@ def _check_holder_agreements(functions, holders, hstruct, params_of,
         hs = holders.get(fn.name) or ()
         by_name = hstruct.get(fn.name) or {}
         for node in M.iter_nodes(fn.body):
-            if not isinstance(node, F.CallExpr) \
-                    or not isinstance(node.func, F.IdentExpr):
+            if not isinstance(node, F.CallExpr):
                 continue
-            callee = node.func.name
+            callee = M.call_callee_name(node.func)
+            if callee is None:
+                continue
             params = params_of.get(callee)
             if not params:
                 continue
@@ -1616,8 +1617,7 @@ def _check_holder_agreements(functions, holders, hstruct, params_of,
                 for site_fn in functions:
                     for site in M.iter_nodes(site_fn.body):
                         if not isinstance(site, F.CallExpr) \
-                                or not isinstance(site.func, F.IdentExpr) \
-                                or site.func.name != callee:
+                                or M.call_callee_name(site.func) != callee:
                             continue
                         for i, a, _k in _frame_argument_slots(site, params):
                             if i != position:
@@ -1769,6 +1769,12 @@ def _expr_spelling(node) -> str:
         return f"{node.func.name}({', '.join(_expr_spelling(a) for a in (node.args or []))})"
     if isinstance(node, F.MemberExpr):
         return _member_chain(node)
+    if isinstance(node, F.SubscriptExpr):
+        # `f[1]`, through the one function that spells a subscript — the same
+        # reason `_member_chain` exists. Without it a diagnostic about a
+        # comptime specialization prints `SubscriptExpr(r, 1)`, which is the AST
+        # and not the source, and the reader has to go and find the call.
+        return _subscript_chain(node)
     for attr in ("value", "name"):
         v = getattr(node, attr, None)
         if isinstance(v, (str, int, float, bool)):
@@ -1777,11 +1783,20 @@ def _expr_spelling(node) -> str:
 
 
 def _call_spelling(call, arg, position, pname) -> str:
-    """`f(2, 3)` — the call as the source spells it, for the disagreement."""
+    """`f(2, 3)` — the call as the source spells it, for the disagreement.
+
+    The callee is spelled through `_expr_spelling` and not `call.func.name`,
+    because a call whose name this pass had to look through — `f[1](2, 3)` —
+    has no `.name` on its func node at all.  That is not a defensive shape: a
+    disagreement is reported by quoting BOTH call sites, so a spelling that
+    raised on exactly the calls it exists to quote would turn a refusal into a
+    crash, and the crash would be the *safety* check this family is built out
+    of (`model.frame_holder_disagreement_refusal`).
+    """
     parts = [_expr_spelling(a) for a in (call.args or [])]
     for k, v in (call.kwargs or []):
         parts.append(f"{k}={_expr_spelling(v)}")
-    return f"{call.func.name}({', '.join(parts)})"
+    return f"{_expr_spelling(call.func)}({', '.join(parts)})"
 
 
 # Every function in the image under analysis, published by `_frame_receivers`.
@@ -1963,8 +1978,23 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                     hs.add(target)
                     hstruct[fn.name][target] = list(hstruct[fn.name][value.name])
                     changed = True
-                if not isinstance(node, F.CallExpr) \
-                        or not isinstance(node.func, F.IdentExpr):
+                if not isinstance(node, F.CallExpr):
+                    continue
+                # `model.call_callee_name`, and NOT `node.func.name`: a
+                # comptime specialization `f[T](r)` names the same function `f`
+                # does, contributes no call-time argument of its own, and so
+                # lands the frame on `f`'s parameter at exactly the position
+                # the bare spelling would. Reading the name off the node instead
+                # made this edge blind to every generic call, which is what left
+                # `_check_frame_escapes` with nothing to follow — and a blind
+                # edge here is the SILENT direction: had the escape check been
+                # lifted without this, `f`'s parameter would have read as an
+                # ordinary word and `r.a` a load eight bytes from wherever it
+                # pointed.  One recogniser, three readers (`_check_frame_escapes`
+                # and `_check_holder_agreements` as well), because the three
+                # have to agree about which function a call is.
+                target_fn = M.call_callee_name(node.func)
+                if target_fn is None:
                     continue
                 # EVERY argument position, not just the first, and a keyword
                 # resolved BY NAME — the position a keyword lands in is the
@@ -1992,8 +2022,12 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                 # `plist` is the callee's OWN parameter list, and the edge is
                 # only taken for a position that list has: a callee this image
                 # does not have has no parameter to make a holder, and that is
-                # the opaque case `_check_frame_escapes` says so about.
-                plist = params_of.get(node.func.name)
+                # the opaque case `_check_frame_escapes` says so about. It is
+                # `function_param_shape(fn).names`, so it holds the RUNTIME
+                # parameters in order and a comptime parameter is not in it —
+                # which is right, because the brackets are passed ahead of these
+                # (`model.incoming_args`) and so occupy no call-time position.
+                plist = params_of.get(target_fn)
                 if not plist:
                     continue
                 for pos, pname, _kw in _frame_argument_slots(node, plist):
@@ -2003,10 +2037,10 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                     if not (r and r[0] in hs and r[1] == 0):
                         continue
                     callee = plist[pos]
-                    if not callee or callee in holders.get(node.func.name, ()):
+                    if not callee or callee in holders.get(target_fn, ()):
                         continue
-                    holders[node.func.name].add(callee)
-                    hstruct[node.func.name][callee] = \
+                    holders[target_fn].add(callee)
+                    hstruct[target_fn][callee] = \
                         list(hstruct[fn.name][r[0]])
                     changed = True
     # AFTER the fixpoint and BEFORE the per-function loop below, and both of
@@ -3093,7 +3127,7 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                 fn, getattr(node, "value", None), holders, by_name,
                 _subscript_chain(node.target))
         elif isinstance(node, F.CallExpr):
-            callee = node.func.name if isinstance(node.func, F.IdentExpr) else None
+            callee = M.call_callee_name(node.func)
             # A struct CONSTRUCTOR carries NO escape to check, and the reason is
             # worth stating because it is the whole reason the other two shapes
             # are representable.  `S(...)`'s block belongs to the function the
@@ -3144,7 +3178,8 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
             # position at all:
             #
             #   0. there is no callee NAME at all (a method call the
-            #      rewriting did not lift)          -> case 3, opaque;
+            #      rewriting did not lift, or a callee that is not a
+            #      name)                                   -> case 3, opaque;
             #   1. the callee wants a VALUE, or is variadic  -> case 2;
             #   2. the callee is not in this image            -> case 3;
             #   3. the callee's parameter list is in hand and the
@@ -3164,20 +3199,37 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                     node, params_of.get(callee) if callee in all_holders
                     else ()):
                 if callee is None:
-                    # 0. A METHOD call on a value receiver: the one case where
-                    #    the declaration genuinely is not in hand, so it is the
-                    #    narrow case rather than the catch-all.
+                    # 0. A callee this pass cannot NAME.  Two shapes, and they
+                    #    are two different sentences, which is the fix: a
+                    #    method call on a value receiver really is dispatched
+                    #    by NAME and really has no parameter list in hand, while
+                    #    a callee that is not a member expression at all
+                    #    (`mod.f[T](x)`, a computed callee) has no NAME to
+                    #    dispatch on.  Saying the method thing about the second
+                    #    is a refusal whose stated reason is entirely false, and
+                    #    it is what this branch used to do for BOTH — measured
+                    #    on the corpus, six files whose terminal finding this
+                    #    message produced had a comptime specialization at the
+                    #    callee and not one of them contains a method call.
+                    #    A comptime specialization of a bare name no longer
+                    #    arrives here at all: `model.call_callee_name` answers
+                    #    `f` for `f[T](x)` and the argument is decided by the
+                    #    ordinary parameter list.
                     _refuse_holder_use(
                         fn, a, holders, by_name, "",
                         M.frame_opaque_position_refusal(
                             where_the=method or "the call", callee=None,
                             position=i, total=len(node.args or []),
                             struct_names=_names(a), method=method,
+                            callee_shape=None if method
+                            else _expr_spelling(node.func),
                             why="a method call on a value receiver is "
                                 "dispatched by NAME, so `recv.m(x)` carries no "
                                 "type and the parameter list this argument "
                                 "lands in belongs to a declaration this walk "
-                                "has not read"))
+                                "has not read" if method else
+                                "this call's callee names no function this "
+                                "pass has a parameter list for"))
                     continue
                 if callee == "len" and isinstance(a, F.IdentExpr) \
                         and a.name in holders \

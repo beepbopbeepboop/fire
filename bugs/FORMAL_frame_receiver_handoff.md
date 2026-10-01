@@ -936,3 +936,156 @@ fail on the pre-change tree and two are labelled GUARDs because they are correct
 before and after. The four refusals additionally require CPython to raise
 `TypeError` on the same program, so what is pinned is that the decision is
 RIGHT, not merely that this compiler makes it.
+
+---
+
+# Wave 11: the position family had a fourth case in it, and it was the only one the message had never heard of
+
+Row 4 of `bugs/FORMAL_sweep_work_map_2026-09-30.md` — "a receiver passed at
+argument position 0", 25 files, all in their own source — was measured here
+rather than assumed, and the measurement is the deliverable, because the work
+map's own §3 says a file's terminal cause is the FIRST refusal the walk reaches
+and that the row is an upper bound.
+
+## 18. What the 25 files are, once the construct is looked at instead of the message
+
+**Zero of the 25 reach `pass`, and every one has another blocker behind the
+first**, so the row's honest reading is not "25 files". Measured two ways, both
+before any code changed: a scratch harness that swallows `CodegenError` from
+`_check_frame_escapes` and reports the NEXT refusal, and an instrumented
+`_check_frame_escapes` that prints the callee object's node kind at the refused
+site. The first answers "what is behind this"; the second answers "what IS
+this", and the two together are what found §19.
+
+What is behind each of the 25, after the position refusal is lifted:
+
+| next blocker | files | whose it is |
+|---|---|---|
+| a method call on a value receiver whose struct is not established — **the same defect, 17 of them** (`?.write_to` ×4, `encoder.encode*` ×3, `writer.write_string`, `w.write_string`, `value.__hash__`, `?.fields`, `?.enqueue_copy`, `values._write_to`, `Self.__eq__`, `self.mojo_value.write_repr_to`, `gfn._selfhost_…`, `Tensor.registry.append`) | 17 | §4a. Filed as `FORMAL_method_call_on_a_subscripted_receiver.md`, with the four shapes of receiver and where each one's type would come from |
+| an MLIR dialect construct in an imported module (`dtype.mojo`, `info.mojo`, `rebind.mojo`, `function.mojo`) | 6 | row 1, a **documented true limit** — 107 files, not work |
+| an imported function's name has no definition in hand (`coord_to_index_list`, `rebind`, `_b64encode`, `atof`, `debug_assert`) | 5 | row 8, honest as written |
+| a frame address returned from a method that received it as its receiver | 6 | §4b |
+| `Slice.__eq__`'s `other.start` in `builtin_slice.mojo` | 3 | row 3, measured ceiling **0** (§3.2 of the map) |
+| a method-parameter field; `origin_of()`, a value-only callee | the rest | rows 3 and 7 |
+| a callee compiled into an imported module, whose own analysis this pass has not read | 3 | §7 case 3, honest as written |
+
+The rows overlap, because a file can have several and the walk reports the first
+— which is the whole of the map's §3 point. **The one number that does not
+overlap is the headline: 0 of 25.**
+
+## 19. The fourth case: a comptime-specialized callee, which is not a method call at all
+
+Six of the 25 files were refused with
+
+> a method call on a value receiver is dispatched by NAME, so `recv.m(x)`
+> carries no type and the parameter list this argument lands in belongs to a
+> declaration this walk has not read
+
+and **not one of them contains a method call.** The callee is a `SubscriptExpr`:
+`_reduce_generator[input_fn, output_fn, …](shape, init=init)` in
+`std/algorithm/reduction.mojo`, `BitSet_union[self_type](self, other)` in
+`std/collections/bitset.mojo`, `Self.compile_entries_runtime[0](…)` in
+`std/collections/string/format.mojo`, `StringLiteral_format[…](buffer, …)` in
+`std/builtin/string_literal.mojo`, `Span_get_immutable[…](self)` in
+`std/memory/span.mojo`, `Self.mojo_value.write_repr_to[…](…)` in
+`std/python/bindings.mojo`. A message that mentions a receiver, a method and a
+NAME dispatch about a callee that is a plain name with none of them is §4's
+defect class exactly, and it sent the reader after "a receiver whose type names
+the struct" — which is not what these files need.
+
+**It is not a method call, and it is not a position question: it is a
+specialization, and the callee's name is in hand.** `f[T](x)` names `f`; the
+brackets are a compile-time binding and contribute no call-time argument, so
+call-time position `i` is the `i`th entry of `function_param_shape(f).names` —
+which is the list every frame table in `formal/build.py` is keyed by. The ABI
+that makes that true is already the shared one: `model.incoming_args` puts a
+generic's comptime parameters first, arm64's `_emit_call` passes the bracket
+expressions first, and arm64's `_allocation_order` allocates them first.
+Measured before any of it was written down:
+
+```
+def f[type: Int](x: Int, y: Int) -> Int: return x * 100 + y
+f[1](3, 7)                       ->  arm64: 307   (307 & 0xFF = 51)
+each parameter read on its own    ->  type=1  x=3  y=7
+```
+
+So `model.call_callee_name` is the one recogniser for the two spellings that name
+a function of this image by a bare name, and **the three places that decide
+whether a frame address follows a call all read it**: the holder fixpoint,
+`_check_frame_escapes`, `_check_holder_agreements`. Three, not one, because the
+blind edge is the SILENT direction: had the fix lifted the refusal without the
+fixpoint, `f`'s parameter would have read as an ordinary word and `r.a` a load
+eight bytes from wherever it pointed.
+
+**The two things that had to be found while doing it, and neither was a
+refusal.**
+
+* `_call_spelling` did `call.func.name`, so the disagreement message — the
+  refusal this family exists to produce — **raised `AttributeError` on exactly
+  the calls it exists to quote**. A crash in the safety check is worse than the
+  wrong answer it was built to prevent, because nothing downstream reports it as
+  a finding.
+* `_expr_spelling` had no `SubscriptExpr` arm, so a diagnostic about a
+  specialization printed `SubscriptExpr(r, 1)`. `_subscript_chain` already
+  spells `f[1]`, and §13's own note — "_expr_spelling is the one spelling
+  function" — says which way round that goes.
+
+## 20. What it moved, measured with the sweep over exactly the 25 files
+
+```
+$ python3 tools/formal_sweep.py -j 4 -t 90 <the 25 files>
+[arm64] 25 files: PASS=0 not-pass=25
+  codegen by family: receiver passed as an argument x23,
+                      callee has no definition on this path x2
+```
+
+**0 files gained a PASS and 0 lost one** — the ceiling of this row is 0, measured
+rather than assumed, and the two things that moved are the two things the row
+counted wrongly:
+
+| files | before | after |
+|---|---|---|
+| `reduction.mojo` | position 0 of `_reduce_generator[…]` | `coord_to_index_list()` — "no definition in hand" |
+| `string_slice.mojo` | position 0 | `rebind()` — the same |
+| `string_literal.mojo`, `bitset.mojo`, `format.mojo` | **"a method call on a value receiver is dispatched by NAME"** | **"The callee of this call is `Self._vectorize_apply[_union]` … which names no function this pass has a parameter list for"** — the actual callee, named |
+| the other 20 | unchanged | unchanged |
+
+The three in the third row are the change that matters: the reason they were
+reported that way was **entirely false**, and the message now says the true
+thing — a specialization of a DOTTED callee (`Self.m[…]`, `Struct.m[…]`),
+which `_rewrite_method_calls` does not lift and so has no parameter list to read.
+
+## 21. The two-backend split, which is a finding and not a defect in the change
+
+`f[T](x)` with a frame address in an argument **builds and computes on arm64 and
+is REFUSED on x86-64**, with a message that is true:
+
+```
+build: unsupported call target on the formal x86-64 path (got SubscriptExpr)
+```
+
+x86-64 has no specialization pass at all (its `_emit_call` constructor docstring
+says so), while its callee prologue **does** reserve a register per comptime
+parameter, because `incoming_args` is shared. So the x86-64 refusal is
+load-bearing: teaching it the callee's name without the call-site half would make
+`f[1](3, 7)` read `x` from where `type` should be. Handed over as
+`FORMAL_x86_64_comptime_specialization_abi.md` with the three-half table and the
+three lines to port; `test_formal_receiver_position.py`'s
+`x86_abi_refusal_is_load_bearing` pins the refusal, because a change that made
+x86-64 "work" by answering the name alone would pass every other case in the
+file and produce a silently wrong image.
+
+## 22. Where the code is
+
+| what | where |
+|---|---|
+| the callee name, for both bare-name spellings | `formal/model.py` `call_callee_name`, next to `incoming_args` |
+| the three readers that must agree | `formal/build.py` `_frame_receivers`, `_check_frame_escapes`, `_check_holder_agreements` |
+| the refusal that remains, and what it says | `formal/model.py` `frame_opaque_position_refusal`, new `callee_shape` |
+| the spelling, through one function | `formal/build.py` `_expr_spelling` → `_subscript_chain`; `_call_spelling` |
+| the cases | `test_formal_receiver_position.py` — 6 differential cases (2 labelled GUARD), 5 refusals checked on BOTH backends, 1 x86-64 ABI case |
+
+The 12 cases, and which nine fail before the change: the four differential
+construct cases were **refused**; the five refusals were refused with *different
+words* (three of them the false method sentence). The three that pass before and
+after are the two labelled GUARDs and the x86-64 ABI refusal.
