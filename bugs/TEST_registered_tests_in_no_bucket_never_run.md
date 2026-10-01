@@ -2,9 +2,10 @@
 
 ## Status
 
-OPEN for two of the nineteen. The other seventeen are accounted for below: five
-were measured and given a bucket by the change that wrote this, eleven belong to
-another doc, and one is deliberate.
+OPEN for two of the nineteen, plus one more instance added after the nineteen
+were counted (`new-syntax-parse`, below). The other seventeen are accounted
+for: five were measured and given a bucket by the change that wrote this,
+eleven belong to another doc, and one is deliberate.
 
 ## What is believed
 
@@ -68,6 +69,35 @@ ratchet assigns at those peaks), and NAMED in a bucket: `cli-usage-text`,
 `ownership-destruct`, `md2html` and `arm64-encoders` in `check`, `x86-decode` in
 `x86`. That is the fix, and it is why this doc's status is OPEN for two rather
 than six.
+
+## A twentieth, added 2026-10-01 while merging master's new-modular work
+
+`new-syntax-parse` (`test_new_syntax_parsing.py`) is a twentieth instance of
+group 3, and it arrived the same way the other seven did: a registration that
+satisfied the estate check and nothing ever ran. Master's `92a71744` wrote both
+the test and the spec, and `076977dd` did not bucket it. It is NOT an artefact
+of the batch-1 merge — `git show master:tools/suite.py | grep new-syntax-parse`
+prints the registration and no bucket line, so it is ungated on master too.
+
+Measured, because the fix for this group is always "measure, then name":
+
+    $ python3 tools/memslot.py --gb 8 --label new-syntax-parse -- \
+        python3 tools/memcap.py --limit-gb 8 --label new-syntax-parse -- \
+        python3 test_new_syntax_parsing.py
+    Results: 87 passed, 0 failed
+    memcap: done, peak 0.0 GB across up to 1 procs (ceiling 8.0 GB), child exit 0
+
+    $ python3 tools/suite.py new-syntax-parse
+    suite: 1 passed, 0 failed, 0 skipped  (1 tests, 1 jobs, 0.6s wall)
+
+So the measurement the next step needs is already in hand: 0.6 s and 0.0 GB,
+`mem='tiny'`, and `check` beside `examples-parse` (the other parser suite) is
+where it belongs. NOT DONE here — `tools/suite.py` bucket membership is not
+this branch's to change, and the merge that surfaced it has no mandate to edit
+registrations beyond resolving its own conflict. It is also `cache=True` with
+`extra=['test_new_syntax_parsing.py', 'fire_compiler.py']`, so unlike the
+other seven it cannot silently rot into a stale PASS: the key covers the file
+under test, and editing the parser re-runs it.
 
 ## The two that are left, and why
 
