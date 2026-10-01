@@ -90,3 +90,45 @@ Until then: **a sweep run over a tree where a module source changed is not
 evidence about anything that imports it.** The 14 files the `sys` sweep listed
 were re-measured from a cleared CAS for exactly this reason, and the numbers in
 that commit's message are from a cold run.
+
+## Second measured instance, 2026-09-30: a re-sweep that measured nothing, and looked like a result
+
+Re-measuring the argparse cause's ceiling
+(`bugs/FORMAL_sweep_work_map_2026-09-30_r2.md` §3.1) hit this and it is worth
+recording in the shape it actually takes, because nothing in the output says
+"stale":
+
+```
+$ python3 tools/formal_sweep.py -j 8 -t 60 <the 37 files argparse blocks>
+[arm64] 37 files: PASS=1 not-pass=36
+cas: 35 hit / 2 miss / 0 not cached (37 files)
+```
+
+The fix under measurement was two `-> int` annotations in
+`formal/hostmods/argparse.mojo`, and **35 of the 37 verdicts were the previous
+run's**, replayed. Only the module itself and one other were rebuilt. The
+summary line, the class counts and the coverage rate were all *shaped exactly
+like a real result* — `PASS=1` is the number the real measurement also
+produced — so a reader comparing this against the cold run below would find two
+runs that agree, which is the worst possible outcome for a stale cache.
+
+The root cause is narrower than "imports are not in the key", and that is what
+makes it easy to miss: `cas._FORMAL_SOURCES` globs `formal/**/*.py`, so
+**`formal/hostmods/*.mojo` — Mojo source this backend compiles, the one place a
+module edit lands in practice — is not in `formal_fingerprint()` at all.**
+
+The cold run, which is the measurement:
+
+```
+$ … env GMOJO_HOME=$PWD/.tmp/gmojo_nc python3 tools/formal_sweep.py -j 4 -t 60 <the 37>
+[arm64] 37 files: PASS=1 not-pass=36
+  pass 1, codegen 2, not-answerable/host-import 34
+cas: 1 hit / 36 miss
+```
+
+**There is no `--no-cache`.** The only way to force a cold store today is to
+point `GMOJO_HOME` at an empty directory, which is what step 1 of the fix would
+make unnecessary. Until then, *any* measurement of a fix that lands in a `.mojo`
+file under `formal/` — which is most hostmod work and all of `formal/hostmods` —
+must be run that way, and the CAS line of the log is the only place that shows
+whether it was.
