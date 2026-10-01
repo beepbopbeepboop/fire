@@ -911,6 +911,25 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
     return (None, [])
 
 
+def _source_defines_struct(name: str, text: str) -> bool:
+    """Does `text` (a module's source) DEFINE a struct/class called `name`?
+
+    `class X:` and `struct X:` are the same node to this parser —
+    `fire_compiler._parse_struct` accepts `class X:` unconditionally and
+    `_parse_statement` routes it straight there — so both spellings are
+    matched, and both require a `(`-bearing base-class list or a `:` body
+    so that a mere mention (`x = Box`, `def f(b: Box)`) is not mistaken
+    for the definition.
+
+    ONE definition, two callers: `_classify_unresolved_export` below (the
+    `from M import X` spelling) and `_inline_bare_import_struct` (the
+    `import M` + `M.X` spelling). They must agree, exactly as the two
+    duplicated copies of the classifier this function replaced had to be
+    collapsed for the same reason — see that function's own docstring."""
+    _nre = gimple_ctypes.re.escape(name)
+    return bool(gimple_ctypes.re.search(rf'\b(?:struct|class)\s+{_nre}\s*(\(|:)', text))
+
+
 def _classify_unresolved_export(gen, sym: str, name: str, inline_module: str,
                                  src_path: str, text: str) -> bool:
     """Link mode: how to make an imported name available when the module has
@@ -958,15 +977,133 @@ def _classify_unresolved_export(gen, sym: str, name: str, inline_module: str,
         return True
     # A struct DEFINITION (not a generic one): inline the whole module, which
     # brings the typedef, its `__init__`, its methods and its class
-    # attributes with it. `class` and `struct` are the same node to this
-    # parser — see this function's docstring.
-    if gimple_ctypes.re.search(rf'\b(?:struct|class)\s+{_nre}\s*(\(|:)', text):
+    # attributes with it. `_source_defines_struct` is shared with the bare
+    # `import M` + `M.X` spelling's caller — see its own docstring.
+    if _source_defines_struct(name, text):
         gen._link_inline_modules.add(inline_module)
         return True
     if gimple_ctypes.re.search(rf'\b(?:fn|def)\s+{_nre}\s*\(', text):
         gen._link_inline_modules.add(inline_module)
         return True
     return False
+
+
+def _bare_import_bindings(stmt) -> list:
+    """Flat `[module, local_name, module, local_name, ...]` for every name a
+    bare `import` statement binds — `import M`, `import M as A`,
+    `import a.b` (which binds `a`) and each `extra` clause of the same
+    shape.
+
+    The local-name rule is `gen_module_impl`'s own ImportStmt scan's, copied
+    deliberately: the marker this is used to look up has to be the name the
+    compiler actually BOUND, and a second, subtly different spelling rule
+    would silently never match (the same reason that scan reads `s.module` /
+    `s.alias` directly instead of going through a helper).
+
+    Flat list rather than a list of 2-tuples, and consumed by index: a
+    freshly-built tuple that is then subscripted is a self-host trap
+    documented at length in `mojo/middle/module_shared.py`
+    (`_collect_import_modules_rec`)."""
+    out = []
+    _mod = _as_str(stmt.module)
+    _alias = _as_str(stmt.alias)
+    out.append(_mod)
+    out.append(_alias if _alias else _mod)
+    for _ex in (getattr(stmt, 'extra', None) or []):
+        _exm = _as_str(_ex[0])
+        _exa = _as_str(_ex[1])
+        out.append(_exm)
+        out.append(_exa if _exa else _exm)
+    return out
+
+
+def _module_marker_attribute_reads(stmts) -> dict:
+    """`{identifier: [attribute, ...]}` for every `ident.attr` anywhere in
+    this module — ONE AST walk for the whole module, so a module with N bare
+    imports costs one walk and not N (the walk is the expensive half of
+    `_inline_bare_import_struct`; see
+    bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md)."""
+    out: dict = {}
+    for _n in gimple_exprtypes._walk_ast(stmts):
+        if not isinstance(_n, gimple_ctypes.MemberExpr):
+            continue
+        _obj = _n.obj
+        if not isinstance(_obj, gimple_ctypes.IdentExpr):
+            continue
+        _lst = out.setdefault(_as_str(_obj.name), [])
+        _lst.append(_as_str(_n.member))
+    return out
+
+
+def _inline_bare_import_struct(gen, stmt, marker_reads) -> None:
+    """`import M` + a use of `M.<Class>` — inline M, the way the
+    `from M import <Class>` spelling already does.
+
+    `_register_link_imports` handled ONLY `FromImportStmt`, so a module
+    reached through its own module object was never a candidate for
+    `_link_inline_modules` and never appeared in this translation unit at
+    all. The struct then had no field table here, `_lower_method_call`'s
+    qualified-constructor check (emit_methods.py) had nothing to resolve
+    against, and `M.Class(...)` fell to the generic scalar-receiver stub —
+    `_t = x;  /* int64_t.Parameter() stubbed */`, the module HANDLE echoed
+    back as the constructed object. Two measured consequences on the real
+    `fire.py build` link-mode path, both from programs CPython runs cleanly:
+
+      * `import insp` + `def show(p): return p.label()` +
+        `show(insp.Parameter('v', 7))` printed `0`, exit 0 — a silent wrong
+        value, and the reason the last remaining row of
+        bugs/hard/CODEGEN_method_call_on_struct_param_mistyped.md was still
+        red (the identical program spelled `from insp import Parameter`
+        printed `v` in the SAME build; that doc is deleted as of this fix —
+        see the 2026-09-30 section of bugs/hard/README.md);
+      * `x = insp.Parameter('v', 7); print(x.v)` raised
+        `AttributeError: v`, exit 1, on the module handle.
+
+    Scoped to a STRUCT reached through the marker, and to a LOCAL PROJECT
+    SIBLING, both deliberately:
+
+    * struct, not any name — a FUNCTION reached through a bare marker is a
+      separately tracked bug with its own filed doc
+      (`bugs/CODEGEN_link_mode_bare_submodule_marker_call_silent_wrong_value.md`,
+      plus the `from . import SUB` sibling in
+      `bugs/COMPILE_FAIL_Tools_cases_generator_analyzer.md`), and taking it
+      here would widen this change's blast radius to every module this
+      compiler's own closure reaches a function through;
+    * local sibling, not stdlib/test — a stdlib module has a dylib (or
+      module_loader's source-level export table) behind it, and inlining it
+      here would emit a second definition of symbols the link already binds
+      to that dylib.
+
+    Records into `gen._link_inline_modules`; returns nothing."""
+    _pairs = _bare_import_bindings(stmt)
+    for _i in range(0, len(_pairs), 2):
+        _mod = _pairs[_i]
+        _local = _pairs[_i + 1]
+        if _local == _mod and '.' in _mod:
+            _local = _mod[:_mod.index('.')]
+        _members = marker_reads.get(_local)
+        if not _members:
+            continue
+        # Existence-only resolution FIRST: `_parsed_import` below parses and
+        # rewrites the module's AST, and a bare `import os` must not pay for
+        # that just to be turned away by the stdlib check on the next line.
+        _path = _submodule_source_path(gen, _mod)
+        if not _path:
+            continue
+        import module_loader as _mlmod_bis
+        if (_path.startswith(_mlmod_bis.STDLIB_PATH)
+                or _path.startswith(_mlmod_bis.TEST_PATH)):
+            continue
+        _res = gen._parsed_import(_mod)
+        if not _res:
+            continue
+        _text = _as_str(_res[1])
+        if not _text:
+            continue
+        for _m in _members:
+            if _source_defines_struct(_m, _text):
+                gen._link_inline_modules.add(_mod)
+                return
 
 
 def _register_link_imports(gen, stmts) -> list:
@@ -1040,9 +1177,22 @@ def _register_link_imports(gen, stmts) -> list:
             gimple_ctypes._debug_note(f'load_module({module!r}) failed; treating module as empty', e)
             return {}, False, _sib_path
 
+    # ONE walk of this module's AST for the `ident.attr` reads the bare-import
+    # branch below needs, computed here rather than inside that branch so a
+    # module with several bare imports pays for one walk. Module-level
+    # function call, not a closure over `stmts`: the self-hosted path treats
+    # a nested function's capture of a mutable local unreliably (see
+    # `mojo/middle/module_shared.py::_collect_import_modules`'s docstring).
+    _marker_reads = _module_marker_attribute_reads(stmts)
+
     def scan(stmt_list):
         for stmt in stmt_list:
-            if isinstance(stmt, gimple_ctypes.FromImportStmt):
+            if isinstance(stmt, gimple_ctypes.ImportStmt):
+                # `import M` + `M.Class` — the OTHER spelling of the
+                # FromImportStmt branch below, which was the only one this
+                # scan considered. See `_inline_bare_import_struct`.
+                _inline_bare_import_struct(gen, stmt, _marker_reads)
+            elif isinstance(stmt, gimple_ctypes.FromImportStmt):
                 exports, from_reflection, source = _exports(stmt.module)
                 for _fip11 in (getattr(stmt, 'name_alias_strs', None) or []):
                     name = gimple_ctypes._fi_name(_fip11)
