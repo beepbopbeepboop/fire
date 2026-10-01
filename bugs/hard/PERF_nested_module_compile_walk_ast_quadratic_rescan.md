@@ -8,6 +8,140 @@ survives in a different unit of work, and is now the single largest consumer in
 a profile. Do not read "Phase 6 removed the last quadratic rescan" as the bug
 being fixed; see the 2026-09-26 entry for the measurement and the named site.
 
+**State as of 2026-09-30 (Phase 8, below): the site that entry names is now
+fixed** — the per-level rescan over generated C text is gone, and what is left
+at `_dedup_variadic_externs` is the one per-level cost that is not a rescan (a
+`'\n'.join` of the output the caller asked for). The doc stays OPEN because the
+other three items in "Remaining work" are untouched, but the headline "34% of
+the run, still superlinear" no longer describes this function.
+
+## Status (2026-09-30, Phase 8 — the output text's parse is DERIVED, so the parent stops rescanning the child's whole blob)
+
+Phase 7's own "What is left, precisely" said the only remaining way to make
+this sub-quadratic was to stop re-deriving both name sets from the whole corpus
+on every call, and rejected a shared running `concrete` set as a superset of any
+one level's corpus. This phase takes the other road it did not name: it does not
+share state across levels at all — it makes each level's own computation
+*derive* the parse of the text it is about to hand back, so the parent's very
+first read of that text is a cache hit instead of a fresh byte-by-byte scan.
+
+**The shape.** `_dedup_variadic_externs` is called once per `gen_module_impl`
+and is handed the CUMULATIVE `parts`; the parent's parts contain each imported
+module's whole output blob (`imported_code.append(code)`,
+module_gen.py:1733). Phase 7 memoized per part TEXT, which made the scan O(one
+scan per distinct text) — but a blob is a distinct text the instant it is born,
+and its parse is *exactly the union of the parses of the parts that produced
+it*, which the child level had just read from the same cache. So half of all
+parse volume was spent re-deriving from scratch, byte by byte, what the child
+had derived a moment earlier. Phase 8 publishes that derivation
+(`_record_output_parse`): `_DEDUP_EXTERN_PARTS_CACHE[out] = (concrete,
+variadic)` where `out` is the text just returned. Per-level parse volume
+becomes the bytes THAT level added, not the cumulative corpus.
+
+**Why it is not an assumption.** `'\n'.join(parts)` changes the parse at exactly
+one place: where a `;`-delimited fragment SPANS parts. So every such run is read
+back with the same per-fragment function the parts themselves were parsed with
+(`_fragment_names`, factored out of `_parse_part` for that reason) and must
+carry exactly the names its pieces carried separately; when any run fails,
+nothing is published and the parent parses the text exactly as before. The
+shapes that break it are not guessable and each one was found by a differential
+harness, not by argument:
+
+- a run can straddle THREE OR MORE parts — an empty part has no `;` either, so
+  the join's own newline passes straight through it (`['extern int a (int', '',
+  'extern int a (...)']`);
+- a piece that names NOTHING can still complete the other piece's declaration:
+  `extern int late (int` has no closing paren, and glued to `char * g2000
+  (char *)` it becomes one fragment that DOES name `late` — so a
+  "neither side carried a name, so the merge is harmless" fast path is unsound,
+  and the cheap skip has to be on `_is_extern_decl` instead;
+- two pieces naming DIFFERENT functions cannot both survive (a fragment carries
+  at most one concrete and one variadic name), and the comparison has to be
+  against EVERY piece, not the first: `extern int a (int)` + `extern int a
+  (int)` + `extern "C" ... b (...)` with no `;` anywhere is ONE fragment whose
+  `find('(')`/`rfind(')')` span all three — naming `a`, swallowing `b`, equal
+  to the first piece and different from the union.
+
+Also two provably-equivalent short circuits on the parse itself: a fragment, or
+a whole part, with no `extern` substring cannot satisfy any of the accepted
+declaration shapes, so it skips the `.split('\n')`/strip work entirely (the
+whole-part one matters because `.split(';')` materializes one str per
+statement — tens of thousands for a multi-MB blob).
+
+**Measured.** `std/format/tstring.mojo` (a real 228-level closure; "bytes
+parsed" is the cache-miss volume, i.e. what actually got scanned in Python,
+and is profiler-independent):
+
+| metric | before | after |
+|---|---|---|
+| bytes parsed | 733,616,248 | 10,924,140 (**−98.5%**) |
+| time inside `_dedup_variadic_externs` (summed over the 228 levels) | 4.010s | 0.662s (**−83%**) |
+| cumulative corpus handed to the function | 755,419,799 | 755,419,799 (unchanged — see below) |
+| live cache entries at exit | 22,352 | 22,353 |
+| wall clock | 125.2s | 124.2s (within noise; the machine was contended) |
+
+Synthetic struct chain (the doc's own benchmark shape: a `class` with attrs,
+`__init__` self-assigns and a method per module, plus a libc call so extern
+declarations actually exist), cumulative corpus per level unchanged:
+
+| n | levels | corpus scanned before | after | time in fn before | after |
+|---|---|---|---|---|---|
+| 20 | 20 | 3.84 MB | 0.17 MB | 0.019s | 0.005s |
+| 40 | 40 | 16.6 MB | 0.31 MB | 0.077s | 0.015s |
+| 80 | 80 | 76.8 MB | 0.59 MB | 0.330s | 0.057s |
+
+**What is left, precisely.** The corpus is still handed to the function at every
+level and is still O(cumulative) — that is inherent to the output, not a
+rescan: the parent's text genuinely CONTAINS every descendant's text, so
+producing it costs one `'\n'.join` per level (one memcpy of bytes the caller
+requires as a single str). What is gone is the per-byte Python-level
+re-reading of it. Two residual per-level costs remain, and neither can change
+output: the `'\n'.join`, and one dict lookup per part plus one `concrete.add`
+per name in that part's entry. The second is *cheaper* than it was — a derived
+entry is the child's already-deduplicated name SET, where a fresh parse is a
+LIST, so a part declared once per module in the closure now costs one `add`
+per level instead of one per declaration. Measured as the count of names folded
+across the 80 levels of the n=80 chain: 3,240 before, 158 after. It is still
+O(the corpus's extern names) per level, and making THAT O(delta) needs the
+shared running `concrete` set this doc already rejected twice as a superset; it
+stays rejected.
+
+**Equivalence evidence.** Generated C BYTE-IDENTICAL on two large succeeding
+real cases — `std/io/io.mojo` (28,318,118 bytes, md5
+`248e44fd29f532280b5d212726dfc9a8`) and `std/format/tstring.mojo` (8,021,416
+bytes, md5 `f7ac69d1b240328ac7181f134ee34b9d`) — and on the synthetic chain at
+every size measured, each `cmp`-clean from a fixed module directory so the
+`#line` directives are stable too: n=20 263,458 bytes md5
+`be03542847a1bd17e3e869d795374e52`, n=40 525,278 bytes md5
+`d18d3d1ef28569d712a4ad18fa1e9bed`, n=80 1,120,918 bytes md5
+`83feabd12315910be3af32c660f27e81`. Differential harness (old body verbatim,
+private memo, vs new): exhaustive over all 8,400 pairs and triples, and
+175,692 4- and 5-tuples, of a 20-piece adversarial set built from
+empty/whitespace/`;`-only parts and unterminated extern fragments in both
+arities; 4,000 randomized corpora; a multi-level simulation (each level's parts
+contain the previous level's output) over 300 seeds with EVERY published entry
+compared against an independent parse of that text; real generated C split into
+random chunks at 7 chunkings; and repeat-call stability (a warm cache must not
+change a second answer).
+
+**Gate** (2026-09-30, worker pass only): `python3 test_gimple.py` 333 passed /
+0 failed, including the new `dedup_variadic_externs_cache_is_a_faithful_parse`;
+`python3 test_module_cache.py` 83 passed / 0 failed;
+`test_silent_noop_iter.py` 16 passed / 0 failed (the change adds a `for` loop
+over a local list inside a nested helper, so the loop-lowering suite is the one
+that would notice if it were not lowered).
+
+**NOT RUN, and owed by the integrator** — this pass was a light worker and
+deliberately did not run `make gate`, `compile_stdlib.py` or
+`build_stdlib_dylib.py`. The change adds code to a file INSIDE the compiled
+closure, so the checks that can only see the self-hosted binary's own lowering
+of it are exactly the ones still owed: `mojoc` builds, the three `stage*`
+self-host steps, `stdlib-dylib`'s `skip <module>:` count vs baseline (must not
+increase), `stdlib-syntax`'s unexpected-failure count vs baseline (must not
+increase), `ab-native` and `native-dumpfull` (expected red for a documented
+pre-existing reason — `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`
+— and must not get redder).
+
 
 ## Status (2026-09-26, Phase 7 — `_dedup_variadic_externs`: one pass + per-part memo; the residual is now provably the corpus, not the rescan)
 
@@ -103,6 +237,12 @@ output change, which is exactly the trap the write-invalidation analysis in
 "Phase 5 implementation notes" rejected for the Pass 2c cache. It needs its
 own pass, with its own proof that the running set is exactly the per-level
 corpus's set, not a superset.
+
+**(Superseded 2026-09-30 by the Phase 8 entry above, which took the other
+road: it keeps the per-level computation exactly as it is and instead makes
+each level publish the parse of the text it returns, so the parent's read of
+that text is a hit. The shared running set above is still rejected, still for
+the superset reason.)**
 
 So the doc stays OPEN, but the honest headline is now narrow: the AST-node
 rescan this was named for is fixed and has been for several phases; the
@@ -869,7 +1009,9 @@ not attributable to one fixable site:
   same 08-18 analysis holds.
 - `_dedup_variadic_externs` (~4.4s) — NOT an `imported_stmts` AST
   consumer (post-hoc string dedup of generated C text); out of this
-  bug's scope, as classified on 08-18.
+  bug's scope, as classified on 08-18. **Fixed anyway as Phase 7
+  (2026-09-26) and Phase 8 (2026-09-30); the per-level rescan over
+  generated C text is gone, see those entries.**
 
 
 ## Symptom
