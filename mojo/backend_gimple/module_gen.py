@@ -408,6 +408,16 @@ def _returns_kinds_valued(gen, node) -> bool:
     if not isinstance(node, gimple_ctypes.CallExpr):
         return False
     f = node.func
+    # A call to a function ALREADY KNOWN to hand back a kinds-carrying value
+    # (`fn drop_one() -> List: var kept = mixed(1.5, "aa"); return kept`).
+    # This is the transitive half and it is why the caller above runs a second
+    # pass: the callee has to be in `_return_maybe_kinds` before the function
+    # calling it can be answered, and either may come first in the module.
+    _callee = getattr(f, 'name', None)
+    if (_callee is not None
+            and _callee in getattr(gen, '_return_maybe_kinds', ())
+            and getattr(gen, 'func_return_types', {}).get(_callee) == 'MojoList *'):
+        return True
     # `struct.unpack(fmt, buf)` / `struct.unpack_from(fmt, buf, off)` /
     # `struct.iter_unpack(fmt, buf)` — fmt is the first argument, read
     # back only when it is a literal (see `_struct_literal_format`).
@@ -4594,15 +4604,32 @@ def gen_module_impl(self, stmts):
             _v = _mk_cache[_k] = _infer_return_maybe_kinds(self, body, fdef)
         if _v:
             self._return_maybe_kinds.add(name)
+    _mk_targets = []
     for s in all_functions:
         if not _is_foreign_main(s) and isinstance(s, FunctionDef):
-            _mk(s.name, s.body, s)
+            _mk_targets.append((s.name, s.body, s))
     for s in all_structs_for_methods:
         if isinstance(s, StructDef):
             _sk = _as_structdef_node(s)
             for _m in _sk.methods:
                 if _m.name != '__init__':
-                    _mk(f"{_sk.name}_{_m.name}", _m.body, _m)
+                    _mk_targets.append((f"{_sk.name}_{_m.name}", _m.body, _m))
+    # To a FIXPOINT, not once. `_returns_kinds_valued`'s call arm answers from
+    # `_return_maybe_kinds`, so a function that RETURNS another such function's
+    # value needs that callee answered first — and either order is possible in
+    # the source or across the closure's modules. One extra round covers the
+    # one-hop chain (`def drop_one(): var kept = mixed(...); return kept`,
+    # measured); the loop stops as soon as a round adds nothing, which is what
+    # a program with no such chain does after the first. `_mk_cache` is
+    # per-round for the same reason: an answer computed before its callee was
+    # known is not reusable after.
+    for _mk_round in range(4):
+        _mk_before = len(self._return_maybe_kinds)
+        _mk_cache = {}
+        for _t in _mk_targets:
+            _mk(*_t)
+        if len(self._return_maybe_kinds) == _mk_before:
+            break
     for _pass2c_iter in range(8):
         _c_changed = False
         for s in all_functions:
