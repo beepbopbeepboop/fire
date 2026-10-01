@@ -13888,6 +13888,42 @@ def member_read_without_a_field(chain, holder, name, candidates) -> str:
             f"Call it (`{holder}.{name}(...)`), which is a receiver and a call "
             f"and lowers, or write the operation out where it was used"
         )
+    # NO candidate has the field, as against SOME having it and some not. Both
+    # reach here as `disagree`, because `struct_frame_slot_candidates` reports
+    # "these candidates do not agree on a slot for `name`" and "no candidate has
+    # one" with the same `(None, (True, rows))` — the second is a special case of
+    # the first, and its docstring says so. The single-candidate case below
+    # already reads correctly ("`W1` has no field `x`"), so this branch is only
+    # for TWO OR MORE candidates, and it exists because with several the old
+    # sentence claimed a conflict that does not exist.
+    #
+    # Measured on `std/io/io.mojo`, whose `buffer.unsafe_mut_cast` produced
+    # "_FlushingWriteBuffer has no such field; _FixedWriteBuffer has no such
+    # field" and then "the shapes do not agree on where 'unsafe_mut_cast'
+    # lives". They agree perfectly — neither has it, and `unsafe_mut_cast` is a
+    # method of `Pointer` — so the reader was sent to two structs' layouts
+    # instead of to the receiver's type. The method branch above cannot catch
+    # it, because that searches the CANDIDATE structs and `Pointer` is not one:
+    # the candidates are what `buffer`'s own bindings are, not the types its
+    # members come from.
+    rows = _slot_rows(candidates, name)
+    if len(candidates) > 1 and all(sl is None for _sn, sl in rows):
+        return (
+            f"{chain} is a field of {holder}, and NO candidate has field "
+            f"{name!r} — "
+            + "; ".join(f"{sn}: {struct_field_summary(cand)}"
+                        for (sn, _sl), cand in zip(rows, candidates))
+            + ". So this is not a disagreement between layouts, which is what "
+              "the candidates-not-agreeing case would say: there is nothing to "
+              "disagree about, and no slot index is being chosen between them. "
+              f"{name!r} is something the receiver's own structs do not spell "
+              f"out at all — a method of the receiver's type rather than one of "
+              f"its fields, or a field reached through a base this path does not "
+              f"flatten — or the program raises at run time, since in Python a "
+              f"missing attribute is an AttributeError. Refused rather than read "
+              f"a word it cannot place: a frame slot holds one 64-bit word and "
+              f"there is no `k` to read"
+        )
     if len(candidates) == 1:
         st = candidates[0]
         return (

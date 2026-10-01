@@ -4694,6 +4694,70 @@ INIT_FIELD_TYPE_REFUSALS = [
      "    c = Cfg()\n"
      "    return c.get() + c.nosuch\n",
      "refuse_without:Cfg has no field 'nosuch':in more than one shape", None),
+    # THE SAME FALSE CLAIM WITH TWO CANDIDATES, which is the shape the
+    # single-candidate fix above could not reach and the one that actually
+    # occurs. `model.struct_frame_slot_candidates` reports "these candidates do
+    # not agree on a slot" and "no candidate has one" with the SAME
+    # `(None, (True, rows))`, so `model.member_read_without_a_field`'s
+    # single-candidate branch handled only the second and everything else fell
+    # into the disagreement sentence.
+    #
+    # Measured on `std/io/io.mojo`, where the message printed the rows that
+    # contradict it: "…_FlushingWriteBuffer has no such field; _FixedWriteBuffer
+    # has no such field" and then "the shapes do not agree on where
+    # 'unsafe_mut_cast' lives". They agree perfectly — neither has it, and it is
+    # a method of `Pointer` — so the reader was sent to two structs' layouts
+    # instead of to the receiver's type.
+    #
+    # TWO candidates with NO field between them, so the forbidden clause is the
+    # one that says they disagree. `A puts it at slot 0; B has no such field` is
+    # the REAL disagreement (one has it, one does not) and is the case the
+    # surviving branch still has to keep saying — which is what the next case
+    # pins, so this one cannot be satisfied by deleting the disagreement
+    # sentence altogether.
+    #
+    # The needle is the corrected sentence, and `refuse_without:` requires both
+    # halves: the forbidden wording gone AND the true wording present, so
+    # dropping the message passes neither. (`|` separates them, which this
+    # runner reads as ALTERNATIVES for the needle and as a LIST for the
+    # forbidden substrings — so they are two cases, not one.)
+    ("no_candidate_having_a_field_is_not_a_layout_disagreement",
+     "struct A:\n"
+     "    var pad: Int\n"
+     "    var other: Int\n"
+     "\n"
+     "struct B:\n"
+     "    var pad2: Int\n"
+     "    var other2: Int\n"
+     "\n"
+     "def go(n: Int) -> Int:\n"
+     "    var w = A(1, 2)\n"
+     "    if n > 0:\n"
+     "        w = B(3, 4)\n"
+     "    var v = w.nosuch\n"
+     "    return v\n",
+     "refuse_without:NO candidate has field 'nosuch':the shapes do not agree",
+     None),
+    # …and the real disagreement, in the same program shape, so the case above
+    # cannot be satisfied by removing the disagreement sentence altogether. `A`
+    # has `src` and `B` does not, which IS a disagreement about where the field
+    # lives, and the message must still say so.
+    ("a_real_layout_disagreement_still_says_so",
+     "struct A:\n"
+     "    var src: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "struct B:\n"
+     "    var other: Int\n"
+     "    var pad2: Int\n"
+     "\n"
+     "def go(n: Int) -> Int:\n"
+     "    var w = A(1, 2)\n"
+     "    if n > 0:\n"
+     "        w = B(3, 4)\n"
+     "    var v = w.src\n"
+     "    return v\n",
+     "refuse:the shapes do not agree on where 'src' lives", None),
 ]
 # ── wave 5 (E2): the three CONSTRUCTION shapes ─────────────────────────────
 #
