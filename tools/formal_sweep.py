@@ -1739,20 +1739,34 @@ def _loadable_for(path: str, cputype: int):
 
 
 def _exports(path: str, name: str) -> bool:
-    """Whether the library at `path` exports `name`, which is spelled bare.
+    """Whether the library at `path` exports the bind-stream name `name`.
 
-    `hasattr` on a CDLL is a dlsym, and dlsym re-adds the leading underscore
-    the Mach-O symbol carries — so the name the bind stream holds (bare, as
-    macho_linker writes it) is exactly what dlsym wants. libSystem is the one
-    exception to "the library at `path`": it is answered from the HOST process
-    (see the block comment above for why that is the same library), and
-    CDLL(None) searches the global namespace, which is why the lstrip is not
-    optional here.
+    The name goes to dlsym EXACTLY as the image's bind stream spells it, and
+    that is the whole contract. The stream already carries the C name —
+    `macho_linker._bind_info` takes off the single leading underscore that is
+    dyld's rather than the name's, and dyld puts it back on when it forms the
+    symbol it looks up — so the name read back out of the image is already the
+    spelling `dlsym` wants, and this must not normalise it a second time.
+
+    It used to, with `lstrip("_")`, which is wrong in the direction that
+    invents findings. A formal module's ABI prefix can begin with an
+    underscore — `abi_module_name('._syscalls')` is `__syscalls`, so EVERY
+    relative import produces one — and stripping "the" underscore turned the
+    bind name `_syscalls_fs_chdir_9f63a2` into `syscalls_fs_chdir_9f63a2`,
+    which dlsym resolved against `__syscalls_fs_chdir_9f63a2` and did not find.
+    The sweep then reported a load failure for an image that loads: measured on
+    `formal/hostmods/os/__init__.mojo` and `formal/hostmods/os/path/__init__.mojo`,
+    both classified `unresolved-extern` on a build that links and runs. See
+    `bugs/FORMAL_relative_submodule_abi_prefix_off_by_one.md`.
+
+    libSystem is the one exception to "the library at `path`": it is answered
+    from the HOST process (see the block comment above for why that is the same
+    library), and CDLL(None) searches the global namespace.
     """
     key = (path, name)
     if key not in _MEMO:
         lib = ctypes.CDLL(None) if path == _LIBSYSTEM else ctypes.CDLL(path)
-        _MEMO[key] = hasattr(lib, name.lstrip("_"))
+        _MEMO[key] = hasattr(lib, name)
     return _MEMO[key]
 
 

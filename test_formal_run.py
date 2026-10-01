@@ -3952,9 +3952,20 @@ DECLARED_TYPE_REFUSALS = [
 # premise (B2) saying which store does not execute, and the comment says which.
 ASSIGNED_TYPE_CASES = [
     # The positive case, and the shape the sweep named: `self.in1.total()` where
-    # `in1` is assigned in `__init__` and declared nowhere.  123 + 5 = 128, and a
-    # build that computed 0 or 5 would be the silently-wrong outcome — a load
-    # from a slot nothing was ever written to.
+    # `in1` is a nested frame of this module and `Outer` declares nothing about
+    # it.  123 + 5 = 128, and a build that computed 0 or 5 would be the
+    # silently-wrong outcome — a load from a slot nothing was ever written to.
+    #
+    # `in1` is DECLARED (`var in1: Inner`) and `__init__` stores a word.  It used
+    # to be the other way round — `fn __init__(self): self.in1 = Inner()` with no
+    # declaration — which made `Outer()` a zero-argument construction of a struct
+    # whose `__init__` takes no required parameter, so the body RUNS and the
+    # nested frame construction in it is refused by name (`model.init_body_stores`:
+    # the nested block is reserved per construction SITE, and a body inlined into
+    # a construction has no such site).  See
+    # `bugs/FORMAL_assigned_type_evidence_unreachable_after_zero_arg_init.md` for
+    # what that did to the evidence source itself.  The guard for the spelling
+    # this replaced is `assigned_type_refuse_a_nested_frame_constructed_in_init`.
     ("assigned_type_nested_frame_method_call",
      "struct Inner:\n"
      "    var a: Int\n"
@@ -3967,9 +3978,10 @@ ASSIGNED_TYPE_CASES = [
      "struct Outer:\n"
      "    var tag: Int\n"
      "    var pad: Int\n"
+     "    var in1: Inner\n"
      "\n"
      "    fn __init__(self):\n"
-     "        self.in1 = Inner()\n"
+     "        self.tag = 0\n"
      "\n"
      "    fn go(self) -> Int:\n"
      "        return self.in1.total() + self.tag\n"
@@ -3983,7 +3995,7 @@ ASSIGNED_TYPE_CASES = [
      "    return o.go()\n", 128, None),
     # The same construct reached through a LOCAL rather than through `self`,
     # which is `scripts/stage2_mojo_interpreter.mojo`'s
-    # `interpreter.scope.define()`: the base is a parameterless constructor in
+    # `interpreter.scope.define()`: the base is a parameterless construction in
     # `main`, not a receiver.  It is a separate case because the two are decided
     # by different tables — `fn._frame_candidates` for a local against
     # `struct_receivers` for `self` — and a fix that taught one and not the other
@@ -4009,9 +4021,10 @@ ASSIGNED_TYPE_CASES = [
      "struct Interpreter:\n"
      "    var filename: Int\n"
      "    var pad: Int\n"
+     "    var scope: Scope\n"
      "\n"
      "    fn __init__(self):\n"
-     "        self.scope = Scope()\n"
+     "        self.filename = 0\n"
      "\n"
      "def main(n: Int) -> Int:\n"
      "    var interpreter = Interpreter()\n"
@@ -4039,9 +4052,10 @@ ASSIGNED_TYPE_CASES = [
      "struct Outer:\n"
      "    var tag: Int\n"
      "    var pad: Int\n"
+     "    var in1: Inner\n"
      "\n"
      "    fn __init__(self):\n"
-     "        self.in1 = Inner()\n"
+     "        self.tag = 0\n"
      "\n"
      "def main(n: Int) -> Int:\n"
      "    var o1 = Outer()\n"
@@ -4061,19 +4075,63 @@ ASSIGNED_TYPE_CASES = [
      "    if o2.in1.c != 10:\n"
      "        return 4000 + o2.in1.c\n"
      "    return 0\n", 0, None),
+]
+
+ASSIGNED_TYPE_REFUSALS = [
+    # THE SPELLING THAT IS NO LONGER ANSWERED, and it is here rather than
+    # deleted because it is the one the sweep named.  `Outer()` on a struct whose
+    # `__init__` takes no required parameter RUNS the body, and a body that
+    # constructs a FRAMED struct of this module is refused by name
+    # (`model.init_body_stores`): that nested block is reserved per construction
+    # SITE in the prologue of the function naming the call, and a body inlined
+    # into a construction has no such site.  Before that change the store never
+    # ran, so this program built and answered 128 — a placed `Inner` frame with
+    # 1, 2, 3 in it, read through `Inner.total`.
+    #
+    # What that costs is the ASSIGNED-TYPE evidence this whole group is named
+    # for, and the two facts are the same fact: the only shape that says a field
+    # holds a nested frame without declaring it is this one.  It is written down
+    # rather than papered over in
+    # `bugs/FORMAL_assigned_type_evidence_unreachable_after_zero_arg_init.md`, and
+    # the evidence itself is still pinned, directly, by
+    # `test_struct_formal.py`'s `struct_init_field_types` cases.
+    ("assigned_type_refuse_a_nested_frame_constructed_in_init",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "    fn total(self) -> Int:\n"
+     "        return self.a * 100 + self.b * 10 + self.c\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "\n"
+     "    fn __init__(self):\n"
+     "        self.in1 = Inner()\n"
+     "\n"
+     "    fn go(self) -> Int:\n"
+     "        return self.in1.total() + self.tag\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
+     "    o.tag = 5\n"
+     "    o.in1.a = 1\n"
+     "    o.in1.b = 2\n"
+     "    o.in1.c = 3\n"
+     "    return o.go()\n",
+     "refuse:a construction of a struct whose receiver is a frame", None),
     # The GUARD on the precedence rule, and the one most likely to be quietly
     # dropped: a DECLARATION still wins over a contradicting `__init__`
-    # assignment, and the reason is premise (B2) rather than a preference —
-    # `Outer()` does not run `__init__`, so the word in `in1` is the
-    # declaration's, whatever the assignment says.  Cross-checking the two
-    # would refuse correct code.
-    #
-    # The reference is the same program with `Other()` replaced by `Inner()`
-    # (CPython 128), which is what premise (B2) says the `__init__` line does
-    # not do.  A build that honoured the ASSIGNMENT would place an `Other` and
-    # call `Inner.total` on it: 1, 2, 3 at the slots `Other` shares, so it
-    # would answer 123 rather than 128 and exit 0 — the silently-wrong shape
-    # this case exists to catch.
+    # assignment.  `Outer` declares `var in1: Inner` and `__init__` assigns
+    # `Other()`, which has the same three fields and therefore the same layout —
+    # so honouring the assignment would build, run, and answer 123 where the
+    # source says 128, with nothing refused and nothing printed.  It does not
+    # build: the assignment is a construction of a framed struct in a
+    # constructor's right-hand side, refused by name.  So the rule is now stated
+    # as a refusal instead of as a silently-correct answer, which is the stronger
+    # of the two claims and the one a reader can act on.
     ("assigned_type_a_declaration_still_wins",
      "struct Inner:\n"
      "    var a: Int\n"
@@ -4105,10 +4163,8 @@ ASSIGNED_TYPE_CASES = [
      "    o.in1.a = 1\n"
      "    o.in1.b = 2\n"
      "    o.in1.c = 3\n"
-     "    return o.go()\n", 128, None),
-]
-
-ASSIGNED_TYPE_REFUSALS = [
+     "    return o.go()\n",
+     "refuse:a construction of a struct whose receiver is a frame", None),
     # The field is a nested frame's type AND an executed method REPLACES it.
     # The type is known, which is what the constructor half of
     # `struct_field_type` bought, and what is not known is WHOSE frame the slot
@@ -4314,30 +4370,27 @@ INIT_FIELD_TYPE_CASES = [
     # naming the same address in two objects, so this asserts a real answer
     # rather than "it linked".
     ("init_assigned_nested_frame_method_call",
-     "class Inner:\n"
-     "    __slots__ = ('a', 'b', 'c')\n"
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
      "\n"
-     "    def __init__(self):\n"
-     "        self.a = 0\n"
-     "        self.b = 0\n"
-     "        self.c = 0\n"
-     "\n"
-     "    def total(self):\n"
+     "    fn total(self) -> Int:\n"
      "        return self.a * 100 + self.b * 10 + self.c\n"
      "\n"
-     "class Outer:\n"
-     "    __slots__ = ('tag', 'pad', 'inner')\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var inner: Inner\n"
      "\n"
-     "    def __init__(self):\n"
+     "    fn __init__(self):\n"
      "        self.tag = 0\n"
-     "        self.pad = 0\n"
-     "        self.inner = Inner()\n"
      "\n"
-     "    def go(self):\n"
+     "    fn go(self) -> Int:\n"
      "        return self.inner.total() + self.tag\n"
      "\n"
-     "def main():\n"
-     "    o = Outer()\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
      "    o.tag = 5\n"
      "    o.inner.a = 1\n"
      "    o.inner.b = 2\n"
@@ -4350,31 +4403,28 @@ INIT_FIELD_TYPE_CASES = [
     # second construction site — which is what makes it a test of the BLOCK
     # placement and not of the method call.
     ("init_assigned_nested_frame_two_objects_no_alias",
-     "class Inner:\n"
-     "    __slots__ = ('a', 'b', 'c')\n"
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
      "\n"
-     "    def __init__(self):\n"
-     "        self.a = 0\n"
-     "        self.b = 0\n"
-     "        self.c = 0\n"
-     "\n"
-     "    def total(self):\n"
+     "    fn total(self) -> Int:\n"
      "        return self.a * 100 + self.b * 10 + self.c\n"
      "\n"
-     "class Outer:\n"
-     "    __slots__ = ('tag', 'pad', 'inner')\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var inner: Inner\n"
      "\n"
-     "    def __init__(self):\n"
+     "    fn __init__(self):\n"
      "        self.tag = 0\n"
-     "        self.pad = 0\n"
-     "        self.inner = Inner()\n"
      "\n"
-     "    def go(self):\n"
+     "    fn go(self) -> Int:\n"
      "        return self.inner.total()\n"
      "\n"
-     "def main():\n"
-     "    o1 = Outer()\n"
-     "    o2 = Outer()\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o1 = Outer()\n"
+     "    var o2 = Outer()\n"
      "    o1.inner.a = 1\n"
      "    o1.inner.b = 2\n"
      "    o1.inner.c = 3\n"
@@ -4418,32 +4468,33 @@ INIT_FIELD_TYPE_CASES = [
      "    t.limit = 4\n"
      "    t._size = 5\n"
      "    return t.limit + t.count()\n", 9, None),
-    # (2) THE VALUE IS NOT `__init__`'s. A class-level default is the only thing
-    # this path materialises into a fresh instance's slot, so 7 is what the
-    # image computes and 99 — what `__init__` says — is what premise (B2)
-    # (`FRAME_FIELD_BLOB_PREMISE_B2`) rules out. CPython runs `__init__` and
-    # returns 99.
+    # (2) THE CONSTRUCTOR'S VALUE, not the class default's.  A zero-argument
+    # `S()` on a struct whose `__init__` takes no required parameter RUNS the
+    # body (`model.struct_construction_plan` reads `struct_init_shapes` before
+    # the zero-argument case), so `limit` is 99 and not the class-level 7 — which
+    # is what CPython says too, and this case used to assert the opposite because
+    # premise (B2) then read "a zero-argument S() does not run __init__".
     #
-    # This case exists because the change makes the field TYPED: `self.limit =
-    # 99` is an int literal, so `struct_field_kind` now has a kind to claim
-    # where it had none, and the materialisable-default gate in
-    # `struct_field_kind` is what keeps the answer at 7. A regression that let
-    # the `__init__` VALUE through would make this return 99 and every case
-    # below would still pass, so it is here on its own.
+    # It is here on its own because `pad` is the other half and the pair is the
+    # whole rule: `pad` is assigned NOTHING by the constructor, so it keeps its
+    # class-level default.  A lowering that either ran the body where it should
+    # not, or failed to bring every other slot up first, changes the answer, and
+    # 102 pins both halves: 10 if the class default won for `limit`, 99 if it
+    # won for `pad`.
     ("init_assigned_class_default_still_governs_the_value",
      "class Cfg:\n"
      "    limit = 7\n"
+     "    pad = 3\n"
      "\n"
      "    def __init__(self):\n"
      "        self.limit = 99\n"
-     "        self.pad = 0\n"
      "\n"
      "    def get(self):\n"
-     "        return self.limit\n"
+     "        return self.limit + self.pad\n"
      "\n"
      "def main():\n"
      "    c = Cfg()\n"
-     "    return c.get()\n", 7, None),
+     "    return c.get()\n", 102, None),
     # The same gate, on the OTHER half of `declared_type_kind`'s table: a
     # class-level STRING default plus `self.s = "hi"` in `__init__` types the
     # field as a string, and `len()` of a string is a `strlen`. Before the
@@ -4848,27 +4899,24 @@ INIT_FIELD_TYPE_REFUSALS = [
     # this operand holds") would be false about a class whose `__init__` says
     # `self.inner = Inner()`.
     ("init_assigned_nested_frame_len_is_the_frame_address_refusal",
-     "class Inner:\n"
-     "    __slots__ = ('a', 'b', 'c')\n"
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
      "\n"
-     "    def __init__(self):\n"
-     "        self.a = 0\n"
-     "        self.b = 0\n"
-     "        self.c = 0\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    var inner: Inner\n"
      "\n"
-     "class Outer:\n"
-     "    __slots__ = ('tag', 'pad', 'inner')\n"
-     "\n"
-     "    def __init__(self):\n"
+     "    fn __init__(self):\n"
      "        self.tag = 0\n"
-     "        self.pad = 0\n"
-     "        self.inner = Inner()\n"
      "\n"
-     "    def go(self):\n"
+     "    fn go(self) -> Int:\n"
      "        return len(self.inner)\n"
      "\n"
-     "def main():\n"
-     "    o = Outer()\n"
+     "def main(n: Int) -> Int:\n"
+     "    var o = Outer()\n"
      "    return o.go()\n",
      "refuse:len(self.inner) is len() of a FRAME ADDRESS", None),
     # ── the member-read diagnostic (row 13 of the sweep map) ──
@@ -5684,16 +5732,22 @@ CONSTRUCTION_CASES = [
      "    if last_v != 9:\n"
      "        return 50 + last_v\n"
      "    return 7\n", 7, None),
-    # GUARD, and the one that says the change did not OVERREACH: `S()` on a
-    # struct that declares an `__init__` still brings every field up at its
-    # class-level default and does NOT run the body, because there are no
-    # arguments for the argument count to select an overload with.  A lowering
-    # that ran the constructor here would have to pick a zero-required overload
-    # by something other than the count, and 8 + 9 is what a reader would be
-    # entitled to expect if it did.  The sibling refusal
-    # `constr_zero_arg_still_ignores_a_declared_init` pins the same fact from
-    # the other side (a constructor that takes arguments).
-    ("constr_init_a_zero_argument_construction_still_ignores_the_body",
+    # THE LANGUAGE'S ANSWER, and the test that was missing while this was
+    # pinned the other way: `S()` on a struct whose `__init__` takes no
+    # REQUIRED parameter RUNS the constructor, so `Z()` is `a == 8, b == 9`.
+    #
+    # This used to assert the opposite (both fields zero), and pinning a
+    # known-wrong answer is how it stayed wrong: nothing else in the corpus
+    # distinguishes a correct zero-argument lowering from the zeros, so a green
+    # suite said nothing either way.  `init_overload_for_arity` is what makes
+    # it decidable rather than a guess — it admits a count of 0 exactly when
+    # some declared overload takes no required parameter, and answers
+    # `ambiguous` (a refusal) when two of them would, so `S()` is selected by
+    # exactly the rule every other count is.  The exit status is 1 because
+    # `main` returns 1 when both fields carry the defaults, and 0 otherwise, so
+    # the zeros and CPython's answer are different exit codes and this test
+    # cannot pass for either by accident.
+    ("constr_a_zero_argument_construction_runs_a_zero_required_init",
      "struct Z:\n"
      "    var a: Int\n"
      "    var b: Int\n"
@@ -5709,8 +5763,28 @@ CONSTRUCTION_CASES = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    var z = Z()\n"
-     "    if z.get(0) != 0 or z.get(1) != 0:\n"
-     "        return 20 + z.get(0)\n"
+     "    if z.get(0) == 8 and z.get(1) == 9:\n"
+     "        return 1\n"
+     "    return 0\n", 1, None),
+    # …and the GUARD that says the change did not OVERREACH: a struct that
+    # declares NO constructor is still brought up at its class-level defaults,
+    # because there is no body to run.  Same shape as the case above with the
+    # `__init__` removed, so it is the only thing separating "zero-argument
+    # constructions run a constructor" from "every construction runs one".
+    ("constr_a_zero_argument_construction_of_a_constructor_less_struct",
+     "struct P9:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    def get(self, i: Int) -> Int:\n"
+     "        if i == 0:\n"
+     "            return self.a\n"
+     "        return self.b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var p = P9()\n"
+     "    if p.get(0) != 0 or p.get(1) != 0:\n"
+     "        return 20 + p.get(0)\n"
      "    return 7\n", 7, None),
 ]
 
@@ -5944,18 +6018,17 @@ CONSTRUCTION_REFUSALS = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    var x = In4(In3(1, 2), 3)\n"
-     "    return x.g",
+"    return x.g",
      "refuse:is stored in the field 'self.f'", None),
-    # The guard on the other side of the same line: a ZERO-argument `S()` on a
-    # struct that declares `__init__` is NOT one of the refusals above. There
-    # are no arguments for the count to select an overload with, so it stays
-    # premise (B2) — every field comes up at its class-level default — and that
-    # is the shape nearly every container in the corpus is written in. If this
-    # case ever starts refusing, the init branch has leaked above the `not args`
-    # early return. `constr_init_a_zero_argument_construction_still_ignores_the_body`
-    # in `CASES` is the same fact with all-defaulted parameters, where a
-    # lowering that DID run the body would have produced 8 and 9.
-    ("constr_zero_arg_still_ignores_a_declared_init",
+    # The other side of the same line, and the one the change made a REFUSAL:
+    # a zero-argument `S()` on a struct whose `__init__` REQUIRES a parameter.
+    # `Bag4()` is a `TypeError` in the language — the constructor needs `n` and
+    # `m` — and it used to build, run and return 7 by bringing both fields up
+    # at zero.  A silently wrong value is the outcome this backend treats as
+    # worst available, and the count is not ambiguous here: `init_overload_
+    # for_arity` says no declared overload takes 0 and the message spells the
+    # overloads it does declare, so the fix is on the caller's side.
+    ("constr_refuse_a_zero_arg_construction_when_init_requires_parameters",
      "struct Bag4:\n"
      "    var n: Int\n"
      "    var m: Int\n"
@@ -5969,9 +6042,8 @@ CONSTRUCTION_REFUSALS = [
      "\n"
      "def main(n: Int) -> Int:\n"
      "    var b = Bag4()\n"
-     "    if b.get() != 0:\n"
-     "        return 20 + b.get()\n"
-     "    return 7\n", 7, None),
+     "    return b.get()\n",
+     "refuse:none of them takes that count", None),
     # ── ARITY: too few, too many, and a zero-field struct ──
     # Too FEW. `S(1)` on a two-field `S` is not a one-field construction, it is
     # a two-field construction missing an argument, and the message has to say
@@ -7586,6 +7658,16 @@ WAVE7_G2_CASES = [
     # most worth its own sentence, because offset 0 of a frame is the struct's
     # FIRST FIELD and `len` over it returns a plausible number meaning nothing.
     # Pre-change this was filed under "the source does not say".
+    # `Outer.__init__` stores a WORD and leaves `inner` alone.  It used to store
+    # `self.inner = Inner()` — a construction of a FRAMED struct in a
+    # constructor's right-hand side — and `Outer()` never ran that body (premise
+    # (B2) as it was then worded), so the store was dead code that happened to
+    # compile.  `S()` on a struct whose `__init__` takes no required parameter
+    # RUNS the body now, and a nested frame construction in it is refused by name
+    # — the message here says the same thing, which is why the program is
+    # written the recommended way instead: `inner` is a PLACED nested frame, so
+    # `Outer()` brings it up without the constructor mentioning it, and `go`
+    # reaches exactly the `len()` of a frame address this case is about.
     ("len_frame_slot_is_a_frame_address",
      "struct Inner:\n"
      "    var a: Int\n"
@@ -7597,7 +7679,6 @@ WAVE7_G2_CASES = [
      "    var inner: Inner\n"
      "    var n: Int\n"
      "    def __init__(out self):\n"
-     "        self.inner = Inner()\n"
      "        self.n = 5\n"
      "    def go(self) -> Int:\n"
      "        return len(self.inner)\n"
@@ -9589,6 +9670,118 @@ def check_comptime_alias_census(verbose=False):
     return passed, failures
 
 
+# The four rules `model.struct_init_field_types` is, asked of `formal.model` and
+# nothing else. `ASSIGNED_TYPE_CASES` above used to cover them end to end and
+# cannot any more: its evidence shape, `self.<f> = T()` for a `T` of this unit
+# whose receiver is a frame, is exactly the shape `model.init_body_stores`
+# refuses now that a zero-argument `S()` RUNS a zero-required `__init__` (see
+# `assigned_type_refuse_a_nested_frame_constructed_in_init` and
+# `bugs/FORMAL_assigned_type_evidence_unreachable_after_zero_arg_init.md`). A
+# rule nothing can reach is a rule nothing tests, so it is asked directly here
+# — and directly is the honest level for it: the value of the inference is what
+# it infers from a parsed class, not what an image does with the answer.
+_ASSIGNED_TYPE_PROBES = [
+    # The positive row: a nested frame the class body never declares.
+    ("a nested frame is read off __init__'s construction of it",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    fn __init__(self):\n"
+     "        self.in1 = Inner()\n",
+     {"in1": ("Inner", "Inner")}),
+    # UNANIMITY OR NOTHING, and the two ways it says no: one assignment that
+    # classifies to nothing at all, and two that classify differently. Both leave
+    # the field OUT of the map rather than answering with the one that worked,
+    # because a type of a slot whose other store says otherwise is a wrong answer
+    # that nothing downstream can see.
+    ("one assignment that classifies to nothing leaves the field out",
+     "struct Inner:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    fn __init__(self):\n"
+     "        self.in1 = Inner()\n"
+     "        self.n = make()\n",
+     {"in1": ("Inner", "Inner")}),
+    ("two assignments of different types leave the field out",
+     "struct A2:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct B2:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    fn __init__(self, c: Int):\n"
+     "        if c > 0:\n"
+     "            self.in1 = A2()\n"
+     "        else:\n"
+     "            self.in1 = B2()\n",
+     {}),
+    # `decls` is the GATE and its absence is the safe direction: without it
+    # `make()` cannot become "a type that is not a struct of this unit", which
+    # would answer the frame question "provably not a frame" about a slot that
+    # may well hold one.
+    ("without decls a construction of an unknown name classifies to nothing",
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    fn __init__(self):\n"
+     "        self.in1 = Inner()\n",
+     {}, False),
+    # A LITERAL row, and the narrowness the last probe names: `self.tag = 0`
+    # classifies (as the language's own `int`), while `pad` — a field the
+    # constructor never mentions at all — is ABSENT rather than defaulted to
+    # something. The map is what `__init__` says, and the annotation and the
+    # class-level default are two other functions' questions.
+    ("a literal classifies and a field __init__ never mentions is absent",
+     "struct Outer:\n"
+     "    var tag: Int\n"
+     "    var pad: Int\n"
+     "    fn __init__(self):\n"
+     "        self.tag = 0\n",
+     {"tag": ("int", "int")}),
+]
+
+
+def check_assigned_type_evidence(verbose=False):
+    """`model.struct_init_field_types` on five parsed classes.
+
+    Returns `(passed, failures)`; a probe's last element is the `decls` to
+    build it with, and only the fourth says no."""
+    build = __import__("formal.build", fromlist=["build"])
+    passed, failures = 0, []
+    for probe in _ASSIGNED_TYPE_PROBES:
+        name, source, want = probe[0], probe[1], probe[2]
+        with_decls = probe[3] if len(probe) > 3 else True
+        stmts = build.parse_module(source, "<assigned-type>")
+        structs = {st.name: st
+                   for st in _TYPE_VALUE_MODEL.iter_struct_defs(stmts)}
+        target = structs.get("Outer")
+        if target is None:
+            failures.append(f"{name}: parsed no Outer")
+            continue
+        decls = structs if with_decls else None
+        got = _TYPE_VALUE_MODEL.struct_init_field_types(target, decls)
+        if got != want:
+            failures.append(f"{name}: {got!r} (want {want!r})")
+            continue
+        passed += 1
+        if verbose:
+            print(f"  PASS  assigned-type: {name}")
+    return passed, failures
+
+
 def _every_type_tag_is_distinct_source(chunk: int = 26) -> str:
     """A program that returns 1 if any two admitted type names share a tag."""
     import itertools
@@ -9871,6 +10064,13 @@ def main():
           f"FAIL={len(census_failures)}")
     passed += census_passed
     failed += len(census_failures)
+    at_passed, at_failures = check_assigned_type_evidence(args.verbose)
+    for detail in at_failures:
+        print(f"  FAIL  assigned-type: {detail}")
+    print(f"formal run: assigned-type PASS={at_passed} "
+          f"FAIL={len(at_failures)}")
+    passed += at_passed
+    failed += len(at_failures)
     with tempfile.TemporaryDirectory() as tmpdir:
         for name, source, cpython_source in wanted_pairs:
             src = os.path.join(tmpdir, name + ".mojo")

@@ -697,7 +697,8 @@ def _extract_functions(stmts: list, synthetic: bool = True,
 
 def _make_codegen(arch: str, fmt: str, test_input: int,
                   dylib_syms: dict = None, comptime_hook=None,
-                  dylib_exports: list = None):
+                  dylib_exports: list = None, import_aliases: dict = None,
+                  extern_decls: dict = None):
     """The codegen for `arch`, configured for the `fmt` binary it feeds.
 
     The only format-dependent choice made here is how an unbound symbol is
@@ -717,7 +718,20 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
     module that owns each export (which is what makes `mod.f()` resolvable
     without ever consulting a bare name) and the declared signature (which is
     what says whether a call's result is a string). See
-    `model.dylib_export_lookup`."""
+    `model.dylib_export_lookup`.
+
+    `import_aliases` is `formal/imports.py`'s `import_bindings` table: the
+    local name `from m import f as g` binds, and where it came from. Without
+    it the emitters can only look a bare callee up by its DEFINING name, so `g`
+    found nothing and the image bound a symbol no library defines. See
+    `model.dylib_aliased_export`.
+
+    `extern_decls` is `formal/imports.py`'s `external_declarations` table:
+    `{export symbol: FunctionDef}`, the callee's own declaration read from the
+    source the linked library was compiled from. It is what lets a call ACROSS
+    a dylib boundary bind its arguments the way a call inside one image does,
+    so a defaulted parameter is materialized instead of arriving as whatever
+    the caller last left in the register."""
     # Where this unit's module-global data segment will be MAPPED, handed to
     # both backends because every slot access is an absolute address computed
     # before the image exists. None when the module declares no writable
@@ -728,7 +742,9 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
                             dylib_syms=dylib_syms,
                             comptime_hook=comptime_hook,
                             dylib_exports=dylib_exports,
-                            globals_base=gbase)
+                            globals_base=gbase,
+                            import_aliases=import_aliases,
+                            extern_decls=extern_decls)
     if arch == "x86_64":
         from formal.x86_64_codegen import X86_64Codegen
         return X86_64Codegen(test_input=test_input,
@@ -737,7 +753,9 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
                              comptime_hook=comptime_hook,
                              dylib_exports=dylib_exports,
                              globals_base=gbase,
-                             target_fmt=fmt)
+                             target_fmt=fmt,
+                             import_aliases=import_aliases,
+                             extern_decls=extern_decls)
     raise FormalBuildError(
         f"unknown arch {arch!r} (expected one of {', '.join(ARCHES)})")
 
@@ -909,7 +927,8 @@ def _unaccounted_report(source_path: str, unaccounted: list, where: str) -> str:
 
 def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
                       dylibs: list = None, comptime_hook=None,
-                      structs: list = None, source_path: str = None):
+                      structs: list = None, source_path: str = None,
+                      import_aliases: dict = None, extern_decls: dict = None):
     """Compile `ordered` for `arch` and wrap it in its binary container.
 
     Returns (code, info, external_syms, binary). Mach-O needs two passes: the
@@ -922,7 +941,16 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     entry's symbols are callee names the codegen must mangle to that library's
     exported spelling, and each adds a load command — which moves the entry
     point, so the second pass has to be emitted for the offset the *same*
-    dylib list implies."""
+    dylib list implies.
+
+    `import_aliases` is `formal/imports.py`'s `import_bindings` table, passed
+    straight through to the codegen: a call site spells the name AS WRITTEN, so
+    `from m import f as g` has to reach `f`'s export rather than miss the flat
+    map and bind `g`.
+
+    `extern_decls` is `formal/imports.py`'s `external_declarations`, for the
+    same reason read from the other end: a callee in another image has a
+    parameter list this build cannot see unless it is handed over."""
     dylibs = list(dylibs or [])
     dylib_syms = {}
     for d in dylibs:
@@ -941,7 +969,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
         from formal.elf import (DEFAULT_BASE, DEFAULT_LIBC, build_elf,
                                  compute_got_addrs)
         codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
-                                comptime_hook, dylib_exports)
+                                comptime_hook, dylib_exports, import_aliases,
+                                extern_decls)
         try:
             code, info = codegen.compile(ordered, base_addr=DEFAULT_BASE,
                                          structs=structs)
@@ -979,7 +1008,7 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     base_noextern = TEXT_BASE + (NOEXTERN_GLOBALS_ENTRYOFF if has_globals
                                  else NOEXTERN_ENTRYOFF)
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms, comptime_hook,
-                            dylib_exports)
+                            dylib_exports, import_aliases, extern_decls)
     try:
         code, info = codegen.compile(ordered, base_addr=base_noextern,
                                      structs=structs)
@@ -988,7 +1017,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
             # Re-emit at the extern entry base (the layout differs, and so do
             # every address the code computed off its own base).
             codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
-                                    comptime_hook, dylib_exports)
+                                    comptime_hook, dylib_exports,
+                                    import_aliases, extern_decls)
             code, info = codegen.compile(ordered, base_addr=base_extern,
                                          structs=structs)
             external_syms = info.get("external_syms") or []
@@ -1017,15 +1047,65 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     return code, info, external_syms, binary
 
 
-def _imported_structs(source_path: str, stmts: list, arch: str) -> list:
+def _imported_structs(source_path: str, stmts: list, arch: str,
+                      linked: list = None) -> list:
     """Struct declarations from the modules this file imports, or [].
 
     A no-op for a target that has no module concept (an ELF image, or a
-    non-Mach-O format): there is nothing to import and nothing to bind."""
+    non-Mach-O format): there is nothing to import and nothing to bind.
+
+    `linked` widens it to the libraries the program was HANDED, which is not the
+    same set and used to be a hole. `--link-dylib heaplib.dylib` with a program
+    that has no import statement is the only way `Bag` reaches such a program —
+    the dylib carries the struct's METHODS in its manifest (`kind: "method"`
+    entries, one per `add`/`__len__`) but not its DECLARATION, and without one
+    `var b = Bag(); b.n = 4` was refused with a repair the reader cannot apply:
+    "Bind the base from a constructor THIS MODULE declares", for a struct
+    declared in a file this build does not have. That advice was right and
+    impossible. The declaration is read from the source the library recorded
+    when it was built — the same bytes its methods were compiled from — so the
+    field list, `struct_is_framed`'s answer and the frame slot table all come
+    from one file and cannot disagree with the library on the link line."""
     if not fmt_wants_macho(arch):
         return []
-    from formal.imports import imported_struct_defs
-    return imported_struct_defs(source_path, stmts, project_root=source_path)
+    from formal.imports import (imported_struct_defs, linked_module_paths,
+                                module_struct_defs)
+    out, seen = [], set()
+    for st in imported_struct_defs(source_path, stmts,
+                                   project_root=source_path):
+        seen.add(st.name)
+        out.append(st)
+    for path in linked_module_paths(linked):
+        for st in module_struct_defs(path, source_path):
+            if st.name not in seen:
+                seen.add(st.name)
+                out.append(st)
+    return out
+
+
+def _import_aliases(stmts: list) -> dict:
+    """`{local name: (module as spelled, defining name)}` for this file's imports.
+
+    Read here, from the statements this build already parsed, and handed to the
+    emitters — a call site spells the name AS WRITTEN, so `from m import f as g`
+    needs the mapping from `g` back to `m`'s `f` and no amount of looking up the
+    bare name in the libraries' export tables can produce it. See
+    `formal/imports.py`'s `import_bindings`."""
+    from formal.imports import import_bindings
+    return import_bindings(stmts)
+
+
+def _external_declarations(linked: list) -> dict:
+    """`{export symbol: FunctionDef}` for the linked libraries' function exports.
+
+    Read from each library's own source — the path its manifest records — so a
+    call ACROSS a dylib boundary binds its arguments from the callee's real
+    parameter list instead of passing whatever the caller wrote and letting an
+    omitted register hold a stale value. Without it a defaulted parameter
+    arrived as a stack address, which is a silently wrong argument rather than a
+    missing feature. See `formal/imports.py`'s `external_declarations`."""
+    from formal.imports import external_declarations
+    return external_declarations(linked)
 
 
 def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
@@ -1167,7 +1247,14 @@ def compile_formal(source_path: str, output: str = None,
     # `<Struct>_<method>` and the rewrite needs to know which struct owns the
     # name. Resolving this after would leave `c.get()` unrecognised in a file
     # that imported the struct, which is the only way such a call occurs.
-    imported_structs = _imported_structs(source_path, stmts, arch)
+    # The libraries this program links against, resolved before codegen: their
+    # export spellings decide both the callee mangling and (via their load
+    # commands) where the entry point lands. Read BEFORE the function pipeline
+    # because `_imported_structs` needs them: a library handed over with
+    # `--link-dylib` and no import statement is the only way its struct
+    # declarations reach this file at all.
+    linked = load_dylib_manifests(link_dylibs)
+    imported_structs = _imported_structs(source_path, stmts, arch, linked)
     # …and the target again, because the dylib builds above republished it as
     # the dylib's own Mach-O target. This is the one place the two genuinely
     # differ (an `--fmt=elf` build on a Mac asks for an ELF image and a Mach-O
@@ -1184,11 +1271,6 @@ def compile_formal(source_path: str, output: str = None,
         # of the one-line diagnostic every other refusal produces.
         raise FormalBuildError(str(e))
     ordered = functions
-
-    # The libraries this program links against, resolved before codegen: their
-    # export spellings decide both the callee mangling and (via their load
-    # commands) where the entry point lands.
-    linked = load_dylib_manifests(link_dylibs)
 
     # `import X` means X is a dependency. Each imported module is compiled in
     # FULL into a dylib that represents it (formal/imports.py) and goes on the
@@ -1336,7 +1418,9 @@ def compile_formal(source_path: str, output: str = None,
     code, info, external_syms, binary = _codegen_and_link(
         arch, fmt, ordered, test_input, dylibs=linked,
         comptime_hook=comptime_hook,
-        structs=structs, source_path=source_path)
+        structs=structs, source_path=source_path,
+        import_aliases=_import_aliases(stmts),
+        extern_decls=_external_declarations(linked))
 
     if output is None:
         stem = os.path.splitext(os.path.basename(source_path))[0] or "a.out"
@@ -8258,7 +8342,7 @@ def update_dylib_manifest(manifest_path: str, mutate) -> None:
 
 def write_dylib_manifest(dylib_path: str, install_name: str,
                          exports: list, module: str = None,
-                         constants: dict = None) -> str:
+                         constants: dict = None, source: str = None) -> str:
     """Record what a formal dylib exports, next to the dylib.
 
     An executable that links this library has to rewrite each call site's
@@ -8298,11 +8382,31 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
     address. A module-level name the build could NOT fold is not here — it is
     a real global with nowhere to live, and it stays refused, which is what
     keeps `sys.argv` and `os.sep` different answers
-    (`bugs/FORMAL_module_state_no_storage.md`)."""
+    (`bugs/FORMAL_module_state_no_storage.md`).
+
+    `source` is the module's own source path, recorded for the same reason and
+    read back by `formal/imports.py`'s `external_declarations`: an export entry
+    carries an ARITY and a signature, and neither is enough to bind a call whose
+    arguments are short of the arity — a DEFAULT is part of the function's
+    contract, and materializing it at the call site needs the default's own
+    expression, which only the DECLARATION has. Reading it from the path
+    recorded here is what makes the two sides unable to disagree: it is the
+    exact file this library was compiled from, not a module name resolved again
+    by whoever is reading."""
+    import json
     path = dylib_manifest_path(dylib_path)
     payload = {
         "dylib": os.path.abspath(dylib_path),
         "install_name": install_name,
+        # What the executable records in its LC_LOAD_DYLIB. The library's own
+        # id is `@rpath/...`, which a dependent can only resolve with an
+        # LC_RPATH of its own, so a dependent links the real location.
+        "load_path": os.path.abspath(dylib_path),
+        # The module's own source, when this library was built from one. Absent
+        # for a library with no source of its own (the runtime dylib, written by
+        # `runtime_manifest`), which is exactly what "there is no declaration to
+        # read" looks like, so a reader can tell the two apart.
+        "source": os.path.abspath(source) if source else None,
         # The reflection payload, in the shape doc/ABI.md's table carries: the
         # boundary symbol, its signature, and the module that owns it, so a
         # client can bind a call without ever reading the module's source.
@@ -8326,12 +8430,12 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
 def load_dylib_manifests(dylib_paths: list) -> list:
     """Read the manifests of the libraries an executable links against.
 
-    Each entry is `{"install_name", "map": {bare callee -> exported symbol},
-    "exports", "module", "reexports", "constants"}`. A library whose manifest
-    is missing is an error rather than a silently ignored dependency: the
-    executable would emit calls to symbols nothing defines and produce an image
-    that dies in dyld at launch — which is exactly the failure this mechanism
-    exists to prevent.
+    Each entry is `{"install_name", "source", "map": {bare callee ->
+    exported symbol}, "exports", "module", "reexports", "constants"}`. A
+    library whose manifest is missing is an error rather than a silently
+    ignored dependency: the executable would emit calls to symbols nothing
+    defines and produce an image that dies in dyld at launch — which is exactly
+    the failure this mechanism exists to prevent.
 
     The `map` is keyed by the BARE name and only by the bare name, and that is
     the whole contract: it is what a BARE callee resolves through, first
@@ -8394,6 +8498,7 @@ def load_dylib_manifests(dylib_paths: list) -> list:
         out.append({
             "install_name": payload.get("load_path") or payload["dylib"],
             "path": dylib,
+            "source": payload.get("source"),
             "map": amap,
             "exports": exports,
             "module": payload.get("module") or "",
@@ -9526,7 +9631,8 @@ def _record_link_deps(manifest_path: str, linked: list) -> None:
 def _namespace_library(output: str, install_name: str, arch: str,
                        reexports: dict, dylib_syms: dict, dep_install: list,
                        linked: list, module: str = None,
-                       constants: dict = None, traits: list = None) -> dict:
+                       constants: dict = None, traits: list = None,
+                       source: str = None) -> dict:
     """A dylib for a module whose whole API is RE-EXPORTED — a package
     `__init__.mojo` — or whose whole API is TRAIT DECLARATIONS.
 
@@ -9630,7 +9736,7 @@ def _namespace_library(output: str, install_name: str, arch: str,
         f.write(binary)
     os.chmod(output, 0o755)
     _ad_hoc_sign(output)
-    manifest_path = write_dylib_manifest(output, install_name, [],
+    manifest_path = write_dylib_manifest(output, install_name, [], source=source,
                                          module=module, constants=constants)
     _record_namespace(manifest_path, reexports, dylib_syms, traits=traits)
     if linked:
@@ -9926,6 +10032,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
         return _namespace_library(
             output, install_name, arch, reexports, dylib_syms, dep_install,
             linked,
+            source=source_paths[0],
             module=(module_prefixes or {}).get(source_paths[0])
             or _module_prefix(source_paths[0]),
             constants=_namespace_constants(reexports, constants, linked),
@@ -10001,6 +10108,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     _ad_hoc_sign(output)
     manifest_path = write_dylib_manifest(
         output, install_name, exports,
+        source=source_paths[0],
         module=(module_prefixes or {}).get(source_paths[0])
         or _module_prefix(source_paths[0]),
         constants=constants)

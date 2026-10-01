@@ -276,7 +276,7 @@ def _get(buf, at: Int, width: Int) -> int:
 
 # ── the public surface ───────────────────────────────────────────────────────
 
-def pack_into(fmt: String, buf, off: Int, v0, v1, v2) -> int:
+def pack_into(fmt: String, buf, off: Int, v0=0, v1=0, v2=0) -> int:
     """Write `fmt`'s values into `buf` at byte `off`. Returns 0.
 
     The lifetime-independent form and the one the twelve `pack_into` call
@@ -294,6 +294,19 @@ def pack_into(fmt: String, buf, off: Int, v0, v1, v2) -> int:
     widest (`<III`), and the `patch(off, fmt, *vals)` sites pass one or two.
     A format needing more is left unwritten rather than written wrong, because
     the extra value would be garbage this function cannot detect.
+
+    THE VALUE SLOTS ARE DEFAULTED, and that is what makes them safe to leave
+    off. A slot beyond `_nvalues(fmt)` is never read, so a caller that packs a
+    two-value format has nothing to say about `v2` — but across a dylib
+    boundary a caller cannot leave a parameter out at all: the callee gives it
+    a register home whether or not the caller mentions it, and a register
+    nothing wrote is whatever the caller last put there
+    (`bugs/FORMAL_default_argument_not_applied_across_a_dylib.md`, and the
+    arity half of the same change). `pack_into(fmt, buf, 4, a, b)` is the shape
+    `test_struct_formal.py`'s offset case and the corpus's `patch` sites use,
+    and it is a `TypeError` against three REQUIRED value parameters. Zero is the
+    right fill for a slot that is not read, and declaring it is what turns the
+    call from an unbindable one into the CPython answer.
     """
     n = _nvalues(fmt)
     if n == 0 or n > 3:

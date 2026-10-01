@@ -538,7 +538,8 @@ class ARM64Codegen:
 
     def __init__(self, test_input: int = 10, dylib_syms: dict = None,
                  comptime_hook=None, module_source: str = "",
-                 dylib_exports: list = None, globals_base: int = None):
+dylib_exports: list = None, globals_base: int = None,
+                 import_aliases: dict = None, extern_decls: dict = None):
         self.test_input = test_input
         # Where this unit's module-global data segment is MAPPED. A parameter
         # and not a lookup, because it differs per container (macho_linker and
@@ -672,6 +673,26 @@ class ARM64Codegen:
         # See `model.dylib_export_lookup`.
         (self._dylib_by_name, self._dylib_by_module,
          self._dylib_forwarded) = M.dylib_export_tables(dylib_exports)
+        # `{local name: (module as spelled, defining name)}` — what
+        # `from m import f as g` binds. The flat map above is keyed by the
+        # DEFINING name and a call site spells the LOCAL one, so without this
+        # an aliased call found nothing and the image bound a symbol no library
+        # defines. Consulted only for a bare callee that is an alias, and
+        # resolved against the MODULE's export table, never the flat one: the
+        # alias says where the name came from, and a name that happens to
+        # collide with another library's export must still bind the module it
+        # was imported from. See `model.dylib_aliased_export`.
+        self._import_aliases: dict = dict(import_aliases or {})
+        # `{export symbol: FunctionDef}` — the callee's OWN declaration, read
+        # from the source each linked library was compiled from
+        # (`formal/imports.py`'s `external_declarations`). Keyed by the symbol
+        # the call binds, not by the name it is spelled, so a name collision
+        # between two libraries cannot hand a call the wrong signature. Without
+        # it an extern call passed `list(e.args)` and nothing more, and a
+        # parameter the caller omitted kept whatever the caller last put in that
+        # register: `need_two(1)` across a dylib returned 1867609072, a stack
+        # address, where the callee's own default says 511.
+        self._extern_decls: dict = dict(extern_decls or {})
         # Compile-time evaluator for `comptime f(...)`: a (name, args) -> int
         # hook that RUNS the callee with this backend (formal/
         # comptime_runner.py). Keeping it out here is what lets the folding
@@ -2946,22 +2967,30 @@ class ARM64Codegen:
         return (ann, M.declared_type_kind(ann, TYPE_NAMES, STRING_TYPE_NAMES,
                                           self._structs))
 
+    def _aliased_export(self, name: str):
+        """The manifest export a bare callee reaches THROUGH an import alias."""
+        return M.dylib_aliased_export(self._dylib_by_name,
+                                      self._dylib_by_module, name,
+                                      self._import_aliases)
+
     def _extern_symbol(self, name: str) -> str:
         """The boundary symbol an unbound callee `name` is emitted against.
 
         The DECISION and the words are `model.dylib_extern_symbol`'s, shared
-        with the x86-64 emitter: two spellings (a bare name from the flat map, a
-        dotted name from the library built for that module or from what it
-        forwards), and a dotted name whose module is linked but does not publish
-        it is refused by name here rather than emitted as a BL against a symbol
-        nothing defines. This used to be a second copy of that rule, in two
-        backends, which is two places for one language implementation to
-        disagree about what a module call binds.
+        with the x86-64 emitter: three spellings (a bare name from the flat
+        map, a bare name bound by an import alias from the module the alias
+        came from, and a dotted name from the library built for that module or
+        from what it forwards), and a name that cannot be bound is refused by
+        name here rather than emitted as a BL against a symbol nothing
+        defines. This used to be a second copy of that rule, in two backends,
+        which is two places for one language implementation to disagree about
+        what a module call binds.
         """
         return M.dylib_extern_symbol(name, self._dylib_syms,
                                      self._dylib_by_name,
                                      self._dylib_by_module,
-                                     self._dylib_forwarded)
+                                     self._dylib_forwarded,
+                                     self._import_aliases)
 
     def _untyped_callee(self, name) -> bool:
         """Is `name` a MOJO function that does not say what it returns?
@@ -2981,7 +3010,11 @@ class ARM64Codegen:
             return type, and `reflect._c_signature` spells an unannotated
             function's as `void`, so `void` here is the same fact as `None`
             above. `dylib_export_return_kind` reads the `char *` case out of
-            the same string, which is how a cross-image `-> str` classifies;
+            the same string, which is how a cross-image `-> str` classifies.
+            An IMPORT ALIAS is that second kind under its local spelling, so
+            it is asked about through `_aliased_export` — `dylib_export_lookup`
+            reads the flat `{defining name: entry}` table and a call site
+            spells the local name, which is exactly the lookup that misses;
           * and an UNBOUND EXTERN is NOT in this set at all. `memcmp(a, b, n)
             == 0` is in every `os` function on this path and is correct on
             every one of them; `getenv(name) == 0` is a NULL check. A C
@@ -2992,6 +3025,8 @@ class ARM64Codegen:
             return getattr(fn, "return_type", None) is None
         entry = M.dylib_export_lookup(self._dylib_by_name,
                                       self._dylib_by_module, name)
+        if entry is None and "." not in name:
+            entry = self._aliased_export(name)
         if entry is None:
             return False
         return M.signature_return_type(
@@ -3011,7 +3046,8 @@ class ARM64Codegen:
             return M.dylib_export_return_kind(
                 M.dylib_export_lookup(self._dylib_by_name,
                                       self._dylib_by_module, name,
-                                      self._dylib_forwarded))
+                                      self._dylib_forwarded)
+                or self._aliased_export(name))
         vk = self._vkinds_for(name, fn, stack)
         ann = getattr(fn, "return_type", None)
         if ann in STRING_TYPE_NAMES:
@@ -5264,6 +5300,35 @@ class ARM64Codegen:
 
         self.asm.label(end_label)
 
+    def _extern_decl_for(self, name: str):
+        """The declaration of an IMPORTED callee `name`, or None.
+
+        Keyed by the SYMBOL the call binds, and the entry is found by the same
+        two steps in the same order as `_extern_symbol` — the plain export
+        lookup, then the import alias — so the declaration handed to
+        `bind_call_arguments` is always the one whose parameter list the call
+        is actually being checked against. Asking by bare name instead would be
+        a way to hand a call the signature of a same-named function in a
+        different library.
+        """
+        entry = M.dylib_export_lookup(self._dylib_by_name,
+                                      self._dylib_by_module, name)
+        if entry is None:
+            entry = self._aliased_export(name)
+        if entry is None:
+            return None
+        return self._extern_decls.get(entry.get("symbol"))
+
+    def _callee_decl(self, name: str):
+        """The FunctionDef a callee `name` was declared by, or None.
+
+        This module's own functions first — a local definition always wins —
+        and then the linked libraries', read from their own source. None means
+        the callee is not a function this image can see a declaration for, and
+        the caller falls back to passing the arguments as written."""
+        fn = self._functions.get(name)
+        return fn if fn is not None else self._extern_decl_for(name)
+
     def _bind_call_args(self, name: str, e: F.CallExpr) -> list:
         """`e`'s arguments in positional form, for a known callee.
 
@@ -5273,8 +5338,22 @@ class ARM64Codegen:
         with a hole: `if not e.kwargs: return list(e.args)` short-circuited
         before the arity check, so a call with no keywords was never examined
         at all — which is how `f(1, 2, r)` reached a `def f(x, *rest)` and
-        bound all three as fixed parameters."""
-        fdef = self._functions.get(name)
+        bound all three as fixed parameters.
+
+        `fdef` is the callee's declaration, and it is looked up in BOTH
+        registries — this module's own functions first, then the declarations
+        read from the source each linked library was compiled from
+        (`self._extern_decls`, keyed by the export symbol the call binds).
+        That second lookup is what makes a call into another image obey the
+        SAME contract as a call inside one: its arguments are bound to the
+        callee's real parameter list, so a defaulted parameter is materialized
+        and an argument count below the arity with nothing to fill it is a
+        refusal naming the callee. It used to pass `list(e.args)` and nothing
+        more, which made an omitted register hold a stale value — measured,
+        `need_two(1)` across a dylib returning 1867609072 where the callee's own
+        default says 511, while the identical call in the same file returned
+        511."""
+        fdef = self._callee_decl(name)
         if fdef is None:
             if e.kwargs:
                 names = [k for k, _v in e.kwargs]
@@ -5919,7 +5998,8 @@ class ARM64Codegen:
         # What is left is decided by the runtime's ABI rather than by the name
         # (`model.gimple_runtime_callable`): a call is answerable when every
         # type crossing the boundary is one 64-bit word — which is what a value
-        # IS here — AND the symbol is on the link line, which `_dylib_syms` is.
+        # IS here — AND the symbol is on the link line, which `_dylib_syms` is
+        # (and `_aliased_export` is for a name bound by `from m import f as g`).
         # Note the two are independent and both are needed. A `MojoList *`
         # argument is a box no link line can answer, so it is refused EVEN IF a
         # dylib provides the symbol; and `mojo_print`, whose every type is a
@@ -5927,15 +6007,23 @@ class ARM64Codegen:
         # prefix got the first case right by accident and could not tell the
         # second from it.
         if is_extern and not M.gimple_runtime_callable(
-                name, name in self._dylib_syms):
+                name, name in self._dylib_syms
+                or self._aliased_export(name) is not None):
             raise CodegenError(M.gimple_runtime_refusal(name))
-        if is_extern:
+        if is_extern and self._callee_decl(name) is None:
             # Unknown signature: AAPCS has no place for Python kwargs on a
             # raw BL. Drop them (they are almost always literals like
             # flush=True) and pass positional args only — same ABI the
             # extern path already uses for zero-kwarg calls.
             args = list(e.args)
         else:
+            # An extern callee whose DECLARATION is known goes through the same
+            # binder as a local one. That is the whole fix for a default
+            # argument that arrives as a stack address: the callee is not in
+            # `self._functions`, but it is in `self._extern_decls`, keyed by
+            # the export symbol the call binds, and `bind_call_arguments` is
+            # the one implementation of "which argument lands on which
+            # parameter, and what fills the gap".
             args = self._bind_call_args(name, e)
         # A comptime specialization `f[a, b](x)` binds the callee's comptime
         # parameters (which are leading arguments on this path), so the bracket

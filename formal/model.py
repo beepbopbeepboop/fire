@@ -8894,19 +8894,22 @@ def dylib_export_lookup(by_name: dict, by_module: dict, callee: str,
 
 
 def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
-                        forwarded: dict = None) -> str:
+                        forwarded: dict = None, aliases: dict = None) -> str:
     """The boundary symbol an unbound callee `name` is emitted against.
 
     THE ONE implementation, shared by both backends' `_extern_symbol`, which
     were two copies of the same decision and therefore two places for them to
     disagree about what a dotted name binds.
 
-    Two spellings, and the second is why this is a function rather than a
-    `dict.get`:
+    THREE spellings, and the second and third are why this is a function rather
+    than a `dict.get`:
 
       * a BARE name — what `from mod import f` binds — is answered by the
         flat `{name: symbol}` map, first library on the line winning, which is
         `load_dylib_manifests`'s own precedence and stays it;
+      * a bare name that is an IMPORT ALIAS — what `from mod import f as g`
+        binds — is answered by the export table of the module the alias came
+        from, never by the flat map (`dylib_aliased_export`);
       * a DOTTED name — what `import mod` binds, spelled `mod.f` — is
         answered ONLY by the export table of the library built for `mod`, or by
         what that module forwards (`dylib_export_tables`' `forwarded`). Falling
@@ -8914,21 +8917,36 @@ def dylib_extern_symbol(name: str, syms: dict, by_name: dict, by_module: dict,
         other library's `f`, which is the silently-wrong binding the whole
         module-identity mechanism exists to prevent.
 
-    A dotted name whose module is linked but which that module does not publish
-    — by definition or by re-export — is REFUSED, naming both halves and
-    listing what the module does publish. It used to fall through to the bare
-    name, which produced a BL against a symbol nothing defines and an image
-    that died in dyld — the failure this whole mechanism was built to make a
-    build-time error instead. It is also what a namespace library's empty trie
-    used to produce: a package whose whole API is re-exported had no table to
-    consult, so `pkg.f` found nothing, was not refused (there was nothing to
-    report), and reached the link audit as a dangling symbol.
+    A name that cannot be bound is REFUSED, and the two refusals are different
+    facts with different messages. A bare ALIAS whose module does not publish
+    the defining name is `dylib_aliased_export_refusal`'s: falling back to the
+    local spelling would bind a symbol nothing defines, and the bind audit would
+    report it with no idea why. A DOTTED name whose module is linked but does
+    not publish the leaf is the message below, which names both halves and lists
+    what the module does publish. Both used to fall through to the bare name,
+    which produced a BL against a symbol nothing defines and an image that died
+    in dyld — the failure this whole mechanism was built to make a build-time
+    error instead. It is also what a namespace library's empty trie used to
+    produce: a package whose whole API is re-exported had no table to consult,
+    so `pkg.f` found nothing, was not refused (there was nothing to report), and
+    reached the link audit as a dangling symbol.
 
     The module is identified by `dylib_export_module`, which knows that a
     manifest keys a package submodule by its ABI prefix (`os.path` → `os_path`)
     — which is what makes `os.path.join(...)`, the spelling 532 measured call
     sites in this tree are written with, resolve at all."""
     if "." not in name:
+        entry = dylib_aliased_export(by_name, by_module, name, aliases)
+        if entry is not None:
+            return entry.get("symbol") or name
+        if is_import_alias(name, aliases):
+            # An ALIAS whose module does not export the name it stands for.
+            # Falling back to the flat map would bind `g` itself, and the bind
+            # audit would report an unbound symbol with no idea why. A plain
+            # `from m import f` is NOT this case and keeps the audit's own
+            # message, which is the one that was always right for it.
+            raise CodegenError(dylib_aliased_export_refusal(
+                name, aliases, by_module))
         return (syms or {}).get(name, name)
     entry = dylib_export_lookup(by_name, by_module, name, forwarded)
     if entry is not None:
@@ -9094,6 +9112,108 @@ def constant_literal_node(value, line: int = 0, col: int = 0):
         return F.StringLiteral(value=value, line=line or 0, col=col or 0,
                                is_bytes=False)
     return F.IntLiteral(value=value, line=line or 0, col=col or 0, raw="")
+
+
+# ── A bare callee bound by an import's `as` ALIAS ──────────────────────────
+
+
+def is_import_alias(callee: str, aliases: dict) -> bool:
+    """Whether `callee` is bound by an `as` in an import, rather than by its
+    defining name.
+
+    The distinction decides which refusal applies when the name cannot be bound.
+    A plain `from m import f` that cannot be resolved is the long-standing
+    "nothing on this link line provides it" case, reported by the bind audit,
+    and it is still reported there — re-deriving it here would give a second
+    message for one condition. Only a genuine ALIAS is this function's business,
+    because the flat `{bare: symbol}` map is keyed by the defining name and so
+    cannot say anything about the local one at all.
+
+    `from m import f as f` is not an alias: it binds the same name, and the flat
+    map answers it exactly as it answers the unaliased spelling.
+    """
+    target = (aliases or {}).get(callee)
+    return bool(target) and target[1] != callee
+
+
+def dylib_aliased_export(by_name: dict, by_module: dict, callee: str,
+                         aliases: dict):
+    """The export a bare callee reaches THROUGH an import alias, or None.
+
+    `aliases` is `formal/imports.py`'s `import_bindings` table: `{local name:
+    (module as spelled, defining name)}`, so `from os.path import exists as
+    pe` is `{"pe": ("os.path", "exists")}`.
+
+    Two questions, and they are asked in this order because the second is the
+    weaker one:
+
+      1. **Does the module the name was imported FROM export it?** That module's
+         export table, not the flat one: the flat table cannot say which module
+         owns a name, so a local alias that happened to collide with another
+         library's export would bind that other library's function. The alias is
+         a statement about where `pe` came from, so it is resolved against that
+         module and nowhere else.
+
+      2. **Does ANY library on the line export the DEFINING name?** This is the
+         re-export case, and it is the same name-based dispatch `from m import
+         f` — with no alias at all — already uses: a package `__init__` is a
+         namespace library with an EMPTY export table (`_namespace_library`),
+         so `from pkg import bump` has to be answered by the submodule's
+         library under `bump`. Asking it by the DEFINING name and not by the
+         local one is what keeps it from being a hole: `bump` is a real export
+         somewhere on the line, where `b` is a name only this file ever used.
+
+    `None` means neither can bind it, which is the caller's cue to raise
+    `dylib_aliased_export_refusal`. Falling back to the LOCAL spelling — what
+    the code did before any of this — is what produced a BL against a symbol
+    nothing defines.
+    """
+    target = (aliases or {}).get(callee)
+    if not target:
+        return None
+    module, defined = target
+    entry = dylib_export_module(by_module, module).get(defined)
+    if entry is not None:
+        return entry
+    if "." in defined:
+        return dylib_export_lookup(by_name, by_module, defined)
+    return by_name.get(defined)
+
+
+def dylib_aliased_export_refusal(callee: str, aliases: dict,
+                                 by_module: dict) -> str:
+    """Why an aliased callee has no symbol to bind, or "" if that is not it.
+
+    Three answers and three different facts, one of which is an error in the
+    PROGRAM rather than in the module, so they cannot share a message:
+
+      * the module is LINKED and exports the defining name — the lookup found
+        it, "" is returned, and the caller uses it;
+      * the module is LINKED but exports neither the defining name nor anything
+        by that bare name anywhere on the line — `doc/ABI.md`'s export rule
+        excluded it, which is a fact about the module and is reported as one,
+        exactly like the dotted-callee case;
+      * the module is NOT on the link line at all — the import did not resolve
+        to anything this image carries, and saying "it exports no such name"
+        would send the reader to a module that is not even here.
+    """
+    module, defined = (aliases or {}).get(callee, ("", callee))
+    if not dylib_export_module(by_module, module):
+        return (
+            f"{callee}(): it is bound by an import from {module!r}, but no "
+            f"library for that module is on this image's link line, so the "
+            f"name it refers to cannot be bound. An import is a DEPENDENCY: "
+            f"if the module has no source this backend can compile, the build "
+            f"reports that at the import itself rather than here.")
+    return (
+        f"{callee}(): it is bound by `from {module} import … as {callee}`, and "
+        f"neither `{module}` nor any other library on this image's link line "
+        f"exports `{defined}`, so the call has no symbol to bind. A name "
+        f"`doc/ABI.md`'s export rule excludes (a leading `_`, a generic "
+        f"template, an overload, or a C library symbol such as `exit` or "
+        f"`write`) is not advertised — and an alias does not make a name "
+        f"exposable that was not already, since the alias is a property of "
+        f"this file and not of the library.")
 
 
 def _target_names(target):
@@ -13376,24 +13496,6 @@ def struct_construction_plan(struct_def, call, decls: dict,
     if kwargs:
         return (None, construction_keyword_refusal(
             name, [k for k, _v in kwargs]))
-    if not args:
-        # The existing shape.  Deliberately NOT re-decided here: `S()`'s
-        # refusal for a non-literal default belongs to
-        # `struct_frame_representable` / `struct_default_word` and has its own
-        # message, and a second copy of the decision is a second thing to keep
-        # in step with the first.
-        #
-        # It is ALSO where premise (B2) still lives, and the two are the same
-        # decision: a declared `__init__` is only inlined where the call has
-        # ARGUMENTS to bind to it, so `S()` on a struct whose `__init__` takes
-        # none still brings every field up at its class-level default and does
-        # not run the body.  That is a real, and now the only, way this path
-        # disagrees with the language about a constructor, and it is written
-        # down rather than fixed here because the fix is a behaviour change
-        # with a sweep-sized blast radius and no test would be able to tell a
-        # correct one from a lucky one; see
-        # `bugs/FORMAL_zero_arg_init_not_inlined.md`.
-        return ((CONSTRUCTION_DEFAULT,), None)
     # A DECLARED `__init__` outranks everything below, and it has to: with one,
     # `S(a, b)` is a call to it, so every message underneath — the arity one
     # included — is describing a construct the source does not contain.
@@ -13407,7 +13509,35 @@ def struct_construction_plan(struct_def, call, decls: dict,
     # blanket refusal is the two facts the inline genuinely needs and cannot
     # supply — an arity that selects exactly one overload, and a body that is
     # only those stores.
+    #
+    # READ BEFORE the zero-argument case, and that ordering is the whole of
+    # premise (B2)'s removal.  `S()` used to return `CONSTRUCTION_DEFAULT`
+    # before this lookup, so a declared `__init__` was inlined only where the
+    # call had ARGUMENTS to bind to it — and `S()` on a struct whose
+    # constructor takes none came up at its class-level defaults with the body
+    # never run.  Measured: `struct Z(a=8, b=9)`, `var z = Z()` then `z.a`,
+    # returned 0 where CPython returns 8, on BOTH architectures, with nothing
+    # refused and nothing printed.
+    #
+    # "THE COUNT SELECTS NOTHING" was the stated reason for the early return
+    # and it is answered here rather than avoided: `init_overload_for_arity` is
+    # the same function that selects an overload for every other count, it
+    # admits a count of 0 exactly when some declared overload takes no required
+    # parameter, and it answers `ambiguous` — a refusal — when two of them
+    # would.  So `S()` is decided by the same rule as `S(1)` and neither of the
+    # two holes the early return was avoiding is open.  A `__init__` that
+    # REQUIRES a parameter is the other half and is now what the language
+    # says: `Bag4()` against `def __init__(out self, n, m)` is a `TypeError`,
+    # and it is refused as one, naming the declared overloads.
     shapes = struct_init_shapes(struct_def)
+    if not args and not shapes:
+        # The existing shape, for a struct that declares no constructor at all:
+        # every field at its own default, and every placed nested frame brought
+        # up.  Deliberately NOT re-decided here: `S()`'s refusal for a
+        # non-literal default belongs to `struct_frame_representable` /
+        # `struct_default_word` and has its own message, and a second copy of
+        # the decision is a second thing to keep in step with the first.
+        return ((CONSTRUCTION_DEFAULT,), None)
     if shapes:
         shape, why = init_overload_for_arity(shapes, len(args))
         if why is not None:
@@ -13626,10 +13756,11 @@ def _frame_source_structs(arg, candidates: dict):
 #        (B1) — a non-literal class-level DEFAULT — is already refused, by
 #        `struct_frame_representable`, and is deliberately NOT re-decided
 #        below; see `frame_field_premise`.
-#   (B2) `S()` does not run `__init__`.  Every slot's value is the class-level
-#        DEFAULT, not what the constructor of the language would assign, so the
-#        `self.items = List[Self.T]()` in every container-shaped `__init__` in
-#        the corpus never executes.
+#   (B2) `S()` does not run `__init__` on a struct whose constructor takes NO
+#        REQUIRED PARAMETER, and that is now a refusal rather than a silent
+#        zero.  A struct that declares NO constructor at all is premise-free:
+#        there is no body to run.  Every slot's value for a refused `S()` is
+#        still nothing, because nothing runs.
 #
 # The two have quite different standing and the check below says so:
 #
@@ -13637,14 +13768,21 @@ def _frame_source_structs(arg, candidates: dict):
 #     runs, so `self.items = List[Self.T]()` inside it puts a blob in a slot
 #     today, and the refusal is the point.  This is the one the value-method
 #     work must keep true.
-#   * (B2) is an ENABLING PREMISE, asserted by the emitter (`_emit_struct_
-#     constructor` emits no call and refuses `S(x)`) and reported by name.  It
-#     is not something this check can prove, and a check that appeared to
-#     prove it would be the worst kind of check.
+#   * (B2) is an ENABLING PREMISE for the `CONSTRUCTION_DEFAULT` shape, which is
+#     what a struct that DECLARES no constructor lowers to.  It is reported by
+#     name so a reader is told which premise a refusal rests on.  It is not
+#     something this check can prove, and a check that appeared to prove it
+#     would be the worst kind of check.  A struct that DOES declare a
+#     constructor is not under (B2) at all — `S()` goes down the same
+#     `CONSTRUCTION_INIT` path as `S(args)`, and the confinement argument in
+#     the next paragraph is what keeps that safe.
 #
-# `S(args)` is the FOURTH door and it is neither premise: a construction with
-# arguments DOES run the constructor, because a constructor does not have to be
-# called to be run — `init_body_stores` inlines the body's stores at the site.
+# `S(args)` — and now `S()` on a struct whose `__init__` takes no required
+# parameter — is the FOURTH door and it is neither premise: such a construction
+# DOES run the constructor, because a constructor does not have to be called to
+# be run — `init_body_stores` inlines the body's stores at the site, and the
+# argument COUNT (zero included) is what `init_overload_for_arity` reads to pick
+# the overload, exactly as it does for every other count.
 # That cannot put an unreclaimable word in a slot, and the reason is the
 # confinement argument above rather than (B2): the inlined body runs in the
 # CONSTRUCTING function, whose scratch holds the block it writes into and
@@ -13663,13 +13801,17 @@ def _frame_source_structs(arg, candidates: dict):
 # sees one word per slot either way.
 FRAME_FIELD_BLOB_PREMISE_B1 = \
     "no executed method writes a container into a field"
-# (B2) is now a statement about the ZERO-ARGUMENT construction only, and the
-# wording says so, because "S() does not run __init__" read as a claim about
-# every construction and stopped being one when `S(args)` began inlining the
-# body.  What the text is FOR is telling a reader which of the two premises a
-# refusal rests on, and a reader who is told the wrong one is sent to look for
-# a violation of a rule that is not what stopped the build.
-FRAME_FIELD_BLOB_PREMISE_B2 = "a zero-argument S() does not run __init__"
+# (B2) is now a statement about a construction of a struct that DECLARES NO
+# CONSTRUCTOR, and the wording says so, because "S() does not run __init__"
+# read as a claim about every construction and stopped being one twice over:
+# when `S(args)` began inlining the body, and then when `S()` on a struct whose
+# `__init__` takes no required parameter began inlining it too.  A struct with
+# no constructor has no body to run, so its fields are the class-level defaults
+# and the word "run" is not the question.  What the text is FOR is telling a
+# reader which of the two premises a refusal rests on, and a reader who is told
+# the wrong one is sent to look for a violation of a rule that is not what
+# stopped the build.
+FRAME_FIELD_BLOB_PREMISE_B2 = "a struct that declares no __init__ has no body to run"
 
 
 def _is_container_value(value, containers: set) -> str:
@@ -15486,8 +15628,30 @@ def folded_literal_node(folded, template):
     return F.IntLiteral(value=folded, line=line, col=col, raw="")
 
 
-def _imported_names(stmt) -> list:
-    """`[(bound name, module)]` for one module-level import statement."""
+def import_bindings(stmt) -> list:
+    """`[(local name, module as spelled, name defined there)]` for one import.
+
+    THE reader of what an import binds in this file, and the three pieces are
+    all of them load-bearing somewhere:
+
+      * the LOCAL name, which is what every read and every call site spells —
+        `from m import f as g` binds `g`, and a compiler that resolves `g` by
+        itself produces a BL against a symbol nothing defines;
+      * the MODULE AS SPELLED, because that is the key the linked library's
+        manifest is filed under. `model.dylib_export_module` falls back to
+        `abi_module_name(spelling)`, so `os.path`, `._syscalls` and
+        `.._syscalls` each reach the one library that was built for them —
+        including the relative spellings, whose manifests are keyed by the dot
+        flattened (`__syscalls`);
+      * the DEFINING name, which is only ever different from the local one when
+        there is an `as`, and which is the name the export table is keyed by.
+
+    A module binding (`import m`, `import m as n`) has no function to define,
+    so its "defined name" is the module name itself: `n.f` is spelled
+    `n.f` and reaches `f` of the module, which is `dylib_export_lookup`'s
+    question and not this one's. `import a.b` binds `a`, which is why the
+    bound name is the FIRST dotted component.
+    """
     kind = type(stmt).__name__
     if kind == "ImportStmt":
         mod = getattr(stmt, "module", None) or getattr(stmt, "name", None)
@@ -15496,18 +15660,17 @@ def _imported_names(stmt) -> list:
             part = part.strip()
             if not part:
                 continue
-            out.append((part.split(".")[0], part.split(".")[0]))
+            out.append((part.split(".")[0], part, part))
             # `import a.b` binds `a`, and `a.b` is a module the dylib resolver
             # owns; the alias `as` form binds the alias.
             alias = getattr(stmt, "asname", None)
             if alias:
-                out.append((alias, part))
+                out.append((alias, part, part))
         return out
     if kind == "FromImportStmt":
         mod = getattr(stmt, "module", None) or getattr(stmt, "name", None)
-        names = getattr(stmt, "names", None) or []
         out = []
-        for pair in names:
+        for pair in (getattr(stmt, "names", None) or []):
             if isinstance(pair, (tuple, list)):
                 orig = pair[0]
                 alias = pair[1] if len(pair) > 1 else None
@@ -15515,9 +15678,14 @@ def _imported_names(stmt) -> list:
                 orig, alias = pair, None
             if not isinstance(orig, str):
                 continue
-            out.append((alias or orig, str(mod)))
+            out.append((alias or orig, str(mod), orig))
         return out
     return []
+
+
+def _imported_names(stmt) -> list:
+    """`[(bound name, module)]` for one module-level import statement."""
+    return [(bound, module) for bound, module, _defined in import_bindings(stmt)]
 
 
 # The dunders and module attributes a bare read may legitimately name. Small on

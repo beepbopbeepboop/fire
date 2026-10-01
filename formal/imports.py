@@ -38,6 +38,11 @@ from formal.build import ImportBuildError  # noqa: E402  (cycle-free: build
 # path, so a program importing the same module twice (or a cycle) reuses it.
 _BUILT: dict = {}
 
+# Parsed module sources, keyed by (absolute path, content digest). See
+# `module_statements`: one parse per file per content, shared by every reader
+# in this module.
+_PARSED: dict = {}
+
 # The root of this source tree — the directory holding fire_compiler.py. This
 # repository is itself the source the formal path compiles, so it is a
 # legitimate (and bounded) place to look for a module name.
@@ -652,6 +657,190 @@ def imported_modules(stmts) -> list:
     return out
 
 
+def import_bindings(stmts) -> dict:
+    """`{local name: (module as spelled, defining name)}` for this file.
+
+    THE missing half of `imported_modules`. That function answers "which
+    modules have to be on the link line", which is a question about DEPENDENCIES
+    and is deliberately blind to the alias and to the imported names — the same
+    answer for `from m import f` and `from m import f as g`. This one answers
+    "which name in THIS file means which export of which module", which is the
+    question a call site asks, and the two are different questions about the
+    same statements.
+
+    It exists because the answer was being reconstructed at the call site, from
+    a name that could not carry it. `ARM64Codegen._extern_symbol` looks a bare
+    callee up in the flat `{bare name: exported symbol}` map built from the
+    libraries' manifests, which is keyed by the DEFINING name, and the callee
+    it is given is the name AS SPELLED at the call site. For `from m import f as
+    g` those differ, the lookup misses, and the fallback binds `g` itself —
+    which the link audit then refuses, because nothing defines `g`:
+
+        build: osp3.mojo: the image would bind 2 symbol(s) that nothing
+        provides, so it could not be loaded: os_exists, os_isdir.
+
+    The information was already in hand at import time and was simply not
+    carried to the call site; this is where it is read off the same statements
+    `imported_modules` reads, so the two cannot disagree about which file
+    imported what.
+
+    The module is kept AS SPELLED, which is what `model.dylib_export_module`
+    needs: it falls back to `abi_module_name(spelling)`, and a relative
+    spelling's manifest is keyed by the dot flattened (`._syscalls` builds and
+    is filed as `__syscalls`). A local name that also DEFINES something in
+    this file is left out — that is a local definition and it wins, which is
+    the same precedence `reexported_names` states for a re-export.
+    """
+    defined = {st.name for st in (stmts or [])
+               if isinstance(st, (F.FunctionDef, F.StructDef))}
+    out: dict = {}
+    for st in stmts or []:
+        if not isinstance(st, (F.ImportStmt, F.FromImportStmt)):
+            continue
+        for bound, module, name in _model.import_bindings(st):
+            if (bound in defined or bound in out or not isinstance(bound, str)
+                    or not bound or not isinstance(name, str) or not name):
+                continue
+            out[bound] = (module, name)
+    return out
+
+
+def module_statements(path: str) -> list:
+    """The parsed top-level statements of the module at `path`, or [].
+
+    ONE parse per (path, content), for every reader in this module, and the
+    cache key includes the content digest rather than the mtime: three callers
+    (`imported_struct_defs`, `declared_kinds`, `build_module_dylib`) each want
+    the same file's AST and each used to read and parse it for itself, so a
+    program importing four modules parsed each of them four times — and after
+    `external_declarations` existed it would have been five. The digest is
+    computed from the bytes already read, so verifying the cache costs a hash
+    and not a parse.
+
+    Unreadable or unparsable is [] rather than an exception, which is what all
+    three callers already did: a module whose source has gone is a module with
+    no declarations, and each caller has a better message for its own case."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return []
+    digest = cas.hash_parts(raw)
+    key = (os.path.abspath(path), digest)
+    hit = _PARSED.get(key)
+    if hit is not None:
+        return hit
+    try:
+        stmts = F.Parser(F.py_tokenize(raw.decode("utf-8", "replace"))) \
+                  .with_filename(path).parse_module()
+    except Exception:
+        stmts = []
+    _PARSED[key] = stmts
+    return stmts
+
+
+def external_declarations(linked: list) -> dict:
+    """`{export symbol: FunctionDef}` for the linked libraries' function exports.
+
+    A call into another image needs the CALLEE's parameter list, and the
+    importing build has no copy of it: the callee is not in this module's
+    function registry, it is a symbol in a library on the link line. So
+    `bind_call_arguments` was never consulted for it, the omitted argument
+    register kept whatever the caller last put there, and a defaulted parameter
+    arrived as a stack address — measured, `need_two(1)` across a dylib
+    returning 1867609072 where the callee's own default says 511, while the
+    identical call in the SAME file returned 511. A silently wrong argument, at
+    a boundary whose whole purpose is that the contract does not change there.
+
+    The declarations are read from each library's OWN source — the path its
+    manifest records, which is the exact file it was compiled from — so the
+    parameter list read here cannot disagree with the library on disk. That is
+    the same argument `imported_struct_defs` makes for a struct's layout, and
+    the reason the manifest carries the path rather than a module name that a
+    reader would have to resolve a second time.
+
+    Keyed by the EXPORT SYMBOL and not by the bare name, which is what makes
+    this safe: two libraries on one link line may export the same name, and the
+    flat `{bare: symbol}` map resolves that by first-wins. Keying by the symbol
+    the call will actually bind means a call can never be handed the wrong
+    callee's signature, whatever the name collision was.
+
+    A library with no `source` — the runtime dylib, whose exports come from a C
+    header — contributes nothing, which is the honest answer: there is no
+    declaration here to read, so a call to one keeps the old positional-only
+    behaviour rather than being given a fabricated signature."""
+    out: dict = {}
+    for lib in linked or []:
+        source = lib.get("source")
+        if not source or not os.path.isfile(source):
+            continue
+        by_name = {}
+        for st in module_statements(source):
+            name = getattr(st, "name", None)
+            if isinstance(st, F.FunctionDef) and name:
+                by_name.setdefault(name, st)
+        for entry in (lib.get("exports") or []):
+            st = by_name.get(entry.get("name"))
+            if st is not None:
+                out.setdefault(entry.get("symbol"), st)
+    return out
+
+
+def linked_module_paths(linked: list) -> list:
+    """The source path of every linked library that recorded one, in link order.
+
+    A library built from a module's own source records that path in its
+    manifest (`write_dylib_manifest`'s `source`), so this is the exact file the
+    library was compiled from and not a module name resolved a second time.
+    Duplicates are dropped and order is kept, so a program that links the same
+    module twice is read once.
+
+    A library with no recorded source — the runtime dylib, whose exports come
+    from a C header — contributes nothing, which is the honest answer: there is
+    no module declaration behind it to read."""
+    out, seen = [], set()
+    for lib in linked or []:
+        path = lib.get("source")
+        if path and os.path.isfile(path) and path not in seen:
+            seen.add(path)
+            out.append(path)
+    return out
+
+
+def module_struct_defs(path: str, project_root: str = None) -> list:
+    """The `StructDef`s the module at `path` declares, following its re-exports.
+
+    The one-module half of `imported_struct_defs`, split out because
+    `_imported_structs` reaches it from a LINKED LIBRARY as well as from an
+    import, and a library is a path rather than an importing file with
+    statements to walk out of. Same contract as the whole-module version: a
+    package's API is its re-exports, so reaching a type means walking to the
+    module that defines it, and the walk is transitive and cycle-safe."""
+    out, seen, visited = [], set(), set()
+
+    def collect(p):
+        key = os.path.abspath(p)
+        if key in visited:
+            return
+        visited.add(key)
+        mod_stmts = module_statements(p)
+        for st in mod_stmts:
+            name = getattr(st, "name", None)
+            if isinstance(st, F.StructDef) and name not in seen:
+                seen.add(name)
+                out.append(st)
+        for st in mod_stmts:
+            if not isinstance(st, F.FromImportStmt):
+                continue
+            dep = resolve_module_path(st.module, relative_to=p,
+                                      project_root=project_root or p)
+            if dep:
+                collect(dep)
+
+    collect(path)
+    return out
+
+
 def _search_roots(relative_to: str, project_root: str) -> list:
     """Directories a module name is looked for in, nearest first.
 
@@ -987,40 +1176,16 @@ def imported_struct_defs(source_path: str, stmts: list,
     Transitive, and cycle-safe: a package that re-exports from a sibling that
     re-exports back terminates on the visited set, and a struct is collected
     once however many paths reach it."""
-    out, seen, visited = [], set(), set()
-
-    def collect(path):
-        key = os.path.abspath(path)
-        if key in visited:
-            return
-        visited.add(key)
-        try:
-            with open(path) as f:
-                text = f.read()
-            mod_stmts = F.Parser(F.py_tokenize(text)).with_filename(path) \
-                            .parse_module()
-        except Exception:
-            return
-        for st in mod_stmts:
-            name = getattr(st, "name", None)
-            if st.__class__.__name__ == "StructDef" and name not in seen:
-                seen.add(name)
-                out.append(st)
-        # Then whatever this module re-exports, which is where a package's
-        # types actually live.
-        for st in mod_stmts:
-            if not isinstance(st, F.FromImportStmt):
-                continue
-            dep = resolve_module_path(st.module, relative_to=path,
-                                      project_root=project_root or source_path)
-            if dep:
-                collect(dep)
-
+    out, seen = [], set()
     for mod in imported_modules(stmts):
         path = resolve_module_path(mod, relative_to=source_path,
                                    project_root=project_root or source_path)
-        if path is not None:
-            collect(path)
+        if path is None:
+            continue
+        for st in module_struct_defs(path, project_root or source_path):
+            if st.name not in seen:
+                seen.add(st.name)
+                out.append(st)
     return out
 
 
@@ -1044,13 +1209,7 @@ def declared_kinds(path: str) -> dict:
     away. Filing it as the kind it is also keeps it out of that set for the
     same reason a re-exported struct is: a type is not a missing symbol."""
     out: dict = {}
-    try:
-        with open(path) as f:
-            text = f.read()
-        stmts = F.Parser(F.py_tokenize(text)).with_filename(path).parse_module()
-    except Exception:
-        return out
-    for st in stmts:
+    for st in module_statements(path):
         name = getattr(st, "name", None)
         if not name:
             continue
@@ -1315,13 +1474,19 @@ def build_module_dylib(module_name: str, source_path: str, out_dir: str,
     # level qualifies the next (see the `_parent` note at the output name).
     module_identity = _module_identity(module_name, _parent)
 
-    with open(source_path) as f:
-        text = f.read()
-    try:
-        stmts = F.Parser(F.py_tokenize(text)).with_filename(source_path) \
-                 .parse_module()
-    except SyntaxError as e:
-        raise ImportBuildError(f"{source_path}: parse error: {e}")
+    stmts = module_statements(source_path)
+    if not stmts and os.path.isfile(source_path):
+        # `module_statements` swallows a parse failure the way it swallows an
+        # unreadable file, because its other callers have a better message for
+        # each case. A dependency that does not PARSE is a different fact and
+        # it is fatal here — this module cannot be built at all — so it is
+        # recovered here, by asking the parser for the reason.
+        try:
+            with open(source_path) as f:
+                F.Parser(F.py_tokenize(f.read())).with_filename(
+                    source_path).parse_module()
+        except SyntaxError as e:
+            raise ImportBuildError(f"{source_path}: parse error: {e}")
 
     # Its imports, first, so we know what this module needs.
     depends = []
