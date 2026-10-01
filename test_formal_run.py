@@ -2406,6 +2406,10 @@ BYREF_REFUSALS = [
      "    return 0\n",
      "refuse:reads a field of a field", None),
     # A callee this module does not compile cannot know the frame's layout.
+    # This is the ONE shape left of four (see the two cases below and the
+    # cross-module one in CROSS_MODULE_CASES): `mojo_print` is defined nowhere
+    # in this image and imported from nowhere, which is what "no definition in
+    # hand" has always meant and the only one of the four it was true of.
     ("byref_refuse_invisible_callee",
      "struct P:\n"
      "    var a: Int\n"
@@ -2414,6 +2418,44 @@ BYREF_REFUSALS = [
      "    var p = P()\n"
      "    return mojo_print(p)\n",
      "refuse:no definition in hand", None),
+    # A COMPILE-TIME PARAMETER called as a function. `Fn` is not a function
+    # this image fails to find — it is a name with no body at all, because
+    # calling one means monomorphising it from the argument, and this path does
+    # not instantiate type parameters. It reached the same sentence as
+    # `mojo_print` above, which is the sentence that tells a reader to go
+    # looking for a missing export; there is no missing export and there never
+    # will be. The needle is the phrase that names what `Fn` is.
+    ("byref_refuse_compile_time_parameter",
+     "struct W:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def drive[\n"
+     "    Fn: def(mut W)\n"
+     "](mut w: W):\n"
+     "    Fn(w)\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var w = W()\n"
+     "    w.a = 1\n"
+     "    w.b = 2\n"
+     "    drive(w)\n"
+     "    return n\n",
+     "refuse:is a compile-time PARAMETER of drive", None),
+    # A COMPILER INTRINSIC rather than a function: `__get_mvalue_as_litref`
+    # hands back an MLIR reference to the value it is given, and there is no
+    # MLIR here, so the thing a receiver would be handed to does not exist at
+    # any stage. Five of the twelve files the sweep files under this construct
+    # are this one call, and every one of them is really an MLIR file whose
+    # operand is refused one level down — a reader sent to a missing export
+    # would not find one.
+    ("byref_refuse_reflection_intrinsic",
+     "struct Q:\n"
+     "    var a: Int\n"
+     "    var b: Int\n\n"
+     "def main(n: Int) -> Int:\n"
+     "    var q = Q()\n"
+     "    var lit = __get_mvalue_as_litref(q)\n"
+     "    return n\n",
+     "refuse:is a compile-time REFLECTION INTRINSIC", None),
     # ── wave 3 (C5) ──
     #
     # A frame address PARKED IN A FIELD. `o.inner = i` looks like an ordinary
@@ -2796,6 +2838,62 @@ CROSS_MODULE_CASES = [
               "    var t = T()\n"
               "    t.a = 7\n"
               "    return t.get()\n"}, 70, None),
+    # A frame address handed to an IMPORTED FREE FUNCTION — the third shape a
+    # "callee this image does not compile" can be, and the one whose refusal was
+    # false. `take_it` IS defined (in `byref_xmod`, which builds: it exports
+    # `take_it` and this case's own module does not fail), so "this module's own
+    # functions are the only ones in this image" was false of it and sent the
+    # reader looking for an export that is exported.
+    #
+    # The module deliberately never reads `p`, so the callee module itself is
+    # clean and the refusal cannot be confused with the dependency's: what is
+    # being asserted is WHICH question stops this program. The answer has to be
+    # the cross-image one — whether THAT compilation made the parameter a frame
+    # holder is a fact about a module compiled without this call site — and not
+    # "there is no such callee", because there is one.
+    #
+    # It stays a REFUSAL. Following the address is what the message now says
+    # would be needed (a per-parameter frame-holder contract in the manifest),
+    # and until that exists the address would land in a slot `take_it` compiled
+    # as a plain word.
+    ("byref_refuse_imported_free_function",
+     {"mod": "struct P:\n"
+             "    var a: Int\n"
+             "    var b: Int\n"
+             "\n"
+             "def take_it(p: P) -> Int:\n"
+             "    return 1\n",
+      "main": "from byref_xmod import P, take_it\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var p = P()\n"
+              "    p.a = 3\n"
+              "    p.b = 4\n"
+              "    return take_it(p) + n\n"},
+     "refuse:it imports it (`from byref_xmod import take_it`)", None),
+    # The same hand-off reached through a STAR import, which is the shape where
+    # "this module's own functions are the only ones in this image" is at its
+    # least true: `from byref_xmod import *` binds whatever that module
+    # EXPORTS, so `take_it` may well be bound — and the export set is a library
+    # this pass has not built, because `_resolve_imports` compiles the modules
+    # and the frame analysis runs first. 22 files of the standard library write
+    # one. The refusal has to name THAT as the open question rather than assert
+    # that nothing binds the name.
+    ("byref_refuse_star_imported_free_function",
+     {"mod": "struct P:\n"
+             "    var a: Int\n"
+             "    var b: Int\n"
+             "\n"
+             "def take_it(p: P) -> Int:\n"
+             "    return 1\n",
+      "main": "from byref_xmod import *\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var p = P()\n"
+              "    p.a = 3\n"
+              "    p.b = 4\n"
+              "    return take_it(p) + n\n"},
+     "refuse:is a `from byref_xmod import *`", None),
 ]
 
 # ── wave 5 (E3): a frame address in a NON-FIRST parameter position ──────────

@@ -4856,7 +4856,10 @@ FRAME_C_VALUE_CALLS = {
 }
 
 
-def frame_receiver_escape_refusal(callee: str, struct_names) -> str | None:
+def frame_receiver_escape_refusal(callee: str, struct_names,
+                                  imported_from: str = None,
+                                  comptime_param_of: str = None,
+                                  star_imported_from: str = None) -> str | None:
     """Why handing a frame ADDRESS to `callee()` is wrong, or None if it is not.
 
     `struct_names` is what the receiver's frame could be — one name, or several
@@ -4881,7 +4884,20 @@ def frame_receiver_escape_refusal(callee: str, struct_names) -> str | None:
        different thing again from "a function this module does not compile" and
        used to be reported as it;
     4. a name lowered as an operation on a VALUE;
-    5. everything else, which really is a name with no definition in hand."""
+    5. everything else, which is a name this build compiles nowhere — and which
+       is `frame_undefined_callee_refusal`, FOUR sentences rather than one,
+       because "no definition in hand" is a true statement about only one of
+       the four things a callee can be when it is not a function of this image
+       (an imported one IS compiled, elsewhere; a compile-time parameter never
+       will be).
+
+    `imported_from` and `comptime_param_of` are the two facts that pick between
+    those four, and both are the CALLER's to supply — an import table and an
+    enclosing `def[…]`'s parameter list, neither of which this module has. They
+    default to None, which is the generic fifth-branch text: the other caller
+    (`_callee_wants_a_value`'s, and `_check_frame_escapes`'s
+    `_callee_wants_a_value` path) reaches case 5 for a callee it has already
+    classified as wanting a value, so case 5 is unreachable from there."""
     who = ", ".join(struct_names) if struct_names else "this struct"
     if callee in FRAME_ADDRESS_CTORS:
         # Measured, not assumed: see FRAME_ADDRESS_CTORS. Returning None here
@@ -4935,11 +4951,161 @@ def frame_receiver_escape_refusal(callee: str, struct_names) -> str | None:
                 f"dereference as one. Not a missing layout: a wrong category "
                 f"of argument. Give it a field (`{callee}(self.n)`) or copy "
                 f"the value out first")
+    return frame_undefined_callee_refusal(callee, struct_names,
+                                          imported_from, comptime_param_of,
+                                          star_imported_from)
+
+
+# Names that are not functions at all, and the one that reaches this branch from
+# the standard library five times over.
+#
+# `__get_mvalue_as_litref` is a compile-time REFLECTION INTRINSIC of the
+# compiler: it is handed a value and hands back an MLIR reference to it, so
+# there is nothing at all for a receiver to be handed TO — the reference it
+# would produce does not exist on a path with no MLIR. Named here rather than
+# left to the generic sentence because the generic sentence sends the reader
+# looking for a missing export, and this name has never been an export of
+# anything: it is 5 of the 12 files the sweep reports under "callee has no
+# definition on this path", and 48 of its 50 spellings in the standard library
+# are the operand of an `__mlir_op.…` build, which is the construct this path
+# refuses one level up (the `__mlir_*` family, `mlir_dialect_refusal`).
+#
+# A SET and not a prefix rule, deliberately: `MLIR_DIALECT_PREFIX` is a
+# different construct with its own refusal and its own owner, and a `__mlir_`
+# prefix test here would swallow names this path already answers elsewhere.
+COMPTIME_REFLECTION_INTRINSICS = frozenset((
+    "__get_mvalue_as_litref",
+))
+
+
+def frame_undefined_callee_refusal(callee: str, struct_names,
+                                   imported_from: str = None,
+                                   comptime_param_of: str = None,
+                                   star_imported_from: str = None) -> str:
+    """Why a callee no image in this build COMPILES cannot take a frame address.
+
+    This is `frame_receiver_escape_refusal`'s fifth case, split — it was one
+    sentence over five different facts, and four of the five were false of the
+    program in front of the reader.  Measured on the 12 files the sweep files
+    under it (`bugs/FORMAL_sweep_work_map_2026-09-30.md` row 8), and on the 41
+    over all roots (`bugs/FORMAL_callee_no_def_ceiling_zero.md`):
+
+      * `_b64encode`, `discover_closures` — the callee is IMPORTED, so it IS
+        compiled, into another module's library.  "this module's own functions
+        are the only ones in this image" and "there is no such callee here to be
+        compiled" are both false of those two, and a reader who believed either
+        went looking for a missing export that is not missing.
+      * `ElementFn`, `Fn` — the callee is a COMPILE-TIME PARAMETER of the
+        enclosing `def`, so there is no callee to compile and never will be
+        until something instantiates it.  Nothing is missing.
+      * `__get_mvalue_as_litref` — a compiler intrinsic that yields MLIR.
+      * a name reachable only through `from M import *` — the star import binds
+        whatever M EXPORTS, which is a fact about a library this pass has not
+        built, so "nothing binds it" would be false wherever M does export it
+        (22 files of the standard library write one).
+      * the rest — genuinely unbound, which is what the old sentence said and
+        is the only one of the five it was true of.
+
+    The order is the order the question is decided in: a name that is not a
+    function, then a name that is a parameter, then a name from another module
+    by name, then a name that could only come from a star import, then nothing.
+    Each returns a refusal, because the hand-off is unsound in all five: what
+    differs is only WHICH fact makes it unsound, and a message that names the
+    wrong one is a message that sends the reader after a non-bug — which is the
+    defect this family exists to stop.  The cross-module METHOD case already
+    answered the second question (see `frame_opaque_position_refusal`'s `why=`
+    for `cross_module`), and this is the FREE-FUNCTION half of it: `owners` is
+    the imported-METHOD table, so a plain imported function was never in it and
+    fell through to here.
+
+    `imported_from` is the module the name is imported from, as the source
+    spells it (`._b64encode`); `comptime_param_of` is the name of the function
+    whose `def[…]` declares the callee; `star_imported_from` is the module of a
+    `from … import *` in this file.  All three are facts the CALLER has:
+    `formal.imports.imported_bound_names` and `star_imported_modules` read the
+    import statements without resolving them (this pass runs before
+    `_resolve_imports`), and `FunctionDef.comptime_params` is the declaration
+    itself."""
+    who = ", ".join(struct_names) if struct_names else "this struct"
+    if callee in COMPTIME_REFLECTION_INTRINSICS:
+        return (
+            f"a {who} receiver is passed to {callee}(), and {callee} is not a "
+            f"function at all: it is a compile-time REFLECTION INTRINSIC of "
+            f"the compiler, which is handed a value and hands back an MLIR "
+            f"reference to it. There is no MLIR on this path — an attribute, a "
+            f"type or an operation has no representation in a model whose "
+            f"every value is one 64-bit word — so the reference it would "
+            f"produce does not exist here at any stage of the compilation and "
+            f"there is nothing compiled to hand an address to. In the standard "
+            f"library it is the operand of an `__mlir_op.…` build (48 of its "
+            f"50 spellings), and that construct is what this path refuses; this "
+            f"name is its operand rather than a call of its own. Nothing about "
+            f"the receiver's layout is at fault here")
+    if comptime_param_of:
+        return (
+            f"a {who} receiver is passed to {callee}(), and {callee} is a "
+            f"compile-time PARAMETER of {comptime_param_of} — declared in its "
+            f"`def {comptime_param_of}[… {callee} …]` — not a function this "
+            f"image compiles. Calling one means MONOMORPHISING it: the body "
+            f"comes from the argument at each call site and is instantiated "
+            f"against that argument's own struct, so the callee's field list is "
+            f"a property of the call rather than of any declaration in hand. "
+            f"This path does not instantiate type parameters, so there is "
+            f"nothing here that was compiled against a field list, and an "
+            f"address handed to it would point at a layout the callee never "
+            f"learned. Measured: `def drive[Fn: def(mut W)]` calling `Fn(w)` on "
+            f"a `W` frame reaches here and the image cannot be built. Nothing "
+            f"is missing — the callee does not exist until a call site creates "
+            f"it, and nothing here creates one")
+    if imported_from:
+        return (
+            f"a {who} receiver is passed to {callee}(), and this file does not "
+            f"define {callee}: it imports it (`from {imported_from} import "
+            f"{callee}`), so its definition is in ANOTHER module's compilation "
+            f"rather than in this one. That is not by itself a reason to "
+            f"refuse — a frame address is exactly what a method of the "
+            f"receiver's own struct wants, and the cross-module METHOD case is "
+            f"followed across the boundary — but the fact that decides it is a "
+            f"fact about THAT compilation: whether it made the parameter this "
+            f"argument lands in a frame holder against this struct's field "
+            f"list. A module is compiled with its own call sites and this one "
+            f"is not among them, so this pass cannot know, and a wrong answer "
+            f"here is a wrong answer in the callee rather than a crash here. "
+            f"Measured in the smallest program with the shape: the same "
+            f"`def take_it(p: Pair)` beside its caller builds, runs and returns "
+            f"7, and split across two modules the callee module cannot be "
+            f"built at all — there `p` is a parameter with no call site to "
+            f"establish it and `p.a` is refused as a field access through a "
+            f"base nothing establishes. So the hand-off needs the callee's "
+            f"per-parameter contract — which parameters are frame holders, and "
+            f"of which struct — to travel in that module's manifest, which "
+            f"carries exported SYMBOL names and nothing else. "
+            f"bugs/FORMAL_wide_receiver_by_reference.md records the design and "
+            f"what is still open about it")
+    if star_imported_from:
+        return (
+            f"a {who} receiver is passed to {callee}(), and this module neither "
+            f"defines {callee} nor names it in any `from … import …`. The one "
+            f"thing that can bind a name like that here is a "
+            f"`from {star_imported_from} import *`, and what such a statement "
+            f"binds is {star_imported_from}'s EXPORT SET — which is not a fact "
+            f"about this file at all: it is a library this pass has not built, "
+            f"because `_resolve_imports` compiles the modules and the frame "
+            f"analysis runs first, from the statements alone. So two questions "
+            f"are open and neither is answerable from here: whether "
+            f"{star_imported_from} exports {callee} at all, and whether its "
+            f"compilation made the parameter this argument lands in a frame "
+            f"holder against this struct's field list. The second is the one "
+            f"that decides the hand-off, and it is the same question "
+            f"`formal.imports`' manifest cannot answer today: it records "
+            f"exported SYMBOL names and no parameter contract. "
+            f"bugs/FORMAL_callee_no_def_ceiling_zero.md has the measurement")
     return (f"a {who} receiver is passed to {callee}(), which is a name with no "
-            f"definition in hand: this module's own functions are the only ones "
-            f"in this image, and the symbol is unbound before the receiver's "
-            f"layout is a question. A frame address would be meaningful to a "
-            f"callee compiled against the same field list, but there is no such "
+            f"definition in hand: nothing in this image binds it — this module "
+            f"does not define it, and no `from … import …` here binds it "
+            f"either — so the symbol is unbound before the receiver's layout is "
+            f"a question. A frame address would be meaningful to a callee "
+            f"compiled against the same field list, but there is no such "
             f"callee here to be compiled. "
             f"bugs/FORMAL_wide_receiver_by_reference.md records the design and "
             f"what is still open about it")

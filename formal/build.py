@@ -1688,7 +1688,8 @@ def _call_receivers(fn):
 
 
 def _frame_receivers(functions: list, structs_by_name: dict,
-                     dc_classes: dict = None) -> None:
+                     dc_classes: dict = None, imported: dict = None,
+                     star_imports: tuple = ()) -> None:
     """Annotate every function with its frame-pointer receivers and field slots.
 
     Writes `fn._frame_holders` (the names holding a frame address) and
@@ -1736,6 +1737,13 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # a reason to look only at index 0 except that `self` is at index 0.
     # `param0` is kept because `known = set(param0)` is the "is a function in
     # this image" test `_check_frame_escapes` makes, and it is spelled once.
+    #
+    # `known` answering FALSE is not the same question as the callee having no
+    # definition anywhere, which is what the CALL half used to conclude from
+    # it: an IMPORTED free function is in neither table, and `imported` is the
+    # third one.  Passed in rather than re-read from the AST here for the same
+    # reason `dc_classes` is: two recognitions of the same fact is the pair
+    # that agrees until the day it does not.
     param0 = {}
     params_of = {}
     for fn in functions:
@@ -2142,7 +2150,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # so it is complete here.
         _check_frame_escapes(fn, hs, by_name, param0, owners, structs_by_name,
                              set(_constructor_bindings(fn, framed)), rets,
-                             holders, hstruct, params_of)
+                             holders, hstruct, params_of, imported,
+                             star_imports)
         _check_method_receiver_types(fn, hs, by_name, owners, structs_by_name)
         fn._frame_holders = hs
         fn._frame_nested_slots = nested_slots
@@ -2803,7 +2812,8 @@ def _check_method_receiver_types(fn, holders, by_name, owners,
 def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                          structs_by_name=None, created_here=frozenset(),
                          rets=None, all_holders=None, all_hstruct=None,
-                         params_of=None) -> None:
+                         params_of=None, imported=None,
+                         star_imports=()) -> None:
     """Refuse every construct a frame ADDRESS may not take part in.
 
     A frame belongs to the function that created it and is reclaimed when that
@@ -2838,7 +2848,12 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
     they are what the CALL half is decided from.  A parameter is a frame holder
     or it is not, and that is a property of every call site at once — see
     `model.frame_holder_disagreement_refusal` for the measured program that
-    says what happens when only one of them agrees."""
+    says what happens when only one of them agrees.
+
+    `imported` is this module's imported-NAME table (`formal.imports`'s
+    `imported_bound_names`), passed in for the same reason `params_of` is: a
+    callee this image does not compile is refused for one of four different
+    reasons, and which one depends on facts that live outside this function."""
     known = set(param0)
     # `<Struct>_<method>` for every method of every struct in hand, MINUS the
     # ones this module compiles.  The difference is exactly the set of callees
@@ -3104,7 +3119,39 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
                     #    true at every position; the old loop only said it at
                     #    position 0 and let the position sentence cover the
                     #    rest.
-                    reason = M.frame_receiver_escape_refusal(callee, _names(a))
+                    #
+                    # `frame_receiver_escape_refusal`'s fifth case, with the
+                    # three facts that pick between its five sentences.  All
+                    # three are the CALLER's: `imported` is
+                    # `formal.imports.imported_bound_names`' table for this
+                    # module and `star_imports` its
+                    # `star_imported_modules`, both read from the import
+                    # statements because `_resolve_imports` has not run yet,
+                    # and `fn.comptime_params` is this function's own `def[…]`.
+                    # Without them `_b64encode` (imported, and therefore
+                    # compiled — into another module's library) and `ElementFn`
+                    # (a compile-time parameter, which no compilation will ever
+                    # define until a call site instantiates it) were both
+                    # reported with the one sentence that fits neither, and a
+                    # `from lib import *` callee was reported as a name nothing
+                    # binds when `lib`'s export set may bind it.
+                    #
+                    # `owners` — the imported-METHOD table the `cross_module`
+                    # branch above is built from — is deliberately not the
+                    # source: it holds lifted `<Struct>_<method>` spellings,
+                    # which is what a rewritten `recv.m(x)` becomes, and a bare
+                    # imported FUNCTION is not one of them.  That gap is the
+                    # half of the cross-module question the method case already
+                    # answers for the RECEIVER.
+                    comptime_params = getattr(fn, "comptime_params", None) or ()
+                    reason = M.frame_receiver_escape_refusal(
+                        callee, _names(a),
+                        imported_from=(imported or {}).get(callee),
+                        comptime_param_of=(fn.name
+                                           if callee in comptime_params
+                                           else None),
+                        star_imported_from=star_imports[0] if star_imports
+                        else None)
                     if reason is not None:
                         _refuse_holder_use(fn, a, holders, by_name, "", reason)
                     continue
@@ -4545,7 +4592,17 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # of from `by_name` — is exactly the pair that agrees until the day it does
     # not. `formal/dataclass_transform.rewrite_equality` takes the holder
     # table as given.
-    _frame_receivers(functions, structs_by_name, dc_equality)
+    #
+    # `imported_names` for the same reason and one step further out: it is what
+    # tells a callee this unit does not compile from a callee NOTHING compiles,
+    # and `known`/`cross_module` cannot answer that (neither holds an imported
+    # free function).  Read here, once, from the statements this function was
+    # given, rather than by the pass from `stmts` — the pass does not have them.
+    from formal.imports import (imported_bound_names,
+                                star_imported_modules)
+    _frame_receivers(functions, structs_by_name, dc_equality,
+                     imported_bound_names(stmts),
+                     star_imported_modules(stmts))
     return functions, structs, symbols
 
 
