@@ -218,6 +218,11 @@ def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=180):
         log("  batch+fixes: rc=%d %s" % (rc, " | ".join(l for l in out.splitlines() if l.startswith(("GREEN", "RED")))[:200]))
         if rc == 0 and "GREEN" in out:
             return True
+        now = parse(out, "FAILED_JOBS")           # the NEXT attempt works on what is red NOW, not on what was red at the first gate
+        if now:
+            log("  now failing (confirmed alone): %s" % ", ".join(now))
+            failed = now
+            excerpt = failed_jobs(os.path.join(I.INTEG, "gate.log"))
     return False
 
 
@@ -344,7 +349,7 @@ def main():
         if not busy:
             # ADOPT: a merger/fixer that is still working (or finished) when this loop (re)starts is NOT thrown away and redone.
             pend = [n for n, t in sorted(C.load().items(), key=lambda kv: kv[1]["slot"])
-                    if re.match(r"batchmerge-\d+(-r\d+)*$", n) and t.get("state") not in ("integrated", "abandoned", "superseded")
+                    if re.match(r"(batchmerge-\d+|batchfix-\d+-a\d+)(-r\d+)*$", n) and t.get("state") not in ("integrated", "abandoned", "superseded")
                     and (C.state_of(t) == "running" or C.ahead(t) > 0) and red.get(n) != head_sha(n)]
             if pend:
                 name = pend[-1]; did = True
