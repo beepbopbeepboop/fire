@@ -9575,6 +9575,38 @@ def _self_field_names(node, out: set, receivers=("self",)) -> None:
     callee is not descended into, while its arguments still are (a method can
     be handed `self.x` as an argument, which is a real field access).
 
+    **The same is true of a method call THROUGH BRACKETS**, `self.helper[T](x)`,
+    and getting that wrong was a silent wrong answer on the stdlib's most-used
+    type rather than a refusal. A generic's comptime parameters are written as a
+    subscript on the callee, so the callee of that call is a `SubscriptExpr`
+    over the very `MemberExpr` this guard tests, and the guard did not match:
+    the walk fell through to the generic arm, found `MemberExpr(self,
+    helper)`, and added `helper` to the field set. The name is a METHOD, so
+    nothing ever writes the slot it now occupies, and every read of that slot is
+    zero.
+
+    Measured on `std/collections/optional.mojo`, where `Optional` has exactly one
+    instance field (`_value`) and one private method reached through brackets:
+
+        self._write_to[is_repr=False](writer)      # write_to's body
+        ->  struct_field_names(Optional) == ['_value', '_write_to']
+        ->  struct_field_count 2, so struct_is_framed True
+
+    and the consequence was that `Optional` — a ONE-word value whose receiver IS
+    its field — became a two-field struct, so every `Optional` receiver became a
+    frame address and the 13-file `builtin_slice.mojo` row was refused for a
+    struct-typed field the source says is a single slot
+    (`bugs/FORMAL_builtin_slice_optional_field_is_a_frame_holder.md`).
+    `bugs/FORMAL_field_set_method_name_and_kwarg_blind_spot.md` records the
+    census of the SIBLING shape — a bare `self.helper` in VALUE position, which
+    is genuinely ambiguous and is deliberately not touched by this change.
+
+    The subscript's own base is unwrapped for the guard and the brackets are
+    then walked, so a subscript on a FIELD (`self.items[0]`) still contributes
+    `items`: only the callee position is exempt. The bracket expressions and the
+    call arguments are walked as before, because a method can be handed
+    `self.x` in any of the three positions.
+
     A nested `FunctionDef` is not descended into either: its `self`, if it has
     one, is a different binding from the struct's receiver.
 
@@ -9591,14 +9623,23 @@ def _self_field_names(node, out: set, receivers=("self",)) -> None:
         return
     if isinstance(node, F.FunctionDef):
         return
-    if isinstance(node, F.CallExpr) and isinstance(node.func, F.MemberExpr) \
-            and isinstance(node.func.obj, F.IdentExpr) \
-            and node.func.obj.name in receivers:
-        for a in node.args or []:
-            _self_field_names(a, out, receivers)
-        for _k, v in (node.kwargs or []):
-            _self_field_names(v, out, receivers)
-        return
+    if isinstance(node, F.CallExpr):
+        # `method_callee_base` is the ONE recogniser for "this call's callee is
+        # a member of a receiver", over both spellings — the same relationship
+        # `formal/build.py`'s `_method_call_target` walks when it rewrites the
+        # call, so the field set and the rewrite cannot come to disagree about
+        # which calls are method calls.
+        base = method_callee_base(node)
+        if isinstance(base, F.MemberExpr) and isinstance(base.obj, F.IdentExpr) \
+                and base.obj.name in receivers:
+            if not isinstance(node.func, F.MemberExpr):
+                for br in _subscript_brackets(node.func):
+                    _self_field_names(br, out, receivers)
+            for a in node.args or []:
+                _self_field_names(a, out, receivers)
+            for _k, v in (node.kwargs or []):
+                _self_field_names(v, out, receivers)
+            return
     if isinstance(node, F.MemberExpr) and isinstance(node.obj, F.IdentExpr) \
             and node.obj.name in receivers:
         out.add(node.member)
@@ -9607,6 +9648,46 @@ def _self_field_names(node, out: set, receivers=("self",)) -> None:
         if fname in ("line", "col"):
             continue
         _self_field_names(getattr(node, fname, None), out, receivers)
+
+
+def method_callee_base(call):
+    """The member a call reaches, over BOTH spellings of a method call.
+
+    `recv.m(x)` and `recv.m[T](x)` are the same call — the second is the first
+    with a generic's comptime parameters written as brackets on the callee — so
+    anything asking "is this call a method call?" has to answer the same for
+    both. It was `formal/build.py`'s `_method_call_target` alone, and a name walk
+    recognising only the bare spelling therefore read the bracketed one as a
+    FIELD access (`_self_field_names`, where the effect was `Optional` measuring
+    two fields because of `self._write_to[is_repr=False](writer)`).
+
+    Returned UNWRAPPED, so each caller decides what the brackets mean: a call
+    rewrite passes them on as the callee's leading comptime arguments, and a
+    field walk skips them because the member itself is what it was looking for.
+    """
+    func = getattr(call, "func", None)
+    if isinstance(func, F.SubscriptExpr):
+        func = func.obj
+    return func
+
+
+def _subscript_brackets(sub) -> list:
+    """The expressions inside a subscript's brackets, flattened, in source order.
+
+    `a[x]`, `a[x, y]` and `a[k=v]` all land here: `SubscriptExpr` keeps the
+    positional index in `index` and the keyword ones in `attrs`, and a field
+    read can be written in either. One flat list, because the caller is walking
+    "everything a node reaches" and one shape to iterate is what keeps the three
+    positions from being handled three times.
+    """
+    out = []
+    for node in (getattr(sub, "index", None),
+                 *(getattr(sub, "attrs", None) or [])):
+        if isinstance(node, tuple):
+            out.extend(x for x in node if x is not None)
+        elif node is not None:
+            out.append(node)
+    return out
 
 
 def _decorator_names(method) -> set:
