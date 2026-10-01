@@ -455,6 +455,25 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         c_name = gen._func_csym(name)
         if name in gen._c_names:
             c_name = gen._c_names[name]
+        # A VARIADIC function taken as a VALUE. Its real C signature is the
+        # packed form (`MojoList *` for `*args`, `MojoDict *` for
+        # `**kwargs`), which the arity-based `mojo_fnptr_call_N` convention
+        # cannot express: `def f(*a)` reached through `f = f` got loose
+        # scalars and the callee dereferenced the integer 1 — a SIGSEGV.
+        # Materialize the same `MojoVarargFn` a variadic LAMBDA gets (see
+        # `_lower_LambdaExpr` and runtime/fire_runtime.h's "Variadic
+        # callables"), so a direct call by name is untouched and only the
+        # value form changes.
+        _vshape = (getattr(gen, '_variadic_func_shape', None) or {}).get(c_name) \
+            or (getattr(gen, '_variadic_func_shape', None) or {}).get(name)
+        if _vshape is not None:
+            _fnv = gen._new_val('void *', f'(void *){c_name}')
+            _vf = gen._call_expr('MojoVarargFn *', 'mojo_vararg_fn_new',
+                                 [('void *', _fnv), ('void *', '0'),
+                                  ('int64_t', f'({_vshape[0]})'),
+                                  ('int64_t', f'({_vshape[1]})'),
+                                  ('int64_t', '(0)')])
+            return 'void *', gen._new_val('void *', f'(void *){_vf}')
         gen._funcptr_builtins_needed.add(c_name)
         static_name = f'_funcptr_{c_name}'
         t = gen._new_val('void *', f'{static_name}')

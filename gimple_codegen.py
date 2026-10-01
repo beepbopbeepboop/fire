@@ -2032,6 +2032,20 @@ class GimpleGen:
         # Lib/importlib/metadata/__init__.py's `def distributions(**kwargs):`
         # called as plain `distributions()`.
         self._func_kwargs_has_vararg: dict[str, bool] = {}
+        # free-fn name (both mangled and plain) -> (n_fixed, kind) for a
+        # function that DECLARES a `*args`/`**kwargs`, exactly the pair
+        # `_lower_LambdaExpr` records for a variadic lambda. Used ONLY when
+        # the function is taken as a VALUE (`f = g`), where its real C
+        # signature (packed `MojoList *`/`MojoDict *` parameters) no longer
+        # matches the arity-based `mojo_fnptr_call_N` convention: `def f(*a)`
+        # called through `f` passed loose scalars where a `MojoList *` was
+        # wanted, and the callee dereferenced the integer 1 — a SIGSEGV.
+        # Materializing such a value as a `MojoVarargFn` (see
+        # runtime/fire_runtime.h's "Variadic callables") makes every holder
+        # of it — local, argument, container, struct field, `sorted(key=)` —
+        # pack correctly. A DIRECT call by name is unaffected and keeps going
+        # through `_lower_named_call`'s own `...`-sentinel packing.
+        self._variadic_func_shape: dict[str, tuple] = {}
         # A free function's own sentinel-preserving param C-type list, for
         # the `(fixed, *args, trailing_kwonly=default, ...)` shape (no
         # `**kwargs`) — populated ONCE at registration time so a call site
@@ -2520,6 +2534,49 @@ class GimpleGen:
         'mojo_bound_method_call_3': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_bound_method_call_4': ('int64_t', ['MojoBoundMethod *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_is_bound_method':     ('int', ['void *']),
+        # Variadic callables (see runtime/fire_runtime.h's "Variadic
+        # callables" comment): a value whose real callee wants its
+        # arguments packed into a MojoList/MojoDict rather than passed
+        # positionally. Registered in its own runtime registry so
+        # mojo_fnptr_call_N / mojo_maybe_bound_call_N can tell it apart
+        # from a bare function pointer at a dynamically-dispatched call.
+        'mojo_vararg_fn_new':  ('MojoVarargFn *', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_is_vararg_fn':   ('int', ['void *']),
+        'mojo_vararg_call_0':  ('int64_t', ['void *', 'void *']),
+        'mojo_vararg_call_1':  ('int64_t', ['void *', 'void *', 'int64_t']),
+        'mojo_vararg_call_2':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t']),
+        'mojo_vararg_call_3':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_vararg_call_4':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_kw_0':  ('int64_t', ['void *', 'void *']),
+        'mojo_fnptr_call_kw_1':  ('int64_t', ['void *', 'void *', 'int64_t']),
+        'mojo_fnptr_call_kw_2':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_kw_3':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_kw_4':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_kw_0': ('int64_t', ['void *', 'void *']),
+        'mojo_maybe_bound_call_kw_1': ('int64_t', ['void *', 'void *', 'int64_t']),
+        'mojo_maybe_bound_call_kw_2': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_kw_3': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_kw_4': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_vararg_call_5':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_5':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_kw_5':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_5': ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_kw_5': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_vararg_call_6':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_6':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_kw_6':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_6': ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_kw_6': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_vararg_call_7':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_7':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_kw_7':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_7': ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_kw_7': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_vararg_call_8':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_8':  ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_fnptr_call_kw_8':  ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_8': ('int64_t', ['void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_maybe_bound_call_kw_8': ('int64_t', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_maybe_bound_call_0':  ('int64_t', ['void *']),
         'mojo_maybe_bound_call_1':  ('int64_t', ['void *', 'int64_t']),
         'mojo_maybe_bound_call_2':  ('int64_t', ['void *', 'int64_t', 'int64_t']),

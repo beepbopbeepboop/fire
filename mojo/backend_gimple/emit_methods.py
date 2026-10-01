@@ -519,10 +519,23 @@ def _lower_maybe_bound_call(gen, fname_raw: str,
         at, av = gen.lower_expr(a)
         widened.append(av if at == 'int64_t' else gen._new_val('int64_t', f'(int64_t){av}'))
     n = len(widened)
-    helper = f'mojo_maybe_bound_call_{min(n, 4)}'
+    # A call that WRITES KEYWORD ARGUMENTS goes through the `_kw_` twin, which
+    # threads the packed MojoDict through to a callee that declares
+    # `**kwargs` (a variadic lambda — see runtime/fire_runtime.h's "Variadic
+    # callables"). This local is branch-joined from a lambda and something
+    # else, so the call site cannot know which; the `_kw_` helpers are
+    # identical to their twins for every other kind of callee.
+    _kwargs = getattr(node, 'kwargs', None) or []
+    if _kwargs:
+        _kw = gen._pack_kwargs_dict({kn: gen.lower_expr(kv) for kn, kv in _kwargs})
+        helper = f'mojo_maybe_bound_call_kw_{min(n, 8)}'
+        lead = [('void *', fp_void), ('void *', _kw)]
+    else:
+        helper = f'mojo_maybe_bound_call_{min(n, 8)}'
+        lead = [('void *', fp_void)]
     ret_type = gen._bound_method_ret_types.get(fname_raw, 'int64_t')
-    raw_t = gen._call_expr('int64_t', helper, [('void *', fp_void)] +
-                             [('int64_t', w) for w in widened[:4]])
+    raw_t = gen._call_expr('int64_t', helper, lead +
+                             [('int64_t', w) for w in widened[:8]])
     if ret_type in ('int64_t', 'int'):
         return ret_type, raw_t
     if ret_type == 'void':
@@ -551,9 +564,15 @@ def _lower_bound_method_call_value(gen, bm: str, node: gimple_ctypes.CallExpr,
         at, av = gen.lower_expr(a)
         widened.append(av if at == 'int64_t' else gen._new_val('int64_t', f'(int64_t){av}'))
     n = len(widened)
-    helper = f'mojo_bound_method_call_{min(n, 4)}'
+    # Arity 8, matching the sibling `_lower_fnptr_call_value` /
+    # `_lower_maybe_bound_call` paths (which the variadic-callable work
+    # widened from 4). This one still capped at 4, so a five-or-more-argument
+    # call through a `MojoBoundMethod *` value dropped its tail — the same
+    # silent wrong value, and a reader would rightly ask why the three
+    # sibling paths disagreed.
+    helper = f'mojo_bound_method_call_{min(n, 8)}'
     raw_t = gen._call_expr('int64_t', helper, [('MojoBoundMethod *', bm)] +
-                             [('int64_t', w) for w in widened[:4]])
+                             [('int64_t', w) for w in widened[:8]])
     if ret_type in ('int64_t', 'int'):
         return ret_type, raw_t
     if ret_type == 'void':

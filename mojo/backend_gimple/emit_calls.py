@@ -4373,12 +4373,17 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     if _inferred:
         _mirrored = []
         for _pn, _ in node.params:
-            if _pn.startswith('*'):
-                continue
             _bare = _pn.lstrip('*')
             _ct = _inferred.get(_pn) or _inferred.get(_bare)
-            if _ct:
-                _mirrored.append(f'{_ct} {gen._param_safe_name(_bare)}')
+            if not _ct:
+                continue
+            # A `*args`/`**kwargs` parameter is emitted under its BARE name
+            # by _gen_lifted_closure's own `pname.startswith('*')` branches
+            # (only the plain-parameter branch runs it through
+            # _param_safe_name), so mirror that exactly — renaming one side
+            # and not the other is a "conflicting types" error.
+            _safe = _bare if _pn.startswith('*') else gen._param_safe_name(_bare)
+            _mirrored.append(f'{_ct} {_safe}')
         if _mirrored:
             params_str = ', '.join(_mirrored)
             if _env_struct:
@@ -4407,6 +4412,77 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         gen._elaborated_externs.append(fwd_decl)
     if lifted_name not in gen.func_return_types:
         gen.func_return_types[lifted_name] = ret_type
+
+    # A VARIADIC lambda's value is a MojoVarargFn, not a bare function
+    # pointer. `mojo_fnptr_call_N` picks its runtime helper by the number of
+    # arguments written at the call and passes them positionally as
+    # scalars; a `lambda *a: ...` callee instead wants them packed into a
+    # `MojoList *` (and `**kwargs` into a `MojoDict *`), which the value now
+    # records so the runtime can do that packing. Before this, the callee
+    # received the first argument as the integer 4 where a `MojoList *` was
+    # wanted and dereferenced address 4 — a SIGSEGV, not a wrong value.
+    # (see runtime/fire_runtime.h's "Variadic callables" comment)
+    # `kind` mirrors the lifted C parameter list `_gen_lifted_closure` builds
+    # from the same `node.params` order: 0 = `*args`, 1 = `*args, **kwargs`,
+    # 2 = `**kwargs` alone. `n_fixed` counts the ORDINARY parameters
+    # declared before the first starred one — the callee takes those as
+    # scalars, so they must not be packed.
+    _n_fixed = 0
+    _kind = -1
+    for _pn, _ in node.params:
+        if _pn.startswith('**'):
+            _kind = 1 if _kind == 0 else 2
+        elif _pn.startswith('*'):
+            if _kind < 0:
+                _kind = 0
+        elif _kind < 0:
+            _n_fixed += 1
+    if _kind >= 0:
+        if _n_fixed > 4:
+            # mojo_vararg_call_N passes at most four leading scalars through
+            # un-packed, so a callee wanting more would be handed the wrong
+            # arguments. Refuse loudly rather than emit that: the backend's
+            # RuntimeError makes the module fall back to interpreting from
+            # source, which is right. (`lambda a, b, c, d, e, *rest: ...` —
+            # five ordinary parameters ahead of a `*args` — is not a shape
+            # real code writes; `lambda a, b, c, d, *rest: ...` works.)
+            raise RuntimeError(
+                f"a lambda with {_n_fixed} ordinary parameters before its "
+                f"*args is not supported (at most 4)")
+        # Materialize the env exactly as the closing-lambda path below does;
+        # a variadic lambda that ALSO captures is the same `self, then the
+        # real parameters` convention, just with the tail packed.
+        _env_void = '0'
+        if _env_struct:
+            _vp = gen._new_temp('void *')
+            _envp = gen._new_temp(f'{_env_struct} *')
+            gen._emit(f'  {_vp} = malloc (sizeof({_env_struct}));')
+            gen._emit(f'  {_envp} = ({_env_struct} *) {_vp};')
+            _default_src = {pn: dv for pn, dv in node.params if dv is not None}
+            for _cn, _ct in _env_fields:
+                _src = _default_src.get(_cn)
+                if _src is not None:
+                    _st, _sv = gen.lower_expr(_src)
+                    _cv = (gen._coerce_to_type(_st, _ct, _sv) if _ct.endswith(' *')
+                           else gen._new_val('int64_t', f'(int64_t){_sv}'))
+                elif _ct.endswith(' *'):
+                    _cv = gen._coerce_to_type(gen.var_types.get(_cn, 'int64_t'), _ct, _cn)
+                elif _ct == 'double':
+                    _cv = gen._new_val('double', f'(double){_cn}')
+                else:
+                    _cv = gen._new_val('int64_t', f'(int64_t){_cn}')
+                gen._emit(f'  {_envp}->{_cn} = {_cv};')
+            _env_void = gen._new_val('void *', f'(void *){_envp}')
+        _fnv = gen._new_val('void *', f'(void *){lifted_name}')
+        _vf = gen._call_expr('MojoVarargFn *', 'mojo_vararg_fn_new',
+                             [('void *', _fnv), ('void *', _env_void),
+                              ('int64_t', f'({_n_fixed})'),
+                              ('int64_t', f'({_kind})'),
+                              ('int64_t', f'({1 if _env_struct else 0})')])
+        # NOT in `_funcptr_builtins_needed`: the bare static function-pointer
+        # form has the wrong signature for this shape, same as the env case.
+        return 'void *', gen._new_val('void *', f'(void *){_vf}')
+
     if not _env_struct:
         gen._funcptr_builtins_needed.add(lifted_name)
         static_name = f'_funcptr_{lifted_name}'
@@ -4600,8 +4676,25 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
         else:
             widened.append(gen._new_val('int64_t', f'(int64_t){av}'))
     # Emit the runtime-helper call; helpers exist for 0..4 args.
-    helper = f'mojo_fnptr_call_{min(n, 4)}'
-    call_args = ', '.join([fp_void] + widened[:4])
+    #
+    # A call that WRITES KEYWORD ARGUMENTS goes through the `_kw_` twin,
+    # which threads the (already packed) MojoDict through to a callee that
+    # declares `**kwargs`. That is the variadic case: `lambda *a, **k: ...`
+    # is a first-class value here, so a call site cannot know whether the
+    # value it holds wants them — which is why the packing and the
+    # decision both live in the runtime helper, not here. The `_kw_`
+    # helpers behave IDENTICALLY to their non-`_kw_` twins for every other
+    # kind of callee (the dict is dropped), so this changes nothing for a
+    # call whose callee cannot use them.
+    _kwargs = getattr(node, 'kwargs', None) or []
+    if _kwargs:
+        _kw_pairs = {kn: gen.lower_expr(kv) for kn, kv in _kwargs}
+        _kw = gen._pack_kwargs_dict(_kw_pairs)
+        helper = f'mojo_fnptr_call_kw_{min(n, 8)}'
+        call_args = ', '.join([fp_void, _kw] + widened[:8])
+    else:
+        helper = f'mojo_fnptr_call_{min(n, 8)}'
+        call_args = ', '.join([fp_void] + widened[:8])
     raw_t = gen._new_val('int64_t', f'{helper} ({call_args})')
     if ret_type in ('int64_t', 'int'):
         return ret_type, raw_t
