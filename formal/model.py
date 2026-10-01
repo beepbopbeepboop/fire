@@ -6504,11 +6504,23 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
         until something instantiates it.  Nothing is missing.
       * `__get_mvalue_as_litref` — a compiler intrinsic that yields MLIR.
       * a name reachable only through `from M import *` — the star import binds
-        whatever M EXPORTS, which is a fact about a library this pass has not
-        built, so "nothing binds it" would be false wherever M does export it
-        (22 files of the standard library write one).
+        whatever M EXPORTS, so "nothing binds it" is only true once the link
+        line has been asked and does not publish the name (22 files of the
+        standard library write a star import).
       * the rest — genuinely unbound, which is what the old sentence said and
         is the only one of the five it was true of.
+
+    **The two imported arms are now REACHABLE ONLY WHEN THE LINK LINE DID NOT
+    ANSWER**, and that is the whole of what changed for them. A frame address
+    handed to a function compiled in another module was refused here because
+    this pass could not know whether that compilation made the parameter a frame
+    holder; it can now, because each export carries the per-parameter
+    frame-holder contract in its manifest (`frame_params`) and
+    `check_imported_frame_handoffs` decides the hand-off from it — following the
+    address when the callee's struct is the one this image has, and refusing
+    with a named disagreement when it is not. So these arms describe what is
+    left after that comparison has been made and has come out with nothing to
+    compare, not the shape of the construct.
 
     The order is the order the question is decided in: a name that is not a
     function, then a name that is a parameter, then a name from another module
@@ -6582,26 +6594,22 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
             f"lacks one: it imports {callee} (`from {imported_from} import "
             f"{callee}`), so {callee} IS compiled — by {imported_from}, into a "
             f"library of its own, when that module builds at all. That is "
-            f"not by itself a reason to "
-            f"refuse — a frame address is exactly what a method of the "
-            f"receiver's own struct wants, and the cross-module METHOD case is "
-            f"followed across the boundary — but the fact that decides it is a "
-            f"fact about THAT compilation: whether it made the parameter this "
-            f"argument lands in a frame holder against this struct's field "
-            f"list. A module is compiled with its own call sites and this one "
-            f"is not among them, so this pass cannot know, and a wrong answer "
-            f"here is a wrong answer in the callee rather than a crash here. "
-            f"Measured in the smallest program with the shape: the same "
-            f"`def take_it(p: Pair)` beside its caller builds, runs and returns "
-            f"7, and split across two modules the callee module cannot be "
-            f"built at all — there `p` is a parameter with no call site to "
-            f"establish it and `p.a` is refused as a field access through a "
-            f"base nothing establishes. So the hand-off needs the callee's "
-            f"per-parameter contract — which parameters are frame holders, and "
-            f"of which struct — to travel in that module's manifest, which "
-            f"carries exported SYMBOL names and nothing else. "
-            f"bugs/FORMAL_wide_receiver_by_reference.md records the design and "
-            f"what is still open about it")
+            f"not by itself a reason to refuse — a frame address is exactly "
+            f"what a method of the receiver's own struct wants, and the "
+            f"cross-module METHOD case is followed across the boundary. It used "
+            f"to be a reason, and this sentence is what it said: the fact that "
+            f"decides the hand-off is whether THAT compilation made the "
+            f"parameter this argument lands in a frame holder, and a module is "
+            f"compiled with its own call sites, so this pass could not know. "
+            f"That module now PUBLISHES it — the per-parameter frame-holder "
+            f"contract each export carries in its manifest (`frame_params`, "
+            f"written by `formal/build.py`'s `_export_frame_contract`) — and "
+            f"`check_imported_frame_handoffs` compares that against the struct "
+            f"this image has, so the hand-off is followed when the two agree and "
+            f"refused with the disagreement when they do not. This arm is now "
+            f"only reached when the callee is NOT resolved through the link "
+            f"line, and the message says so. "
+            f"bugs/FORMAL_callee_no_def_ceiling_zero.md has the measurement")
     if star_imported_from:
         return (
             f"a {who} receiver is passed to {callee}(), which is a name with no "
@@ -6610,16 +6618,15 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
             f"thing that can bind a name like that here is a "
             f"`from {star_imported_from} import *`, and what such a statement "
             f"binds is {star_imported_from}'s EXPORT SET — which is not a fact "
-            f"about this file at all: it is a library this pass has not built, "
-            f"because `_resolve_imports` compiles the modules and the frame "
-            f"analysis runs first, from the statements alone. So two questions "
-            f"are open and neither is answerable from here: whether "
-            f"{star_imported_from} exports {callee} at all, and whether its "
-            f"compilation made the parameter this argument lands in a frame "
-            f"holder against this struct's field list. The second is the one "
-            f"that decides the hand-off, and it is the same question "
-            f"`formal.imports`' manifest cannot answer today: it records "
-            f"exported SYMBOL names and no parameter contract. "
+            f"about this file at all. Both of the questions this used to call "
+            f"unanswerable are now answered, from the link line rather than "
+            f"from the statements: whether {star_imported_from} exports "
+            f"{callee} is what its manifest's export table says, and whether "
+            f"its compilation made the parameter this argument lands in a frame "
+            f"holder is the `frame_params` contract that table now carries. "
+            f"This arm is reached when the link line settles NEITHER — so "
+            f"{callee} is not among the names any library on it publishes, and "
+            f"there is no contract to compare. "
             f"bugs/FORMAL_callee_no_def_ceiling_zero.md has the measurement")
     return (f"a {who} receiver is passed to {callee}(), which is a name with no "
             f"definition in hand in this image: this module defines no FUNCTION "
@@ -6793,9 +6800,280 @@ def frame_holder_disagreement_refusal(callee: str, position, param,
             f"so a field read through it is a load at `base + 8k` — and at the "
             f"other call site there is no frame there at all. Measured on both "
             f"architectures with nothing lifted: the two-call-site shape builds, "
-            f"runs, and dies with SIGSEGV (exit 139). Give {param!r} one kind "
-            f"of value at every call site — pass the frame address everywhere, "
-            f"or nowhere")
+f"runs, and dies with SIGSEGV (exit 139). Give {param!r} one kind "
+             f"of value at every call site — pass the frame address everywhere, "
+             f"or nowhere")
+
+
+# ── The cross-image half: a frame address handed to an IMPORTED function ─────
+#
+# `frame_holder_disagreement_refusal` above is the same disagreement decided
+# from ONE image: every call site of the parameter is visible, so "one kind of
+# value at every call site" is a checkable rule. Across a module boundary the
+# other side's call sites are not in this image at all — they are in a dylib
+# this build linked and then cannot read — so the same question needs a
+# different piece of evidence, and that is what the dylib MANIFEST now carries.
+#
+# `_dylib_frame_contracts` publishes, for every exported function, which of its
+# parameters its own compilation made frame holders and of which struct. That
+# is a fact about a compilation this process did not perform, so it cannot be
+# re-derived here; publishing it is the only honest way for a consumer to ask.
+# The three refusals below are the answers that can come back, and they are
+# three because "the contract says no" is not one fact:
+#
+#   * the contract says the parameter IS a frame holder, of a DIFFERENT struct
+#     than the argument here — a real disagreement, and the worst of the three,
+#     because both sides are now certain and they differ;
+#   * the contract says the parameter is NOT a frame holder — a real
+#     disagreement of the other kind, and the one that used to be invisible;
+#   * the contract says nothing — a limit of the ANALYSIS again, and the only
+#     one of the three that is not a statement about the program.
+#
+# All three keep the clause `which is a name with no definition in hand`, for
+# the reason `frame_undefined_callee_refusal`'s docstring gives: two taxonomies
+# key on that substring, and it is what keeps this family counted as one.
+
+
+def cross_image_frame_disagreement_refusal(
+        callee: str, position, contract_struct, argument_structs,
+        argument_spelling) -> str:
+    """The callee's own manifest says the parameter in `position` is a frame
+    holder — of a struct other than the one handed to it here.
+
+    Both sides are now certain and they disagree, which is what makes this the
+    worst of the three cross-image answers: nothing here is missing, and the
+    program is wrong rather than unknown.  `base + 8k` means slot 0 for one
+    struct and some other field for the other, so the callee would read — or
+    write — the caller's object through ITS OWN field list.
+
+    Measured on this tree, with the contract published and the name comparison
+    REMOVED — `resolve_frame_parameter_contract` returning `(True, None)` with no
+    lookup, which is the one line of this construct that has to be right for
+    this refusal to be worth anything.  The two modules differ only in the order
+    their structs declare their fields (`Q(v, pad)` against `P(pad, v)`), which
+    is exactly the disagreement `model.struct_frame_slot_candidates` documents
+    and the reason layouts are compared by NAME rather than by count: the
+    program builds, runs, exits 0, and returns **213** where CPython says 312,
+    because `Q.v` is slot 0 and the caller's slot 0 is `P.pad`.
+    """
+    return (
+        f"a {contract_struct} receiver is passed to {callee}() at argument "
+        f"position {position}, and {callee}'s own manifest says the parameter "
+        f"in that position is a frame holder of {contract_struct}: the module that "
+        f"defines {callee}() compiled it that way, so a field read through it "
+        f"is a load at `base + 8k` for {contract_struct}'s field list. This "
+        f"call hands it {argument_spelling}, whose frame is "
+        f"{_who(argument_structs)}. One struct's address read as another's "
+        f"fields is a wrong answer rather than a failure, and it is why the "
+        f"contract is compared rather than believed. Give the parameter the "
+        f"struct the frame actually has, or pass {contract_struct} here")
+
+
+def cross_image_plain_parameter_refusal(
+        callee: str, position, argument_structs,
+        argument_spelling) -> str:
+    """The callee's own manifest says the parameter in `position` is an
+    ordinary word.
+
+    The inverse of the refusal above, and the one that was invisible before the
+    manifest carried the contract: nothing in this image says the parameter is
+    a holder, `known` and `all_holders` both lack the callee, and the old
+    answer was "this pass cannot know".  Now it can — and what it finds is that
+    the parameter is compiled as a plain word, so a frame address arriving in
+    it is a number the callee will read as a value and then dereference.
+
+    This is `frame_holder_disagreement_refusal` across an image boundary, and
+    the same consequence, MEASURED on this tree rather than inherited: the
+    identical program with the call in ONE file builds and runs, and returns
+    the FRAME'S OWN ADDRESS added to the callee's other operand — 42 and 58 on
+    two consecutive runs of the same binary on arm64, 250 on x86-64, because
+    the low byte of a stack address is not a constant. So the single-file shape
+    is not a crash either; it is a wrong answer that MOVES, which is the harder
+    of the two to notice and the reason the word has to be refused rather than
+    followed.
+
+    (CPython rejects the shape outright — `P + int` is a `TypeError` — so
+    there is no "right answer" to compare against here, and the claim being
+    made is only that the backend must not invent a number at all.)
+    """
+    who = _who(argument_structs)
+    return (
+        f"a {who} receiver is passed to {callee}() at argument position "
+        f"{position}, and {callee}'s own manifest says the parameter in that "
+        f"position is an ordinary word, NOT a frame holder: nothing in "
+        f"{callee}'s module ever hands it an address, so it was compiled to "
+        f"read the word as a value. Handing it {argument_spelling} puts a frame "
+        f"address where {callee}() expects a value, so {callee}() computes on "
+        f"the ADDRESS — measured on this tree, the same program with the call "
+        f"in ONE file builds, runs, and returns the frame's own address added "
+        f"to the other operand: 42 and 58 on two consecutive runs of the same "
+        f"arm64 binary, 250 on x86-64, where CPython rejects the shape "
+        f"outright. A wrong answer that moves between runs is why the word is "
+        f"refused rather than followed. Pass the field the callee reads "
+        f"({argument_spelling}.a), or give the parameter a declared struct type "
+        f"so both sides agree it is a frame")
+
+
+def cross_image_contract_absent_refusal(callee: str, position,
+                                        argument_structs,
+                                        argument_spelling, why_absent) -> str:
+    """No contract for this callee in any manifest on the link line.
+
+    A limit of the ANALYSIS, and the only cross-image answer that is not a
+    statement about the program — so it says so, and names the reason the
+    contract is missing rather than asserting a mechanism that is not
+    operating.  `why_absent` is which of the four it is:
+
+      * `not-exported` — the callee is in the export table but the contract is
+        shorter than the argument index, so this argument lands on no
+        parameter.  Usually an arity or a naming disagreement, which the link
+        audit will say about separately.
+      * `not-a-callee` — the library carries no per-parameter contract (built
+        before the field existed, or written by something that does not), or has
+        a contract with no entry for this position.
+      * `no-manifest` — no manifest on this image's link line mentions the
+        callee at all, so the question cannot even be asked of it.
+
+    `why_absent` is one of `CONTRACT_ABSENT_REASONS`' sentences, and that
+    constant is the enumeration of them; there is no fourth and none is
+    unreachable, which is why the list lives in one place rather than at three
+    call sites.
+    """
+    return (
+        f"a {_who(argument_structs)} receiver is passed to {callee}() at "
+        f"argument position {position}, and {callee} is compiled into another "
+        f"module, so whether ITS analysis made the parameter in that position "
+        f"a frame holder is a "
+        f"fact about that module's compilation. Nothing on this image's link "
+        f"line settles it: {why_absent}. This is a limit of the ANALYSIS and "
+        f"not a fact about the program — the frame belongs to the function "
+        f"that created it, that function is an ancestor of the callee, so a "
+        f"read or a write through the parameter would be in the right place. "
+        f"The word is refused rather than followed, because following it "
+        f"without the contract is a program that builds, runs, and returns a "
+        f"number the source never wrote. "
+        f"bugs/FORMAL_callee_no_def_ceiling_zero.md records the measurement")
+
+
+# The THREE reasons a contract can be missing, as SENTENCES. A named constant
+# each rather than a bare string at the one call site, so the three are
+# enumerable — a reader can see the whole set of "why not" answers at once —
+# and every one of them is emitted by `resolve_frame_parameter_contract` below.
+#
+# Three and not four. A fourth — "two libraries on the line publish a contract
+# for it and they disagree" — was drafted here and deleted, because it is not a
+# thing that can happen: `dylib_export_lookup` resolves a bare callee through
+# the flat `by_name` table with `setdefault` in LINK ORDER, so two libraries
+# exporting the same name is decided, and it is decided the same way the emitted
+# call binds. Publishing a reason nothing can reach would be a fourth "why not"
+# a reader could look for and never find, which is the defect this whole family
+# of messages exists to stop.
+CONTRACT_ABSENT_REASONS = {
+    "not-exported": (
+        f"the manifest for the module it came from does not list it as an "
+        f"export, so its compilation never published a contract for it"),
+    "not-a-callee": (
+        f"the library it resolves to carries no per-parameter contract — "
+        f"either built before the manifest carried one, written by something "
+        f"that does not, or holding a contract with no entry for this "
+        f"argument's position"),
+    "no-manifest": (
+        f"no manifest on this image's link line mentions it, so the question "
+        f"cannot be asked of anything"),
+}
+
+
+def resolve_frame_parameter_contract(candidates, position, argument_structs,
+                                    argument_spelling, callee: str):
+    """`(follow, refusal)` for a frame address reaching an imported callee.
+
+    THE decision, and it is in this file beside the three refusal texts it
+    prints, because it is a question about the LANGUAGE — what a frame address
+    means to a callee compiled in another module — and because both the build
+    pass and anything else that has to answer it must get one answer. The
+    three refusal builders are its only outputs; there is no fourth path and no
+    flag that says "decided but unsure".
+
+    `candidates` is what the link line offers for this callee, and it is a LIST
+    rather than a single entry so that "which library does this bind to" is
+    visibly a question this function does NOT answer: the caller passes what
+    the resolver that binds the CALL found, in link order, and this function
+    reads element 0 — the same first-wins precedence `load_dylib_manifests`'
+    `map` and `dylib_syms` use. Taking one here would be a second resolution
+    that could pick a different library's `f` from the one the emitted call
+    binds, which is the silently-wrong binding the module-identity mechanism
+    exists to prevent. An empty list is `no-manifest`.
+
+    The list is a list and not a single entry for the same reason, and it is why
+    there is no "ambiguous" answer in `CONTRACT_ABSENT_REASONS`: the ambiguity
+    is settled by that precedence before this function is called, which is why it
+    is not a state this function can be in.
+
+    `argument_structs` is the SET of struct NAMES the caller's own argument is
+    a frame of, and it is compared against the contract's names rather than
+    against a struct object: the two sides of the boundary are different
+    compilations of different `StructDef` trees, so the only thing they can be
+    compared on is the name the layout was derived from. That is enough, and it
+    is what makes following the address sound — `base + 8k` means the same thing
+    on both sides only because both computed it from the same field list, and
+    the importer read that struct from the module's OWN source
+    (`formal.imports.imported_struct_defs`), so it is the same
+    `struct_field_names` over the same class body.
+
+    `position` is the argument index. Out of range of the contract — a
+    variadic tail, or a call whose arity the callee's export disagrees with —
+    is `not-exported`, because "this argument lands on no parameter" is a fact
+    about the export rather than about the contract.
+
+    **Follow is only ever `True` when the contract says the parameter is a
+    holder of one of the structs this image actually has.** That is the whole
+    safety argument: a struct of the right NAME in a different module with a
+    different field list is a real possibility on this path — nothing stops two
+    modules each declaring a `Pair` — and comparing counts instead of names
+    would follow it silently.
+
+    An EMPTY `argument_structs` does not follow, and cannot: the caller cannot
+    say what its own argument is a frame OF, so it cannot show the layouts
+    agree, and following on no evidence is the outcome the contract exists to
+    prevent.
+    """
+    if not candidates:
+        return (False, cross_image_contract_absent_refusal(
+            callee, position, argument_structs,
+            argument_spelling, CONTRACT_ABSENT_REASONS["no-manifest"]))
+    entry = candidates[0]
+    contract = entry.get("frame_params")
+    if contract is None:
+        return (False, cross_image_contract_absent_refusal(
+            callee, position, argument_structs,
+            argument_spelling, CONTRACT_ABSENT_REASONS["not-a-callee"]))
+    if position >= len(contract):
+        return (False, cross_image_contract_absent_refusal(
+            callee, position, argument_structs,
+            argument_spelling, CONTRACT_ABSENT_REASONS["not-exported"]))
+    holders = contract[position]
+    if not holders or holders == ["one-word"]:
+        # `None` is an ordinary word: the callee was compiled to read the slot
+        # as a value, so a frame address arriving there is the disagreement
+        # `frame_holder_disagreement_refusal` reports within one image, with the
+        # same consequence. `["one-word"]` is a one-field struct, whose
+        # receiver IS its field — the wrong CATEGORY rather than the wrong
+        # layout, and the same refusal rather than a fourth sentence.
+        return (False, cross_image_plain_parameter_refusal(
+            callee, position, argument_structs,
+            argument_spelling))
+    mine = set(argument_structs or ())
+    if not mine:
+        return (False, cross_image_contract_absent_refusal(
+            callee, position, argument_structs,
+            argument_spelling, CONTRACT_ABSENT_REASONS["not-a-callee"]))
+    if mine & set(holders):
+        return (True, None)
+    # Both sides are certain and they differ: the worst of the three, because
+    # nothing is missing and the answer is wrong rather than unknown.
+    return (False, cross_image_frame_disagreement_refusal(
+        callee, position, ", ".join(holders),
+        argument_structs, argument_spelling))
 
 
 def frame_declared_parameter_refusal(callee, position, param, struct_name,
