@@ -185,21 +185,23 @@ afford, not for the red ones.
 
 Two things the table says that the markers do not:
 
-- **Eleven of the sixteen are in no bucket at all.** (Sixteen, not thirteen: the
-  three `formal-*` host-module suites below arrived on master after this table
-  was written, and each is `expect=` in `proofs` — see
-  `bugs/TEST_registered_tests_in_no_bucket_never_run.md` §"Why this is the same
-  bug as the estate one", which counted the 19 ungated registrations and named
-  this group.) The eleven are registered, they are red, they are declared — and
-  nothing runs them, which is a coverage hole rather than a cost problem: their
-  `expect=` markers are currently untested anti-rot. `coro` (the
-  `coroutine` bucket, in the gate) is the obvious home for the eight async ones
-  and `x86` for `x86-containers`. Note the flip side: the day they join a
-  bucket they are on the cheap side of the threshold, so `expect=` is the right
-  marker for all eleven, not `disabled=`. The owner of that decision is
-  recorded in `bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md`; the
-  costing half of it, and the part that says a marker on a test no gate runs
-  cannot rot out, is in CLAUDE.md, "Known-failing tests".
+- **The eleven of the sixteen that were in no bucket at all are in buckets
+  now** (2026-10-01). (Sixteen, not thirteen: the three `formal-*` host-module
+  suites below arrived on master after this table was written, and each is
+  `expect=` in `proofs`.) The eleven were registered, red and declared, and
+  nothing ran them — a coverage hole rather than a cost problem, because their
+  `expect=` markers were untested anti-rot. They are now the `coroutine`
+  bucket's ten (`gimple-async-runner`, `coro-detached-async`,
+  `async-with-lock-guard`, `mutable-async-capture`,
+  `transitive-closure-capture`, `async-void-return`, `nested-async-generic`,
+  `taskgroup`, `async-runtime-scaffold`, `coro-future-await`) and `x86`'s
+  `x86-containers`, each measured first: 0.0-0.2 GB and 1.2-11.6 s for the ten
+  (34.6 s total), ~4 minutes for `x86-containers`, which is why that one is in
+  `x86` only. They are all on the cheap side of the threshold, which confirms
+  `expect=` was the right marker for all eleven rather than `disabled=`. The
+  part that says a marker on a test no gate runs cannot rot out is in CLAUDE.md,
+  "Known-failing tests", and what stops the next one is
+  `test_suite.py`'s `the buckets:` checks.
 - **No duration is recorded for any of them.** `MEASURED_PEAK_GB` has rows only
   for jobs a gate ran while the peak table was being recorded, and the registry
   keeps no wall-time table; "wall time" above is from the registry comments and

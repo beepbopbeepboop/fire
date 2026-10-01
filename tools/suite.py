@@ -955,12 +955,13 @@ class Spec:
               one honest way out of "every registered test is in a bucket"
               (checked in test_suite.py), and it is a per-spec opt-out rather
               than a name list in the checker for exactly that reason: a list
-              in the checker is an excuse table, and an excuse table is what
-              bugs/TEST_registered_tests_in_no_bucket_never_run.md is about.
-              The checker refuses a `dep` that NOTHING depends on, so the
-              marker cannot become a way to be ungated — it can only be the
-              statement that this is run, as a dependency, on purpose.
-              `prooflib` is the one: 27 MB, ~80 s, sixteen jobs `deps` on it.
+              in the checker is an excuse table, and an excuse table is how
+              nineteen registrations came to sit in the estate's inventory and
+              in no run at all. The checker refuses a `dep` that NOTHING
+              depends on, so the marker cannot become a way to be ungated — it
+              can only be the statement that this is run, as a dependency, on
+              purpose. `prooflib` is the one: 27 MB, ~80 s, sixteen jobs `deps`
+              on it.
     """
     __slots__ = ('name', 'cmd', 'driver', 'mem', 'memwhy', 'deps', 'extra',
                  'extraglob', 'cache', 'j', 'excl', 'reject', 'timeout',
@@ -1225,9 +1226,9 @@ test('no-new-casts', [PY, 'test_no_new_container_casts.py'], cache=True,
 # `mem='tiny'` and in `check`, both added here rather than at registration:
 # registering a test is not the same as running it, and 19 of this registry's
 # members sat in NO bucket at all — named by a spec, in the estate's inventory,
-# and executed by nothing (the whole list, and the two that are still open:
-# `bugs/TEST_registered_tests_in_no_bucket_never_run.md`). This one is 1.1 s and
-# 0.04 GB, which is what the everyday bucket is for.
+# and executed by nothing. Every one is in a bucket now, and
+# test_suite.py's `the buckets:` checks are what keeps it that way. This one is
+# 1.1 s and 0.04 GB, which is what the everyday bucket is for.
 test('cli-usage-text', [PY, 'test_cli_usage_text.py'], cache=True, mem='tiny',
      extra=['test_cli_usage_text.py', 'fire.py', 'fire_main.py', 'fire_compiler.py'],
      desc='the tool prints the name it was invoked as, in usage, -v and every error')
@@ -1343,13 +1344,13 @@ test('examples-parse', [PY, 'test_examples_parse.py'], cache=True,
 # …and every one of them is in a BUCKET now, which is the other half of the
 # same sentence. All of this block was registered in one commit and bucketed in
 # none, so `--list` printed `[]` in the bucket column for nineteen of them and
-# no run in the tree executed them:
-# `bugs/TEST_registered_tests_in_no_bucket_never_run.md` (the unmarked group)
-# and `bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md` (the `expect=`-
-# marked one, where the damage is worse because a marker nobody can observe
-# going stale is immortal). Both are closed by this registration's buckets plus
-# the `dep=True` field and its check in test_suite.py, which is the part that
-# stops the next one arriving the same way.
+# no run in the tree executed them. Eleven were `expect=`-marked, which is the
+# worse half: a marker nobody can observe going stale is immortal, and a
+# `coro` bucket that ran nothing for two rounds is what that looks like in this
+# tree's own history. The buckets plus the `dep=True` field below are the fix;
+# the `the buckets:` checks in test_suite.py are the part that stops the next
+# one arriving the same way, and their bug docs are deleted with the fix rather
+# than left with a Status history (CLAUDE.md, "Bug docs").
 #
 # The `mem=` on each row below is the ratchet's, from a measured run: every one
 # of these is 0.0-0.2 GB, and at 0.2 GB the 1.5x rule that assigns a class puts
@@ -2434,9 +2435,8 @@ BUCKETS = {
               # `metalgpu`, the other half of that pairing. It was registered
               # and in NO bucket because "whether it passes needs a real GPU
               # and a full codegen run, which is not a thing a registration
-              # can be assumed to be true of"
-              # (bugs/TEST_registered_tests_in_no_bucket_never_run.md) — and
-              # the honest answer to that was to run it, not to keep it out.
+              # can be assumed to be true of" — and the honest answer to that
+              # was to run it, not to keep it out of a bucket.
               # Measured green on a machine with a Metal device: 102 tests,
               # 49.9 s, 0.4 GB. It is `cache=True`, so an unchanged tree
               # replays that PASS, and the GPU layer
@@ -2550,8 +2550,8 @@ BUCKETS = {
             # `expect=`-marked for one case (`with 7 as y: x = y`, refused by
             # the read-before-store rule) and the marker is the reason it must
             # be RUN somewhere: a known failure that nothing runs can never be
-            # observed going green, which is the whole argument of
-            # bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md.
+            # observed going green, which is the whole argument for the
+            # `the buckets:` checks in test_suite.py.
             'x86-containers'],
     # The compiled-path async/await and coroutine cluster: eleven
     # `expect=`-marked suites that were registered and in no bucket, so the

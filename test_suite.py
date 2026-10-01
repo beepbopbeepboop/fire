@@ -1058,9 +1058,11 @@ def test_an_expect_marker_points_at_a_doc_that_exists():
 # A Markdown table row that is unmistakably a status inventory: a pipe, a
 # backticked name, and a status word. Deliberately narrow, because the whole
 # value of this check is that it has no exemptions and no false positives —
-# a rule that needs an exception list is the excuse table
-# `bugs/TEST_registered_tests_in_no_bucket_never_run.md` argues against, and it
-# would rot the same way.
+# a rule that needs an exception list is an excuse table, and an excuse table
+# is how nineteen registrations came to sit in the estate's inventory and in no
+# run at all (see `test_every_registered_test_is_in_a_bucket_or_says_it_is_a
+# _dependency` below, which is the same argument with a `dep=True` field
+# instead of a list).
 _STATUS_ROW = re.compile(
     r'^\s*\|(?P<cells>.*)\|\s*$')
 _CELL_NAME = re.compile(r'^`(?P<name>[\w.-]+)`$')
@@ -3261,16 +3263,16 @@ def test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency():
     bucket is named, so the estate counted it as covered, while `make check`,
     `make gate` and every other bucket walked straight past it. Nineteen tests
     were in that state — eleven of them `expect=`-marked, which is the worse
-    half, because a marker nobody can observe going stale is immortal. The
-    write-ups are `bugs/TEST_registered_tests_in_no_bucket_never_run.md` (the
-    unmarked group) and
-    `bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md` (the `expect=`-
-    marked one, with the anti-rot argument), both closed by the buckets landed
-    with this check.
+    half, because a marker nobody can observe going stale is immortal. Both
+    groups were written up as bug docs and both docs are DELETED with this
+    commit, per CLAUDE.md's "Bug docs": a doc for a fully fixed bug is removed
+    rather than left with a Status history, because a fixed bug still listed is
+    indistinguishable from an open one. What is left in their place is this
+    check, the buckets, and the measured table at the registrations.
 
     The opt-out is a per-spec `dep=True`, not a name list here, and the reason
     is the same one the `--list` ratchets above give: a list inside the checker
-    is an excuse table, and an excuse table is what those two docs are about.
+    is an excuse table, and an excuse table is how the nineteen got in.
     `prooflib` is the one legitimate case — 27 MB, ~80 s, a `deps` of sixteen
     proof-checking jobs, and deliberately in no bucket so `make check` does not
     pay for it (CLAUDE.md, "Shared expensive dependencies").
