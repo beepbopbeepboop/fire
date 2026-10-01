@@ -145,13 +145,16 @@ knows the callee's name, module, symbol and return kind, and not its arity.
 
 ## Checked and NOT these, so nobody re-derives it
 
-- **`bugs/FORMAL_arm64_ninth_argument_is_silently_dropped.md`** is the
-  neighbouring case and a different one: that is the AAPCS register-file limit
-  (X0–X7 on arm64, six on x86-64), where the *callee* cannot receive a ninth
-  parameter at all and the fix is to refuse. This document is about a call
-  whose count is 2 or 3 — well inside every register file — where the callee
-  has a perfectly good parameter list and the caller simply does not match it.
-  Its step 1 would not catch this, and this step 1 does not catch it.
+- **A ninth argument silently dropped rather than refused** is the
+  neighbouring case and a different one. That one is now fixed and its doc
+  deleted (CLAUDE.md removes a fixed bug's doc), so it is named by symptom
+  here: it was the AAPCS register-file limit (X0–X7 on arm64, six on x86-64),
+  where the *callee* cannot receive a ninth parameter at all and the fix was to
+  refuse. `formal/build.py` emits that refusal and `test_formal_run.py`
+  asserts it. This document is about a call whose count is 2 or 3 — well inside
+  every register file — where the callee has a perfectly good parameter list
+  and the caller simply does not match it. That fix would not catch this, and
+  this step 1 does not catch it.
 - **`bugs/FORMAL_variadic_call_has_no_abi`** is about `*args` on the callee
   side; the calls here pass fixed positional arguments to a fixed-parameter
   function.

@@ -3365,6 +3365,77 @@ def test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency():
             suite.BUCKETS.update(saved)
 
 
+def test_a_deleted_bug_doc_is_not_still_cited():
+    """A reference to a `bugs/` path that is not there is a lie in a file that
+    exists to be believed — and the project's own rule manufactures them.
+
+    CLAUDE.md deletes a bug doc when the bug is fixed, rather than leaving it
+    behind with a Status history, and that is the right rule: a fixed bug still
+    listed is indistinguishable from an open one to whoever reads the queue
+    next. It has a cost nobody was measuring, though, and the first instance
+    found was a test file's module docstring sending a reader to a file that is
+    not there. `bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md` is
+    the write-up, rewritten after the walk turned out to be a hundred times
+    bigger than the two places it named.
+
+    So the WALK is `tools/dangling_doc_refs.py`, and these four checks are about
+    the walk rather than about the corpus, which is the only shape that can
+    land: the census is 335 citations across 127 deleted names, two thirds of
+    them inside `fire_compiler.py`, `gimple_codegen.py`, `formal/` and
+    `mojo/` — files that belong to whoever owns that area. A `check()` over the
+    whole corpus goes red on every one of those branches for something it did
+    not do, and a red check is indistinguishable from a real regression. What
+    is checked here is that the tool finds the corpus, that it does not invent
+    it, and that the two citations this bug named are gone.
+
+    `test_suite.py` itself is skipped, and that is not an exception list: the
+    checks below for `expect=` and `disabled=` markers deliberately name
+    documents that do not exist (`NEVER_WRITTEN.md`,
+    `NO_SUCH_DOC_ANYWHERE.md`) to prove those checks can fail. This file is
+    where a walk for missing files is guaranteed to find one.
+    """
+    sys.path.insert(0, os.path.join(HERE, 'tools'))
+    try:
+        import dangling_doc_refs
+    except ImportError as e:
+        check('dangling refs: the walk is importable', False, repr(e))
+        return
+
+    have, by_doc, by_file = dangling_doc_refs.find(skip={'test_suite.py'})
+    check('dangling refs: the walk is not vacuous — there is a real corpus',
+          len(by_doc) > 50 and sum(len(v) for v in by_doc.values()) > 100,
+          f'found {len(by_doc)} names / '
+          f'{sum(len(v) for v in by_doc.values())} citations; a walk that '
+          f'matches nothing reports green forever, which is the one thing it '
+          f'must not be able to do')
+    check('dangling refs: it does not invent one — a cited doc that EXISTS is '
+          'not reported',
+          'bugs/FORMAL_arm64_right_shift_is_always_arithmetic.md' in have
+          and 'FORMAL_arm64_right_shift_is_always_arithmetic.md' not in by_doc
+          and 'CODEGEN_ab_native_fails.md' not in by_doc,
+          f'the walk found {len(have)} docs under bugs/; a walk that reports '
+          f'every citation would make the census meaningless, so the '
+          f'exists-branch is checked against names this tree really cites')
+    check('dangling refs: every name it reports really is absent',
+          not [n for n in by_doc if f'bugs/{n}' in have],
+          f'{[n for n in by_doc if f"bugs/{n}" in have]}')
+
+    # The two the bug doc named, by file and by name — the specific defect,
+    # asserted directly rather than read out of a total, because a census check
+    # cannot tell "fixed" from "the number went down".
+    gone = {('test_formal_hashlib.py', 'FORMAL_arm64_lsl_imm_is_wrong_for_'
+             'every_amount_above_8.md'),
+            ('bugs/FORMAL_arm64_right_shift_is_always_arithmetic.md',
+             'FORMAL_arm64_lsl_imm_is_wrong_for_every_amount_above_8.md')}
+    still = [f'{f}: {d}' for f, d in sorted(gone)
+             if any(d == n for n, _ln in by_file.get(f, ()))]
+    check('dangling refs: the two this bug named are rewritten by symptom',
+          not still,
+          f'still cited: {still}. The fix is to name the BUG — the symptom, or '
+          f'the commit that fixed it — which is what '
+          f'test_arm64_encoders.py says at its shift sweep.')
+
+
 def _module_const_paths(src, tree):
     """`<NAME> = os.path.join(..., 'build', '<name>')` -> {NAME: that source text}.
 
@@ -3581,6 +3652,7 @@ def main():
                 test_every_test_file_is_registered,
                 test_the_estate_check_is_in_a_gate_and_can_see_its_own_subject,
                 test_every_registered_test_is_in_a_bucket_or_says_it_is_a_dependency,
+                test_a_deleted_bug_doc_is_not_still_cited,
                 test_no_test_preflights_on_an_unbuildable_artifact,
                # The memory-campaign tests. They were DEFINED and never CALLED
                # — three functions, 300-odd lines, nothing in this list — which

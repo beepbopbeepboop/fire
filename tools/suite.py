@@ -1479,7 +1479,7 @@ test('preflight', [PY, '-c',
 test('suite-self-test', [PY, 'test_suite.py'], cache=True,
      extra=['test_suite.py', 'tools/suite.py', 'tools/procrun.py',
             'tools/memslot.py', 'tools/memcap.py', 'checked_run.py',
-            'test_memslot.py'],
+            'test_memslot.py', 'tools/dangling_doc_refs.py'],
      extraglob=['**/test_*.py'],
      desc='the runner: drivers, deps, exclusivity, fanout, tally, log split')
 
