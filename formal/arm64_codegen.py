@@ -1792,6 +1792,7 @@ class ARM64Codegen:
             # iterates the struct's fields.  Measured on both architectures:
             # summing a four-field struct gave 99 on arm64 and 53 on x86-64.
             self._refuse_frame_container_operand("a for-in iteration", it)
+            self._refuse_string_iteration("a for-in iteration", it)
             tnames = _lbn_target_names(stmt.target) if isinstance(
                 stmt.target, str) else []
             if not tnames or any(not n.isidentifier() for n in tnames):
@@ -2999,6 +3000,21 @@ class ARM64Codegen:
         is a freshly materialized blob and the scan compares one address
         against another. It built, it ran, and it disagreed with x86-64."""
         return self._is_dict_subscript(e.obj)
+
+    def _refuse_string_iteration(self, op: str, obj) -> None:
+        """Refuse to ITERATE a `char *` as a container.
+
+        The sibling of `_refuse_frame_container_operand`, and the same
+        failure: the blob walk reads offset 0 of the operand and calls it a
+        COUNT, and a string's first eight bytes are text. `M.
+        string_iteration_refusal` owns the wording and the measurements (see
+        there for what both architectures returned before this), and both
+        backends ask it through their own `_is_string_subscript`, which is
+        the one place that knows whether an expression holds a `char *`.
+        """
+        if self._is_string_subscript(obj):
+            raise CodegenError(M.string_iteration_refusal(
+                op, self.func_name or "<module>"))
 
     def _refuse_frame_container_operand(self, op: str, obj) -> None:
         """Raise if `obj` is a BARE NAME holding a frame address.
@@ -5433,6 +5449,11 @@ class ARM64Codegen:
         false_label = f"{fn}_cg{wid}_false"
         end_label = f"{fn}_cg{wid}_end"
 
+        # Same walk as a for-in, so the same operand it refuses: a `char *`
+        # has no count word at offset 0, and one here is read as a count of
+        # its own first bytes (measured: SIGBUS walking past the string).
+        self._refuse_string_iteration("a comprehension iterable",
+                                      gen.iterable)
         self._emit_expr(gen.iterable)
         self._store_var(cb_name, 0)
         self.asm.emit(encode_movz_xd_imm(0, 0))
