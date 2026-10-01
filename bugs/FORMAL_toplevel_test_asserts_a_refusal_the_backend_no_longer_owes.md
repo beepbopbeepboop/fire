@@ -6,6 +6,13 @@ and its parent — 68 PASS / 2 FAIL before and after, the two failures being the
 two rows. Not fixed here: `test_formal_toplevel.py` and the `__init__` inlining
 are not the `construct:module-attribute-access` claim's area.**
 
+**Second row, same family, found 2026-09-30 while running the regression floor
+for `construct:method-param-field-access`: the run is now 66 PASS / 4 FAIL, so
+`name_in_function` (both backends) has joined `body_construction_refusal`. It is
+the same defect class with a different spelling — the backend still refuses,
+and refuses correctly, but not in the words the row pins.** Appended below with
+its own reproducer; the exact next step for it is step 4.
+
 A test that asserts a refusal for a construct the backend now lowers CORRECTLY
 is not a known failure to be forgiven — it is a hole in coverage pointed the
 wrong way. It says "this has no representation" about a construct that has one,
@@ -106,6 +113,41 @@ construction argument. Only a bare parameter can be …
 row would have stopped pinning the second, which is the one that would be a
 silent wrong answer if it regressed (`P(3)` would print `3` where the source
 says `30`).
+
+## The second row: `name_in_function`, a REWORDING rather than a lifted refusal
+
+```
+$ cat > .tmp/nif/nif.mojo
+def f():
+    if __name__ == "__main__":
+        return 1
+    return 0
+
+f()
+$ python3 fire.py build --formal --no-prove nif.mojo
+build: `__name__ == '__main__'` compares a NUMBER with a string, and the string
+comparison this would lower to is `strcmp`, which DEREFERENCES both operands …
+```
+
+The row pins `'__name__' has no home`, and the program is still refused on both
+backends — by the operand-kind check that fires first, which says something
+MORE specific (the right-hand side is a string and the left-hand side is a
+number) rather than something less. `test_formal_run.py` already has the mode
+for this direction: `refuse_without:`, "the anti-rot direction for a
+REWORDING", and its docstring explains why a needle-only `refuse:` is not
+enough ("a fix that satisfies it by APPENDING the true sentence and leaving the
+false one in place").
+
+Verified pre-existing, not caused by the change that surfaced it: the same
+source, built with the tree's own `formal/build.py` at `HEAD` restored from git
+into a scratch package copy, refuses identically.
+
+4. **Add a `refuse_without:` mode to `test_formal_toplevel.py`** (or reuse
+   `test_formal_run.py`'s, which is a helper in that file rather than a shared
+   one) and convert this row to it: the needle becomes `compares a NUMBER with
+   a string`, and the row keeps pinning what it is FOR — that `__name__` in a
+   FUNCTION is not substituted — which is still true and is the half that must
+   not be lost when the words move again.
 
 ## The exact next step
 

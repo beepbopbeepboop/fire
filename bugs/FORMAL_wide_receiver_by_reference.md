@@ -1549,3 +1549,137 @@ converts a wrong answer into a red test, which is worth something but is not
 this item." These are not wrong answers — they are refusals — and renaming or
 elaborating them would have moved the headline without a line of behaviour
 changing. **The 18 findings are gone when the copy is emitted, and not before.**
+
+---
+
+# Wave 8 (formal-string-return): the returned-frame convention LANDED
+
+The last sentence of wave 3 said what the 18 findings were waiting for, and it
+was right about the mechanism and wrong about the order: the copy is emitted
+now, and the two halves that were designed around it — the caller's block
+(`model.struct_returned_frame_sites`) and the convention decision
+(`model.returned_frame_convention_refusal`) — are no longer a design, they are
+what the emitters call.
+
+## The convention, in three sentences
+
+A function that returns a multi-field struct's receiver **takes one hidden
+trailing argument**: the address of a block the CALLER reserved, in the
+caller's own scratch, per call site, in the prologue. `return <frame>` becomes
+"copy the block to that word and return that word". Nothing else changes: the
+value model, `MojoFunc`, `evalFunc`, `evalBodyEnv` and the machine model are
+untouched, because a frame address was already one word and the receiver is
+already passed as one.
+
+Three properties of that shape are what make it work, and each is a place a
+naive version of it goes wrong:
+
+* **The block is per CALL SITE, not per function.** One fixed slot works for
+  `a = f(); b = f()` — the same block, reused — and collides for `f(g())`,
+  where the inner and outer results must be live at once. That is the
+  measurement `returned_frame_convention_refusal` records against candidate 2
+  ("the callee computes the caller's block itself"), and
+  `returned_frame_nested_calls_two_blocks` in `test_formal_returned_frame.py`
+  is the program that says so.
+* **The whole BLOCK is copied, and the nested frames are re-pointed at the
+  copy.** A placed nested frame's slot holds the address of a frame inside the
+  object's own block (`model.struct_nested_frame_fields`), so copying the bytes
+  without re-pointing the slot leaves the caller reading a nested field out of
+  the callee's reclaimed scratch — the use-after-free, one level down, with the
+  outer object looking perfectly correct.
+* **The budget is SIX source arguments, not eight.** arm64's X0..X7 could carry
+  one more; x86-64 passes integer arguments in six registers. The shared number
+  is the smaller one, because a build that says "eight is fine" on arm64 and
+  "eight is not fine" on x86-64 is the two-backend disagreement this pair of
+  backends is not allowed to have.
+
+## What is still refused, and why each one is not a missing lowering
+
+`model.frame_return_mixed_refusal` is the one that is a real limit rather than
+a representation, and it is worth stating why: **one function cannot have two
+return conventions in one image.** A caller has to decide, before the call,
+whether to reserve a block for the result, and there is no reading of
+`return r` on one path and `return 7` on another under which both are right —
+treating it as frame-returning hands the caller the ADDRESS of a block the
+callee never wrote, and treating it as word-returning hands it a frame address
+to read fields through. The same message covers a body that returns a frame on
+one path and ENDS on another, which is the uninitialised-block version of the
+same question.
+
+`model.entry_frame_return_refusal` is the entry function: its caller is the C
+runtime, which passes no such word, so there is nowhere for the copy to land.
+`model.dylib_frame_return_refusal` is a frame-returning function offered at a
+module boundary: the hidden word is a property of ONE image's calling
+convention, and an importer compiled the module's source with its own
+`_frame_receivers` pass and has no table saying which exports take one.
+
+All three are PARKED on the function and raised by `check_frame_return_shapes`
+from the entry points, beside the other three late frame checks — a refusal
+raised from inside `_prepare_functions` is reported in place of the import
+diagnosis, and that defect has already moved 67 files in this repository once.
+
+## The measured effect, both architectures
+
+| sweep (repo scope, `-j 12 -t 60`) | before | after |
+|---|---|---|
+| arm64 `PASS` | 84 | **84** — 0 gained, 0 lost |
+| arm64 codegen coverage | 84/123 = 68.3% | 84/114 = 73.7% |
+| `frame address escapes: returned by its creator` | 11 files | **0** |
+| `frame address escapes: aliased out of a method` | 3 files | **0** |
+| x86_64 `PASS` | 82 | **82** — 0 gained, 0 lost |
+| x86_64 codegen coverage | 82/118 = 69.5% | 82/112 = 73.2% |
+| shared files whose class OR detail differs between the two machines | 0 of 216 | **0 of 216** |
+
+**The coverage percentage rose and that is NOT 6.6 points of progress.** The
+denominator fell by nine, and it fell because six files moved
+`codegen → not-answerable/host-import`, one moved to
+`not-answerable/system-module-call`, and two stopped being classified at all
+because the 60-second timeout caught them on a loaded machine (both get their
+pre-change `CODEGEN` verdict at `-t 180`, and their wall time is ~75s of which
+7s is CPU, so the difference is machine load and not this change). Moving out
+of the denominator without becoming answerable is the one direction of
+denominator drift that flatters a number, and it is called out here for the
+same reason wave 3 called it out.
+
+**Zero files gained a PASS**, which is the honest headline and is not a
+disappointment: almost none of them was ever blocked by the frame layout. What
+changed is the DIAGNOSIS, and 18 of this repository's own files now name a
+specific next construct. Two of them, measured:
+
+| file | before | after |
+|---|---|---|
+| `imports.py` | "a Resolver receiver is returned from the function that created it" | `Resolver__find()` takes a `Resolver` receiver at argument 0 at one call site and not a frame at another — the holder-AGREEMENT check, which is a different defect with a different fix |
+| `test_async_execution.py`, `test_generators.py` | "an Interpreter receiver is returned…" | `interp.scope.get()` hands the word in the slot to `Scope.get()`, whose receiver is a frame — the slot's declared type does not say it holds one |
+| `bootstrap_test_classes.mojo` | "a Point receiver is returned…" | `Point(x, y)` is a call to a user-defined `__init__`, which this path does not run |
+
+On the stdlib side the six files the snapshot named all moved too, and four of
+them moved to `codegen/dependency` on a DIFFERENT module's construct
+(`binary_heap.mojo`'s `len(self.items)`, `_assembly.mojo`'s inlined assembly,
+`env.mojo`'s tuple-indexed `external_call`) — the file's own construct is no
+longer what stops it, which is the progress a terminal-construct fix is supposed
+to produce. None of the six passes; each has a different blocker underneath.
+
+## A bug the convention made reachable, which is the more useful half
+
+The hidden word is an ordinary local, so it has the same two homes every other
+local has — and the SPILLED home had never been used. arm64's prologue
+parameter path had a branch for it that moved `X<arg>` into X17 and then stored
+X17 *through* X17, so the slot received **the address of itself** instead of the
+value. It was unreachable: a function could have at most eight parameters and
+ten callee-saved registers, and nothing else could make an eleventh local. The
+returned-frame hidden word IS an eleventh local.
+
+Measured, on the change before the fix: a frame-returning function with eight
+locals or more **segfaulted on arm64** — the first store to the slot wrote the
+frame's own address into it and the first field read dereferenced that — while
+x86-64 was correct throughout, because its parameter path went through
+`_store_var` and so used the one correct spill addressing. One routine
+(`_load_home_from_reg`) now covers both callers, and it also extends a spilled
+parameter through a register on the way, which the old `continue` skipped for
+the same reason it could not be reached.
+`returned_frame_with_spilled_locals` is the case.
+
+The general lesson, which is the one worth keeping: **a convention that adds a
+word to a call is also a change to the register allocator**, and the arm64
+prologue's two homes for a value are two pieces of code. They had been one for
+as long as only one of them was reachable.

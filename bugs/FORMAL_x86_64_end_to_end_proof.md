@@ -412,21 +412,41 @@ only lever, because a timeout is not a tactic failure.
 
 ## Open, in the order I would take them
 
-**`call_rel32` (7 examples) — the last big uncovered form.** It needs *two*
-successors *and* a memory write: it pushes the return address and jumps. The
-pushed word has to be shown separated from the callee's frame, and the callee
-must be in the path tree at all. This is a bigger job than `imul` was, and worth
-thinking about before writing.
+**~~`call_rel32` (7 examples) — the last big uncovered form.~~ WIRED, and no
+longer blocking anything.** Re-measured 2026-09-30 with `_plan` over
+`formal/examples` (decode + codegen only, no Lean): `call_rel32` is named as a
+missing lemma by 0 of 45 examples, and six plan clean THROUGH it — `count`,
+`fact`, `fib`, `pow2`, `sqsum`, `sum`. It is wired at
+`formal/x86_64_endtoend_test.py:177` (`_FORMS`), `:259` (the successor
+expression) and `:429` (the `$tgt`/`$ret` literal substitution), and
+`lib/X86.lean` has the call/return pairing this entry described as the real
+design work — `x86_call_post`, `x86_ret_post`, `x86_at_target`, and the stack
+round-trip theorem that says a call and its return are inverses on `rsp`.
 
-**The remaining uncovered forms**, after `call_rel32`: `movsx_r64_r8` (3
-examples) and eight singletons — `alu_rr:and`/`:or`/`:xor`, `alu_rr32:xor`,
-`shift_imm8:shl`/`:shr`, `group3:div`, `alu_ri32:and`, one example each. That
-is 12 distinct forms over 18 example-slots; an earlier draft of this line said
-"15 uncovered forms" and listed `alu_ri32:add_other` as well, both of which
-measurement contradicts — the gate prints 15 *examples* with no coverage, which
-is a different quantity from the number of distinct forms. Counts re-measured
-against `emit_terminates` rather than a proxy; see `OPEN_WORK.md` D2 for the
-separate loop-count discrepancy, which is still unresolved.
+**What is left for it is a RUN, not wiring.** The generator's own comment says
+`NOT VERIFIED. This was wired without running the suite`, and names the open
+risk precisely: a call's `rip` is `m + 5 + off`, a literal the generator
+supplies, and whether the path from *there* re-enters a block whose certificate
+is wired is a question only a run answers. If it does not, the failure moves
+from "no step lemma wired for: call_rel32" to whatever the target needs — a
+different and more specific error, which is progress but not a proof. Running
+`formal/x86_64_endtoend_test.py` settles it.
+
+**The remaining uncovered forms**, after `call_rel32` — and this is now the
+whole of the uncovered-form work. The list below is the one this entry was
+written from; the 2026-09-30 `_plan` measurement names the ones still missing
+today as `movsx_r64_r8` (3), `alu_ri32` (3), and one each of `alu_rr`,
+`shift_imm8`, `cqo`, `group3`, `lea_r64_rm64`, `mov_r64_rm64`, `mov_rm64_r64`.
+Two of those (`cqo`, `lea_r64_rm64`) were not on the original list, and
+`alu_ri32` is reported as a family rather than per sub-op. The original text:
+`movsx_r64_r8` (3 examples) and eight singletons — `alu_rr:and`/`:or`/`:xor`,
+`alu_rr32:xor`, `shift_imm8:shl`/`:shr`, `group3:div`, `alu_ri32:and`, one
+example each. That is 12 distinct forms over 18 example-slots; an earlier
+draft said "15 uncovered forms" and listed `alu_ri32:add_other` as well, both
+of which measurement contradicts — the gate prints 15 *examples* with no
+coverage, which is a different quantity from the number of distinct forms.
+Counts re-measured against `emit_terminates` rather than a proxy; see
+`OPEN_WORK.md` D2 for the separate loop-count discrepancy, still unresolved.
 
 **The 14 sorries** (B18): the symbolic `mem_write_bytes` separation inequalities.
 

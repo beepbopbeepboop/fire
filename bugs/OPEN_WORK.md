@@ -30,7 +30,11 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 | `FORMAL_string_value_model.md` | what a string IS on the formal path, `len`/`==`/`+` on it, and the `String`-struct collision behind the 16 "a String receiver" refusals |
 | `FORMAL_arm64_instruction_coverage.md`, `FORMAL_arm64_known_proof_gaps.md`, `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` | arm64 work — not duplicated here |
 | `FORMAL_formal_frame_size_bounds_recursion_depth.md` | neither backend guards the stack: a fixed 128 KiB (arm64) / 16 KiB (x86-64) frame per call and no depth test, so recursion past 61 (arm64) or 450 (x86-64) frames is a SIGSEGV and not a refusal. **Both backends.** |
-| `FORMAL_frame_receiver_handoff.md` | who can take a frame address: the cross-module method hand-off (a binding bug, fixed), `Pointer(to=frame)` (an unjustified refusal, fixed), whether the frame layout and the struct's C layout coincide (measured: they do, for 8-byte fields), and the three refusals that named a cause which was not operating |
+| `FORMAL_method_call_on_a_subscripted_receiver.md` | the 17 of row 4's 25 files whose receiver's STRUCT is not established, so `_rewrite_method_calls` cannot lift the call: the four shapes of receiver, where each one's type would come from, and the 4 whose diagnostic is measurably wrong (a LINK diagnosis for a CODEGEN problem). Needs receiver-type inference — `construct:formal-value-model-gaps` |
+| `FORMAL_x86_64_comptime_specialization_abi.md` | x86-64 refuses `f[T](x)` and the refusal is LOAD-BEARING (its callee reserves a register per comptime parameter and its call site passes none): three lines to port, and until they land the receiver-position family's construct lowers on arm64 only |
+| `FORMAL_frame_receiver_handoff.md` | who can take a frame address: the cross-module method hand-off (a binding bug, fixed), `Pointer(to=frame)` (an unjustified refusal, fixed), `origin_of` (the same mistake again — a compile-time intrinsic with no body, so no dereference for the sentence to describe; fixed), whether the frame layout and the struct's C layout coincide (measured: they do, for 8-byte fields), the three refusals that named a cause which was not operating, and the constructor-assigned field type that closed the `field slot holds a frame address` family (10 files → 2) |
+| `FORMAL_frame_by_value_ceiling_zero.md` | map rows 7 and 8 of the sweep work map, **measured at a ceiling of 0**: 26 files, both refusals lifted behind a temporary guard, not one reaches `pass`, and 10 of the 26 land in a chain whose end is a documented permanent limit. Carries the per-file landing table, which is the deliverable |
+| `FORMAL_type_argument_read_as_a_container.md` | a subscript's INDEX tuple is a type argument list, not a container store, and four stdlib files are refused for a store that never happens. Not an artefact of the `origin_of` work — `Box[Int, s]` reproduces it with no `origin_of` in it |
 
 ---
 
@@ -39,22 +43,50 @@ x86-64 side has a mirror of the same defect, and are marked as such.
 Verbatim, with the current measured state attached to each. Ordered as I would
 take them.
 
-### A1. `call_rel32` — 7 examples, the last big uncovered form — **high**
+### A1. `call_rel32` — WIRED, no longer a blocker — **done, needs a run**
 
-The largest single blocker left in the x86-64 proof work. `x86_step_call_rel32`
-**already exists** in `lib/X86.lean`; it is simply not wired into the
-generator's `_FORMS`/`_SUCCS`/`_resolve` trio. What makes it more than a
-lookup is that a call has **two** successors *and* a memory write: it pushes
-the return address and jumps. The pushed word has to be shown separated from
-the callee's frame, and the callee has to be in the path tree at all. Real
-design work, not a wiring change.
+`x86_step_call_rel32` exists in `lib/X86.lean` and **is now** wired into the
+generator's `_FORMS`/`_SUCCS`/`_resolve` trio
+(`formal/x86_64_endtoend_test.py`: `_FORMS` at :177, the successor expression at
+:259, the literal-address substitution at :429). `lib/X86.lean` also grew the
+call/return *pairing* section — `x86_call_post`, `x86_ret_post`,
+`x86_at_target` and the stack round-trip theorem — which is the "two successors
+and a memory write" work this item said was real design rather than a wiring
+change.
+
+**Measured 2026-09-30 (`_plan` over `formal/examples`, no Lean):** `call_rel32`
+is named as a missing lemma by **0 of 45** examples. Six plan clean *through*
+it — `count`, `fact`, `fib`, `pow2`, `sqsum`, `sum` — and none is blocked by it.
+So it is no longer on the critical path, and the "7 examples" figure in the
+header below is what it was on 2026-09-26.
+
+**What remains is verification, and the code says so itself**: the entry is
+commented `NOT VERIFIED. This was wired without running the suite`, with the
+open risk named as the continuation AT the target — a call's `rip` is
+`m + 5 + off`, a literal supplied by the generator, and whether the path from
+there re-enters a block whose certificate is wired is a question only a run
+answers. Running `formal/x86_64_endtoend_test.py` settles it, and it needs Lean
+runs this worker is not permitted to start; it belongs with the integrator.
+
+What the remaining blockers actually are, same measurement: `movsx_r64_r8` (3),
+`alu_ri32` (3), and one each of `alu_rr`, `shift_imm8`, `cqo`, `group3`,
+`lea_r64_rm64`, `mov_r64_rm64`, `mov_rm64_r64` — i.e. A2 below, which is now
+the whole of the uncovered-form work.
 
 ### A2. `movsx_r64_r8` (3 examples) + 8 one-example forms — **medium**
 
-After `call_rel32`, the remaining uncovered forms are `movsx_r64_r8` and
-singletons: `alu_rr:and`/`:or`/`:xor`, `alu_rr32:xor`, `shift_imm8:shl`/`:shr`,
-`group3:div`, `alu_ri32:and`. One lemma each, and most follow an existing
-shape — see the generalisation rule at the end of A4.
+With `call_rel32` done (A1) this is now the WHOLE of the uncovered-form work.
+The forms below are what `_plan` names as missing across `formal/examples`,
+measured 2026-09-30: `movsx_r64_r8` (3), `alu_ri32` (3), and one each of
+`alu_rr`, `shift_imm8`, `cqo`, `group3`, `lea_r64_rm64`, `mov_r64_rm64`,
+`mov_rm64_r64`.
+
+The list above names the old forms (`alu_rr:and`/`:or`/`:xor`, `alu_rr32:xor`,
+`shift_imm8:shl`/`:shr`, `group3:div`, `alu_ri32:and`) because that is the list
+this item was written from; where the measurement disagrees, the measurement
+wins — note that `cqo` and `lea_r64_rm64` were not on it, and `alu_ri32` is
+reported once as a family rather than per sub-op. One lemma each, and most
+follow an existing shape — see the generalisation rule at the end of A4.
 
 ### A3. 14 termination proofs carry a `sorry` — **medium**
 
@@ -207,6 +239,23 @@ emitter actually rejects as loop-shaped. The *form* counts are stable and
 trustworthy (`call_rel32` 7, `movsx_r64_r8` 3, eight singletons); the loop
 split is not. Cheap to reconcile, and worth doing before anyone reasons about
 "how many loop examples are left".
+
+### D4. Two finished branches each built the whole returned-frame convention, differently — **needs a decision**
+
+`work/formal-string-return` and `work/formal-frame-escape` diverge from the
+same commit and each implemented the caller-owned-block convention in full —
+prologue, call site, model and its own refusal family. Merging the second onto
+a tree carrying the first was attempted and aborted: 22 conflict regions over 8
+files, and the two disagree about the *shape of the table the backends read*
+and about the **arity of the predicate** `model.struct_returned_frame_sites` is
+called with, so neither tree passes the other's tests
+(`TypeError: _p() takes 1 positional argument but 2 were given`).
+
+Neither is half-applied; both branches are intact. The map, the evidence, the
+argument for which table shape to keep, and the five steps to reconcile are in
+`FORMAL_returned_frame_two_incompatible_designs.md`. **Do not resolve it by
+keeping both tables** — they answer the same question for the same image, and
+which one a backend reads would then depend on which was assigned last.
 
 ### D3. A/B sweep shows 605 CI-DIFFs, untriaged — **medium, may be benign**
 

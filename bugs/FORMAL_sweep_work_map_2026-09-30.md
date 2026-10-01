@@ -1,5 +1,23 @@
 # FORMAL_sweep_work_map_2026-09-30: the formal backend's coverage, re-measured on current master and ranked by TERMINAL cause
 
+> **SUPERSEDED for planning by `FORMAL_sweep_work_map_2026-09-30_r2.md`**
+> (same day, `f378280d`, 637 files). Nothing below is wrong — the §3 ceiling
+> measurements are measurements and three documents cite them — but three of its
+> numbers no longer describe the tree, and the r2 map says which:
+>
+> * **`type-name-as-value` 41 → 4.** `5536f17b` landed it. The 35 files it moved
+>   are now counted under `module exports no public functions`, which went 3 → 38
+>   and is the second-largest cause on the tree. §3.1 predicted exactly this.
+> * **`other refusal` 32 → 4**, and one cause of 37 files was extracted from it
+>   (argparse's one comparison) which **had no row in the table at all**.
+> * **§4's per-module host-import split cannot be diffed** against r2's: its
+>   rows sum to 175 against its own stated 176, and it omits `importlib` (38
+>   files) and `zlib` (5). It was a partial list; r2's is a census.
+>
+> Also: the pass count was **112 on both sweeps**, and the reason is not that
+> nothing landed — 88 commits of finished formal work sit in unintegrated
+> branches, and eight of the twelve causes above 5 files are owned by them.
+
 **Measured 2026-09-30 on `24f96604` (master), arm64, the tool's default scope**
 (this repo + `../modular/mojo/stdlib/std`). Replaces the sweep snapshot the
 earlier workers planned from, which predates the `os`/`sys`/`struct`/
@@ -63,7 +81,7 @@ is a taxonomy whose numbers are only as good as whoever ran it.
 | 7 | frame address passed where a value is wanted | **14** | 14 | the file itself | `std/builtin/tuple.mojo` | `FORMAL_wide_receiver_by_reference.md` | none |
 | 8 | callee has no definition on this path | **12** | 12 | the file itself | `std/base64/base64.mojo` | `FORMAL_frame_receiver_handoff.md` §"Found, deliberately NOT fixed" | none |
 | 9 | frame address escapes: aliased out of a method | **11** | 10 | the file itself 10, `itertools.mojo` 1 | `std/benchmark/_progress.mojo` | `FORMAL_wide_receiver_by_reference.md` | none |
-| 10 | a slot's declared type is not declared by its struct | **10** | 10 | the file itself | `formal/arm64_codegen.py` | **none — FILED: `FORMAL_class_assigns_its_fields_in_init.md`** | none |
+| 10 | a slot's declared type is not declared by its struct | **10** | 0 | the file itself | `formal/arm64_codegen.py` | **FIXED and `git rm`'d**: `model.assigned_value_base_name` + `struct_init_field_types` read the type out of what `__init__` ASSIGNS, unanimity or nothing, with the negative half (`struct_init_field_type_why`) so a refusal says which evidence it read and rejected. **Re-measured at 0 pass**: 5 of the 10 land on rows 5/9 (the frame-LIFETIME family — `Interpreter.__init__` binds `self.scope` and never returns `self`, but the test returns the object) and 3 leave the `codegen` class entirely onto a host import (`re`, types`), which is the right answer for them. So this row is a single-file fix that unblocked a different one. | the 3 host-import files |
 | 11 | a module-global name has no storage | **6** | 6 | the file itself | `formal/arm64.py` | `FORMAL_module_state_no_storage.md` | none |
 | 12 | a field of a nested frame that the struct does not declare | 4 | 4 | the file itself | `std/memory/arc_pointer.mojo` | — (below the 5-file bar) | none |
 | 13 | a name holds a frame address in more than one shape | 4 | 4 | the file itself | `analyze_benchmarks_types.py` | `FORMAL_frame_receiver_handoff.md` | none |

@@ -114,16 +114,56 @@ def main():
     print(q.a)
 """
 
+# Three frame-returning calls whose results are NOT bound to a name, which is
+# the case the landed version walked past.
+UNBOUND_RESULTS = """\
+class Point:
+    def __init__(self):
+        self.x = 7
+        self.y = 9
+
+def make():
+    p = Point()
+    return p
+
+def take(v):
+    return v
+
+def main():
+    take(make())
+    print(make().x)
+    return make()
+"""
+
+# One path returns a frame and the other ends the body, which is the shape
+# `returns_on_every_path` has to say no to.
+MIXED_RETURN = """\
+class Point:
+    def __init__(self):
+        self.x = 7
+        self.y = 9
+
+def make(c):
+    p = Point()
+    if c:
+        return p
+    print(c)
+"""
+
 
 def _returns(callee_names, struct_by_name):
     """A `returns_frame` predicate over the callees that return a frame.
 
     Deliberately a closure supplied by the caller, because that is the
-    contract `struct_returned_frame_sites` documents: the build pass's holder
-    fixpoint decides this, and a second answer to the same question inside the
+    contract `struct_returned_frame_sites` documents: the build pass's fixpoint
+    decides this, and a second answer to the same question inside the
     model is the disagreement that produces a wrong number instead of a
-    refusal."""
-    def _p(callee, _bound_name):
+    refusal.  ONE argument, because the landed version took the bound name as
+    well and used it to decide whether the call site's result was kept — the
+    function now reserves a block for EVERY call of such a callee, so the
+    parameter had no meaning left and keeping it would have suggested a
+    restriction that is not there."""
+    def _p(callee):
         if callee not in callee_names:
             return None
         return struct_by_name.get(callee)
@@ -212,6 +252,66 @@ def main(argv):
     check('under_the_limit_is_not_refused',
           M.returned_frame_convention_refusal('make', 2) == '',
           'a callee with room for the hidden word was refused')
+
+    # 7. The budget is SIX, and it is six because of x86-64 rather than
+    #    arm64.  Pinned because the number is a shared decision with a
+    #    one-machine reason behind it, and a reader who "fixes" it to eight
+    #    makes the two backends answer differently about one program.
+    check('the_budget_is_the_smaller_abi',
+          M.returned_frame_convention_refusal('make', 6) != ''
+          and M.returned_frame_convention_refusal('make', 5) == '',
+          'the hidden word needs a register, and x86-64 passes six')
+    check('the_budget_matches_x86_64_argument_registers',
+          M.RETURNED_FRAME_MAX_ARGS == 6,
+          f'got {M.RETURNED_FRAME_MAX_ARGS}')
+
+    # 8. A call whose result is NOT bound to a name still needs a block, and
+    #    this is the change from the landed version.  `return make()`,
+    #    `make().x` and `f(make())` are all frames the caller dereferences
+    #    immediately, which is exactly the lifetime the block is sound for;
+    #    leaving them out meant a callee copying into a register it had been
+    #    handed by accident.
+    stmts = parse(UNBOUND_RESULTS)
+    structs = structs_of(stmts)
+    main_fn = [f for f in funcs_of(stmts) if f.name == 'main'][0]
+    ret = _returns({'make'}, {'make': structs['Point']})
+    sites = M.struct_returned_frame_sites(main_fn, structs, ret)
+    check('an_unbound_result_still_gets_a_block',
+          len(sites) == 3, f'got {len(sites)} site(s), expected 3')
+    offs = sorted(v[1] for v in sites.values())
+    want3 = M.struct_frame_block_bytes(structs['Point'], structs)
+    check('unbound_blocks_advance_by_the_block',
+          offs == [0, want3, 2 * want3], f'offsets {offs}')
+
+    # 9. One block's INTERNAL layout, which is what the copy re-points the
+    #    nested frames through, and which has to be the same arithmetic the
+    #    constructor uses.  A two-field struct has no nested frame, so the
+    #    list is empty and the block is exactly the frame.
+    nested, block = M.struct_frame_block_layout(structs['Point'], structs)
+    check('a_flat_struct_block_is_its_frame',
+          nested == [] and block == M.struct_frame_bytes(structs['Point']),
+          f'nested {nested}, block {block}')
+
+    # 10. `returns_on_every_path` is the strict answer and is the only one the
+    #     returned-frame decision consults: a body that returns a frame on one
+    #     path and ends on another leaves the caller's block uninitialised.
+    stmts = parse(TWO_CALL_SITES)
+    funcs = funcs_of(stmts)
+    make_fn = [f for f in funcs if f.name == 'make'][0]
+    main_fn = [f for f in funcs if f.name == 'main'][0]
+    check('a_body_that_ends_in_a_return_always_returns',
+          M.returns_on_every_path(make_fn.body) is True,
+          f'body {[type(s).__name__ for s in make_fn.body]}')
+    check('a_body_with_no_return_does_not',
+          M.returns_on_every_path(main_fn.body) is False
+          and M.returns_on_every_path([]) is False,
+          'main has no return and an empty list has no path')
+
+    stmts = parse(MIXED_RETURN)
+    make_fn = [f for f in funcs_of(stmts) if f.name == 'make'][0]
+    check('an_if_without_else_can_fall_off_the_end',
+          M.returns_on_every_path(make_fn.body) is False,
+          'the `if` has no else, so one path ends the body')
 
     print(f'\n{_PASS} passed, {_FAIL} failed')
     return 1 if _FAIL else 0
