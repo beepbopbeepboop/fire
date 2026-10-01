@@ -382,10 +382,10 @@ CAUSE_SAMPLES = [
      "atom also holds the address of a Repeat frame — Repeat() binds it to "
      "one, and this path has no way to say that a later binding changes what "
      "the name is"),
-    ("a field the struct does not declare — CPython raises AttributeError too",
+    ("a field the struct does not declare (missing, or a comptime member)",
      "res._InjectedValues is a field of res, and _ZipIterator has no field "
      "'_InjectedValues': its 2 field(s): origin, _values"),
-    ("a field the struct does not declare — CPython raises AttributeError too",
+    ("a field the struct does not declare (missing, or a comptime member)",
      "shape.is_flat is a field of shape, and Coord has no field 'is_flat': "
      "its 3 field(s): _storage, rank, product"),
     ("a NUMBER compared with a string (`strcmp` would dereference it)",

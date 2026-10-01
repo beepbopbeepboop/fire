@@ -304,14 +304,20 @@ CAUSES = (
     # and `:14288` are the two sites and they word it differently, so two
     # alternatives. 5 files, all in-file, identical on both architectures.
     #
-    # It gets a row of its own because of what its message says next: "In
-    # Python this is an AttributeError at run time, so the program is very
-    # likely already raising here". These 5 are as likely a stdlib bug as a
-    # backend gap, and a planner who reads them as a backend gap sends someone
-    # to write a lowering for a program CPython rejects — the same trap the
-    # 13-file declared-parameter row sets, and the same reason it is enqueued
-    # with "measure whether CPython raises BEFORE measuring coverage".
-    ("a field the struct does not declare — CPython raises AttributeError too",
+    # It gets a row of its own because the row is a bucket of MESSAGES and
+    # those 5 files are TWO constructs, which is the lesson
+    # `FORMAL_subscripted_method_callee_and_three_level_nested_frames.md`
+    # records for an earlier row and which no marker can express: the same
+    # sentence is produced whether the name is missing (3 of the 5 — and for
+    # those, CPython raises `AttributeError`, because nothing in the tree ever
+    # assigns the name) or present as a `comptime` class member the field
+    # census does not read (2 of the 5, correct Mojo that raises nothing, and
+    # `bugs/FORMAL_comptime_class_attribute_read_through_a_receiver.md` has
+    # the measurement). So the label claims neither: the per-file split is in
+    # `bugs/FORMAL_sweep_work_map_2026-10-01_b3.md`, and a reader who trusts
+    # the message's own "In Python this is an AttributeError" clause will be
+    # wrong about 2 of these 5.
+    ("a field the struct does not declare (missing, or a comptime member)",
      (("is a field of", "has no field"),
       ("is a field of", "NO candidate has field"))),
     ("a slot's declared type is not declared by its struct",
