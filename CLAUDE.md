@@ -334,21 +334,34 @@ mark it with a reason and a bug-doc link.
   compiled path ignored decorators too, so the diff was clean). A new
   interpreter-oracle bug belongs there, not in `test_runtime_diff.py`.
 
-Current `EXPECTED` entries, and the one `DISABLED` entry — the three that
-reach a bucket (eleven more `expect=` jobs are registered and in no bucket at
-all, so they run in nothing today; `bugs/CODEGEN_ab_native_fails.md` §4 has
-them all, with a recommendation each):
+Current `EXPECTED` entries, and the one `DISABLED` entry — the five that reach a
+bucket, plus eleven more `expect=` jobs registered in no bucket at all (so they
+run in nothing today; `bugs/CODEGEN_ab_native_fails.md` §4 has those eleven with
+a recommendation each). **`python3 tools/suite.py --list` is the census**, not
+this table: the bucket column reads `[]` for an ungated test, and nothing else in
+the tree reads it.
 
 | test | marker | subject | cost it charges every gate |
 |---|---|---|---|
 | `ab-native` | `disabled=bugs/CODEGEN_ab_native_fails.md` | python vs native codegen over the A/B corpus | **nothing** — registered, not run |
 | `native-dumpfull` | `expect=` (`SELFHOST_TOKENIZE_BLOWUP`) | the native `--dump-full` artifact vs the reference | 31.3 GB, `program` (55 GB) |
 | `bootstrap-stage2-dumps` | `expect=` (`SELFHOST_STAGE2_STALL`) | the compiled binary dumping every source | 47 items x 0.5 GB, `tiny` (4 GB) each |
+| `formal-struct` | `expect=` (`bugs/FORMAL_struct_pack_over_eight_arguments.md`) | `struct.pack`/calcsize against CPython | 2 of 148 cases; `proofs` |
+| `formal-toplevel` | `expect=` (`bugs/FORMAL_toplevel_body_struct_construction_no_longer_refused.md`) | a module body runs, diffed against CPython | 2 of 70 cases; `proofs` |
+| `formal-module-attr` | `expect=` (`bugs/FORMAL_bracketed_call_to_a_private_name_is_refused_as_a_dangling_symbol.md`) | `mod.NAME` on both backends | 1 of 11 cases; `proofs` |
 
-The two `expect=` entries are the old "the binary segfaults on any input"
-claim, which was **measured false on 2026-09-27 and corrected rather than left
-to rot**: `./mojoc --dump-full` on a two-line program is now exit 0 / 12.1 MB /
-94.6 M instructions. What is left is the self-hosting bootstrap pre-pass's cost
+**A declared red and an unrun red are different failures**, and the second is
+worse: a marker on a test no gate runs can never be observed going green, so it
+cannot rot out. That is why the eleven ungated ones above are a coverage hole
+(`bugs/TEST_expect_marked_tests_in_no_bucket_never_run.md`) and not merely a
+cost question, and why "register it" is never the same act as "run it"
+(`bugs/TEST_registered_tests_in_no_bucket_never_run.md` for the ungated tests
+that are not marked at all).
+
+The two heavyweight `expect=` entries are the old "the binary segfaults on any
+input" claim, which was **measured false on 2026-09-27 and corrected rather than
+left to rot**: `./mojoc --dump-full` on a two-line program is now exit 0 / 12.1 MB
+/ 94.6 M instructions. What is left is the self-hosting bootstrap pre-pass's cost
 (~15-30 GB / ~15-25 s per call, localised in
 `bugs/CODEGEN_bootstrap_resource_blowup.md` and BLOW.md §0) and, for
 `bootstrap-stage2-dumps`, a silent-wrong-answer `mojo_unsupported_iter` class
@@ -356,7 +369,10 @@ that no exit code reports. Divergences themselves:
 `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`.
 
 **The gate is otherwise clean**: `check` 11/11, `coro` 20/20, `stdlib` 2/2,
-`mojoc` builds, `bootstrap` green through `stage2-cc`.
+`mojoc` builds, `bootstrap` green through `stage2-cc`. (Those counts are a claim
+about a *run*, so only a gate run establishes them; `check` has since gained
+members, so read the current tally off `build/suite.log` rather than this line —
+see `bugs/DOCS_stated_test_statuses_the_registry_no_longer_has.md`.)
 
 ## Known failures: `expect=` or `disabled=`, decided by cost
 

@@ -1054,6 +1054,139 @@ def test_an_expect_marker_points_at_a_doc_that_exists():
           f'is fixed, so the row outlives its own next step: {dangling}')
 
 
+# A Markdown table row that is unmistakably a status inventory: a pipe, a
+# backticked name, and a status word. Deliberately narrow, because the whole
+# value of this check is that it has no exemptions and no false positives —
+# a rule that needs an exception list is the excuse table
+# `bugs/TEST_registered_tests_in_no_bucket_never_run.md` argues against, and it
+# would rot the same way.
+_STATUS_ROW = re.compile(
+    r'^\s*\|(?P<cells>.*)\|\s*$')
+_CELL_NAME = re.compile(r'^`(?P<name>[\w.-]+)`$')
+# A status word is a MARKER, so the token is the one the registry spells: the
+# `expect=`/`disabled=` of a registration, or the EXPECTED/DISABLED the runner
+# reports. Bare "red" or "broken" is prose, not an inventory, and matching it
+# would flag every bug doc in the tree. The boundaries are spelled with
+# lookarounds rather than `\b`, because `\b` after `expect=` requires a word
+# character and the token is nearly always followed by a backtick — `\b` there
+# is false, which silently matched none of the rows in CLAUDE.md.
+_STATUS_WORD = re.compile(
+    r'(?<![\w-])(?:expect=|disabled=)'
+    r'|(?<![\w-])(?:EXPECTED-FAIL|EXPECTED|DISABLED)(?![\w-])')
+
+
+def _stated_statuses(text, name):
+    """The status a Markdown table row asserts for `name`, or None.
+
+    A row is read as an assertion, and this is the whole rule:
+
+      * it is a TABLE row — the line starts with `|`, not `> |`. A quoted line
+        is someone showing you an example, including the quoted stale row in
+        `bugs/DOCS_stated_test_statuses_the_registry_no_longer_has.md`, which
+        is the bug this check was written from and must not itself trip;
+      * one of its cells is EXACTLY the backticked name, so a cell that also
+        narrates is not being read as the name;
+      * the row states exactly ONE status word.
+
+    The last clause is what removes the need for an exemption list, and it is
+    worth being explicit that the alternative was tried and abandoned: a
+    `_HISTORICAL` word list (was/formerly/no longer) was the first
+    implementation, and it exempts a row on the strength of one ordinary
+    English word, which any future doc can use to escape the check. A row
+    naming TWO statuses is not making a claim the registry can falsify — it is
+    describing a change ("was EXPECTED, now DISABLED") or quoting a marker and
+    its replacement — and that is a fact about the row's shape rather than
+    about a vocabulary, so it does not rot into a loophole.
+    """
+    for line in text.splitlines():
+        m = _STATUS_ROW.match(line)
+        if not m:
+            continue
+        cells = [c.strip() for c in m.group('cells').split('|')]
+        if not any(_CELL_NAME.match(c) and _CELL_NAME.match(c).group('name')
+                   == name for c in cells):
+            continue
+        words = _STATUS_WORD.findall(m.group('cells'))
+        said = {'expect' if w.lower().startswith('expect') else 'disabled'
+                for w in words}
+        if len(said) == 1:
+            return said.pop()
+    return None
+
+
+def test_a_doc_that_states_a_tests_status_agrees_with_the_registry():
+    """A Markdown table row naming a marked test must name the mark it has.
+
+    The other two checks in this file read the REGISTRY and the filesystem: an
+    `expect=` reason that cites a doc which is gone, a `memwhy` over the debt
+    line with no reason. This one reads the other direction, and it exists
+    because of what happened twice while merging this work: a file stated
+    `| ab-native | EXPECTED |` after `ab-native` had been moved to `disabled=`,
+    and a second doc listed "13 expect= tests" after a commit made in none of
+    them registered three more. Neither was a defect — nothing computes a
+    verdict from either string — and both are exactly what a reader of the
+    queue is told to believe. `bugs/DOCS_stated_test_statuses_the_registry_no_
+    longer_has.md` is the write-up.
+
+    The rule is only about STATUS, and only in a table row, for the reason
+    `_stated_statuses` spells out: a check that had to be exempted from every
+    bug doc in the tree would be a second inventory to keep in sync, which is
+    the failure it was written to catch. A test with no marker has no status to
+    state, so an unmarked name in a table row is not this check's business —
+    whether it is in a bucket is `bugs/TEST_registered_tests_in_no_bucket_never_
+    run.md`'s subject, and that one is not machine-checkable without the
+    exception list this rule avoids.
+    """
+    marked = {n: ('disabled' if getattr(s, 'disabled', '')
+                  else 'expect')
+              for n, s in suite.REGISTRY.items()
+              if getattr(s, 'expect', '') or getattr(s, 'disabled', '')}
+
+    # Every Markdown file in the repo that is not under a derived directory.
+    # The walk is the same one the estate check below uses, and the reason for
+    # reusing `checked_run.is_derived_dir` rather than a second skip list is the
+    # one that function's docstring gives: two lists are two answers to "what is
+    # a file in this repo", which is the disagreement this check exists to
+    # prevent. A scan of a FIXED list of files is exactly the list that goes
+    # stale — the first version of this rule read CLAUDE.md and bugs/ only, and
+    # reported green on the tree with `CRASH.md`'s `| ab-native | EXPECTED |`
+    # still in it, which is the one file the bug doc is about. The root and
+    # `bugs/` are the whole Markdown tree here (245 files), so nothing is
+    # excluded by accident.
+    import checked_run
+    docs = []
+    for dirpath, dirnames, filenames in os.walk(HERE):
+        dirnames[:] = [d for d in dirnames if not checked_run.is_derived_dir(d)]
+        docs += [os.path.join(dirpath, f) for f in sorted(filenames)
+                 if f.endswith('.md')]
+
+    stated, wrong = {}, []
+    for path in docs:
+        try:
+            text = open(path, encoding='utf-8', errors='replace').read()
+        except OSError:
+            continue
+        for name, want in sorted(marked.items()):
+            said = _stated_statuses(text, name)
+            if said is None:
+                continue
+            stated.setdefault(name, []).append(os.path.relpath(path, HERE))
+            if said != want:
+                wrong.append(f'{os.path.relpath(path, HERE)}: {name} says '
+                             f'{said!r}, registry says {want!r}')
+
+    check('doc status: the rule is not vacuous — a doc states a marked status',
+          len(stated) >= 3,
+          f'only {len(stated)} marked tests are stated in any table row '
+          f'({sorted(stated)}); a rule that matches nothing reports green '
+          f'forever, which is the one thing it must not be able to do')
+    check('doc status: every table row agrees with the registry',
+          not wrong,
+          'a doc that states a status the registry does not have is a reader '
+          'being told something false, and it is how the 2026-09-29 and the '
+          f'2026-09-30 censuses both went stale: {wrong}')
+
+
 def _makefile_target_closure(start):
     """Every make target reachable from `start` through prerequisites.
 
@@ -3229,6 +3362,7 @@ def main():
                test_over_provisioned_classes_are_reported_not_silently_kept,
                test_every_job_over_the_debt_line_says_why,
                test_an_expect_marker_points_at_a_doc_that_exists,
+               test_a_doc_that_states_a_tests_status_agrees_with_the_registry,
                test_a_make_recipe_never_asks_for_more_than_its_job_reserved):
         fn()
     print()

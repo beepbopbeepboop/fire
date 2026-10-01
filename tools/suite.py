@@ -1422,11 +1422,11 @@ SELFHOST_STAGE2_STALL = (
 # `_selfhost_*` seed passes within one process; degenerate-hashing check on
 # the tokenizer's `MojoSet` usage).
 #
-# `native-dumpfull` carries this same reason and is LEFT on `expect=`: the two
-# are the same blowup, the call is the owner's, and
-# bugs/CODEGEN_ab_native_fails.md §4 tables it with the recommendation to
-# disable it as well (31.3 GB, 55 GB reserved, for a known red). Only
-# `ab-native` is switched here.
+# `native-dumpfull` carries this same reason and is LEFT on `expect=`; see its
+# registration below for why that one is not switched too. This constant is
+# also the whole of §4's subject matter: bugs/CODEGEN_ab_native_fails.md tables
+# every `expect=` job in the registry with its measured peak, its class and its
+# reservation, and a recommendation each.
 SELFHOST_TOKENIZE_BLOWUP = (
     'no longer segfaults, but the self-hosting bootstrap pre-pass this '
     'corpus legitimately triggers costs ~15-30 GB / ~15-25s per call — see '
@@ -1494,11 +1494,14 @@ test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
      deps=['mojoc'], excl=True, cache=True, extra=['test_ab_native.py'],
      disabled='bugs/CODEGEN_ab_native_fails.md',
      desc='python vs native codegen, byte-for-byte, over the A/B corpus')
-# NOT touched, deliberately: `native-dumpfull` and `bootstrap-stage2-dumps`
-# carry the same blowup in their `expect=` reason and are the owner's call —
-# both are also the jobs whose runs produce the measurements the blowup work is
-# steered by. bugs/CODEGEN_ab_native_fails.md §4 tables every `expect=` job in
-# the registry with its peak, class and reservation, and a recommendation each.
+# NOT switched, deliberately, and the reason is per job rather than per
+# principle: `native-dumpfull` and `bootstrap-stage2-dumps` carry the same
+# blowup in their `expect=` reason and are the owner's call, because both are
+# also the jobs whose runs produce the measurements the blowup work is steered
+# by — a marker that cannot be observed going green is weak, and this is the
+# case for not weakening it. §4 of bugs/CODEGEN_ab_native_fails.md tables both
+# with their peak, class and reservation and a recommendation each, so the
+# choice is a line rather than an investigation.
 test('native-dumpfull', [PY, 'test_native_dumpfull.py'], driver='mem',
      mem='program',
      memwhy='measured 31.3 GB — the largest job in the registry that still '

@@ -3,6 +3,30 @@
 Branch `crash`, commit `19bc0dd`. Reproduced and root-caused to one runtime
 predicate. **Not fixed** — this is a handoff.
 
+> **SUPERSEDED, kept as a handoff. Every claim below about the current tree is
+> out of date, and the two that would mislead a reader are corrected in place
+> rather than left to rot.** The segfault was fixed in `e7fc3ece`, so the
+> headline ("segfaults on every input") no longer holds: `./mojoc --dump-full` on
+> the two-line program in §1 is now exit 0 / 12.1 MB / 94.6 M instructions
+> (measured 2026-09-27). The root cause named in §3 was the `_mojo_ptr_shaped` /
+> `_mojo_tagged_addr_ok` split, and it now lives in `runtime/fire_runtime.c` as
+> source rather than as a diagnosis here. What still stands is the METHOD in §4
+> — silent by construction, so a bisect is driven by exit status and not by log
+> text — and the deployment reasoning in §5.
+>
+> The remaining live subject is a *different* bug: what is left is the
+> self-hosting bootstrap pre-pass's cost and a silent-wrong-answer
+> `mojo_unsupported_iter` class, not a crash. That is
+> `bugs/CODEGEN_bootstrap_resource_blowup.md` and
+> `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`, and the run status of
+> the three steps below is in CLAUDE.md, "Known-failing tests". By this repo's own
+> bug-doc rule a fixed bug's doc is deleted rather than left with a status
+> history, so this file is a deletion candidate — see
+> `bugs/DOCS_stated_test_statuses_the_registry_no_longer_has.md` §"Exact next
+> step", which is where the decision is parked. It is kept here for now because
+> `bugs/FORMAL_string_value_model.md` cites the fix by name and a reader who
+> wants to know what "the CRASH.md fix" was needs §3.
+
 ## 1. The crash
 
 ```
@@ -18,13 +42,22 @@ reproducible on a two-line program. Signal is SIGSEGV (11), shell status 139.
 
 ## 2. Blast radius in the gate
 
+> **Historical.** The three EXPECTED rows below were the state when this was
+> written. Only the first has changed, and it changed because of the
+> `expect=`-vs-`disabled=` decision rather than because anything was fixed:
+> `ab-native` is now `disabled=bugs/CODEGEN_ab_native_fails.md` — registered,
+> and NOT RUN at all, because it measured 20.5 GB and held 55 of a 96 GB machine
+> budget exclusively in every run to be told what its own marker already said.
+> The other two are still `expect=`. The census is CLAUDE.md, "Known-failing
+> tests", or `python3 tools/suite.py --list`.
+
 One root cause makes three registered steps red. They are marked
 `expect=` in `tools/suite.py` and report as EXPECTED, and five more steps
 skip behind them:
 
 | step | state |
 |---|---|
-| `ab-native` | EXPECTED |
+| `ab-native` | EXPECTED — now `disabled=`, not run (see the banner) |
 | `native-dumpfull` | EXPECTED |
 | `bootstrap-stage2-dumps` | EXPECTED — all **45** sub-jobs `exit -11` |
 | `bootstrap-stage2-transitive`, `bootstrap-stage3-dumps`, `bootstrap-stage3-transitive`, `bootstrap-verify`, `bootstrap-validate` | SKIP, all `dependency did not pass` |
