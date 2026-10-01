@@ -4289,6 +4289,61 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                         root.name == m or m.startswith(f"{root.name}.")
                         for m in imported):
                     callees.add(id(root))
+        # The same rule one level up, for a callee spelled with a BRACKET.
+        # `external_call["setenv", Int32](…)` puts the C symbol in the bracket
+        # and leaves `external_call` as a bare name with no home — but it is the
+        # callee of a call, exactly as `_sym` above is, and a callee is not a
+        # read of a value.  The bracket's second element is a type EXPRESSION
+        # and is compile-time by construction, so it is not a read of a value
+        # either — `Int32` is a type the module need not declare and there is no
+        # local by that spelling to find.  Only a WELL-FORMED template is
+        # exempt: a malformed one still reaches the bracketed refusal below with
+        # a message about the template rather than a name-placement symptom.
+        # Collected here rather than added to `name_resolves_without_a_local`
+        # because that list is a statement about NAMES THAT HAVE A VALUE, and
+        # `external_call` has none — it is a template, and the value the call
+        # produces is the C function's, not this name's.
+        #
+        # `xc_callees` is the same set, kept apart because the bracketed scan
+        # below needs the OPPOSITE answer for a template that is NOT a callee:
+        # `var x = external_call["sym", T]` is a template used as a value, and
+        # the name-placement message ("`external_call` has no home") names a
+        # symptom of this pass rather than the construct.  `M.iter_nodes` has no
+        # parent, so "is this subscript a call's callee" is answerable here and
+        # nowhere else.
+        xc_callees = set()
+        for c in M.iter_nodes(fn.body):
+            if not isinstance(c, F.CallExpr) \
+                    or not M.is_external_call_template(c.func) \
+                    or M.external_call_spec(c.func)[2] is not None:
+                continue
+            xc_callees.add(id(c.func))
+            callees.add(id(c.func.obj))
+            callees |= {id(n) for n in _external_call_type_nodes(c.func.index)}
+        # …and the SAME rule the other way, because the general
+        # `subscript_callee_names` exemption above knows nothing about
+        # `external_call`: it exempts the root of ANY bracketed callee, which
+        # includes a MALFORMED template's root — and the whole point of the
+        # `external_call_spec(c.func)[2] is not None` guard is the opposite, so
+        # that the template is refused by the bracketed scan below with the
+        # sentence that names the construct ("declares its return type as
+        # Scalar[dtype], and this path has no value of that kind …") rather
+        # than falling through to whichever free name the function happens to
+        # read next. Measured: without this, `check_module_symbols` reported
+        # `'x' has no home` for
+        # `external_call["sym", Scalar[dtype]](x)` — a true statement about
+        # this pass and a useless one, since `x` is not what the reader wrote
+        # and the unmodellable return type is.
+        #
+        # A subtraction rather than a guard in the general loop, because the
+        # specific rule has to be stated where the reason for it is: the
+        # general one is about `List[Int]()` and has no opinion here, and
+        # whichever runs LAST wins a set, so saying it here is what makes the
+        # precedence explicit instead of incidental.
+        callees -= {id(c.func.obj) for c in M.iter_nodes(fn.body)
+                    if isinstance(c, F.CallExpr)
+                    and M.is_external_call_template(c.func)
+                    and M.external_call_spec(c.func)[2] is not None}
         # A BRACKETED or DOTTED form has the same problem one level up:
         # `__mlir_attr[…]`, `__mlir_attr.`lit`` and
         # `__mlir_op.`lit.materialize_into`[value=v]` are a SubscriptExpr and/or
@@ -4311,6 +4366,17 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             if why is None and isinstance(sub, F.SubscriptExpr):
                 why = M.multi_index_refusal_for(sub, False,
                                                 _callee_defs(functions))
+                if why is None and M.is_external_call_template(sub) \
+                        and id(sub) not in xc_callees:
+                    # A well-formed template that is not a call's callee: a
+                    # template read as a VALUE.  `multi_index_refusal_for`
+                    # cannot see it (no parent), and without this the name
+                    # would fall through to the placement message below, which
+                    # says `external_call` has no home — a true statement about
+                    # this pass and a useless one, because the file is not
+                    # missing a variable, it is using a call as a subscript.
+                    why = M.external_call_value_refusal(
+                        M.external_call_spelling(sub))
             if why is None and isinstance(sub, F.MemberExpr):
                 # The dotted spelling can also be the base of a bracket, and
                 # `std/builtin/value.mojo` spells an MLIR template exactly
@@ -4475,6 +4541,23 @@ def _unstored_read(fn, placed: set, frame_slots: dict):
         return None
     hit = M.read_before_store(fn, params, own)
     return None if hit is None else (hit[0], hit[1], fn.name)
+
+
+def _external_call_type_nodes(index) -> list:
+    """Every node of an `external_call[...]` bracket's TYPE argument.
+
+    The template's second element is a type EXPRESSION — `Int32`,
+    `_CPointer[UInt8, UntrackedOrigin[mut=False]]` — so it is compile-time by
+    construction and the name-placement pass must not read it as a runtime
+    name.  Returns `[]` for the one-element bracket, where there is no type
+    argument at all, and is only ever called for a WELL-FORMED template
+    (`external_call_spec` with no `why`), which is exactly the set of brackets
+    whose second element `type_expr_text` could render — so no node it returns
+    is a value read."""
+    items = list(index.elements) if isinstance(index, F.TupleExpr) else [index]
+    if len(items) < 2:
+        return []
+    return list(M.iter_nodes(items[1]))
 
 
 def _callee_defs(functions: list) -> dict:
