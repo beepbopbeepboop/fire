@@ -615,14 +615,15 @@ def run_repl():
             print()
             break
 
-def jit_compile_and_execute(input_file: str, src: str, opt_flag=None, debug_flag=None, program_args=None):
+def jit_compile_and_execute(input_file: str, src: str, opt_flag=None, debug_flag=None,
+                            program_args=None, auto_gpu=True):
     """JIT compile and execute Mojo source code for ARM64.
     
     Returns True on success, False on failure.
     """
     try:
         from jit.arm64 import ARM64JIT
-        jit = ARM64JIT(opt_flag=opt_flag, debug_flag=debug_flag)
+        jit = ARM64JIT(opt_flag=opt_flag, debug_flag=debug_flag, auto_gpu=auto_gpu)
         return bool(jit.compile_and_execute(src, filename=input_file, program_args=program_args))
     except Exception as e:
         print(f"JIT error: {e}", file=sys.stderr)
@@ -1108,7 +1109,8 @@ def main():
 
     # If JIT requested, compile and execute
     if jit:
-        ok = jit_compile_and_execute(input_file, src, opt_flag, debug_flag, program_args)
+        ok = jit_compile_and_execute(input_file, src, opt_flag, debug_flag,
+                                     program_args, auto_gpu=auto_gpu)
         sys.exit(0 if ok else 1)
 
     # If build requested, compile to executable. backend='arm64' routes through
@@ -1123,8 +1125,9 @@ def main():
                 arch=backend))
         try:
             import driver
-            rc = driver.compile_program(input_file, src, output=build_output,
-                                        run=False, opt_flag=opt_flag, debug_flag=debug_flag)
+            rc = driver.compile_program(
+                input_file, src, output=build_output, run=False,
+                opt_flag=opt_flag, debug_flag=debug_flag, auto_gpu=auto_gpu)
         except Exception:
             rc = None
         if rc is None:
@@ -1293,9 +1296,10 @@ def main():
                 prove, run_it=True, arch=backend))
         try:
             import driver
-            rc = driver.compile_program(input_file, src, run=True,
-                                        opt_flag=opt_flag, debug_flag=debug_flag,
-                                        program_args=program_args)
+            rc = driver.compile_program(
+                input_file, src, run=True, opt_flag=opt_flag,
+                debug_flag=debug_flag, program_args=program_args,
+                auto_gpu=auto_gpu)
         except Exception as e:
             print(f"driver error, interpreting instead: {e}", file=sys.stderr)
             rc = None

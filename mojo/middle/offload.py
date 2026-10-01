@@ -587,20 +587,35 @@ def synthesise(fdef, info: 'Offloadable') -> 'object':
             raise SynthesisRefused(
                 f'scalar {nm!r} has type {ann!r}, which is not a device '
                 'scalar type')
-    # ORDER IS A CONTRACT, not a convenience. `device_glue.launch_arg_types`
-    # takes the FIRST `Int`/`Int64` parameter as the element count for the
-    # device->host copy-back, so putting the length anywhere but first lets an
-    # `Int` scalar coefficient steal the role: measured, `out[i] = x[i] * k`
-    # with `k: Int` put `k` at count_idx, and the host would have copied back
-    # `k` elements instead of the list's length. The length goes first, then
-    # the scalars, then the read buffers, then the written buffer LAST so its
-    # index is not shifted by a buffer inserted before it.
-    params: list = [(_LENGTH_PARAM, 'Int')]
-    for nm in sorted(carried):
-        params.append((nm, _param_annotation(fdef, nm)))
+    # ORDER IS A CONTRACT, and THREE of them have to agree here.
+    #
+    # 1. runtime/fire_metal.m binds buffers at indices 0..n_bufs-1 and the
+    #    scalars after them.
+    # 2. MSL gives a parameter WITHOUT a `[[buffer(N)]]` attribute the next
+    #    free index BY DECLARATION POSITION, counting every preceding
+    #    buffer-or-reference parameter. So a scalar declared BEFORE a buffer
+    #    silently takes that buffer's index.
+    # 3. `device_glue.launch_arg_types` takes the FIRST `Int`/`Int64`
+    #    parameter as the element count for the copy-back.
+    #
+    # BUFFERS FIRST, THEN SCALARS satisfies all three: the explicit
+    # `[[buffer(0..n)]]` on the buffers matches the runtime, the scalars land
+    # implicitly at n_bufs.. where the runtime puts them, and the length is
+    # still the first `Int` parameter (a buffer is not an `Int` parameter, so
+    # its position does not matter for that rule -- only its being an `Int`
+    # does).
+    #
+    # Length first WITHIN the scalars, so an `Int` coefficient cannot steal
+    # count_idx. Measured: with the length before the buffers, `x`'s
+    # [[buffer(0)]] and the scalar's implicit index collided and the real
+    # runtime aborted with "Command encoder released without endEncoding".
+    params: list = []
     for nm in info.reads:
         params.append((nm, _POINTER_SPELLING % anns[nm]))
-    params.append((info.writes, _POINTER_SPELLING % anns[info.writes]))
+    params.append((info.writes, _POINTER_SPELLING % anns[nm]))
+    params.append((_LENGTH_PARAM, 'Int'))
+    for nm in sorted(carried):
+        params.append((nm, _param_annotation(fdef, nm)))
 
     return gctypes.FunctionDef(
         name=SYNTH_PREFIX + _as_str(fdef.name),
@@ -671,3 +686,161 @@ def _decorator_names(fdef) -> set:
         elif isinstance(f, gctypes.MemberExpr) and getattr(f, 'member', None):
             names.add(_as_str(f.member))
     return names
+
+
+# ---------------------------------------------------------------------------
+# The host half: replace the loop with a call
+# ---------------------------------------------------------------------------
+
+
+def host_call(fdef, info: 'Offloadable') -> 'object':
+    """A `CallExpr` replacing `fdef`'s loop, targeting the synthesised kernel.
+
+    This is the other half of increment 3. The kernel alone is unreachable;
+    this is what makes the offload real. It is a plain `CallExpr` to a
+    function that is a DEVICE function, so `emit_calls._lower_device_launch`
+    picks it up unchanged and does all the host-side work -- packing each list
+    into a contiguous buffer, narrowing each scalar to the width the MSL
+    declares, dispatching, writing the output back, freeing. Reusing that
+    path rather than writing a second marshaller is the point: the marked
+    `@gpu` path is already verified on real hardware, and a parallel
+    implementation of the same marshalling is a second thing to get right.
+
+    Argument order is the SYNTHESISED KERNEL's parameter order, which
+    `synthesise` fixed: length, scalars, read buffers, written buffer. It is
+    read back off that function rather than recomputed here, so the call site
+    and the signature cannot disagree -- a mismatch would be a silent wrong
+    answer, and it is exactly the class of bug the two ordering contracts in
+    `synthesise` exist to prevent.
+
+    The length argument is the trip-count PARAMETER (`n`), not the container
+    length. They are the same whenever the caller passes a matching count,
+    and when they differ the caller's `n` is the loop's own trip count, which
+    is what `range(n)` said -- taking the container's length instead would
+    silently change the loop's meaning.
+    """
+    kernel = synthesise(fdef, info)
+    # The arguments are named in the HOST function's namespace, NOT the
+    # kernel's. The kernel's length parameter is `_mg_len`, which exists only
+    # inside the device function; naming it here produced
+    #
+    #     _t1 = (int64_t)0;  /* ct param or undeclared: _mg_len */
+    #
+    # i.e. a length of 0, so every list packed to one element, the kernel's
+    # `i >= _mg_len` guard rejected every thread, and the zero-length buffer
+    # allocation took runtime/fire_metal.m's early-return path -- which leaks
+    # the command encoder and ABORTS the process. Measured end to end.
+    #
+    # So: read buffers, written buffer, the trip count under its OWN name,
+    # then the scalars -- the same order `synthesise` gave the parameters,
+    # which is what makes the two agree by construction.
+    host_args = list(info.reads) + [info.writes, info.param] + list(info.scalars)
+    kernel_names = [_as_str(p[0]) for p in (kernel.params or ())]
+    expected = (list(info.reads) + [info.writes, _LENGTH_PARAM]
+                + sorted(info.scalars))
+    if kernel_names != expected:
+        # If these ever disagree the call would bind arguments to the wrong
+        # parameters -- a silent wrong answer, not a build error. Refuse.
+        raise SynthesisRefused(
+            f'call argument order {expected!r} does not match the synthesised '
+            f'kernel parameters {kernel_names!r}')
+    args = [gctypes.IdentExpr(name=nm, line=0, col=0) for nm in host_args]
+    return gctypes.CallExpr(
+        func=gctypes.IdentExpr(name=_as_str(kernel.name), line=0, col=0),
+        args=args, line=0, col=0)
+
+
+def rewrite_to_dispatch(fdef, info: 'Offloadable') -> 'object | None':
+    """`fdef` with its loop replaced by the dispatch call, or None.
+
+    Returns a NEW FunctionDef; the original AST is not mutated, because the
+    synthesised kernel copies nodes OUT of the original body and mutating it
+    underneath would change what those copies contain.
+
+    Refuses (returns None) when anything about the shape is not exactly what
+    `host_call` assumed, because a partially-rewritten host function is the
+    silent-wrong-answer case: the kernel would run over a list the host never
+    finished preparing, or the host would keep the loop and the kernel would
+    run too. Both compute something; neither is what the program said.
+    """
+    body = list(getattr(fdef, 'body', None) or ())
+    loops = [s for s in body if isinstance(s, gctypes.ForStmt)]
+    if len(loops) != 1:
+        return None
+    loop = loops[0]
+    try:
+        call = host_call(fdef, info)
+    except (SynthesisRefused, AttributeError, TypeError):
+        return None
+
+    new_body = []
+    for st in body:
+        if st is loop:
+            # The call result is void; it is a statement here, so it is
+            # wrapped as one rather than left as a bare expression, which the
+            # statement lowering would treat as a value to print or discard.
+            new_body.append(gctypes.ExprStmt(value=call, line=0, col=0))
+            continue
+        new_body.append(st)
+    return gctypes.FunctionDef(
+        name=_as_str(fdef.name),
+        params=list(fdef.params or ()),
+        return_type=fdef.return_type,
+        body=new_body,
+        decorators=list(fdef.decorators or ()),
+        param_convs=dict(fdef.param_convs or {}),
+        param_has_default=dict(fdef.param_has_default or {}),
+        param_defaults=dict(fdef.param_defaults or {}),
+        kwonly=list(fdef.kwonly or ()),
+        comptime_params=list(fdef.comptime_params or ()),
+        is_generator=bool(getattr(fdef, 'is_generator', False)),
+        is_async=bool(getattr(fdef, 'is_async', False)),
+        line=getattr(fdef, 'line', 0), col=getattr(fdef, 'col', 0))
+
+
+def offload_module(stmts: list) -> tuple:
+    """Both halves of increment 3, over a whole module.
+
+    Returns `(new_stmts, synthesised_kernels)`.
+
+    For each free function whose whole body is one recognised parallel map:
+
+      - a `@gpu` synthesised kernel is APPENDED, which seam 1 classifies as
+        DEVICE and seams 2/3 turn into MSL plus a host wrapper;
+      - the ORIGINAL function is REPLACED in place by a version whose loop has
+        become a call to that kernel.
+
+    Replacement rather than mutation: the synthesised kernel copies nodes out
+    of the original body, so rewriting in place would change what those
+    copies contain.
+
+    The kernel is synthesised FIRST, from the untouched function, and the
+    rewritten function is produced from the same `info`. The two therefore
+    describe the same computation by construction rather than by agreement
+    between two passes.
+    """
+    out: list = []
+    kernels: list = []
+    for s in (stmts or []):
+        if not isinstance(s, gctypes.FunctionDef):
+            out.append(s)
+            continue
+        if _decorator_names(s) & _EXPLICIT:
+            out.append(s)
+            continue
+        info = recognise(s)
+        if info is None:
+            out.append(s)
+            continue
+        try:
+            kernel = synthesise(s, info)
+        except SynthesisRefused:
+            out.append(s)
+            continue
+        rewritten = rewrite_to_dispatch(s, info)
+        if rewritten is None:
+            out.append(s)
+            continue
+        out.append(rewritten)
+        kernels.append(kernel)
+    return out, kernels

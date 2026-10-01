@@ -125,7 +125,7 @@ int mojo_metal_dispatch(const char *kernel_name,
                     options:MTLResourceStorageModeShared];
                 if (!db) {
                     _set_error("buffer %lld allocation failed", (long long)bi);
-                    return 0;
+                    goto fail;
                 }
                 [enc setBuffer:db offset:0 atIndex:(NSUInteger)bi];
                 devbufs[bi] = db;
@@ -137,7 +137,7 @@ int mojo_metal_dispatch(const char *kernel_name,
                     options:MTLResourceStorageModeShared];
                 if (!db) {
                     _set_error("scalar %lld allocation failed", (long long)si);
-                    return 0;
+                    goto fail;
                 }
                 if (scalars && scalars[si])
                     memcpy([db contents], scalars[si], w);
@@ -168,7 +168,7 @@ int mojo_metal_dispatch(const char *kernel_name,
             if (tg > 0xFFFFFFFFu) {
                 _set_error("output of %lld elements needs more threadgroups "
                            "than Metal can dispatch", (long long)need);
-                return 0;
+                goto fail;
             }
         }
         if (tg == 0) tg = 1;
@@ -194,5 +194,33 @@ int mojo_metal_dispatch(const char *kernel_name,
         free(devbufs);
         g_dispatches++;
         return 1;
+
+    fail:
+        /* A dispatch that fails after the command encoder exists still has to
+         * END it. Returning without endEncoding leaves the encoder to the
+         * @autoreleasepool, and Metal asserts on that --
+         *
+         *   -[_MTLCommandEncoder dealloc]: failed assertion `Command encoder
+         *   released without endEncoding'
+         *
+         * which ABORTS the process. So a failed dispatch killed the program
+         * instead of returning 0, which turns an ordinary, reportable
+         * condition (a zero-length buffer allocation, a grid too large to
+         * dispatch) into a crash that hides the real error the caller was
+         * already told about by `_set_error`.
+         *
+         * Found by auto-offload: a length that reached the device as 0 made
+         * every list pack to zero elements, `newBufferWithBytes:length:0`
+         * returned nil, and that `return 0` aborted here. The underlying bug
+         * was fixed at the source; this is the runtime not being allowed to
+         * escalate a recoverable failure into a SIGABRT.
+         *
+         * endEncoding + commit is the documented way to discard an encoded
+         * command; the work never runs, which is what a failure means.
+         */
+        [enc endEncoding];
+        [cb commit];
+        free(devbufs);
+        return 0;
     }
 }

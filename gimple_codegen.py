@@ -4932,12 +4932,12 @@ def _verify_desugared_genexps(code: str, gen, names: list) -> None:
             f"rewrite the expression as an explicit generator function.")
 
 
-def compile_to_c(mojo_src: str) -> str:
+def compile_to_c(mojo_src: str, auto_gpu: bool = True) -> str:
     """Parse Mojo source and return C code WITHOUT __GIMPLE annotations.
 
     Useful for execution tests where __GIMPLE restrictions don't apply.
     """
-    c_code, _gen = _run_pipeline(mojo_src)
+    c_code, _gen = _run_pipeline(mojo_src, auto_gpu=auto_gpu)
 
     # Strip __GIMPLE annotations for executability
     c_code = c_code.replace(' __GIMPLE ', ' ')
@@ -5149,14 +5149,16 @@ def module_may_have_supported_generator(mojo_src: str, filename: str = "") -> bo
     return False
 
 
-def compile_to_gimple_linked(mojo_src: str, filename: str = "") -> str:
+def compile_to_gimple_linked(mojo_src: str, filename: str = "",
+                             auto_gpu: bool = True) -> str:
     """Like compile_to_gimple, but in *link mode*: imported symbols become
     `extern` declarations (bodies come from a linked artifact / stdlib dylib;
     see MODULE_CACHE_DESIGN.md and ABI.md) rather than being inlined."""
-    return compile_linked(mojo_src, filename)[0]
+    return compile_linked(mojo_src, filename, auto_gpu)[0]
 
 
-def compile_linked(mojo_src: str, filename: str = "") -> tuple:
+def compile_linked(mojo_src: str, filename: str = "",
+                   auto_gpu: bool = True) -> tuple:
     """Link-mode compile that also returns what the driver must link: the
     dylibs `import` recorded, the object files elaboration produced
     (generic instantiations — possibly including a C++-compiled coroutine
@@ -5180,7 +5182,8 @@ def compile_linked(mojo_src: str, filename: str = "") -> tuple:
     fall back to a completely different, simpler inline pipeline
     (`fire.py`'s own `build_executable`, which already had this handling)
     whenever `driver.compile_program` fails, masking the gap."""
-    code, gen = _run_pipeline(mojo_src, filename=filename, link_mode=True)
+    code, gen = _run_pipeline(mojo_src, filename=filename, link_mode=True,
+                              auto_gpu=auto_gpu)
     # `gen._link_needs_cxx_box[0]`: a coroutine unit discovered several
     # `_compile_imported_module` levels deep (a do_imports=True-only nested
     # temp_gen, not `gen` itself) sets this shared box rather than `gen`'s

@@ -397,3 +397,44 @@ def emit_device_sidecar(parts: list[str], kernel_names: list[str],
     lines.append('int64_t _mojo_gpu_dispatch_count(void) { return _mg_dispatches; }')
     lines.append('int64_t _mojo_gpu_failure_count(void)  { return _mg_failures; }')
     return '\n'.join(lines)
+
+
+#: The introspection entry points, for a module with NO device code at all.
+#:
+#: `emit_device_sidecar` is skipped when a module offloads nothing, and it is
+#: the only definition of these four. So a program that merely ASKS whether the
+#: device path was taken could not be linked -- "implicit declaration of
+#: function '_mojo_gpu_kernel_count'" -- which is precisely the question
+#: `--no-gpu` makes interesting: with the flag, "did anything go to the GPU?"
+#: should answer 0, not fail to build.
+#:
+#: Deliberately no `#include <fire_metal.h>`, no MSL, and no device
+#: initialisation: a module with no kernels must not acquire a dependency on
+#: the Metal runtime (see module_gen's preamble comment), and must stay
+#: loadable on a machine with no GPU. `have_device` therefore reports 0 --
+#: truthfully, nothing here can use a device.
+EMPTY_SIDECAR = """\
+/* No device code in this module, so there is nothing to offload. The
+   introspection entry points still exist so a program can ASK whether the
+   device path was taken -- which is the question --no-gpu makes worth asking
+   -- and get an honest 0. See device_glue.EMPTY_SIDECAR. */
+int64_t _mojo_gpu_kernel_count(void)    { return 0; }
+int64_t _mojo_gpu_have_device(void)     { return 0; }
+int64_t _mojo_gpu_dispatch_count(void)  { return 0; }
+int64_t _mojo_gpu_failure_count(void)   { return 0; }
+"""
+
+
+def emit_introspection_prototypes() -> str:
+    """Prototypes for the four introspection entry points, unconditionally.
+
+    They are REAL runtime functions registered in _RUNTIME_FUNCS, so a call
+    from compiled Mojo must resolve to a sidecar definition rather than
+    colliding with a weak auto-stub. Emitted for every module, kernel or not.
+    """
+    return ('/* GPU introspection entry points; present in every module so a\n'
+            '   program can ask whether the device path was taken. */\n'
+            + '\n'.join(
+                f'int64_t {_n}(void);' for _n in
+                ('_mojo_gpu_kernel_count', '_mojo_gpu_have_device',
+                 '_mojo_gpu_dispatch_count', '_mojo_gpu_failure_count')))

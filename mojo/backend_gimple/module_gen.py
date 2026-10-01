@@ -1133,8 +1133,13 @@ def gen_module_impl(self, stmts):
     # does NOT change `_device_kinds`: a marked or registrar-reached function
     # is still DEVICE, because that was an explicit request and the flag is
     # about inference.
-    _synth_names = (_gmi_offload.synthesise_module(stmts)
-                    if getattr(self, 'auto_gpu', True) else [])
+    # BOTH halves: the synthesised kernels AND the host rewrite that calls
+    # them. The kernel alone is unreachable, which would make the whole
+    # feature dead code that compiles and never runs.
+    if getattr(self, 'auto_gpu', True):
+        stmts, _synth_names = _gmi_offload.offload_module(stmts)
+    else:
+        _synth_names = []
     if _synth_names:
         stmts = list(stmts) + list(_synth_names)
         _device_kinds = _gmi_device_select.classify_functions(stmts)
@@ -7376,7 +7381,10 @@ def gen_module_impl(self, stmts):
         # is the same shape as the coroutine shim just below.
         *(['#include <fire_metal.h>',
            _gmi_device_glue.emit_launch_prototypes(_device_kernels_meta)]
-          if _device_kernels_meta else []),
+          if _device_kernels_meta
+          # The introspection prototypes are unconditional; the launch
+          # prototypes and the Metal include are not (see device_glue).
+          else [_gmi_device_glue.emit_introspection_prototypes()]),
         '#include <fire_sqlite3.h>',
         '#include <fire_zlib.h>',
         '#include <fire_ssl.h>',
@@ -10038,6 +10046,15 @@ def gen_module_impl(self, stmts):
         # error reported against the wrong line.
         parts.append(_gmi_device_glue.emit_device_sidecar(
             _device_parts, sorted(self._device_kernels), _device_kernels_meta))
+    else:
+        # No device code in this module -- an ordinary module, or one compiled
+        # with `--no-gpu` and no marked kernels. Emit the introspection entry
+        # points anyway, reporting 0. Without them a program that ASKS whether
+        # anything offloaded cannot be linked at all, which makes the question
+        # unaskable exactly where it is most worth asking. No Metal include and
+        # no device initialisation, so a kernel-free module still does not
+        # depend on the GPU runtime and still runs on a machine without one.
+        parts.append(_gmi_device_glue.EMPTY_SIDECAR)
 
     return self._dedup_variadic_externs(parts)
 

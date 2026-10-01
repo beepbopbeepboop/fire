@@ -188,7 +188,8 @@ def _compile_optional_unit(unit, src, plain, gcc):
 
 
 def compile_program(input_file, src, output=None, run=True,
-                    opt_flag=None, debug_flag=None, program_args=None):
+                    opt_flag=None, debug_flag=None, program_args=None,
+                    auto_gpu=True):
     """Compile (and optionally run) a Mojo program through the module-cache system.
     Returns the program's exit code when run / 0 on a successful build, or None if
     the build failed (caller decides the fallback)."""
@@ -201,7 +202,8 @@ def compile_program(input_file, src, output=None, run=True,
     # see compile_linked's own docstring — a real coroutine translation
     # unit either directly in this module or inside an elaborated generic
     # it calls.
-    c_code, dylibs, objects, cpp_code, needs_cxx = compile_linked(src, filename=input_file)
+    c_code, dylibs, objects, cpp_code, needs_cxx = compile_linked(
+        src, filename=input_file, auto_gpu=auto_gpu)
     objects = list(objects)
     if cpp_code:
         objects.append(_build_client_cpp_object(cpp_code, gcc, objflags))

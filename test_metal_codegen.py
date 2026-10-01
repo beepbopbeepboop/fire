@@ -1210,14 +1210,39 @@ class TestOffloadSynthesis(unittest.TestCase):
         self.assertTrue(str(self.k.name).startswith(ofl.SYNTH_PREFIX))
         self.assertNotEqual(str(self.k.name), 'saxpy')
 
-    def test_the_length_parameter_comes_first(self):
-        # device_glue takes the FIRST Int parameter as the copy-back element
-        # count. With `a: Int` present, any other order lets a coefficient
-        # steal that role and the host copies back the wrong number of
-        # elements.
+    def test_the_length_parameter_is_the_one_that_holds_the_count(self):
+        # THREE contracts have to agree on parameter order, and they pull in
+        # different directions (see synthesise's note):
+        #   1. fire_metal.m binds buffers at 0..n_bufs-1, scalars after;
+        #   2. MSL gives an unattributed parameter the next index BY
+        #      DECLARATION POSITION, so a scalar before a buffer takes that
+        #      buffer's index;
+        #   3. device_glue takes the FIRST `Int` parameter as the copy-back
+        #      element count.
+        # Buffers-first-then-scalars satisfies all three, with the length
+        # first AMONG the scalars so an `Int` coefficient cannot steal it.
+        #
+        # What matters is not the position but the identity: this asserts the
+        # count parameter is the length. An earlier ordering put the length
+        # at index 0, which satisfied (3) and broke (1) and (2) -- the real
+        # runtime aborted with "Command encoder released without
+        # endEncoding" because `x`'s [[buffer(0)]] collided with the scalar's
+        # implicit index.
         types, count_idx = dglue.launch_arg_types(self.k.params)
         self.assertEqual(self.k.params[count_idx][0], ofl._LENGTH_PARAM)
-        self.assertEqual(count_idx, 0)
+        # Every buffer precedes every scalar, so the explicit [[buffer(N)]]
+        # numbering is the same sequence the runtime binds.
+        buf_pos = [i for i, (_n, _a) in enumerate(self.k.params)
+                   if _a.startswith('UnsafePointer[')]
+        sc_pos = [i for i, (_n, _a) in enumerate(self.k.params)
+                  if not _a.startswith('UnsafePointer[')]
+        self.assertTrue(buf_pos and sc_pos)
+        self.assertLess(max(buf_pos), min(sc_pos),
+                        'a scalar before a buffer takes that buffer\'s MSL index')
+        self.assertEqual(buf_pos, list(range(len(buf_pos))),
+                         'buffer indices must be dense from 0')
+        # And the length is the first Int among the scalars.
+        self.assertEqual(count_idx, min(sc_pos))
 
     def test_containers_are_device_pointers_not_lists(self):
         # `List[Float32]` resolves to `MojoList *`, which emit_metal refuses
@@ -1581,6 +1606,193 @@ class TestNoGpuOnRealGpu(unittest.TestCase):
                          f'--no-gpu changed a marked kernel\n{out}\n{err[-600:]}')
         self.assertIn('d 1', out, f'no dispatch happened\n{out}')
         self.assertIn('f 0', out, f'a dispatch failed\n{out}')
+
+
+
+class TestOffloadHostRewrite(unittest.TestCase):
+    """The other half of increment 3: the host stops looping and starts
+    dispatching. The kernel alone is unreachable, so without this the whole
+    feature is dead code that compiles and never runs."""
+
+    def setUp(self):
+        self.fn = _fn(SAXPY)
+        self.info = ofl.recognise(self.fn)
+
+    def test_the_loop_becomes_a_call_to_the_synthesised_kernel(self):
+        r = ofl.rewrite_to_dispatch(self.fn, self.info)
+        self.assertIsNotNone(r)
+        self.assertEqual(len(r.body), 1)
+        self.assertIsInstance(r.body[0], gctypes.ExprStmt)
+        self.assertEqual(str(r.body[0].value.func.name), '_mg_offload_saxpy')
+
+    def test_the_call_arguments_are_named_in_the_HOST_namespace(self):
+        """The bug this replaced, and it was silent-then-fatal.
+
+        The kernel's length parameter is `_mg_len`, which exists only inside
+        the device function. Naming it at the call site produced
+
+            _t1 = (int64_t)0;  /* ct param or undeclared: _mg_len */
+
+        -- a length of ZERO, so every list packed to one element, the
+        kernel's `i >= _mg_len` guard rejected every thread, and the
+        zero-length buffer allocation took fire_metal.m's early-return path.
+        The call site must use the host's own names, with the length
+        argument being the trip count `n`.
+        """
+        r = ofl.rewrite_to_dispatch(self.fn, self.info)
+        names = [str(a.name) for a in r.body[0].value.args]
+        self.assertEqual(names, ['x', 'y', 'out', 'n', 'a'],
+                         'call args must be host names, kernel names would be '
+                         'undeclared identifiers at the call site')
+        self.assertNotIn('_mg_len', names)
+
+    def test_the_original_function_is_not_mutated(self):
+        # The synthesised kernel copies nodes OUT of the original body, so
+        # rewriting in place would change what those copies contain.
+        before = [type(s).__name__ for s in self.fn.body]
+        ofl.rewrite_to_dispatch(self.fn, self.info)
+        self.assertEqual([type(s).__name__ for s in self.fn.body], before)
+        self.assertIn('ForStmt', before)
+
+    def test_a_trailing_return_survives_the_rewrite(self):
+        f = _fn('def f(x: List[Float32], out: List[Float32], n: Int):\n'
+                '    for i in range(n):\n'
+                '        out[i] = x[i] * 2.0\n'
+                '    return out\n')
+        r = ofl.rewrite_to_dispatch(f, ofl.recognise(f))
+        self.assertEqual([type(s).__name__ for s in r.body],
+                         ['ExprStmt', 'ReturnStmt'])
+
+    def test_generated_c_packs_dispatches_and_unpacks(self):
+        gen = gctypes.GimpleGen(None)
+        gen.module_name = 'hr'
+        out = gen.gen_module(list(parse(SAXPY)))
+        # Each list is packed, the kernel is dispatched, and each is written
+        # back and freed. This is seam 3's EXISTING marshalling, reached
+        # because the call targets a DEVICE function -- the reason the host
+        # rewrite is a plain CallExpr.
+        self.assertIn('_mg_pack_float(x,', out)
+        self.assertIn('_mg_pack_float(y,', out)
+        self.assertIn('_mg_pack_float(out,', out)
+        self.assertIn('_mg_launch__mg_offload_saxpy(', out)
+        self.assertIn('_mg_unpack_float(out,', out)
+        # The length handed to the packer is the trip count, not a constant.
+        self.assertIn('(int64_t)n)', out)
+        # `_mg_len` must not appear in the HOST function. It legitimately
+        # appears in the wrapper's own signature -- that is the kernel-facing
+        # name, and it is correct there. What must not happen is the host
+        # body reading it, which is what produced
+        # `_t1 = (int64_t)0;  /* ct param or undeclared: _mg_len */`.
+        host = out[out.find('void hr_saxpy_38bab5 (float a'):
+                   out.find('int _gimple_main')]
+        self.assertNotIn('_mg_len', host,
+                         'the kernel-only length name must not reach the host')
+        self.assertIn('(int64_t)n)', host)
+
+    def test_no_gpu_suppresses_the_rewrite_too(self):
+        gen = gctypes.GimpleGen(None, auto_gpu=False)
+        gen.module_name = 'hr'
+        out = gen.gen_module(list(parse(SAXPY)))
+        self.assertNotIn('_mg_offload_saxpy', out)
+        self.assertNotIn('_mg_launch__mg_offload_saxpy', out)
+        # ...and the host loop is still there, computing the same answer.
+        self.assertIn('mojo_list_get_double', out)
+
+    def test_a_refused_loop_is_left_completely_alone(self):
+        f = _fn('def f(x: List[Float32], out: List[Float32], n: Int):\n'
+                '    t = 0.0\n'
+                '    for i in range(n):\n'
+                '        t = t + x[i]\n'
+                '    out[0] = t\n')
+        self.assertIsNone(ofl.recognise(f))
+        gen = gctypes.GimpleGen(None)
+        gen.module_name = 'ref'
+        out = gen.gen_module(list(parse(
+            'def f(x: List[Float32], out: List[Float32], n: Int):\n'
+            '    t = 0.0\n'
+            '    for i in range(n):\n'
+            '        t = t + x[i]\n'
+            '    out[0] = t\n')))
+        self.assertNotIn('_mg_offload', out)
+        self.assertIn('mojo_list_get_double', out)
+
+    def test_introspection_exists_even_with_no_kernels(self):
+        """So a program can ASK whether anything offloaded.
+
+        This is what makes `--no-gpu` answerable: the question is only
+        interesting exactly when the answer is 0, and without these four a
+        kernel-free module could not even be linked ("implicit declaration of
+        function '_mojo_gpu_kernel_count'").
+        """
+        for auto in (True, False):
+            gen = gctypes.GimpleGen(None, auto_gpu=auto)
+            gen.module_name = 'i'
+            out = gen.gen_module(list(parse('def main():\n    print(1)\n')))
+            for fn in ('_mojo_gpu_kernel_count', '_mojo_gpu_have_device',
+                       '_mojo_gpu_dispatch_count', '_mojo_gpu_failure_count'):
+                self.assertIn(f'int64_t {fn}(void)', out, f'auto_gpu={auto}')
+            # And a kernel-free module does not pull in the Metal runtime.
+            self.assertNotIn('#include <fire_metal.h>', out)
+
+
+@unittest.skipUnless(sys.platform == 'darwin', 'Metal is macOS-only')
+class TestAutoOffloadRunsOnGpu(unittest.TestCase):
+    """The end-to-end claim: an UNMARKED Python loop, no `@gpu` anywhere in
+    the source, computes the right answer on the real GPU and writes the
+    result back into ordinary Python lists."""
+
+    PROG = ('def saxpy(a: Float32, x: List[Float32], y: List[Float32],\n'
+            '          out: List[Float32], n: Int):\n'
+            '    for i in range(n):\n'
+            '        out[i] = a * x[i] + y[i]\n'
+            '\n'
+            'def main():\n'
+            '    a = [1.0, 2.0, 3.0, 4.0]\n'
+            '    b = [5.0, 6.0, 7.0, 8.0]\n'
+            '    o = [0.0, 0.0, 0.0, 0.0]\n'
+            '    saxpy(2.0, a, b, o, 4)\n'
+            '    for v in o:\n'
+            '        print(v)\n'
+            '    print("kernels", _mojo_gpu_kernel_count())\n'
+            '    print("d", _mojo_gpu_dispatch_count())\n'
+            '    print("f", _mojo_gpu_failure_count())\n')
+
+    def _run(self, extra):
+        with tempfile.TemporaryDirectory() as wd:
+            path = os.path.join(wd, 'e2e.mojo')
+            with open(path, 'w') as f:
+                f.write(self.PROG)
+            r = subprocess.run(
+                [sys.executable, os.path.join(HERE, 'fire.py')] + extra +
+                ['--jit', path],
+                capture_output=True, text=True, timeout=900, cwd=HERE)
+            return r.stdout.strip().splitlines(), r.stderr
+
+    def test_an_unmarked_loop_computes_on_the_gpu(self):
+        out, err = self._run([])
+        if not out:
+            self.skipTest(f'no JIT build here: {err[-400:]}')
+        # saXPY: 2*[1,2,3,4] + [5,6,7,8] = [7,10,13,16]. The interpreter
+        # produces exactly this, so it is a real oracle rather than a
+        # hand-computed hope.
+        self.assertEqual(out[:4], ['7.0', '10.0', '13.0', '16.0'],
+                         f'wrong answer\n{out}\n{err[-600:]}')
+        self.assertIn('kernels 1', out)
+        self.assertIn('d 1', out, 'the loop did not reach the GPU')
+        self.assertIn('f 0', out)
+
+    def test_no_gpu_computes_the_same_answer_on_the_host(self):
+        """The flag must change WHERE, never WHAT. Same values, no dispatch --
+        and the introspection still answers, which is the only way a user can
+        tell the difference happened deliberately."""
+        out, err = self._run(['--no-gpu'])
+        if not out:
+            self.skipTest(f'no JIT build here: {err[-400:]}')
+        self.assertEqual(out[:4], ['7.0', '10.0', '13.0', '16.0'],
+                         f'--no-gpu changed the answer\n{out}\n{err[-600:]}')
+        self.assertIn('kernels 0', out)
+        self.assertIn('d 0', out)
+        self.assertIn('f 0', out)
 
 
 
