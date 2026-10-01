@@ -3771,6 +3771,8 @@ class GimpleGen:
                                  depth: int = 0, want_abs: bool = False):
         return gfn._find_symbol_home_module(self, module, name, kind,
                                            depth=depth, want_abs=want_abs)
+    def _resolved_export_entry(self, module: str, name: str, info):
+        return gfn._resolved_export_entry(self, module, name, info)
     def _resolve_test_relative_module(self, module: str) -> str | None:
         return gfn._resolve_test_relative_module(self, module)
     def _parsed_import(self, module: str):
