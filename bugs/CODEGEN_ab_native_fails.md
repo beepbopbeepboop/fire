@@ -82,9 +82,10 @@ matters for what to do next:
   document can substitute for it.
 - **The cost is the same blowup `native-dumpfull` still runs into.** Both
   corpora deliberately trigger the self-hosting bootstrap pre-pass (a genuine
-  `do_imports=True` sibling-import compile with files placed at the repo root —
-  see `test_ab_native.py`'s `DUMP_FULL_TESTS` docstring), and that pre-pass
-  costs ~15-30 GB / ~15-25 s per call. It is localised, not fixed:
+  `do_imports=True` sibling-import compile, whose sources live in a per-run
+  scratch directory under the worktree rather than the repo root since the
+  2026-09-29 flake fix — see `test_ab_native.py`'s module docstring), and that
+  pre-pass costs ~15-30 GB / ~15-25 s per call. It is localised, not fixed:
   `bugs/CODEGEN_bootstrap_resource_blowup.md` and BLOW.md §0.
 
 ## 2. What would make it pass
@@ -92,15 +93,25 @@ matters for what to do next:
 Two independent conditions, and the cheap one is worth doing first:
 
 1. **Find the divergence.** `make mojoc && python3 test_ab_native.py`, run from
-   the repo root (it writes its corpus into the root on purpose, and `mojoc`
-   must run from there). It needs the binary and up to ~21 GB, and it prints,
-   per case, `PASS <name>: IDENTICAL` or `FAIL <name>: DIFF at line N`, with
-   the first differing line and four lines of context. Note that
-   `python3 tools/suite.py ab-native` will **not** run it — that is the
-   marker working, and the run says `1 disabled` and exits 0 — so run the test
-   file directly, or flip the marker (§3). Write the failing case names into
-   this doc. If the answer is "all 30 pass", the regression is already fixed
-   and §3 is a two-line change.
+   the repo root (`mojoc` must run from there: both dump paths use `cwd=HERE`,
+   so the compiler writes each case's `.ci/.tok/.ast/.pyi` into the repo root
+   beside its tagged source name). The test's own `.mojo` sources go in a
+   private per-process directory under `.tmp/` and no longer in the root — that
+   was the writer half of the 2026-09-29 round-6 flake, and
+   `test_ab_native.py`'s module docstring has the four constraints. It needs the
+   binary and up to ~21 GB, and it prints, per case, `PASS <name>: IDENTICAL`
+   or `FAIL <name>: DIFF at line N`, with the first differing line and four
+   lines of context. Note that `python3 tools/suite.py ab-native` will **not**
+   run the sweep — that is the marker working — but it does not cost nothing
+   either: naming a test brings its `deps` with it (which is what a Make
+   prerequisite means), so it would first build `mojoc`, 3.7 GB, `small` and
+   exclusive. `--dry-run` shows the marker and starts nothing:
+   `python3 tools/suite.py --dry-run ab-native` prints `2 tests, 1 jobs` — the
+   job being `mojoc` — and then
+   `ab-native  (DISABLED: not run, 0 jobs, reserves 0 GB)`. To run the sweep,
+   invoke the test file directly as above, or flip the marker (§3). Write the
+   failing case names into this doc. If the answer is "all 30 pass", the
+   regression is already fixed and §3 is a two-line change.
 2. **Fix the divergence class**, which is the real work and is tracked
    elsewhere: the compiled backend's emitted `.ci` must be byte-identical to
    the python reference's. Every instance found so far is documented in

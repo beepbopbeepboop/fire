@@ -1540,12 +1540,17 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
     runs cannot collide.
 
     It is checked HERE, and not left to `ab-native`, because `ab-native` cannot
-    check it: that spec needs the self-hosted binary, is capped at 55 GB, and is
-    `expect=`-marked red because the binary segfaults on any input. So the code
-    that decides where this test writes had no executing coverage at all — the
-    exact hole `coro` sat in after the `mojo_*` rename, one level down. The
-    self-test is pure Python and needs no compiler, so it runs in a tenth of a
-    second here, in the `smoke` bucket, on every run.
+    check it: that spec needs the self-hosted binary, measured 20.5 GB, and is
+    `disabled=`-marked against bugs/CODEGEN_ab_native_fails.md — registered,
+    not run, because a known red bought at 55 GB of a 96 GB machine budget,
+    exclusive, every gate, is the machine paying twice. (Its marker is no
+    longer "the binary segfaults on any input" either: that was measured false
+    on 2026-09-27, and the two halves of the flake — the enumeration above and
+    the writer here — are why.) So the code that decides where this test writes
+    had no executing coverage at all — the exact hole `coro` sat in after the
+    `mojo_*` rename, one level down. The self-test is pure Python and needs no
+    compiler, so it runs in a tenth of a second here, in the `smoke` bucket, on
+    every run.
 
     The invariant asserted is the whole directory, not the files this happened
     to write: a check that only looked for its own leftovers would pass on a
@@ -2918,7 +2923,8 @@ def test_no_test_preflights_on_an_unbuildable_artifact():
 
 def main():
     for fn in (test_cmd_driver, test_reject_pattern, test_mem_driver,
-               test_make_driver, test_j_forwarded,                test_deps_order_and_skip,
+               test_make_driver, test_j_forwarded,
+               test_deps_order_and_skip,
                test_exclusive_is_alone, test_fanout_aggregates,
                test_fanout_enumeration_ignores_untracked_scratch,
                test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root,

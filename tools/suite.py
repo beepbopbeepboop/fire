@@ -1317,9 +1317,11 @@ SELFHOST_STAGE2_STALL = (
 # `ab-native`/`native-dumpfull` no longer segfault (verified 2026-09-27,
 # BLOW.md §0) but are STILL red for a different, real reason: their corpora
 # legitimately trigger this compiler's self-hosting bootstrap pre-pass
-# (a genuine, do_imports=True sibling-import compile with files placed at
-# the repo root on purpose — see test_ab_native.py's DUMP_FULL_TESTS
-# docstring), and that pre-pass itself is extremely expensive per call
+# (a genuine, do_imports=True sibling-import compile whose sources live in a
+# per-run scratch directory under the worktree — see test_ab_native.py's
+# module docstring; they used to be placed in the repo root on purpose, which
+# is what raced the fan-out enumeration and is no longer the case), and that
+# pre-pass itself is extremely expensive per call
 # (~15-30 GB, ~15-25s — see BLOW.md §0's "NOT closed" addendum for the
 # measured repro and hot-stack profile: mojo_cstr_region_eq/
 # mojo_set_add_int/_set_grow dominating, the same signature as the original
