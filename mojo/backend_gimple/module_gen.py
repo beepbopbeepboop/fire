@@ -1168,8 +1168,11 @@ def gen_module_impl(self, stmts):
         # absent rather than re-initialising it.
         if not hasattr(self, '_device_launch_lengths'):
             self._device_launch_lengths = {}
+        if not hasattr(self, '_device_launch_grids'):
+            self._device_launch_grids: dict = {}
         stmts, _synth_names = _gmi_offload.offload_module(
-            stmts, lengths_sink=self._device_launch_lengths)
+            stmts, lengths_sink=self._device_launch_lengths,
+            grids_sink=self._device_launch_grids)
     else:
         _synth_names = []
     if _synth_names:
@@ -10173,7 +10176,8 @@ def gen_module_impl(self, stmts):
         # error reported against the wrong line.
         parts.append(_gmi_device_glue.emit_device_sidecar(
             _device_parts, sorted(self._device_kernels), _device_kernels_meta,
-            module_name=_as_str(self.module_name)))
+            module_name=_as_str(self.module_name),
+            grids=getattr(self, '_device_launch_grids', None)))
         # The full sidecar defines the same four introspection entry points
         # as EMPTY_SIDECAR does, so mark them here too -- otherwise a
         # kernel-free module later in the closure emits EMPTY_SIDECAR and the

@@ -67,6 +67,8 @@ is a kernel that computes a wrong answer at exit 0.
 
 from __future__ import annotations
 
+import os
+
 import fire_compiler as gctypes
 from typing import NamedTuple
 
@@ -1241,7 +1243,114 @@ def _gemm_kernel_source(info: 'GemmInfo') -> str:
     return '\n'.join(L)
 
 
-def synthesise_gemm(info: 'GemmInfo'):
+#: The MMA fragment layout for an 8x8 simdgroup_matrix, taken from the layout
+#: table verified by test_llm/frag_layout_probe.m. A lane q holds rows
+#: (q/4 & 4) + (q/2 % 4) and (q/4 & 4) + (q/2 % 4) + 1; its first value is in
+#: column (q/4 & 2)*2 + (q%2)*2, its second in the column after. Both are
+#: CONSTANTS of the architecture, not of the matrix -- that is what makes the
+#: MMA form what it is, and getting one row wrong transposes the result
+#: silently.
+_MMA_ROW = '((lane / 4) & 4) + ((lane / 2) % 4)'
+_MMA_COL = '((lane / 4) & 2) * 2 + (lane % 2) * 2'
+
+
+def _msl(x: str) -> str:
+    return x
+
+
+def gemm_tensor_core_msl(info: 'GemmInfo') -> str:
+    """The whole tensor-core kernel body, as MSL text.
+
+    One SIMDGROUP per 8x8 OUTPUT TILE, not one thread per output element --
+    that is the whole point, and it is why the grid is not the runtime's
+    inferred one. 32 lanes cooperate on 64 outputs.
+
+    There is deliberately NO threadgroup staging here. test_llm/gemm_tiled.m
+    measured the staged, double-buffered 64x64 kernel at 2-4% SLOWER than the
+    unstaged one, so staging would be code that exists to be slower. Fragments
+    are read straight from global memory into registers.
+
+    Reads past the edge of a partial tile are replaced by 0.0 rather than
+    predicated off, because a zeroed A or B row contributes exactly nothing to
+    the product, so the stores below can be the only place bounds are checked.
+
+    `lane` is __lid directly: the grid is one SIMDGROUP wide, so the
+    thread's position in the threadgroup IS its lane. No division to recover it.
+    """
+    m, k, n = info.m, info.k, info.n
+    A, B, C = info.a, info.b, info.c
+    return f"""\
+    int ntn = ({n} + 7) / 8;
+    int tm = (__tgid / ntn) * 8;
+    int tn = (__tgid - (__tgid / ntn) * ntn) * 8;
+    int lane = int(__lid);
+    int fr = {_MMA_ROW};
+    int fc = {_MMA_COL};
+    simdgroup_matrix<float, 8, 8> acc;
+    reinterpret_cast<thread float2&>(acc.thread_elements()) = float2(0.0f);
+    for (int k0 = 0; k0 < {k}; k0 += 8) {{
+        simdgroup_matrix<float, 8, 8> Am;
+        simdgroup_matrix<float, 8, 8> Bm;
+        float2 av = float2(0.0f);
+        float2 bv = float2(0.0f);
+        if (tm + fr < {m} && k0 + fc < {k}) {{
+            av.x = {A}[(tm + fr) * {k} + (k0 + fc)];
+            if (k0 + fc + 1 < {k}) {{ av.y = {A}[(tm + fr) * {k} + (k0 + fc + 1)]; }}
+        }}
+        if (k0 + fr < {k} && tn + fc < {n}) {{
+            bv.x = {B}[(k0 + fr) * {n} + (tn + fc)];
+            if (tn + fc + 1 < {n}) {{ bv.y = {B}[(k0 + fr) * {n} + (tn + fc + 1)]; }}
+        }}
+        reinterpret_cast<thread float2&>(Am.thread_elements()) = av;
+        reinterpret_cast<thread float2&>(Bm.thread_elements()) = bv;
+        simdgroup_multiply_accumulate(acc, Am, Bm, acc);
+    }}
+    float2 r = reinterpret_cast<thread float2&>(acc.thread_elements());
+    if (tm + fr < {m} && tn + fc < {n}) {{ {C}[(tm + fr) * {n} + (tn + fc)] = r.x; }}
+    if (tm + fr < {m} && tn + fc + 1 < {n}) {{ {C}[(tm + fr) * {n} + (tn + fc + 1)] = r.y; }}"""
+
+
+#: Grid for a tensor-core GEMM: one threadgroup per 8x8 output tile, one
+#: SIMDGROUP wide. (nthreads, ngroups) as C expressions, because m/k/n are
+#: runtime scalars in the wrapper's scope.
+def gemm_tensor_core_grid(info: 'GemmInfo') -> tuple:
+    return ('32', f'(({info.m} + 7) / 8) * (({info.n} + 7) / 8)')
+
+
+#: Choose the tensor-core body. OFF by default, and that is a MEASUREMENT, not
+#: caution. The MMA kernel is correct -- bit-exact, same checksum and elements
+#: as the naive one on the same source -- and it is exactly as FAST as the
+#: naive one, which is to say not fast:
+#:
+#:     512x512x512      ms/iter   TFLOPS
+#:     tensor-core          2     0.134
+#:     naive-parallel       2     0.134
+#:     cpu (--no-gpu)     138       0.002
+#:
+#: One SIMDGROUP per 8x8 tile loads 64 A-elements and 64 B-elements to do
+#: 1024 FLOP: an arithmetic intensity of 2 FLOP/byte. That is memory-bound by
+#: a wide margin, so the MMA is never the thing being waited on and replacing
+#: the scalar FMA with it buys nothing. The tile is too small to reuse anything.
+#:
+#: What the C kernel that reaches 0.96 TFLOPS does instead is a 64x64 tile
+#: across 4 SIMDGROUPS, so each loaded element is reused 64 times and the
+#: intensity is ~128 FLOP/byte. That is the change worth making, and it is
+#: register pressure and an smem tile, not a better intrinsic. Until then the
+#: AST-expressed naive kernel is the better default: same speed, and it is
+#: Mojo rather than a raw MSL string.
+TENSOR_CORES = os.environ.get('MOJO_GEMM_TENSOR_CORES', '') not in ('0', '')
+
+
+def _raw_msl(text: str):
+    """RawMslStmt, imported here so the parser/AST tier has no edge to the
+    backend. `offload` already reaches the backend for the launch
+    marshalling, so this is not a new dependency -- it just keeps the
+    textual node out of the module that builds AST nodes."""
+    from mojo.backend_gimple.emit_metal import RawMslStmt
+    return RawMslStmt(text)
+
+
+def synthesise_gemm(info: 'GemmInfo', tensor_cores: bool = False):
     """A `@gpu` FunctionDef computing the same product, one thread per output.
 
     The grid is 1-D and sized by the runtime from the OUTPUT buffer's element
@@ -1258,6 +1367,30 @@ def synthesise_gemm(info: 'GemmInfo'):
         for (p = 0; p < k; p += 1) { acc = (acc + (A[((i*k)+p)] * B[((p*n)+j)])); }
         C[((i * n) + j)] = acc;
     """
+    params = [
+        (info.a, f'UnsafePointer[{info.elem}, ImmutAnyOrigin]'),
+        (info.b, f'UnsafePointer[{info.elem}, ImmutAnyOrigin]'),
+        (info.c, f'UnsafePointer[{info.elem}, MutAnyOrigin]'),
+        (info.m, 'Int'), (info.k, 'Int'), (info.n, 'Int'),
+    ]
+
+    def _fdef(body: list):
+        # The signature is IDENTICAL for both bodies on purpose. The kernel
+        # name, parameter list and address spaces are the recogniser's
+        # contract, checked by recognise_gemm; only the computation differs,
+        # so a divergence here could not be reached by a source that passes
+        # recognition. That is what lets the two paths be A/B'd on one source.
+        return gctypes.FunctionDef(
+            name='_mg_offload_gemm', params=params, return_type=None,
+            body=body,
+            decorators=[gctypes.IdentExpr(name='gpu', line=0, col=0)],
+            param_convs={}, param_has_default={}, param_defaults={},
+            kwonly=[], comptime_params=[], is_generator=False, is_async=False,
+            line=0, col=0)
+
+    if tensor_cores:
+        return _fdef([_raw_msl(gemm_tensor_core_msl(info))])
+
     I = gctypes.IdentExpr
     Lit = gctypes.IntLiteral
     FLit = gctypes.FloatLiteral
@@ -1298,18 +1431,7 @@ def synthesise_gemm(info: 'GemmInfo'):
             index=bin('+', bin('*', i, I(name=info.n, line=0, col=0)), j),
             attrs=None, line=0, col=0), acc),
     ]
-    params = [
-        (info.a, f'UnsafePointer[{info.elem}, ImmutAnyOrigin]'),
-        (info.b, f'UnsafePointer[{info.elem}, ImmutAnyOrigin]'),
-        (info.c, f'UnsafePointer[{info.elem}, MutAnyOrigin]'),
-        (info.m, 'Int'), (info.k, 'Int'), (info.n, 'Int'),
-    ]
-    return gctypes.FunctionDef(
-        name='_mg_offload_gemm', params=params, return_type=None, body=body,
-        decorators=[I(name='gpu', line=0, col=0)], param_convs={},
-        param_has_default={}, param_defaults={}, kwonly=[],
-        comptime_params=[], is_generator=False, is_async=False,
-        line=0, col=0)
+    return _fdef(body)
 
 
 def rewrite_gemm(fdef, info: 'GemmInfo', kernel):
@@ -1352,7 +1474,8 @@ def rewrite_gemm(fdef, info: 'GemmInfo', kernel):
         line=getattr(fdef, 'line', 0), col=getattr(fdef, 'col', 0))
 
 
-def offload_module(stmts: list, lengths_sink: dict | None = None) -> tuple:
+def offload_module(stmts: list, lengths_sink: dict | None = None,
+                  grids_sink: dict | None = None) -> tuple:
     """Both halves of increment 3, over a whole module.
 
     Returns `(new_stmts, synthesised_kernels)`.
@@ -1394,7 +1517,7 @@ def offload_module(stmts: list, lengths_sink: dict | None = None) -> tuple:
                 out.append(s)
                 continue
             try:
-                gkernel = synthesise_gemm(ginfo)
+                gkernel = synthesise_gemm(ginfo, tensor_cores=TENSOR_CORES)
             except (SynthesisRefused, AttributeError, TypeError):
                 out.append(s)
                 continue
@@ -1403,6 +1526,11 @@ def offload_module(stmts: list, lengths_sink: dict | None = None) -> tuple:
             # caller owns rather than something computed here and returned.
             if lengths_sink is not None:
                 lengths_sink[_as_str(gkernel.name)] = dict(ginfo.lengths)
+            # A tensor-core kernel needs a grid the runtime cannot infer: one
+            # SIMDGROUP per 8x8 output tile. Recorded for the same reason as
+            # the lengths -- BEFORE the classification pass builds the args.
+            if grids_sink is not None and TENSOR_CORES:
+                grids_sink[_as_str(gkernel.name)] = gemm_tensor_core_grid(ginfo)
             out.append(rewrite_gemm(s, ginfo, gkernel))
             kernels.append(gkernel)
             continue

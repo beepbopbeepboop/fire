@@ -219,7 +219,7 @@ def element_count_index(kernel: str, count_idx: int) -> int:
 _GRID: dict = {}
 
 
-def emit_launch_wrappers(kernels: dict) -> str:
+def emit_launch_wrappers(kernels: dict, grids: dict | None = None) -> str:
     """The per-kernel host wrapper each host call site targets.
 
     `kernels` maps kernel name -> (params, count index) as produced by
@@ -423,7 +423,8 @@ def c_suffix(module_name: str) -> str:
 
 def emit_device_sidecar(parts: list[str], kernel_names: list[str],
                         kernels: dict | None = None,
-                        module_name: str = '') -> str:
+                        module_name: str = '',
+                        grids: dict | None = None) -> str:
     """The whole device sidecar as C text, ready to append to the module.
 
     `parts` and `kernel_names` are in the SAME order -- `module_gen` builds
@@ -486,11 +487,14 @@ def emit_device_sidecar(parts: list[str], kernel_names: list[str],
     lines.append('}')
     lines.append('')
     if kernels:
+        # Populated by the synthesiser for a tensor-core GEMM; empty
+        # otherwise, so every existing kernel keeps the inferred 0,0 grid.
+        _GRID.update(grids or {})
         # The pack/unpack helpers are NOT emitted here: they live in the
         # preamble, next to the `_mojo_at_<T>` pointer helpers, because a call
         # site in an ordinary function body needs them and those bodies are
         # emitted before this tail.
-        lines.append(emit_launch_wrappers(kernels))
+        lines.append(emit_launch_wrappers(kernels, grids))
     lines.append('/* The device kernels this module contains. Lets a host program, or a')
     lines.append('   test, ask what was offloaded instead of guessing. */')
     lines.append('static const char *_mg_kernels[] = {')
