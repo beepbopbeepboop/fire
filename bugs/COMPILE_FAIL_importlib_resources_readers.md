@@ -43,9 +43,12 @@ there is no second copy left to omit the guard from. Two regression tests
 the LITERAL half still answers True so the fix cannot have silently
 disabled the per-slot-kinds feature.
 
-Measured on this build: the `AttributeError` appears **0** times, and
-`shutil` / `tempfile` / `importlib/resources/_common` / `_functional` /
-`_itertools` now contribute their own real gcc errors (or none).
+Measured on this build: the `AttributeError` appears **0** times.
+`zipfile`, `importlib/resources/{__init__,_common,_functional,_itertools}`
+now compile (they are in the closure's compiled file list) instead of
+crashing; `shutil` compiles up to the `'open' is ambiguous` refusal
+(`bugs/COMPILE_FAIL_open_is_ambiguous_from_transitive_registrations.md`);
+`tempfile` contributes 3 real gcc errors.
 
 ### Still blocking, unchanged, all four located
 
