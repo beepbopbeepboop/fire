@@ -404,6 +404,14 @@ CAUSE_TOOL_ERROR = "tool-error"
 # down with it is what that made possible, and the fix is the ceiling that
 # produces this label: the file is killed, classified, and the sweep continues.
 CAUSE_MEMORY = "memory-killed"
+# The image BUILDS, but this host cannot check whether its imports resolve,
+# because they are dylibs of the other architecture and dlopen can only load
+# this process's own. Not a finding about the image and not a fact about the
+# target: it is a gap in the RUN, and the fix is to run the sweep on a host of
+# the image's architecture. Its own label because the neighbouring classes give
+# the opposite advice — an `unresolved-extern` says the link line is wrong,
+# which would send someone to fix an image that is already correct.
+CAUSE_FOREIGN_ARCH = "unverifiable-here"
 # The build driver raised instead of refusing a construct. Which side of the
 # line that falls on is decided by the DEEPEST frame of the traceback, not by
 # the message: fire.py prints `build: {e}` for a FormalBuildError *and* for
@@ -1556,6 +1564,48 @@ _MEMO: dict = {}            # (dylib path, name) -> bool, for the whole run
 _CPU_NAMES = {ML.CPU_TYPE_ARM64: "arm64", ML.CPU_TYPE_X86_64: "x86_64"}
 
 
+def _host_cputype():
+    """The CPU type of the PROCESS doing the probing, or None if unreadable.
+
+    Read from the running interpreter's own Mach-O header rather than from
+    `platform.machine()`, because the question is not "what is this machine
+    called" but "what will this process's dlopen accept" — and those are the
+    same question with one fewer way to be wrong (a Rosetta-translated shell on
+    an arm64 host reports the translated name).
+
+    This is the fourth fact the probe needs, and until 2026-10-01 it was missing:
+    the probe `dlopen`s each library on the image's link line, and dlopen can
+    only ever load a library of THIS process's architecture. So on an arm64
+    host, an x86-64 image's own perfectly good x86-64 dylibs could not be
+    opened, and the resulting OSError was reported as the finding
+    `dyld cannot load <path> here: ... (mach-o file, but is an incompatible
+    architecture (have 'x86_64', need 'arm64'))` — a claim about the image,
+    derived entirely from a limitation of the instrument. Measured: it is the
+    whole of the arm64-vs-x86-64 pass difference, all 7 files, every one of them
+    an image that builds and links correctly for its architecture
+    (bugs/FORMAL_sweep_work_map_2026-10-01.md §4).
+    """
+    global _HOST_CPUTYPE
+    if _HOST_CPUTYPE is _UNSET:
+        _HOST_CPUTYPE = None
+        for exe in (sys.executable, sys.prefix):
+            types = _macho_cputypes(exe) if exe and os.path.exists(exe) else set()
+            if len(types) == 1:
+                _HOST_CPUTYPE = next(iter(types))
+                break
+    return _HOST_CPUTYPE
+
+
+_UNSET = object()
+_HOST_CPUTYPE = _UNSET
+
+
+def _host_arch_name() -> str:
+    """This process's architecture, in the spelling the report uses."""
+    host = _host_cputype()
+    return _cpu_name(host) if host is not None else "unknown-architecture"
+
+
 def _cpu_name(cputype: int) -> str:
     return _CPU_NAMES.get(cputype, f"cpu type {cputype}")
 
@@ -1586,40 +1636,77 @@ def _macho_cputypes(path: str) -> set:
         return set()
 
 
-def _loadable_for(path: str, cputype: int) -> str:
-    """"" for a library this image's dyld could load, else why not.
+def _loadable_for(path: str, cputype: int):
+    """`(state, foreign, why)` for a library this image's dyld could load.
 
-    dlopen is deliberately NOT the test — it is happy to load a library built
-    for the other architecture, which is precisely the case dyld refuses
-    ("Library not loaded: … (mach-o file, but is an incompatible architecture
-    (have 'arm64', need 'x86_64'))") and precisely the case that would turn
-    this probe into a false PASS. The architecture is checked first, from the
-    file's own header; cpusubtype is not, because dyld accepts a mismatch
-    there and matching it more strictly would invent findings.
+    THREE states, and the third is the one that was missing until 2026-10-01.
+    `foreign` is the architecture a host would need in order to answer at all,
+    and is None for the other two:
 
-    libSystem short-circuits to "loadable" without either check: it is answered
-    from the host process (see the block comment above), and on this system
-    /usr/lib/libSystem.B.dylib is a shared-cache stub with no header to read —
-    so the arch test below would report every image as unloadable, which is the
-    false-finding direction.
+      ("loadable",   None, "")     the image could load it, and it does export
+      ("unloadable", None, why)    the image could NOT load it — a real failure
+      ("unprovable", arch, why)    this PROCESS cannot find out, because the
+                                   library is not of the host's architecture
+
+    dlopen is deliberately NOT the test for the second — it is happy to load a
+    library built for the other architecture, which is precisely the case dyld
+    refuses and precisely the case that would turn this probe into a false PASS.
+    The architecture is checked first, from the file's own header; cpusubtype is
+    not, because dyld accepts a mismatch there and matching it more strictly
+    would invent findings.
+
+    The third state is separate from the second because "this image cannot load
+    it" and "I cannot check whether this image can load it" are different facts
+    and the tool conflated them. A `dlopen` failure on a library of the HOST's
+    architecture is a fact about the image (the image's dyld runs in the same
+    world). A `dlopen` failure on a library of the OTHER architecture says
+    nothing at all about the image — the image's dyld would be a different
+    process on a different slice, and the honest answer is that the probe cannot
+    answer, not that the image is broken. Reporting it as a load failure filed
+    7 correct x86-64 images as `not-answerable/unresolved-extern` on an arm64
+    host.
+
+    libSystem short-circuits to "loadable" without any of the checks: it is
+    answered from the host process (see the block comment above), and on this
+    system /usr/lib/libSystem.B.dylib is a shared-cache stub with no header to
+    read — so the arch test below would report every image as unloadable, which
+    is the false-finding direction.
     """
     if path == _LIBSYSTEM:
-        return ""                       # ordinal 1, answered from the host
+        return "loadable", None, ""       # ordinal 1, answered from the host
     types = _macho_cputypes(path)
     if not types:
-        return f"cannot read a Mach-O header at {path}"
+        return "unloadable", None, f"cannot read a Mach-O header at {path}"
     if cputype not in types:
         have = "/".join(sorted(_cpu_name(t) for t in types))
-        return (f"{path} is built for {have}, which this "
+        return ("unloadable", None,
+                f"{path} is built for {have}, which this "
                 f"{_cpu_name(cputype)} image cannot load")
+    host = _host_cputype()
+    if host is None:
+        # Cannot establish what this process can dlopen, so the dlopen below
+        # would be an uninterpretable result either way. Refusing to answer is
+        # the direction that cannot invent a finding.
+        return ("unprovable", None,
+                f"cannot establish this host's architecture, so whether "
+                f"{path} could be loaded here is unknown")
+    if host not in types:
+        foreign = "/".join(sorted(_cpu_name(t) for t in types))
+        return ("unprovable", foreign,
+                f"{path} is built for {foreign}, which this "
+                f"{_cpu_name(host)} HOST cannot dlopen — so this probe cannot "
+                f"say whether the image's own dyld could load it. Not a "
+                f"finding about the image: re-run the sweep on a {foreign} "
+                f"host, or take the verdict as unproven rather than as a "
+                f"failure")
     if path in _LIBS:
-        return _LIBS[path]
+        return ("loadable" if not _LIBS[path] else "unloadable"), None, _LIBS[path]
     try:
         _LIBS[path] = ""
         ctypes.CDLL(path)
     except OSError as e:
         _LIBS[path] = f"dyld cannot load {path} here: {e}"
-    return _LIBS[path]
+    return ("unloadable" if _LIBS[path] else "loadable"), None, _LIBS[path]
 
 
 def _exports(path: str, name: str) -> bool:
@@ -1640,32 +1727,44 @@ def _exports(path: str, name: str) -> bool:
     return _MEMO[key]
 
 
-def _resolvable(ordinal: int, name: str, dylibs: list, cputype: int) -> str:
-    """Why dyld cannot bind `name` from dylib `ordinal`, or "" if it can.
+def _resolvable(ordinal: int, name: str, dylibs: list, cputype: int):
+    """`(state, foreign, why)` for whether dyld can bind `name` from `ordinal`.
 
     See the block comment above: the answer is read out of the image's own load
     commands and bind stream, and looked up in the one library dyld would use.
-    "" is the only success value, so a caller cannot mistake a partial answer
-    for a resolution.
+    `("resolved", None, "")` is the only success, so a caller cannot mistake a
+    partial answer — including "this host cannot find out" — for a resolution.
     """
     if not dylibs:
-        return "the image has no load commands"
+        return "unresolved", None, "the image has no load commands"
     if ordinal < 1 or ordinal > len(dylibs):
-        return (f"the bind names dylib ordinal {ordinal}, which the image's "
+        return ("unresolved", None,
+                f"the bind names dylib ordinal {ordinal}, which the image's "
                 f"{len(dylibs)} load command(s) do not define")
     path = dylibs[ordinal - 1]
-    bad = _loadable_for(path, cputype)
-    if bad:
-        return f"{bad}; nothing in it binds"
+    state, foreign, bad = _loadable_for(path, cputype)
+    if state == "unprovable":
+        # Propagated as itself rather than folded into "unresolved": the caller
+        # files the two differently, and that difference is the whole point.
+        return state, foreign, bad
+    if state == "unloadable":
+        return state, None, f"{bad}; nothing in it binds"
     if not _exports(path, name):
-        return f"{name} is not exported by {path}"
-    return ""
+        return "unresolved", None, f"{name} is not exported by {path}"
+    return "resolved", None, ""
 
 
 # A name the image binds that no loadable library provides, and the reason —
 # so the printed finding says WHICH library was consulted and what was wrong
 # with it, rather than only how many names there were.
-Missing = collections.namedtuple("Missing", "name why")
+#
+# `unprovable` is a third answer beside "dyld cannot bind this" and "dyld binds
+# this": it means the sweep ran on a host that cannot answer, so the name is
+# neither bound nor unbound as far as this run knows. Carried on the record
+# rather than encoded in the message, because run_one files the two differently
+# and a caller that had to tell them apart by reading prose would eventually
+# read them the same way round.
+Missing = collections.namedtuple("Missing", "name why unprovable foreign")
 
 
 def _unresolved_imports(binary: bytes) -> list:
@@ -1675,6 +1774,11 @@ def _unresolved_imports(binary: bytes) -> list:
     would, at the first call to it): that is not coverage and is not a codegen
     finding, so it is reported in its own class. See the block comment above
     for what this does and does not prove.
+
+    `Missing.unprovable` marks the names this host could not check at all; see
+    _loadable_for's third state. Both kinds are returned so a caller can see
+    that a name was looked for, and the caller is what decides that one is a
+    finding and the other is a gap in the run.
     """
     dylibs = _load_dylib_names(binary)
     if not dylibs and binary[:4] not in _MACHO_MAGICS:
@@ -1684,10 +1788,15 @@ def _unresolved_imports(binary: bytes) -> list:
         # failure of the reader itself. Said out loud instead.
         return [Missing("<unreadable image>",
                         f"{len(binary)} bytes with no Mach-O header, so what "
-                        f"it binds could not be read at all")]
+                        f"it binds could not be read at all", False, None)]
     cputype = struct.unpack_from("<i", binary, 4)[0]
-    return [Missing(name, why) for ordinal, name in _binds(binary)
-            for why in [_resolvable(ordinal, name, dylibs, cputype)] if why]
+    out = []
+    for ordinal, name in _binds(binary):
+        state, foreign, why = _resolvable(ordinal, name, dylibs, cputype)
+        if state == "resolved":
+            continue
+        out.append(Missing(name, why, state == "unprovable", foreign))
+    return out
 
 
 def _verdict_bytes(ok, detail):
@@ -1873,12 +1982,41 @@ def run_one(path, timeout, flags, mem_gb=MEMCAP_GB) -> Verdict:
             linked = [d for d in _load_dylib_names(binary) if d != _LIBSYSTEM]
             cause = None
             if missing:
-                names = sorted({m.name for m in missing})
+                # Split first, because the two kinds need different files. A
+                # name the probe could not check (this host cannot dlopen a
+                # library of the image's architecture) is NOT a fact about the
+                # image, and reporting it as one is how 7 correct x86-64 images
+                # came to be filed `not-answerable/unresolved-extern` on an arm64
+                # host. If every unprovable name is unprovable, the file gets no
+                # verdict at all and says why; if some are real, the real ones
+                # are the finding and the unchecked ones are counted beside it,
+                # because a reader has to know the finding is not the whole
+                # story.
+                unprovable = [m for m in missing if m.unprovable]
+                real = [m for m in missing if not m.unprovable]
+                names = sorted({m.name for m in real or unprovable})
+                if not real:
+                    need = unprovable[0].foreign or "matching"
+                    return verdict(
+                        False,
+                        f"builds, but this {_host_arch_name()} host cannot "
+                        f"check the {len(unprovable)} import(s) it binds "
+                        f"({', '.join(names[:3])}"
+                        + (" ..." if len(names) > 3 else "")
+                        + f"): they are in a {need} dylib, which only a {need} "
+                        f"process can dlopen. The image's own dyld would load "
+                        f"them; verifying that needs a {need} host, so this run "
+                        f"reports no verdict rather than a failure "
+                        f"[{unprovable[0].why}]",
+                        CAUSE_FOREIGN_ARCH, False)
                 ok, detail = False, (
-                    f"builds, but {len(missing)} import(s) dyld cannot "
+                    f"builds, but {len(real)} import(s) dyld cannot "
                     f"resolve: {', '.join(names[:3])}"
                     + (" ..." if len(names) > 3 else "")
-                    + f" [{missing[0].why}]")
+                    + f" [{real[0].why}]"
+                    + (f" ({len(unprovable)} further name(s) could not be "
+                       f"checked from this host at all — see "
+                       f"'{CAUSE_FOREIGN_ARCH}')" if unprovable else ""))
             else:
                 ok, detail = True, ""
         else:
@@ -2627,6 +2765,24 @@ def main():
               f"cannot take the run down; each is a real cost finding about "
               f"that file (see bugs/PERF_memory_over_4gb_is_a_bug.md) and is "
               f"NOT cached, so re-running re-measures it")
+    foreign_arch = sum(1 for p in files
+                       if results[p].cause == CAUSE_FOREIGN_ARCH)
+    if foreign_arch:
+        # Said in the summary, not only on the rows, because it changes what the
+        # headline IS. These files are in no rate, so the rate is unchanged —
+        # but a reader comparing this arch's PASS count with another host's is
+        # comparing a floor with a number, and the difference is exactly this
+        # many files. The honest way to say that is in the sentence a reader
+        # will actually read.
+        print(f"  note: {foreign_arch} file(s) built, but this "
+              f"{_host_arch_name()} host could not check whether their "
+              f"imports resolve (the dylibs are another architecture's, and "
+              f"dlopen only loads this process's own). They are in `tool`, in "
+              f"NO rate, and NOT cached — so the {passed} pass(es) above is a "
+              f"FLOOR for this arch on this host, and re-running the sweep on a "
+              f"host of each image's architecture is what turns it into a "
+              f"number. This is the instrument's limit, not a defect in those "
+              f"images")
     if counts[CLASS_CRASH]:
         print(f"  note: {counts[CLASS_CRASH]} file(s) made the BACKEND RAISE "
               f"rather than refuse a construct. A crash is a bug in the "

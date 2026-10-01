@@ -495,14 +495,85 @@ class TestDyldProbe(unittest.TestCase):
         # dyld would refuse the image; the probe must not read past the end of
         # the load-command list and fall off into "resolvable". The same
         # lookup for an ordinal the image DOES have is the control.
+        #
+        # `_resolvable` returns (state, foreign, why) and only the triple
+        # ("resolved", None, "") is success, so a caller cannot mistake a
+        # partial answer — including "this host cannot find out" — for one.
         from formal import macho_linker as ML
         only_libsystem = [S._LIBSYSTEM]
-        self.assertNotEqual(
-            S._resolvable(9, "printf", only_libsystem, ML.CPU_TYPE_ARM64), "")
         self.assertEqual(
-            S._resolvable(1, "printf", only_libsystem, ML.CPU_TYPE_ARM64), "")
-        self.assertNotEqual(
-            S._resolvable(1, "printf", [], ML.CPU_TYPE_ARM64), "")
+            S._resolvable(9, "printf", only_libsystem, ML.CPU_TYPE_ARM64)[0],
+            "unresolved")
+        self.assertEqual(
+            S._resolvable(1, "printf", only_libsystem, ML.CPU_TYPE_ARM64),
+            ("resolved", None, ""))
+        self.assertEqual(
+            S._resolvable(1, "printf", [], ML.CPU_TYPE_ARM64)[0], "unresolved")
+
+    def test_a_foreign_architecture_dylib_is_unprovable_not_unloadable(self):
+        # The 2026-10-01 false finding. An x86-64 image with correct x86-64
+        # dylibs on its link line, probed from an arm64 process: dlopen cannot
+        # load an x86-64 dylib into an arm64 process, and that failure says
+        # NOTHING about whether the x86-64 image's own dyld could. Reporting it
+        # as a load failure filed 7 correct images as unanswerable and made the
+        # x86-64 sweep's pass count a floor rather than a number.
+        from formal import macho_linker as ML
+        self.assertEqual(S._host_cputype(), ML.CPU_TYPE_ARM64,
+                         "this case is written for an arm64 host; the sweep "
+                         "does run on x86-64 and the other direction is the "
+                         "same code path with the roles swapped")
+        other = [os.path.join(S._LIBSYSTEM)]
+        fake = os.path.join(tempfile.gettempdir(), "sweep_foreign_probe.dylib")
+        with open(fake, "wb") as f:
+            # A real Mach-O header claiming x86_64, with no content: enough for
+            # _macho_cputypes, and nothing else is consulted because the host
+            # check fires before the dlopen.
+            f.write(b"\xcf\xfa\xed\xfe" + b"\x07\x00\x00\x01" + b"\x00" * 24)
+        try:
+            state, foreign, why = S._loadable_for(fake, ML.CPU_TYPE_X86_64)
+        finally:
+            os.unlink(fake)
+        self.assertEqual(state, "unprovable",
+                         "an x86-64 dylib on an x86-64 image is not unloadable; "
+                         "this host simply cannot check it")
+        self.assertEqual(foreign, "x86_64")
+        self.assertIn("HOST cannot dlopen", why)
+        self.assertIn("Not a finding about the image", why)
+
+    def test_a_dylib_of_the_HOST_architecture_is_still_a_real_answer(self):
+        # The conservative direction must not have been taken one step too far:
+        # when the library IS this host's architecture, dlopen's verdict is a
+        # fact about the image and is reported as a load failure if it fails.
+        from formal import macho_linker as ML
+        state, foreign, _ = S._loadable_for(S._LIBSYSTEM, ML.CPU_TYPE_X86_64)
+        # libSystem is answered from the host, so it is loadable whatever the
+        # image's arch — that is the documented exception, and it is the case
+        # that must not be swept up in the new state.
+        self.assertEqual((state, foreign), ("loadable", None))
+
+    def test_a_file_whose_imports_are_all_unprovable_gets_no_verdict(self):
+        # Not a finding, and not a pass: the class is `tool`, the cause is its
+        # own, and nothing is cached. A `pass` would be inventing coverage the
+        # probe never established; an `unresolved-extern` would be accusing a
+        # correct image of a broken link line.
+        from formal import macho_linker as ML
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "x.mojo")
+            with open(path, "w") as f:
+                f.write("def f():\n    return 1\n")
+            saved = S._unresolved_imports
+            S._unresolved_imports = lambda binary: [
+                S.Missing("helper_add", "…is built for x86_64, which this "
+                          "arm64 HOST cannot dlopen…", True, "x86_64")]
+            try:
+                v = S.run_one(path, 30, S.build_flags("x86_64"), mem_gb=0)
+            finally:
+                S._unresolved_imports = saved
+        self.assertEqual(v.cls, S.CLASS_TOOL)
+        self.assertEqual(v.cause, S.CAUSE_FOREIGN_ARCH)
+        self.assertIn("x86_64 host", v.detail)
+        self.assertIn("would load", v.detail)
+        self.assertFalse(v.cached)
 
 
 class TestChainedDependencyRefusal(unittest.TestCase):
