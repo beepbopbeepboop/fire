@@ -938,7 +938,7 @@ def _gmi_container_ctype(v):
 
 
 def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found: dict,
-                              param_bools=None) -> None:
+                              param_bools) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Not recursive (walks via _walk_ast), but a
     lifted closure all the same; `param_types`/`found` (dicts) threaded
@@ -955,7 +955,13 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
     True/False rather than 1/0, and that the struct's own generated
     `_mojo_repr_<Sn>` already reads. Without it the canonical Python shape
     (`self.flag = flag` from a `flag: bool` parameter) had no bool evidence
-    anywhere and every spelling of `b.flag` printed `1`/`0`."""
+    anywhere and every spelling of `b.flag` printed `1`/`0`.
+
+    Required, not defaulted, and THREADED through every recursive call below
+    rather than defaulted to an empty set: the descent at the bottom walks
+    into `if`/`else`/`try`/`match`/nested-`def` bodies, so a defaulted
+    argument would silently drop the evidence for `def __init__(self, flag:
+    bool):` whose assignment sits inside a branch."""
     for node in _walk_ast(body):
         if isinstance(node, AssignStmt):
             fn = _gmi_self_member(node.target)
@@ -975,7 +981,7 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
                 v = node.value
                 if isinstance(v, IdentExpr):
                     ft = param_types.get(v.name, 'int64_t')
-                    if param_bools and v.name in param_bools:
+                    if v.name in param_bools:
                         self.struct_bool_fields.setdefault(_sname, set()).add(fn)
                 elif isinstance(v, IntLiteral):
                     ft = 'int64_t'
@@ -1153,9 +1159,9 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
     for _nn in body:
         if isinstance(_nn, StructDef):
             for _mm in _nn.methods:
-                _gmi_collect_self_assigns(self, _sname, _mm.body, param_types, found)
+                _gmi_collect_self_assigns(self, _sname, _mm.body, param_types, found, param_bools)
         elif isinstance(_nn, FunctionDef):
-            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found)
+            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found, param_bools)
         # Control-flow bodies, same reasoning: `_walk_ast` does not recurse
         # into them reliably self-hosted, so an assignment nested one level
         # down (`with self._cond: self._thread = threading.Thread(...)` in
@@ -1163,36 +1169,36 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict, found:
         # its field stayed unregistered. Mirrors the explicit per-node-type
         # recursion `_selfhost_walk_stmts_for_assign_targets` already uses.
         elif isinstance(_nn, IfStmt):
-            _gmi_collect_self_assigns(self, _sname, _nn.then_body, param_types, found)
+            _gmi_collect_self_assigns(self, _sname, _nn.then_body, param_types, found, param_bools)
             for _ei in range(len(_nn.elifs)):
-                _gmi_collect_self_assigns(self, _sname, _nn.elifs[_ei][1], param_types, found)
+                _gmi_collect_self_assigns(self, _sname, _nn.elifs[_ei][1], param_types, found, param_bools)
             if _nn.else_body:
-                _gmi_collect_self_assigns(self, _sname, _nn.else_body, param_types, found)
+                _gmi_collect_self_assigns(self, _sname, _nn.else_body, param_types, found, param_bools)
         elif isinstance(_nn, ComptimeIfStmt):
-            _gmi_collect_self_assigns(self, _sname, _nn.then_body, param_types, found)
+            _gmi_collect_self_assigns(self, _sname, _nn.then_body, param_types, found, param_bools)
             for _ec2 in range(len(_nn.elifs)):
-                _gmi_collect_self_assigns(self, _sname, _nn.elifs[_ec2][1], param_types, found)
+                _gmi_collect_self_assigns(self, _sname, _nn.elifs[_ec2][1], param_types, found, param_bools)
             if _nn.else_body:
-                _gmi_collect_self_assigns(self, _sname, _nn.else_body, param_types, found)
+                _gmi_collect_self_assigns(self, _sname, _nn.else_body, param_types, found, param_bools)
         elif (isinstance(_nn, WhileStmt) or isinstance(_nn, ForStmt)
                 or isinstance(_nn, ComptimeForStmt)):
-            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found)
+            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found, param_bools)
             _eb3 = getattr(_nn, 'else_body', None)
             if _eb3:
-                _gmi_collect_self_assigns(self, _sname, _eb3, param_types, found)
+                _gmi_collect_self_assigns(self, _sname, _eb3, param_types, found, param_bools)
         elif isinstance(_nn, TryStmt):
-            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found)
+            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found, param_bools)
             for _hi in range(len(_nn.handlers)):
-                _gmi_collect_self_assigns(self, _sname, _nn.handlers[_hi].body, param_types, found)
+                _gmi_collect_self_assigns(self, _sname, _nn.handlers[_hi].body, param_types, found, param_bools)
             if _nn.else_body:
-                _gmi_collect_self_assigns(self, _sname, _nn.else_body, param_types, found)
+                _gmi_collect_self_assigns(self, _sname, _nn.else_body, param_types, found, param_bools)
             if _nn.finally_body:
-                _gmi_collect_self_assigns(self, _sname, _nn.finally_body, param_types, found)
+                _gmi_collect_self_assigns(self, _sname, _nn.finally_body, param_types, found, param_bools)
         elif isinstance(_nn, WithStmt):
-            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found)
+            _gmi_collect_self_assigns(self, _sname, _nn.body, param_types, found, param_bools)
         elif isinstance(_nn, MatchStmt):
             for _ci in range(len(_nn.cases)):
-                _gmi_collect_self_assigns(self, _sname, _nn.cases[_ci].body, param_types, found)
+                _gmi_collect_self_assigns(self, _sname, _nn.cases[_ci].body, param_types, found, param_bools)
 
 def _gmi_scan_import_modules(mod_stmts, all_modules: dict) -> None:
     """Record every module named by `import m` / `import m as a, m2` /

@@ -4809,8 +4809,7 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
         # expression can — one shared decision for the dict literal, the dict
         # comprehension and every `d[k] = v` spelling, which are five copies
         # of it. See that function's docstring.
-        ginf_emit = gen._emit_dict_int_value_store
-        ginf_emit(t, kt, kv, vt, vv, val_expr)
+        gen._emit_dict_int_value_store(t, kt, kv, vt, vv, val_expr)
 
 
 def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:

@@ -3912,7 +3912,7 @@ def note_dict_callable_ret(gen, dict_val: str, value_text: str) -> None:
 
 
 def emit_dict_int_value_store(gen, dict_val: str, key_ctype: str, key_val: str,
-                              val_ctype: str, val: str, val_node=None) -> None:
+                              val_ctype: str, val: str, val_node) -> None:
     """The one dict store of an integer-ish VALUE, shared by the dict literal
     (`_lower_dict_literal`), the dict comprehension (`_lower_dict_compr`),
     the subscript store `d[k] = v` and the two `d[k] = v` shapes that reach a
