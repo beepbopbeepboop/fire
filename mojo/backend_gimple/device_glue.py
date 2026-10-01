@@ -133,6 +133,22 @@ class LaunchArg(NamedTuple):
     is_buffer: bool
     width: int
     writable: bool = True
+    #: C expression giving THIS buffer's element count, for the pack and the
+    #: copy-back. None means "the kernel's first Int/Int64 parameter", which is
+    #: the historical single-length contract and still the right default.
+    #:
+    #: It exists because a GEMM has three buffers of three DIFFERENT lengths --
+    #: A is M*K, B is K*N, C is M*N -- and one count cannot express that.
+    #: Measured, that is not hypothetical: with every buffer cut to a single
+    #: count, A is truncated to the first parameter's value and the kernel
+    #: reads past it. Which is the same class of silent wrong answer as the
+    #: offset-index refusal in 9798ee7b, one level up: there the length was
+    #: right and the OFFSET was dropped; here the offset idea is fine and the
+    #: LENGTH is wrong.
+    #:
+    #: Defaulting to None keeps every existing kernel and every existing test
+    #: byte-identical; only kernels that ask for it get per-buffer lengths.
+    length: str | None = None
 
 
 class LaunchError(Exception):
@@ -220,11 +236,18 @@ def emit_launch_wrappers(kernels: dict) -> str:
         if _bufs:
             lines.append('    void *_mg_bufs[] = {%s};'
                          % ', '.join(n for n, _ in _bufs))
-            # Every buffer is cut to the kernel's element count. Writing past
-            # an output buffer because its own length was longer would be a
-            # heap corruption, so the count wins over any per-argument idea.
+            # A buffer's element count is its OWN `length` expression when the
+            # kernel gave it one, and the kernel's single Int parameter
+            # otherwise. The single-count rule is not abandoned: it is the
+            # default, and it is what protects the common case where writing
+            # past an output buffer because its own length was longer would be
+            # heap corruption. What it could not express is a kernel whose
+            # buffers genuinely differ -- a GEMM's A is M*K, B is K*N, C is
+            # M*N -- and truncating A to the first parameter is the same class
+            # of silent wrong answer as the dropped offset in 9798ee7b.
             lines.append('    int64_t _mg_sizes[] = {%s};'
-                         % ', '.join([params[count_idx][0]] * len(_bufs)))
+                         % ', '.join((a.length or params[count_idx][0])
+                                     for a in params if a.is_buffer))
         else:
             lines.append('    void *_mg_bufs[1]; int64_t _mg_sizes[1];')
         if _scals:

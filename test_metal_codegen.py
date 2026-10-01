@@ -1088,6 +1088,71 @@ def _fn(src: str, name: str = None):
     raise AssertionError('no such function')
 
 
+class TestPerBufferLengths(unittest.TestCase):
+    """A kernel whose buffers have DIFFERENT lengths.
+
+    The single-length contract -- every buffer cut to the kernel's first Int
+    parameter -- is the default and stays the default. It cannot express a
+    GEMM though: A is M*K, B is K*N, C is M*N, and truncating A to the first
+    parameter is the same class of silent wrong answer as the dropped offset
+    index, one level up. There the LENGTH was right and the OFFSET was lost;
+    here the offset idea is fine and the LENGTH is wrong.
+    """
+
+    SRC = ("@gpu\n"
+           "def tri(A: UnsafePointer[Float32, ImmutAnyOrigin],\n"
+           "        B: UnsafePointer[Float32, ImmutAnyOrigin],\n"
+           "        C: UnsafePointer[Float32, MutAnyOrigin],\n"
+           "        m: Int, k: Int, n: Int):\n"
+           "    C[0] = A[0] + B[0]\n"
+           "\n"
+           "def main():\n"
+           "    m = 4\n"
+           "    k = 5\n"
+           "    n = 6\n"
+           "    A = [1.0] * (m * k)\n"
+           "    B = [2.0] * (k * n)\n"
+           "    C = [0.0] * (m * n)\n"
+           "    tri(A, B, C, m, k, n)\n"
+           "    print(C[0])\n")
+
+    def _gen(self, lengths):
+        m = list(parse(self.SRC))
+        gen = gctypes.GimpleGen(None)
+        gen.module_name = 'tri'
+        gen._device_launch_lengths = {'tri': lengths} if lengths else {}
+        return gen.gen_module(m)
+
+    def test_each_buffer_gets_its_own_length(self):
+        out = self._gen({'A': 'm * k', 'B': 'k * n', 'C': 'm * n'})
+        self.assertIn('_mg_pack_float(A, (int64_t)(m * k))', out)
+        self.assertIn('_mg_pack_float(B, (int64_t)(k * n))', out)
+        self.assertIn('_mg_pack_float(C, (int64_t)(m * n))', out)
+        # The write-back is sized for C, not for A.
+        self.assertIn('_mg_unpack_float(C,', out)
+
+    def test_a_kernel_that_asks_for_nothing_is_unchanged(self):
+        """The default must be byte-identical to before the field existed.
+
+        With no recorded lengths every buffer falls back to the kernel's single
+        Int parameter, which is what the 108 pre-existing tests already pin.
+        This is the guard against the new field quietly changing the common
+        case."""
+        out = self._gen({})
+        self.assertNotIn('(m * k)', out)
+        self.assertNotIn('(k * n)', out)
+        self.assertIn('_mg_pack_float(A, (int64_t)(m))', out)
+
+    def test_the_wrapper_sizes_each_buffer_separately(self):
+        """The device-side `_mg_sizes` table, not just the host pack.
+
+        The host packs correctly but the device is told the wrong size, the
+        buffer is allocated short and the kernel reads past it -- so this half
+        has to be checked too, and it is a different string."""
+        out = self._gen({'A': 'm * k', 'B': 'k * n', 'C': 'm * n'})
+        self.assertIn('int64_t _mg_sizes[] = {m * k, k * n, m * n};', out)
+
+
 class TestOffloadRefusals(unittest.TestCase):
     """Shapes that LOOK offloadable and are not, each for a measured reason.
 

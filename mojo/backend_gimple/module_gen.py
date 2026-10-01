@@ -1186,12 +1186,33 @@ def gen_module_impl(self, stmts):
     _device_fallbacks: list = []
     self._device_launch_args = {}
     self._device_launch_count: dict = {}
+    # Per-BUFFER element-count expressions, recorded by the SYNTHESISER:
+    # {kernel_name: {param_name: "m * k"}}. It is synthesis metadata and not
+    # something a type annotation can carry -- a GEMM's A is M*K, B is K*N and
+    # C is M*N, and no spelling of `List[Float32]` says which. Applied to the
+    # LaunchArgs just below, where they are built.
+    # Created ONCE, not reset here: the synthesiser records into this table
+    # BEFORE the module is generated, and a plain `= {}` in the classification
+    # pass silently wiped it -- measured, every buffer came out sized to the
+    # kernel's single Int parameter and two tests failed while the plumbing
+    # looked correct. The other two tables ARE reset per module and should be;
+    # this one carries information from an earlier pass.
+    if not hasattr(self, '_device_launch_lengths'):
+        self._device_launch_lengths: dict = {}
     _device_kernels_meta: dict = {}
     for _s in stmts:
         if (isinstance(_s, FunctionDef)
                 and _device_kinds.get(_as_str(_s.name)) == _gmi_device_select.DEVICE):
             _nm = _as_str(_s.name)
             _tys, _ci = _gmi_device_glue.launch_arg_types(_s.params)
+            # Apply any per-buffer lengths the synthesiser recorded for this
+            # kernel. A NamedTuple._replace keeps every other field, so this
+            # cannot silently drop `writable` -- which is the field whose loss
+            # would skip a copy-back and leave the output list untouched.
+            _lens = self._device_launch_lengths.get(_nm) or {}
+            if _lens:
+                _tys = [_a._replace(length=_lens[_a.name]) if _a.name in _lens
+                        else _a for _a in _tys]
             # Fail here, at the classification pass, rather than at the first
             # call site: an un-marshallable kernel is a build error either
             # way, and failing before anything is emitted gives a file and
