@@ -1,9 +1,18 @@
-# `callee has no definition on this path`: the ceiling is ZERO, and four of its five sentences were false
+# `callee has no definition on this path`: the ceiling is ZERO, four of its five
+sentences were false, and the hand-off itself now lowers
 
-**Status: the refusal is now TRUE of every file it names (landed), and the
-construct's ceiling is 0 of 12 — no file the sweep files under it can be
-unblocked by anything done here. The hand-off itself is still refused, and the
-step that would allow it is written down at the end.**
+**Status: the refusal is TRUE of every file it names (landed); the hand-off
+itself is NO LONGER refused — the step §4 named is built (2026-10-01), and the
+ceiling is re-measured below and is still 0 of 11, on the new-modular tree.**
+
+The population is no longer 12. The 2026-10-01 x86-64 sweep of the new-modular
+stdlib (`.tmp/sweep-x86-4.txt`, 623 files) files **33** files under this cause,
+and they are 11 imported free functions, 18 genuinely unbound names, and 4
+`__get_mvalue_as_litref` — see §1a for the full split and §1b for what the 11
+land on now. The 18 and the 4 are unchanged and still correct: `getattr`,
+`hasattr`, `type_of`, `debug_assert` are host builtins or stdlib functions the
+file does not import, and `__get_mvalue_as_litref` is a compiler intrinsic that
+yields MLIR. Nothing here can lower a name that no source declares.
 
 The row is `bugs/FORMAL_sweep_work_map_2026-09-30.md` row 8 (12 files, all
 in-file, no dependency chain, so the bound and the value look identical on
@@ -58,6 +67,69 @@ frame-escape family (`formal-frame-escape`).
 
 So the row's 12 is an upper bound with **no** slack, and this construct cannot
 be worth a fix on file count. It is still worth something, and §2 is what.
+
+## 1a. The 33 files of the new-modular tree, by arm
+
+`python3 tools/formal_sweep_causes.py --min 4 .tmp/sweep-x86-4.txt`, and the
+names read off the messages themselves. The arms are the five
+`frame_undefined_callee_refusal` distinguishes, so this is a measurement of the
+classifier's coverage and not a guess at it:
+
+| arm | files | names |
+|---|---|---|
+| imported free function | **11** | `discover_closures`, `llvm_intrinsic` ×2, `bitcast` ×2, `_b64encode`, `dirname`, `_getpw_macos`, `external_call` ×2, `_check_not_poison_masked` |
+| genuinely unbound | **18** | `type_of` ×7, `getattr` ×2, `hasattr` ×3, `coro_fn`, `gen`, `element_fn`, `encode_mov_rm64_r64`, `Scalar`, `debug_assert` |
+| MLIR reflection intrinsic | **4** | `__get_mvalue_as_litref` ×4 |
+| compile-time parameter | **0** | — |
+| star import | **0** | (the 22 star-importing stdlib files land elsewhere) |
+
+`type_of` is 7 of the 18 and is the largest single-name cluster in the whole
+row. It is not a missing declaration: no `type_of` is defined anywhere in the
+new-modular stdlib (`grep -rn "def type_of\|fn type_of"` over 252 files: no
+hits), and the seven uses are all compile-time type queries — `type_of(self).mut`,
+`type_of(x)._mlir_type`, `type_of(unsafe_from_address)()`. A type is not a
+value on this path and there is nothing to hand back, so those seven are the
+`formal-type-value-2` construct (`construct:type-name-as-value-2`, 82 files)
+and not this one.
+
+## 1b. The 11 imported files, re-measured after the contract landed
+
+All eleven, one build each, on this tree, after the step in §4 is built:
+
+| file | what stops it now | class |
+|---|---|---|
+| `formal/build.py` | host import `copy` | **`not-answerable/host-import`** |
+| `std/base64/base64.mojo` | dependency: `binary_heap.mojo` `'List' has no home` | `codegen/dependency` |
+| `std/sys/_libc.mojo` | dependency: `std.ffi` → `binary_heap.mojo`, same | `codegen/dependency` |
+| `std/io/file.mojo` | a method call on a value receiver (`….write_to`) | `codegen` |
+| `std/utils/numerics.mojo` | a method call on a value receiver (`arg1.gt`) | `codegen` |
+| `std/pwd/pwd.mojo` | a frame address STORED IN A FIELD (`self.pw_name`) | `codegen` |
+| `std/bit/bit.mojo` | `type_of()` — a name nothing binds (the unbound arm) | `codegen` |
+| `std/sys/intrinsics.mojo` | `type_of()` — the unbound arm | `codegen` |
+| `std/_gpu/intrinsics.mojo` | `Int()` — the unbound arm | `codegen` |
+| `std/_gpu/primitives/warp.mojo` | `func()` — the unbound arm | `codegen` |
+| `std/sys/_metal_print.mojo` | a declared parameter every call site disagrees with | `codegen` |
+
+**0 of 11 reach `pass`.** The ceiling is zero again, on a different population,
+and for the same reason: the row was never a block of work but a row of
+*diagnoses*, and every one of these eleven files has a different real problem
+underneath it. Seven of them are now reported by a DIFFERENT ARM of the same
+classifier, which is the accuracy fix doing its work rather than a new
+refusal: `_gpu/intrinsics.mojo` was refused for `llvm_intrinsic` and is now
+refused for `Int()`, which is the first unbound name its walk reaches, and
+`llvm_intrinsic` is a name it really does import.
+
+**One file changed CLASS, and it is the one worth having.**
+`formal/build.py` was `CODEGEN` and is now `NOT-ANSWERABLE/HOST-IMPORT`
+(measured with `python3 tools/formal_sweep.py -j 3 -t 300 formal/build.py`).
+A file that imports `copy` is out of this backend's reach whatever its codegen
+says, so counting it as a codegen finding put an unbuildable file in the
+measured denominator. That is the preemption `FORMAL_frame_refusal_preempts_the_import_diagnosis.md`
+names, and parking the hand-off instead of raising it fixed it for this
+construct as a side effect — the frame analysis no longer runs before the
+imports do on this path, so the import is reported. It moves the coverage
+denominator DOWN by one and the finding count down by one, which is the
+direction that makes the number mean something.
 
 ## 2. The row's one sentence was five sentences, four of them false
 
@@ -116,6 +188,8 @@ sends the reader after a non-bug").
 
 Nothing else moved: over the same 987 files, 41 messages changed and **all 41
 are this construct** — no other file's message and **no file's class** changed.
+(This was measured before the contract landed; §1b measures the classes after,
+and the one that changed — `formal/build.py` — is this construct's doing.)
 
 **All five arms keep the clause `which is a name with no definition in hand`,
 and that is load-bearing.** `tools/formal_sweep.py`'s `_FRAME_ESCAPES` and
@@ -129,48 +203,115 @@ fix: 41 files, and **all 41 still classify as `callee has no definition on this
 path`** in both tools (`formal_sweep._refusal_family` and
 `formal_sweep_causes`' label, run over the real messages).
 
-## 4. What is NOT fixed, and the exact next step
+## 4. What is NOT fixed, and the exact next step — WHICH IS NOW BUILT
 
-The hand-off stays refused in all five arms, and for the imported arm that is
-right rather than cautious. Measured, in the smallest program with the shape:
+**As of 2026-10-01 the step below is DONE**, and the two arms of the classifier
+that refused the hand-off are reachable only when the link line answers neither
+question. What follows keeps the original diagnosis (it is what the step was
+built from) and then records what changed.
 
-    # lib.mojo                        # prog.mojo
-    struct P:                         from lib import P, take_it
-      var a: Int                      def main(n):
-      var b: Int                        var p = P()
-                                      p.a = 3; p.b = 4
-    def take_it(p: P) -> Int:           return take_it(p) + n
-      return p.a + p.b
-
-* **Same file**: builds, runs, returns **17** for `n = 10`. The hand-off into a
-  callee's parameter is followed and is correct.
-* **Two modules**: refused — and refused **inside the callee module**, before
-  the caller's own refusal: there `p` is a parameter with no call site to
-  establish it, and `p.a` is refused as "a field access through a base nothing
-  establishes". A module is compiled with its own call sites, and the importing
-  file's call site is not one of them.
-
-So the missing thing is not the refusal, it is a **per-parameter contract in the
+The missing thing was not the refusal, it was a **per-parameter contract in the
 dylib manifest**: for each exported function, which parameters its own analysis
 made frame holders and of which struct. With that, the importer can compare it
 against the argument it is passing and either follow the address or refuse for a
 real disagreement — the cross-image half of `_check_holder_agreements`, which
-today stops at the module boundary. The manifest (`formal/imports.py`'s
-`build_module_dylib`) records `exports` / `reexports` / `constants` / `module`
-and no parameter information at all.
+stopped at the module boundary. The manifest recorded `exports` / `reexports` /
+`constants` / `module` and no parameter information at all.
 
-Two things that are NOT this row's work and are named here so nobody measures
-this row twice for them:
+### 4a. The blocker named here is GONE, and that is what made the step buildable
 
-1. **The callee module's own refusal** (`take_it(p: P)` with no call site) is the
-   map's row 3, "a method parameter's field, with no call site to establish it"
-   — 27 files, claimed by `formal-method-param-field`
-   (`construct:method-param-field-access`). Until that lands, no cross-module
-   free-function hand-off can be built at all, whatever the manifest carries.
-2. **The 24 `test/` files** in the imported arm are outside the sweep's default
-   scope (`DEFAULT_STDLIB_SUBTREES = ("std",)`), which is why the map says 12
-   where the real population over all roots is 41. That is a property of the
-   sweep's scope, not a disagreement about the taxonomy.
+The original text said the step was blocked on the map's row 3 —
+`take_it(p: P)` with no call site, `p.a` refused as "a field access through a
+base nothing establishes" — claimed by `formal-method-param-field`
+(`construct:method-param-field-access`), and that "until that lands, no
+cross-module free-function hand-off can be built at all, whatever the manifest
+carries".
+
+**It landed**: commit `0c603fb2` ("formal: lower a method parameter's field from
+its DECLARED type", the `Slice.__eq__` family) seeds a parameter's frame-holder
+status from the parameter's DECLARED type, which holds whether or not the
+module contains a call site. Measured on this tree, the exact two-module program
+whose callee module used to be unbuildable:
+
+    # lib.mojo                          # prog.mojo
+    struct P:                           from lib import P, take_it
+      var a: Int                        def main(n: Int) -> Int:
+      var b: Int                          var p = P()
+    def take_it(p: P) -> Int:              p.a = 3
+      return p.a * 10 + p.b                p.b = 4
+                                           return take_it(p) + n
+
+`fire.py build --formal --no-prove lib.mojo` → **Built**. So the callee module
+compiles, and the only thing left was the manifest.
+
+### 4b. What landed
+
+* `formal/build.py` `_frame_param_contract` / `_export_frame_contract` — the
+  contract is built from the holder tables `_frame_receivers` has just settled
+  and published on every export entry as `frame_params`, so it travels in the
+  manifest beside the symbol it belongs to. **Derived, never re-derived**: a
+  second reading of "is parameter i a frame address" is the pair of
+  recognitions that agrees until the day it does not, which is the failure
+  `_frame_candidates` was added to prevent.
+* A module that declares **no** framed struct publishes all-`None` rather than
+  nothing. That was a real bug in the first version: the early return in
+  `_frame_receivers` skipped the publication, so `def bump(x: Int, by: Int)` in a
+  struct-free module published no contract and its consumer reported "nothing on
+  this image's link line settles it" where the truth was "it is a plain word".
+* `formal/model.py` `resolve_frame_parameter_contract` — the decision, beside
+  its three refusal texts, comparing the callee's struct **names** against the
+  caller's. Names, not counts: two modules may each declare a `Pair`, and
+  `base + 8k` means the same thing on both sides only because both computed it
+  from the same field list.
+* The site is **parked** in `_check_frame_escapes` and decided by
+  `check_imported_frame_handoffs` from the link line, because
+  `_prepare_functions` runs before `_resolve_imports`. Parking is what stopped
+  the frame refusal preempting the import diagnosis, which is why
+  `formal/build.py` changed class (§1b).
+* `_check_frame_escapes` asks the classifier **twice** — with the import facts
+  and without, `comptime_param_of` in both — and the comparison is the decision.
+  Asking the fifth case directly is the mistake that had to be avoided, and it
+  was made first: it skipped every arm above it and reported `print(p)` as "a
+  name with no definition in hand", false of a builtin that is compiled.
+  Measured, and it is in the tree as a note at the branch.
+
+### 4c. What it is worth, measured
+
+`test_formal_run.py`, both architectures:
+
+| case | expected | what it would be if the address were wrong |
+|---|---|---|
+| read through the parameter | 44 | — (44 is also the single-module answer) |
+| **write** through the parameter | 96 | 46 |
+| star-imported free function | 44 | — |
+| layout disagreement (`Q(v,pad)` vs `P(pad,v)`) | refused by name | 213 where CPython says 312 |
+| plain-parameter disagreement | refused | the frame's own address: 42 and 58 on consecutive runs of one arm64 binary, 250 on x86-64 |
+| a name no library publishes | refused as a real "nothing binds it" | — |
+
+The write case is the one that earns the rest: the contract is per-parameter and
+says nothing about direction, so a store through the parameter is as
+load-bearing as a load, and the call is its own **statement** on purpose —
+folding it into the return expression reads `p.a` before the call, in CPython and
+here alike, and the case would pass with the write going nowhere. (An earlier
+draft did exactly that and "passed" for that reason.)
+
+**The file count is 0**, §1b: the eleven imported files each land on a different
+real problem, and seven of them are now reported by a different arm of the same
+classifier. What the step bought is a construct that is no longer a limit of the
+analysis — the refusal is now a *decision* rather than an admission — and one
+file that changed from `codegen` to `not-answerable/host-import`.
+
+### 4d. Still not this row's work
+
+* **The 24 `test/` files** in the imported arm are outside the sweep's default
+  scope (`DEFAULT_STDLIB_SUBTREES = ("std",)`), which is why the 2026-09-30 map
+  says 12 where the real population over all roots is 41. That is a property of
+  the sweep's scope, not a disagreement about the taxonomy.
+* **A method's non-receiver parameter** of an imported struct was parked by the
+  same change and is decided by the same contract, so the opaque-position arm
+  there is narrower than it was. What is left of it is the receiver-position
+  family, which is `construct:receiver-position-and-no-representation`'s, not
+  this row's.
 
 **Found in passing, not fixed, not this row's to fix:**
 `bugs/FORMAL_aliased_reexport_publishes_the_wrong_name.md` — the sibling reader
