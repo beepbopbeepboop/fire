@@ -175,11 +175,84 @@ MOJO_MAIN = 'fire.py'
 PY_FILES = ['fire.py', 'fire_compiler.py', 'myinterpreter.py',
             'module_loader.py', 'fire_main.py', 'generated_dispatch.py']
 
-# Every source the bootstrap stages dump: top-level *.mojo, mojo/*.mojo, and
-# the core .py files. Same globs the Makefile's MOJO_FILES/PY_FILES used.
-MOJO_FILES = (sorted(os.path.basename(p) for p in glob.glob(os.path.join(REPO, '*.mojo')))
-             + sorted(os.path.relpath(p, REPO)
-                      for p in glob.glob(os.path.join(REPO, 'mojo', '*.mojo'))))
+
+# Whether the last `tracked_mojo_files()` call really enumerated git's index
+# rather than falling back to a directory glob. Recorded because the two
+# produce item lists that differ in exactly the way that caused the flake
+# (transients included), and a log that cannot tell them apart is a log that
+# cannot be used to explain one.
+_MOJO_FILES_ARE_TRACKED = False
+
+
+def _glob_mojo_files(root: str) -> list:
+    """The pre-git enumeration, kept as the fallback. One definition, called
+    from both failure paths below, so the fallback cannot drift into a third
+    shape."""
+    return sorted(
+        [os.path.basename(p) for p in glob.glob(os.path.join(root, '*.mojo'))]
+        + [os.path.relpath(p, root)
+           for p in glob.glob(os.path.join(root, 'mojo', '*.mojo'))])
+
+
+def tracked_mojo_files(root: str = REPO) -> list:
+    """Every top-level and `mojo/`-level `*.mojo` that GIT TRACKS, sorted.
+
+    This replaced a `glob.glob(REPO + '/*.mojo')`, and the glob was one half of
+    a real flake (the other half was the writer it raced; see
+    test_ab_native.py's scratch-dir handling). A glob enumerates whatever is
+    *in the directory* at plan time, and this repo root is a shared, writable
+    scratch surface: the `ab-native` job writes `_abt_<case>.mojo` here while
+    it runs. So a plan built during that window listed one of those transients
+    as a `bootstrap-stage*-dumps` item, and the job that then deleted it (its
+    `finally`, or a `memcap` kill of the whole tree) failed that item with
+    `Error reading ../_abt_minimal_main.mojo: [Errno 2]` — which SKIPPED the
+    entire bootstrap chain behind it. Measured 2026-09-29, integrator gate
+    round 6.
+
+    `git ls-files` is the fix rather than a scratch-pattern exclusion list, for
+    a reason beyond the obvious one. An exclusion list is a denylist that has
+    to learn the name of every future transient, and the next one would come
+    from some job that never heard of the list; "is this file tracked source?"
+    is a property that holds for every item and needs no maintenance. It also
+    does not hide the other way a tracked file goes missing — a worktree that
+    never had it, or one deleted between the plan and the launch — which
+    `Fanout.items_are_files` now reports as a named per-item FAIL, so the
+    enumeration and the existence check reinforce each other rather than one
+    masking the other.
+
+    `:(top,glob)` is load-bearing, not decoration: a git pathspec matches at
+    any depth by default, so a bare `*.mojo` would also pull in all 54
+    `formal/examples/*.mojo` and every stdlib file, silently turning a 41-item
+    sweep into a 664-item one. Sorted explicitly because the fan-out's job
+    order is the plan's order, and a reproducible plan is worth more than
+    git's incidental ordering.
+
+    Falls back to the glob where git is unavailable (a source tarball, a
+    vendored copy) because refusing to run would be a worse failure than the
+    one being fixed — and `_MOJO_FILES_ARE_TRACKED` makes the fallback visible
+    in the run log, so such a run is never mistaken for a tracked one.
+    """
+    global _MOJO_FILES_ARE_TRACKED
+    out = subprocess.run(
+        ['git', '-C', root, 'ls-files', '-z', '--',
+         ':(top,glob)*.mojo', ':(top,glob)mojo/*.mojo'],
+        capture_output=True, text=True)
+    if out.returncode == 0:
+        found = sorted(p for p in out.stdout.split('\0') if p)
+        if found:
+            _MOJO_FILES_ARE_TRACKED = True
+            return found
+        # An empty result from a SUCCESSFUL ls-files is indistinguishable from
+        # a pathspec this git does not understand, and `plan_for` raises on a
+        # fan-out with no items — which would read as a bug in the runner.
+        # Fall through to the glob rather than fail opaquely.
+    _MOJO_FILES_ARE_TRACKED = False
+    return _glob_mojo_files(root)
+
+
+# Every source the bootstrap stages dump: the tracked top-level `*.mojo`, the
+# tracked `mojo/*.mojo` (currently none), and the core .py files.
+MOJO_FILES = tracked_mojo_files()
 BOOTSTRAP_INPUTS = MOJO_FILES + PY_FILES
 
 # Codegen sources: an edit to any of these can change every generated .ci, so
@@ -796,13 +869,20 @@ class Fanout:
     its own verdict, and the bucket reports one result for the whole set.
     Never cached: the artifact a fanout produces *is* its output, so replaying
     a cached result would leave the artifact missing.
+
+    `items_are_files` declares that every item names a file in the repo (the
+    bootstrap sweeps do; a synthetic sweep over bare strings legitimately does
+    not), which is what lets `run_job` turn "the file this item is supposed to
+    read is not there" into a FAIL naming that item instead of whatever the
+    compiler happens to say about a path it cannot open.
     """
     __slots__ = ('name', 'cmd', 'items', 'cwd', 'env', 'mem', 'memwhy',
-                 'deps', 'excl', 'reject', 'timeout', 'desc', 'expect')
+                 'deps', 'excl', 'reject', 'timeout', 'desc', 'expect',
+                 'items_are_files')
 
     def __init__(self, name, cmd, items, cwd=None, env=None, mem=None,
                  memwhy='', deps=(), excl=False, reject=None, timeout=None,
-                 desc='', expect=''):
+                 desc='', expect='', items_are_files=False):
         self.name, self.cmd = name, list(cmd)
         self.items = list(items) if not callable(items) else items
         self.cwd, self.env, self.mem = cwd, dict(env or {}), mem
@@ -810,6 +890,7 @@ class Fanout:
         self.timeout, self.desc = timeout, desc
         self.expect = expect
         self.memwhy = memwhy
+        self.items_are_files = items_are_files
 
         if mem is None:
             raise ValueError(f"{name}: a fanout runs the compiler per item; "
@@ -1329,6 +1410,7 @@ fanout('bootstrap-stage1-dumps',
        items=BOOTSTRAP_INPUTS, cwd='stage1',
        env={'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-clean'], reject='mojo_unsupported_iter',
+       items_are_files=True,
        desc='stage1: python dumps every .mojo and core .py source')
 # Must stay AFTER the per-file dumps above: that loop writes fire.ci into
 # stage1/ from fire.py as a single module, and this transitive-closure dump
@@ -1378,7 +1460,7 @@ fanout('bootstrap-stage2-dumps',
        items=BOOTSTRAP_INPUTS, cwd='stage2',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-stage2-cc'], reject='mojo_unsupported_iter',
-       expect=SELFHOST_STAGE2_STALL,
+       expect=SELFHOST_STAGE2_STALL, items_are_files=True,
        desc='stage2: the compiled binary dumps every source')
 # Same ordering constraint as stage1's: the per-file loop writes fire.ci into
 # stage2/ from a single-module dump, so the closure dump has to go last or
@@ -1395,6 +1477,7 @@ fanout('bootstrap-stage3-dumps',
        items=BOOTSTRAP_INPUTS, cwd='stage3',
        env={'MOJO_HOME': '..', 'PYTHONPATH': '..'}, mem='tiny',
        deps=['bootstrap-stage2-transitive'], reject='mojo_unsupported_iter',
+       items_are_files=True,
        desc='stage3: same binary, fresh dir (idempotency)')
 test('bootstrap-stage3-transitive',
      ['../stage2/mojo', '--dump-full', '../' + MOJO_MAIN],
@@ -1521,6 +1604,17 @@ test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
 test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
      deps=['preflight'],
      desc='every bound symbol is accounted for, on every container format')
+# `formal/hostmods/re.mojo` against CPython's own `re`: 112 patterns, eight
+# sections each, every integer compared.  In `proofs` rather than `check` for
+# the reason it is slow and not the reason it is fast: it builds and EXECUTES
+# ~140 arm64 images, and a suite that only checked the interpreter would miss
+# the whole class of bug this one exists for (a silently wrong span is
+# indistinguishable from a right one to anything downstream).
+test('formal-re', [PY, 'test_re_formal.py'],
+     deps=['preflight'],
+     extra=['test_re_formal.py', 'formal/hostmods/re.mojo',
+            'formal/hostmods/os/_syscalls.mojo', 'formal/imports.py'],
+     desc='the `re` host module, span for span, against CPython')
 # The gimple runtime's C library on a formal link line, and the three-way
 # split a `mojo_*` call now takes: linked, refused for its TYPES, and refused
 # because this library does not export the name. In `proofs` rather than
@@ -1625,7 +1719,7 @@ BUCKETS = {
     'proofs': ['formal', 'formal-call-proofgen',
                'formal-run', 'formal-dylib', 'formal-imports',
                'formal-sweep', 'formal-sweep-truth',
-               'formal-link-accounting', 'formal-runtime-link',
+               'formal-link-accounting', 'formal-re', 'formal-runtime-link',
                'refusal-taxonomy', 'comptime-parity',
                'returned-frame-layout', 'formal-x86',
                'formal-x86-endtoend', 'formal-x86-model'],
@@ -2007,6 +2101,27 @@ def run_job(job: Job, opts, log: Log) -> Result:
     log.line(f'  memcap: {cls} class'
              + (f' (default)' if not spec.mem else '')
              + f', ceiling {memlimit(cls)} GB')
+
+    # A fan-out item that names a file which is not there is this item's
+    # failure, and it is checked HERE, before the process is launched, so the
+    # verdict names the item instead of relaying the compiler's own message
+    # about a path it could not open. This is not defensive padding: the
+    # 2026-09-29 round-6 flake was exactly this — `ab-native`'s transient
+    # `_abt_minimal_main.mojo` was enumerated as a stage1-dumps item, deleted
+    # out from under it, and the report was eight SKIPs with the one real
+    # cause buried in an item's stderr. `tracked_mojo_files` stops the
+    # transient from being enumerated at all; this catches the residue that
+    # survives that (a tracked file absent from this worktree, a file deleted
+    # between the plan and the launch) and, critically, keeps the damage
+    # local: the item FAILs, the rest of the sweep still runs, and the tally
+    # says 1 of 41 rather than reporting a chain that silently did not run.
+    if isinstance(spec, Fanout) and spec.items_are_files and job.label:
+        item_path = os.path.join(REPO, job.label)
+        if not os.path.exists(item_path):
+            return Result(FAIL, detail=(
+                f'item file {job.label} does not exist — it was enumerated as '
+                f'a tracked source but is not in this worktree (deleted after '
+                f'the plan was built, or a checkout that never had it)'))
 
     # An artifact-cached step: a hit means the binary is already correct, so
     # the step does not run at all. Only whole steps are cached; a fanout's
@@ -2849,6 +2964,14 @@ def _run_all(names, opts, log: Log):
              f'class before it starts')
     for line in memclass_report_lines():
         log.line('  ' + line)
+    # Which enumeration produced the fan-out item list. The two differ in a way
+    # that matters: the glob fallback picks up whatever transient files happen
+    # to be in the repo root, which is the race this line exists to make
+    # visible. A reader seeing `glob` in a log knows the sweep's item list was
+    # not content-controlled.
+    log.line(f'  {"fan-out":<12} {len(MOJO_FILES)} tracked *.mojo items'
+             + ('' if _MOJO_FILES_ARE_TRACKED
+                else '  (GLOB FALLBACK — not a git checkout)'))
     log.line('')
 
     if not opts.quiet:
