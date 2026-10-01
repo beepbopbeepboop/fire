@@ -166,8 +166,18 @@ LINE_RE = re.compile(
 CAUSES = (
     # ── limits of the TARGET, not of the backend. ──
     # Three wordings of ONE construct, so three alternatives and not one AND.
+    # FOUR wordings of ONE construct, and the fourth is the one this table was
+    # MISSING until the 2026-10-01 b3 sweep: `formal/model.py` computes the kind
+    # from the node (`kind = "type" if is_mlir_type_template(node) else
+    # "attribute"`) and says "an MLIR type template" for `__mlir_type.`!kgen
+    # .target``, so a message carrying the TYPE spelling satisfied none of the
+    # three markers and fell into `other refusal`. 5 files measured
+    # (`std/_gpu/_utils.mojo`, `std/builtin/{_coroutine,enum_like,type_aliases}
+    # .mojo`, `std/sys/info.mojo`), and the label already named `__mlir_type`,
+    # so the row claimed a construct it could not see.
     ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
      (("is initialized from an MLIR attribute template",),
+      ("is initialized from an MLIR type template",),
       ("__mlir_attr[",),
       ("__mlir_op is an MLIR dialect construct",))),
     ("inlined_assembly (a gimple-C runtime construct)",
@@ -225,6 +235,16 @@ CAUSES = (
      (("frame address is passed to",),)),
     ("receiver stored in a container",
      (("receiver is stored in a container",),)),
+    # The FIELD sibling of the row above, and it was unclassified until the
+    # 2026-10-01 b3 sweep: `formal/build.py`'s `AssignStmt`-to-`MemberExpr`
+    # branch passes "is stored in the field …, so it outlives the frame it
+    # names", which shares no substring with the container branch's wording.
+    # 22 files in-file on both architectures, the largest unclassified row in
+    # the b3 sweep. It is a different construct from the container row — a
+    # field has an owner that outlives the call, a container does not — so it
+    # is its own cause and not an alternative of that one.
+    ("receiver stored in a field of a struct that outlives it",
+     (("is stored in the field",),)),
     ("a field of a field: a frame slot holds one word, not a struct",
      (("reads a field of a field",),)),
     ("a field of a nested frame that the struct does not declare",
@@ -236,6 +256,17 @@ CAUSES = (
      (("holds a frame address in more than one shape",),)),
     ("one parameter, two kinds of value across call sites",
      (("One parameter, two kinds of value",),)),
+    # The DECLARED-TYPE sibling of the row above — `frame_declared_parameter_
+    # refusal` rather than `frame_holder_disagreement_refusal` — and the two
+    # are different rules, so they are different causes. That one compares the
+    # call sites with EACH OTHER; this one compares them with the parameter's
+    # own annotation, which is the only evidence there is when no call site ever
+    # passed a frame. Its marker was absent until the 2026-10-01 b3 sweep, so
+    # 13 files sat in `other refusal` naming a construct this table claims to
+    # cover. Placed BELOW the row above deliberately: the two messages share no
+    # substring, so the order between them is documentation, not precedence.
+    ("a parameter's declared type contradicts every call site",
+     (("every call site in this image hands it something else",),)),
     ("a slot's declared type is not a value this path can supply",
      (("this slot's DECLARED type is",),)),
 
@@ -243,6 +274,22 @@ CAUSES = (
     #    which shares `… is passed to …`. ──
     ("callee has no definition on this path",
      (("which is a name with no definition in hand",),)),
+    # `f[…](x)` on a callee THIS UNIT DOES NOT COMPILE. This is the single
+    # largest row in the 2026-10-01 b3 sweep — 93 files on BOTH architectures,
+    # 85 of them the `debug_assert[…]` in `std/collections/binary_heap.mojo`
+    # alone — and it had NO marker, so the whole row was inside `other
+    # refusal`. That is the same defect the `==` row below records, one order
+    # of magnitude larger, and it is the row a planner most needs: it is one
+    # builtin with no lowering at all
+    # (`bugs/FORMAL_debug_assert_bracket_has_no_lowering.md`).
+    #
+    # Above `callee has no definition` deliberately. The two messages are about
+    # the same callee and share no substring — that one says "a name with no
+    # definition in hand", this one "calls a name this unit does not compile" —
+    # so today the order is documentation. It is pinned by
+    # `test_refusal_taxonomy.py` so it stays that way in BOTH directions.
+    ("a bracketed specialization of a callee this unit does not compile",
+     (("so the brackets cannot be bound",),)),
     ("receiver passed at argument position 0",
      (("in argument position",),)),
     ("receiver passed to a call, position not stated",

@@ -196,6 +196,16 @@ CAUSE_SAMPLES = [
     ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
      "the module-level comptime binding '_PLUGIN_COUNT' is initialized from an "
      "MLIR attribute template: __mlir_attr[`#kgen.param_list.size<`"),
+    # The TYPE spelling, which is the one `formal/model.py` computes from the
+    # node (`kind = "type" if is_mlir_type_template(node) else "attribute"`).
+    # It is a SEPARATE sample rather than a variant of the one above because
+    # `classify_message` sees only the message: one sample in a cause is one
+    # proof its marker matches, and a marker added for the type wording that no
+    # sample exercised is exactly the dead-marker failure this file exists for.
+    ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
+     "the module-level comptime binding '_dtype_to_llvm_type_f8' is initialized "
+     "from an MLIR type template: __mlir_type.`i8` names an MLIR TYPE, not a "
+     "value"),
     ("inlined_assembly (a gimple-C runtime construct)",
      "inlined_assembly: 'NoneType' has no home: this module declares no "
      "module-level name by that spelling"),
@@ -230,6 +240,25 @@ CAUSE_SAMPLES = [
     ("receiver stored in a container",
      "a Optional receiver is stored in a container, which has no layout for a "
      "frame address on this path"),
+    # The three causes below, plus the MLIR row's fourth wording, were all
+    # added on 2026-10-01 from the b3 sweep, and every one of them is a marker
+    # that was MISSING rather than one that had gone stale: each shape had files
+    # in it and the table could not see them, so `other refusal` read 183 files
+    # where the classified rows below read 50. Samples are cut from that run's
+    # own arm64 log, abbreviated at clause boundaries as above.
+    ("receiver stored in a field of a struct that outlives it",
+     "a Optional receiver is stored in the field 'self.start', so it outlives "
+     "the frame it names by however long that object lives: the slot belongs to "
+     "the function that created THAT frame"),
+    ("a parameter's declared type contradicts every call site",
+     "b64encode() declares 'result' as String, so it is compiled with 'result' "
+     "as the ADDRESS of a frame of 8-byte slots — and every call site in this "
+     "image hands it something else: b64encode(input_bytes, result) passes a "
+     "name, 'result'"),
+    ("a bracketed specialization of a callee this unit does not compile",
+     "debug_assert[…](…) calls a name this unit does not compile, so the "
+     "brackets cannot be bound. A comptime specialization's brackets are the "
+     "generic's comptime parameters"),
     ("a field of a field: a frame slot holds one word, not a struct",
      "self._dict._table._ctrl reads a field of a field through the receiver"),
     ("a field of a nested frame that the struct does not declare",
@@ -386,6 +415,47 @@ def check_cause_table(failures):
             "broader receiver cause; its findings are counted as a receiver "
             f"problem again (got {C.classify_message(pre)!r})")
 
+    # The bracketed-specialization row and the callee row are about the SAME
+    # callee, and `formal/model.py` grew the second message as a sibling of the
+    # first. They share no substring today, so neither order is load-bearing —
+    # and a refactor that made them share one would be silent about which row
+    # lost. Both directions are stated, with the message each way, because the
+    # cost of getting this wrong is the 93-file row being counted as the
+    # 28-file one.
+    bracket = ("debug_assert[…](…) calls a name this unit does not compile, so "
+               "the brackets cannot be bound")
+    if C.classify_message(bracket) != (
+            "a bracketed specialization of a callee this unit does not "
+            "compile"):
+        failures.append(
+            "the bracketed-specialization cause is being shadowed; its row is "
+            "the largest in the sweep and it must classify to itself, not to a "
+            f"neighbouring callee row (got {C.classify_message(bracket)!r})")
+    plain = ("a X receiver is passed to foo(), which is a name with no "
+             "definition in hand IN THIS IMAGE")
+    if C.classify_message(plain) != "callee has no definition on this path":
+        failures.append(
+            "the 'callee has no definition' cause is now being shadowed BY the "
+            "bracketed-specialization one; adding a cause below it must not "
+            f"steal its row (got {C.classify_message(plain)!r})")
+
+    # The field-store row is a SIBLING of the container row, not an
+    # alternative: `formal/build.py` emits different wording for each, and the
+    # two say different things (a field has an owner that outlives the call).
+    # Asserted separately so merging them cannot happen unnoticed.
+    for msg, want in (
+            ("a Optional receiver is stored in a container, which has no layout "
+             "for a frame address on this path", "receiver stored in a container"),
+            ("a Optional receiver is stored in the field 'self.start', so it "
+             "outlives the frame it names",
+             "receiver stored in a field of a struct that outlives it")):
+        if C.classify_message(msg) != want:
+            failures.append(
+                f"the container/field frame-store pair collapsed: expected "
+                f"{want!r}, got {C.classify_message(msg)!r}. They are two "
+                "constructs — a container has no owner, a field outlives the "
+                "call — and a merge would hide which one a file is blocked by")
+
 
 def main() -> int:
     failures = []
@@ -432,7 +502,13 @@ def main() -> int:
 
     for f in failures:
         print("  FAIL  " + f)
-    checks = (len(SAMPLES) + 3 + len(CAUSE_SAMPLES) + len(C.CAUSES) + 4)
+    # `+ 4` is the number of assertions `main` makes about the FAMILY table
+    # below (precedence, the catch-all's absence, one per marker). It is
+    # written as a literal because these are counted by hand, which is exactly
+    # how a tally starts lying: an assertion added to `check_cause_table` and
+    # not counted here is a check that cannot fail the run in anyone's reading
+    # of the number. Anything added to either function needs its count bumped.
+    checks = (len(SAMPLES) + 3 + len(CAUSE_SAMPLES) + len(C.CAUSES) + 4 + 4)
     # …and the `uses:` column's own audit, which counts its checks into the
     # same total rather than printing a second tally.
     checks += _uses_column_checks(failures)
