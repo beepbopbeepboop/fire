@@ -2307,6 +2307,24 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # — a lifted closure resets too, and clearing there would wipe the
     # enclosing function's entries mid-body.
     gen._inlined_lambdas = {}
+    # This function's higher-order parameters whose default names a
+    # compiled generator of this compile, so a call through one can be
+    # typed and driven like a direct generator call. An ordinary function
+    # answers from its own `param_defaults` (the parser records defaults
+    # for keyword-only parameters too, in the same dict); an A3
+    # stack-switch BODY answers from `_coro_body_callable_param_apis`,
+    # because `_lower_one` moved every source parameter into a
+    # `var p = __mojo_gen_arg(...)` local and the body therefore carries
+    # none of the source's `param_defaults` — see
+    # `mojo.middle.coro.register`'s second pass for where that map is
+    # filled, and `calls_shared._callable_param_generator_apis` for what
+    # the resulting typing is and is allowed to assume.
+    if _is_coro_body:
+        gen._callable_param_gen_api = dict(
+            (getattr(gen, '_coro_body_callable_param_apis', None) or {})
+            .get(node.name, {}))
+    else:
+        gen._callable_param_gen_api = ggc._callable_param_generator_apis(gen, node)
     # BUG-2026-016's allow-list: locals whose DECLARATION carries an
     # explicit NUMERIC/boolean annotation (`hin_id: UInt64 = 0`). Such a
     # variable can never legitimately hold a pointer, so when one is

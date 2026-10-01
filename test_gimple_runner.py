@@ -419,6 +419,54 @@ fn main():
     tk.run(0)
 """, "42\n7\n")
 
+    # A CALLABLE-VALUED PARAMETER, keyword-only and positional-with-default
+    # alike. Both used to be padded with `calls_shared._default_expr_to_pair`'s
+    # `('int', '0')` fallback -- i.e. a NULL function pointer -- because that
+    # helper had no case for a default that IS a function, so the body called
+    # address 0 and the process died with SIGSEGV (exit 139, nothing on
+    # stdout). The generator instance of the same shape is
+    # `Tools/c-analyzer/c_common/fsutil.py`'s `walk_tree(root, *,
+    # walk=_walk_tree)`, tracked in
+    # bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md; this is the
+    # ordinary-path twin, which that doc did not mention. Expected text is
+    # CPython's for the same source.
+    test_gimple_stdout("gimple_callable_valued_parameter_default", """\
+def twice(x):
+    return x + x
+
+def kw_only(x, *, f=twice):
+    return f(x)
+
+def positional(x, f=twice):
+    return f(x)
+
+def main():
+    print(kw_only(3))
+    print(kw_only(4, f=twice))
+    print(positional(5))
+    print(positional(6, twice))
+
+main()
+""", "6\n8\n10\n12\n")
+
+    # The same value read out of a parameter and handed on, which is the
+    # other half of the fix (`_lower_IdentExpr`'s function-value arm): a
+    # function passed as an ARGUMENT must arrive as its real address, not
+    # as the `(int64_t)0` placeholder the unknown-identifier fallback
+    # emitted.
+    test_gimple_stdout("gimple_function_passed_as_argument", """\
+def twice(x):
+    return x + x
+
+def via_param(x, f):
+    return f(x)
+
+def main():
+    print(via_param(7, twice))
+
+main()
+""", "14\n")
+
     # A CAPTURING lambda: `n` lives in the enclosing function, but a lifted
     # lambda is a top-level C function that does not contain it, so the read
     # stubbed to 0 — silently, exit 0. When the lambda's local is called

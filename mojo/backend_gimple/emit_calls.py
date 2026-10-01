@@ -47,7 +47,9 @@ import mojo.backend_gimple.emit_calls as ggc
 from mojo.middle.calls_shared import *  # noqa: F401,F403
 from mojo.middle.types import _SCALAR_INT_TYPES, _SCALAR_FLOAT_TYPES  # underscore: `import *` won't carry them
 from mojo.middle.calls_shared import (
-    _as_str, _build_call_args_for_candidate, _default_expr_to_pair, _ident_call_name, _isinstance_type_name, _pack_kwargs_dict,
+    _as_str, _build_call_args_for_candidate, _callable_default_generator,
+    _callable_param_generator_apis, _callable_value_symbol, _default_expr_to_pair,
+    _ident_call_name, _isinstance_type_name, _pack_kwargs_dict,
     _resolve_overload, _sms_key
 )
 from mojo.middle.methods_shared import _is_selfhost_source_file
@@ -4696,6 +4698,29 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
         helper = f'mojo_fnptr_call_{min(n, 8)}'
         call_args = ', '.join([fp_void] + widened[:8])
     raw_t = gen._new_val('int64_t', f'{helper} ({call_args})')
+    # Calling a HIGHER-ORDER PARAMETER whose declared default is a compiled
+    # generator of this compile (`def walk_tree(root, *, walk=_walk_tree)`
+    # — Tools/c-analyzer/c_common/fsutil.py's whole idiom, and the shape
+    # `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` names as
+    # "the real blocker is invoking a kw-only parameter as a callee"). The
+    # returned box IS a `MojoGenerator *`; recording that, plus the default
+    # generator's api on this temp, is exactly what a DIRECT generator
+    # call records (`_emit_generator_start_call` / the `_fn_returns_generator`
+    # arm of `_emit_named_call`), so `for f in walk(root):` / `yield from
+    # walk(root)` take `_gen_for_generator_iter`'s ordinary drive path
+    # instead of the `mojo_unsupported_iter` zero-iteration stub they hit
+    # before.
+    #
+    # `fp_raw` is the local's own lowered name (a parameter, here), so the
+    # api is keyed by it; `_lower_fnptr_call` loads a global/captured
+    # callable through the IdentExpr path instead, in which case there is
+    # no parameter default to consult and nothing is recorded.
+    _cap_api = (getattr(gen, '_callable_param_gen_api', None) or {}).get(fp_raw)
+    if _cap_api is not None:
+        _gen_t = gen._new_val('MojoGenerator *', f'(MojoGenerator *){raw_t}')
+        gen._actual_types[_gen_t] = 'MojoGenerator *'
+        gen._generator_var_api[_gen_t] = _cap_api
+        return 'MojoGenerator *', _gen_t
     if ret_type in ('int64_t', 'int'):
         return ret_type, raw_t
     if ret_type == 'void':
