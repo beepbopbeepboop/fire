@@ -23,6 +23,7 @@ import monomorphize as mm
 import comptime
 import build_stdlib_dylib as bsd
 from gimple_codegen import compile_to_gimple_linked
+from exec_budget import RUN_TIMEOUT_S
 
 GCC = find_gcc()
 _PASS = 0
@@ -39,8 +40,34 @@ def check(name, cond, detail=""):
         _FAIL += 1
 
 
+# Was 20 s, which failed this suite in a full gate at -j18 -- as an UNCAUGHT
+# TimeoutExpired, so every check before it was lost and every check after it never
+# ran. See exec_budget.py for the shared value and the layering rationale.
+EXE_TIMEOUT_S = RUN_TIMEOUT_S
+_TIMED_OUT_PREFIX = '<<timed out'
+
+
 def _run(exe):
-    return subprocess.run([exe], capture_output=True, text=True, timeout=20)
+    """Run a built executable and return a CompletedProcess-alike.
+
+    A timeout here used to propagate as an uncaught TimeoutExpired, which
+    aborted the whole suite with a traceback: every check before it was lost,
+    every check after it never ran, and the gate could not tell what had been
+    covered at all. Returning a synthetic result whose stdout says so instead
+    makes every existing `check(..., _run(exe).stdout...)` call site fail
+    honestly and legibly -- the check's own name is right there in the report --
+    and lets the rest of the suite run.
+    """
+    try:
+        return subprocess.run([exe], capture_output=True, text=True,
+                              timeout=EXE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            [exe], returncode=-1,
+            stdout=f'{_TIMED_OUT_PREFIX} after {EXE_TIMEOUT_S}s (see '
+                   f'subprocess.TimeoutExpired; the job timeout is the real '
+                   f'hang detector)>',
+            stderr='')
 
 
 def _write_runtime_module(name, src):
