@@ -210,6 +210,54 @@ these sizes, measuring the marshalling path instead.</p>
 and an MMA kernel — land on the same time. When the work per call changes by
 8&times; and the time does not move, the time is not in the kernel.</p>
 
+<h3>Per-dispatch phase timing &mdash; where the time actually is</h3>
+<p>Measured with <code>gettimeofday</code> around each phase of
+<code>mojo_metal_dispatch_impl</code>, 128&times;128&times;128 (196 KB,
+4.2 MFLOP — deliberately trivial work, so anything large is overhead):</p>
+<table>
+<tr><th>Phase</th><th>&micro;s</th><th>verdict</th></tr>
+<tr><td><code>newFunctionWithName</code></td><td>0–1</td><td>free</td></tr>
+<tr><td>pipeline state (cached)</td><td>1–2</td><td>free</td></tr>
+<tr><td><strong>bind + upload</strong></td><td><strong>13</strong></td><td>of which upload 14–17 and <code>setBuffer</code> 0–1</td></tr>
+<tr><td><code>dispatchThreadgroups</code></td><td>0–1</td><td>free</td></tr>
+<tr><td><code>commit</code></td><td>1–2</td><td>free</td></tr>
+<tr><td><strong><code>waitUntilCompleted</code></strong></td><td><strong>231–261</strong></td><td><strong>90% of the entire per-dispatch cost</strong></td></tr>
+<tr><td>copy-back</td><td>0</td><td>free</td></tr>
+<tr><td><strong>TOTAL</strong></td><td><strong>245–274</strong></td><td></td></tr>
+</table>
+<p>So the fixed per-call cost is <strong>GPU launch latency</strong>, and it is
+the price of <strong>draining the queue on every call</strong>:
+<code>waitUntilCompleted</code> means the GPU goes idle after each dispatch and
+must wake again for the next, so nothing ever overlaps. At small and medium
+shapes this — not marshalling — is what limits the offload path.</p>
+<p>Three plausible explanations, each <strong>ruled out by measurement</strong>:</p>
+<ul>
+<li><p><em>Per-call <code>MTLBuffer</code> allocation.</em> Caching both the data
+buffers and the scalar constant buffers changed nothing (324 &rarr; 319 &micro;s).
+Both caches are kept — they are correct and they will matter on a machine where
+allocation is dearer — but neither was this.</p></li>
+<li><p><em>The pipeline state.</em> Already cached, and that one <em>was</em> real:
+it was the whole fixed floor before.</p></li>
+<li><p><em>Sleep/wake in the blocking wait.</em> Replacing
+<code>waitUntilCompleted</code> with a bounded spin on an atomic set by
+<code>addCompletedHandler</code> gave 320 &rarr; 315 &micro;s, i.e. nothing.
+Reverted: a busy-wait that buys nothing is pure complexity.</p></li>
+</ul>
+<p><strong>Integer <code>ms/iter</code> hid all of this.</strong> It reported a
+"0 ms" floor for 32&times;32&times;32 because of integer division; the ns clock
+puts the same case at <strong>193 &micro;s/call</strong>. Any fixed-cost claim
+from this path needs a sub-millisecond clock.</p>
+<p>Per-call latency, ns clock, best of 5:</p>
+<table>
+<tr><th>Shape</th><th>Payload</th><th>Work</th><th>&micro;s/call</th></tr>
+<tr><td>32&times;32&times;32</td><td>12 KB</td><td>65 KFLOP</td><td><strong>193</strong></td></tr>
+<tr><td>128&times;128&times;128</td><td>196 KB</td><td>4.2 MFLOP</td><td>319</td></tr>
+<tr><td>512&times;512&times;512</td><td>3.2 MB</td><td>268 MFLOP</td><td>2154</td></tr>
+</table>
+<p>A flat ~200 &micro;s floor that does not shrink with the work, then bytes take
+over. That crossover is the shape of the cost model: <strong>launch latency
+below ~256 KB, bytes above it.</strong></p>
+
 <h3>Bandwidths and latencies</h3>
 <table>
 <tr><th>Quantity</th><th>Value</th><th>Note</th></tr>
@@ -265,6 +313,7 @@ mismatch counts — it should be <code>0/4096</code>.</p>
 output, wrong answer or no effect.</p>
 <table>
 <tr><th>Trap</th><th>Symptom</th><th>Why it is dangerous</th></tr>
+<tr><td>A revert that removed a region spanning <code>[cb commit]</code></td><td><strong>a hang</strong> — no error, no exit code, no output</td><td>the spin-wait block I had inserted <em>contained</em> the commit, so deleting it left the command buffer unsubmitted and <code>waitUntilCompleted</code> waiting forever. Found by cutting to 64&times;64 with 4 reps under <code>ulimit -t</code>. A revert must restore every call it spanned.</td></tr>
 <tr><td><code>cas._RUNTIME_SOURCES</code> omitted <code>fire_metal.m/.h</code></td><td>runtime changes had <em>no effect at all</em>; the dylib was served stale</td><td>a "no improvement" result was a measurement of the <strong>previous binary</strong>. Found by adding an <code>fprintf</code> and seeing no output. <strong>Fixed</strong> — they are in the fingerprint now.</td></tr>
 <tr><td>Writability mask keyed on <code>'Mut' in ctype</code></td><td>GEMM returned <code>0.0</code>, exit 0, bit-exact</td><td>these are the <em>MSL-side</em> params, where the address space is already lowered to <code>device const float *</code>; the Mojo spelling is gone, so the predicate never matched and the mask was all zeros. Now keys on <code>const</code>.</td></tr>
 <tr><td>A second loop over the original statements when appending the GEMM</td><td><code>main</code> appeared twice; prints vanished; <strong>exit 0 with no output</strong></td><td>the worst available symptom to debug. One pass, with the GEMM as a fallback, so there is one append per statement.</td></tr>
