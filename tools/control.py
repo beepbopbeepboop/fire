@@ -323,6 +323,20 @@ def cmd_queue(a):
             print("%-28s needs: %-40s claims: %s" % (i["name"], ", ".join(i["needs"]) or "-", ", ".join(i["claims"])))
 
 
+def cmd_hold(a):
+    """Hold (or release) a task: a held task is never picked up by the integrator, but is otherwise a normal task
+    (it still counts as running, is watched by unstick, and can finish). Used to pipeline: batch 2 is built while batch 1 is
+    still being gated, and is released when batch 1 has landed."""
+    with registry() as reg:
+        if a.name not in reg:
+            sys.exit("no such task")
+        if a.release:
+            reg[a.name].pop("hold", None)
+        else:
+            reg[a.name]["hold"] = True
+    print("%s %s" % (a.name, "released" if a.release else "held"))
+
+
 def cmd_ps(a):
     """Our workers' live opencode processes, told apart from the user's own opencode sessions by their
     arguments: ours are launched with `--model M run --auto --dir <PARENT>/work-N`, theirs have neither."""
@@ -580,6 +594,7 @@ def main():
     s.add_argument("--interval", type=float, default=3.0); s.add_argument("--once", action="store_true"); s.set_defaults(f=cmd_memtrim)
     s = sub.add_parser("restart"); s.add_argument("name"); s.add_argument("--why", default="restarted by the controller"); s.set_defaults(f=cmd_restart)
     s = sub.add_parser("unstick"); s.add_argument("--idle-min", type=float, default=25); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_unstick)
+    s = sub.add_parser("hold"); s.add_argument("name"); s.add_argument("--release", action="store_true"); s.set_defaults(f=cmd_hold)
     sub.add_parser("ps").set_defaults(f=cmd_ps)
     s = sub.add_parser("reap"); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_reap)
     sub.add_parser("report").set_defaults(f=cmd_report)
