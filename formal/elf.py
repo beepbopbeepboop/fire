@@ -45,6 +45,7 @@ DT_STRSZ = 10
 STB_GLOBAL = 1
 R_X86_64_GLOB_DAT = 6
 
+
 # Default virtual address of .text. Fixed rather than derived from the image
 # so `compute_got_addrs` (called before the image exists, to patch call sites)
 # and `build_elf` (called with the finished code) agree by construction.
@@ -53,6 +54,22 @@ DEFAULT_BASE = 0x400000
 # The C library the extern symbols resolve against. macOS has everything in
 # libSystem; on Linux the symbols formal needs (exit, printf) live in libc.
 DEFAULT_LIBC = "libc.so.6"
+
+# Where the module-global `.globals` section is MAPPED, for the same reason
+# `macho_linker.GLOBALS_VM` is fixed rather than derived: __TEXT's size is a
+# function of the code, and every access to a slot needs this address BEFORE the
+# code is emitted, so deriving one from the other makes each depend on the other.
+# A fixed base 4 MB past the code leaves every RIP-relative displacement (whose
+# range is ±2 GB) comfortably inside, and it is a constant both the codegen and
+# this builder read — so the address a backend computes and the one this
+# segment declares are the same number rather than two that have to agree.
+GLOBALS_VM = DEFAULT_BASE + 0x400000
+
+# The `__DATA`-equivalent program header an image with module-global slots
+# carries. `PT_LOAD` is 56 bytes and its flags are the PF_W bit, which the
+# code segment does not have: a slot is WRITTEN by a `global NAME` store, and a
+# read-only mapping faults on the first one.
+GLOBALS_PF = PF_R | PF_W
 
 # sizeofcmds equivalent: one PT_LOAD with no externs, two with.
 _PHDR_SIZE = 56
@@ -114,6 +131,8 @@ def _build_dynsym(sym_names: list[str], str_offsets: dict[str, int]) -> bytes:
 def _build_dynamic(str_offsets: dict[str, int], lib_name: str,
                    dynsym_vaddr: int, dynstr_vaddr: int, dynstr_size: int,
                    rela_vaddr: int, rela_size: int) -> bytes:
+    """The .dynamic array: DT_NEEDED, DT_SYMTAB, DT_STRTAB, DT_STRSZ,
+    DT_RELA, DT_RELASZ, DT_NULL."""
     entries = [
         struct.pack("<QQ", DT_NEEDED, str_offsets[lib_name]),
         struct.pack("<QQ", DT_SYMTAB, dynsym_vaddr),
@@ -136,13 +155,19 @@ def _build_rela_dyn(got_slots: list[tuple[str, int]],
     return bytes(buf)
 
 
-def _layout(code_size: int, external_syms: list[str], lib_name: str) -> dict:
+def _layout(code_size: int, external_syms: list[str], lib_name: str,
+            globals_size: int = 0) -> dict:
     """Every size and virtual address the image needs, in one place.
 
     `compute_got_addrs` runs BEFORE the image exists (it back-patches the call
     sites) while `build_elf` runs after, so the two must not each compute the
     .got address: they share this."""
     phnum = _PHNUM_EXTERN if external_syms else _PHNUM_NOEXTERN
+    # A `.globals` section adds a second PT_LOAD: the code segment is PF_X and a
+    # slot is WRITTEN, and a program header's flags are per-segment, so the two
+    # cannot be one mapping.
+    if globals_size:
+        phnum += 1
     text_file_offset = _EHDR_SIZE + _PHDR_SIZE * phnum
 
     names = list(external_syms) + ([lib_name] if external_syms else [])
@@ -150,6 +175,11 @@ def _layout(code_size: int, external_syms: list[str], lib_name: str) -> dict:
     dynsym_size = (1 + len(external_syms)) * _SYMSZ
     dynamic_size = _DYNAMIC_SIZE if external_syms else 0
     got_size = _GOTSLOT * len(external_syms)
+    # NO relocation entries for the globals: their address-valued slots are
+    # filled by CODE in the startup stub (`x86_64_codegen._emit_global_init`),
+    # not by the loader. That is the same mechanism the Mach-O side uses and
+    # for the same reason — it needs no cooperation from the dynamic linker, and
+    # it is the one already proven against a real loader on this target.
     rela_size = _RELASZ * len(external_syms)
 
     off = code_size
@@ -161,6 +191,21 @@ def _layout(code_size: int, external_syms: list[str], lib_name: str) -> dict:
     off += dynamic_size
     got_off = off
     off += got_size
+    # The .globals CONTENT sits at the end of the image but is MAPPED at
+    # GLOBALS_VM, so `globals_off` (a file offset) and `GLOBALS_VM` (an address)
+    # are deliberately different numbers — see GLOBALS_VM's note.
+    #
+    # The offset follows the SAME convention as the code segment's, which is
+    # `text_file_offset` — "the next byte after the headers" — rather than
+    # page-aligning it. Page-aligning only THIS segment would make the two
+    # disagree about how a PT_LOAD's offset relates to its address, which is a
+    # stranger image than either convention alone. Making both congruent with
+    # p_align is a change to the existing `_layout` arithmetic and to every ELF
+    # image the tree already builds; it is not this change's, and it is recorded
+    # as an observation in `bugs/FORMAL_elf_globals_segment.md` rather than
+    # half-applied here.
+    globals_off = off
+    off += globals_size
     rela_off = off
     off += rela_size
     return {
@@ -170,6 +215,7 @@ def _layout(code_size: int, external_syms: list[str], lib_name: str) -> dict:
         "dynsym_off": dynsym_off, "dynsym_size": dynsym_size,
         "dynamic_off": dynamic_off, "dynamic_size": dynamic_size,
         "got_off": got_off, "got_size": got_size,
+        "globals_off": globals_off, "globals_size": globals_size,
         "rela_off": rela_off, "rela_size": rela_size,
         "body_size": off,
     }
@@ -192,18 +238,26 @@ def compute_got_addrs(code_size: int, external_syms: list[str],
 def build_elf(code: bytes, entry: int = DEFAULT_BASE,
               vaddr: int = DEFAULT_BASE,
               external_syms: Optional[list[str]] = None,
-              lib_name: str = DEFAULT_LIBC) -> bytes:
+              lib_name: str = DEFAULT_LIBC,
+              globals_image=None) -> bytes:
     """Build an x86-64 ET_EXEC image around `code`.
 
     `entry` is the process entry (the startup stub's address), which is `vaddr`
     here because the code is the first thing in the image. PT_LOAD maps the
     code at `vaddr` by starting its file offset at the end of the headers, so
     every address the codegen computed off `vaddr` is the address the loader
-    gives it."""
+    gives it.
+
+    `globals_image` is a `formal.model.GlobalDataImage` or None; non-None adds
+    the module-global slot table as a second, WRITABLE PT_LOAD mapped at
+    `GLOBALS_VM`. Its address-valued words are filled by the startup stub's
+    initializer rather than by a relocation — see
+    `x86_64_codegen._emit_global_init`."""
     if external_syms is None:
         external_syms = []
+    gblob = b"" if globals_image is None else bytes(globals_image.blob)
 
-    lay = _layout(len(code), external_syms, lib_name)
+    lay = _layout(len(code), external_syms, lib_name, len(gblob))
     phnum = lay["phnum"]
     text_file_offset = lay["text_file_offset"]
     code_align = 0x1000
@@ -246,15 +300,29 @@ def build_elf(code: bytes, entry: int = DEFAULT_BASE,
     ))
 
     # PT_LOAD covering code + the dynamic sections. p_offset is the end of the
-    # headers so the code lands exactly at vaddr.
+    # headers so the code lands exactly at vaddr. Its p_filesz stops at the
+    # globals so the second PT_LOAD owns those bytes — a byte claimed by two
+    # program headers is a mapping the loader resolves by refusing to load.
     p_flags = PF_R | PF_X
     if external_syms:
         p_flags |= PF_W        # the loader writes the .got slots
-    segment_file_size = lay["body_size"]
+    code_and_dyn_size = lay["globals_off"]
     buf.extend(struct.pack("<IIQQQQQQ",
         PT_LOAD, p_flags, text_file_offset, vaddr, vaddr,
-        segment_file_size, segment_file_size, code_align,
+        code_and_dyn_size, code_and_dyn_size, code_align,
     ))
+
+    if gblob:
+        # The slot table's own mapping: writable, at the FIXED address the
+        # codegen computed every access against (GLOBALS_VM), covering a file
+        # range at the end of the image. `p_filesz == p_memsz` because the
+        # blob is fully present in the file — this is initialized data, not
+        # .bss.
+        buf.extend(struct.pack("<IIQQQQQQ",
+            PT_LOAD, GLOBALS_PF,
+            text_file_offset + lay["globals_off"], GLOBALS_VM, GLOBALS_VM,
+            lay["globals_size"], lay["globals_size"], code_align,
+        ))
 
     if external_syms:
         buf.extend(struct.pack("<IIQQQQQQ",
@@ -269,6 +337,7 @@ def build_elf(code: bytes, entry: int = DEFAULT_BASE,
     buf.extend(dynsym_data)               # .dynsym
     buf.extend(dynamic_data)              # .dynamic
     buf.extend(b"\x00" * lay["got_size"])  # .got, filled by the loader
+    buf.extend(gblob)                     # .globals, the module-global slots
     buf.extend(rela_data)                 # .rela.dyn
 
     buf.extend(b"\x00" * (total_size_padded - total_size))

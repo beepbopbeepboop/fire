@@ -154,7 +154,13 @@ def prepass(source, name='prepass'):
         f.write(source)
     with open(path) as f:
         stmts = B.parse_module(f.read(), filename=path)
-    functions, _structs, _symbols = B._prepare_functions(stmts, synthetic=True)
+    # The fourth value is the unit's module-global slot table, which
+    # `_prepare_functions` returns as well as publishes for the reason
+    # `_symbols` is: building an import compiles the imported module through
+    # this same function, so the caller re-publishes its own afterwards. This
+    # pre-pass wants none of them and says so by name.
+    functions, _structs, _symbols, _slots = B._prepare_functions(
+        stmts, synthetic=True)
     return B._runtime_word_calls(functions)
 
 

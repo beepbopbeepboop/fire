@@ -33,9 +33,10 @@ import fire_compiler as F
 from formal import model as M
 from formal.arm64_codegen import ARM64Codegen, CodegenError
 from formal.macho import build_macho, compute_macho_got_addrs
-from formal.macho_linker import (EXTERN_ENTRYOFF, NOEXTERN_ENTRYOFF, TEXT_BASE,
-                                  build_macho_dylib, dylib_code_offset,
-                                  externer_layout)
+from formal.macho_linker import (EXTERN_ENTRYOFF, EXTERN_GLOBALS_ENTRYOFF,
+                                  NOEXTERN_ENTRYOFF, NOEXTERN_GLOBALS_ENTRYOFF,
+                                  TEXT_BASE, build_macho_dylib,
+                                  dylib_code_offset, externer_layout)
 from mojo.middle.closures import discover_closures
 from formal.comptime_runner import make_call_hook
 from formal import dataclass_transform as DC
@@ -713,20 +714,67 @@ def _make_codegen(arch: str, fmt: str, test_input: int,
     without ever consulting a bare name) and the declared signature (which is
     what says whether a call's result is a string). See
     `model.dylib_export_lookup`."""
+    # Where this unit's module-global data segment will be MAPPED, handed to
+    # both backends because every slot access is an absolute address computed
+    # before the image exists. None when the module declares no writable
+    # global, so an ordinary program pays nothing and emits no data segment.
+    gbase = globals_base(fmt) if M.module_slots() else None
     if arch == "arm64":
         return ARM64Codegen(test_input=test_input,
                             dylib_syms=dylib_syms,
                             comptime_hook=comptime_hook,
-                            dylib_exports=dylib_exports)
+                            dylib_exports=dylib_exports,
+                            globals_base=gbase)
     if arch == "x86_64":
         from formal.x86_64_codegen import X86_64Codegen
         return X86_64Codegen(test_input=test_input,
                              extern_style="got" if fmt == "elf" else "stub",
                              dylib_syms=dylib_syms,
                              comptime_hook=comptime_hook,
-                             dylib_exports=dylib_exports)
+                             dylib_exports=dylib_exports,
+                             globals_base=gbase)
     raise FormalBuildError(
         f"unknown arch {arch!r} (expected one of {', '.join(ARCHES)})")
+
+
+def globals_image(fmt: str = "macho"):
+    """The data image for the current unit's module-global slots, or None.
+
+    One function, and the only caller of `model.build_data_image` on the build
+    side, because the blob and its fixup list are ONE fact that the linker and
+    the codegen both act on: the linker writes the bytes and emits a relocation
+    per fixup, and the codegen addresses slot `i` at the same offsets the blob
+    was laid out from. Building it in two places would give two images and one
+    of them would be wrong in a way no test could attribute.
+
+    `fmt` selects the base address the image's data segment is MAPPED at, which
+    the two containers define separately (`macho_linker.GLOBALS_VM` and
+    `elf.GLOBALS_VM`) and which is not optional: both linkers' relocation
+    machinery adds the load slide to the value already in the file, so a slot
+    word must hold the link-time ADDRESS.
+
+    None for a module with no `global NAME` — the ordinary case — so a program
+    that does not use this capability gets byte-for-byte the image it got
+    before."""
+    table = M.module_slots()
+    if not table:
+        return None
+    return M.build_data_image(table, globals_base(fmt))
+
+
+def globals_base(fmt: str = "macho") -> int:
+    """The address this container maps a unit's module-global data at.
+
+    Read by THREE parties that must not each look it up: the image builder
+    (which writes `base + offset` into every address-valued slot), the two
+    backends' `_global_slot_address` (which compute where slot `i` lives), and
+    the linker (which declares the segment there). One function, so a format
+    whose base moved cannot leave three copies behind."""
+    if fmt == "elf":
+        from formal.elf import GLOBALS_VM
+        return GLOBALS_VM
+    from formal.macho_linker import GLOBALS_VM
+    return GLOBALS_VM
 
 
 def _audit_bound_symbols(external_syms, dylib_syms, where: str,
@@ -848,15 +896,22 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
                                     "image"))
         binary = build_elf(code, entry=info["base_addr"],
                            vaddr=info["base_addr"],
-                           external_syms=external_syms, lib_name=DEFAULT_LIBC)
+                           external_syms=external_syms, lib_name=DEFAULT_LIBC,
+                           globals_image=globals_image(fmt))
         return code, info, external_syms, binary
 
     # The extern entry offset depends on the linked dylibs: each adds a load
-    # command, and the code starts after the whole list.
+    # command, and the code starts after the whole list. `has_globals` moves it
+    # the same way, because a module-global `__DATA` segment is one more load
+    # command — and it is read from the PUBLISHED table rather than recomputed,
+    # so the image the linker is about to be handed and the layout the code was
+    # emitted for are the same fact read twice.
     from formal.macho_linker import extern_entry_offset
+    has_globals = bool(M.module_slots())
     base_extern = TEXT_BASE + extern_entry_offset(
-        [d["install_name"] for d in dylibs])
-    base_noextern = TEXT_BASE + NOEXTERN_ENTRYOFF
+        [d["install_name"] for d in dylibs], has_globals=has_globals)
+    base_noextern = TEXT_BASE + (NOEXTERN_GLOBALS_ENTRYOFF if has_globals
+                                 else NOEXTERN_ENTRYOFF)
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms, comptime_hook,
                             dylib_exports)
     try:
@@ -876,7 +931,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
             stub_addrs = compute_macho_got_addrs(
                 len(code), external_syms, vaddr=info["base_addr"], arch=arch,
                 entryoff=extern_entry_offset(
-                    [d["install_name"] for d in dylibs]))
+                    [d["install_name"] for d in dylibs],
+                    has_globals=has_globals))
             codegen.asm.resolve_extern(stub_addrs)
             code = bytes(codegen.asm.sections["text"])
     except CodegenError as e:
@@ -890,7 +946,8 @@ def _codegen_and_link(arch: str, fmt: str, ordered: list, test_input: int,
     binary = build_macho(code, external_syms=external_syms, arch=arch,
                          dylibs=[{"install_name": d["install_name"],
                                   "symbols": set((d.get("map") or {}).values())}
-                                 for d in dylibs] or None)
+                                 for d in dylibs] or None,
+                         globals_image=globals_image(fmt))
     return code, info, external_syms, binary
 
 
@@ -1031,7 +1088,7 @@ def compile_formal(source_path: str, output: str = None,
     # that imported the struct, which is the only way such a call occurs.
     imported_structs = _imported_structs(source_path, stmts, arch)
     try:
-        functions, structs, symbols = _prepare_functions(
+        functions, structs, symbols, slots = _prepare_functions(
             stmts, synthetic=True, extra_structs=imported_structs)
     except CodegenError as e:
         # A clean compile error. The function pipeline runs before codegen
@@ -1120,6 +1177,7 @@ def compile_formal(source_path: str, output: str = None,
         symbols = _publish_imported_constants(functions, symbols,
                                               import_manifests)
         M.publish_module_symbols(symbols)
+        M.publish_global_slots(slots)
         check_frame_field_blob_premises(structs)
         check_frame_subscript_escapes(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
@@ -1251,8 +1309,8 @@ def _formal_module_functions(source_path: str,
     # the same message the executable path gives and the same answer the reader
     # needs: a module-level store needs storage, and this path has none
     # (`bugs/FORMAL_module_state_no_storage.md`).
-    functions, structs, symbols = _prepare_functions(stmts, synthetic=False,
-                                                    as_dylib=True)
+    functions, structs, symbols, slots = _prepare_functions(
+        stmts, synthetic=False, as_dylib=True)
     # The other of the two call sites of `check_frame_field_blob_premises`, and
     # for the same reason: this is the dylib path, it has no import resolution
     # of its own to be preempted by, and the check has to apply to a dylib
@@ -1277,6 +1335,7 @@ def _formal_module_functions(source_path: str,
         # globals over the published one, and the dylib path builds imported
         # modules before it gets here.
         M.publish_module_symbols(symbols)
+        M.publish_global_slots(slots)
         check_frame_field_blob_premises(structs)
         check_frame_subscript_escapes(functions)
         check_construction_shapes(functions, {st.name: st for st in structs})
@@ -1298,7 +1357,7 @@ def _formal_module_functions(source_path: str,
         raise FormalBuildError(str(e))
     module = re.sub(r"[^A-Za-z0-9_]", "_",
                     os.path.splitext(os.path.basename(source_path))[0])
-    return module, functions, source, structs, _module_constants(symbols)
+    return module, functions, source, structs, slots, _module_constants(symbols)
 
 
 def _struct_methods(stmts: list) -> list:
@@ -3583,9 +3642,20 @@ def _module_constant_sites() -> dict:
 
     Reads the PUBLISHED table rather than re-deriving it, so a caller with no
     statement list in hand and the executable path's consumer cannot answer
-    differently about the same name."""
+    differently about the same name.
+
+    A name with a `__DATA` SLOT is excluded, and that exclusion is the load-
+    bearing part rather than an optimisation. A slotted name is one some function
+    writes through `global`, so its value CHANGES while the program runs —
+    substituting its module-level initializer at every read would replace a value
+    the program computed with the constant it started at. Measured on the tree
+    this replaces: `G = 5` with `def bump(): global G; G = G + 1` called twice
+    printed `G=5` where CPython prints `G=7`, because the read was the folded 5
+    and the write went into a register nothing else named. Two homes for one
+    word, and the read picked the one that never changes."""
+    stored = M.module_slots()
     return {name: sym.literal for name, sym in M.module_symbols().items()
-            if sym.literal is not None}
+            if sym.literal is not None and name not in stored}
 
 
 def _module_constants(symbols: dict) -> dict:
@@ -4301,6 +4371,19 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # to the construct.
                 why = M.mlir_dialect_refusal(name)
                 raise CodegenError(f"{fn.name}: {why}" if fn.name else why)
+            gslot = M.module_slot(name)
+            if gslot is not None:
+                # A module-level name WITH a `__DATA` slot: the storage exists
+                # and both backends lower a read of it to a load, so it is
+                # placed — unless the slot has no initializer, in which case the
+                # load would read the zero an unwritten slot gives. That is a
+                # plausible-looking wrong number rather than a refusal, so it is
+                # refused by name with the reason the initializer is missing.
+                why = M.static_initializer_refusal_reason(gslot)
+                if why is not None:
+                    raise CodegenError(
+                        M.global_value_refusal(name, fn.name, why))
+                continue
             sym = M.module_symbol(name)
             if sym is not None:
                 if id(node) in bracket_callees \
@@ -4311,13 +4394,15 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                     # rather than allowed to reach a dangling `BL`.
                     raise CodegenError(M.imported_callee_refusal(
                         name, sym, fn.name))
-                # A module-level name, refused for the reason a module-level
-                # name is refused: it has no storage with a lifetime longer
-                # than a frame's.  `model.module_global_refusal` says which of
-                # the four kinds it is, because the four have four different
-                # repairs.
+                # A module-level name with no slot, refused for the reason a
+                # module-level name is refused: nothing writes it, so its value
+                # is the module-level one, and the build can only know that if
+                # it folds to a literal — and there is no storage with a
+                # lifetime longer than a frame's for the rest.
+                # `model.module_global_refusal` says which of the four kinds it
+                # is, because the four have four different repairs.
                 raise CodegenError(M.module_global_refusal(name, sym,
-                                                          fn.name))
+                                                           fn.name))
             raise CodegenError(M.unresolved_name_refusal(
                 name, fn.name, _why_unplaced(node, fn, frame_slots)))
         _refuse_variadic_reads(functions, fn, shape)
@@ -4567,13 +4652,14 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     compiled has to happen here or the two front ends disagree about the same
     source file.
 
-    Returns (functions, structs, symbols) — the structs are passed to the
-    codegen so a `S(...)` constructor and a `self.<field>` access can be
-    recognised, and `symbols` is the module-level name table, RETURNED as well
-    as published. Returned because the published copy is not durable: building
-    an import compiles the imported module through this same function, and that
-    nested call publishes ITS globals over ours, so the caller re-publishes its
-    own before anything reads the table. Measured, and the symptom was the two
+    Returns (functions, structs, symbols, slots) — the structs are passed to
+    the codegen so a `S(...)` constructor and a `self.<field>` access can be
+    recognised, and `symbols` (the module-level name table) and `slots` (the
+    module-global `__DATA` slot table) are RETURNED as well as published.
+    Returned because the published copy is not durable: building an import
+    compiles the imported module through this same function, and that nested
+    call publishes ITS globals over ours, so the caller re-publishes its own
+    before anything reads the table. Measured, and the symptom was the two
     architectures disagreeing about which module a name came from."""
     # A module-level `comptime X = __mlir_type[…]` is a compile-time binding the
     # function-body expression walk never sees — this pipeline lowers
@@ -4759,6 +4845,23 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     discover_closures(ctx, stmts)
     functions = _flatten_closures(functions, ctx._all_closures)
     functions = _lift_lambdas(functions)
+    # The module-global `__DATA` slots, on the FINAL function list and BEFORE
+    # the substitution below. Both positions are load-bearing:
+    #
+    #   * after every rewrite, because a `global G` inside a lifted lambda or a
+    #     flattened closure declares G a module global just as one inside a
+    #     top-level function does, and a slot table built from the pre-rewrite
+    #     list would not know that — the name would be folded away by the
+    #     substitution below and the write would be lost, which is the exact
+    #     defect this capability exists to fix.
+    #   * before the substitution, which must skip a slotted name because a
+    #     write through `global` changes its value while the program runs.
+    #
+    # Published for the reason `_MODULE_SYMBOLS` is: the consumers are a
+    # per-function walk inside each backend and the linker, and none of them has
+    # the module statements in hand.
+    slots = M.collect_global_slots(stmts, functions)
+    M.publish_global_slots(slots)
     # A module-level NAME whose value the build can FOLD is substituted at
     # every read, so `G = 5` read from a function is the 5 and not whatever
     # the register allocator left behind.  LAST of the rewrites, for the reason
@@ -4782,7 +4885,11 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # not. `formal/dataclass_transform.rewrite_equality` takes the holder
     # table as given.
     _frame_receivers(functions, structs_by_name, dc_equality)
-    return functions, structs, symbols
+    # The slot table is RETURNED as well as published, for the reason
+    # `symbols` is: building an import compiles the imported module through this
+    # same function, and that nested call publishes ITS globals over ours, so
+    # the caller re-publishes its own before anything reads the table.
+    return functions, structs, symbols, slots
 
 
 def _method_owners(stmts: list, extra_structs: list = None) -> dict:
@@ -6223,19 +6330,50 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     ordered = []
     seen: dict = {}
     structs_by_file: dict = {}
-    # What this library PUBLISHES besides its symbols: the module-level names
-    # its own build folded to literals, which a consumer materializes in its
-    # own image rather than reading an address for (there is nowhere for one to
-    # live — `bugs/FORMAL_module_state_no_storage.md` — and a literal does not
-    # need one). Collected from the module's own symbol table, so the values
-    # are the ones THIS build folded rather than a second reading of the source.
+    # What this library PUBLISHES besides its symbols, and it is two things.
+    #
+    # (a) the module-level names its own build folded to literals, which a
+    # consumer materializes in its own image rather than reading an address for
+    # (there is nowhere for one to live — `bugs/FORMAL_module_state_no_storage.md`
+    # — and a literal does not need one). Collected from the module's own symbol
+    # table, so the values are the ones THIS build folded rather than a second
+    # reading of the source.
     constants: dict = {}
+    # (b) the library's merged module-global slot table, published before the
+    # codegen runs because every slot access is an absolute address computed
+    # against it. Built by hand here rather than by re-running
+    # `collect_global_slots`, because a library is compiled from SEVERAL
+    # sources and each one's table numbers its own slots from zero.
+    library_slots: dict = {}
+    library_slot_owners: dict = {}
     for source_path in source_paths:
-        module, functions, module_source, file_structs, file_constants = \
+        module, functions, module_source, file_structs, file_slots, \
+            file_constants = \
             _formal_module_functions(source_path, link_dylibs)
         structs_by_file[source_path] = file_structs
         for name, value in file_constants.items():
             constants.setdefault(name, value)
+        for name, slot in (file_slots or {}).items():
+            owner = library_slot_owners.get(name)
+            if owner is not None:
+                # Two files of ONE library both declaring the same module-level
+                # name is a genuine collision, not something to resolve: a slot
+                # is placed by its BARE name, so one `COUNT` in two files would
+                # silently share a word. (In Mojo they are `a.COUNT` and
+                # `b.COUNT`; this backend carries no module identity at a use
+                # site, which is the same limit
+                # `FORMAL_module_attribute_access_refused` records for
+                # module-attribute CALLS.) Refused by name, naming BOTH files,
+                # rather than one of them silently winning by ordering.
+                raise FormalBuildError(
+                    f"{source_path}: module-level name {name!r} is also "
+                    f"declared in {owner}, and this library compiles both files "
+                    f"into one image, so the two would share a single word. A "
+                    f"module global is placed by its bare name on this path, so "
+                    f"two files of one library cannot both declare it")
+            library_slots[name] = M.GlobalSlot(name, len(library_slots),
+                                               slot.init, slot.site)
+            library_slot_owners[name] = source_path
         for fn in functions:
             # A repeated name is an OVERLOAD, not a collision — and Mojo
             # overloads are ordinary (`def tile[...]` appears three times in
@@ -6329,13 +6467,20 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             or _module_prefix(source_paths[0]),
             constants=_namespace_constants(reexports, constants, linked))
 
+    # The library's merged slot table is PUBLISHED before the codegen runs,
+    # because a slot access is an absolute address the codegen computes against
+    # it, and the image the linker is handed at the end has to be built from the
+    # same table. The per-file tables each numbered their slots from zero, so
+    # this merge is what makes the library's slots distinct.
+    M.publish_global_slots(library_slots)
+    has_globals = bool(library_slots)
     codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                             dylib_exports=dylib_exports)
     try:
         code, info = codegen.compile(
             ordered,
-            base_addr=TEXT_BASE + dylib_code_offset(install_name, False,
-                                                    dep_install),
+            base_addr=TEXT_BASE + dylib_code_offset(
+                install_name, False, dep_install, has_globals),
             emit_startup=False)
         external_syms = info.get("external_syms") or []
         if external_syms:
@@ -6344,7 +6489,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             # segment and libSystem are discovered by the first pass.
             codegen = _make_codegen(arch, fmt, test_input, dylib_syms,
                                     dylib_exports=dylib_exports)
-            code_file = dylib_code_offset(install_name, True, dep_install)
+            code_file = dylib_code_offset(install_name, True, dep_install,
+                                          has_globals)
             code, info = codegen.compile(ordered,
                                          base_addr=TEXT_BASE + code_file,
                                          emit_startup=False)
@@ -6381,9 +6527,10 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     binary = build_macho_dylib(
         code,
         TEXT_BASE + dylib_code_offset(install_name, bool(external_syms),
-                                      dep_install),
+                                      dep_install, has_globals),
         exports, install_name, arch=arch, external_syms=external_syms,
-        deps=dep_install, dep_syms=dep_syms)
+        deps=dep_install, dep_syms=dep_syms,
+        globals_image=globals_image("macho") if has_globals else None)
     with open(output, "wb") as f:
         f.write(binary)
     os.chmod(output, 0o755)

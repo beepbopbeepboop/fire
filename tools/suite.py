@@ -1553,6 +1553,18 @@ test('formal', [PY, 'test_formal.py'], j=True,
      desc='every formal/examples/*.mojo typechecks its generated Lean proof')
 test('formal-run', [PY, 'test_formal_run.py'], deps=['preflight'],
      desc='formal arm64 executables that actually build AND run (no lean)')
+# Module-global state. Its own file rather than more rows in `formal-run`
+# because it is the only formal test that runs each case THREE ways — the two
+# backends' images plus the Mojo interpreter — and that is the assertion: a
+# module global's correctness depends on a codegen, a linker and a segment
+# agreeing about one address, and no single-backend run can see a disagreement
+# between two codegens. It was worth its own file that it found three
+# x86-64-only instruction-encoding bugs (`jne rel32` with a spurious ModRM, a
+# `jne` guarding on flags `mov` never set, and the initializer flag stored
+# before its value was in it) — all of which presented as a crash somewhere
+# else entirely.
+test('formal-globals', [PY, 'test_formal_globals.py'], deps=['preflight'],
+     desc='module-global state: image + interpreter agree, on both backends')
 # `deps=['preflight', 'prooflib']` and NOT in `check`: half this file's
 # assertions are "Lean accepts the generated file", and without `prooflib` they
 # SKIP -- which would be a silent coverage hole of exactly the kind `prooflib`
@@ -1717,7 +1729,7 @@ BUCKETS = {
     'stdlib-corpus': ['stdlib-tests'],
 
     'proofs': ['formal', 'formal-call-proofgen',
-               'formal-run', 'formal-dylib', 'formal-imports',
+               'formal-run', 'formal-globals', 'formal-dylib', 'formal-imports',
                'formal-sweep', 'formal-sweep-truth',
                'formal-link-accounting', 'formal-re', 'formal-runtime-link',
                'refusal-taxonomy', 'comptime-parity',
