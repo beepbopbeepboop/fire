@@ -2994,55 +2994,152 @@ CROSS_MODULE_CASES = [
     # functions are the only ones in this image" was false of it and sent the
     # reader looking for an export that is exported.
     #
-    # The module deliberately never reads `p`, so the callee module itself is
-    # clean and the refusal cannot be confused with the dependency's: what is
-    # being asserted is WHICH question stops this program. The answer has to be
-    # the cross-image one — whether THAT compilation made the parameter a frame
-    # holder is a fact about a module compiled without this call site — and not
-    # "there is no such callee", because there is one.
+    # It was a REFUSAL and is now a POSITIVE case, and that is the whole
+    # content of the change: the callee module's manifest publishes a
+    # per-parameter frame-holder contract (`frame_params`), `take_it`'s
+    # parameter 0 is a holder of `P` there, and this image also has a `P` — so
+    # `base + 8k` means the same thing on both sides and the address is
+    # followed. `take_it` reads `p.a` through the parameter, so the answer is
+    # only right if the address really is the caller's `P` frame: 3*10 + 4 = 34,
+    # plus `n` = 10, so 44.
     #
-    # It stays a REFUSAL. Following the address is what the message now says
-    # would be needed (a per-parameter frame-holder contract in the manifest),
-    # and until that exists the address would land in a slot `take_it` compiled
-    # as a plain word.
-    ("byref_refuse_imported_free_function",
+    # The module reads BOTH fields and the caller reads both back afterwards,
+    # so a wrong address shows up as a wrong number rather than as a
+    # coincidence. (`byref_cross_module_wide_receiver_writes` is the same
+    # property for the method half; this is the free-function half.)
+    ("byref_cross_module_free_function_reads",
      {"mod": "struct P:\n"
              "    var a: Int\n"
              "    var b: Int\n"
              "\n"
              "def take_it(p: P) -> Int:\n"
-             "    return 1\n",
+             "    return p.a * 10 + p.b\n",
       "main": "from byref_xmod import P, take_it\n"
               "\n"
               "def main(n: Int) -> Int:\n"
               "    var p = P()\n"
               "    p.a = 3\n"
               "    p.b = 4\n"
+              "    return take_it(p) + n\n"}, 44, None),
+    # The WRITE half, and the case that would catch a fix which only got the
+    # read right: `bump` writes `p.a` through its parameter and the caller
+    # reads `p.a` back on its OWN side afterwards. A hand-off that passed a
+    # copy, a re-created block, or any word other than the caller's frame
+    # address would leave `p.a` at 3 and return 46; the address is right only if
+    # `p.a` reads 8 here, which is what the 96 against 46 says. The contract is
+    # per-parameter and says nothing about direction, so a store through the
+    # parameter is exactly as load-bearing as a load.
+    #
+    # The call is its own STATEMENT on purpose. Folding it into the return
+    # expression — `return p.a * 10 + p.b + bump(p, 5)` — reads `p.a` BEFORE
+    # the call, in CPython and here alike, so it returns 46 and the case would
+    # pass with the write going nowhere. An earlier draft of this case did
+    # exactly that and "passed" for that reason.
+    ("byref_cross_module_free_function_writes",
+     {"mod": "struct P:\n"
+             "    var a: Int\n"
+             "    var b: Int\n"
+             "\n"
+             "def bump(p: P, by: Int) -> Int:\n"
+             "    p.a = p.a + by\n"
+             "    return p.a + p.b\n",
+      "main": "from byref_xmod import P, bump\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var p = P()\n"
+              "    p.a = 3\n"
+              "    p.b = 4\n"
+              "    var r = bump(p, 5)\n"
+              "    return p.a * 10 + p.b + r\n"}, 96, None),
+    # The NEGATIVE half, and the one that makes the positive case above worth
+    # anything: the same shape with the two modules declaring the same NUMBER of
+    # fields in a different ORDER. `Q.v` is slot 0 and the caller's slot 0 is
+    # `P.pad`, so following the address computes on the wrong storage and
+    # returns 213 where CPython says 312 — measured on both architectures with
+    # the name comparison removed. It is refused, and named as the layout
+    # disagreement it is rather than as an unknowable.
+    ("byref_refuse_cross_module_layout_disagreement",
+     {"mod": "struct Q:\n"
+             "    var v: Int\n"
+             "    var pad: Int\n"
+             "\n"
+             "def take_it(q: Q) -> Int:\n"
+             "    return q.v * 100 + q.pad\n",
+      "main": "struct P:\n"
+              "    var pad: Int\n"
+              "    var v: Int\n"
+              "\n"
+              "from byref_xmod import take_it\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var p = P()\n"
+              "    p.pad = 2\n"
+              "    p.v = 3\n"
               "    return take_it(p) + n\n"},
-     "refuse:it imports take_it (`from byref_xmod import take_it`)", None),
+     "refuse:own manifest says the parameter in that position is a frame "
+     "holder of Q", None),
+    # And the inverse: the callee was compiled with an ordinary word in that
+    # slot, so a frame address arriving there is computed on. Refused, with the
+    # same measured consequence the single-file version has — the frame's own
+    # address, added to the other operand, different on every run.
+    ("byref_refuse_cross_module_plain_parameter",
+     {"mod": "def bump(x: Int, by: Int) -> Int:\n"
+             "    return x + by\n",
+      "main": "struct P:\n"
+              "    var a: Int\n"
+              "    var b: Int\n"
+              "\n"
+              "from byref_xmod import bump\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var p = P()\n"
+              "    p.a = 7\n"
+              "    p.b = 8\n"
+              "    return bump(p, n)\n"},
+     "refuse:is an ordinary word, NOT a frame holder", None),
     # The same hand-off reached through a STAR import, which is the shape where
     # "this module's own functions are the only ones in this image" is at its
     # least true: `from byref_xmod import *` binds whatever that module
-    # EXPORTS, so `take_it` may well be bound — and the export set is a library
-    # this pass has not built, because `_resolve_imports` compiles the modules
-    # and the frame analysis runs first. 22 files of the standard library write
-    # one. The refusal has to name THAT as the open question rather than assert
-    # that nothing binds the name.
-    ("byref_refuse_star_imported_free_function",
+    # EXPORTS. 22 files of the standard library write one. It used to be
+    # refused for asking a question the pass could not answer — whether the
+    # module exports the name at all, and whether its compilation made the
+    # parameter a frame holder — and both are now read off the link line, so
+    # this is a POSITIVE case with the same expected answer as the named import
+    # above.
+    ("byref_cross_module_star_imported_free_function",
      {"mod": "struct P:\n"
              "    var a: Int\n"
              "    var b: Int\n"
              "\n"
              "def take_it(p: P) -> Int:\n"
-             "    return 1\n",
+             "    return p.a * 10 + p.b\n",
       "main": "from byref_xmod import *\n"
               "\n"
               "def main(n: Int) -> Int:\n"
               "    var p = P()\n"
               "    p.a = 3\n"
               "    p.b = 4\n"
-              "    return take_it(p) + n\n"},
-     "refuse:can bind a name like that here is a `from byref_xmod import *`", None),
+              "    return take_it(p) + n\n"}, 44, None),
+    # …and the star-import arm's remaining half: a name NO library on the link
+    # line publishes. The export table is now consulted, so this is a real
+    # "nothing binds it" rather than the old "a library this pass has not
+    # built" — which was true of every one of the 22 star-importing stdlib
+    # files and of none of the programs.
+    ("byref_refuse_star_imported_unpublished_name",
+     {"mod": "def helper(x: Int) -> Int:\n"
+             "    return x + 1\n",
+      "main": "from byref_xmod import *\n"
+              "\n"
+              "struct P:\n"
+              "    var a: Int\n"
+              "    var b: Int\n"
+              "\n"
+              "def main(n: Int) -> Int:\n"
+              "    var p = P()\n"
+              "    p.a = 3\n"
+              "    p.b = 4\n"
+              "    return mystery(p) + n\n"},
+     "refuse:no manifest on this image's link line mentions it", None),
 ]
 
 # ── wave 5 (E3): a frame address in a NON-FIRST parameter position ──────────
