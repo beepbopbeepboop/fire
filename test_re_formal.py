@@ -523,6 +523,26 @@ def build_and_run(tmpdir, name, source, backend=None):
     if r.returncode != 0:
         raise AssertionError("build failed: %s" % (r.stderr or r.stdout).strip()[-800:])
     run = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT)
+    # The image's EXIT STATUS is checked, and not just its output: an image that
+    # dies said nothing, and "printed 0 lines" is a sentence about the PRINTING
+    # rather than about what happened. Observed on a loaded machine before this
+    # check existed — an image that had been killed reported itself as a corpus
+    # that answered nothing, which reads as a wrong answer rather than as a
+    # process that is not there. A negative status is a signal (`-11` is SIGSEGV,
+    # `-9` SIGKILL), so it is reported with its name.
+    if run.returncode != 0:
+        import signal as _signal
+        st = run.returncode
+        name = ""
+        if st < 0:
+            try:
+                name = " (%s)" % _signal.Signals(-st).name
+            except ValueError:                  # pragma: no cover
+                name = " (signal %d)" % -st
+        raise AssertionError("the image exited %d%s with no usable output; "
+                             "stderr: %s"
+                             % (st, name,
+                                (run.stderr or "").strip()[-300:]))
     return [ln for ln in run.stdout.split("\n") if ln.strip() != ""]
 
 
