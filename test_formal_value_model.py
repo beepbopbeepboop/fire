@@ -397,6 +397,51 @@ MODULE_GLOBAL_CASES = [
      "    printf(\"s=%d r=%d g=%d\", shadow(), rd(), G)\n"
      "    return 0\n",
      "s=99 r=5 g=5"),
+    # THE SAME NAME, WRITTEN through a `global` declaration — which the
+    # language allows and which used to have nowhere to live.
+    #
+    # This case was a REFUSAL (`REFUSALS`, below, with the needle "G is
+    # declared `global` in bump() and assigned there") and it moved HERE
+    # because the refusal became the wrong answer, not because the test grew
+    # tired of it. Two branches fixed the same construct in the same batch
+    # without ever meeting (`git merge-base` of `81b6d101` and `4b5629aa` is
+    # `a0c09694`, and neither is an ancestor of the other):
+    #
+    #   * `formal-value-model` added `mutated_module_global_refusal` and this
+    #     case with it. Its measurement is in that function's docstring and is
+    #     still exactly right about the tree IT saw: CPython answers 6 and 6,
+    #     and this path answered 10601485 and 5 on arm64, 11 and 5 on x86-64.
+    #   * `formal-module-globals` gave every name a function writes a real
+    #     `__DATA` slot, and its own `formal/build.py` comment says what that
+    #     does to this check: "`formal-module-globals` landed the slot, so
+    #     refusing it now refuses a program this path computes exactly".
+    #
+    # So the storage arrived, the refusal's premise went with it, and the
+    # refusal itself was narrowed to `declared_globals & assigned -
+    # module_slots()` — which is right, and which makes this case a program the
+    # path now computes. Measured on the merged tree, both architectures, the
+    # image built and printed `bump=6 read=6`, which is what CPython prints.
+    #
+    # It is here rather than deleted because a wrong answer is worse than no
+    # answer and the fix is exactly the kind one regression undoes: pin what
+    # the path computes now, so the day a `global` write stops reaching its
+    # slot this reads as `bump=<garbage> read=5` against CPython instead of
+    # passing.
+    ("a_module_global_a_function_declares_global_and_assigns_it",
+     "G = 5\n"
+     "\n"
+     "def bump():\n"
+     "    global G\n"
+     "    G = G + 1\n"
+     "    return G\n"
+     "\n"
+     "def rd():\n"
+     "    return G\n"
+     "\n"
+     "def main(n):\n"
+     "    printf(\"bump=%d read=%d\", bump(), rd())\n"
+     "    return 0\n",
+     "bump=6 read=6"),
 ]
 
 # (name, source, needle the refusal must contain)
@@ -535,27 +580,12 @@ REFUSALS = [
      "    printf(\"local=%d global=%d\", bump(), G)\n"
      "    return 0\n",
      "G is read in bump() at `G + 1`"),
-    # THE SAME NAME, WRITTEN through a `global` declaration — which the language
-    # allows and the value model has nowhere for.  There is no `__DATA` slot to
-    # redirect the write into, so the emitters treat the declaration as a no-op
-    # and the assignment lands in a local while the module's name still folds to
-    # the value it was bound with.  Measured: CPython 6 and 6; this path
-    # 10601485 and 5 on arm64, 11 and 5 on x86-64.
-    ("a_module_global_a_function_declares_global_and_assigns_is_refused",
-     "G = 5\n"
-     "\n"
-     "def bump():\n"
-     "    global G\n"
-     "    G = G + 1\n"
-     "    return G\n"
-     "\n"
-     "def rd():\n"
-     "    return G\n"
-     "\n"
-     "def main(n):\n"
-     "    printf(\"bump=%d read=%d\", bump(), rd())\n"
-     "    return 0\n",
-     "G is declared `global` in bump() and assigned there"),
+    # A `global G; G = G + 1` was HERE, next to the read-before-assign case
+    # above, with the needle "G is declared `global` in bump() and assigned
+    # there". It moved to `MODULE_GLOBAL_CASES` — same program, now pinned for
+    # what it computes rather than for a refusal that stopped being the right
+    # answer when `formal-module-globals` gave the name a real `__DATA` slot.
+    # That comment, and the measurement behind the move, are on the case.
 ]
 
 
