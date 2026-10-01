@@ -107,9 +107,23 @@ for _p in sorted(_glob.glob(os.path.join(HERE, 'mojo', '**', '*.py'),
 # Runtime ABI: every cached object is compiled against this header (and links the
 # runtime). A change to either MUST invalidate the cache, or stale objects link
 # against a mismatched ABI. These live under runtime/, not next to the .py files.
+# fire_metal.m/.h were MISSING here, and that is not a theoretical gap: the
+# whole Metal runtime lives in them -- dispatch, pipeline creation, buffer
+# allocation, the copy-back. A change to any of it left every cache key
+# unchanged, so build/libmojostdlib.<arch>.dylib was served STALE and a
+# measurement of a "no improvement" change was really a measurement of the
+# previous binary. Caught by: instrumenting the runtime with an fprintf, seeing
+# no output, and asking why. A change that cannot be observed is a change that
+# was never tested, and the cache was hiding that.
+#
+# They are built by a different compiler (clang -fobjc-arc, not cc) and link
+# Metal rather than nothing, which is exactly why they were overlooked: nothing
+# in the C path includes them.
 _RUNTIME_SOURCES = [
     os.path.join('runtime', 'fire_runtime.h'),
     os.path.join('runtime', 'fire_runtime.c'),
+    os.path.join('runtime', 'fire_metal.h'),
+    os.path.join('runtime', 'fire_metal.m'),
 ]
 
 # In-process hit/miss instrumentation (and reset for tests).

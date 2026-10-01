@@ -37,6 +37,220 @@
 
 <h1>Metal GPU Offload on macOS (Future Work)</h1>
 <blockquote><p>Status: <strong>design note / parking lot.</strong> Not implemented. Captured now so we don't lose the plan; we build it down the road once the CPU path (stdlib → MLIR → GIMPLE → C) is solid.</p></blockquote>
+<h2>What is built and measured</h2>
+<p>A dumb Mojo triple loop now offloads itself, bit-exactly, with no annotation
+and no change to the source:</p>
+<pre><code>def gemm_dumb(A: List[Float32], B: List[Float32], C: List[Float32],
+            m: Int, k: Int, n: Int):
+    for i in range(m):
+        for j in range(n):
+            acc: Float32 = 0.0
+            for p in range(k):
+                acc = acc + A[i * k + p] * B[p * n + j]
+            C[i * n + j] = acc</code></pre>
+<p>Two synthesis paths recognise that exact shape (every clause checked against
+the AST, not assumed): a one-thread-per-output-element kernel, and a
+tensor-core kernel. Plus: a per-buffer element-count ABI, a per-kernel grid
+override, a pipeline-state cache, and a writability mask that stops the runtime
+copying read-only buffers back.</p>
+
+<h2>The device</h2>
+<table>
+<tr><th>Property</th><th>Value</th><th>How it was established</th></tr>
+<tr><td>GPU</td><td>Apple M5 Max, MSL 3.2</td><td><code>MTLCreateSystemDefaultDevice</code></td></tr>
+<tr><td>MMA instruction ceiling</td><td><strong>117.47 TFLOPS</strong></td><td>saturating <code>simdgroup_multiply_accumulate</code> on <code>simdgroup_matrix&lt;T,8,8&gt;</code></td></tr>
+<tr><td>MMA fp32 vs fp16</td><td>equal at 8&times;8&times;8</td><td>the tile is the limit, not the type</td></tr>
+<tr><td>fp64</td><td><strong>unsupported</strong></td><td>Metal rejects it: <code>'double' is not supported in Metal</code></td></tr>
+<tr><td>scalar fp16 / bf16</td><td>no useful gain over fp32</td><td>the FMA units, not the type, are the limit</td></tr>
+<tr><td>nanosecond clock</td><td><code>clock_gettime_nsec_np(4)</code>, ~41 ns granularity</td><td>id 4 = <code>CLOCK_MONOTONIC_RAW</code>; id 6 measures ~1000 ns</td></tr>
+</table>
+
+<h2>Peak performance, and how to get it</h2>
+<p>The single most important fact on this page: <strong>arithmetic intensity,
+not the instruction, decides whether a tensor-core kernel is fast.</strong> The
+same <code>simdgroup_multiply_accumulate</code>, the same fragment layout, the
+same kernel — differing only in tile size — spans two orders of magnitude.</p>
+<p>For a tile <code>R&times;N</code> stepping K 8 at a time, the arithmetic
+intensity is <strong>RN / (2(R+N))</strong> FLOP per byte — because it loads
+<code>8R</code> A-elements and <code>8N</code> B-elements (that is
+<code>32(R+N)</code> bytes) to do <code>16&middot;R&middot;N</code> FLOP. It
+depends on <em>neither</em> K nor the problem size, which is what makes it
+predictable:</p>
+<table>
+<tr><th>Mapping</th><th>Loads per k-step</th><th>Bytes</th><th>FLOP</th><th>Intensity</th><th>Measured</th></tr>
+<tr><td>1 simdgroup per <strong>8&times;8</strong> tile</td><td>64 A + 64 B</td><td>512</td><td>1 024</td><td><strong>2 FLOP/byte</strong></td><td>0.134 TFLOPS — <em>no faster than scalar</em></td></tr>
+<tr><td>1 simdgroup per <strong>32&times;32</strong> tile (4&times;4 grid of 8&times;8 MMAs)</td><td>256 A + 256 B</td><td>2 048</td><td>16 384</td><td><strong>8 FLOP/byte</strong></td><td>0.58 TFLOPS</td></tr>
+<tr><td>staged 64&times;64 (measured slower)</td><td>512 A + 512 B</td><td>4 096</td><td>65 536</td><td>16 FLOP/byte</td><td>2–4% <em>slower</em></td></tr>
+</table>
+<p>At 2 FLOP/byte the kernel is deeply memory-bound, so the MMA is never the
+thing being waited on and replacing the scalar FMA with it buys exactly nothing.
+The 8&times;8 version was built first, verified bit-exact, and measured as a
+<em>null</em> speedup — the tile size was the entire difference and it was
+invisible in the code.</p>
+<p><strong>The model predicts the measurement.</strong> Going 8&times;8 &rarr;
+32&times;32 raises intensity 4.0&times; and measured throughput 4.3&times; (0.134
+&rarr; 0.58 TFLOPS). That is the main reason to trust the cost model below
+rather than treating these as anecdotes.</p>
+<p>Note the honest ceiling this implies: even 64&times;64 is 16 FLOP/byte, still
+memory-bound on any GPU whose balance is 50–100 FLOP/byte. <strong>Reaching
+the 117 TFLOPS ceiling needs blocking/reuse across the whole k-loop, not a
+bigger tile.</strong> On a single pass, intensity is capped by
+<code>RN/(2(R+N))</code> &asymp; R/2 for R=N, so it only grows linearly with
+register pressure — the two fight each other, and that tension is the real
+optimisation problem.</p>
+
+<h3>The configuration that reaches peak</h3>
+<ul>
+<li><p><strong>32&times;32 output tile</strong>, as a 4&times;4 grid of 8&times;8 MMAs. This is the reuse: 16 accumulators means each loaded element is used 16 times instead of once, and intensity goes 2 &rarr; 8 FLOP/byte. 32&times;32 is the sweet spot <em>given the no-staging constraint</em> — 64&times;64 reaches 16 FLOP/byte but measured slower.</p></li>
+<li><p><strong>One simdgroup, not four.</strong> 16 accumulators is already 32 registers of <code>acc</code>; four simdgroups of them want 128 registers before any operands, which is the register-pressure cliff. The reuse comes from the tile, not the simdgroup count, so there is nothing to buy by widening it.</p></li>
+<li><p><strong>No threadgroup staging.</strong> The staged, double-buffered 64&times;64 version measured <strong>2–4% slower</strong>. Staging would be code that exists to be slower.</p></li>
+<li><p><strong>Fragments read straight from global memory into registers</strong> — no smem round trip at all.</p></li>
+<li><p><strong>Out-of-range reads are 0.0, not predicated</strong>, because a zeroed A or B row contributes nothing to the product, so the stores are the only place bounds are checked.</p></li>
+</ul>
+
+<h3>The 8&times;8 fragment layout</h3>
+<p>A constant of the architecture, not of the matrix. Getting one term wrong
+transposes the result silently. Lane <code>q</code> holds row
+<code>(q/4 &amp; 4) + (q/2 % 4)</code>, its first value in column
+<code>(q/4 &amp; 2) * 2 + (q%2) * 2</code> and its second in the column after:</p>
+<pre><code>int fr   = ((lane / 4) &amp; 4) + ((lane / 2) % 4);
+int fcol = ((lane / 4) &amp; 2) * 2 + (lane % 2) * 2;
+simdgroup_matrix&lt;float, 8, 8&gt; acc;
+reinterpret_cast&lt;thread float2&amp;&gt;(acc.thread_elements()) = float2(0.0f);</code></pre>
+<p>Verified two ways: an exhaustive 32-lane probe with distinguishable values
+(<code>test_llm/frag_layout_probe.m</code>), and end-to-end bit-exactness
+against a naive triple loop.</p>
+
+<h2>The cost model a scheduler needs</h2>
+<p>Two independent costs, and on this machine the first one usually dominates:</p>
+<pre><code>T_gpu  =  T_marshal + T_kernel
+
+T_marshal = (bytes_in + bytes_out) / BW_effective
+            bytes_in  = sizeof(A) + sizeof(B)          # every buffer uploaded
+            bytes_out = sizeof(C)                      # writable buffers only
+
+T_kernel  = 2*m*k*n / TFLOPS_achieved</code></pre>
+<p>The decision is <code>T_gpu &lt; T_cpu</code>, where <code>T_cpu</code> for
+this Mojo List-indexed path measures about <strong>2.0 GFLOP/s</strong>. The
+<em>same GEMM</em> in C runs at 440 GFLOP/s, so the Mojo CPU path is roughly
+<strong>220&times; slower than C</strong> at the same operation. That gap is why
+every speedup claim here has to name its baseline: "44&times; vs the Mojo CPU
+path" and "~1.3&times; vs C" are both true of the same run, and only the second
+is a statement about the hardware.</p>
+
+<h3>Measured, 512&times;512&times;512 (268.4 MFLOP, 3.15 MB/call)</h3>
+<table>
+<tr><th>Path</th><th>ms/iter</th><th>TFLOPS</th><th>vs CPU</th></tr>
+<tr><td>CPU (<code>--no-gpu</code>)</td><td>133</td><td>0.002</td><td>1&times;</td></tr>
+<tr><td>GPU, naive-parallel</td><td>3</td><td>0.089</td><td><strong>44&times;</strong></td></tr>
+<tr><td>GPU, tensor-core</td><td>4</td><td>0.067</td><td><strong>33&times;</strong></td></tr>
+<tr><td>C harness, same tensor-core algorithm</td><td>0.462</td><td>0.58</td><td>—</td></tr>
+</table>
+<p>Note the two GPU rows are <em>within noise of each other</em>, and that is
+the point of the next section.</p>
+
+<h2>Marshalling: the cost that hides everything</h2>
+<p><strong>Measured, holding FLOPs fixed and stretching k</strong> — time tracks
+<em>bytes</em>, not arithmetic:</p>
+<table>
+<tr><th>Shape</th><th>MB/call</th><th>MFLOP/call</th><th>FLOP/byte</th><th>ms/iter</th></tr>
+<tr><td>512&times;512&times;512</td><td>3.15</td><td>268.4</td><td>85</td><td>3</td></tr>
+<tr><td>512&times;512&times;4096</td><td>17.83</td><td>2147.5</td><td>120</td><td>19</td></tr>
+</table>
+<p>Bytes went up 5.66&times;, FLOPs 8&times;, time 6.3&times; — the time follows
+the bytes. Effective bandwidth through the offload path is about
+<strong>0.9–1.0 GB/s</strong>. Every millisecond spent tuning the kernel was, at
+these sizes, measuring the marshalling path instead.</p>
+<p>The tell is that two <em>completely different kernels</em> — a scalar FMA loop
+and an MMA kernel — land on the same time. When the work per call changes by
+8&times; and the time does not move, the time is not in the kernel.</p>
+
+<h3>Bandwidths and latencies</h3>
+<table>
+<tr><th>Quantity</th><th>Value</th><th>Note</th></tr>
+<tr><td>Effective bandwidth, whole offload path</td><td><strong>~0.9–1.0 GB/s</strong></td><td>upload + download + alloc + sync</td></tr>
+<tr><td>Host memcpy on this machine</td><td>~10 GB/s</td><td>so the path is <strong>10&times; below memcpy</strong></td></tr>
+<tr><td>Fixed cost per dispatch, before the pipeline cache</td><td><strong>~1 ms</strong></td><td><code>newComputePipelineStateWithFunction:</code> per dispatch</td></tr>
+<tr><td>Fixed cost per dispatch, after the cache</td><td><strong>~0 ms</strong></td><td>32&times;32&times;32 went from 1 ms to 0 ms; it does 65 KFLOP</td></tr>
+<tr><td>Copy-back direction</td><td>plain <code>memcpy</code></td><td>buffers are <code>MTLResourceStorageModeShared</code> on unified memory, so <code>[db contents]</code> is already host-addressable — <strong>not</strong> a PCIe transfer</td></tr>
+</table>
+
+<h3>What was fixed, in order of size</h3>
+<ol>
+<li><p><strong>Cache the pipeline state per kernel name.</strong> It was being rebuilt on <em>every dispatch</em> — the driver compiles and validates the function each time. This was the entire fixed per-call floor, invisible in the obvious way: a 32&times;32&times;32 GEMM, which should cost nothing, took 1 ms. Fixing it took the floor to 0 ms and 1024&times;1024&times;1024 from 10 ms to 7 ms.</p></li>
+<li><p><strong>Stop copying back read-only buffers.</strong> The runtime copied <em>every</em> buffer back, including A and B, which the kernel only reads — 16 of the 17 MB moved per call, device to host and then discarded. 1024&times;1024&times;1024: 12 &rarr; 9 ms.</p></li>
+<li><p><strong>Per-buffer element counts.</strong> One count for the whole call could not describe three buffers of different lengths.</p></li>
+</ol>
+<p>Still open, and the next thing to attack: <strong><code>newBufferWithBytes</code>
+allocates fresh per buffer per call</strong> (~8 MB twice per call at
+512&times;512&times;4096). That is the remaining ~10&times; gap to memcpy
+bandwidth. Reusing buffers across calls is the obvious fix and is not yet
+done.</p>
+
+<h2>Grid and launch ABI</h2>
+<ul>
+<li><p>The grid is <strong>1-D</strong>. <code>tg = ngroups &gt; 0 ? ngroups : ceil(max(sizes)/tptg)</code> and <code>use = nthreads &gt; 0 ? nthreads : tptg</code>. The launch path sizes the grid from the <strong>largest buffer's element count</strong>, which silently encodes the assumption <em>one thread per output element</em>.</p></li>
+<li><p>That assumption breaks for tensor cores, where 32 lanes cooperate on one 8&times;8 tile: an m&times;n grid would be ~32&times; too many threads with 31 of every 32 exiting immediately. Both values were already overridable in the runtime, so a per-kernel grid spec cost <strong>no ABI change</strong> — only a way for a kernel to ask.</p></li>
+<li><p>Grids in use: naive GEMM <code>0,0</code> (inferred); tensor-core GEMM <code>32, ((m+31)/32)*((n+31)/32)</code>.</p></li>
+</ul>
+
+<h2>Verifying a GEMM is bit-exact</h2>
+<p>Reduction order must not be able to hide an error. Fill the data with
+multiples of <strong>1/16</strong>: every partial sum is then exactly
+representable in f32, so a different accumulation order is the <em>only</em>
+thing that could produce a difference, and a correct kernel has none.</p>
+<pre><code>checksum -4.01171875
+elems 0.109375 0.54296875 -0.7578125 0.18359375 0.41015625</code></pre>
+<p>Identical across: naive-parallel GPU, tensor-core GPU, the C tensor-core
+harness, and (as a checksum only) the CPU. A naive-C comparison harness reports
+mismatch counts — it should be <code>0/4096</code>.</p>
+
+<h2>How to get performance: the checklist</h2>
+<ol>
+<li>Tile for <strong>arithmetic intensity first</strong> — <code>RN/(2(R+N))</code>, which predicts throughput. 32&times;32 is the measured optimum without staging; an 8&times;8 tile is a scalar kernel with extra steps.</li>
+<li>Count <strong>per-dispatch fixed costs</strong> and cache them. A fixed cost that does not shrink with the work is per-call setup by definition.</li>
+<li>Measure <strong>bytes moved per call</strong>, not just FLOPs. On this machine the two are independent, and bytes usually win.</li>
+<li>Copy back <strong>only what was written</strong>, and take that claim from the type.</li>
+<li>Do <strong>not</strong> stage through threadgroup memory until measured. It was slower.</li>
+<li>Compare against <strong>both</strong> the Mojo CPU path (what a user gets) and optimised C (what the hardware is doing). Only one is a hardware claim.</li>
+</ol>
+
+<h2>Traps that cost real time</h2>
+<p>Every one of these failed <em>silently</em> — correct exit code, plausible
+output, wrong answer or no effect.</p>
+<table>
+<tr><th>Trap</th><th>Symptom</th><th>Why it is dangerous</th></tr>
+<tr><td><code>cas._RUNTIME_SOURCES</code> omitted <code>fire_metal.m/.h</code></td><td>runtime changes had <em>no effect at all</em>; the dylib was served stale</td><td>a "no improvement" result was a measurement of the <strong>previous binary</strong>. Found by adding an <code>fprintf</code> and seeing no output. <strong>Fixed</strong> — they are in the fingerprint now.</td></tr>
+<tr><td>Writability mask keyed on <code>'Mut' in ctype</code></td><td>GEMM returned <code>0.0</code>, exit 0, bit-exact</td><td>these are the <em>MSL-side</em> params, where the address space is already lowered to <code>device const float *</code>; the Mojo spelling is gone, so the predicate never matched and the mask was all zeros. Now keys on <code>const</code>.</td></tr>
+<tr><td>A second loop over the original statements when appending the GEMM</td><td><code>main</code> appeared twice; prints vanished; <strong>exit 0 with no output</strong></td><td>the worst available symptom to debug. One pass, with the GEMM as a fallback, so there is one append per statement.</td></tr>
+<tr><td>Assuming a measured "no change" meant the code ran</td><td>concluded "pipeline creation isn't the cost" from a stale binary</td><td>see row 1. A change you cannot observe is a change you have not tested.</td></tr>
+<tr><td>A benchmark row below the offload floor</td><td>three columns all read "18 ms"</td><td>256&times;256 = 65536 elements is under the 90 000 default floor, so it <strong>never dispatched</strong> and all three paths were identical. Always check the dispatch count, not just the time.</td></tr>
+</table>
+<p>Related: <code>simdgroup_matrix</code> state is a per-lane <em>register tile</em>,
+not a value in memory. Expressing an MMA through ordinary expressions yields a
+kernel that compiles and computes nothing.</p>
+
+<h2>Open work, in the order I would do it</h2>
+<ol>
+<li><p><strong>Reuse device buffers across calls</strong> — the remaining ~10&times; to memcpy bandwidth, and it gates every large-shape win.</p></li>
+<li><p><strong>Build a real cost model</strong> from the tables above and drive the <code>MOJO_OFFLOAD_MIN_ELEMENTS</code> guard from predicted <code>T_gpu &lt; T_cpu</code> rather than a flat element count. The guard should weigh bytes, not elements: the two are independent on this machine.</p></li>
+<li><p>Widen the recogniser: reductions (with MLX's <code>float4</code> accumulators, <code>simd_sum</code>, two-level simdgroup/threadgroup reduction as the model), elementwise, transpose.</p></li>
+<li><p>Decide the tensor-core default on evidence. It is currently <strong>off</strong> because it measures the same as the naive kernel and is a raw MSL string; that should flip once marshalling stops dominating.</p></li>
+</ol>
+
+<h2>Reference points for calibration</h2>
+<table>
+<tr><th>Kernel</th><th>TFLOPS</th><th>Source</th></tr>
+<tr><td>MMA instruction ceiling</td><td>117.47</td><td><code>test_llm/mma_peak.m</code></td></tr>
+<tr><td>tensor-core GEMM, C</td><td>0.58</td><td><code>test_llm/gemm_tensorcore.m</code> (32&times;32 tile)</td></tr>
+<tr><td>naive GEMM, C</td><td>0.44</td><td>512&times;512&times;512</td></tr>
+<tr><td>scalar matvec, C</td><td>0.049</td><td>the "20&times; faster" baseline</td></tr>
+<tr><td>Mojo List-indexed triple loop</td><td>0.002</td><td>the CPU path a user actually gets</td></tr>
+</table>
+<p>The 117 TFLOPS ceiling is 5&times; above the best GEMM written so far. Closing
+that is a tiling-and-reuse problem, not an intrinsic problem — which is the one
+optimistic sentence on this page.</p>
+<h2>Original plan (2026-09-30, before any of this existed)</h2>
 <h2>The idea in one line</h2>
 <p>On a Mac we already have a full GPU toolchain in the box: identify the Mojo kernels we want to offload, lower their inner bodies to <strong>Metal Shading Language (MSL)</strong> / <strong>LLVM Metal IR</strong>, run them through <strong>Apple's IR→binary compiler</strong> to get a real <code>.metallib</code> for this machine, and call that from the C we already emit. Result: actual GPU offload on macOS with no external runtime.</p>
 <h2>Why this is tractable here</h2>

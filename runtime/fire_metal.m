@@ -89,6 +89,62 @@ int mojo_metal_init(const char *msl_source) {
  * earlier version counted at the success tail only, which meant every one of
  * the failure paths (no device, no library, no function, no pipeline, OOM,
  * encoder failure) silently reported zero failures. */
+/* Pipeline states, cached by kernel name.
+ *
+ * Creating one is NOT free: `newComputePipelineStateWithFunction:` asks the
+ * driver to compile and validate the function against the device, and it was
+ * being called ONCE PER DISPATCH. That was the single largest cost in the whole
+ * offload path, and it was invisible in the obvious way -- a 32x32x32 GEMM,
+ * which does 65 KFLOP and should cost nothing, took 1 ms per call, and so did
+ * a 128x128x128. A fixed cost that does not shrink with the work is a
+ * per-call setup cost by definition, and this was the only one.
+ *
+ * It is safe to cache because a pipeline state is a function of (library,
+ * function) and the device, all three of which are fixed for the process --
+ * g_lib is built once by mojo_metal_init and never replaced, and g_device is
+ * the system default. Nothing in this file can produce a second library, so
+ * there is no way for a cache hit to return a state built from a stale source.
+ *
+ * Bounded and linear: a module has a handful of kernels, and this only runs on
+ * a miss. A miss past the bound simply stops caching rather than evicting,
+ * because a workload that needs more than this many DISTINCT kernels is not
+ * one where a linear scan is the bottleneck.
+ */
+#define _MG_PS_MAX 64
+static id<MTLComputePipelineState> g_ps[_MG_PS_MAX] __attribute__((unused));
+static char *g_ps_name[_MG_PS_MAX] __attribute__((unused));
+static int64_t g_ps_hits, g_ps_misses __attribute__((unused));
+
+static id<MTLComputePipelineState> _mg_pipeline(id<MTLDevice> dev,
+                                                id<MTLLibrary> lib,
+                                                id<MTLFunction> fn,
+                                                const char *name) {
+    for (int i = 0; i < _MG_PS_MAX; i++) {
+        if (g_ps_name[i] && strcmp(g_ps_name[i], name) == 0) {
+            g_ps_hits++;
+            return g_ps[i];
+        }
+    }
+    g_ps_misses++;
+    NSError *err = nil;
+    id<MTLComputePipelineState> ps =
+        [dev newComputePipelineStateWithFunction:fn error:&err];
+    if (!ps) {
+        _set_error("no pipeline for '%s': %s", name,
+                   err ? err.description.UTF8String : "?");
+        return nil;
+    }
+    for (int i = 0; i < _MG_PS_MAX; i++) {
+        if (!g_ps_name[i]) {
+            g_ps_name[i] = strdup(name);
+            g_ps[i] = ps;           /* ARC retains into the strong static */
+            break;
+        }
+    }
+    (void)lib;
+    return ps;
+}
+
 static int mojo_metal_dispatch_impl(const char *kernel_name,
                         int64_t n_bufs, void *const *bufs,
                         const int64_t *sizes,
@@ -107,14 +163,12 @@ static int mojo_metal_dispatch_impl(const char *kernel_name,
             _set_error("no kernel named '%s' in the compiled library", kernel_name);
             return 0;
         }
-        NSError *err = nil;
-        id<MTLComputePipelineState> ps =
-            [g_device newComputePipelineStateWithFunction:fn error:&err];
-        if (!ps) {
-            _set_error("no pipeline for '%s': %s", kernel_name,
-                       err ? err.description.UTF8String : "?");
-            return 0;
-        }
+        id<MTLComputePipelineState> ps = _mg_pipeline(g_device, g_lib, fn,
+                                                      kernel_name);
+        if (!ps) return 0;
+    if (getenv("MOJO_GEMM_TRACE"))
+        fprintf(stderr, "[mg] %s ps_hits=%lld ps_misses=%lld\n", kernel_name,
+                (long long)g_ps_hits, (long long)g_ps_misses);
         id<MTLBuffer> __strong *devbufs = NULL;
         if (n_bufs > 0) {
             devbufs = (id<MTLBuffer> __strong *)
