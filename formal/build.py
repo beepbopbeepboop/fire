@@ -3894,6 +3894,39 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         callees = {id(c.func) for c in M.iter_nodes(fn.body)
                    if isinstance(c, F.CallExpr) and isinstance(c.func,
                                                                F.IdentExpr)}
+        # …and a SUBSCRIPT callee, `List[Int]()` / `f[a, b](x)`, which is the
+        # same rule one level up and the last spelling this check was missing.
+        # A call names a symbol; when the symbol is spelled with a bracket, the
+        # bracket is that symbol's compile-time argument list and the base is
+        # the thing the call dispatches on. Neither is a read of a value, so
+        # neither may be placed, and asking this walk to place them produced a
+        # diagnostic that was false about the file in the most expensive way
+        # this tool has: `List[Int]()` was refused with "'List' has no home: the
+        # module-level symbol table is empty for this unit … the register
+        # allocator collected no home for it", which is a statement about the
+        # register allocator sent to a reader for a fact about the language —
+        # `List` is a TYPE, it is in none of the four places a value can be, and
+        # no amount of looking at `_load_var` would have found the bug.
+        #
+        # 41 of the 2026-09-30 sweep's files were filed under that sentence
+        # (35 of them through `std/collections/binary_heap.mojo`'s
+        # `self._data = List[Self.T]()`), which is why it is worth the three
+        # lines: the whole terminal cause was one missing position in a set.
+        # `model.subscript_callee_names` is the ONE recogniser of the shape and
+        # it returns NODES, not names, because `iter_nodes` has no parent and
+        # the same spelling is a genuine read in a value position — the
+        # exemption is for this call site, not for every read of `List` in the
+        # function, which is the silently-wrong direction.
+        #
+        # It is a CALL-SITE exemption, so a bare `f(x)` where `f` is genuinely
+        # undeclared is unaffected (it was already exempt, and refuses
+        # downstream at the emitter's "this module does not compile" arm), and
+        # a type in a non-callee position is unaffected: `var xs: List[Int]`
+        # and `len(List)` keep whatever answer they had.
+        for c in M.iter_nodes(fn.body):
+            if isinstance(c, F.CallExpr):
+                for node in M.subscript_callee_names(c):
+                    callees.add(id(node))
         # …and the DOTTED callee, `mod.f(...)`, which is the other spelling of
         # a cross-module call and the only one `import mod` produces. The root
         # of the chain is not a read of a value either: it names the MODULE,
