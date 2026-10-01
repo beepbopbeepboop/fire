@@ -16270,8 +16270,21 @@ def expr_spelling(node) -> str:
     a model function must not reach up into the build pass for a string."""
     if isinstance(node, F.IdentExpr):
         return node.name
-    if isinstance(node, F.CallExpr) and isinstance(node.func, F.IdentExpr):
-        return f"{node.func.name}({', '.join(expr_spelling(a) for a in (node.args or []))})"
+    if isinstance(node, F.CallExpr):
+        # The callee is spelled by the same two helpers as any other position,
+        # so `TypeList.reduce[Self._mapper]()` and `Intrinsics.read[0]()` come
+        # out as themselves. Restricting this arm to a bare `IdentExpr` callee
+        # printed `CallExpr` — a bare placeholder, in a diagnostic whose whole
+        # job is to name the thing — for every specialization in the new-modular
+        # stdlib (`_integral_type_of[Self.dtype]()`, 100+ of them).
+        return (f"{expr_spelling(node.func)}"
+                f"({', '.join(expr_spelling(a) for a in (node.args or []))})")
+    if isinstance(node, F.UnaryOp):
+        # `-1` is an IntLiteral inside a UnaryOp, and `type(node).__name__` is
+        # what the fallback below said about it — "UnaryOp" in a sentence about
+        # a class attribute whose value the reader is being sent to look at.
+        word = "not " if node.op == "not" else node.op
+        return f"{word}{expr_spelling(node.operand)}"
     if isinstance(node, F.MemberExpr):
         return member_chain_text(node)
     if isinstance(node, F.SubscriptExpr):

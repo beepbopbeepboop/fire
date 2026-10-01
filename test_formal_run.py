@@ -754,6 +754,43 @@ CASES = [
       "    return Level.NOTSET\n",
       "refuse:Level.NOTSET reads a `comptime` class attribute of Level, whose "
       "value is `Self(0)`", None),
+     # An MLIR TEMPLATE reached THROUGH the binding is refused as the MLIR
+     # construct it is, not as "not a literal". The two questions meet on one
+     # node — a `comptime` class attribute whose value is a template — and
+     # dropping the MLIR half would replace a refusal that named the construct
+     # with one that does not. `_plugin/selector.mojo`, `builtin/variadics.mojo`,
+     # `ffi/unsafe_union.mojo` and `memory/pointer.mojo` are the four new-modular
+     # stdlib files this moves onto the MLIR verdict, and it is asked through
+     # `model.mlir_template_refusal` so a binding that asks the BUILD a target
+     # question (`#kgen.param.expr<current_target>`) is still answered rather than
+     # refused.
+     ("mlir_template_in_a_comptime_attribute_is_refused_as_mlir",
+      "struct Tag:\n"
+      "    comptime _t = __mlir_type.`!kgen.none`\n"
+      "    var v: Int\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var t = Tag()\n"
+      "    t.v = n\n"
+      "    printf(\"%d\", t.v + Tag._t)\n"
+      "    return 0\n",
+      "refuse:Tag._t reads a `comptime` class attribute of Tag, whose value is "
+      "an MLIR construct: __mlir_type.`!kgen.none` names an MLIR TYPE", None),
+     # …and the same template in a TYPE POSITION builds, which is the pair that
+     # makes the refusal above a refusal rather than a blanket ban on the
+     # construct. `std/builtin/none.mojo` is this file: it declares
+     # `comptime _mlir_type = __mlir_type.`!kgen.none`` and BUILDS, because its
+     # only reads of the name are a field annotation and a parameter annotation.
+     ("mlir_template_in_a_type_annotation_still_builds",
+      "struct Tag:\n"
+      "    comptime _t = __mlir_type.`!kgen.none`\n"
+      "    var v: Self._t\n"
+      "\n"
+      "def main(n: Int) -> Int:\n"
+      "    var t = Tag()\n"
+      "    t.v = n\n"
+      "    printf(\"%d\", t.v)\n"
+      "    return 0\n", 0, "10"),
      # A TYPE POSITION is not a read. `var v: Self.K` is the shape
      # `std/builtin/none.mojo:30` has (`var _value: Self._mlir_type`, a file that
      # BUILDS), and an annotation is not evaluated on this path — the field

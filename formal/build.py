@@ -5517,6 +5517,30 @@ def _overridden_comptime_refusal(struct_def, name: str, spelling: str) -> str:
     )
 
 
+def _first_unanswerable_mlir(value):
+    """The first MLIR template in `value` this build cannot answer, or None.
+
+    One walk and one reader, and both are the ones the rest of this path uses:
+    `model.iter_templates_preorder` (which is how
+    `refuse_module_level_mlir_templates` finds the templates in a module-level
+    binding's initializer) and `model.mlir_template_refusal` (which answers a
+    `#kgen.param.expr<…>` target query this build knows and refuses the rest, so
+    a binding that asks the target a question is NOT caught here).
+
+    It exists because the two questions meet on one construct: a `comptime` class
+    attribute whose value is an MLIR template. `utils/numerics.mojo`'s
+    `FPUtils.integral_type` and `memory/pointer.mojo`'s `_Null._mlir_type` are
+    two, and without this the read is refused as "not a literal" — which drops a
+    refusal that named the MLIR construct onto one that does not, and sends the
+    reader to a literal the file does not contain."""
+    if value is None:
+        return None
+    for node in M.iter_templates_preorder(value):
+        if M.mlir_template_refusal(node) is not None:
+            return node
+    return None
+
+
 def _constant_kind(struct_def, name: str) -> str:
     """`"comptime"` for a `comptime` binding, `"constant"` for an assignment.
 
@@ -7354,6 +7378,20 @@ def _apply_constant_sites(node, sites: dict, disputed: dict = None):
                 spelling = f"{node.obj.name}.{node.member}"
                 declared = (f"a `comptime` class attribute" if kind == "comptime"
                             else f"a class-level constant")
+                mlir = _first_unanswerable_mlir(default)
+                if mlir is not None:
+                    raise CodegenError(
+                        f"{spelling} reads {declared} of {st.name}, whose value "
+                        f"is an MLIR construct: "
+                        f"{M.mlir_template_refusal(mlir)} It is reached "
+                        f"through the binding rather than in a function body, "
+                        f"which is why the expression walk that refuses MLIR "
+                        f"templates does not see it: that walk runs over "
+                        f"FUNCTION bodies and over module-level bindings "
+                        f"(`model.refuse_module_level_mlir_templates`), and a "
+                        f"struct body's `comptime` binding is neither — so the "
+                        f"refusal is asked here, at the read, which is where the "
+                        f"construct is fatal.")
                 reason = (f"a `comptime` binding's value is written in the class "
                           f"body and is often a CALL or a COMPUTATION rather "
                           f"than a literal, and this path has no comptime "
