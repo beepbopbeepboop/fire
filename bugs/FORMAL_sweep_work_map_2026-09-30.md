@@ -79,7 +79,7 @@ is a taxonomy whose numbers are only as good as whoever ran it.
 | 5 | frame address escapes: returned by its creator | **19** | 19 | the file itself | `std/builtin/_format_float.mojo` | `FORMAL_wide_receiver_by_reference.md`, `FORMAL_frame_receiver_handoff.md` §4 | none |
 | 6 | `inlined_assembly` (a gimple-C runtime construct) | **18** | 0 | `_assembly.mojo` 18 | `std/atomic/__init__.mojo` | `FORMAL_known_limits.md` §1 (a **true limit**) | `formal-comptime-asm` |
 | 7 | frame address passed where a value is wanted | **14** | 14 | the file itself | `std/builtin/tuple.mojo` | `FORMAL_wide_receiver_by_reference.md` | none |
-| 8 | callee has no definition on this path | **12** | 12 | the file itself | `std/base64/base64.mojo` | `FORMAL_frame_receiver_handoff.md` §"Found, deliberately NOT fixed" | none |
+| 8 | callee has no definition on this path | **12** | 12 | the file itself | `std/base64/base64.mojo` | `FORMAL_callee_no_def_ceiling_zero.md` — ceiling measured at **0** (§7); the one sentence was five, four of them false | was none |
 | 9 | frame address escapes: aliased out of a method | **11** | 10 | the file itself 10, `itertools.mojo` 1 | `std/benchmark/_progress.mojo` | `FORMAL_wide_receiver_by_reference.md` | none |
 | 10 | a slot's declared type is not declared by its struct | **10** | 0 | the file itself | `formal/arm64_codegen.py` | **FIXED and `git rm`'d**: `model.assigned_value_base_name` + `struct_init_field_types` read the type out of what `__init__` ASSIGNS, unanimity or nothing, with the negative half (`struct_init_field_type_why`) so a refusal says which evidence it read and rejected. **Re-measured at 0 pass**: 5 of the 10 land on rows 5/9 (the frame-LIFETIME family — `Interpreter.__init__` binds `self.scope` and never returns `self`, but the test returns the object) and 3 leave the `codegen` class entirely onto a host import (`re`, types`), which is the right answer for them. So this row is a single-file fix that unblocked a different one. | the 3 host-import files |
 | 11 | a module-global name has no storage | **6** | 6 | the file itself | `formal/arm64.py` | `FORMAL_module_state_no_storage.md` | none |
@@ -315,3 +315,35 @@ container so `len()` of it is answerable.
   struct template (35 files), a bare-TYPE-name-in-a-value-position rule (5, and
   overlapping `work/frontend-silent`'s `f5bcb0a1`), then premise B2 (1).
   **None of the three is row 2, and each is bigger than row 2 was.**
+
+## 7. Row 8 measured: the ceiling is 0, and the row was one sentence over five facts
+
+`bugs/FORMAL_callee_no_def_ceiling_zero.md` has the whole thing. The two
+numbers that belong in this map:
+
+* **The ceiling of row 8 is 0 of 12.** Every one of the twelve files, re-built
+  on a cold CAS with that refusal suppressed in-process, reaches a second
+  refusal — and six of them reach one that is not about this file at all: three
+  `codegen/dependency` (`std.memory`/`std.builtin.device_passable`/
+  `std.builtin.rebind`) and three `not-answerable/host-import` (`copy`,
+  `subprocess`, `ast`). The other six are each behind a refusal that belongs to
+  another row: the method-call-on-a-value family (3), the value-only-callee
+  family (2), the frame-escape family (1). So this row's 12 has no slack at all,
+  and row 8 cannot be worth a fix on file count.
+* **Its population is 41, not 12**, over the repo, the stdlib's `std/` and its
+  `test/`. The 29 extra files are outside the sweep's default scope
+  (`DEFAULT_STDLIB_SUBTREES = ("std",)`), so a number derived from a default
+  sweep is a lower bound on the population of a cause whose files are mostly
+  test files — worth knowing for every row of this table, not just this one.
+
+And the reason a row with a ceiling of 0 was still worth a pass: the one
+sentence all 41 carried ("this module's own functions are the only ones in this
+image … there is no such callee here to be compiled") was **false of 34 of
+them** — 26 imported free functions that ARE compiled into another module's
+library, 1 compile-time parameter that no compilation will ever define, 5
+compiler intrinsics that yield MLIR, 2 star-imported names. A planner reading
+this table cannot see that; a reader of one of those 41 diagnostics could not
+avoid it. The refusal is still a refusal in all five cases — a build that hands
+a frame address to a callee that never learned the field list is the
+silent-wrong-answer failure this backend exists to prevent — but it now says
+which of the five it is.
