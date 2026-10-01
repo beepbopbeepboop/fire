@@ -385,15 +385,26 @@ def _returns_kinds_valued(gen, node) -> bool:
     ARE recorded, by the callee's own literal lowering; marking the call
     result makes the read a boxed one and lets the runtime answer per slot."""
     if isinstance(node, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
+        # `gen is None` is the predicate's own no-type-context mode, which
+        # test_gimple.py's struct-format case calls it in (that case is about
+        # the CallExpr arm below and needs no types). With no context an
+        # identifier element cannot be typed, so the literal half answers what
+        # it can — LITERAL elements only — rather than claiming to have seen
+        # the whole literal.
         _kinds = set()
+        _saw_typed = False
         for _el in (node.elements or []):
             if isinstance(_el, (gimple_ctypes.NoneLiteral,)) or (
                     isinstance(_el, gimple_ctypes.IdentExpr) and _el.name == 'None'):
                 _kinds.add('n')
+                _saw_typed = True
+            elif gen is None:
+                continue
             else:
                 _kinds.add(gimple_ctypes.TypeLattice.slot_kind_byte(
                     gen._quick_type(_el)))
-        return len(_kinds) > 1
+                _saw_typed = True
+        return _saw_typed and len(_kinds) > 1
     if not isinstance(node, gimple_ctypes.CallExpr):
         return False
     f = node.func
@@ -446,12 +457,13 @@ def _infer_return_maybe_kinds(gen, body, func_def=None) -> bool:
     every identifier, so all three read as one kind and the literal looks
     homogeneous. Seed and restore are the same save/overlay/restore
     `_infer_return_elem_type` does for the same reason."""
-    _saved_vt = gen.var_types
-    gen.var_types = dict(_as_dict(_saved_vt))
-    if func_def is not None:
-        for _pname, _ptype in (func_def.params or []):
-            if _ptype:
-                gen.var_types[_pname] = gimple_ctypes._mojo_type(_ptype)
+    _saved_vt = gen.var_types if gen is not None else None
+    if gen is not None:
+        gen.var_types = dict(_as_dict(_saved_vt))
+        if func_def is not None:
+            for _pname, _ptype in (func_def.params or []):
+                if _ptype:
+                    gen.var_types[_pname] = gimple_ctypes._mojo_type(_ptype)
     bound: set = set()
     try:
         for _round in range(2):
@@ -477,7 +489,8 @@ def _infer_return_maybe_kinds(gen, body, func_def=None) -> bool:
                 return True
         return False
     finally:
-        gen.var_types = _saved_vt
+        if gen is not None:
+            gen.var_types = _saved_vt
 
 
 def _homogeneous_tuple_ann_elem(self, _ret_ann):
