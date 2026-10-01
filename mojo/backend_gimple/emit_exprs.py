@@ -3166,6 +3166,46 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             return _lower_container_eq(gen, op, _lk, left_node, lt, lv,
                                        _rk, right_node, rt, rv)
 
+
+    # `x == None` / `x != None` where `x` is a `char *` is a NULL-POINTER test,
+    # not a string comparison, and must be taken BEFORE the string path below.
+    #
+    # `None` is a singleton and the container misses on this path ARE null
+    # pointers: `mojo_dict_get_str` returns NULL for an absent key and
+    # `mojo_dict_get_str` is what `d.get(k)` lowers to. So the answer has to
+    # be True, and the generic path cannot produce it — it sends the `None`
+    # side through `mojo_char_to_str((char)0)`, i.e. it compares the pointer
+    # against the ONE-CHARACTER string NUL, and lets `strcmp` decide. That is
+    # the measured shape of this bug: the natural missing-key guard
+    #
+    #     if d.get("MISSING") == None: ...
+    #
+    # came out FALSE on the compiled path (CPython: True), so the branch a
+    # lookup uses to tell "absent" from "present" was inverted, and exit 0
+    # with no diagnostic. `None == None` and `None == 0` are NOT this case and
+    # still fall through: neither side is a `char *`, so they keep the
+    # existing lowering.
+    if op in ('==', '!=') and (gen._is_none_literal(left_node)
+                              or gen._is_none_literal(right_node)):
+        _none_left = gen._is_none_literal(left_node)
+        _ptr_val = rv if _none_left else lv
+        _ptr_ty = rt if _none_left else lt
+        if _ptr_ty == 'char *':
+            # Same shape as the `is`/`is not` pointer-identity case below
+            # (`(int64_t) p == (int64_t) 0`), for the same reason: GIMPLE
+            # compares like with like, and this is the one spelling of
+            # "this pointer is null" already in the file.
+            # `x == None` IS `x == NULL` — the operator carries straight
+            # through, which is the opposite polarity from the `mojo_str_eq`
+            # idiom above (that helper returns 1 for EQUAL, so there `==`
+            # becomes `!= 0`; a pointer comparison here already is the
+            # answer). Getting that backwards inverts every missing-key
+            # guard, which is the shape this branch exists to fix.
+            _p = gen._new_val('int64_t', f'(int64_t){_ptr_val}')
+            _t = gen._new_temp('_Bool')
+            gen._emit(f'  {_t} = {_p} {op} 0;')
+            return '_Bool', _t
+
     # String equality: char*, int64_t-stored-char*, or string literals → strcmp
     rv_is_str_lit = isinstance(right_node, gimple_ctypes.StringLiteral)
     lv_is_str_lit = isinstance(left_node, gimple_ctypes.StringLiteral)

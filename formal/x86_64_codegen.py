@@ -3096,7 +3096,15 @@ class X86_64Codegen:
         self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.RAX))
         self.asm.emit(encode_mov_r64_r64(Reg.R8, Reg.R11))
         self.asm.emit(encode_test_r64_r64(Reg.R8, Reg.R8))
-        abs_label = f"{self.func_name}_rabs"
+        # The rid-suffixed `abs_label` above, and NOT a bare `_rabs`: the
+        # label table keeps one address per NAME, so a shared name silently
+        # re-points every earlier `jge` at the LAST range()'s block — and that
+        # block ends in `jmp <that range's div_label>`, so the earlier range's
+        # control flow continues into the later one's materialization. Its blob
+        # is then never built, its base never stored, and the loop that meant
+        # to walk it walks a register nothing wrote. Two `range()` calls in one
+        # function is what it takes: a nested comprehension whose inner
+        # iterable is a range() is the shape that has both.
         self._emit_jcc(COND_GE, abs_label)
         self.asm.emit(encode_neg_r64(Reg.R8))
         self.asm.label(abs_label)
@@ -3567,6 +3575,7 @@ class X86_64Codegen:
             # iterates the struct's fields.  Measured on both architectures:
             # summing a four-field struct gave 99 on arm64 and 53 on x86-64.
             self._refuse_frame_container_operand("a for-in iteration", it)
+            self._refuse_string_iteration("a for-in iteration", it)
             from mojo.middle.boundnames import _lbn_target_names
             tnames = _lbn_target_names(stmt.target) \
                 if isinstance(stmt.target, str) else []
@@ -3670,11 +3679,30 @@ class X86_64Codegen:
     def _is_dict_subscript(self, obj) -> bool:
         """True when `obj` is known to hold a dict pair-blob pointer, so a
         subscript is a key lookup rather than an index."""
-        if isinstance(obj, F.DictExpr):
+        # `M.is_dict_expr` and not `isinstance(obj, F.DictExpr)`: a dict
+        # COMPREHENSION is a `Comprehension` with kind='dict', and asking
+        # only about literals sent `d[k]` down the index path, which reads
+        # the key as the value. See `M.is_dict_expr`.
+        if M.is_dict_expr(obj):
             return True
         if isinstance(obj, F.IdentExpr):
             return obj.name in self._dict_vars
         return False
+
+    def _refuse_string_iteration(self, op: str, obj) -> None:
+        """Refuse to ITERATE a `char *` as a container.
+
+        The sibling of `_refuse_frame_container_operand`, and the same
+        failure: the blob walk reads offset 0 of the operand and calls it a
+        COUNT, and a string's first eight bytes are text. `M.
+        string_iteration_refusal` owns the wording and the measurements (see
+        there for what both architectures returned before this), and both
+        backends ask it through their own `_is_string_subscript`, which is
+        the one place that knows whether an expression holds a `char *`.
+        """
+        if self._is_string_subscript(obj):
+            raise CodegenError(M.string_iteration_refusal(
+                op, self.func_name or "<module>"))
 
     def _emit_dict_lookup_addr(self, e: F.SubscriptExpr) -> None:
         """RAX = the ADDRESS of the value stored under `e`'s key.
@@ -4831,6 +4859,11 @@ class X86_64Codegen:
         false_label = f"{fn}_cg{wid}_false"
         end_label = f"{fn}_cg{wid}_end"
 
+        # Same walk as a for-in, so the same two operands it refuses: a
+        # `char *` has no count word to read at offset 0, and one here exits
+        # 1 from the capacity guard instead of walking the text.
+        self._refuse_string_iteration("a comprehension iterable",
+                                      gen.iterable)
         # Under container context so a BinaryOp `+` iterable means concat.
         self._container_ctx += 1
         try:
@@ -5284,7 +5317,7 @@ class X86_64Codegen:
             self._fd_vars.add(name)          # an alias keeps it: `g = f`
         else:
             self._fd_vars.discard(name)
-        if isinstance(value, F.DictExpr) or (
+        if M.is_dict_expr(value) or (
                 isinstance(value, F.IdentExpr)
                 and value.name in self._dict_vars):
             self._dict_vars.add(name)

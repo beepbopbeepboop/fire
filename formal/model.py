@@ -3019,6 +3019,42 @@ def frame_container_operand_refusal(op: str, spelled: str, struct_names):
         f"it is the only reading there is")
 
 
+def string_iteration_refusal(where: str, function: str) -> str:
+    """Why ITERATING a `char *` is refused. Always a refusal.
+
+    The sibling of `frame_container_operand_refusal`, and the same mistake:
+    the blob walk reads eight bytes at offset 0 of its operand and calls the
+    result a COUNT, and a NUL-terminated string has no header word — the
+    "count" is the first eight bytes of text. The bounds check then passes on
+    those bytes and the element walk reads `base + 8 + 8k`, which is the
+    middle of the string and then whatever the text section puts after it.
+
+    Measured on the real binaries, on `for c in "abc"` (three iterations):
+
+        x86-64   returns 97      -- 'a', the first byte, read as the count
+        arm64    SIGBUS (-10)   -- and the two architectures disagree
+
+    and on `[a + b for a in "abc" for b in "de"]` both exit 1, from the
+    comprehension's capacity guard catching a count of 0x61626361-ish.
+
+    There is no kind under which this is right, and it is not a case where a
+    refusal loses a program that worked: `len(s)` answers (4, on both), and
+    `s[i]` is a byte load on both. Iterating a string needs a LENGTH this
+    representation does not carry, so the honest answer is to say so at build
+    time rather than to return a number nobody wrote — or, on arm64, to die
+    on a signal.
+    """
+    return (
+        f"iterating a string is a CONTAINER operation on a char *, and a char "
+        f"* has no count. This lowering reads eight bytes at offset 0 of the "
+        f"iterable and calls the result the element COUNT — that is a blob's "
+        f"header word, and a string's first eight bytes are TEXT: measured on "
+        f"both architectures, `for c in \"abc\"` returned 97 on x86-64 ('a' as "
+        f"the count) and died of SIGBUS on arm64. `len(s)` and `s[i]` both work "
+        f"and are unaffected; to walk the characters, build a list of them "
+        f"first ([c for c in <a list>]) or iterate that list")
+
+
 def string_operand_is_string(kind) -> bool:
     """True when `kind` says the value is a `char *` to NUL-terminated bytes.
 
@@ -7366,6 +7402,31 @@ def list_elem_kind(kind):
 def is_list_kind(kind) -> bool:
     """True when `kind` names a list/tuple/set blob of any element kind."""
     return isinstance(kind, str) and kind.startswith(LIST_PREFIX)
+
+
+def is_dict_expr(e) -> bool:
+    """True when `e` builds a dict PAIR blob: a dict literal or a dict
+    COMPREHENSION.
+
+    One predicate, because the two backends each had this question twice and
+    each spelled it `isinstance(e, F.DictExpr)` — which the comprehension
+    half silently fails: `{k: v for ...}` parses as a `Comprehension` with
+    `kind == "dict"`, not a `DictExpr`. So a name bound to one was recorded
+    as holding a plain blob, its subscript took the INDEX path, and
+    `{i: 100 + i for i in range(3)}[2]` read the second KEY as if it were
+    the value under it: right key count, right keys, wrong answers, exit 0.
+
+    The emitters are NOT routed through here — `_emit_dict` takes a literal's
+    `pairs` and there is nothing to hand a comprehension instead, so a
+    comprehension still goes through `_emit_expr`'s own dispatch. This is the
+    DICT-NESS question (does a subscript mean "look this key up"), not the
+    "which emitter" one.
+    """
+    import fire_compiler as F
+    if isinstance(e, F.DictExpr):
+        return True
+    return (isinstance(e, F.Comprehension)
+            and getattr(e, "kind", "list") == "dict")
 
 
 def _unify(a, b):

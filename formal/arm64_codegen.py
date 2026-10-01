@@ -2138,6 +2138,7 @@ class ARM64Codegen:
             # iterates the struct's fields.  Measured on both architectures:
             # summing a four-field struct gave 99 on arm64 and 53 on x86-64.
             self._refuse_frame_container_operand("a for-in iteration", it)
+            self._refuse_string_iteration("a for-in iteration", it)
             tnames = _lbn_target_names(stmt.target) if isinstance(
                 stmt.target, str) else []
             if not tnames or any(not n.isidentifier() for n in tnames):
@@ -3097,8 +3098,11 @@ class ARM64Codegen:
             self._fd_vars.add(name)
         else:
             self._fd_vars.discard(name)
-        if isinstance(value, F.DictExpr) or (
-                isinstance(value, F.Comprehension) and value.kind == "dict"):
+        # `M.is_dict_expr` is the shared spelling of this rule (a dict
+        # literal OR a dict comprehension); it used to be written out here
+        # and in x86_64_codegen separately, and x86-64's copy was missing
+        # the comprehension half.
+        if M.is_dict_expr(value):
             self._dict_vars.add(name)
             self._string_vars.discard(name)
         elif isinstance(value, F.SetExpr) or (
@@ -3148,7 +3152,11 @@ class ARM64Codegen:
         if isinstance(obj, F.MemberExpr):
             key = _member_slot_key(obj)
             return key is not None and key in self._dict_vars
-        if isinstance(obj, F.DictExpr):
+        # `M.is_dict_expr` and not `isinstance(obj, F.DictExpr)`: a dict
+        # COMPREHENSION is a `Comprehension` with kind='dict', and asking
+        # only about literals sent `d[k]` down the index path. See
+        # `M.is_dict_expr`.
+        if M.is_dict_expr(obj):
             return True
         return False
 
@@ -3408,6 +3416,21 @@ class ARM64Codegen:
         against another. It built, it ran, and it disagreed with x86-64."""
         return self._is_dict_subscript(e.obj)
 
+    def _refuse_string_iteration(self, op: str, obj) -> None:
+        """Refuse to ITERATE a `char *` as a container.
+
+        The sibling of `_refuse_frame_container_operand`, and the same
+        failure: the blob walk reads offset 0 of the operand and calls it a
+        COUNT, and a string's first eight bytes are text. `M.
+        string_iteration_refusal` owns the wording and the measurements (see
+        there for what both architectures returned before this), and both
+        backends ask it through their own `_is_string_subscript`, which is
+        the one place that knows whether an expression holds a `char *`.
+        """
+        if self._is_string_subscript(obj):
+            raise CodegenError(M.string_iteration_refusal(
+                op, self.func_name or "<module>"))
+
     def _refuse_frame_container_operand(self, op: str, obj) -> None:
         """Raise if `obj` is a BARE NAME holding a frame address.
 
@@ -3533,8 +3556,17 @@ class ARM64Codegen:
             self.asm.emit(encode_ldp_sp_post(0, 31))  # restore SP (clobbers X0)
             self.asm.emit(encode_mov_zr_xn(0, 9))
             return
+        # A COMPREHENSION is in this list for the same reason the container
+        # literals are: it produces a blob of exactly the shape the walk below
+        # reads (`[count][e0…]`, reserved before any generator runs). Without
+        # it, `[i * 2 for i in [1, 2, 3]][2]` was REFUSED here and computed on
+        # x86-64 — the two backends disagreeing about one program, which is
+        # the one thing this pair may not do. A string base is not here
+        # because it never reaches this gate: `_is_string_subscript` above
+        # takes it as a byte load.
         obj_ok = type(e.obj) in (F.IdentExpr, F.CallExpr, F.ListExpr,
-                                 F.TupleExpr, F.MemberExpr, F.SubscriptExpr)
+                                 F.TupleExpr, F.Comprehension, F.MemberExpr,
+                                 F.SubscriptExpr)
         if not obj_ok:
             raise CodegenError(
                 "subscript base must be a list/tuple name or literal on "
@@ -6110,6 +6142,11 @@ class ARM64Codegen:
         false_label = f"{fn}_cg{wid}_false"
         end_label = f"{fn}_cg{wid}_end"
 
+        # Same walk as a for-in, so the same operand it refuses: a `char *`
+        # has no count word at offset 0, and one here is read as a count of
+        # its own first bytes (measured: SIGBUS walking past the string).
+        self._refuse_string_iteration("a comprehension iterable",
+                                      gen.iterable)
         self._emit_expr(gen.iterable)
         self._store_var(cb_name, 0)
         self.asm.emit(encode_movz_xd_imm(0, 0))
@@ -6209,14 +6246,23 @@ class ARM64Codegen:
 
     def _compr_append_pair(self, res_offset: int, cap: int) -> None:
         """Append (X0=key, X1=value) to dict result; exit(1) past cap."""
-        # Two pushes, and the offsets below depend on the order: the SECOND
-        # stp lands lower, so [sp+0] is the value pushed second and [sp+8] is
-        # the key. They were read the other way round, so every dict
-        # comprehension stored its key in the value slot and vice versa —
-        # which is why the right keys and the right len sat next to values
-        # that were somebody else's.
-        self.asm.emit(encode_stp_sp_pre(0, 1))  # push key, value
-        self.asm.emit(encode_stp_sp_pre(1, 31))  # push value again (lower)
+        # ONE 16-byte frame slot, with the key at [sp+0] and the value at
+        # [sp+8], and both loads reading back exactly those offsets.
+        #
+        # This used to be two STP pairs — `stp x0, x1` then `stp x1, x31` —
+        # which the comment above it read back as "the second stp lands lower,
+        # so [sp+0] is the value and [sp+8] is the key". It does not: STP
+        # Xrt1, Xrt2 stores Xrt1 at [SP] and Xrt2 at [SP+8], so after those
+        # two pushes [sp+8] holds **X31**, a scratch register, and the key was
+        # sitting unused at [sp+16]. Every dict comprehension therefore
+        # stored a garbage key and the right value: the first pair read 0 out
+        # of X31 by luck, so `{i: 100 + i for i in range(3)}[0]` was right and
+        # [1] and [2] were a miss (exit 1). The value needed a second slot
+        # only because the count load below clobbers X1; a plain STR into the
+        # slot the STP already reserved is that, without moving the frame
+        # twice or putting the key somewhere the loads cannot see.
+        self.asm.emit(encode_stp_sp_pre(0, 31))            # key at [sp+0]
+        self.asm.emit(encode_str_xt_xn_imm(1, 31, 8))     # value at [sp+8]
         self._emit_list_base(res_offset)
         self.asm.emit(encode_ldr_xt_xn_imm(1, 9, 0))
         self._emit_mov_imm("X2", cap)
@@ -6229,13 +6275,12 @@ class ARM64Codegen:
         self.asm.emit_label_rel(oob, here_offset=-4)
         self.asm.emit(encode_add_xd_xn_imm(4, 9, 8))
         self.asm.emit(encode_add_xd_xn_xm_lsl4(4, 4, 1))
-        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))   # [sp+8] = key
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))   # [sp+0] = key
         self.asm.emit(encode_str_xt_xn_imm(0, 4, 0))
-        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))   # [sp+0] = value
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 8))   # [sp+8] = value
         self.asm.emit(encode_str_xt_xn_imm(0, 4, 8))
         self.asm.emit(encode_add_xd_xn_imm(1, 1, 1))
         self.asm.emit(encode_str_xt_xn_imm(1, 9, 0))
-        self.asm.emit(encode_ldp_sp_post(0, 31))
         self.asm.emit(encode_ldp_sp_post(0, 31))
         self._emit_b_to(ok)
         self.asm.label(oob)

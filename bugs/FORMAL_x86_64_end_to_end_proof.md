@@ -462,39 +462,41 @@ covers them and a register- and nibble-parameterised version would be machinery
 nothing calls. Conversely every form that *was* pinned to one register pair
 turned out to need generalising (B7), so the rule is a heuristic, not a proof.
 
-## Characterised, not fixed — nested comprehensions, both backends
+## Nested comprehensions, both backends — FIXED 2026-09-30
 
-Two distinct x86-64 observables, both real. The arm64 root cause and the shared
-comprehension shape matrix are in `CODEGEN_nested_comprehension.md`; the x86-64
-handoff below is what that doc's "x86-64 handoff" section tracks.
+Both x86-64 observables below were ONE bug, and it was not the recursion.
+`_emit_range_list` named its labels `_rz{id}` / `_rd{id}` / `_rabs{id}` /
+`_rok{id}` / `_rfill{id}` / `_rdone{id}` so two `range()` calls in one
+function could not collide — and then reassigned `abs_label` to the rid-LESS
+`_rabs`, a few lines later, defeating it. The label table keeps the LAST
+address for a name, so the FIRST `range()` in a function branched into the
+SECOND one's `abs` block and left through the second's `jmp div_label`. Its
+blob was never built and its base never stored; the outer generator looped
+over a callee-saved register nothing had written, and read the count from
+address 0 or from whatever the caller left there. Hence a wrong sum, a wrong
+count, and a SIGSEGV that came and went between runs of one binary.
 
-**The sum is 2 short.** `test_x86_64_containers.py:229`, n = 5:
-`[i + j for i in range(n) for j in range(n)]`, summed, wants 100 and gets 98.
-Not a crash and not a wrong count, so elements *are* being appended and a couple
-carry the wrong value. A single-generator comprehension is correct and so is the
-same nesting on arm64, so it is specific to the recursion in
-`X86_64Codegen._emit_compr_gen` (`formal/x86_64_codegen.py:2529`).
+Measured on the real binaries under Rosetta, before -> after:
 
-Ruled out, so nobody re-checks them: the control temps *are* allocated
-(`walk_compr` is invoked per statement, so unlike arm64 it is handed a statement
-and `_ci{i}`/`_cb{i}` exist — that was the arm64 bug and does not apply here);
-the append cursor is *not* register-held (`_compr_append_elem` re-reads the count
-from the blob header and writes it back, which is why the count is right and
-only values are wrong); and the outer loop is self-healing for R10/R11, since
-`label(start_label)` reloads both from `_cb{di}` every iteration.
+| case | x86-64 before | x86-64 after |
+|---|---|---|
+| `[i+j for i in range(5) for j in range(5)]`, summed | 98 | **100** |
+| `len` of the same | 4 | **25** |
+| `[i+j for i in range(2) for j in range(2)]`, summed | 241 | **4** |
+| `[i+j+k for i in range(2) ... for k in range(2)]`, summed | 1 / -11 | **12** |
+| two `range()` calls in one function, both summed | 38 | **9** |
 
-**The count is wrong too**, which is a different bug from the above: `len` of a
-4x4 nested comprehension reads **4** — the inner generator's count — where arm64
-reads 16. The blob header is not being updated by the appends the way the append
-path reads it; the recursion leaves the wrong value behind, and
-`label(start_label)` protects the *outer* loop's next iteration, not the inner
-generator's append.
+The arm64 residual (4x4 sum exactly double) was this same x86-64 measurement
+being read against arm64, which was already correct; 4x4 is right on both now.
 
-On arm64 there is a separate residual: 4x4 gives `len` = 16 and sum = 48, exactly
-twice the correct 24, while 2x2, 3x2, no-`i` and constant-element nestings are
-all exactly right. A correct count with a doubled sum means wrong values or
-double appends, not a count bug — and 2x2/3x2 passing does not cover it, so
-**4x4 is the case to check a fix against**.
+All of it is a case in `test_x86_64_containers.py` (`nested-comprehension*`,
+`two-ranges-one-function`), which now also cross-checks every expectation
+against CPython — the first version of that harness's notes had two sums
+computed at n=4 and read by a harness that runs at n=5.
+
+The dict-comprehension half of the same cluster (right keys, wrong values) and
+the arm64 refusal of a comprehension as a subscript base were separate bugs and
+are fixed too; see the two commits on `work/codegen-old-divergences`.
 
 ## How to continue
 

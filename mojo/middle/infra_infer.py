@@ -1485,6 +1485,46 @@ _CONTAINER_LITERAL_CTYPES: dict = {
     'TupleExpr': 'MojoList *',   # a tuple lowers to a real MojoList
 }
 
+def _each_binding(body: list):
+    """Every statement in `body` that can BIND a local, recursing through
+    control flow and never into a nested `FunctionDef` (which has its own
+    locals and its own return inference -- the same boundary
+    `mutated_free_names` uses).
+
+    ONE walker for the three local-type overlays below. Each of them used to
+    carry its own copy, and they had already drifted: the container copy
+    walked `elif` bodies and the dict copy did not. The unified walk takes
+    the superset (every branch that can bind is walked), which for the dict
+    overlay is strictly more evidence of the same kind -- it exists to give
+    `_quick_type` a better type for a local, and a binding inside an `elif`
+    is exactly as real as one inside the `else`.
+    """
+    def walk(stmts):
+        for s in (stmts or []):
+            if isinstance(s, gimple_ctypes.FunctionDef):
+                continue
+            yield s
+            if isinstance(s, gimple_ctypes.IfStmt):
+                yield from walk(s.then_body)
+                yield from walk(getattr(s, 'else_body', None))
+                for _cond, eb in (getattr(s, 'elifs', None) or []):
+                    yield from walk(eb)
+            elif isinstance(s, (gimple_ctypes.WhileStmt,
+                                gimple_ctypes.ForStmt)):
+                yield from walk(getattr(s, 'body', None))
+                yield from walk(getattr(s, 'else_body', None))
+            elif isinstance(s, gimple_ctypes.WithStmt):
+                yield from walk(s.body)
+            elif isinstance(s, gimple_ctypes.TryStmt):
+                yield from walk(s.body)
+                for h in (getattr(s, 'handlers', None) or []):
+                    yield from walk(getattr(h, 'body', None))
+                yield from walk(getattr(s, 'else_body', None))
+                yield from walk(getattr(s, 'finally_body', None))
+    yield from walk(body)
+
+
+
 def _prebound_local_ctypes(gen, body: list) -> dict:
     """`{local name: ctype}` for every local in `body` whose FIRST binding
     is already POINTER-SHAPED evidence about the value, recursing through
@@ -1561,38 +1601,16 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             _src = _as_str(_v.name)
             if _src in out and _src != name:
                 out[name] = out[_src]
-    def walk(stmts):
-        for s in (stmts or []):
-            if isinstance(s, gimple_ctypes.FunctionDef):
-                continue
-            note(s)
-            if isinstance(s, gimple_ctypes.IfStmt):
-                walk(s.then_body)
-                if s.else_body:
-                    walk(s.else_body)
-                for _cond, _eb in (getattr(s, 'elifs', None) or []):
-                    walk(_eb)
-            elif isinstance(s, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
-                walk(s.body)
-                if getattr(s, 'else_body', None):
-                    walk(s.else_body)
-            elif isinstance(s, gimple_ctypes.WithStmt):
-                walk(s.body)
-            elif isinstance(s, gimple_ctypes.TryStmt):
-                walk(s.body)
-                for h in (getattr(s, 'handlers', None) or []):
-                    walk(getattr(h, 'body', None))
-                if s.else_body:
-                    walk(s.else_body)
-                if getattr(s, 'finally_body', None):
-                    walk(s.finally_body)
-    walk(body)
+    for _n in _each_binding(body):
+        note(_n)
     # One more round, so `q = p` binds even when the alias is visited before
     # the statement that gives `p` its type (a branch visited first, or a
     # `for` body). `note` is idempotent — a name already recorded is left
     # alone — so this only ever adds what the first pass could not resolve.
-    walk(body)
+    for _n in _each_binding(body):
+        note(_n)
     return out
+
 
 def _dict_value_locals(gen, body: list) -> dict:
     """`{dict name: ctype}` for every dict in `body` that is STORE-INTO with
@@ -1641,30 +1659,8 @@ def _dict_value_locals(gen, body: list) -> dict:
                    or vt.endswith(' *')):
             out[name] = vt
 
-    def walk(stmts):
-        for n in (stmts or []):
-            note(n)
-            if isinstance(n, gimple_ctypes.FunctionDef):
-                continue
-            if isinstance(n, gimple_ctypes.IfStmt):
-                walk(n.then_body)
-                if isinstance(getattr(n, 'else_body', None), list):
-                    walk(n.else_body)
-            elif isinstance(n, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
-                walk(n.body)
-                if getattr(n, 'else_body', None):
-                    walk(n.else_body)
-            elif isinstance(n, gimple_ctypes.WithStmt):
-                walk(n.body)
-            elif isinstance(n, gimple_ctypes.TryStmt):
-                walk(n.body)
-                for h in (getattr(n, 'handlers', None) or []):
-                    walk(getattr(h, 'body', None))
-                if n.else_body:
-                    walk(n.else_body)
-                if getattr(n, 'finally_body', None):
-                    walk(n.finally_body)
-    walk(body)
+    for n in _each_binding(body):
+        note(n)
     return out
 
 
