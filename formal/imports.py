@@ -165,7 +165,19 @@ HOST_MODELLED = frozenset((
     #     `os` idea the `module:small-hosts` doc proposed: `os/_syscalls.mojo`
     #     has `fs_open_ro`, `fs_lseek` and `fs_close` and NO read or write, so
     #     the missing half is a stream.
-    "errno", "stat", "platform", "select",
+    #   `platform`  — `formal/hostmods/platform.mojo`, checked name by name
+    #     against CPython's own `platform` by `test_formal_platform.py`: the
+    #     five `uname(3)` fields (`system`, `node`, `release`, `version`,
+    #     `machine`), `uname().processor`, both computable components of
+    #     `mac_ver()` and `system_alias` in full including CPython's SunOS
+    #     release arithmetic. It is the largest reachable host-import row in
+    #     the sweep — thirty files, and all thirty ask for `machine()` — so it
+    #     is the row whose disappearance is worth counting; the accounting is in
+    #     `bugs/FORMAL_platform_reachable_row_measured.md`. What it cannot
+    #     answer is written at the top of the file: `platform()` itself is one
+    #     call away and blocked on `architecture()`, which needs `file(1)`, and
+    #     `processor()`/`libc_ver()` are subprocesses and a readable file.
+    "errno", "stat", "select",
     #   `pathlib`  — `formal/hostmods/pathlib.mojo`, in the pure half only,
     #     checked read for read against CPython's own `PurePosixPath` by
     #     `test_formal_pathlib.py`: `as_posix`, `name`, `stem`, `suffix`,
