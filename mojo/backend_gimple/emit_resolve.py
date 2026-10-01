@@ -1272,10 +1272,48 @@ def _register_link_imports(gen, stmts) -> list:
     def scan(stmt_list):
         for stmt in stmt_list:
             if isinstance(stmt, gimple_ctypes.ImportStmt):
-                # `import M` + `M.Class` — the OTHER spelling of the
-                # FromImportStmt branch below, which was the only one this
-                # scan considered. See `_inline_bare_import_struct`.
+                # `import M` needs TWO things registered here, and they are
+                # the only two arms of this ladder that ever matched a bare
+                # import — see the unreachable `elif isinstance(stmt,
+                # ImportStmt)` further down, whose whole body used to live
+                # there and which this arm made dead code (two branches
+                # landing in the same `if`/`elif` chain from two different
+                # merges; the earlier one is the arm that runs).
+                #
+                # 1. `import M` + `M.Class` — the OTHER spelling of the
+                #    FromImportStmt branch below, which was the only one
+                #    this scan considered. See `_inline_bare_import_struct`.
                 _inline_bare_import_struct(gen, stmt, _marker_reads)
+                # 2. A plain `import a.b` binds `a` and makes the SUBMODULE
+                #    `a.b` reachable as an attribute, so `a.b.f(...)` is a
+                #    real cross-module call whose symbol link mode has to be
+                #    able to provide. Registering the submodule for inlining
+                #    is what stops that call site binding the extern
+                #    preamble's `weak` "unavailable in compiled mode" stub —
+                #    printing `tri: unavailable in compiled mode` then `0`,
+                #    exit 0, with the diagnostic on the program's own stdout
+                #    (bugs/CODEGEN_import_dotted_name_two_hop_attribute_
+                #    call_exits_1.md's link-mode half; `test_gimple.py`'s
+                #    `dotted_import_two_hop_attribute_call` is its
+                #    regression, both pipelines, against CPython).
+                #
+                #    Only the DOTTED form, and only when nothing else can
+                #    provide the module: a real dylib/reflection entry keeps
+                #    its own path, and `import a` (no dot) names a module the
+                #    normal machinery already handles. `import a.b as q` is
+                #    left alone — the alias names the submodule directly,
+                #    which is the single-hop spelling `_register_sym`
+                #    already resolves.
+                for _im_pair in ([(stmt.module, stmt.alias)]
+                                 + list(getattr(stmt, 'extra', None) or [])):
+                    _im_m = gimple_ctypes._as_str(_im_pair[0])
+                    if '.' not in _im_m or gimple_ctypes._as_str(_im_pair[1]):
+                        continue
+                    _exp2, _refl2, _src2 = _exports(_im_m)
+                    if _exp2:
+                        continue
+                    if _src2 and gen._submodule_source_path(_im_m):
+                        gen._link_inline_modules.add(_im_m)
             elif isinstance(stmt, gimple_ctypes.FromImportStmt):
                 exports, from_reflection, source = _exports(stmt.module)
                 for _fip11 in (getattr(stmt, 'name_alias_strs', None) or []):
@@ -1541,35 +1579,6 @@ def _register_link_imports(gen, stmts) -> list:
                         _csym = gen._func_csym(sym)
                         decls.append(
                             f"extern {ret} {_csym} ({', '.join(ptypes) if ptypes else 'void'});")
-            elif isinstance(stmt, gimple_ctypes.ImportStmt):
-                # A plain `import a.b` binds `a` and makes the SUBMODULE
-                # `a.b` reachable as an attribute, so `a.b.f(...)` is a real
-                # cross-module call whose symbol link mode has to be able to
-                # provide. `scan` only ever looked at FromImportStmt, so
-                # nothing registered the submodule, and the call site bound
-                # the extern preamble's `weak` "unavailable in compiled mode"
-                # stub — printing `tri: unavailable in compiled mode` then
-                # `0`, exit 0, with the diagnostic on the program's own
-                # stdout (bugs/CODEGEN_import_dotted_name_two_hop_attribute_
-                # call_exits_1.md's link-mode half).
-                #
-                # Only the DOTTED form, and only when nothing else can
-                # provide the module: a real dylib/reflection entry keeps
-                # its own path, and `import a` (no dot) names a module the
-                # normal machinery already handles. `import a.b as q` is
-                # left alone — the alias names the submodule directly, which
-                # is the single-hop spelling `_register_sym` already
-                # resolves.
-                for _im_pair in ([(stmt.module, stmt.alias)]
-                                 + list(getattr(stmt, 'extra', None) or [])):
-                    _im_m = gimple_ctypes._as_str(_im_pair[0])
-                    if '.' not in _im_m or gimple_ctypes._as_str(_im_pair[1]):
-                        continue
-                    _exp2, _refl2, _src2 = _exports(_im_m)
-                    if _exp2:
-                        continue
-                    if _src2 and gen._submodule_source_path(_im_m):
-                        gen._link_inline_modules.add(_im_m)
             elif isinstance(stmt, gimple_ctypes.FunctionDef):
                 scan(stmt.body)
             elif isinstance(stmt, gimple_ctypes.IfStmt):

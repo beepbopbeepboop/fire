@@ -6781,14 +6781,27 @@ print("%r" % p)
         CPython on the same files is the expectation, and BOTH pipelines are
         exercised because they are separate codegen paths.
 
-        Skipped, loudly and with the reason, when this harness's temporary
-        directory lands inside the compiler's own source tree: the
-        module-qualified-call fallback is deliberately disabled there
-        (`_lower_method_call`'s `_mgc_is_selfhost` check — `_func_qualifier`
-        returns an unqualified bare symbol while compiling the compiler's
-        own sources), so such a run would measure that pre-existing,
-        separate self-host limitation rather than the import resolution
-        under test.
+        Run in BOTH locations, and the location is the point. This case used
+        to SKIP — silently, counting neither a pass nor a fail — whenever the
+        harness's temporary directory landed inside this checkout, on the
+        stated ground that the module-qualified-call fallback is disabled
+        there. That ground went stale: the gate is
+        `mojo/middle/methods_shared.py::_is_selfhost_source_file`, which
+        answers "is this one of the COMPILER'S OWN modules" from the file's
+        own place in the tree (a root-level `*.py` beside
+        `fire_compiler.py`, or inside its `mojo/` or `jit/` package) and
+        deliberately NOT "any `.py` under the install directory" — so a
+        fixture that merely happens to sit inside the checkout gets the
+        ordinary resolution path, in this checkout and in every other.
+        `test_link_mode.py`'s `test_bare_submodule_import_call_inside_source_
+        tree` pins that half for the single-hop spelling; this one pins it
+        for the two-hop spelling, and pins it the same way: build the
+        identical package at a path under this checkout AND at whatever
+        `$TMPDIR` names, so where the scratch directory happens to land can
+        never decide the verdict again. Measured on both, one process, only
+        the fixture's directory differing: single-TU `42`/`42`, link-mode
+        `42`/`42`; with the link-mode registration removed, the link-mode arm
+        at either location printed `tri: unavailable in compiled mode0`.
         """
         global _PASS, _FAIL
         name = "dotted_import_two_hop_attribute_call"
@@ -6797,15 +6810,12 @@ print("%r" % p)
             'q/sub.py': 'def tri(x):\n    return x * 3\n',
             'q/main.py': 'import q.sub\n\nprint(q.sub.tri(14))\n',
         }
-        with tempfile.TemporaryDirectory() as td:
-            _selfhost = gimple_codegen._SELFHOST_DIR
-            if os.path.abspath(td) == _selfhost or \
-                    os.path.abspath(td).startswith(_selfhost + os.sep):
-                print(f"SKIP  {name}: TMPDIR puts the scratch package inside "
-                      f"the compiler's own source tree ({td}), where the "
-                      f"module-qualified-call fallback is disabled by "
-                      f"design — set TMPDIR outside the checkout to run it")
-                return
+
+        def build_and_compare(td, label):
+            """CPython-vs-compiled over `files` rooted at `td`. Returns None
+            on agreement, or the failure message. A helper rather than a
+            second copy of the body because the two locations must run
+            BYTE-IDENTICAL programs — that is the whole claim."""
             for rel, body in files.items():
                 fp = os.path.join(td, rel)
                 os.makedirs(os.path.dirname(fp), exist_ok=True)
@@ -6816,12 +6826,10 @@ print("%r" % p)
                                 text=True, cwd=td, timeout=60,
                                 env=dict(os.environ, PYTHONPATH=td))
             if py.returncode != 0 or not py.stdout:
-                print(f"FAIL  {name}: CPython on the same program exited "
-                      f"{py.returncode} printing {py.stdout!r} "
-                      f"({py.stderr[:400]}) — the test program itself is "
-                      f"wrong, not the compiler")
-                _FAIL += 1
-                return
+                return (f"{label}: CPython on the same program exited "
+                        f"{py.returncode} printing {py.stdout!r} "
+                        f"({py.stderr[:400]}) — the test program itself is "
+                        f"wrong, not the compiler")
             want = py.stdout
             for mode in ('single-TU', 'link-mode'):
                 c_src = gimple_codegen._run_pipeline(
@@ -6837,17 +6845,36 @@ print("%r" % p)
                      os.path.join(_RUNTIME_INC, 'fire_runtime.c')],
                     capture_output=True, text=True, timeout=300)
                 if cc.returncode != 0:
-                    print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
-                          f"{cc.stderr[:1200]}")
-                    _FAIL += 1
-                    return
+                    return (f"{label} [{mode}]: gcc -fgimple failed:\n"
+                            f"{cc.stderr[:1200]}")
                 run = subprocess.run([exe], capture_output=True, text=True,
                                      timeout=30)
                 if run.stdout != want:
-                    print(f"FAIL  {name} [{mode}]: printed {run.stdout!r}, "
-                          f"CPython printed {want!r}")
-                    _FAIL += 1
-                    return
+                    return (f"{label} [{mode}]: printed {run.stdout!r}, "
+                            f"CPython printed {want!r}")
+            return None
+
+        with tempfile.TemporaryDirectory() as td:
+            err = build_and_compare(td, 'TMPDIR')
+        if err:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+            return
+        # `build/` is git-ignored, so a fixture left behind would be an
+        # untracked file in the tree; removed in a `finally` either way.
+        # Same reasoning as test_link_mode.py's own in-tree case.
+        root = os.path.join(_PROJECT_DIR, 'build', 'test_gimple')
+        os.makedirs(root, exist_ok=True)
+        inside = tempfile.mkdtemp(prefix='twohop_', dir=root)
+        try:
+            err = build_and_compare(inside, 'inside this checkout')
+        finally:
+            import shutil
+            shutil.rmtree(inside, ignore_errors=True)
+        if err:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+            return
         print(f"PASS  {name}")
         _PASS += 1
 
