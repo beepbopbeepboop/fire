@@ -301,6 +301,52 @@ CASES = [
         "    for x in xs:",
         "        t += x",
         "    return t"), 170),        # n=5: 5*(10+20) + 0+1+2+3+4
+    # A comprehension is a blob of the same shape as a literal, so subscripting
+    # one is a subscript. arm64 refused the base (`subscript base must be a
+    # list/tuple name or literal`) while x86-64 computed it — the two backends
+    # disagreeing about one program.
+    ("comprehension-subscript", _p(
+        "def f(n):",
+        "    return [i * 2 for i in [1, 2, 3]][2]"), 6),
+    # index 15 of a 5x5 is (3, 0) — the index arithmetic is the case's, and
+    # the CPython check below is what says so.
+    ("nested-comprehension-subscript", _p(
+        "def f(n):",
+        "    return [i + j for i in range(n) for j in range(n)][15]"), 3),
+    # A dict comprehension's SUBSCRIPT is a key lookup. Both backends asked
+    # `isinstance(base, DictExpr)`, which a dict comprehension is not (it is a
+    # Comprehension with kind='dict'), so `d` was treated as a plain blob and
+    # `d[k]` indexed the pair array: right len, right keys, the key read as
+    # the value under it.
+    ("dict-comprehension-lookup-first", _p(
+        "def f(n):",
+        "    d = {i: 100 + i for i in range(3)}",
+        "    return d[0]"), 100),
+    ("dict-comprehension-lookup-middle", _p(
+        "def f(n):",
+        "    d = {i: 100 + i for i in range(3)}",
+        "    return d[1]"), 101),
+    ("dict-comprehension-lookup-last", _p(
+        "def f(n):",
+        "    d = {i: 100 + i for i in range(3)}",
+        "    return d[2]"), 102),
+    ("dict-comprehension-len", _p(
+        "def f(n):",
+        "    d = {i: 100 + i for i in range(3)}",
+        "    return len(d)"), 3),
+    # A MISSING key exits 1: this path has no exception runtime to raise
+    # KeyError with, and a miss is the same signal an out-of-range index
+    # gives. Asserted rather than left implicit, because "the value happened
+    # to be 1" and "the lookup missed and exited 1" are otherwise the same
+    # exit status.
+    ("dict-comprehension-missing-key", _p(
+        "def f(n):",
+        "    d = {i: 100 + i for i in range(3)}",
+        "    return d[3]"), 1),
+    ("dict-literal-still-a-lookup", _p(
+        "def f(n):",
+        "    d = {1: 10, 2: 20}",
+        "    return d[2]"), 20),
     ("try-finally-runs", _p(
         "def f():",
         "    out = 0",
@@ -451,34 +497,35 @@ def main() -> int:
 
     failed = passed = 0
     for name, source, want in CASES:
-        got, detail = run_case(name, source, args.arch)
+        # CPython first, and on its own: a wrong EXPECTATION has to be
+        # reported as one even when the backend happens to agree with it,
+        # and it has to be reported even when the backend does not (which is
+        # the case that costs the most time — a note computed at n=4 read by
+        # a harness that runs at n=5 looks exactly like a codegen bug).
+        problems = []
+        cpy = None if args.no_cpython else cpython_answer(source)
+        if cpy is not None and cpy != want:
+            problems.append(f"expectation {want} is not what CPython "
+                            f"answers ({cpy})")
         if not 0 <= want <= 255:
             # A wait status cannot carry it, so the comparison below would be
-            # against a truncated value and report a codegen bug that is not
-            # there. Said here rather than in the suite output because it is a
-            # property of the CASE, and the case is what has to change.
-            detail = (detail + f"; expectation {want} is outside the 8-bit "
-                      f"exit-status domain (0..255)") \
-                if detail else f"expectation {want} is outside 0..255"
-            got = None
+            # against a truncated value and read as a codegen bug that is not
+            # there. A property of the CASE, so the case is what has to change.
+            problems.append(f"expectation {want} is outside the 8-bit "
+                            f"exit-status domain (0..255)")
+        got, detail = run_case(name, source, args.arch)
         if got is None:
-            status, note = "FAIL", detail
-            failed += 1
+            problems.append(detail)
         elif got != want:
-            status, note = "FAIL", f"returned {got}, want {want}"
+            problems.append(f"returned {got}, want {want}")
+        if problems:
             failed += 1
+            status, note = "FAIL", "; ".join(problems)
         else:
-            status, note = "PASS", f"= {got}"
             passed += 1
-        if status == "PASS" and not args.no_cpython:
-            cpy = cpython_answer(source)
-            if cpy is not None and cpy != want:
-                status, note = "FAIL", (f"expectation {want} is not what "
-                                       f"CPython answers ({cpy})")
-                passed -= 1
-                failed += 1
+            status, note = "PASS", f"= {got}"
         if status != "PASS" or args.v:
-            print(f"{status:4} {name:26} {note}")
+            print(f"{status:4} {name:34} {note}")
     print(f"[{args.arch}] PASS={passed} FAIL={failed} of {len(CASES)}")
     return 1 if failed else 0
 

@@ -5826,6 +5826,31 @@ def is_list_kind(kind) -> bool:
     return isinstance(kind, str) and kind.startswith(LIST_PREFIX)
 
 
+def is_dict_expr(e) -> bool:
+    """True when `e` builds a dict PAIR blob: a dict literal or a dict
+    COMPREHENSION.
+
+    One predicate, because the two backends each had this question twice and
+    each spelled it `isinstance(e, F.DictExpr)` — which the comprehension
+    half silently fails: `{k: v for ...}` parses as a `Comprehension` with
+    `kind == "dict"`, not a `DictExpr`. So a name bound to one was recorded
+    as holding a plain blob, its subscript took the INDEX path, and
+    `{i: 100 + i for i in range(3)}[2]` read the second KEY as if it were
+    the value under it: right key count, right keys, wrong answers, exit 0.
+
+    The emitters are NOT routed through here — `_emit_dict` takes a literal's
+    `pairs` and there is nothing to hand a comprehension instead, so a
+    comprehension still goes through `_emit_expr`'s own dispatch. This is the
+    DICT-NESS question (does a subscript mean "look this key up"), not the
+    "which emitter" one.
+    """
+    import fire_compiler as F
+    if isinstance(e, F.DictExpr):
+        return True
+    return (isinstance(e, F.Comprehension)
+            and getattr(e, "kind", "list") == "dict")
+
+
 def _unify(a, b):
     """The kind an expression has when its two operands have kinds `a` and `b`.
 

@@ -3334,7 +3334,11 @@ class X86_64Codegen:
     def _is_dict_subscript(self, obj) -> bool:
         """True when `obj` is known to hold a dict pair-blob pointer, so a
         subscript is a key lookup rather than an index."""
-        if isinstance(obj, F.DictExpr):
+        # `M.is_dict_expr` and not `isinstance(obj, F.DictExpr)`: a dict
+        # COMPREHENSION is a `Comprehension` with kind='dict', and asking
+        # only about literals sent `d[k]` down the index path, which reads
+        # the key as the value. See `M.is_dict_expr`.
+        if M.is_dict_expr(obj):
             return True
         if isinstance(obj, F.IdentExpr):
             return obj.name in self._dict_vars
@@ -4820,7 +4824,7 @@ class X86_64Codegen:
             self._fd_vars.add(name)          # an alias keeps it: `g = f`
         else:
             self._fd_vars.discard(name)
-        if isinstance(value, F.DictExpr) or (
+        if M.is_dict_expr(value) or (
                 isinstance(value, F.IdentExpr)
                 and value.name in self._dict_vars):
             self._dict_vars.add(name)
