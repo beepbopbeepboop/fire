@@ -6524,6 +6524,94 @@ print("%r" % p)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_struct_unpack_computed_format_compiles():
+        """`struct.unpack(fmt, buf)` whose format is a VARIABLE must not
+        crash the compiler.
+
+        `_returns_kinds_valued` (mojo/backend_gimple/module_gen.py) asked
+        `node.args[0].value` — an attribute only a string-literal node has —
+        as soon as it saw a `struct.unpack*` call, so `struct.unpack(fmt,
+        buf)` raised `AttributeError: 'IdentExpr' object has no attribute
+        'value'` and took the WHOLE build down. That is not a rare shape:
+        it is how every module that forwards a caller-supplied format
+        writes it, and it is what refused Lib/zipfile/__init__.py,
+        Lib/shutil.py, Lib/tempfile.py and four Lib/importlib/resources/
+        modules from the readers.py closure (see
+        bugs/COMPILE_FAIL_importlib_resources_readers.md). Its own
+        docstring already said "only literal formats answer"; the code did
+        not.
+
+        Asserts only that the module compiles, because that is the whole of
+        the regression: the answer for a computed format is "no static
+        kinds", which is a compile-time fact and not observable in the
+        output. The literal half of the same branch is covered by
+        `test_struct_unpack_computed_format_keeps_literal_half`."""
+        global _PASS, _FAIL
+        name = "struct_unpack_computed_format_compiles"
+        src = '''\
+import struct
+
+def unpack_it(fmt, buf):
+    return struct.unpack(fmt, buf)
+
+def main():
+    print(unpack_it("<if", b"abcd"))
+
+main()
+'''
+        try:
+            compile_to_gimple(src)
+        except Exception as e:
+            print(f"FAIL  {name}: {type(e).__name__}: {e}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_struct_unpack_computed_format_keeps_literal_half():
+        """The same fix must not have turned the LITERAL half off: a
+        literal mixed format still has to be recognised as kinds-carrying,
+        because that is the answer the per-slot-kinds table exists to
+        record. A guard that simply returned False for every format would
+        satisfy the crash test above and silently disable the feature.
+
+        Both answers come out of ONE expression, so they are asserted on the
+        same source rather than by re-deriving the predicate: the two
+        functions differ ONLY in whether their format argument is a literal
+        or a variable, so a regression that widened the new guard (or a
+        pre-existing bug that narrowed it) cannot pass one and fail the
+        other unnoticed."""
+        global _PASS, _FAIL
+        name = "struct_unpack_computed_format_keeps_literal_half"
+        src = '''\
+import struct
+
+def literal(buf):
+    return struct.unpack("<if", buf)
+
+def computed(fmt, buf):
+    return struct.unpack(fmt, buf)
+'''
+        mg = __import__('mojo.backend_gimple.module_gen', fromlist=['x'])
+        stmts = gimple_codegen.Parser(
+            gimple_codegen.py_tokenize(src)).parse_module()
+        answers = {getattr(st, 'name', None):
+                   mg._infer_return_maybe_kinds(None, st.body)
+                   for st in stmts if getattr(st, 'name', None) in
+                   ('literal', 'computed')}
+        want = {'literal': True, 'computed': False}
+        bad = {k: answers.get(k) for k, v in want.items() if answers.get(k) is not v}
+        if bad:
+            print(f"FAIL  {name}: wrong static-kinds answer(s) {bad} "
+                  f"(want {want}); a computed format must answer False and a "
+                  f"literal mixed format True")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    test_struct_unpack_computed_format_compiles()
+    test_struct_unpack_computed_format_keeps_literal_half()
     test_ctor_arg_container_literal_field_is_container_typed()
     test_ctor_arg_dict_and_set_literal_fields_are_container_typed()
     test_ctor_arg_mixed_container_and_scalar_stays_int64()

@@ -656,6 +656,30 @@ def _struct_format_codes(fmt):
     sits there rather than here."""
     return _struct_value_codes(fmt)
 
+def _struct_literal_format(a) -> str | None:
+    """The format string a `struct.*` call's format ARGUMENT node literally
+    carries, or None for anything that is not a plain non-bytes string
+    literal.
+
+    The one place the "is this format statically known" bar is defined, for
+    both callers: `struct.unpack(fmt, buf)`'s first argument and
+    `struct.Struct(fmt)`'s single argument are the same question with the
+    same answer, so they must not each grow their own reading of what a
+    literal node looks like — that is how `_returns_kinds_valued` came to
+    reach for `.value` on whatever node it was handed and crash with
+    `AttributeError: 'IdentExpr' object has no attribute 'value'` on
+    `struct.unpack(fmt, buf)` where `fmt` is a variable (zipfile,
+    shutil, tempfile, importlib/resources/*).
+
+    A bytes literal is None on purpose: `struct.unpack(b'<if', buf)` takes
+    its format as bytes, and none of the callers' callers want to reason
+    about that spelling here."""
+    if isinstance(a, StringLiteral):
+        val = a.value
+        return val if isinstance(val, str) and not a.is_bytes else None
+    return None
+
+
 def _struct_format_is_mixed(fmt) -> bool:
     """True when a const-foldable struct format has values of more than one
     kind, i.e. its unpack result is a heterogeneous container. The
@@ -701,11 +725,7 @@ def _struct_ctor_format(v) -> str | None:
         return None
     if len(v.args) != 1 or getattr(v, 'kwargs', None):
         return None
-    a = v.args[0]
-    if isinstance(a, StringLiteral):
-        val = a.value
-        return val if isinstance(val, str) and not a.is_bytes else None
-    return None
+    return _struct_literal_format(v.args[0])
 _FIXED_ARRAY_ANN_RE = re.compile('^\\[\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*;\\s*([A-Za-z_0-9]+)\\s*\\]$')
 
 
