@@ -34,7 +34,6 @@ import mlir
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
@@ -44,12 +43,9 @@ import mojo.backend_gimple.emit_calls as ggc
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.loops_shared import *  # noqa: F401,F403
 from mojo.middle.loops_shared import (
-    _as_str, _gfl_declare_target_name, _pair_key, _single_loop_target_name,
-    _try_const_fold_int, _tuple_elem_value, _tuple_unpack_slot_elems,
-    _emit_starred_slot_from_cstr, _emit_starred_slot_from_value,
-    _emit_starred_slot_list, starred_slot_index, starred_slot_name,
-    ZipLongestFillRefusal,
+    _as_str, _gfl_declare_target_name, _pair_key, _try_const_fold_int, _tuple_elem_value, _tuple_unpack_slot_elems
 )
+
 def _gen_for_range(gen, node: gimple_ctypes.ForStmt):
     args = node.iterable.args
     var  = node.target
@@ -390,7 +386,7 @@ def _gen_for_regex_iter(gen, node: gimple_ctypes.ForStmt, pattern: str) -> None:
     gen._emit_label(bb_post)
     # pos = (mend > pos) ? mend : pos + 1 — advance past the match, or by
     # one char on a zero-width match, exactly like Python's finditer.
-    pos_plus1 = gen._inc_val(pos_var)
+    pos_plus1 = gen._new_val('int64_t', f'{pos_var} + (int64_t)1')
     cmp_t = gen._new_val('_Bool', f'{mend_var} > {pos_var}')
     next_pos = gen._new_val('int64_t', f'{cmp_t} ? {mend_var} : {pos_plus1}')
     gen._emit(f'  {pos_var} = {next_pos};')
@@ -402,14 +398,11 @@ def _regex_prog_for(gen, pattern: str) -> dict:
     """Compile `pattern` into the emitted regex-program tables, reusing the
     one already built for that exact pattern text. Shared by the finditer
     and findall lowerings so `for m in P.finditer(s)` and
-    `for w in P.findall(s)` over the same pattern cost one program.
-
-    A delegate to `gimple_ctypes.regex_prog_for`, which is the one
-    implementation — it lives in `mojo/middle/types.py` because this module
-    imports `emit_methods` and every `P.<method>(...)` arm in emit_methods
-    needs the same helper, so the reverse module-level import would be a
-    cycle."""
-    return gimple_ctypes.regex_prog_for(gen, pattern)
+    `for w in P.findall(s)` over the same pattern cost one program."""
+    if pattern not in gen._regex_progs:
+        prog_id = f"re{len(gen._regex_progs)}"
+        gen._regex_progs[pattern] = gimple_ctypes.regex_compile.compile_pattern(pattern, prog_id)
+    return gen._regex_progs[pattern]
 
 
 def _emit_regex_scan(gen, pattern: str, text_val: str) -> tuple:
@@ -472,7 +465,7 @@ def _close_regex_scan(gen, pieces) -> None:
     gen._emit_label(bb_post)
     # pos = (mend > pos) ? mend : pos + 1 — advance past the match, or by
     # one char on a zero-width match, exactly like Python's finditer/findall.
-    pos_plus1 = gen._inc_val(pos)
+    pos_plus1 = gen._new_val('int64_t', f'{pos} + (int64_t)1')
     cmp_t = gen._new_val('_Bool', f'{mend} > {pos}')
     next_pos = gen._new_val('int64_t', f'{cmp_t} ? {mend} : {pos_plus1}')
     gen._emit(f'  {pos} = {next_pos};')
@@ -573,6 +566,8 @@ def _gen_for_findall_loop(gen, node: gimple_ctypes.ForStmt) -> None:
         # `for a, b in ...` then unpacks as N pairs of (group, null) —
         # twice the iterations and a null second slot.)
         _tup = gen._call_expr('MojoList *', 'mojo_list_new', []) if ngroups >= 2 else None
+        if _tup is not None:
+            gen._void_call('mojo_mark_as_tuple', [('MojoList *', _tup)])
         for _gi in range(ngroups):
             _gi64 = gen._new_val('int64_t', f'(int64_t){_gi + 1}')
             _gsp = gen._new_val('int64_t *', f'_mojo_at_int64_t ({gstart}, {_gi64})')
@@ -605,12 +600,6 @@ def _gen_for_findall_loop(gen, node: gimple_ctypes.ForStmt) -> None:
             # the same way.
             _boxed = gen._new_val('int64_t', f'(int64_t)(intptr_t){_tup}')
             gen._void_call('mojo_list_append_int', [('MojoList *', res), ('int64_t', _boxed)])
-            # Marked AFTER the group slots are appended, not before: a
-            # marked list is refused by every mutating MojoList entry
-            # point (mojo_require_mutable_list's own comment), so marking
-            # first made `re.findall` with 2+ groups raise out of its own
-            # construction. Same ordering rule as _lower_tuple_literal.
-            gen._void_call('mojo_mark_as_tuple', [('MojoList *', _tup)])
     _close_regex_scan(gen, pieces)
     if ngroups >= 2:
         gen._elem_types[res] = 'MojoList *'
@@ -662,43 +651,6 @@ def _lower_int_dict_items(gen, recv) -> tuple:
     gen._dict_items_val_elems[t] = gen._dict_val_of(_as_str(recv.name))
     gen._dict_items_int_keys.add(t)
     return 'MojoList *', t
-
-
-def _boxed_list_ptr(gen, lst_type: str, lst_val: str) -> str | None:
-    """The `MojoList *` to iterate for a BOXED (int64_t) handle whose element
-    type is POSITIVELY known, or None when there is no such evidence.
-
-    This is the one definition of that rule, shared by every lowering that
-    otherwise has to emit the runtime dict-or-list dispatch: `_gen_for_iter`
-    (a bare `for <t> in <param>:`) and `_gen_for_enumerate`
-    (`enumerate(<param>)`). Both need it, they need it for the same reason,
-    and two copies of a rule about when a dispatch arm is provably dead is
-    how they drift.
-
-    The rule: `gen._elem_types` is only ever recorded for a LIST value — a
-    literal, a cross-call parameter contract, a struct field — and a dict's
-    keys are always strings, so an entry that is present and is not the
-    `int64_t` "nothing known" default is positive evidence that the handle
-    is a list AND the element type to read it with. The dict (and set) arm
-    is then provably dead, and skipping it is not an optimization: both arms
-    bind the SAME loop variable, `_declare_var` is first-decl-wins, so
-    emitting the dead arm declares one variable with two incompatible types
-    and `gcc -fgimple` rejects the whole function ("assignment to
-    'FunctionDef *' from incompatible pointer type 'char *'", or, for a
-    `double` element against a `char *` dict key, "pointer value used where a
-    floating-point was expected").
-
-    Returns None for the untyped case, and the caller falls back to emitting
-    the dispatch exactly as before.
-    """
-    if lst_type not in ('int', 'int64_t', 'void *'):
-        return None
-    elem = gen._elem_of(lst_val)
-    if not elem or elem == 'int64_t':
-        return None
-    lp = gen._coerce_to_type('int64_t', 'MojoList *', gen._to_int64(lst_type, lst_val))
-    gen._elem_types[lp] = elem
-    return lp
 
 
 def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
@@ -767,10 +719,10 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             and it.func.index.name in gen._comptime_list_asts):
         list_ast = gen._comptime_list_asts[it.func.index.name]
         var0 = node.target
-        if gimple_ctypes.for_target_is_tuple(var0):
-            tgt_names = gimple_ctypes.target_slots(var0[1:-1].strip())
+        if isinstance(var0, str) and var0.startswith('(') and var0.endswith(')'):
+            tgt_names = gen._split_top_level_comma(var0[1:-1])
         else:
-            tgt_names = gimple_ctypes.for_target_names(var0)
+            tgt_names = [var0]
         for el in list_ast.elements:
             el_args = el.args if isinstance(el, gimple_ctypes.CallExpr) else [el]
             if len(el_args) < len(tgt_names):
@@ -818,10 +770,10 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # run BEFORE the generic lower_expr(node.iterable) below, which would
     # treat `it` as a plain MojoList* and restart the scan from element 0.
     if (isinstance(it, gimple_ctypes.IdentExpr)
-            and itc.cursor_for(gen, gen._cname(it.name)) is not None
-            and isinstance(var, str) and not gimple_ctypes.for_target_is_tuple(var)
+            and it.name in getattr(gen, '_list_iter_cursor', {})
+            and isinstance(var, str) and ',' not in var
             and not getattr(node, 'else_body', None)):
-        _gen_for_iter_cursor(gen, node, var)
+        _gen_for_list_iter_cursor(gen, node, var)
         return
 
     # A loop over a provably Dict[Int, V] name (`for k in d`, `d.keys()`,
@@ -874,7 +826,9 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # loop target's C variable gets overwritten with), and force a fresh,
     # non-colliding C declaration for the loop target (see
     # `_declare_var(force=True)`).
-    target_names = gimple_ctypes.for_target_names(var)
+    target_names = (gen._split_top_level_comma(var[1:-1])
+                     if isinstance(var, str) and var.startswith('(') and var.endswith(')')
+                     else [var])
     shadow_name = None
     if (isinstance(it, gimple_ctypes.IdentExpr) and it.name in target_names
             and it_val == gen._c_names.get(it.name, it.name)):
@@ -926,44 +880,6 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             # nonexistent MojoGenerator___has_next__/__next__).
             api = gen._generator_var_api.get(it_val)
             if api is not None:
-                # `async for x in gen():` in an ORDINARY (never-suspended)
-                # function -- the one place an async generator can be
-                # consumed by a consumer with no yield channel of its own,
-                # so it is also the one place `_gen_for_generator_iter`'s
-                # resume/value pair below is not automatically right: this
-                # coroutine's channel carries a wait-descriptor (is_wd=1)
-                # for every parking `await` and a real value (is_wd=0) for
-                # every `yield`, and an ordinary C function has no `__c` to
-                # forward a descriptor on. Binding it as the loop variable
-                # is real silent garbage, not merely a wrong answer to the
-                # loop count -- measured, a generator awaiting
-                # `asyncio.sleep(0)` printed a heap ADDRESS instead of its
-                # yield value. So drive it only when the coroutine is
-                # proven never to produce a descriptor, and refuse it
-                # otherwise. The analysis is coro.py's
-                # `_compute_no_wd_forward` fixpoint, carried on the api as
-                # `no_wd_forward`; `_cpp_async_for_stmt` refuses the same
-                # consumer shape for the C++ backend on unrelated grounds
-                # (`async for` is only legal inside an async body), so
-                # this is the stackswitch path's matching honest refusal,
-                # not a new restriction.
-                #
-                # Deliberately NOT gated on `node.is_async`: a plain
-                # `for x in gen()` over an async generator is a TypeError in
-                # CPython, so there is no correct behaviour to preserve
-                # here -- only the silent-garbage one to remove. A clean
-                # async generator keeps its existing lowering on that
-                # spelling.
-                if api.get('is_async_gen') and not api.get('no_wd_forward'):
-                    raise RuntimeError(
-                        "cannot compile module: `async for` over async "
-                        f"generator {api.get('base') or it_val!r} in an "
-                        "ordinary function — that generator's body can "
-                        "suspend (it has an `await` that may park), so its "
-                        "yield channel carries a wait-descriptor the "
-                        "enclosing function has no channel of its own to "
-                        "forward; drive it from an `async def` body "
-                        "(`await asyncio.run(...)`) instead")
                 # Only auto-destroy the coroutine when this `for` loop's
                 # iterable expression IS the generator construction call
                 # itself (`for x in counter(3):`) — that value has no
@@ -1028,8 +944,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 _dsub_dp = gen._new_val('MojoDict *', f"{it_val}->_data")
                 gen._gen_for_dict(var, _dsub_dp, node.body, shadow_name=shadow_name)
             elif has_next in gen.func_return_types or nxt in gen.func_return_types:
-                gen._gen_for_struct_iter(var, it_type, it_val, node.body,
-                                         shadow_name=shadow_name, node=node)
+                gen._gen_for_struct_iter(var, it_type, it_val, node.body, shadow_name=shadow_name)
             else:
                 gimple_ctypes._debug_note(
                     'for loop dropped (no iterator protocol)',
@@ -1052,23 +967,22 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             # pair-accessor gap (counter/interval/_unicode/string_slice
             # stdlib modules regress) — see A5-BUG.md. Keep this patch in
             # the tree as the starting point for resolving the frontier.
-            # POSITIVE EVIDENCE the boxed handle is a LIST, and the element
-            # type to read it with: skip the runtime dict-or-list dispatch
-            # entirely. `_boxed_list_ptr` owns that rule and its rationale;
-            # this is one of its two callers.
-            #
-            # This is what closes the GENERATOR's version of the shape: a
-            # generator's params cross as untyped `int64_t` slots, so
-            # `def rows(data): for r in data: yield r` called
-            # `rows([1.5, 2.5])` had no element type here at all, the dict arm
-            # won the shared `r`, and the `double` yield slot could not be fed
-            # from a `char *` (a hard `gcc -fgimple` "pointer value used where a
-            # floating-point was expected"). The element ctype reaches
-            # `_elem_types` via `_mojo_coro_param_elem_kinds` ->
-            # `_param_elem_types` -> `gen_func`. See
-            # CODEGEN_coro_yield_kind_unresolved_callsite.
-            _lp_known = _boxed_list_ptr(gen, it_type, it_val)
-            if _lp_known is not None:
+            # POSITIVE EVIDENCE the boxed handle is a LIST: a tracked element
+            # type that is a real (non-boxed) pointer can only have been
+            # recorded for a list. Take the list path directly instead of
+            # emitting the runtime dict-or-list dispatch below, whose dict
+            # arm would bind this same loop variable to a `char *` KEY.
+            # `_declare_var` is first-decl-wins, so the two arms otherwise
+            # declare one variable with two incompatible types and GCC
+            # rejects the dead dict arm outright ("assignment to
+            # 'FunctionDef *' from incompatible pointer type 'char *'").
+            # The dict arm is provably dead for such a value anyway.
+            _boxed_elem = gen._elem_of(it_val)
+            if (it_type in ('int', 'int64_t', 'void *') and _boxed_elem
+                    and _boxed_elem != 'int64_t' and _boxed_elem.endswith(' *')):
+                _lp_known = gen._coerce_to_type(
+                    'int64_t', 'MojoList *', gen._to_int64(it_type, it_val))
+                gen._elem_types[_lp_known] = _boxed_elem
                 gen._gen_for_list(var, _lp_known, node.body)
             elif it_type in ('int', 'int64_t', 'void *'):
                 bb_dict = gen._new_bb(); bb_list = gen._new_bb()
@@ -1100,7 +1014,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     and isinstance(node.iterable.func, gimple_ctypes.MemberExpr)
                     and node.iterable.func.member == 'items'
                     and not node.iterable.args
-                    and not gimple_ctypes.for_target_is_tuple(var))
+                    and not (var.startswith('(') and var.endswith(')')))
                 gen._emit_label(bb_dict)
                 dp = gen._coerce_to_type('int64_t', 'MojoDict *', it64)
                 if _it_is_items:
@@ -1131,71 +1045,6 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             gen._dataclass_fields_vars.discard(var)
 
 
-#: The ABSENT fill each slot type selects, keyed by `TypeLattice.list_suffix`.
-#: `None` is the `double` arm's marker for "patched to `(double)0` below", which
-#: is the pre-existing spelling for it; the two integer-ish arms share the
-#: `(int64_t)0` the select is typed in, and a string slot's 0 is the NULL that
-#: `mojo_print` already renders as `None`. It is ONE table rather than three
-#: literals in three arms because a slot that the fill cannot reach uses it too
-#: (see `_gen_for_zip_longest`), and two copies of "what absent means here" is
-#: how the two would come to disagree.
-_ZIP_LONGEST_ABSENT = {'double': None, 'str': '(int64_t)0', 'int': '(int64_t)0'}
-
-
-def _zip_longest_fill_refusal(fill_ctype: str, slot_domain: str):
-    """The one message for a `fillvalue` whose type the slot cannot hold.
-
-    One builder for three call sites, because the three are the same fact: the
-    fill's C type and the slot's own C type are different, and this model gives
-    each slot its own type rather than a box. CPython hands every slot the value
-    as given, so there is no conversion to appeal to — the alternative answer is
-    a value of the wrong type read back through the right one.
-    """
-    return ZipLongestFillRefusal(
-        f"zip_longest: `fillvalue` is {fill_ctype} and cannot fill "
-        f"{slot_domain} — CPython hands every slot the value as given, and "
-        f"this model gives each slot its own C type, so storing one in "
-        f"another is a wrong answer rather than a conversion (measured: a "
-        f"string fill in an `int64_t` slot prints the pointer's own decimal). "
-        f"Pass a `fillvalue` of that type.")
-
-
-def _zip_longest_reaches(args: list, slot: int) -> bool:
-    """Can `zip_longest`'s padded fill ever be SELECTED into `args[slot]`?
-
-    `zip_longest` iterates `max(len_a, len_b)` times and slot `i` is padded
-    exactly when that count is past `len(args[i])`, so the answer is a
-    comparison of two lengths — and both are compile-time facts when both
-    sequences are list LITERALS. When either is not (a name, a call, a
-    comprehension) the lengths are `mojo_list_len` calls read at run time and
-    the honest answer is that any slot may be padded.
-
-    A `*seq` element makes a literal's length unknown TOO, and in the direction
-    that matters: `len([1, *xs])` is `1 + len(xs)` and this can only count the
-    one, so a literal carrying a spread answers "cannot be padded" for a slot
-    that can be. Under-counting a length here would decide a refusal NOT to
-    fire, which is the silent direction, so a spread makes the answer `True`.
-
-    The distinction is what keeps a refusal from costing correct code: with it,
-    `zip_longest([1, 2], ["p"], fillvalue="-")` keeps its integer slot's
-    unreachable `(int64_t)` coercion (the iteration count is 2 and that
-    sequence has 2 elements, so the fill is never selected) while the same
-    `fillvalue` into a slot that CAN be padded is a refusal, because
-    `(int64_t)(char *)"-"` in an integer slot prints `4364407504`.
-    """
-    lens = []
-    for a in args:
-        if not isinstance(a, gimple_ctypes.ListExpr):
-            lens.append(None)
-        elif any(gimple_ctypes.is_star_spread(el) for el in a.elements):
-            lens.append(None)
-        else:
-            lens.append(len(a.elements))
-    if any(n is None for n in lens):
-        return True
-    return max(lens) > lens[slot]
-
-
 def _gen_for_zip_longest(gen, node):
     """Handle: for (a, b) in itertools.zip_longest(seq_a, seq_b
     [, fillvalue=v]): ...
@@ -1204,31 +1053,10 @@ def _gen_for_zip_longest(gen, node):
     max(len_a, len_b) times; each tuple-target slot is assigned from its
     OWN sequence's element i (read with that sequence's own tracked
     element-type accessor), or the fill value once the index runs past
-    that sequence's length.
-
-    **What a PADDED slot can hold is the whole constraint here**, because
-    CPython hands every slot the fill as given and each slot below is a C
-    local of its sequence's own element type — there is no box to put a value
-    of the wrong type into. So:
-
-      * `str` and `int` slots keep the model's long-standing 0/NULL sentinel
-        for an ABSENT fill, and a `char *` NULL is what `mojo_print` already
-        renders as `None`, so a padded string slot reads `None` as CPython
-        does. An `int64_t` has no such word, so a padded integer slot reads
-        `0` — a real, measured divergence from CPython's `None`, kept because
-        it is this model's documented representation and changing it is the
-        value-model work below, not this function's;
-      * a `double` slot has NO absent value at all — every double is a value
-        here, so `None` and `0.0` are one word — and a padded one is therefore
-        REFUSED (`ZipLongestFillRefusal`) rather than answered `0.0`;
-      * an EXPLICIT `fillvalue` is admitted only into a slot whose own read
-        type it matches, for the same reason.
-
-    Representing absence for a `double` — so the first refusal above becomes
-    an answer — is the value-model change this doc's bug names: the per-slot
-    kind byte (`mojo_list_set_kinds`' `MOJO_KIND_NONE`, which
-    `TypeLattice.slot_kind_byte` already names) is the precedent, and a loop
-    target would have to carry that kind alongside its value.
+    that sequence's length. The default fill is 0 — this scalar C model's
+    representation of None — so the common `if x is None:` guards after a
+    padded iteration test a genuine 0/NULL, exactly like real Python's
+    None sentinel.
 
     Before this, `itertools.zip_longest(...)` hit _gen_for_iter's generic
     boxed-iterable fallback, where `itertools` is an opaque module global:
@@ -1247,9 +1075,7 @@ def _gen_for_zip_longest(gen, node):
     Any shape this narrow handler can't prove supported (non-2-arity call,
     non-tuple target, non-list sequence, non-literal fillvalue) raises;
     the caller (_gen_stmt_ForStmt) rolls back partial output transactionally
-    and falls through to the pre-existing generic path unchanged — EXCEPT for
-    `ZipLongestFillRefusal`, which is re-raised, because the generic path drops
-    the loop and answers nothing.
+    and falls through to the pre-existing generic path unchanged.
     """
     it = node.iterable
     args = list(it.args)
@@ -1262,7 +1088,7 @@ def _gen_for_zip_longest(gen, node):
     if len(args) != 2:
         raise ValueError("only the 2-sequence zip_longest shape is supported")
     target = node.target
-    if not gimple_ctypes.for_target_is_tuple(target):
+    if not (isinstance(target, str) and target.startswith('(') and target.endswith(')')):
         raise ValueError("zip_longest lowering needs a tuple loop target")
     tgt_names = [t.strip() for t in gen._split_top_level_comma(target[1:-1])]
     if len(tgt_names) != 2:
@@ -1278,103 +1104,40 @@ def _gen_for_zip_longest(gen, node):
             ptr = gen._coerce_to_type('int64_t', 'MojoList *', sv)
         seqs.append((ptr, gen._elem_of(sv)))
 
-    # The fillvalue, LOWERED ONCE.  It used to be lowered inside the per-slot
-    # loop below, so `zip_longest(a, b, fillvalue=f())` called `f()` once per
-    # slot — CPython evaluates the default exactly once, and a fillvalue with a
-    # side effect is the shape that notices.  It is lowered here, before the
-    # loop is emitted, which is also where its value has to be computed: it is
-    # loop-invariant.
-    fill_ctype = None
-    fill_value = None
-    if fill_node is not None:
-        fill_ctype, fill_value = gen.lower_expr(fill_node)
-
     # Per-slot read + fill expressions, all selected through ONE int64_t
     # (or double) select so the fill/element type mismatch never reaches
     # GIMPLE as differing ternary operand types. The final assignment to
     # the declared target coerces back to its real declared ctype (the
     # same box/unbox dance _gen_for_list's tuple branch uses).
-    #
-    # The fill is admitted into a slot ONLY when the slot's own read type can
-    # hold it, and the reason is CPython's: `zip_longest` hands every slot the
-    # value as given, so a `fillvalue` of one type landing in a slot of another
-    # is not a conversion but a wrong answer. It used to be coerced per slot,
-    # which produced three of them and each was measured:
-    #
-    #   fillvalue="-" into an int slot  → `(int64_t)(char *)"-"`, and
-    #     `zip_longest([1], ["p", "q"], fillvalue="-")` printed `4364407504 q`
-    #     where CPython prints `- q` (the pointer, as a decimal)
-    #   fillvalue=0.0 into an int slot  → `(int64_t)0.0`, and
-    #     `zip_longest([1, 2.5], [7], fillvalue=0.0)` printed `2.5 0` where
-    #     CPython prints `2.5 0.0`
-    #   fillvalue="-" into a float slot → already a refusal here, and it stays
-    #     one (it was the only direction the old per-slot check covered)
-    #
-    # A fill that cannot REACH its slot is not this question: see
-    # `_zip_longest_reaches`, which is what keeps the doc's own first program
-    # (`zip_longest([1, 2], ["p"], fillvalue="-")`) building.
     fills = []
     slot_reads = []  # (raw_ctype, expr_with_{i} placeholder fn)
-    for si, (ptr, elem) in enumerate(seqs):
+    for ptr, elem in seqs:
         suf = gimple_ctypes.TypeLattice.list_suffix(elem)
-        reaches = _zip_longest_reaches(args, si)
         if suf == 'double':
             slot_reads.append(('double', lambda p=ptr: f"mojo_list_get_double ({p}, {gen._ziptmp})"))
+            if fill_node is not None:
+                ft, fv = gen.lower_expr(fill_node)
+                if ft != 'double':
+                    raise ValueError("fillvalue must be float-typed to fill a float sequence")
+                fills.append(fv)
+            else:
+                fills.append(None)  # patched below with a 0.0 temp
         elif suf == 'str':
             slot_reads.append(('str', lambda p=ptr: f"mojo_list_get_str ({p}, {gen._ziptmp})"))
+            if fill_node is not None:
+                ft, fv = gen.lower_expr(fill_node)
+                if ft != 'char *' and not isinstance(fill_node, gimple_ctypes.StringLiteral):
+                    raise ValueError("fillvalue must be string-typed to fill a string sequence")
+                fills.append(f"(int64_t)(char *)({fv})")
+            else:
+                fills.append('(int64_t)0')
         else:
             slot_reads.append(('int', lambda p=ptr: f"mojo_list_get_int ({p}, {gen._ziptmp})"))
-        # The expression this slot's select takes when the index is past its
-        # own sequence's end. `None` means "the arm's `(double)0`", patched
-        # below, and it is the DEFAULT the absent fill has always been.
-        #
-        # A slot the fill can never reach gets that default rather than the
-        # fillvalue, and the reason is not tidiness: an unreachable slot's
-        # expression still has to COMPILE. `(int64_t)(char *)(9.0)` for a
-        # string slot in `zip_longest([1.5], ["q", "r"], fillvalue=9.0)` is not
-        # dead code to gcc, it is "cannot convert to a pointer type" — the
-        # second sequence has two elements and the loop runs twice, so slot `b`
-        # is never padded, and the program still did not build until the
-        # unreachable slot stopped naming the fillvalue at all.
-        if not reaches:
-            fills.append(_ZIP_LONGEST_ABSENT[suf])
-            continue
-        if fill_node is None:
-            if suf == 'double':
-                # The default fill is `absent`, and this is the one slot type
-                # that cannot carry it: the loop target is a C `double` and
-                # every double is a value here, so `None` and `0.0` are the
-                # same word and `zip_longest([1.5], ["q", "r"])` printed
-                # `0.0 r` where CPython prints `None r`. The `int` and `str`
-                # arms keep their 0/NULL sentinel because a C `int64_t` and a
-                # C `char *` each have one word that is not a value of their
-                # own domain. Representing absence for a `double` is a
-                # value-model change — the per-slot kind byte
-                # (`mojo_list_set_kinds`' `MOJO_KIND_NONE`, which
-                # `TypeLattice.slot_kind_byte` names) is the precedent, and a
-                # loop target would have to carry that kind with it — and not
-                # a tweak to this lowering.
-                raise ZipLongestFillRefusal(
-                    "zip_longest: a padded `double` slot has no value that "
-                    "means `absent` on this model — the loop target is a C "
-                    "`double`, every double is a value here, so `None` and "
-                    "`0.0` are the same word and the padded row reads `0.0`. "
-                    "Pass an explicit float `fillvalue`, or zip two float "
-                    "sequences of the same length.")
-            fills.append(_ZIP_LONGEST_ABSENT[suf])
-        elif suf == 'double':
-            if not gimple_ctypes.TypeLattice.is_float(fill_ctype):
-                raise _zip_longest_fill_refusal(fill_ctype, "a float sequence")
-            fills.append(fill_value)
-        elif suf == 'str':
-            if (fill_ctype != 'char *'
-                    and not isinstance(fill_node, gimple_ctypes.StringLiteral)):
-                raise _zip_longest_fill_refusal(fill_ctype, "a string sequence")
-            fills.append(f"(int64_t)(char *)({fill_value})")
-        else:
-            if not gimple_ctypes.TypeLattice.is_int(fill_ctype):
-                raise _zip_longest_fill_refusal(fill_ctype, "an integer sequence")
-            fills.append(f"(int64_t)({fill_value})")
+            if fill_node is not None:
+                ft, fv = gen.lower_expr(fill_node)
+                fills.append(f"(int64_t)({fv})")
+            else:
+                fills.append('(int64_t)0')
 
     # Declare each target by its own slot's element type BEFORE the loop
     # (mirrors _gen_for_enumerate's declare-then-assign order; first-decl-
@@ -1449,37 +1212,6 @@ def _gen_for_zip_longest(gen, node):
     gen._emit_label(bb_after)
 
 
-def _carry_nested_elem_type(gen, target, it_val, elem) -> None:
-    """One level IN: a loop target over a container OF containers must record
-    on ITSELF what those inner containers hold, so a loop over the target
-    inside the body types its own target from the same table instead of
-    falling to the `int64_t` default.
-
-    Without it the second loop reads its elements through
-    `mojo_list_get_int` whatever they are, so `for row in rows: for cell in
-    row: print(cell)` over `[["a", "b"]]` printed the strings' heap ADDRESSES
-    -- exit 0, no diagnostic, and the integer spelling of the same program
-    (`[[1, 2], [3, 4]]`) was correct, because `int64_t` happens to be what
-    the default already is. `note_list_literal` /
-    `_lower_list_literal` already do this carrying for a list LITERAL bound
-    to a local (`_nested_elem_types[t] = _inner_ct`); what was missing is the
-    same step for a name the ITERATION bound.
-
-    Only `MojoList *` is carried: `_nested_elem_types` records what a list
-    holds, and a struct pointer's fields are already reachable through
-    `_actual_types`, which the callers set for themselves.
-
-    One implementation, called from both loop paths that need it -- the
-    `zip()` slot binding and the ordinary `for x in <list>` -- because they
-    are the same step and a partial copy is exactly how the ordinary loop
-    came to disagree with `zip()` about the same nested shape."""
-    if _as_str(elem) != 'MojoList *':
-        return
-    _inner = gen._nested_elem_types.get(_as_str(it_val))
-    if _inner is not None:
-        gen._elem_types[target] = _inner
-
-
 def _zip_bind_slot(gen, vn: str, list_ptr: str, elem: str, idx_t: str) -> None:
     """Bind one `zip()` loop target `vn` to `list_ptr[idx_t]`, reading with
     the accessor matching THAT sequence's own element type and coercing to
@@ -1503,21 +1235,6 @@ def _zip_bind_slot(gen, vn: str, list_ptr: str, elem: str, idx_t: str) -> None:
         nested_elem = gen._nested_elem_types.get(list_ptr, 'int64_t')
         for j, nn in enumerate(gen._split_top_level_comma(vn[1:-1].strip())):
             _zip_bind_slot(gen, nn, nested_ptr, nested_elem, j)
-        return
-    if starred_slot_index([vn]) >= 0:
-        # The starred slot: read this sequence's element with the same
-        # accessor rule as any other slot, then box it as the one-element
-        # list `*b` means in `for a, *b in zip(...)`.
-        _se = elem if elem else 'int64_t'
-        _ssuf = gimple_ctypes.TypeLattice.list_suffix(_se)
-        if _ssuf == 'str':
-            _star_val = gen._new_val('char *', f"mojo_list_get_str ({list_ptr}, {idx_t})")
-        elif _ssuf == 'double':
-            _star_val = gen._new_val('double', f"mojo_list_get_double ({list_ptr}, {idx_t})")
-        else:
-            _star_val = gen._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {idx_t})")
-        _emit_starred_slot_from_value(gen, starred_slot_name(vn), _se,
-                                      _star_val, _se)
         return
     cvn = gen._cname(vn)
     vt = gen.var_types.get(vn, elem)
@@ -1550,7 +1267,8 @@ def _zip_bind_slot(gen, vn: str, list_ptr: str, elem: str, idx_t: str) -> None:
     # instead of falling to the boxed dynamic-dispatch path.
     if elem and elem.endswith(' *'):
         gen._actual_types[vn] = elem
-    _carry_nested_elem_type(gen, vn, list_ptr, elem)
+        if elem == 'MojoList *' and list_ptr in gen._nested_elem_types:
+            gen._elem_types[vn] = gen._nested_elem_types[list_ptr]
 
 
 def _gen_for_zip(gen, node):
@@ -1604,7 +1322,7 @@ def _gen_for_zip(gen, node):
     # fire_compiler.py's own `for op, operand in zip(node.ops,
     # node.operands[1:]):`, silently dropping the rest of `emit`).
     target = _as_str(node.target)
-    if not gimple_ctypes.for_target_is_tuple(target):
+    if not (target.startswith('(') and target.endswith(')')):
         raise ValueError("zip() lowering needs a tuple loop target")
     tgt_names = [t.strip() for t in gen._split_top_level_comma(target[1:-1])]
     if len(tgt_names) != len(args):
@@ -1644,13 +1362,6 @@ def _gen_for_zip(gen, node):
             nested_elem = gen._nested_elem_types.get(seq_ptr, 'int64_t')
             for nn in gen._split_top_level_comma(vn[1:-1].strip()):
                 _declare_zip_slot(nn, seq_ptr, nested_elem)
-            return
-        if starred_slot_index([vn]) >= 0:
-            # `for a, *b in zip(xs, ys)` binds `b` to a ONE-ELEMENT LIST
-            # holding this slot's own element — zip yields one tuple per
-            # iteration, so the remainder after `a` is exactly this slot.
-            # Declared as the list it is; `_zip_bind_slot` below fills it.
-            gen._declare_var(starred_slot_name(vn), 'MojoList *')
             return
         gen._declare_var(vn, elem)
 
@@ -1718,15 +1429,7 @@ def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None
     # Same rule as _gen_for_cstr (see its comment): iterating a str yields
     # 1-char STRINGS, so the value slot is `char *` too. It was `char`,
     # which made `for i, c in enumerate(s)` hand out character codes.
-    if starred_slot_index([val_var]) >= 0:
-        # `for i, *rest in enumerate(s)`: the character's remainder is a
-        # ONE-ELEMENT LIST (see `_gen_for_enumerate`'s identical arm).
-        star_src = val_var
-        gen._declare_var(starred_slot_name(val_var), 'MojoList *')
-        val_var = gen._new_temp('char *')
-    else:
-        star_src = ''
-        gen._declare_var(val_var, 'char *')
+    gen._declare_var(val_var, 'char *')
     cidx_var = gen._cname(idx_var)
     cval_var = gen._cname(val_var)
 
@@ -1749,21 +1452,12 @@ def _gen_for_enumerate_str(gen, node, s_val: str, start_val: str | None) -> None
         gen._emit(f"  {cidx_var} = {disp_idx};")
     else:
         gen._emit(f"  {cidx_var} = {idx_t};")
-    # `mojo_char_at_str(s, i)` rather than a `char`-taking helper: gimple
-    # rejects a `char` argument outright, so `mojo_char_to_str(s[i])` is not
-    # available — see _gen_for_cstr for the whole of it. It shares
-    # mojo_char_to_str's immortal table, where the `mojo_cstr_slice` this
-    # replaced allocated one string per character and freed none of them. The
-    # `_mojo_at_char` helper this used to ask for is not requested any more:
-    # nothing here needs a pointer INTO the string, and asking for it emitted
-    # a `static` definition no call site used.
-    gen._emit(f"  {cval_var} = mojo_char_at_str ({s_val}, {idx_t});")
-    if star_src:
-        # Iterating a `str` yields 1-char STRINGS, so the starred list's
-        # element type is `char *` (see the declaration above). Mirrors
-        # `_gen_for_cstr`'s identical arm.
-        _emit_starred_slot_from_value(gen, starred_slot_name(star_src),
-                                      'char *', cval_var, 'char *')
+    gen._ptr_helpers_needed.add('char')
+    # See _gen_for_cstr for why this is a cstr_slice and not a
+    # `char`-taking helper: gimple rejects a `char` argument outright.
+    _one_c2 = gen._new_val('int64_t', "(int64_t)1")
+    _end_c2 = gen._new_val('int64_t', f"{idx_t} + {_one_c2}")
+    gen._emit(f"  {cval_var} = mojo_cstr_slice ({s_val}, {idx_t}, {_end_c2});")
     gen._gen_loop_body(node.body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
@@ -1790,7 +1484,7 @@ def _gen_for_enumerate(gen, node):
     # shape of this same gap showed up separately in the
     # comprehension-embedded `for` clause form; see
     # `_lower_comprehension`'s `is_enumerate` handling and
-    # “CODEGEN_generator_function: Lib/gettext.py” root cause #2).
+    # bugs/CODEGEN_generator_function_Lib_gettext.md root cause #2).
     # `idx_t` below stays the 0-based list-access index (used for
     # every `mojo_list_get_*` call); only the user-visible `cidx_var`
     # gets the start offset added.
@@ -1829,24 +1523,7 @@ def _gen_for_enumerate(gen, node):
     # If the value part is itself a tuple like (a, b, c), use a temp for the element
     val_is_tuple = (isinstance(raw_val, str) and
                     raw_val.startswith('(') and raw_val.endswith(')'))
-    # ...or a STARRED slot (`for i, *rest in enumerate(xs)`), which binds
-    # the yielded pair's second half as a ONE-ELEMENT LIST. enumerate's pair
-    # is synthesized slot by slot rather than sliced out of a row, so this is
-    # the `_emit_starred_slot_from_value` shape, not `_emit_starred_slot_list`
-    # — and without it the star reached the C declarator as
-    # `int64_t *rest;` with a store through it, so `rest` read as 0.
-    val_is_star = (isinstance(raw_val, str) and raw_val.strip().startswith('*')
-                   and not val_is_tuple)
-    if val_is_tuple:
-        val_var = gen._new_temp('int64_t')
-    elif val_is_star:
-        # The temp that receives the value is minted BELOW, once the
-        # sequence's element type is known — its C type has to match that
-        # element, not be guessed here (`char *` for an int list is exactly
-        # the "makes pointer from integer" this avoids).
-        val_var = None
-    else:
-        val_var = raw_val
+    val_var = gen._new_temp('int64_t') if val_is_tuple else raw_val
 
     # Ensure underlying list
     if lst_type == 'MojoList *':
@@ -1854,42 +1531,18 @@ def _gen_for_enumerate(gen, node):
         if lst_val in gen.var_types and gen.var_types[lst_val] == 'int64_t':
             list_ptr = gen._coerce_to_type('int64_t', 'MojoList *', lst_val)
     else:
-        # Same positive-list-evidence shortcut as `_gen_for_iter`, same
-        # helper, same reason (`_boxed_list_ptr`): without it
-        # `enumerate(<list param>)` materialized the param through the
-        # dict/set/list dispatch into a FRESH temp that carries no element
-        # type, so `for i, v in enumerate(xs)` read every value with
-        # `mojo_list_get_int` and printed a list of floats as their raw
-        # IEEE-754 bit patterns -- even though the identical program with a
-        # bare `for v in xs:` was correct. See
-        # CODEGEN_coro_yield_kind_unresolved_callsite.
-        _lp_known = _boxed_list_ptr(gen, lst_type, lst_val)
-        if _lp_known is not None:
-            list_ptr = _lp_known
-        else:
-            # DESIGN.html R1/R5: dict/set materialization (`enumerate(d)`/
-            # `enumerate(s)` — real Python semantics: a dict's KEYS, a set's
-            # elements, not a reinterpret of the header) shares
-            # _materialize_as_list with all()/any()/str.join()/bytes.join()/
-            # shlex.join(); a genuinely-unknown boxed handle is now also
-            # runtime-guarded (mojo_is_registered_dict/_set) there instead of
-            # blindly assuming list.
-            list_ptr = gen._materialize_as_list(lst_type, lst_val)
+        # DESIGN.html R1/R5: dict/set materialization (`enumerate(d)`/
+        # `enumerate(s)` — real Python semantics: a dict's KEYS, a set's
+        # elements, not a reinterpret of the header) shares
+        # _materialize_as_list with all()/any()/str.join()/bytes.join()/
+        # shlex.join(); a genuinely-unknown boxed handle is now also
+        # runtime-guarded (mojo_is_registered_dict/_set) there instead of
+        # blindly assuming list.
+        list_ptr = gen._materialize_as_list(lst_type, lst_val)
 
     elem = gen._elem_of(list_ptr)
     gen._declare_var(idx_var, 'int64_t')
-    star_elem = None
-    if val_is_star:
-        # The starred slot is a LIST of what follows the index, not the
-        # index's own slot type — declared by the emission below, which also
-        # records its element type so `print(rest)` prints `[7]` and not a
-        # pointer.
-        gen._declare_var(starred_slot_name(raw_val), 'MojoList *')
-        star_elem = elem if elem else 'int64_t'
-        val_var = gen._new_temp({
-            'str': 'char *', 'double': 'double'}.get(
-                gimple_ctypes.TypeLattice.list_suffix(star_elem), 'int64_t'))
-    elif not val_is_tuple:
+    if not val_is_tuple:
         gen._declare_var(val_var, elem if elem else 'int64_t')
     # Writes go through _cname (a target named after a C keyword is
     # DECLARED renamed — see _gen_for_dict's identical note). `val_var` is
@@ -1955,21 +1608,6 @@ def _gen_for_enumerate(gen, node):
                     gen._emit(f"  {cv} = {ti};")
                 else:
                     gen._safe_coerce_emit('int64_t', gen.var_types.get(vname, pair_elem), ti, cv)
-    elif val_is_star:
-        # `rest = [<element>]` — the pair's second half, as a one-element
-        # list. The element is read with the same per-element accessor rule
-        # as every other slot here, then boxed by the shared helper (the
-        # receiving temp's C type already matches `star_elem`, minted above).
-        _se_suf = gimple_ctypes.TypeLattice.list_suffix(star_elem)
-        if _se_suf == 'str':
-            _sv = gen._new_val('char *', f"mojo_list_get_str ({list_ptr}, {idx_t})")
-        elif _se_suf == 'double':
-            _sv = gen._new_val('double', f"mojo_list_get_double ({list_ptr}, {idx_t})")
-        else:
-            _sv = gen._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {idx_t})")
-        gen._emit(f"  {cval_var} = {_sv};")
-        _emit_starred_slot_from_value(gen, starred_slot_name(raw_val),
-                                      star_elem, cval_var, star_elem)
     elif suf == 'double':
         gen._emit(f"  {cval_var} = mojo_list_get_double ({list_ptr}, {idx_t});")
     elif suf == 'str':
@@ -2016,14 +1654,8 @@ def _gfd_flatten_target(gen, vn: str, acc: list) -> None:
 
 def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | None = None,
                    share_var_with_sibling_arm: bool = False):
-    # Handle tuple unpacking: for (a, b) in list_of_tuples — and the 1-tuple
-    # `for (a,) in ...`, which unpacks too. `for_target_is_tuple` is what says
-    # so: a parenthesised single NAME (`for (a) in ...`) binds the whole item
-    # and must NOT be unpacked, and the two spellings differ by exactly one
-    # comma that the parser now keeps (fire_compiler.py's "Unpacking-target
-    # representation"). Reading the parens alone treated both as unpack, so
-    # `for (a,) in [(1,)]` printed `1` where CPython prints `(1,)`.
-    is_tuple = gimple_ctypes.for_target_is_tuple(var)
+    # Handle tuple unpacking: for (a, b) in list_of_tuples:
+    is_tuple = var.startswith('(') and var.endswith(')')
     elem = None if is_tuple else gen._elem_of(it_val)
     if is_tuple:
         # Bracket-aware split (a naive `inner.split(',')` turned a nested
@@ -2033,12 +1665,6 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # Lib/test/support/__init__.py's WindowsCleanup.__exit__).
         inner = var[1:-1].strip()
         var_names = gen._split_top_level_comma(inner)
-        # A `*`-starred slot (`for first, *rest in ...`) binds the REMAINDER
-        # as a LIST and shifts every slot after it, so it has to be found
-        # BEFORE the declarations below decide what each slot is. See
-        # `starred_slot_index` for why it is a position and not a name scan.
-        star_idx = starred_slot_index(var_names)
-        n_after = 0 if star_idx < 0 else len(var_names) - star_idx - 1
         # Declare each FLAT slot by its real per-slot element type, not a
         # blanket int64_t: _declare_var is deliberately first-decl-wins,
         # so pre-declaring int64_t here permanently locked every unpacked
@@ -2057,16 +1683,6 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         for _fli in range(len(var_names)):
             _fl_vn = _as_str(var_names[_fli])
             _fl_se = _as_str(slot_elems[_fli]) if _fli < len(slot_elems) else 'int64_t'
-            if _fli == star_idx:
-                # The starred slot holds a LIST OF the remaining elements,
-                # so that is what it is declared as — and its element type
-                # is recorded, because `print(rest)` must print `[2, 3]`
-                # and not the pointer.
-                _gfl_declare_target_name(gen, shadow_name,
-                                         starred_slot_name(_fl_vn), 'MojoList *')
-                if _fl_se and _fl_se != 'int64_t':
-                    gen._elem_types[starred_slot_name(_fl_vn)] = _fl_se
-                continue
             _gfl_declare_target_name(gen, shadow_name, _fl_vn, _fl_se)
     else:
         var_names = None
@@ -2114,10 +1730,6 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                      or _as_str(it_val) in getattr(gen, '_maybe_kinds_vals', ()))
                 and gen.var_types.get(var) != 'int64_t'):
             gen._declare_var(var, 'int64_t', force=True)
-        # AFTER every declaration above (each of which can re-type `var`) and
-        # BEFORE the body is generated below, so a loop over `var` INSIDE the
-        # body sees the inner element type. The doc's placement note.
-        _carry_nested_elem_type(gen, var, it_val, _fl_ctype)
     len64 = gen._new_temp('int64_t')
     len_t = gen._new_temp('int64_t')
     idx_t = gen._new_temp('int64_t')
@@ -2209,39 +1821,11 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 else:
                     gen._safe_coerce_emit('int64_t', vt, raw, cvn)
 
-        # A starred slot's own bounds, and the slots after it, depend on the
-        # item's RUNTIME length (`a, *mid, z` over a 4-item row gives
-        # `mid == [2, 3]`), so with a star in the target the length is read
-        # once and the trailing slots are counted from its end. No star: the
-        # indices stay the literal slot numbers they always were, so a
-        # starless target's generated C is unchanged.
-        item_len = None
-        if star_idx >= 0:
-            item_len = gen._new_val(
-                'int64_t', f"mojo_list_len ({_as_str(tuple_ptr)})")
-
         for i, vn in enumerate(var_names):
-            if i == star_idx:
-                # `rest` gets everything from the star's position up to the
-                # slot before the first slot after it — `mojo_list_len` minus
-                # the number of trailing slots.
-                stop = item_len
-                if n_after:
-                    _n = gen._new_val('int64_t', f"{n_after}LL")
-                    stop = gen._new_val('int64_t', f"{item_len} - {_n}")
-                _emit_starred_slot_list(gen, tuple_ptr,
-                                        starred_slot_name(_as_str(vn)),
-                                        f"{i}LL", stop, slot_elems[i])
-                continue
-            slot_i = i
-            if star_idx >= 0 and i > star_idx:
-                _base = gen._new_val('int64_t', f"{item_len} - {n_after}LL")
-                _off = gen._new_val('int64_t', f"{i - star_idx - 1}LL")
-                slot_i = gen._new_val('int64_t', f"{_base} + {_off}")
             if vn.startswith('(') and vn.endswith(')'):
-                _emit_target_assign(tuple_ptr, vn, slot_i, 'int64_t')
+                _emit_target_assign(tuple_ptr, vn, i, 'int64_t')
                 continue
-            _emit_target_assign(tuple_ptr, vn, slot_i, slot_elems[i])
+            _emit_target_assign(tuple_ptr, vn, i, slot_elems[i])
     else:
         cvar = gen._cname(var)
         suf = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -2308,71 +1892,8 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     _is_pair_var = (not is_tuple) and (it_val in gen._dict_items_val_elems)
     _had_pair = _is_pair_var and var in gen._dict_item_pair_vars
     _saved_pair = gen._dict_item_pair_vars.get(var, '')
-    # The pair IS a 2-element `MojoList` — slot 0 the key (always a string;
-    # `mojo_dict_items` appends it with append_str) and slot 1 the dict's own
-    # value type — and the variable carried no evidence of that, so
-    # `print(v)` / `str(v)` / an f-string reached the scalar `mojo_str_from_int`
-    # path with a `MojoList *` in hand and printed the pair's HEAP ADDRESS: a
-    # different decimal every run, which is also exactly what breaks
-    # bootstrap's stage2-vs-stage3 byte-identity check. Recording the two slot
-    # ctypes is the same evidence a tuple literal records, and it is what
-    # routes the value to the kinds-aware `mojo_repr_list_kinds`. See
-    # CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.
-    _pcv = gen._cname(var) if _is_pair_var else ''
-    _saved_pc = ((gen._elem_types.get(_pcv),
-                  gen._struct_slot_kinds.get(_pcv),
-                  gen._actual_types.get(_pcv))
-                 if _is_pair_var else None)
-    # The pair IS a 2-element `MojoList` — slot 0 the key, slot 1 the dict's
-    # own value type — and the variable carried no evidence of that, so
-    # `print(v)` / `str(v)` / an f-string reached the scalar `mojo_str_from_int`
-    # path with a `MojoList *` in hand and printed the pair's HEAP ADDRESS: a
-    # different decimal every run, which is also exactly what breaks
-    # bootstrap's stage2-vs-stage3 byte-identity check. Recording the two slot
-    # ctypes is the same evidence a tuple literal records, and it is what
-    # routes the value to the kinds-aware `mojo_repr_list_kinds`. See
-    # CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.
-    #
-    # STR-KEYED dicts only. An Int-keyed dict's pair slot 0 is an integer word,
-    # so both slots come out `'int'` and `_struct_slot_kind_bytes` declines a
-    # UNIFORM kind row by design (a uniform `struct.unpack` format is already
-    # exact under its uniform helper; a pair is not, and that uniform case is
-    # a separate piece of missing evidence — the same one `v.value` on a
-    # container-valued dict needs).
-    _pair_str_keyed = _is_pair_var and it_val not in gen._dict_items_int_keys
     if _is_pair_var:
         gen._dict_item_pair_vars[var] = gen._dict_items_val_elems[it_val]
-    if _pair_str_keyed:
-        gen._elem_types[_pcv] = 'MojoList *'
-        # `_gmi_slot_kind_long` is imported HERE, at its one use site, rather
-        # than at the top of this file, and that is the layering rule rather
-        # than a style choice: a top-level `from mojo.backend_gimple.emit_infra
-        # import ...` here begins the import chain in the wrong direction.
-        # `emit_infra` imports `gimple_codegen` at its own top level (it has
-        # to — it is the module the shims hang off), and `gimple_codegen`
-        # imports THIS module, so a first-import of `emit_infra` would re-enter
-        # it half-built and die on the name:
-        #
-        #   ImportError: cannot import name '_gmi_slot_kind_long' from
-        #   partially initialized module 'mojo.backend_gimple.emit_infra'
-        #
-        # which makes `mojo.backend_gimple.emit_infra` unable to be a process's
-        # first `mojo.*` import — and that module is explicitly NOT exempt from
-        # `test_suite.py`'s load-order check, because the backend sits
-        # downstream of `gimple_codegen` so every one of them is reachable
-        # first. The re-entrancy the OTHER direction causes is already here and
-        # already works; what has to stay away is the edge that starts the
-        # chain. Same rule and same precedent as
-        # `emit_funcs._struct_method_qualifier` and the eight middle modules
-        # that exemption list names.
-        from mojo.backend_gimple.emit_infra import _gmi_slot_kind_long
-        gen._struct_slot_kinds[_pcv] = ['str', _gmi_slot_kind_long(
-            gen._dict_items_val_elems[it_val])]
-        # The loop variable is declared `int64_t` and holds the pair's handle,
-        # so `print`'s boxed-int64 arm has to be told what the box holds —
-        # `_get_actual_type` reads this table and it is what turns that arm
-        # into the list-repr route.
-        gen._actual_types[_pcv] = 'MojoList *'
     # `item.key` reads slot 0 as an integer when the pairs came from an
     # Int-keyed dict; scoped to the body like the pair var itself.
     _int_pair = _is_pair_var and it_val in gen._dict_items_int_keys
@@ -2388,17 +1909,6 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
             gen._dict_item_pair_vars[var] = _saved_pair
         else:
             gen._dict_item_pair_vars.pop(var, None)
-    if _pair_str_keyed:
-        # Same scoping discipline as the pair-var registration above: these
-        # three describe THIS loop's target, and a same-named variable in an
-        # enclosing or sibling scope is a different value.
-        for _tbl, _k, _v in ((gen._elem_types, _pcv, _saved_pc[0]),
-                             (gen._struct_slot_kinds, _pcv, _saved_pc[1]),
-                             (gen._actual_types, _pcv, _saved_pc[2])):
-            if _v is None:
-                _tbl.pop(_k, None)
-            else:
-                _tbl[_k] = _v
     if _had_int_pair:
         gen._dict_item_int_key_vars.add(var)
     else:
@@ -2564,18 +2074,17 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
 
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
-    # `mojo_char_at_str(s, i)` rather than
-    # `mojo_char_to_str(*_mojo_at_char(s, i))`: gimple REFUSES a `char`-typed
-    # argument ("invalid argument to gimple call" / "non-trivial conversion in
-    # 'integer_cst'") because a char is promoted to int64_t and the conversion
-    # is not trivial to it, so the two-step spelling is not available at all.
-    # `mojo_cstr_slice(s, i, i+1)` was the workaround that did lower — and it
-    # allocated a 1-char string per character that nobody freed, which was the
-    # whole of the char-scan residual (1226 bytes a pass, measured).
-    # The helper takes a pointer and an index instead, so it lowers cleanly AND
-    # lands in the immortal table `mojo_char_to_str` already keeps. As above,
-    # no `_mojo_at_char` is requested: the helper is not called from here.
-    gen._emit(f"  {gen._cname(var)} = mojo_char_at_str ({it_val}, {idx_t});")
+    gen._ptr_helpers_needed.add('char')
+    # `mojo_cstr_slice(s, i, i+1)` rather than
+    # `mojo_char_to_str(*_mojo_at_char(s, i))`: both produce a fresh
+    # NUL-terminated 1-char C string, but gimple REFUSES a `char`-typed
+    # argument ("invalid argument to gimple call" / "non-trivial
+    # conversion in 'integer_cst'") because a char is promoted to
+    # int64_t and the conversion is not trivial to it. The slice takes
+    # only a pointer and two int64 bounds, so it lowers cleanly.
+    _one_c = gen._new_val('int64_t', "(int64_t)1")
+    _end_c = gen._new_val('int64_t', f"{idx_t} + {_one_c}")
+    gen._emit(f"  {gen._cname(var)} = mojo_cstr_slice ({it_val}, {idx_t}, {_end_c});")
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
     gen.loop_stack.pop()
@@ -2592,53 +2101,18 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
 def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | None = None,
                   int_keys: bool = False):
     """for k in dict — iterates over keys as char *."""
-    # Handle tuple target like '(name, alias)' — declare each name
-    # separately. `for_target_is_tuple`, so the 1-tuple `for (k,) in d.items()`
-    # unpacks and the parenthesised single name `for (k) in d` does not; see
-    # _gen_for_list's note.
-    is_tuple = gimple_ctypes.for_target_is_tuple(var)
+    # Handle tuple target like '(name, alias)' — declare each name separately
+    is_tuple = var.startswith('(') and var.endswith(')')
     if is_tuple:
         inner = var[1:-1].strip()
         var_names = gen._split_top_level_comma(inner)
-        # `for k, *rest in <dict>` unpacks the KEY STRING — Python says
-        # `for a, *b in {"xy": 1}` gives `a == 'x'`, `b == ['y']`, because
-        # iterating a dict yields its keys and a key is a `str` — so the slots
-        # of this loop are CHARACTERS of one C string, not slots of a shared
-        # row (slot 0 is the key; every later slot is the literal 0, the
-        # starless lowering's stand-in for a pair's value). What the star adds
-        # is the before/after arithmetic `starred_slot_index` describes: every
-        # slot before the star is measured from the front of the string, every
-        # slot after it from its END, and the star takes what is left between
-        # them (`a, *mid, z` over "abcd" gives `mid == ['b', 'c']`).
-        #
-        # This USED TO REFUSE, through `_emit_unsupported_iter`, because the
-        # interpreter bound the whole key (`for k, *vs in d` printed `abc []`
-        # where CPython prints `a ['b', 'c']`) and only one of the two engines
-        # could be moved inside a merge. Both are fixed now — the interpreter
-        # splits a `str` item in `_unpack_source`, this is the lowering — and a
-        # refusal here is what kept the comparison that checks them from
-        # existing at all.
-        #
-        # An INT-keyed dict still refuses, and that is not the same shape being
-        # put off: CPython's answer there is a `TypeError` ("cannot unpack
-        # non-iterable int object"), because an int has no characters to take
-        # one at a time. Refusing at compile time is the honest answer for a
-        # construct whose runtime error message this lowering does not carry.
         # Flatten any nested tuple target the same way _gen_for_list does
         # (a naive split turned `(k, (a, b))` into the bogus fragments
-        # `(a` / `b)`, declared verbatim — hard C syntax errors). BEFORE the
-        # star is located, because the star's POSITION is what every index
-        # below is measured from and a flatten that ran after it would leave
-        # `_n_after` counting slots that are no longer there.
+        # `(a` / `b)`, declared verbatim — hard C syntax errors).
         _flat = []
         for vn in var_names:
             _gfd_flatten_target(gen, vn, _flat)
         var_names = _flat
-        star_idx = starred_slot_index(var_names)
-        if star_idx >= 0 and int_keys:
-            _emit_unsupported_iter(gen, 'dict with integer keys')
-            return
-        _n_after = 0 if star_idx < 0 else len(var_names) - star_idx - 1
         # First var is the KEY (char*); the rest are value slots, always
         # 0/NULL in this runtime's dict-key iteration. Declare the value
         # slots int64_t (not char*) so a sibling list-iteration branch over
@@ -2659,25 +2133,7 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # `for vname, vtype in ci.captures:`).
         _slot_ctypes = []
         for i, vn in enumerate(var_names):
-            if i == star_idx:
-                # A starred slot holds a LIST of the remaining CHARACTERS of the
-                # key, so that is what it is declared as — and its element type
-                # is recorded, because `print(rest)` must print `['b', 'c']`
-                # and not the list's pointer. `_emit_starred_slot_from_cstr`
-                # declares it too, but this site's pre-pass is where the C
-                # declaration is emitted (before the loop opens) and
-                # `_declare_var` is first-decl-wins, so the call below only
-                # fills in the entry when nothing has declared it yet.
-                _gfl_declare_target_name(gen, shadow_name,
-                                         starred_slot_name(vn), 'MojoList *')
-                gen._elem_types[starred_slot_name(vn)] = 'char *'
-                _slot_ctypes.append('MojoList *')
-                continue
-            # With a star, every slot is a CHARACTER of the key, so `char *` —
-            # including the ones after the star, which the starless lowering
-            # declares `int64_t` and stores a literal 0 into.
-            _want = ('int64_t' if int_keys else 'char *') if (i == 0 or star_idx >= 0) \
-                else 'int64_t'
+            _want = ('int64_t' if int_keys else 'char *') if i == 0 else 'int64_t'
             _retype = (int_keys and i == 0 and gen.var_types.get(vn, _want) != _want) \
                 or (not int_keys and i == 0 and vn in gen._int_key_loop_vars)
             gen._declare_var(vn, _want, force=(vn == shadow_name) or _retype)
@@ -2744,85 +2200,29 @@ def _gen_for_dict(gen, var: str, it_val: str, body: list, shadow_name: str | Non
     if int_keys:
         pass    # the integer key was stored above
     elif is_tuple:
-        if star_idx >= 0:
-            # The star's half: every slot of this target is a CHARACTER of the
-            # key, at a position that depends on the key's RUNTIME length, so
-            # the length is read once and the slots after the star are counted
-            # from its END (`a, *mid, z` over "abcd" -> `mid == ['b', 'c']`).
-            # `starred_slot_index` is the model for the arithmetic.
-            _klen = gen._new_val('int64_t', f"mojo_strlen ((char *) {key_tmp})")
-            _n = gen._new_val('int64_t', f"{_n_after}LL")
-            # CPython raises ValueError when a starred target's non-starred
-            # slots outnumber the item's elements ("not enough values to unpack
-            # (expected at least 2, got 1)"), and the positions below are then
-            # NEGATIVE — `mojo_cstr_slice` resolves a negative index against the
-            # length, so without this the loop would quietly bind a slot to ""
-            # and keep going, which is a program that builds, runs and answers
-            # wrongly. The interpreter raises the same class
-            # (`_bind_comprehension_target`); this is the compiled half of that
-            # rule. Emitted only when there IS a slot after the star, because
-            # that is the only way an index can go negative — `for k, *rest in d`
-            # over any key is well-defined.
-            if _n_after:
-                _req = gen._new_val('int64_t', f"{star_idx + _n_after}LL")
-                _short = gen._new_val('_Bool', f"{_as_str(_klen)} < {_req}")
-                _bb = gen._new_bb(); _bo = gen._new_bb()
-                gen._emit(f'  if ({_short}) goto {_bb}; else goto {_bo};')
-                gen._emit_label(_bb)
-                gen._emit_call('void', '', 'mojo_raise_value_error',
-                               [('char *', gen._intern_string(
-                                   'not enough values to unpack (expected at '
-                                   f'least {star_idx + _n_after}, got a shorter '
-                                   'string)'))])
-                gen._emit(f'  goto {_bo};')
-                gen._emit_label(_bo)
-            for _si, _svn in enumerate(var_names):
-                if _si == star_idx:
-                    _stop = _klen
-                    if _n_after:
-                        _stop = gen._new_val('int64_t', f"{_as_str(_klen)} - {_n}")
-                    _from = gen._new_val('int64_t', f"{_si}LL")
-                    _emit_starred_slot_from_cstr(
-                        gen, starred_slot_name(_as_str(_svn)), key_tmp,
-                        _from, _stop)
-                    continue
-                # Front of the key for a slot before the star, END for one after:
-                # slot `_si` sits `_si - star_idx - 1` places from the end.
-                if _si < star_idx:
-                    _pos = gen._new_val('int64_t', f"{_si}LL")
-                else:
-                    _off = gen._new_val('int64_t', f"{_si - star_idx - 1}LL")
-                    _from_end = gen._new_val('int64_t', f"{_as_str(_n)} - {_off}")
-                    _pos = gen._new_val('int64_t', f"{_as_str(_klen)} - {_from_end}")
-                _plus = gen._new_val('int64_t', f"{_as_str(_pos)} + 1LL")
-                _chr = gen._new_val('char *',
-                                    f"mojo_cstr_slice ((char *) {key_tmp}, "
-                                    f"{_as_str(_pos)}, {_as_str(_plus)})")
-                gen._emit(f"  {gen._cname(_svn)} = {_chr};")
+        # Assign key to first name, NULL (zero) to remaining names
+        vn0 = var_names[0]
+        cvn0 = gen._cname(vn0)
+        # `_slot_ctypes`, not a fresh `var_types.get(..., 'char *')`: the
+        # store must use the type the slot was actually DECLARED with (see
+        # where _slot_ctypes is built).
+        vt0 = _slot_ctypes[0]
+        if vt0 in ('int64_t', 'int', 'int32_t'):
+            vp = gen._new_val('void *', f'(void *){key_tmp}')
+            box = gen._new_val('int64_t', f'(int64_t){vp}')
+            gen._emit(f"  {cvn0} = {box};")
         else:
-            # Assign key to first name, NULL (zero) to remaining names
-            vn0 = var_names[0]
-            cvn0 = gen._cname(vn0)
-            # `_slot_ctypes`, not a fresh `var_types.get(..., 'char *')`: the
-            # store must use the type the slot was actually DECLARED with (see
-            # where _slot_ctypes is built).
-            vt0 = _slot_ctypes[0]
-            if vt0 in ('int64_t', 'int', 'int32_t'):
-                vp = gen._new_val('void *', f'(void *){key_tmp}')
-                box = gen._new_val('int64_t', f'(int64_t){vp}')
-                gen._emit(f"  {cvn0} = {box};")
+            gen._emit(f"  {cvn0} = (char *) {key_tmp};")
+        for _vi in range(1, len(var_names)):
+            vn = var_names[_vi]
+            cvn = gen._cname(vn)
+            vt = _slot_ctypes[_vi]
+            if vt in ('int64_t', 'int', 'int32_t'):
+                gen._emit(f"  {cvn} = (int64_t)0;")
+            elif vt.endswith(' *'):
+                gen._emit(f"  {cvn} = ({vt})0;")
             else:
-                gen._emit(f"  {cvn0} = (char *) {key_tmp};")
-            for _vi in range(1, len(var_names)):
-                vn = var_names[_vi]
-                cvn = gen._cname(vn)
-                vt = _slot_ctypes[_vi]
-                if vt in ('int64_t', 'int', 'int32_t'):
-                    gen._emit(f"  {cvn} = (int64_t)0;")
-                elif vt.endswith(' *'):
-                    gen._emit(f"  {cvn} = ({vt})0;")
-                else:
-                    gen._emit(f"  {cvn} = (char *)0;")
+                gen._emit(f"  {cvn} = (char *)0;")
     else:
         cvar = gen._cname(var)
         vt = gen.var_types.get(var, 'char *')
@@ -2985,22 +2385,11 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
     # outer captured variable via shadowing, are unaffected -- those
     # still resolve their param type the normal way below.
     _lambda_capture_types = dict(ci.captures) if not ci.env_struct else {}
-    # The call site's own answer for this function's parameters (a lambda
-    # handed to `map`/`filter`/`sorted(key=)`, whose element type the call
-    # site resolved and bound to the lambda's param names). A FALLBACK, not
-    # an override: the body's usage evidence above is the primary answer and
-    # this only fills in for a parameter it says nothing about, which is the
-    # case that used to default to `int64_t` and turn a real string argument
-    # into a decimal address (`sorted(names, key=lambda s: k3(s))` — see
-    # `ci.call_site_param_types`'s own comment).
-    _call_site_types = dict(ci.call_site_param_types) if not ci.env_struct else {}
     for pname, ptype in node.params:
         if pname in _lambda_capture_types:
             gen.var_types[pname] = _lambda_capture_types[pname]
         elif ptype is None and pname in inferred_params:
             gen.var_types[pname] = inferred_params[pname]
-        elif ptype is None and pname in _call_site_types:
-            gen.var_types[pname] = _call_site_types[pname]
         else:
             gen.var_types[pname] = gen._resolve_type(ptype)
 
@@ -3067,12 +2456,6 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
             ctype = _lambda_capture_types[pname]
         elif ptype is None and pname in inferred_params:
             ctype = inferred_params[pname]
-        elif ptype is None and pname in _call_site_types:
-            # Same fallback as the var_types seeding above, and it must be
-            # the same answer: this loop is what DECLARES the parameter, so
-            # a disagreement with the body would be a definition whose own
-            # `var_types` seed contradicts its signature.
-            ctype = _call_site_types[pname]
         else:
             ctype = gen._param_ctype(pname, ptype, node)
         gen.var_types[pname] = ctype
@@ -3107,21 +2490,6 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
             closure_param_ctypes.append(ci.inferred_params.get(pname, 'int64_t'))
     gen.func_param_types[ci.lifted_name] = closure_param_ctypes
     params_str = ', '.join(param_strs) if param_strs else 'void'
-
-    # A doubly-nested closure's by-reference captures live in ITS OWN parent —
-    # this lifted function — so the boxing setup `gen_func` does for a
-    # top-level function has to be done here too, keyed by `ci.lifted_name`
-    # (which is exactly how `discover_closures` keys this function's own
-    # nested defs). Without it a `{mut x}` capture two levels down declared
-    # `x` as an ordinary scalar, and the env-fill then assigned that scalar to
-    # an `int64_t *` field: "non-trivial conversion in 'var_decl'"
-    # (benchmarks/memory/bench_heap_parallel's `call_fn` -> `task_body`
-    # -> `{mut checksum}`). Same three calls, same order, as `gen_func`:
-    # seed the boxed-pointer declarations, seed the address-taken locals, then
-    # allocate each box once in the prologue.
-    gen._seed_mut_captured_local_types(ci.lifted_name)
-    gen._seed_addressed_locals(node.body)
-    gen._emit_mut_local_box_allocs()
 
     gen._emit_label("bb_2")
     # `{mut}`-capture-spec names (ClosureInfo.mut_names): the env
@@ -3268,26 +2636,11 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     # single-name declare below, unchanged prior behavior).
     tuple_slot_ctypes = api.get('tuple_slot_ctypes')
     tuple_slot_nested = api.get('tuple_slot_nested')
-    is_tuple_target = (gimple_ctypes.for_target_is_tuple(var)
-                       and tuple_slot_ctypes is not None)
+    is_tuple_target = var.startswith('(') and var.endswith(')') and tuple_slot_ctypes is not None
     if is_tuple_target:
         var_names = gen._split_top_level_comma(var[1:-1])
-        # The per-slot names are declared by `_emit_generator_tuple_unpack`
-        # below, from the generator's OWN per-slot types. Declaring `var` here
-        # as well is what emitted `MojoList * (text, name, spec);` — not a C
-        # declaration, and the reason EVERY tuple-target generator consumer
-        # failed to compile (gcc: "expected ')' before ',' token"), both in
-        # `Tools/c-analyzer/c_parser/preprocessor/__init__.py` and in
-        # `test_gimple_generator_runner.py`'s four `gen_tuple_slot_*` cases.
     else:
         var_names = None
-        # `for x, in gen():` binds ONE name and `var` is the literal string
-        # `'(x,)'`. A multi-slot target over a generator whose yield arity was
-        # never recorded is a different mismatch — filed as
-        # bugs/CODEGEN_generator_multi_slot_target_needs_the_yield_arity.md.
-        _one = _single_loop_target_name(var)
-        if _one is not None:
-            var = _one
         gen._declare_var(var, vct)
 
     bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
@@ -3347,45 +2700,17 @@ def _emit_generator_pending_exc_check(gen, gen_val: str, base: str,
     gen._emit("  mojo_raise ();")
 
 
-def _gen_for_iter_cursor(gen, node, var: str) -> None:
-    """`for x in it:` over a resumable iterator local — see
+def _gen_for_list_iter_cursor(gen, node, var: str) -> None:
+    """`for x in it:` over a resumable list-iterator local — see
     `_gen_for_iter`'s call site. Resumes from the shared cursor and leaves
-    it exhausted.
-
-    The cursor advance belongs at the TOP of the body, immediately after
-    the read, not in `bb_post` after it. That is the Python invariant:
-    by the time the loop body runs, the iterator is already one past the
-    element just yielded, so a `next(it)` inside the body reads the
-    FOLLOWING one. With the advance in `bb_post`, `cur` still pointed AT
-    the element the loop had just handed to `var` while the body ran, and
-    `next(it)` read exactly that one again — so `walk([1,2,3,4])` below
-    printed `[1, 1, 3, 3]` (two elements consumed, each reported twice,
-    and half the iterations lost) where CPython prints `[1, 2, 3, 4]`.
-
-    This is the same shape CPython's
-    `Tools/cases_generator/analyzer.py::check_escaping_calls` uses:
-
-        tkn_iter = iter(stmt.contents)
-        for tkn in tkn_iter:
-            ...
-                next(tkn_iter)
-
-    `bb_post` stays on `loop_stack` so `break`/`continue` still land
-    somewhere correct; it is now just the jump back to `bb_cond`. A
-    `continue` is still right, precisely because the advance has already
-    happened by the time the body is reached.
-    """
-    rec = itc.cursor_for(gen, gen._cname(node.iterable.name))
-    cur = rec['cursor']
-    vct = itc.element_ctype(rec)
-    # One value per step, so `for x, in it:` is ONE name — see
-    # `_gen_for_generator_iter`'s identical handling for why the target's own
-    # spelling cannot answer this.
-    _one = _single_loop_target_name(var)
-    if _one is not None:
-        var = _one
+    it exhausted."""
+    li = gen._list_iter_cursor[node.iterable.name]
+    lst, cur, elem = li['list'], li['cursor'], li['elem']
+    suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
+    vct = {'str': 'char *', 'double': 'double'}.get(suf, 'int64_t')
     gen._declare_var(var, vct)
-    n = gen._new_val('int64_t', rec['full'])
+    n = gen._new_temp('int64_t')
+    gen._emit(f"  {n} = mojo_list_len ({lst});")
     bb_cond = gen._new_bb(); bb_body = gen._new_bb()
     bb_post = gen._new_bb(); bb_after = gen._new_bb()
     gen._emit(f"  goto {bb_cond};")
@@ -3394,25 +2719,16 @@ def _gen_for_iter_cursor(gen, node, var: str) -> None:
     gen._emit(f"  if ({cond}) goto {bb_body}; else goto {bb_after};")
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
-    # The cursor invariant is Python's: `cur` is the index of the next
-    # UNCONSUMED element, and the advance happens as the element is read —
-    # not after the body. `next(it)` inside the body (the
-    # `Tools/cases_generator/analyzer.py::check_escaping_calls` shape) reads
-    # at `cur`, so a post-body advance would make it re-read the element the
-    # loop had just yielded: two elements consumed, each reported twice.
-    _evct, ev = itc.read_at(gen, rec, cur)
+    ev = gen._new_val(vct, f"mojo_list_get_{suf} ({lst}, {cur})")
     gen._emit(f"  {gen._cname(var)} = {ev};")
-    nc = gen._inc_val(cur)
-    gen._emit(f"  {cur} = {nc};")
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(node.body)
     gen.loop_stack.pop()
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
-    # `bb_post` stays in the loop_stack above so a `continue` still lands
-    # somewhere correct; with the advance already done it is just the jump
-    # back to the condition.
     gen._emit_label(bb_post)
+    nc = gen._new_val('int64_t', f"{cur} + (int64_t)1")
+    gen._emit(f"  {cur} = {nc};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
 
@@ -3458,7 +2774,7 @@ def _gen_for_enumerate_generator(gen, node, gen_val: str, api: dict,
     gen._loop_depth -= 1
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
-    nc = gen._inc_val(ctr)
+    nc = gen._new_val('int64_t', f"{ctr} + (int64_t)1")
     gen._emit(f"  {ctr} = {nc};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_check_exc)
@@ -3469,43 +2785,13 @@ def _gen_for_enumerate_generator(gen, node, gen_val: str, api: dict,
 
 
 def _gen_for_struct_iter(gen, var: str, struct_type: str,
-                          obj_val: str, body: list, shadow_name: str | None = None,
-                          node=None):
-    """for x in obj — dispatches via StructName___iter__ / __has_next__ / __next__.
-
-    A struct that implements PYTHON's `__next__` and not Mojo's `__has_next__`
-    cannot drive this loop, and the refusal is now the same loud one every
-    other unsupported iterable gets rather than a silently false loop
-    condition — see the `else` below."""
+                          obj_val: str, body: list, shadow_name: str | None = None):
+    """for x in obj — dispatches via StructName___iter__ / __has_next__ / __next__."""
     base = gimple_exprtypes._struct_name_of(struct_type)
 
-    # Determine iterator type (may be the same struct or a separate iter type).
-    # Every symbol here goes through `gen._struct_method_csym`, the tree's ONE
-    # composer for a struct method's C name — NOT an f-string spelling
-    # `{Struct}___{method}__` written out again. The hand-written form omits
-    # the home-module qualifier, so a struct reached via `from mod import
-    # Struct` emitted a call to the BARE name: gcc's implicit-declaration
-    # fallback made it an `int` and the `for`/`next` lowering then read
-    # `It___iter__(It *)` as `int`, so `iter_var` was a garbage pointer —
-    # "implicit declaration of function 'It___iter__'; did you mean
-    # 'itmod_It___iter__'?" plus "assignment to 'It *' from 'int' makes
-    # pointer from integer without a cast", with no correct answer anywhere
-    # in the output.
-    iter_fn = gen._struct_method_csym(base, '__iter__', '')
-    # `__iter__` is the ONE method here that may be dispatched through its bare
-    # name, because the `else` branch below (keep the receiver's own type) is
-    # its correct answer when it is absent. But a struct that OVERLOADS
-    # `__iter__` defines neither `_0120be` nor `_0120be_2` under the bare name,
-    # so taking this branch would emit a call to a symbol nothing defines —
-    # measured, `test/itertools/test_repeat.mojo` linked with `Undefined
-    # symbols: __RepeatIterator_11_ElementType_5_Int64___iter__`, called from
-    # both of its `for` loops. Every iterator in `std/iter` overloads `__iter__`
-    # on `var self` and on `ref self`, so this is the whole family, and the
-    # `else` branch is right for all of them: `__iter__` returns
-    # `Self.IteratorOwnedType`, and `comptime IteratorOwnedType: Iterator =
-    # Self`.
-    if (iter_fn in gen.func_return_types
-            and (base, '__iter__') not in gen._ambiguous_struct_methods):
+    # Determine iterator type (may be the same struct or a separate iter type)
+    iter_fn = f"{base}___iter__"
+    if iter_fn in gen.func_return_types:
         iter_type = gen.func_return_types[iter_fn]
         iter_var  = gen._new_temp(iter_type)
         gen._emit(f"  {iter_var} = {iter_fn} ({obj_val});")
@@ -3515,8 +2801,8 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         iter_var  = obj_val
         iter_base = base
 
-    has_next_fn = gen._struct_method_csym(iter_base, '__has_next__', '')
-    next_fn     = gen._struct_method_csym(iter_base, '__next__', '')
+    has_next_fn = f"{iter_base}___has_next__"
+    next_fn     = f"{iter_base}___next__"
     elem_type   = gen.func_return_types.get(next_fn, 'int64_t')
     gen._declare_var(var, elem_type, force=(var == shadow_name))
 
@@ -3531,32 +2817,9 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         gen._emit(f"  {hn_t} = {has_next_fn} ({iter_var});")
         gen._emit(f"  {cond_t} = {hn_t} != 0;")
     else:
-        # Python spells exhaustion by RAISING StopIteration out of `__next__`,
-        # and this loop has no way to see a raise: `raise StopIteration` inside
-        # the method lowers to `mojo_exc_type_set (...)` + `mojo_raise ()`
-        # (measured, `Counter___next__` in the generated C), which unwinds
-        # past the loop with nothing left to test. So a struct with `__next__`
-        # and no `__has_next__` has no expressible loop condition.
-        #
-        # It USED to emit `cond = 0` with a `/* TODO */` marker, which is the
-        # same zero-iteration behaviour the runtime diagnostic is built to
-        # describe — `mojo_unsupported_iter`'s own message ends "the loop body
-        # runs zero times" — except SILENTLY. So the program exits 0 having
-        # done nothing and nothing says which of its loops was dropped:
-        #
-        #     class Counter: __iter__ / __next__ but no __has_next__
-        #     for x in c: print(x)          # prints nothing, exit 0
-        #
-        # Calling the shared refusal is strictly that plus a greppable
-        # diagnostic naming the type and the loop's file:line, which is the
-        # whole reason `_emit_unsupported_iter` exists. It is the same call
-        # `_gen_for_iter`'s dispatch makes for a type with NEITHER method, so
-        # "this iterator protocol has no lowering" stops being a property of
-        # which half of the protocol the type happens to implement.
-        gimple_ctypes._debug_note('iterator loop has no __has_next__ (Python-style __next__ exhaustion is a raise)', iter_base)
-        gen._emit_unsupported_iter(f'{iter_base} (no __has_next__)', node)
+        gimple_ctypes._debug_note('iterator loop emitted with false condition (no __has_next__)', iter_base)
         cond_t = gen._new_temp('_Bool')
-        gen._emit(f"  {cond_t} = 0;")
+        gen._emit(f"  {cond_t} = 0;  /* TODO: no __has_next__ on {iter_base} */")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
 
     gen._loop_depth += 1

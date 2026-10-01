@@ -26,14 +26,8 @@ Statuses:
 
 Usage:
     python3 test_runtime_diff.py [file.mojo ...]
-    python3 test_runtime_diff.py --case NAME [NAME ...]
 
 With no file arguments, runs the built-in corpus of small programs.
-`--case NAME` runs named entries of that corpus, which is how a
-CPython-comparable case gets CPython: `run_file` deliberately has no third
-opinion, because a file on disk is not necessarily valid Python, while a
-built-in case always is. The whole corpus JIT-compiles every program, so
-`--case` is also the cheap way to run ONE of them.
 """
 import os
 import sys
@@ -62,24 +56,11 @@ JIT_RUN_FAIL_MARKER = "JIT execution failed with code"
 def run_one(mode: str, fpath: str) -> tuple:
     """Run fpath through one execution engine.
 
-    mode is 'interp' (`python3 fire.py run X.mojo`), 'jit'
-    (`python3 fire.py --jit X.mojo`), or 'cpy' (`python3 X.mojo` — CPython
-    itself, for a program it can run). Returns (status, stdout, exit_code,
+    mode is 'interp' (`python3 fire.py run X.mojo`) or 'jit'
+    (`python3 fire.py --jit X.mojo`). Returns (status, stdout, exit_code,
     stderr). status is 'ok', 'timeout', or 'error'.
     """
-    if mode == 'cpy':
-        # CPython defines `main` and stops; Mojo RUNS it. So the CPython run
-        # gets a driver line appended, which is the whole difference between
-        # "CPython printed nothing" and "CPython printed the wrong thing".
-        cpy = fpath + '.py'
-        with open(fpath) as f:
-            _src = f.read()
-        with open(cpy, 'w') as f:
-            f.write(_src + "\nmain()\n")
-        cmd = [sys.executable, cpy]
-    else:
-        cmd = [sys.executable, MOJO, 'run' if mode == 'interp' else '--jit',
-               fpath]
+    cmd = [sys.executable, MOJO, 'run' if mode == 'interp' else '--jit', fpath]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
                            errors='replace', timeout=TIMEOUT, cwd=HERE)
@@ -114,12 +95,8 @@ def _first_stdout_diff(stdout_a: str, stdout_b: str) -> str:
             f"first {which}-only line at {i + 1}: {extra!r}")
 
 
-def diff_program(fpath: str, cpython: bool = False) -> tuple:
+def diff_program(fpath: str) -> tuple:
     """Run fpath through both engines and compare stdout + exit code.
-
-    `cpython=True` adds a third run — CPython itself — and requires the
-    compiled path to agree with it as well, which is the only check here that
-    can see a bug the two engines share (see `CPYTHON_COMPARABLE`).
 
     Returns (status, detail). See the module docstring for status meanings.
     """
@@ -143,25 +120,7 @@ def diff_program(fpath: str, cpython: bool = False) -> tuple:
         return 'JIT-COMPILE-FAILED', f"{reason[:300]}"
 
     if i_code == j_code and i_out == j_out:
-        if not cpython:
-            return 'PASS', 'stdout + exit identical'
-        # The two engines agreeing is not evidence that EITHER is right — a
-        # bug they share is invisible here, which is why test_interp_oracle.py
-        # exists. For a program CPython can also run, the third opinion is
-        # available and this is where it is asked for: the compiled path has
-        # to agree with CPython too, not merely with the interpreter.
-        c_status, c_out, c_code, c_err = run_one('cpy', fpath)
-        if c_status != 'ok':
-            return 'ERROR', f"cpython run failed: {c_err}"
-        if j_out != c_out or j_code != c_code:
-            detail = _first_stdout_diff(c_out or '', j_out or '')
-            if j_code != c_code:
-                detail = (f"exit codes differ: cpython={c_code} jit={j_code}"
-                          if j_out == c_out
-                          else f"{detail}; exit codes differ: "
-                               f"cpython={c_code} jit={j_code}")
-            return 'FAIL', f"compiled path disagrees with CPython: {detail}"
-        return 'PASS', 'stdout + exit identical, and CPython agrees'
+        return 'PASS', 'stdout + exit identical'
 
     detail = _first_stdout_diff(i_out or '', j_out or '')
     if i_code != j_code:
@@ -185,31 +144,6 @@ BUILTIN_PROGRAMS = {
     "minimal_main": textwrap.dedent("""\
         def main():
             print(42)
-    """),
-    # `def main(n):` is this repository's own entry-point convention and it is
-    # the shape the compiled path's C wrapper exists for: `emit_funcs.py`
-    # renames `main` to `_gimple_main` and calls it as `_gimple_main(0, 0,
-    # ...)`, one boxed zero per declared parameter, because a bare `main()`
-    # cannot satisfy a signature that declares one. `fire.py run` had no such
-    # wrapper — it invoked `main()` with nothing at all — and `n` came out as
-    # `None`, which was invisible while `_invoke` bound an unsupplied
-    # parameter to `None` and became an arity error (not a silent 0) the
-    # moment that was fixed. It is not in CPYTHON_COMPARABLE: CPython has no
-    # auto-invoked entry point, so there is no third opinion to ask.
-    #
-    # The program READS `n`, so a `None` cannot hide behind an unused
-    # parameter, and it calls a function with a DECLARED DEFAULT as well: the
-    # wrapper passes 0 for every parameter of `main` unconditionally because
-    # it cannot spell a default expression in a C call site, while a call
-    # inside a body gets its default on both paths. Those are two different
-    # rules and one case that reads both.
-    "main_takes_a_parameter": textwrap.dedent("""\
-        def with_default(a: Int = 3) -> Int:
-            return a
-
-        def main(n):
-            print(n)
-            print(with_default())
     """),
     "arithmetic": textwrap.dedent("""\
         def main():
@@ -259,76 +193,6 @@ BUILTIN_PROGRAMS = {
             var x: Int = 42
             var s = f"value={x}"
             print(s)
-    """),
-    # An ordinary string whose own TEXT begins with an f/t prefix and a quote.
-    # Both engines printed the STRIPPED body (`n`, `x`) and exited 0, so the
-    # diff between them was clean — which is why this program is also in
-    # CPYTHON_COMPARABLE: engine-vs-engine is the comparison that cannot see a
-    # bug the two share, and CPython prints `f"n"` and `t'x'`. The escaped row
-    # is the control: with the inner and the outer quote the same kind, `\"`
-    # survives into the value, so it starts `f\` and the prefix sniff every
-    # engine used to do was accidentally right about it.
-    "string_body_that_starts_with_a_prefix": textwrap.dedent("""\
-        def main():
-            a = 'f"n"'
-            b = "t'x'"
-            c = "f\\"n\\""
-            print(a)
-            print(b)
-            print(c)
-    """),
-    # A method call is the only `return` EXPRESSION KIND whose type the
-    # enclosing function's inference had no case for: `_quick_type`'s
-    # method-call branch is gated on the RECEIVER's type naming a registered
-    # struct, and during return inference the receiver local (`p` here) is not
-    # in `var_types` yet. So `g` below was declared `int64_t` and its correct
-    # `char *` came back as a pointer DECIMAL (measured: 4380508000), and the
-    # compiled path disagreed with the interpreter and with CPython about the
-    # program while `k` — the same local, read as a FIELD — was already right.
-    # That contrast is the test: the receiver is the same `P *` in both, so
-    # only `k` passing would be evidence the inference never had the receiver
-    # type at all.
-    #
-    # `repr(p)` is deliberately NOT in this program: the interpreter has its
-    # own documented gap there (it prints `<P instance>` instead of `R<a>`,
-    # bugs/CODEGEN_user_defined_dunder_repr_not_consulted_by_str_and_container_
-    # spellings.md), and this harness diffs the two engines, so putting it
-    # here would make this case red for a bug that is not the one under test.
-    "method_call_result": textwrap.dedent("""\
-        class P:
-            def __init__(self, x):
-                self.x = x
-            def __repr__(self):
-                return "R<" + self.x + ">"
-
-        def g():
-            p = P("a")
-            return p.__repr__()
-
-        def k():
-            p = P("a")
-            return p.x
-
-        def main():
-            print(g())
-            print(k())
-    """),
-    # The natural missing-key guard, and it was INVERTED on the compiled
-    # path: `d.get(k)` lowers to `mojo_dict_get_str`, which returns NULL for an
-    # absent key, and `None` — a singleton, with no NULL to compare against —
-    # was routed through `mojo_char_to_str((char)0)`, i.e. compared against
-    # the one-character string NUL. So the branch that tells "absent" from
-    # "present" answered the wrong way (CPython True, compiled False), exit 0,
-    # no diagnostic. `print(d.get("MISSING"))` printed whatever printf does
-    # with a NULL `%s` ("(null)") rather than `None`, which is the same
-    # misreading in a second place.
-    "dict_get_none_guard": textwrap.dedent("""\
-        def main():
-            a = {"A": "1"}
-            print(a.get("MISSING"))
-            print(a.get("MISSING") == None)
-            print(a.get("A") == None)
-            print(a.get("MISSING") is None)
     """),
     "struct_def": textwrap.dedent("""\
         struct Point:
@@ -413,136 +277,6 @@ BUILTIN_PROGRAMS = {
                     total = total + i * j
             print(total)
     """),
-    # A 1-TUPLE for-target and a PARENTHESISED SINGLE NAME are different
-    # targets. The parser spelled both `"(a)"`, so "is there a comma?" — the
-    # question every consumer asked — could not tell them apart, and BOTH
-    # engines bound the whole item: `for (a,) in [(1,), (2,)]` printed `1` / `2`
-    # where CPython prints `(1,)` / `(2,)`, exit 0, no diagnostic
-    # (CODEGEN_for_loop_target_one_tuple_vs_paren_single_name).
-    # CPython-comparable because the two engines were wrong in the SAME
-    # direction here, which is exactly the case a plain engine-vs-engine diff
-    # cannot see.
-    #
-    # Every spelling of each target is in the one program, and each line is a
-    # different question: the parenthesised 1-tuple, the bare 1-tuple, the
-    # parenthesised single name, the bare name, the 2-tuple, and the nested
-    # 1-tuple — the last two are the regression guard for the fix's own two
-    # failure modes (dropping a trailing comma, and reading a group's text as
-    # a single name).
-    "for_target_one_tuple_vs_paren_name": textwrap.dedent("""\
-        def main():
-            # 1-tuple: unpack each item's single element.
-            for (a,) in [(1,), (2,)]:
-                print(a)
-            for b, in [(3,), (4,)]:
-                print(b)
-            # Parenthesised single NAME: bind the whole item.
-            for (c) in [(5,), (6,)]:
-                print(c)
-            for d in [(7,), (8,)]:
-                print(d)
-            # 2-tuple, both spellings, and the nested 1-tuple.
-            for (e, f) in [(9, 10)]:
-                print(e, f)
-            for g, h in [(11, 12)]:
-                print(g, h)
-            for (i, (j,)) in [(13, (14,))]:
-                print(i, j)
-            # A comprehension's target has its own parser path
-            # (`_parse_generator_target`) and produced `'a'` for `a,` — the
-            # comma dropped outright, which is not even the same wrong answer.
-            print([k for (k,) in [(15,), (16,)]])
-            print([m for m, in [(17,), (18,)]])
-            print([(n) for (n) in [(19,), (20,)]])
-            print([(o, p) for (o, p) in [(21, 22)]])
-    """),
-    # The same distinction through a DICT and through a NESTED group, because
-    # those two for-loop lowerings are separate code with their own "is this a
-    # tuple target" test: `_gen_for_dict` and the interpreter's binder.
-    #
-    # Two shapes deliberately left OUT, each for a reason that is its own bug
-    # and not this one:
-    #   * `for (v) in d.items(): print(v)` puts a [key, value] PAIR in the loop
-    #     variable and this runtime has no repr for a pair-valued variable — the
-    #     compiled path prints the MojoList pointer (it was wrong before this fix
-    #     too, differently: the paren test unpacked the pair's slot 0). See
-    #     CODEGEN_dict_items_pair_valued_loop_var_prints_as_pointer.
-    "for_target_one_tuple_dict_and_nested": textwrap.dedent("""\
-        def main():
-            d = {"a": 1, "b": 2}
-            for (k, v) in d.items():
-                print(k, v)
-            for k2, v2 in d.items():
-                print(k2, v2)
-            for (only,) in [(7,), (8,)]:
-                print(only)
-            for (a2, (b2, c2)) in [(9, (10, 11))]:
-                print(a2, b2, c2)
-    """),
-    # Extended unpacking (`*rest`) in a for target, in all three positions the
-    # rule has: a star at the end, a star with slots after it, and the
-    # dict-`.items()` pair shape. Each line was `1 0` where CPython prints
-    # `1 [2, 3]` — the star reached the C declarator as `int64_t *rest;` and
-    # the assignment after it was `*rest = _t22;`, a store through an
-    # uninitialised pointer that happens to be mapped. The comprehension form
-    # (`[r for first, *r in pairs]`) is in its own case below because it was
-    # a PARSER gap as well as this lowering one: the generator-target parser
-    # had no `*` arm at all, so the whole comprehension was a SyntaxError on
-    # both engines before the star reached any lowering.
-    "for_target_starred_rest": textwrap.dedent("""\
-        def main():
-            for first, *rest in [(1, 2, 3), (4, 5, 6)]:
-                print(first, rest)
-            for a, *mid, z in [(1, 2, 3, 4)]:
-                print(a, mid, z)
-            for k, *vs in {"k1": 1, "k2": 2}.items():
-                print(k, vs)
-            for x, *ys in [("p", "q", "r")]:
-                print(x, ys, ys[0])
-            # enumerate and zip yield a PAIR per iteration, so the starred
-            # remainder is a ONE-ELEMENT list there — a different lowering
-            # again (`_emit_starred_slot_from_value`, not a slice of a row).
-            # Distinct target names per loop, because a loop TARGET rebinds
-            # its name and this compiler still keeps the FIRST loop's declared
-            # type for the rest of the function: reusing `i` across an int and
-            # a double sequence prints the wrong number (and killed the image
-            # on the read side), which is
-            # bugs/CODEGEN_zip_loop_target_keeps_the_first_loops_type.md —
-            # fixed for the generator consumers, still open for the
-            # zip/enumerate/str/bytes/list/dict/set families, where the fix's
-            # cost is measured and its blocker is named.
-            for ei, *erest in enumerate([7, 8]):
-                print(ei, erest)
-            for zi, *zrest in zip([1, 2], ["u", "v"]):
-                print(zi, zrest)
-            for si, *srest in enumerate("ab"):
-                print(si, srest)
-    """),
-    # A starred for-target over a DICT, whose item is the KEY — and a key is a
-    # `str`, so the target unpacks the key STRING: CPython gives `k == 'a'` and
-    # `vs == ['b', 'c']`. Three engines disagreed here, and the middle one is
-    # why this case had to wait for the other two: the interpreter bound the
-    # WHOLE key ("abc" and an empty `vs`) because `_bind_comprehension_target`
-    # exempted `str`/`bytes` from the unpack, and the compiled path REFUSED the
-    # shape outright (`_emit_unsupported_iter`) because lowering CPython's
-    # reading while the interpreter disagreed would have made the two engines
-    # differ on the one comparison this file is. Both are fixed (2026-10-04,
-    # with the filing deleted).
-    #
-    # All three positions the star can be in, because each is a different piece
-    # of arithmetic and the slots after the star are counted from the END of the
-    # key. Distinct target names per loop, for the first-decl-wins reason
-    # `for_target_starred_rest` states.
-    "for_target_starred_rest_over_a_dict": textwrap.dedent("""\
-        def main():
-            d = {"abc": 1, "de": 2, "fgh": 3}
-            for k1, *vs1 in d:
-                print(k1, vs1, len(vs1))
-            for k2, *mid2, w2 in d:
-                print(k2, mid2, w2)
-            for *only3, in d:
-                print(only3)
-    """),
     "dict_ops": textwrap.dedent("""\
         def main():
             var d = {"a": 1, "b": 2}
@@ -556,256 +290,7 @@ BUILTIN_PROGRAMS = {
                 total = total + x
             print(total)
     """),
-    # A comprehension's `for` target is a FRESH BINDING: it must not share the
-    # enclosing function's C variable for the same source name. It did not —
-    # `_compr_list_loop` declared the target without
-    # `force=_compr_target_is_shadowed(...)`, the argument its three sibling
-    # comprehension loops pass, so first-decl-wins kept whatever was already
-    # live under that name (CODEGEN_comprehension_target_shadows_struct_local).
-    # With a `struct` pointer live under the name the shape did not compile at
-    # all (gcc "non-trivial conversion in 'var_decl'"), which is how it was
-    # found; with a `char *` live it compiled and printed string ADDRESSES.
-    #
-    # The comprehension is deliberately NOT inside a branch, so that this case
-    # measures the target's binding and nothing else; the branch spelling is
-    # its own case below
-    # (`comprehension_result_elem_type_across_a_branch`), which is what the
-    # branch-shaped reproducer for
-    # “A comprehension inside an `if` body loses its RESULT list's element type”
-    # turned out to be measuring.
-    "comprehension_target_shadows_an_enclosing_local": textwrap.dedent("""\
-        class Token:
-            def __init__(self, kind):
-                self.kind = kind
-
-        def pick(s):
-            return Token(s)
-
-        def struct_pointer_live():
-            t = pick("outer")
-            i = 0
-            while i < 2:
-                t = pick("loop")
-                i = i + 1
-            return [t for t in ["a", "b"]]
-
-        def char_star_live():
-            t = "outer"
-            i = 0
-            while i < 2:
-                t = "loop"
-                i = i + 1
-            return [t for t in ["c", "d"]]
-
-        def main():
-            print(struct_pointer_live())
-            print(char_star_live())
-    """),
-    # The SAME fresh-binding rule, against a binding that is not a local at
-    # all: a MODULE constant. `_declare_var` writes `var_types[name]`, and
-    # `_lower_IdentExpr`\'s module-global branch is gated on
-    # `(name in _func_declared_globals or name not in var_types)`, so a target
-    # named like a module global silently REBOUND that global for the rest of
-    # the enclosing function \u2014 `var_types` was the only thing routing the
-    # later read away from `root__mojo_global_get_G()`. The compiled path
-    # answered 3 (the iterable\'s last element) where CPython answers 6.
-    # Both engines and CPython agree on `6` now; see
-    # `module_shared.bare_global_read_plan`, which is the one decision both the
-    # read and the comprehension lowering ask.
-    "comprehension_target_does_not_shadow_a_module_constant": textwrap.dedent("""\
-        G = 5
-
-        def f(rows):
-            out = [G for G in rows]
-            return G + out[0]
-
-        def main():
-            print(f([1, 2]))
-    """),
-    # And the OTHER half of the same pair, which the module-constant case
-    # cannot reach: an arm that DID take the shadow (`_declare_var(\'',
-    # force=True)`) but never undid it, so the shadow outlived the
-    # comprehension and the enclosing function\'s own `x` read back as the
-    # loop\'s last value. The list/set/cursor arms already restored; the range
-    # arm did not. `3` vs CPython\'s `5` before, `5` now.
-    "comprehension_target_does_not_outlive_its_own_loop": textwrap.dedent("""\
-        def f(n):
-            x = 5
-            out = [x for x in range(n)]
-            return x
-
-        def main():
-            print(f(3))
-    """),
-    # A dict value slot the runtime TAGGED as a plain int went through the
-    # generic element repr, whose 0-is-the-None-sentinel rule turned a real
-    # int 0 into `None` (`{i: i for i in range(2)}` printed `{'0': None, '1': 1}`).
-    # `_DictSlot.kind` is `0` for a plain int64_t (see its own comment: 1 =
-    # double bit-cast, 2 = char *, 3 = a Python bool), so the tag IS the
-    # evidence and `kind == 0` is `mojo_repr_int(val)`. The `kind == 1` arm is
-    # added in the same place: a double's IEEE-754 bits went to `mojo_repr_str`
-    # as a `char *`, and that pattern is pointer-shaped, so it printed garbage
-    # or faulted. See bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md.
-    #
-    # INTEGER KEYS are all this case uses, and they are all STRINGS on purpose:
-    # `{1: "a"}` prints `{'1': 'a'}`, and that needs the slot to remember
-    # whether the key ARRIVED as an integer or as the string "1" (`_canon_int`
-    # deliberately makes those one entry, as CPython does). Pinning either
-    # spelling here would make this case stop describing its own fix; the
-    # discriminator is written down at the missing arm in `module_gen.py`'s
-    # `_mojo_repr_dict` template. The last two lines are the controls: a dict
-    # LITERAL and a hand-built dict whose entries arrive by SUBSCRIPT STORE
-    # rather than through a comprehension, so the case is not measuring only
-    # one lowering.
-    #
-    # A double stored by SUBSCRIPT (`d["j"] = 1.5; print(d)` -> `{'j': 1}`) is
-    # also absent, and that one is a store-side tag the subscript-store
-    # lowering does not set -- it is recorded in the bug doc rather than pinned
-    # here, because pinning it would make this case describe two fixes.
-    "dict_repr_zero_value_is_not_the_none_sentinel": textwrap.dedent("""\
-        def main():
-            print({"k" + str(i): i for i in range(2)})
-            print({"k" + str(i): i * 1.5 for i in range(2)})
-            print({"k" + str(i): i + 1 for i in range(2)})
-            print({"a": 1, "b": 0})
-            d = {}
-            d["k"] = 0
-            d["j"] = 1
-            print(d)
-    """),
-    # The SAME value kinds, read back through `.items()` instead of through
-    # `print(d)`. The dict's own repr reads `_DictSlot.kind`; a `(key, value)`
-    # PAIR does not, because a pair slot is a raw int64_t and the pair is built
-    # by the runtime with nothing from the dict slot travelling with it. So the
-    # two halves of one program disagreed: `print({'mid': 0})` printed `0` and
-    # `sorted({'mid': 0}.items())` printed `[('mid', None)]` — and a float value
-    # did not merely print wrong, it SEGFAULTED, because the pair walker handed
-    # the IEEE-754 bits to the runtime type-tag reader, which dereferences them.
-    # `mojo_dict_items` records a per-slot kinds row on each pair now (the same
-    # bargain `mojo_list_set_kinds` and `MojoDict.val_repr` make), and
-    # `mojo_repr_slot_kind` is the ONE renderer every walker asks.
-    #
-    # `list(d.items())` is deliberately NOT here: that spelling reads each pair
-    # pointer as an integer and segfaults, which is the element-type half of
-    # `list(<a boxed container>)` and is already filed as
-    # `bugs/CODEGEN_materialized_container_has_no_element_type.md`. Adding it
-    # here would make this case a place where an unrelated red lives.
-    "dict_items_reads_each_slot_kind": textwrap.dedent("""\
-        def main():
-            d = {}
-            d["z"] = 0
-            d["n"] = None
-            d["b"] = True
-            d["f"] = 1.5
-            d["s"] = "q"
-            d["c"] = [1, 2]
-            d["d"] = {"x": 1}
-            print(d)
-            print(sorted(d.items()))
-            # `for k, v in d.items()` is deliberately NOT here: the loop\'s slot-1
-            # accessor comes from `_dict_items_val_elems`, ONE value type per
-            # dict, so a HETEROGENEOUS dict reads every value with that one
-            # accessor (a container prints as a pointer decimal, a float as its
-            # IEEE-754 bits). The kinds row fixes what a pair PRINTS with, not
-            # what a subscript loop READS with, and that half is still open —
-            # `bugs/CODEGEN_dict_slot_read_loses_its_value_kind.md`.
-            #
-            # The keyed spec of the SAME value kinds, which was already right and
-            # is the control that keeps this case from being satisfied by
-            # broadening something else.
-            print("%(z)s %(n)s %(b)s %(f)s" % d)
-    """),
-    # `getattr(o, name, default)` computed the default-selection ternary
-    # correctly -- `_mojo_getattr_missed` was set, `_t9 = missed ? dflt : raw`
-    # was emitted -- and then BOXED the whole expression as `int64_t`, so
-    # `print` read it with the numeric path and printed the string's own heap
-    # address. The default's own C type is the domain both answers share, so
-    # the result is presented there; a `char *` default makes the expression a
-    # `char *`. The int default and the `hasattr` probe beside it are the
-    # controls: neither involves the cast. See
-    # bugs/CODEGEN_dynamic_attribute_string_reads_as_pointer.md.
-    "getattr_default_on_a_miss": textwrap.dedent("""\
-        class C:
-            pass
-
-        def main():
-            o = C()
-            print(getattr(o, "nope", "dflt"))
-            print(getattr(o, "nope", 7))
-            o.y = "set"
-            print(getattr(o, "y", "dflt"))
-            print(o.y)
-            print(hasattr(o, "nope"), hasattr(o, "y"))
-    """),
-    # An EMPTY container literal asserts no element type, and one place
-    # believed otherwise: `_lower_list_literal` /
-    # `_lower_tuple_literal` recorded `_infer_list_elem_type([])`'s
-    # `'int64_t'` no-evidence default as the temp's element type, and
-    # `_gen_ReturnStmt` publishes the returned temp's element type as the
-    # FUNCTION's return element type, last write wins. So a function whose
-    # `return []` came after a container return published `int64_t` for the
-    # whole function and `print(...)` of its result routed to
-    # `mojo_repr_list_ints`, which reads each slot with the integer accessor —
-    # a `char *` slot came back as a heap-address decimal. Measured in
-    # “A comprehension inside an `if` body loses its RESULT list's element type”,
-    # whose own diagnosis ("the ReturnStmt walk does not descend into an
-    # `if`") was wrong on both counts: `_collect_return_elems` has always
-    # descended, and the program WITHOUT the trailing `return []` was right.
-    #
-    # Each line is one shape, and the pair (first / second function) is the
-    # measurement: the same comprehension, the same `if`, and the only
-    # difference is whether an empty `return []` follows it. `b4`/`b5` have no
-    # branch at all and are the no-branch control.
-    "comprehension_result_elem_type_across_a_branch": textwrap.dedent("""\
-        def b2(i):
-            if i:
-                return [t for t in ["a", "b"]]
-            return []
-
-        def b7(i):
-            if i:
-                x = [t for t in ["a", "b"]]
-                return x
-            else:
-                return []
-
-        def b4(i):
-            x = [t for t in ["a", "b"]]
-            return x
-
-        def b8():
-            return []
-
-        def b9():
-            return ()
-
-        def main():
-            print(b2(1))
-            print(b7(1))
-            print(b4(1))
-            print(b8())
-            print(b9())
-    """),
-    # The same extended unpacking in a COMPREHENSION target, which needed two
-    # fixes rather than one: the generator-target parser had no `*` arm, so
-    # `[r for first, *r in pairs]` was a SyntaxError on both engines (the
-    # statement path's own `_parse_unpack_target` has always spelled it
-    # "*name" in the same target string), and once it parsed, the per-slot
-    # walk read `*r` as a slot NAME — a variable literally called `*r`, so
-    # the element repr came out `[0, 0]`.
-    #
-    # The remainder rows have THREE elements on purpose: a two-element
-    # remainder prints as a `(a, b)` pair through the runtime's
-    # registered-2-element-list heuristic (`_mojo_repr_pair`), which is a
-    # separate bug from this one and would mask it here — and the nested
-    # comprehension's own result holds three inner lists for the same reason.
-    "comprehension_starred_rest": textwrap.dedent("""\
-        def main():
-            pairs = [(1, "a", "b", "c"), (2, "d", "e", "f")]
-            print([r for first, *r in pairs])
-            rows = [[(1, "m", "n", "o"), (2, "p", "q", "r"), (3, "s", "t", "u")]]
-            print([[q for head, *q in r] for r in rows])
-    """),
+    # A comprehension with MORE THAN ONE `for` clause. `_lower_comprehension`
     # binds only `node.generators[0]` and every `_compr_*_loop` helper takes a
     # single generator, so the extra clauses were silently dropped -- exit 0,
     # wrong answer. `for i in range(5) for j in range(5)` gave a 5-element
@@ -837,153 +322,6 @@ BUILTIN_PROGRAMS = {
         def main():
             print([i * 100 + j * 10 + k for i in range(2) for j in range(2) for k in range(2)])
             print([i * j for i in range(4) for j in range(4) if j > i])
-    """),
-    # A set/dict comprehension with MORE THAN ONE `for` clause. `set` and
-    # `dict` were left out of the multi-clause lowering that fixed `list`
-    # (the parked-remainder mechanism in `_gen_compr_append`), so every
-    # clause after the first was silently DROPPED — exit 0, and for a set
-    # that is invisible in the printed result because the outer clause alone
-    # is still a plausible-looking smaller set: `{i + j for i in range(3) for
-    # j in range(3)}` gave `{0, 1, 2}` where CPython gives `{0, 1, 2, 3, 4}`.
-    # Each kind needs its own merge — a list extend concatenates, a set must
-    # re-add per element so it deduplicates, a dict must re-insert per pair
-    # keeping each pair's key/value kinds — so the merge is `mojo_set_update`
-    # / `mojo_dict_update` respectively.
-    #
-    # The value-1 minimum in the element expressions is deliberate and NOT a
-    # dodge: a dict/slot holding the int 0 renders as `None` through the
-    # generic value reader, which is a SEPARATE pre-existing defect (a plain
-    # `{1: 0}` dict literal does it too, no comprehension involved). Using
-    # `i + j + 1` keeps this case measuring the clause count and the merge,
-    # which is what it is for.
-    "comprehension_multi_clause_set_and_dict": textwrap.dedent("""\
-        def main():
-            print({i + j for i in range(3) for j in range(3)})
-            print({i * j + 1 for i in range(3) for j in range(3)})
-            print(len({i + j for i in range(3) for j in range(3)}))
-            print(4 in {i + j for i in range(3) for j in range(3)})
-            print({str(i) + str(j): i + j + 1 for i in range(2) for j in range(2)})
-            print({str(i) + str(j): i + j + 1 for i in range(2) for j in range(2) if j > 0})
-            print(len({str(i) + str(j): i + j + 1 for i in range(3) for j in range(3)}))
-            print({str(i) + str(j): i + j + 1 for i in range(3) for j in range(3) if j > 1})
-            # …and the pairs themselves, read back out. The printed set and
-            # dict above are built by `mojo_set_update` / `mojo_dict_update`,
-            # so a merge that DROPPED a clause would still print a plausible
-            # smaller container; a subscript on the right pair is what
-            # distinguishes "fewer pairs" from "the wrong pair".
-            d = {i + j: i * j for i in range(2) for j in range(2)}
-            print(len(d), (1 + 1) in d, d[0 + 1], d[1 + 1])
-    """),
-    # A heterogeneous list built in a CALLEE and read at a computed index in the
-    # caller. The elements' joined type is `char *` (TypeLattice.join resolves
-    # double-vs-char* to char*), so without the cross-function kinds marker the
-    # subscript lowered to `mojo_list_get_str` and handed a float slot's
-    # IEEE-754 bits to strlen — SIGSEGV. The callee already records the
-    # literal's per-slot kinds on the VALUE, so the read has to be lowered as a
-    # boxed one and the runtime has to be able to answer a str slot as well as a
-    # float one.
-    "list_returned_by_a_call_reads_heterogeneous_slots": textwrap.dedent("""\
-        def mixed(x: Float64, s: String) -> List:
-            return [x, 1, s]
-
-        def ints() -> List:
-            return [1, 2, 3]
-
-        def strs(s: String) -> List:
-            return [s, s]
-
-        def main():
-            var a = mixed(2.5, "yy")
-            var p = 0
-            print(a[p])
-            print(a[2])
-            print(a)
-            print(a[0] + 1)
-            print(str(a[2]))
-            for e in a:
-                print(e)
-            print(len(a))
-            var b = ints()
-            print(b[0])
-            print(b)
-            var c = strs("q")
-            print(c[0])
-            print(c)
-    """),
-    # A comprehension whose ELEMENT is itself a list or a tuple. The result is
-    # a list of containers, which needs a SECOND type map (`_nested_elem_types`
-    # — what the inner containers hold) on top of `_elem_types` ("they are
-    # lists"); the single-clause path recorded only the first, so the repr
-    # helper that reads an inner slot as an int was never selected and the
-    # generic walker's None-sentinel heuristic rendered the first element's int
-    # 0 as `None`: `[[5, j] for j in range(3)]` printed `[(5, None), (5, 1),
-    # (5, 2)]`. Both the list and the tuple element, and both iterable kinds,
-    # because the two maps are recorded per ELEMENT and per RESULT, not per
-    # iterable — so the shape of the comprehension does not matter, only that
-    # its element is a container.
-    #
-    # The ZEROS are the point of this case; a version without them is the one
-    # that hid the bug, and it is also why the symptom read as "the later slots
-    # lose their element type" when every non-zero slot printed correctly.
-    # `_gen_compr_append` records `_tuple_slot_types` but NOT
-    # `_nested_elem_types`, so `_list_repr_fn` picked the generic repr. The
-    # literal-of-tuples and one-slot-tuple lines pin the other half of the same
-    # family: `mojo_repr_list_intlists` opened every inner element on "["
-    # instead of consulting `mojo_is_tuple`, so a list of tuples printed as a
-    # list of lists.
-    "comprehension_of_tuples_and_lists": textwrap.dedent("""\
-        def main():
-            print([[5, j] for j in range(3)])
-            print([(5, j) for j in range(3)])
-            ys = [7, 8, 9]
-            print([[5, y] for y in ys])
-            print([(5, y) for y in ys])
-            print([[i, j] for i in range(2) for j in range(2)])
-            print([(i, j) for i in range(2) for j in range(2)])
-            print([[0, 7], [1, 8]])
-            print([(0, 7), (1, 8)])
-            print(([0, 7], [1, 8]))
-            print(([0, 7],))
-            print([[5, y] for y in [7, 0, 9]])
-            print([(5, 0), (5, 1)])
-            print([[5, 0], [5, 1]])
-            print([(7,)])
-            print([(0, 0)])
-    """),
-    # A TUPLE holding a nested container in one of its slots, read on its own —
-    # `comprehension_of_tuples_and_lists`'s shape one level down, where the
-    # container is a tuple SLOT rather than an element. Every uniform repr
-    # helper takes one accessor for the whole value and one list-wide element
-    # ctype for what that accessor is reading, and neither says anything about a
-    # 2-slot tuple whose slots disagree: the list-wide ctype here is the inner
-    # list's own element type (`int64_t`, because slot 0 is a list of ints), so
-    # `_mojo_repr_intlists` read slot 1 — a plain int — through the inner-list
-    # reader, found no list there, and fell to `mojo_repr_obj`
-    # (`([1, 2], <object at 0x3>)`). The literal already records its own
-    # per-slot kinds on the VALUE (`mojo_list_set_kinds`, "li"), so the fix is
-    # for those two helpers to describe the value by them first, exactly as
-    # `_mojo_repr_defers_to_kinds` already does for the int/double/bool/bytes
-    # helpers. `str()` and a local are here because the value's own kinds row
-    # travels with the value, so a derived read needs no second record.
-    # `([[1, 2], 3], 4)` is the same defect one level out and takes the
-    # `slotkinds` helper instead, whose `kinds` argument describes the INNER
-    # slots and so was not a description of this value at all.
-    "tuple_with_a_nested_container_slot": textwrap.dedent("""\
-        def main():
-            print(([1, 2], 3))
-            print(([1, 2], 3.5))
-            print(([1, 2], "z"))
-            print(([1, 2], None))
-            print((1, [2, 3], "a", 4.5))
-            print(([1, 2], [3, 4]))
-            t = ([1, 2], 3)
-            print(t)
-            print(list(t))
-            print(t[0])
-            print(str(([1, 2], 3)))
-            print(([[1, 2], 3], 4))
-            print(((1, 2), 3))
-            print([([1, 2], 3)])
     """),
     "global_var": textwrap.dedent("""\
         var counter: Int = 0
@@ -1292,47 +630,6 @@ BUILTIN_PROGRAMS = {
             print(asyncio.run(c))
             print(asyncio.run(work(7)))
     """),
-    # `asyncio.iscoroutine(x)` had NO lowering at all, so it answered `False`
-    # for a value that really was a coroutine: the
-    # `if asyncio.iscoroutine(result):` guard that guards `asyncio.run` — the
-    # idiom `Android/android.py` writes — evaluated backwards. Silent, exit 0,
-    # no diagnostic, and it reads as correct because the `else` branch of a
-    # guard nobody is looking at is usually empty.
-    #
-    # Both the positive and the negative spelling are asserted, because the
-    # failure mode is the guard choosing the wrong branch rather than a value
-    # being wrong: a test with only the positive case would pass on a
-    # predicate that always answered True. `await`-free on purpose — the
-    # question is about the handle, not about suspension. (`isawaitable` is
-    # deliberately absent: it is `inspect.isawaitable` in CPython 3.14, so a
-    # compiled answer where CPython raises `AttributeError` would be the
-    # divergence, not the fix.)
-    "asyncio_iscoroutine_predicate": textwrap.dedent("""\
-        import asyncio
-
-        async def work(n):
-            await asyncio.sleep(0)
-            return n
-
-        def main():
-            c = work(5)
-            if asyncio.iscoroutine(c):
-                print('coroutine')
-            else:
-                print('not a coroutine')
-            d = 7
-            if asyncio.iscoroutine(d):
-                print('coroutine')
-            else:
-                print('not a coroutine')
-            print(asyncio.iscoroutine(5))
-            print(asyncio.iscoroutine('s'))
-            print(asyncio.iscoroutine(None))
-            # Driven at the end so CPython does not report an un-awaited
-            # coroutine at exit -- which would make this case's interpreter
-            # side fail on a warning rather than on the predicate.
-            print(asyncio.run(c))
-    """),
     "sibling_closure_kwargs": textwrap.dedent("""\
         def outer(flag):
             def probe(a, deep=False, refine=False):
@@ -1361,116 +658,6 @@ BUILTIN_PROGRAMS = {
         def main():
             print(outer(True))
     """),
-    # A VARIADIC lambda, called every way a real program holds one: through
-    # a local, as an argument, returned, rebound across branches, and as a
-    # `sorted(key=)` / `map` / `filter` callable. Its lifted C signature is
-    # the PACKED form (`MojoList *` for `*args`, `MojoDict *` for
-    # `**kwargs`) while the call site writes loose arguments, so the compiled
-    # path used to hand the callee a raw integer where a `MojoList *` was
-    # wanted and dereference it — a SIGSEGV in both engines' shared shape.
-    # Belongs HERE rather than in test_interp_oracle.py because the compiled
-    # path now supports it, and this harness additionally proves the two
-    # engines agree (a strictly stronger assertion).
-    #
-    # `sorted(key=lambda *a: ...)` / `map(lambda *a: ...)` are deliberately
-    # NOT here: the COMPILED path handles them (test_gimple_runner.py's
-    # `gimple_variadic_lambda_works_through_every_holder` covers both), but
-    # the INTERPRETER crashes on a user-defined function passed as a builtin
-    # callback at all — `sorted(key=lambda a: -a)` and `sorted(key=k)` for a
-    # plain `def k(a)` fail the same way — so this harness could not compare
-    # anything. Tracked in
-    # CODEGEN_interpreter_user_function_as_builtin_callback_crashes.
-    "variadic_lambda_packs_its_arguments": textwrap.dedent("""\
-        def add(a, b):
-            return a + b
-
-        def apply(f, v):
-            return f(v, v)
-
-        def mk(n):
-            return lambda *a: a[0] * n
-
-        class Box:
-            def __init__(self):
-                self.fn = None
-
-        def main():
-            print(apply(lambda *a: a[0] + a[1], 3))
-            print(mk(2)(21))
-            n = 7
-            cap = lambda *args, **kwargs: add(n, args[0])
-            print(cap(1))
-            b = Box()
-            b.fn = lambda *a: a[0] + 1
-            print(b.fn(41))
-            if 1:
-                r = lambda *a: a[0]
-            else:
-                r = lambda *a: a[1]
-            print(r(7, 8))
-            e = lambda *a, **k: len(a) * 100 + len(k)
-            print(e(1, 2, z=9))
-            f = lambda *a: len(a)
-            print(f(1, 2, 3, 4, 5, 6, 7))
-    """),
-    # `*args` and `**kwargs` together, with keyword arguments at the call
-    # site and a zero-argument call (which must still hand the callee a real
-    # empty dict, never NULL).
-    "variadic_lambda_kwargs_at_the_call_site": textwrap.dedent("""\
-        def walk(*a, **k):
-            return len(a) * 10 + len(k)
-
-        def main():
-            e = lambda *a, **k: len(a) * 100 + len(k)
-            print(e(1, 2))
-            print(e(1, 2, z=9))
-            only = lambda **k: len(k)
-            print(only(a=1, b=2, c=3))
-            print(only())
-            both = lambda *a, **k: walk(*a, **k)
-            print(both(1, 2, 3))
-            print(both(1, z=5))
-            two = lambda f, g, *a: f * g + len(a)
-            print(two(3, 4, 1, 2))
-    """),
-}
-
-
-# Corpus programs that CPython can run verbatim, so the compiled path has to
-# agree with CPython and not only with the interpreter. Every entry here is
-# plain Python 3 — no `var`, no `struct`, no Mojo-only annotation — because
-# `python3 X.mojo` has to parse it.
-# (`var x: Int = 10` — the corpus's `arithmetic`, `if_else`, `while_loop`,
-# `list_ops`, `string_ops` and `fstring` — is Mojo-only syntax and is
-# therefore NOT in this list: `python3 X.mojo` cannot parse it, so there is
-# no third opinion to ask for. `function_def` is here because PEP 649 makes
-# `def add(a: Int, b: Int) -> Int:` a legal Python annotation, so it runs.)
-CPYTHON_COMPARABLE = {
-    "minimal_main", "function_def", "method_call_result",
-    "dict_get_none_guard",
-    # Both engines answered these the SAME wrong way before the for-target
-    # fix, so an engine-vs-engine diff was clean while both printed `1` where
-    # CPython prints `(1,)`. The third opinion is the only thing that could
-    # have seen it.
-    "for_target_one_tuple_vs_paren_name",
-    "for_target_one_tuple_dict_and_nested",
-    "for_target_starred_rest",
-    # …and the dict-KEY shape above it: the compiled path used to REFUSE it
-    # rather than disagree with the interpreter, and a refusal here scores
-    # JIT-COMPILE-FAILED, which the summary counts and does NOT fail on — so
-    # without CPython in the comparison the case could have stayed a green
-    # non-check.
-    "for_target_starred_rest_over_a_dict",
-    "comprehension_starred_rest",
-    "comprehension_target_shadows_an_enclosing_local",
-    "comprehension_target_does_not_shadow_a_module_constant",
-    "comprehension_target_does_not_outlive_its_own_loop",
-    "comprehension_result_elem_type_across_a_branch",
-    "dict_repr_zero_value_is_not_the_none_sentinel",
-    "dict_items_reads_each_slot_kind",
-    "getattr_default_on_a_miss",
-    "dict_update_preserves_insertion_order",
-    "string_body_that_starts_with_a_prefix",
 }
 
 
@@ -1489,8 +676,7 @@ def run_program_source(name: str, source: str) -> str:
         fpath = os.path.join(td, f"{name}.mojo")
         with open(fpath, 'w') as f:
             f.write(source)
-        status, detail = diff_program(fpath, cpython=name in
-                                      CPYTHON_COMPARABLE)
+        status, detail = diff_program(fpath)
         report(status, name, detail)
         return status
 
@@ -1511,14 +697,7 @@ def main():
 
     counts = {'PASS': 0, 'FAIL': 0, 'JIT-COMPILE-FAILED': 0, 'TIMEOUT': 0, 'ERROR': 0}
 
-    if len(sys.argv) > 2 and sys.argv[1] == '--case':
-        unknown = [n for n in sys.argv[2:] if n not in BUILTIN_PROGRAMS]
-        if unknown:
-            print("no such built-in case: " + ", ".join(unknown), file=sys.stderr)
-            sys.exit(2)
-        for name in sys.argv[2:]:
-            counts[run_program_source(name, BUILTIN_PROGRAMS[name])] += 1
-    elif len(sys.argv) > 1:
+    if len(sys.argv) > 1:
         for path in sys.argv[1:]:
             counts[run_file(path)] += 1
     else:

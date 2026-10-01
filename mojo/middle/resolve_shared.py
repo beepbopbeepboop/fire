@@ -10,24 +10,13 @@ from __future__ import annotations
 import os
 import re
 import determinism_trace as _dtrace
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_dict, _sms_key, _as_assignstmt_node, _as_vardecl_node, _as_multiassignstmt_node
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _sms_key, _as_assignstmt_node, _as_vardecl_node, _as_multiassignstmt_node
 import regex_compile
 import mlir
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
-# NO module-level `import gimple_codegen` here: nothing in this file reads
-# anything from it. The edge middle-tier -> `gimple_codegen` (which imports the
-# whole `mojo/backend_gimple/*` tier at its own top level, gimple_codegen.py:738)
-# -> that tier reading THIS module back at ITS top level is an import CYCLE, and
-# only `test_suite.py`'s declared exemption list was hiding it — a process
-# entering through a middle module met a half-built module and an ImportError
-# about a name in it, a long way from the edge that closed the loop. A middle
-# module that does need something from `gimple_codegen` imports it at its USE
-# SITE, the shape `mojo/backend_gimple/module_gen.py:6727` already uses for
-# `mojo/middle/infra_infer.py`. The rule in full, and why a function-local
-# `import X` survives where `from X import NAME` cannot, is in
-# `mojo/middle/methods_shared.py`'s header comment.
+import gimple_codegen  # constants used by some extracted helpers
 from mojo.middle.types import (  # underscore names: `import *` won't carry these
     _struct_value_codes, _struct_slot_kinds, _struct_elem_ctype,
     _SCALAR_FLOAT_TYPES, _LIBM_FN_RETVALS, _BUILTIN_RET_CTYPES,
@@ -117,68 +106,6 @@ def _struct_unpack_elem_ctype(gen, call, index):
     return _struct_elem_ctype(codes)
 
 
-def _operand_is_dict(gen, node, t: str, v=None) -> bool:
-    """Is this operand's value a DICT, on more evidence than its C type?
-
-    The C type answers `int64_t` for a boxed pointer as readily as for an
-    integer, so "is it a dict" is a separate question whenever the container
-    was stored through the boxing convention — which is the case for every
-    module-level global and for every parameter. Each signal below is one this
-    codegen populates only for a dict, so any of them is positive evidence and
-    none of them is a guess:
-
-      * `t == 'MojoDict *'` — not boxed at all.
-      * the node is a `{...}` LITERAL — nothing to be uncertain about, and
-        `_quick_type`'s own docstring's reason for not listing `DictExpr`
-        generally (guessing wrong launders a container through a scalar slot)
-        does not apply to a literal whose type is not a guess.
-      * `_actual_types[n] == 'MojoDict *'` — the boxed-pointer tracking has
-        already recovered the real pointer type for this name.
-      * `n` has a `_dict_val_types` entry — that table is keyed by DICTS, and
-        an `int64_t` there means "a dict whose values are integers", not "an
-        integer" (see `_lower_dict_literal`). Its whole-program half is
-        `_global_dict_val_types`, which Phase 1.7 fills only from a global
-        bound to a dict literal / `dict(...)` / a `dict[K, V]` annotation.
-      * `node.name` is a PARAMETER of the function being emitted that every
-        visible call site handed a dict — `_param_dict_val_obs` is populated
-        only from arguments the call-site scan proved were dicts, so an entry
-        for this function's own parameter is that proof. Read here, and only
-        here, for the container KIND; the table's primary meaning stays the
-        dict's VALUE type.
-
-    Two names are consulted when both are available and different: `v`, the
-    already-lowered C expression (a module global lowers to a fresh `_tN`
-    temp, which is the name `_actual_types` is keyed by), and the source-level
-    `node.name` (which is what the whole-program tables are keyed by, and what
-    pre-lowering callers like `_quick_type` have).
-
-    Deliberately a predicate about ONE operand. Deciding whether `a | b` is a
-    `dict.__or__` needs BOTH answers, and that conjunction is the caller's, so
-    this cannot be misread as "this expression is a union"."""
-    if t == 'MojoDict *':
-        return True
-    if isinstance(node, gimple_ctypes.DictExpr):
-        return True
-    names = []
-    if isinstance(v, str):
-        names.append(v)
-    if isinstance(node, gimple_ctypes.IdentExpr):
-        _nm = _as_str(node.name)
-        if _nm not in names:
-            names.append(_nm)
-    for _n in names:
-        if (getattr(gen, '_actual_types', None) or {}).get(_n) == 'MojoDict *':
-            return True
-        if _n in (getattr(gen, '_dict_val_types', None) or {}):
-            return True
-    if isinstance(node, gimple_ctypes.IdentExpr):
-        _cf = _as_str(getattr(gen, 'current_func_name', '') or '')
-        _obs = getattr(gen, '_param_dict_val_obs', None) or {}
-        if _as_str(node.name) in (_obs.get(_cf) or {}):
-            return True
-    return False
-
-
 def _quick_type(gen, node) -> str:
     """Estimate C type of an expression without emitting code."""
     if isinstance(node, gimple_ctypes.IntLiteral):    return 'int64_t'
@@ -208,37 +135,6 @@ def _quick_type(gen, node) -> str:
         _ci = gen._closure_info_for_ident(node.name)
         if _ci is not None:
             return 'MojoBoundMethod *' if _ci.env_struct else 'void *'
-        # A MODULE-LEVEL global, read by bare name. `var_types` holds only
-        # locals and parameters, so a name that is not one fell to the
-        # int64_t default even though the global's own SEMANTIC type is
-        # recorded — and a global holding a STRUCT is the one value class
-        # that cannot recover: the C field is a boxed `int64_t` holding the
-        # pointer, and there is no runtime type tag on a struct-allocated
-        # value for the container walkers to dispatch on. Measured:
-        #
-        #     class P: ... def __repr__(self): return "R<" + self.x + ">"
-        #     p = P("a")
-        #     print(repr([p]))      # CPython [R<a>] / compiled [4345469360]
-        #
-        # `repr(p)` alone was already right, which is what makes this a
-        # `_quick_type` gap rather than a repr bug: the list literal's
-        # element type comes from `_infer_list_elem_type`, which asks
-        # `_quick_type` per element.
-        #
-        # `_own_global_var_types` and NOT the shared `_global_var_types`, and
-        # the distinction is measured rather than stylistic. The shared table
-        # is a whole-transitive-tree superset (it has to be, for cross-module
-        # `mod.attr`), so answering from it makes `_quick_type` describe a
-        # SIBLING's global — and two errors appear on the self-host closure
-        # that are absent with the own overlay: `assignment to 'char *' from
-        # 'int64_t'` in `resolve_shared.py` and `invalid conversion in gimple
-        # call` in `gimple_codegen.py`, because the answer is a semantic
-        # pointer type while the value on the C level is a boxed `int64_t`.
-        # The own overlay is the same "is this bare name MINE" answer
-        # `_lower_IdentExpr` asks before it picks a field to load, so the two
-        # agree by construction.
-        if node.name in getattr(gen, '_own_global_var_types', {}):
-            return _as_str(gen._own_global_var_types[node.name])
         return 'int64_t'
     if (isinstance(node, gimple_ctypes.SubscriptExpr)
             and isinstance(node.obj, gimple_ctypes.IdentExpr)):
@@ -264,44 +160,6 @@ def _quick_type(gen, node) -> str:
         _dvt = (getattr(gen, '_dict_val_types', None) or {}).get(node.obj.name)
         if _dvt:
             return _as_str(_dvt)
-    if (isinstance(node, gimple_ctypes.CallExpr)
-            and isinstance(node.func, gimple_ctypes.IdentExpr)
-            and _as_str(node.func.name) == 'next'
-            and not gen._locally_binds_name('next')
-            and len(node.args or []) >= 1):
-        # `next(<generator>)` / `next(<generator>, default)` yields that
-        # generator's own VALUE ctype, which `_lower_generator_next` already
-        # knows from the api it drives (`api['value_ctype']`) and returns as
-        # the call's type. Without a row here the type of the `next(...)`
-        # CALL is asked instead, and the answer is the scalar box `int64_t` --
-        # so `def h(): return next(mk())` declared `int64_t h(void)` and a
-        # yielded `char *` came back through an `int64_t` return slot as its
-        # own address, printed in decimal, exit 0. Every other consumption
-        # shape was already correct (`for x in mk():`, `list(mk())`,
-        # `r = next(mk())`), which is exactly why this survived: the value is
-        # read correctly everywhere and only the enclosing function's SIGNATURE
-        # is wrong.
-        #
-        # The 2-argument form answers the generator's value ctype too, and
-        # that is deliberate rather than a shortcut: `_lower_call`'s own
-        # 2-arg branch declares its result `gen._new_temp(vct)` and coerces
-        # `default` INTO it, so `vct` is what the emitter's expression is
-        # actually typed as. Inferring a join with `default`'s type here
-        # would make the inference and the emission disagree about the same
-        # expression, which is strictly worse than either being wrong alone --
-        # and `next(g, default)` where `default` is of another kind is an
-        # EMITTER defect (it coerces the default into the value slot), not an
-        # inference one. Recorded here rather than filed because the answer is
-        # right for every case that compiles.
-        #
-        # Falls back to the box (today's behaviour) when the argument does not
-        # resolve to a registered generator api, so nothing that works today
-        # changes -- `next(<user iterator struct>)` is the shape that reaches
-        # here unresolved, and it has its own lowering with its own return
-        # type.
-        _nc = gen._generator_value_ctype_for_next(node.args[0])
-        if _nc:
-            return _nc
     if isinstance(node, gimple_ctypes.BinaryOp):
         # 'in'/'not in' are missing from _CMP_OPS (generated_dispatch.py) —
         # real, pre-existing gap: falling through to
@@ -329,19 +187,6 @@ def _quick_type(gen, node) -> str:
             lt = gen._quick_type(node.left)
             rt = gen._quick_type(node.right)
             return gimple_ctypes.TypeLattice.join(lt, rt)
-        if node.op == '|':
-            # `a | b` on two dicts is `dict.__or__`, and it MATERIALISES a
-            # new `MojoDict *` — so a function whose whole body is
-            # `return a | b` has a pointer return, and typing it `int64_t`
-            # (what `join` below returns for two boxed operands) hands the
-            # caller an integer: the caller then formats the pointer's own
-            # bits with `%s` and prints an address, exit 0, no diagnostic.
-            # Both operands must be provably dicts, which is also Python's
-            # own rule — `int.__or__` is the only other `|` this codegen
-            # implements, and `join` below is still the answer for it.
-            if (_operand_is_dict(gen, node.left, gen._quick_type(node.left))
-                    and _operand_is_dict(gen, node.right, gen._quick_type(node.right))):
-                return 'MojoDict *'
         if node.op in gimple_ctypes._CMP_OPS or node.op in ('in', 'not in'): return '_Bool'
         lt = gen._quick_type(node.left)
         rt = gen._quick_type(node.right)
@@ -430,20 +275,8 @@ def _quick_type(gen, node) -> str:
         # mechanism, see its docstring.
         if fname in _BUILTIN_SCALARS and not gen._locally_binds_name(fname):
             return _BUILTIN_SCALARS[fname]
-        # `struct_field_types` is keyed by the struct's own bare name as
-        # written in its DEFINING module, so a `from M import Class as
-        # Alias` call site misses it and falls through to the int64_t
-        # default — which then propagates: `def f(): ...; return Alias("s")`
-        # inferred `int64_t`, and the caller read the struct through an
-        # integer ("assignment to 'char *' from 'int64_t' ... makes pointer
-        # from integer without a cast"). Map the alias back through
-        # `_struct_import_aliases` first, exactly as the constructor
-        # dispatch in emit_calls.py does, so this estimator and the real
-        # lowering cannot disagree about what a call returns.
-        _fname_ctor = (getattr(gen, '_struct_import_aliases', None)
-                       or {}).get(fname, fname)
-        if _fname_ctor in gen.struct_field_types:
-            return f'{_fname_ctor} *'
+        if fname in gen.struct_field_types:
+            return f'{fname} *'
         # A bare call to a KNOWN COMPILED GENERATOR function (Milestone
         # B/C, self._generator_api) returns an opaque MojoGenerator* —
         # calling the generator function only CONSTRUCTS the coroutine,
@@ -500,36 +333,7 @@ def _quick_type(gen, node) -> str:
                 and len(node.args) == 1 and not getattr(node, 'kwargs', None)
                 and gen._quick_type(node.args[0]) == 'char *'):
             return 'char *'
-        # A call through a local bound to a LAMBDA, which is never
-        # materialized when it is created and called in the same statement
-        # list: the body is inlined and its real (ctype, expr) survives to
-        # the use site, so the ESTIMATOR has to say the same thing or the
-        # enclosing function's signature truncates it (`def g(): q = 2.5; fn
-        # = lambda: q * 2; return fn()` inferred `int64_t` and printed 5
-        # where CPython prints 5.0; a `char *` body printed its address).
-        # Populated by `infra_infer._lambda_call_ret_locals` for the body
-        # under inference — the emission-time `_callable_ret_types` is too
-        # late, since the forward declaration has already been written from
-        # this answer. See
-        # CODEGEN_lambda_call_boundary_loses_the_return_type.
-        _lrt = (getattr(gen, '_lambda_call_ret_types', None) or {}).get(fname)
-        if _lrt:
-            return _as_str(_lrt)
-        # `func_return_types[bare]` is one slot for the whole translation
-        # unit, so it cannot answer "what does the `_mentions` THIS module
-        # calls return" once two modules of one closure define that name
-        # (measured: offload.py's `_mentions(...) -> bool` against
-        # elab_intu.py's unannotated `_mentions(ann)`; and here it compounds,
-        # because this estimator is what infers a FORWARDER's own return type
-        # — `def found(...): return _mentions(...)` took the other module's
-        # `MojoList *`, so `print(found(...))` emitted
-        # `mojo_repr_list_ints((MojoList *)1)` and crashed on the int).
-        # `_func_return_type_for_call` reads the DEFINING module's own
-        # published answer first and falls back to the bare slot, so every
-        # name only one module defines behaves exactly as before — and a
-        # lambda call, which publishes no module-level return type at all,
-        # is answered by the arm above.
-        return gen._func_return_type_for_call(fname, 'int64_t')
+        return gen.func_return_types.get(fname, 'int64_t')
     if isinstance(node, gimple_ctypes.CallExpr) and isinstance(node.func, gimple_ctypes.MemberExpr):
         # A receiver this codegen KNOWS is a registered user struct resolves
         # through its own mangled method symbol, and it has to be checked
@@ -841,29 +645,7 @@ def _quick_type(gen, node) -> str:
         return 'int64_t'
     # A slice's type is the type of the object being sliced (mirrors _lower_slice:
     # list slice -> list, str slice -> str, plain pointer -> same pointer).
-    if isinstance(node, gimple_ctypes.SliceExpr):
-        _st = gen._quick_type(node.obj)
-        if _st == 'int64_t' and isinstance(node.obj, gimple_ctypes.IdentExpr):
-            # The object is a MODULE GLOBAL of this compile, whose semantic
-            # type this estimator otherwise never consults (`var_types` is
-            # per-function and has no entry for it), so `L[1:]` was the box
-            # and every consumer of the slice — `_collect_return_types` first
-            # of all — typed it as a scalar. That made `def pick(): return
-            # L[1:]` infer `int64_t`, and `print(pick())` then formatted the
-            # list POINTER as a decimal.
-            #
-            # Restricted to the box: a name this function types itself is
-            # already answered above, and the ownership guard mirrors
-            # `_lower_IdentExpr`'s bare-name global read (the table is
-            # whole-program-shared and keyed by bare name, so an inlined
-            # sibling module's same-named global is not this module's).
-            _sn = _as_str(node.obj.name)
-            _g2m = getattr(gen, '_global_to_module', {}) or {}
-            _own = getattr(gen, 'module_name', '') or 'root'
-            if _sn in (getattr(gen, '_global_var_types', None) or {}) and (
-                    _g2m.get(_sn) is None or _as_str(_g2m.get(_sn)) == _own):
-                _st = gen._global_var_types[_sn]
-        return _st
+    if isinstance(node, gimple_ctypes.SliceExpr): return gen._quick_type(node.obj)
     if isinstance(node, gimple_ctypes.SubscriptExpr):
         # container[idx]: result is the container's element type, read from the
         # same side-tables the subscript lowering uses. Covers nested reads
@@ -933,73 +715,14 @@ def _infer_list_elem_type(gen, elements: list) -> str:
     """Determine element C type for a list/set/tuple literal."""
     if not elements:
         return 'int64_t'
-    # A `*spread` element is EXTENDED into the literal (`mojo_list_extend`),
-    # not stored in it, so the operand's own CONTAINER type is not evidence
-    # about the slots it contributes: iterating a `list[int]` yields ints and
-    # iterating a `list[str]` yields strings, from operands of the same
-    # `MojoList *` shape. Letting it in was measurable — `[0, *a, 9]` joined
-    # `int` with the operand's `MojoList *`, so the literal looked
-    # heterogeneous, `_list_repr_fn` refused a uniform reader, the generic
-    # walker ran, and its "a zero slot is a boxed None" heuristic printed
-    # `[None, 1, 2, 9]` where CPython prints `[0, 1, 2, 9]`.
-    #
-    # What the spread DOES contribute is the ELEMENT type of its operand, under
-    # the one rule that keeps every branch honest:
-    #
-    #   * A `char *` operand is provable: iterating a string yields
-    #     one-character STRINGS, whatever else the literal holds. So
-    #     `[*"ab"]` is a list of strings and `(0, *"ab")` is a tuple whose
-    #     first slot is an int — evidence either way.
-    #   * A container operand is only evidence when it is the literal's ONLY
-    #     evidence, because otherwise the literal is genuinely heterogeneous
-    #     (`[0, *a, 9]` over a list of strings is `[0, 'x', 9]`) and no single
-    #     container-wide type describes it. `[*a]` is that case: the literal is
-    #     nothing but the spread, so the operand's element type is the whole
-    #     answer.
-    #
-    # An unknown operand answers nothing, which leaves the `int64_t` storage
-    # default — the same answer an empty literal takes, for the same reason.
-    _spread_types = []
-    for _e in elements:
-        if not gimple_ctypes.is_star_spread(_e):
-            continue
-        _op = getattr(_e, 'operand', None)
-        if not isinstance(_op, gimple_ctypes.IdentExpr):
-            continue
-        if gen._quick_type(_op) == 'char *':
-            _spread_types.append('char *')
-            continue
-        _oe = gen._elem_types.get(_as_str(_op.name))
-        if _oe:
-            _spread_types.append(_oe)
-    # An explicit loop here too, and for the SAME reason as the `types` one
-    # below: `elements` is a `list` PARAMETER, so self-hosted it is a runtime
-    # `MojoList *`, and a comprehension over one emits a no-op — which would
-    # silently make this function believe a spread-bearing literal had no
-    # stored slots at all. The two loops are two halves of one question and
-    # are written the same way deliberately.
-    stored = []
-    for _e in elements:
-        if not gimple_ctypes.is_star_spread(_e):
-            stored.append(_e)
-    if not stored:
-        return gimple_ctypes.TypeLattice.join_all(_spread_types) if _spread_types else 'int64_t'
     # Explicit loop (NOT a comprehension): the self-hosted compiler has no
     # lowering for `[f(x) for x in lst]` over a runtime MojoList (the
     # comprehension emits a no-op, leaving `types` NULL -> join_all(NULL)
     # segfault). List comprehension lowering only works for a small
     # hardcoded set of shapes.
     types = []
-    for _e in stored:
+    for _e in elements:
         types.append(gen._quick_type(_e))
-    if _spread_types and gimple_ctypes.TypeLattice.join_all(_spread_types) == 'char *':
-        # A string spread beside non-string slots of its own: the join is
-        # `char *`, and `_lower_list_literal` answers that by appending EACH
-        # element by its own type (`per_element`), so the ints stay ints.
-        # `.append`, not `types = types + ['char *']`: the list-concat
-        # operator is not one of the shapes this module's own self-host notes
-        # vouch for, and appending is the idiom the loops above already use.
-        types.append('char *')
     _joined = gimple_ctypes.TypeLattice.join_all(types) if types else 'int64_t'
     # A HETEROGENEOUS literal is not a string list. `TypeLattice.join`
     # short-circuits to `char *` whenever either side is `char *`, which is
@@ -1023,25 +746,7 @@ def _infer_list_elem_type(gen, elements: list) -> str:
     if _joined == 'char *' and any(
             _t and _t.endswith(' *') and _t != 'char *' for _t in types):
         return 'int64_t'
-    # A literal of NOTHING BUT Python bools is a `_Bool` list, which
-    # `_list_repr_fn` routes to `mojo_repr_list_bools` (that helper exists for
-    # exactly `[True, False]`, whose elements `_quick_type` already types
-    # `_Bool`). The estimate has to be made HERE rather than by teaching
-    # `_quick_type` that a `bool`-annotated struct field is a `_Bool`: that
-    # estimator also writes the enclosing function's PROTOTYPE and every local
-    # declaration, so claiming `_Bool` for a field the lowering really loads as
-    # an `int` would write a `_Bool x = <int>` store into a `__GIMPLE` body —
-    # which gcc rejects outright. The literal's element type is this
-    # function's own decision (it already overrides the join for a literal that
-    # spells out a `None`, and `_lower_list_literal` checks that again), so the
-    # same kind of override is the right shape here. Only the ALL-bool literal
-    # answers `_Bool`: a mixed one joins exactly as before, because
-    # `TypeLattice.join` widens `_Bool` to `int` and a genuine 0/1 int must
-    # keep printing as one.
-    for _e in stored:
-        if not gimple_exprtypes.is_python_bool_expr(gen, _e):
-            return gimple_ctypes.TypeLattice.join_all(types) if types else 'int64_t'
-    return '_Bool'
+    return gimple_ctypes.TypeLattice.join_all(types) if types else 'int64_t'
 
 def _prepass_callee_key(gen, node) -> str | None:
     """Symbol key of a CallExpr's callee for the pre-pass's
@@ -1131,43 +836,6 @@ def _collect_return_elems(gen, stmts, acc) -> None:
         elif isinstance(node, gimple_ctypes.WithStmt):
             gen._collect_return_elems(node.body, acc)
 
-def _scan_scratch_dict(gen) -> dict:
-    """The next reusable scratch dict of the type-scan pool, emptied.
-
-    The hermetic type scans (`_infer_return_elem_type`, `_infer_local_var_types`)
-    each need a private, throwaway copy of the ambient type maps. They used to
-    build it with `dict(base)` on every call, and a copy that is dropped is only
-    garbage under CPython: the self-hosted binary has no collector, so each call
-    leaked a table of ~1,650 entries plus a strdup of every key.
-    `_infer_return_elem_type` runs 153,580 times on a `--dump-full fire.py` (Pass
-    2c, once per function per fixpoint round per nesting level): 254 million
-    entries, ~23 GB, the dominant cost of the whole compile.
-
-    The scans are strictly nested (each releases what it took in a `finally`),
-    so a pool indexed by depth serves them: a scratch dict is emptied when it is
-    handed out and refilled from the base, and its table is reused by the next
-    scan at the same depth instead of being allocated again. Memory is bounded
-    by the deepest nesting, not by the number of calls. `gen._scan_scratch_top`
-    is the pool's stack pointer; callers restore it to the value they saw on
-    entry."""
-    _top: int = gen._scan_scratch_top
-    if _top >= len(gen._scan_scratch):
-        gen._scan_scratch.append({})
-    _d: dict = _as_dict(gen._scan_scratch[_top])
-    gen._scan_scratch_top = _top + 1
-    _d.clear()
-    return _d
-
-
-def _scratch_dict_copy(gen, src) -> dict:
-    """A pooled scratch dict holding a copy of `src` (see `_scan_scratch_dict`).
-    The caller takes `mark = gen._scan_scratch_top` BEFORE calling and restores
-    `gen._scan_scratch_top = mark` where it restores the dict it replaced."""
-    _d: dict = _scan_scratch_dict(gen)
-    _d.update(_as_dict(src))
-    return _d
-
-
 def _infer_return_elem_type(gen, body, func_def=None,
                             _base_var_types=None) -> str | None:
     """Infer the container ELEMENT type a function returns, or None when it
@@ -1203,13 +871,7 @@ def _infer_return_elem_type(gen, body, func_def=None,
     # entry-by-entry. Content is identical either way; when no snapshot
     # is supplied the legacy path below still seeds from
     # gen.func_return_types directly.
-    # Scratch dicts come from the depth-indexed pool (`_scan_scratch_dict`), not
-    # a fresh `dict(...)` per call: see its docstring for the ~23 GB this saves.
-    _scratch_mark: int = gen._scan_scratch_top
-    _scratch_vt: dict = _scan_scratch_dict(gen)
-    if _base_var_types is not None:
-        _scratch_vt.update(_as_dict(_base_var_types))
-    gen.var_types = _scratch_vt
+    gen.var_types = dict(_base_var_types) if _base_var_types is not None else {}
     # Seed with facts that are TRUE regardless of processing order: this
     # function's own annotated params, every registered cross-function
     # return type (imported externs + Pass-2a inferred), and the fixed
@@ -1223,13 +885,9 @@ def _infer_return_elem_type(gen, body, func_def=None,
             gen.var_types.setdefault(k, v)
     for k, v in KNOWN_LEAF_RETS.items():
         gen.var_types.setdefault(k, v)
-    _scratch_et: dict = _scan_scratch_dict(gen)
-    _scratch_et.update(_as_dict(_saved[1]))   # container elem types stay visible
-    gen._elem_types = _scratch_et
-    gen._dict_val_types = _scan_scratch_dict(gen)
-    _scratch_at: dict = _scan_scratch_dict(gen)
-    _scratch_at.update(_as_dict(_saved[3]))
-    gen._actual_types = _scratch_at
+    gen._elem_types = dict(_saved[1])   # container elem types stay visible
+    gen._dict_val_types = {}
+    gen._actual_types = dict(_saved[3])
     gen._prepass_local_elems = {}
     # Scalar assignment seeding: `ret = _mojo_type(...)` — record the
     # callee's registered return type for simple Ident targets so the
@@ -1274,7 +932,6 @@ def _infer_return_elem_type(gen, body, func_def=None,
         gen.var_types, gen._elem_types, gen._dict_val_types, \
             gen._actual_types, _ps = _saved
         gen._prepass_struct = _ps
-        gen._scan_scratch_top = _scratch_mark
 
 def _local_value_type(gen, value) -> str:
     """The C type an unannotated local takes from one assigned VALUE, for the
@@ -1325,10 +982,7 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
     # var_types just for this scan (saved/restored below) so identifier
     # lookups inside it resolve correctly.
     _saved_var_types = gen.var_types
-    _scratch_mark: int = gen._scan_scratch_top
-    _scratch_lvt: dict = _scan_scratch_dict(gen)
-    _scratch_lvt.update(_as_dict(_saved_var_types))
-    gen.var_types = _scratch_lvt
+    gen.var_types = dict(_saved_var_types)
     for pname, ptype in (func.params or []):
         if pname not in gen.var_types and ptype:
             gen.var_types[pname] = gimple_ctypes._mojo_type(ptype)
@@ -1487,62 +1141,13 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
         collect_assigned_types(func.body)
     finally:
         gen.var_types = _saved_var_types
-        gen._scan_scratch_top = _scratch_mark
 
-# Join all types for each variable using TypeLattice
+    # Join all types for each variable using TypeLattice
     result: dict[str, str] = {}
     for vname in inferred:
         types = inferred[vname]
         if types:
             result[_as_str(vname)] = gimple_ctypes.TypeLattice.join_all(types)
-
-    # Names bound to containers/structs of MORE THAN ONE kind, recorded in
-    # their own table because the join above cannot say WHICH of the two
-    # situations produced its `int64_t`: a name whose only evidence is
-    # unknown, and a name whose evidence is two different containers
-    # (`Tools/build/umarshal.py`'s `r_object`, whose `retval` is a list on
-    # the LIST branch, a dict on DICT, a set on SET, a frozenset on FROZENSET
-    # and a `Code` on CODE).
-    #
-    # Only the second must NOT be pinned to whichever kind its first
-    # assignment site carries: `_gen_stmt_AssignStmt`'s "trust ground truth"
-    # rule reads that `int64_t` as a stale scalar hint and declares the local
-    # as that one kind, after which every other branch's store is refused by
-    # `_sce_simple_emit`'s container-kind guard. The box is the honest
-    # answer here, and this says so explicitly rather than leaving the
-    # consumer to guess from an `int64_t` that means two different things.
-    #
-    # A struct pointer counts as a kind: `Code *` vs `MojoList *` is the same
-    # "no single C type" situation and the guard refuses it identically.
-    #
-    # `len(set(...))`, and that is load-bearing: `inferred[vname]` is one entry
-    # per ASSIGNMENT SITE, so a local assigned the SAME container kind three
-    # times produced three identical entries and this read as a conflict.
-    # The `TypeLattice.join_all` two lines above had already answered
-    # `['MojoSet *', 'MojoSet *', 'MojoSet *', 'int64_t'] -> MojoSet *` — a
-    # single kind — and the two disagreed about the same list.
-    #
-    # The consequence was silent and one-sided: a false conflict makes
-    # `_gen_stmt_AssignStmt`'s `_pin_to_ground_truth` False, which DISABLES
-    # the three "trust ground truth" rules for that name, so the local keeps
-    # whatever `_infer_param_types` guessed for it and every store is then
-    # judged against that guess. Real:
-    # `Tools/c-analyzer/c_parser/match.py`'s
-    # `match_storage(decl, expected)`, whose four branches all assign a SET
-    # (`{default}`, `{expected or default}`, `_info.STORAGE` (a frozenset)
-    # and a set comprehension) — the parameter's usage-only guess was
-    # `MojoList *`, so the set comprehension's store was refused with
-    # `cannot coerce MojoSet * to MojoList *` and the whole module fell out
-    # of the compiled path.
-    _known_structs = set(gen.struct_field_types)
-    conflicting: set = set()
-    for vname in inferred:
-        _kinds = {t for t in inferred[vname]
-                  if t in ('MojoDict *', 'MojoList *', 'MojoSet *')
-                  or gimple_exprtypes._is_known_struct_ptr_ctype(t, _known_structs)}
-        if len(_kinds) > 1:
-            conflicting.add(_as_str(vname))
-    gen._multi_kind_locals[_as_str(getattr(func, 'name', ''))] = conflicting
 
     return result
 
@@ -1630,29 +1235,16 @@ def _parse_fstring_parts(gen, inner: str) -> list[tuple[str, str, str, str]]:
         parts.append(('lit', ''.join(buf), '', ''))
     return parts
 
-def _decode_str_literal_text(gen, val: str, is_interp: str) -> tuple[str, str]:
+def _decode_str_literal_text(gen, val: str) -> tuple[str, str]:
     """Strip a raw StringLiteral.value's f/r/b/u/t prefix and outer quotes,
     returning (text, is_fstring). Shared by plain-string lowering, f-string
     interpolation, and `%`-style string-formatting (which needs the format
-    string's literal text at codegen time, before any quoting/escaping).
-
-    `is_interp` is the AST's OWN `StringLiteral.is_interpolated` answer as
-    `'1'`/`''`, and it is the only thing that decides whether an f/t prefix is
-    on the front to be taken off. It cannot be recovered from `val`: an
-    ordinary literal's value is its BODY, so `s = 'f"n"'` arrives here as the
-    three characters `f"n"` and a prefix-sniffing walk read them as an f-string
-    token — emitting `n` where the source says `f"n"`, on every one of this
-    function's eight call sites at once. The parser answers it from the source
-    token (`Parser._raw_string_is_ftstring`) and the node carries it, so it is
-    passed in rather than re-derived. A plain `str` argument (`''`) is for a
-    value that is not a literal at all — a `builtin_module_constant`, a
-    synthesized format — and those are already text."""
+    string's literal text at codegen time, before any quoting/escaping)."""
     # Detect and strip f/r/b/u/t prefix — only if followed by a quote character
     # Regular strings have their quotes already stripped by the parser; f-strings
     # and t-strings (template strings — same `{expr}` interpolation syntax,
     # treated identically here) keep prefix+quotes.
     is_fstring = False
-    prefix = ''
     # Index-based prefix walk (was `while val: ... val = val[1:]`). Once
     # self-hosted, a `while` loop that reslices `val = val[1:]` every
     # iteration to shrink it never terminated for an f/r/b-prefixed string
@@ -1660,21 +1252,19 @@ def _decode_str_literal_text(gen, val: str, is_interp: str) -> tuple[str, str]:
     # progress, `val[0]` stayed `'f'`, and `_parse_fstring_parts` then spun
     # on a mangled `inner` allocating forever. A single positive slice at
     # the end has no such issue.
-    if is_interp == '1':
-        is_fstring = True
-        _pfx_end = 0
-        while _pfx_end < len(val) and val[_pfx_end] in 'fFrRbBuUtT':
-            _pfx_end += 1
-        prefix = val[:_pfx_end]
-        val = val[_pfx_end:]
+    _pfx_end = 0
+    while _pfx_end < len(val) and val[_pfx_end] in 'fFrRbBuUtT':
+        _pfx_end += 1
+    prefix = val[:_pfx_end]
+    val = val[_pfx_end:]
     # fire_compiler.py's Parser already strips the outer quotes from a plain
     # (non-f/t-string) StringLiteral's value at tokenize time. So if what's
-    # left does NOT start with a quote, it is a plain string whose content is
-    # final — return it verbatim, INCLUDING any leading characters that look
-    # like a prefix (`f"n"`, `r"x"`, `b'x'` are three- and four-character
-    # strings, not tokens). Do NOT re-run the quote strip below: a plain
-    # string whose CONTENT happens to start and end with a quote — this file's
-    # own `'"'` / `"'"` / `'"""'` / `"'''"` literals, and every user string
+    # left after the prefix walk does NOT start with a quote, it is a plain
+    # string whose content is final — return it verbatim (plus any
+    # prefix-like leading chars that turned out to be content, not a
+    # prefix). Do NOT re-run the quote strip below: a plain string whose
+    # CONTENT happens to start and end with a quote — this file's own
+    # `'"'` / `"'"` / `'"""'` / `"'''"` literals, and every user string
     # like `"a "` — would otherwise be mangled ( `'"""'` → `''`, so once
     # self-hosted `"anything".startswith(<that literal>)` matched and every
     # user StringLiteral's text was stripped to "" in the emitted pool ).
@@ -1695,13 +1285,10 @@ def _decode_str_literal_text(gen, val: str, is_interp: str) -> tuple[str, str]:
             _all_quote = False
             break
     if _all_quote:
-        return prefix + val, ('1' if is_fstring else '')
-    # val still carries quotes: an f/t-string, or a triple-quoted value handed
-    # back from the placeholder cache (`replace_multiline_strings` caches the
-    # literal source, quotes and all, under a `__MOJO_STR_n__` name — for an
-    # ordinary triple-quoted docstring that is the whole body with nothing else
-    # to tell it apart from a delimiter, which is why this arm is reachable
-    # without `is_interp`).
+        return prefix + val, ('1' if any(c in 'fFtT' for c in prefix) else '')
+    # val still carries quotes: an f/t-string (prefix has f/F/t/T) or a
+    # triple-quoted value handed back from the placeholder cache.
+    is_fstring = any(c in 'fFtT' for c in prefix)
     # `len(val) >= 6` / `>= 2`: a value that IS just quote characters (`"""`,
     # `"`, this file's own such literals) starts and ends with the quote but
     # carries no delimited content — a real `"""x"""` is >= 7 chars (>= 6
@@ -1800,8 +1387,7 @@ def _type_expr_to_ann(gen, node) -> str:
     return ''
 
 def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
-                                 mangled_type_args: list, arg_count: int,
-                                 materialize=None) -> None:
+                                 mangled_type_args: list, arg_count: int) -> None:
     """elaborate.py's _signature() resolves a generic's return type via the
     bare, stateless _mojo_type(), which has no notion of a struct newly
     monomorphized by _ensure_generic_struct just above (e.g. "MoveOnly_Int")
@@ -1812,25 +1398,7 @@ def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
     template's own return annotation, substituted with the mangled type
     args — and only override info['ret'] when that yields something more
     specific than the generic int64_t default, so ordinary (non-struct)
-    generics are unaffected.
-
-    `materialize` is an optional `ann -> ann` hook the CALLER supplies, and it
-    exists because the materializer itself lives one layer up
-    (`emit_resolve._materialize_generic_struct_mentions`, which is the gimple
-    backend's, and this file is the middle tier that backend imports). It is
-    given the substituted return annotation and returns it with every generic
-    struct instantiation it mentions (`_Empty[Int]` -> `_Empty_Int64`)
-    REGISTERED as a side effect, so the `_resolve_type` below sees a name
-    this compile knows. Without it `empty[Int]() -> _Empty[T]` erases to
-    `int64_t`, `var it = empty[Int]()` types `it` as a boxed integer, and
-    `next(it)` has no receiver type to dispatch the iterator protocol
-    through — the refusal in `emit_calls.py::_lower_call` (see
-    bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
-
-    Nothing here INFER anything new: it is the already-shipped materializer
-    applied at the one further site that needed it, and an annotation naming
-    no elaborable generic struct comes back unchanged, so every other generic
-    keeps its existing byte-for-byte result."""
+    generics are unaffected."""
     import elaborate
     tmpl = elaborate.extract_fn_source(module_src, g, arg_count=arg_count)
     if not tmpl:
@@ -1843,8 +1411,6 @@ def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
             ret_ann = s.return_type
             for tp, concrete in zip(params, mangled_type_args):
                 ret_ann = gimple_ctypes.re.sub(rf'\b{gimple_ctypes.re.escape(tp)}\b', concrete, ret_ann)
-            if materialize is not None:
-                ret_ann = materialize(ret_ann.strip())
             better_ret = gen._resolve_type(ret_ann)
             if better_ret != 'int64_t':
                 info['ret'] = better_ret
@@ -1991,4 +1557,12 @@ def _collect_calls_in_stmt(gen, n, out):
         _eb2 = getattr(n, 'else_body', None)
         if isinstance(_eb2, list):
             gen._calls_in_stmts(_eb2, out)
+
+
+# ---------------------------------------------------------------------------
+# Dependencies extracted with the shared API (originally gimple_gen_resolve.py)
+# ---------------------------------------------------------------------------
+
+# --- dependency KNOWN_LEAF_RETS (from gimple_gen_resolve.py) ---
+KNOWN_LEAF_RETS = {'_mojo_type': 'char *'}
 

@@ -70,14 +70,6 @@ int mojo_metal_dispatch(const char *kernel_name,
                         const int64_t *sizes,
                         int64_t n_scalars, void *const *scalars,
                         const uint8_t *widths,
-                        /* Per buffer: nonzero if the kernel may WRITE it. NULL
-                         * means "copy every buffer back", which is what a
-                         * caller that predates this argument gets. It is a
-                         * separate array rather than a flag on `sizes` because
-                         * a negative size would be a second meaning for one
-                         * number, and this is a claim about the buffer's
-                         * address space, not about its length. */
-                        const uint8_t *writable,
                         int64_t nthreads, int64_t ngroups);
 
 /* A human-readable reason for the last failure, or "" if none. */
@@ -87,13 +79,6 @@ const char *mojo_metal_last_error(void);
  * assert that the device path was actually taken rather than trusting a
  * plausible-looking result. */
 int64_t mojo_metal_dispatch_count(void);
-
-/* Failed dispatches since load, and whether a device was found. Both
- * process-wide, because the generated sidecar forwards to them rather than
- * keeping per-translation-unit counters: a program that dispatches in one
- * module and asks in another must get the same answer either way round. */
-int64_t mojo_metal_failure_count(void);
-int64_t mojo_metal_have_device(void);
 
 #ifdef __cplusplus
 }

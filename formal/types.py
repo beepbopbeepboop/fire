@@ -16,12 +16,6 @@ from dataclasses import dataclass
 import fire_compiler as F
 from mojo.middle.boundnames import _with_item_alias_name, _lbn_target_names
 
-# `fold_literal_expr` is the ONE folder for literal-only arithmetic (model.py's
-# own note: "It is now in all three folders"), and `infer_expr` needs its
-# answer to decide SIGNEDNESS. This import is safe in that direction: model.py
-# imports no other formal module, so there is no cycle, and it costs 3 ms.
-from formal import model as M
-
 
 @dataclass(frozen=True)
 class IntType:
@@ -81,78 +75,6 @@ TYPE_NAMES = {
 # segfault with a plausible-looking format.
 STRING_TYPE_NAMES = frozenset({"String", "str", "StringLiteral", "StringSlice"})
 
-# Annotations that name the TYPE OF A TYPE. `DType` is the only spelling the
-# corpus writes, and one is the right number here: this is not a family whose
-# members can be derived by shape, it is the single annotation whose value on
-# this path is a TYPE TAG (`model.TYPE_KIND`, `model.type_tag`). It is a set
-# rather than the bare string for the reason the two tables above are sets —
-# `declared_type_kind` reads three vocabularies and a fourth that existed only
-# inline would be the one that drifts.
-#
-# Why it is needed at all: a `var d: DType` field was UNCLASSIFIED, so `len(self.d)`
-# and `self.d[i]` were refused by the machinery that refuses a word whose kind
-# nothing states, and `print(self.d)` refused too — while the same tag bound to a
-# LOCAL (`t = DType.int32`) was already `TYPE_KIND` and answered. One value, two
-# kinds, decided by where the name is written.
-DTYPE_TYPE_NAMES = frozenset({"DType"})
-
-# Annotations that name a DICT, and the third member of the same vocabulary
-# beside the two above. Kept here rather than in `model.py` because the same
-# discipline applies: a name that means "a string" and a name that means "a
-# dict" are the only two answers a use site can act on differently, and two
-# hand-kept lists are two lists that drift.
-#
-# Why a dict needs its OWN set when `model.BLOB_TYPE_CTORS` already names
-# `Dict`: the blob set answers "is this a container at all", which is what
-# `declared_type_kind`'s kind is, and a kind cannot say WHICH container —
-# `List[Int]`, `Tuple[Int, Int]`, `Set[Int]` and `Dict[String, Int]` are all one
-# word on this path and all classify as the bare list prefix. A SUBSCRIPT is
-# the one consumer that must tell them apart, because a pair blob indexed with
-# a key is a SCAN and a sequence's is an address computation, and asking one
-# for the other is a load from a nonsense address rather than a refusal. See
-# `model.global_slot_is_dict`, whose own docstring carries the measurement.
-DICT_TYPE_NAMES = frozenset({"Dict", "dict"})
-
-
-# Annotations that name a BOOL, and why they are a SET rather than two rows of
-# `TYPE_NAMES`. A Bool's KIND on this path is an integer — a word holding 0 or
-# 1 — and `model._kind_of_simple` already says exactly that about a
-# `BoolLiteral`, so putting `Bool` in `TYPE_NAMES` would be true and useless:
-# every consumer of a kind would read it as the integer it is, and nothing could
-# tell a Bool from an Int afterwards. What the dialect `pop.select` lowering
-# needs is the narrower question "does this annotation say the word holds 0 or
-# 1", because that is what makes `x != 0` the right answer for `x.__mlir_bool__()`
-# rather than a `char *`'s "is this address non-zero". One vocabulary, read by
-# one predicate, so the two cannot drift apart — and so a Bool is NOT removed
-# from `TYPE_NAMES`' half of the story: `declared_type_kind` maps this set to
-# `INT_KIND`, which is correct, and this set is the extra fact on top.
-#
-# `bool` is here beside `Bool` for the same reason `STRING_TYPE_NAMES` carries
-# both `String` and `str` and `TYPE_NAMES` carries both `int` and `Int`: they are
-# two spellings of one declaration, and a table that recognised one of them is a
-# table that answers differently for two spellings of the same program.
-BOOL_TYPE_NAMES = frozenset({"Bool", "bool"})
-
-# Annotations that name an IEEE-754 BINARY64 — a `double` — and nothing else.
-#
-# **binary64 only, and the exclusion is the interesting half.**  `Float32` is
-# four bytes with a different exponent bias and `float16`/`bfloat16` are two
-# bytes each; their bit patterns are not sub-patterns of a double's, so a 64-bit
-# word holding one is not a `double` and reading it as one is a wrong answer
-# rather than an approximation.  This path has one FP instruction family
-# (scalar double), so the honest vocabulary is the spellings that MEAN that
-# family.  `Float16`/`Float32` and the `float8_*`/`float4_*`/`float6_*` dtypes
-# are therefore NOT here: they stay unclassified, which routes them into the
-# pre-existing refusal with a reason about their declared type rather than
-# producing an integer where a half-precision value should be.  See
-# `bugs/FORMAL_float_binary64_only.md`.
-#
-# Both spellings are here, for the reason `TYPE_NAMES` carries both `int` and
-# `Int` and `STRING_TYPE_NAMES` both `String` and `str`: they are one
-# declaration written two ways, and a vocabulary that knew one of them would
-# give two different answers to the same program.
-FLOAT_TYPE_NAMES = frozenset({"Float64", "float64"})
-
 
 def parse_type_name(s):
     """Parse a fire_compiler type-annotation string; None if unknown/None."""
@@ -195,57 +117,6 @@ def common_type(a, b):
     return IntType(max(a.width, b.width), a.signed or b.signed)
 
 
-def _negative_constant_type(node, t):
-    """The type a CONSTANT NEGATIVE expression has beside a `t` context.
-
-    **A negative value cannot be an unsigned one, however it is spelled, and
-    the spelling must not decide it.**  `infer_expr` returns `None` for an
-    expression with no declared type — a bare literal, or an operator whose
-    operands are all typeless — and `None` means "this value takes the type of
-    its context".  That is the right rule for a value whose type its context
-    can supply, and it is the WRONG rule for a value the build already knows is
-    negative: `x: UInt32 = 7` supplies `UInt32`, `common_type` treats the
-    flexible operand as neutral, the comparison is emitted with UNSIGNED
-    condition codes, and `(0 - 3) < x` is FALSE where CPython answers TRUE,
-    because the value is 0xFFFF...FD.  Measured on BOTH backends, for every
-    spelling this function recognises:
-
-        x: UInt32 = 7
-        1 if -(1 + 2) < x else 0     arm64 0   x86-64 0   CPython 1
-        1 if x < -(1 + 2) else 0     arm64 1   x86-64 1   CPython 0
-
-    The sign is decided by ONE reader of the question — `formal/model.py`'s
-    `fold_literal_expr`, the folder that answers "what does the build know
-    this expression is" and answers `None` for an opaque one, so a VARIABLE is
-    never mistaken for a constant.  Both spellings ask it here rather than
-    each carrying its own test, which is what makes the two of them agree: the
-    narrow `isinstance(operand, IntLiteral)` test that used to live in the
-    `UnaryOp` arm was right about `-3` and silent about `-(1 + 2)`, and a
-    value that is negative however it is written cannot be right in one
-    spelling and flexible in another.
-
-    `t` is the width the CONTEXT already decided, and only the SIGN is
-    flipped: `x: UInt8 = 7` beside `(0 - 3)` stays eight bits wide, so this
-    cannot widen a narrow declared type by answering a question about a
-    constant.
-
-    **What it does NOT decide, and it is a limit of the folder rather than of
-    this rule:** an operator `fold_literal_expr` does not fold leaves the sign
-    undecided, so `-(1 << 3)` and `-(2 % 5)` beside a `UInt32` are still
-    flexible.  That is deliberate and documented in the folder itself — every
-    operator added there is one more way for a fold to be wrong — and `%` is the
-    one that looks like an oversight and is not: Python's `%` is a FLOOR
-    modulus (sign follows the divisor) and the truncating division both emitters
-    lower is not, so folding it would answer a different question from the one
-    the emitters answer.  A constant expression this build cannot evaluate is
-    not a constant it may guess at.
-    """
-    folded = M.fold_literal_expr(node)
-    if isinstance(folded, int) and not isinstance(folded, bool) and folded < 0:
-        return IntType(resolve(t).width, True)
-    return None
-
-
 def infer_expr(e, vtypes: dict, call_types: dict = None):
     """Infer the type of a fire_compiler expression.
 
@@ -259,27 +130,27 @@ def infer_expr(e, vtypes: dict, call_types: dict = None):
         # A string expression evaluates to its address (pointer-sized).
         return DEFAULT_INT_TYPE
     if isinstance(e, F.UnaryOp):
-        # One spelling of the rule `_negative_constant_type` states: `-3` and
-        # `-(1 + 2)` are the same negative value, and both cannot be unsigned.
-        # A negation of a VARIABLE is not a constant and recurses as before,
-        # which is what `-x` on an unsigned `x` needs — there the language says
-        # the subtraction wraps, and this path is not entitled to call that a
-        # signed subtraction.
+        # A negated literal is the one case where "no type yet" is not good
+        # enough. The bare-literal rule below returns None so a literal takes
+        # the type of its context, but a NEGATIVE value cannot be an unsigned
+        # one: with both operands typeless, `common_type` is None,
+        # `cmp_signed(None)` is False, and the comparison was emitted with
+        # unsigned condition codes -- so `if -3 < 2` was false, because -3 is
+        # 0xFFFF...FD as a UInt64. Reporting it signed is what Python and Mojo
+        # mean, and `common_type` treats None as neutral, so the signedness
+        # survives promotion against a typeless literal.
         #
-        # Both the CSET value path and the B.cond branch path read this one
-        # function, so they cannot disagree.
-        operand_t = infer_expr(e.operand, vtypes, call_types)
-        signed = _negative_constant_type(e, operand_t)
-        return operand_t if signed is None else signed
+        # Narrow on purpose: `0 - 3` is a BinaryOp and stays typeless, and a
+        # negation of a *variable* still recurses, so only a literal negative
+        # changes behaviour. Both the CSET value path and the B.cond branch
+        # path read this one function, so they cannot disagree.
+        if (e.op == "-" and isinstance(e.operand, F.IntLiteral)
+                and e.operand.value != 0):
+            return IntType(64, True)
+        return infer_expr(e.operand, vtypes, call_types)
     if isinstance(e, F.BinaryOp):
-        lt = common_type(infer_expr(e.left, vtypes, call_types),
-                         infer_expr(e.right, vtypes, call_types))
-        # The other spelling: `0 - 4` is a BinaryOp of two literals, and
-        # `51 - 55` is a BinaryOp whose value is negative the same way.  Same
-        # folder, same rule, same answer — see `_negative_constant_type`, which
-        # is where the reasoning and the measurement live.
-        signed = _negative_constant_type(e, lt)
-        return lt if signed is None else signed
+        return common_type(infer_expr(e.left, vtypes, call_types),
+                           infer_expr(e.right, vtypes, call_types))
     if isinstance(e, F.CompareChain):
         # The chain's result is a boolean; operands share the common type
         # only insofar as each link needs it — report default.
@@ -309,62 +180,6 @@ def _range_args(iterable):
             and iterable.func.name == "range"):
         return list(iterable.args)
     return None
-
-
-def uses_typed_model(fn: F.FunctionDef, call_types: dict = None) -> bool:
-    """Whether `fn`'s Lean model is the FIXED-WIDTH one rather than the
-    word-at-64-bits one.  THE decision, in one place, for both generators.
-
-    **WHAT THE FLAG IS FOR**, since it was a proxy for a long time and the
-    proxy's own docstring said so: the fixed-width model (`_expr_go_t` /
-    `_stmts_go_t`, with the `t8u`/`t8s`/… truncators) is the only one that
-    models a DECLARED width, so it is needed exactly when some type this
-    function declares or infers is not the default 64-bit signed word. That is
-    the whole question, and this function asks it.
-
-    **IT IS NOT VACUOUS, and it was thought to be for six months.**
-    `DEFAULT_INT_TYPE` became signed `IntType(64, True)` (`19bc0dd`), so every
-    name whose type is inferred from an `int` literal now RESOLVES to the
-    default — which made the old spelling `any(t != DEFAULT_INT_TYPE for t in
-    vtypes.values() ∪ {rt})` true for a function only if some type is narrower
-    or differently signed. That is not the same as true for nothing:
-    `n: UInt8` still resolves to `IntType(8, False)`, so a function that
-    declares one still gets the model that can prove things about it.
-
-    Measured over `formal/examples/` on this tree — 45 functions, and this is
-    what settled the question the flag's own docstring kept re-asking
-    (`“`formal/`: `DEFAULT_INT_TYPE` became signed `Int`”`, item 1):
-
-    | source | functions | `uses_typed_model` |
-    |---|---|---|
-    | no annotation at all | 38 | False |
-    | `-> Int` only (`ret42`, `subscript_var`, `wide_recv`) | 3 | False — `Int` IS the default type |
-    | `n: UInt8` / `Int8` and the return type (`n8`, `sgt8`, `sle8`, `ug8`) | 4 | **True** |
-
-    So the answer is True for exactly the four functions that declare a
-    non-default width, which is what the flag is FOR, and the alternative
-    spelling the same document proposed — "compute it from the presence of a
-    type ANNOTATION in the source" — would answer identically on every one of
-    the 45 (measured: 0 changes), because an unannotated name cannot
-    contribute a non-default type and a default-width annotation cannot either.
-    It is also the WEAKER rule: it would ignore an INFERRED non-default type,
-    which is the half that can move when `infer_expr` learns something. So the
-    annotation rule was not adopted, and this predicate is the flag's single
-    definition rather than five lines copied into each generator — two copies
-    of a decision is two chances for the two architectures to prove different
-    programs.
-
-    Forcing it True for everything (the same document's option (b)) was measured
-    and is not viable: `test_formal.py` went from 1.2 GB to a 32 GB kill across
-    37 processes, because the fixed-width model is the expensive one — which is
-    presumably why the flag exists.
-    """
-    call_types = call_types or {}
-    for t in function_var_types(fn, call_types).values():
-        if t != DEFAULT_INT_TYPE:
-            return True
-    return resolve(parse_type_name(getattr(fn, "return_type", None))) \
-        != DEFAULT_INT_TYPE
 
 
 def function_var_types(fn: F.FunctionDef, call_types: dict = None) -> dict:
@@ -515,37 +330,8 @@ def needs_trunc(t) -> bool:
 
 
 def cmp_signed(t) -> bool:
-    """Whether a value of type `t` is read as a SIGNED one.
-
-    **A flexible type is not an unsigned one, and that is the whole of what
-    this used to get wrong.** `None` is what `infer_expr` returns for an
-    expression with no declared type — a bare literal, or an operator whose
-    operands are both typeless — and it means "this value takes the type of its
-    context", NOT "this value is unsigned". Returning False for it made every
-    consumer that must decide a signedness read the context's absence as a
-    decision, and the three that matter:
-
-    * `print` picked `%llu` for it, so `print(0 - 3)` printed
-      `18446744073709551613`. Measured on both architectures; `v = 0 - 3;
-      print(v)` printed `-3`, because an ASSIGNMENT resolves the flexible type
-      through `function_var_types`' `resolve`, so only an expression printed
-      directly was affected — a difference with no name in the source.
-    * a comparison emitted unsigned condition codes for it, so
-      `1 if (0 - 5) < 3 else 0` was 0: `-5` was `0xFFFF…FB`.
-    * `//` and `%` chose UDIV and the unsigned remainder for it.
-
-    So the flexible case resolves to the DEFAULT, which is signed
-    (`DEFAULT_INT_TYPE`), and a context that really is unsigned reaches this
-    function as a real `IntType` — `common_type` treats `None` as neutral, so a
-    bare literal beside a `UInt32` is `UInt32` and still reads as unsigned.
-    That is what makes the change safe rather than a blanket "signed": the
-    unsigned answers come from a DECLARED type, and only the absence of one
-    changed.
-
-    Consumers that genuinely want to know "is there a declared type at all"
-    ask `infer_expr` for it; this function answers the narrower question the
-    docstring above says it answers."""
-    return resolve(t).signed
+    """Whether comparisons of type t use signed condition codes."""
+    return t is not None and t.signed
 
 
 def used_narrow_types(fn: F.FunctionDef) -> set:

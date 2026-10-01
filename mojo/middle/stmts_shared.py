@@ -15,18 +15,7 @@ import mlir
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
-# NO module-level `import gimple_codegen` here: nothing in this file reads
-# anything from it. The edge middle-tier -> `gimple_codegen` (which imports the
-# whole `mojo/backend_gimple/*` tier at its own top level, gimple_codegen.py:738)
-# -> that tier reading THIS module back at ITS top level is an import CYCLE, and
-# only `test_suite.py`'s declared exemption list was hiding it — a process
-# entering through a middle module met a half-built module and an ImportError
-# about a name in it, a long way from the edge that closed the loop. A middle
-# module that does need something from `gimple_codegen` imports it at its USE
-# SITE, the shape `mojo/backend_gimple/module_gen.py:6727` already uses for
-# `mojo/middle/infra_infer.py`. The rule in full, and why a function-local
-# `import X` survives where `from X import NAME` cannot, is in
-# `mojo/middle/methods_shared.py`'s header comment.
+import gimple_codegen  # constants used by some extracted helpers
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
@@ -35,48 +24,6 @@ import mojo.middle.exprtypes as gimple_exprtypes
 # (formal imports that directly; this file re-exports so emit_stmts'
 # `from mojo.middle.stmts_shared import _with_item_alias_name` keeps working).
 from mojo.middle.boundnames import _with_item_alias_name
-
-def _annotation_container_elem_type(gen, ann, ctype) -> str | None:
-    """`list[T]` / `List[T]` / `set[T]` / `Set[T]` / `tuple[T, ...]`
-    annotation → the container's ELEMENT C type (`T`), else None.
-
-    The dict counterpart is `_annotation_dict_val_type` above (which answers
-    the SECOND type argument, because a dict's value type is what its reads
-    need); this one answers the first, and only for a container whose
-    resolved `ctype` really is a list or a set, so a `Dict[K, V]` can never
-    be read as "elements are K".
-
-    `int64_t` is never returned: it is the fallback every element read
-    already assumes, so an annotation that resolves to it carries no
-    information and must not overwrite a real answer.
-
-    This is the ONE place the `List[String]`-shaped annotation is turned
-    into an element ctype. It used to be written out inline, identically,
-    at each of the two statement paths that see an annotated declaration
-    with an initializer — and a THIRD path, the owned-local stack
-    allocation that swallows such a statement whole, had no copy at all.
-    That omission is a silent wrong value: `kept: List[String] = []` filled
-    only from a callee came back as ints, because the element type of a
-    list is otherwise recorded by the `append` sites, and a caller that
-    only sees the list through a call has none
-    (CODEGEN_list_of_string_read_as_int_when_filled_in_a_callee,
-    closed and removed when this helper landed).
-    """
-    if ctype not in ('MojoList *', 'MojoSet *'):
-        return None
-    if not isinstance(ann, str) or '[' not in ann or ann.startswith('['):
-        return None
-    _inner = ann.split('[', 1)[1].rstrip(']').strip()
-    if not _inner:
-        return None
-    _parts = gimple_ctypes._split_top_level_commas(_inner)
-    if not _parts:
-        return None
-    try:
-        _et = gen._resolve_type(_parts[0].strip())
-    except Exception:
-        return None
-    return _et if _et and _et != 'int64_t' else None
 
 def _annotation_dict_val_type(gen, ann) -> str | None:
     """`dict[K, V]` / `Dict[K, V]` annotation → the dict's VALUE C type,

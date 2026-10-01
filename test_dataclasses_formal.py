@@ -161,9 +161,9 @@ def main(n):
 # path's construction fills DECLARATION ORDER from positional arguments and
 # refuses a count that does not match (`check_construction_shapes`), so
 # `Config(7)` is a construction-shape refusal rather than a dataclasses one.
-# It was filed as a bug of its own and fixed (that doc is deleted with
-# the fix); putting it in this case would have tested the construction
-# check and called it a dataclasses failure.
+# It is recorded in `bugs/FORMAL_dataclass_partial_construction.md`; putting it
+# in this case would have tested the construction check and called it a
+# dataclasses failure.
 FIELD_DEFAULT = """
 from dataclasses import dataclass, field
 
@@ -176,44 +176,6 @@ def main(n):
     a = Config()
     b = Config(1, 2)
     printf("%d %d %d %d", a.width, a.height, b.width, b.height)
-    return 0
-"""
-
-# `x: T = None` is the default for an optional field, and it is the single most
-# common class-level default in this repository's own dataclasses
-# (`std/type_system.py`'s `Type.bit_width: Optional[int] = None` and nine more
-# on the same class; `std/fault_tolerance.py`'s `SideResult.harness_error`).
-#
-# It used to be refused, and the refusal had a branch of its own in
-# `field_refusal` because it is the one a reader is most likely to believe is
-# free: on this parser `None` is a NAME (`IdentExpr('None')`) and not a
-# literal, so there was nothing for a class-level constant to be materialized
-# as. `model.NONE_WORD` closed it by making `None` the word 0, which is the
-# representation rather than an approximation — it is what an unwritten frame
-# slot already is.
-#
-# The branch is gone from `field_refusal` and this row is what keeps it gone:
-# a refusal nobody can see is a refusal nobody removes. Both halves matter —
-# the default is read at construction, and the word it reads as is 0 — and
-# `test_formal_run.py`'s `none_*` group pins the representation from the other
-# side (a class-level constant, a module-level one, and the three comparisons
-# the fold must NOT answer).
-#
-# Deliberately NOT compared against CPython: `printf("%d", None)` is a
-# TypeError there, so the oracle does not exist. What this asserts is the
-# REPRESENTATION, which is a 0.
-NONE_FIELD_DEFAULT = """
-from dataclasses import dataclass
-
-@dataclass
-class T:
-    bit_width: int = None
-    name: int = 7
-
-def main(n):
-    a = T()
-    b = T(3)
-    printf("%d %d %d %d", a.bit_width, a.name, b.bit_width, b.name)
     return 0
 """
 
@@ -328,27 +290,13 @@ def main(n):
     return 0
 """
 
-# A class that declares its OWN `__eq__` — `OWN_EQ` and `OWN_EQ_ONE_FIELD`
-# below, which are EXECUTED and compared with CPython, and the two
-# `OWN_EQ_*_OPERAND` sources that are REFUSED.
-#
-# It used to be refused outright, and the reason it is worth three rows now is
-# that the refusal was for the WRONG reason and then for a right one, and each
-# of the three states is a program whose answer changed:
-#
-#   * the original refusal said `==` never dispatches by name — true on
-#     2026-09-29, false since `formal/build.py`'s
-#     `_rewrite_eq_on_frame_receivers` (and its one-word half);
-#   * the second said this transform's field-wise desugar would replace the
-#     method — true of the TRANSFORM and already handled, since
-#     `rewrite_equality` skips a class with `own_eq`;
-#   * what was actually left was the operator dispatch's own scope, and it is
-#     not the class that is wrong, it is the COMPARISONS: two bare names of the
-#     same class are answered by the method, and every other spelling is not.
-#
-# So the class is accepted and the residue is refused, each residue naming the
-# comparison that cannot be lowered and why. A refusal that names a construct
-# nobody can change is worse than a wrong answer a reader can see.
+# A class that declares its OWN `__eq__` is REFUSED, and this is its source —
+# see `OWN_EQ` in the refusal table below, and `own_eq_refusal` for the
+# measurement. The reason it is here rather than absent is that it is the case
+# most likely to be got wrong by silence: a transform that simply declines to
+# rewrite the comparison leaves `==` as an address compare, which is a wrong
+# answer produced without a word, and the source contains a method saying the
+# opposite.
 
 # Two DIFFERENT dataclass types compared. CPython's generated `__eq__` returns
 # NotImplemented for a different type, which falls back to identity, so this is
@@ -454,237 +402,10 @@ def main(n):
     return 0
 """
 
-# THE fourth way CPython's generated `__init__` and this path's field-filling
-# construction differ, and the one the transform is FOR: a generated `__init__`
-# has a signature per field — `def __init__(self, width=80, height=24)` — so a
-# call may supply a PREFIX of the fields and a KEYWORD spelling, and the rest
-# come from their own defaults. `Config(7)` is `width = 7, height = 24`, which
-# CPython says and which this backend used to refuse (fixed; the doc that
-# recorded it is deleted with the fix).
-#
-# Every row is here because each of the four spellings has a DIFFERENT answer if
-# one of the rules is wrong, and a program that prints 7 24 7 24 7 3 cannot tell
-# which rule produced which pair: `Config()` catches a default that was zeroed,
-# `Config(7)` catches a prefix that was refused or filled with zeros,
-# `Config(width=7)` catches a keyword read as a positional (which would land 7
-# in whichever field sorted first), `Config(7, 3)` is the control that the
-# ordinary full positional fill still works, and `Config(height=3)` catches a
-# keyword matching the WRONG field.
-OWN_EQ = """
-from dataclasses import dataclass
-
-@dataclass
-class Always:
-    x: int
-    y: int
-
-    def __eq__(self, other):
-        return True
-
-def eq(a, b):
-    if a == b:
-        return 1
-    return 0
-
-def main(n):
-    a = Always(3, 4)
-    b = Always(9, 9)
-    printf("%d %d", eq(a, b), eq(a, a))
-    return 0
-"""
-
-# The ONE-FIELD half of the same thing, and a different path: a struct of one
-# field has no frame at all, so its value is a word and the dispatch reaches it
-# through the one-word table rather than the holder table.  The old
-# `FORMAL_eq_dispatch_on_a_frame_receiver.md` §1 is the measurement that the
-# frame-only version of this answer was 0 where CPython says 1.
-#
-# THE COMPARISON IS IN `main`, not behind a call, and that is deliberate rather
-# than convenient: a one-word class compared through a function BOUNDARY does
-# not dispatch, on this tree and on the one before it —
-# `FORMAL_one_word_eq_dispatch_stops_at_a_call_boundary` is the
-# measurement, and it is a different construct from the one this file is about.
-# A row here would pin a program that answers 0, and a case whose expectation
-# is a known wrong answer teaches the next reader that 0 is the answer.
-OWN_EQ_ONE_FIELD = """
-from dataclasses import dataclass
-
-@dataclass
-class Tag:
-    v: int
-
-    def __eq__(self, other):
-        return True
-
-def main(n):
-    a = Tag(5)
-    b = Tag(6)
-    printf("%d %d", a == b, a == a)
-    return 0
-"""
-
-# The residue, and the two shapes that make it a residue: the operator's
-# dispatch lowers a comparison only when BOTH operands are bare names this image
-# can say are values of the same class.  `a == 5` is a word against a frame and
-# `Always(3, 4) == Always(9, 9)` compares two temporaries — neither can be
-# classified, and both would answer 0 through the address compare the dispatch
-# exists to replace.
-OWN_EQ_WORD_OPERAND = """
-from dataclasses import dataclass
-
-@dataclass
-class Always:
-    x: int
-    y: int
-
-    def __eq__(self, other):
-        return True
-
-def main(n):
-    a = Always(3, 4)
-    printf("%d", a == 5)
-    return 0
-"""
-
-OWN_EQ_CONSTRUCTION_OPERAND = """
-from dataclasses import dataclass
-
-@dataclass
-class Always:
-    x: int
-    y: int
-
-    def __eq__(self, other):
-        return True
-
-def main(n):
-    printf("%d", Always(3, 4) == Always(9, 9))
-    return 0
-"""
-
-# …and the CALL-OPERAND half, which is the one that EXECUTES.  Two calls to a
-# function whose declared return type names the class, compared with each other
-# in a function that binds NOTHING: no holder name, no construction, and
-# therefore nothing the old `if not hs and not fn_one_word: continue` guard could
-# see.  `__eq__` returns True for everything, so the two answers are 1 (the
-# method ran) and 0 (the operator stayed a compare of two addresses, and two
-# calls are two objects) — and nothing said anything when it printed 0, on
-# either architecture.
-# (`test_formal_run.py`'s `both_arch_eq_dispatch_through_two_call_operands`, the
-# same construct without the decorator.)
-OWN_EQ_TWO_CALL_OPERANDS = """
-from dataclasses import dataclass
-
-@dataclass
-class Always:
-    x: int
-    y: int
-
-    def __eq__(self, other):
-        return True
-
-def mk(v: int) -> Always:
-    return Always(v, v + 1)
-
-def main(n):
-    printf("%d", mk(1) == mk(2))
-    return 0
-"""
-
-# The same comparison with a CALL on the left and a WORD on the right, which is
-# the pair the audit above has to tell apart from a construction: `mk(1)` is a
-# call the dispatch CAN lower (its callee's declared return type names the
-# class), so it is not the gap, and the refusal has to name the `5`.  Before the
-# audit learned the fourth shape this built and printed 0 where CPython prints 1,
-# and when it was first taught to see the call it blamed `mk(...)` for being "a
-# construction", which is false in every clause — the reader is sent to edit the
-# wrong operand.  So this row pins BOTH halves: the needle is the right operand's
-# clause, and the forbidden substring is the wrong one.
-OWN_EQ_CALL_OPERAND_AGAINST_A_WORD = """
-from dataclasses import dataclass
-
-@dataclass
-class Always:
-    x: int
-    y: int
-
-    def __eq__(self, other):
-        return True
-
-def mk(v: int) -> Always:
-    return Always(v, v + 1)
-
-def main(n):
-    printf("%d", mk(1) == 5)
-    return 0
-"""
-
-PARTIAL_CONSTRUCTION = """
-from dataclasses import dataclass, field
-
-@dataclass
-class Config:
-    width: int = field(default=80)
-    height: int = 24
-
-def main(n):
-    a = Config()
-    b = Config(7)
-    c = Config(width=7)
-    d = Config(7, 3)
-    e = Config(height=3)
-    printf("%d %d|", a.width, a.height)
-    printf("%d %d|", b.width, b.height)
-    printf("%d %d|", c.width, c.height)
-    printf("%d %d|", d.width, d.height)
-    printf("%d %d", e.width, e.height)
-    return 0
-"""
-
-# A field default that NAMES another class's constant — the enum idiom, and
-# this repository's `type_system.py`, whose `Type.origin` is
-# `origin: TypeOrigin = TypeOrigin.DEFAULT` and which is the 668-file sweep's
-# `codegen` row for "a class-level default that is not a value this build can
-# materialize".
-#
-# It was refused in BOTH places the construct appears, for the same reason: the
-# class-constant rewrite materializes a constant where it is READ, and it could
-# only materialize a LITERAL. `model.class_constant_word_in` resolves the
-# reference through the other constant's own declaration, so this row is the
-# dataclass half of `test_formal_run.py`'s
-# `pyclass_constant_whose_value_is_another_constant`, and the two cannot
-# disagree about what is knowable — `field_refusal` asks the same function the
-# substitution performs.
-#
-# `T(7, "x")` is in the program so the row is about the DEFAULT rather than
-# about a constructor that ignores it: CPython fills `origin` from the
-# declaration, and so must this path.
-CONSTANT_REFERENCE_DEFAULT = """
-from dataclasses import dataclass
-
-class Origin:
-    ANNOTATED = "annotated"
-    DEFAULT = "default"
-
-@dataclass
-class T:
-    x: int
-    origin: str = Origin.DEFAULT
-
-def main(n):
-    a = T(7)
-    b = T(7, "elsewhere")
-    printf("%s %s", a.origin, b.origin)
-    return 0
-"""
-
 EXEC_CASES = [
     ("bare_decorator_constructs_in_declaration_order", BARE_CONSTRUCT),
     ("dotted_dataclasses_decorator_spelling", DOTTED_DECORATOR),
     ("field_default_is_lowered_to_its_literal", FIELD_DEFAULT),
-    ("a_field_default_naming_another_classs_constant",
-     CONSTANT_REFERENCE_DEFAULT),
-    ("a_prefix_of_the_fields_fills_from_their_defaults", PARTIAL_CONSTRUCTION),
     ("dataclass_equality_is_field_wise", EQUALITY),
     ("dataclass_equality_through_a_call_boundary", EQUALITY_ACROSS_CALL),
     ("one_field_dataclass_equality_was_already_right", ONE_FIELD_EQUALITY),
@@ -693,20 +414,6 @@ EXEC_CASES = [
     ("a_dataclass_compared_with_a_word_is_false", MIXED_COMPARISON),
     ("equality_inside_a_method_compares_the_receiver", SELF_COMPARISON),
     ("a_string_field_compares_as_text", STRING_FIELD),
-    # A class with its OWN `__eq__` is EXECUTED, and the two answers are the
-    # whole point: `eq(a, b)` must reach the method (1, because the method
-    # returns True for anything) and so must `eq(a, a)` — a rewrite that
-    # short-circuited the identity case, or the field-wise desugar this
-    # transform declines to apply, would answer 0 for one of them.
-    ("a_user_declared_eq_reaches_the_method", OWN_EQ),
-    ("a_user_declared_eq_reaches_the_method_on_a_one_field_class",
-     OWN_EQ_ONE_FIELD),
-    # …and the shape where the two operands are CALLS, which is the only one of
-    # the four that the dispatch used to leave as an address compare SILENTLY:
-    # the other three are all refused by the audit below, which is the safe
-    # direction, and this one was a wrong answer with nothing on stderr.
-    ("a_user_declared_eq_reaches_the_method_through_two_call_operands",
-     OWN_EQ_TWO_CALL_OPERANDS),
 ]
 
 
@@ -817,33 +524,6 @@ def main(n):
     return 0
 """
 
-# The SAME hook on a MULTI-FIELD class, and the case that pins the
-# `__post_init__` rule rather than a contest between two refusals. `POST_INIT`
-# above is refused by `dataclass_transform`'s `post_init_refusal` AND by
-# `formal/model.py`'s `one_field_dropped_receiver_stores` (its receiver IS the
-# field, and `self.x = …` is a dropped store), so the sentence it gets is a
-# property of WHICH CHECK RUNS FIRST — `one_field_dropped_receiver_stores`
-# excludes `__post_init__` precisely so the specific message wins. On two fields
-# that second rule cannot fire at all (`struct_is_one_field` gates it), so this
-# case reaches the dataclass refusal with nothing to out-rank it: if the hook
-# stopped being refused, or its sentence stopped naming the sequence, only THIS
-# row would say so.
-POST_INIT_MULTI = """
-from dataclasses import dataclass
-
-@dataclass
-class Point:
-    x: int
-    y: int
-
-    def __post_init__(self):
-        self.x = self.x + 1
-        self.y = self.y + 2
-
-def main(n):
-    return 0
-"""
-
 UNKNOWN_OPTION = """
 from dataclasses import dataclass
 
@@ -922,6 +602,29 @@ def main(n):
     return h.fields()
 """
 
+# A `@dataclass` that declares its OWN `__eq__`. CPython KEEPS the user's in
+# preference to the generated one, so the class is legal and its meaning is
+# unambiguous — and it is still refused, because `==` on this path is one
+# flag-setting compare of two words and never dispatches by name. Measured: a
+# class with a user `__eq__` returning True gives `a == b` as 0 here and 1
+# under CPython, while `a.__eq__(b)` gives 1 under both. So accepting the class
+# would build an image that runs the comparison as an address compare and
+# prints a number the source's own method contradicts.
+OWN_EQ = """
+from dataclasses import dataclass
+
+@dataclass
+class Always:
+    x: int
+    y: int
+
+    def __eq__(self, other):
+        return True
+
+def main(n):
+    return 0
+"""
+
 REFUSE_CASES = [
     ("frozen_is_refused_with_its_reason", FROZEN,
      ["frozen=True", "no place to put that setter"]),
@@ -931,55 +634,16 @@ REFUSE_CASES = [
      ["repr", "SEGFAULTS"]),
     ("default_factory_is_refused_with_its_reason", DEFAULT_FACTORY,
      ["default_factory", "nowhere to keep the result"]),
-    # The needle is the half that is STILL the reason, and it moved when the
-    # layout merge landed: the old message said "this path's struct has no
-    # base-class field merge at all", which stopped being true and would have
-    # sent the reader looking for a merge that is in `model.py`. What remains is
-    # that everything the DATACLASS path generates is read off the class's own
-    # body, so `field(default=…)` in a BASE and an `InitVar` in a base are not
-    # seen.
     ("inheritance_is_refused_with_its_reason", INHERITANCE,
-     ["inherits from", "own class body"]),
+     ["inherits from", "no base-class field merge"]),
     ("post_init_is_refused_with_its_reason", POST_INIT,
-     ["__post_init__", "no point in that sequence"],
-     # A one-field receiver also makes `self.x = …` a DROPPED STORE, and that
-     # refusal is a different and less useful sentence for a hook that is never
-     # called at all. `one_field_dropped_receiver_stores` excludes
-     # `__post_init__` so the dataclass rule is the one that speaks here; the
-     # forbidden column is what holds that exclusion in place, because both
-     # messages mention a store and a needles-only check cannot tell them apart.
-     ["would keep the old one"]),
-    ("a_post_init_on_a_multi_field_class_is_refused_with_its_reason",
-     POST_INIT_MULTI,
-     ["__post_init__", "no point in that sequence"],
-     # Two fields, so `one_field_dropped_receiver_stores` has nothing to fire on
-     # and the needle above is the ONLY refusal available. This is the row that
-     # pins the hook rule itself.
-     ["would keep the old one"]),
+     ["__post_init__", "no point in that sequence"]),
     ("an_unknown_option_is_refused_by_name", UNKNOWN_OPTION,
      ["whatever", "not ignored"]),
     ("kw_only_is_refused_with_its_reason", KW_ONLY,
      ["kw_only", "one construction shape here, not two"]),
-    # A user `__eq__` whose COMPARISONS are not the shape the dispatch lowers.
-    # The needle is the clause that says which shape, because "it is refused"
-    # is not the assertion — `OWN_EQ` is a user `__eq__` that is EXECUTED above,
-    # and this pair is what keeps the two from drifting into one answer. A
-    # refusal of the class would refuse `OWN_EQ` too, which computes exactly.
-    ("a_user_declared_eq_against_a_word_is_refused_by_the_shape",
-     OWN_EQ_WORD_OPERAND,
-     ["__eq__", "5 is not a plain name"]),
-    ("a_user_declared_eq_between_two_constructions_is_refused_by_the_shape",
-     OWN_EQ_CONSTRUCTION_OPERAND,
-     ["__eq__", "ADDRESSES"]),
-    # A call operand the dispatch CAN resolve, so the gap is the other operand.
-    # The forbidden half is the point: naming `mk(...)` as "a construction" is
-    # false (it is a function) and sends the reader to the wrong line, and a
-    # needles-only check cannot see it because the wrong message also contains
-    # the right clause. Hence the optional fourth column below.
-    ("a_user_declared_eq_against_a_word_names_the_word_not_the_call",
-     OWN_EQ_CALL_OPERAND_AGAINST_A_WORD,
-     ["__eq__", "5 is not a plain name"],
-     ["mk(...) is a construction"]),
+    ("a_user_declared_eq_is_refused_not_silently_ignored", OWN_EQ,
+     ["__eq__", "never dispatches by name"]),
     ("reflection_is_refused_by_name", REFLECTION_CALL,
      ["is_dataclass", "no type tag attached"]),
     ("the_fields_attribute_is_refused_by_name", REFLECTION_ATTRIBUTE,
@@ -990,15 +654,7 @@ REFUSE_CASES = [
 
 
 def run_refuse_cases(tmpdir, only=None):
-    for row in REFUSE_CASES:
-        name, source, needles = row[0], row[1], row[2]
-        # An optional FOURTH column is a list of substrings the refusal must NOT
-        # contain, and it exists because "it says the right thing" and "it does
-        # not ALSO say a wrong thing" are different assertions: a refusal can
-        # name both operands, one of which is fine, and then the reader is sent
-        # to edit a line that needs no edit.  Three-column rows assert only the
-        # first, which is right for every other row here.
-        forbidden = row[3] if len(row) > 3 else []
+    for name, source, needles in REFUSE_CASES:
         if only and name not in only:
             continue
         try:
@@ -1008,11 +664,6 @@ def run_refuse_cases(tmpdir, only=None):
             check(all(nd in msg for nd in needles), name,
                   "the refusal does not say what it should: missing "
                   + ", ".join(repr(nd) for nd in needles if nd not in msg)
-                  + f" — got: {msg[-400:]}")
-            said = [f for f in forbidden if f in msg]
-            check(not said, name,
-                  "the refusal blames an operand it can lower: "
-                  + ", ".join(repr(f) for f in said)
                   + f" — got: {msg[-400:]}")
             continue
         except subprocess.TimeoutExpired:
@@ -1032,55 +683,6 @@ def run_guard_case(tmpdir, only=None):
               f"refused an unrelated .fields: {str(e)[-300:]}")
         return
     check(rc == 1, name, f"expected the method's own return value, got {rc}")
-
-
-# A default with NO CPython oracle, checked against the REPRESENTATION on both
-# architectures. `run_exec_cases` diffs against CPython, which is the right
-# default for this suite and the wrong oracle here: `printf("%d", None)` is a
-# TypeError on CPython, so a program whose whole point is that a `None` default
-# reads as the word 0 cannot be run through the reference to find out what it
-# should print. What it should print is a property of the representation, and
-# the representation is decided in `formal/model.py` — so the expectation is
-# written down here, once, and BOTH backends are held to it.
-REPRESENTATION_CASES = [
-    ("a_none_field_default_reads_as_the_word_zero", NONE_FIELD_DEFAULT,
-     "0 7 3 7", 0),
-]
-
-
-def run_representation_cases(tmpdir, only=None):
-    for name, source, want_out, want_rc in REPRESENTATION_CASES:
-        if only and name not in only:
-            continue
-        answers = {}
-        for arch in ("arm64", "x86_64"):
-            try:
-                answers[arch] = formal_run(tmpdir, f"{name}_{arch}", source,
-                                           arch)
-            except BuildRefused as e:
-                check(False, name, f"{arch} refused: {str(e)[-400:]}")
-                answers = None
-                break
-            except subprocess.TimeoutExpired:
-                check(False, name, f"{arch} build timed out")
-                answers = None
-                break
-        if answers is None:
-            continue
-        (arm_out, arm_rc), (x86_out, x86_rc) = answers["arm64"], \
-            answers["x86_64"]
-        # The two architectures agreeing is the assertion that matters most
-        # here: the fold is in `formal/model.py`, which both read, so a
-        # disagreement would mean one of them stopped reading it — and the
-        # failure mode is a wrong number on one side with everything else
-        # green.
-        check(arm_out == x86_out,
-              f"{name}: arm64 and x86-64 disagree on stdout",
-              f"arm64 {arm_out!r} vs x86-64 {x86_out!r}")
-        check(arm_out == want_out and arm_rc == want_rc == x86_rc,
-              f"{name}: the image is not the representation",
-              f"want {want_out!r}/{want_rc}, arm64 {arm_out!r}/{arm_rc}, "
-              f"x86-64 {x86_out!r}/{x86_rc}")
 
 
 # ── 3. the corpus, DISCOVERED from the tree rather than listed ──────────────
@@ -1198,7 +800,6 @@ def main(argv):
         run_exec_cases(tmpdir, only)
         run_refuse_cases(tmpdir, only)
         run_guard_case(tmpdir, only)
-        run_representation_cases(tmpdir, only)
         run_corpus_case(tmpdir, only)
         run_arch_parity_case(tmpdir, only)
 

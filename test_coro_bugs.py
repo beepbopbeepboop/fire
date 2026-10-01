@@ -18,6 +18,7 @@ link / no stdlib dylib) so it runs in ~seconds/module, not ~minutes.
 import os
 import re
 import sys
+import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC_RE = re.compile(r'^Source file:\s*(\S+)', re.M)

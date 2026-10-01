@@ -1,20 +1,11 @@
 # FORMAL_dataclass_runtime_reflection: `dataclasses.fields()` / `is_dataclass()` ask what a VALUE's type is, and a value here is one word with no type tag
 
 **Status: OPEN, and it is a property of the value model rather than a gap in
-the transform — and the "next bounded action" below is now MEASURED, and its
-answer is the second branch.** The `@dataclass` DECORATOR half is implemented
-and tested (`formal/dataclass_transform.py`, `test_dataclasses_formal.py`);
-this document is about the other half, the runtime reflection, which is what
+the transform.** The `@dataclass` DECORATOR half is implemented and tested
+(`formal/dataclass_transform.py`, `test_dataclasses_formal.py`); this document
+is about the other half, the runtime reflection, which is what
 `ownership_check.py` and `mojo/backend_gimple/cpp_core.py` actually call and
 which cannot be implemented on this target at all.
-
-**The measurement (2026-10-03, this tree): 0 of the 3 `dataclasses.fields(…)`
-sites have a statically known receiver type, and all 3
-`getattr(node, f.name)` sites inherit that** — `KNOWN: 0 POLYMORPHIC: 6` by
-`tools/dataclass_reflection_sites.py`. So the front-end transform the paragraph
-below weighs is NOT the shape these two files want — they want a type-carrying walker, and the
-backend wants nothing. The numbers, the method and what they decide are in
-§"The measurement the doc asked for", below.
 
 Found while writing the module for the formal backend (2026-09-29, the
 `module:dataclasses` claim). Every measurement below is from this tree.
@@ -96,18 +87,10 @@ for f in dataclasses.fields(node):
 ```
 
 `getattr(node, f.name)` is a DYNAMIC field read — the name is a run-time
-value. **Status 2026-10-04 (`formal29-1`): the sentence after this one is now
-WRONG in two directions and both are fixed; the conclusion is unchanged.** The
-old text said `getattr(x, "a")` "does not lower at all; the image binds a symbol
-nothing provides". Measured on this tree today, with a LITERAL name it is
-REFUSED — `model.UNIMPLEMENTED_BUILTINS["getattr"]` exists and names the limit —
-and with a literal name it now LOWERS, because `getattr(p, "a")` is `p.a` and
-this backend has always lowered that. See "What landed 2026-10-04" at the end.
-
-So even a hypothetical `fields()` that returned the right names would be
-followed by a loop the backend cannot express, because the field to read is not
-known until the loop runs — and that is now a statement about the loop alone,
-with the name half measured rather than described.
+value. Measured, `.tmp/dc/p2.py`: `getattr(x, "a")` does not lower at all; the
+image binds a symbol nothing provides. So even a hypothetical `fields()` that
+returned the right names would be followed by a loop the backend cannot
+express, because the field to read is not known until the loop runs.
 
 Answering it would mean unrolling the loop in the front end, at the point where
 the static type of the receiver IS known, turning
@@ -132,10 +115,8 @@ carries a type tag (a small index into a per-image table of class names and
 field layouts), which is a change to `formal/model.py`'s value representation
 AND to the Lean proof (`lib/ProofLib.lean`'s `Value` is one word — the same
 change `bugs/FORMAL_module_state_no_storage.md` describes for module state, and
-for the same reason). That is the shape of work this tree has already done
-twice — `bugs/FORMAL_a_conditional_value_in_a_dylib_export.md` §1 is the same
-shape, a value-model change plus the Lean side of it: a model change plus a
-proof, not a codegen change.
+for the same reason). That is the `bugs/FORMAL_contract_work_handoff.md` shape
+of work: a model change plus a proof, not a codegen change.
 
 **The alternative, and the one the corpus actually needs**, is to answer the
 question AT COMPILE TIME where the static type is known — which is what
@@ -155,53 +136,6 @@ days, and it is the same seam `formal/dataclass_transform.py` already occupies.
 If it is few, the files want a type-carrying walker instead and the backend
 wants nothing.
 
-## The measurement the doc asked for (2026-10-03)
-
-The "next bounded action" above, done — reading the two files' ASTs rather than
-their text, because a `grep` counts `getattr(gen, '_cpp_gen_self_struct', None)`
-on generator state, which is a different question and 95 of the ~97 `getattr`
-calls in `cpp_core.py`. The census is committed as a tool so the numbers below
-are re-derivable rather than re-typed:
-
-```console
-$ python3 tools/memslot.py --gb 8 --label m -- \
-      python3 tools/dataclass_reflection_sites.py
-KNOWN: 0   POLYMORPHIC: 6
-```
-
-**`dataclasses.fields(…)` — three sites, none of them with a known receiver:**
-
-| file:line | the call | the receiver | who reaches the enclosing function |
-|---|---|---|---|
-| `ownership_check.py:321` | `for f in dataclasses.fields(node)` | `_walk_expr`'s FIRST PARAMETER | 28 call sites, **18 distinct argument shapes** (`node.obj`, `stmt.value`, `operand`, `tgt`, `a`, `v`, `item.expr`, lists and tuples of them …), over the 23 AST classes the file names in `isinstance` guards |
-| `ownership_check.py:587` | `for f in dataclasses.fields(stmt)` | `_check_stmt`'s first parameter | 1 call site, 1 shape — and that parameter is the STATEMENT walker, so "1 call site" means "every statement the file walks", not "one type" |
-| `mojo/backend_gimple/cpp_core.py:1320` | `for f in dataclasses.fields(node)` | `_cpp_rename_ident`'s first parameter | 3 call sites with 3 shapes (`v`, `c`, `elem_node`), reached through `_cpp_rename_ident_container`'s `is_dataclass(v)` test — so it is "whichever dataclass node was handed down" |
-
-**`getattr(node, f.name)` — three sites, one per `fields()` loop**, and none is
-answerable independently: the attribute name is the loop variable `f`, so
-removing `fields()` removes the answer with it. That is this document's "even a
-hypothetical `fields()` that returned the right names would be followed by a
-loop the backend cannot express", confirmed rather than restated.
-
-**One more fact that decides it faster than the counts do: NEITHER file
-declares the dataclasses it reflects over.** `ownership_check.py` declares one
-`@dataclass` of its own — `Diagnostic`, measured 4 fields — and never passes it
-to `fields()`; its `fields()` calls are about `fire_compiler`'s node classes,
-reached through `_is_node(x) = dataclasses.is_dataclass(x) and not isinstance(x,
-type)`. `cpp_core.py` declares none. So a front-end transform would have to
-enumerate the field layouts of a module this path already refuses to place
-(`fire_compiler` is `not-answerable/host-import`), for a walker that has no
-static type at any of its three sites.
-
-**What the answer is for.** It settles the question this section posed — "is
-this days of transform or a change to the two files" — in favour of the second:
-a type-carrying walker (an enum parameter, or a per-class dispatch table
-threaded through `_walk_expr` / `_check_stmt`) is a change to THOSE FILES, and
-after it a compile-time `fields(x)` would be answerable at three sites instead
-of none. Until then the three refusals by name (`fields`, `is_dataclass`,
-`replace`, and the `getattr`/`hasattr` spelling) are the honest answer, and they
-are what `formal/dataclass_transform.py` already does.
-
 ## What is deliberately NOT being done here
 
 `formal/dataclass_transform.py` refuses each of these names BY NAME, at the
@@ -211,94 +145,3 @@ spelling of the same question. That is the honest answer and it is pinned by
 `test_dataclasses_formal.py`'s three reflection cases, which assert on the
 message rather than only on the build failing. What is refused here is not
 implemented, and the word "implemented" is doing no work it has not earned.
-
-## What landed 2026-10-04 (`formal29-1`): `getattr(o, "name")` with a LITERAL
-## name is the field read, and the refusal's reason was false for it
-
-This is the `getattr` half of "What is deliberately NOT being done here", and it
-is the one part of it that was **wrong rather than unimplemented**.
-
-`model.UNIMPLEMENTED_BUILTINS["getattr"]` read, and this is the measured text:
-
-> the attribute it names is a STRING at run time, and a field read on this path
-> is a load from `[base, #8k]` with a slot index the build computed from the
-> struct's own field list; a frame has no element width and no length, so a
-> run-time-indexed read of one is not an address arithmetic question this backend
-> can answer
-
-and it refused this, identically on arm64 and x86-64:
-
-```python
-struct Pt:  a, b
-def main(k): var p = Pt(); p.a = 7; p.b = 5
-             var v = getattr(p, "a"); printf("getattr-a=%d", v)
-```
-
-**The name in that program is a literal.** There is no run-time string, no
-unknown index, and no element width to establish: `v` is `p.a`, the slot comes
-from `Pt`'s own field list and the read is `base + 8` — the read this backend has
-always emitted. Four clauses of the sentence are false of this source, and the
-one thing it does not say is the repair, because there is no defect to repair.
-That is the failure mode the wide-receiver family documents itself as existing to
-prevent: "a message that asserts a mechanism which is not operating sends the
-reader after a non-bug", and its mirror — a message that asserts a limit which is
-not operating.
-
-**What landed**, and it is a REWRITE beside `_rewrite_identity_intrinsic_calls`
-rather than an emitter branch, for the reason that function's own docstring
-gives: every check downstream of `_prepare_functions` reads the AST, so a
-lowering in an emitter would leave `getattr(p, "a")` in the tree the field-read
-analysis has already classified.
-
-* `model.LITERAL_ATTRIBUTE_READ_CALLS` + `model.literal_attribute_read` — the
-  table is `{"getattr"}` and the predicate accepts a **bare string literal** and
-  nothing else.
-* `formal/build.py::_rewrite_literal_attribute_reads` erases `getattr(o, "name")`
-  to `MemberExpr(o, "name")`, called immediately after
-  `_rewrite_identity_intrinsic_calls` and for the same reason.
-* the three siblings keep their own entries in `UNIMPLEMENTED_BUILTINS` with
-  their own reasons, because each asks a different question: `hasattr` asks
-  whether the attribute is THERE (a frame's slots are its whole layout, so there
-  is no absent case), `setattr` is a store whose target is not a slot the build
-  established, `delattr` removes one.
-* `getattr`'s own entry now SAYS which case it is, and names the literal one as
-  not it — so a reader who reaches it can tell in one clause that their program
-  is not the case and that a different spelling is.
-
-**The dynamic case is untouched, and that is the point.** `getattr(p, f.name)`,
-`getattr(p, k)` and `getattr(p, "a" + b)` all still refuse, which is why
-**this document's answer is unchanged**: all three `fields()` loops in
-`ownership_check.py` and `mojo/backend_gimple/cpp_core.py` name the field with
-`f.name`, so the loop the backend cannot express is still the loop, and the
-front-end unroller is still what they would want. Measured on this tree after the
-rewrite: both files are `codegen/dependency` behind `_syscalls.mojo`'s own
-non-ASCII refusal, i.e. neither moved — which is the honest result and not a
-disappointment, because the row they are in is the one this document measured.
-
-**Files blocked: 0.** There are 11 `getattr(o, "literal")` sites in the corpus
-and ten of them are in `formal/` and `mojo/backend_gimple/` — the compiler's own
-sources, which this path does not compile as targets. What the change buys is
-that a construct with two spellings answers both, and that the refusal is now
-true of every program it reaches.
-
-**Pinned four ways, and two of them are the boundary rather than the win**, which
-is what makes the rewrite a rewrite and not a hole:
-
-| row | what it pins |
-|---|---|
-| `test_formal_run.py`'s `getattr_of_a_literal_name_is_the_field_read` | the read is the SECOND slot (`b`, not `a`), both architectures — 3 + 4 = 7 laid out so a read at offset 0 would be visible |
-| `getattr_defined_here_is_not_erased_to_a_field_read` | a module that DEFINES `getattr` keeps its own function (7, not 4) — the gate `_shadowing_attribute_read_names` exists for |
-| `byref_refuse_getattr_of_a_computed_name` | `getattr(p, names[0])` still refuses, needle **"A LITERAL name is not this case"** — so a reword that dropped the clause fails here rather than leaving the right program refused with the wrong sentence |
-| `byref_refuse_getattr_of_a_name_that_is_not_a_field` | `getattr(p, "zz")` is refused by the FIELD refusal (quoting `Pt`'s two real fields), not by a `getattr` message — which is the accurate answer about a name that is not in the layout |
-| `byref_refuse_getattr_names_the_builtin` | **this row's program was `getattr(p, "a")` and it asserted the refusal**, so it went red and had to be re-pointed at `getattr(p, n)` — a plain word — rather than deleted, because the builtin clause it pins is load-bearing for `tools/formal_sweep.py`'s `_FRAME_ESCAPES` and for `tools/formal_sweep_causes.py` |
-
-**The last row is the one worth reading.** An existing green test said, in
-effect, "`getattr` with a literal name is a builtin this path does not
-implement", and it was right about the message and wrong about the program. The
-full `test_formal_run.py` run is what found it — a rewrite in
-`_prepare_functions` touches every build, so it owes the whole corpus rather
-than the five rows above — and the right response was to move the row to the
-shape the message is about, not to delete it. A deleted test is a hole; a
-re-pointed one is the anti-rot working, and the two are now different programs
-(a plain word, and a value read out of a container) rather than one program with
-two needles.

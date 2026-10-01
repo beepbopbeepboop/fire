@@ -360,16 +360,6 @@ _CLIB_SYMS = frozenset({
     'strdup', 'strtol', 'strtod', 'atoi', 'atof', 'rand', 'srand', 'time',
     'open', 'close', 'read', 'write', 'fopen', 'fclose', 'fread', 'fwrite',
     'fgets', 'fputs', 'getline', 'setjmp', 'longjmp', 'signal',
-    # The two clock counters fire_runtime.h declares so compiled Mojo can TIME
-    # itself. They are declared there -- not in <time.h>, which also declares
-    # `time`, `strftime`, `localtime`, `gmtime`, `mktime` and `clock_gettime`
-    # and would drag every one of them into this comparison against the
-    # stdlib's own `external_call` declarations -- but they are LIBSYSTEM's
-    # definitions, not the runtime's, so advertising them in the dylib export
-    # table is a lie the dylib test reports as
-    # "declared with no definition in this dylib". Same rule as every other
-    # name above, for the same reason: the C library provides it.
-    'clock_gettime_nsec_np', 'mach_absolute_time',
 })
 
 
@@ -664,57 +654,6 @@ _NOT_A_RETURN_TYPE = ('typedef', 'struct', 'union', 'enum', 'static', 'extern',
 # made it necessary. A blank is left behind rather than nothing, so two
 # declarations either side of a comment cannot be glued into one token.
 _COMMENT_RE = re.compile(r'/\*.*?\*/|//[^\n]*', re.DOTALL)
-
-# A one-line `typedef <target> <name>;`, which is the only shape whose alias can
-# be resolved by reading the line: the name is the last identifier before the
-# `;`, and the target is everything before it. The target may not contain `{`,
-# `}`, `;` or a newline, which is what excludes the two shapes this does NOT
-# resolve — an ANONYMOUS aggregate (`typedef struct { void *fn; void *self; }
-# MojoBoundMethod;`) and a named one spelled across lines (`typedef struct {`
-# … `} Foo;`). Neither is a scalar or a pointer, so neither is an alias that
-# hides a value from a rule about values; see `collect_runtime_typedefs_h`.
-_TYPEDEF_RE = re.compile(
-    r'^[ \t]*typedef[ \t]+(?P<target>[^;{}=]+?)[ \t]*(?P<name>[A-Za-z_]\w*)[ \t]*;',
-    re.MULTILINE)
-
-# The words that make a target an AGGREGATE rather than a type spelling. A
-# `struct X` alias is deliberately left out of the table: an unknown base type
-# is already refused by the consumer (`formal/model.py`'s `_WORD_SCALARS`
-# refuses a spelling it has not heard of, deliberately), so resolving it would
-# change no verdict, and pretending to understand `typedef struct { … } A`
-# because the line before it looked like a declaration is how a scanner starts
-# inventing C.
-_TYPEDEF_NOT_A_TYPE = frozenset({'struct', 'union', 'enum'})
-
-
-def collect_runtime_typedefs_h(header_path: str) -> dict:
-    """The header's one-line `typedef` ALIASES, as `{name: target spelling}`.
-
-    Read for the same reason and by the same scanner as
-    `collect_runtime_exports_h`: the runtime headers' type vocabulary is part
-    of the ABI this repository documents, and it is spelled in the headers and
-    nowhere else. A prototype that says `mojo_write(MojoFileHandle fh, …)` says
-    nothing about what `MojoFileHandle` is; the line above it in the same file
-    says `typedef void* MojoFileHandle;`, and a consumer that reads the
-    prototype without reading THAT is reading half the declaration.
-
-    Only scalar and pointer targets are returned. A struct/union/enum alias is
-    an aggregate by another name, and an aggregate is a box under every rule
-    that reads these prototypes — so including it would buy nothing and would
-    put a C parser in the business of understanding a struct body.
-    """
-    out = {}
-    try:
-        with open(header_path) as f:
-            content = f.read()
-    except OSError:
-        return out
-    for m in _TYPEDEF_RE.finditer(_COMMENT_RE.sub(' ', content)):
-        target = ' '.join(m.group('target').split())
-        if not target or target.split('(')[0].split()[0] in _TYPEDEF_NOT_A_TYPE:
-            continue
-        out.setdefault(m.group('name'), target)
-    return out
 
 
 def collect_runtime_exports_h(header_path: str) -> list:

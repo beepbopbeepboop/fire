@@ -2,47 +2,52 @@
 
 Source file: `/Users/mrs/net/Python-3.14.6/Modules/_decimal/tests/randdec.py`
 
-## Status 2026-10-01 — 8 generators, down from 17; still not building, and the remaining cause is one shared mechanism
+## Status (re-verified 2026-08-26, worktree-agent-a01a24fff53233531 @ master `43fb291`): byte-identical 16-generator refusal, unchanged
 
-Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Modules/_decimal/tests/randdec.py`
-on this tree: **exit 1, 8 generators refused** (was 17 in the most recent
-entries below):
+Fresh `python3 fire.py build .../Modules/_decimal/tests/randdec.py`
+against this worktree (fast-forwarded to master `43fb291`, which
+includes the loop-as-expression, Float64(str), and StringSlice
+char*-passthrough landings noted in this session's task brief — none
+of which touch this file's blockers): byte-identical refusal to every
+prior re-verify below — same generator list and same per-generator
+causes (unresolved `sample`/`func`/`func1` callees from `from random
+import ...` and from module-global function-list iteration, plus the
+`all_binary`/`all_ternary`/`all_unary` consumption-ordering derivatives;
+`un_incr_digits_tuple` still lists `sample(...)` as its blocking cause).
+Both remaining root causes (arbitrary CPython Lib module inlining;
+callable-value-from-container support in coroutine bodies) remain
+campaign-sized, not narrow fixes. Not attempted; no code change.
 
-```
-bin_close_numbers, bin_close_to_pow10, bin_random_mixed_op,
-tern_close_numbers, tern_random_mixed_op, un_close_numbers,
-un_close_to_pow10, un_incr_digits_tuple
-```
+## Status (re-verified 2026-08-26, worktree-agent-a21934cd6fb7c6509 @ master `e60b9cd`): identical 17-generator refusal, unchanged
 
-and every one of them now names the SAME cause — a call to a callable-value
-loop variable or a `from random import` name:
+Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Modules/
+_decimal/tests/randdec.py` against this worktree (fast-forwarded to
+master `e60b9cd`): byte-identical refusal list to the same-day entries
+below — all 17 generators, same per-generator causes (8 x unresolved
+`sample`/`randrange` callees from `from random import ...`, 6 x
+function-valued loop-variable calls (`func`/`func1`), `un_incr_digits_
+tuple`'s masked mixed scalar/tuple shape, 3 x consumption-ordering-
+derived refusals). Both remaining root causes (arbitrary CPython Lib
+module inlining; callable-value-from-container support in coroutine
+bodies) are campaign-sized features, not narrow fixes. Not attempted;
+no code change.
 
-```
-a call to unresolved callee 'func1(...)' is not supported in a compiled
-generator/coroutine body (not a builtin this emitter supports, a known
-module-level/imported function, a same-module struct constructor, or a
-declared callable-value local)
-```
+## Status (re-verified 2026-08-26, worktree fix/opencode-misc1 @ `e1e12bb`): identical 17-generator refusal, unchanged
 
-The per-generator bucketing the older entries below carefully re-derived
-(8 x random-imports, 6 x function-valued loop variables, 1 x mixed
-scalar/tuple, 3 x consumption-ordering) has collapsed into that one message:
-the three consumption-ordering-derived refusals are GONE, and what is left is
-one shape. The five "re-verified, identical, unchanged" entries that used to
-sit above the substantive ones are removed — they changed nothing and cost a
-reader time.
-
-### The one remaining cause, stated once
-
-`sample` and `randrange` are imported `from random import ...`, and
-`random` is a CPython `Lib/` module. An entry file at
-`Modules/_decimal/tests/randdec.py` cannot see CPython's `Lib/` at all — the
-resolver layers are `.mojo`-only for PATH-based lookup and no ancestor walk
-from `Modules/_decimal/tests/` reaches `Lib/`. That is now filed on its own,
-with the two halves it needs and the blast-radius warning, in
-`“The compiler has no way to see CPython's `Lib/` from an entry file outside it”`. `func`/`func1` are
-the same class: a callable value stored in a container and called through a
-loop variable, which no lowering resolves statically.
+Fresh safety-wrapped `python3 fire.py build .../randdec.py` against
+this worktree (includes this session's dict-keyed %-formatting landing,
+commit `e1e12bb` — unrelated to any of the four causes below):
+byte-identical refusal list to the same-day entries below — all 17
+generators (`all_binary` ... `un_random_mixed_op`), same per-generator
+causes (8 × unresolved `from random import randrange, sample` callees,
+6 × function-valued loop-variable calls, `un_incr_digits_tuple`'s mixed
+scalar/tuple shape, 3 × consumption-ordering-derived). Note the
+campaign's broader finding that CPython Lib modules are invisible to
+every import resolver for entry files OUTSIDE Lib/ (`.mojo`-only
+resolvers; walk-up from Modules/_decimal/tests never reaches Lib/) —
+the unresolved-`random` group is an instance of that shared mechanism,
+not randdec-specific. No tractable angle found; not attempted; no code
+change.
 
 ## Status (re-verified 2026-08-26, wtRest19b — second independent re-check same day)
 
@@ -305,8 +310,8 @@ single scalar (int/decimal-string handle); every one of the 14 refused
 functions has at least one `yield a, b` / `yield a, b, c` site.
 
 This is the SAME structural gap already root-caused and documented in
-`“CODEGEN_generator_function: Lib/test/libregrtest/save_env.py”` and
-`“CODEGEN_generator_function: Lib/test/test_exception_group.py”`:
+`bugs/CODEGEN_generator_function_Lib_test_libregrtest_save_env.md` and
+`bugs/CODEGEN_generator_function_Lib_test_test_exception_group.md`:
 `gimple_codegen.py`'s compiled-generator ABI (`_gen_cpp_generator_unit`)
 represents a generator's suspended state as a `std::coroutine_handle`
 plus a promise whose `yield_value` accepts exactly ONE scalar

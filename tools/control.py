@@ -13,7 +13,6 @@
     control.py queue               # what is waiting
     control.py restart NAME        # snapshot, stop and continue a worker as NAME-rN from its own branch
     control.py unstick [--idle-min 25]   # restart workers that are stalled (idle log AND no CPU in their tree)
-    control.py cleanup [--dry-run] # remove worktrees whose branch is merged, clean, and not running
     control.py ps                  # our live workers (not the user's own opencode sessions)
     control.py reap [--dry-run]    # kill leftovers (lean, gcc, ...) in finished workers' trees
     control.py digest NAME         # verdict, commits, diffstat, the worker's REPORT block
@@ -136,7 +135,6 @@ def next_slot():
 
 
 def cmd_spawn(a):
-    a.model = a.model or MODEL            # callers that build a Namespace by hand (autointegrate) pass None
     task = a.task if a.task is not None else open(a.task_file).read()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", a.name):
         sys.exit("NAME must be lowercase-kebab")
@@ -324,20 +322,6 @@ def cmd_queue(a):
             print("%-28s needs: %-40s claims: %s" % (i["name"], ", ".join(i["needs"]) or "-", ", ".join(i["claims"])))
 
 
-def cmd_hold(a):
-    """Hold (or release) a task: a held task is never picked up by the integrator, but is otherwise a normal task
-    (it still counts as running, is watched by unstick, and can finish). Used to pipeline: batch 2 is built while batch 1 is
-    still being gated, and is released when batch 1 has landed."""
-    with registry() as reg:
-        if a.name not in reg:
-            sys.exit("no such task")
-        if a.release:
-            reg[a.name].pop("hold", None)
-        else:
-            reg[a.name]["hold"] = True
-    print("%s %s" % (a.name, "released" if a.release else "held"))
-
-
 def cmd_ps(a):
     """Our workers' live opencode processes, told apart from the user's own opencode sessions by their
     arguments: ours are launched with `--model M run --auto --dir <PARENT>/work-N`, theirs have neither."""
@@ -366,14 +350,8 @@ def cmd_guard(a):
     `program` memclass is measured to need, so honest big jobs are not touched. RSS undercounts a process the
     OS has compressed or swapped, so this is a floor on protection, not a guarantee. Never touches a process
     outside our trees."""
-    def tree_roots():
-        # Recomputed every pass: workers are spawned all day, and a list taken once at start-up
-        # stopped covering every worktree created after the guard did (2026-10-03: two orphaned
-        # `lean` processes at 154 and 286 CPU-minutes ran for an hour inside work-337, a worktree
-        # born after the guard, and the lean time bound never matched their cwd).
-        return [os.path.realpath(p) for p in
-                [t["worktree"] for t in load().values()] + [os.path.join(PARENT, "work-integ")]]
-    roots = tree_roots()
+    roots = [os.path.realpath(p) for p in
+             [t["worktree"] for t in load().values()] + [os.path.join(PARENT, "work-integ")]]
     limit_kb = int(a.limit_gb * 1048576)
     total_kb = int(a.total_gb * 1048576)
 
@@ -389,7 +367,6 @@ def cmd_guard(a):
         except OSError: pass
 
     while True:
-        roots = tree_roots()
         out = subprocess.run(["ps", "-axo", "pid=,rss=,args="], capture_output=True, text=True).stdout
         big = []                                     # processes over 1 GB that live in our trees
         for line in out.splitlines():
@@ -409,121 +386,9 @@ def cmd_guard(a):
         while big and sum(b[0] for b in big) > total_kb:
             rss, pid, args = big.pop(0)
             kill(pid, "tree total over the %.0f GB budget" % a.total_gb, rss, args)
-        _guard_lean_time(roots, a, cwd_of, kill)
-        _guard_runaway(roots, a, cwd_of, kill)
         if a.once:
             return
         time.sleep(a.interval)
-
-
-def _ps_time(s):
-    """`ps` etime/time -> seconds. Formats: [[dd-]hh:]mm:ss, with a fractional seconds part on `time`."""
-    days = 0
-    if "-" in s:
-        d, s = s.split("-", 1); days = int(d)
-    parts = [float(x) for x in s.split(":")]
-    while len(parts) < 3:
-        parts.insert(0, 0.0)
-    return days * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
-
-
-def _guard_lean_time(roots, a, cwd_of, kill):
-    """Wall-clock and CPU upper bound on Lean 4 processes in OUR trees.
-
-    2026-10-02 the user killed ten `lean` processes, some with HUNDREDS of CPU-hours: a valid inductive proof
-    checks in seconds to minutes, so anything past these limits is a non-terminating elaboration (a `simp` /
-    `decide` / kernel reduction loop that `maxHeartbeats` does not meter), not a slow proof. CPU time is
-    counted across Lean's threads, so it grows faster than the wall clock. Applies to `lean` itself, not to
-    `lake`/shell wrappers, and only to processes whose cwd is inside a worker worktree or the integrator tree.
-    The same bounds belong in the code that launches Lean (formal/lean.py); this is the net under every
-    launcher that has not been taught them, including a worker's ad-hoc `lean` run."""
-    out = subprocess.run(["ps", "-axo", "pid=,etime=,time=,args="], capture_output=True, text=True).stdout
-    for line in out.splitlines():
-        f = line.split(None, 3)
-        if len(f) < 4 or not re.search(r"(^|/)lean( |$)", f[3].split(" -", 1)[0]):
-            continue
-        try:
-            wall, cpu = _ps_time(f[1]), _ps_time(f[2])
-        except ValueError:
-            continue
-        if wall < a.lean_wall_min * 60 and cpu < a.lean_cpu_min * 60:
-            continue
-        c = cwd_of(int(f[0]))
-        if any(c == x or c.startswith(x + os.sep) for x in roots):
-            kill(int(f[0]), "lean past its bound: %.0f min wall, %.0f min CPU (limits %g / %g)" % (
-                wall / 60, cpu / 60, a.lean_wall_min, a.lean_cpu_min), 0, f[3])
-
-
-def _guard_runaway(roots, a, cwd_of, kill):
-    """Wall-clock bound on a worker's compiler builds and test runs in OUR trees.
-
-    2026-10-02: twelve `fire.py build --formal ... std/python/bindings.mojo` processes, up to 1.6 DAYS old and
-    each burning ~55% of a core, plus two `test_formal_math.py` runs 10 hours old, were found left behind by
-    workers that had since finished: a non-terminating compile (“`fire.py build --formal` on `std/python/bindings.mojo` never terminates”)
-    that nothing bounded. Any `fire.py build` / `test_*.py` / `formal_sweep.py` / probe script that is still
-    running after --runaway-min minutes (default 120; the longest legitimate one is the self-host build at ~25 min)
-    is killed. The gate and the integrator run through tools/suite.py (its own timeouts), so their processes are
-    named `suite.py`, not matched here."""
-    out = subprocess.run(["ps", "-axo", "pid=,etime=,args="], capture_output=True, text=True).stdout
-    for line in out.splitlines():
-        f = line.split(None, 2)
-        if len(f) < 3 or "control.py" in f[2] or "opencode" in f[2] or "suite.py" in f[2]:
-            continue
-        if not re.search(r"Python\S*\s.*(fire\.py build|/test_\w+\.py|\btest_\w+\.py|formal_sweep\.py|\.tmp/\S+\.py)", f[2]) \
-                and not re.search(r"^(\S*python\S*)\s+(\S*fire\.py build|\S*test_\w+\.py|\S*formal_sweep\.py|\.tmp/\S+\.py)", f[2]):
-            continue
-        try:
-            wall = _ps_time(f[1])
-        except ValueError:
-            continue
-        if wall < a.runaway_min * 60:
-            continue
-        c = cwd_of(int(f[0]))
-        if any(c == x or c.startswith(x + os.sep) for x in roots):
-            kill(int(f[0]), "runaway: %.0f min wall (limit %g)" % (wall / 60, a.runaway_min), 0, f[2])
-
-
-def cmd_cleanup(a):
-    """Remove the worktrees we created and no longer use: a `work-*` tree whose HEAD is already an ancestor of
-    master, with a clean tree (no modified or untracked-and-not-ignored files), and no live worker.
-
-    2026-10-04: 403 worktrees held 257 GB. The removal is `git worktree remove` WITHOUT --force, so git
-    itself refuses a tree with anything it would lose; unmerged work, dirty trees, running workers and
-    `integ` are listed and left alone. Branches are kept (they are merged, so they cost nothing, and the
-    registry and `control.py status` read them)."""
-    reg = load()
-    byw = {os.path.realpath(t["worktree"]): (n, t) for n, t in reg.items()}
-    wt, cur = [], {}
-    for l in subprocess.run(["git", "worktree", "list", "--porcelain"], capture_output=True, text=True,
-                            cwd=MAIN).stdout.splitlines():
-        if l.startswith("worktree "):
-            cur = {"path": l[9:]}; wt.append(cur)
-        elif l.startswith("HEAD "):
-            cur["head"] = l[5:]
-    safe, kept = [], []
-    for w in wt:
-        p = os.path.realpath(w["path"])
-        if not os.path.basename(p).startswith("work-") or os.path.basename(p) == "work-integ":
-            continue
-        t = byw.get(p)
-        if t and state_of(t[1]) == "running":
-            kept.append((p, "running")); continue
-        if subprocess.run(["git", "merge-base", "--is-ancestor", w["head"], "master"], cwd=MAIN).returncode != 0:
-            kept.append((p, "unmerged")); continue
-        if subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, cwd=p).stdout.strip():
-            kept.append((p, "dirty")); continue
-        safe.append(p)
-    done = 0
-    for p in safe:
-        if a.dry_run:
-            print("would remove", p); continue
-        r = subprocess.run(["git", "worktree", "remove", p], capture_output=True, text=True, cwd=MAIN)
-        if r.returncode == 0: done += 1
-        else: print("kept", p, r.stderr.strip()[:100])
-    subprocess.run(["git", "worktree", "prune"], cwd=MAIN)
-    from collections import Counter
-    print("%s %d worktrees; left alone: %s" % ("would remove" if a.dry_run else "removed",
-          len(safe) if a.dry_run else done, dict(Counter(r for _, r in kept))))
 
 
 def cmd_memtrim(a):
@@ -701,13 +566,8 @@ def main():
     s = sub.add_parser("mark"); s.add_argument("name"); s.add_argument("state"); s.set_defaults(f=cmd_mark)
     s = sub.add_parser("log"); s.add_argument("name"); s.add_argument("-n", type=int, default=40); s.set_defaults(f=cmd_log)
     s = sub.add_parser("digest"); s.add_argument("name"); s.set_defaults(f=cmd_digest)
-    s = sub.add_parser("cleanup"); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_cleanup)
     s = sub.add_parser("guard"); s.add_argument("--limit-gb", type=float, default=55); s.add_argument("--total-gb", type=float, default=90)
-    s.add_argument("--interval", type=float, default=3); s.add_argument("--once", action="store_true")
-    s.add_argument("--lean-wall-min", type=float, default=45, help="kill a lean process in our trees past this many wall minutes")
-    s.add_argument("--lean-cpu-min", type=float, default=90, help="... or this many CPU minutes (all threads)")
-    s.add_argument("--runaway-min", type=float, default=120, help="kill a fire.py build / test_*.py / sweep / probe in our trees past this many wall minutes")
-    s.set_defaults(f=cmd_guard)
+    s.add_argument("--interval", type=float, default=3); s.add_argument("--once", action="store_true"); s.set_defaults(f=cmd_guard)
     s = sub.add_parser("enqueue"); s.add_argument("name"); s.add_argument("--claim", action="append", required=True)
     g = s.add_mutually_exclusive_group(required=True); g.add_argument("--task"); g.add_argument("--task-file")
     s.add_argument("--file", action="append", default=[]); s.add_argument("--base", default="master")
@@ -719,7 +579,6 @@ def main():
     s.add_argument("--interval", type=float, default=3.0); s.add_argument("--once", action="store_true"); s.set_defaults(f=cmd_memtrim)
     s = sub.add_parser("restart"); s.add_argument("name"); s.add_argument("--why", default="restarted by the controller"); s.set_defaults(f=cmd_restart)
     s = sub.add_parser("unstick"); s.add_argument("--idle-min", type=float, default=25); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_unstick)
-    s = sub.add_parser("hold"); s.add_argument("name"); s.add_argument("--release", action="store_true"); s.set_defaults(f=cmd_hold)
     sub.add_parser("ps").set_defaults(f=cmd_ps)
     s = sub.add_parser("reap"); s.add_argument("--dry-run", action="store_true"); s.set_defaults(f=cmd_reap)
     sub.add_parser("report").set_defaults(f=cmd_report)

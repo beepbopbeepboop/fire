@@ -3,15 +3,16 @@
 The spelling is CPython's `os.path` for every function below, with two
 deviations that are properties of this target and are stated on each one:
 
-  * BOTH BACKENDS TODAY, and not because of anything in this source. A module
-    dylib that makes a call into the C library builds and runs under
-    `--backend=x86_64` as well as arm64 — measured, and `formal/hostmods/os/
-    __init__.mojo` gives it at length with the evidence. The claim this replaces
-    was false, and it had a cost: `test_formal_os_backing.py` used to skip its
-    `os.path` cases on x86-64 for this reason, which is where a silently wrong
-    `stat` field survived. What the x86-64 backend has to get right is the
-    symbol each call binds, and `formal/model.py`'s `target_libc_symbol` is the
-    table that says so.
+  * ARM64 ONLY TODAY, and not because of anything in this source. A module
+    dylib that makes a call into the C library is arm64-only on this backend:
+    the same two-line module builds and RUNS with `--backend=arm64` and
+    produces an image the loader refuses with ``main executable failed strict
+    validation`` under `--backend=x86_64``, which is the unclaimed-trailing-byte
+    failure `formal/macho_linker.py`'s `_assert_no_unclaimed_bytes` exists for.
+    Every function below needs the C library, so all of them are arm64-only
+    until that is fixed; `test_formal_os.py` skips a non-arm64 host and the
+    reason it has to is here. Filed as
+    `bugs/FORMAL_x86_64_dylib_with_an_extern_call_does_not_load.md`.
 
   * A RESULT IS EITHER AN INTERIOR POINTER OR A `malloc`'d BUFFER. A string
     here is a bare NUL-terminated `char *` with no growable buffer of its own
@@ -51,24 +52,23 @@ deviations that are properties of this target and are stated on each one:
     outlives the function that made it where a frame does not.
 
 The pure-string half — `join`, `split`, `dirname`, `basename`, `splitext`,
-`normpath`, `isabs`, `splitdrive`, `commonprefix`, `splitroot_root` — is
-CPython's `posixpath`/`genericpath` algorithm for a POSIX target, transcribed,
-and `test_formal_os.py` checks it against CPython's own answers on the same
-inputs rather than against a table written here.
+`normpath`, `isabs`, `splitdrive`, `commonprefix` — is CPython's
+`posixpath`/`genericpath` algorithm for a POSIX target, transcribed, and
+`test_formal_os.py` checks it against CPython's own answers on the same inputs
+rather than against a table written here.
 
 `os.path` also carries the four predicates CPython re-exports from
 `genericpath` (`exists`, `isfile`, `isdir`, `getsize`) and the `os` module
 re-exports them from here, so both spellings reach one definition.
 """
 
-from .._syscalls import str_alloc, str_trunc, str_put
+from .._syscalls import str_alloc, str_trunc, str_put, str_append
 from .._syscalls import str_dup, str_prefix, str_build, str_repeat
 from .._syscalls import str_len, str_eq_n, str_starts, str_at
 from .._syscalls import str_rfind, str_rindex_of, str_rstrip_len, str_lead
 from .._syscalls import str_chr_from
 from .._syscalls import fs_access
 from .._syscalls import fs_opendir, fs_closedir, fs_realpath, fs_cwd, fs_getenv
-from .._syscalls import fs_getpwnam_dir
 from .._syscalls import fs_stat_mode
 from .._syscalls import fs_stat_field16, fs_stat_field32, fs_stat_field64
 
@@ -99,24 +99,7 @@ def join(a, b) -> str:
     if str_len(a) == 0:
         return b
     if str_at(a, str_len(a) - 1, "/") == 1:
-        # `str_build(a, "", b)` and NOT `str_append(str_dup(a), b)`, and the
-        # difference is a HEAP OVERFLOW rather than a style preference:
-        # `str_dup(a)` is `str_alloc(len(a))` — a block of `len(a) + 1` bytes,
-        # room for `a` and its terminator and NOTHING else — and `strcat`
-        # writes `len(b) + 1` bytes at `dst + len(a)`, so every byte of `b`
-        # and its terminator land past the end of the allocation. Measured on
-        # this tree with `join("some/dir/with/slash/", b)` and `b` 100 bytes
-        # long: all 40 same-size blocks allocated after the call came back
-        # overwritten, on three runs out of three, while the ANSWER was
-        # correct — which is why every differential test of `join` passed over
-        # it. `formal/hostmods/glob.mojo`'s `**` walk is what turned it into
-        # an observed `SIGABRT` ("malloc: Heap corruption detected, free list
-        # is damaged"), because CPython's `_glob2` yields a trailing-slash
-        # dirname and every join it does is this branch.
-        #
-        # `str_append` is not wrong and still exists for a `dst` that HAS the
-        # room; what was wrong was handing it a fresh `str_dup`.
-        return str_build(a, "", b)
+        return str_append(str_dup(a), b)
     return str_build(a, "/", b)
 
 
@@ -248,49 +231,6 @@ def splitext(p):
     return (root, p + di)
 
 
-def splitroot_root(p) -> str:
-    """CPython's `posixpath.splitroot(p)[1]`: the ROOT of `p`, as ONE WORD.
-
-    CPython's `splitroot` answers `(drive, root, tail)`, and on this target the
-    DRIVE is `""` for every path, so the whole of what is left is a string of
-    slashes — which is why this is a function here and the three-element tuple
-    is not (`splitdrive`'s entry, and this module's header, give the tuple's
-    problem: a tuple's first word is a COUNT).
-
-    **Three tests, in this order, and `isabs` is not one of them.**
-
-        splitroot_root("a/b")     ->  ""
-        splitroot_root("/a/b")    ->  "/"
-        splitroot_root("//a/b")   ->  "//"
-        splitroot_root("///a")    ->  "/"
-        splitroot_root("////")    ->  "/"
-        splitroot_root("/")       ->  "/"
-        splitroot_root("")        ->  ""
-
-    POSIX reserves a path that begins with EXACTLY TWO slashes for
-    implementation-defined meaning and CPython honours it; three or more is an
-    ordinary root. So `isabs` is wrong here on the two-slash case — it answers
-    `1` for `//a/b` and there is no way to ask it WHICH root — and every
-    function here that has to act on the root asks this instead.
-
-    `normpath` KEEPS a `//` root because CPython's does, and `realpath` DROPS
-    it because CPython's does; both answers come from here, which is what stops
-    the two from disagreeing about which paths are the POSIX case.
-
-    A literal, so nothing here is allocated on the three answers. `posixpath`'s
-    own `splitroot_root` forwards to this rather than carrying a second copy of
-    the three tests.
-    """
-    if str_starts(p, "/") == 0:
-        return ""
-    if str_len(p) > 1 and str_at(p, 1, "/") == 1:
-        # Two slashes, and not three: the POSIX case. `str_at` is in range for
-        # every index here because each test is behind the length above it.
-        if str_len(p) == 2 or str_at(p, 2, "/") == 0:
-            return "//"
-    return "/"
-
-
 def normpath(path) -> str:
     """CPython's `posixpath.normpath`, rule for rule.
 
@@ -308,10 +248,7 @@ def normpath(path) -> str:
         `"//a"` is `"//a"` and `"///a"` is `"/a"`. That is POSIX's
         implementation-defined leading-double-slash, and CPython keeps it, so
         a transcription that collapses every run of separators to one is wrong
-        on two inputs out of the thirty-two in this module's test. Which
-        paths those are is `splitroot_root`'s question and this function asks
-        it rather than repeating the tests; `realpath` is the one function here
-        that DROPS the `//` root, and CPython's does too.
+        on two inputs out of the thirty-two in this module's test.
 
     The result is a fresh buffer, except for the degenerate answers: `"."`,
     `"/"` and `"//"` are literals.
@@ -320,10 +257,13 @@ def normpath(path) -> str:
     if n == 0:
         return "."
     # How many leading separators to write back: one, or two when the path
-    # starts with exactly two. The third is what makes it one again. The RULE is
-    # `splitroot_root`'s and this is its only other consumer, so the two
-    # functions cannot disagree about which paths are the POSIX case.
-    lead = str_len(splitroot_root(path))
+    # starts with exactly two. The third is what makes it one again.
+    lead = 0
+    if str_starts(path, "/") == 1:
+        lead = 1
+        if n > 1 and str_at(path, 1, "/") == 1:
+            if n == 2 or str_at(path, 2, "/") == 0:
+                lead = 2
     out = str_alloc(n + 2)
     used = 0
     if lead == 2:
@@ -676,42 +616,10 @@ def realpath(p) -> str:
     closer to CPython than an empty string would be, and closer than pretending
     the resolution succeeded. A caller that needs to know whether the path
     exists should ask `exists`.
-
-    **A LEADING `//` IS COLLAPSED, and it is the only rule here CPython's
-    `realpath` and `normpath` disagree about.** CPython does not call
-    `realpath(3)` at all: it resolves component by component and joins the
-    answers with one separator, so its answer can never begin with `//` — while
-    `normpath` keeps that root, because POSIX reserves it and CPython's
-    `normpath` honours the reservation. Measured on this tree, both backends:
-
-        realpath("//a")     CPython  /a        here, before  //a
-        realpath("//a/b")   CPython  /a/b      here, before  //a/b
-        realpath("//tmp")   CPython  /private/tmp   here, the same
-
-    **The divergence was the FALLBACK and not the C library call**, which is
-    worth stating because the opposite reading is the obvious one and the
-    measurement rejects it: `realpath(3)` on this target already collapses the
-    double slash, so every path that RESOLVES was always CPython's answer
-    (`//tmp` and `//usr//bin` measured). What leaked the `//` was the branch
-    that answers `abspath(p)`, whose `normpath` keeps the root for the reason
-    above. So the collapse is applied to the input of BOTH branches and the two
-    cannot disagree about it: `q` below is the path with the POSIX root
-    collapsed, and it is what the kernel is asked about and what `abspath` is
-    given.
-
-    Only the EXACTLY-TWO case collapses: `///a` and `//` are already `/` in both
-    CPython functions, and `//` and `//a/b` are the two shapes
-    `splitroot_root` exists to name.
     """
-    q = p
-    if splitroot_root(p) == "//":
-        # `/` followed by everything after the two leading slashes. `p + 2` is
-        # BYTE arithmetic, which is right for a `char *`: the same spelling
-        # over a wider pointee is not a slice, and `str_at`'s docstring says so.
-        q = str_build("/", "", p + 2)
-    r = fs_realpath(q)
+    r = fs_realpath(p)
     if r == 0:
-        return abspath(q)
+        return abspath(p)
     return r
 
 
@@ -818,51 +726,23 @@ def _same_component(a, ca, b, cb) -> int:
 
 
 def expanduser(p) -> str:
-    """CPython's `os.path.expanduser`: a leading `~` replaced from `$HOME`,
-    and a leading `~name` from that user's home DIRECTORY.
+    """CPython's `os.path.expanduser`: a leading `~` replaced from `$HOME`.
 
-    **THE `~name` HALF IS A `getpwnam`, and this function used to claim it could
-    not be done.**  It said "reading the password database is not something this
-    target can do", and answered `~root/` unchanged where CPython answers
-    `/var/root/`.  That is a divergence CPython's own `test_posixpath.py` has a
-    case for — `self.assertEqual(posixpath.expanduser('~root/'), '/var/root')` —
-    and it was found by generating that suite's cases rather than by reading it,
-    which is the argument for generating them: the case is in the file the whole
-    time, and a hand-picked corpus does not have it because `~root` only means
-    something on a machine where `root` exists.
+    `"~"` is the home directory and `"~/x"` is `x` inside it. A `~name` for
+    some other user is returned UNCHANGED, because reading the password
+    database is not something this target can do — and returning it unchanged
+    is what CPython does when it cannot resolve the name either.
 
-    It CAN be done, and the measurement is in `os/_syscalls.mojo`'s
-    `fs_getpwnam_dir`: `getpwnam` binds on both backends, and `pw_dir` is one
-    64-bit load at byte 48 of the struct.  The three states CPython distinguishes
-    are all still distinguished, and they are:
-
-        `~`         `$HOME`, and unchanged when `HOME` is unset
-        `~/x`       `$HOME` + `/x`
-        `~name/x`   `getpwnam(name)->pw_dir` + `/x`
-        `~name`     `getpwnam(name)->pw_dir`
-        anything else, including a name `getpwnam` does not know, UNCHANGED
-
-    A fresh buffer in every case where the answer is not `p` itself.  `p` comes
-    back as it arrived when there is no leading `~`, which is CPython's answer
-    and is also the one case where there is nothing to allocate.
+    A fresh buffer, except when `p` has no leading `~` at all: then `p` comes
+    back as it arrived.
     """
     if str_starts(p, "~") == 0:
         return p
-    # `~` alone and `~/x` are `$HOME`; `~name` and `~name/x` are the database's.
-    if str_len(p) == 1 or str_starts(p + 1, "/") == 1:
-        h = fs_getenv("HOME")
-        if h == 0:
-            return p
-        if str_len(p) == 1:
-            return h
-        return str_build(h, "", p + 1)
-    n = str_len(p)
-    i = 1
-    while i < n and str_at(p, i, "/") == 0:
-        i = i + 1
-    d = fs_getpwnam_dir(str_prefix(p + 1, i - 1))
-    if d == 0:
+    if str_len(p) > 1 and str_starts(p + 1, "/") == 0:
         return p
-    if i >= n:
-        return d
-    return str_build(d, "", p + i)
+    h = fs_getenv("HOME")
+    if h == 0:
+        return p
+    if str_len(p) == 1:
+        return h
+    return str_build(h, "", p + 1)

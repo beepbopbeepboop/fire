@@ -23,14 +23,6 @@ stage2/
 *.pyi
 *.o
 *.aout
-# `fire.py build`'s C++20-coroutine companion unit, beside the `*.ci` and
-# `*.o` above: `fire.py` writes `<stem>_gen.cpp` into the CURRENT WORKING
-# DIRECTORY, so a build run from the repository root leaves one here and
-# nothing reads it. Two of them were committed by e98ea1f8 before this line
-# existed. `bugs/TEST_py314_sweep_still_leaves_a_generated_cpp_at_the_repo_root.md`
-# has the measurement; the ignore is the cheap half of the fix and the CWD
-# itself is the other.
-*_gen.cpp
 mojoc
 bfib
 bnbody
@@ -71,12 +63,6 @@ abt*_*.pyi
 # `pixi run prooflib` / `tools/proof.sh <stem>` / `fire.py formalbuild`)
 *.olean
 *.olean.srcsha256
-# A build's PRIVATE temp `.olean`, written beside the real one and renamed into
-# place (`formal/lean.py::ensure_library`'s private-temp discipline). A build that
-# is killed mid-write leaves one behind, and it is 31 MB of build output: it was
-# committed by accident once on this branch and the `*.olean` rule above does not
-# match a name that does not END in `.olean`.
-*.olean.tmp.*
 # The flock file `formal.lean.ensure_library` takes while building an .olean.
 # Never meaningful between runs, and it must NOT be gitignored as a pattern
 # that would also swallow a real build product — hence the explicit name.
@@ -87,6 +73,3 @@ abt*_*.pyi
 # keeps artifacts under output/, so a proof built by hand lands in the tree
 # untracked; these are rebuildable from the source, not sources themselves.
 *_proof.lean
-
-# a compiled binary dropped at the repo root by `fire.py build <path>`
-/mine
