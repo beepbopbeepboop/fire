@@ -80,6 +80,13 @@ const char *mojo_metal_last_error(void);
  * plausible-looking result. */
 int64_t mojo_metal_dispatch_count(void);
 
+/* Failed dispatches since load, and whether a device was found. Both
+ * process-wide, because the generated sidecar forwards to them rather than
+ * keeping per-translation-unit counters: a program that dispatches in one
+ * module and asks in another must get the same answer either way round. */
+int64_t mojo_metal_failure_count(void);
+int64_t mojo_metal_have_device(void);
+
 #ifdef __cplusplus
 }
 #endif

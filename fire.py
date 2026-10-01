@@ -110,7 +110,15 @@ Codegen flags (may appear anywhere; forwarded to gcc, mixed into the JIT cache k
   -g -g0 -g1 -g2 -g3               Debug info level (build default -g3)
 
 Backend selector (may appear anywhere; selects the codegen path):
-  --backend=gimple|arm64           gimple = default C/GIMPLE path; arm64 = formal arm64 + Mach-O (no gimple, no driver)"""
+  --backend=gimple|arm64           gimple = default C/GIMPLE path; arm64 = formal arm64 + Mach-O (no gimple, no driver)
+
+GPU:
+  --no-gpu                         Do not auto-offload. A recognised parallel
+                                   loop nest gets no synthesised device
+                                   kernel. Code MARKED @gpu/@kernel, or reached
+                                   through compile_function[...], is still
+                                   compiled for the GPU -- this turns off
+                                   inference, not the device path."""
 
 
 def _extract_codegen_flags(args: list):
@@ -177,6 +185,36 @@ def _backend_was_explicit(argv: list) -> bool:
     "no backend named" from "arm64 named explicitly" — both of which arrive
     from _extract_backend as the same string."""
     return any(a == "--backend" or a.startswith("--backend=") for a in argv)
+
+
+def _extract_gpu_flags(args: list):
+    """Pull `--no-gpu` out of an argument list.
+
+    Returns (auto_gpu, remaining_args).
+
+    WHAT IT TURNS OFF, precisely: the INFERENCE that synthesises a device
+    kernel for a recognised parallel loop nest
+    (`mojo/middle/offload.py`, increment 3 of doc/GPU_OFFLOAD_PLAN.html). A
+    function that already carries `@gpu`/`@kernel`, or that is reached through
+    `compile_function[...]`/`enqueue_function[...]`, is STILL a device
+    function under `--no-gpu`. That is the contract: the flag turns off
+    guessing, not the device path, and the two mechanisms cannot overlap
+    because `offload.synthesise_module` already skips explicitly-marked
+    functions.
+
+    Why it needs to exist at all: auto-offload fires on ordinary Python with
+    no marker, so without an opt-out a user who wants their loop on the host
+    has no way to say so -- and "it ran slower and I cannot tell why" is not
+    an acceptable answer to a compiler that moved their code.
+    """
+    auto_gpu = True
+    remaining = []
+    for a in args:
+        if a == '--no-gpu':
+            auto_gpu = False
+        else:
+            remaining.append(a)
+    return auto_gpu, remaining
 
 
 def _extract_formal_flags(args: list):
@@ -577,14 +615,15 @@ def run_repl():
             print()
             break
 
-def jit_compile_and_execute(input_file: str, src: str, opt_flag=None, debug_flag=None, program_args=None):
+def jit_compile_and_execute(input_file: str, src: str, opt_flag=None, debug_flag=None,
+                            program_args=None, auto_gpu=True):
     """JIT compile and execute Mojo source code for ARM64.
     
     Returns True on success, False on failure.
     """
     try:
         from jit.arm64 import ARM64JIT
-        jit = ARM64JIT(opt_flag=opt_flag, debug_flag=debug_flag)
+        jit = ARM64JIT(opt_flag=opt_flag, debug_flag=debug_flag, auto_gpu=auto_gpu)
         return bool(jit.compile_and_execute(src, filename=input_file, program_args=program_args))
     except Exception as e:
         print(f"JIT error: {e}", file=sys.stderr)
@@ -611,7 +650,8 @@ def link_executable(objs, exe_file, extra_ldflags=None, cxx=False):
 
 def build_executable(input_file: str, src: str, output: str = None,
                      opt_flag: str = None, debug_flag: str = None,
-                     work_dir: str = None, quiet: bool = False) -> bool:
+                     work_dir: str = None, quiet: bool = False,
+                     auto_gpu: bool = True) -> bool:
     """Compile Mojo source to executable using GIMPLE codegen."""
     basename = os.path.splitext(os.path.basename(input_file))[0] or 'main'
     if work_dir is not None:
@@ -655,9 +695,10 @@ def build_executable(input_file: str, src: str, output: str = None,
         if gimple_codegen.module_may_have_supported_generator(src, filename=input_file):
             c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
                 src, do_imports=True, filename=input_file,
-                link_objects_out=sibling_cpp_objs)
+                link_objects_out=sibling_cpp_objs, auto_gpu=auto_gpu)
         else:
-            c_code = gimple_codegen.compile_to_gimple_cached(src, do_imports=True, filename=input_file)
+            c_code = gimple_codegen.compile_to_gimple_cached(
+                src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
         ci_file = f"{basename}.ci"
         with open(ci_file, "w") as f:
             f.write(c_code)
@@ -874,6 +915,11 @@ def main():
     backend_explicit = _backend_was_explicit(sys.argv[1:])
     backend, rest = _extract_backend(rest)
     formal, prove, rest = _extract_formal_flags(rest)
+    # --no-gpu: turn off auto-offload of recognised parallel loop nests. Marked
+    # @gpu/@kernel code is unaffected. Extracted here, alongside the other
+    # flags, so it is stripped from argv before `program_args = sys.argv[2:]`
+    # and never reaches the executed program as an argument of its own.
+    auto_gpu, rest = _extract_gpu_flags(rest)
     if formal and not backend_explicit:
         # --formal alone means the arm64 formal backend, but an explicit
         # --backend wins: `build --formal --backend=x86_64` is how the x86-64
@@ -1063,7 +1109,8 @@ def main():
 
     # If JIT requested, compile and execute
     if jit:
-        ok = jit_compile_and_execute(input_file, src, opt_flag, debug_flag, program_args)
+        ok = jit_compile_and_execute(input_file, src, opt_flag, debug_flag,
+                                     program_args, auto_gpu=auto_gpu)
         sys.exit(0 if ok else 1)
 
     # If build requested, compile to executable. backend='arm64' routes through
@@ -1078,13 +1125,15 @@ def main():
                 arch=backend))
         try:
             import driver
-            rc = driver.compile_program(input_file, src, output=build_output,
-                                        run=False, opt_flag=opt_flag, debug_flag=debug_flag)
+            rc = driver.compile_program(
+                input_file, src, output=build_output, run=False,
+                opt_flag=opt_flag, debug_flag=debug_flag, auto_gpu=auto_gpu)
         except Exception:
             rc = None
         if rc is None:
             success = build_executable(input_file, src, output=build_output,
-                                       opt_flag=opt_flag, debug_flag=debug_flag)
+                                       opt_flag=opt_flag, debug_flag=debug_flag,
+                                       auto_gpu=auto_gpu)
             rc = 0 if success else 1
         sys.exit(rc)
 
@@ -1110,7 +1159,8 @@ def main():
             return
         try:
             import gimple_codegen
-            c_code = gimple_codegen.compile_to_gimple(src, do_imports=True, filename=input_file)
+            c_code = gimple_codegen.compile_to_gimple(
+                src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
             with open(f"{basename}.ci", "w") as f:
                 f.write(c_code)
             print(f"✓ Generated {basename}.ci (transitive closure)", file=sys.stderr)
@@ -1187,7 +1237,9 @@ def main():
             # arm64 backend: skip gimple .ci entirely (no gimple_codegen import).
             if backend != 'arm64':
                 try:
-                    c_code = gimple_codegen.compile_to_gimple(src, do_imports=False, filename=input_file)
+                    c_code = gimple_codegen.compile_to_gimple(
+                        src, do_imports=False, filename=input_file,
+                        auto_gpu=auto_gpu)
                 except Exception as e:
                     print(f"compile_to_gimple failed: {e}", file=sys.stderr)
                     import traceback; traceback.print_exc(file=sys.stderr)
@@ -1244,9 +1296,10 @@ def main():
                 prove, run_it=True, arch=backend))
         try:
             import driver
-            rc = driver.compile_program(input_file, src, run=True,
-                                        opt_flag=opt_flag, debug_flag=debug_flag,
-                                        program_args=program_args)
+            rc = driver.compile_program(
+                input_file, src, run=True, opt_flag=opt_flag,
+                debug_flag=debug_flag, program_args=program_args,
+                auto_gpu=auto_gpu)
         except Exception as e:
             print(f"driver error, interpreting instead: {e}", file=sys.stderr)
             rc = None
