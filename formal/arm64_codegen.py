@@ -3912,6 +3912,72 @@ class ARM64Codegen:
         self._emit_call(F.CallExpr(func=F.IdentExpr(name="printf"),
                                    args=[F.StringLiteral(fmt)] + operands))
 
+    def _emit_debug_assert(self, e: F.CallExpr) -> None:
+        """`debug_assert(cond, *messages)` — evaluate `cond`, and on falsy exit.
+
+        The same SHAPE as the `AssertStmt` arm, and deliberately: that arm's own
+        comment says the nonzero exit status is the signal and the message is
+        not formatted, which is also true here — this backend has one output
+        stream and the interpreter's contract for a failed assert is an
+        `AssertionError`, whose observable part is the status. What differs is
+        that this one is a CALL (`debug_assert(cond, m)` reaches here, not the
+        statement form), so it has to handle the arguments, and it has to
+        refuse a bracket it cannot bind.
+
+        The message arguments are EVALUATED on the failing path only. That is
+        not a shortcut: they are ordinary argument expressions, so evaluating
+        them is what keeps a side effect from being dropped, and a program whose
+        condition HOLDS never evaluates them because the real `debug_assert`
+        does not either — its own docstring says so ("make sure there are no
+        side effects in your message and condition expressions", which is
+        exactly why that is true). Formatting them is
+        `FORMAL_string_value_model.md`'s question and not this one's; see
+        `model.debug_assert_is_call`.
+
+        The condition is evaluated through `_emit_truthy_word`, so the empty
+        string and the empty list are falsy for the reason they are elsewhere
+        rather than by a null test.
+        """
+        bracket_why = M.debug_assert_bracket_refusal(e.func)
+        if bracket_why is not None:
+            raise CodegenError(bracket_why)
+        args = list(e.args)
+        if e.kwargs:
+            raise CodegenError(
+                f"debug_assert() takes no keyword arguments on the formal "
+                f"arm64 path (got {[k for k, _v in e.kwargs]}); the only "
+                f"keyword the builtin declares is `location`, which is a "
+                f"source location for a diagnostic this path does not format")
+        if not args:
+            raise CodegenError(
+                "debug_assert() takes the condition as its first argument, and "
+                "got none: there is nothing to test, and lowering the empty call "
+                "as a check that always passes would be an assert that can "
+                "never fail, which is a program whose assertion says nothing")
+        self._emit_truthy_word(args[0])
+        self.asm.emit(encode_cmp_xn_imm(0, 0))
+        self._assert_counter += 1
+        aid = self._assert_counter
+        fail_label = f"{self.func_name}_assert{aid}_fail"
+        ok_label = f"{self.func_name}_assert{aid}_ok"
+        self.asm.emit(encode_cbz_xn(0, 0))
+        self.asm.emit_label_rel(fail_label, here_offset=-4)
+        self._emit_b_to(ok_label)
+        self.asm.label(fail_label)
+        # The messages, for their effects, and only on the path that exits —
+        # so a program that passes pays nothing for them and a program that
+        # fails runs exactly the expressions the source wrote.
+        for msg in args[1:]:
+            self._emit_expr(msg)
+        # Darwin arm64 exit(1): x16 = SYS_exit, x0 = status, svc #0x80. The
+        # same three instructions `AssertStmt` and `RaiseStmt` emit, so the
+        # status a failed `debug_assert` leaves behind is the one every other
+        # failing check on this path leaves behind.
+        self.asm.emit(encode_movz_xd_imm(0, 1))
+        self.asm.emit(encode_movz_xd_imm(16, 1))
+        self.asm.emit(encode_svc(0x80))
+        self.asm.label(ok_label)
+
     # ── methods on a value ───────────────────────────────────────────────
 
     def _is_value_receiver(self, obj) -> bool:
@@ -5749,6 +5815,18 @@ class ARM64Codegen:
         # the format the source wrote, not `print`.
         ext_return = None
         is_extern_call = M.is_external_call_template(e.func)
+        # `debug_assert` — a builtin of the LANGUAGE, intercepted before
+        # `_callee_symbol` for the same reason `external_call` is: it is not a
+        # symbol on this link line, and left to the extern path it became a
+        # `BL debug_assert` that nothing defines. BEFORE `_callee_symbol`
+        # rather than beside the `print` arm because the BRACKETED spelling is
+        # the one this backend's reader cannot flatten at all — x86-64's
+        # `_callee_symbol` has no `SubscriptExpr` arm — so asking the shared
+        # predicate on the CALL is what lets the two architectures answer the
+        # same question about the same call. One predicate, two arms.
+        if not is_extern_call and M.debug_assert_is_call(e):
+            self._emit_debug_assert(e)
+            return
         if is_extern_call:
             symbol, ext_return, why = M.external_call_spec(e.func)
             if why is not None:

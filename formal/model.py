@@ -6079,6 +6079,10 @@ def _article_join(items) -> str:
 # it passed the mode STRING as the flags word.
 BUILTIN_FUNCTIONS = {
     "open": "file_open",
+    # `debug_assert` is here rather than in an emitter's own `if name == ...`
+    # arm because BOTH spellings have to be recognised by the SAME rule and the
+    # rule is a language fact: see `debug_assert_call` and `debug_assert_is_call`.
+    "debug_assert": "debug_assert",
 }
 
 
@@ -6086,6 +6090,137 @@ def builtin_function(name: str):
     """How a call to the bare name `name` lowers, or None if it is not one of
     the builtins this model represents."""
     return BUILTIN_FUNCTIONS.get(name)
+
+
+# ── `debug_assert` ──────────────────────────────────────────────────────────
+#
+# A builtin of the LANGUAGE, in `myinterpreter.py:3010` in six lines, with no
+# lowering at all on either backend. Both spellings failed, for two unrelated
+# reasons, and neither of them was about the brackets:
+#
+#   * `debug_assert(cond, msg)` fell through every check and emitted a
+#     `BL debug_assert` — an extern nothing defines. The link audit caught the
+#     dangling symbol, so it was a refusal rather than a wrong image, but it
+#     caught it by ordering accident, and 33 of the call sites in the new-modular
+#     stdlib are spelled this way.
+#   * `debug_assert[assert_mode="safe"](cond, msg)` was refused by
+#     `specialization_call_refusal`, which is TRUE in general (a bracket needs a
+#     declaration to bind to, and there is none) and FALSE here: `debug_assert`
+#     is a builtin, so its declaration is a fact of the language rather than
+#     something this image has to compile.
+#
+# WHAT IT MEANS, and it is small: evaluate the condition; on falsy, report and
+# exit non-zero. The interpreter's version raises `AssertionError`, so the
+# observable contract is the exit status and a message on stderr — and this
+# backend has one output stream, so the status is the whole of what it can
+# carry, exactly as it is for `AssertStmt` (whose arm says the same thing about
+# its own message: "the nonzero exit status is the signal").
+#
+# WHAT IS NOT HERE, and each omission is a decision rather than a gap:
+#
+#   * `assert_mode`. The real `debug_assert` runs only when the ASSERT mode
+#     matches, so `assert_mode="none"` (the DEFAULT) means the check is COMPILED
+#     OUT and `assert_mode="safe"` means it is on. This path has no `ASSERT`
+#     build setting to resolve that against, so the bracket cannot select
+#     between them. It is read as the comptime argument it is and the check is
+#     emitted either way: a lowered `debug_assert` that fires is the interpreter's
+#     answer for every program written for this engine, and one that is silently
+#     DROPPED is the `specialization_call_refusal` failure mode this section
+#     exists to end. Refusing the bracket instead would have bought the same
+#     refusal as before with a longer message.
+#   * the variadic messages. `*messages: *Ts` with `write_to` on each element is
+#     a variadic of values and belongs to `FORMAL_string_value_model.md`. The
+#     arguments are still EVALUATED (they are ordinary Python argument
+#     expressions, and evaluating them is what keeps a side effect from being
+#     dropped), but nothing is formatted from them. `bugs/FORMAL_ast_module_
+#     subset.md` and `FORMAL_known_limits.md` §1.1 are that neighbourhood.
+#
+# The two spellings are ONE construct with one predicate, because two private
+# copies of "is this a debug_assert call" is how two architectures come to
+# disagree about one call — which has happened on this backend more than once
+# (see `run_cpython_pair_case`'s docstring).
+
+# The bracket parameters `debug_assert` declares, as `std/builtin/debug_assert.mojo`
+# declares them. Named because the bracket has to BIND against a declaration, and
+# an unknown parameter name is a different call than the one this lowers: it is
+# the refusal below rather than a silent accept of whatever the source wrote.
+DEBUG_ASSERT_COMPTIME_PARAMS = ("assert_mode", "cpu_only", "_use_compiler_assume")
+
+
+def debug_assert_callee(func) -> bool:
+    """Whether `func`, a call's CALLEE, is `debug_assert` in either spelling.
+
+    `debug_assert(cond, m)` and `debug_assert[assert_mode="safe"](cond, m)` are
+    one construct: the bracket binds the builtin's comptime parameters and does
+    not change what the call does on this path.
+
+    Split out from `debug_assert_is_call` because `build.py`'s bracketed-callee
+    scan holds the SUBSCRIPT and has no parent to find the call through, so it
+    cannot ask the call-level question — and a reader who found only the
+    call-level one would re-derive this rule beside it, which is how two
+    architectures come to disagree about one construct.
+    """
+    if isinstance(func, F.IdentExpr):
+        return func.name == "debug_assert"
+    if isinstance(func, F.SubscriptExpr):
+        base = func.obj
+        return isinstance(base, F.IdentExpr) and base.name == "debug_assert"
+    return False
+
+
+def debug_assert_is_call(call) -> bool:
+    """Whether `call` is a call to `debug_assert`, in EITHER spelling.
+
+    The one entry point for a caller that holds the CALL. Keyed on the call
+    rather than on a callee name because `iter_nodes` has no parent, and a
+    name-based test would also match `len(debug_assert)`, which is not this
+    construct.
+    """
+    func = getattr(call, "func", None)
+    if func is None:
+        return False
+    return debug_assert_callee(func)
+
+
+def debug_assert_bracket_refusal(func) -> str | None:
+    """Why `debug_assert[…]` cannot bind its brackets, or None when they can.
+
+    Asked by BOTH backends and by `build.py`'s bracketed-callee scan, and it is
+    the one place that decides, because the failure it prevents is the exact one
+    `specialization_call_refusal` was written for: a bracket the build cannot
+    account for would otherwise be dropped, and `debug_assert[assert_mode="safe"]`
+    dropping its bracket is the same silently-wrong image as `plain[3](5)`
+    emitted as `plain(5)`.
+
+    A bracket is refused when it binds a parameter `debug_assert` does not
+    declare, or when it is a POSITIONAL bracket — `debug_assert[Int](c, m)`.
+    Positional is refused rather than read as `assert_mode` because the
+    declaration puts `Cond` first and a type is not a value; accepting it would
+    mean inventing a binding the language does not have.
+    """
+    if not isinstance(func, F.SubscriptExpr):
+        return None
+    base = func.obj
+    if not (isinstance(base, F.IdentExpr) and base.name == "debug_assert"):
+        return None
+    attrs = getattr(func, "attrs", None)
+    if attrs is None:
+        return (f"debug_assert[…] binds its brackets positionally, and this "
+                f"path cannot bind them: `assert_mode`, `cpu_only` and "
+                f"`_use_compiler_assume` are the parameters `debug_assert` "
+                f"declares, and a positional bracket has no declaration to "
+                f"bind against here. Write the bracket by name "
+                f"(`debug_assert[assert_mode=\"safe\"](…)`), which is the "
+                f"spelling every call site in the stdlib uses")
+    for name, _value in attrs:
+        if name not in DEBUG_ASSERT_COMPTIME_PARAMS:
+            return (f"debug_assert[…] binds {name!r}, which is not a parameter "
+                    f"of `debug_assert`: the builtin declares "
+                    f"{', '.join(DEBUG_ASSERT_COMPTIME_PARAMS)}. Refused rather "
+                    f"than ignored, because a bracket this path cannot account "
+                    f"for is dropped silently and a dropped bracket is a call "
+                    f"that returns an answer the source never wrote")
+    return None
 
 
 # ── Where a frame ADDRESS may be handed off, and why not ───────────────────
@@ -6233,6 +6368,23 @@ FRAME_VALUE_ONLY_CALLS = {
     "list", "dict", "set", "tuple", "slice", "range", "enumerate", "zip",
     "sorted", "reversed", "sum", "min", "max", "abs", "round", "divmod",
     "chr", "ord", "hex", "oct", "bin", "any", "all",
+    # `debug_assert` is here rather than in `FRAME_VARIADIC_BUILTIN_CALLS`
+    # beside `print`, and the two rows answer DIFFERENT questions about it, so
+    # the placement is worth stating. It is a builtin that reads the VALUE it is
+    # handed — the CONDITION's truthiness, via `_emit_truthy_word` — so a frame
+    # address is a category error for the first argument exactly as it is for
+    # `len`: what would be tested is the ADDRESS. Its MESSAGE arguments are the
+    # variadic half, but this path does not format them yet (see
+    # `debug_assert_is_call`), so a frame there is not yet rendering as a
+    # decimal address, and putting the name in the variadic set would refuse a
+    # shape on the strength of a formatting that does not exist yet.
+    #
+    # Measured: without this row `std/collections/interval.mojo`'s
+    # `debug_assert(self.overlaps(other), "…'", self, "' and '", other, "'")`
+    # was refused as "`debug_assert()` … is a name with no definition in hand in
+    # this image", which is false — it is a builtin this path compiles, and the
+    # refusal sent the reader looking for a missing callee.
+    "debug_assert",
 }
 
 # Calls by bare name that reach the C library and take the struct's STORAGE —

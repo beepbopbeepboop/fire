@@ -575,18 +575,50 @@ def imported_modules(stmts) -> list:
     module `a.b`; the alias and the imported names do not change which module
     has to be built. `extra` carries `import a, b, c`'s additional names.
 
+    A FUNCTION-LOCAL import is collected too, and the reason is that the
+    exclusion below is about CONDITIONALS, not about nesting: `import x` at
+    column 0 and `import x` inside a `def` are both unconditional statements of
+    their block, and the callee they bind is on the link line either way.
+
+    Measured: `test_runtime_header_scan.py:67` writes
+
+        def exports(header):
+            import reflect
+            return {e['name'] for e in
+                    reflect.collect_runtime_exports_h(...)}
+
+    and the local import was not seen at all, so `reflect` reached
+    `check_module_symbols` as a bare name with nothing to place it and the file
+    was refused with
+
+        exports: 'reflect' has no home: this module declares no module-level
+        name by that spelling, and the reading function declares no local or
+    parameter by it either. This path places a name in a register or a spill
+    slot allocated for THIS function […]
+
+    which is FALSE in a way a reader cannot check: `reflect` is a module-level
+    name of ANOTHER module, and the walk asked the wrong question because the
+    name it never found is the answer. Hoisting the same import to column 0
+    changes the message to the true one ("imports 'reflect', which cannot be
+    built either: … importlib, which is a host module"), which is the whole
+    diagnosis in one line and moves the file out of the `codegen` class it does
+    not belong in.
+
     Two kinds of import are deliberately NOT dependencies, and both exclusions
     belong here rather than at each call site, because every consumer of this
     list wants the same answer:
 
       * a semantically inert import (`from __future__ import annotations` — see
         `INERT_MODULES`), which binds nothing and emits nothing;
-      * anything nested inside an `if`/`try` body, which is not a top-level
-        statement and so is never seen. A `TYPE_CHECKING` block, an
+      * anything nested inside an `if`/`try` body. A `TYPE_CHECKING` block, an
         `if sys.version_info` arm and a guarded `try: import x except
         ImportError` are inert for the same underlying reason — the name is not
         unconditionally required — and excluding them structurally means the
         rule cannot go stale as new spellings appear.
+
+    So the walk descends into a function body and stops at a conditional, and
+    `test_guarded_imports_stay_inert` pins both halves: it asserts a guarded
+    import inside a function body is still inert, not just one at module level.
 
     What is left is exactly "what must be on the link line for this file".
     """
@@ -607,6 +639,16 @@ def imported_modules(stmts) -> list:
                     and not _is_inert_module(m)
                     and not is_frontend_provided(m)):
                 out.append(m)
+        elif isinstance(st, F.FunctionDef):
+            # Into the BODY, and nowhere else. `elif`, not `if`: a
+            # `ClassDef`/`StructDef` body is a class body, where `import` has
+            # the same conditional-or-not question a function body's does —
+            # but this walk has no reason to reach it and adding it is a
+            # second question, not this one. An `If`/`Try` is deliberately NOT
+            # descended, which is the whole exclusion the docstring states.
+            for m in imported_modules(getattr(st, "body", None) or []):
+                if m not in out:
+                    out.append(m)
     return out
 
 
