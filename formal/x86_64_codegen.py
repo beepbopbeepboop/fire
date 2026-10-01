@@ -990,6 +990,27 @@ class X86_64Codegen:
             self.asm.emit(encode_mov_r64_rm64(dst, Reg.RBP,
                                               self._spill_off(name)))
             return
+        # A TYPE name read as a value is the FOURTH place a name's value comes
+        # from, after the three above, and it is asked HERE — at the end, where
+        # the immediate-0 fall-through used to be — for two reasons. It is the
+        # only reader of "does this name have a home" in the file, so putting
+        # the tag anywhere earlier would mean a second one: measured, an arm in
+        # `_emit_expr` before `_load_var` made `var Int = 7; printf("%d", Int)`
+        # print the TAG of the type `Int` instead of the local's 7, silently
+        # and on every such program. And a type has no home by definition, so
+        # "no home" and "is a type" are not in competition here — they are the
+        # same observation read twice.
+        #
+        # Asked of the shared model reader so this architecture and arm64
+        # cannot answer `t == Int32` differently, which for a tag is not a
+        # diagnostic that differs but a comparison that comes out one way on one
+        # side. `formal/build.py` places the name in a pre-pass, so a type
+        # reaching here is a route that pass does not model, and the tag is
+        # still the answer rather than the fall-through.
+        tag = M.type_tag_for_name(name)
+        if tag is not None:
+            self._emit_mov_imm(dst, tag)
+            return
         raise CodegenError(self._no_home(name))
 
     def _no_home(self, name: str) -> str:
@@ -3858,6 +3879,23 @@ class X86_64Codegen:
             return
 
         if isinstance(expr, F.MemberExpr):
+            # `DType.<member>` is a VALUE naming a type — `dtype == DType.int32`
+            # is how `std/testing/prop/random.mojo:304` asks a question — and
+            # the value is the member's tag, the same word the bare `Int32` is.
+            # Asked BEFORE the member path below, which would look for a frame
+            # slot named `DType.int32`, find none, and read the field as 0 —
+            # which is a wrong answer rather than a refusal, and the one this
+            # whole path is arranged to avoid.
+            tag = M.type_value_tag(expr)
+            if tag is not None:
+                self._emit_mov_imm(Reg.RAX, tag)
+                return
+            if M.is_dtype_member_access(expr):
+                # `DType.float8_e4m3fn` and its siblings: a real Mojo type whose
+                # NAME is in no table on this path, so there is no tag to
+                # compute. Refused by name here, because the arm below reads the
+                # field as 0 — a wrong answer rather than a refusal.
+                raise CodegenError(M.dtype_member_refusal("DType", expr.member))
             # A receiver FIELD of a by-reference struct is real memory:
             # `mov rax, [holder + 8*slot]`. Anything else has no object model
             # here — evaluate the base for its side effects, read the field as

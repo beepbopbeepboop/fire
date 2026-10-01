@@ -4867,6 +4867,45 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # template that is not exported is two different facts.
         bracket_callees = _bracket_callee_roots(fn.body)
         bracket_callees -= set(bracketed)
+        # A TYPE name in a VALUE position is a compile-time constant whose value
+        # is the type's TAG, so it has a home — the same one a folded
+        # module-level constant has, which is the fourth of the four this walk
+        # already accepts, and both backends materialise it where they
+        # materialise the others. `bugs/FORMAL_type_name_as_a_value.md` is the
+        # long form; `model.TYPE_VALUE_NAMES` is the name space and
+        # `model.type_value_tag` the one reader both backends ask, so the two
+        # architectures cannot disagree about what a type is.
+        #
+        # `DType.<member>` is collected FIRST and by node identity, because
+        # `iter_nodes` has no parent and the walk only ever sees the `DType`
+        # IdentExpr: the value there is the MEMBER's tag, not the tag of a type
+        # called `DType`, so the base is placed as part of the member rather
+        # than as a name in its own right. A member with no tag (the float8
+        # family) is refused HERE, by the member's name, so that the two
+        # diagnostics that are about types stay apart: a bare `DType` is the
+        # type OF a type and `model.dtype_object_refusal` says so.
+        dtype_members = {}
+        for sub in M.iter_nodes(fn.body):
+            if M.is_dtype_member_access(sub):
+                dtype_members[id(sub.obj)] = sub.member
+        # A name that is the BASE of a subscript is not read as a value, and
+        # this is the case that says so. `List[Self.T]()` and
+        # `rebind[Scalar[dtype]](…)` are type APPLICATIONS — the bracket is the
+        # type's argument list and the base names the symbol the call dispatches
+        # on — so the base has no tag, and asking `type_value_tag` about it
+        # would hand `List` a value and let this walk walk past the one question
+        # it should be asking. Measured: with the tag asked unconditionally,
+        # `std/collections/binary_heap.mojo` stopped being refused at
+        # `BinaryHeap___init__: 'List' has no home` and its next refusal moved
+        # to a LATER FUNCTION, which is the signature of a construct that has
+        # stopped being examined rather than one that has been answered. Whether
+        # a bracketed callee is answerable is a different question with its own
+        # answer (`model.subscript_callee_names`), and this arm must not
+        # pre-empt it in either direction.
+        subscript_bases = set()
+        for sub in M.iter_nodes(fn.body):
+            if isinstance(sub, F.SubscriptExpr) and isinstance(sub.obj, F.IdentExpr):
+                subscript_bases.add(id(sub.obj))
         for node in M.iter_nodes(fn.body):
             if not isinstance(node, F.IdentExpr):
                 continue
@@ -4889,6 +4928,23 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                     or M.module_constant_literal(name) is not None \
                     or M.name_resolves_without_a_local(name):
                 continue
+            member = dtype_members.get(id(node))
+            if member is not None:
+                if M.dtype_member_is_a_type(member):
+                    continue
+                raise CodegenError(M.dtype_member_refusal(name, member))
+            if id(node) not in subscript_bases \
+                    and M.type_value_tag(node) is not None:
+                continue
+            if name == "DType":
+                # The one type name that is not a type as a value. Asked here
+                # rather than left to the fallback below, because the fallback's
+                # sentence — "no local or parameter by that spelling … read out
+                # of whatever register the allocator left behind" — is false
+                # about it: there is no register question here at all. AFTER the
+                # local check above, so a function that binds its own `DType`
+                # still reads its own.
+                raise CodegenError(M.dtype_object_refusal(name))
             if "." in name and name.split(".", 1)[0] in holders:
                 continue
             if name.startswith(M.MLIR_DIALECT_PREFIX):
