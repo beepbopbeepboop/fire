@@ -2759,7 +2759,15 @@ class X86_64Codegen:
         self.asm.emit(encode_mov_r64_r64(Reg.R9, Reg.RAX))
         self.asm.emit(encode_mov_r64_r64(Reg.R8, Reg.R11))
         self.asm.emit(encode_test_r64_r64(Reg.R8, Reg.R8))
-        abs_label = f"{self.func_name}_rabs"
+        # The rid-suffixed `abs_label` above, and NOT a bare `_rabs`: the
+        # label table keeps one address per NAME, so a shared name silently
+        # re-points every earlier `jge` at the LAST range()'s block — and that
+        # block ends in `jmp <that range's div_label>`, so the earlier range's
+        # control flow continues into the later one's materialization. Its blob
+        # is then never built, its base never stored, and the loop that meant
+        # to walk it walks a register nothing wrote. Two `range()` calls in one
+        # function is what it takes: a nested comprehension whose inner
+        # iterable is a range() is the shape that has both.
         self._emit_jcc(COND_GE, abs_label)
         self.asm.emit(encode_neg_r64(Reg.R8))
         self.asm.label(abs_label)
