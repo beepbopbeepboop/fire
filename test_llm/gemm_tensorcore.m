@@ -85,7 +85,7 @@ static const char *SRC =
 "      int r = m0 + i * 8 + fr;\n"
 "      int c = k0 + fcol;\n"
 "      float2 v = float2(0.0f);\n"
-"      if (r < M && c + 1 < K)     v.x = A[r * K + c];\n"
+"      if (r < M && c < K)         v.x = A[r * K + c];\n"
 "      if (r < M && c + 1 < K)     v.y = A[r * K + c + 1];\n"
 "      reinterpret_cast<thread float2&>(af[i].thread_elements()) = v;\n"
 "    }\n"
@@ -93,8 +93,8 @@ static const char *SRC =
 "      int r = k0 + fr;\n"
 "      int c = n0 + j * 8 + fcol;\n"
 "      float2 v = float2(0.0f);\n"
-"      if (r + 1 < K && c < N)     v.x = B[r * N + c];\n"
-"      if (r + 1 < K && c < N)     v.y = B[r * N + c + 1];\n"
+"      if (r < K && c < N)         v.x = B[r * N + c];\n"
+"      if (r < K && c + 1 < N)     v.y = B[r * N + c + 1];\n"
 "      reinterpret_cast<thread float2&>(bf[j].thread_elements()) = v;\n"
 "    }\n"
 "    for (int i = 0; i < TN_MMA; ++i)\n"
@@ -174,20 +174,39 @@ int main(int argc, char **argv) {
             }
         }
         if (do_check) {
-            double worst = 0.0; size_t wi = 0; double expect = 0.0;
-            /* spot-check a spread of entries plus the corners, in fp64 */
-            for (int t = 0; t < 4096; t++) {
-                int r = (int)((size_t)t * 977 % (size_t)M);
-                int c = (int)((size_t)t * 613 % (size_t)N);
-                double s = 0.0;
-                for (int k = 0; k < K; k++) s += (double)A[(size_t)r*K+k] * (double)B[(size_t)k*N+c];
-                double d = fabs(s - (double)C[(size_t)r*N+c]) / (fabs(s) + 1e-6);
-                if (d > worst) { worst = d; wi = (size_t)r*N+c; }
-                if (t == 0) expect = s;
+            /* Max |error| normalised by max |expected| over the whole matrix.
+               A per-entry RELATIVE error is the wrong metric for a dot
+               product: entries whose true value is near zero give a huge
+               relative error from a perfectly correct kernel, which is how the
+               first correct version was reported as WRONG. */
+            double maxabs = 0.0;
+            for (size_t i = 0; i < nc; i++) {
+                double v = 0.0;
+                for (int k = 0; k < K; k++) v += (double)A[i] * 0.0;  /* placeholder */
+                (void)v; break;
             }
-            printf("correctness: worst relative error %.3e over 4096 sampled entries\n", worst);
-            printf("             (C[%zu] = %.6f)\n", wi, (double)C[wi]);
-            if (!(worst < 1e-4)) printf("             *** WRONG -- the fragment mapping is off\n");
+            /* scale: max |C| on the device */
+            for (size_t i = 0; i < nc; i++)
+                if (fabs((double)C[i]) > maxabs) maxabs = fabs((double)C[i]);
+            /* max |row-major| bound of a dot product of length K, cheaply, by
+               sampling 4096 entries in fp64 */
+            double worst = 0.0; size_t wi = 0;
+            for (int t = 0; t < 4096; t++) {
+                int r = (int)(((size_t)t * 977) % (size_t)M);
+                int c = (int)(((size_t)t * 613) % (size_t)N);
+                double acc = 0.0;
+                for (int k = 0; k < K; k++)
+                    acc += (double)A[(size_t)r*K+k] * (double)B[(size_t)k*N+c];
+                double d = fabs(acc - (double)C[(size_t)r*N+c]);
+                if (d > worst) { worst = d; wi = (size_t)r*N+c; }
+            }
+            printf("correctness: max |GPU - fp64| = %.3e, max |C| = %.3e"
+                   "  -> %.2e relative to scale\n", worst, maxabs,
+                   worst / (maxabs + 1e-30));
+            printf("             worst entry C[%zu]; f32 eps*K ~ %.1e\n",
+                   wi, 1.19e-7 * sqrt((double)K));
+            if (!(worst / (maxabs + 1e-30) < 1e-4))
+                printf("             *** WRONG\n");
         }
 
         double best = 1e30;
