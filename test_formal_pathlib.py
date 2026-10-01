@@ -123,6 +123,14 @@ MATCHES = [
     ("/", "*"), (".", "*"), ("", "a"), ("a/..", "*"),
     ("dir/f.txt", "*.txt"), ("dir/sub/f.txt", "dir/*.txt"),
     ("a/b/c/d.tar.gz", "*.gz"), ("a/b/c", "**/c"), ("x", "**/x"),
+    # An unterminated `[` is a LITERAL `[`, and a `-` immediately before the
+    # closing `]` is a literal `-` rather than half a range. Both were answered
+    # 0 here before the matcher moved to `formal/hostmods/fnmatch.mojo` — the
+    # walk ran past the end of the set and then called it unterminated — and
+    # both are in this corpus because the corpus is what noticed.
+    ("a[", "a["), ("[", "["), ("a[b", "a[b"), ("a", "a["), ("[abc", "[abc"),
+    ("[a", "[a"), ("a.b", "a["), ("[", "[!"), ("-", "[a-]"), ("a-", "[a-]"),
+    ("-", "[--0]"), ("b", "[a-]b"), ("-", "[a-c-]"), ("a", "[!a-]"),
 ]
 
 

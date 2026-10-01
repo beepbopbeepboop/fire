@@ -186,7 +186,19 @@ HOST_MODELLED = frozenset((
     #     pathlib has and `os.path` has no name for, and the names `os.path`
     #     already answers are NOT answered again there — see the module's own
     #     docstring, which names each one.
-    "glob", "fnmatch", "secrets", "uuid",
+    #   `fnmatch`  — `formal/hostmods/fnmatch.mojo`, checked answer for answer
+    #     against CPython's own `fnmatch` by `test_formal_fnmatch.py`: the
+    #     bracket set, the range, the negation, the literal `]` first, the
+    #     unterminated `[`, and the two spellings CPython has (`fnmatch` and
+    #     `fnmatchcase`, one function on a POSIX target because `normcase` is
+    #     the identity). It is worth one paragraph rather than one line because
+    #     its matcher is not its own: `pathlib.mojo`'s `match_seg` calls
+    #     `match_core` here with the flag that keeps `*` inside a component, so
+    #     the tree has ONE bracket matcher instead of two. What it cannot answer
+    #     is written at the top of the file: `filter`/`filterfalse` are
+    #     sequences, `iglob` is a generator, and `translate` emits a regex
+    #     dialect `re.mojo` does not compile.
+    "glob", "secrets", "uuid",
     #   `ast`  — `formal/hostmods/ast.mojo`, the TOKENIZER and a lexical
     #     validator, not a tree: `parse`, `parse_reason`, `tokenize`,
     #     `tokenize_from`, `token_bound` and `token_name`, with token kinds,
