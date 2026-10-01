@@ -77,3 +77,54 @@ Until one of those lands, 16x16 is the empirically correct choice and is what
 `mojo/middle/offload.py` emits. Do not "improve" it by enlarging the tile, and do
 not start a split-K project on the strength of the occupancy story — that story
 is disproved above.
+
+## The "same slow feed, more work" hypothesis: TESTED, DISPROVEN
+
+Proposed as a fix on the reasoning that if the operand FEED is the bottleneck,
+fanning one loaded tile out to more consumers raises throughput without feeding
+more. Implemented in `test_llm/gemm_fanout_probe.m`: a 64x64 output tile staged
+once per k-step in threadgroup memory, read by 16 SIMDGROUPS each owning a 16x16
+sub-tile and holding only FOUR accumulators — so reuse comes from SHARING, not
+from per-thread register blocking. 2048^3, median of 15, all bit-exact at 512^3:
+
+| kernel | TFLOPS |
+|---|---|
+| fan-out, TKS=8 | 5.74 |
+| fan-out, TKS=32 | 5.95 |
+| **16x16, no staging, no barriers** | **6.64** |
+
+**Disproven: the staged, shared tile is ~10% SLOWER than doing nothing extra.**
+The barriers and the threadgroup-memory round trip cost more than the DRAM traffic
+they save.
+
+The reason is that the premise is false. The 16x16 kernel moves 201 MB in 24 ms
+= **8.4 GB/s against a measured 307.8 GB/s peak** — DRAM traffic is 37x under the
+limit and is therefore not the constraint at all. What the kernel actually
+saturates is the chip's *load-issue* rate (roughly 1.4 TB/s of requests, served
+mostly by cache), which is a per-thread pipeline cost. Staging relocates that
+traffic to shared memory and adds two barriers per k-step on top; it cannot
+remove a cost it is not paying.
+
+So the answer to "more consumers on the same feed" is: on this machine the feed
+is not slow. Note also that `TKS` has a sharp optimum — 32 gives 5.95, but 8 and
+64 both give ~5, because the barrier pair is amortised over only 4 MMAs at TKS=8
+and the staged tile starts costing more than it saves at TKS=64.
+
+## Two methodology errors this probe exposed, both mine
+
+Worth recording because both produced confident nonsense:
+
+1. **An unguarded `#define` made a "sweep" measure one config four times.**
+   `-DTKS=32` could not override the file's own `#define TKS 8`, so four
+   differently-labelled runs were the same kernel, and the differing times were
+   read as a trend. Same shape as the earlier best-of-5 error: a knob that does
+   not reach the thing being measured.
+2. **A wrong kernel measured FASTER, twice.** The staging loop strided by
+   `TN*32` while there were only `NREAD*32` threads, so at TKS=32 it initialised
+   512 of 2048 staged elements and computed on garbage for the rest — 511 of
+   262144 outputs wrong, and "11.50 TFLOPS", the best number seen in the whole
+   project. The bit-exactness check caught both, which is the entire argument for
+   running it on every configuration rather than only the one you trust.
+
+Both apparent wins evaporated on the correctness check. **The best verified
+number remains 9.01 TFLOPS (16x16, four accumulators, no staging).**
