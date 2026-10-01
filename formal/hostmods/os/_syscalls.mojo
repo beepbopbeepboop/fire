@@ -1,7 +1,18 @@
 """The C library this module needs, and nothing else.
 
-Every call into libSystem that `os` and `os.path` make is spelled here, once,
-and nowhere else. Three reasons, in the order they mattered while writing it.
+Every call into libSystem that `os`, `os.path` and `platform` make is spelled
+here, once, and nowhere else. Three reasons, in the order they mattered while
+writing it.
+
+  `platform` is here for the same reason the other two are, and it is worth
+  being explicit about why it is NOT a second copy. `formal/hostmods/
+  platform.mojo` needs the string primitives below for its own reasons — a
+  kernel string lives in a buffer the C library fills and a caller cannot keep
+  — so it imports from here either way, and the moment it did, a second
+  `str_alloc` in `platform.mojo` would be a second implementation of a routine
+  whose whole value is being the same one everywhere. `uname(3)` and
+  `sysctlbyname(3)` therefore joined the set below rather than appearing
+  beside it.
 
 1. A NAME COLLISION IS A SILENT RECURSION. A call is extern exactly when the
    name is not a function of the unit being compiled
@@ -232,6 +243,25 @@ def str_starts(s, p) -> int:
     if strncmp(s, p, str_len(p)) == 0:
         return 1
     return 0
+
+
+def str_cmp(a, b) -> int:
+    """`strcmp(a, b)`: <0, 0 or >0 — the lexicographic order of `a` and `b`.
+
+    Python's `<` on `str` is a compare by CODE POINT and the C library's
+    `strcmp` is a compare by UNSIGNED CHAR, and the two agree on every input a
+    program can hand this: for UTF-8 the byte order IS the code point order,
+    which is what makes UTF-8 self-synchronizing, so `a < b` in Python is
+    `strcmp(a, b) < 0` here for every code point including everything above
+    ASCII.
+
+    This is the one way two strings are ORDERED on this path. `==` and `!=` on
+    two `str` values are refused or wrong (see
+    `bugs/FORMAL_string_equality_of_two_unclassified_words.md`), and `os.path`
+    needed no ordering at all, so this arrived with `platform.system_alias`,
+    which is nothing but two string comparisons and one rewrite.
+    """
+    return strcmp(a, b)
 
 
 
@@ -788,3 +818,133 @@ def fs_free(p) -> int:
     the caller's to keep, and releasing one while a derived string still points
     into it is the caller's decision, not this module's."""
     return free(p)
+
+
+# ── What the KERNEL says, rather than what the filesystem says ───────────────
+#
+# Two C library calls, both of which `formal/hostmods/platform.mojo` needs and
+# both of which belong here for the reason at the top of the file: this is the
+# auditable answer to "what does this backend ask of the operating system".
+#
+#   * `uts_str(field)` is `uname(3)`, which is five NUL-TERMINATED `char[256]`
+#     fields in the caller's buffer. It is read FIELD BY FIELD one byte at a
+#     time for the same reason `struct stat` is (`fs_stat_layout_ok` and the
+#     `ST_DEV` block above): the source declares no struct, so the offsets are
+#     the ABI's, and an offset that is wrong reads a neighbouring field
+#     rather than failing.
+#
+#   * `kern_str(name)` is `sysctlbyname(3)`, the other way to ask the kernel a
+#     question that has no syscall of its own.
+
+def uts_field_bytes() -> int:
+    """The size of one `uname(3)` field on this target: 256.
+
+    MEASURED, not assumed. Five fields at 256 bytes each is what
+    `<sys/utsname.h>` on this SDK declares, and the measured answer agrees:
+    reading a filled `utsname` at offsets 0, 256, 512, 768 and 1024 yields
+    `Darwin`, the node name, the release, the version string and `arm64` —
+    which is `os.uname()`'s own order — and offset 1280 is past the end and
+    empty. It is a FUNCTION rather than a module-level constant because a
+    module-level name is not exported as a word (`formal/hostmods/sys.mojo`'s
+    docstring), and a caller that needs the number has to be able to ask for it.
+    """
+    return 256
+
+
+def uts_str(field) -> str:
+    """Field `field` of `uname(3)`, in a `malloc`'d copy the caller owns.
+
+    `field` is 0 for the system name, 1 for the node name, 2 for the release,
+    3 for the version and 4 for the machine — the order `os.uname()` returns
+    them in, which is the order CPython's `platform.uname()` reads them from.
+
+    A COPY, not an interior pointer. The C library fills a buffer the CALLER
+    supplies, so a pointer into it would hand back something the caller has to
+    keep alive and knows nothing about; a `malloc`'d copy is a string the caller
+    owns and releases with `platform.free_string` (or `os.os_free`, which is the
+    same `free`).
+
+    THE TERMINATOR IS CHECKED, and that check is the reason the field loop
+    exists at all. POSIX says each field is NUL-terminated, so the natural
+    spelling is `str_dup(base + 256 * field)` — and if a field ever were not
+    terminated, `strlen` would walk off the end of a 1280-byte buffer into
+    whatever follows it in the heap and return a number nobody can check. So
+    the field is scanned for its own NUL within its 256 bytes first, and a
+    field without one yields `""`: an honest wrong-looking answer for an
+    impossible layout beats an unbounded read.
+
+    The scan is a one-byte load and is spelled `q: Pointer[UInt8] = f + n`
+    then `q.value()` — an EXPRESSION cannot be asked for a pointee it does not
+    declare, which is the same fact `json.mojo`'s `byte_at` is written around
+    and the reason this is not `(f + n).value()`.
+
+    One `uname(3)` call per invocation, because this path has nowhere to keep
+    the answer between calls (there is no module storage, so CPython's
+    `_uname_cache` has nowhere to live) and a stale kernel answer would be a
+    wrong one anyway.
+    """
+    var w = uts_field_bytes()
+    var b: Pointer[UInt8] = malloc(w * 5)
+    memset(b, 0, w * 5)
+    if uname(b) != 0:
+        free(b)
+        return ""
+    if field < 0:
+        free(b)
+        return ""
+    if field > 4:
+        free(b)
+        return ""
+    var f = b + w * field
+    var n = 0
+    var ok = 0
+    while n < w:
+        var q: Pointer[UInt8] = f + n
+        if q.value() == 0:
+            ok = 1
+            break
+        n = n + 1
+    var out = ""
+    if ok == 1:
+        out = str_copy(str_alloc(n), f, n)
+    free(b)
+    return out
+
+
+def kern_str(name) -> str:
+    """The value of the kernel string MIB `name`, or `""` if there is no such.
+
+    `sysctlbyname(name, …)` with the two-call idiom: ask once with no buffer to
+    learn the size, then once into a buffer of exactly that size. The size is a
+    run-time value, so the buffer cannot be a literal-sized one, and a fixed
+    256 would be a module that silently truncates a long value — which is the
+    failure `time.mojo`'s docstring calls a wrong `time.time()`, and the reason
+    a probe is done here rather than a guess.
+
+    The reported size INCLUDES the terminator, so the returned buffer is cut
+    to one byte shorter: what the kernel wrote is a string and the answer is
+    the string, not the string plus its own length.
+
+    `""` for a name the kernel does not have, which is `sysctlbyname`'s own
+    failure (it returns non-zero and writes nothing) and is also CPython's
+    answer for an unknown version: `platform.mac_ver()` returns `''` when it
+    cannot read the product version. There is no error to raise on this path
+    (FORMAL.md phase 7), and a caller distinguishing "no such name" from "an
+    empty value" is asking a question this target cannot answer.
+    """
+    var np: Pointer[Int64] = malloc(8)
+    np[0] = 0
+    if sysctlbyname(name, 0, np, 0, 0) != 0:
+        free(np)
+        return ""
+    var sz = np[0]
+    if sz < 1:
+        free(np)
+        return ""
+    var v = str_alloc(sz)
+    np[0] = sz
+    var rc = sysctlbyname(name, v, np, 0, 0)
+    free(np)
+    if rc != 0:
+        return v
+    return str_trunc(v, sz - 1)
