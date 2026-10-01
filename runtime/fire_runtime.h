@@ -311,6 +311,36 @@ static inline int64_t mojo_fnptr_call_kw_8(void *fp, void *kw, int64_t _a0, int6
 
 
 
+/* The `double`-returning twin of each helper above. A callee whose real
+ * return type is `double` cannot be called through an `int64_t (*)(...)`
+ * cast and have the value survive: it comes back in an SSE register, not
+ * the general-purpose one the `int64_t` return reads, so the bits are
+ * whatever the ABI happened to leave there (measured: `d = lambda: 1.5;
+ * print(d())` printed 2.1393696074e-314). These are the same helpers with
+ * the real return type, so the call is well-typed and the value arrives.
+ * The codegen picks them only when it knows the callee returns a double —
+ * see `_lower_fnptr_call_value`. */
+static inline double mojo_fnptr_call_d0(void *fp) {
+    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_0((MojoBoundMethod *)fp);
+    return ((double (*)(void))fp)();
+}
+static inline double mojo_fnptr_call_d1(void *fp, int64_t a) {
+    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_1((MojoBoundMethod *)fp, a);
+    return ((double (*)(int64_t))fp)(a);
+}
+static inline double mojo_fnptr_call_d2(void *fp, int64_t a, int64_t b) {
+    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_2((MojoBoundMethod *)fp, a, b);
+    return ((double (*)(int64_t, int64_t))fp)(a, b);
+}
+static inline double mojo_fnptr_call_d3(void *fp, int64_t a, int64_t b, int64_t c) {
+    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_3((MojoBoundMethod *)fp, a, b, c);
+    return ((double (*)(int64_t, int64_t, int64_t))fp)(a, b, c);
+}
+static inline double mojo_fnptr_call_d4(void *fp, int64_t a, int64_t b, int64_t c, int64_t d) {
+    if (mojo_is_bound_method(fp)) return (double)mojo_bound_method_call_4((MojoBoundMethod *)fp, a, b, c, d);
+    return ((double (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
+}
+
 /* Dynamic dispatch through a value that may be EITHER a MojoBoundMethod*
  * or a plain function pointer — the callee identity isn't known
  * statically (a local branch-joined from `lambda`/free-function and a
@@ -579,6 +609,20 @@ void        mojo_list_set_kinds(MojoList *l, const char *kinds);
 const char *mojo_list_get_kinds(MojoList *l);
 char        mojo_list_slot_kind(MojoList *l, int64_t i);
 void        mojo_list_inherit_kinds(MojoList *dst, MojoList *src);
+/* The per-slot kind alphabet, as named constants. A MojoList slot is a raw
+ * int64_t, so anything that ORDERS a list (mojo_list_sort) or READS one has
+ * to be told what a slot holds — comparing the slots as integers orders a
+ * list of strings by ADDRESS, which is non-deterministic across runs and
+ * different from Python's alphabetical order. The call site passes what its
+ * own element-type inference knows; the constants are here so the generated
+ * C reads `mojo_list_sort (l, MOJO_KIND_STR, 0, 0)` instead of a bare
+ * `'p'`, and so a new kind has one definition. */
+#define MOJO_KIND_INT     'i'   /* int64_t (and bool, and None) */
+#define MOJO_KIND_DOUBLE  'd'
+#define MOJO_KIND_BYTES   's'
+#define MOJO_KIND_STR     'p'
+#define MOJO_KIND_LIST    'l'   /* nested container: not totally ordered */
+#define MOJO_KIND_NONE    'n'
 /* A read whose slot index is not known at compile time (`for x in
  * struct.unpack('<if', buf)`, `t[i]`) has to land in ONE C type, and for a
  * heterogeneous list no single accessor is right for every slot. This
@@ -608,6 +652,14 @@ void    mojo_list_append_str(MojoList *l, const char *v);
 
 int64_t mojo_list_get_int(MojoList *l, int64_t i);
 double  mojo_list_get_double(MojoList *l, int64_t i);
+
+/* A double travels as its IEEE-754 BITS inside an int64_t — a list slot, a
+ * box, or the int64_t the homogenized `mojo_fnptr_call_N` helpers return for
+ * a callable value. The one definition of the conversion in each direction.
+ * `mojo_double_from_bits` must not be written as a C cast: `(double)bits` is
+ * the bits' NUMERIC value, not the double they encode. */
+double  mojo_double_from_bits(int64_t bits);
+int64_t mojo_double_to_bits(double v);
 
 int64_t mojo_list_len(MojoList *l);
 
@@ -1091,7 +1143,13 @@ int64_t     mojo_list_pop_at(MojoList *l, int64_t idx);
  * operation with a different refusal on a tuple (see its definition). */
 int64_t     mojo_list_delitem(MojoList *l, int64_t idx);
 void        mojo_list_extend(MojoList *dst, MojoList *src);
-void        mojo_list_sort(MojoList *l);
+/* `l.sort()` in place. `kind` is a MOJO_KIND_* byte for the elements (or for
+ * the KEYS, when `keys` is given), or 0 to let the runtime decide from the
+ * per-slot kinds and then its own discriminator. `keys` is the parallel key
+ * list codegen built for a `key=` call, or NULL. A list with no order (mixed
+ * or nested-container elements) is a TypeError here exactly as it is in
+ * Python — never a silent no-op, which is what this used to be. */
+void        mojo_list_sort(MojoList *l, int kind, int reverse, MojoList *keys);
 void        mojo_list_reverse(MojoList *l);
 void        mojo_list_clear(MojoList *l);
 void        mojo_list_remove_str(MojoList *l, const char *v);
@@ -1411,6 +1469,16 @@ double  mojo_min_double(void *args);
 double mojo_sum_double(void *args);
 /* Python bool repr: "True"/"False", not 1/0. */
 char *mojo_repr_bool(int b);
+
+/* A callable-valued parameter default naming an IMPORTED module's function
+ * (`def probe(x, *, g=os.walk)`) — see the block comment on
+ * mojo_unavailable_callable in fire_runtime.c for why padding it with 0 was a
+ * SIGSEGV and why ONE no-parameter function is the right stub for every
+ * arity. `mojo_set_unavailable_callable_name` arms the name the diagnostic
+ * prints; the codegen emits it immediately before the call it belongs to. */
+void    mojo_set_unavailable_callable_name(const char *name);
+int64_t mojo_unavailable_callable(void);
+void   *mojo_unavailable_callable_ptr(void);
 /* An int64_t used as a C string: itself when it is a boxed char*, else its
    decimal string (see mojo_cstr_or_int_str's comment in the .c). */
 char *mojo_cstr_or_int_str(int64_t v);

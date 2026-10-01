@@ -410,6 +410,30 @@ def _reset_func(gen, body: list = None, params: list = None,
     # Reset per function for the same reason _actual_types is: temp
     # names (_tN) recycle across functions. See _lower_bound_method_value.
     gen._bound_method_ret_types: dict[str, str] = {}
+    # Any callable VALUE (a lambda's `_funcptr_X` static, a bound-method
+    # handle, a struct method taken as a value) -> that callee's real return
+    # type. The `mojo_fnptr_call_N` / `mojo_maybe_bound_call_N` helpers are
+    # the homogenized `int64_t` convention — the RIGHT thing for the box they
+    # hand back — but the CALLEE is the one that knows the type, so a `_Bool`,
+    # a `double` or a `char *` came back widened: `e = lambda: False;
+    # print(e())` printed `0` and `e = lambda: "hi"; print(e())` printed its
+    # own pointer decimal. Recorded where the value is materialized (see
+    # `_lower_LambdaExpr`) and read by `_lower_fnptr_call_value`.
+    # Reset per function for the same reason _bound_method_ret_types is: temp
+    # names (_tN) recycle across functions.
+    gen._callable_ret_types: dict[str, str] = {}
+    # A DICT's lowered value -> the SET of callable return types stored into
+    # it. A dict is the one container whose value type is a single slot, so a
+    # per-key table does not exist; a set of what was stored is enough,
+    # because the consumer (a `d[k](...)` call site) only uses the answer
+    # when it is UNANIMOUS. A dict holding callables of different return
+    # types then keeps the old int64_t answer, which is the pre-existing
+    # behaviour — never a new wrong one. Without any of this, `d['k'] =
+    # lambda: False; print(d['k']())` printed `0`: the callable's return type
+    # was lost at the store, exactly as it was at the call before
+    # `_callable_ret_types` existed.
+    # Reset per function for the same reason as the maps above.
+    gen._dict_callable_ret: dict[str, set] = {}
     # Builtin-container method bound as a first-class VALUE (`append =
     # l.append`, the classic accumulator-aliasing idiom) — key: the C
     # name of the temp/var holding the boxed value; value: (receiver
@@ -2770,13 +2794,25 @@ def _list_repr_call(gen, key: str, lst: str | None = None) -> tuple[str, list]:
     return fn, args
 
 
-def _stringify_value(gen, et: str, ev: str) -> str:
+def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
     """Convert an already-lowered (type, value) pair into a `char *` per
-    Python `str()` semantics. Shared by f-string interpolation and `%`
-    string-formatting's `%s` conversion — both need "stringify this typed
-    value" and previously only f-strings had it inline."""
+    Python `str()` semantics. Shared by f-string interpolation, `%`
+    string-formatting's `%s` conversion and the `str()` builtin — all three
+    need "stringify this typed value" and previously only f-strings had it
+    inline.
+
+    `enode` is the operand's AST node when the caller has it, and is the only
+    way to tell a bool from the int 0/1 it shares a slot with: a bool's
+    lowered C type is a plain `int` here, so `'%s' % (b,)`, `f'{b}'` and
+    `str(b)` all printed `1` for a `b = True` at module scope while the same
+    value inside a `def` (where the name's inferred type IS `_Bool`) printed
+    `True`. See `is_python_bool_expr`."""
     if et == 'char *':
         return ev
+    if enode is not None and et in ('int', 'int64_t') \
+            and gimple_exprtypes.is_python_bool_expr(gen, enode):
+        return gen._call_expr('char *', 'mojo_bool_to_str',
+                              [('int', gen._new_val('int', f'(int){ev}'))])
     # A boxed char* (a string pointer stored in an int64_t var, e.g. a
     # tuple-loop var read via get_str and boxed) — stringify as the string
     # it points to, not its decimal address. Without this, f-strings /
@@ -3647,6 +3683,22 @@ def _compr_set_loop(gen, node, gen0, res, res_type, it_val):
     gen._emit(f"  mojo_set_iter_free ({iter_t});")
 
 
+def note_dict_callable_ret(gen, dict_val: str, value_text: str) -> None:
+    """A callable stored into a dict keeps its return type for a later
+    `d[k](...)` call, which is the one place a dict subscript can be a
+    CALLEE. Called from every dict store of an int64 slot; a non-callable
+    value has no entry in `_callable_ret_types` and is a no-op, which is
+    what keeps this off the hot path."""
+    _rt = gen._callable_ret_types.get(value_text)
+    if not _rt:
+        return
+    _set = gen._dict_callable_ret.get(dict_val)
+    if _set is None:
+        _set = set()
+        gen._dict_callable_ret[dict_val] = _set
+    _set.add(_rt)
+
+
 def _gen_print(gen, args: list, kwargs: list = None):
     # print(..., file=sys.stderr): kwargs used to be silently dropped
     # entirely (the file= expression was never even inspected), so every
@@ -3775,11 +3827,12 @@ def _gen_print(gen, args: list, kwargs: list = None):
         _stat = arg_static[i] if i < len(arg_static) else ''
         # A name recorded as holding a bool (`b = True`): its own static type
         # is the `int` that BoolLiteral lowers to, so the check above cannot
-        # see it. Only `print` consults this set.
+        # see it. Only `print` consults this set — through the one shared
+        # predicate, which a dict store now uses too, so the two cannot
+        # disagree about the same value (they did: `print(b)` said True while
+        # `{'k': b}` printed `{'k': 1}`).
         if _stat != '_Bool' and args and i < len(args):
-            _an = args[i]
-            if (isinstance(_an, gimple_ctypes.IdentExpr)
-                    and _an.name in getattr(gen, '_bool_valued', ())):
+            if gimple_exprtypes.is_python_bool_expr(gen, args[i]):
                 _stat = '_Bool'
         if atype == 'char *':
             gen._emit(f'  {print_fn} ({aval});')

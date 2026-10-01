@@ -2081,10 +2081,28 @@ def _split_expr_format(src: str) -> str:
 
 
 
-def _repr_value(gen, rat: str, rav: str) -> str:
+def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
     """Convert an already-lowered (type, value) pair into a `char *` per
-    Python `repr()` semantics. Shared by the `repr()` builtin and `%r`
-    string-formatting."""
+    Python `repr()` semantics. Shared by the `repr()` builtin, `%r` and an
+    f-string's `!r` conversion.
+
+    `enode` is the operand's AST node when the caller has it, and is the ONLY
+    way a bool is distinguishable from the integer 1/0 it shares a slot with:
+    a bool's C type here is a plain `int` (see `is_python_bool_expr`)."""
+    # `_Bool` FIRST, before every other arm: Python's repr of a bool is
+    # `True`/`False`, and with no arm for it a `_Bool` fell all the way to
+    # the int64_t one and printed `1`/`0` — the right value, the wrong type.
+    # `print()` was already right (`_gen_print`'s `_Bool` arm) and so was
+    # `%s` and `f'{x}'`, which is exactly what let this survive: the obvious
+    # smoke test passes, and the spellings that ship (`repr(x)`, `'%r' % (x,)`,
+    # `f'{x!r}'`, a dict's repr) are the ones that are wrong.
+    # `mojo_repr_bool` takes an `int`, not a `_Bool`, on purpose — this header
+    # is included from the C++20 backend's translation units, where `_Bool`
+    # does not exist — so the cast is the same one the print path makes.
+    if rat == '_Bool' or (enode is not None and rat in ('int', 'int64_t')
+                          and gimple_exprtypes.is_python_bool_expr(gen, enode)):
+        return gen._call_expr('char *', 'mojo_repr_bool',
+                              [('int', gen._new_val('int', f'(int){rav}'))])
     if rat == 'char *':
         return gen._call_expr('char *', 'mojo_repr_str', [('char *', rav)])
     if rat == 'MojoList *':
@@ -2174,17 +2192,23 @@ def _intern_string(gen, escaped: str) -> str:
 
 
 
-def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str) -> str:
+def _format_percent_spec(gen, full_spec: str, conv: str, et: str, ev: str,
+                         enode=None) -> str:
     """Render one %-spec's operand to `char *`, applying any width or
     precision in `full_spec` via a real C sprintf (see _sprintf_one)
-    rather than reimplementing printf-style padding by hand."""
+    rather than reimplementing printf-style padding by hand.
+
+    `enode` is the operand's AST node when the caller has it. It carries the
+    only thing that distinguishes a bool from an int 0/1 — a bool's lowered C
+    type is a plain `int` — so `'%r' % (b,)` has no other way to print True
+    (see `is_python_bool_expr` and `_repr_value`)."""
     if conv == 's':
-        sval = gen._stringify_value(et, ev)
+        sval = gen._stringify_value(et, ev, enode)
         if full_spec == '%s':
             return sval
         return gen._sprintf_one(full_spec[:-1] + 's', sval)
     if conv == 'r':
-        rval = gen._repr_value(et, ev)
+        rval = gen._repr_value(et, ev, enode)
         if full_spec == '%r':
             return rval
         return gen._sprintf_one(full_spec[:-1] + 's', rval)
@@ -2957,8 +2981,9 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         else:
             # See the dict-literal case's identical comment: vt alone
             # can't distinguish a real bool literal from a genuine int.
-            if isinstance(node.key, gimple_ctypes.BoolLiteral):
+            if gimple_exprtypes.is_python_bool_expr(gen, node.key):
                 gen._emit(f"  mojo_mark_dict_bool_values ({res});")
+            gen._note_dict_callable_ret(res, vv)
             vv64 = gen._to_int64(vt, vv)
             gen._emit(f"  mojo_dict_set_int ({res}, {kv}, {vv64});")
 

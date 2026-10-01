@@ -1884,6 +1884,12 @@ class GimpleGen:
         self._param_generator_api: dict = {}
         self._all_async_fn_names: set = set()
         self._bound_method_ret_types: dict = {}
+        # Any callable VALUE -> that callee's real return type; see
+        # emit_infra._reset_func's `_callable_ret_types` entry.
+        self._callable_ret_types: dict = {}
+        # dict value -> set of callable return types stored into it; see
+        # emit_infra._reset_func's `_dict_callable_ret` entry.
+        self._dict_callable_ret: dict = {}
         self._module_int_consts_cache: dict = {}
         self._seen_generator_base_names: dict = {}
         self._cpp_module_fn_asts: dict = {}
@@ -2898,6 +2904,10 @@ class GimpleGen:
         'mojo_dict_items_int':   ('MojoList *', ['MojoDict *']),
         'mojo_sorted':           ('MojoList *', ['void *']),
         'mojo_list_sorted_str':  ('MojoList *', ['MojoList *']),
+        # `l.sort()`: the kind byte is a MOJO_KIND_* alphabet constant and
+        # `keys` is NULL unless a `key=` built one, so the two are passed as
+        # plain C text rather than as a coerced temp.
+        'mojo_list_sort':        ('void', ['MojoList *', 'int', 'int', 'MojoList *']),
         'mojo_set_sorted':       ('MojoList *', ['MojoSet *']),
         'mojo_set_to_list':      ('MojoList *', ['MojoSet *']),
         'mojo_dict_sorted_keys': ('MojoList *', ['MojoDict *']),
@@ -3563,8 +3573,9 @@ class GimpleGen:
         return gmp._lower_method_call(self, node)
     def _lower_dict_method(self, ov: str, method: str, args: list) -> tuple:
         return gmp._lower_dict_method(self, ov, method, args)
-    def _lower_list_method(self, ov: str, method: str, args: list) -> tuple:
-        return gmp._lower_list_method(self, ov, method, args)
+    def _lower_list_method(self, ov: str, method: str, args: list,
+                           kwargs: list = None) -> tuple:
+        return gmp._lower_list_method(self, ov, method, args, kwargs)
     def _lower_set_method(self, ov: str, method: str, args: list) -> tuple:
         return gmp._lower_set_method(self, ov, method, args)
     def _lower_pointer_method(self, ov: str, ot: str, method: str, args: list) -> tuple:
@@ -4320,8 +4331,8 @@ class GimpleGen:
         return ginf._list_repr_fn(self, rav)
     def _list_repr_call(self, key: str, lst: str | None = None) -> tuple[str, list]:
         return ginf._list_repr_call(self, key, lst)
-    def _stringify_value(self, et: str, ev: str) -> str:
-        return ginf._stringify_value(self, et, ev)
+    def _stringify_value(self, et: str, ev: str, enode=None) -> str:
+        return ginf._stringify_value(self, et, ev, enode)
     def _apply_fstring_spec(self, part_val: str, spec: str) -> str:
         return ginf._apply_fstring_spec(self, part_val, spec)
     def _subst_in_value(self, v, mapping: dict):
@@ -4358,6 +4369,8 @@ class GimpleGen:
         return ginf._compr_set_loop(self, node, gen0, res, res_type, it_val)
     def _gen_print(self, args: list, kwargs: list=None):
         return ginf._gen_print(self, args, kwargs)
+    def _note_dict_callable_ret(self, dict_val: str, value_text: str) -> None:
+        return ginf.note_dict_callable_ret(self, dict_val, value_text)
     def _eval_const_int(self, node) -> int | None:
         return ginf._eval_const_int(self, node)
     def _eval_const_bool(self, node) -> bool | None:
@@ -4431,8 +4444,8 @@ class GimpleGen:
         return grsl._split_expr_format(src)
     def _parse_fstring_parts(self, inner: str) -> list[tuple[str, str, str, str]]:
         return grsl._parse_fstring_parts(self, inner)
-    def _repr_value(self, rat: str, rav: str) -> str:
-        return grsl._repr_value(self, rat, rav)
+    def _repr_value(self, rat: str, rav: str, enode=None) -> str:
+        return grsl._repr_value(self, rat, rav, enode)
     def _decode_str_literal_text(self, val: str) -> tuple[str, str]:
         return grsl._decode_str_literal_text(self, val)
     def _stub_result(self, ctype: str, value: str, note: str) -> tuple[str, str]:
@@ -4443,8 +4456,9 @@ class GimpleGen:
         return grsl._str_literal_to_slit(self, str_literal)
     def _subst_idents(self, expr, mapping: dict):
         return grsl._subst_idents(self, expr, mapping)
-    def _format_percent_spec(self, full_spec: str, conv: str, et: str, ev: str) -> str:
-        return grsl._format_percent_spec(self, full_spec, conv, et, ev)
+    def _format_percent_spec(self, full_spec: str, conv: str, et: str, ev: str,
+                             enode=None) -> str:
+        return grsl._format_percent_spec(self, full_spec, conv, et, ev, enode)
     def _cast_for_list(self, elem_type: str, val: str, suf: str) -> str:
         return grsl._cast_for_list(self, elem_type, val, suf)
     def _type_expr_to_ann(self, node) -> str:

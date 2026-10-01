@@ -241,8 +241,8 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
 
     # Map builtin/common functions to their first parameter type
     # `len` deliberately excluded: passing a param to `len()` means it's
-    # a SIZED CONTAINER (str/list/dict/set/tuple — no single correct C
-    # type to default to), not that the param's own type IS `int` —
+    # a SIZED CONTAINER (str/list/dict/set/tuple — no single correct C type
+    # to default to), not that the param's own type IS `int` —
     # that's len()'s RETURN type, not its argument's type. This entry
     # used to wrongly infer 'int' for any unannotated parameter whose
     # ONLY usage signal was `len(param)` (no subscript/iteration to
@@ -254,12 +254,29 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # len(args) != 2: ...` (no subscript/for-loop over `args`
     # anywhere in the function, so `len(args)` was the only signal,
     # and this entry silently won).
+    #
+    # `print` removed for the IDENTICAL defect with the roles swapped, and it
+    # was the worse of the two: `print(x)` says NOTHING about x's type —
+    # print accepts a value of any type — so inferring `char *` from it
+    # produced
+    #
+    #   void g (char * x) { mojo_print (x); ... }   /   g ((char *)((void *)1))
+    #
+    # and `g(1)` strlen'd address 1 and died with SIGSEGV (exit 139), while
+    # `g(1.5)` did not even compile. The trigger is narrow because every
+    # OTHER spelling of the same body was already right (`print("v=", x)`,
+    # `print(str(x))`, `print(x + 1)`, `return x`): the parameter's ONLY use
+    # being a bare `print` argument. The string call site is unaffected
+    # because a `char *` parameter is still reached by the call-site
+    # unanimity contract (Pass 1.3d in module_gen.py) and by the
+    # string-only-evidence rules below, so removing the entry trades a crash
+    # for nothing at all.
     BUILTIN_PARAM_TYPES = {
         'open': 'char *',
         'mojo_open_file': 'char *',
-        'print': 'char *',
         'str': 'int',
     }
+
 
     # Methods that exist ONLY on Python str (never on list/dict/set), so a
     # `param.method(...)` call using one of these unambiguously identifies

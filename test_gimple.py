@@ -6552,6 +6552,107 @@ def main():
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_every_funcptr_initializer_has_a_definition():
+        """Every `_funcptr_X = (void *)X` initializer in the output must have a
+        matching `X` DEFINITION in the same file.
+
+        Shape-independent, and it is the check the nested-`def`-lambda bug
+        asked for and did not have: `_lower_LambdaExpr` lifts a lambda's C
+        body into `gen._lambda_parts` and only `gen_module` flushes that side
+        table, and the nested-closure emission path flushed nothing — so a
+        lambda inside a nested `def` was declared and had its address taken
+        and never defined, which is an `Undefined symbols` LINK failure:
+
+            Undefined symbols for architecture arm64:
+              "__make_make_lambda_1", referenced from:
+                  __funcptr__make_make_lambda_1 in ...o
+
+        Asserted over a spread of shapes (lambda at top level, in a plain
+        `def`, in a nested `def`, in a struct method, a nested `def` inside a
+        struct method, and a two-deep nest), because the
+        flush points are per-path and a single shape only pins one of them.
+        """
+        global _PASS, _FAIL
+        name = "every_funcptr_initializer_has_a_definition"
+        cases = {
+            "top_level_lambda": """\
+d = {}
+d['k'] = lambda a, b: a + b
+print(d['k'](1, 2))
+""",
+            "def_body_lambda": """\
+def f(x):
+    return lambda y: y + x
+print(f(1)(2))
+""",
+            "nested_def_lambda": """\
+def _make():
+    def make():
+        return lambda x: x + 1
+    return make
+
+def main():
+    print(_make()()(1))
+main()
+""",
+            "struct_method_lambda": """\
+class K:
+    def __init__(self, n):
+        self.n = n
+    def get(self):
+        return lambda: self.n
+
+def main():
+    print(K(7).get()())
+main()
+""",
+            "nested_def_in_struct_method": """\
+class K:
+    def __init__(self, n):
+        self.n = n
+    def outer(self):
+        def inner():
+            return lambda: self.n
+        return inner()
+
+def main():
+    print(K(9).outer()())
+main()
+""",
+            "two_deep_nested_def_lambda": """\
+def a():
+    def b():
+        def c():
+            return lambda: 5
+        return c
+    return b
+
+def main():
+    print(a()()()())
+main()
+""",
+        }
+        import re as _re
+        for label, src in cases.items():
+            c = compile_to_gimple(src)
+            init = set(_re.findall(r'_funcptr_([A-Za-z0-9_]+)\s*=\s*\(void\s*\*\)\s*'
+                                   r'([A-Za-z0-9_]+)', c))
+            missing = []
+            for var, sym in sorted(init):
+                # A definition is the symbol appearing at the start of a
+                # line as a return type + name + '(' — a declaration ends in
+                # ';' and a definition's body opens with '{'.
+                if not _re.search(r'\b' + _re.escape(sym) + r'\s*\([^;]*\)\s*\{',
+                                  c, _re.S):
+                    missing.append(f'{var} -> {sym}')
+            if missing:
+                print(f"FAIL  {name}[{label}]: funcptr initializer with no "
+                      f"definition in the same file: {', '.join(missing)}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}  ({len(cases)} shapes)")
+        _PASS += 1
+
     def test_user_defined_dunder_repr_value():
         """The same thing with the VALUE checked, on BOTH pipelines
         (single-TU and link mode — they are separate codegen paths and this
@@ -7058,6 +7159,7 @@ print("%r" % p)
     test_aliased_and_reexported_imports_resolve_to_the_defining_module()
     test_dotted_import_two_hop_attribute_call()
     test_dedup_variadic_externs_cache_is_a_faithful_parse()
+    test_every_funcptr_initializer_has_a_definition()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

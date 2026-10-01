@@ -223,7 +223,11 @@ def test_every_declaration_is_seen():
     # catch: `reflect.collect_runtime_exports_h('runtime/fire_runtime.h')`
     # returns 521 on the merged header, and that call is where the number comes
     # from.
-    for header, want in (('fire_runtime.h', 521),
+    # 521 -> 526 (2026-10-01, `compiled-silent`): the `double`-returning twins
+    # of the function-pointer dispatch helpers (`mojo_fnptr_call_d0..d4`), plus
+    # the sort primitive the `list.sort()` fix moved four orderings onto.
+    # Again taken from the call, not from the arithmetic.
+    for header, want in (('fire_runtime.h', 526),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),

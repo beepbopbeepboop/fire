@@ -248,6 +248,38 @@ class TypeLattice:
         return 'int'
 
     @classmethod
+    def slot_kind_byte(cls, elem: str) -> str:
+        """The one byte per list slot of `mojo_list_set_kinds`' alphabet that
+        an element of C type `elem` holds — see that function's docstring in
+        runtime/fire_runtime.c for the alphabet and the MOJO_KIND_* names.
+
+        A MojoList slot is a raw int64_t, so every consumer that has to know
+        what a slot HOLDS (the repr, the per-slot readers, the sorters) needs
+        this one mapping rather than its own; the runtime's own default for an
+        undescribed slot is 'i', so an unrecognised element type maps there too
+        instead of inventing a letter.
+
+        `None` is NOT decided here — it is indistinguishable from 0 once
+        lowered, so a caller that can still see the expression (a list
+        literal) detects it there, as _list_literal_slot_kind does."""
+        if elem in _TYPE_FLOAT:
+            return 'd'
+        if elem in ('char *', 'MojoStr *'):
+            return 'p'
+        if elem == 'MojoBytes *':
+            return 's'
+        if elem in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+            return 'l'
+        return 'i'
+
+    # The MOJO_KIND_* constant each alphabet byte is named by in
+    # runtime/fire_runtime.h, so generated C says `MOJO_KIND_STR` rather than a
+    # bare `'p'`. The header is the one definition of the letters; this is the
+    # one definition of their names.
+    SLOT_KIND_CONST = {'i': 'INT', 'd': 'DOUBLE', 's': 'BYTES',
+                       'p': 'STR', 'l': 'LIST', 'n': 'NONE'}
+
+    @classmethod
     def printf_fmt(cls, ctype: str) -> str:
         if ctype in ('double', 'float', '__fp16'):
             return '%g'

@@ -171,6 +171,53 @@ def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
                 pass
 
 
+def test_gimple_diagnostic(name: str, mojo_src: str, expected_stderr: str,
+                           expected_stdout: str = None, expected_return: int = 0):
+    """Assert the compiled program prints `expected_stderr` on stderr and,
+    optionally, exactly `expected_stdout` with exit `expected_return`.
+
+    The shape of a LOUD-BUT-CONTINUING refusal — the compiled path's
+    established alternative to a signal or to a silent wrong value, the same
+    one `mojo_unsupported_iter` and the `_unsupported_generator_names` weak
+    stubs use (see those comments for why abort() is worse: no Mojo-level
+    try/except can catch SIGABRT, so it takes down the whole process). It
+    needs its own helper because `test_gimple_runtime_error` asserts a
+    NON-ZERO exit, which is the opposite convention: there the program fails
+    as CPython would, here it says what it cannot do and carries on with the
+    behaviour the gap already produced. Asserting only the stderr substring
+    would be weak, so the stdout and exit code are pinned too where the test
+    has an opinion."""
+    global _PASS, _FAIL, _TIMEOUT
+    exe_path = None
+    try:
+        exe_path = compile_mojo_to_gimple_exe(mojo_src)
+        result = subprocess.run([exe_path], capture_output=True, timeout=10)
+        err = result.stderr.decode('utf-8', errors='replace')
+        out = result.stdout.decode('utf-8', errors='replace')
+        if (expected_stderr in err and result.returncode == expected_return
+                and (expected_stdout is None or out == expected_stdout)):
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: expected {expected_stderr!r} on stderr with "
+                  f"exit {expected_return}"
+                  + (f' and stdout {expected_stdout!r}' if expected_stdout is not None else '')
+                  + f', got exit {result.returncode} err={err[-300:]!r} out={out[-200:]!r}')
+            _FAIL += 1
+    except subprocess.TimeoutExpired as e:
+        print(f"TIMEOUT {name}: {e}")
+        _TIMEOUT += 1
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+    finally:
+        if exe_path:
+            try:
+                os.unlink(exe_path)
+            except:
+                pass
+
+
 def test_gimple_bounded_memory(name: str, mojo_src: str, expected_stdout: str, limit_mb: int):
     """The program prints exactly `expected_stdout` AND its peak RSS stays
     under `limit_mb`. A leak in a loop shows up as RSS proportional to the
@@ -768,6 +815,36 @@ y = g("a", "b")
 print(y)
 """, "ab\n")
 
+    # `print(<unannotated param>)` typed the parameter `char *` (the
+    # BUILTIN_PARAM_TYPES entry for `print`, since `print` accepts a value of
+    # ANY type in Python and so says nothing about its argument's type), and
+    # the call site then passed the integer as a pointer:
+    #
+    #   void g (char * x) { mojo_print (x); ... }
+    #   _t1 = (void *)1; g ((char *)_t1);
+    #
+    # so `g(1)` strlen'd address 1 and died with SIGSEGV, and `g(1.5)` did
+    # not even compile. Every OTHER use of the same parameter was already
+    # right (`print("v=", x)`, `print(str(x))`, `print(x + 1)`,
+    # `return x`), which is why the trigger is so narrow. The sibling
+    # `gimple_untyped_param_string_passthrough` above is the case that must
+    # keep working, and the string call site is the third: all three in one
+    # test so removing the inference cannot quietly trade a crash for a wrong
+    # string.
+    test_gimple_stdout("gimple_print_of_untyped_param_is_not_a_pointer", """\
+def gi(x):
+    print(x)
+
+def gs(x):
+    print(x)
+
+def gf(x):
+    print(x)
+gi(1)
+gf(1.5)
+gs("s")
+""", "1\n1.5\ns\n")
+
     # 15. Same two-param concat shape, but the result is read back through an
     # f-string interpolation (`{y}`) rather than a plain print(y) — the exact
     # surrounding shape that originally surfaced this bug class.
@@ -883,6 +960,228 @@ print(sorted(["ccc", "a", "bb"], key=len))
 print(sorted([1, 3, 2], reverse=True))
 print(sorted(["b", "a", "c"], reverse=True))
 """, "[3, 2, 1]\n['c', 'b', 'a']\n")
+
+    # `l.sort()` — the METHOD — used to be a no-op stub in the runtime
+    # (`void mojo_list_sort(MojoList *l) { (void)l; }`), so it returned the
+    # list in its original order with exit 0 and said nothing: the worst
+    # shape, because `sorted(l)` was right and `l.sort(); x = l` was silently
+    # wrong, so the two spellings of one operation disagreed.
+    # A lambda inside a nested `def` was lifted and its address taken but
+    # never DEFINED, because `_lower_LambdaExpr` puts the body in the
+    # `gen._lambda_parts` side table and the nested-closure emission path
+    # flushed nothing — so this was a hard `Undefined symbols
+    # ...: "__make_make_lambda_1"` LINK failure. A lambda at the same
+    # nesting depth in a TOP-LEVEL function does get its definition, which is
+    # what made the shape look supported. The shape-independent guard (every
+    # `_funcptr_X` initializer has a matching definition) is
+    # `every_funcptr_initializer_has_a_definition` in test_gimple.py; this
+    # is the end-to-end run beside CPython.
+    test_gimple_stdout("gimple_lambda_in_nested_def_is_emitted", """\
+def _make():
+    def make():
+        return lambda x: x + 1
+    return make
+
+def main():
+    f = _make()()
+    print(f(1))
+main()
+""", "2\n")
+
+    # The two-deep nest is a separate path — a second `gen._gen_lifted_closure`
+    # level, so its `_lambda_parts` flush has to happen at each one — and is
+    # here rather than assumed to follow from the single-level case.
+    # (`*args` is deliberately NOT here: a variadic lambda segfaults on this
+    # tree at every nesting depth including top level, which is
+    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md's already-fixed
+    # variadic work sitting in an unlanded branch, not this path.)
+    test_gimple_stdout("gimple_lambda_two_deep_nested_def", """\
+def a():
+    def b():
+        def c():
+            return lambda: 5
+        return c
+    return b
+
+def main():
+    print(a()()()())
+main()
+""", "5\n")
+
+    # A callable VALUE's real return type used to be lost at the call,
+    # because `mojo_fnptr_call_N` is the homogenized `int64_t` convention —
+    # the RIGHT thing for the box it hands back, but the CALLEE is the one
+    # that knows the type. So `lambda: False` printed `0` (the bug doc's
+    # symptom), `lambda: "hi"` printed its own pointer decimal, and
+    # `lambda: 1.5` printed `2.1393696074e-314`: a `double` cannot even ride
+    # the `int64_t` return, which reads a general-purpose register the value
+    # is not in, so the fix for THAT one is a `double`-returning twin of the
+    # helper family rather than a reinterpretation.
+    #
+    # An ordinary `def` returning the same value is in the same test because
+    # it was already right — it is what proves the loss is in the callable
+    # VALUE path and not in the return-type inference.
+    # `d['k'](2, 3)` — a callable value held in a dict subscript, a
+    # name-keyed dispatch table — was stubbed to 0, exit 0, silently wrong.
+    # It was lumped in with the ONE other SubscriptExpr callee that is not a
+    # runtime value read (`Scalar[x.dtype](...)`, a comptime bracket
+    # argument), which `_static_generic_return_ctype` tells apart and which
+    # still keeps the stub.
+    #
+    # The `f = d['k']` line is in the same test because the doc records it as
+    # ALREADY working (`print(f(2, 3))` printed 5) — so it is the control
+    # that proves the loss is in the subscript-callee dispatch and not in the
+    # value representation.
+    test_gimple_stdout("gimple_call_through_subscript_callee", """\
+def main():
+    d = {}
+    d['k'] = lambda a, b: a + b
+    print(d['k'](2, 3))
+    f = d['k']
+    print(f(4, 5))
+    e = {"j": lambda: "hi"}
+    print(e["j"]())
+main()
+""", "5\n9\nhi\n")
+
+    test_gimple_stdout("gimple_callable_value_keeps_its_return_type", """\
+def plain():
+    return False
+
+def main():
+    a = lambda: True
+    print(a())
+    b = lambda: False
+    print(b())
+    c = lambda x: x > 1
+    print(c(5))
+    print(c(0))
+    d = lambda: 1.5
+    print(d())
+    e = lambda: "hi"
+    print(e())
+    print(plain())
+main()
+""", "True\nFalse\nTrue\nFalse\n1.5\nhi\nFalse\n")
+
+    test_gimple_stdout("gimple_list_sort_method_in_place", """\
+def main():
+    l = [3, 1, 2]
+    l.sort()
+    print(l)
+    m = ['c', 'a', 'b']
+    m.sort()
+    print(m)
+    n = [3, 1, 2]
+    print(sorted(n))
+main()
+""", "[1, 2, 3]\n['a', 'b', 'c']\n[1, 2, 3]\n")
+
+    # Every element kind the sort has to tell apart. A MojoList slot is a raw
+    # int64_t, so a double is its IEEE bits and a str is a pointer: ordering
+    # the slots as integers sorts floats by SIGN and strings by ADDRESS. The
+    # kind byte the call site passes (gen._elem_of -> TypeLattice.slot_kind_byte)
+    # is what makes each of these right. `bool` is an int subclass in Python,
+    # so False sorts before True.
+    test_gimple_stdout("gimple_list_sort_every_element_kind", """\
+def main():
+    f = [3.5, -1.25, 2.0]
+    f.sort()
+    print(f)
+    b = [True, False, True]
+    b.sort()
+    print(b)
+    d = ['b', 'a', 'c']
+    d.sort()
+    print(d)
+    n = [[2], [1]]
+    n.sort()
+    print(n)
+main()
+""", "[-1.25, 2.0, 3.5]\n[False, True, True]\n['a', 'b', 'c']\n[[1], [2]]\n")
+
+    # `key=` and `reverse=` on the METHOD, which used to be dropped on the
+    # floor exactly as they were on `sorted()` before its own fix.
+    test_gimple_stdout("gimple_list_sort_key_and_reverse", """\
+def main():
+    l = [1, 3, 2]
+    l.sort(key=lambda v: -v)
+    print(l)
+    m = [1, 3, 2]
+    m.sort(reverse=True)
+    print(m)
+    w = ['ccc', 'a', 'bb']
+    w.sort(key=len)
+    print(w)
+main()
+""", "[3, 2, 1]\n[3, 2, 1]\n['a', 'bb', 'ccc']\n")
+
+    # A list of lists sorts ELEMENTWISE (Python's ordering, shorter first) —
+    # the one total order a MojoList-of-MojoList has. Past
+    # MOJO_SORT_MAX_DEPTH nesting the two compare equal rather than risking
+    # unbounded recursion on a self-referential list.
+    test_gimple_stdout("gimple_list_sort_nested_shorter_first", """\
+def main():
+    l = [[1, 2], [1], [1, 2, 3], []]
+    l.sort()
+    print(l)
+main()
+""", "[[], [1], [1, 2], [1, 2, 3]]\n")
+
+    # What Python REFUSES to sort must be refused here too, and loudly. The
+    # silent no-op this replaced was indistinguishable from a sort that
+    # happened to leave the list alone; a heterogeneous list's only correct
+    # answer is the TypeError, so that is what this must be — verified by
+    # stderr text because the compiled binary's exit code alone cannot tell a
+    # TypeError from an unrelated failure (and the signal it replaced was
+    # exit 0 with a wrong list).
+    # A callable-valued parameter default naming an IMPORTED module's function
+    # (`def probe(x, *, g=os.walk)`) was padded with 0, so `g` arrived as
+    # address 0 and the callee called through a null pointer: SIGSEGV, exit
+    # 139, no output. Whether `os.walk` was compiled into this translation
+    # unit at all is a property of the whole import closure, not of the
+    # expression, so "0" is the one answer that is always available and
+    # always wrong.
+    #
+    # The honest answer follows `mojo_unsupported_iter`: say so, loudly, and
+    # carry on. `n > 0` printing False is what the null pointer WOULD have
+    # printed had it survived — the loop's own "unsupported iterable"
+    # diagnostic says the body runs zero times, which is pre-existing
+    # behaviour, not something this change introduced.
+    test_gimple_diagnostic("gimple_imported_callable_default_is_diagnosed", """\
+def probe(x, *, g=os.walk):
+    return g(x)
+
+def main():
+    r = probe(".")
+    n = 0
+    for a, b, c in r:
+        n = n + 1
+    print(n > 0)
+main()
+""", "mojo_unavailable_callable: 'os.walk'", "False\n")
+
+    # The same default in a callee that NEVER CALLS the parameter must be
+    # completely unaffected: the diagnostic lives inside the stub, so it fires
+    # on a call, not on a padding. Without this the fix would trade a crash
+    # for a spurious message in every program that merely mentions a callable
+    # default.
+    test_gimple_stdout("gimple_uncalled_imported_callable_default_is_silent", """\
+def probe(x, *, g=os.walk):
+    return x
+
+def main():
+    print(probe("hello"))
+main()
+""", "hello\n")
+
+    test_gimple_runtime_error("gimple_list_sort_mixed_types_is_a_typeerror", """\
+def main():
+    l = [1, 'a', 2.5]
+    l.sort()
+    print(l)
+main()
+""", "TypeError: list.sort()")
 
     # reverse=True composes with key= (the sort is by key, then flipped) —
     # sorting by -v descending puts the original order back.
@@ -4701,6 +5000,48 @@ print({"a": 1})
     test_gimple_stdout("gimple_print_bool_list", """\
 print([True, False])
 """, "[True, False]\n")
+
+    # repr() of a bool printed `1`/`0` — the right VALUE, the wrong type.
+    # print() was already right (`_gen_print`'s `_Bool` arm calls
+    # mojo_repr_bool) and so were `%s` and `f'{x}'`, which is exactly what let
+    # this survive: the obvious smoke test passes and the spellings that ship
+    # are the wrong ones. `_repr_value` had no `_Bool` arm at all, so a
+    # `_Bool` fell through to the int64_t one — the ordering trap being that
+    # the new arm has to come before the `endswith(' *')` test.
+    #
+    # `%d` and `%i` are in the same test deliberately: they are RIGHT (Python
+    # formats a bool as an int there), and a fix that made them print
+    # True/False would pass every other assertion in this file.
+    test_gimple_stdout("gimple_repr_of_a_bool_is_true_false", """\
+x = 1 == 1
+print(repr(x))
+print(repr(x == 2))
+print('%r' % (x,))
+print(f'{x!r}')
+print('%d' % (x,))
+print('%i' % (x == 2,))
+print('%s' % (x,))
+print(f'{x}')
+print(str(x))
+""", "True\nFalse\nTrue\nTrue\n1\n0\nTrue\nTrue\nTrue\n")
+
+    # A bool stored as a dict VALUE is a plain `int` slot by the time it is
+    # stored, so the dict is MARKED (mojo_mark_dict_bool_values) and
+    # mojo_is_bool_dict picks the bool formatter for its whole repr. The mark
+    # used to require a literal RHS, so every other bool expression — a name
+    # holding a bool, a comparison — printed `{'k': 1}` while print() on the
+    # same value said True. `{'k': 1}` (a genuine int) is in the same test so
+    # the mark cannot turn into a blanket "this dict holds 0/1".
+    test_gimple_stdout("gimple_dict_of_bool_values", """\
+b = True
+print({'k': b})
+print({'k': 1 == 1})
+print({'k': 1 == 2})
+print({'k': 1})
+d = {}
+d['a'] = b
+print(d)
+""", "{'k': True}\n{'k': True}\n{'k': False}\n{'k': 1}\n{'a': True}\n")
 
     # §4.2b: print({1, 2}) printed the set's own ADDRESS -- print had no
     # MojoSet * dispatch branch at all (len()/iteration on the same value

@@ -361,7 +361,7 @@ def _lower_builtin_bound_method_call(gen, fname_raw: str,
     return types all match the direct-call spelling exactly."""
     recv_ct, recv_v, method = gen._builtin_method_values[fname_raw]
     if recv_ct == 'MojoList *':
-        return gen._lower_list_method(recv_v, method, node.args)
+        return gen._lower_list_method(recv_v, method, node.args, node.kwargs)
     if recv_ct == 'MojoDict *':
         return gen._lower_dict_method(recv_v, method, node.args)
     if recv_ct == 'MojoBytes *':
@@ -3426,7 +3426,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if ot == 'MojoDict *':
         return gen._lower_dict_method(ov, method, node.args)
     if ot == 'MojoList *':
-        return gen._lower_list_method(ov, method, node.args)
+        return gen._lower_list_method(ov, method, node.args, node.kwargs)
     if ot == 'MojoSet *':
         return gen._lower_set_method(ov, method, node.args)
     if ot == 'MojoBytes *':
@@ -3690,7 +3690,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if ot.endswith(' *'):
         _sn = gimple_exprtypes._struct_name_of(ot)
     if _sn == 'MojoList':
-        return gen._lower_list_method(ov, method, node.args)
+        return gen._lower_list_method(ov, method, node.args, node.kwargs)
     if _sn == 'MojoDict':
         return gen._lower_dict_method(ov, method, node.args)
     if _sn == 'MojoSet':
@@ -4014,7 +4014,8 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
     return 'int64_t', gen._new_val('int64_t', '0')
 
 
-def _lower_list_method(gen, ov: str, method: str, args: list) -> tuple:
+def _lower_list_method(gen, ov: str, method: str, args: list,
+                       kwargs: list = None) -> tuple:
     """Lower MojoList * method calls."""
     # list.insert(i, v) (BUG-2026-023 residual, box.3d/game's
     # FileSystem.current_dir_path): previously UNHANDLED — the unknown-method
@@ -4170,7 +4171,67 @@ def _lower_list_method(gen, ov: str, method: str, args: list) -> tuple:
             t = gen._new_val('char *', f"(char *){raw}")
             return 'char *', t
         return 'int64_t', raw
-    if method in ('sort', 'reverse', 'clear'):
+    if method == 'sort':
+        # Was `mojo_list_sort(ov)` — and THAT was a no-op stub in the runtime
+        # (`{ (void)l; }`), so `l.sort()` returned the list in its original
+        # order with exit 0 and said nothing. The two spellings of one
+        # operation disagreed: `sorted(l)` was right, `l.sort(); x = l` was
+        # silently wrong.
+        #
+        # A MojoList slot is a raw int64_t, so the runtime cannot tell a
+        # number from a pointer and needs to be TOLD: `gen._elem_of(ov)` is
+        # this backend's element-type inference for the receiver, and
+        # TypeLattice.slot_kind_byte turns it into the one byte-per-slot
+        # alphabet mojo_list_set_kinds already uses. It is threaded through as
+        # an argument rather than left to the runtime's guess, exactly as
+        # _lower_builtin_sorted picks mojo_list_sorted_str over mojo_sorted for
+        # the same reason. 0 (`MOJO_KIND_INT` is 'i', so pass 0) means "I do
+        # not know", and the runtime then consults the per-slot kinds side
+        # table and its own discriminator before deciding.
+        _skind = '0'
+        _elem = gen._elem_of(ov)
+        if _elem != 'int64_t' or gen._elem_types.get(ov):
+            # A recorded element type — including a recorded `int64_t`, which
+            # is a real answer for a list of ints. `TypeLattice.slot_kind_byte`
+            # is the shared element-type -> alphabet-byte mapping (the same one
+            # a list literal's per-slot kinds are built from).
+            _b = gimple_ctypes.TypeLattice.slot_kind_byte(_elem)
+            _skind = f'MOJO_KIND_{gimple_ctypes.TypeLattice.SLOT_KIND_CONST[_b]}'
+        # else: nothing recorded at all, and `_elem_of`'s 'int64_t' is its
+        # ABSENCE answer rather than a fact. Pass 0 — "I do not know" — and
+        # let the runtime consult the per-slot kinds side table and its own
+        # discriminator before deciding, rather than committing this call site
+        # to a type it has no evidence for.
+        # `key=` / `reverse=` are real Python ordering options that used to be
+        # dropped on the floor here too (`l.sort(key=f)` sorted as if neither
+        # were given). The key list is built by the SAME builder sorted()'s
+        # lowering uses, and the runtime orders by it in place.
+        _key_expr = None
+        _reverse = False
+        for _k, _v in (kwargs or []):
+            if _k == 'key':
+                _key_expr = _v
+            elif _k == 'reverse':
+                _reverse = not (isinstance(_v, gimple_ctypes.BoolLiteral)
+                                and not _v.value)
+        _keys_val = 'NULL'
+        if _key_expr is not None:
+            _keys_val = ggc._build_sort_keys(gen, ov, _elem, _key_expr)
+            # The KEYS are what get compared, so the kind argument describes
+            # them, not the elements (the same split mojo_sorted_by_keys
+            # makes). Its own recorded type is the one the builder just
+            # appended with.
+            _kb = gimple_ctypes.TypeLattice.slot_kind_byte(
+                gen._elem_of(_keys_val))
+            _skind = f'MOJO_KIND_{gimple_ctypes.TypeLattice.SLOT_KIND_CONST[_kb]}'
+        gen._emit_call('void', '', 'mojo_list_sort',
+                       [('MojoList *', ov), ('int', _skind),
+                        ('int', '1' if _reverse else '0'),
+                        ('MojoList *', _keys_val)])
+        # Python's list.sort() returns None; the compiled path's convention for
+        # a mutator's value is int 0 (shared with append/extend/reverse).
+        return 'int', gen._new_val('int', '0')
+    if method in ('reverse', 'clear'):
         gen._emit(f"  mojo_list_{method} ({ov});")
         return 'int', gen._new_val('int', '0')
     if method == 'copy':

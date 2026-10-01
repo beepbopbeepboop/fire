@@ -1248,11 +1248,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # ONLY a CallExpr callee (a genuine chained call) and a
         # LambdaExpr callee (an immediately-invoked lambda — a real
         # runtime callable value) are value-lowered here. A
-        # SubscriptExpr callee is a GENERIC TYPE/constructor expression
-        # (`Scalar[x.dtype](...)` — a comptime bracket argument, not a
-        # runtime value), whose eager value-lowering would miscompile
-        # (found via math.mojo's `Scalar[x.dtype](...)`); those keep the
-        # old stub.
+        # SubscriptExpr callee is handled further down, after the generic
+        # bracket-argument case it shares a node type with.
         if isinstance(node.func, (gimple_ctypes.CallExpr, gimple_ctypes.LambdaExpr)):
             _callee_t, _callee_v = gen.lower_expr(node.func)
             if _callee_t == 'MojoBoundMethod *':
@@ -1280,6 +1277,15 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # loop then correctly takes the "no iterator protocol" path
         # and drops the loop body (still functionally a stub, but one
         # that compiles) rather than colliding types.
+        #
+        # BEFORE the runtime-subscript value-lowering below, deliberately:
+        # this is the ONE SubscriptExpr callee that is a comptime bracket
+        # argument rather than a runtime value read, and
+        # `_static_generic_return_ctype` is what tells the two apart — it
+        # answers only for a base NAME this compile recorded as an IMPORTED
+        # GENERIC (`Scalar`, `from_numpy_array`, ...). The other order
+        # would reintroduce the math.mojo `Scalar[x.dtype](...)` miscompile
+        # the comment above records.
         if isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr):
             _static_ct = gen._static_generic_return_ctype(node.func.obj.name)
             if _static_ct is not None:
@@ -1288,6 +1294,50 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 gimple_ctypes._debug_note('un-elaboratable generic call statically-typed stub',
                             (node.func.obj.name, _static_ct))
                 return _static_ct, t
+        # The OTHER SubscriptExpr callee: a RUNTIME subscript read of a
+        # callable held as a first-class value — `d['k'](2, 3)`, a name-keyed
+        # dispatch table. This was lumped in with the generic case above and
+        # stubbed to 0, a SILENT wrong answer with exit 0 for a shape common
+        # enough that anything relying on it is already broken.
+        #
+        # What is left of the discriminator is a POSITIVE test, and it has to
+        # be one: this container is one a callable was actually recorded
+        # being stored into (see `note_dict_callable_ret`). A negative test
+        # ("the base looks like a container") is not enough, and finding that
+        # out cost a real regression — `re`'s own `_RE.finditer(src)` reaches
+        # this branch with a TUPLE index and a base whose actual type is a
+        # plain `int64_t`, and value-lowering it emitted the finditer result
+        # into the wrong place in the generator's C++, which then failed at
+        # RUNTIME with `dyld: symbol not found in flat namespace
+        # '_std_memory___init___is_trivially_copyable'`. A speculatively
+        # lowered callee is the real hazard, independent of the test: lowering
+        # has side effects (it emits statements and allocates temps), so
+        # probing with `gen.lower_expr` and then discarding the result emits
+        # the same code twice. Hence the base is read from the type TABLES by
+        # name and never lowered on this path.
+        #
+        # A base that is not a plain Name (`a[i]['k']()`, `self.d['k']()`)
+        # keeps the old stub: there is nothing cheap and side-effect-free to
+        # read its type from, and guessing is what this bug was.
+        if (isinstance(node.func, gimple_ctypes.SubscriptExpr)
+                and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+                and node.func.obj.name in gen._dict_callable_ret):
+            _callee_t, _callee_v = gen.lower_expr(node.func)
+            if _callee_t == 'MojoBoundMethod *':
+                return gen._lower_bound_method_call_value(_callee_v, node)
+            if _callee_t == 'void *' or _callee_t in ('int', 'int64_t', '_Bool'):
+                # A dict's own value type is a single slot, so what the
+                # callables stored in it were recorded as is a SET — usable
+                # only when it is UNANIMOUS, which is the same
+                # "unanimity or nothing" rule every other inference in this
+                # file follows. A dict holding callables of different return
+                # types then keeps the int64_t answer, i.e. exactly the
+                # behaviour before this existed.
+                _seen = gen._dict_callable_ret.get(node.func.obj.name)
+                _vt = 'int64_t'
+                if _seen is not None and len(_seen) == 1:
+                    _vt = next(iter(_seen))
+                return gen._lower_fnptr_call_value(_callee_t, _callee_v, node, _vt)
         gimple_ctypes._debug_note('indirect call stubbed', type(node.func).__name__)
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t)0;  /* indirect call via {type(node.func).__name__} */')
@@ -1732,7 +1782,10 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `repr(ast)` on a parsed AST list.
     if fname_raw == 'repr' and node.args:
         rat, rav = gen.lower_expr(node.args[0])
-        return 'char *', gen._repr_value(rat, rav)
+        # The operand NODE as well as its lowered type: a bool's C type here
+        # is a plain `int`, so `repr(b)` for a `b = True` printed `1` unless
+        # the node is consulted too (see is_python_bool_expr).
+        return 'char *', gen._repr_value(rat, rav, node.args[0])
 
     # bytes(...): construct a MojoBytes value.
     #   bytes()            -> empty
@@ -1846,11 +1899,16 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (fname_raw == 'str' and len(node.args) == 1
             and not gen._locally_binds_name('str')):
         et, ev = gen.lower_expr(node.args[0])
-        # A bare True/False literal lowers with ctype 'int' (not '_Bool' —
-        # _lower_BoolLiteral does this deliberately; other sites depend on
-        # it), so str(True) would take the int path → "1". Recover the
-        # bool intent from the AST so it stringifies as "True"/"False".
-        if isinstance(node.args[0], gimple_ctypes.BoolLiteral):
+        # A bool lowers with ctype 'int' (not '_Bool' — _lower_BoolLiteral
+        # does this deliberately; other sites depend on it), so str(True)
+        # would take the int path → "1". Recover the bool intent from the
+        # AST, which is the only place it survives: the node itself for a
+        # literal, and `gen._bool_valued` for a name bound to one. The
+        # recognition is `is_python_bool_expr` — one predicate with the print
+        # dispatch, `repr()` and the dict store — so `str(b)`, `print(b)`,
+        # `repr(b)` and `{'k': b}` cannot disagree about the same value.
+        # (They did: at module scope all but `repr` said `1`.)
+        if gimple_exprtypes.is_python_bool_expr(gen, node.args[0]):
             et = '_Bool'
         return 'char *', gen._stringify_value(et, ev)
 
@@ -2972,6 +3030,127 @@ def _lower_builtin_filter(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     return 'MojoList *', res
 
 
+def _build_sort_keys(gen, av: str, elem: str, key_expr) -> str:
+    """The key LIST for a `key=` ordering, shared by `sorted(x, key=f)`
+    and `l.sort(key=f)`.
+
+    The compiled path has no per-element callback in the runtime, so the
+    keys are built HERE: `key_expr` is called once per element through the
+    ordinary call path and each result appended to a fresh list, which the
+    runtime then orders by (mojo_sorted_by_keys for `sorted`, mojo_list_sort
+    for the method).  `av` is the list value (already a MojoList *), `elem`
+    its recorded element type ('int64_t' when unknown).
+
+    Returns the keys value, or the literal text 'NULL' when there is no
+    `key=` to apply — which is how both callers spell "no keys".
+    """
+    if key_expr is None:
+        return 'NULL'
+    # Bind each element to a real local and lower a synthesized
+    # `key(<element>)` CALL through the ordinary call path, rather than
+    # resolving the callee to a C symbol here: a lambda lowers to a
+    # function-POINTER VARIABLE (`_funcptr_main_lambda_1`), not to its
+    # function's name, so calling it by name emitted "called object
+    # `_t5` is not a function or function pointer". Going through the
+    # call path handles a lambda, a plain function, and a bound method
+    # uniformly — whatever this backend can call, it can call as a key.
+    # Unique per call: `_declare_var` is first-decl-wins, so two
+    # `sorted(..., key=...)` calls in one function would otherwise share
+    # the first one's element type and emit a conflicting-types error.
+    _kvar = f'_sorted_key_elem_{gen.temp_counter}'
+    gen.temp_counter += 1
+    # The element keeps its REAL type. A scalar key is read straight, but
+    # a list/tuple element must be bound as `MojoList *` (the accessor
+    # always hands back an int64_t slot, so it needs the same coercion
+    # the `for`-loop tuple path uses) — binding it as int64_t made
+    # `sorted([(2, "b"), (1, "a")], key=lambda t: t[0])` emit
+    # "conflicting types" instead of sorting.
+    _kelem_t = 'int64_t'
+    if elem == 'double':
+        _kelem_t = 'double'
+    elif elem and elem.endswith(' *'):
+        _kelem_t = elem
+    keys = gen._new_temp('MojoList *')
+    gen._emit(f"  {keys} = mojo_list_new ();")
+    klen = gen._new_val('int64_t', f'mojo_list_len ({av})')
+    kidx = gen._new_val('int64_t', '(int64_t)0')
+    bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_cond)
+    kcond = gen._new_val('_Bool', f'{kidx} < {klen}')
+    gen._emit(f"  if ({kcond}) goto {bb_body}; else goto {bb_after};")
+    gen._emit_label(bb_body)
+    _read64 = gen._new_val('int64_t', f'mojo_list_get_int ({av}, {kidx})')
+    if _kelem_t == 'double':
+        _read = gen._new_val('double', f'mojo_list_get_double ({av}, {kidx})')
+    elif _kelem_t == 'int64_t':
+        _read = _read64
+    else:
+        _read = gen._coerce_to_type('int64_t', _kelem_t, _read64)
+    gen._declare_var(_kvar, _kelem_t)
+    gen._emit(f"  {gen._cname(_kvar)} = {_read};")
+    # A lambda key's FORWARD DECLARATION types its params from
+    # `var_types[<param name>]`, while the definition picks up the type
+    # of the argument at this call site. Bind the element to the
+    # lambda's own param name for the duration of the call so a
+    # container-typed param (`key=lambda t: t[0]`) declares
+    # `int64_t f(MojoList *)` in both places — otherwise the definition
+    # said `MojoList *` and the declaration `int64_t`, which GCC rejects
+    # as "conflicting types".
+    _saved_param_types = {}
+    if isinstance(key_expr, gimple_ctypes.LambdaExpr):
+        for _pn, _pd in key_expr.params:
+            _saved_param_types[_pn] = gen.var_types.get(_pn, None)
+            gen.var_types[_pn] = _kelem_t
+    try:
+        kret_t, kret_v = gen.lower_expr(gimple_ctypes.CallExpr(
+            func=key_expr, args=[gimple_ctypes.IdentExpr(_kvar)],
+            line=getattr(key_expr, 'line', 0), col=getattr(key_expr, 'col', 0)))
+        # A lambda invoked through a function POINTER
+        # (mojo_fnptr_call_N) always reports the generic homogenized
+        # `int64_t` return type, regardless of what the lambda body
+        # actually returns — even when the VALUE handed back is a
+        # genuine `char *` bit pattern (an identity-shaped key,
+        # `lambda s: s`, with `s` bound to `_kelem_t == 'char *'`
+        # above). Without this, `kret_t == 'char *'` just below never
+        # fired for a lambda key, so a STRING key was appended via
+        # `mojo_list_append_int` (the pointer's raw ADDRESS, not its
+        # content) and `mojo_sorted_by_keys` compared addresses:
+        # `sorted(["bb", "a", "ccc"], key=lambda s: s)` silently sorted
+        # by heap layout instead of lexicographically, exit 0. The
+        # param bindings are still in effect here (restored in
+        # `finally`, below), so `_quick_type` sees the same `char *`
+        # `s` the call itself was just made with.
+        if (isinstance(key_expr, gimple_ctypes.LambdaExpr) and kret_t != 'char *'
+                and gen._quick_type(key_expr.body) == 'char *'):
+            kret_v = gen._coerce_to_type(kret_t, 'char *', kret_v)
+            kret_t = 'char *'
+    finally:
+        for _pn, _old_t in _saved_param_types.items():
+            if _old_t is None:
+                gen.var_types.pop(_pn, None)
+            else:
+                gen.var_types[_pn] = _old_t
+    # A `char *` key is a STRING to compare (strcmp), not an address to
+    # compare as an int64_t slot — `sorted(words, key=lambda w: w)` with
+    # the int path ordered by address. The key's own lowered return type
+    # is what decides that, and it is recorded on the keys list so the
+    # in-place `l.sort(key=f)` path can hand the runtime the same answer
+    # (mojo_sorted_by_keys re-derives it with the runtime's own probe).
+    if kret_t == 'char *':
+        gen._void_call('mojo_list_append_str', [('MojoList *', keys), ('char *', kret_v)])
+        gen._elem_types[keys] = 'char *'
+    else:
+        kret = gen._to_int64(kret_t, kret_v)
+        gen._void_call('mojo_list_append_int', [('MojoList *', keys), ('int64_t', kret)])
+    kone = gen._new_val('int64_t', '(int64_t)1')
+    knew = gen._new_val('int64_t', f'{kidx} + {kone}')
+    gen._emit(f"  {kidx} = {knew};")
+    gen._emit(f"  goto {bb_cond};")
+    gen._emit_label(bb_after)
+    return keys
+
+
 def _lower_builtin_sorted_keyed(gen, node, arg0, key_expr, reverse: bool):
     """`sorted(x, key=f)` / `sorted(x, reverse=True)` / both.
 
@@ -2997,109 +3176,7 @@ def _lower_builtin_sorted_keyed(gen, node, arg0, key_expr, reverse: bool):
         at = 'MojoList *'
     elem = gen._elem_of(av)
 
-    keys_val = 'NULL'
-    if key_expr is not None:
-        # Bind each element to a real local and lower a synthesized
-        # `key(<element>)` CALL through the ordinary call path, rather than
-        # resolving the callee to a C symbol here: a lambda lowers to a
-        # function-POINTER VARIABLE (`_funcptr_main_lambda_1`), not to its
-        # function's name, so calling it by name emitted "called object
-        # `_t5` is not a function or function pointer". Going through the
-        # call path handles a lambda, a plain function, and a bound method
-        # uniformly — whatever this backend can call, it can call as a key.
-        # Unique per call: `_declare_var` is first-decl-wins, so two
-        # `sorted(..., key=...)` calls in one function would otherwise share
-        # the first one's element type and emit a conflicting-types error.
-        _kvar = f'_sorted_key_elem_{gen.temp_counter}'
-        gen.temp_counter += 1
-        # The element keeps its REAL type. A scalar key is read straight, but
-        # a list/tuple element must be bound as `MojoList *` (the accessor
-        # always hands back an int64_t slot, so it needs the same coercion
-        # the `for`-loop tuple path uses) — binding it as int64_t made
-        # `sorted([(2, "b"), (1, "a")], key=lambda t: t[0])` emit
-        # "conflicting types" instead of sorting.
-        _kelem_t = 'int64_t'
-        if elem == 'double':
-            _kelem_t = 'double'
-        elif elem and elem.endswith(' *'):
-            _kelem_t = elem
-        keys = gen._new_temp('MojoList *')
-        gen._emit(f"  {keys} = mojo_list_new ();")
-        klen = gen._new_val('int64_t', f'mojo_list_len ({av})')
-        kidx = gen._new_val('int64_t', '(int64_t)0')
-        bb_cond = gen._new_bb(); bb_body = gen._new_bb(); bb_after = gen._new_bb()
-        gen._emit(f"  goto {bb_cond};")
-        gen._emit_label(bb_cond)
-        kcond = gen._new_val('_Bool', f'{kidx} < {klen}')
-        gen._emit(f"  if ({kcond}) goto {bb_body}; else goto {bb_after};")
-        gen._emit_label(bb_body)
-        _read64 = gen._new_val('int64_t', f'mojo_list_get_int ({av}, {kidx})')
-        if _kelem_t == 'double':
-            _read = gen._new_val('double', f'mojo_list_get_double ({av}, {kidx})')
-        elif _kelem_t == 'int64_t':
-            _read = _read64
-        else:
-            _read = gen._coerce_to_type('int64_t', _kelem_t, _read64)
-        gen._declare_var(_kvar, _kelem_t)
-        gen._emit(f"  {gen._cname(_kvar)} = {_read};")
-        # A lambda key's FORWARD DECLARATION types its params from
-        # `var_types[<param name>]`, while the definition picks up the type
-        # of the argument at this call site. Bind the element to the
-        # lambda's own param name for the duration of the call so a
-        # container-typed param (`key=lambda t: t[0]`) declares
-        # `int64_t f(MojoList *)` in both places — otherwise the definition
-        # said `MojoList *` and the declaration `int64_t`, which GCC rejects
-        # as "conflicting types".
-        _saved_param_types = {}
-        if isinstance(key_expr, gimple_ctypes.LambdaExpr):
-            for _pn, _pd in key_expr.params:
-                _saved_param_types[_pn] = gen.var_types.get(_pn, None)
-                gen.var_types[_pn] = _kelem_t
-        try:
-            kret_t, kret_v = gen.lower_expr(gimple_ctypes.CallExpr(
-                func=key_expr, args=[gimple_ctypes.IdentExpr(_kvar)],
-                line=getattr(key_expr, 'line', 0), col=getattr(key_expr, 'col', 0)))
-            # A lambda invoked through a function POINTER
-            # (mojo_fnptr_call_N) always reports the generic homogenized
-            # `int64_t` return type, regardless of what the lambda body
-            # actually returns — even when the VALUE handed back is a
-            # genuine `char *` bit pattern (an identity-shaped key,
-            # `lambda s: s`, with `s` bound to `_kelem_t == 'char *'`
-            # above). Without this, `kret_t == 'char *'` just below never
-            # fired for a lambda key, so a STRING key was appended via
-            # `mojo_list_append_int` (the pointer's raw ADDRESS, not its
-            # content) and `mojo_sorted_by_keys` compared addresses:
-            # `sorted(["bb", "a", "ccc"], key=lambda s: s)` silently sorted
-            # by heap layout instead of lexicographically, exit 0. The
-            # param bindings are still in effect here (restored in
-            # `finally`, below), so `_quick_type` sees the same `char *`
-            # `s` the call itself was just made with.
-            if (isinstance(key_expr, gimple_ctypes.LambdaExpr) and kret_t != 'char *'
-                    and gen._quick_type(key_expr.body) == 'char *'):
-                kret_v = gen._coerce_to_type(kret_t, 'char *', kret_v)
-                kret_t = 'char *'
-        finally:
-            for _pn, _old_t in _saved_param_types.items():
-                if _old_t is None:
-                    gen.var_types.pop(_pn, None)
-                else:
-                    gen.var_types[_pn] = _old_t
-        # A `char *` key is a STRING to compare (strcmp), not an address to
-        # compare as an int64_t slot — `sorted(words, key=lambda w: w)` with
-        # the int path ordered by address. The key's own lowered return type
-        # is what decides which.
-        if kret_t == 'char *':
-            gen._void_call('mojo_list_append_str', [('MojoList *', keys), ('char *', kret_v)])
-        else:
-            kret = gen._to_int64(kret_t, kret_v)
-            gen._void_call('mojo_list_append_int', [('MojoList *', keys), ('int64_t', kret)])
-        kone = gen._new_val('int64_t', '(int64_t)1')
-        knew = gen._new_val('int64_t', f'{kidx} + {kone}')
-        gen._emit(f"  {kidx} = {knew};")
-        gen._emit(f"  goto {bb_cond};")
-        gen._emit_label(bb_after)
-        keys_val = keys
-
+    keys_val = _build_sort_keys(gen, av, elem, key_expr)
     if keys_val == 'NULL':
         # No key: keep the type-aware sort the keyless path already picks
         # (mojo_list_sorted_str for strings, mojo_sorted for ints, ...) and
@@ -4224,6 +4301,19 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     saved_decls          = gen.decls
     saved_body           = gen.body_lines
     saved_var_types      = dict(gen.var_types)
+    # The callable-value knowledge the ENCLOSING function has built up, for
+    # the same reason and with the same shape as the state saved just below:
+    # `_gen_lifted_closure` calls `_reset_func` to generate the lambda's own
+    # body, and `_reset_func` clears these maps because their keys are temp
+    # names that recycle across functions. So lifting a lambda erased the
+    # enclosing function's record of what it had already stored —
+    # `d['k'] = lambda: False; d['j'] = lambda: 1; print(d['j']())` then saw
+    # an EMPTY set and the wrong answer for both. Restored below with the
+    # rest of it.
+    saved_callable_rets  = gen._callable_ret_types
+    saved_dict_callable  = gen._dict_callable_ret
+    gen._callable_ret_types = {}
+    gen._dict_callable_ret = {}
     saved_func_name      = gen.current_func_name
     saved_ret_type       = gen.func_ret_type
     saved_bb             = gen.bb_counter
@@ -4330,6 +4420,8 @@ def _lower_LambdaExpr(gen, node) -> tuple:
 
     gen.decls                   = saved_decls
     gen.body_lines              = saved_body
+    gen._callable_ret_types     = saved_callable_rets
+    gen._dict_callable_ret      = saved_dict_callable
     gen.var_types               = saved_var_types
     gen.current_func_name       = saved_func_name
     gen.func_ret_type           = saved_ret_type
@@ -4489,6 +4581,18 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         gen._funcptr_builtins_needed.add(lifted_name)
         static_name = f'_funcptr_{lifted_name}'
         t = gen._new_val('void *', static_name)
+        # The VALUE's real return type, so a later call through it does not
+        # lose it. `mojo_fnptr_call_N` is the homogenized `int64_t`
+        # convention — that IS the right thing for the box it hands back —
+        # but the CALLEE is the one that knows the type, and a `_Bool`, a
+        # `double` or a `char *` returned that way came back widened:
+        # `e = lambda: False; print(e())` printed `0` and
+        # `e = lambda: "hi"; print(e())` printed the pointer decimal. The
+        # lifted function's own declared return type is right here
+        # (`ret_type` is re-read from `func_return_types` just above for
+        # exactly this reason), so record it against the value and let
+        # `_lower_fnptr_call_value` narrow the result through.
+        gen._callable_ret_types[t] = ret_type
         return 'void *', t
 
     # A closing lambda's value: a heap env holding the captured values,
@@ -4520,7 +4624,12 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     _fnv = gen._new_val('void *', f'(void *){lifted_name}')
     _bm = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
                          [('void *', _fnv), ('void *', gen._new_val('void *', _envp))])
-    return 'void *', gen._new_val('void *', f'(void *){_bm}')
+    _bmv = gen._new_val('void *', f'(void *){_bm}')
+    # Same reason as the non-capturing case just above: a call through this
+    # value goes through the homogenized `int64_t` helper, so the return
+    # type has to travel with the value or it is lost.
+    gen._callable_ret_types[_bmv] = ret_type
+    return 'void *', _bmv
 
 
 def _lower_async_closure_construct(gen, key: tuple, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -4655,7 +4764,15 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
     (`fp_raw`, of C type `fp_type`), the value-based twin of
     _lower_fnptr_call (shared so an arbitrary callable VALUE — e.g. the
     result of a chained `factory()(5)` call expression — dispatches
-    through the same mojo_fnptr_call_N runtime helpers)."""
+    through the same mojo_fnptr_call_N runtime helpers).
+
+    `ret_type` is the callee's declared C return type when the call site
+    knows it. When it does not, `_callable_ret_types` is the second source:
+    a callable VALUE carries its own return type from where it was
+    materialized (see `_lower_LambdaExpr`), because the `int64_t` the
+    homogenized helper hands back is a BOX, not the value's real type — so
+    without it a `lambda: False` prints `0` and a `lambda: "hi"` prints its
+    own pointer decimal. `_narrow_callable_result` is that one conversion."""
     arg_pairs = [gen.lower_expr(a) for a in node.args]
     n = len(arg_pairs)
     # Cast to void * so the runtime helper receives a stable pointer type.
@@ -4677,17 +4794,23 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
             widened.append(av)
         else:
             widened.append(gen._new_val('int64_t', f'(int64_t){av}'))
-    # Emit the runtime-helper call; helpers exist for 0..4 args.
+    # The callee's real return type: what the caller knew, else what the
+    # callable VALUE carries from where it was materialized. Both must be
+    # settled BEFORE the helper is chosen — the helper's own return type is
+    # the whole point for a `double`.
+    if ret_type == 'int64_t':
+        ret_type = gen._callable_ret_types.get(fp_raw, ret_type)
+    # Emit the runtime-helper call; the helpers exist for 0..8 arguments.
     #
     # A call that WRITES KEYWORD ARGUMENTS goes through the `_kw_` twin,
     # which threads the (already packed) MojoDict through to a callee that
     # declares `**kwargs`. That is the variadic case: `lambda *a, **k: ...`
     # is a first-class value here, so a call site cannot know whether the
-    # value it holds wants them — which is why the packing and the
-    # decision both live in the runtime helper, not here. The `_kw_`
-    # helpers behave IDENTICALLY to their non-`_kw_` twins for every other
-    # kind of callee (the dict is dropped), so this changes nothing for a
-    # call whose callee cannot use them.
+    # value it holds wants them — which is why the packing and the decision
+    # both live in the runtime helper, not here. The `_kw_` helpers behave
+    # IDENTICALLY to their non-`_kw_` twins for every other kind of callee
+    # (the dict is dropped), so this changes nothing for a call whose callee
+    # cannot use them.
     _kwargs = getattr(node, 'kwargs', None) or []
     if _kwargs:
         _kw_pairs = {kn: gen.lower_expr(kv) for kn, kv in _kwargs}
@@ -4697,6 +4820,32 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
     else:
         helper = f'mojo_fnptr_call_{min(n, 8)}'
         call_args = ', '.join([fp_void] + widened[:8])
+    if ret_type == 'void':
+        # `void` still has to be CALLED, so it goes through the int64_t
+        # helper and discards the result.
+        gen._emit(f"  {helper} ({call_args});")
+        return 'int', gen._new_val('int', '0')
+    if ret_type == 'double':
+        # A `double`-returning callee cannot be called through the `int64_t`
+        # helper at all — the value comes back in an SSE register the `int64_t`
+        # return does not read, so what the caller got was whatever the ABI
+        # happened to leave in the general-purpose one (measured:
+        # `d = lambda: 1.5; print(d())` printed 2.1393696074e-314). This is the
+        # `double` twin of the helper family, not a reinterpretation of its
+        # result; a reinterpretation cannot work because the bits are not there
+        # to reinterpret.
+        #
+        # KNOWN GAP, stated rather than hidden: the runtime defines
+        # `mojo_fnptr_call_d0..d4` and no `_d` twin of the `_kw_` family, so a
+        # call that both passes KEYWORDS and wants a double is emitted through
+        # the `_d` twin with its positional arguments only — the packed dict is
+        # not passed. Neither branch had a helper that could, and inventing one
+        # here is a runtime change rather than a merge decision; the alternative
+        # (narrowing the `int64_t` helper's result) is the silent wrong value
+        # this arm exists to stop.
+        t = gen._call_expr('double', f'mojo_fnptr_call_d{min(n, 4)}',
+                           [('void *', fp_void)] + [('int64_t', w) for w in widened[:4]])
+        return 'double', t
     raw_t = gen._new_val('int64_t', f'{helper} ({call_args})')
     # Calling a HIGHER-ORDER PARAMETER whose declared default is a compiled
     # generator of this compile (`def walk_tree(root, *, walk=_walk_tree)`
@@ -4723,9 +4872,6 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
         return 'MojoGenerator *', _gen_t
     if ret_type in ('int64_t', 'int'):
         return ret_type, raw_t
-    if ret_type == 'void':
-        gen._emit(f'  {helper} ({call_args});')
-        return 'int', gen._new_val('int', '0')
     # Narrow back to declared return type.
     t = gen._new_val(ret_type, f'({ret_type}){raw_t}')
     return ret_type, t
