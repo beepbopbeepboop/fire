@@ -7525,7 +7525,7 @@ def computed(fmt, buf):
         stmts = gimple_codegen.Parser(
             gimple_codegen.py_tokenize(src)).parse_module()
         answers = {getattr(st, 'name', None):
-                   mg._infer_return_maybe_kinds(None, st.body)
+                   mg._infer_return_maybe_kinds(None, st.body, None)
                    for st in stmts if getattr(st, 'name', None) in
                    ('literal', 'computed')}
         want = {'literal': True, 'computed': False}

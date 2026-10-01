@@ -436,7 +436,7 @@ def _returns_kinds_valued(gen, node) -> bool:
     return False
 
 
-def _infer_return_maybe_kinds(gen, body, func_def=None) -> bool:
+def _infer_return_maybe_kinds(gen, body, func_def) -> bool:
     """Does any `return` in this body hand back a kinds-carrying value?
 
     The cross-function half of the per-slot-kinds mechanism. A
@@ -4604,6 +4604,11 @@ def gen_module_impl(self, stmts):
             _v = _mk_cache[_k] = _infer_return_maybe_kinds(self, body, fdef)
         if _v:
             self._return_maybe_kinds.add(name)
+    # NO default parameter: the self-hosted backend lowers a cross-module call
+    # with a default by re-declaring the callee's signature, and a default
+    # reached through `None` is one more thing to get right there. Every call
+    # site — including test_gimple.py's, which passes None for both — passes
+    # all three explicitly.
     _mk_targets = []
     for s in all_functions:
         if not _is_foreign_main(s) and isinstance(s, FunctionDef):
