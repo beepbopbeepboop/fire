@@ -505,6 +505,12 @@ def _lower_device_launch(gen, node: gimple_ctypes.CallExpr):
         _is_buf = (_spec.is_buffer if isinstance(_spec, _gmi_glue.LaunchArg)
                    else (len(_spec) > 2 and _spec[2]))
         _t, _v = _lowered[_i]
+        # PER-BUFFER LENGTH. A kernel may give a buffer its own element-count
+        # expression (`LaunchArg.length`), because one count cannot describe a
+        # GEMM: A is M*K, B is K*N, C is M*N. Falling back to the kernel's
+        # single Int parameter keeps every existing kernel byte-identical.
+        _len_expr = (_spec.length
+                     if isinstance(_spec, _gmi_glue.LaunchArg) else None)
         if _is_buf and _t == 'MojoList *':
             # A boxed list where the kernel wants a `T *`.
             #
@@ -545,10 +551,11 @@ def _lower_device_launch(gen, node: gimple_ctypes.CallExpr):
             # design passed it back through an `int64_t *` out-parameter; that
             # needed an extra uninitialised pointer local at every call site,
             # which segfaults inside the helper. See _PACK_TEMPLATE.)
-            gen._emit(f'  {_buf} = {_pack}({_v}, (int64_t){_count_val});')
+            _use = _len_expr if _len_expr else _count_val
+            gen._emit(f'  {_buf} = {_pack}({_v}, (int64_t)({_use}));')
             _parts.append(_buf)
             if _unpack is not None:
-                _unpacks.append((_v, _buf, _count_val, _unpack))
+                _unpacks.append((_v, _buf, _use, _unpack))
             else:
                 # Still has to be released, just not written back -- and the
                 # release must come AFTER the dispatch, like the write-back

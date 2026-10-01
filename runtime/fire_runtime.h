@@ -1576,6 +1576,72 @@ static ssize_t _mojo_getline(void *lp, void *n, void *f) {
     return getline((char **)lp, (size_t *)n, (FILE *)f);
 }
 #include <stdarg.h>
+/* The C CLOCKS, declared by hand rather than by including <time.h>.
+ *
+ * This header included only stdint/stdio/setjmp/stdlib, so EVERY C function
+ * compiled Mojo can call reached its definition with NO PROTOTYPE in scope --
+ * verified by preprocessing this header alone, which declares neither
+ * `time_t time(` nor `clock_t clock(`. The backend mints a weak stub for an
+ * unregistered name and lets the linker prefer the real libSystem symbol, so
+ * the LINK is fine and the CALL is not: an unprototyped call is assumed to
+ * return int, which truncates a 64-bit time_t. `time()` still looks right
+ * because whole seconds fit in 32 bits until 2038.
+ *
+ * That finding is real and it is NOT fully fixed here, and the reason is
+ * worth recording. The obvious fix -- `#include <time.h>` -- is what this
+ * comment originally said, and it breaks the build immediately:
+ *
+ *   std/time/time.mojo:369: error: conflicting types for 'clock_gettime'
+ *
+ * because that include also declares `time`, `clock`, `strftime`, `localtime`,
+ * `gmtime`, `mktime` and `clock_gettime`, every one of which is in
+ * _C_RESERVED_FUNCS and every one of which the stdlib reaches through
+ * `external_call` with its own declaration. The module calls
+ * `external_call["clock_gettime", Int32](Int32(id), Pointer(to=ts))` and its
+ * emitted declaration disagrees with the real
+ * `int clock_gettime(clockid_t, struct timespec *)`. That is a genuine bug in
+ * the module and it was invisible precisely BECAUSE there was no prototype to
+ * disagree with -- the call worked by ABI luck.
+ *
+ * Fixing it properly means auditing every `external_call` in the stdlib
+ * against its real C signature, which is its own project and not something to
+ * smuggle in behind a benchmark. So only the two counters actually needed are
+ * declared here, with the TRUE prototypes from the SDK headers
+ * (`__uint64_t clock_gettime_nsec_np(clockid_t)`, `uint64_t
+ * mach_absolute_time(void)`), and `<time.h>` is included only off Apple, where
+ * it carries no conflicting declarations.
+ *
+ * What this buys, measured: `clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)`
+ * resolves to real libSystem and is TYPED. Untyped it returned 0 on one read
+ * and a real timestamp on the next, because the 64-bit return was read through
+ * an implicit `int`. CLOCK_MONOTONIC (6) resolves 1000 ns and cannot time a
+ * dispatch honestly; MONOTONIC_RAW (4) resolves 41 ns. Note `time.time_ns`
+ * remains unavailable in compiled Mojo -- that is a separate gap; this is the
+ * C route around it. */
+#if !defined(__APPLE__)
+#include <time.h>
+#else
+/* SIGNED, deliberately, and not because the SDK says so: the SDK prototype is
+ * `__uint64_t clock_gettime_nsec_np(clockid_t)`, but the stdlib reaches this
+ * symbol through `external_call["clock_gettime_nsec_np", Int64](...)` --
+ * std/time/time.mojo:91 -- so the generated translation unit declares it
+ * `int64_t (int32_t)`. Declaring it `unsigned long long` here is
+ *
+ *   error: conflicting types for 'clock_gettime_nsec_np';
+ *          have 'int64_t(int32_t)' {aka 'long long int(int)'}
+ *   note: previous declaration ... with type 'long long unsigned int(int)'
+ *
+ * and the ABI is identical either way, so the signedness that AGREES with the
+ * only caller in the tree is the one to write. Unregistering the name instead
+ * would put it back to an implicit `int` return, which is the bug this whole
+ * declaration exists to fix.
+ *
+ * `mach_absolute_time` is declared signed for the same reason and on the same
+ * reasoning; nothing in the stdlib calls it today, so nothing constrains it
+ * yet, and consistency is the safer default for a future `external_call`. */
+long long clock_gettime_nsec_np(int clockid);
+long long mach_absolute_time(void);
+#endif
 static int _mojo_vprintf(char *fmt, void *ap) {
     /* va_list is passed as void* from GIMPLE code; cast is implementation-defined
        but safe on all targets where va_list is a pointer type. */
