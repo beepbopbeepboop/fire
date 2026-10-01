@@ -178,10 +178,12 @@ both worth knowing before the next bisect because they produce the same
   literal (a runtime length check rescans from byte 0 on every character):
   0.05 s under python3, 2.5 minutes self-hosted, for `myinterpreter.py`,
   before a single statement is compiled.
-- `CODEGEN_container_eq_is_pointer_identity.md` — `==` between two containers
-  is a pointer comparison, so any fixed-point loop written on one never
-  terminates; with C2's never-freed allocator each round's fresh set is also
-  permanent. Measured: a two-line program past 8 GB.
+- ~~`CODEGEN_container_eq_is_pointer_identity.md`~~ — **LANDED 2026-09-30.**
+  `==` / `!=` between containers is Python value equality on the compiled path
+  (runtime `mojo_set_eq` / `mojo_list_eq` / `mojo_dict_eq` / `mojo_value_eq`),
+  diffed against CPython case by case in `test_container_equality.py` (24
+  cases). Doc deleted. The ordering siblings (`<`, `>`, `<=`, `>=`) are
+  `CODEGEN_container_ordering_is_pointer_identity.md`.
 
 ### C2. The self-hosted runtime's never-frees allocator — **high**
 

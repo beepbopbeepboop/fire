@@ -1,19 +1,14 @@
 # CODEGEN: `<` / `>` / `<=` / `>=` between two containers is a POINTER comparison
 
-> **Sibling doc — DELETE IT.** `bugs/CODEGEN_container_eq_is_pointer_identity.md`
-> is fixed by `test_container_equality.py`'s branch (`work/container-eq`, 2026-09-30):
+> **Sibling doc — ALREADY DELETED.** `bugs/CODEGEN_container_eq_is_pointer_identity.md`
+> was fixed by `test_container_equality.py`'s branch (`work/container-eq`, 2026-09-30):
 > `==` / `!=` between containers is now Python value equality on the compiled path,
-> on all three lowering routes, diffed against CPython case by case. That doc lands
-> with `merge2-compiled` / `round8-merged`, which is AFTER the branch that fixes it,
-> so a plain `git rm` on the fixing branch is a no-op and the open doc would survive
-> the merge. Whoever integrates should `git rm` it in the same commit as the merge.
-> Kept here rather than in a scratch file because this is the one place a reader of
-> an ordering bug will look for the state of its sibling.
+> on all three lowering routes, diffed against CPython case by case. If you are
+> reading this and that file is still in `bugs/`, `git rm` it — the fix landed.
 >
-> Also read, and deliberately NOT touched: `bugs/CODEGEN_in_dispatch_int_has_no_dict_branch.md`
-> (`x in <dict>` on the erased int view has no dict branch in `mojo_in_dispatch_int`).
-> Same erased-container family, one line of runtime, but a different question
-> (`in`, not `==`) and outside the claim this work held.
+> Also already fixed: `x in <dict>` on the erased int view, which had no dict
+> branch in `mojo_in_dispatch_int` (`bugs/CODEGEN_in_dispatch_int_has_no_dict_branch.md`,
+> deleted). See `test_container_membership.py`.
 
 ## Status (2026-09-30 — OPEN, measured on CPython 3.14.7; sibling of the `==`/`!=` bug this branch fixed)
 

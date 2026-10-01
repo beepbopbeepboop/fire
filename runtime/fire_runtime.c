@@ -5783,9 +5783,31 @@ int mojo_in_dispatch_str(int64_t container, char *needle)
     return 0;
 }
 
+/* The int view asks the same question with BOTH operands erased to
+ * int64_t, so the NEEDLE is as untyped as the container and needs the same
+ * treatment: `mojo_boxed_is_str` -- the discriminator mojo_cstr_or_int_str
+ * and every `_kw` dict entry point already use, so no new notion of "which
+ * words are strings" enters the runtime here -- picks the predicate. Without
+ * it this function asked the INT predicates about a boxed `char *`:
+ *
+ *   - a dict fell off the end entirely (there was no dict branch at all), so
+ *     `x in d` answered False for every erased dict -- bugs/
+ *     CODEGEN_in_dispatch_int_has_no_dict_branch.md;
+ *   - a set of strings answered False too, for a different reason: its
+ *     elements live in tag-1 string slots and `_set_slot_int` probes the
+ *     int domain, which cannot hold a pointer-shaped key at all.
+ *
+ * Both were silent: exit 0, no diagnostic, and the "no" inverts whatever
+ * branch of the program the membership test was guarding. A container that
+ * is none of the three kinds really is not a container, so the trailing 0
+ * is the honest answer and not a fallback. */
 int mojo_in_dispatch_int(int64_t container, int64_t needle)
 {
     if (container == 0) return 0;
+    if (mojo_boxed_is_str(needle))
+        return mojo_in_dispatch_str(container, (char *)(intptr_t)needle);
+    if (mojo_is_registered_dict(container))
+        return mojo_dict_contains_kw((MojoDict *)(intptr_t)container, needle);
     if (mojo_is_registered_list(container))
         return mojo_list_contains_int((MojoList *)(intptr_t)container, needle);
     if (mojo_is_registered_set(container))
