@@ -3929,6 +3929,164 @@ def main():
 
     test_qualified_module_struct_construction()
 
+    # bugs/hard/CODEGEN_same_bare_name_struct_collision_across_modules.md:
+    # two REAL classes sharing a bare name across two modules. The single
+    # string this codegen used as a struct's C identity was the bare
+    # `StructDef.name`, so whichever module was processed first owned the
+    # field table and the second one's `self.<field>` accesses, field types
+    # and `__init__` call sites all resolved against the winner's. The
+    # helpers below compile 2 or 3 sibling files with do_imports=True, run
+    # the result, AND run the same source under CPython, and require the two
+    # stdouts to agree — so every assertion here is anchored to what Python
+    # actually answers, never to a value this compiler happens to produce.
+    def _compile_n_files_and_run(files: dict, entry: str, timeout=60):
+        """Write `files` ({name: source}), compile `entry` with
+        do_imports=True (the single-TU inline path), build with gcc -fgimple,
+        run, return (compiled_stdout, cpython_stdout). Raises on any
+        failure with the stage that failed in the message."""
+        with tempfile.TemporaryDirectory() as wd:
+            for name, src in files.items():
+                open(os.path.join(wd, name), 'w').write(src)
+            ep = os.path.join(wd, entry)
+            from gimple_codegen import compile_to_gimple
+            c_code = compile_to_gimple(files[entry], do_imports=True,
+                                       filename=ep)
+            # CPython's own answer for the identical program text, so the
+            # expectation is never a hardcoded string this repo chose. Taken
+            # INSIDE the `with`, while the source files still exist.
+            cp = subprocess.run([sys.executable, ep], capture_output=True,
+                                text=True, timeout=timeout, cwd=wd)
+            cp_out = cp.stdout
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.c',
+                                         delete=False) as f:
+            f.write(c_code)
+            c_file = f.name
+        exe_file = c_file.replace('.c', '.exe')
+        try:
+            runtime_dir = os.path.join(HERE, 'runtime')
+            result = subprocess.run(
+                [find_gcc(), '-fgimple', f'-I{runtime_dir}', '-o', exe_file,
+                 c_file, os.path.join(runtime_dir, 'fire_runtime.c')],
+                capture_output=True, text=True, timeout=timeout)
+            if result.returncode != 0:
+                raise RuntimeError(f"gcc -fgimple failed: {result.stderr[:400]}")
+            return run_executable_stdout(exe_file), cp_out
+        finally:
+            for p in (c_file, exe_file):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+    def _check_agrees_with_cpython(name, files, entry, timeout=60):
+        """Run `files` both ways; PASS only if compiled == CPython."""
+        global _PASS, _FAIL, _TIMEOUT
+        try:
+            got, want = _compile_n_files_and_run(files, entry, timeout)
+        except subprocess.TimeoutExpired as e:
+            print(f"TIMEOUT {name}: {e}")
+            _TIMEOUT += 1
+            return
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if got == want:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: compiled {got!r} != CPython {want!r}")
+            _FAIL += 1
+
+    # The two shapes the bug doc calls out as the LIVE residues, both
+    # re-measured on this tree before the fix: (a) a `str` field sharing a
+    # NAME with the winner's `int64_t` field was stored as a raw pointer
+    # into the winner's int slot, so reading it back printed a heap address
+    # (ASLR-varying, exit 0, no diagnostic) where CPython printed the
+    # string; (b) a 0-arg `mod_b.Dialog()` called the winner's 1-arg
+    # `__init__`, a hard gcc "too few arguments" compile error.
+    _check_agrees_with_cpython("same_bare_name_struct_shared_field_cname", {
+        'colln_mod_a.py': "class Dialog:\n"
+                          "    def __init__(self, n):\n"
+                          "        self.n = n\n",
+        'colln_mod_b.py': "class Dialog:\n"
+                          "    def __init__(self, unused):\n"
+                          "        self.n = 'hello'\n",
+        'colln_main.py': "import colln_mod_a, colln_mod_b\n"
+                         "def main():\n"
+                         "    a = colln_mod_a.Dialog(5)\n"
+                         "    b = colln_mod_b.Dialog(0)\n"
+                         "    print(a.n)\n"
+                         "    print(b.n)\n"
+                         "main()\n",
+    }, 'colln_main.py')
+
+    _check_agrees_with_cpython("same_bare_name_struct_ctor_arity", {
+        'colln2_mod_a.py': "class Dialog:\n"
+                           "    def __init__(self, n):\n"
+                           "        self.n = n\n",
+        'colln2_mod_b.py': "class Dialog:\n"
+                           "    def __init__(self):\n"
+                           "        self.n = 'hello'\n",
+        'colln2_main.py': "import colln2_mod_a, colln2_mod_b\n"
+                          "def main():\n"
+                          "    a = colln2_mod_a.Dialog(5)\n"
+                          "    b = colln2_mod_b.Dialog()\n"
+                          "    print(a.n)\n"
+                          "    print(b.n)\n"
+                          "main()\n",
+    }, 'colln2_main.py')
+
+    # The doc's §3 shape: the two classes share NO field name, so before the
+    # fix the loser's access degraded to a runtime AttributeError rather
+    # than a wrong value. Method dispatch has to reach the right class too:
+    # both `show` methods are same-named, and the loser's call site used to
+    # resolve to the winner's body.
+    _check_agrees_with_cpython("same_bare_name_struct_methods_and_fields", {
+        'colln3_mod_a.py': "class Dialog:\n"
+                           "    def __init__(self, widgetName: str):\n"
+                           "        self.widgetName = widgetName\n"
+                           "    def show(self):\n"
+                           "        return self.widgetName\n",
+        'colln3_mod_b.py': "class Dialog:\n"
+                           "    def __init__(self, result: str):\n"
+                           "        self.result = result\n"
+                           "    def show(self):\n"
+                           "        return self.result\n",
+        'colln3_main.py': "import colln3_mod_a, colln3_mod_b\n"
+                          "def main():\n"
+                          "    x = colln3_mod_a.Dialog('a')\n"
+                          "    y = colln3_mod_b.Dialog('b')\n"
+                          "    print(x.widgetName)\n"
+                          "    print(y.result)\n"
+                          "    print(x.show())\n"
+                          "    print(y.show())\n"
+                          "main()\n",
+    }, 'colln3_main.py')
+
+    # A `from mod import Dialog as X` binding must not change which class a
+    # module-qualified construction picks, and the two classes must stay
+    # independent when BOTH are constructed in one program (the shape where
+    # a single shared field table is most visible).
+    _check_agrees_with_cpython("same_bare_name_struct_from_import_alias", {
+        'colln4_mod_a.py': "class Dialog:\n"
+                           "    def __init__(self, n):\n"
+                           "        self.n = n\n",
+        'colln4_mod_b.py': "class Dialog:\n"
+                           "    def __init__(self, s: str):\n"
+                           "        self.s = s\n"
+                           "        self.n = 42\n",
+        'colln4_main.py': "from colln4_mod_a import Dialog\n"
+                          "import colln4_mod_b\n"
+                          "def main():\n"
+                          "    a = Dialog(3)\n"
+                          "    b = colln4_mod_b.Dialog('hi')\n"
+                          "    print(a.n)\n"
+                          "    print(b.s)\n"
+                          "    print(b.n)\n"
+                          "main()\n",
+    }, 'colln4_main.py')
+
     # bugs/CODEGEN_fstring_and_str_of_a_list_are_garbage.md: f"{container}"
     # and str(container) read the container's raw header bytes as a C
     # string (`_stringify_value` had no container branch at all, unlike

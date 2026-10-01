@@ -62,6 +62,13 @@ from mojo.middle.module_shared import (
     _mojo_type, _pair_key, _ptr_slot_in_range, _register_sym, _selfhost_fn_reassigns_method, _selfhost_homogeneous_tuple_ret_funcs,
     _selfhost_modglobal_is_pathcall, _selfhost_module_scalar_globals, _selfhost_struct_dict_field_val_types, _sms_key, _walk_ast
 )
+# Module-qualified struct identity (the same-bare-name collision fix) — see
+# `_struct_cname_by_id` in GimpleGen.__init__ and the collision pass in
+# `gen_module_impl` below. Imported from funcs_shared, the same module
+# `_struct_method_qualifier` lives in, so the C-name qualifier and the
+# method-symbol qualifier are one function on one input.
+import mojo.middle.funcs_shared as _ggfs
+from mojo.middle.funcs_shared import _resolve_struct_cname, _sanitize_cname_qualifier
 
 
 def _gmi_literal_ctype(node):
@@ -1305,6 +1312,18 @@ def gen_module_impl(self, stmts):
     for _lsn_s in stmts:
         if isinstance(_lsn_s, StructDef):
             self._local_struct_names.add(_as_str(_lsn_s.name))
+    # Each StructDef's HOME module, the input to the collision test in the
+    # module-qualified-identity pass further down (see `_struct_cname_by_id`
+    # in GimpleGen.__init__). THIS gen_module call IS the compile of
+    # `self.module_name`, so every StructDef in `stmts` is that module's own.
+    # Keyed by node identity, which is what `_struct_name_owner` compares when
+    # it decides "same class", so the two agree on what that means. The ROOT
+    # module compiles with `module_name == ''`; it is not a peer of any
+    # imported module, so it claims the bare name like any other first-wins
+    # owner rather than being qualified against itself.
+    for _hms in stmts:
+        if isinstance(_hms, StructDef) and self.module_name:
+            self._struct_home_by_id[id(_hms)] = _as_str(self.module_name)
     # Overloaded / duplicated top-level functions (same name, multiple defs)
     # can't all be emitted as distinct C symbols. Two genuinely different
     # situations hide behind that one description, with OPPOSITE correct
@@ -3153,18 +3172,88 @@ def gen_module_impl(self, stmts):
         if isinstance(s, StructDef) and s.name == 'GimpleGen':
             self._struct_name_owner['GimpleGen'] = s
             break
+    # Module-qualified struct IDENTITY. See `_struct_cname_by_id` in
+    # GimpleGen.__init__ for what a cname is and why the bare StructDef.name
+    # used to BE it was the bug.
+    #
+    # Every StructDef gets an entry in `_struct_cname_by_id`, and
+    # `_struct_cname_of_name[bare]` is the WINNER's cname — for a struct that
+    # never collided that is simply the bare name, so every non-colliding
+    # struct's `struct_field_types` key, `typedef struct X` name, `_alloc_X`
+    # helper and `{X}_{method}` symbol stay byte-identical to what they were
+    # before. Only a GENUINE cross-module collision mints a qualified cname,
+    # and even then the loser's METHOD SYMBOLS do not move: its cname is
+    # `{qualifier}_{Name}`, and `_struct_method_qualifier` answers '' for an
+    # already-qualified spelling, so the composer emits exactly the
+    # `{qualifier}_{Name}_{method}` this codegen has always emitted for such a
+    # struct. Nothing but the C *type* identity moves.
+    #
+    # A same-home same-named pair is NOT a collision: that is one file
+    # redefining a class (Python semantics — the second binding replaces the
+    # first), which is what `_struct_name_owner`'s first-wins already models,
+    # and it is the shape this compiler's own two byte-identical
+    # `class StringLiteral` definitions take (see this doc's §5). Keying the
+    # qualification on the genuine cross-module case, NOT on the name loss,
+    # is what keeps the self-hosting closure's struct set unchanged.
     for s in all_struct_defs:
         s = _as_structdef_node(s)
-        if isinstance(s, StructDef) and s.name not in self._struct_name_owner:
-            self._struct_name_owner[s.name] = s
-    for s in all_struct_defs:
-        s = _as_structdef_node(s)
-        if isinstance(s, StructDef) and self._struct_name_owner.get(s.name) is s:
-            if s.name not in self.struct_field_types:
-                self.struct_field_types[s.name] = {}
+        if not isinstance(s, StructDef):
+            continue
+        _sid = id(s)
+        if _sid in self._struct_cname_by_id:
+            continue
+        _sname = _as_str(s.name)
+        _shome = self._struct_home_by_id.get(_sid, '')
+        _owner = self._struct_name_owner.get(_sname)
+        if _owner is None:
+            # First claim on this bare name: it OWNS it, under the bare name.
+            self._struct_name_owner[_sname] = s
+            self._struct_cname_by_id[_sid] = _sname
+            self._struct_cname_of_name[_sname] = _sname
+            if _shome:
+                self._struct_cname_by_home[_shome + '::' + _sname] = _sname
+            continue
+        if _owner is s:
+            self._struct_cname_by_id[_sid] = _sname
+            continue
+        # A different StructDef already owns this bare name. Genuine collision?
+        _ohome = self._struct_home_by_id.get(id(_owner), '')
+        if not _shome or not _ohome or _shome == _ohome:
+            # Same file (or an unresolvable home): a redefinition, not a
+            # cross-module collision. Leave it to the first-wins skip below.
+            continue
+        # Real cross-module collision: give the loser a module-qualified cname,
+        # uniquified against any cname already handed out.
+        _q = _sanitize_cname_qualifier(_shome)
+        _cname = _q + '_' + _sname
+        _n = 2
+        while _cname in self._struct_cname_of_name or _cname in self._struct_name_owner:
+            _cname = _q + '_' + _sname + str(_n)
+            _n += 1
+        self._struct_cname_by_id[_sid] = _cname
+        self._struct_name_owner[_cname] = s
+        self._struct_cname_by_home[_shome + '::' + _sname] = _cname
+        self._struct_qualified_cnames.add(_cname)
     for s in all_struct_defs:
         s = _as_structdef_node(s)
         if isinstance(s, StructDef):
+            _sname = _as_str(s.name)
+            _cname = self._struct_cname_by_id.get(id(s), _sname)
+            if self._struct_name_owner.get(_cname) is not s:
+                continue
+            if _cname not in self.struct_field_types:
+                self.struct_field_types[_cname] = {}
+    for s in all_struct_defs:
+        s = _as_structdef_node(s)
+        if isinstance(s, StructDef):
+            # The struct's C IDENTITY from here on. Every `s.name` that keys a
+            # whole-program table (field table, class attrs, boxed/bool field
+            # sets, per-struct elem/array/annotation side tables) is this, not
+            # the bare name — and that substitution IS the fix: a collision
+            # loser's fields land in its OWN table instead of being dropped,
+            # and its `self.<field>` accesses then read the ctype IT declared.
+            _sname = _as_str(s.name)
+            s.name = self._struct_cname_by_id.get(id(s), _sname)
             if self._struct_name_owner.get(s.name) is not s:
                 continue
             if s.name not in self.struct_field_types:
@@ -5217,6 +5306,71 @@ def gen_module_impl(self, stmts):
         else:
             d[pname] = (e, ne)
 
+    def _literal_arg_elems(a):
+        """`(elem, nested)` C types for a container LITERAL passed as a call
+        argument, or None when `a` is not one whose element type is statically
+        decidable. The same two answers `note_list_literal` inside
+        `_scan_container_elems` derives for a literal bound to a local, so the
+        two observation sources of this table cannot drift: a list-of-lists is
+        `('MojoList *', <inner elem>)`, anything else is `(<joined elem>,
+        None)`.
+
+        Why this exists at all: `_param_elem_types` was fed ONLY from an
+        argument that is a bare identifier naming a tracked local, so
+        `show(xs)` inherited xs's element type while `show([1.5, 2.5])` —
+        the SAME call with the list written in place — inherited nothing. The
+        callee then read every element through `mojo_list_get_int` and
+        `print(r)` emitted the floats' raw IEEE-754 bit patterns with exit 0.
+        See bugs/hard/CODEGEN_coro_yield_kind_unresolved_callsite.md
+        ("Item 8")."""
+        if not isinstance(a, ListExpr):
+            return None
+        els = a.elements
+        if not els:
+            return None
+        if isinstance(els[0], ListExpr):
+            return ('MojoList *', self._infer_list_elem_type(els[0].elements))
+        return (self._infer_list_elem_type(els), None)
+
+    def _informative_elem_ctype(e):
+        """True when an observed element ctype tells the callee something the
+        `int64_t` default would not already do.
+
+        `int64_t` is this table's "no information" answer, not a fact about
+        the value: the consumer seeds `_elem_types[bare] = e` and every
+        absent entry falls back to exactly the same `int64_t`
+        (`_elem_of`), so an int list is read identically with or without a
+        contract. Recording it as EVIDENCE can therefore only ever destroy
+        information — it collides with a `char *`/`double` observation from a
+        sibling call site and turns a resolvable param into
+        `(None, None)` = unknown = `int64_t` again, which is what the int
+        observation alone already gave. So a literal argument contributes its
+        element ctype only when it is one the default gets wrong.
+
+        Deliberately NOT applied to the bare-identifier branch below, which
+        predates this: dropping `int64_t` there flips which side of a
+        genuinely-heterogeneous param (`f(int_list)` and `f(str_list)` from
+        different call sites) reads correctly, and that is a coin flip
+        either way — not worth re-rolling real stdlib code on while the
+        breadth number is unmeasured."""
+        return e != 'int64_t' and e != ''
+
+    def _note_literal_arg_elems(callee, pname, a):
+        """Record `pname`'s element ctype from a container-literal argument.
+        No-op unless the literal's element ctype is one the `int64_t` default
+        gets wrong (see `_informative_elem_ctype`)."""
+        pair = _literal_arg_elems(a)
+        if pair is None:
+            return
+        e = pair[0]
+        ne = pair[1]
+        if not _informative_elem_ctype(e):
+            return
+        import os as _os
+        if _os.environ.get('MOJO_TRACE_PARAM_ELEM'):
+            print('TRACE', _as_str(callee), _as_str(pname), e, ne, file=sys.stderr)
+        _record_param_elem(callee, pname, e, ne)
+
     _fn_by_name: dict = {}
     for _fbn_s in all_functions:
         if isinstance(_fbn_s, FunctionDef):
@@ -5321,6 +5475,19 @@ def gen_module_impl(self, stmts):
                     _sp_inner = _struct_obs.setdefault(callee, {})
                     _sp_set = _sp_inner.setdefault(pnames[i], set())
                     _sp_set.add(_gmi_as_str(spt))
+            # Keyword arguments name the parameter directly, so the element
+            # contract reads them the same way — `show(data=[1.5, 2.5])` is
+            # the same call as `show([1.5, 2.5])` and used to inherit exactly
+            # as little. Only the literal branch is added here: the scalar and
+            # struct-pointer observations above are a separate pre-existing
+            # contract with its own coverage, and widening those is not this
+            # change's business.
+            for _kw in (getattr(call, 'kwargs', None) or []):
+                _kwn = _as_str(_kw[0])
+                for _ki in range(len(pnames)):
+                    if pnames[_ki] == _kwn:
+                        _note_literal_arg_elems(callee, _kwn, _kw[1])
+                        break
 
     for caller_name, caller_struct, cbody in _method_caller_bodies:
         _melem, _mnested, _ = self._scan_container_elems(cbody)

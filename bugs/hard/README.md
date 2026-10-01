@@ -16,8 +16,8 @@ Last updated 2026-10-01.
 
 | doc | one line |
 |---|---|
-| `CODEGEN_same_bare_name_struct_collision_across_modules.md` | two same-named structs in sibling modules collide on an unqualified field table / typedef name. Re-derived 2026-09-26: mechanism intact, but the documented `'Dialog' has no member named 'result'` C error is **gone** (the loser's field access now degrades to dynamic getattr/setattr), and the one genuinely silent residue is a field name **both** structs share — the loser's value is coerced into the winner's ctype, so a `str` field lands as a heap address in an `int64_t` slot. Unfixable *today* only because a **bigger bug sits in front of it**: `module.Class(...)` construction is unresolved on every path, so no program can exhibit this. Fix that first. |
 | `CODEGEN_cross_module_struct_ctor_at_module_scope_mistyped.md` | a cross-module struct constructor called at **module scope** (not inside a function) is mistyped, in BOTH import spellings and neither is the import seam: the bare-`import` spelling prints the object's own pointer as a decimal with exit 0, the `from`-import spelling fails the build outright with `non-trivial conversion in 'var_decl'`. The same four cases inside a function body, and the same two cases with the class in the same file, are all correct. Found 2026-09-30 next to the deleted row below. |
+| `CODEGEN_function_scoped_import_module_not_inlined.md` | a function-scoped `from X import Y` records Y's signature/exports and then returns without compiling the module: Y's `X.Y(...)` construction returns `0`, and reading a class attribute prints `unavailable in compiled mode` with exit 0. The module-scoped spelling of the same import works. **New 2026-09-26.** |
 
 ## PARTIAL — the recorded gap is fixed; named residue remains
 
@@ -64,10 +64,31 @@ new OPEN doc above rather than losing the residue:
 | `CODEGEN_unannotated_init_param_field_type_defaults_int64.md` | `CODEGEN_ctor_arg_field_type_scalars_only.md` |
 | `CODEGEN_generator_consuming_generator_value_ctype.md` | `CODEGEN_generator_value_slot_loses_bool.md` |
 
-Nothing is left on the "still to verify" list. A ninth CLOSED report's
-analysis (`CODEGEN_same_bare_name_struct_collision_across_modules.md`) was
-re-derived and kept — see its OPEN row for the three load-bearing claims that
-turned out to be false.
+Nothing is left on the "still to verify" list.
+
+A ninth CLOSED report's analysis
+(`CODEGEN_same_bare_name_struct_collision_across_modules.md`) was
+re-derived rather than trusted, and that re-derivation is what found the
+bug was still live — the "unfixable today" framing turned out to rest on a
+*different* bug (`module.Class(...)` construction) that had since been
+fixed, which is what made a runnable repro exist. It was then fixed
+properly, on 2026-09-29: two same-bare-named structs in different modules
+now get distinct module-qualified C identities instead of sharing one field
+table and one typedef, so a loser's `str` field no longer lands in the
+winner's `int64_t` slot as a heap address. Verified against CPython on four
+shapes, and on the real trigger this doc originally named — `Lib/tkinter/
+filedialog.py`, whose closure holds THREE same-named `Dialog` classes,
+which the unfixed compiler collapsed into a single `typedef struct Dialog`
+and which now come out as `tkinter_dialog_Dialog` and
+`tkinter_simpledialog_Dialog`. **Doc deleted** (CLAUDE.md: a fully-fixed
+bug's report is removed), so unlike the eight above it is not being kept as
+a monument to re-verify.
+
+The two-step sequence is worth keeping as a lesson rather than as a doc:
+every entry in this table was "OPEN" partly because a *larger* bug sat in
+front of it, and fixing the larger one is what turned the smaller one from
+unreachable into a two-hour fix. "No program can exhibit this" is a claim
+about the bugs in front of it, not about the bug.
 
 ### 2026-09-29: one removal with no residue of its own — and what that cost
 

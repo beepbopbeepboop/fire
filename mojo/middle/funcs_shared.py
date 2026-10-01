@@ -1049,6 +1049,16 @@ def _struct_method_qualifier(gen, struct_name: str) -> str:
     exempt by never going through struct-method mangling at all."""
     if struct_name == 'Span':
         return ''
+    # An already-QUALIFIED struct cname (a same-bare-name collision loser's;
+    # see `_struct_cname_by_id` in GimpleGen.__init__) carries its own module
+    # prefix, so it must compose to `{cname}_{method}` with NOTHING prepended.
+    # Prefixing again would name the symbol `mod_b_mod_b_Dialog___init__`,
+    # which nothing defines — and answering '' is exactly what keeps such a
+    # struct's method symbols byte-identical to what this codegen emitted for
+    # it before the collision fix, since the pre-fix spelling was already
+    # `{qualifier}_{Name}_{method}`.
+    if struct_name in getattr(gen, '_struct_qualified_cnames', ()):
+        return ''
     # GimpleGen: same shape of exemption as Span just above, for a
     # different reason. GimpleGen genuinely DOES have a real home module
     # (gimple_codegen.py) and a normal per-file compile of THAT file
@@ -1183,6 +1193,72 @@ def _struct_method_qualifier(gen, struct_name: str) -> str:
     if home and struct_name in home:
         return _sanitize_qualifier(home[struct_name])
     return ''
+
+
+# ---------------------------------------------------------------------------
+# Module-qualified struct IDENTITY (same-bare-name collisions across modules)
+# ---------------------------------------------------------------------------
+
+def _sanitize_cname_qualifier(q):
+    """The C-identifier form of a module qualifier. Deliberately the same
+    transformation as `_struct_method_qualifier`'s own `_sanitize_qualifier`
+    just above, so a qualified struct cname and a qualified method symbol of
+    the same struct always agree: `{cname}_{method}` and
+    `{qualifier}_{Name}_{method}` are the same string."""
+    return q.lstrip('.').replace('.', '_').replace('-', '_') if q else q
+
+
+def _resolve_struct_cname(gen, name: str, home: str = '') -> str:
+    """The C identity (`cname`) a reference to the class spelled `name`
+    resolves to, optionally disambiguated by the MODULE it was reached
+    through.
+
+    With no `home`, this is the historical answer: the bare name for every
+    struct that never collided, and the WINNER's cname for one that did
+    (`_struct_cname_of_name`). With a `home` module qualifier, a class owned
+    by THAT module resolves to its own cname instead — the whole point:
+    `mod_b.Dialog(...)` must construct mod_b's `Dialog`, not whichever of two
+    same-named classes won the bare-name race.
+
+    Returns the bare `name` unchanged when nothing is registered for it, so
+    this is safe to call on any name (a builtin, a local, a not-yet-scanned
+    struct) and degrades exactly to the pre-existing behaviour."""
+    if not name:
+        return name
+    if home:
+        _q = _sanitize_cname_qualifier(home)
+        if _q:
+            _hit = getattr(gen, '_struct_cname_by_home', None)
+            if _hit:
+                _v = _hit.get(_q + '::' + name)
+                if _v:
+                    return _v
+    _owner = getattr(gen, '_struct_cname_of_name', None)
+    if _owner:
+        _v2 = _owner.get(name)
+        if _v2:
+            return _v2
+    return name
+
+
+def _ctor_cname_via_module(gen, binding: str, name: str) -> str:
+    """`_resolve_struct_cname` keyed by the module a qualified-constructor
+    receiver (`mod_b.Dialog(...)`) actually names.
+
+    `binding` is the SOURCE-LEVEL spelling of the receiver, which is a LOCAL
+    alias, not necessarily the module's own name (`import mod_b as mb` binds
+    `mb`). `imported_symbols[binding]['module']` resolves the alias back to
+    the real module — the key `_struct_cname_by_home` was registered under. A
+    binding with no recorded module (a builtin, a local name) resolves to the
+    bare name, the historical answer."""
+    _info = getattr(gen, 'imported_symbols', None)
+    if _info:
+        _e = _info.get(binding)
+        if isinstance(_e, dict):
+            _m = _e.get('module')
+            if _m:
+                return _resolve_struct_cname(gen, name, _m)
+    return _resolve_struct_cname(gen, name)
 
 
 # ---------------------------------------------------------------------------
