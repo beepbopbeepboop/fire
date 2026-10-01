@@ -30,6 +30,8 @@ from fire_compiler import (
     YieldExpr, YieldFromExpr, AwaitExpr,
     Parser, py_tokenize,
     _as_str, _signed_int64, _signed_int64_c_literal,
+    is_tuple_target as _for_target_is_tuple,
+    for_target_slots as _for_target_slots,
 )
 import regex_compile
 import mlir
@@ -5607,7 +5609,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
     # approximated — this emitter's break-flag protocol is shared with the
     # generic path and wiring a generator loop into it is a separate,
     # unexercised change.
-    if (isinstance(target, str) and ',' not in target
+    if (isinstance(target, str) and not _for_target_is_tuple(target)
             and not s.else_body
             and isinstance(s.iterable, gimple_ctypes.IdentExpr)
             and s.iterable.name in getattr(gen, '_cpp_generator_var_api', {})):
@@ -5649,7 +5651,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
     # leave it exhausted afterward, matching real Python's single-pass
     # iterator semantics. Must run BEFORE the generic bare-identifier list
     # case below, which would restart the scan from element 0.
-    if (isinstance(target, str) and ',' not in target
+    if (isinstance(target, str) and not _for_target_is_tuple(target)
             and not s.else_body
             and isinstance(s.iterable, gimple_ctypes.IdentExpr)
             and s.iterable.name in getattr(gen, '_cpp_list_iter_cursor', {})):
@@ -6130,7 +6132,8 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         # or outside a coroutine body — `mojo_set_add_str` exists but
         # this narrow model never types a LOCAL set as string-valued;
         # matches `_gen_for_set`'s own int64_t-only assumption).
-        if (not s.else_body and isinstance(target, str) and ',' not in target
+        if (not s.else_body and isinstance(target, str)
+                and not _for_target_is_tuple(target)
                 and _cpp_receiver_ctype(gen, s.iterable) == 'MojoSet *'):
             _sexpr = gen._cpp_expr(s.iterable)
             _sit = gen._cpp_fresh_name("_mg_sit")
@@ -6344,9 +6347,9 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 # the accessor matching that name's ALREADY-DECLARED
                 # type when known (an earlier declaration wins — its C++
                 # type cannot change), int64_t otherwise.
-                _tuple_names = ([t.strip() for t in
-                                 gimple_ctypes._split_top_level_commas(target) if t.strip()]
-                                if isinstance(target, str) and ',' in target else None)
+                _tuple_names = (_for_target_slots(target)
+                                if isinstance(target, str)
+                                and _for_target_is_tuple(target) else None)
                 if _tuple_names:
                     _tupvar = gen._cpp_fresh_name("_mg_tup")
                     for _nm in _tuple_names:
@@ -6402,7 +6405,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 if (_eff_elem is None
                         and not target_was_declared
                         and isinstance(target, str)
-                        and ',' not in target
+                        and not _for_target_is_tuple(target)
                         and _cpp_body_str_evidence(target, s.body)):
                     # Unknown element provenance but the loop body itself
                     # uses the (single) target as a string — declare it
@@ -6525,7 +6528,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             elif (isinstance(s.iterable, gimple_ctypes.IdentExpr)
                     and gen._cpp_declared is not None
                     and s.iterable.name not in gen._cpp_declared
-                    and isinstance(target, str) and ',' not in target
+                    and isinstance(target, str) and not _for_target_is_tuple(target)
                     and isinstance(iter_expr, str)
                     and iter_expr.startswith('_root_globals.')):
                 # The same module-level-global case with the global's C

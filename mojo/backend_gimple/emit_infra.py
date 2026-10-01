@@ -30,6 +30,13 @@ from fire_compiler import (
     Parser, py_tokenize, _as_str, _as_set, _as_int, _pair_key, _ptr_slot_in_range,
     _as_ident_node, _as_member_node,
 )
+# Aliased: this module also has a LOCAL `is_tuple_target` (the
+# generator-driven comprehension loop's own flag, which additionally
+# requires known tuple slot types), so the shared predicate could not keep
+# the plain name here without shadowing confusion at both sites.
+from fire_compiler import (is_tuple_target as _for_target_is_tuple,
+                           for_target_slots as _for_target_slots,
+                           _split_top_level_commas as _fc_split_top_level_commas)
 import regex_compile
 import mlir
 import mojo.backend_gimple.device_glue as _gmi_glue
@@ -3538,10 +3545,16 @@ def _compr_list_loop(gen, node, gen0, res, res_type, it_val):
     # every emitted reference. FRESH name, not `it_val = _as_str(it_val)`:
     # reassigning the param re-widens it via the same unification.
     _iv = _as_str(it_val)
-    # Detect tuple unpacking target: "_, av" or "(_, av)"
+    # Detect tuple unpacking target: "(_, av)" — a parenthesised group
+    # (fire_compiler.is_tuple_target), or the bare comma form "_, av" that
+    # `_parse_generator_target` produces for `for a, b in ...` inside a
+    # comprehension. A 1-tuple target is `(a)` — parenthesised but with no
+    # comma inside — so testing `',' in inner_str` alone missed it and
+    # `[y for (y,) in [(1,), (2,)]]` bound the whole item per iteration
+    # (printing `[0, 0]` / `[(1,), (2,)]` where CPython prints `[1, 2]`).
     target_str = gen0.target.strip()
     inner_str = target_str[1:-1].strip() if (target_str.startswith('(') and target_str.endswith(')')) else target_str
-    if ',' in inner_str:
+    if _for_target_is_tuple(target_str) or ',' in inner_str:
         # Tuple target: each element of the outer list is a sub-list
         # (tuple). Mirrors _gen_for_list's identical, already-fixed
         # per-slot logic (see its own comment for the history): pick
@@ -3761,9 +3774,14 @@ def _compr_generator_loop(gen, node, gen0, res, res_type, it_val):
     _inner_str = (_target_str[1:-1].strip()
                   if (_target_str.startswith('(') and _target_str.endswith(')'))
                   else _target_str)
-    is_tuple_target = (',' in _inner_str and tuple_slot_ctypes is not None)
+    # `_for_target_is_tuple` rather than `',' in _inner_str`: a 1-tuple
+    # target `(a)` is parenthesised with NO comma inside, so the comma test
+    # alone called it a plain single-name bind and the whole item went to
+    # `a`.
+    is_tuple_target = ((_for_target_is_tuple(_target_str) or ',' in _inner_str)
+                       and tuple_slot_ctypes is not None)
     if is_tuple_target:
-        var_names = [v.strip() for v in _inner_str.split(',')]
+        var_names = _for_target_slots(_target_str)
     else:
         var_names = None
         gen._declare_var(gen0.target, vct,
@@ -4181,16 +4199,11 @@ def _eval_const_bool(gen, node) -> bool | None:
                                            _comptime_call_hook(gen))
 
 def _split_top_level_comma(s: str) -> list[str]:
-    """Split s by top-level commas only (bracket-aware)."""
-    parts, depth, start = [], 0, 0
-    for i, c in enumerate(s):
-        if c in '([': depth += 1
-        elif c in ')]': depth -= 1
-        elif c == ',' and depth == 0:
-            parts.append(s[start:i].strip())
-            start = i + 1
-    parts.append(s[start:].strip())
-    return parts
+    """Split `s` by top-level commas only (bracket-aware) — the tree's one
+    splitter, `fire_compiler._split_top_level_commas`, re-exported under the
+    name this module's call sites use. This used to be a second copy with
+    its own `([`-only depth tracking."""
+    return _fc_split_top_level_commas(s)
 
 # Per-part parse results for `_dedup_variadic_externs`, keyed by the part's
 # exact text: (concrete, variadic) function names, or None-absent.

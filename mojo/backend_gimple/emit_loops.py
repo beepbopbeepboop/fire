@@ -775,7 +775,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # treat `it` as a plain MojoList* and restart the scan from element 0.
     if (isinstance(it, gimple_ctypes.IdentExpr)
             and it.name in getattr(gen, '_list_iter_cursor', {})
-            and isinstance(var, str) and ',' not in var
+            and isinstance(var, str) and not gimple_ctypes._fc_is_tuple_target(var)
             and not getattr(node, 'else_body', None)):
         _gen_for_list_iter_cursor(gen, node, var)
         return
