@@ -304,16 +304,46 @@ def rotr64(x: int, n: int) -> int:
     return ((x >> n) & ((1 << (64 - n)) - 1)) | (x << (64 - n))
 
 
-def b2_g(v: Pointer[UInt8], a: int, b: int, c: int, d: int,
-         x: int, y: int) -> int:
-    """The BLAKE2b `G` function, on the four words at byte offsets a,b,c,d.
+# THE EIGHT `G` CALL SITES, as the four working-vector words each one mixes,
+# packed low-to-high into four NIBBLES of one word. `b2_g` unpacks them.
+#
+# Byte offset = word index * 8, and there are 16 words, so every index is four
+# bits and four of them fit in one word with room to spare. That packing is
+# what keeps `b2_g` inside the SIX integer argument registers both backends
+# pass: it took `v, a, b, c, d, x, y` — seven, one too many for x86-64 — and
+# the module could not be built for x86-64 at all
+# (`b2_g: 7 parameters exceeds the 6 the formal x86-64 ABI passes in
+# registers`), which is three of the files that import it.
+#
+# The offsets themselves are NOT derivable from anything smaller, which is why
+# they are packed rather than computed: the four COLUMNS are (d, d+4, d+8,
+# d+12) but the four DIAGONALS are not an arithmetic progression — {1, 6, 11,
+# 12} has steps 5, 5, 1 — so a base and a stride cannot spell them and each is
+# written out.
+_Q_C0 = 0xC840       # column  0: words 0, 4, 8, 12   (bytes   0,  32,  64,  96)
+_Q_C1 = 0xD951       # column  1: words 1, 5, 9, 13   (bytes   8,  40,  72, 104)
+_Q_C2 = 0xEA62       # column  2: words 2, 6, 10, 14  (bytes  16,  48,  80, 112)
+_Q_C3 = 0xFB73       # column  3: words 3, 7, 11, 15  (bytes  24,  56,  88, 120)
+_Q_D0 = 0xFA50       # diagonal 0: words 0, 5, 10, 15 (bytes   0,  40,  80, 120)
+_Q_D1 = 0xCB61       # diagonal 1: words 1, 6, 11, 12 (bytes   8,  48,  88,  96)
+_Q_D2 = 0xD872       # diagonal 2: words 2, 7, 8, 13  (bytes  16,  56,  64, 104)
+_Q_D3 = 0xE943       # diagonal 3: words 3, 4, 9, 14  (bytes  24,  32,  72, 112)
 
-    `a`..`d` are BYTE OFFSETS into the working vector and `x`, `y` are the two
-    message words. Offsets rather than indices because this path has no
-    container a function can index, and the mixing function has to name its
-    slots dynamically — the whole point of `G` is that the same eight lines
-    run on four different column/diagonal slot sets.
+
+def b2_g(v: Pointer[UInt8], q: int, x: int, y: int) -> int:
+    """The BLAKE2b `G` function, on the four slots `q` names, mixing in `x`, `y`.
+
+    `q` is four packed nibbles — see the constants above, which is where the
+    offsets are written out and why they cannot be computed. Offsets rather
+    than indices because this path has no container a function can index, and
+    the mixing function has to name its slots dynamically — the whole point of
+    `G` is that the same eight lines run on eight different column/diagonal
+    slot sets.
     """
+    a = (q & 15) * 8
+    b = ((q >> 4) & 15) * 8
+    c = ((q >> 8) & 15) * 8
+    d = ((q >> 12) & 15) * 8
     word_put(v, a, (word_get(v, a) + word_get(v, b) + x) & MASK64)
     word_put(v, d, rotr64(word_get(v, d) ^ word_get(v, a), 32))
     word_put(v, c, (word_get(v, c) + word_get(v, d)) & MASK64)
@@ -337,50 +367,45 @@ def b2_round(v: Pointer[UInt8], m: Pointer[UInt8], sg: Pointer[UInt8],
     over a TEN-row permutation, which is why `b2_compress` ends with base 0
     and base 16 again.
     """
-    b2_g(v, 0, 32, 64, 96, word_get(m, 8 * byte_at(sg, s)),
+    b2_g(v, _Q_C0, word_get(m, 8 * byte_at(sg, s)),
          word_get(m, 8 * byte_at(sg, s + 1)))
-    b2_g(v, 8, 40, 72, 104, word_get(m, 8 * byte_at(sg, s + 2)),
+    b2_g(v, _Q_C1, word_get(m, 8 * byte_at(sg, s + 2)),
          word_get(m, 8 * byte_at(sg, s + 3)))
-    b2_g(v, 16, 48, 80, 112, word_get(m, 8 * byte_at(sg, s + 4)),
+    b2_g(v, _Q_C2, word_get(m, 8 * byte_at(sg, s + 4)),
          word_get(m, 8 * byte_at(sg, s + 5)))
-    b2_g(v, 24, 56, 88, 120, word_get(m, 8 * byte_at(sg, s + 6)),
+    b2_g(v, _Q_C3, word_get(m, 8 * byte_at(sg, s + 6)),
          word_get(m, 8 * byte_at(sg, s + 7)))
-    b2_g(v, 0, 40, 80, 120, word_get(m, 8 * byte_at(sg, s + 8)),
+    b2_g(v, _Q_D0, word_get(m, 8 * byte_at(sg, s + 8)),
          word_get(m, 8 * byte_at(sg, s + 9)))
-    b2_g(v, 8, 48, 88, 96, word_get(m, 8 * byte_at(sg, s + 10)),
+    b2_g(v, _Q_D1, word_get(m, 8 * byte_at(sg, s + 10)),
          word_get(m, 8 * byte_at(sg, s + 11)))
-    b2_g(v, 16, 56, 64, 104, word_get(m, 8 * byte_at(sg, s + 12)),
+    b2_g(v, _Q_D2, word_get(m, 8 * byte_at(sg, s + 12)),
          word_get(m, 8 * byte_at(sg, s + 13)))
-    b2_g(v, 24, 32, 72, 112, word_get(m, 8 * byte_at(sg, s + 14)),
+    b2_g(v, _Q_D3, word_get(m, 8 * byte_at(sg, s + 14)),
          word_get(m, 8 * byte_at(sg, s + 15)))
     return 0
 
 
-def put6(sg: Pointer[UInt8], at: int, a0: int, a1: int, a2: int, a3: int,
-        a4: int, a5: int) -> int:
-    """Write six SIGMA indices at `at`. Returns 0.
-
-    SIX, and not sixteen, because **a function on this path may have at most
-    EIGHT parameters**: the ninth and beyond are silently dropped and read as
-    zero, with no diagnostic at either end
-    (`bugs/FORMAL_arm64_ninth_argument_is_silently_dropped.md`). A sixteen-way
-    `put16` is the obvious spelling of "write one row" and it is wrong in a way
-    that produced a BLAKE2b digest which was plausible and incorrect. Two
-    parameters of address plus six of data is the widest call that works, so
-    a row is written as `put6` + `put6` + `put4`.
-    """
-    byte_store(sg, at, a0)
-    byte_store(sg, at + 1, a1)
-    byte_store(sg, at + 2, a2)
-    byte_store(sg, at + 3, a3)
-    byte_store(sg, at + 4, a4)
-    byte_store(sg, at + 5, a5)
-    return 0
-
-
 def put4(sg: Pointer[UInt8], at: int, a0: int, a1: int, a2: int,
-        a3: int) -> int:
-    """Write four SIGMA indices at `at`. Returns 0. See `put6` for the six."""
+         a3: int) -> int:
+    """Write four SIGMA indices at `at`. Returns 0.
+
+    FOUR, and not sixteen, because of the ABI this module has to fit in BOTH
+    backends' terms, and SIX is the smaller of the two: arm64 passes eight
+    integer argument registers (X0-X7) and x86-64 passes six (RDI/RSI/RDX/RCX/
+    R8/R9), so a module both backends compile has to fit six
+    (`bugs/FORMAL_arm64_ninth_argument_is_silently_dropped.md` for what the
+    seventh and beyond used to do on arm64 — silently dropped and read as
+    zero, with no diagnostic at either end, which produced a BLAKE2b digest
+    that was plausible and incorrect). A sixteen-way `put16` is the obvious
+    spelling of "write one row" and it is wrong twice over: too wide for
+    either backend here, and a digest nobody could tell from a right one.
+
+    It was `put6` + `put6` + `put4` per row, which fit arm64's eight and not
+    x86-64's six — `put6: 8 parameters exceeds the 6 …`. A row is now four
+    `put4`s, and `put6` is gone rather than left beside the thing that
+    replaced it.
+    """
     byte_store(sg, at, a0)
     byte_store(sg, at + 1, a1)
     byte_store(sg, at + 2, a2)
@@ -427,64 +452,73 @@ def sigma_table() -> Pointer[UInt8]:
 
 
 def row1(sg: Pointer[UInt8], at: int) -> int:
-    put6(sg, at, 14, 10, 4, 8, 9, 15)
-    put6(sg, at + 6, 13, 6, 1, 12, 0, 2)
+    put4(sg, at + 0, 14, 10, 4, 8)
+    put4(sg, at + 4, 9, 15, 13, 6)
+    put4(sg, at + 8, 1, 12, 0, 2)
     put4(sg, at + 12, 11, 7, 5, 3)
     return 0
 
 
 def row2(sg: Pointer[UInt8], at: int) -> int:
-    put6(sg, at, 11, 8, 12, 0, 5, 2)
-    put6(sg, at + 6, 15, 13, 10, 14, 3, 6)
+    put4(sg, at + 0, 11, 8, 12, 0)
+    put4(sg, at + 4, 5, 2, 15, 13)
+    put4(sg, at + 8, 10, 14, 3, 6)
     put4(sg, at + 12, 7, 1, 9, 4)
     return 0
 
 
 def row3(sg: Pointer[UInt8], at: int) -> int:
-    put6(sg, at, 7, 9, 3, 1, 13, 12)
-    put6(sg, at + 6, 11, 14, 2, 6, 5, 10)
+    put4(sg, at + 0, 7, 9, 3, 1)
+    put4(sg, at + 4, 13, 12, 11, 14)
+    put4(sg, at + 8, 2, 6, 5, 10)
     put4(sg, at + 12, 4, 0, 15, 8)
     return 0
 
 
 def row4(sg: Pointer[UInt8], at: int) -> int:
-    put6(sg, at, 9, 0, 5, 7, 2, 4)
-    put6(sg, at + 6, 10, 15, 14, 1, 11, 12)
+    put4(sg, at + 0, 9, 0, 5, 7)
+    put4(sg, at + 4, 2, 4, 10, 15)
+    put4(sg, at + 8, 14, 1, 11, 12)
     put4(sg, at + 12, 6, 8, 3, 13)
     return 0
 
 
 def row5(sg: Pointer[UInt8], at: int) -> int:
-    put6(sg, at, 2, 12, 6, 10, 0, 11)
-    put6(sg, at + 6, 8, 3, 4, 13, 7, 5)
+    put4(sg, at + 0, 2, 12, 6, 10)
+    put4(sg, at + 4, 0, 11, 8, 3)
+    put4(sg, at + 8, 4, 13, 7, 5)
     put4(sg, at + 12, 15, 14, 1, 9)
     return 0
 
 
 def row6(sg: Pointer[UInt8], at: int) -> int:
-    put6(sg, at, 12, 5, 1, 15, 14, 13)
-    put6(sg, at + 6, 4, 10, 0, 7, 6, 3)
+    put4(sg, at + 0, 12, 5, 1, 15)
+    put4(sg, at + 4, 14, 13, 4, 10)
+    put4(sg, at + 8, 0, 7, 6, 3)
     put4(sg, at + 12, 9, 2, 8, 11)
     return 0
 
 
 def row7(sg: Pointer[UInt8], at: int) -> int:
-    put6(sg, at, 13, 11, 7, 14, 12, 1)
-    put6(sg, at + 6, 3, 9, 5, 0, 15, 4)
+    put4(sg, at + 0, 13, 11, 7, 14)
+    put4(sg, at + 4, 12, 1, 3, 9)
+    put4(sg, at + 8, 5, 0, 15, 4)
     put4(sg, at + 12, 8, 6, 2, 10)
     return 0
 
 
 def row8(sg: Pointer[UInt8], at: int) -> int:
-    put6(sg, at, 6, 15, 14, 9, 11, 3)
-    put6(sg, at + 6, 0, 8, 12, 2, 13, 7)
+    put4(sg, at + 0, 6, 15, 14, 9)
+    put4(sg, at + 4, 11, 3, 0, 8)
+    put4(sg, at + 8, 12, 2, 13, 7)
     put4(sg, at + 12, 1, 4, 10, 5)
     return 0
 
 
 def row9(sg: Pointer[UInt8], at: int) -> int:
-    put6(sg, at, 10, 2, 8, 4, 7, 6)
-    put6(sg, at + 6, 1, 5, 15, 11, 9, 14)
+    put4(sg, at + 0, 10, 2, 8, 4)
+    put4(sg, at + 4, 7, 6, 1, 5)
+    put4(sg, at + 8, 15, 11, 9, 14)
     put4(sg, at + 12, 3, 12, 13, 0)
     return 0
 

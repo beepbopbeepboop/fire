@@ -166,11 +166,25 @@ def encode_mov_r64_imm32(reg: Reg, imm: int) -> bytes:
 
 
 def encode_mov_r64_imm64(reg: Reg, imm: int) -> bytes:
-    """mov reg, imm64 — REX.W B8+r io."""
+    """mov reg, imm64 — REX.W B8+r io.
+
+    `imm` is the whole 64-bit PATTERN, which is what the caller hands over
+    (`X86_64Codegen._emit_mov_imm` masks to 64 bits before choosing this form)
+    and what the `assert` below states: -2**63 <= imm < 2**64, unsigned top
+    included. It is packed UNSIGNED for that reason. `struct.pack("<q", …)`
+    raises `struct.error` — an unhandled exception, i.e. a compiler CRASH
+    rather than a refusal — for any pattern with bit 63 set, which is every
+    constant in [2**63, 2**64) and so every 64-bit hash IV above 2**63:
+    BLAKE2b's `IV1` (0xbb67ae8584caa73b) is one, and `formal/hostmods/
+    hashlib.mojo` could not be built for x86-64 until this was fixed. The ten
+    bytes are the same either way — a signed pack of the same bits is the same
+    little-endian pattern — so the unsigned pack is a fix and not a choice
+    between two answers.
+    """
     assert -2**63 <= imm < 2**64
     rex = _rex(w=1, b=1 if reg.value >= 8 else 0)
     enc = [rex, 0xB8 | (reg.value & 7)]
-    enc.extend(struct.pack("<q", imm & 0xFFFFFFFFFFFFFFFF))
+    enc.extend(struct.pack("<Q", imm & 0xFFFFFFFFFFFFFFFF))
     return bytes(enc)
 
 

@@ -38,6 +38,23 @@ CASES = [
     ("movq $-7, %r9", lambda: X.encode_mov_r64_imm32(Reg.R9, -7)),
     ("movq $0x1122334455667788, %rbx",
      lambda: X.encode_mov_r64_imm64(Reg.RBX, 0x1122334455667788)),
+    # The half of the 64-bit PATTERN argument's domain that `struct.pack("<q",
+    # …)` cannot take: constants whose bit 63 is set, which is every value in
+    # [2**63, 2**64 - 2**31) — the first of these is BLAKE2b's IV1, and it
+    # CRASHED this compiler (an unhandled struct.error out of a build) rather
+    # than refusing. GNU as writes the same ten bytes for each, which is what
+    # makes them the same instruction.
+    #
+    # -1 is NOT here even though it is in the pattern's domain: `as` spells it
+    # `48c7c3ffffffff` (a sign-extended imm32) and `_emit_mov_imm` never picks
+    # the imm64 form for it, so a byte-identity check would be testing the
+    # length choice rather than the packing.
+    ("movq $0xbb67ae8584caa73b, %rbx",
+     lambda: X.encode_mov_r64_imm64(Reg.RBX, 0xbb67ae8584caa73b)),
+    ("movq $0x8000000000000000, %r12",
+     lambda: X.encode_mov_r64_imm64(Reg.R12, 0x8000000000000000)),
+    ("movq $-4294967296, %rbx",
+     lambda: X.encode_mov_r64_imm64(Reg.RBX, 0xFFFFFFFF00000000)),
     ("movq %rax, %rbx", lambda: X.encode_mov_r64_r64(Reg.RBX, Reg.RAX)),
     ("movq %r14, %r9", lambda: X.encode_mov_r64_r64(Reg.R9, Reg.R14)),
     ("movq (%rax), %rbx", lambda: X.encode_mov_r64_rm64(Reg.RBX, Reg.RAX, 0)),
