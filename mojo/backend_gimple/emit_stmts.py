@@ -4223,11 +4223,33 @@ def _gen_stmt_WithStmt(gen, node):
             if alias not in gen.var_types:
                 gen._declare_var(alias, enter_ret_t)
             gen._safe_coerce_emit(enter_ret_t, gen.var_types[alias], enter_v, alias)
-            _ctx_ts.append(ctx_t)
-            _ctx_vs.append(ctx_v)
-            _ctx_sns.append(struct_name)
-            _gctx_bases.append(None)   # keep index-parallel
-            _gctx_vs.append(None)
+        # Registered for the teardown WHETHER OR NOT there is an `as` target.
+        # These five appends used to sit INSIDE the `if item.alias is not
+        # None:` branch above, so `with C():` contributed nothing to them:
+        # `has_exit` below read False, no setjmp region was emitted, and
+        # `_with_emit_exits` iterated an empty list — `__enter__` ran, the
+        # body ran, and the teardown was never emitted AT ALL. Not a wrong
+        # `__exit__` argument and not a missing `mojo_exc_pop`: no teardown.
+        # The interpreter is the reference and calls `__exit__` for
+        # `with C():`, and `test_runtime_diff.py`'s engine A/B cannot see it
+        # either, because the OUTPUT can be identical (the body worked) while
+        # the teardown never ran.
+        #
+        # It is worse than a leak for anything whose release matters: a
+        # self-hosted build's cross-process publish lock held through a class
+        # with `__exit__` wedged every other process that wanted the same
+        # output path for the life of the tree. That is
+        # bugs/CODEGEN_with_no_as_target_drops_exit.md, whose next step was
+        # exactly this move — to the same place the GENERATOR arm above
+        # already registers itself, which appends before its own alias check.
+        # `has_exit` and `_with_emit_exits` consume exactly these lists and
+        # need no change of their own; index-parallelism is the convention
+        # both arms already keep.
+        _ctx_ts.append(ctx_t)
+        _ctx_vs.append(ctx_v)
+        _ctx_sns.append(struct_name)
+        _gctx_bases.append(None)   # keep index-parallel
+        _gctx_vs.append(None)
 
     has_exit = False
     for _hxi in range(len(_ctx_sns)):
@@ -4237,6 +4259,36 @@ def _gen_stmt_WithStmt(gen, node):
                 or f"{_hsn}___exit__" in gen.func_return_types):
             has_exit = True
             break
+    # A GENERATOR context manager has no `__exit__` to find that way — its
+    # teardown is the final `resume()` + `destroy()` in `_with_emit_exits`,
+    # which the normal-exit emission below already calls. So this pre-scan
+    # used to read the generator arm as "no teardown", leave `has_exit`
+    # False, skip the whole setjmp region, and the teardown then existed ONLY
+    # on the fallthrough path: a body that raised propagated straight out with
+    # the generator still parked at its `yield`, so everything after the
+    # `yield` — which for `@contextlib.contextmanager` is the `finally` that
+    # releases the resource — never ran. Silent, and invisible from the
+    # program's own output (the body's work all happened).
+    #
+    # Measured on this tree, a `@contextmanager` whose `finally` prints:
+    #
+    #     with tracked("a"): print("body a"); raise ValueError
+    #
+    # compiled to `enter a / body a / caught / done` — Python's answer has
+    # `exit a` between `body a` and `caught`. The `bb_exc` block below
+    # already calls `_with_emit_exits` before `mojo_raise()`; it was simply
+    # never generated for this arm.
+    #
+    # The arm's own comment when it was added said the exceptional path was
+    # "deliberately not threaded through the setjmp machinery here", which was
+    # true when the alternative was emitting NO body code at all. It is not a
+    # reason to leave a resource unreleased now that the arm is what ordinary
+    # `@contextlib.contextmanager` code lowers to.
+    if not has_exit:
+        for _hgi in range(len(_gctx_bases)):
+            if _gctx_bases[_hgi] is not None:
+                has_exit = True
+                break
 
     if has_exit:
         # See _reset_func's own comment on `_func_used_setjmp` -- same
