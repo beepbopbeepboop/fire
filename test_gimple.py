@@ -3,6 +3,7 @@
 Each test compiles generated C with gcc -fgimple -fsyntax-only to
 verify the output is accepted by the GIMPLE parser.
 """
+import re
 import subprocess
 import tempfile
 import os
@@ -187,6 +188,207 @@ def kinds_bystander():
         _FAIL += 1
 
 
+def test_box_marker_scope():
+    """`_boxed_vals` — the BOX marker — must not outlive its function either.
+
+    The same defect as `test_kinds_marker_scope`, in the table that sits next
+    to it and had the same fix omitted: `_boxed_vals` holds the names of values
+    that are a BOX (a heap cell a heterogeneous container's float slot had to
+    be written into, read out at a non-constant index), is keyed by C NAME
+    including TEMPS, and `temp_counter` restarts at `_t1` in every function's
+    prologue. So a stale entry is a marker on a name that now belongs to a
+    different value, and the collision is decided entirely by how many temps
+    each function happened to allocate.
+
+    Measured in the compiler's own source before the fix, in
+    emit_loops.py's `_gen_for_dict`: an ordinary string literal was unboxed as
+    a float, `_t161 = mojo_box_double (_t160);` where `_t160` is a `char *`.
+    The four lines below are the hand-reduced form of exactly that. Asserted
+    as a COUNT of `mojo_box_double` because the count is the whole bug: the
+    owner earns exactly one (its `m[b] * 1.0` really is a boxed read), and a
+    second one is the bystander's `'ab'` unboxed as a float. On the unfixed
+    codegen the bystander does not merely emit an extra call, it does not
+    compile at all — measured, the identical diagnostic to the real one:
+
+        passing argument 1 of 'mojo_box_double' makes integer from pointer
+        without a cast [-Wint-conversion]"""
+    global _PASS, _FAIL
+    ok, c_src, stderr = gimple_compiles("""\
+def box_owner(b):
+    var m = [1, 2.5]
+    return m[b] * 1.0
+
+
+def box_bystander(d):
+    for k in d:
+        if k == 'ab':
+            print(1.0)
+""")
+    unboxed = c_src.count('mojo_box_double')
+    if ok and unboxed == 1:
+        print("PASS  box_marker_does_not_leak_into_a_later_function")
+        _PASS += 1
+    else:
+        print(f"FAIL  box_marker_does_not_leak_into_a_later_function: "
+              f"compiles={ok} mojo_box_double={unboxed} (want exactly 1)")
+        if not ok:
+            for line in stderr.splitlines()[:6]:
+                print(f"      {line}")
+        _FAIL += 1
+
+
+def test_gimple_operators_are_actually_gimple():
+    """No `!x` and no `&&` in a `__GIMPLE`-tagged body.
+
+    A `__GIMPLE`-tagged function's body bypasses gcc's normal frontend
+    gimplification, so it must already BE GIMPLE: one operation per
+    statement, no C operator sugar. GIMPLE has neither `!` nor `&&` as an
+    expression, and the raw parser rejects both outright — `!x` with "'!' not
+    valid in GIMPLE before '!' token", and `a && b` by giving up on the `&&`
+    and re-reading the operand list, which surfaces as the much less helpful
+    "expected expression before '(' token".
+
+    `_isinstance_one_type`'s `isinstance(x, list)` test (a list is a MojoList
+    that may carry the tuple marker, so it needs the runtime's two
+    predicates) spelled both literally, and every `isinstance(sub, list)`
+    inside a `__GIMPLE` body in the compiler's own closure inherited it —
+    20 sites, and the four in `mojo/middle/infra_infer.py`'s
+    `_scan_container_elems_walk` took the whole self-host build down. The
+    fix is the shared `_bool_not` / `_bool_and` helpers in
+    `mojo/backend_gimple/emit_resolve.py`.
+
+    Asserted on the emitted C because the defect IS the spelling: it compiles
+    as ordinary C (where `!` and `&&` are fine) and only the `__GIMPLE`
+    functions are strict, so only the strict ones are scanned here. A struct
+    METHOD is what produces one — `gen_func` tags a free function LENIENT on
+    purpose (`emit_funcs.py`'s own note), and the tag is dropped again for a
+    method whose body called `setjmp`."""
+    global _PASS, _FAIL
+    ok, c_src, stderr = gimple_compiles("""\
+struct Box:
+    var n: Int
+
+    def check(self, s: String, t: String, items: list) -> Bool:
+        if isinstance(items, list):
+            return True
+        if s == t:
+            return False
+        for i in items:
+            if isinstance(i, String):
+                return True
+        return False
+
+    def cls(self, other: Box) -> Bool:
+        if self.__class__ is not Box:
+            return True
+        return False
+""")
+    # Every `__GIMPLE` body, which is where the strict parser applies. A
+    # definition header is at column 0 and its `{` is on the NEXT line, so the
+    # scan keys on the header line and ends at the column-0 `}`.
+    bodies, bad, strict = [], [], False
+    for line in c_src.split('\n'):
+        if line == '}':
+            strict = False
+            continue
+        if not strict and line and not line.startswith(' ') \
+                and '(' in line and not line.rstrip().endswith(';'):
+            strict = '__GIMPLE' in line
+            if strict:
+                bodies.append(line)
+            continue
+        if strict and re.search(r'=\s*!|&&', line):
+            bad.append(line.strip())
+    if ok and bodies and not bad:
+        print(f"PASS  gimple_bodies_spell_and_or_as_comparisons "
+              f"({len(bodies)} strict bodies)")
+        _PASS += 1
+    else:
+        print(f"FAIL  gimple_bodies_spell_and_or_as_comparisons: "
+              f"compiles={ok} strict_bodies={len(bodies)} offending={bad[:4]}")
+        if not ok:
+            for line in stderr.splitlines()[:8]:
+                print(f"      {line}")
+        _FAIL += 1
+
+
+def test_return_type_of_a_rebound_local_is_the_box():
+    """A local rebound to a different STRUCT has no single pointer type.
+
+    `_prebound_local_ctypes` reads a local's first pointer-shaped binding as
+    evidence for the enclosing function's RETURN type, which is what makes
+    `p = P("a"); return p.__repr__()` resolve instead of falling back to the
+    int64_t box. First-binding-wins is right for a container (`d = {}` then
+    `d = []` retypes one slot) and wrong for a struct: `x` here holds an A, a
+    B, a C and an A again, so no pointer type describes it and the honest
+    answer is the box.
+
+    This is the shape that broke the self-host build. In
+    `fire_compiler.Parser._parse_expr` the local `left` is first bound by the
+    `not` branch's `left = UnaryOp(op="not", operand=...)` and then holds
+    CompareChain/BinaryOp/WalrusExpr/TernaryExpr as the operator loop refines
+    the expression, so the whole parser inferred `UnaryOp * (Parser *, int64_t)`
+    against the `int64_t` that three hand-written tables declare for
+    cross-module callers, and ~50 call sites assigned a `UnaryOp *` to an
+    `int64_t` local.
+
+    Asserted on the RETURN TYPE alone: a wrong answer here is a wrong
+    signature, which is invisible in the program's output. `single` and
+    `twice_same` are the two shapes that must still infer the STRUCT -- the
+    first binding is then also the only, or an agreeing, one -- so they are
+    asserted too and the test fails if the rule is over-corrected into "never
+    record a struct"."""
+    global _PASS, _FAIL
+    ok, c_src, stderr = gimple_compiles("""\
+struct A:
+    var x: Int
+
+
+struct B:
+    var y: Int
+
+
+def rebound():
+    v = A(1)
+    v = B(2)
+    return v
+
+
+def single():
+    v = A(1)
+    return v.x
+
+
+def twice_same():
+    v = A(1)
+    v = A(2)
+    return v.x
+""")
+    def definition(name):
+        """The emitted DEFINITION's return type (the header at column 0 that
+        is followed by a body; the forward declaration above it ends in `;`)."""
+        for m in re.finditer(r'^(\S[^\n;]*\b' + name + r'\b\s*\([^\n;]*\))\s*$',
+                             c_src, re.M):
+            return m.group(1).split()[0]
+        return ''
+
+    rebound_ret = definition('rebound')
+    single_ret = definition('single')
+    same_ret = definition('twice_same')
+    if ok and rebound_ret == 'int64_t' and single_ret == 'int64_t' \
+            and same_ret == 'int64_t':
+        print("PASS  rebound_local_returns_the_box_not_its_first_struct")
+        _PASS += 1
+    else:
+        print(f"FAIL  rebound_local_returns_the_box_not_its_first_struct: "
+              f"compiles={ok} rebound={rebound_ret!r} single={single_ret!r} "
+              f"twice_same={same_ret!r} (want 'int64_t' for all three)")
+        if not ok:
+            for line in stderr.splitlines()[:8]:
+                print(f"      {line}")
+        _FAIL += 1
+
+
 def run_tests():
     # A vetted struct constructor bound to an owned local is initialised in frame storage.
     test_c_shape("owned_struct_local_is_initialised_in_the_frame", """\
@@ -280,6 +482,13 @@ def main():
     # The per-slot-kinds marker must not outlive its function; the reasoning
     # and the hand-reduced collision are in the helper's own docstring.
     test_kinds_marker_scope()
+    # Same defect, same table family, in the BOX marker that sat next to it
+    # with the fix omitted.
+    test_box_marker_scope()
+    # `!x` and `a && b` are not GIMPLE, and a `__GIMPLE` body must be.
+    test_gimple_operators_are_actually_gimple()
+    # A local rebound to a different struct has no single pointer type.
+    test_return_type_of_a_rebound_local_is_the_box()
 
 
     # 1. Empty void function (pass body)
