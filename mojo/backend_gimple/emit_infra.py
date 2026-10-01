@@ -1643,7 +1643,12 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 cv = aval if atype == 'char' else gen._new_val('char', f'(char){aval}')
                 sv = gen._call_expr('char *', 'mojo_char_to_str', [('char', cv)])
                 coerced_args.append(sv)
-            else:
+            elif actual_atype.endswith(' *'):
+                # A pointer the codegen POSITIVELY knows this value holds
+                # (`_actual_types` / `_global_var_types` recorded a pointer
+                # type), just spelled `int64_t` here. Round-trip the bits,
+                # exactly as before: the value really is a pointer, so the
+                # cast is the identity it has always been.
                 vp = gen._new_temp('void *')
                 cp = gen._new_temp('char *')
                 if atype in ('int',):
@@ -1653,6 +1658,53 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                     gen._emit(f'  {vp} = (void *){aval};')
                 gen._emit(f'  {cp} = (char *){vp};')
                 coerced_args.append(cp)
+            else:
+                # An UNTRACKED int64_t going into a `char *` parameter.
+                #
+                # `char *` IS this dialect's string slot: `_TYPE_MAP` maps
+                # only `str`/`String` to it (`*UInt8` and friends resolve to
+                # `uint8_t *`, `None` to `void *`), so a parameter spelled
+                # `char *` is a STRING parameter and the callee will hand
+                # the word to strlen/strcmp. The annotation is a static
+                # PROMISE codegen used to take literally by bit-reinterpreting
+                # whatever integer arrived: `Dialog(5)` on
+                # `def __init__(self, widgetName: str)` emitted
+                # `(char *)(void *)(int64_t)5`, and `mojo_print` then
+                # `strlen`ed address 5 -- SIGSEGV, exit -11, no output at
+                # all (bugs/CODEGEN_annotated_str_param_given_an_int_
+                # segfaults.md). In Python a parameter annotation is
+                # documentation, not a cast: `Dialog(5)` is legal and prints
+                # `5`.
+                #
+                # So this is not a place the codegen may decide: in this
+                # compiler's scalar body model an int64_t and a `char *` are
+                # the same 64 bits, and an untracked word is genuinely
+                # ambiguous -- it is a real string handle far more often
+                # than not (a lambda parameter, an erased dict value, a
+                # getattr result all arrive here with their pointer bits and
+                # nothing recorded, and that by-value handle pass-through is
+                # load-bearing for the self-host's own compilation).
+                # `mojo_cstr_or_int_str` is the model's OWN answer to exactly
+                # this question -- it is what `_char_to_cstr` already routes
+                # every other int64_t-used-where-a-string-is-needed through --
+                # and it is safe in BOTH directions rather than right in
+                # only one: a real boxed `char *` comes back as the very same
+                # address (the cast's own result), and a genuine integer
+                # comes back as its decimal, which is what CPython prints.
+                #
+                # Deliberately NOT registered with `_cstr_key_src`, so the
+                # `mojo_cstr_or_int_release` protocol does not reclaim it:
+                # the callee may STORE the pointer (`self.widgetName =
+                # widgetName`), and releasing a string the value kept is a
+                # use-after-free. The int case therefore leaks its one
+                # block, which is this runtime's documented no-free model for
+                # a kept string (`mojo_str_from_int`'s own comment) and only
+                # happens on the path that used to be a SIGSEGV.
+                iv = (aval if atype == 'int64_t'
+                      else gen._new_val('int64_t', f'(int64_t){aval}'))
+                sv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
+                                    [('int64_t', iv)])
+                coerced_args.append(sv)
         elif ptype.endswith(' *') and (actual_atype in ('int', 'int64_t') or atype == 'int64_t'):
             # Parameter expects a pointer; the lowered argument is a plain
             # scalar-typed value. TWO unrelated situations reach this one

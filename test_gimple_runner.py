@@ -5105,6 +5105,52 @@ def main():
 main()
 """, "str\n2\n")
 
+    # A parameter ANNOTATED `str` handed a non-string. In Python an
+    # annotation is documentation, not a cast, so every line of this is
+    # legal and prints what CPython prints. `char *` is this dialect's
+    # string slot (`_TYPE_MAP` maps only `str`/`String` to it), so the call
+    # site used to satisfy the annotation by BIT-REINTERPRETING the integer:
+    # `Dialog(5)` emitted `_t3 = (void *)_t5; _t4 = (char *)_t3;` with
+    # `_t5 = (int64_t)5`, and the first `mojo_print` then `strlen`ed address
+    # 5 — SIGSEGV, exit -11, not even the line before it reached stdout
+    # (bugs/CODEGEN_annotated_str_param_given_an_int_segfaults.md; the same
+    # crash was filed a second time as
+    # bugs/CODEGEN_method_returning_self_str_field_segfaults.md, whose
+    # diagnosis pointed at the method's return path and was wrong — the
+    # generated C for `Dialog_show` is a correct `char *` load and the fault
+    # is entirely upstream, at the constructor's argument).
+    #
+    # Every spelling of the same mistake is here — a bare literal, a local,
+    # and a value reached through a method — and the string cases are here
+    # too, because the fix routes an UNTRACKED int64_t through the runtime's
+    # own discriminator (`mojo_cstr_or_int_str`) rather than a cast, and that
+    # must still hand a genuine boxed `char *` back as the same address.
+    #
+    # NOT here: an int64 in [2^31, 2^47), which the runtime's shape-only
+    # discriminator cannot tell from a pointer — the same window
+    # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md covers on
+    # the dict-key path, and which reaches this one through the very same
+    # predicate. `echo(3000000001)` belongs with that fix, not this one.
+    test_gimple_stdout("gimple_annotated_str_param_given_a_non_str", """\
+class Dialog:
+    def __init__(self, widgetName: str):
+        self.widgetName = widgetName
+    def show(self):
+        return self.widgetName
+
+def echo(s: str):
+    print(s)
+
+def main():
+    a = Dialog(5)
+    print(a.widgetName)
+    print(a.show())
+    n = 7
+    echo(n)
+    echo("hello")
+main()
+""", "5\n5\n7\nhello\n")
+
     # The `var` spelling of a class-body field. To Python this is the SAME
     # declaration as the bare `NAME = ...` above — `var` only suppresses a
     # type inference the class body never did — but only the bare spelling
