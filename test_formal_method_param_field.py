@@ -505,6 +505,73 @@ CASES = [
      "raise SystemExit(field_sum(i))\n",
      7, None, None),
 
+    # ── A CALL SITE THAT HANDS OVER A FRAME THE EMITTER BUILT ITSELF ─────────
+    #
+    # `take(P(3, 4))` passes a frame address and says so: the emitters reserve a
+    # block per construction site in the prologue and a construction's VALUE is
+    # that block's address (`formal/model.py`'s `struct_constructor_sites`,
+    # `formal/arm64_codegen.py`'s `_emit_frame_constructor`).  The check read it
+    # as "a call to 'P'", found no frame there, and refused the program as a
+    # declaration no call site agrees with — which is the opposite of what the
+    # call site does.  `formal/types.py`'s `mask_of(IntType(w, False))` is the
+    # shipped instance (`bugs/FORMAL_declared_parameter_against_its_call_sites.md`
+    # §2), and `mask_of` is `formal/types.py` in this tree.
+    #
+    # `p.a * 10 + p.b` rather than a sum, so a read at the wrong SLOT says which
+    # field moved: 34 for (3, 4), 43 if the two were transposed.
+    ("construction_in_argument_position_agrees",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def take(p: P) -> Int:\n"
+     "    return p.a * 10 + p.b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return take(P(3, 4))\n",
+     "class P:\n"
+     "    def __init__(self, a=0, b=0):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "def take(p):\n"
+     "    return p.a * 10 + p.b\n"
+     "raise SystemExit(take(P(3, 4)))\n",
+     34, None, None),
+
+    # The same agreement by the other route: a call to a function that RETURNS a
+    # frame.  `model.struct_returned_frame_sites` is the caller's half of the
+    # same arrangement — the callee copies into a block this function reserved —
+    # so `take(make(5))` is a frame address in exactly the sense `take(p)` is.
+    ("frame_returning_call_in_argument_position_agrees",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def make(x: Int) -> P:\n"
+     "    var p = P()\n"
+     "    p.a = x\n"
+     "    p.b = 2\n"
+     "    return p\n"
+     "\n"
+     "def take(p: P) -> Int:\n"
+     "    return p.a * 10 + p.b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return take(make(5))\n",
+     "class P:\n"
+     "    def __init__(self):\n"
+     "        self.a = 0\n"
+     "        self.b = 0\n"
+     "def make(x):\n"
+     "    p = P()\n"
+     "    p.a = x\n"
+     "    p.b = 2\n"
+     "    return p\n"
+     "def take(p):\n"
+     "    return p.a * 10 + p.b\n"
+     "raise SystemExit(take(make(5)))\n",
+     52, None, None),
+
     # ── THE REFUSALS: a declaration is a promise a call site can break ──────
     #
     # Each of these builds and RUNS wrong if the promise is believed: the field
@@ -575,6 +642,57 @@ CASES = [
      "    return x.take(b)\n",
      None, None, None,
      "passes a Big frame"),
+
+    # ── AND THE TWO THAT LOOK LIKE THE POSITIVES ABOVE ─────────────────────
+    #
+    # A call site that hands over a frame is only corroborating the declaration
+    # if it is a frame OF THE DECLARED STRUCT.  These are the two ways it is
+    # not, and both were reachable by the fix that taught the check about
+    # constructions and frame-returning calls: `base + 8k` is P's layout, so a Q
+    # address reads storage the source never wrote — Q's third field is not
+    # even in P's frame.
+    ("refuse_another_structs_construction",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct Q:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "def take(p: P) -> Int:\n"
+     "    return p.a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return take(Q(1, 2, 3))\n",
+     None, None, None,
+     "passes a Q frame built here"),
+
+    ("refuse_a_frame_returning_call_of_another_struct",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "struct Q:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "    var c: Int\n"
+     "\n"
+     "def make_q(x: Int) -> Q:\n"
+     "    var q = Q()\n"
+     "    q.a = x\n"
+     "    q.b = 2\n"
+     "    q.c = 3\n"
+     "    return q\n"
+     "\n"
+     "def take(p: P) -> Int:\n"
+     "    return p.a\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    return take(make_q(7))\n",
+     None, None, None,
+     "passes a Q frame from make_q()"),
 ]
 
 

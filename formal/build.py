@@ -1786,7 +1786,7 @@ def _callee_wants_a_value(callee: str) -> bool:
 
 def _check_holder_agreements(functions, holders, hstruct, params_of,
                              declared=None, structs_by_name=None,
-                             name_defs=None) -> None:
+                             name_defs=None, returns_frame=None) -> None:
     """Refuse a parameter reached with a frame address at one call site and
     with something else at another.  A WHOLE-IMAGE pass, and that is the whole
     content of where it runs.
@@ -1878,11 +1878,12 @@ def _check_holder_agreements(functions, holders, hstruct, params_of,
                     continue
                 _check_one_callee(functions, fn, callee, def_fn, params, node,
                                   hs, holders, hstruct, declared,
-                                  structs_by_name or {})
+                                  structs_by_name or {}, returns_frame)
 
 
 def _check_one_callee(functions, fn, callee, def_fn, params, node, hs,
-                      holders, hstruct, declared, structs_by_name) -> None:
+                      holders, hstruct, declared, structs_by_name,
+                      returns_frame=None) -> None:
     """One definition's worth of the holder-agreement check, for one call site.
 
     The body of `_check_holder_agreements`'s per-callee loop, split out so it
@@ -1900,7 +1901,7 @@ def _check_one_callee(functions, fn, callee, def_fn, params, node, hs,
         if pname in by_decl:
             _check_declared_parameter(
                 functions, callee, position, pname, by_decl[pname],
-                holders, hstruct, structs_by_name, params)
+                holders, hstruct, structs_by_name, params, returns_frame)
             continue
         if here == there:
             # Both frame addresses, or neither.  A parameter reached one
@@ -1941,7 +1942,67 @@ def _check_one_callee(functions, fn, callee, def_fn, params, node, hs,
             plain_spellings))
 
 
-def _argument_frames(site_fn, arg, holders, hstruct, structs_by_name):
+def _frame_valued_calls(site_fn, structs_by_name, returns_frame, fns):
+    """`{id(call): ([struct name], why)}` — the calls in `site_fn` whose VALUE is
+    a frame address, read off the tables the emitters build their blocks from.
+
+    **Two more shapes than `_argument_frames` used to know, and they are read
+    off the emitters' own tables rather than re-derived here.**  A frame address
+    reaches a callee through a constructor call (`f(Pair(3, 4))` — the emitter
+    reserves a block per construction site in the prologue and the
+    construction's value is its address, `formal/arm64_codegen.py`'s
+    `_emit_frame_constructor`) or through a call to a function that RETURNS one
+    (`f(make())` — `model.struct_returned_frame_sites`, the caller's half of the
+    same arrangement).  Both are frames at the call site in the same sense
+    `f(r)` is, and the emitters lower them; a check that cannot see them reads
+    those two programs as "the declaration is contradicted at every call site"
+    when the call site is handing over precisely the value the declaration
+    promised.  That is `formal/types.py`'s `mask_of(IntType(w, False))` and it
+    is the whole of the false-refusal half of the 13-file
+    `frame_declared_parameter_refusal` row in
+    `bugs/FORMAL_declared_parameter_against_its_call_sites.md` §2.
+
+    **So the recogniser is shared, not parallel.**  `struct_constructor_sites`
+    and `struct_returned_frame_sites` are the tables both backends reserve their
+    scratch from, and the construction case additionally goes through
+    `model.call_lowers_as_framed_construction` — the emitter's own dispatch
+    predicate, which is what keeps `String()` (a type CONVERSION, and a plain
+    word) out of this set while `Pair(3, 4)` (a construction, and an address) is
+    in it.  A second implementation of "is this call a frame" would agree with
+    the emitters until the day one of them was edited, and the disagreement is a
+    refusal lifted on a word that is not an address: a wrong answer rather than
+    a failure.
+
+    `returns_frame` is the fixpoint's `{callee name: struct}`, the same
+    dictionary published on every function as `_image_returns_frame` and read by
+    both emitters through `struct_returned_frame_sites`.
+    """
+    out = {}
+    constructors = M.struct_constructor_sites(site_fn, structs_by_name)
+    returned = M.struct_returned_frame_sites(site_fn, structs_by_name,
+                                             (returns_frame or {}).get)
+    if not constructors and not returned:
+        return out
+    for node in M.iter_nodes(getattr(site_fn, "body", None)):
+        if not isinstance(node, F.CallExpr) \
+                or not isinstance(node.func, F.IdentExpr):
+            continue
+        built = constructors.get(id(node))
+        if built is not None and M.call_lowers_as_framed_construction(
+                node.func.name, structs_by_name,
+                len(node.args or []) + len(node.kwargs or []), fns):
+            out[id(node)] = ([built[0].name],
+                             f"a {built[0].name} frame built here")
+            continue
+        got = returned.get(id(node))
+        if got is not None:
+            out[id(node)] = ([got[0].name],
+                             f"a {got[0].name} frame from {node.func.name}()")
+    return out
+
+
+def _argument_frames(site_fn, arg, holders, hstruct, structs_by_name,
+                     frame_calls=None):
     """The frame addresses `arg` could be at this call site, and what if not.
 
     `([struct names], why)` — the structs whose FRAME the argument is, when this
@@ -1950,8 +2011,8 @@ def _argument_frames(site_fn, arg, holders, hstruct, structs_by_name):
     an argument this analysis cannot place is not evidence of anything, and a
     caller has to be told which of the two it is looking at.
 
-    Two shapes put an address on the stack for a callee, and they are the only
-    two:
+    Four shapes put an address on the stack for a callee, and they are the only
+    four:
 
       * a bare NAME the site function's holder analysis recognised — the
         ordinary `f(r)` with `r` a frame;
@@ -1961,7 +2022,14 @@ def _argument_frames(site_fn, arg, holders, hstruct, structs_by_name):
         placement is decided, and it is asked here rather than read off a
         published table because the table records only the CALL shape
         `h.a.m()`, and a nested frame handed over as an ordinary argument never
-        appears in it.
+        appears in it;
+      * a CONSTRUCTION of a framed struct — `f(Pair(3, 4))`;
+      * a call to a function that RETURNS a frame — `f(make())`.
+
+    The last two are `frame_calls`, `_frame_valued_calls`'s table, and they are
+    the two the emitters already lower; they were missing here, which is what
+    made `_check_declared_parameter` refuse a program whose call sites agree
+    with the declaration.
 
     A frame of the WRONG struct comes back as a non-empty list naming it,
     which is the whole point of returning the list rather than a bool: `base +
@@ -1984,12 +2052,15 @@ def _argument_frames(site_fn, arg, holders, hstruct, structs_by_name):
                                      structs_by_name, None)
         if isinstance(nested, F.StructDef):
             return ([nested.name], f"a {nested.name} nested frame")
+    placed = (frame_calls or {}).get(id(arg))
+    if placed is not None:
+        return (placed[0], placed[1])
     return ([], _describe_value(arg))
 
 
 def _check_declared_parameter(functions, callee, position, pname, want,
                               holders, hstruct, structs_by_name,
-                              params) -> None:
+                              params, returns_frame=None) -> None:
     """A parameter this image classified from its DECLARED type: refuse any
     call site that hands it something of the wrong shape.
 
@@ -2022,8 +2093,26 @@ def _check_declared_parameter(functions, callee, position, pname, want,
     A method with NO call site in the image is not this function's business —
     that is the construct being fixed, there is nothing to disagree with, and
     `sites` being empty is what "nothing to say" looks like here.
+
+    **What counts as a call site that AGREES.**  `_argument_frames` says which
+    frame an argument is, and the four shapes it knows are the four the emitters
+    put a frame ADDRESS in that slot: a placed nested field, a holder name, a
+    construction, a frame-returning call (`_frame_valued_calls` for the last
+    two, read off the emitters' own block tables).  An argument outside that set
+    is not evidence against the declaration — it is an argument this path cannot
+    place — and the two are not the same answer, so they do not get the same
+    one.  Reading "cannot place" as "contradiction" is what refused
+    `mask_of(IntType(w, False))`, whose call site hands over exactly the value
+    the declaration promised; measured, the image that refusal was standing in
+    front of builds, runs and returns 7, which is what CPython returns for the
+    same program.
     """
     framed = M.struct_is_framed(want)
+    fns = [f.name for f in functions]
+    # One table per SITE FUNCTION, built on first use: the loop below asks
+    # about every call of `callee` in the image, and recomputing this per
+    # argument would walk every body once per argument.
+    frame_calls: dict = {}
     sites = []
     for site_fn in functions:
         for site in M.iter_nodes(site_fn.body):
@@ -2034,8 +2123,13 @@ def _check_declared_parameter(functions, callee, position, pname, want,
             for i, a, _k in _frame_argument_slots(site, params):
                 if i != position:
                     continue
+                key = _fn_key(site_fn)
+                if key not in frame_calls:
+                    frame_calls[key] = _frame_valued_calls(
+                        site_fn, structs_by_name, returns_frame, fns)
                 cands, why = _argument_frames(site_fn, a, holders, hstruct,
-                                              structs_by_name)
+                                              structs_by_name,
+                                              frame_calls[key])
                 # A framed declaration is corroborated by a frame OF THAT
                 # STRUCT; a one-field one is corroborated by anything that is
                 # not a frame address at all, because its value is one word and
@@ -3214,7 +3308,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # skipped — see `_check_holder_agreements` for the program that measures it.
     _check_holder_agreements(functions, holders, hstruct, params_of,
                              declared_holders, structs_by_name,
-                             _name_defs)
+                             _name_defs, returns_frame)
     _collect_holder_rebinds(functions, holders, hstruct, structs_by_name,
                             by_name_returns_frame)
     _park_construction_mismatches(functions, framed)
