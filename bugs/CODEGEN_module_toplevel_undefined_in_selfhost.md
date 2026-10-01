@@ -50,6 +50,34 @@ fails with the **same five symbols**, and `diff` of the two sorted symbol lists
 is empty. So the GPU line neither introduced nor repaired it, and bisecting it
 inside the metal branch will not find it — the bisect point is inside the merge.
 
+## SUPERSEDED PARTLY (2026-10-01, after merging master)
+
+Merging `master` changed the failure. `make stage2/mojo` no longer reaches the
+link: it now fails earlier, at COMPILE, with self-host ABI mismatches. **So this
+bug is neither fixed nor disproved — it is currently masked by a different
+failure, and its status is UNKNOWN until the compile errors below are cleared.**
+
+Two concrete mismatches, both ABI-sync bugs from master's runtime change rather
+than from this branch:
+
+1. **`py_tokenize`** — `runtime/fire_runtime.h:1751` now declares
+   `py_tokenize(char *source, char *filename)` (2 args, matching Python's
+   `py_tokenize(src, filename="")`), but `py_tokenize` is in
+   `module_gen.py:9476`'s passthrough list, so the generated C forwards whatever
+   the Mojo source passed. Every 1-arg call site in the compiler's own source is
+   now a type error: `monomorphize.py:194,304`, `elaborate.py:138,161,226,235`,
+   `build_stdlib_dylib.py:393,431,477`.
+2. **`l.sort()`** — the MojoList method path is CORRECT and emits all four
+   arguments (`emit_methods.py:4227`). The failures are `dirnames.sort()` and
+   friends in `cas.py:424`, which take a DIFFERENT route — the generic variadic
+   stub `('sort', 'void sort(...);')` at `module_gen.py:8044` — and that route
+   still emits the old 1-argument call.
+
+Note (2) is the more interesting one: the correct code already exists in the
+tree, and the bug is that some call sites never reach it. That is the same shape
+as the original toplevel defect — a correct path plus a second path that skips
+it — which is worth weighing when this comes back around.
+
 ## Localised (2026-10-01, after the first gate)
 
 Not five bugs. **57 forward declarations, 0 bodies** in `stage1/fire.ci`:
