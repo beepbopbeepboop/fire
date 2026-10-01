@@ -23,6 +23,13 @@ formal run: PASS=484 FAIL=5
 (The fifth failure, `a_mutated_module_global_is_refused`, is a different thing
 and is not this document's subject — see the last section.)
 
+**These 5 are not this tree's.** Measured on the base commit `e695183a`, with
+none of this branch's commits applied, by the previous instance of this same
+task (`control.py status`: "Identical `PASS=484 FAIL=5` on the base commit").
+Two measurements, two trees, the same five — so the first thing to establish
+about this document is that it is a pre-existing gap in the batch and not
+something the batch-3 integration did.
+
 ## The refusal, and what it says about the callee's manifest
 
 `test_formal_run.py:3435`'s `run_module_case` writes the callee next to the
