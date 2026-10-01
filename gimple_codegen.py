@@ -4502,6 +4502,10 @@ class GimpleGen:
         return grsl._inc_val(self, base)
     def _call_expr(self, ret_type: str, fname: str, arg_pairs: list) -> str:
         return grsl._call_expr(self, ret_type, fname, arg_pairs)
+    def _bool_not(self, ctype: str, val: str) -> str:
+        return grsl._bool_not(self, ctype, val)
+    def _bool_and(self, left: str, right: str) -> str:
+        return grsl._bool_and(self, left, right)
     def _void_call(self, fname: str, arg_pairs: list) -> tuple:
         return grsl._void_call(self, fname, arg_pairs)
     def _emit_label(self, label: str, freq_hint: str=''):

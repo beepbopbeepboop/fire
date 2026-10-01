@@ -2625,12 +2625,27 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
             # a NULL is not a tuple either, so both agree there and the
             # order is only about keeping this one visible.
             if obj_type == 'MojoList *' and type_name == 'list':
+                # GIMPLE has NEITHER `!x` NOR `a && b` as an expression: a
+                # `__GIMPLE`-tagged body's statement must already BE GIMPLE,
+                # and both operators are rejected outright by the raw parser
+                # ("'!' not valid in GIMPLE before '!' token", "expected
+                # expression before '(' token" — the latter because gcc
+                # recovers by re-reading the operand list). Each half goes
+                # through the shared `_bool_not` / `_bool_and` helpers, which
+                # also put the CALL RESULT in its own temp first, since
+                # `bool_temp = call(...)` with no comparison is equally
+                # rejected ("bogus comparison result type"). Both operands are
+                # pure predicates over an already-materialized pointer, so
+                # there is no side effect the `&&`'s short-circuit was
+                # protecting and `&` is the same answer.
                 iv = gen._new_val('int64_t', f'(int64_t){obj_val}')
-                isl = gen._call_expr('int', 'mojo_is_registered_list', [('int64_t', iv)])
-                notup = gen._new_val('int', f'!mojo_is_tuple (({obj_type}){obj_val})')
-                both = gen._new_temp('_Bool')
-                gen._emit(f'  {both} = ({isl} != 0) && ({notup} != 0);')
-                return both
+                isl_r = gen._call_expr('int', 'mojo_is_registered_list',
+                                       [('int64_t', iv)])
+                isl = gen._new_val('_Bool', f'{isl_r} != 0')
+                tup_r = gen._call_expr('int', 'mojo_is_tuple',
+                                       [(obj_type, obj_val)])
+                notup = gen._bool_not('int', tup_r)
+                return gen._bool_and(isl, notup)
             if obj_type.endswith(' *'):
                 # A NULL pointer here means None (e.g. the "default"
                 # branch of a dynamic getattr(obj, attr, None) on a
