@@ -1049,6 +1049,72 @@ def _split_on_separators(s: str) -> list[str]:
     parts.append("".join(buf))
     return parts
 
+# ── what a line break is ────────────────────────────────────────────────────
+#
+# The line terminators the LANGUAGE has, and `str.splitlines()` is not it: that
+# also breaks on vertical tab, form feed, the four C1 information separators,
+# NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR, and CPython's tokenizer breaks on
+# none of them. So `s.splitlines()` invented a line break inside any string
+# literal containing one of those, which destroyed the literal — `x = "a\x0bb"`
+# tokenized to NO STRING token at all, and the diagnostic then named a line with
+# no problem on it — and inside a COMMENT, where the second half became a bare
+# NAME statement the source never contained. Eight characters, every one of
+# which CPython accepts inside a string, and not one of which occurs in any of
+# the 617 `.mojo`/`.py` files reachable from this worktree (counted, not
+# assumed).
+#
+# `\r` IS a line terminator, and CPython's tokenizer agrees: `compile` of
+# `s = "a\rb"` is a SyntaxError. The value CPython gives a `\r` that lands inside
+# a TRIPLE-quoted literal is normalized to `\n`, and this path normalizes nothing
+# — that half is the documented byte-exact divergence. The SPLIT is the part that
+# has to agree, and for a single-quoted literal agreeing means refusing.
+#
+# Both users are here so there is one answer to "where does a line end":
+# `_scan_string_end` (which must refuse to let a literal cross one) and
+# `_source_lines` (which must split on one and only on one).
+_LINE_ENDS = '\r\n'
+_LINE_TERMINATORS = re.compile(r'\r\n|\r|\n')
+
+
+def _source_lines(src: str) -> list:
+    """`src`'s physical lines, split the way the language splits them.
+
+    Same shape as `str.splitlines()` for every input built from `\n`, `\r\n` and
+    `\r` alone — including the trailing-empty-line convention, so this is a
+    drop-in for every file on this tree.
+    """
+    lines = _LINE_TERMINATORS.split(src)
+    if lines and lines[-1] == '':
+        lines.pop()
+    return lines
+
+
+def _indent_expanded(line: str) -> str:
+    r"""`line` with tabs expanded in its LEADING whitespace only.
+
+    The tab expansion exists for the INDENT, and `indent` below is computed from
+    the leading run and nothing else — so expanding the body of the line was
+    pure loss. In code a tab is whitespace (`_TOKEN_RE`'s WS arm is `[^\S\n]+`,
+    which a tab matches) and expanding it changed no token. Inside a string
+    literal a tab is CONTENT, and expanding it rewrote the value in a program
+    that built, ran and printed the wrong string:
+
+        print("x<TAB>y")     CPython: x<TAB>y, len 3      here, before: x y, len 4
+
+    The leading run is the only part that matters and a tab at the start of a
+    line always lands on a column boundary, so expanding that run alone gives
+    the same `indent` — and `lstrip` splits at the same place either way, since
+    `expandtabs` turns a tab into spaces and both are whitespace to it.
+
+    This is the third pass in this function to need to know where the literals
+    are, after the backslash join and the line split; the other two are
+    `_ends_inside_string` and `_strip_inline_comment`, and this one is the only
+    one that still had to be taught.
+    """
+    cut = len(line) - len(line.lstrip())
+    return line[:cut].expandtabs(_INDENT_SIZE) + line[cut:]
+
+
 def _scan_string_end(src: str, i: int, quote: str, triple: bool) -> int:
     r"""Index just PAST the closing delimiter of the string literal that OPENS at
     `i`, or -1 when that literal is unterminated.
@@ -1106,10 +1172,66 @@ def _scan_string_end(src: str, i: int, quote: str, triple: bool) -> int:
             continue
         if src.startswith(delim, j):
             return j + dlen
-        if c == '\n' and not triple:
+        if c in _LINE_ENDS and not triple:
+            # A raw line break closes nothing in a single-quoted literal, and
+            # that includes `\r`: CPython's tokenizer treats a lone CR as a line
+            # end (its own value for a CR inside a triple-quoted literal is
+            # normalized to `\n`, which is the byte-exact divergence, not this)
+            # and refuses `compile('s = "a\rb"')` as an unterminated literal.
+            # Without this arm the CR stayed invisible here and the front end
+            # refused to refuse — see `_source_lines`, which splits on the same
+            # two characters.
             return -1
         j += 1
     return -1
+
+def _ends_inside_string(line: str) -> bool:
+    r"""True when `line` stops part-way through an unterminated string literal.
+
+    The companion question to `_scan_string_end` ("where does the literal that
+    OPENS at `i` end") — this one asks "is the line's last character inside one",
+    which is what the backslash-continuation join in `py_tokenize` needs to know.
+    Same escape rule, so the two cannot disagree: a backslash consumes the NEXT
+    character, and a backslash at the very end of the line therefore consumes
+    the line break that follows it, leaving the line still inside its string.
+
+    A backtick string is skipped as an opaque unit and is NOT reported as being
+    inside: it has no backslash escape, so a trailing backslash in one is not a
+    continuation and the join must keep treating it as one (the pre-existing
+    behaviour for that spelling, unchanged).
+
+    Only single-quoted literals can reach `True`. `py_tokenize` replaces
+    triple-quoted spans with placeholder names before this is consulted, and a
+    single-quoted literal cannot hold a raw newline, so a line can only end
+    inside one by way of the backslash-newline pair this function exists for.
+    """
+    i = 0
+    n = len(line)
+    delim = None
+    while i < n:
+        c = line[i]
+        if delim is None:
+            if c == '`':
+                j = line.find('`', i + 1)
+                if j < 0:
+                    return False
+                i = j + 1
+                continue
+            if c in ('"', "'"):
+                delim = c * 3 if line.startswith(c * 3, i) else c
+                i += len(delim)
+                continue
+            i += 1
+            continue
+        if c == '\\':
+            i += 2
+            continue
+        if line.startswith(delim, i):
+            i += len(delim)
+            delim = None
+            continue
+        i += 1
+    return delim is not None
 
 def _src_loc(src: str, pos: int, filename: str = "") -> str:
     """gcc-style `file:line:col: ` prefix for a diagnostic about `src[pos]`.
@@ -1124,6 +1246,7 @@ def _src_loc(src: str, pos: int, filename: str = "") -> str:
     if filename:
         return f"{filename}:{line}:{col}: "
     return f"{line}:{col}: "
+
 
 def py_tokenize(src: str, filename: str = "") -> list[Token]:
     """Tokenize with layout rules derived from the .md spec:
@@ -1300,8 +1423,38 @@ def py_tokenize(src: str, filename: str = "") -> list[Token]:
         return ''.join(out)
 
     src = replace_multiline_strings(src)
-    raw_lines = src.splitlines()
+    raw_lines = _source_lines(src)
     # Join backslash-continued lines: "expr = \\\n    continuation" → one logical line
+    #
+    # CPython deletes a backslash-newline pair from the source BEFORE it
+    # tokenizes, and what the pair is worth depends on where it sits. Outside a
+    # string it separates two tokens, so a space is the right thing to put
+    # between the joined halves and the next line's indentation is
+    # insignificant. INSIDE a string the pair is worth nothing and the next
+    # line's indentation is CONTENT, and CPython keeps both facts:
+    #
+    #     x = "a\
+    #     b"          CPython: 'ab'         here, before: 'a b'
+    #     x = "a\
+    #         b"      CPython: 'a    b'     here, before: 'a  b'
+    #
+    # (the second is `a`, four spaces, `b` — the join put one space in and took
+    # the four out). Both were the silent-miscompile class, and both are the
+    # same defect shape as the one `_scan_string_end` was written for: a
+    # line-joining pass with no idea where the literals are. `_ends_inside_string`
+    # is the one place that now answers that, and it is asked about the
+    # RSTRIPPED line, which is the text whose last character the loop has just
+    # decided is a backslash.
+    #
+    # What the pair is worth is CPython's own rule, measured with `tokenize`
+    # rather than inferred: the STRING token's TEXT is `'"a\\nb"'` for
+    # `"a\<nl>b"` and `'r"a\\\nb"'` for `r"a\<nl>b"` — deleted unless the
+    # literal is raw. This join deletes it unconditionally, which is right for
+    # three of the four shapes and wrong for a raw single-quoted literal, where
+    # CPython keeps the pair as content. That one is pinned with its exact next
+    # step in bugs/CODEGEN_backslash_continuation_in_a_raw_literal.md; the
+    # triple-quoted shapes are placeholdered before this pass runs and so are
+    # untouched by it either way.
     joined = []
     line_nums = []  # track physical line number (1-based) for each logical line
     i = 0
@@ -1309,10 +1462,13 @@ def py_tokenize(src: str, filename: str = "") -> list[Token]:
         start_line = i + 1  # 1-indexed physical line number
         line = raw_lines[i]
         while line.rstrip().endswith('\\'):
-            line = line.rstrip()[:-1]  # strip the backslash
+            stripped = line.rstrip()
+            inside = _ends_inside_string(stripped)
+            line = stripped[:-1]  # strip the backslash
             i += 1
             if i < len(raw_lines):
-                line = line + ' ' + raw_lines[i].lstrip()
+                nxt = raw_lines[i] if inside else raw_lines[i].lstrip()
+                line = line + ('' if inside else ' ') + nxt
             else:
                 break
         joined.append(line)
@@ -1325,7 +1481,7 @@ def py_tokenize(src: str, filename: str = "") -> list[Token]:
     continued_from_prev = False  # last physical line ended in an implicit-continuation token
     for line_idx, line in enumerate(joined):
         physical_line = line_nums[line_idx]
-        expanded = line.expandtabs(_INDENT_SIZE)
+        expanded = _indent_expanded(line)
         raw_content = expanded.lstrip()
         if not raw_content or raw_content.startswith(_CMT_CHAR): continue
         content = _strip_inline_comment(raw_content).rstrip()
