@@ -522,8 +522,21 @@ _FRAME_ESCAPES = (
     # A field slot holding a frame address, so two bindings of one name
     # disagree about what lives where.
     ("hands the word in the slot", "field slot holds a frame address"),
+    # A member read of a name that is a METHOD of the receiver's own struct,
+    # in a VALUE position. Not a frame question at all: a bound method is not
+    # a word, so there is no slot to read it out of. `formal/model.py`'s
+    # `member_read_without_a_field` says so where the old message claimed two
+    # layouts disagreed when there was one, and WITHOUT this family the five
+    # files it fixed fall into "other refusal" — which is the specific thing
+    # this table exists to prevent, introduced by fixing a diagnostic.
+    ("which is a METHOD of", "member read of a method used as a value"),
+    # A member read of a name the receiver's struct does not have. One
+    # candidate and no disagreement, so there was nothing to disagree about;
+    # the same five-file note applies.
+    ("has no field", "member read of a name the struct does not have"),
     # The same disagreement, stated as a placement failure rather than as a
-    # slot.
+    # slot. Matches ONLY the two-candidate wording now, which is the only case
+    # it was ever true of.
     ("cannot be placed", "name has two disagreeing shapes"),
 )
 

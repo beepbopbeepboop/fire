@@ -2300,6 +2300,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                                 f"one type there is no frame to place here"
                             )
                         if nested is _REASSIGNED:
+                            ann = _field_annotation(cands, outer,
+                                                    structs_by_name)
                             raise CodegenError(
                                 f"{base}.{outer} is a "
                                 f"{M.annotation_base_name(_field_annotation(cands, outer, structs_by_name))}"
@@ -2368,6 +2370,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                 nested = _typed_nested_frame(
                     base, outer_field, cands, structs_by_name, None)
                 if nested is _NOT_TYPED:
+                    vrows = _type_rows(cands, outer_field, structs_by_name)
                     raise CodegenError(
                         f"{chain} reads a field of a field through the receiver "
                         f"{base}: a frame slot holds one 64-bit word, and the word "
@@ -2385,6 +2388,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                         f"{M.field_type_disagreement(cands, outer_field, _type_rows(cands, outer_field, structs_by_name))}"
                     )
                 if nested is _REASSIGNED:
+                    vann = _field_annotation(cands, outer_field, structs_by_name)
                     raise CodegenError(
                         f"{chain} reads through {base}.{outer_field}, which is "
                         f"a "
@@ -2414,6 +2418,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                 outer_slot, (odis, orows) = M.struct_frame_slot_candidates(
                     cands, outer_field)
                 if odis or outer_slot is None:
+                    trows = _type_rows(cands, outer_field, structs_by_name)
                     raise CodegenError(
                         f"{base}.{outer_field} cannot be placed, so the nested "
                         f"read {chain} has no first load: "
@@ -2438,22 +2443,19 @@ def _frame_receivers(functions: list, structs_by_name: dict,
                 # bound from a constructor that is not framed: a plain word.
                 # Not a frame access, so not this pass's business.
                 continue
-            slot, (disagree, rows) = M.struct_frame_slot_candidates(
+            slot, (disagree, _rows) = M.struct_frame_slot_candidates(
                 cands, node.member)
             if disagree:
+                # The message is the model's because it has to pick between
+                # three SHAPES — a method, a field the struct does not have, and
+                # a genuine two-candidate disagreement — and only the model can
+                # ask which, because only it has the struct tables. It used to
+                # be spelled here, and it printed "more than one shape" for
+                # every one of the three; see
+                # `model.member_read_without_a_field`.
                 raise CodegenError(
-                    f"{base}.{node.member} cannot be placed: this name holds a "
-                    f"frame address in more than one shape, and the shapes do "
-                    f"not agree on where {node.member!r} lives — "
-                    + "; ".join(
-                        f"{sn} puts it at slot {sl}" if sl is not None
-                        else f"{sn} has no such field" for sn, sl in rows)
-                    + ". Which one applies depends on the path taken, and this "
-                      "analysis has none, so a slot index computed from either "
-                      "would read the wrong word on the other: the program "
-                      "would build, run, and return a number the source never "
-                      "wrote"
-                )
+                    M.member_read_without_a_field(chain, base, node.member,
+                                                  cands))
             if slot is None:
                 raise CodegenError(
                     f"{base}.{node.member} is a member access on a "

@@ -50,9 +50,9 @@ here rather than inferred:
    |---|---|---|
    | `formal-comptime-asm-r2-r2` (`construct:comptime-mlir-and-inline-asm-remainder`) | **55** | MLIR 108, `inlined_assembly` 18 |
    | `formal-module-globals` (`construct:module-global-storage`) | 13 | module-global storage 5 |
-   | `formal-frame-by-value` (`construct:frame-address-as-value`) | 5 | frame address passed where a value is wanted 14 |
-   | `formal-class-fields-in-init` (`construct:class-assigns-fields-in-init`) | 5 | slot's declared type 10 |
-   | `formal-frame-escape` (`construct:frame-address-escapes`) | 4 | frame escapes, returned 18 + aliased 10 |
+   | `formal-frame-by-value` (`construct:frame-address-as-value`) | 5 — **merged** | frame address passed where a value is wanted 14 |
+   | `formal-class-fields-in-init` (`construct:class-assigns-fields-in-init`) | 5 — **merged** | slot's declared type 10 |
+   | `formal-frame-escape` (`construct:frame-address-escapes`) | 4 — **merge ABORTED, see `FORMAL_returned_frame_two_incompatible_designs.md`** | frame escapes, returned 18 + aliased 10 |
    | `formal-receiver-position` (`construct:receiver-position-family`) | 4 | receiver at argument position 0, 25 |
    | `formal-method-param-field` (`construct:method-param-field-access`) | 2 | method parameter's field 27 |
    | `formal-receiver-handoff` (`construct:receiver-handoff-method`) | 6 | receiver hand-off |
@@ -97,11 +97,11 @@ Owner is `python3 tools/control.py claims` + `status` at 19:30. "unmerged" is
 | 4 | a method parameter's field, with no call site to establish it | **27** | 0 | `builtin_slice.mojo` 27 | `std/base64/__init__.mojo` | `FORMAL_method_param_field_access.md` | `formal-method-param-field`, 2 unmerged |
 | 5 | receiver passed at argument position 0 | **25** | 25 | the file itself | `std/algorithm/reduction.mojo` | `FORMAL_frame_receiver_handoff.md` §"the position family" | `formal-receiver-position`, 4 unmerged |
 | 6 | `inlined_assembly` (a gimple-C runtime construct) | **18** | 0 | `_assembly.mojo` 18 | `std/atomic/__init__.mojo` | `FORMAL_known_limits.md` §1.1 — a **true limit** | `formal-comptime-asm-r2-r2`, 55 unmerged |
-| 7 | frame address escapes: returned by its creator | **18** | 18 | the file itself | `std/builtin/_format_float.mojo` | `FORMAL_wide_receiver_by_reference.md`, `FORMAL_frame_receiver_handoff.md` §4 | `formal-frame-escape`, 4 unmerged |
-| 8 | frame address passed where a value is wanted | **14** | 14 | the file itself | `std/builtin/tuple.mojo` | `FORMAL_wide_receiver_by_reference.md` | `formal-frame-by-value`, 5 unmerged |
+| 7 | frame address escapes: returned by its creator | **18** | 18 | the file itself | `std/builtin/_format_float.mojo` | `FORMAL_wide_receiver_by_reference.md`, `FORMAL_frame_receiver_handoff.md` §4 | `formal-frame-escape`, **merge ATTEMPTED and ABORTED** — two incompatible returned-frame designs; see `FORMAL_returned_frame_two_incompatible_designs.md` |
+| 8 | frame address passed where a value is wanted | **14** | 14 | the file itself | `std/builtin/tuple.mojo` | `FORMAL_wide_receiver_by_reference.md` | `formal-frame-by-value`, **merged** |
 | 9 | callee has no definition on this path | **12** | 12 | the file itself | `std/base64/base64.mojo` | `FORMAL_frame_receiver_handoff.md` §"Found, deliberately NOT fixed" | **none** → `formal-callee-no-def` |
-| 10 | frame address escapes: aliased out of a method | **10** | 9 | own 9, `itertools.mojo` 1 | `std/benchmark/_progress.mojo` | `FORMAL_wide_receiver_by_reference.md` | `formal-frame-escape`, 4 unmerged |
-| 11 | a slot's declared type is not declared by its struct | **10** | 10 | the file itself | `formal/arm64_codegen.py` | `FORMAL_class_assigns_its_fields_in_init.md` | `formal-class-fields-in-init`, 5 unmerged |
+| 10 | frame address escapes: aliased out of a method | **10** | 9 | own 9, `itertools.mojo` 1 | `std/benchmark/_progress.mojo` | `FORMAL_wide_receiver_by_reference.md` | `formal-frame-escape`, **merge ATTEMPTED and ABORTED** — two incompatible returned-frame designs; see `FORMAL_returned_frame_two_incompatible_designs.md` |
+| 11 | a slot's declared type is not declared by its struct | **10** | 0 | the file itself | `formal/arm64_codegen.py` | **FIXED and `git rm`'d** — the type is read out of what `__init__` ASSIGNS (`model.assigned_value_base_name` + `struct_init_field_types`, unanimity or nothing, with `struct_init_field_type_why` as the negative half) | `formal-class-fields-in-init`, **merged**; re-measured at 0 pass: 5 of the 10 land on rows 7/10 (the frame-LIFETIME family) and 3 leave the `codegen` class onto a host import (`re`, `types`) |
 | 12 | a module-global name has no storage | **5** | 5 | the file itself | `formal/arm64.py` | `FORMAL_module_state_no_storage.md` | `formal-module-globals`, 13 unmerged |
 | 13–33 | twenty-one causes of 1–4 files each | 47 files | | | — | `FORMAL_known_limits.md` for the audit | mostly none |
 
