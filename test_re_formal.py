@@ -460,7 +460,7 @@ def case_function(i, pattern, subject, flags):
     lines.append("        n = n + 1")
     lines.append("    emit(0, MARK)")
     lines.append("    sstat = [0]")
-    lines.append("    r = re.sub(sstat, 1, p, \"|\", s, %d, 0)" % flags)
+    lines.append("    r = re.sub(sstat, p, \"|\", s, %d, 0)" % flags)
     lines.append("    emit(0, str_len(r))")
     lines.append("    n = 0")
     lines.append("    while n < str_len(r):")
@@ -498,13 +498,27 @@ def check(ok, what, detail=""):
     return bool(ok)
 
 
-def build_and_run(tmpdir, name, source):
+def build_and_run(tmpdir, name, source, backend=None):
+    """Build `source` through the formal backend and RUN the image.
+
+    `backend` selects the codegen (`formal/build.py`'s `--backend`). The image
+    is then executed and its output returned, so this is the only thing in this
+    file that can tell a right answer from a plausible one — everything else
+    here is about whether the module builds.
+
+    The two backends' images run the same way on this host: an x86-64 Mach-O is
+    loaded by Rosetta 2 transparently, and `fire.py`'s `_formal_run_argv`
+    (`arch -x86_64 <path>`) exists for the cases where it does not.
+    """
     path = os.path.join(tmpdir, "%s.py" % name)
     with open(path, "w") as f:
         f.write(source)
     out = os.path.join(tmpdir, "%s.bin" % name)
-    r = subprocess.run([sys.executable, FIRE, "build", "--formal", "--no-prove",
-                        "-o", out, path], capture_output=True, text=True,
+    argv = [sys.executable, FIRE, "build", "--formal", "--no-prove"]
+    if backend:
+        argv.append("--backend=%s" % backend)
+    argv += ["-o", out, path]
+    r = subprocess.run(argv, capture_output=True, text=True,
                        timeout=BUILD_TIMEOUT, cwd=HERE)
     if r.returncode != 0:
         raise AssertionError("build failed: %s" % (r.stderr or r.stdout).strip()[-800:])
@@ -517,19 +531,21 @@ def group_corpus(indices, size):
         yield indices[k:k + size]
 
 
-def test_the_corpus_against_cpython(tmpdir):
-    """Every case, built, run, and compared value for value with CPython."""
+def run_corpus(tmpdir, backend=None):
+    """Every case, built, RUN, and compared value for value with CPython."""
+    tag = backend or "arm64"
     for chunk in group_corpus(list(range(len(CASES))), GROUP):
         try:
-            got_lines = build_and_run(tmpdir, "corpus_%d" % chunk[0],
-                                      program(chunk))
+            got_lines = build_and_run(tmpdir, "corpus_%s_%d" % (tag, chunk[0]),
+                                      program(chunk), backend=backend)
         except AssertionError as e:
             for i in chunk:
                 p, s, f, note = CASES[i]
-                check(False, "case %d (%r on %r) builds" % (i, p, s), str(e))
+                check(False, "[%s] case %d (%r on %r) builds"
+                      % (tag, i, p, s), str(e))
             continue
         if len(got_lines) != len(chunk):
-            check(False, "the image printed one line per case",
+            check(False, "[%s] the image printed one line per case" % tag,
                   "expected %d, got %d" % (len(chunk), len(got_lines)))
             continue
         for i, line in zip(chunk, got_lines):
@@ -539,14 +555,14 @@ def test_the_corpus_against_cpython(tmpdir):
             # caught here rather than compared against the wrong subject.
             toks = line.split()
             if not check(toks and toks[0] == "C%d" % i,
-                         "line %d is case C%d's" % (i, i),
+                         "[%s] line %d is case C%d's" % (tag, i, i),
                          "got %r" % (toks[0] if toks else None)):
                 continue
             got = [int(x) for x in toks[1:]]
             want = expected(p, s, f)
             if not check(got == want,
-                         "case %d: re.search(%r, %r, %d) == CPython  [%s]"
-                         % (i, p, s, f, note)):
+                         "[%s] case %d: re.search(%r, %r, %d) == CPython  [%s]"
+                         % (tag, i, p, s, f, note)):
                 if len(got) != len(want):
                     print("      lengths differ: got %d values, CPython %d"
                           % (len(got), len(want)), flush=True)
@@ -556,6 +572,26 @@ def test_the_corpus_against_cpython(tmpdir):
                     print("      %d of %d differ; first few (index, got, "
                           "CPython): %s" % (len(bad), len(want), bad[:6]),
                           flush=True)
+
+
+def test_the_corpus_against_cpython(tmpdir):
+    """Every case, built, run, and compared value for value with CPython."""
+    run_corpus(tmpdir)
+
+
+def test_the_corpus_against_cpython_on_x86_64(tmpdir):
+    """The same corpus, on the OTHER backend, run and compared the same way.
+
+    This is new coverage rather than a repeat: until `re.mojo` fit six integer
+    argument registers it could not be compiled for x86-64 AT ALL, so the
+    45 files that import it were refused with `sub: 7 parameters exceeds the 6
+    …` and nothing here ever looked at an x86-64 `re` image. A backend that
+    can now build the module can also get it wrong — the `sub` walk keeps its
+    output-buffer state in the arena rather than in parameters, which is a
+    different program to the one arm64 lowers — so the answers are compared
+    against CPython on this backend too, over the same 128 cases.
+    """
+    run_corpus(tmpdir, backend="x86_64")
 
 
 # ── escape, over every byte ─────────────────────────────────────────────────
@@ -737,14 +773,14 @@ def test_a_span_list_that_is_too_small_is_a_status_not_a_crash(tmpdir):
              "    printf(\"%s\", re.nl())",
              "    printf(\"E %d\", re.split(ssmall, 2, p, s, 0, 2) + ssmall[0])",
              "    printf(\"%s\", re.nl())",
-             "    printf(\"F %d\", re.sub(ssmall, 0, p, \"|\", s, 0, 0) != 0)",
+             "    printf(\"F %d\", re.sub(ssmall, p, \"|\", s, 0, 0) != 0)",
              "    printf(\"%s\", re.nl())",
              "    # and the RIGHT capacity still works, in the same process",
              "    printf(\"G %d\", re.search(big, 7, p, s, 0))",
              "    printf(\"%s\", re.nl())",
              "    printf(\"H %d\", re.findall(fbig, 7, p, s, 0, 2))",
              "    printf(\"%s\", re.nl())",
-             "    printf(\"I %d\", str_len(re.sub(sbig, 2, p, \"|\", s, 0, 0)))",
+             "    printf(\"I %d\", str_len(re.sub(sbig, p, \"|\", s, 0, 0)))",
              "    printf(\"%s\", re.nl())",
              "    return 0"]
     try:
@@ -885,6 +921,79 @@ def test_the_corpus_patterns_all_work(tmpdir):
                   "got %d, CPython %d" % (got[1], want.start()))
 
 
+def test_no_signature_is_wider_than_the_smaller_abi(tmpdir=None):
+    """No function in `re.mojo` takes more parameters than the SMALLER of the
+    two backends' integer argument register files passes.
+
+    The cheap pre-check for the thing that made this module x86-64-unbuildable
+    — `sub: 7 parameters exceeds the 6 the formal x86-64 ABI passes in
+    registers`, which cost the module itself and the 45 files that import it.
+    The x86-64 half of `test_the_module_builds_as_a_dylib_on_both_backends` is
+    the real check and it costs a whole module compile; this one parses and
+    costs nothing, so it says WHICH function is too wide instead of that a
+    build failed.
+
+    The ceiling is DERIVED from the two emitters rather than written down, for
+    `test_struct_formal.py`'s reason: a hardcoded 6 would keep passing if either
+    ABI changed, and would then be testing nothing. A function that RETURNS A
+    FRAME needs one further word for the hidden block address
+    (`formal/x86_64_codegen.py`'s prologue), so such a function has one fewer
+    parameter to spend; `re.mojo` has none, and the build is what says so.
+    """
+    try:
+        import fire_compiler as F
+        from formal.arm64_codegen import _ABI_ARG_REGS
+        from formal.x86_64 import ARG_REGS
+    except Exception as e:                       # pragma: no cover
+        check(False, "the two ABIs import", repr(e))
+        return
+    ceiling = min(_ABI_ARG_REGS, len(ARG_REGS))
+    with open(RE_MODULE) as f:
+        src = f.read()
+    lines = src.split("\n")
+    wide = []
+    i = 0
+    while i < len(lines):
+        m = re.match(r"^def (\w+)\((.*)$", lines[i])
+        if not m:
+            i += 1
+            continue
+        sig = m.group(2)
+        while sig.count("(") > sig.count(")") or sig.count("[") > sig.count("]"):
+            i += 1
+            sig += " " + lines[i].strip()
+        depth = 0
+        end = len(sig)
+        for k, ch in enumerate(sig):             # cut the return annotation
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    end = k
+                    break
+        params, cur, depth = [], "", 0
+        for ch in sig[:end]:
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                depth -= 1
+            if ch == "," and depth == 0:
+                params.append(cur)
+                cur = ""
+            else:
+                cur += ch
+        params.append(cur)
+        n = len([p for p in params if p.strip()])
+        if n > ceiling:
+            wide.append("%s(%d) at line %d" % (m.group(1), n, i + 1))
+        i += 1
+    check(not wide,
+          "every signature in re.mojo fits the %d integer argument registers "
+          "both backends pass (widest offenders: %s)"
+          % (ceiling, ", ".join(wide[:4]) or "none"))
+
+
 def test_module_resolves_and_host_modelled_is_gone(tmpdir):
     """`re` resolves to the module source, and HOST_MODELLED no longer claims
     it. Without this the tests above would pass against a module no importer
@@ -905,10 +1014,25 @@ def test_the_module_builds_as_a_dylib_on_both_backends(_tmpdir=None):
     The same question `test_struct_formal.py` asks, for the same reason: a
     module compiled for BOTH backends has to fit the smaller of their integer
     argument register files, and that is not discoverable from either backend
-    alone.
+    alone. It is a question about the widest signature in the file, and the
+    widest one used to be `sub`'s seven parameters — six of which the x86-64
+    ABI does not pass in registers — so this whole half of the test was
+    unreachable: the build raised the arity refusal before a container was ever
+    chosen, and the refusal was caught by the `except` arm below, which
+    accepted it. Nothing here had ever looked at an x86-64 `re` dylib.
+
+    The container is asserted against `default_format(arch)` and NOT hardcoded,
+    for `test_struct_formal.py`'s reason and because this check used to carry
+    the premise `bugs/CODEGEN_x86_64_module_dylib_emitted_as_macho.md` was
+    filed on and that doc's own author measured to be FALSE: on a macOS host an
+    x86-64 image is a Mach-O, because an x86-64 binary that RUNS here has to be
+    one Rosetta 2 will load and `fire.py`'s `_formal_run_argv` is what runs it.
+    Asserting ELF would be asserting that the module library and the image
+    linking it must disagree.
     """
     import tempfile as _tf
     try:
+        import formal.build as B
         from formal.imports import build_module_dylib
     except Exception as e:                       # pragma: no cover
         check(False, "formal.imports imports", repr(e))
@@ -929,19 +1053,19 @@ def test_the_module_builds_as_a_dylib_on_both_backends(_tmpdir=None):
             if produced:
                 with open(out, "rb") as f:
                     magic = f.read(4)
-                check(magic == b"\x7fELF",
-                      "the x86-64 module dylib is an ELF object, not a Mach-O "
-                      "(magic %r)" % magic)
+                want = (b"\xcf\xfa\xed\xfe" if B.default_format("x86_64")
+                        == "macho" else b"\x7fELF")
+                check(magic == want,
+                      "the x86-64 module dylib's container is %r, expected %r "
+                      "— the format this host builds x86-64 in. A module "
+                      "library and the image linking it must agree on it."
+                      % (magic, want))
             else:
                 check(False, "re.mojo produces a module dylib for x86_64")
         except Exception as e:
-            msg = str(e)
-            check("x86_64_module_dylib_emitted_as_macho" in msg or
-                  "strict validation" in msg,
-                  "the x86-64 module dylib is an ELF object; while it is a "
-                  "Mach-O this must fail with the container mismatch "
-                  "(bugs/CODEGEN_x86_64_module_dylib_emitted_as_macho.md), not "
-                  "something else. Got: %s" % msg[:200])
+            check(False,
+                  "re.mojo produces a module dylib for x86_64; it was refused "
+                  "or mis-containered: %s" % str(e)[:300])
 
 
 def test_the_sweep_files_no_longer_refuse_on_the_import(tmpdir):
@@ -984,8 +1108,10 @@ def main():
 
     tests = [
         test_module_resolves_and_host_modelled_is_gone,
+        test_no_signature_is_wider_than_the_smaller_abi,
         test_the_module_builds_as_a_dylib_on_both_backends,
         test_the_corpus_against_cpython,
+        test_the_corpus_against_cpython_on_x86_64,
         test_escape_every_byte,
         test_unsupported_constructs_are_refused,
         test_a_span_list_that_is_too_small_is_a_status_not_a_crash,
