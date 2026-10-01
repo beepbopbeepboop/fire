@@ -3639,6 +3639,59 @@ for x in ['p', 'q']:
     print(x)
 """, "1\n2\np\nq\n")
 
+    # A `for` loop whose target is a bare 1-tuple — `for patterns, in ...:`,
+    # real at c_parser/preprocessor/__init__.py:169
+    # (`for patterns, in _resolve_file_values(filename, file_same.items()):`).
+    # `_parse_unpack_target` cannot tell a TRAILING comma from a separator, so
+    # the parser used to consume the `in` as a second target name and the whole
+    # module failed to parse — `169:17: Expected KW got NAME(...)` — which
+    # took every c-analyzer file whose closure reaches
+    # `c_parser/preprocessor` down with it. The compiled path already
+    # unpacks a one-name parenthesised for-target correctly, so restoring the
+    # parse restores compiled-path/CPython parity for the shape; asserted here
+    # against CPython's own output rather than a hardcoded literal for exactly
+    # that reason.
+    test_gimple_stdout("gimple_for_target_bare_one_tuple", """\
+def main():
+    for a, in [(1,), (2,), (3,)]:
+        print(a)
+    for b, in [('x',), ('y',)]:
+        print(b)
+""", "1\n2\n3\nx\ny\n")
+
+    # The parser invariant the fix rests on: the bare trailing-comma spelling
+    # and the parenthesised one produce the IDENTICAL target representation,
+    # so there is exactly one shape for every downstream consumer (the
+    # interpreter's `_bind_comprehension_target`, both codegen paths'
+    # tuple-target machinery) to learn rather than two spellings. Asserted on
+    # the AST, not on behaviour, because the two Python meanings that share
+    # this spelling are a separate, separately-filed bug — see
+    # bugs/CODEGEN_for_loop_target_one_tuple_vs_paren_single_name.md, whose
+    # subject is `for (a) in b:` (parenthesised NAME, no comma) sharing this
+    # representation with `for (a,) in b:`.
+    def test_for_target_bare_one_tuple_matches_paren_ast():
+        global _PASS, _FAIL
+        name = "gimple_for_target_bare_one_tuple_matches_paren_ast"
+        try:
+            import fire_compiler as _N
+            def _tgt(src):
+                return _N.Parser(_N.py_tokenize(src)).parse_module()[0].target
+            _bare = _tgt("for a, in b:\n    pass\n")
+            _paren = _tgt("for (a,) in b:\n    pass\n")
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+            return
+        if _bare == _paren:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: bare trailing comma parses to {_bare!r}, "
+                  f"`for (a,) in` parses to {_paren!r}")
+            _FAIL += 1
+
+    test_for_target_bare_one_tuple_matches_paren_ast()
+
     # bugs/hard/CODEGEN_function_scoped_import_module_not_inlined.md: a
     # cross-module constructor call whose only field-type evidence is an
     # unannotated scalar/container LITERAL argument (`Parameter('v', 7)`,
