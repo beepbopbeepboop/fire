@@ -4217,16 +4217,43 @@ def _gen_stmt_WithStmt(gen, node):
             gen._emit(f"  /* with: __enter__ ({struct_name}) */")
             enter_v = ctx_v
             enter_ret_t = et
+        # Register the item for its TEARDOWN before deciding anything about
+        # the `as` target, which is what the generator arm just above does.
+        # These five appends used to sit INSIDE `if item.alias is not None:`,
+        # so `with ctx():` — no `as` — appended nothing at all: `has_exit`
+        # below stayed False, no `setjmp`-protected region was emitted, and
+        # `_with_emit_exits` walked an empty list. `__enter__` was called, the
+        # body ran, and the teardown was never emitted. Not a wrong `__exit__`
+        # argument and not a missing `mojo_exc_pop` — no teardown at all, with
+        # exit 0, on every `with` whose context manager has one.
+        #
+        # Real Python calls `__exit__` for `with C():` too, so this is a
+        # compiled-path-only divergence, and `test_runtime_diff.py`'s A/B engine
+        # comparison cannot see it either: the two engines differ on the
+        # OUTPUT, and here the output can be identical (the body worked) while
+        # the teardown never ran.
+        #
+        # It was found on a LOCK: `build_stdlib_dylib`'s publish lock, where
+        # `with _OutputLock(out):` silently never released it and wedged every
+        # other process wanting the same lock for the life of the tree —
+        # exactly the cross-process situation the lock exists for. Any
+        # resource with an `__exit__` (a temp file, a transaction, a
+        # subprocess) leaks per iteration.
+        #
+        # `has_exit` and `_with_emit_exits` need no change: they already
+        # consume exactly these lists, and index-parallelism is the
+        # convention the generator arm established (which is why it is three
+        # lists and not a list of tuples).
+        _ctx_ts.append(ctx_t)
+        _ctx_vs.append(ctx_v)
+        _ctx_sns.append(struct_name)
+        _gctx_bases.append(None)   # keep index-parallel
+        _gctx_vs.append(None)
         if item.alias is not None:
             alias = _with_item_alias_name(item.alias)
             if alias not in gen.var_types:
                 gen._declare_var(alias, enter_ret_t)
             gen._safe_coerce_emit(enter_ret_t, gen.var_types[alias], enter_v, alias)
-            _ctx_ts.append(ctx_t)
-            _ctx_vs.append(ctx_v)
-            _ctx_sns.append(struct_name)
-            _gctx_bases.append(None)   # keep index-parallel
-            _gctx_vs.append(None)
 
     has_exit = False
     for _hxi in range(len(_ctx_sns)):
@@ -4266,10 +4293,24 @@ def _gen_stmt_WithStmt(gen, node):
         gen._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
 
         gen._emit_label(bb_try)
+        # Set when the interceptor below has ALREADY emitted this region's
+        # teardown on an early-exit path, so the tail block below does not emit
+        # it a second time as unreachable code. A one-element list rather than
+        # a `nonlocal`, for the self-hosted compiled path.
+        _teardown_done = [False]
         for s in node.body:
             # break/continue lower to a bare `goto <loop label>;` and jump
             # out of this with's protected region same as an early return
             # — same leak as in _gen_stmt_TryStmt if unaccounted for.
+            #
+            # Both of those paths popped the exception stack and emitted
+            # NOTHING else, so the teardown never ran on them either: a
+            # `return` out of a `with` body, or a `continue`/`break` out of
+            # one, left the context manager's `__exit__` uncalled. That is
+            # pre-existing and hit the `as` spelling too — but the tail block
+            # below emits its teardown AFTER the body, i.e. after the `return`,
+            # so the very lines meant to clean up were themselves dead. The
+            # teardown has to be emitted BEFORE the statement that leaves.
             original_emit = gen._emit
             def intercepted_emit(line, rv=None, rt=None):
                 stripped = line.strip()
@@ -4278,8 +4319,20 @@ def _gen_stmt_WithStmt(gen, node):
                     f"goto {gen._loop_break_bb()};",
                 ):
                     original_emit("  mojo_exc_pop ();")
+                    _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns,
+                                     _gctx_bases, _gctx_vs)
+                    _teardown_done[0] = True
                     original_emit(line)
                     return
+                if stripped.startswith('return ') or stripped == 'return;':
+                    # The same early exit, spelled as a return. `mojo_raise`'s
+                    # own unwind is NOT this path (that is the bb_exc arm
+                    # below), and neither is a `return` belonging to a nested
+                    # `def` — those bodies are emitted through their own
+                    # function-generation path, which restores `gen._emit`.
+                    _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns,
+                                     _gctx_bases, _gctx_vs)
+                    _teardown_done[0] = True
                 original_emit(line)
             gen._emit = intercepted_emit
             gen.gen_stmt(s)
@@ -4289,12 +4342,13 @@ def _gen_stmt_WithStmt(gen, node):
         # and must pop the exception stack (_mojo_exc_top) exactly like
         # the normal-exit path does (see the matching fix and comment in
         # _gen_stmt_TryStmt — this is the same leak, in the `with`
-        # codegen instead of `try`).
+        # codegen instead of `try`). It does NOT re-emit the teardown when the
+        # interceptor already did it above (`_teardown_done`).
         if not gen._last_was_terminal:
             gen._emit("  mojo_exc_pop ();")
             _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs)
             gen._emit(f"  goto {bb_after};")
-        else:
+        elif not _teardown_done[0]:
             gen._emit("  mojo_exc_pop ();")
             _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs)
 

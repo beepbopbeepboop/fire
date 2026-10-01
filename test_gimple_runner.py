@@ -1234,6 +1234,101 @@ d2 = d
 print(d2["k"]())
 """)
 
+    # ── `with` teardown: the `as` target is optional, and so is running
+    # ── __exit__ at all (bugs/CODEGEN_with_no_as_target_drops_exit.md).
+
+    # `with C():` with NO `as` target used to drop the teardown entirely. The
+    # five index-parallel per-item lists `_gen_stmt_WithStmt` feeds
+    # `_with_emit_exits` from were appended INSIDE
+    # `if item.alias is not None:`, so a no-`as` item appended nothing:
+    # `has_exit` stayed False, no `setjmp`-protected region was emitted, and
+    # the exit walk iterated an empty list. `__enter__` ran, the body ran, and
+    # `__exit__` never did — with exit 0, on every `with` over a class that has
+    # one.
+    #
+    # The interpreter is the reference and gets this right, and
+    # `test_runtime_diff.py`'s A/B engine comparison CANNOT see it even in
+    # principle: the two engines differ on the OUTPUT, and here the output can
+    # be byte-identical (the body worked) while the teardown never ran. So the
+    # only shape that catches it is one where `__exit__` PRINTS — which is what
+    # both spellings below do, each on the same class so the only difference
+    # between the two halves is the `as`.
+    #
+    # Found on a lock (`build_stdlib_dylib`'s publish lock, commit ccd83a2b):
+    # a `with` on a cross-process lock object that never releases it wedges
+    # every other process wanting the same lock for the life of the tree, so
+    # this is not only a per-iteration leak.
+    test_gimple_matches_cpython("gimple_with_no_as_target_still_calls_exit", """\
+class Ctx:
+    def __init__(self, n):
+        self.n = n
+    def __enter__(self):
+        print("enter", self.n)
+        return self.n * 10
+    def __exit__(self, a, b, c):
+        print("exit", self.n)
+
+def with_alias():
+    with Ctx(1) as v:
+        print("as", v)
+
+def without_alias():
+    with Ctx(2):
+        print("noas")
+
+with_alias()
+without_alias()
+""")
+
+    # The exceptional and early-exit paths, which are separate emission sites
+    # and separate bugs — all silent, all with exit 0:
+    #   * a `raise` in the body has to unwind through the bb_exc arm, which
+    #     emits the exit again, so `__exit__` must appear exactly ONCE (twice
+    #     would be a different wrong answer, and a visible one);
+    #   * a `return` out of the body used to emit the teardown AFTER the
+    #     `return`, i.e. the cleanup was itself unreachable — same for the
+    #     `continue`/`break` arm, which popped the exception stack and emitted
+    #     nothing else.
+    # Those two leaked on the `as` spelling too, so they are pre-existing and
+    # independent of the no-`as` fix; they are here because a no-`as` `with`
+    # only reaches the setjmp region at all now that it registers.
+    test_gimple_matches_cpython("gimple_with_teardown_on_raise_return_and_loop_exit", """\
+class Ctx:
+    def __init__(self, n):
+        self.n = n
+    def __enter__(self):
+        print("enter", self.n)
+        return self.n
+    def __exit__(self, a, b, c):
+        print("exit", self.n)
+
+def raising():
+    try:
+        with Ctx(1):
+            print("raising")
+            raise ValueError("boom")
+    except ValueError:
+        print("caught")
+
+def returning():
+    with Ctx(2):
+        print("returning")
+        return 7
+
+def looping():
+    for i in range(3):
+        with Ctx(3 + i):
+            print("loop", i)
+            if i == 1:
+                continue
+            if i == 2:
+                break
+
+raising()
+print("ret", returning())
+looping()
+""")
+
     test_gimple_stdout("gimple_list_sort_method_in_place", """\
 def main():
     l = [3, 1, 2]
