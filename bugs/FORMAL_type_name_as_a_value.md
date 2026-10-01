@@ -1,9 +1,13 @@
 # FORMAL_type_name_as_a_value: a bare TYPE name in a value position is refused as a name with no register
 
-**Status: the COVERAGE half is landed and measured.** A type is a word on this
-path and the word is a tag, so `t == Int32` is an integer comparison, a type
-crosses a call boundary, and a `dtype: DType` field holds one. Both
-architectures, tested against CPython and against the interpreter.
+**Status: the COVERAGE half is landed and measured, and the branch is merged.**
+A type is a word on this path and the word is a tag, so `t == Int32` is an
+integer comparison, a type crosses a call boundary, and a `dtype: DType` field
+holds one. Both architectures, tested against CPython and against the
+interpreter. `master` is merged on top of this branch (`d43fdd88`), which is
+where the construct meets `L[T]()`'s half of the same row and where one of the
+two branches' tests had to be reworded; §4 is that record and §6 the numbers as
+they stand after it.
 
 **Coverage: 0 of the 4 reachable files reach `pass`, and 1 of the 5 the 2026-09-30
 sweep named is no longer reachable at all.** Both numbers are measured below, not
@@ -87,15 +91,41 @@ load-bearing and it was measured, not chosen:
   stopped being looked at rather than one that has been answered. `f[a, b](x)` is
   a specialization of `f`, not a read of a value named `f`, and that is a
   different question with its own answer (`model.subscript_callee_names`).
+  **Re-measured on the merged tree, where that answer now exists and is gated on
+  CALL position**, so the exclusion has two jobs and the second one is no longer
+  hypothetical: a subscript base in a VALUE position — `var v = List[Int]` — is
+  not exempt by anything, so the tag must not answer for it either. With
+  `build.py`'s `subscript_bases` set removed from the merged tree, that program
+  BUILDS and runs, holding the tag of the type `List` as if a subscript were a
+  value; with it, it is refused at "'List' has no home". That row is
+  `a_subscript_base_in_a_value_position_is_not_a_type_value`. So the two
+  constructs do not overlap: a bracketed CALL is master's question, a bracketed
+  READ is this one's, and neither answer reaches the other's program.
 
-One side effect worth stating because it is easy to assume and was measured not
-to be there: `len()` of a type name. `len(List)` and `len(bool)` are refused by
-the length machinery with **byte-identical messages before and after** this
-change, on both architectures (the four production files reverted in place and
-the same two programs rebuilt), so this construct neither introduces nor repairs
-that refusal. It is a pre-existing imprecision and §5 has it. What is *not*
-claimed here is anything about what another branch's test pins for it — that is
-answerable by running that branch, not by reading this one.
+One consequence worth stating, because an earlier version of this document got
+it exactly backwards and a reader would have believed it: **`len()` of a type
+name moves.** Measured on the merged tree with the four production files
+reverted in place and the same two programs rebuilt —
+
+```
+$ cat a.mojo
+def main(n: Int) -> Int:
+    return len(bool)
+$ python3 fire.py build --formal --no-prove a.mojo -o a.arm64     # pre-merge files
+build: main: 'bool' has no home: the module-level symbol table is empty …
+$ python3 fire.py build --formal --no-prove a.mojo -o a.arm64     # merged tree
+build: len(bool) is a length, and bool is a TYPE: on this path a type is a
+word — its tag … and a word is neither a char * nor a counted blob, so there is
+nothing here for len() to count …
+```
+
+so the refusal used to be the name walk's and is now the length machinery's, and
+BOTH of the two sentences this construct passed through were false about the
+program: the first claimed there was no value where there is a tag, and the
+second claimed the source does not say what its operand holds where the source
+says `bool`. The merged tree asks the shape (`model.len_operand_is_a_type`,
+`model.len_of_a_type_refusal`) and gets a message that is true; §5 records what
+that cost and what is still not answered.
 
 ### What is admitted, and what is refused
 
@@ -105,7 +135,7 @@ answerable by running that branch, not by reading this one.
 | `DType.int32`, `DType.uint8`, `DType.bfloat16`, `DType.bool` | a tag, the same word as the bare name | the spelling convention, as five PREFIXES (`uint8` is `UInt8`, where the capital `U` is the unsigned marker — a "capitalise the first letter" rule gets that one wrong and no test of `int8` would notice), plus three exceptions where the member is not named after its type (`int`/`index` are `Int64`, `uint` is `UInt64`) |
 | `DType.float8_e4m3fn` and its six siblings, `DType.uint128` | **refused, by name** | 202 spellings in the corpus. Their type names are in no table here, and admitting them by SHAPE would make the name space a tag is asked about unbounded — which is exactly what the injectivity argument needs it not to be. The refusal says which members do work and that naming the type instead of the member is the same value |
 | a bare `DType` | **refused, by name** | `DType` is the type OF a type. A formal value is one word and there is nothing in a freestanding image for a word to point at that would answer "what type is this". The two things that do work are named in the message: a member, or a parameter annotated `DType` whose value is the member's tag by the caller's doing |
-| `len(bool)` | refused, by the length machinery | see §5 |
+| `len(bool)`, `len(DType.int32)` | refused, by `model.len_of_a_type_refusal` | a tag is neither a `char *` nor a counted blob, so both of the two things `len` can answer are correctly declined — and the message says that, rather than complaining that the source did not say what the operand holds, which it does: it says `bool` |
 
 ## 3. The measurement, and it is not good news
 
@@ -174,15 +204,28 @@ rule, which is the smallest of the four.
 
 Recorded so a merge is a decision rather than a surprise. Every case in this
 document was built on this tree alone, with neither branch present; what these two
-notes are for is the merge, and each says which way it cuts.
+notes are for is the merge, and each says which way it cuts. The first of them is
+no longer a note about a branch: **`work/formal-sweep-next` is merged** (master
+`69f20418`), so the questions below were settled by the merge commit `d43fdd88`
+on this branch and what is left here is the record.
 
-* **`work/formal-sweep-next`'s `L[T]()` half** (`model.subscript_callee_names`,
+* **master's `L[T]()` half** (`model.subscript_callee_names`,
   `empty_blob_constructor`) is the other spelling of row 2 and is orthogonal: it
   lowers the zero-operand container constructor, this one makes the type NAME a
-  value. The subscript exclusion in §2 is what keeps the two from colliding — it
-  holds `List[Self.T]()` at "'List' has no home" and `List()` at "constructing
-  List has no representation", the two spellings exactly as they were, so that
-  branch's `subscript_callee_names` is still the thing that decides them.
+  value. The subscript exclusion in §2 is what keeps the two from colliding, and
+  it is still the branch's own `subscript_bases` set rather than anything of
+  master's: master's recogniser is gated on CALL position (`f[x](…)` is a
+  specialization, `List[Int]()` is a construction), so a type in a non-call
+  position still reaches §2's guard and still falls through to the name walk's
+  refusal. Measured after the merge, both halves in one program: `f(bool)` → 1,
+  `len(List[Int]())` → 0.
+  One thing the merge had to settle, because the two refusals met: master's
+  `a_type_name_in_a_value_position_is_still_refused` pinned `len(List)` to the
+  name walk's "has no home", which this construct makes false (§2's `len`
+  paragraph). `d43fdd88` landed `len_operand_is_a_type` /
+  `len_of_a_type_refusal` and turned that case into a `refuse_without:`, so
+  master's assertion survives in the form that is still true — it refuses, and it
+  is not told the source said nothing.
 * **`work/frontend-silent`'s `f5bcb0a1`** (a bare TYPE name in a value position is
   refused as a type, not as a register) rewords the same refusal this change
   LIFTS, and it defines a recogniser over the same four tables this change
@@ -198,25 +241,29 @@ notes are for is the merge, and each says which way it cuts.
 
 ## 5. What is still open, each with its next step
 
-* **`len()` of a type is refused with the wrong reason.** `len(bool)` and
-  `len(List)` get "the source does not say what this operand holds … Annotate it
-  (`x: String`) or bind it to a list" — true as far as it goes (a tag is neither
-  a `char *` nor a counted blob, so both of the two things `len` can answer are
-  correctly declined) and false in the only clause that matters for the reader,
-  because the source does say what the operand holds: it says `bool`. **This is
-  pre-existing and unchanged by this change** — measured with the four
-  production files reverted, byte-identical either way — so it is here as an
-  inherited imprecision, not as something this construct introduced.
-  **Next step:** three lines in each backend's `_emit_len`, before
-  `M.len_refusal` — ask `M.type_value_tag(operand)` and raise a message that says
-  a type is not a container. Deliberately not done here: it is a fourth
-  diagnostic for a program that cannot mean anything, and the two arms would have
-  to agree on it.
+* **`len()` of a type: LANDED in the merge, and what it cost is on record.** It
+  was the first item here, phrased as a next step ("three lines in each
+  backend's `_emit_len`, before `M.len_refusal` — ask `M.type_value_tag(operand)`
+  and raise a message that says a type is not a container"), and the merge made it
+  the only place two branches' tests could not both stand. `d43fdd88` did exactly
+  that and no more: `formal/model.py`'s `len_operand_is_a_type` /
+  `len_of_a_type_refusal`, asked from both backends' `_emit_len` before
+  `len_operand_lowering` gets a vote, plus two rows in `test_formal_run.py`
+  (`len_of_a_type_is_refused`, `len_of_a_dtype_member_is_refused`) and the
+  reworded row above. The two arms cannot answer differently because the decision
+  and the text are both in `formal/model.py`, which is the reason that concern —
+  recorded in the earlier version of this section — is discharged. What is still
+  open is the OTHER half of the same question and is unchanged: `len()` of a
+  value whose kind this path cannot see, and `len()` of a local bound to a tag
+  (`var t = bool; len(t)`), which is the next item's problem wearing a different
+  spelling — `t` is a local, so `len_operand_lowering` classifies it as an
+  integer and refuses with the integer row.
 * **A type is classified as an `int`, or as nothing at all.** `ValueKinds` has no
-  `TYPE_KIND`: a bare type-name read is unclassified (None — which is why `len` of
-  one takes its "the source does not say" branch above), and a LOCAL bound to a
-  type is an integer by `_value_kind`'s word default. So a subscript by one
-  (`xs[bool]`) would read a blob at a tag-derived offset instead of refusing.
+  `TYPE_KIND`: a bare type-name read is unclassified (None — which is why the
+  length machinery needed its own type arm, §5's first item) and a LOCAL bound to
+  a type is an integer by `_value_kind`'s word default, which is what `len(t)` for
+  `var t = bool` gets: "len() of a value classified as 'int'". So a subscript by
+  one (`xs[bool]`) would read a blob at a tag-derived offset instead of refusing.
   **Next step:** a `TYPE_KIND` in `formal/model.py` plus the two
   `if kind == M.INT_KIND` format switches in the backends, which is why it is a
   separate piece of work and not a line in this one. Nothing a program that
@@ -235,13 +282,19 @@ notes are for is the merge, and each says which way it cuts.
 
 ## 6. Verification
 
-| command | this change |
+| command | this change, after the merge of master (`d43fdd88`) |
 |---|---|
-| `python3 test_formal_run.py` | **PASS=401 FAIL=0**, of which 13 are the new cases below |
+| `python3 test_formal_run.py` | **PASS=410 FAIL=0**, of which 16 are about this construct: the 15 in `TYPE_VALUE_*` and the type-application counter-case the merge reworded (`a_type_name_in_a_value_position_is_still_refused`) |
 | `python3 test_formal_imports.py` | PASS=41 EXPECTED=0 FAIL=0 |
 | `python3 -m unittest test_formal_sweep_truth` | Ran 31 tests — OK |
-| `python3 test_formal_link_accounting.py` | 133 passed, 0 failed, 133 checks |
-| `python3 tools/formal_sweep.py -j 3 -t 120 <the 8 files>` | PASS=0, 0/8, four terminals moved — the table in §3 |
+| `python3 test_formal_link_accounting.py` | 133 passed, 0 failed, 133 checks (run on this branch before the merge; not re-run after it) |
+| `python3 tools/formal_sweep.py -j 3 -t 120 <the 8 files>` | PASS=0, 0/8, four terminals moved — the table in §3, measured on the branch and NOT on the merged tree |
+
+The last row is the one to read with care: §3's numbers were measured on this
+branch, before master landed the dataclass transform, the `re` host module, the
+container `==` and this construct's own neighbour. They are a record of what this
+construct did to eight files, not a current census, and the integrator's sweep is
+the census. The two commands above were run on the merged tree and are.
 
 The answered cases' expected values are what CPython prints for the same text
 (`a=12 b=10 c=1 d=1 h=7`, and exit 5 for `int(int(5))`), run with a `printf`
@@ -255,8 +308,8 @@ host architecture for an answered case and both only for a refusal.
 
 | file | one line |
 |---|---|
-| `formal/model.py` | the tag, the name space, the `DType` member spelling rule, the two refusals, and the injectivity check |
-| `formal/build.py` | the name-placement walk places a type name (and only a bare type name, never a subscript base) and refuses the two type shapes by name |
-| `formal/arm64_codegen.py` | `_load_var`'s last resort; the `DType.<member>` arm in `_emit_expr` |
-| `formal/x86_64_codegen.py` | the same two, x86-64 |
-| `test_formal_run.py` | `TYPE_VALUE_CASES` (6), `TYPE_VALUE_DTYPE_CASES` (3), `TYPE_VALUE_REFUSALS` (3), `TYPE_VALUE_TAG_CASES` (1, generated) |
+| `formal/model.py` | the tag, the name space, the `DType` member spelling rule, the two refusals, the injectivity check, and (from the merge) `len_operand_is_a_type` / `len_of_a_type_refusal` |
+| `formal/build.py` | the name-placement walk places a type name (and only a bare type name, never a subscript base) and refuses the two type shapes by name; from the merge, the gate on master's subscript-callee exemption |
+| `formal/arm64_codegen.py` | `_load_var`'s last resort; the `DType.<member>` arm in `_emit_expr`; `_emit_len`'s type operand |
+| `formal/x86_64_codegen.py` | the same three, x86-64 |
+| `test_formal_run.py` | `TYPE_VALUE_CASES` (6), `TYPE_VALUE_DTYPE_CASES` (3), `TYPE_VALUE_REFUSALS` (5), `TYPE_VALUE_TAG_CASES` (1, generated) |

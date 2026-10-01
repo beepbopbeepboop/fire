@@ -6878,12 +6878,26 @@ TYPE_VALUE_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    return Int(DType.float8_e4m3fn)\n",
      "refuse:DType.float8_e4m3fn names a type", None),
+# A SUBSCRIPT BASE in a value position, which is the one place this
+    # construct and the type-APPLICATION construct (`List[Int]()`, answered by
+    # `model.subscript_callee_names`, which is gated on CALL position) meet.
+    # `var v = List[Int]` reads a subscript whose base is not a call target, so
+    # nothing exempts the base and the tag must not answer for it either:
+    # `build.py`'s `subscript_bases` set is what holds it, and with that set
+    # removed the program BUILDS and runs, holding the tag of the type `List` as
+    # if a subscript were a value — silently, and on every such program. So the
+    # refusal is the name walk's, and it names the base.
+    ("a_subscript_base_in_a_value_position_is_not_a_type_value",
+     "def main(n: Int) -> Int:\n"
+     "    var v = List[Int]\n"
+     "    return 0\n",
+     "refuse:'List' has no home", None),
     # `len()` of a type. A GUARD rather than a new lowering: what it pins is
     # that making a type a VALUE did not turn `len()` of one into a count. The
     # refusal is the construct's own (`model.len_of_a_type_refusal`, asked of
     # the operand's SHAPE by both backends before `len_operand_lowering` gets a
     # vote) and not the generic `len_refusal`, whose subject is a source that
-    # does not say what its operand holds — which is false here: the source says
+    # does not say what the operand holds — which is false here: the source says
     # `bool`. Before this row existed the same program was refused by the NAME
     # walk with "has no home", which is a second thing that was false about it,
     # since a type does have a home once it has a tag.
