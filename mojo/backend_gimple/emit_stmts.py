@@ -4311,6 +4311,19 @@ def _gen_stmt_WithStmt(gen, node):
             # below emits its teardown AFTER the body, i.e. after the `return`,
             # so the very lines meant to clean up were themselves dead. The
             # teardown has to be emitted BEFORE the statement that leaves.
+            #
+            # The `return` is caught at the STATEMENT level rather than in the
+            # emitter interceptor, because `_with_emit_exits`'s own docstring
+            # records that a nested closure in this function emitted NOTHING
+            # once the self-hosted binary compiled the compiler (a real
+            # stage1-vs-stage2 divergence). Anything that must be reliable here
+            # belongs outside the closure. `type(x).__name__` is the
+            # established spelling in this file family (see `_lower_LambdaExpr`'s
+            # `_bound` scan).
+            if type(s).__name__ == 'ReturnStmt':
+                _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns,
+                                 _gctx_bases, _gctx_vs)
+                _teardown_done[0] = True
             original_emit = gen._emit
             def intercepted_emit(line, rv=None, rt=None):
                 stripped = line.strip()
@@ -4324,15 +4337,6 @@ def _gen_stmt_WithStmt(gen, node):
                     _teardown_done[0] = True
                     original_emit(line)
                     return
-                if stripped.startswith('return ') or stripped == 'return;':
-                    # The same early exit, spelled as a return. `mojo_raise`'s
-                    # own unwind is NOT this path (that is the bb_exc arm
-                    # below), and neither is a `return` belonging to a nested
-                    # `def` — those bodies are emitted through their own
-                    # function-generation path, which restores `gen._emit`.
-                    _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns,
-                                     _gctx_bases, _gctx_vs)
-                    _teardown_done[0] = True
                 original_emit(line)
             gen._emit = intercepted_emit
             gen.gen_stmt(s)
