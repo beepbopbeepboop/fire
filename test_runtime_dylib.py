@@ -729,8 +729,14 @@ def test_dylib_link_key_includes_the_arch():
 #
 # which reached the suites as a failing `test_link_mode` case and a failing
 # `test_nonlocal` case wanting '7\n'. The dylib was never wrong; it was never
-# finished. `_output_lock` (build_stdlib_dylib) plus the staged link and the
-# in-lock re-check are the fix; this is what holds them to it.
+# finished. Two halves answer that, and they are not equally important:
+# `_output_lock` (build_stdlib_dylib) collapses N racing builds into one, and
+# the staged link + `os.replace` makes the artifact whole no matter what — the
+# second half is the correctness claim, because a compiled `fcntl.flock` is the
+# extern preamble's weak stub, so the lock is a no-op in a self-hosted build
+# (see `_output_lock`'s docstring for the measurement). The assertions below
+# cover both: the first is about nobody failing, the second about the work
+# being done once.
 
 _CONCURRENT_BUILD_WORKER = r'''
 import json, sys
@@ -809,7 +815,9 @@ def test_concurrent_builds_of_one_output_path_do_not_collide():
               f'exactly one of the {workers} actually links and the other '
               f'{workers - 1} re-check the cache inside the lock and return '
               f'(dylib hits={hits}) — instead of racing the winner onto the '
-              f'same file')
+              f'same file. A WORK claim, not a correctness one: correctness '
+              f'rests on the staged link, and holds even where `flock` does '
+              f'not (see the section comment)')
         host = bsd.normalize_arch(None)
         check(bsd.arches_of(out) == frozenset([host]),
               f'and the surviving artifact is a whole {host} dylib',

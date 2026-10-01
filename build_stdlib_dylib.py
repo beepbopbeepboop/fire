@@ -638,47 +638,56 @@ def _compile_module_job(path: str, workdir: str, use_cache: bool, objflags: tupl
 
 @contextlib.contextmanager
 def _output_lock(out: str):
-    """Exclusive, cross-process, released on exit: an flock on a side file
-    next to `out`, held across `build`'s whole publish.
+    """Exclusive, cross-process, released on exit: an `flock` on a side file
+    next to `out`, held across `build`'s whole publish. A SIDE file, because
+    `build` replaces the `.dylib` and a lock on the library itself would admit
+    a second process the instant the first created it.
 
-    A side file and not the library itself, because `build` REPLACES the
-    `.dylib` and a lock on the library would let a second process in the
-    instant the first created it. `flock` is advisory and per-open-file-
-    description, so the kernel releases it when the process dies and a
-    killed build cannot wedge the tree (the same shape, and the same
-    reasoning, as `formal/imports.py::_dylib_lock`).
+    **What this buys, and what it does not.** It buys LATENCY, not safety: with
+    the currency check moved inside it, N concurrent callers collapse to one
+    link and N-1 no-ops instead of N identical links. Safety comes entirely
+    from the atomic publish — the link stages into the work directory and
+    `os.replace`s into `out`, and the cache-hit copy renames rather than
+    truncating in place — and that half deliberately depends on nothing but
+    `os.replace` / `shutil.copy` / `os.path`, all of which this file already
+    relies on (`runtime_dylib`'s own staged link is the same shape).
 
-    Why it is needed at all: `out` is a FIXED path
-    (`build_stdlib_dylib.build_stdlib`'s default is
-    `build/libmojostdlib.<arch>.dylib`), and every `fire.py build` reaches it
-    through `driver.compile_program`'s `bsd.build_stdlib()`. So N gate jobs
-    running in parallel each asked for the same library, and the losers of
-    the CAS race did not queue — they raced the WINNER onto the same output
-    file. Measured, two `linkmode`/`nonlocal` jobs in one `-j4` run, twice on
-    this tree:
+    The split is not tidiness, it is measured. `fcntl.flock` does NOT survive
+    the compiled path: compiled through this compiler's own link-mode
+    pipeline, a module whose body is `fcntl.flock(fd, 2)` emits
+
+        _t4 = _t2;  /* int64_t.flock() stubbed */
+
+    — the extern preamble's weak stub, which returns 0 and takes no lock. So
+    in a self-hosted build this lock is a no-op, and it must be: a
+    correctness argument that rested on it would be an argument that holds on
+    `python3 fire.py build` and silently does not hold in `mojoc`. Staging +
+    `os.replace` is the half that is equally true in both.
+
+    Why the lock is here at all, then: `out` is a FIXED path
+    (`build_stdlib`'s default is `build/libmojostdlib.<arch>.dylib`) and every
+    `fire.py build` reaches it through `driver.compile_program`, so every
+    parallel job in the gate asks for the same library at once. Measured on
+    this tree, twice, `python3 tools/suite.py -j4 linkmode nonlocal ...`:
 
         ld: open() failed, errno=17 (File exists) for
             '<checkout>/build/libmojostdlib.arm64.dylib'
 
-    which surfaced as a failing `test_link_mode` case
-    (`test_bare_submodule_import_value_read raised: Command '[...,
-    -dynamiclib, ..., -o, <checkout>/build/libmojostdlib.arm64.dylib, ...]'
-    returned non-zero exit status 1`) and as a failing `test_nonlocal` case
-    wanting `'7\\n'` — i.e. the dylib was never wrong, it was never finished.
-    A second, quieter version of the same race needs no error at all: the
-    cache-hit path `shutil.copy`s onto `out` in place, so a client linking
-    against `out` at that moment can read a half-written Mach-O.
+    which reached two of this batch's own jobs as a failing `test_link_mode`
+    case (`test_bare_submodule_import_value_read raised: ... -o,
+    .../libmojostdlib.arm64.dylib ... returned non-zero exit status 1`) and a
+    failing `test_nonlocal` case wanting `'7\n'`. That error is the link
+    colliding on the shared output path; on the python3 path the lock is what
+    removes it, and the staged link is what makes it harmless if it recurs.
 
-    The lock makes latecomers QUEUE rather than collide, and `build` re-checks
-    the CAS inside it, so the queue collapses to one build and N-1 no-ops —
-    the mechanism CLAUDE.md's "Shared expensive dependencies" section
-    describes, and the same one `formal/lean.py`'s `ensure_library` uses.
-
-    Local to this module, not shared: this file is in `mojoc`'s own compile
-    closure, and `_is_selfhost_source_dir`'s docstring in
+    `flock` is advisory and per-open-file-description, so the kernel releases
+    it when the process dies and a killed build cannot wedge the tree — the
+    same shape and the same reasoning as `formal/imports.py::_dylib_lock` (and
+    the reason this helper is LOCAL to this module rather than shared with it:
+    this file is in `mojoc`'s own compile closure — `cas.selfhost_inputs()`
+    lists it — and `_is_selfhost_source_dir`'s docstring in
     `mojo/backend_gimple/module_gen.py` records a measured self-host failure
-    for exactly the cross-module function reference that sharing one would
-    have meant."""
+    for exactly the cross-module function reference sharing one would mean)."""
     fd = os.open(out + '.lock', os.O_CREAT | os.O_RDWR, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -965,14 +974,18 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         extra_digest=extra_link_digest, arch=arch)
 
     # One exclusive section from here to the return, covering the currency
-    # check, the link and the publish — see `_output_lock` for the measured
-    # failure this replaces. The CAS is deliberately consulted INSIDE the
-    # lock and not before it: a check-then-act on a shared filesystem is the
+    # check, the link and the publish. The CAS is consulted INSIDE the lock
+    # and not before it: a check-then-act on a shared filesystem is the
     # stampede, and `out` is the most-shared path in the tree (every parallel
     # `fire.py build` in the gate wants this one library). Everything above
-    # the lock — the per-module compiles, all of them individually
-    # content-addressed — still runs in parallel across callers, so the
-    # serialised section is only the table compile and the link.
+    # the lock — the per-module compiles, all individually content-addressed —
+    # still runs in parallel across callers, so the serialised section is only
+    # the table compile and the link.
+    #
+    # Correctness does NOT rest on that lock; `_output_lock`'s own docstring
+    # gives the measurement (a compiled `fcntl.flock` is the extern preamble's
+    # weak stub), and the guarantee is the staged link plus `os.replace` below,
+    # which hold whether or not the lock did anything.
     with _output_lock(out):
         if use_cache:
             # Re-checked under the lock: a caller that queued behind another
