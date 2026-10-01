@@ -31,14 +31,59 @@ _gcc_syntax_cache: dict = {}
 # Subtrees of the stdlib to attempt, in the order we want maximal coverage:
 # benchmarks first (smallest, exercises real client code), then the library
 # proper, then the test corpus, then tools.
-DEFAULT_ROOTS = ['benchmarks', 'std', 'test', 'tools', '_core', 'collections', 'io', 'math', 'os']
+#
+# This is a PREFERENCE ORDER, not an enumeration. It used to be the whole
+# story, and that was a silent-coverage hole: a root that does not exist is
+# skipped without a word (`if not search_root.exists(): continue`), so any
+# top-level directory the stdlib adds later would simply never be compiled —
+# while the run still reported "PASSED: 610" over the files it did find. Five
+# of the nine entries here (`_core`, `collections`, `io`, `math`, `os`) are
+# from the previous stdlib layout and do not exist at all in the current one.
+#
+# `discover_roots` below now appends every top-level directory the stdlib
+# actually has, so a new subcomponent is picked up without editing this list;
+# this list only decides the ORDER of what is already known.
+DEFAULT_ROOTS = ['benchmarks', 'std', 'test', 'tools']
 
-# Files that are honest, currently-understood, documented whole-module
-# refusals — genuinely out of reach right now, not a shortcut around actually
-# trying. Each entry names the specific bugs/ writeup with the full root
-# cause, so a failure here is still visible (reported separately from
-# genuinely UNEXPECTED failures below) rather than silently absorbed.
-# Never add an entry here without a bugs/*.md file backing it.
+# Directory names under the stdlib root that are never source to compile even
+# though they sit beside the ones that are. Keyed by name so a subcomponent
+# appearing here is a deliberate, visible decision.
+ROOT_EXCLUDE = {
+    # Build/tooling trees: Python and shell, not Mojo modules. `scripts` is in
+    # this stdlib today with no .mojo files at all, but it is the exact shape of
+    # the hole described above, so it is named rather than left to chance.
+    'scripts',
+    'docs', 'doc', 'examples', 'proposals', 'bench', 'bazel-*',
+}
+
+
+def discover_roots(base: Path) -> list:
+    """Every top-level directory under the stdlib root that holds .mojo files,
+    ordered by DEFAULT_ROOTS preference first and then alphabetically.
+
+    The alphabetical tail is the load-bearing part: a subcomponent nobody
+    listed still gets compiled, in a deterministic position, instead of being
+    silently skipped. `sorted()` rather than directory order, so two runs over
+    one tree emit the same order (the failure report and the CAS keys both
+    depend on it).
+    """
+    on_disk = []
+    try:
+        entries = sorted(p for p in base.iterdir() if p.is_dir())
+    except OSError:
+        return list(DEFAULT_ROOTS)
+    for entry in entries:
+        name = entry.name
+        if name in ROOT_EXCLUDE or name.startswith('.'):
+            continue
+        if name.startswith('bazel-'):
+            continue
+        on_disk.append(name)
+    preferred = [r for r in DEFAULT_ROOTS if r in on_disk]
+    rest = [r for r in on_disk if r not in DEFAULT_ROOTS]
+    return preferred + rest
+
+
 EXPECTED_FAILURES = {
     # UPDATE (this session, continued): `create_task`/`create_raising_task`
     # await-composition (`await create_task(<call>) + await create_task(
@@ -121,6 +166,10 @@ def find_mojo_files(base_path, roots=None, module=None):
     """
     Find all .mojo files in the stdlib subtrees named in `roots`.
 
+    If `roots` is None the roots are DISCOVERED from the stdlib tree (see
+    `discover_roots`) rather than taken from DEFAULT_ROOTS, so a subcomponent
+    added later is compiled without editing this file.
+
     If `module` is specified, only search that module's subdirectory under std/.
     Paths are yielded relative to the stdlib root so display shows e.g.
     "benchmarks/...", "std/...", "test/...".
@@ -140,12 +189,44 @@ def find_mojo_files(base_path, roots=None, module=None):
             yield (mojo_file.relative_to(base), mojo_file)
         return
 
-    for root in (roots or DEFAULT_ROOTS):
+    # `roots` given explicitly means the caller asked for exactly those (the
+    # `--module` path above, and any direct caller); otherwise discover what
+    # the stdlib actually has. See DEFAULT_ROOTS for why that is not the same
+    # thing as the preference list.
+    for root in (roots if roots is not None else discover_roots(base)):
         search_root = base / root
         if not search_root.exists():
             continue
         for mojo_file in sorted(search_root.rglob("*.mojo")):
             yield (mojo_file.relative_to(base), mojo_file)
+
+
+def excluded_mojo_files(base: Path) -> list:
+    """.mojo files under the stdlib root that this sweep deliberately does NOT
+    attempt, as (relative_path, excluding_directory_name) pairs.
+
+    This is the honest form of the coverage cross-check. An earlier version
+    compared the attempted count against a raw `rglob('*.mojo')` total and
+    warned on any shortfall, which fires spuriously the moment `ROOT_EXCLUDE`
+    excludes a directory that actually has Mojo files in it — i.e. exactly
+    when the exclusion is doing its job. What is worth surfacing is not "the
+    numbers differ" but WHICH files are not being compiled and WHY, so a
+    subcomponent that acquires real source cannot sit in `scripts` (or any
+    other excluded name) quietly.
+
+    Returns [] when nothing is excluded, which is the normal case.
+    """
+    try:
+        entries = sorted(p for p in base.iterdir() if p.is_dir())
+    except OSError:
+        return []
+    out = []
+    for entry in entries:
+        name = entry.name
+        if name in ROOT_EXCLUDE or name.startswith('.') or name.startswith('bazel-'):
+            for f in sorted(entry.rglob('*.mojo')):
+                out.append((f.relative_to(base), name))
+    return out
 
 def _gcc_syntax_cached(c_src: str) -> tuple:
     """CAS-cached gcc -fsyntax-only check.  Returns (returncode, stderr);
@@ -248,12 +329,15 @@ def main():
                              'as they happen).')
     args = parser.parse_args()
 
-    roots = [r.strip() for r in args.roots.split(',')] if args.roots else DEFAULT_ROOTS
+    # `--roots` overrides discovery (an explicit ask for a subset); with no
+    # flag, compile everything the stdlib root actually contains.
+    roots = ([r.strip() for r in args.roots.split(',')] if args.roots
+             else None)
 
     stdlib_root = get_stdlib_path()
     print(f"Stdlib path: {stdlib_root}")
     if not args.module:
-        print(f"Scanning roots: {', '.join(roots)}")
+        print(f"Scanning roots: {', '.join(roots if roots is not None else discover_roots(stdlib_root))}")
 
     if not stdlib_root.exists():
         print(f"ERROR: stdlib path does not exist", file=sys.stderr)
@@ -269,6 +353,24 @@ def main():
         sys.exit(0)
 
     print(f"Found {len(mojo_files)} .mojo files\n")
+
+    # Coverage cross-check, in the only form that is accurate: report the
+    # .mojo files this sweep is NOT attempting and which directory excluded
+    # them. Silent under-reporting was the original hazard here (a hardcoded
+    # root list meant a new subcomponent was never compiled while the run still
+    # said PASSED); `discover_roots` fixes the cause, and this makes any
+    # remaining exclusion a stated decision rather than a gap.
+    if roots is None and not args.module:
+        excluded = excluded_mojo_files(stdlib_root)
+        if excluded:
+            by_dir = {}
+            for _rel, dirname in excluded:
+                by_dir[dirname] = by_dir.get(dirname, 0) + 1
+            print(f"NOTE: {len(excluded)} .mojo file(s) are NOT being attempted, "
+                  f"excluded by ROOT_EXCLUDE: "
+                  + ', '.join(f'{d}/ ({n} file(s))' for d, n in sorted(by_dir.items()))
+                  + "\n      If any of that is real Mojo source, move the name "
+                    "from ROOT_EXCLUDE to DEFAULT_ROOTS.\n")
 
     # Transpile each file. Each file is fully independent (own codegen
     # instance + its own gcc subprocess), so this parallelizes cleanly across

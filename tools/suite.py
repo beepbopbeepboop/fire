@@ -396,6 +396,7 @@ MEASURED_PEAK_GB = {
     'bootstrap-stage2-cc':         (1.2,  'measured'),
     'bootstrap-stage2-dumps':      (0.5,  'measured'),   # per item
     'ptrreg':                      (0.4,  'measured'),
+    'ptrreg-boxed-str':            (0.2,  'measured'),
     'runtimediff':                 (0.3,  'measured'),
     'modcache':                    (0.3,  'measured'),
     'stdlib-dylib':                (0.2,  'measured'),
@@ -1035,6 +1036,20 @@ test('modcache', [PY, 'test_module_cache.py'], mem='tiny', cache=True,
 test('ptrreg', [PY, 'test_ptr_registry.py'], mem='tiny', cache=True,
      extra=['test_ptr_registry.py', RUNTIME_SRC, RUNTIME_HDR],
      desc='runtime unit test: pointer-registry table + inline-buffer lists (-O0/-O2/ASan)')
+# The one group of the same harness that is allowed to be red, split out so it
+# can be named instead of taking the green groups down with it. Registered
+# 2026-09-30 when the harness's asserts were found to be compiled out by
+# python3-config's -DNDEBUG (test_ptr_registry.py::_flags); with them live, a
+# pre-existing crash appeared that had been sitting in the file the whole time.
+test('ptrreg-boxed-str', [PY, 'test_ptr_registry.py', '--group', 'boxedstr'],
+     mem='tiny', cache=True,
+     extra=['test_ptr_registry.py', RUNTIME_SRC, RUNTIME_HDR],
+     expect='an int64 dict key in [2^31, 2^47) is misread as a char* and '
+            'dereferenced: `d[3000000000] = 1` segfaults. The scalar body model '
+            'gives a char* and an int64_t the same 64 bits, so the shape test '
+            'cannot be right; the fix is for the codegen to stop asking. See '
+            'bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md',
+     desc='a large integer dict key is not dereferenced as a pointer')
 # The two instruments from the previous round, which existed and ran by nothing
 # for the same reason until agent [5]'s estate check reported them. The taxonomy
 # is what makes the coverage number honest, and `comptime` parity pins the one
@@ -1234,6 +1249,25 @@ test('x86-decode', [PY, 'test_x86_64_decode.py'], mem='tiny',
 test('ownership-destruct', [PY, 'test_ownership_destruct.py'], mem='tiny',
      deps=['preflight'],
      desc='an owned value is destructed exactly once')
+# Registered 2026-09-30 with the new-modular work. Nine parser features landed
+# that day (dotted literals, `__match` and its flat case layout, typed lambdas
+# with capture/comptime blocks, explicit `def` capture lists, the `imm`
+# convention, struct `where` clauses, multi-target `comptime`, function types in
+# subscript position, decorated imports) and compile_stdlib went 356/610 ->
+# 610/610 on them — with NO fixture for any of them, so a regression in any
+# one would have shown up only as a compile_stdlib delta, days later, in a
+# 610-file run. It already caught one real bug on the day it was written: the
+# multi-target `comptime` consumed its own `=` and then looked for a second,
+# silently dropping the binding (codepoint.mojo compiled with `char` and
+# `num_bytes` bound to nothing).
+test('new-syntax-parse', [PY, 'test_new_syntax_parsing.py'], cache=True,
+     # `fire_compiler.py` is the file under test and is NOT in GIMPLE_SOURCES
+     # (that list is the CODEGEN sources); without it in the key, editing the
+     # parser replayed a recorded PASS.
+     extra=(['test_new_syntax_parsing.py', 'fire_compiler.py']
+            + GIMPLE_SOURCES),
+     desc="the new-modular syntax parses, and still does NOT parse where it "
+          "must not (ellipsis, float literals, attribute access)")
 test('x86-containers', [PY, 'test_x86_64_containers.py'],
      deps=['preflight'],
      expect='nested-comprehension exits nondeterministically (58, or SIGSEGV, '
@@ -2170,9 +2204,15 @@ BUCKETS = {
     'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
               'gimplegenerators', 'interporacle', 'examples-parse',
-              'rthdrscan', 'ptrreg', 'runtimedylib', 'sqliteruntime',
-              'formal-sweep-truth', 'formal-link-accounting', 'formal-ast',
-              'silentnoop',
+# `ptrreg-boxed-str` is master's split-out red group of the
+              # pointer-registry harness and `formal-ast` is the batch's
+              # hostmod claim for `ast`; each was added to this bucket on its
+              # own side of the merge and both are named here, so a conflict
+              # resolution that had to pick one would have quietly dropped a
+              # test from the everyday loop.
+              'rthdrscan', 'ptrreg', 'ptrreg-boxed-str', 'runtimedylib',
+              'sqliteruntime', 'formal-sweep-truth', 'formal-link-accounting',
+              'formal-ast', 'silentnoop',
               'refusal-taxonomy', 'returned-frame-layout',
               # The suite tests ITSELF, and so does the inventory of what runs.
               # Both were in `smoke`, which is in no bucket, so `make gate`

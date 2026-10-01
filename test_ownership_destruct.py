@@ -787,6 +787,70 @@ def mk() -> List[Int]:
     return l
 """, "mk", False),
 
+    # The nested-scope veto is decided against the CAPTURE SET, not the mere
+    # existence of a nested scope. `has_capture_list` is what makes the set
+    # known: a def that wrote one can only capture the names in it, and `{}`
+    # captures nothing. Every True below used to be refused.
+    ("nested_def_with_capture_list_not_naming_the_returned_local", """
+def mk() -> List[Int]:
+    total = 0
+    def note() {mut total}:
+        total += 1
+    note()
+    l = []
+    return l
+""", "mk", True),
+
+    ("nested_def_with_explicit_empty_capture_list", """
+def mk() -> List[Int]:
+    def note() {}:
+        total = 1
+        return total
+    note()
+    l = []
+    return l
+""", "mk", True),
+
+    ("nested_def_capturing_the_returned_local_is_still_refused", """
+def mk() -> List[Int]:
+    l = []
+    def note() {mut l}:
+        l.append(1)
+    note()
+    return l
+""", "mk", False),
+
+    ("nested_def_capturing_the_returned_local_by_ordinary_borrow", """
+def mk() -> List[Int]:
+    l = []
+    def note() {read l}:
+        return len(l)
+    note()
+    return l
+""", "mk", False),
+
+    # A bare `{mut}`/`{var}` names no one, so it captures "whatever the body
+    # references" — the set is unknown and the refusal stands.
+    ("nested_def_with_bare_mut_capture_convention_is_refused", """
+def mk() -> List[Int]:
+    l = []
+    def note() {mut}:
+        l.append(1)
+    note()
+    return l
+""", "mk", False),
+
+    ("lambda_alongside_an_explicit_list_is_still_refused", """
+def mk() -> List[Int]:
+    l = []
+    def note() {mut total}:
+        total = 1
+        return total
+    g = lambda: l
+    g()
+    return l
+""", "mk", False),
+
     ("is_a_generator", """
 def mk():
     l = []

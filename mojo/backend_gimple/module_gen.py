@@ -998,13 +998,22 @@ def _gmi_emit_closure_recursive(self, func_parts: list, _emitted_closures: set,
     if ci.env_struct and ci.env_struct not in _emitted_env_allocs:
         _emitted_env_allocs.add(ci.env_struct)
         alloc_fn = f"_alloc_{ci.env_struct}"
+        # Plain-C size accessor, immediately before its only caller — see
+        # GimpleGen._c_sizeof_helper / _c_helper_def.
+        _env_sz = self._c_sizeof_helper(ci.env_struct)
+        _env_sz_def = self._c_helper_def(_env_sz)
+        if _env_sz_def:
+            func_parts.append(_env_sz_def)
+            func_parts.append('')
         func_parts.append(
             f"{ci.env_struct} * __GIMPLE {alloc_fn} (void)\n"
             f"{{\n"
             f"  {ci.env_struct} * _e;\n"
             f"  void * _vp;\n"
+            f"  int64_t _vs;\n"
             f"\nbb_2:\n"
-            f"  _vp = malloc (sizeof({ci.env_struct}));\n"
+            f"  _vs = {_env_sz} ();\n"
+            f"  _vp = malloc (_vs);\n"
             f"  _e = ({ci.env_struct} *) _vp;\n"
             f"  return _e;\n"
             f"}}"
@@ -2286,6 +2295,12 @@ def gen_module_impl(self, stmts):
         'is_generator': '_Bool',
         'yield_bearing_node_ids': 'int64_t',
         'is_async': '_Bool',
+        # The explicit capture list and the flag that says one was written.
+        # Both are needed: `captures` alone cannot distinguish `{}` from no
+        # list. `has_capture_list` is `_Bool` for the same reason `is_async`
+        # is — it is a real Python bool on the dataclass.
+        'captures': 'MojoList *',
+        'has_capture_list': '_Bool',
     }
     self.struct_field_types['ExprStmt'] = {
         'value': 'int64_t',
@@ -9024,6 +9039,21 @@ def gen_module_impl(self, stmts):
                     parts.append(f"}} {ci.env_struct};")
                     parts.append('')
                     self._emitted_structs.add(ci.env_struct)
+                    # A closure's env is heap-allocated, and `sizeof` is not a
+                    # valid GIMPLE operand, so its size accessor is defined
+                    # HERE — right after the typedef it needs, and before every
+                    # body that allocates one. Registering it at the typedef
+                    # rather than at the allocation site matters because the
+                    # allocation is emitted from inside a function body (the
+                    # lifted closure's own `_alloc_`, or the outer function when
+                    # the lambda is beta-reduced inline), where no top-level
+                    # definition can be introduced. See
+                    # GimpleGen._c_sizeof_helper / _c_helper_def.
+                    _env_h = self._c_sizeof_helper(ci.env_struct)
+                    _env_hd = self._c_helper_def(_env_h)
+                    if _env_hd:
+                        parts.append(_env_hd)
+                        parts.append('')
 
         if self._dispatch_solver and len(self._dispatch_tables) > 0:
             for callee_set, dispatch_table in self._dispatch_tables.items():
@@ -9109,13 +9139,23 @@ def gen_module_impl(self, stmts):
             f"}}"
         )
         parts.append('')
+        # Plain-C definition of the size accessor, immediately before its only
+        # caller — see GimpleGen._c_sizeof_helper / _c_helper_def.
+        _sz_helper = self._c_sizeof_helper(sn)
+        _sz_def = self._c_helper_def(_sz_helper)
+        if _sz_def:
+            parts.append(_sz_def)
         parts.append(
             f"static {sn} * __GIMPLE _alloc_{sn} (void)\n"
             f"{{\n"
             f"  {sn} * _p;\n"
             f"  void * _vp;\n"
+            f"  int64_t _vs;\n"
             f"\nbb_2:\n"
-            f"  _vp = malloc (sizeof({sn}));\n"
+            # `sizeof` is not a valid GIMPLE operand, so the size comes from
+            # the non-GIMPLE accessor — see GimpleGen._c_sizeof_helper.
+            f"  _vs = {self._c_sizeof_helper(sn)} ();\n"
+            f"  _vp = malloc (_vs);\n"
             f"  _p = ({sn} *) _vp;\n"
             f"  _init_{sn} (_p);\n"
             f"  return _p;\n"
@@ -9621,6 +9661,13 @@ def gen_module_impl(self, stmts):
                     parts.append(f"}} {ci.env_struct};")
                     parts.append('')
                     self._emitted_structs.add(ci.env_struct)
+                    # See the emit_struct_defs twin above: the size accessor is
+                    # defined at the typedef, not at the allocation site.
+                    _env_h = self._c_sizeof_helper(ci.env_struct)
+                    _env_hd = self._c_helper_def(_env_h)
+                    if _env_hd:
+                        parts.append(_env_hd)
+                        parts.append('')
     # Index-walk both dict levels, NOT `for outer_name, inner_map in
     # self._all_closures.items(): for inner_name, ci in inner_map.items():`
     # — a NESTED `.items()` 2-tuple unpack boxes `ci` itself on the

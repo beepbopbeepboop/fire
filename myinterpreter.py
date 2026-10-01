@@ -3436,6 +3436,18 @@ class Interpreter:
                 # The parser records this as a real CallExpr — it used to
                 # discard the argument list, so a parameterised decorator and
                 # a bare one were the same node and both did nothing.
+                #
+                # EXCEPT when the decorator's own name is compile-time, which
+                # is what `@inline(.always)` is: `inline` is a marker, not a
+                # callable, and evaluating the CallExpr would look it up and
+                # NameError on a decorator that is documented as carrying no
+                # runtime meaning. The bare-name branch above already skips
+                # exactly these names; this is the same skip for the
+                # parameterised spelling, so `@inline` and `@inline(.always)`
+                # agree.
+                fname = getattr(d.func, 'name', None)
+                if fname in self._COMPILE_TIME_DECORATORS:
+                    continue
                 decorator = self.eval_expr(d)
             elif isinstance(d, N.DecoratorArgs):
                 # `@spec(c1; c2; ...)` -- a `;`-separated SPECIFICATION
@@ -4632,6 +4644,27 @@ class Interpreter:
         """The `...` literal — Python's Ellipsis singleton (was "No handler for
         EllipsisLiteral" — hit by tomllib/_types.py)."""
         return Ellipsis
+
+    def eval_DottedLiteral(self, expr: N.DottedLiteral):
+        """A dot-relative value reference (`.always`, `.uint64`).
+
+        The reference omits the type it belongs to, so it has no meaning on its
+        own — it resolves only against the type the surrounding position
+        supplies, which this interpreter does not infer. Refusing with the path
+        named is deliberate: the alternatives are worse. Looking the path up as
+        an ordinary identifier reports a `NameError` for a name the source
+        never wrote, and returning None would make the program run and print a
+        wrong answer.
+
+        The compiled backend takes the same view but has a use for the value —
+        it lowers the reference to the same zero placeholder the spelled-out
+        form (`DType.uint64`) already produces there — so a module using this
+        can still be transpiled; it just cannot be interpreted.
+        """
+        raise NotImplementedError(
+            f"{self._loc(expr)}cannot resolve the dot-relative value "
+            f"'.{expr.path}': it names a variant of a type this interpreter "
+            f"does not infer, and the source omits which type that is")
 
     def eval_IdentExpr(self, expr: N.IdentExpr):
         """Evaluate identifier."""

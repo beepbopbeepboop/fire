@@ -6,7 +6,8 @@ Invoked via `make check-stdlib` or directly: `python3 test_stdlib.py`.
 import os, sys, subprocess, concurrent.futures
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-STDLIB = "/Users/mrs/net/chatgpt/claude/modular/mojo/stdlib"
+sys.path.insert(0, HERE)
+from module_loader import STDLIB_PATH as STDLIB  # single source of truth
 MOJO = os.path.join(HERE, "fire.py")
 MAX_WORKERS = 20
 

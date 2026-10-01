@@ -286,15 +286,70 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                 if _fg not in outer_params:
                     free_globals.add(_fg)
             free         = used - inner_declared - free_globals
+            # An EXPLICIT capture list on the inner def is authoritative and
+            # replaces the inference above. `def handler(...) {mut got_sum}:`
+            # says exactly what the body borrows from this scope and under
+            # which convention; inferring that from the body instead gets it
+            # wrong in both directions — a name the body only AUGMENTS
+            # (`got_sum += x`) never appears in `used` at all and was
+            # silently dropped, while a name it ASSIGNS (`got_str = ...`)
+            # lands in `inner_assign_targets`, is classified as a local of the
+            # inner function, and its write is lost to the enclosing scope.
+            # A list that is present but EMPTY (`{}`) is a statement of
+            # "captures nothing" and is honoured as one. Presence is
+            # `FunctionDef.has_capture_list`, not a non-empty list: `{}` and
+            # "no list written" both leave `captures == []` and mean opposite
+            # things, so testing the list's length would let a source that says
+            # "captures nothing" fall back to the inference and get captures
+            # anyway. `getattr(..., False)` for an AST built without the field.
+            _explicit_caps = getattr(inner, 'captures', None)
+            _has_explicit_caps = bool(getattr(inner, 'has_capture_list', False))
+            _cap_convs: dict = {}
+            # Bound unconditionally, not only inside the `if` below: the
+            # reference a few lines further down is inside a conditional
+            # expression, which CPython evaluates lazily but this codebase's
+            # self-hosted backend does not reliably short-circuit — a name
+            # only defined on one branch is a latent NameError there.
+            _default_conv = None
+            _named_caps = []
+            if _has_explicit_caps:
+                # `{mut}` / `{var}` with no name: "every free name, under this
+                # convention". Resolved against `free` below.
+                for _cn, _cc in _as_list(_explicit_caps or []):
+                    _cn = _as_str(_cn) if _cn is not None else None
+                    _cc = _as_str(_cc) if _cc is not None else None
+                    if _cn is None:
+                        _default_conv = _cc
+                    else:
+                        _named_caps.append((_cn, _cc))
             # `_as_str(v)`: elements of `sorted(free)` (a set-of-str) erase
             # to boxed int64_t under self-compile — without the static
             # `str` view `v in enriched_scope` would hash the pointer.
             captures     = []
-            for v in _as_list(sorted(free)):
-                v = _as_str(v)
-                if v in enriched_scope:
-                    captures.append((v, enriched_scope[v]))
+            if _has_explicit_caps:
+                for _cn, _cc in _named_caps:
+                    if _cn in enriched_scope:
+                        captures.append((_cn, enriched_scope[_cn]))
+                        _cap_convs[_cn] = _cc
+                # The convention-only form contributes every free name the
+                # list did not already name.
+                for v in _as_list(sorted(free)):
+                    v = _as_str(v)
+                    if v in enriched_scope and v not in _cap_convs:
+                        captures.append((v, enriched_scope[v]))
+                        _cap_convs[v] = _default_conv
+            else:
+                for v in _as_list(sorted(free)):
+                    v = _as_str(v)
+                    if v in enriched_scope:
+                        captures.append((v, enriched_scope[v]))
             _cap_names_so_far = {_cn for _cn, _ in captures}
+            for _cn, _cc in _named_caps:
+                # A name the list states that is not in scope at all is
+                # dropped rather than captured from nothing — but it still
+                # counts as "named", so the transitive fixup below will not
+                # re-add it under a different convention.
+                _cap_convs.setdefault(_cn, _cc)
             _called_names = {nd.func.name for nd in _walk_ast(inner_body)
                               if isinstance(nd, CallExpr) and isinstance(nd.func, IdentExpr)}
             _transitive_mut: set = set()
@@ -315,6 +370,16 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                 ctx._func_param_defaults[lifted] = [
                     (_pn2, _dv2) for _pn2, _dv2 in _inner_dflts.items()]
             ci.mut_names = mutated_free_names(inner, _cap_names_so_far) | _transitive_mut
+            # An explicit `mut`/`var` capture is authoritative about
+            # mutability too: `mutated_free_names` has to see the name in the
+            # body to decide, so a capture the list says is mutable but the
+            # body only READS would otherwise be classified immutable and the
+            # enclosing scope would get a stale copy. The list wins.
+            # Rebuilt rather than mutated in place — `mut_names` is a frozenset.
+            _explicit_mut = {_cn for _cn, _cc in _cap_convs.items()
+                             if _cc == 'mut' and _cn in _cap_names_so_far}
+            if _explicit_mut:
+                ci.mut_names = frozenset(set(ci.mut_names) | _explicit_mut)
             if outer_name not in ctx._all_closures:
                 ctx._all_closures[outer_name] = {}
             ctx._all_closures[outer_name][inner.name] = ci

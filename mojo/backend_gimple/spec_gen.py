@@ -137,6 +137,7 @@ class GimpleSpecGenerator:
         ('FloatLiteral',    '_lower_FloatLiteral'),
         ('BoolLiteral',     '_lower_BoolLiteral'),
         ('EllipsisLiteral', '_lower_EllipsisLiteral'),
+        ('DottedLiteral',      '_lower_DottedLiteral'),
         ('StringLiteral',   '_lower_StringLiteral'),
         ('IdentExpr',       '_lower_IdentExpr'),
         ('WalrusExpr',      '_lower_WalrusExpr'),

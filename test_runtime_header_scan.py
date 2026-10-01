@@ -181,16 +181,23 @@ def test_every_declaration_is_seen():
     #   465 -> 466 (metal): one more entry point, from the self-host closure
     #   work in d446f5be.
     # Verified by COUNTING the merged header, not by adding the two deltas:
-    # `reflect.collect_runtime_exports_h('runtime/fire_runtime.h')` returns 479
+    # `reflect.collect_runtime_exports_h('runtime/fire_runtime.h')` returns 480
     # on the merged tree. Take this number from that call, not from the
     # arithmetic -- that is the whole point of the check.
+    #
+    # 479 -> 480 (2026-09-30): `mojo_str_from_double`, the float dict-key
+    # formatter. It was defined in fire_runtime.c and CALLED by generated code
+    # (emit_infra.py's dict-key path) with no declaration in the header, so the
+    # emitted `.ci` prototype came from the compiler's own inference rather
+    # than from the header this scan reads -- the exact gap the scan exists to
+    # close, found by the scan rather than by a link error.
     #
     # 475 -> 479 (2026-09-30): the four container value-equality entry points
     # (`mojo_list_eq` / `mojo_dict_eq` / `mojo_set_eq` / `mojo_value_eq`). They
     # are declared here rather than in their container's own section because
     # unlike every other comparison primitive all three container types have to
     # be complete first -- see bugs/CODEGEN_container_eq_is_pointer_identity.md.
-    for header, want in (('fire_runtime.h', 479),
+    for header, want in (('fire_runtime.h', 480),
                          ('fire_sqlite3.h', 22),
                          ('fire_zlib.h', 6),
                          ('fire_ssl.h', 13),
